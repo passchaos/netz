@@ -159,10 +159,11 @@ test "QUIC first server 1-RTT send does not allocate frame augmentation" {
 
     const allocations_before_send = counting.allocations;
     try sender.sendAt(&.{.{ .padding = .{ .len = 32 } }}, 100);
-    // Six allocations establish durable recovery payload/index ownership. The
-    // old temporary `frames + HANDSHAKE_DONE` array made this seven.
+    // Four allocations establish durable recovery payload/queue ownership.
+    // The old temporary `frames + HANDSHAKE_DONE` array and two recovery
+    // indexes made this seven.
     try std.testing.expectEqual(
-        @as(usize, 6),
+        @as(usize, 4),
         counting.allocations - allocations_before_send,
     );
     try std.testing.expect(sender.handshakeDoneAwaitingAck());

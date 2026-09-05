@@ -113,13 +113,188 @@ pub const SendState = struct {
     }
 };
 
+const ReceivedBitmap = struct {
+    const Word = usize;
+    const word_bits = @bitSizeOf(Word);
+    const Shift = std.math.Log2Int(Word);
+
+    words: std.ArrayList(Word) = .empty,
+    bit_len: usize = 0,
+
+    const View = struct {
+        words: []const Word = &.{},
+        bit_len: usize = 0,
+
+        fn isSet(self: View, index: usize) bool {
+            std.debug.assert(index < self.bit_len);
+            return (self.words[wordIndex(index)] & bitMask(index)) != 0;
+        }
+    };
+
+    fn deinit(self: *ReceivedBitmap, allocator: std.mem.Allocator) void {
+        self.words.deinit(allocator);
+        self.* = undefined;
+    }
+
+    fn clone(
+        self: ReceivedBitmap,
+        allocator: std.mem.Allocator,
+    ) std.mem.Allocator.Error!ReceivedBitmap {
+        var copy: ReceivedBitmap = .{};
+        try copy.words.ensureUnusedCapacity(allocator, self.words.items.len);
+        copy.words.appendSliceAssumeCapacity(self.words.items);
+        copy.bit_len = self.bit_len;
+        return copy;
+    }
+
+    fn len(self: ReceivedBitmap) usize {
+        return self.bit_len;
+    }
+
+    fn view(self: ReceivedBitmap) View {
+        return .{ .words = self.words.items, .bit_len = self.bit_len };
+    }
+
+    fn resize(
+        self: *ReceivedBitmap,
+        allocator: std.mem.Allocator,
+        new_len: usize,
+        fill: bool,
+    ) std.mem.Allocator.Error!void {
+        const old_len = self.bit_len;
+        const old_word_len = self.words.items.len;
+        const new_word_len = wordCount(new_len);
+        if (new_word_len > old_word_len) {
+            try self.words.resize(allocator, new_word_len);
+            @memset(
+                self.words.items[old_word_len..],
+                std.math.boolMask(Word, fill),
+            );
+        } else {
+            self.words.items.len = new_word_len;
+        }
+        self.bit_len = new_len;
+        if (new_len > old_len) {
+            const old_word_end = @min(
+                new_len,
+                old_word_len * word_bits,
+            );
+            if (old_len < old_word_end) {
+                self.setRangeValue(
+                    .{ .start = old_len, .end = old_word_end },
+                    fill,
+                );
+            }
+        }
+        self.clearPadding();
+    }
+
+    fn isSet(self: ReceivedBitmap, index: usize) bool {
+        return self.view().isSet(index);
+    }
+
+    fn setRangeValue(
+        self: *ReceivedBitmap,
+        range: std.bit_set.Range,
+        value: bool,
+    ) void {
+        std.debug.assert(range.end <= self.bit_len);
+        std.debug.assert(range.start <= range.end);
+        if (range.start == range.end) return;
+
+        const start_word = wordIndex(range.start);
+        const start_bit: Shift = @truncate(range.start);
+        const end_word = wordIndex(range.end);
+        const end_bit: Shift = @truncate(range.end);
+        const fill_word = std.math.boolMask(Word, value);
+
+        if (start_word == end_word) {
+            const low = @as(Word, std.math.maxInt(Word)) << start_bit;
+            const high = @as(Word, std.math.maxInt(Word)) >>
+                ((word_bits - 1) - (end_bit - 1));
+            const mask = low & high;
+            self.words.items[start_word] =
+                (self.words.items[start_word] & ~mask) |
+                (fill_word & mask);
+            return;
+        }
+
+        var current = start_word;
+        if (start_bit != 0) {
+            const mask = @as(Word, std.math.maxInt(Word)) << start_bit;
+            self.words.items[current] =
+                (self.words.items[current] & ~mask) |
+                (fill_word & mask);
+            current += 1;
+        }
+        @memset(self.words.items[current..end_word], fill_word);
+        if (end_bit != 0) {
+            const mask = @as(Word, std.math.maxInt(Word)) >>
+                ((word_bits - 1) - (end_bit - 1));
+            self.words.items[end_word] =
+                (self.words.items[end_word] & ~mask) |
+                (fill_word & mask);
+        }
+    }
+
+    fn removePrefix(self: *ReceivedBitmap, prefix_len: usize) void {
+        std.debug.assert(prefix_len <= self.bit_len);
+        const remaining = self.bit_len - prefix_len;
+        if (remaining == 0) {
+            self.words.items.len = 0;
+            self.bit_len = 0;
+            return;
+        }
+
+        const word_shift = prefix_len / word_bits;
+        const bit_shift: Shift = @truncate(prefix_len);
+        const old_word_len = self.words.items.len;
+        const new_word_len = wordCount(remaining);
+        for (0..new_word_len) |destination| {
+            const source = destination + word_shift;
+            var word = self.words.items[source] >> bit_shift;
+            if (bit_shift != 0 and source + 1 < old_word_len) {
+                const inverse_shift: Shift = @intCast(
+                    word_bits - @as(usize, bit_shift),
+                );
+                word |= self.words.items[source + 1] <<
+                    inverse_shift;
+            }
+            self.words.items[destination] = word;
+        }
+        self.words.items.len = new_word_len;
+        self.bit_len = remaining;
+        self.clearPadding();
+    }
+
+    fn clearPadding(self: *ReceivedBitmap) void {
+        if (self.bit_len == 0) return;
+        const used_bits = self.bit_len % word_bits;
+        if (used_bits == 0) return;
+        self.words.items[self.words.items.len - 1] &=
+            (@as(Word, 1) << @as(Shift, @intCast(used_bits))) - 1;
+    }
+
+    fn wordCount(bit_len: usize) usize {
+        return bit_len / word_bits + @intFromBool(bit_len % word_bits != 0);
+    }
+
+    fn wordIndex(index: usize) usize {
+        return index / word_bits;
+    }
+
+    fn bitMask(index: usize) Word {
+        return @as(Word, 1) << @as(Shift, @truncate(index));
+    }
+};
+
 pub const RecvState = struct {
     allocator: std.mem.Allocator,
     stream_id: u64,
     /// Absolute stream offset represented by buffer[0].
     storage_offset: usize = 0,
     buffer: std.ArrayList(u8) = .empty,
-    received: std.ArrayList(bool) = .empty,
+    received: ReceivedBitmap = .{},
     /// Absolute application read offset.
     read_offset: usize = 0,
     /// Absolute first not-yet-contiguous stream offset.
@@ -144,8 +319,7 @@ pub const RecvState = struct {
         errdefer copy.deinit();
         try copy.buffer.ensureUnusedCapacity(allocator, self.buffer.items.len);
         copy.buffer.appendSliceAssumeCapacity(self.buffer.items);
-        try copy.received.ensureUnusedCapacity(allocator, self.received.items.len);
-        copy.received.appendSliceAssumeCapacity(self.received.items);
+        copy.received = try self.received.clone(allocator);
         copy.storage_offset = self.storage_offset;
         copy.read_offset = self.read_offset;
         copy.contiguous_end = self.contiguous_end;
@@ -184,7 +358,7 @@ pub const RecvState = struct {
             return error.InvalidStreamRange;
         if (relative_end > self.max_buffered) return error.StreamBufferTooLarge;
 
-        const old_len = self.received.items.len;
+        const old_len = self.received.len();
         if (relative_end <= old_len and absolute_end <= self.contiguous_end) {
             if (!std.mem.eql(u8, self.buffer.items[relative_offset..relative_end], data)) {
                 return error.ConflictingStreamData;
@@ -202,7 +376,7 @@ pub const RecvState = struct {
             const overlap_end = @min(relative_end, old_len);
             var relative = relative_offset;
             while (relative < overlap_end) : (relative += 1) {
-                if (self.received.items[relative]) {
+                if (self.received.isSet(relative)) {
                     const data_index = relative - relative_offset;
                     if (self.buffer.items[relative] != data[data_index]) {
                         return error.ConflictingStreamData;
@@ -222,21 +396,31 @@ pub const RecvState = struct {
 
         if (relative_end > self.buffer.items.len) {
             try self.buffer.resize(self.allocator, relative_end);
-            try self.received.resize(self.allocator, relative_end);
+            try self.received.resize(
+                self.allocator,
+                relative_end,
+                relative_offset == old_len,
+            );
             if (relative_offset > old_len) {
                 @memset(self.buffer.items[old_len..relative_offset], 0);
-                @memset(self.received.items[old_len..relative_offset], false);
             }
         }
         @memcpy(self.buffer.items[relative_offset..relative_end], data);
-        @memset(self.received.items[relative_offset..relative_end], true);
+        if (relative_offset != old_len or relative_end <= old_len) {
+            self.received.setRangeValue(
+                .{ .start = relative_offset, .end = relative_end },
+                true,
+            );
+        }
         var contiguous_relative = self.contiguous_end - self.storage_offset;
-        if (relative_offset <= contiguous_relative and contiguous_relative < relative_end) {
+        if (relative_offset <= contiguous_relative and
+            contiguous_relative < relative_end)
+        {
             self.contiguous_end = self.storage_offset + relative_end;
             contiguous_relative = relative_end;
         }
-        while (contiguous_relative < self.received.items.len and
-            self.received.items[contiguous_relative])
+        while (contiguous_relative < self.received.len() and
+            self.received.isSet(contiguous_relative))
         {
             contiguous_relative += 1;
             self.contiguous_end += 1;
@@ -262,6 +446,27 @@ pub const RecvState = struct {
         const relative_start = self.read_offset - self.storage_offset;
         const relative_end = self.contiguous_end - self.storage_offset;
         return self.buffer.items[relative_start..relative_end];
+    }
+
+    /// Transfer a complete, unread stream buffer to the caller. This keeps
+    /// protocol adapters independent of the receive-gap representation while
+    /// preserving the existing zero-copy ownership handoff.
+    pub fn takeCompleteBuffer(self: *RecvState) Error![]u8 {
+        const final_size = self.final_size orelse return error.NothingAvailable;
+        if (self.storage_offset != 0 or
+            self.read_offset != 0 or
+            self.contiguous_end < final_size)
+        {
+            return error.NothingAvailable;
+        }
+        self.buffer.items.len = final_size;
+        const bytes = try self.buffer.toOwnedSlice(self.allocator);
+        const allocator = self.allocator;
+        const stream_id = self.stream_id;
+        const max_buffered = self.max_buffered;
+        self.received.deinit(self.allocator);
+        self.* = RecvState.init(allocator, stream_id, max_buffered);
+        return bytes;
     }
 
     pub fn consume(self: *RecvState, len: usize) Error!void {
@@ -291,12 +496,8 @@ pub const RecvState = struct {
             self.buffer.items[0..remaining],
             self.buffer.items[consumed..],
         );
-        @memmove(
-            self.received.items[0..remaining],
-            self.received.items[consumed..],
-        );
         self.buffer.items.len = remaining;
-        self.received.items.len = remaining;
+        self.received.removePrefix(consumed);
         self.storage_offset = self.read_offset;
     }
 
@@ -360,7 +561,7 @@ pub const RecvState = struct {
         stream_id: u64,
         storage_offset: usize,
         buffer: []const u8,
-        received: []const bool,
+        received: ReceivedBitmap.View,
         final_size: ?usize,
         received_total: u64,
         highest_received_end: usize,
@@ -375,7 +576,7 @@ pub const RecvState = struct {
                 .stream_id = state.stream_id,
                 .storage_offset = state.storage_offset,
                 .buffer = state.buffer.items,
-                .received = state.received.items,
+                .received = state.received.view(),
                 .final_size = state.final_size,
                 .received_total = state.received_total,
                 .highest_received_end = state.highest_received_end,
@@ -395,7 +596,7 @@ pub const RecvState = struct {
                 .stream_id = stream_id,
                 .storage_offset = 0,
                 .buffer = &.{},
-                .received = &.{},
+                .received = .{},
                 .final_size = null,
                 .received_total = 0,
                 .highest_received_end = 0,
@@ -466,47 +667,77 @@ pub const RecvState = struct {
                 absolute_offset,
                 self.storage_offset,
             );
+            const relative_offset = retained_offset - self.storage_offset;
             const relative_end = absolute_end - self.storage_offset;
             if (relative_end > self.max_buffered) {
                 return error.StreamBufferTooLarge;
             }
 
-            var newly_received: u64 = 0;
-            var absolute = retained_offset;
-            while (absolute < absolute_end) : (absolute += 1) {
-                const incoming = frame.data[absolute - absolute_offset];
-                const relative = absolute - self.storage_offset;
-                if (relative < self.received.len and
-                    self.received[relative])
+            const overlaps_buffer = relative_offset < self.buffer.len;
+            var overlaps_pending = false;
+            for (self.pending.items()) |prior| {
+                if (prior.stream_id != self.stream_id) continue;
+                const prior_offset = std.math.cast(
+                    usize,
+                    prior.offset,
+                ) orelse return error.InvalidStreamRange;
+                const prior_end = std.math.add(
+                    usize,
+                    prior_offset,
+                    prior.data.len,
+                ) catch return error.InvalidStreamRange;
+                if (retained_offset < prior_end and
+                    prior_offset < absolute_end)
                 {
-                    if (self.buffer[relative] != incoming) {
-                        return error.ConflictingStreamData;
-                    }
-                    continue;
-                }
-
-                var covered_by_pending = false;
-                for (self.pending.items()) |prior| {
-                    if (prior.stream_id != self.stream_id) continue;
-                    const prior_offset = std.math.cast(
-                        usize,
-                        prior.offset,
-                    ) orelse return error.InvalidStreamRange;
-                    const prior_end = std.math.add(
-                        usize,
-                        prior_offset,
-                        prior.data.len,
-                    ) catch return error.InvalidStreamRange;
-                    if (absolute < prior_offset or absolute >= prior_end) {
-                        continue;
-                    }
-                    if (prior.data[absolute - prior_offset] != incoming) {
-                        return error.ConflictingStreamData;
-                    }
-                    covered_by_pending = true;
+                    overlaps_pending = true;
                     break;
                 }
-                if (!covered_by_pending) newly_received += 1;
+            }
+
+            // Ordered STREAM traffic overwhelmingly appends beyond both the
+            // retained receive buffer and this packet's earlier frames. Avoid
+            // the old byte-by-byte duplicate scan in that hot case. Complex
+            // retransmission overlap retains the exact conflict/count logic.
+            var newly_received: u64 = @intCast(
+                absolute_end - retained_offset,
+            );
+            if (overlaps_buffer or overlaps_pending) {
+                newly_received = 0;
+                var absolute = retained_offset;
+                while (absolute < absolute_end) : (absolute += 1) {
+                    const incoming = frame.data[absolute - absolute_offset];
+                    const relative = absolute - self.storage_offset;
+                    if (relative < self.received.bit_len and
+                        self.received.isSet(relative))
+                    {
+                        if (self.buffer[relative] != incoming) {
+                            return error.ConflictingStreamData;
+                        }
+                        continue;
+                    }
+
+                    var covered_by_pending = false;
+                    for (self.pending.items()) |prior| {
+                        if (prior.stream_id != self.stream_id) continue;
+                        const prior_offset = std.math.cast(
+                            usize,
+                            prior.offset,
+                        ) orelse return error.InvalidStreamRange;
+                        const prior_end = std.math.add(
+                            usize,
+                            prior_offset,
+                            prior.data.len,
+                        ) catch return error.InvalidStreamRange;
+                        if (absolute < prior_offset or
+                            absolute >= prior_end) continue;
+                        if (prior.data[absolute - prior_offset] != incoming) {
+                            return error.ConflictingStreamData;
+                        }
+                        covered_by_pending = true;
+                        break;
+                    }
+                    if (!covered_by_pending) newly_received += 1;
+                }
             }
 
             // Match RecvState's conflict-first classification: an overlapping
@@ -530,6 +761,56 @@ pub const RecvState = struct {
         }
     };
 };
+
+test "QUIC receive bitmap matches byte model across range and prefix operations" {
+    const allocator = std.testing.allocator;
+    var bitmap: ReceivedBitmap = .{};
+    defer bitmap.deinit(allocator);
+    var model = [_]bool{false} ** 192;
+
+    try bitmap.resize(allocator, 130, false);
+    bitmap.setRangeValue(.{ .start = 3, .end = 127 }, true);
+    @memset(model[3..127], true);
+    bitmap.setRangeValue(.{ .start = 17, .end = 73 }, false);
+    @memset(model[17..73], false);
+    for (model[0..130], 0..) |expected, index| {
+        try std.testing.expectEqual(expected, bitmap.isSet(index));
+    }
+
+    try bitmap.resize(allocator, 191, true);
+    @memset(model[130..191], true);
+    for (model[0..191], 0..) |expected, index| {
+        try std.testing.expectEqual(expected, bitmap.isSet(index));
+    }
+
+    var cloned = try bitmap.clone(allocator);
+    defer cloned.deinit(allocator);
+    for (0..131) |prefix_len| {
+        var shifted = try cloned.clone(allocator);
+        defer shifted.deinit(allocator);
+        shifted.removePrefix(prefix_len);
+        for (model[prefix_len..191], 0..) |expected, index| {
+            try std.testing.expectEqual(expected, shifted.isSet(index));
+        }
+    }
+
+    bitmap.removePrefix(13);
+    for (model[13..191], 0..) |expected, index| {
+        try std.testing.expectEqual(expected, bitmap.isSet(index));
+        try std.testing.expectEqual(model[index], cloned.isSet(index));
+    }
+    try bitmap.resize(allocator, 65, false);
+    for (model[13..78], 0..) |expected, index| {
+        try std.testing.expectEqual(expected, bitmap.isSet(index));
+    }
+    bitmap.removePrefix(65);
+    try std.testing.expectEqual(@as(usize, 0), bitmap.len());
+    try std.testing.expectEqual(@as(usize, 0), bitmap.words.items.len);
+    try std.testing.expectEqual(
+        std.math.maxInt(usize) / ReceivedBitmap.word_bits + 1,
+        ReceivedBitmap.wordCount(std.math.maxInt(usize)),
+    );
+}
 
 test "QUIC send stream state writes offset STREAM frames" {
     const allocator = std.testing.allocator;
@@ -599,6 +880,45 @@ test "QUIC receive stream state reassembles out of order and tracks FIN" {
     try std.testing.expectEqualStrings("hello world", recv.available());
     try recv.consume("hello world".len);
     try std.testing.expect(recv.complete());
+}
+
+test "QUIC receive stream transfers complete buffer ownership" {
+    const allocator = std.testing.allocator;
+    var recv = RecvState.init(allocator, 0, 1024);
+    defer recv.deinit();
+
+    try std.testing.expectError(
+        error.NothingAvailable,
+        recv.takeCompleteBuffer(),
+    );
+    try recv.insert(.{
+        .stream_id = 0,
+        .offset = 6,
+        .data = "world",
+        .fin = true,
+    });
+    try std.testing.expectError(
+        error.NothingAvailable,
+        recv.takeCompleteBuffer(),
+    );
+    try recv.insert(.{
+        .stream_id = 0,
+        .offset = 0,
+        .data = "hello ",
+    });
+    const bytes = try recv.takeCompleteBuffer();
+    defer allocator.free(bytes);
+    try std.testing.expectEqualStrings("hello world", bytes);
+    try std.testing.expectEqual(@as(usize, 0), recv.buffer.items.len);
+    try std.testing.expectEqual(@as(usize, 0), recv.received.len());
+
+    try recv.insert(.{
+        .stream_id = 0,
+        .offset = 0,
+        .data = "reused",
+        .fin = true,
+    });
+    try std.testing.expectEqualStrings("reused", recv.available());
 }
 
 test "QUIC receive stream rejects inconsistent final size" {
@@ -699,6 +1019,62 @@ test "QUIC receive stream slides consumed storage across large offsets" {
     );
     try std.testing.expectEqual(@as(usize, 0), recv.buffer.items.len);
     try std.testing.expectEqual(@as(u64, 24), recv.receivedByteCount());
+}
+
+test "QUIC receive stream compacts non-word-aligned bitmap with sparse tail" {
+    const allocator = std.testing.allocator;
+    var recv = RecvState.init(allocator, 0, 128);
+    defer recv.deinit();
+
+    try std.testing.expectEqual(
+        @as(u64, 4),
+        try recv.insertTracked(.{
+            .stream_id = 0,
+            .offset = 70,
+            .data = "tail",
+            .fin = true,
+        }),
+    );
+    try std.testing.expectEqual(
+        @as(u64, 40),
+        try recv.insertTracked(.{
+            .stream_id = 0,
+            .offset = 0,
+            .data = &([_]u8{'a'} ** 40),
+        }),
+    );
+    try std.testing.expectEqual(@as(usize, 40), recv.available().len);
+    try recv.consume(40);
+    try std.testing.expectEqual(@as(usize, 40), recv.storage_offset);
+    try std.testing.expectEqual(@as(usize, 34), recv.buffer.items.len);
+
+    try std.testing.expectEqual(
+        @as(u64, 30),
+        try recv.insertTracked(.{
+            .stream_id = 0,
+            .offset = 40,
+            .data = &([_]u8{'b'} ** 30),
+        }),
+    );
+    try std.testing.expectEqual(@as(usize, 34), recv.available().len);
+    try std.testing.expectEqualSlices(
+        u8,
+        &([_]u8{'b'} ** 30),
+        recv.available()[0..30],
+    );
+    try std.testing.expectEqualStrings("tail", recv.available()[30..]);
+    try std.testing.expectEqual(
+        @as(u64, 0),
+        try recv.insertTracked(.{
+            .stream_id = 0,
+            .offset = 70,
+            .data = "tail",
+            .fin = true,
+        }),
+    );
+    try std.testing.expectEqual(@as(u64, 74), recv.receivedByteCount());
+    try recv.consume(34);
+    try std.testing.expect(recv.complete());
 }
 
 test "QUIC receive stream clips overlap at sliding window boundary" {
@@ -803,6 +1179,34 @@ test "QUIC receive stream preflight checks packet-local overlap and FIN" {
             .data = "i",
         }),
     );
+}
+
+test "QUIC receive stream preflight fast path counts adjacent frames" {
+    const allocator = std.testing.allocator;
+    var recv = RecvState.init(allocator, 0, 64);
+    defer recv.deinit();
+    try recv.insert(.{ .stream_id = 0, .offset = 0, .data = "abcd" });
+
+    var pending_storage: [4]quic.StreamFrame = undefined;
+    var pending = RecvState.PreflightFrames.init(allocator, &pending_storage);
+    defer pending.deinit();
+    var preflight = RecvState.Preflight.init(&recv, &pending);
+    defer preflight.deinit();
+
+    try std.testing.expectEqual(@as(u64, 4), try preflight.insertTracked(.{
+        .stream_id = 0,
+        .offset = 4,
+        .data = "efgh",
+    }));
+    try std.testing.expectEqual(@as(u64, 4), try preflight.insertTracked(.{
+        .stream_id = 0,
+        .offset = 8,
+        .data = "ijkl",
+        .fin = true,
+    }));
+    try std.testing.expectEqual(@as(u64, 12), preflight.receivedByteCount());
+    try std.testing.expectEqual(@as(?usize, 12), preflight.final_size);
+    try std.testing.expectEqual(@as(usize, 2), pending.items().len);
 }
 
 test "QUIC receive preflight frames use caller storage and spill safely" {

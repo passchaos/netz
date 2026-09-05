@@ -110,6 +110,10 @@ test "HTTP/2 response body batch streams interleaved DATA" {
     defer for (&responses) |*response| response.deinit(allocator);
     for (responses, context.bytes) |response, bytes| {
         try std.testing.expectEqual(@as(u16, 200), response.status);
+        try std.testing.expectEqual(
+            @as(usize, 29),
+            runtime.testing.findHeader(response.headers, "date").?.len,
+        );
         try std.testing.expectEqual(response_body.len, response.body_bytes);
         try std.testing.expectEqual(response_body.len, bytes);
     }

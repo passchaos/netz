@@ -19,7 +19,6 @@ fn writeAll(io: std.Io, stream: net.Stream, bytes: []const u8) !void {
         written += count;
     }
 }
-
 test "WebSocket server handshake timeout is absolute across trickled bytes" {
     const allocator = std.testing.allocator;
     var threaded = std.Io.Threaded.init(allocator, .{
@@ -200,7 +199,6 @@ test "WebSocket client bounds an idle HTTP upgrade response" {
     );
     thread.join();
 }
-
 test "WebSocket client connect timeout is independent from upgrade timeout" {
     const allocator = std.testing.allocator;
     var threaded = std.Io.Threaded.init(allocator, .{
@@ -522,6 +520,8 @@ test "WSS server caller timeout bounds TLS and HTTP upgrade" {
     };
     var shared = Shared{ .server = &server };
     const thread = try std.Thread.spawn(.{}, Shared.run, .{&shared});
+    var joined = false;
+    defer if (!joined) thread.join();
     const stream = try server.address().connect(io, .{ .mode = .stream });
     var stream_owned = true;
     defer if (stream_owned) stream.close(io);
@@ -541,9 +541,15 @@ test "WSS server caller timeout bounds TLS and HTTP upgrade" {
     // Leave the HTTP Upgrade incomplete after TLS has consumed part of the
     // same caller-owned budget. The HTTP phase must not receive a fresh one.
     try std.Io.sleep(io, .fromMilliseconds(25), .awake);
-    try client.writeAll("GET / HTTP/1.1\r\nHost: localhost\r\n");
+    client.writeAll("GET / HTTP/1.1\r\nHost: localhost\r\n") catch |err| switch (err) {
+        // The server may consume the shared TLS + HTTP deadline and close the
+        // connection before this deliberately late, incomplete Upgrade write.
+        error.SocketUnconnected, error.ConnectionResetByPeer => {},
+        else => return err,
+    };
 
     thread.join();
+    joined = true;
     try std.testing.expectEqual(error.Timeout, shared.err.?);
 }
 
@@ -584,8 +590,8 @@ test "WSS accepted stream timeout bounds TLS handshake" {
         err: ?anyerror = null,
 
         fn run(self: *@This()) void {
-            const stream = self.server.listener.accept(self.server.io) catch
-                |err| {
+            const stream = self.server.listener.accept(self.server.io) catch |err|
+                {
                     self.err = err;
                     return;
                 };
@@ -804,75 +810,4 @@ test "WSS connect options forward TLS timeout to standard client" {
         ),
     );
     thread.join();
-}
-
-test "WebSocket io_uring rejects unsupported handshake timeout" {
-    if (comptime @import("builtin").os.tag != .linux) {
-        return error.SkipZigTest;
-    }
-    const allocator = std.testing.allocator;
-    var ring = std.os.linux.IoUring.init(16, 0) catch |err| switch (err) {
-        error.PermissionDenied, error.SystemOutdated => return error.SkipZigTest,
-        else => |value| return value,
-    };
-    defer ring.deinit();
-    var threaded = std.Io.Threaded.init(allocator, .{
-        .async_limit = .unlimited,
-    });
-    defer threaded.deinit();
-    const io = threaded.io();
-    var listener = try (net.IpAddress{ .ip4 = .loopback(0) }).listen(
-        io,
-        .{ .reuse_address = true },
-    );
-    defer listener.deinit(io);
-
-    const Shared = struct {
-        io: std.Io,
-        listener: *net.Server,
-        err: ?anyerror = null,
-
-        fn run(self: *@This()) void {
-            const stream = self.listener.accept(self.io) catch |err| {
-                self.err = err;
-                return;
-            };
-            defer stream.close(self.io);
-            var scratch: [512]u8 = undefined;
-            while (true) {
-                var buffers = [_][]u8{&scratch};
-                const count = self.io.vtable.netRead(
-                    self.io.userdata,
-                    stream.socket.handle,
-                    &buffers,
-                ) catch |err| {
-                    self.err = err;
-                    return;
-                };
-                if (count == 0) return;
-            }
-        }
-    };
-    var shared = Shared{ .io = io, .listener = &listener };
-    const thread = try std.Thread.spawn(.{}, Shared.run, .{&shared});
-    const uri = try std.fmt.allocPrint(
-        allocator,
-        "ws://127.0.0.1:{d}/timeout",
-        .{listener.socket.address.ip4.port},
-    );
-    defer allocator.free(uri);
-    try std.testing.expectError(
-        error.TimedReadUnsupported,
-        runtime.Client.connectUriLinuxIoUring(
-            allocator,
-            io,
-            &ring,
-            uri,
-            .{ .limits = .{
-                .http1_handshake_timeout = .fromMilliseconds(10),
-            } },
-        ),
-    );
-    thread.join();
-    if (shared.err) |err| return err;
 }

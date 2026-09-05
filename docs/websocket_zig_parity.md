@@ -9,7 +9,7 @@ superiority.
 
 | Area | netz | `websocket.zig` reference |
 | --- | --- | --- |
-| HTTP/1 Upgrade client/server | Covered, including host names, IPv4/IPv6, Unix-domain listener/client transports, strict duplicate critical-header checks, upgrade-body rejection, optional client DNS/TCP connect budgets, caller-owned relative/absolute connection deadlines spanning DNS/TCP, TLS where applicable, and the complete HTTP Upgrade, optional absolute request/response-head deadlines over WS/WSS that are not renewed by trickled bytes, and long-running bounded TCP/Unix/TLS supervisors with graceful cancellation plus accept/connection error policy | Covered with configurable handshake parsing, handler callbacks, a Unix listener, client TCP/TLS connect timeouts, a server-side handshake timeout, worker pools and coordinated shutdown |
+| HTTP/1 Upgrade client/server | Covered, including host names, IPv4/IPv6, Unix-domain listener/client transports, two-phase application admission before 101 with request metadata, custom acceptance fields, and final 3xx-5xx rejection, client `ConnectAttempt` access to rejected status/headers/trailers/bounded body while legacy `connect*` retains `InvalidResponse`, strict duplicate critical-header checks, upgrade-body rejection, optional client DNS/TCP connect budgets, caller-owned relative/absolute connection deadlines spanning DNS/TCP, TLS where applicable, and the complete HTTP Upgrade, optional absolute request/response-head deadlines over WS/WSS that are not renewed by trickled bytes, and long-running bounded TCP/Unix/TLS supervisors with graceful cancellation plus accept/connection error policy | Covered with configurable handshake parsing, pre-101 handler callbacks and custom response headers, a Unix listener, client TCP/TLS connect timeouts, a server-side handshake timeout, worker pools and coordinated shutdown |
 | WSS client/server | Covered through shared TLS transports with host/CA verification, separate resolved-address plus TLS-host connection, optional client identities, caller-provided server identities, optional/required client certificates, verified peer chains and concurrent serving | Client covered; 0.16 README labels the branch experimental, while the audited server API terminates cleartext WebSocket |
 | HTTP/2 and HTTP/3 WebSocket (RFC 8441/RFC 9220) | Covered through extended CONNECT client/server adapters. The authenticated HTTP/3 path negotiates CONNECT over QUIC/TLS, preserves masking direction, subprotocol, Origin and permessage-deflate validation, and exchanges data/control/Close frames across split HTTP/3 DATA framing | Neither transport is present in the audited source |
 | permessage-deflate | Negotiated and exercised by HTTP/1 and H2 runtimes with no-context-takeover, actual LZ77/Huffman compression and expansion fallback | Negotiation/decompression exists, but audited 0.16 client/server send compression code is disabled |
@@ -18,7 +18,7 @@ superiority.
 | Close / Ping / Pong | Typed close parsing/writing, close-state guards, automatic Pong and Close replies, deadline-bounded typed peer-Close reads, plus deadline-bounded active Ping/Pong round trips that preserve interleaved application frames for both HTTP/1 Upgrade and RFC 8441. Partial Close frames remain resumable after timeout | Handler callbacks and automatic default control replies |
 | Concurrent sends | Serialized by per-connection `std.Io.Mutex`; writers recheck Close state after acquiring it, and HTTP/1, RFC 8441, plus RFC 9220 runtime tests exercise concurrent sends (the H2/H3 cases share one compressed encoder) | Documented thread-safe connection writes |
 | TCP/TLS latency policy | TCP_NODELAY defaults on for ordinary accepted and client TCP/WSS sockets; WSS header + first payload bytes fill one TLS record/network write; configurable in runtime limits/connect options | Server enables NODELAY, audited client leaves Nagle enabled unless the embedding application changes the socket |
-| Linux io_uring experiment | Cleartext client helper | Custom epoll/kqueue/Windows server backends |
+| I/O abstraction | HTTP/1, HTTP/2, and HTTP/3 adapters consume only `std.Io`; backend selection stays outside the protocol API | Custom epoll/kqueue/Windows server backends |
 
 RFC 8441 now has process-boundary interoperability evidence in addition to the
 in-process tests and benchmark:
@@ -61,8 +61,23 @@ contribution to five bytes, which drives quic-go beyond its automatic
 pinned v0.59 compatibility profile while the library default remains RFC 9369.
 The Go fixture
 implements its own bounded RFC 6455 frame reader/writer, so this is external
-wire evidence rather than two netz adapters sharing a codec. Browser
-interoperability remains follow-up work.
+wire evidence rather than two netz adapters sharing a codec.
+
+`zig build interop-websocket-chrome -Doptimize=ReleaseFast` now drives Chrome's
+native browser WebSocket API against the HTTP/1 runtime. The first connection
+comes from a disallowed origin and must fail before Upgrade; a second origin is
+accepted and verifies client-preferred subprotocol selection, actual
+permessage-deflate traffic in both directions, text and binary messages,
+browser-generated Pong for a server Ping, and a clean 1001 close with the exact
+reason. Passing `-- --tls` repeats the same matrix over native TLS 1.3 using a
+fresh short-lived certificate and an exact Chrome SPKI pin rather than a global
+certificate-error bypass. The captured gate used Chrome 146.0.7680.164. Chrome
+does not expose Pong frames or compressed-wire flags to JavaScript, so those
+two properties are asserted by the independent netz server endpoint on the
+same real browser connection while the browser verifies decoded payloads and
+close metadata. Browser coverage for RFC 8441/9220 remains limited by the
+standard browser WebSocket API's HTTP version selection and current browser
+support.
 
 `websocket.runtime.TlsServer` performs TLS 1.3 before the same transport-neutral
 HTTP Upgrade parser and frame state machine used by cleartext `Server`.
@@ -75,6 +90,74 @@ pin/custom verifier, it maps caller CA bundles or system roots plus hostname
 verification. TLS
 client reads are true short reads, so a small Upgrade response no longer waits
 for a caller's larger scratch buffer to fill.
+
+HTTP/1 TCP, Unix, and native TLS servers expose the same two-phase admission
+surface. `receiveUpgradeRequest*` parses and validates the opening handshake but
+does not send 101; its owning `PendingUpgrade` exposes the target, request
+headers, and authenticated WSS certificate/cipher/hash metadata. Applications
+may then call `acceptWithHeaders` to add validated response fields or `reject`
+with a final 3xx-5xx response and body; convenience 403, 404, and 429 helpers
+cover common policy outcomes. Rejections always add `Connection: close`, and
+both outcomes prevent applications from overriding WebSocket negotiation or
+HTTP body-framing fields. The original absolute handshake deadline remains in
+force across the application decision instead of being renewed before the
+response write. A pending value owns the transport until one outcome succeeds;
+validation or write failures leave that ownership with the caller so `deinit`
+can close it deterministically. Existing `accept*` entry points remain
+compatible wrappers that receive and immediately accept. End-to-end TCP, Unix,
+and WSS tests inspect credentials before 101; the TCP tests additionally prove
+that no response is sent before admission, custom acceptance fields survive the
+wire, a 401 response carries its body and closes, and delayed admission expires
+the original deadline. This closes the reference server's pre-upgrade handler
+gap without introducing a callback or worker-pool policy into the transport.
+RFC 8441 now exposes the same decision boundary through
+`H2Server.receiveUpgradeRequest*` and `PendingH2Upgrade`. Applications can
+inspect the CONNECT stream ID, path, scheme, authority, and request fields
+before any 200 response, then accept with additional response fields or reject
+with a final 3xx-5xx response. `rejectWithBody` can additionally send an
+ordinary HTTP/2 DATA body and final trailers; framing fields remain adapter-
+owned so the generated Content-Length matches the bytes on the wire. Rejecting
+or dropping a pending value terminates only that HTTP/2 stream, leaving sibling
+requests and the shared HPACK state usable. Deadline variants retain their
+original absolute budget across the application decision. Real h2c tests cover
+metadata, custom acceptance fields, Content-Length and END_STREAM-delimited
+rejection bodies, trailers, body-limit cancellation, 401 rejection followed by
+a successful sibling request, and delayed-decision timeout. Existing
+`H2Server.accept*` calls remain immediate compatibility wrappers.
+`H2Client.openAttempt*` completes the other side of that policy: final non-2xx
+status, response fields, bounded body, and trailers remain owned and
+inspectable, while `requireAccepted` and the legacy `open*` wrappers retain
+strict WebSocket negotiation and `InvalidStatus` behavior after draining the
+complete rejection. The body bound is the caller-owned HTTP/2 connection's
+`Limits.max_body_bytes`; an overflow cancels only that stream. The underlying
+HTTP/2 attempt API retires rejected streams immediately, so the connection can
+issue a sibling request after authentication failure.
+RFC 9220 exposes the corresponding `Server.receiveUpgradeRequest*` and
+`receiveSessionUpgradeRequest*` entry points. Its `PendingUpgrade` owns the
+HTTP/3 session while the decision is pending, exposes CONNECT
+path/authority/headers, preserves the original handshake deadline through the
+application decision, and can either add accepted response fields or emit a
+final 3xx-5xx rejection. A pending value created from a caller-owned session
+returns that session after rejection or destruction; acceptance still
+transfers it into the WebSocket connection.
+`rejectWithBody` adds ordinary HTTP/3 DATA and final trailers, with automatic
+Content-Length when a body is present and framing fields kept under the
+adapter's control. Short-lived rejection drains reliable QUIC recovery before
+session teardown on a best-effort bounded budget. Existing `accept*` methods
+remain immediate wrappers.
+`Client.connect*Attempt*` retains the complete non-2xx response body and
+trailers under `Limits.max_rejection_body_bytes`, rejects an oversized declared
+Content-Length before allocating or reading DATA, and skips bounded 1xx heads
+before the final response. Declared-length bodies use one exact retained
+allocation even when DATA arrives fragmented; unknown-length rejections keep
+the bounded incremental path. Compatibility `connect*` calls still return
+`InvalidResponse`, but only after draining the rejection. Caller-owned HTTP/3
+sessions are restored after a complete rejection without an unnecessary
+stream cancellation; limit failures abandon only the affected CONNECT stream.
+Authenticated transport tests cover 103 followed by body/trailers, automatic
+Content-Length, split DATA without Content-Length, legacy draining, body-limit
+cancellation, explicit server rejection and dropped pending requests, and a
+successful sibling request on both reused client and server sessions.
 
 The reference has a richer callback-oriented standalone server surface and
 pooled-buffer/thread-pool configuration. Netz has broader protocol integration
@@ -105,8 +188,8 @@ implementation.
 
 HTTP/1 Upgrade clients now also accept typed `ConnectOptions.extra_headers`,
 matching the reference client's custom handshake-header facility without its
-raw string injection surface. The option is shared by WS, WSS, Unix-socket and
-io_uring entry points. Header syntax is validated, and fields owned by the
+raw string injection surface. The option is shared by WS, WSS, and Unix-socket
+entry points. Header syntax is validated, and fields owned by the
 runtime (Host, Upgrade, Connection, Origin, WebSocket negotiation fields) or
 capable of adding an HTTP request body (Content-Length, Transfer-Encoding and
 Trailer) are rejected before any request bytes are sent. This supports common
@@ -124,7 +207,17 @@ Run:
 
 ```sh
 zig build bench-websocket-frame -Doptimize=ReleaseFast
+taskset -c 0 zig build bench-websocket-receive-buffer -Doptimize=ReleaseFast
 ```
+
+The receive-buffer benchmark exercises 8,192 coalesced eight-byte frames over
+20 iterations. Five CPU-0 runs measured 2.14-2.17 ns/frame for the retained
+read-window implementation versus 489.24-497.03 ns/frame for eager tail
+compaction, a 226-231x synthetic speedup. More importantly, it reduced copied
+bytes from 5,368,053,760 to 1,305,600: HTTP/1, RFC 8441, and RFC 9220 receive
+paths are now amortized linear rather than quadratic when a transport read
+contains many small frames. The benchmark is intentionally adversarial and is
+not presented as an end-to-end network throughput ratio.
 
 The 2026-08-17 same-host sample ranges for 200,000 masked 4 KiB binary frames:
 
@@ -173,8 +266,7 @@ warmup exchanges, then 200 measured 4 KiB binary echo round trips. Client
 requests are masked, server replies are unmasked, both wire frames use minimal
 16-bit extended lengths, and both clients copy the echoed application payload
 back into their mutable send buffer before the next round. Handshake time is
-excluded. This evidence covers the ordinary TCP runtime, not the separate
-io_uring adapter.
+excluded. This evidence covers the public backend-neutral `std.Io` TCP runtime.
 
 The same executable accepts `--compression`, negotiating permessage-deflate on
 both endpoints and exercising retained send/receive scratch plus direct caller-
@@ -350,6 +442,12 @@ websocket.zig:
 netz latency advantage:
   1.435x by median, 1.436x by trimmed mean
 ```
+
+A CPU-0 `ReleaseFast` regression run on 2026-09-04 after adding two-phase
+admission measured 9.513 us/roundtrip, 105,117 roundtrips/s, and 822.44 MiB/s
+of uncompressed-equivalent wire throughput. Handshake time is excluded, so the
+sample confirms that the new pre-101 control path did not alter the established
+frame hot path; it is not presented as a new throughput improvement.
 
 The websocket.zig public client defaults to Nagle enabled and writes its masked
 header then payload separately. Five default-socket samples were about
@@ -556,9 +654,13 @@ authority, and the raw path/query while retaining HTTP/3's multi-address
 fallback. Their timeout/deadline forms keep that same absolute budget through
 resolution, every QUIC/TLS attempt, SETTINGS, and the CONNECT response.
 Direct-address and URI clients also expose attempt variants that preserve a
-non-2xx Extended CONNECT status and owned response headers for application
-authentication, redirect, or retry policy. The compatibility connect helpers
-continue to map those responses to `InvalidResponse`.
+non-2xx Extended CONNECT status, owned response headers, bounded body, and
+trailers for application authentication, redirect, or retry policy. The
+compatibility connect helpers continue to map those responses to
+`InvalidResponse` after draining the entity. Caller-owned HTTP/3 sessions
+expose matching attempt variants; abandoning an incomplete attempt resets only
+its CONNECT stream, while a fully consumed rejection restores the session
+without a redundant cancellation.
 HTTP/3 WebSocket connections now expose the same typed Ping and Close progress
 events as HTTP/1 and RFC 8441. Timeout/deadline continuations return in-flight
 application frames with ownership and resume without retransmitting the control
@@ -581,6 +683,25 @@ payload before ownership returns even when flow control divides it into DATA.
 All H3 message, fragmentation, control, Close, and key-update send entry points
 serialize complete write sequences. This protects compression scratch and stops
 concurrent callers from interleaving one RFC 6455 frame across HTTP/3 DATA.
+The authenticated H3 server connection also reads its established Extended
+CONNECT stream through a targeted request-event API. A ready sibling HTTP/3
+request therefore remains queued for its own consumer instead of being
+mistaken for malformed WebSocket traffic; the real handshake exchange test
+interleaves such a sibling, completes its 204 response, and continues the
+WebSocket data/control/Close sequence on the original stream.
+All HTTP/1, RFC 8441, and RFC 9220 application-send entry points now also
+apply `Limits.max_frame_bytes` and `Limits.max_message_bytes` before acquiring
+the send mutex, allocating compressor scratch, or mutating an in-place client
+buffer. This includes text, binary, two-slice binary, and fragmented messages;
+fragmented sends bound every caller-selected frame and their logical aggregate.
+Ping, Pong, and Close additionally obey the configured frame bound as well as
+RFC 6455's 125-byte control-frame limit, matching receive-side enforcement.
+Configured-limit failures consistently return `MessageTooLarge`, while only
+unrepresentable aggregate wire lengths retain `PayloadTooLarge`. A shared
+validation matrix, transport-specific pre-I/O tests, and a real TCP exact-limit
+exchange cover these boundaries. The audited Tungstenite configuration applies
+its similarly named frame/message limits only to incoming data; netz deliberately
+uses one symmetric resource policy for both directions.
 HTTP/1, RFC 8441, and HTTP/3 writers also validate connection Close state after
 acquiring their send mutex, so a sender queued behind Close cannot append a
 data or control frame after the closing handshake has begun. Ping and Close
@@ -683,3 +804,45 @@ applying TCP-only socket options.
 4. Add an equal-wire compressed echo comparison if the reference re-enables
    its currently disabled outbound compressor; until then the netz timing is
    only an internal baseline.
+
+The handshake capacity audit now includes real 80-request / 80-response-field
+round trips for HTTP/1 Upgrade, RFC 8441, and RFC 9220. HTTP/1 uses its explicit
+100-field request/response limits and a 16-KiB head budget; HTTP/2 uses its
+256-field and 16-KiB header-list limits. HTTP/3 uses a 1200-byte QUIC datagram
+limit with 64-byte never-indexed values, so success requires actual STREAM
+fragmentation rather than QPACK repetition. The H3 client completes the normal
+attempt-to-connection promotion after inspecting all 80 response fields, while
+the server independently verifies all 80 request fields. H1/H2 capacity tests
+live under `runtime/handshake/` instead of enlarging the existing handshake
+header test file. The shared HTTP/1 and RFC 8441 handshake policy now lives
+beside those tests in `runtime/handshake/headers.zig`: singleton lookup,
+reserved/framing-field validation, legacy RFC 8441 rejection, extension
+selection, and duplicate-aware subprotocol preference are no longer embedded
+in the roughly ten-thousand-line runtime root. Private aliases retain existing
+call and test shapes; the public API is unchanged and the root is about 270
+lines smaller.
+HTTP/1 Upgrade, RFC 8441, and RFC 9220 request/success-response descriptor
+assembly now shares `runtime/handshake/storage.zig`: up to 16 fields remain on
+the stack and larger sets use one exact allocation. HTTP/1 rejection fields and
+the Host-completion writer use the same policy. The storage test proves the
+common path under an allocator that rejects every allocation and verifies the
+first overflow reports OOM; the three 80+80 wire tests cover each fallback.
+Subprotocol offer serialization uses a 128-byte stack buffer, while duplicate
+token detection uses 16 stack slots before exact fallback; H1, RFC 8441, and
+RFC 9220 now share that grammar and preference implementation. Final isolated
+`bench-websocket-echo --stats` smokes reported 18 allocations / 9,916 peak live
+bytes at one connection and 51 / 39,664 bytes at four connections, identical
+to the immediately preceding descriptor-only run. Latency was 9.224 and 9.733
+us/roundtrip respectively. This is no-regression evidence; whole-connection
+telemetry is dominated by other retained allocations and does not isolate the
+removed temporary handshake buffers.
+
+HTTP/1 clients now expose `ConnectAttempt` through direct-address and WS/WSS URI
+helpers, with relative/absolute deadline variants. A non-101 final
+response retains owned status, headers, decoded chunked trailers, and a body
+bounded by `Limits.max_rejection_body_bytes`; the transport is closed before a
+direct address attempt returns. `requireAccepted` keeps the established API's
+`InvalidResponse` mapping, while successful attempts preserve bytes coalesced
+after the 101 head and transfer them without another copy into the WebSocket
+receive buffer. Bodyless interim 1xx responses are skipped under the same
+absolute deadline and `Limits.max_informational_responses` bound.

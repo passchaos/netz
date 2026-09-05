@@ -963,15 +963,23 @@ test "QUIC 1-RTT connection enforces anti-amplification budget" {
     try std.testing.expectEqual(@as(usize, 0), server.pendingRecoveryCount());
     try std.testing.expectEqual(@as(usize, 0), server.congestion.bytes_in_flight);
 
-    server.recordPeerAddressBytesReceived(10);
+    // The one-byte PING payload would fit a payload-only budget, but its full
+    // protected datagram does not fit within 3 * 7 received bytes.
+    server.recordPeerAddressBytesReceived(7);
+    try std.testing.expectEqual(@as(?usize, 21), server.antiAmplificationLimitRemaining());
+    try std.testing.expectError(error.AntiAmplificationLimited, server.sendAt(&ping, 20));
+    server.recordPeerAddressBytesReceived(3);
     try std.testing.expectEqual(@as(?usize, 30), server.antiAmplificationLimitRemaining());
     try server.sendAt(&ping, 20);
     try std.testing.expectEqual(@as(usize, 1), server.pendingRecoveryCount());
-    try std.testing.expectEqual(@as(?usize, 29), server.antiAmplificationLimitRemaining());
 
     var sent = try client_endpoint.receiveBytes();
     defer sent.deinit(allocator);
     try std.testing.expect(sent.bytes.len > 0);
+    try std.testing.expectEqual(
+        @as(?usize, 30 - sent.bytes.len),
+        server.antiAmplificationLimitRemaining(),
+    );
 
     server.setPeerAddressValidated(true);
     try std.testing.expectEqual(@as(?usize, null), server.antiAmplificationLimitRemaining());
@@ -1005,24 +1013,329 @@ test "QUIC 1-RTT anti-amplification credit services expired PTO" {
     server.setPeerAddressValidated(false);
 
     const ping = [_]quic.Frame{.{ .ping = {} }};
-    server.recordPeerAddressBytesReceived(1);
+    server.recordPeerAddressBytesReceived(9);
     try server.sendAt(&ping, 10_000_000);
-    try std.testing.expectEqual(@as(?usize, 2), server.antiAmplificationLimitRemaining());
+    var original = try client_endpoint.receiveBytes();
+    defer original.deinit(allocator);
+    try std.testing.expectEqual(
+        @as(?usize, 27 - original.bytes.len),
+        server.antiAmplificationLimitRemaining(),
+    );
 
     // Consume the tiny remaining budget so the server is blocked exactly when
     // another datagram arrives with enough credit to service the already-due PTO.
-    server.peer_address_bytes_sent = 3;
+    server.peer_address_bytes_sent = 27;
     const serviced = (try server.recordPeerAddressDatagramReceived(210_000_000, 10)) orelse return error.TestUnexpectedResult;
     try std.testing.expectEqual(one_rtt.LossDetectionTimerKind.pto, serviced.kind);
     try std.testing.expectEqual(@as(u8, 1), server.ptoBackoffCount());
     try std.testing.expect(server.antiAmplificationLimitRemaining().? < 30);
 
-    var original = try client_endpoint.receiveBytes();
-    defer original.deinit(allocator);
     var probe = try client_endpoint.receiveBytes();
     defer probe.deinit(allocator);
     try std.testing.expect(original.bytes.len > 0);
     try std.testing.expect(probe.bytes.len > 0);
+}
+
+test "QUIC PATH_CHALLENGE commits only after an anti-amplification-blocked send succeeds" {
+    const allocator = std.testing.allocator;
+
+    var threaded = std.Io.Threaded.init(allocator, .{});
+    defer threaded.deinit();
+    const io = threaded.io();
+
+    var server_endpoint = try quic.runtime.Endpoint.bind(
+        allocator,
+        io,
+        .{ .ip4 = .loopback(0) },
+        .{ .max_datagram_size = 4096 },
+    );
+    defer server_endpoint.deinit();
+    var client_endpoint = try quic.runtime.Endpoint.bind(
+        allocator,
+        io,
+        .{ .ip4 = .loopback(0) },
+        .{ .max_datagram_size = 4096 },
+    );
+    defer client_endpoint.deinit();
+
+    const client_cid = [_]u8{ 0xba, 0xbb, 0xbc, 0xbd };
+    const server_cid = [_]u8{ 0xbe, 0xbf, 0xc0, 0xc1 };
+    const keys = quic.protection.deriveAes128Keys(
+        [_]u8{0xba} ** quic.protection.secret_len,
+    );
+    var server = try one_rtt.Connection.init(&server_endpoint, .{
+        .peer = client_endpoint.address(),
+        .receive_keys = keys,
+        .send_keys = keys,
+        .local_connection_id = &server_cid,
+        .peer_connection_id = &client_cid,
+        .local_endpoint = .server,
+        .enable_pacing = false,
+    });
+    defer server.deinit();
+    server.setPeerAddressValidated(false);
+
+    const challenge = [_]u8{ 0xcc, 1, 2, 3, 4, 5, 6, 7 };
+    try server.queuePathChallenge(challenge);
+    try std.testing.expectError(
+        error.AntiAmplificationLimited,
+        server.sendPendingPathChallengeAt(100, 50),
+    );
+    try std.testing.expectEqual(@as(usize, 1), server.path_validation.pendingChallengeCount());
+    try std.testing.expectEqual(@as(usize, 0), server.path_validation.outstandingChallengeCount());
+    try std.testing.expectEqual(@as(?u64, null), server.pathValidationDeadline());
+    try std.testing.expectEqual(@as(u64, 0), server.next_packet_number);
+    try std.testing.expectEqual(@as(usize, 0), server.pendingRecoveryCount());
+
+    server.recordPeerAddressBytesReceived(400);
+    try server.sendPendingPathChallengeAt(100, 50);
+    try std.testing.expectEqual(@as(usize, 0), server.path_validation.pendingChallengeCount());
+    try std.testing.expectEqual(@as(usize, 1), server.path_validation.outstandingChallengeCount());
+    try std.testing.expectEqual(@as(?u64, 150), server.pathValidationDeadline());
+
+    var packet = try client_endpoint.receiveBytes();
+    defer packet.deinit(allocator);
+    try std.testing.expectEqual(
+        quic.pmtu.min_udp_payload_size,
+        packet.bytes.len,
+    );
+    var decoded = try one_rtt.openReceivedBytes(
+        &client_endpoint,
+        packet.from,
+        packet.bytes,
+        keys,
+        client_cid.len,
+        0,
+        8,
+    );
+    defer decoded.deinit(allocator);
+    try std.testing.expectEqualSlices(
+        u8,
+        &challenge,
+        &decoded.frames[0].path_challenge.data,
+    );
+}
+
+test "QUIC PATH_CHALLENGE batch preserves every pending item on send failure" {
+    const allocator = std.testing.allocator;
+
+    var threaded = std.Io.Threaded.init(allocator, .{});
+    defer threaded.deinit();
+    const io = threaded.io();
+
+    var server_endpoint = try quic.runtime.Endpoint.bind(
+        allocator,
+        io,
+        .{ .ip4 = .loopback(0) },
+        .{ .max_datagram_size = 4096 },
+    );
+    defer server_endpoint.deinit();
+    var client_endpoint = try quic.runtime.Endpoint.bind(
+        allocator,
+        io,
+        .{ .ip4 = .loopback(0) },
+        .{ .max_datagram_size = 4096 },
+    );
+    defer client_endpoint.deinit();
+
+    const client_cid = [_]u8{ 0xca, 0xcb, 0xcc, 0xcd };
+    const server_cid = [_]u8{ 0xce, 0xcf, 0xd0, 0xd1 };
+    const keys = quic.protection.deriveAes128Keys(
+        [_]u8{0xca} ** quic.protection.secret_len,
+    );
+    var server = try one_rtt.Connection.init(&server_endpoint, .{
+        .peer = client_endpoint.address(),
+        .receive_keys = keys,
+        .send_keys = keys,
+        .local_connection_id = &server_cid,
+        .peer_connection_id = &client_cid,
+        .local_endpoint = .server,
+        .enable_pacing = false,
+    });
+    defer server.deinit();
+    server.setPeerAddressValidated(false);
+
+    const first = [_]u8{ 0xd1, 0, 0, 0, 0, 0, 0, 1 };
+    const second = [_]u8{ 0xd2, 0, 0, 0, 0, 0, 0, 2 };
+    try server.queuePathChallenge(first);
+    try server.queuePathChallenge(second);
+    try std.testing.expectError(
+        error.AntiAmplificationLimited,
+        server.sendPendingPathChallengesAt(200, 75),
+    );
+    try std.testing.expectEqual(@as(usize, 2), server.path_validation.pendingChallengeCount());
+    try std.testing.expectEqual(@as(usize, 0), server.path_validation.outstandingChallengeCount());
+    try std.testing.expectEqual(@as(?u64, null), server.pathValidationDeadline());
+
+    server.recordPeerAddressBytesReceived(400);
+    try std.testing.expectEqual(
+        @as(usize, 2),
+        try server.sendPendingPathChallengesAt(200, 75),
+    );
+    try std.testing.expectEqual(@as(usize, 0), server.path_validation.pendingChallengeCount());
+    try std.testing.expectEqual(@as(usize, 2), server.path_validation.outstandingChallengeCount());
+    try std.testing.expectEqual(@as(?u64, 275), server.pathValidationDeadline());
+}
+
+test "QUIC blocked PATH_CHALLENGE timer remains armed until credit arrives" {
+    const allocator = std.testing.allocator;
+    var threaded = std.Io.Threaded.init(allocator, .{});
+    defer threaded.deinit();
+    const io = threaded.io();
+
+    var endpoint = try quic.runtime.Endpoint.bind(
+        allocator,
+        io,
+        .{ .ip4 = .loopback(0) },
+        .{ .max_datagram_size = 4096 },
+    );
+    defer endpoint.deinit();
+    var peer = try quic.runtime.Endpoint.bind(
+        allocator,
+        io,
+        .{ .ip4 = .loopback(0) },
+        .{ .max_datagram_size = 4096 },
+    );
+    defer peer.deinit();
+    const keys = quic.protection.deriveAes128Keys(
+        [_]u8{0xd3} ** quic.protection.secret_len,
+    );
+    var server = try one_rtt.Connection.init(&endpoint, .{
+        .peer = peer.address(),
+        .receive_keys = keys,
+        .send_keys = keys,
+        .local_connection_id = "timer-server",
+        .peer_connection_id = "timer-peer",
+        .local_endpoint = .server,
+        .enable_pacing = false,
+    });
+    defer server.deinit();
+    server.setPeerAddressValidated(false);
+
+    try server.queuePathChallenge([_]u8{0xd3} ** 8);
+    try std.testing.expectError(
+        error.AntiAmplificationLimited,
+        server.sendPendingPathChallengeAt(100, 50),
+    );
+    const first_retry = server.nextTimerDeadline() orelse
+        return error.TestUnexpectedResult;
+    try std.testing.expectEqual(
+        one_rtt.TimerDeadlineKind.path_validation,
+        first_retry.kind,
+    );
+    try std.testing.expectEqual(
+        @as(u64, 100 + std.time.ns_per_ms),
+        first_retry.deadline_ns,
+    );
+    _ = try server.serviceNextTimerAt(first_retry.deadline_ns);
+    const second_retry = server.nextTimerDeadline() orelse
+        return error.TestUnexpectedResult;
+    try std.testing.expectEqual(
+        @as(u64, first_retry.deadline_ns + std.time.ns_per_ms),
+        second_retry.deadline_ns,
+    );
+    try std.testing.expectEqual(
+        @as(usize, 1),
+        server.path_validation.pendingChallengeCount(),
+    );
+    try std.testing.expectEqual(
+        @as(usize, 0),
+        server.path_validation.outstandingChallengeCount(),
+    );
+
+    server.recordPeerAddressBytesReceived(400);
+    _ = try server.serviceNextTimerAt(second_retry.deadline_ns);
+    try std.testing.expect(server.nextTimerDeadline() != null);
+    try std.testing.expectEqual(
+        @as(usize, 0),
+        server.path_validation.pendingChallengeCount(),
+    );
+    try std.testing.expectEqual(
+        @as(usize, 1),
+        server.path_validation.outstandingChallengeCount(),
+    );
+    var sent = try peer.receiveBytes();
+    defer sent.deinit(allocator);
+    try std.testing.expectEqual(
+        quic.pmtu.min_udp_payload_size,
+        sent.bytes.len,
+    );
+}
+
+test "QUIC congestion-blocked PATH_CHALLENGE retains retry deadline" {
+    const allocator = std.testing.allocator;
+    var threaded = std.Io.Threaded.init(allocator, .{});
+    defer threaded.deinit();
+    const io = threaded.io();
+
+    var endpoint = try quic.runtime.Endpoint.bind(
+        allocator,
+        io,
+        .{ .ip4 = .loopback(0) },
+        .{ .max_datagram_size = 4096 },
+    );
+    defer endpoint.deinit();
+    var peer = try quic.runtime.Endpoint.bind(
+        allocator,
+        io,
+        .{ .ip4 = .loopback(0) },
+        .{ .max_datagram_size = 4096 },
+    );
+    defer peer.deinit();
+    const keys = quic.protection.deriveAes128Keys(
+        [_]u8{0xd4} ** quic.protection.secret_len,
+    );
+    var client = try one_rtt.Connection.init(&endpoint, .{
+        .peer = peer.address(),
+        .receive_keys = keys,
+        .send_keys = keys,
+        .local_connection_id = "timer-client",
+        .peer_connection_id = "timer-server",
+        .enable_pacing = false,
+    });
+    defer client.deinit();
+    client.congestion.congestion_window = 0;
+
+    try client.queuePathChallenge([_]u8{0xd4} ** 8);
+    try std.testing.expectError(
+        error.CongestionLimited,
+        client.sendPendingPathChallengeAt(200, 50),
+    );
+    const retry = client.nextTimerDeadline() orelse
+        return error.TestUnexpectedResult;
+    try std.testing.expectEqual(
+        one_rtt.TimerDeadlineKind.path_validation,
+        retry.kind,
+    );
+    try std.testing.expectEqual(
+        @as(u64, 200 + std.time.ns_per_ms),
+        retry.deadline_ns,
+    );
+    try std.testing.expectEqual(
+        @as(usize, 1),
+        client.path_validation.pendingChallengeCount(),
+    );
+    try std.testing.expectEqual(
+        @as(usize, 0),
+        client.path_validation.outstandingChallengeCount(),
+    );
+
+    client.congestion.congestion_window = quic.congestion.initialWindow(1200);
+    _ = try client.serviceNextTimerAt(retry.deadline_ns);
+    try std.testing.expectEqual(
+        @as(usize, 0),
+        client.path_validation.pendingChallengeCount(),
+    );
+    try std.testing.expectEqual(
+        @as(usize, 1),
+        client.path_validation.outstandingChallengeCount(),
+    );
+    var sent = try peer.receiveBytes();
+    defer sent.deinit(allocator);
+    try std.testing.expectEqual(
+        quic.pmtu.min_udp_payload_size,
+        sent.bytes.len,
+    );
 }
 
 test "QUIC 1-RTT connection enforces congestion send window" {
@@ -1217,6 +1530,63 @@ test "QUIC 1-RTT beginPeerMigration obeys disable_active_migration" {
     try std.testing.expectEqual(@as(usize, 0), connection.path_validation.pendingChallengeCount());
 }
 
+test "QUIC 1-RTT duplicate migration challenge leaves current path unchanged" {
+    const allocator = std.testing.allocator;
+    var threaded = std.Io.Threaded.init(allocator, .{});
+    defer threaded.deinit();
+    const io = threaded.io();
+    var endpoint = try quic.runtime.Endpoint.bind(
+        allocator,
+        io,
+        .{ .ip4 = .loopback(0) },
+        .{ .max_datagram_size = 4096 },
+    );
+    defer endpoint.deinit();
+    var peer_b = try quic.runtime.Endpoint.bind(
+        allocator,
+        io,
+        .{ .ip4 = .loopback(0) },
+        .{ .max_datagram_size = 4096 },
+    );
+    defer peer_b.deinit();
+    var peer_c = try quic.runtime.Endpoint.bind(
+        allocator,
+        io,
+        .{ .ip4 = .loopback(0) },
+        .{ .max_datagram_size = 4096 },
+    );
+    defer peer_c.deinit();
+
+    const keys = quic.protection.deriveAes128Keys(
+        [_]u8{0xef} ** quic.protection.secret_len,
+    );
+    var connection = try one_rtt.Connection.init(&endpoint, .{
+        .peer = endpoint.address(),
+        .receive_keys = keys,
+        .send_keys = keys,
+        .local_connection_id = "duplicate-local",
+        .peer_connection_id = "duplicate-peer",
+    });
+    defer connection.deinit();
+
+    const challenge = [_]u8{ 0xd0, 1, 2, 3, 4, 5, 6, 7 };
+    try connection.beginPeerMigration(peer_b.address(), challenge);
+    const path_epoch = one_rtt.testing.currentPathEpoch(&connection);
+    try std.testing.expectError(
+        error.DuplicatePathChallenge,
+        connection.beginPeerMigration(peer_c.address(), challenge),
+    );
+    try std.testing.expectEqual(peer_b.address(), connection.peerAddress());
+    try std.testing.expectEqual(
+        path_epoch,
+        one_rtt.testing.currentPathEpoch(&connection),
+    );
+    try std.testing.expectEqual(
+        @as(usize, 1),
+        connection.path_validation.pendingChallengeCount(),
+    );
+}
+
 test "QUIC 1-RTT receive commits NAT rebinding after non-probing packet" {
     const allocator = std.testing.allocator;
 
@@ -1256,6 +1626,9 @@ test "QUIC 1-RTT receive commits NAT rebinding after non-probing packet" {
     server.pmtud.onProbeAckedWithIdentity(0, 1, 1300, 1300, 10);
     server.congestion.onMtuUpdate(server.currentSendDatagramSize());
     server.pacer.onMtuUpdate(server.currentSendDatagramSize());
+    server.rtt_stats.updateAt(37_000_000, 0, true, 1);
+    server.pto_count = 4;
+    server.last_persistent_congestion_packet_number = 9;
 
     try one_rtt.sendFrames(&rebound_client_endpoint, server_endpoint.address(), keys, .{
         .destination_connection_id = &server_cid,
@@ -1280,6 +1653,13 @@ test "QUIC 1-RTT receive commits NAT rebinding after non-probing packet" {
     try std.testing.expectEqual(
         quic.congestion.initialWindow(quic.pmtu.min_udp_payload_size),
         server.congestionWindow(),
+    );
+    try std.testing.expect(server.rtt_stats.has_measurement);
+    try std.testing.expectEqual(@as(u64, 37_000_000), server.rtt_stats.latest_rtt);
+    try std.testing.expectEqual(@as(u8, 0), server.ptoBackoffCount());
+    try std.testing.expectEqual(
+        @as(?u64, null),
+        server.last_persistent_congestion_packet_number,
     );
     try std.testing.expectEqual(@as(usize, 0), server.path_validation.pendingChallengeCount());
     try std.testing.expectEqual(
@@ -1429,6 +1809,10 @@ test "QUIC 1-RTT migration resets path state and validates on PATH_RESPONSE" {
     connection.congestion.onMtuUpdate(connection.currentSendDatagramSize());
     connection.pacer.onMtuUpdate(connection.currentSendDatagramSize());
     connection.congestion.congestion_window = 42_000;
+    connection.rtt_stats.updateAt(33_000_000, 0, true, 50);
+    connection.pto_count = 3;
+    connection.pacing_blocked_until_ns = 999;
+    connection.last_persistent_congestion_packet_number = 7;
     connection.pacer.onPacketSentAt(100, connection.pacer.maxBurstSize(), connection.congestionWindow(), connection.rtt_stats.smoothedOrInitial());
     try std.testing.expectEqual(@as(usize, 1300), connection.pmtudCurrentSize());
     try std.testing.expectEqual(@as(usize, 0), connection.pacer.budget);
@@ -1447,7 +1831,7 @@ test "QUIC 1-RTT migration resets path state and validates on PATH_RESPONSE" {
     try std.testing.expect(
         one_rtt.testing.currentPathEpoch(&connection) != old_path_epoch,
     );
-    try std.testing.expectEqual(@as(?usize, 0), connection.antiAmplificationLimitRemaining());
+    try std.testing.expectEqual(@as(?usize, null), connection.antiAmplificationLimitRemaining());
     try std.testing.expectEqual(quic.pmtu.min_udp_payload_size, connection.pmtudCurrentSize());
     try std.testing.expect(connection.pmtudShouldProbe());
     try std.testing.expectEqual(
@@ -1457,10 +1841,22 @@ test "QUIC 1-RTT migration resets path state and validates on PATH_RESPONSE" {
     try std.testing.expectEqual(quic.pacing.Pacer.init(true, quic.pmtu.min_udp_payload_size, quic.pacing.Pacer.default_max_burst_packets).maxBurstSize(), connection.pacer.maxBurstSize());
     try std.testing.expectEqual(connection.pacer.maxBurstSize(), connection.pacer.budget);
     try std.testing.expectEqual(@as(?u64, null), connection.pacer.last_sent_time_ns);
+    try std.testing.expect(!connection.rtt_stats.has_measurement);
+    try std.testing.expectEqual(@as(u8, 0), connection.ptoBackoffCount());
+    try std.testing.expectEqual(@as(?u64, null), connection.pacing_blocked_until_ns);
+    try std.testing.expectEqual(
+        @as(?u64, null),
+        connection.last_persistent_congestion_packet_number,
+    );
     try std.testing.expectEqual(@as(usize, 1), connection.path_validation.pendingChallengeCount());
 
-    var challenge_frame = try connection.path_validation.nextChallengeFrame();
-    try std.testing.expectEqualSlices(u8, &challenge, &challenge_frame.path_challenge.data);
+    try connection.sendPendingPathChallenge();
+    var challenge_datagram = try migrated_endpoint.receiveBytes();
+    defer challenge_datagram.deinit(allocator);
+    try std.testing.expectEqual(
+        quic.pmtu.min_udp_payload_size,
+        challenge_datagram.bytes.len,
+    );
     try std.testing.expectEqual(@as(usize, 1), connection.path_validation.outstandingChallengeCount());
 
     const frames = [_]quic.Frame{.{ .path_response = .{ .data = challenge } }};
@@ -1468,6 +1864,324 @@ test "QUIC 1-RTT migration resets path state and validates on PATH_RESPONSE" {
     try std.testing.expect(connection.peerAddressValidated());
     try std.testing.expectEqual(@as(usize, 0), connection.path_validation.outstandingChallengeCount());
     try std.testing.expectEqual(@as(?usize, null), connection.antiAmplificationLimitRemaining());
+}
+
+test "QUIC 1-RTT delayed old-path response cannot validate current path" {
+    const allocator = std.testing.allocator;
+
+    var threaded = std.Io.Threaded.init(allocator, .{});
+    defer threaded.deinit();
+    const io = threaded.io();
+
+    var server_endpoint = try quic.runtime.Endpoint.bind(
+        allocator,
+        io,
+        .{ .ip4 = .loopback(0) },
+        .{ .max_datagram_size = 4096 },
+    );
+    defer server_endpoint.deinit();
+    var original_peer = try quic.runtime.Endpoint.bind(
+        allocator,
+        io,
+        .{ .ip4 = .loopback(0) },
+        .{ .max_datagram_size = 4096 },
+    );
+    defer original_peer.deinit();
+    var peer_b = try quic.runtime.Endpoint.bind(
+        allocator,
+        io,
+        .{ .ip4 = .loopback(0) },
+        .{ .max_datagram_size = 4096 },
+    );
+    defer peer_b.deinit();
+    var peer_c = try quic.runtime.Endpoint.bind(
+        allocator,
+        io,
+        .{ .ip4 = .loopback(0) },
+        .{ .max_datagram_size = 4096 },
+    );
+    defer peer_c.deinit();
+
+    const client_cid = [_]u8{ 0xb1, 0xb2, 0xb3, 0xb4 };
+    const server_cid = [_]u8{ 0xb5, 0xb6, 0xb7, 0xb8 };
+    const keys = quic.protection.deriveAes128Keys(
+        [_]u8{0xb1} ** quic.protection.secret_len,
+    );
+    var server = try one_rtt.Connection.init(&server_endpoint, .{
+        .peer = original_peer.address(),
+        .receive_keys = keys,
+        .send_keys = keys,
+        .local_connection_id = &server_cid,
+        .peer_connection_id = &client_cid,
+        .local_endpoint = .server,
+        .enable_pacing = false,
+    });
+    defer server.deinit();
+
+    const challenge_b = [_]u8{ 0xb0, 1, 2, 3, 4, 5, 6, 7 };
+    try server.beginPeerMigration(peer_b.address(), challenge_b);
+    server.recordPeerAddressBytesReceived(400);
+    const epoch_b = one_rtt.testing.currentPathEpoch(&server);
+    try server.sendPendingPathChallenge();
+    var packet_b = try peer_b.receiveBytes();
+    packet_b.deinit(allocator);
+
+    const challenge_c = [_]u8{ 0xc0, 1, 2, 3, 4, 5, 6, 7 };
+    try server.beginPeerMigration(peer_c.address(), challenge_c);
+    server.recordPeerAddressBytesReceived(400);
+    const epoch_c = one_rtt.testing.currentPathEpoch(&server);
+    try std.testing.expect(epoch_c != epoch_b);
+    try server.sendPendingPathChallenge();
+    var packet_c = try peer_c.receiveBytes();
+    packet_c.deinit(allocator);
+
+    try std.testing.expectEqual(@as(usize, 2), server.path_validation.outstandingChallengeCount());
+    try std.testing.expectEqual(@as(?usize, 0), server.antiAmplificationLimitRemaining());
+
+    // A delayed response consumes B's token, but cannot validate C or release
+    // C's server anti-amplification limit.
+    try one_rtt.sendFrames(&peer_b, server_endpoint.address(), keys, .{
+        .destination_connection_id = &server_cid,
+        .packet_number = 0,
+        .frames = &.{.{ .path_response = .{ .data = challenge_b } }},
+    });
+    var delayed = try server.receivePacket();
+    delayed.deinit(allocator);
+    try std.testing.expectEqual(peer_c.address(), server.peerAddress());
+    try std.testing.expect(!server.peerAddressValidated());
+    try std.testing.expectEqual(@as(?usize, 0), server.antiAmplificationLimitRemaining());
+    try std.testing.expectEqual(@as(usize, 1), server.path_validation.outstandingChallengeCount());
+    try std.testing.expect(server.path_validation.hasChallengeForPathEpoch(epoch_c));
+
+    // RFC 9000 permits PATH_RESPONSE to arrive on a different network path.
+    // The token identifies C's challenge even though this packet also comes
+    // from B's tuple.
+    try one_rtt.sendFrames(&peer_b, server_endpoint.address(), keys, .{
+        .destination_connection_id = &server_cid,
+        .packet_number = 1,
+        .frames = &.{.{ .path_response = .{ .data = challenge_c } }},
+    });
+    var current = try server.receivePacket();
+    current.deinit(allocator);
+    try std.testing.expectEqual(peer_c.address(), server.peerAddress());
+    try std.testing.expect(server.peerAddressValidated());
+    try std.testing.expectEqual(@as(?usize, null), server.antiAmplificationLimitRemaining());
+    try std.testing.expectEqual(@as(usize, 0), server.path_validation.outstandingChallengeCount());
+}
+
+test "QUIC 1-RTT late old-path ACK cannot mutate new-path recovery state" {
+    const allocator = std.testing.allocator;
+    var threaded = std.Io.Threaded.init(allocator, .{});
+    defer threaded.deinit();
+    const io = threaded.io();
+    var endpoint = try quic.runtime.Endpoint.bind(
+        allocator,
+        io,
+        .{ .ip4 = .loopback(0) },
+        .{ .max_datagram_size = 4096 },
+    );
+    defer endpoint.deinit();
+    var migrated_endpoint = try quic.runtime.Endpoint.bind(
+        allocator,
+        io,
+        .{ .ip4 = .loopback(0) },
+        .{ .max_datagram_size = 4096 },
+    );
+    defer migrated_endpoint.deinit();
+
+    const keys = quic.protection.deriveAes128Keys(
+        [_]u8{0xd4} ** quic.protection.secret_len,
+    );
+    var connection = try one_rtt.Connection.init(&endpoint, .{
+        .peer = endpoint.address(),
+        .receive_keys = keys,
+        .send_keys = keys,
+        .local_connection_id = "migration-local",
+        .peer_connection_id = "migration-peer",
+        .enable_pacing = false,
+    });
+    defer connection.deinit();
+
+    const old_epoch = one_rtt.testing.currentPathEpoch(&connection);
+    try connection.sent.sentInFlightAtWithDatagramSizeAndPathEpoch(
+        0,
+        true,
+        true,
+        100,
+        1200,
+        .not_ect,
+        100,
+        old_epoch,
+    );
+    _ = try connection.recovery.trackSent(
+        0,
+        &.{@intFromEnum(quic.FrameType.ping)},
+    );
+    try connection.congestion.reserve(100);
+    connection.rtt_stats.updateAt(50_000_000, 0, true, 100);
+    try connection.beginPeerMigration(
+        migrated_endpoint.address(),
+        [_]u8{ 8, 6, 7, 5, 3, 0, 9, 1 },
+    );
+    const new_epoch = one_rtt.testing.currentPathEpoch(&connection);
+    try std.testing.expect(new_epoch != old_epoch);
+    try std.testing.expect(!connection.rtt_stats.has_measurement);
+
+    try connection.sent.sentInFlightAtWithDatagramSizeAndPathEpoch(
+        1,
+        true,
+        true,
+        200,
+        1200,
+        .not_ect,
+        1_000,
+        new_epoch,
+    );
+    try connection.congestion.reserve(200);
+    connection.pto_count = 3;
+    const new_path_cwnd = connection.congestionWindow();
+    const new_path_flight = connection.bytesInFlight();
+    const jitter_epoch = connection.ptoJitterEpoch();
+    const pto_deadline = connection.ptoDeadline();
+
+    try one_rtt.testing.applyReceivedFrames(
+        &connection,
+        10,
+        &.{.{ .ack = .{
+            .largest_acknowledged = 0,
+            .ack_delay = 0,
+            .first_ack_range = 0,
+        } }},
+        10_000,
+        .not_ect,
+    );
+    try std.testing.expect(connection.sent.packets.items[0].acknowledged);
+    try std.testing.expect(!connection.rtt_stats.has_measurement);
+    try std.testing.expectEqual(new_path_cwnd, connection.congestionWindow());
+    try std.testing.expectEqual(new_path_flight, connection.bytesInFlight());
+    try std.testing.expectEqual(@as(usize, 0), connection.pendingRecoveryCount());
+    try std.testing.expectEqual(@as(u8, 3), connection.ptoBackoffCount());
+    try std.testing.expectEqual(jitter_epoch, connection.ptoJitterEpoch());
+    try std.testing.expectEqual(pto_deadline, connection.ptoDeadline());
+
+    try one_rtt.testing.applyReceivedFrames(
+        &connection,
+        11,
+        &.{.{ .ack = .{
+            .largest_acknowledged = 1,
+            .ack_delay = 0,
+            .first_ack_range = 0,
+        } }},
+        11_000,
+        .not_ect,
+    );
+    try std.testing.expect(connection.rtt_stats.has_measurement);
+    try std.testing.expectEqual(
+        @as(u64, 10_000),
+        connection.rtt_stats.latest_rtt,
+    );
+    try std.testing.expectEqual(@as(usize, 0), connection.bytesInFlight());
+    try std.testing.expectEqual(@as(u8, 0), connection.ptoBackoffCount());
+}
+
+test "QUIC 1-RTT old-path loss does not reduce new-path congestion" {
+    const allocator = std.testing.allocator;
+    var threaded = std.Io.Threaded.init(allocator, .{});
+    defer threaded.deinit();
+    const io = threaded.io();
+    var endpoint = try quic.runtime.Endpoint.bind(
+        allocator,
+        io,
+        .{ .ip4 = .loopback(0) },
+        .{ .max_datagram_size = 4096 },
+    );
+    defer endpoint.deinit();
+    var migrated_endpoint = try quic.runtime.Endpoint.bind(
+        allocator,
+        io,
+        .{ .ip4 = .loopback(0) },
+        .{ .max_datagram_size = 4096 },
+    );
+    defer migrated_endpoint.deinit();
+
+    const keys = quic.protection.deriveAes128Keys(
+        [_]u8{0xd5} ** quic.protection.secret_len,
+    );
+    var connection = try one_rtt.Connection.init(&endpoint, .{
+        .peer = endpoint.address(),
+        .receive_keys = keys,
+        .send_keys = keys,
+        .local_connection_id = "loss-local",
+        .peer_connection_id = "loss-peer",
+        .enable_pacing = false,
+    });
+    defer connection.deinit();
+
+    const old_epoch = one_rtt.testing.currentPathEpoch(&connection);
+    for (0..2) |packet_number| {
+        try connection.sent.sentInFlightAtWithDatagramSizeAndPathEpoch(
+            packet_number,
+            true,
+            true,
+            100,
+            1200,
+            .not_ect,
+            100 + packet_number,
+            old_epoch,
+        );
+        _ = try connection.recovery.trackSent(
+            packet_number,
+            &.{@intFromEnum(quic.FrameType.ping)},
+        );
+    }
+    try connection.congestion.reserve(200);
+    try connection.beginPeerMigration(
+        migrated_endpoint.address(),
+        [_]u8{ 1, 3, 3, 7, 2, 1, 0, 8 },
+    );
+    connection.setPeerAddressValidated(true);
+    const new_epoch = one_rtt.testing.currentPathEpoch(&connection);
+    try connection.sent.sentInFlightAtWithDatagramSizeAndPathEpoch(
+        4,
+        true,
+        true,
+        200,
+        1200,
+        .not_ect,
+        1_000,
+        new_epoch,
+    );
+    try connection.congestion.reserve(200);
+    const new_path_cwnd = connection.congestionWindow();
+
+    try one_rtt.testing.applyReceivedFrames(
+        &connection,
+        20,
+        &.{.{ .ack = .{
+            .largest_acknowledged = 4,
+            .ack_delay = 0,
+            .first_ack_range = 0,
+        } }},
+        2_000,
+        .not_ect,
+    );
+    try std.testing.expect(connection.sent.packets.items[0].lost);
+    try std.testing.expect(connection.sent.packets.items[1].lost);
+    try std.testing.expect(connection.sent.packets.items[2].acknowledged);
+    try std.testing.expectEqual(new_path_cwnd, connection.congestionWindow());
+    try std.testing.expectEqual(@as(usize, 0), connection.bytesInFlight());
+    try std.testing.expectEqual(@as(usize, 2), connection.pendingRecoveryCount());
+
+    // Loss still makes reliable old-path payloads eligible. Their fresh
+    // packet-number copies are sent under the new epoch and consume only the
+    // replacement path's congestion budget.
+    connection.next_packet_number = 5;
+    try std.testing.expectEqual(
+        @as(usize, 2),
+        try connection.retransmitPacketThresholdLosses(2),
+    );
+    try std.testing.expectEqual(@as(usize, 2), connection.pendingRecoveryCount());
+    try std.testing.expectEqual(@as(usize, 2), connection.bytesInFlight());
 }
 
 test "QUIC 1-RTT late old-path plain ACK does not fail fresh path ECN" {
@@ -1651,6 +2365,7 @@ test "QUIC 1-RTT preferred address migration selects address and CID" {
         .local_connection_id = &local_cid,
         .peer_connection_id = &peer_cid,
         .peer_preferred_address = preferred_address,
+        .peer_disable_active_migration = true,
         .active_connection_id_limit = 4,
     });
     defer connection.deinit();
@@ -1665,9 +2380,62 @@ test "QUIC 1-RTT preferred address migration selects address and CID" {
     try std.testing.expectEqualSlices(u8, &preferred_cid, connection.config.peer_connection_id);
     try std.testing.expectEqual(@as(usize, 2), connection.peer_connection_ids.count());
     try std.testing.expect(!connection.peerAddressValidated());
-    try std.testing.expectEqual(@as(?usize, 0), connection.antiAmplificationLimitRemaining());
-    var challenge_frame = try connection.path_validation.nextChallengeFrame();
-    try std.testing.expectEqualSlices(u8, &challenge, &challenge_frame.path_challenge.data);
+    try std.testing.expectEqual(@as(?usize, null), connection.antiAmplificationLimitRemaining());
+    try connection.sendPendingPathChallenge();
+    var challenge_packet = try preferred_endpoint.receiveBytes();
+    defer challenge_packet.deinit(allocator);
+    try std.testing.expectEqual(
+        quic.pmtu.min_udp_payload_size,
+        challenge_packet.bytes.len,
+    );
+    var decoded = try one_rtt.openReceivedBytes(
+        &preferred_endpoint,
+        challenge_packet.from,
+        challenge_packet.bytes,
+        keys,
+        preferred_cid.len,
+        0,
+        8,
+    );
+    defer decoded.deinit(allocator);
+    try std.testing.expectEqual(@as(usize, 2), decoded.frames.len);
+    try std.testing.expectEqualSlices(
+        u8,
+        &challenge,
+        &decoded.frames[0].path_challenge.data,
+    );
+
+    var invalid_family = try one_rtt.Connection.init(&original_endpoint, .{
+        .peer = original_endpoint.address(),
+        .receive_keys = keys,
+        .send_keys = keys,
+        .local_connection_id = &local_cid,
+        .peer_connection_id = &peer_cid,
+        .peer_preferred_address = preferred_address,
+        .active_connection_id_limit = 4,
+    });
+    defer invalid_family.deinit();
+    try std.testing.expectError(
+        error.InvalidTransportParameter,
+        invalid_family.beginPeerPreferredAddressMigration(challenge, .ipv6),
+    );
+    try std.testing.expectEqual(original_endpoint.address(), invalid_family.peerAddress());
+    try std.testing.expectEqualSlices(u8, &peer_cid, invalid_family.config.peer_connection_id);
+    try std.testing.expectEqual(@as(usize, 1), invalid_family.peer_connection_ids.count());
+    try std.testing.expectEqual(@as(usize, 0), invalid_family.path_validation.pendingChallengeCount());
+
+    var failing = std.testing.FailingAllocator.init(allocator, .{});
+    invalid_family.path_validation.allocator = failing.allocator();
+    defer invalid_family.path_validation.allocator = allocator;
+    failing.fail_index = failing.alloc_index;
+    try std.testing.expectError(
+        error.OutOfMemory,
+        invalid_family.beginPeerPreferredAddressMigration(challenge, .ipv4),
+    );
+    try std.testing.expectEqual(original_endpoint.address(), invalid_family.peerAddress());
+    try std.testing.expectEqualSlices(u8, &peer_cid, invalid_family.config.peer_connection_id);
+    try std.testing.expectEqual(@as(usize, 1), invalid_family.peer_connection_ids.count());
+    try std.testing.expectEqual(@as(usize, 0), invalid_family.path_validation.pendingChallengeCount());
 
     var missing = try one_rtt.Connection.init(&original_endpoint, .{
         .peer = original_endpoint.address(),
@@ -1678,6 +2446,102 @@ test "QUIC 1-RTT preferred address migration selects address and CID" {
     });
     defer missing.deinit();
     try std.testing.expectError(error.InvalidTransportParameter, missing.beginPeerPreferredAddressMigration(challenge, .ipv4));
+}
+
+test "QUIC failed preferred-address validation restores last validated address and CID" {
+    const allocator = std.testing.allocator;
+    var threaded = std.Io.Threaded.init(allocator, .{});
+    defer threaded.deinit();
+    const io = threaded.io();
+
+    var local_endpoint = try quic.runtime.Endpoint.bind(
+        allocator,
+        io,
+        .{ .ip4 = .loopback(0) },
+        .{ .max_datagram_size = 4096 },
+    );
+    defer local_endpoint.deinit();
+    var original_peer = try quic.runtime.Endpoint.bind(
+        allocator,
+        io,
+        .{ .ip4 = .loopback(0) },
+        .{ .max_datagram_size = 4096 },
+    );
+    defer original_peer.deinit();
+    var preferred_peer = try quic.runtime.Endpoint.bind(
+        allocator,
+        io,
+        .{ .ip4 = .loopback(0) },
+        .{ .max_datagram_size = 4096 },
+    );
+    defer preferred_peer.deinit();
+
+    const local_cid = [_]u8{ 0x71, 0x72, 0x73, 0x74 };
+    const original_cid = [_]u8{ 0x81, 0x82, 0x83, 0x84 };
+    const preferred_cid = [_]u8{ 0x91, 0x92, 0x93, 0x94 };
+    const keys = quic.protection.deriveAes128Keys(
+        [_]u8{0x61} ** quic.protection.secret_len,
+    );
+    const preferred_address = quic.PreferredAddress{
+        .ipv4_address = preferred_peer.address().ip4.bytes,
+        .ipv4_port = preferred_peer.address().ip4.port,
+        .connection_id = &preferred_cid,
+        .stateless_reset_token = [_]u8{0x62} ** 16,
+    };
+    var connection = try one_rtt.Connection.init(&local_endpoint, .{
+        .peer = original_peer.address(),
+        .receive_keys = keys,
+        .send_keys = keys,
+        .local_connection_id = &local_cid,
+        .peer_connection_id = &original_cid,
+        .peer_preferred_address = preferred_address,
+        .active_connection_id_limit = 4,
+        .enable_pacing = false,
+    });
+    defer connection.deinit();
+    connection.path_validation.max_challenge_transmissions = 1;
+
+    const challenge = [_]u8{ 0x63, 1, 2, 3, 4, 5, 6, 7 };
+    try connection.beginPeerPreferredAddressMigration(challenge, .ipv4);
+    const failed_epoch = one_rtt.testing.currentPathEpoch(&connection);
+    try connection.sendPendingPathChallengeAt(100, 50);
+    var challenge_datagram = try preferred_peer.receiveBytes();
+    challenge_datagram.deinit(allocator);
+
+    try std.testing.expectEqual(
+        @as(usize, 1),
+        try connection.checkPathValidationTimeouts(150),
+    );
+    try std.testing.expectEqual(original_peer.address(), connection.peerAddress());
+    try std.testing.expect(connection.peerAddressValidated());
+    try std.testing.expectEqualSlices(
+        u8,
+        &original_cid,
+        connection.config.peer_connection_id,
+    );
+    try std.testing.expectEqual(@as(usize, 0), connection.pendingPathValidationCount());
+    try std.testing.expect(
+        one_rtt.testing.currentPathEpoch(&connection) != failed_epoch,
+    );
+
+    try connection.send(&.{.{ .ping = {} }});
+    var restored_datagram = try original_peer.receiveBytes();
+    defer restored_datagram.deinit(allocator);
+    var restored_packet = try one_rtt.openReceivedBytes(
+        &original_peer,
+        restored_datagram.from,
+        restored_datagram.bytes,
+        keys,
+        original_cid.len,
+        0,
+        4,
+    );
+    defer restored_packet.deinit(allocator);
+    try std.testing.expectEqualSlices(
+        u8,
+        &original_cid,
+        restored_packet.packet.destination_connection_id,
+    );
 }
 
 test "QUIC 1-RTT connection exchanges PATH_CHALLENGE and PATH_RESPONSE" {
@@ -1764,10 +2628,14 @@ test "QUIC 1-RTT PATH_RESPONSE returns to probing source address" {
     defer server.deinit();
 
     const challenge = [_]u8{ 9, 8, 7, 6, 5, 4, 3, 2 };
+    const probing_frames = [_]quic.Frame{
+        .{ .path_challenge = .{ .data = challenge } },
+        .{ .padding = .{ .len = 1166 } },
+    };
     try one_rtt.sendFrames(&probing_endpoint, server_endpoint.address(), keys, .{
         .destination_connection_id = &server_cid,
         .packet_number = 0,
-        .frames = &.{.{ .path_challenge = .{ .data = challenge } }},
+        .frames = &probing_frames,
     });
 
     var packet = try server.receivePacket();
@@ -1775,12 +2643,668 @@ test "QUIC 1-RTT PATH_RESPONSE returns to probing source address" {
     try std.testing.expectEqual(original_client_endpoint.address(), server.config.peer);
     try std.testing.expect(server.peerAddressValidated());
     try std.testing.expectEqual(@as(usize, 1), server.path_validation.pendingResponseCount());
+    const received_budget = one_rtt.testing.candidatePathBudgetFor(
+        &server,
+        probing_endpoint.address(),
+    ).?;
+    try std.testing.expectEqual(
+        quic.pmtu.min_udp_payload_size,
+        received_budget.received,
+    );
+    try std.testing.expectEqual(@as(usize, 0), received_budget.sent);
 
     try server.sendPendingPathResponse();
-    var response = try one_rtt.receive(&probing_endpoint, keys, client_cid.len, 0, 8);
+    var response_datagram = try probing_endpoint.receiveBytes();
+    defer response_datagram.deinit(allocator);
+    try std.testing.expectEqual(
+        quic.pmtu.min_udp_payload_size,
+        response_datagram.bytes.len,
+    );
+    const sent_budget = one_rtt.testing.candidatePathBudgetFor(
+        &server,
+        probing_endpoint.address(),
+    ).?;
+    try std.testing.expectEqual(
+        quic.pmtu.min_udp_payload_size,
+        sent_budget.received,
+    );
+    try std.testing.expectEqual(
+        quic.pmtu.min_udp_payload_size,
+        sent_budget.sent,
+    );
+    var response = try one_rtt.openReceivedBytes(
+        &probing_endpoint,
+        response_datagram.from,
+        response_datagram.bytes,
+        keys,
+        client_cid.len,
+        0,
+        8,
+    );
     defer response.deinit(allocator);
     try std.testing.expectEqual(quic.Frame.path_response, std.meta.activeTag(response.frames[0]));
     try std.testing.expectEqualSlices(u8, &challenge, &response.frames[0].path_response.data);
+}
+
+test "QUIC client pads PATH_RESPONSE to a probing source" {
+    const allocator = std.testing.allocator;
+    var threaded = std.Io.Threaded.init(allocator, .{});
+    defer threaded.deinit();
+    const io = threaded.io();
+
+    var client_endpoint = try quic.runtime.Endpoint.bind(
+        allocator,
+        io,
+        .{ .ip4 = .loopback(0) },
+        .{ .max_datagram_size = 4096 },
+    );
+    defer client_endpoint.deinit();
+    var original_server_endpoint = try quic.runtime.Endpoint.bind(
+        allocator,
+        io,
+        .{ .ip4 = .loopback(0) },
+        .{ .max_datagram_size = 4096 },
+    );
+    defer original_server_endpoint.deinit();
+    var probing_endpoint = try quic.runtime.Endpoint.bind(
+        allocator,
+        io,
+        .{ .ip4 = .loopback(0) },
+        .{ .max_datagram_size = 4096 },
+    );
+    defer probing_endpoint.deinit();
+
+    const client_cid = [_]u8{ 0x41, 0x42, 0x43, 0x44 };
+    const server_cid = [_]u8{ 0x45, 0x46, 0x47, 0x48 };
+    const keys = quic.protection.deriveAes128Keys(
+        [_]u8{0x41} ** quic.protection.secret_len,
+    );
+    var client = try one_rtt.Connection.init(&client_endpoint, .{
+        .peer = original_server_endpoint.address(),
+        .receive_keys = keys,
+        .send_keys = keys,
+        .local_connection_id = &client_cid,
+        .peer_connection_id = &server_cid,
+        .enable_pacing = false,
+    });
+    defer client.deinit();
+
+    const challenge = [_]u8{ 4, 3, 2, 1, 5, 6, 7, 8 };
+    try one_rtt.sendFrames(
+        &probing_endpoint,
+        client_endpoint.address(),
+        keys,
+        .{
+            .destination_connection_id = &client_cid,
+            .packet_number = 0,
+            .frames = &.{.{ .path_challenge = .{ .data = challenge } }},
+        },
+    );
+    var received = try client.receivePacket();
+    received.deinit(allocator);
+    try client.sendPendingPathResponse();
+    var response = try probing_endpoint.receiveBytes();
+    defer response.deinit(allocator);
+    try std.testing.expectEqual(
+        quic.pmtu.min_udp_payload_size,
+        response.bytes.len,
+    );
+}
+
+test "QUIC candidate PATH_RESPONSE waits for its own amplification credit" {
+    const allocator = std.testing.allocator;
+    var threaded = std.Io.Threaded.init(allocator, .{});
+    defer threaded.deinit();
+    const io = threaded.io();
+
+    var server_endpoint = try quic.runtime.Endpoint.bind(
+        allocator,
+        io,
+        .{ .ip4 = .loopback(0) },
+        .{ .max_datagram_size = 4096 },
+    );
+    defer server_endpoint.deinit();
+    var original_endpoint = try quic.runtime.Endpoint.bind(
+        allocator,
+        io,
+        .{ .ip4 = .loopback(0) },
+        .{ .max_datagram_size = 4096 },
+    );
+    defer original_endpoint.deinit();
+    var probing_endpoint = try quic.runtime.Endpoint.bind(
+        allocator,
+        io,
+        .{ .ip4 = .loopback(0) },
+        .{ .max_datagram_size = 4096 },
+    );
+    defer probing_endpoint.deinit();
+
+    const client_cid = [_]u8{ 0x82, 0x83, 0x84, 0x85 };
+    const server_cid = [_]u8{ 0x86, 0x87, 0x88, 0x89 };
+    const keys = quic.protection.deriveAes128Keys(
+        [_]u8{0x82} ** quic.protection.secret_len,
+    );
+    var server = try one_rtt.Connection.init(&server_endpoint, .{
+        .peer = original_endpoint.address(),
+        .receive_keys = keys,
+        .send_keys = keys,
+        .local_connection_id = &server_cid,
+        .peer_connection_id = &client_cid,
+        .local_endpoint = .server,
+        .enable_pacing = false,
+    });
+    defer server.deinit();
+
+    const challenge = [_]u8{ 8, 7, 6, 5, 4, 3, 2, 1 };
+    try one_rtt.sendFrames(
+        &probing_endpoint,
+        server_endpoint.address(),
+        keys,
+        .{
+            .destination_connection_id = &server_cid,
+            .packet_number = 0,
+            .frames = &.{.{ .path_challenge = .{ .data = challenge } }},
+        },
+    );
+    var packet = try server.receivePacket();
+    defer packet.deinit(allocator);
+    try std.testing.expectError(
+        error.AntiAmplificationLimited,
+        server.sendPendingPathResponse(),
+    );
+    try std.testing.expectEqual(
+        @as(usize, 1),
+        server.path_validation.pendingResponseCount(),
+    );
+    const budget = one_rtt.testing.candidatePathBudgetFor(
+        &server,
+        probing_endpoint.address(),
+    ).?;
+    try std.testing.expect(budget.received < 400);
+    try std.testing.expectEqual(@as(usize, 0), budget.sent);
+    try std.testing.expectEqual(@as(u64, 0), server.next_packet_number);
+    try std.testing.expectError(
+        error.Timeout,
+        probing_endpoint.receiveBytesWithTimeout(.fromMilliseconds(1)),
+    );
+}
+
+test "QUIC candidate amplification credit transfers when path becomes active" {
+    const allocator = std.testing.allocator;
+    var threaded = std.Io.Threaded.init(allocator, .{});
+    defer threaded.deinit();
+    const io = threaded.io();
+
+    var server_endpoint = try quic.runtime.Endpoint.bind(
+        allocator,
+        io,
+        .{ .ip4 = .loopback(0) },
+        .{ .max_datagram_size = 4096 },
+    );
+    defer server_endpoint.deinit();
+    var original_endpoint = try quic.runtime.Endpoint.bind(
+        allocator,
+        io,
+        .{ .ip4 = .loopback(0) },
+        .{ .max_datagram_size = 4096 },
+    );
+    defer original_endpoint.deinit();
+    var candidate_endpoint = try quic.runtime.Endpoint.bind(
+        allocator,
+        io,
+        .{ .ip4 = .{
+            .bytes = .{ 127, 0, 0, 2 },
+            .port = 0,
+        } },
+        .{ .max_datagram_size = 4096 },
+    );
+    defer candidate_endpoint.deinit();
+
+    const client_cid = [_]u8{ 0x92, 0x93, 0x94, 0x95 };
+    const server_cid = [_]u8{ 0x96, 0x97, 0x98, 0x99 };
+    const keys = quic.protection.deriveAes128Keys(
+        [_]u8{0x92} ** quic.protection.secret_len,
+    );
+    var server = try one_rtt.Connection.init(&server_endpoint, .{
+        .peer = original_endpoint.address(),
+        .receive_keys = keys,
+        .send_keys = keys,
+        .local_connection_id = &server_cid,
+        .peer_connection_id = &client_cid,
+        .local_endpoint = .server,
+        .enable_pacing = false,
+    });
+    defer server.deinit();
+
+    const challenge = [_]u8{ 9, 7, 5, 3, 1, 2, 4, 6 };
+    const probe_frames = [_]quic.Frame{
+        .{ .path_challenge = .{ .data = challenge } },
+        .{ .padding = .{ .len = 1166 } },
+    };
+    try one_rtt.sendFrames(
+        &candidate_endpoint,
+        server_endpoint.address(),
+        keys,
+        .{
+            .destination_connection_id = &server_cid,
+            .packet_number = 0,
+            .frames = &probe_frames,
+        },
+    );
+    var probe = try server.receivePacket();
+    probe.deinit(allocator);
+
+    try one_rtt.sendFrames(
+        &candidate_endpoint,
+        server_endpoint.address(),
+        keys,
+        .{
+            .destination_connection_id = &server_cid,
+            .packet_number = 1,
+            .frames = &.{.{ .stream = .{
+                .stream_id = 0,
+                .data = "select",
+            } }},
+        },
+    );
+    var selected = try server.receivePacket();
+    selected.deinit(allocator);
+    try std.testing.expectEqual(
+        candidate_endpoint.address(),
+        server.peerAddress(),
+    );
+    try std.testing.expect(!server.peerAddressValidated());
+    try std.testing.expect(
+        one_rtt.testing.candidatePathBudgetFor(
+            &server,
+            candidate_endpoint.address(),
+        ) == null,
+    );
+    try std.testing.expect(
+        server.antiAmplificationLimitRemaining().? >=
+            quic.pmtu.min_udp_payload_size,
+    );
+    try server.sendPendingPathChallenge();
+    var sent = try candidate_endpoint.receiveBytes();
+    defer sent.deinit(allocator);
+    try std.testing.expectEqual(
+        quic.pmtu.min_udp_payload_size,
+        sent.bytes.len,
+    );
+}
+
+test "QUIC late PATH_RESPONSE validates only its challenge path epoch" {
+    const allocator = std.testing.allocator;
+    var threaded = std.Io.Threaded.init(allocator, .{});
+    defer threaded.deinit();
+    const io = threaded.io();
+
+    var endpoint = try quic.runtime.Endpoint.bind(
+        allocator,
+        io,
+        .{ .ip4 = .loopback(0) },
+        .{ .max_datagram_size = 4096 },
+    );
+    defer endpoint.deinit();
+    var peer_b = try quic.runtime.Endpoint.bind(
+        allocator,
+        io,
+        .{ .ip4 = .{ .bytes = .{ 127, 0, 0, 2 }, .port = 0 } },
+        .{ .max_datagram_size = 4096 },
+    );
+    defer peer_b.deinit();
+    var peer_c = try quic.runtime.Endpoint.bind(
+        allocator,
+        io,
+        .{ .ip4 = .{ .bytes = .{ 127, 0, 0, 3 }, .port = 0 } },
+        .{ .max_datagram_size = 4096 },
+    );
+    defer peer_c.deinit();
+
+    const keys = quic.protection.deriveAes128Keys(
+        [_]u8{0xa3} ** quic.protection.secret_len,
+    );
+    var server = try one_rtt.Connection.init(&endpoint, .{
+        .peer = endpoint.address(),
+        .receive_keys = keys,
+        .send_keys = keys,
+        .local_connection_id = "epoch-server",
+        .peer_connection_id = "epoch-peer",
+        .local_endpoint = .server,
+        .enable_pacing = false,
+    });
+    defer server.deinit();
+    server.recordPeerAddressBytesReceived(400);
+
+    const challenge_b = [_]u8{ 0xb1, 0, 0, 0, 0, 0, 0, 1 };
+    try server.beginPeerMigration(peer_b.address(), challenge_b);
+    server.recordPeerAddressBytesReceived(400);
+    try server.sendPendingPathChallengeAt(100, 50);
+    const epoch_b = one_rtt.testing.currentPathEpoch(&server);
+
+    const challenge_c = [_]u8{ 0xc1, 0, 0, 0, 0, 0, 0, 2 };
+    try server.beginPeerMigration(peer_c.address(), challenge_c);
+    server.recordPeerAddressBytesReceived(400);
+    try server.sendPendingPathChallengeAt(200, 50);
+    const epoch_c = one_rtt.testing.currentPathEpoch(&server);
+    try std.testing.expect(epoch_c != epoch_b);
+    try std.testing.expectEqual(@as(usize, 2), server.path_validation.outstandingChallengeCount());
+
+    try one_rtt.testing.applyReceivedFrames(
+        &server,
+        10,
+        &.{.{ .path_response = .{ .data = challenge_b } }},
+        300,
+        .not_ect,
+    );
+    try std.testing.expectEqual(peer_c.address(), server.peerAddress());
+    try std.testing.expect(!server.peerAddressValidated());
+    try std.testing.expect(server.antiAmplificationLimitRemaining() != null);
+    try std.testing.expectEqual(@as(usize, 1), server.path_validation.outstandingChallengeCount());
+
+    // RFC 9000 permits a PATH_RESPONSE to arrive on a different path; the
+    // challenge's recorded epoch, not the response source tuple, identifies
+    // the path that becomes validated.
+    const response_payload = try one_rtt.encodeFrames(allocator, &.{.{
+        .path_response = .{ .data = challenge_c },
+    }});
+    defer allocator.free(response_payload);
+    const response_datagram = try quic.protection.sealShortPacket(
+        allocator,
+        keys,
+        .{
+            .destination_connection_id = "epoch-server",
+            .packet_number = 11,
+            .packet_number_len = 4,
+            .payload = response_payload,
+        },
+    );
+    defer allocator.free(response_datagram);
+    var response = try one_rtt.testing.processReceivedBytesAt(
+        &server,
+        peer_b.address(),
+        response_datagram,
+        .not_ect,
+        400,
+    );
+    response.deinit(allocator);
+    try std.testing.expectEqual(peer_c.address(), server.peerAddress());
+    try std.testing.expect(server.peerAddressValidated());
+    try std.testing.expectEqual(@as(?usize, null), server.antiAmplificationLimitRemaining());
+    try std.testing.expectEqual(@as(usize, 0), server.path_validation.outstandingChallengeCount());
+}
+
+test "QUIC superseded path timeout cannot retry on current path" {
+    const allocator = std.testing.allocator;
+    var state = quic.path_validation.State.init(allocator);
+    defer state.deinit();
+
+    const challenge_b = [_]u8{ 0xb2, 0, 0, 0, 0, 0, 0, 1 };
+    const challenge_c = [_]u8{ 0xc2, 0, 0, 0, 0, 0, 0, 2 };
+    _ = try state.queueChallengeForPath(challenge_b, 2);
+    var frames: [1]quic.Frame = undefined;
+    try std.testing.expectEqual(
+        @as(usize, 1),
+        try state.prepareChallengeFrames(&frames),
+    );
+    state.commitChallengeFrames(1, 100, 50, 2);
+
+    _ = try state.queueChallengeForPath(challenge_c, 3);
+    try std.testing.expectEqual(
+        @as(usize, 1),
+        try state.prepareChallengeFrames(&frames),
+    );
+    state.commitChallengeFrames(1, 200, 50, 3);
+
+    const timeout = try state.checkTimeoutsForPathEpoch(150, 3);
+    try std.testing.expectEqual(@as(usize, 1), timeout.expired);
+    try std.testing.expectEqual(@as(usize, 0), timeout.failed);
+    try std.testing.expect(!timeout.failed_current_path);
+    try std.testing.expectEqual(@as(usize, 0), state.pendingChallengeCount());
+    try std.testing.expectEqual(@as(usize, 1), state.outstandingChallengeCount());
+    try std.testing.expect(!state.receiveResponseValidated(challenge_b));
+    try std.testing.expect(state.receiveResponseValidated(challenge_c));
+}
+
+test "QUIC one PATH_RESPONSE retires redundant current-path challenges" {
+    const allocator = std.testing.allocator;
+    var threaded = std.Io.Threaded.init(allocator, .{});
+    defer threaded.deinit();
+    const io = threaded.io();
+    var endpoint = try quic.runtime.Endpoint.bind(
+        allocator,
+        io,
+        .{ .ip4 = .loopback(0) },
+        .{ .max_datagram_size = 4096 },
+    );
+    defer endpoint.deinit();
+    var peer = try quic.runtime.Endpoint.bind(
+        allocator,
+        io,
+        .{ .ip4 = .loopback(0) },
+        .{ .max_datagram_size = 4096 },
+    );
+    defer peer.deinit();
+
+    const keys = quic.protection.deriveAes128Keys(
+        [_]u8{0x65} ** quic.protection.secret_len,
+    );
+    var connection = try one_rtt.Connection.init(&endpoint, .{
+        .peer = endpoint.address(),
+        .receive_keys = keys,
+        .send_keys = keys,
+        .local_connection_id = "multi-local",
+        .peer_connection_id = "multi-peer",
+        .enable_pacing = false,
+    });
+    defer connection.deinit();
+
+    const first = [_]u8{ 0x66, 1, 2, 3, 4, 5, 6, 7 };
+    const second = [_]u8{ 0x67, 1, 2, 3, 4, 5, 6, 7 };
+    try connection.beginPeerMigration(peer.address(), first);
+    try connection.queuePathChallenge(second);
+    try std.testing.expectEqual(
+        @as(usize, 2),
+        try connection.sendPendingPathChallengesAt(100, 50),
+    );
+    var datagram = try peer.receiveBytes();
+    datagram.deinit(allocator);
+    try std.testing.expectEqual(
+        @as(usize, 2),
+        connection.path_validation.outstandingChallengeCount(),
+    );
+
+    try one_rtt.testing.applyReceivedFrames(
+        &connection,
+        1,
+        &.{.{ .path_response = .{ .data = first } }},
+        125,
+        .not_ect,
+    );
+    try std.testing.expect(connection.peerAddressValidated());
+    try std.testing.expectEqual(@as(usize, 0), connection.pendingPathValidationCount());
+    try std.testing.expectEqual(@as(?u64, null), connection.pathValidationDeadline());
+    try std.testing.expectEqual(
+        @as(usize, 0),
+        try connection.checkPathValidationTimeouts(150),
+    );
+    try std.testing.expectEqual(@as(usize, 0), connection.failedPathValidationCount());
+}
+
+test "QUIC failed consecutive migration restores most recently validated path" {
+    const allocator = std.testing.allocator;
+    var threaded = std.Io.Threaded.init(allocator, .{});
+    defer threaded.deinit();
+    const io = threaded.io();
+    var endpoint = try quic.runtime.Endpoint.bind(
+        allocator,
+        io,
+        .{ .ip4 = .loopback(0) },
+        .{ .max_datagram_size = 4096 },
+    );
+    defer endpoint.deinit();
+    var peer_b = try quic.runtime.Endpoint.bind(
+        allocator,
+        io,
+        .{ .ip4 = .{ .bytes = .{ 127, 0, 0, 2 }, .port = 0 } },
+        .{ .max_datagram_size = 4096 },
+    );
+    defer peer_b.deinit();
+    var peer_c = try quic.runtime.Endpoint.bind(
+        allocator,
+        io,
+        .{ .ip4 = .{ .bytes = .{ 127, 0, 0, 3 }, .port = 0 } },
+        .{ .max_datagram_size = 4096 },
+    );
+    defer peer_c.deinit();
+
+    const keys = quic.protection.deriveAes128Keys(
+        [_]u8{0x64} ** quic.protection.secret_len,
+    );
+    var connection = try one_rtt.Connection.init(&endpoint, .{
+        .peer = endpoint.address(),
+        .receive_keys = keys,
+        .send_keys = keys,
+        .local_connection_id = "fallback-local",
+        .peer_connection_id = "fallback-peer",
+        .enable_pacing = false,
+    });
+    defer connection.deinit();
+    connection.path_validation.max_challenge_transmissions = 1;
+
+    const challenge_b = [_]u8{ 0xb3, 0, 0, 0, 0, 0, 0, 1 };
+    try connection.beginPeerMigration(peer_b.address(), challenge_b);
+    try connection.sendPendingPathChallengeAt(100, 50);
+    var datagram_b = try peer_b.receiveBytes();
+    datagram_b.deinit(allocator);
+    try one_rtt.testing.applyReceivedFrames(
+        &connection,
+        1,
+        &.{.{ .path_response = .{ .data = challenge_b } }},
+        125,
+        .not_ect,
+    );
+    try std.testing.expect(connection.peerAddressValidated());
+
+    const challenge_c = [_]u8{ 0xc3, 0, 0, 0, 0, 0, 0, 2 };
+    try connection.beginPeerMigration(peer_c.address(), challenge_c);
+    try connection.sendPendingPathChallengeAt(200, 50);
+    var datagram_c = try peer_c.receiveBytes();
+    datagram_c.deinit(allocator);
+    try std.testing.expectEqual(
+        @as(usize, 1),
+        try connection.checkPathValidationTimeouts(250),
+    );
+    try std.testing.expectEqual(peer_b.address(), connection.peerAddress());
+    try std.testing.expect(connection.peerAddressValidated());
+}
+
+test "QUIC candidate path budget is bounded without evicting referenced tuples" {
+    const allocator = std.testing.allocator;
+    var threaded = std.Io.Threaded.init(allocator, .{});
+    defer threaded.deinit();
+    const io = threaded.io();
+
+    var server_endpoint = try quic.runtime.Endpoint.bind(
+        allocator,
+        io,
+        .{ .ip4 = .loopback(0) },
+        .{ .max_datagram_size = 4096 },
+    );
+    defer server_endpoint.deinit();
+    var original_endpoint = try quic.runtime.Endpoint.bind(
+        allocator,
+        io,
+        .{ .ip4 = .loopback(0) },
+        .{ .max_datagram_size = 4096 },
+    );
+    defer original_endpoint.deinit();
+
+    const client_cid = [_]u8{ 0xa2, 0xa3, 0xa4, 0xa5 };
+    const server_cid = [_]u8{ 0xa6, 0xa7, 0xa8, 0xa9 };
+    const keys = quic.protection.deriveAes128Keys(
+        [_]u8{0xa2} ** quic.protection.secret_len,
+    );
+    var server = try one_rtt.Connection.init(&server_endpoint, .{
+        .peer = original_endpoint.address(),
+        .receive_keys = keys,
+        .send_keys = keys,
+        .local_connection_id = &server_cid,
+        .peer_connection_id = &client_cid,
+        .local_endpoint = .server,
+    });
+    defer server.deinit();
+
+    var packet_number: u64 = 0;
+    for (0..quic.connection_id.max_pool_size) |index| {
+        var peer = original_endpoint.address();
+        peer.ip4.bytes = .{ 127, 0, 1, @intCast(index + 1) };
+        const payload = try one_rtt.encodeFrames(allocator, &.{.{
+            .path_challenge = .{ .data = .{
+                0xb0, 0, 0, 0, 0, 0, 0, @intCast(index),
+            } },
+        }});
+        defer allocator.free(payload);
+        const datagram = try quic.protection.sealShortPacket(
+            allocator,
+            keys,
+            .{
+                .destination_connection_id = &server_cid,
+                .packet_number = packet_number,
+                .packet_number_len = 4,
+                .payload = payload,
+            },
+        );
+        defer allocator.free(datagram);
+        var received = try one_rtt.testing.processReceivedBytesAt(
+            &server,
+            peer,
+            datagram,
+            .not_ect,
+            packet_number + 1,
+        );
+        received.deinit(allocator);
+        packet_number += 1;
+    }
+    try std.testing.expectEqual(
+        quic.connection_id.max_pool_size,
+        one_rtt.testing.candidatePathBudgetCount(&server),
+    );
+
+    var ninth = original_endpoint.address();
+    ninth.ip4.bytes = .{ 127, 0, 2, 1 };
+    const ninth_payload = try one_rtt.encodeFrames(allocator, &.{.{
+        .path_challenge = .{ .data = [_]u8{0xbf} ** 8 },
+    }});
+    defer allocator.free(ninth_payload);
+    const ninth_datagram = try quic.protection.sealShortPacket(
+        allocator,
+        keys,
+        .{
+            .destination_connection_id = &server_cid,
+            .packet_number = packet_number,
+            .packet_number_len = 4,
+            .payload = ninth_payload,
+        },
+    );
+    defer allocator.free(ninth_datagram);
+    try std.testing.expectError(
+        error.PathValidationLimit,
+        one_rtt.testing.processReceivedBytesAt(
+            &server,
+            ninth,
+            ninth_datagram,
+            .not_ect,
+            packet_number + 1,
+        ),
+    );
+    try std.testing.expectEqual(
+        quic.connection_id.max_pool_size,
+        one_rtt.testing.candidatePathBudgetCount(&server),
+    );
+    try std.testing.expect(
+        one_rtt.testing.candidatePathBudgetFor(&server, ninth) == null,
+    );
 }
 
 test "QUIC 1-RTT connection batches PATH_CHALLENGE and PATH_RESPONSE frames" {
@@ -1831,7 +3355,7 @@ test "QUIC 1-RTT connection batches PATH_CHALLENGE and PATH_RESPONSE frames" {
 
     var challenge_packet = try server.receivePacket();
     defer challenge_packet.deinit(allocator);
-    try std.testing.expectEqual(@as(usize, 2), challenge_packet.frames.len);
+    try std.testing.expectEqual(@as(usize, 3), challenge_packet.frames.len);
     try std.testing.expectEqualSlices(u8, &first, &challenge_packet.frames[0].path_challenge.data);
     try std.testing.expectEqualSlices(u8, &second, &challenge_packet.frames[1].path_challenge.data);
     try std.testing.expectEqual(@as(usize, 2), server.path_validation.pendingResponseCount());
@@ -1841,8 +3365,89 @@ test "QUIC 1-RTT connection batches PATH_CHALLENGE and PATH_RESPONSE frames" {
     try std.testing.expectEqual(@as(usize, 0), server.path_response_targets.items.len);
     var response_packet = try client.receivePacket();
     defer response_packet.deinit(allocator);
-    try std.testing.expectEqual(@as(usize, 2), response_packet.frames.len);
+    try std.testing.expectEqual(@as(usize, 3), response_packet.frames.len);
     try std.testing.expectEqual(@as(usize, 0), client.path_validation.outstandingChallengeCount());
+}
+
+test "QUIC queued PATH_RESPONSE retains exact source across migration" {
+    const allocator = std.testing.allocator;
+    var threaded = std.Io.Threaded.init(allocator, .{});
+    defer threaded.deinit();
+    const io = threaded.io();
+
+    var server_endpoint = try quic.runtime.Endpoint.bind(
+        allocator,
+        io,
+        .{ .ip4 = .loopback(0) },
+        .{ .max_datagram_size = 4096 },
+    );
+    defer server_endpoint.deinit();
+    var original_peer = try quic.runtime.Endpoint.bind(
+        allocator,
+        io,
+        .{ .ip4 = .loopback(0) },
+        .{ .max_datagram_size = 4096 },
+    );
+    defer original_peer.deinit();
+    var migrated_peer = try quic.runtime.Endpoint.bind(
+        allocator,
+        io,
+        .{ .ip4 = .loopback(0) },
+        .{ .max_datagram_size = 4096 },
+    );
+    defer migrated_peer.deinit();
+
+    const server_cid = [_]u8{ 0x31, 0x32, 0x33, 0x34 };
+    const peer_cid = [_]u8{ 0x41, 0x42, 0x43, 0x44 };
+    const keys = quic.protection.deriveAes128Keys(
+        [_]u8{0x35} ** quic.protection.secret_len,
+    );
+    var server = try one_rtt.Connection.init(&server_endpoint, .{
+        .peer = original_peer.address(),
+        .receive_keys = keys,
+        .send_keys = keys,
+        .local_connection_id = &server_cid,
+        .peer_connection_id = &peer_cid,
+        .local_endpoint = .server,
+        .enable_pacing = false,
+    });
+    defer server.deinit();
+
+    const peer_challenge = [_]u8{ 0x51, 1, 2, 3, 4, 5, 6, 7 };
+    try one_rtt.sendFrames(&original_peer, server_endpoint.address(), keys, .{
+        .destination_connection_id = &server_cid,
+        .packet_number = 0,
+        .frames = &.{.{ .path_challenge = .{ .data = peer_challenge } }},
+    });
+    var received = try server.receivePacket();
+    received.deinit(allocator);
+    try std.testing.expectEqual(
+        @as(usize, 1),
+        server.path_validation.pendingResponseCount(),
+    );
+
+    try server.beginPeerMigration(
+        migrated_peer.address(),
+        [_]u8{ 0x52, 1, 2, 3, 4, 5, 6, 7 },
+    );
+    try server.sendPendingPathResponse();
+    var response_datagram = try original_peer.receiveBytes();
+    defer response_datagram.deinit(allocator);
+    var response = try one_rtt.openReceivedBytes(
+        &original_peer,
+        response_datagram.from,
+        response_datagram.bytes,
+        keys,
+        peer_cid.len,
+        0,
+        4,
+    );
+    defer response.deinit(allocator);
+    try std.testing.expectEqualSlices(
+        u8,
+        &peer_challenge,
+        &response.frames[0].path_response.data,
+    );
 }
 
 test "QUIC 1-RTT PATH_RESPONSE targets use cursor discard" {
@@ -2316,8 +3921,25 @@ test "QUIC 1-RTT queues RETIRE_CONNECTION_ID for retired peer IDs" {
     var new_cid_packet = try client.receivePacket();
     defer new_cid_packet.deinit(allocator);
     try std.testing.expectEqual(@as(usize, 1), client.pendingRetireConnectionIdCount());
-    try std.testing.expect(client.switchToNextPeerConnectionId());
     try std.testing.expectEqualStrings("server-cid-two", client.config.peer_connection_id);
+
+    try client.send(&.{.{ .ping = {} }});
+    var replacement_datagram = try server_endpoint.receiveBytes();
+    defer replacement_datagram.deinit(allocator);
+    var replacement_packet = try one_rtt.openReceivedBytes(
+        &server_endpoint,
+        replacement_datagram.from,
+        replacement_datagram.bytes,
+        keys,
+        "server-cid-two".len,
+        0,
+        4,
+    );
+    defer replacement_packet.deinit(allocator);
+    try std.testing.expectEqualStrings(
+        "server-cid-two",
+        replacement_packet.packet.destination_connection_id,
+    );
 
     try std.testing.expectEqual(@as(usize, 1), try client.sendPendingRetireConnectionIds());
     try std.testing.expectEqual(@as(usize, 0), client.pendingRetireConnectionIdCount());

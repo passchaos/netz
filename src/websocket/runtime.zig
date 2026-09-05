@@ -5,6 +5,9 @@ const common = @import("runtime/common.zig");
 const http1 = @import("../http1/mod.zig");
 const http2 = @import("../http2/mod.zig");
 const http1_runtime = http1.runtime;
+const http1_write = @import("../http1/runtime/write.zig");
+const http1_message_framing =
+    @import("../http1/runtime/message/framing.zig");
 const http2_runtime = http2.runtime;
 const tls_stream = @import("../tls/mod.zig").stream;
 const tls_client_identity = @import(
@@ -12,6 +15,11 @@ const tls_client_identity = @import(
 );
 const compression_scratch =
     @import("runtime/compression_scratch.zig");
+const message_buffer = @import("runtime/message/buffer.zig");
+pub const ReceiveBuffer = message_buffer;
+const message_state = @import("runtime/message/state.zig");
+const handshake_headers = @import("runtime/handshake/headers.zig");
+const handshake_storage = @import("runtime/handshake/storage.zig");
 const origin_policy = @import("runtime/origin_policy.zig");
 const stream_io = @import("../internal/stream_io.zig");
 const deadline_policy = @import("../internal/deadline.zig");
@@ -46,7 +54,6 @@ pub const Error = websocket.Error || http1_runtime.Error ||
     MessageTooLarge,
     UnexpectedPong,
     InvalidServeOptions,
-    TimedReadUnsupported,
     ExporterUnavailable,
     TlsKeyUpdateUnavailable,
 } || std.Io.RandomSecureError || net.HostName.ValidateError || net.HostName.ConnectError || net.Stream.Reader.Error || net.Stream.Writer.Error || std.posix.SetSockOptError;
@@ -70,7 +77,6 @@ const RuntimeTransport = union(enum) {
     tls: *http1_runtime.TlsClientConnection,
     tls_vail: *tls_stream.ClientConnection,
     tls_server: *tls_stream.ServerConnection,
-    linux_io_uring: http1_runtime.LinuxIoUringStream,
 
     fn read(self: RuntimeTransport, buffer: []u8) Error!usize {
         return switch (self) {
@@ -78,7 +84,6 @@ const RuntimeTransport = union(enum) {
             .tls => |conn| conn.read(buffer),
             .tls_vail => |conn| conn.read(buffer),
             .tls_server => |conn| conn.read(buffer),
-            .linux_io_uring => |conn| conn.read(buffer),
         };
     }
 
@@ -100,10 +105,6 @@ const RuntimeTransport = union(enum) {
             .tls_vail => |conn| conn.readWithDeadline(buffer, deadline),
             .tls_server => |conn| conn.readWithDeadline(buffer, deadline),
             .tls => |conn| conn.readWithDeadline(buffer, deadline),
-            // The raw io_uring adapter does not expose deadline-aware reads.
-            // Failing explicitly is safer than silently weakening an
-            // upper-layer inactivity contract.
-            .linux_io_uring => error.TimedReadUnsupported,
         };
     }
 
@@ -113,7 +114,6 @@ const RuntimeTransport = union(enum) {
             .tls => |conn| conn.writeAll(bytes),
             .tls_vail => |conn| conn.writeAll(bytes),
             .tls_server => |conn| conn.writeAll(bytes),
-            .linux_io_uring => |conn| conn.writeAll(bytes),
         };
     }
 
@@ -132,12 +132,6 @@ const RuntimeTransport = union(enum) {
             .tls => |conn| conn.writeAllParts(header, payload),
             .tls_vail => |conn| conn.writeAllParts(header, payload),
             .tls_server => |conn| conn.writeAllParts(header, payload),
-            // The raw io_uring adapter currently exposes one-slice sends.
-            // Two submissions still avoid a payload-sized temporary copy.
-            .linux_io_uring => |conn| {
-                try conn.writeAll(header);
-                try conn.writeAll(payload);
-            },
         };
     }
 
@@ -152,7 +146,7 @@ const RuntimeTransport = union(enum) {
                 parts,
             ),
             .tls => |conn| return conn.writeAllSlices(parts),
-            .tls_vail, .tls_server, .linux_io_uring => {
+            .tls_vail, .tls_server => {
                 for (parts) |part| try self.writeAll(part);
             },
         }
@@ -164,10 +158,18 @@ const RuntimeTransport = union(enum) {
             .tls => |conn| conn.deinit(),
             .tls_vail => |conn| conn.deinit(),
             .tls_server => |conn| conn.deinit(),
-            .linux_io_uring => |conn| conn.close(),
         }
     }
 };
+
+fn transportStream(transport: RuntimeTransport) net.Stream {
+    return switch (transport) {
+        .tcp => |tcp| tcp.stream,
+        .tls_server => |connection| connection.stream,
+        .tls => |connection| connection.stream,
+        .tls_vail => |connection| connection.stream,
+    };
+}
 
 pub const Server = struct {
     http: http1_runtime.Server,
@@ -193,8 +195,9 @@ pub const Server = struct {
     }
 
     pub fn accept(self: *Server, options: AcceptOptions) Error!Connection {
-        const http_conn = try self.http.accept();
-        return self.acceptHttpConnection(http_conn, options);
+        var pending = try self.receiveUpgradeRequest(options);
+        errdefer pending.deinit();
+        return pending.accept();
     }
 
     /// Accept TCP, then bound the complete HTTP Upgrade with one caller-owned
@@ -204,13 +207,12 @@ pub const Server = struct {
         options: AcceptOptions,
         deadline: std.Io.Clock.Timestamp,
     ) Error!Connection {
-        _ = try deadline_policy.usableAwake(self.http.io, deadline);
-        const http_conn = try self.http.accept();
-        return self.acceptHttpConnectionWithDeadline(
-            http_conn,
+        var pending = try self.receiveUpgradeRequestWithDeadline(
             options,
             deadline,
         );
+        errdefer pending.deinit();
+        return pending.accept();
     }
 
     pub fn acceptWithTimeout(
@@ -218,13 +220,12 @@ pub const Server = struct {
         options: AcceptOptions,
         timeout: std.Io.Duration,
     ) Error!Connection {
-        if (timeout.nanoseconds <= 0) return error.Timeout;
-        const http_conn = try self.http.accept();
-        return self.acceptHttpConnectionWithDeadline(
-            http_conn,
+        var pending = try self.receiveUpgradeRequestWithTimeout(
             options,
-            .fromNow(self.http.io, .{ .raw = timeout, .clock = .awake }),
+            timeout,
         );
+        errdefer pending.deinit();
+        return pending.accept();
     }
 
     /// Upgrade an already accepted HTTP/1 connection. This lets protocol
@@ -235,11 +236,13 @@ pub const Server = struct {
         http_connection: http1_runtime.Connection,
         options: AcceptOptions,
     ) Error!Connection {
-        return self.acceptHttpConnectionMaybeBefore(
+        var pending = try self.receiveHttpUpgradeRequestMaybeBefore(
             http_connection,
             options,
             null,
         );
+        errdefer pending.deinit();
+        return pending.accept();
     }
 
     /// Upgrade an accepted HTTP/1 connection before an absolute deadline. The
@@ -250,12 +253,13 @@ pub const Server = struct {
         options: AcceptOptions,
         deadline: std.Io.Clock.Timestamp,
     ) Error!Connection {
-        _ = try deadline_policy.usableAwake(self.http.io, deadline);
-        return self.acceptHttpConnectionMaybeBefore(
+        var pending = try self.receiveHttpUpgradeRequestWithDeadline(
             http_connection,
             options,
             deadline,
         );
+        errdefer pending.deinit();
+        return pending.accept();
     }
 
     pub fn acceptHttpConnectionWithTimeout(
@@ -274,19 +278,137 @@ pub const Server = struct {
         );
     }
 
-    fn acceptHttpConnectionMaybeBefore(
+    /// Receive and validate a WebSocket Upgrade request without sending 101.
+    /// The returned value owns the accepted transport until the application
+    /// accepts, rejects, or deinitializes it.
+    pub fn receiveUpgradeRequest(
+        self: *Server,
+        options: AcceptOptions,
+    ) Error!PendingUpgrade {
+        const http_connection = try self.http.accept();
+        return self.receiveHttpUpgradeRequest(http_connection, options);
+    }
+
+    pub fn receiveUpgradeRequestWithDeadline(
+        self: *Server,
+        options: AcceptOptions,
+        deadline: std.Io.Clock.Timestamp,
+    ) Error!PendingUpgrade {
+        _ = try deadline_policy.usableAwake(self.http.io, deadline);
+        const http_connection = try self.http.accept();
+        return self.receiveHttpUpgradeRequestMaybeBefore(
+            http_connection,
+            options,
+            deadline,
+        );
+    }
+
+    pub fn receiveUpgradeRequestWithTimeout(
+        self: *Server,
+        options: AcceptOptions,
+        timeout: std.Io.Duration,
+    ) Error!PendingUpgrade {
+        if (timeout.nanoseconds <= 0) return error.Timeout;
+        const http_connection = try self.http.accept();
+        return self.receiveHttpUpgradeRequestMaybeBefore(
+            http_connection,
+            options,
+            .fromNow(self.http.io, .{ .raw = timeout, .clock = .awake }),
+        );
+    }
+
+    /// Adopt a caller-accepted TCP stream and stop before the 101 decision.
+    pub fn receiveStreamUpgradeRequest(
+        self: *Server,
+        stream: net.Stream,
+        options: AcceptOptions,
+    ) Error!PendingUpgrade {
+        const http_connection = try self.http.acceptStream(stream);
+        return self.receiveHttpUpgradeRequest(http_connection, options);
+    }
+
+    pub fn receiveStreamUpgradeRequestWithDeadline(
+        self: *Server,
+        stream: net.Stream,
+        options: AcceptOptions,
+        deadline: std.Io.Clock.Timestamp,
+    ) Error!PendingUpgrade {
+        _ = try deadline_policy.usableAwake(self.http.io, deadline);
+        const http_connection = try self.http.acceptStream(stream);
+        return self.receiveHttpUpgradeRequestMaybeBefore(
+            http_connection,
+            options,
+            deadline,
+        );
+    }
+
+    pub fn receiveStreamUpgradeRequestWithTimeout(
+        self: *Server,
+        stream: net.Stream,
+        options: AcceptOptions,
+        timeout: std.Io.Duration,
+    ) Error!PendingUpgrade {
+        if (timeout.nanoseconds <= 0) return error.Timeout;
+        return self.receiveStreamUpgradeRequestWithDeadline(
+            stream,
+            options,
+            .fromNow(self.http.io, .{ .raw = timeout, .clock = .awake }),
+        );
+    }
+
+    pub fn receiveHttpUpgradeRequest(
+        self: *Server,
+        http_connection: http1_runtime.Connection,
+        options: AcceptOptions,
+    ) Error!PendingUpgrade {
+        return self.receiveHttpUpgradeRequestMaybeBefore(
+            http_connection,
+            options,
+            null,
+        );
+    }
+
+    pub fn receiveHttpUpgradeRequestWithDeadline(
+        self: *Server,
+        http_connection: http1_runtime.Connection,
+        options: AcceptOptions,
+        deadline: std.Io.Clock.Timestamp,
+    ) Error!PendingUpgrade {
+        _ = try deadline_policy.usableAwake(self.http.io, deadline);
+        return self.receiveHttpUpgradeRequestMaybeBefore(
+            http_connection,
+            options,
+            deadline,
+        );
+    }
+
+    pub fn receiveHttpUpgradeRequestWithTimeout(
+        self: *Server,
+        http_connection: http1_runtime.Connection,
+        options: AcceptOptions,
+        timeout: std.Io.Duration,
+    ) Error!PendingUpgrade {
+        if (timeout.nanoseconds <= 0) return error.Timeout;
+        return self.receiveHttpUpgradeRequestWithDeadline(
+            http_connection,
+            options,
+            .fromNow(self.http.io, .{ .raw = timeout, .clock = .awake }),
+        );
+    }
+
+    fn receiveHttpUpgradeRequestMaybeBefore(
         self: *Server,
         http_connection: http1_runtime.Connection,
         options: AcceptOptions,
         deadline: ?std.Io.Clock.Timestamp,
-    ) Error!Connection {
+    ) Error!PendingUpgrade {
         var http_conn = http_connection;
         errdefer http_conn.close();
         if (self.limits.tcp_nodelay) {
             try socket_options.setTcpNoDelay(http_conn.stream);
         }
 
-        return acceptTransport(
+        return receiveUpgradeRequestFromTransport(
             self.http.allocator,
             http_conn.io,
             .{ .tcp = .{
@@ -378,7 +500,9 @@ pub const UnixServer = struct {
         self: *UnixServer,
         options: AcceptOptions,
     ) Error!Connection {
-        return self.acceptMaybeBefore(options, null);
+        var pending = try self.receiveUpgradeRequest(options);
+        errdefer pending.deinit();
+        return pending.accept();
     }
 
     /// Accept a Unix stream, then bound its HTTP Upgrade with one caller-owned
@@ -388,8 +512,12 @@ pub const UnixServer = struct {
         options: AcceptOptions,
         deadline: std.Io.Clock.Timestamp,
     ) Error!Connection {
-        _ = try deadline_policy.usableAwake(self.http.io, deadline);
-        return self.acceptMaybeBefore(options, deadline);
+        var pending = try self.receiveUpgradeRequestWithDeadline(
+            options,
+            deadline,
+        );
+        errdefer pending.deinit();
+        return pending.accept();
     }
 
     pub fn acceptWithTimeout(
@@ -397,40 +525,108 @@ pub const UnixServer = struct {
         options: AcceptOptions,
         timeout: std.Io.Duration,
     ) Error!Connection {
+        var pending = try self.receiveUpgradeRequestWithTimeout(
+            options,
+            timeout,
+        );
+        errdefer pending.deinit();
+        return pending.accept();
+    }
+
+    /// Receive and validate a Unix-socket Upgrade request without sending 101.
+    pub fn receiveUpgradeRequest(
+        self: *UnixServer,
+        options: AcceptOptions,
+    ) Error!PendingUpgrade {
+        return self.receiveUpgradeRequestMaybeBefore(options, null);
+    }
+
+    pub fn receiveUpgradeRequestWithDeadline(
+        self: *UnixServer,
+        options: AcceptOptions,
+        deadline: std.Io.Clock.Timestamp,
+    ) Error!PendingUpgrade {
+        _ = try deadline_policy.usableAwake(self.http.io, deadline);
+        return self.receiveUpgradeRequestMaybeBefore(options, deadline);
+    }
+
+    pub fn receiveUpgradeRequestWithTimeout(
+        self: *UnixServer,
+        options: AcceptOptions,
+        timeout: std.Io.Duration,
+    ) Error!PendingUpgrade {
         if (timeout.nanoseconds <= 0) return error.Timeout;
-        const http_connection = try self.http.accept();
-        return self.upgradeHttpConnectionMaybeBefore(
-            http_connection,
+        return self.receiveUpgradeRequestWithDeadline(
             options,
             .fromNow(self.http.io, .{ .raw = timeout, .clock = .awake }),
         );
     }
 
-    fn acceptMaybeBefore(
+    pub fn receiveHttpUpgradeRequest(
         self: *UnixServer,
+        http_connection: http1_runtime.Connection,
         options: AcceptOptions,
-        deadline: ?std.Io.Clock.Timestamp,
-    ) Error!Connection {
-        const http_connection = try self.http.accept();
-        return self.upgradeHttpConnectionMaybeBefore(
+    ) Error!PendingUpgrade {
+        return self.receiveHttpUpgradeRequestMaybeBefore(
+            http_connection,
+            options,
+            null,
+        );
+    }
+
+    pub fn receiveHttpUpgradeRequestWithDeadline(
+        self: *UnixServer,
+        http_connection: http1_runtime.Connection,
+        options: AcceptOptions,
+        deadline: std.Io.Clock.Timestamp,
+    ) Error!PendingUpgrade {
+        _ = try deadline_policy.usableAwake(self.http.io, deadline);
+        return self.receiveHttpUpgradeRequestMaybeBefore(
             http_connection,
             options,
             deadline,
         );
     }
 
-    fn upgradeHttpConnectionMaybeBefore(
+    pub fn receiveHttpUpgradeRequestWithTimeout(
+        self: *UnixServer,
+        http_connection: http1_runtime.Connection,
+        options: AcceptOptions,
+        timeout: std.Io.Duration,
+    ) Error!PendingUpgrade {
+        if (timeout.nanoseconds <= 0) return error.Timeout;
+        return self.receiveHttpUpgradeRequestWithDeadline(
+            http_connection,
+            options,
+            .fromNow(self.http.io, .{ .raw = timeout, .clock = .awake }),
+        );
+    }
+
+    fn receiveUpgradeRequestMaybeBefore(
+        self: *UnixServer,
+        options: AcceptOptions,
+        deadline: ?std.Io.Clock.Timestamp,
+    ) Error!PendingUpgrade {
+        const http_connection = try self.http.accept();
+        return self.receiveHttpUpgradeRequestMaybeBefore(
+            http_connection,
+            options,
+            deadline,
+        );
+    }
+
+    fn receiveHttpUpgradeRequestMaybeBefore(
         self: *UnixServer,
         http_connection: http1_runtime.Connection,
         options: AcceptOptions,
         deadline: ?std.Io.Clock.Timestamp,
-    ) Error!Connection {
+    ) Error!PendingUpgrade {
         var http_connection_owned = http_connection;
         var http_owned = true;
         errdefer if (http_owned) http_connection_owned.close();
         var limits = self.limits;
         limits.tcp_nodelay = false;
-        const connection = try acceptTransport(
+        const pending = try receiveUpgradeRequestFromTransport(
             self.http.allocator,
             self.http.io,
             .{ .tcp = .{
@@ -442,7 +638,7 @@ pub const UnixServer = struct {
             deadline,
         );
         http_owned = false;
-        return connection;
+        return pending;
     }
 
     pub fn serveConcurrent(
@@ -545,8 +741,9 @@ pub const TlsServer = struct {
         self: *TlsServer,
         options: AcceptOptions,
     ) Error!Connection {
-        const stream = try self.listener.accept(self.io);
-        return self.acceptStream(stream, options);
+        var pending = try self.receiveUpgradeRequest(options);
+        errdefer pending.deinit();
+        return pending.accept();
     }
 
     /// Accept TCP, then carry one caller-owned deadline through TLS and the
@@ -556,9 +753,12 @@ pub const TlsServer = struct {
         options: AcceptOptions,
         deadline: std.Io.Clock.Timestamp,
     ) Error!Connection {
-        _ = try deadline_policy.usableAwake(self.io, deadline);
-        const stream = try self.listener.accept(self.io);
-        return self.acceptStreamWithDeadline(stream, options, deadline);
+        var pending = try self.receiveUpgradeRequestWithDeadline(
+            options,
+            deadline,
+        );
+        errdefer pending.deinit();
+        return pending.accept();
     }
 
     pub fn acceptWithTimeout(
@@ -566,13 +766,12 @@ pub const TlsServer = struct {
         options: AcceptOptions,
         timeout: std.Io.Duration,
     ) Error!Connection {
-        if (timeout.nanoseconds <= 0) return error.Timeout;
-        const stream = try self.listener.accept(self.io);
-        return self.acceptStreamWithDeadline(
-            stream,
+        var pending = try self.receiveUpgradeRequestWithTimeout(
             options,
-            .fromNow(self.io, .{ .raw = timeout, .clock = .awake }),
+            timeout,
         );
+        errdefer pending.deinit();
+        return pending.accept();
     }
 
     /// Perform TLS and WebSocket handshakes on an already accepted stream.
@@ -581,7 +780,13 @@ pub const TlsServer = struct {
         stream: net.Stream,
         options: AcceptOptions,
     ) Error!Connection {
-        return self.acceptStreamMaybeBefore(stream, options, null);
+        var pending = try self.receiveStreamUpgradeRequestMaybeBefore(
+            stream,
+            options,
+            null,
+        );
+        errdefer pending.deinit();
+        return pending.accept();
     }
 
     pub fn acceptStreamWithDeadline(
@@ -590,8 +795,13 @@ pub const TlsServer = struct {
         options: AcceptOptions,
         deadline: std.Io.Clock.Timestamp,
     ) Error!Connection {
-        _ = try deadline_policy.usableAwake(self.io, deadline);
-        return self.acceptStreamMaybeBefore(stream, options, deadline);
+        var pending = try self.receiveStreamUpgradeRequestWithDeadline(
+            stream,
+            options,
+            deadline,
+        );
+        errdefer pending.deinit();
+        return pending.accept();
     }
 
     pub fn acceptStreamWithTimeout(
@@ -608,12 +818,89 @@ pub const TlsServer = struct {
         );
     }
 
-    fn acceptStreamMaybeBefore(
+    /// Complete TLS and validate the HTTP Upgrade without sending 101.
+    pub fn receiveUpgradeRequest(
+        self: *TlsServer,
+        options: AcceptOptions,
+    ) Error!PendingUpgrade {
+        const stream = try self.listener.accept(self.io);
+        return self.receiveStreamUpgradeRequest(stream, options);
+    }
+
+    pub fn receiveUpgradeRequestWithDeadline(
+        self: *TlsServer,
+        options: AcceptOptions,
+        deadline: std.Io.Clock.Timestamp,
+    ) Error!PendingUpgrade {
+        _ = try deadline_policy.usableAwake(self.io, deadline);
+        const stream = try self.listener.accept(self.io);
+        return self.receiveStreamUpgradeRequestMaybeBefore(
+            stream,
+            options,
+            deadline,
+        );
+    }
+
+    pub fn receiveUpgradeRequestWithTimeout(
+        self: *TlsServer,
+        options: AcceptOptions,
+        timeout: std.Io.Duration,
+    ) Error!PendingUpgrade {
+        if (timeout.nanoseconds <= 0) return error.Timeout;
+        const stream = try self.listener.accept(self.io);
+        return self.receiveStreamUpgradeRequestMaybeBefore(
+            stream,
+            options,
+            .fromNow(self.io, .{ .raw = timeout, .clock = .awake }),
+        );
+    }
+
+    pub fn receiveStreamUpgradeRequest(
+        self: *TlsServer,
+        stream: net.Stream,
+        options: AcceptOptions,
+    ) Error!PendingUpgrade {
+        return self.receiveStreamUpgradeRequestMaybeBefore(
+            stream,
+            options,
+            null,
+        );
+    }
+
+    pub fn receiveStreamUpgradeRequestWithDeadline(
+        self: *TlsServer,
+        stream: net.Stream,
+        options: AcceptOptions,
+        deadline: std.Io.Clock.Timestamp,
+    ) Error!PendingUpgrade {
+        _ = try deadline_policy.usableAwake(self.io, deadline);
+        return self.receiveStreamUpgradeRequestMaybeBefore(
+            stream,
+            options,
+            deadline,
+        );
+    }
+
+    pub fn receiveStreamUpgradeRequestWithTimeout(
+        self: *TlsServer,
+        stream: net.Stream,
+        options: AcceptOptions,
+        timeout: std.Io.Duration,
+    ) Error!PendingUpgrade {
+        if (timeout.nanoseconds <= 0) return error.Timeout;
+        return self.receiveStreamUpgradeRequestWithDeadline(
+            stream,
+            options,
+            .fromNow(self.io, .{ .raw = timeout, .clock = .awake }),
+        );
+    }
+
+    fn receiveStreamUpgradeRequestMaybeBefore(
         self: *TlsServer,
         stream: net.Stream,
         options: AcceptOptions,
         deadline: ?std.Io.Clock.Timestamp,
-    ) Error!Connection {
+    ) Error!PendingUpgrade {
         var stream_owned = true;
         errdefer if (stream_owned) stream.close(self.io);
         if (self.tcp_nodelay) try socket_options.setTcpNoDelay(stream);
@@ -634,7 +921,7 @@ pub const TlsServer = struct {
             );
         stream_owned = false;
         errdefer tls_connection.deinit();
-        return acceptTransport(
+        return receiveUpgradeRequestFromTransport(
             self.allocator,
             self.io,
             .{ .tls_server = tls_connection },
@@ -705,14 +992,14 @@ pub const TlsListenOptions = struct {
     tcp_nodelay: bool = true,
 };
 
-fn acceptTransport(
+fn receiveUpgradeRequestFromTransport(
     allocator: std.mem.Allocator,
     io: std.Io,
     transport: RuntimeTransport,
     limits: Limits,
     options: AcceptOptions,
     outer_deadline: ?std.Io.Clock.Timestamp,
-) Error!Connection {
+) Error!PendingUpgrade {
     const deadline = deadline_policy.earlier(
         outer_deadline,
         if (limits.http1_handshake_timeout) |timeout|
@@ -726,14 +1013,14 @@ fn acceptTransport(
         limits.max_head_bytes,
         deadline,
     );
-    defer head.deinit(allocator);
+    errdefer head.deinit(allocator);
 
     var request = try http1.parseRequest(
         allocator,
         head.head,
         http1HandshakeRequestParseOptions(limits),
     );
-    defer request.deinit(allocator);
+    errdefer request.deinit(allocator);
     try websocket.validateClientHandshake(request);
     try origin_policy.validateHttp1(request.headers, options.allowed_origins);
     // Bytes sent before the 101 response are ambiguous HTTP smuggling/junk,
@@ -742,6 +1029,7 @@ fn acceptTransport(
 
     const key = request.header("sec-websocket-key") orelse
         return error.MissingHeader;
+    try validateUpgradeAcceptHeaders(options.extra_headers);
     const selected_protocol = try selectHttp1Subprotocol(
         allocator,
         request.headers,
@@ -757,57 +1045,25 @@ fn acceptTransport(
             request.headers,
             options.enable_permessage_deflate,
         );
-    defer if (selected_extension) |extension| allocator.free(extension);
+    errdefer if (selected_extension) |extension| allocator.free(extension);
     const negotiated_extension = if (selected_extension) |extension|
         try websocket.ExtensionNegotiation.validateResponse(extension)
     else
         websocket.ExtensionNegotiation{};
 
-    var response: std.ArrayList(u8) = .empty;
-    defer response.deinit(allocator);
-    var headers: std.ArrayList(http1.Header) = .empty;
-    defer headers.deinit(allocator);
-    if (selected_protocol) |protocol| {
-        try headers.append(allocator, .{
-            .name = "Sec-WebSocket-Protocol",
-            .value = protocol,
-        });
-    }
-    if (selected_extension) |extension| {
-        try headers.append(allocator, .{
-            .name = "Sec-WebSocket-Extensions",
-            .value = extension,
-        });
-    }
-    try headers.appendSlice(allocator, options.extra_headers);
-    try websocket.writeServerHandshake(
-        &response,
-        allocator,
-        key,
-        headers.items,
-    );
-    try transport.writeAll(response.items);
-
     return .{
         .io = io,
         .allocator = allocator,
-        .stream = switch (transport) {
-            .tcp => |tcp| tcp.stream,
-            .tls_server => |connection| connection.stream,
-            .tls => |connection| connection.stream,
-            .tls_vail => |connection| connection.stream,
-            .linux_io_uring => undefined,
-        },
-        .tls_server_conn = switch (transport) {
-            .tls_server => |connection| connection,
-            else => null,
-        },
-        .role = .server,
+        .transport = transport,
         .limits = limits,
+        .options = options,
+        .deadline = deadline,
+        .request_head = head,
+        .request = request,
+        .client_key = key,
         .selected_protocol = selected_protocol,
-        .permessage_deflate = negotiated_extension.permessage_deflate,
-        .compression_threshold = options.compression_threshold,
-        .compression_send_max_window_bits = negotiated_extension.server_max_window_bits orelse 15,
+        .selected_extension = selected_extension,
+        .negotiated_extension = negotiated_extension,
     };
 }
 
@@ -1048,30 +1304,6 @@ fn waitForServeEvent(
     try event.wait(io);
 }
 
-fn appendTransportBytesPrecise(
-    buffer: *std.ArrayList(u8),
-    allocator: std.mem.Allocator,
-    bytes: []const u8,
-) std.mem.Allocator.Error!void {
-    const required = std.math.add(
-        usize,
-        buffer.items.len,
-        bytes.len,
-    ) catch return error.OutOfMemory;
-    if (required > buffer.capacity) {
-        // Socket reads frequently split one frame into a tiny header prefix and
-        // a payload suffix. Exact growth for each piece minimizes retained
-        // memory but needlessly reallocates twice. Round only within a bounded
-        // 256-byte slab: common small continuations reuse capacity while a 4
-        // KiB frame retains at most 255 bytes of slack rather than ArrayList's
-        // roughly 1.5x geometric over-allocation.
-        const slab: usize = 256;
-        const rounded = std.mem.alignForward(usize, required, slab);
-        try buffer.ensureTotalCapacityPrecise(allocator, rounded);
-    }
-    buffer.appendSliceAssumeCapacity(bytes);
-}
-
 fn ServeTask(comptime HandlerContext: type) type {
     return struct {
         connection: Connection,
@@ -1111,7 +1343,375 @@ pub const AcceptOptions = struct {
     compression_threshold: usize = default_compression_threshold,
 };
 
+/// A validated HTTP/1 WebSocket Upgrade request awaiting application
+/// admission. No 101 response has been sent yet.
+///
+/// This value owns the transport and parsed request. Consume it with `accept`,
+/// `acceptWithHeaders`, or `reject`, or call `deinit` to close it. Request
+/// metadata remains valid until then, allowing authentication, routing, and
+/// load shedding at the HTTP boundary instead of after protocol upgrade. The
+/// slices in the original `AcceptOptions` must also remain valid until the
+/// pending value is consumed.
+pub const PendingUpgrade = struct {
+    io: std.Io,
+    allocator: std.mem.Allocator,
+    transport: RuntimeTransport,
+    limits: Limits,
+    options: AcceptOptions,
+    deadline: ?std.Io.Clock.Timestamp,
+    request_head: HttpHead,
+    request: http1.Request,
+    client_key: []const u8,
+    selected_protocol: ?[]u8,
+    selected_extension: ?[]u8,
+    negotiated_extension: websocket.ExtensionNegotiation,
+
+    pub fn deinit(self: *PendingUpgrade) void {
+        const allocator = self.allocator;
+        const transport = self.transport;
+        self.request.deinit(allocator);
+        self.request_head.deinit(allocator);
+        if (self.selected_protocol) |protocol| allocator.free(protocol);
+        if (self.selected_extension) |extension| allocator.free(extension);
+        self.* = undefined;
+        transport.close();
+    }
+
+    pub fn target(self: PendingUpgrade) []const u8 {
+        return self.request.target;
+    }
+
+    pub fn headers(self: PendingUpgrade) []const http1.Header {
+        return self.request.headers;
+    }
+
+    pub fn header(
+        self: PendingUpgrade,
+        name: []const u8,
+    ) ?[]const u8 {
+        return self.request.header(name);
+    }
+
+    /// Return the authenticated client certificate chain for pending WSS
+    /// requests. Cleartext and anonymous TLS requests return null.
+    pub fn peerCertificates(
+        self: *const PendingUpgrade,
+    ) ?[]const []const u8 {
+        const connection = switch (self.transport) {
+            .tls_server => |value| value,
+            else => return null,
+        };
+        return connection.peerCertificates();
+    }
+
+    pub fn negotiatedCipherSuite(
+        self: *const PendingUpgrade,
+    ) ?tls_stream.CipherSuite {
+        const connection = switch (self.transport) {
+            .tls_server => |value| value,
+            else => return null,
+        };
+        return connection.negotiatedCipherSuite();
+    }
+
+    pub fn negotiatedTranscriptHash(
+        self: *const PendingUpgrade,
+    ) ?tls_stream.TranscriptHash {
+        const connection = switch (self.transport) {
+            .tls_server => |value| value,
+            else => return null,
+        };
+        return connection.negotiatedTranscriptHash();
+    }
+
+    pub fn accept(self: *PendingUpgrade) Error!Connection {
+        return self.acceptWithHeaders(&.{});
+    }
+
+    /// Accept the validated request and add application-selected response
+    /// fields to the negotiated subprotocol/extension fields.
+    pub fn acceptWithHeaders(
+        self: *PendingUpgrade,
+        additional_headers: []const http1.Header,
+    ) Error!Connection {
+        const allocator = self.allocator;
+        try validateUpgradeAcceptHeaders(additional_headers);
+        const combined_count = std.math.add(
+            usize,
+            self.options.extra_headers.len,
+            additional_headers.len,
+        ) catch return error.HeadersTooLarge;
+        var response: std.ArrayList(u8) = .empty;
+        defer response.deinit(allocator);
+        const negotiated_count: usize =
+            @as(usize, @intFromBool(self.selected_protocol != null)) +
+            @as(usize, @intFromBool(self.selected_extension != null));
+        const response_count = std.math.add(
+            usize,
+            combined_count,
+            negotiated_count,
+        ) catch return error.HeadersTooLarge;
+        var response_stack: [handshake_storage.stack_capacity]http1.Header =
+            undefined;
+        const response_fields = try handshake_storage.acquire(
+            http1.Header,
+            allocator,
+            &response_stack,
+            response_count,
+        );
+        defer handshake_storage.release(
+            http1.Header,
+            allocator,
+            &response_stack,
+            response_fields,
+        );
+        var response_index: usize = 0;
+        if (self.selected_protocol) |protocol| {
+            response_fields[response_index] = .{
+                .name = "Sec-WebSocket-Protocol",
+                .value = protocol,
+            };
+            response_index += 1;
+        }
+        if (self.selected_extension) |extension| {
+            response_fields[response_index] = .{
+                .name = "Sec-WebSocket-Extensions",
+                .value = extension,
+            };
+            response_index += 1;
+        }
+        @memcpy(
+            response_fields[response_index..][0..self.options.extra_headers.len],
+            self.options.extra_headers,
+        );
+        response_index += self.options.extra_headers.len;
+        @memcpy(response_fields[response_index..], additional_headers);
+        try websocket.writeServerHandshake(
+            &response,
+            self.allocator,
+            self.client_key,
+            response_fields,
+        );
+        if (response.items.len > self.limits.max_head_bytes) {
+            return error.HeadersTooLarge;
+        }
+        if (self.deadline) |deadline| {
+            _ = try deadline_policy.usableAwake(self.io, deadline);
+        }
+        const io = self.io;
+        const transport = self.transport;
+        try transport.writeAll(response.items);
+
+        const selected_protocol = self.selected_protocol;
+        const request_head = self.request_head;
+        var request = self.request;
+        const limits = self.limits;
+        const compression_threshold = self.options.compression_threshold;
+        const negotiated_extension = self.negotiated_extension;
+        if (self.selected_extension) |extension| allocator.free(extension);
+        request.deinit(allocator);
+        var owned_head = request_head;
+        owned_head.deinit(allocator);
+        self.* = undefined;
+
+        return .{
+            .io = io,
+            .allocator = allocator,
+            .stream = transportStream(transport),
+            .tls_server_conn = switch (transport) {
+                .tls_server => |connection| connection,
+                else => null,
+            },
+            .role = .server,
+            .limits = limits,
+            .selected_protocol = selected_protocol,
+            .permessage_deflate = negotiated_extension.permessage_deflate,
+            .compression_threshold = compression_threshold,
+            .compression_send_max_window_bits = negotiated_extension.server_max_window_bits orelse 15,
+        };
+    }
+
+    /// Send a final HTTP rejection and close the transport. The request never
+    /// becomes a WebSocket connection.
+    pub fn reject(
+        self: *PendingUpgrade,
+        status: u16,
+        reason: []const u8,
+        response_headers: []const http1.Header,
+        body: []const u8,
+    ) Error!void {
+        if (status < 300 or status > 599) return error.InvalidStatus;
+        const allocator = self.allocator;
+        try validateUpgradeRejectionHeaders(response_headers);
+        const response_count = std.math.add(
+            usize,
+            response_headers.len,
+            1,
+        ) catch return error.HeadersTooLarge;
+        var response_stack: [handshake_storage.stack_capacity]http1.Header =
+            undefined;
+        const response_fields = try handshake_storage.acquire(
+            http1.Header,
+            allocator,
+            &response_stack,
+            response_count,
+        );
+        defer handshake_storage.release(
+            http1.Header,
+            allocator,
+            &response_stack,
+            response_fields,
+        );
+        @memcpy(response_fields[0..response_headers.len], response_headers);
+        response_fields[response_headers.len] = .{
+            .name = "Connection",
+            .value = "close",
+        };
+        var scratch: http1_write.Scratch = .{};
+        defer scratch.deinit(allocator);
+        const message = try http1_write.prepareResponse(
+            allocator,
+            .{
+                .status = status,
+                .reason = reason,
+                .headers = response_fields,
+                .body = body,
+                .request_method = self.request.method,
+            },
+            &scratch,
+        );
+        if (message.header.len > self.limits.max_head_bytes) {
+            return error.HeadersTooLarge;
+        }
+        if (self.deadline) |deadline| {
+            _ = try deadline_policy.usableAwake(self.io, deadline);
+        }
+        try self.transport.writeAllParts(message.header, message.body);
+        self.deinit();
+    }
+
+    pub fn forbidden(self: *PendingUpgrade) Error!void {
+        return self.reject(403, "Forbidden", &.{}, &.{});
+    }
+
+    pub fn notFound(self: *PendingUpgrade) Error!void {
+        return self.reject(404, "Not Found", &.{}, &.{});
+    }
+
+    pub fn tooManyRequests(self: *PendingUpgrade) Error!void {
+        return self.reject(429, "Too Many Requests", &.{}, &.{});
+    }
+};
+
 pub const TlsClientIdentityOptions = tls_client_identity.Options;
+
+/// Result of an HTTP/1 Upgrade attempt before a non-101 response is mapped to
+/// the compatibility `InvalidResponse` error. Rejection status, headers,
+/// trailers, and body remain owned and inspectable until `deinit`. Successful
+/// attempts retain the transport until `requireAccepted` transfers it into a
+/// WebSocket connection.
+pub const ConnectAttempt = struct {
+    allocator: std.mem.Allocator,
+    io: std.Io,
+    transport: ?RuntimeTransport,
+    response_bytes: []u8,
+    response: http1.Response,
+    initial_websocket_bytes: ?[]u8,
+    key: [24]u8,
+    protocols: []const []const u8,
+    enable_permessage_deflate: bool,
+    compression_threshold: usize,
+    limits: Limits,
+
+    pub fn accepted(self: ConnectAttempt) bool {
+        return self.response.status == 101;
+    }
+
+    pub fn status(self: ConnectAttempt) u16 {
+        return self.response.status;
+    }
+
+    pub fn headers(self: ConnectAttempt) []const http1.Header {
+        return self.response.headers;
+    }
+
+    pub fn responseHeader(
+        self: ConnectAttempt,
+        name: []const u8,
+    ) ?[]const u8 {
+        return self.response.header(name);
+    }
+
+    pub fn body(self: ConnectAttempt) []const u8 {
+        return self.response.body;
+    }
+
+    pub fn trailers(self: ConnectAttempt) []const http1.Header {
+        return self.response.trailers;
+    }
+
+    pub fn deinit(self: *ConnectAttempt) void {
+        const allocator = self.allocator;
+        const transport = self.transport;
+        self.response.deinit(allocator);
+        allocator.free(self.response_bytes);
+        if (self.initial_websocket_bytes) |bytes| allocator.free(bytes);
+        self.* = undefined;
+        if (transport) |owned| owned.close();
+    }
+
+    pub fn requireAccepted(self: *ConnectAttempt) Error!Connection {
+        if (!self.accepted()) return error.InvalidResponse;
+        const selected_protocol = try validateServerHandshake(
+            self.allocator,
+            self.response,
+            &self.key,
+            self.protocols,
+        );
+        errdefer if (selected_protocol) |protocol| {
+            self.allocator.free(protocol);
+        };
+        const selected_extension = try websocket.ExtensionNegotiation
+            .validateResponse(try optionalSingletonHeader(
+            self.response.headers,
+            "sec-websocket-extensions",
+        ));
+        if (selected_extension.permessage_deflate and
+            !self.enable_permessage_deflate)
+        {
+            return error.InvalidExtension;
+        }
+
+        const transport = self.transport orelse return error.InvalidResponse;
+        const initial_websocket_bytes =
+            self.initial_websocket_bytes orelse return error.InvalidResponse;
+        const connection = Connection{
+            .io = self.io,
+            .allocator = self.allocator,
+            .stream = transportStream(transport),
+            .tls_conn = switch (transport) {
+                .tls => |value| value,
+                else => null,
+            },
+            .tls_vail_conn = switch (transport) {
+                .tls_vail => |value| value,
+                else => null,
+            },
+            .role = .client,
+            .limits = self.limits,
+            .selected_protocol = selected_protocol,
+            .permessage_deflate = selected_extension.permessage_deflate,
+            .compression_threshold = self.compression_threshold,
+            .compression_send_max_window_bits = selected_extension.client_max_window_bits orelse 15,
+            .inbuf = .fromOwnedSlice(initial_websocket_bytes),
+        };
+        const allocator = self.allocator;
+        self.response.deinit(allocator);
+        allocator.free(self.response_bytes);
+        self.* = undefined;
+        return connection;
+    }
+};
 
 pub const Client = struct {
     /// Perform a cleartext WebSocket handshake on an already connected stream.
@@ -1123,9 +1723,25 @@ pub const Client = struct {
         stream: net.Stream,
         options: ConnectOptions,
     ) Error!Connection {
+        var attempt = try connectAcceptedStreamAttempt(
+            allocator,
+            io,
+            stream,
+            options,
+        );
+        errdefer attempt.deinit();
+        return attempt.requireAccepted();
+    }
+
+    pub fn connectAcceptedStreamAttempt(
+        allocator: std.mem.Allocator,
+        io: std.Io,
+        stream: net.Stream,
+        options: ConnectOptions,
+    ) Error!ConnectAttempt {
         var stream_owned = true;
         errdefer if (stream_owned) stream.close(io);
-        const connection = try connectStream(
+        var attempt = try connectStreamAttempt(
             allocator,
             io,
             stream,
@@ -1133,7 +1749,7 @@ pub const Client = struct {
             options,
         );
         stream_owned = false;
-        return connection;
+        return closeRejectedAttempt(&attempt);
     }
 
     /// Perform TLS and WebSocket handshakes on a connected stream after an
@@ -1146,6 +1762,26 @@ pub const Client = struct {
         options: ConnectOptions,
         tls_options: http1_runtime.TlsClientOptions,
     ) Error!Connection {
+        var attempt = try connectAcceptedTlsStreamAttempt(
+            allocator,
+            io,
+            stream,
+            server_name,
+            options,
+            tls_options,
+        );
+        errdefer attempt.deinit();
+        return attempt.requireAccepted();
+    }
+
+    pub fn connectAcceptedTlsStreamAttempt(
+        allocator: std.mem.Allocator,
+        io: std.Io,
+        stream: net.Stream,
+        server_name: []const u8,
+        options: ConnectOptions,
+        tls_options: http1_runtime.TlsClientOptions,
+    ) Error!ConnectAttempt {
         var stream_owned = true;
         errdefer if (stream_owned) stream.close(io);
         if (options.vail_tls orelse options.tls_identity) |identity| {
@@ -1159,13 +1795,14 @@ pub const Client = struct {
             );
             stream_owned = false;
             errdefer tls_conn.deinit();
-            return connectVailStream(
+            var attempt = try connectTransportAttempt(
                 allocator,
                 io,
-                stream,
-                tls_conn,
+                .{ .tls_vail = tls_conn },
                 options,
+                null,
             );
+            return closeRejectedAttempt(&attempt);
         }
         const tls_conn = try http1_runtime.TlsClientConnection.init(
             allocator,
@@ -1176,7 +1813,14 @@ pub const Client = struct {
         );
         stream_owned = false;
         errdefer tls_conn.deinit();
-        return connectStream(allocator, io, stream, tls_conn, options);
+        var attempt = try connectTransportAttempt(
+            allocator,
+            io,
+            .{ .tls = tls_conn },
+            options,
+            null,
+        );
+        return closeRejectedAttempt(&attempt);
     }
 
     pub fn connect(
@@ -1185,12 +1829,24 @@ pub const Client = struct {
         address: net.IpAddress,
         options: ConnectOptions,
     ) Error!Connection {
+        var attempt = try connectAttempt(allocator, io, address, options);
+        errdefer attempt.deinit();
+        return attempt.requireAccepted();
+    }
+
+    pub fn connectAttempt(
+        allocator: std.mem.Allocator,
+        io: std.Io,
+        address: net.IpAddress,
+        options: ConnectOptions,
+    ) Error!ConnectAttempt {
         if (options.tls_identity != null or options.vail_tls != null) {
             return error.UnsupportedScheme;
         }
         const stream = try tcp_connect.ip(io, address, options.connect_timeout);
         errdefer stream.close(io);
-        return connectStream(allocator, io, stream, null, options);
+        var attempt = try connectStreamAttempt(allocator, io, stream, null, options);
+        return closeRejectedAttempt(&attempt);
     }
 
     /// Establish cleartext WebSocket under one caller-owned deadline spanning
@@ -1202,6 +1858,24 @@ pub const Client = struct {
         options: ConnectOptions,
         deadline: std.Io.Clock.Timestamp,
     ) Error!Connection {
+        var attempt = try connectAttemptWithDeadline(
+            allocator,
+            io,
+            address,
+            options,
+            deadline,
+        );
+        errdefer attempt.deinit();
+        return attempt.requireAccepted();
+    }
+
+    pub fn connectAttemptWithDeadline(
+        allocator: std.mem.Allocator,
+        io: std.Io,
+        address: net.IpAddress,
+        options: ConnectOptions,
+        deadline: std.Io.Clock.Timestamp,
+    ) Error!ConnectAttempt {
         if (options.tls_identity != null or options.vail_tls != null) {
             return error.UnsupportedScheme;
         }
@@ -1215,7 +1889,7 @@ pub const Client = struct {
             ),
         );
         errdefer stream.close(io);
-        return connectStreamBefore(
+        var attempt = try connectStreamAttemptBefore(
             allocator,
             io,
             stream,
@@ -1223,6 +1897,7 @@ pub const Client = struct {
             options,
             deadline,
         );
+        return closeRejectedAttempt(&attempt);
     }
 
     pub fn connectWithTimeout(
@@ -1242,6 +1917,23 @@ pub const Client = struct {
         );
     }
 
+    pub fn connectAttemptWithTimeout(
+        allocator: std.mem.Allocator,
+        io: std.Io,
+        address: net.IpAddress,
+        options: ConnectOptions,
+        timeout: std.Io.Duration,
+    ) Error!ConnectAttempt {
+        if (timeout.nanoseconds <= 0) return error.Timeout;
+        return connectAttemptWithDeadline(
+            allocator,
+            io,
+            address,
+            options,
+            .fromNow(io, .{ .raw = timeout, .clock = .awake }),
+        );
+    }
+
     /// Connect a cleartext WebSocket over a Unix-domain stream socket.
     /// `options.host` remains the HTTP Host authority and must be supplied by
     /// the caller because a filesystem path is not an HTTP authority.
@@ -1251,6 +1943,17 @@ pub const Client = struct {
         address: net.UnixAddress,
         options: ConnectOptions,
     ) Error!Connection {
+        var attempt = try connectUnixAttempt(allocator, io, address, options);
+        errdefer attempt.deinit();
+        return attempt.requireAccepted();
+    }
+
+    pub fn connectUnixAttempt(
+        allocator: std.mem.Allocator,
+        io: std.Io,
+        address: net.UnixAddress,
+        options: ConnectOptions,
+    ) Error!ConnectAttempt {
         if (options.tls_identity != null or options.vail_tls != null) {
             return error.UnsupportedScheme;
         }
@@ -1260,7 +1963,7 @@ pub const Client = struct {
         errdefer if (stream_owned) stream.close(io);
         var connect_options = options;
         connect_options.tcp_nodelay = false;
-        const connection = try connectStream(
+        var attempt = try connectStreamAttempt(
             allocator,
             io,
             stream,
@@ -1268,7 +1971,7 @@ pub const Client = struct {
             connect_options,
         );
         stream_owned = false;
-        return connection;
+        return closeRejectedAttempt(&attempt);
     }
 
     pub fn connectUnixWithDeadline(
@@ -1278,6 +1981,24 @@ pub const Client = struct {
         options: ConnectOptions,
         deadline: std.Io.Clock.Timestamp,
     ) Error!Connection {
+        var attempt = try connectUnixAttemptWithDeadline(
+            allocator,
+            io,
+            address,
+            options,
+            deadline,
+        );
+        errdefer attempt.deinit();
+        return attempt.requireAccepted();
+    }
+
+    pub fn connectUnixAttemptWithDeadline(
+        allocator: std.mem.Allocator,
+        io: std.Io,
+        address: net.UnixAddress,
+        options: ConnectOptions,
+        deadline: std.Io.Clock.Timestamp,
+    ) Error!ConnectAttempt {
         if (options.tls_identity != null or options.vail_tls != null) {
             return error.UnsupportedScheme;
         }
@@ -1295,7 +2016,7 @@ pub const Client = struct {
         errdefer if (stream_owned) stream.close(io);
         var connect_options = options;
         connect_options.tcp_nodelay = false;
-        const connection = try connectStreamBefore(
+        var attempt = try connectStreamAttemptBefore(
             allocator,
             io,
             stream,
@@ -1304,7 +2025,7 @@ pub const Client = struct {
             deadline,
         );
         stream_owned = false;
-        return connection;
+        return closeRejectedAttempt(&attempt);
     }
 
     pub fn connectUnixWithTimeout(
@@ -1324,6 +2045,23 @@ pub const Client = struct {
         );
     }
 
+    pub fn connectUnixAttemptWithTimeout(
+        allocator: std.mem.Allocator,
+        io: std.Io,
+        address: net.UnixAddress,
+        options: ConnectOptions,
+        timeout: std.Io.Duration,
+    ) Error!ConnectAttempt {
+        if (timeout.nanoseconds <= 0) return error.Timeout;
+        return connectUnixAttemptWithDeadline(
+            allocator,
+            io,
+            address,
+            options,
+            .fromNow(io, .{ .raw = timeout, .clock = .awake }),
+        );
+    }
+
     pub fn connectHost(
         allocator: std.mem.Allocator,
         io: std.Io,
@@ -1331,6 +2069,24 @@ pub const Client = struct {
         port: u16,
         options: ConnectOptions,
     ) Error!Connection {
+        var attempt = try connectHostAttempt(
+            allocator,
+            io,
+            host,
+            port,
+            options,
+        );
+        errdefer attempt.deinit();
+        return attempt.requireAccepted();
+    }
+
+    pub fn connectHostAttempt(
+        allocator: std.mem.Allocator,
+        io: std.Io,
+        host: []const u8,
+        port: u16,
+        options: ConnectOptions,
+    ) Error!ConnectAttempt {
         if (options.tls_identity != null or options.vail_tls != null) {
             return error.UnsupportedScheme;
         }
@@ -1346,7 +2102,14 @@ pub const Client = struct {
         defer allocator.free(default_host);
         var connect_options = options;
         if (connect_options.host.len == 0) connect_options.host = default_host;
-        return connectStream(allocator, io, stream, null, connect_options);
+        var attempt = try connectStreamAttempt(
+            allocator,
+            io,
+            stream,
+            null,
+            connect_options,
+        );
+        return closeRejectedAttempt(&attempt);
     }
 
     pub fn connectHostWithDeadline(
@@ -1357,6 +2120,26 @@ pub const Client = struct {
         options: ConnectOptions,
         deadline: std.Io.Clock.Timestamp,
     ) Error!Connection {
+        var attempt = try connectHostAttemptWithDeadline(
+            allocator,
+            io,
+            host,
+            port,
+            options,
+            deadline,
+        );
+        errdefer attempt.deinit();
+        return attempt.requireAccepted();
+    }
+
+    pub fn connectHostAttemptWithDeadline(
+        allocator: std.mem.Allocator,
+        io: std.Io,
+        host: []const u8,
+        port: u16,
+        options: ConnectOptions,
+        deadline: std.Io.Clock.Timestamp,
+    ) Error!ConnectAttempt {
         if (options.tls_identity != null or options.vail_tls != null) {
             return error.UnsupportedScheme;
         }
@@ -1380,7 +2163,7 @@ pub const Client = struct {
         defer allocator.free(default_host);
         var connect_options = options;
         if (connect_options.host.len == 0) connect_options.host = default_host;
-        return connectStreamBefore(
+        var attempt = try connectStreamAttemptBefore(
             allocator,
             io,
             stream,
@@ -1388,6 +2171,7 @@ pub const Client = struct {
             connect_options,
             deadline,
         );
+        return closeRejectedAttempt(&attempt);
     }
 
     pub fn connectHostWithTimeout(
@@ -1409,6 +2193,25 @@ pub const Client = struct {
         );
     }
 
+    pub fn connectHostAttemptWithTimeout(
+        allocator: std.mem.Allocator,
+        io: std.Io,
+        host: []const u8,
+        port: u16,
+        options: ConnectOptions,
+        timeout: std.Io.Duration,
+    ) Error!ConnectAttempt {
+        if (timeout.nanoseconds <= 0) return error.Timeout;
+        return connectHostAttemptWithDeadline(
+            allocator,
+            io,
+            host,
+            port,
+            options,
+            .fromNow(io, .{ .raw = timeout, .clock = .awake }),
+        );
+    }
+
     pub fn connectTlsHost(
         allocator: std.mem.Allocator,
         io: std.Io,
@@ -1417,6 +2220,26 @@ pub const Client = struct {
         options: ConnectOptions,
         tls_options: http1_runtime.TlsClientOptions,
     ) Error!Connection {
+        var attempt = try connectTlsHostAttempt(
+            allocator,
+            io,
+            host,
+            port,
+            options,
+            tls_options,
+        );
+        errdefer attempt.deinit();
+        return attempt.requireAccepted();
+    }
+
+    pub fn connectTlsHostAttempt(
+        allocator: std.mem.Allocator,
+        io: std.Io,
+        host: []const u8,
+        port: u16,
+        options: ConnectOptions,
+        tls_options: http1_runtime.TlsClientOptions,
+    ) Error!ConnectAttempt {
         const host_name = try net.HostName.init(host);
         const stream = try tcp_connect.host(
             io,
@@ -1424,7 +2247,7 @@ pub const Client = struct {
             port,
             options.connect_timeout,
         );
-        return connectTlsStream(
+        var attempt = try connectTlsStreamAttempt(
             allocator,
             io,
             stream,
@@ -1433,6 +2256,7 @@ pub const Client = struct {
             options,
             tls_options,
         );
+        return closeRejectedAttempt(&attempt);
     }
 
     pub fn connectTlsHostWithDeadline(
@@ -1444,6 +2268,28 @@ pub const Client = struct {
         tls_options: http1_runtime.TlsClientOptions,
         deadline: std.Io.Clock.Timestamp,
     ) Error!Connection {
+        var attempt = try connectTlsHostAttemptWithDeadline(
+            allocator,
+            io,
+            host,
+            port,
+            options,
+            tls_options,
+            deadline,
+        );
+        errdefer attempt.deinit();
+        return attempt.requireAccepted();
+    }
+
+    pub fn connectTlsHostAttemptWithDeadline(
+        allocator: std.mem.Allocator,
+        io: std.Io,
+        host: []const u8,
+        port: u16,
+        options: ConnectOptions,
+        tls_options: http1_runtime.TlsClientOptions,
+        deadline: std.Io.Clock.Timestamp,
+    ) Error!ConnectAttempt {
         const host_name = try net.HostName.init(host);
         const stream = try tcp_connect.hostWithDeadline(
             io,
@@ -1455,7 +2301,7 @@ pub const Client = struct {
                 options.connect_timeout,
             ),
         );
-        return connectTlsStreamBefore(
+        var attempt = try connectTlsStreamAttemptBefore(
             allocator,
             io,
             stream,
@@ -1465,6 +2311,7 @@ pub const Client = struct {
             tls_options,
             deadline,
         );
+        return closeRejectedAttempt(&attempt);
     }
 
     pub fn connectTlsHostWithTimeout(
@@ -1488,6 +2335,27 @@ pub const Client = struct {
         );
     }
 
+    pub fn connectTlsHostAttemptWithTimeout(
+        allocator: std.mem.Allocator,
+        io: std.Io,
+        host: []const u8,
+        port: u16,
+        options: ConnectOptions,
+        tls_options: http1_runtime.TlsClientOptions,
+        timeout: std.Io.Duration,
+    ) Error!ConnectAttempt {
+        if (timeout.nanoseconds <= 0) return error.Timeout;
+        return connectTlsHostAttemptWithDeadline(
+            allocator,
+            io,
+            host,
+            port,
+            options,
+            tls_options,
+            .fromNow(io, .{ .raw = timeout, .clock = .awake }),
+        );
+    }
+
     /// Connect to a resolved address while verifying TLS against a separate
     /// hostname. This keeps caller-controlled DNS/service discovery distinct
     /// from SNI and certificate identity. `options.host`, when empty, defaults
@@ -1500,13 +2368,33 @@ pub const Client = struct {
         options: ConnectOptions,
         tls_options: http1_runtime.TlsClientOptions,
     ) Error!Connection {
+        var attempt = try connectTlsAddressAttempt(
+            allocator,
+            io,
+            address,
+            tls_host,
+            options,
+            tls_options,
+        );
+        errdefer attempt.deinit();
+        return attempt.requireAccepted();
+    }
+
+    pub fn connectTlsAddressAttempt(
+        allocator: std.mem.Allocator,
+        io: std.Io,
+        address: net.IpAddress,
+        tls_host: []const u8,
+        options: ConnectOptions,
+        tls_options: http1_runtime.TlsClientOptions,
+    ) Error!ConnectAttempt {
         _ = try net.HostName.init(tls_host);
         const stream = try tcp_connect.ip(
             io,
             address,
             options.connect_timeout,
         );
-        return connectTlsStream(
+        var attempt = try connectTlsStreamAttempt(
             allocator,
             io,
             stream,
@@ -1515,6 +2403,7 @@ pub const Client = struct {
             options,
             tls_options,
         );
+        return closeRejectedAttempt(&attempt);
     }
 
     pub fn connectTlsAddressWithDeadline(
@@ -1526,6 +2415,28 @@ pub const Client = struct {
         tls_options: http1_runtime.TlsClientOptions,
         deadline: std.Io.Clock.Timestamp,
     ) Error!Connection {
+        var attempt = try connectTlsAddressAttemptWithDeadline(
+            allocator,
+            io,
+            address,
+            tls_host,
+            options,
+            tls_options,
+            deadline,
+        );
+        errdefer attempt.deinit();
+        return attempt.requireAccepted();
+    }
+
+    pub fn connectTlsAddressAttemptWithDeadline(
+        allocator: std.mem.Allocator,
+        io: std.Io,
+        address: net.IpAddress,
+        tls_host: []const u8,
+        options: ConnectOptions,
+        tls_options: http1_runtime.TlsClientOptions,
+        deadline: std.Io.Clock.Timestamp,
+    ) Error!ConnectAttempt {
         _ = try net.HostName.init(tls_host);
         const stream = try tcp_connect.ipWithDeadline(
             io,
@@ -1536,7 +2447,7 @@ pub const Client = struct {
                 options.connect_timeout,
             ),
         );
-        return connectTlsStreamBefore(
+        var attempt = try connectTlsStreamAttemptBefore(
             allocator,
             io,
             stream,
@@ -1546,6 +2457,7 @@ pub const Client = struct {
             tls_options,
             deadline,
         );
+        return closeRejectedAttempt(&attempt);
     }
 
     pub fn connectTlsAddressWithTimeout(
@@ -1569,10 +2481,28 @@ pub const Client = struct {
         );
     }
 
-    /// Own `stream` from entry and close it on every pre-connection failure.
-    /// Both hostname and pre-resolved-address APIs use this path so standard
-    /// TLS, vail TLS, Host synthesis, and socket policy cannot drift apart.
-    fn connectTlsStream(
+    pub fn connectTlsAddressAttemptWithTimeout(
+        allocator: std.mem.Allocator,
+        io: std.Io,
+        address: net.IpAddress,
+        tls_host: []const u8,
+        options: ConnectOptions,
+        tls_options: http1_runtime.TlsClientOptions,
+        timeout: std.Io.Duration,
+    ) Error!ConnectAttempt {
+        if (timeout.nanoseconds <= 0) return error.Timeout;
+        return connectTlsAddressAttemptWithDeadline(
+            allocator,
+            io,
+            address,
+            tls_host,
+            options,
+            tls_options,
+            .fromNow(io, .{ .raw = timeout, .clock = .awake }),
+        );
+    }
+
+    fn connectTlsStreamAttempt(
         allocator: std.mem.Allocator,
         io: std.Io,
         stream: net.Stream,
@@ -1580,8 +2510,8 @@ pub const Client = struct {
         port: u16,
         options: ConnectOptions,
         tls_options: http1_runtime.TlsClientOptions,
-    ) Error!Connection {
-        return connectTlsStreamMaybeBefore(
+    ) Error!ConnectAttempt {
+        return connectTlsStreamAttemptMaybeBefore(
             allocator,
             io,
             stream,
@@ -1593,7 +2523,7 @@ pub const Client = struct {
         );
     }
 
-    fn connectTlsStreamBefore(
+    fn connectTlsStreamAttemptBefore(
         allocator: std.mem.Allocator,
         io: std.Io,
         stream: net.Stream,
@@ -1602,9 +2532,9 @@ pub const Client = struct {
         options: ConnectOptions,
         tls_options: http1_runtime.TlsClientOptions,
         deadline: std.Io.Clock.Timestamp,
-    ) Error!Connection {
+    ) Error!ConnectAttempt {
         _ = try deadline_policy.usableAwake(io, deadline);
-        return connectTlsStreamMaybeBefore(
+        return connectTlsStreamAttemptMaybeBefore(
             allocator,
             io,
             stream,
@@ -1616,7 +2546,7 @@ pub const Client = struct {
         );
     }
 
-    fn connectTlsStreamMaybeBefore(
+    fn connectTlsStreamAttemptMaybeBefore(
         allocator: std.mem.Allocator,
         io: std.Io,
         stream: net.Stream,
@@ -1625,7 +2555,7 @@ pub const Client = struct {
         options: ConnectOptions,
         tls_options: http1_runtime.TlsClientOptions,
         deadline: ?std.Io.Clock.Timestamp,
-    ) Error!Connection {
+    ) Error!ConnectAttempt {
         var stream_owned = true;
         errdefer if (stream_owned) stream.close(io);
         const default_host = try std.fmt.allocPrint(
@@ -1635,9 +2565,7 @@ pub const Client = struct {
         );
         defer allocator.free(default_host);
         var connect_options = options;
-        if (connect_options.host.len == 0) {
-            connect_options.host = default_host;
-        }
+        if (connect_options.host.len == 0) connect_options.host = default_host;
         if (connect_options.vail_tls orelse
             connect_options.tls_identity) |identity|
         {
@@ -1662,23 +2590,13 @@ pub const Client = struct {
                 );
             stream_owned = false;
             errdefer tls_conn.deinit();
-            return if (deadline) |absolute|
-                connectVailStreamBefore(
-                    allocator,
-                    io,
-                    stream,
-                    tls_conn,
-                    connect_options,
-                    absolute,
-                )
-            else
-                connectVailStream(
-                    allocator,
-                    io,
-                    stream,
-                    tls_conn,
-                    connect_options,
-                );
+            return connectTransportAttempt(
+                allocator,
+                io,
+                .{ .tls_vail = tls_conn },
+                connect_options,
+                deadline,
+            );
         }
         const tls_conn = if (deadline) |absolute|
             try http1_runtime.TlsClientConnection.initWithDeadline(
@@ -1699,17 +2617,13 @@ pub const Client = struct {
             );
         stream_owned = false;
         errdefer tls_conn.deinit();
-        return if (deadline) |absolute|
-            connectStreamBefore(
-                allocator,
-                io,
-                stream,
-                tls_conn,
-                connect_options,
-                absolute,
-            )
-        else
-            connectStream(allocator, io, stream, tls_conn, connect_options);
+        return connectTransportAttempt(
+            allocator,
+            io,
+            .{ .tls = tls_conn },
+            connect_options,
+            deadline,
+        );
     }
 
     pub fn connectUri(
@@ -1738,6 +2652,33 @@ pub const Client = struct {
         );
     }
 
+    pub fn connectUriAttempt(
+        allocator: std.mem.Allocator,
+        io: std.Io,
+        uri_text: []const u8,
+        options: ConnectOptions,
+    ) Error!ConnectAttempt {
+        return connectUriTlsAttempt(allocator, io, uri_text, options, .{});
+    }
+
+    pub fn connectUriTlsAttempt(
+        allocator: std.mem.Allocator,
+        io: std.Io,
+        uri_text: []const u8,
+        options: ConnectOptions,
+        tls_options: http1_runtime.TlsClientOptions,
+    ) Error!ConnectAttempt {
+        var attempt = try connectUriTlsAttemptBefore(
+            allocator,
+            io,
+            uri_text,
+            options,
+            tls_options,
+            null,
+        );
+        return closeRejectedAttempt(&attempt);
+    }
+
     pub fn connectUriWithDeadline(
         allocator: std.mem.Allocator,
         io: std.Io,
@@ -1746,6 +2687,23 @@ pub const Client = struct {
         deadline: std.Io.Clock.Timestamp,
     ) Error!Connection {
         return connectUriTlsWithDeadline(
+            allocator,
+            io,
+            uri_text,
+            options,
+            .{},
+            deadline,
+        );
+    }
+
+    pub fn connectUriAttemptWithDeadline(
+        allocator: std.mem.Allocator,
+        io: std.Io,
+        uri_text: []const u8,
+        options: ConnectOptions,
+        deadline: std.Io.Clock.Timestamp,
+    ) Error!ConnectAttempt {
+        return connectUriTlsAttemptWithDeadline(
             allocator,
             io,
             uri_text,
@@ -1772,6 +2730,23 @@ pub const Client = struct {
         );
     }
 
+    pub fn connectUriAttemptWithTimeout(
+        allocator: std.mem.Allocator,
+        io: std.Io,
+        uri_text: []const u8,
+        options: ConnectOptions,
+        timeout: std.Io.Duration,
+    ) Error!ConnectAttempt {
+        if (timeout.nanoseconds <= 0) return error.Timeout;
+        return connectUriAttemptWithDeadline(
+            allocator,
+            io,
+            uri_text,
+            options,
+            .fromNow(io, .{ .raw = timeout, .clock = .awake }),
+        );
+    }
+
     pub fn connectUriTlsWithDeadline(
         allocator: std.mem.Allocator,
         io: std.Io,
@@ -1788,6 +2763,25 @@ pub const Client = struct {
             tls_options,
             try deadline_policy.usableAwake(io, deadline),
         );
+    }
+
+    pub fn connectUriTlsAttemptWithDeadline(
+        allocator: std.mem.Allocator,
+        io: std.Io,
+        uri_text: []const u8,
+        options: ConnectOptions,
+        tls_options: http1_runtime.TlsClientOptions,
+        deadline: std.Io.Clock.Timestamp,
+    ) Error!ConnectAttempt {
+        var attempt = try connectUriTlsAttemptBefore(
+            allocator,
+            io,
+            uri_text,
+            options,
+            tls_options,
+            try deadline_policy.usableAwake(io, deadline),
+        );
+        return closeRejectedAttempt(&attempt);
     }
 
     pub fn connectUriTlsWithTimeout(
@@ -1809,6 +2803,25 @@ pub const Client = struct {
         );
     }
 
+    pub fn connectUriTlsAttemptWithTimeout(
+        allocator: std.mem.Allocator,
+        io: std.Io,
+        uri_text: []const u8,
+        options: ConnectOptions,
+        tls_options: http1_runtime.TlsClientOptions,
+        timeout: std.Io.Duration,
+    ) Error!ConnectAttempt {
+        if (timeout.nanoseconds <= 0) return error.Timeout;
+        return connectUriTlsAttemptWithDeadline(
+            allocator,
+            io,
+            uri_text,
+            options,
+            tls_options,
+            .fromNow(io, .{ .raw = timeout, .clock = .awake }),
+        );
+    }
+
     fn connectUriTlsBefore(
         allocator: std.mem.Allocator,
         io: std.Io,
@@ -1817,6 +2830,26 @@ pub const Client = struct {
         tls_options: http1_runtime.TlsClientOptions,
         deadline: ?std.Io.Clock.Timestamp,
     ) Error!Connection {
+        var attempt = try connectUriTlsAttemptBefore(
+            allocator,
+            io,
+            uri_text,
+            options,
+            tls_options,
+            deadline,
+        );
+        errdefer attempt.deinit();
+        return attempt.requireAccepted();
+    }
+
+    fn connectUriTlsAttemptBefore(
+        allocator: std.mem.Allocator,
+        io: std.Io,
+        uri_text: []const u8,
+        options: ConnectOptions,
+        tls_options: http1_runtime.TlsClientOptions,
+        deadline: ?std.Io.Clock.Timestamp,
+    ) Error!ConnectAttempt {
         const uri = std.Uri.parse(uri_text) catch return error.InvalidUri;
         const is_ws = std.ascii.eqlIgnoreCase(uri.scheme, "ws");
         const is_wss = std.ascii.eqlIgnoreCase(uri.scheme, "wss");
@@ -1895,23 +2928,13 @@ pub const Client = struct {
                     );
                 stream_owned = false;
                 errdefer tls_conn.deinit();
-                return if (deadline) |absolute|
-                    connectVailStreamBefore(
-                        allocator,
-                        io,
-                        stream,
-                        tls_conn,
-                        connect_options,
-                        absolute,
-                    )
-                else
-                    connectVailStream(
-                        allocator,
-                        io,
-                        stream,
-                        tls_conn,
-                        connect_options,
-                    );
+                return connectTransportAttempt(
+                    allocator,
+                    io,
+                    .{ .tls_vail = tls_conn },
+                    connect_options,
+                    deadline,
+                );
             }
             var standard_tls_options = tls_options;
             if (standard_tls_options.handshake_timeout == null) {
@@ -1937,102 +2960,33 @@ pub const Client = struct {
                 );
             stream_owned = false;
             errdefer tls_conn.deinit();
-            return if (deadline) |absolute|
-                connectStreamBefore(
-                    allocator,
-                    io,
-                    stream,
-                    tls_conn,
-                    connect_options,
-                    absolute,
-                )
-            else
-                connectStream(
-                    allocator,
-                    io,
-                    stream,
-                    tls_conn,
-                    connect_options,
-                );
-        }
-        const connection = if (deadline) |absolute|
-            try connectStreamBefore(
+            return connectTransportAttempt(
                 allocator,
                 io,
-                stream,
-                null,
+                .{ .tls = tls_conn },
                 connect_options,
-                absolute,
-            )
-        else
-            try connectStream(
-                allocator,
-                io,
-                stream,
-                null,
-                connect_options,
+                deadline,
             );
-        stream_owned = false;
-        return connection;
-    }
-
-    /// Linux-only `ws://` client path backed by `std.os.linux.IoUring`.
-    ///
-    /// This mirrors the HTTP/1 io_uring client support and reuses the same
-    /// WebSocket handshake/framing logic as the normal TCP runtime.  It is
-    /// limited to cleartext `ws://` and literal IP authorities because TLS and
-    /// DNS still depend on the higher-level `std.Io.net`/TLS layers.
-    pub fn connectUriLinuxIoUring(
-        allocator: std.mem.Allocator,
-        io: std.Io,
-        ring: *http1_runtime.LinuxIoUringHandle,
-        uri_text: []const u8,
-        options: ConnectOptions,
-    ) Error!Connection {
-        if (options.tls_identity != null or options.vail_tls != null) {
-            return error.UnsupportedScheme;
         }
-        const uri = std.Uri.parse(uri_text) catch return error.InvalidUri;
-        if (!std.ascii.eqlIgnoreCase(uri.scheme, "ws")) return error.UnsupportedScheme;
-        const target = try uriTargetAlloc(allocator, uri);
-        defer allocator.free(target);
-        var endpoint = try http1_runtime.uriEndpoint(allocator, uri, 80);
-        defer endpoint.deinit();
-        const address = switch (endpoint.target) {
-            .ip => |address| address,
-            .host => return error.UnsupportedEndpoint,
-        };
-
-        var connect_options = options;
-        connect_options.target = target;
-        if (connect_options.host.len == 0) connect_options.host = endpoint.authority;
-
-        var uring_stream = try http1_runtime.connectIpLinuxIoUring(ring, address);
-        errdefer uring_stream.close();
-        if (connect_options.tcp_nodelay) {
-            try setLinuxTcpNoDelay(uring_stream.fd);
-        }
-        return connectTransport(
+        const attempt = try connectTransportAttempt(
             allocator,
             io,
-            .{ .linux_io_uring = uring_stream },
-            undefined,
-            null,
-            null,
-            uring_stream,
+            .{ .tcp = .{ .io = io, .stream = stream } },
             connect_options,
-            null,
+            deadline,
         );
+        stream_owned = false;
+        return attempt;
     }
 
-    fn connectStream(
+    fn connectStreamAttempt(
         allocator: std.mem.Allocator,
         io: std.Io,
         stream: net.Stream,
         tls_conn: ?*http1_runtime.TlsClientConnection,
         options: ConnectOptions,
-    ) Error!Connection {
-        return connectStreamMaybeBefore(
+    ) Error!ConnectAttempt {
+        return connectStreamAttemptMaybeBefore(
             allocator,
             io,
             stream,
@@ -2042,16 +2996,16 @@ pub const Client = struct {
         );
     }
 
-    fn connectStreamBefore(
+    fn connectStreamAttemptBefore(
         allocator: std.mem.Allocator,
         io: std.Io,
         stream: net.Stream,
         tls_conn: ?*http1_runtime.TlsClientConnection,
         options: ConnectOptions,
         deadline: std.Io.Clock.Timestamp,
-    ) Error!Connection {
+    ) Error!ConnectAttempt {
         _ = try deadline_policy.usableAwake(io, deadline);
-        return connectStreamMaybeBefore(
+        return connectStreamAttemptMaybeBefore(
             allocator,
             io,
             stream,
@@ -2061,139 +3015,104 @@ pub const Client = struct {
         );
     }
 
-    fn connectStreamMaybeBefore(
+    fn connectStreamAttemptMaybeBefore(
         allocator: std.mem.Allocator,
         io: std.Io,
         stream: net.Stream,
         tls_conn: ?*http1_runtime.TlsClientConnection,
         options: ConnectOptions,
         deadline: ?std.Io.Clock.Timestamp,
-    ) Error!Connection {
+    ) Error!ConnectAttempt {
         if (options.tcp_nodelay) {
             try socket_options.setTcpNoDelay(stream);
         }
         const transport: RuntimeTransport = if (tls_conn) |conn| .{ .tls = conn } else .{ .tcp = .{ .io = io, .stream = stream } };
-        return connectTransport(
+        return connectTransportAttempt(
             allocator,
             io,
             transport,
-            stream,
-            tls_conn,
-            null,
-            null,
             options,
             deadline,
         );
     }
 
-    fn connectVailStream(
-        allocator: std.mem.Allocator,
-        io: std.Io,
-        stream: net.Stream,
-        tls_conn: *tls_stream.ClientConnection,
-        options: ConnectOptions,
-    ) Error!Connection {
-        return connectVailStreamMaybeBefore(
-            allocator,
-            io,
-            stream,
-            tls_conn,
-            options,
-            null,
-        );
-    }
-
-    fn connectVailStreamBefore(
-        allocator: std.mem.Allocator,
-        io: std.Io,
-        stream: net.Stream,
-        tls_conn: *tls_stream.ClientConnection,
-        options: ConnectOptions,
-        deadline: std.Io.Clock.Timestamp,
-    ) Error!Connection {
-        _ = try deadline_policy.usableAwake(io, deadline);
-        return connectVailStreamMaybeBefore(
-            allocator,
-            io,
-            stream,
-            tls_conn,
-            options,
-            deadline,
-        );
-    }
-
-    fn connectVailStreamMaybeBefore(
-        allocator: std.mem.Allocator,
-        io: std.Io,
-        stream: net.Stream,
-        tls_conn: *tls_stream.ClientConnection,
-        options: ConnectOptions,
-        deadline: ?std.Io.Clock.Timestamp,
-    ) Error!Connection {
-        if (options.tcp_nodelay) {
-            try socket_options.setTcpNoDelay(stream);
+    fn closeRejectedAttempt(attempt: *ConnectAttempt) ConnectAttempt {
+        if (!attempt.accepted()) {
+            attempt.transport.?.close();
+            attempt.transport = null;
         }
-        return connectTransport(
-            allocator,
-            io,
-            .{ .tls_vail = tls_conn },
-            stream,
-            null,
-            tls_conn,
-            null,
-            options,
-            deadline,
-        );
+        return attempt.*;
     }
 
-    fn connectTransport(
+    fn connectTransportAttempt(
         allocator: std.mem.Allocator,
         io: std.Io,
         transport: RuntimeTransport,
-        stream: net.Stream,
-        tls_conn: ?*http1_runtime.TlsClientConnection,
-        tls_vail_conn: ?*tls_stream.ClientConnection,
-        linux_io_uring: ?http1_runtime.LinuxIoUringStream,
         options: ConnectOptions,
         outer_deadline: ?std.Io.Clock.Timestamp,
-    ) Error!Connection {
+    ) Error!ConnectAttempt {
         var nonce: [16]u8 = undefined;
         try std.Io.randomSecure(io, &nonce);
         var key: [24]u8 = undefined;
         _ = std.base64.standard.Encoder.encode(&key, &nonce);
 
-        var headers: std.ArrayList(http1.Header) = .empty;
-        defer headers.deinit(allocator);
-        try headers.appendSlice(allocator, &.{
-            .{ .name = "Upgrade", .value = "websocket" },
-            .{ .name = "Connection", .value = "Upgrade" },
-            .{ .name = "Sec-WebSocket-Key", .value = &key },
-            .{ .name = "Sec-WebSocket-Version", .value = "13" },
-        });
-        var protocol_value: std.ArrayList(u8) = .empty;
+        var protocol_value_stack: [handshake_headers.protocol_value_stack_capacity]u8 = undefined;
+        var protocol_value = try handshake_headers.prepareProtocolValue(
+            allocator,
+            options.protocols,
+            &protocol_value_stack,
+        );
         defer protocol_value.deinit(allocator);
-        if (options.protocols.len != 0) {
-            for (options.protocols, 0..) |protocol, index| {
-                if (!websocket.validSubprotocolToken(protocol)) return error.InvalidSubprotocol;
-                if (index != 0) try protocol_value.appendSlice(allocator, ", ");
-                try protocol_value.appendSlice(allocator, protocol);
-            }
-            try headers.append(allocator, .{ .name = "Sec-WebSocket-Protocol", .value = protocol_value.items });
+        try validateHttp1ClientExtraHeadersImpl(options.extra_headers);
+        const headers_count = std.math.add(
+            usize,
+            4 + @as(usize, @intFromBool(protocol_value.value.len != 0)) +
+                @as(usize, @intFromBool(options.origin != null)) +
+                @as(usize, @intFromBool(options.enable_permessage_deflate)),
+            options.extra_headers.len,
+        ) catch return error.HeadersTooLarge;
+        var headers_stack: [handshake_storage.stack_capacity]http1.Header =
+            undefined;
+        const headers = try handshake_storage.acquire(
+            http1.Header,
+            allocator,
+            &headers_stack,
+            headers_count,
+        );
+        defer handshake_storage.release(
+            http1.Header,
+            allocator,
+            &headers_stack,
+            headers,
+        );
+        var header_index: usize = 0;
+        headers[header_index] = .{ .name = "Upgrade", .value = "websocket" };
+        header_index += 1;
+        headers[header_index] = .{ .name = "Connection", .value = "Upgrade" };
+        header_index += 1;
+        headers[header_index] = .{ .name = "Sec-WebSocket-Key", .value = &key };
+        header_index += 1;
+        headers[header_index] = .{ .name = "Sec-WebSocket-Version", .value = "13" };
+        header_index += 1;
+        if (protocol_value.value.len != 0) {
+            headers[header_index] = .{
+                .name = "Sec-WebSocket-Protocol",
+                .value = protocol_value.value,
+            };
+            header_index += 1;
         }
         if (options.origin) |origin| {
-            try headers.append(allocator, .{
-                .name = "Origin",
-                .value = origin,
-            });
+            headers[header_index] = .{ .name = "Origin", .value = origin };
+            header_index += 1;
         }
         if (options.enable_permessage_deflate) {
-            try headers.append(allocator, .{
+            headers[header_index] = .{
                 .name = "Sec-WebSocket-Extensions",
                 .value = "permessage-deflate; server_no_context_takeover; client_no_context_takeover",
-            });
+            };
+            header_index += 1;
         }
-        try validateHttp1ClientExtraHeadersImpl(options.extra_headers);
-        try headers.appendSlice(allocator, options.extra_headers);
+        @memcpy(headers[header_index..], options.extra_headers);
         try writeHttpUpgradeRequest(
             allocator,
             transport,
@@ -2201,7 +3120,7 @@ pub const Client = struct {
                 .method = .GET,
                 .target = options.target,
                 .host = options.host,
-                .headers = headers.items,
+                .headers = headers,
             },
             options.limits.max_head_bytes,
         );
@@ -2219,37 +3138,97 @@ pub const Client = struct {
             options.limits.max_head_bytes,
             deadline,
         );
-        defer head.deinit(allocator);
+        var head_owned = true;
+        defer if (head_owned) head.deinit(allocator);
+        var informational_count: usize = 0;
+        while (true) {
+            var response_header_stack: [handshake_storage.stack_capacity]http1.Header =
+                undefined;
+            const response_headers = try handshake_storage.acquire(
+                http1.Header,
+                allocator,
+                &response_header_stack,
+                options.limits.max_response_headers,
+            );
+            defer handshake_storage.release(
+                http1.Header,
+                allocator,
+                &response_header_stack,
+                response_headers,
+            );
+            const response_head = try http1.parseResponseHead(
+                head.head,
+                response_headers,
+                http1HandshakeResponseParseOptions(options.limits),
+                .{ .request_method = .GET },
+            );
+            if (response_head.status < 100 or
+                response_head.status >= 200 or
+                response_head.status == 101)
+            {
+                break;
+            }
+            try http1.validateResponseBodyForStatus(
+                response_head.status,
+                response_head.headers,
+                &.{},
+                &.{},
+            );
+            informational_count += 1;
+            if (informational_count >
+                options.limits.max_informational_responses)
+            {
+                return error.TooManyInformationalResponses;
+            }
+            const next = try readHttpHeadFromTransportWithInitial(
+                allocator,
+                transport,
+                options.limits.max_head_bytes,
+                deadline,
+                head.extra,
+            );
+            head.deinit(allocator);
+            head = next;
+        }
+        const response_bytes = try readHttpUpgradeResponseBytes(
+            allocator,
+            transport,
+            &head,
+            options.limits,
+            outer_deadline,
+        );
+        if (response_bytes.extra != null) head_owned = false;
+        errdefer allocator.free(response_bytes.bytes);
+        errdefer if (response_bytes.extra) |extra| allocator.free(extra);
         var response = try http1.parseResponse(
             allocator,
-            head.head,
+            response_bytes.bytes,
             http1HandshakeResponseParseOptions(options.limits),
         );
-        defer response.deinit(allocator);
-        if (response.status != 101) return error.InvalidResponse;
-        const selected_protocol = try validateServerHandshake(allocator, response, &key, options.protocols);
-        errdefer if (selected_protocol) |protocol| allocator.free(protocol);
-        const selected_extension = try websocket.ExtensionNegotiation.validateResponse(try optionalSingletonHeader(response.headers, "sec-websocket-extensions"));
-        if (selected_extension.permessage_deflate and !options.enable_permessage_deflate) return error.InvalidExtension;
-
-        var connection = Connection{
-            .io = io,
+        errdefer response.deinit(allocator);
+        if (response.status != 101 and
+            http1_message_framing.responseHeadUsesCloseDelimitedBody(
+                head.head[0 .. head.head.len - 4],
+                .GET,
+            ))
+        {
+            response.body = response_bytes.bytes[head.head.len..];
+            response.body_framing = .close_delimited;
+            response.consumed = response_bytes.bytes.len;
+        }
+        return .{
             .allocator = allocator,
-            .stream = stream,
-            .tls_conn = tls_conn,
-            .tls_vail_conn = tls_vail_conn,
-            .linux_io_uring = linux_io_uring,
-            .role = .client,
-            .limits = options.limits,
-            .selected_protocol = selected_protocol,
-            .permessage_deflate = selected_extension.permessage_deflate,
+            .io = io,
+            .transport = transport,
+            .response_bytes = response_bytes.bytes,
+            .response = response,
+            .initial_websocket_bytes = response_bytes.extra,
+            .key = key,
+            .protocols = options.protocols,
+            .enable_permessage_deflate = options.enable_permessage_deflate,
             .compression_threshold = options.compression_threshold,
-            .compression_send_max_window_bits = selected_extension.client_max_window_bits orelse 15,
-            .inbuf = try std.ArrayList(u8).initCapacity(allocator, head.extra.len),
+            .limits = options.limits,
         };
-        errdefer connection.inbuf.deinit(connection.allocator);
-        try connection.bufferInitial(head.extra);
-        return connection;
     }
 };
 
@@ -2314,10 +3293,10 @@ pub const Connection = struct {
     tls_conn: ?*http1_runtime.TlsClientConnection = null,
     tls_vail_conn: ?*tls_stream.ClientConnection = null,
     tls_server_conn: ?*tls_stream.ServerConnection = null,
-    linux_io_uring: ?http1_runtime.LinuxIoUringStream = null,
     role: Role,
     limits: Limits = .{},
     inbuf: std.ArrayList(u8) = .empty,
+    inbuf_consumed: usize = 0,
     send_mutex: std.Io.Mutex = .init,
     /// Read progress and application writers may observe close state on
     /// different threads, while the send mutex orders complete wire writes.
@@ -2426,11 +3405,15 @@ pub const Connection = struct {
     }
 
     fn bufferInitial(self: *Connection, bytes: []const u8) Error!void {
-        try self.inbuf.appendSlice(self.allocator, bytes);
+        try message_buffer.appendAfterConsumed(
+            &self.inbuf,
+            &self.inbuf_consumed,
+            self.allocator,
+            bytes,
+        );
     }
 
     fn transport(self: *Connection) RuntimeTransport {
-        if (self.linux_io_uring) |conn| return .{ .linux_io_uring = conn };
         if (self.tls_server_conn) |conn| return .{ .tls_server = conn };
         if (self.tls_vail_conn) |conn| return .{ .tls_vail = conn };
         if (self.tls_conn) |conn| return .{ .tls = conn };
@@ -2472,16 +3455,11 @@ pub const Connection = struct {
         if (!canSendOpcode(.binary, self.closeSent(), self.closeReceived())) {
             return error.ConnectionClosed;
         }
-        const payload_len = std.math.add(
-            usize,
-            first.len,
-            second.len,
-        ) catch return error.PayloadTooLarge;
-        if (payload_len > self.limits.max_message_bytes or
-            payload_len > self.limits.max_frame_bytes)
-        {
-            return error.PayloadTooLarge;
-        }
+        const parts = [_][]const u8{ first, second };
+        const payload_len = try common.validateOutgoingMessageParts(
+            self.limits,
+            &parts,
+        );
         self.send_mutex.lockUncancelable(self.io);
         defer self.send_mutex.unlock(self.io);
         if (!self.canSendOpcodeLocked(.binary)) return error.ConnectionClosed;
@@ -2489,7 +3467,6 @@ pub const Connection = struct {
         if (self.permessage_deflate and
             payload_len >= self.compression_threshold)
         {
-            const parts = [_][]const u8{ first, second };
             const compressed = try self.compressMessagePartsLocked(
                 &parts,
                 payload_len,
@@ -2553,7 +3530,11 @@ pub const Connection = struct {
         if (!canSendOpcode(.binary, self.closeSent(), self.closeReceived())) {
             return error.ConnectionClosed;
         }
-        try validateOutgoingMessagePayload(.binary, payload);
+        try common.validateOutgoingMessage(
+            self.limits,
+            .binary,
+            payload,
+        );
         self.send_mutex.lockUncancelable(self.io);
         defer self.send_mutex.unlock(self.io);
         if (!self.canSendOpcodeLocked(.binary)) return error.ConnectionClosed;
@@ -2601,7 +3582,11 @@ pub const Connection = struct {
         deadline: std.Io.Clock.Timestamp,
     ) Error!PingEvent {
         _ = try deadline_policy.usableAwake(self.io, deadline);
-        try validateOutgoingFramePayload(.ping, payload);
+        try common.validateOutgoingControlFrame(
+            self.limits,
+            .ping,
+            payload,
+        );
         {
             self.send_mutex.lockUncancelable(self.io);
             defer self.send_mutex.unlock(self.io);
@@ -2785,6 +3770,11 @@ pub const Connection = struct {
                     &storage,
                     close_frame,
                 );
+                try common.validateOutgoingControlFrame(
+                    self.limits,
+                    .close,
+                    payload,
+                );
                 try self.sendFrameValidatedLocked(.close, payload);
             }
         }
@@ -2848,7 +3838,11 @@ pub const Connection = struct {
     }
 
     pub fn sendFrame(self: *Connection, opcode: websocket.Opcode, payload: []const u8) Error!void {
-        try validateOutgoingFramePayload(opcode, payload);
+        try common.validateOutgoingControlFrame(
+            self.limits,
+            opcode,
+            payload,
+        );
         if (!canSendOpcode(opcode, self.closeSent(), self.closeReceived())) {
             return error.ConnectionClosed;
         }
@@ -2872,7 +3866,7 @@ pub const Connection = struct {
         if (!canSendOpcode(opcode, self.closeSent(), self.closeReceived())) {
             return error.ConnectionClosed;
         }
-        try validateOutgoingMessagePayload(opcode, payload);
+        try common.validateOutgoingMessage(self.limits, opcode, payload);
         self.send_mutex.lockUncancelable(self.io);
         defer self.send_mutex.unlock(self.io);
         if (!self.canSendOpcodeLocked(opcode)) return error.ConnectionClosed;
@@ -2898,17 +3892,16 @@ pub const Connection = struct {
         if (!canSendOpcode(opcode, self.closeSent(), self.closeReceived())) {
             return error.ConnectionClosed;
         }
-        if (opcode != .text and opcode != .binary) return error.InvalidFrame;
-        if (fragments.len == 0) return error.InvalidFrame;
+        const plain_len = try common.validateOutgoingFragments(
+            self.limits,
+            opcode,
+            fragments,
+        );
 
         if (self.permessage_deflate) {
             self.send_mutex.lockUncancelable(self.io);
             defer self.send_mutex.unlock(self.io);
             if (!self.canSendOpcodeLocked(opcode)) return error.ConnectionClosed;
-            const plain_len = try fragmentedPayloadLen(fragments);
-            if (opcode == .text and !fragmentedTextIsValid(fragments)) {
-                return error.InvalidUtf8;
-            }
             if (plain_len >= self.compression_threshold) {
                 try self.compression_send.prepare(
                     self.allocator,
@@ -2942,8 +3935,6 @@ pub const Connection = struct {
             return;
         }
 
-        if (opcode == .text) try validateOutgoingFragmentedText(self.allocator, fragments);
-
         self.send_mutex.lockUncancelable(self.io);
         defer self.send_mutex.unlock(self.io);
         if (!self.canSendOpcodeLocked(opcode)) return error.ConnectionClosed;
@@ -2973,24 +3964,39 @@ pub const Connection = struct {
         errdefer |err| closeAfterReceiveError(self, err);
         if (self.closeSent() and self.closeReceived()) return error.ConnectionClosed;
         try self.ensureBufferedWithDeadline(2, deadline);
-        const second = self.inbuf.items[1];
+        var available = message_buffer.unread(
+            &self.inbuf,
+            self.inbuf_consumed,
+        );
+        const second = available[1];
         var header_len: usize = 2;
         const len_code = second & 0x7f;
         if (len_code == 126) header_len += 2 else if (len_code == 127) header_len += 8;
         if ((second & 0x80) != 0) header_len += 4;
         try self.ensureBufferedWithDeadline(header_len, deadline);
-
-        const header = try websocket.FrameHeader.parse(self.inbuf.items);
+        available = message_buffer.unread(
+            &self.inbuf,
+            self.inbuf_consumed,
+        );
+        const header = try websocket.FrameHeader.parse(available);
         const payload_len = std.math.cast(usize, header.payload_len) orelse return error.PayloadTooLarge;
         if (payload_len > self.limits.max_frame_bytes) return error.MessageTooLarge;
         const total_len = header.header_len + payload_len;
         try ensureIncomingFrameBuffered(self, header, total_len, deadline);
+        available = message_buffer.unread(
+            &self.inbuf,
+            self.inbuf_consumed,
+        );
 
         const parse_options: websocket.ParseFrameOptions = switch (self.role) {
             .client => .{ .expect_mask = .unmasked, .allow_rsv1 = self.permessage_deflate },
             .server => .{ .expect_mask = .masked, .allow_rsv1 = self.permessage_deflate },
         };
-        var frame = try websocket.parseFrameOptions(self.allocator, self.inbuf.items[0..total_len], parse_options);
+        var frame = try websocket.parseFrameOptions(
+            self.allocator,
+            available[0..total_len],
+            parse_options,
+        );
         errdefer frame.deinit(self.allocator);
         self.discardBuffered(frame.consumed);
         if (self.closeReceived() and frame.header.opcode != .close) return error.ConnectionClosed;
@@ -3398,7 +4404,10 @@ pub const Connection = struct {
         deadline: ?std.Io.Clock.Timestamp,
     ) Error!void {
         var scratch: [transport_read_scratch_len]u8 = undefined;
-        while (self.inbuf.items.len < len) {
+        while (message_buffer.unreadLen(
+            &self.inbuf,
+            self.inbuf_consumed,
+        ) < len) {
             const n = if (deadline) |absolute|
                 try self.transport().readWithDeadline(&scratch, absolute)
             else
@@ -3408,8 +4417,9 @@ pub const Connection = struct {
             // ArrayList's geometric append growth retained roughly 6.5 KiB for
             // every 4 KiB benchmark connection. Exact growth preserves the
             // same reuse while retaining only bytes the transport delivered.
-            try appendTransportBytesPrecise(
+            try message_buffer.appendAfterConsumed(
                 &self.inbuf,
+                &self.inbuf_consumed,
                 self.allocator,
                 scratch[0..n],
             );
@@ -3417,13 +4427,11 @@ pub const Connection = struct {
     }
 
     fn discardBuffered(self: *Connection, len: usize) void {
-        if (len == self.inbuf.items.len) {
-            self.inbuf.clearRetainingCapacity();
-            return;
-        }
-        const remaining = self.inbuf.items[len..];
-        @memmove(self.inbuf.items[0..remaining.len], remaining);
-        self.inbuf.shrinkRetainingCapacity(remaining.len);
+        _ = message_buffer.discardPrefix(
+            &self.inbuf,
+            &self.inbuf_consumed,
+            len,
+        );
     }
 
     /// Call only while holding `send_mutex`. Every writer repeats its close
@@ -3468,6 +4476,7 @@ pub const H2Connection = struct {
     role: Role,
     limits: Limits = .{},
     inbuf: std.ArrayList(u8) = .empty,
+    inbuf_consumed: usize = 0,
     send_mutex: std.Io.Mutex = .init,
     /// RFC 8441 keeps the same split receive/write ownership as HTTP/1.
     close_sent: std.atomic.Value(bool) = .init(false),
@@ -3594,11 +4603,11 @@ pub const H2Connection = struct {
         if (!canSendOpcode(.binary, self.closeSent(), self.closeReceived())) {
             return error.ConnectionClosed;
         }
-        if (payload.len > self.limits.max_frame_bytes or
-            payload.len > self.limits.max_message_bytes)
-        {
-            return error.PayloadTooLarge;
-        }
+        try common.validateOutgoingMessage(
+            self.limits,
+            .binary,
+            payload,
+        );
         self.send_mutex.lockUncancelable(self.tunnel.connection.io);
         defer self.send_mutex.unlock(self.tunnel.connection.io);
         if (!self.canSendOpcodeLocked(.binary)) return error.ConnectionClosed;
@@ -3630,16 +4639,11 @@ pub const H2Connection = struct {
         if (!canSendOpcode(.binary, self.closeSent(), self.closeReceived())) {
             return error.ConnectionClosed;
         }
-        const payload_len = std.math.add(
-            usize,
-            first.len,
-            second.len,
-        ) catch return error.PayloadTooLarge;
-        if (payload_len > self.limits.max_message_bytes or
-            payload_len > self.limits.max_frame_bytes)
-        {
-            return error.PayloadTooLarge;
-        }
+        const parts = [_][]const u8{ first, second };
+        const payload_len = try common.validateOutgoingMessageParts(
+            self.limits,
+            &parts,
+        );
         self.send_mutex.lockUncancelable(self.tunnel.connection.io);
         defer self.send_mutex.unlock(self.tunnel.connection.io);
         if (!self.canSendOpcodeLocked(.binary)) return error.ConnectionClosed;
@@ -3647,7 +4651,6 @@ pub const H2Connection = struct {
         if (self.permessage_deflate and
             payload_len >= self.compression_threshold)
         {
-            const parts = [_][]const u8{ first, second };
             const compressed = try self.compressMessagePartsLocked(
                 &parts,
                 payload_len,
@@ -3675,7 +4678,6 @@ pub const H2Connection = struct {
             payload_len,
             .{ .mask_key = mask_key },
         );
-        const parts = [_][]const u8{ first, second };
         if (mask_key) |mask| {
             try writeMaskedTunnelPayloadSlices(
                 &self.tunnel,
@@ -3722,7 +4724,11 @@ pub const H2Connection = struct {
             self.tunnel.connection.io,
             deadline,
         );
-        try validateOutgoingFramePayload(.ping, payload);
+        try common.validateOutgoingControlFrame(
+            self.limits,
+            .ping,
+            payload,
+        );
         {
             self.send_mutex.lockUncancelable(self.tunnel.connection.io);
             defer self.send_mutex.unlock(self.tunnel.connection.io);
@@ -3915,6 +4921,11 @@ pub const H2Connection = struct {
                     &storage,
                     close_frame,
                 );
+                try common.validateOutgoingControlFrame(
+                    self.limits,
+                    .close,
+                    payload,
+                );
                 try self.sendFrameValidatedLocked(.close, payload);
             }
         }
@@ -3978,7 +4989,11 @@ pub const H2Connection = struct {
     }
 
     pub fn sendFrame(self: *H2Connection, opcode: websocket.Opcode, payload: []const u8) Error!void {
-        try validateOutgoingFramePayload(opcode, payload);
+        try common.validateOutgoingControlFrame(
+            self.limits,
+            opcode,
+            payload,
+        );
         if (!canSendOpcode(opcode, self.closeSent(), self.closeReceived())) {
             return error.ConnectionClosed;
         }
@@ -4002,7 +5017,7 @@ pub const H2Connection = struct {
         if (!canSendOpcode(opcode, self.closeSent(), self.closeReceived())) {
             return error.ConnectionClosed;
         }
-        try validateOutgoingMessagePayload(opcode, payload);
+        try common.validateOutgoingMessage(self.limits, opcode, payload);
         self.send_mutex.lockUncancelable(self.tunnel.connection.io);
         defer self.send_mutex.unlock(self.tunnel.connection.io);
         if (!self.canSendOpcodeLocked(opcode)) return error.ConnectionClosed;
@@ -4028,17 +5043,16 @@ pub const H2Connection = struct {
         if (!canSendOpcode(opcode, self.closeSent(), self.closeReceived())) {
             return error.ConnectionClosed;
         }
-        if (opcode != .text and opcode != .binary) return error.InvalidFrame;
-        if (fragments.len == 0) return error.InvalidFrame;
+        const plain_len = try common.validateOutgoingFragments(
+            self.limits,
+            opcode,
+            fragments,
+        );
 
         if (self.permessage_deflate) {
             self.send_mutex.lockUncancelable(self.tunnel.connection.io);
             defer self.send_mutex.unlock(self.tunnel.connection.io);
             if (!self.canSendOpcodeLocked(opcode)) return error.ConnectionClosed;
-            const plain_len = try fragmentedPayloadLen(fragments);
-            if (opcode == .text and !fragmentedTextIsValid(fragments)) {
-                return error.InvalidUtf8;
-            }
             if (plain_len >= self.compression_threshold) {
                 try self.compression_send.prepare(
                     self.allocator,
@@ -4066,8 +5080,6 @@ pub const H2Connection = struct {
             );
         }
 
-        if (opcode == .text) try validateOutgoingFragmentedText(self.allocator, fragments);
-
         self.send_mutex.lockUncancelable(self.tunnel.connection.io);
         defer self.send_mutex.unlock(self.tunnel.connection.io);
         if (!self.canSendOpcodeLocked(opcode)) return error.ConnectionClosed;
@@ -4089,24 +5101,39 @@ pub const H2Connection = struct {
         errdefer |err| closeAfterReceiveError(self, err);
         if (self.closeSent() and self.closeReceived()) return error.ConnectionClosed;
         try self.ensureBufferedWithDeadline(2, deadline);
-        const second = self.inbuf.items[1];
+        var available = message_buffer.unread(
+            &self.inbuf,
+            self.inbuf_consumed,
+        );
+        const second = available[1];
         var header_len: usize = 2;
         const len_code = second & 0x7f;
         if (len_code == 126) header_len += 2 else if (len_code == 127) header_len += 8;
         if ((second & 0x80) != 0) header_len += 4;
         try self.ensureBufferedWithDeadline(header_len, deadline);
-
-        const header = try websocket.FrameHeader.parse(self.inbuf.items);
+        available = message_buffer.unread(
+            &self.inbuf,
+            self.inbuf_consumed,
+        );
+        const header = try websocket.FrameHeader.parse(available);
         const payload_len = std.math.cast(usize, header.payload_len) orelse return error.PayloadTooLarge;
         if (payload_len > self.limits.max_frame_bytes) return error.MessageTooLarge;
         const total_len = header.header_len + payload_len;
         try ensureIncomingFrameBuffered(self, header, total_len, deadline);
+        available = message_buffer.unread(
+            &self.inbuf,
+            self.inbuf_consumed,
+        );
 
         const parse_options: websocket.ParseFrameOptions = switch (self.role) {
             .client => .{ .expect_mask = .unmasked, .allow_rsv1 = self.permessage_deflate },
             .server => .{ .expect_mask = .masked, .allow_rsv1 = self.permessage_deflate },
         };
-        var frame = try websocket.parseFrameOptions(self.allocator, self.inbuf.items[0..total_len], parse_options);
+        var frame = try websocket.parseFrameOptions(
+            self.allocator,
+            available[0..total_len],
+            parse_options,
+        );
         errdefer frame.deinit(self.allocator);
         self.discardBuffered(frame.consumed);
         if (self.closeReceived() and frame.header.opcode != .close) return error.ConnectionClosed;
@@ -4650,28 +5677,39 @@ pub const H2Connection = struct {
         len: usize,
         deadline: ?std.Io.Clock.Timestamp,
     ) Error!void {
-        while (self.inbuf.items.len < len) {
+        while (message_buffer.unreadLen(
+            &self.inbuf,
+            self.inbuf_consumed,
+        ) < len) {
             var data = if (deadline) |absolute|
                 try self.tunnel.readWithDeadline(absolute)
             else
                 try self.tunnel.read();
             defer data.deinit(self.allocator);
-            if (data.data.len != 0) try self.inbuf.appendSlice(self.allocator, data.data);
+            if (data.data.len != 0) {
+                try message_buffer.appendAfterConsumed(
+                    &self.inbuf,
+                    &self.inbuf_consumed,
+                    self.allocator,
+                    data.data,
+                );
+            }
             if (data.end_stream) {
-                if (self.inbuf.items.len < len) return error.ConnectionClosed;
+                if (message_buffer.unreadLen(
+                    &self.inbuf,
+                    self.inbuf_consumed,
+                ) < len) return error.ConnectionClosed;
                 break;
             }
         }
     }
 
     fn discardBuffered(self: *H2Connection, len: usize) void {
-        if (len == self.inbuf.items.len) {
-            self.inbuf.clearRetainingCapacity();
-            return;
-        }
-        const remaining = self.inbuf.items[len..];
-        @memmove(self.inbuf.items[0..remaining.len], remaining);
-        self.inbuf.shrinkRetainingCapacity(remaining.len);
+        _ = message_buffer.discardPrefix(
+            &self.inbuf,
+            &self.inbuf_consumed,
+            len,
+        );
     }
 
     /// Same post-lock invariant as the TCP/TLS adapter: no RFC 8441 DATA may
@@ -4716,7 +5754,22 @@ pub const H2Client = struct {
         connection: *http2_runtime.Connection,
         options: H2ConnectOptions,
     ) Error!H2Connection {
-        return openUntil(allocator, connection, options, null);
+        var attempt = try openAttemptUntil(
+            allocator,
+            connection,
+            options,
+            null,
+        );
+        errdefer attempt.deinit();
+        return attempt.requireAccepted();
+    }
+
+    pub fn openAttempt(
+        allocator: std.mem.Allocator,
+        connection: *http2_runtime.Connection,
+        options: H2ConnectOptions,
+    ) Error!H2ConnectAttempt {
+        return openAttemptUntil(allocator, connection, options, null);
     }
 
     /// Complete RFC 8441 negotiation before one absolute awake-clock
@@ -4731,7 +5784,32 @@ pub const H2Client = struct {
             connection.io,
             deadline,
         );
-        return openUntil(allocator, connection, options, absolute);
+        var attempt = try openAttemptUntil(
+            allocator,
+            connection,
+            options,
+            absolute,
+        );
+        errdefer attempt.deinit();
+        return attempt.requireAccepted();
+    }
+
+    pub fn openAttemptWithDeadline(
+        allocator: std.mem.Allocator,
+        connection: *http2_runtime.Connection,
+        options: H2ConnectOptions,
+        deadline: std.Io.Clock.Timestamp,
+    ) Error!H2ConnectAttempt {
+        const absolute = try deadline_policy.usableAwake(
+            connection.io,
+            deadline,
+        );
+        return openAttemptUntil(
+            allocator,
+            connection,
+            options,
+            absolute,
+        );
     }
 
     pub fn openWithTimeout(
@@ -4752,39 +5830,86 @@ pub const H2Client = struct {
         );
     }
 
-    fn openUntil(
+    pub fn openAttemptWithTimeout(
+        allocator: std.mem.Allocator,
+        connection: *http2_runtime.Connection,
+        options: H2ConnectOptions,
+        timeout: std.Io.Duration,
+    ) Error!H2ConnectAttempt {
+        if (timeout.nanoseconds <= 0) return error.Timeout;
+        return openAttemptWithDeadline(
+            allocator,
+            connection,
+            options,
+            .fromNow(
+                connection.io,
+                .{ .raw = timeout, .clock = .awake },
+            ),
+        );
+    }
+
+    fn openAttemptUntil(
         allocator: std.mem.Allocator,
         connection: *http2_runtime.Connection,
         options: H2ConnectOptions,
         deadline: ?std.Io.Clock.Timestamp,
-    ) Error!H2Connection {
-        var request_headers: std.ArrayList(http2.Hpack.HeaderField) = .empty;
-        defer request_headers.deinit(allocator);
-        try request_headers.append(allocator, .{ .name = "sec-websocket-version", .value = "13" });
-        var protocol_value: std.ArrayList(u8) = .empty;
+    ) Error!H2ConnectAttempt {
+        var protocol_value_stack: [handshake_headers.protocol_value_stack_capacity]u8 = undefined;
+        var protocol_value = try handshake_headers.prepareProtocolValue(
+            allocator,
+            options.protocols,
+            &protocol_value_stack,
+        );
         defer protocol_value.deinit(allocator);
-        if (options.protocols.len != 0) {
-            for (options.protocols, 0..) |protocol, index| {
-                if (!websocket.validSubprotocolToken(protocol)) return error.InvalidSubprotocol;
-                if (index != 0) try protocol_value.appendSlice(allocator, ", ");
-                try protocol_value.appendSlice(allocator, protocol);
-            }
-            try request_headers.append(allocator, .{ .name = "sec-websocket-protocol", .value = protocol_value.items });
+        try validateH2ClientExtraHeaders(options.extra_headers);
+        const request_count = std.math.add(
+            usize,
+            1 + @as(usize, @intFromBool(protocol_value.value.len != 0)) +
+                @as(usize, @intFromBool(options.origin != null)) +
+                @as(usize, @intFromBool(options.enable_permessage_deflate)),
+            options.extra_headers.len,
+        ) catch return error.HeadersTooLarge;
+        var request_stack: [handshake_storage.stack_capacity]http2.Hpack.HeaderField = undefined;
+        const request_headers = try handshake_storage.acquire(
+            http2.Hpack.HeaderField,
+            allocator,
+            &request_stack,
+            request_count,
+        );
+        defer handshake_storage.release(
+            http2.Hpack.HeaderField,
+            allocator,
+            &request_stack,
+            request_headers,
+        );
+        var request_index: usize = 0;
+        request_headers[request_index] = .{
+            .name = "sec-websocket-version",
+            .value = "13",
+        };
+        request_index += 1;
+        if (protocol_value.value.len != 0) {
+            request_headers[request_index] = .{
+                .name = "sec-websocket-protocol",
+                .value = protocol_value.value,
+            };
+            request_index += 1;
         }
         if (options.origin) |origin| {
-            try request_headers.append(allocator, .{
+            request_headers[request_index] = .{
                 .name = "origin",
                 .value = origin,
-            });
+            };
+            request_index += 1;
         }
         if (options.enable_permessage_deflate) {
-            try request_headers.append(allocator, .{
+            request_headers[request_index] = .{
                 .name = "sec-websocket-extensions",
                 .value = "permessage-deflate; server_no_context_takeover; client_no_context_takeover",
-            });
+            };
+            request_index += 1;
         }
-        try validateH2ClientExtraHeaders(options.extra_headers);
-        try request_headers.appendSlice(allocator, options.extra_headers);
+        @memcpy(request_headers[request_index..], options.extra_headers);
 
         const request_options: http2_runtime.RequestOptions = .{
             .method = "CONNECT",
@@ -4792,25 +5917,88 @@ pub const H2Client = struct {
             .scheme = options.scheme,
             .authority = options.authority,
             .protocol = "websocket",
-            .headers = request_headers.items,
+            .headers = request_headers,
         };
-        var response = if (deadline) |absolute|
-            try connection.openExtendedConnectWithDeadline(
+        const response = if (deadline) |absolute|
+            try connection.openExtendedConnectAttemptWithDeadline(
                 request_options,
                 absolute,
             )
         else
-            try connection.openExtendedConnect(request_options);
-        errdefer response.deinit(allocator);
+            try connection.openExtendedConnectAttempt(request_options);
+        return .{
+            .allocator = allocator,
+            .response = response,
+            .options = options,
+        };
+    }
+};
 
-        const selected_protocol = try validateH2ServerHandshake(allocator, response.headers, options.protocols);
-        errdefer if (selected_protocol) |protocol| allocator.free(protocol);
-        const selected_extension = try websocket.ExtensionNegotiation.validateResponse(try optionalH2SingletonHeader(response.headers, "sec-websocket-extensions"));
-        if (selected_extension.permessage_deflate and !options.enable_permessage_deflate) return error.InvalidExtension;
+/// Result of an RFC 8441 attempt before a non-2xx response is mapped to the
+/// compatibility `InvalidResponse` error. Rejection metadata stays owned and
+/// inspectable until `deinit` or `requireAccepted`.
+pub const H2ConnectAttempt = struct {
+    allocator: std.mem.Allocator,
+    response: http2_runtime.ExtendedConnectAttempt,
+    options: H2ConnectOptions,
+
+    pub fn accepted(self: H2ConnectAttempt) bool {
+        return self.response.accepted();
+    }
+
+    pub fn status(self: H2ConnectAttempt) u16 {
+        return self.response.status;
+    }
+
+    pub fn responseHeader(
+        self: H2ConnectAttempt,
+        name: []const u8,
+    ) ?[]const u8 {
+        return self.response.responseHeader(name);
+    }
+
+    pub fn body(self: H2ConnectAttempt) []const u8 {
+        return self.response.body;
+    }
+
+    pub fn trailers(
+        self: H2ConnectAttempt,
+    ) []const http2.Hpack.HeaderField {
+        return self.response.trailers;
+    }
+
+    pub fn deinit(self: *H2ConnectAttempt) void {
+        const allocator = self.allocator;
+        self.response.deinit(allocator);
+        self.* = undefined;
+    }
+
+    pub fn requireAccepted(self: *H2ConnectAttempt) Error!H2Connection {
+        if (!self.accepted()) return error.InvalidStatus;
+        const selected_protocol = try validateH2ServerHandshake(
+            self.allocator,
+            self.response.headers,
+            self.options.protocols,
+        );
+        errdefer if (selected_protocol) |protocol| {
+            self.allocator.free(protocol);
+        };
+        const selected_extension = try websocket.ExtensionNegotiation
+            .validateResponse(try optionalH2SingletonHeader(
+            self.response.headers,
+            "sec-websocket-extensions",
+        ));
+        if (selected_extension.permessage_deflate and
+            !self.options.enable_permessage_deflate)
+        {
+            return error.InvalidExtension;
+        }
+        var response = try self.response.requireAccepted();
         const tunnel = response.tunnel;
-        response.tunnel = undefined;
-        response.deinit(allocator);
-
+        response.deinit(self.allocator);
+        const allocator = self.allocator;
+        const options = self.options;
+        self.* = undefined;
         return H2Connection.init(
             allocator,
             tunnel,
@@ -4829,7 +6017,14 @@ pub const H2Server = struct {
         connection: *http2_runtime.Connection,
         options: H2AcceptOptions,
     ) Error!H2Connection {
-        return acceptUntil(allocator, connection, options, null);
+        var pending = try receiveUpgradeRequestUntil(
+            allocator,
+            connection,
+            options,
+            null,
+        );
+        errdefer pending.deinit();
+        return pending.accept();
     }
 
     pub fn acceptWithDeadline(
@@ -4842,7 +6037,14 @@ pub const H2Server = struct {
             connection.io,
             deadline,
         );
-        return acceptUntil(allocator, connection, options, absolute);
+        var pending = try receiveUpgradeRequestUntil(
+            allocator,
+            connection,
+            options,
+            absolute,
+        );
+        errdefer pending.deinit();
+        return pending.accept();
     }
 
     pub fn acceptWithTimeout(
@@ -4863,12 +6065,64 @@ pub const H2Server = struct {
         );
     }
 
-    fn acceptUntil(
+    /// Receive and validate an RFC 8441 request without sending the 200
+    /// response. The returned value owns only that HTTP/2 stream; the parent
+    /// connection remains caller-owned and may carry independent streams.
+    pub fn receiveUpgradeRequest(
+        allocator: std.mem.Allocator,
+        connection: *http2_runtime.Connection,
+        options: H2AcceptOptions,
+    ) Error!PendingH2Upgrade {
+        return receiveUpgradeRequestUntil(
+            allocator,
+            connection,
+            options,
+            null,
+        );
+    }
+
+    pub fn receiveUpgradeRequestWithDeadline(
+        allocator: std.mem.Allocator,
+        connection: *http2_runtime.Connection,
+        options: H2AcceptOptions,
+        deadline: std.Io.Clock.Timestamp,
+    ) Error!PendingH2Upgrade {
+        const absolute = try deadline_policy.usableAwake(
+            connection.io,
+            deadline,
+        );
+        return receiveUpgradeRequestUntil(
+            allocator,
+            connection,
+            options,
+            absolute,
+        );
+    }
+
+    pub fn receiveUpgradeRequestWithTimeout(
+        allocator: std.mem.Allocator,
+        connection: *http2_runtime.Connection,
+        options: H2AcceptOptions,
+        timeout: std.Io.Duration,
+    ) Error!PendingH2Upgrade {
+        if (timeout.nanoseconds <= 0) return error.Timeout;
+        return receiveUpgradeRequestWithDeadline(
+            allocator,
+            connection,
+            options,
+            .fromNow(
+                connection.io,
+                .{ .raw = timeout, .clock = .awake },
+            ),
+        );
+    }
+
+    fn receiveUpgradeRequestUntil(
         allocator: std.mem.Allocator,
         connection: *http2_runtime.Connection,
         options: H2AcceptOptions,
         deadline: ?std.Io.Clock.Timestamp,
-    ) Error!H2Connection {
+    ) Error!PendingH2Upgrade {
         var request = if (deadline) |absolute|
             try connection.readExtendedConnectRequestWithDeadline(
                 "websocket",
@@ -4876,7 +6130,12 @@ pub const H2Server = struct {
             )
         else
             try connection.readExtendedConnectRequest("websocket");
-        errdefer request.deinit(allocator);
+        var request_owned = true;
+        errdefer if (request_owned) {
+            const stream_id = request.stream_id;
+            request.deinit(allocator);
+            connection.abandonExtendedConnect(stream_id);
+        };
         const version = try requiredH2SingletonHeader(request.headers, "sec-websocket-version");
         if (!std.mem.eql(u8, version, "13")) return error.InvalidHandshake;
         try rejectH2ExtendedConnectLegacyHeaders(request.headers);
@@ -4884,27 +6143,165 @@ pub const H2Server = struct {
 
         const selected_protocol = try selectH2Subprotocol(allocator, request.headers, options.protocols);
         errdefer if (selected_protocol) |protocol| allocator.free(protocol);
+        if (options.require_subprotocol and selected_protocol == null) {
+            return error.InvalidSubprotocol;
+        }
         const selected_extension = try acceptH2Extensions(allocator, request.headers, options.enable_permessage_deflate);
-        defer if (selected_extension) |extension| allocator.free(extension);
+        errdefer if (selected_extension) |extension| allocator.free(extension);
         const negotiated_extension = if (selected_extension) |extension|
             try websocket.ExtensionNegotiation.validateResponse(extension)
         else
             websocket.ExtensionNegotiation{};
 
-        var response_headers: std.ArrayList(http2.Hpack.HeaderField) = .empty;
-        defer response_headers.deinit(allocator);
-        if (selected_protocol) |protocol| try response_headers.append(allocator, .{ .name = "sec-websocket-protocol", .value = protocol });
-        if (selected_extension) |extension| try response_headers.append(allocator, .{ .name = "sec-websocket-extensions", .value = extension });
         try validateH2ServerExtraHeaders(options.extra_headers);
-        try response_headers.appendSlice(allocator, options.extra_headers);
-        if (deadline) |absolute| {
-            // Header validation and extension selection remain inside the same
-            // admission budget; never send 200 after the deadline has expired.
-            _ = try deadline_policy.usableAwake(connection.io, absolute);
-        }
+        request_owned = false;
+        return .{
+            .allocator = allocator,
+            .connection = connection,
+            .options = options,
+            .deadline = deadline,
+            .request = request,
+            .selected_protocol = selected_protocol,
+            .selected_extension = selected_extension,
+            .negotiated_extension = negotiated_extension,
+        };
+    }
+};
 
-        const tunnel = try connection.acceptExtendedConnect(request, response_headers.items);
-        request.deinit(allocator);
+/// A validated RFC 8441 request awaiting application admission. No response
+/// HEADERS have been sent. The request headers and negotiated values remain
+/// owned until this value is accepted, rejected, or deinitialized. Slices in
+/// the original `H2AcceptOptions` must remain valid until then.
+pub const PendingH2Upgrade = struct {
+    allocator: std.mem.Allocator,
+    connection: *http2_runtime.Connection,
+    options: H2AcceptOptions,
+    deadline: ?std.Io.Clock.Timestamp,
+    request: http2_runtime.ExtendedConnectRequest,
+    selected_protocol: ?[]u8,
+    selected_extension: ?[]u8,
+    negotiated_extension: websocket.ExtensionNegotiation,
+
+    /// Cancel only the pending stream. The shared HTTP/2 connection remains
+    /// caller-owned and can continue serving sibling streams.
+    pub fn deinit(self: *PendingH2Upgrade) void {
+        const allocator = self.allocator;
+        const connection = self.connection;
+        const stream_id = self.request.stream_id;
+        self.request.deinit(allocator);
+        if (self.selected_protocol) |protocol| allocator.free(protocol);
+        if (self.selected_extension) |extension| allocator.free(extension);
+        self.* = undefined;
+        connection.abandonExtendedConnect(stream_id);
+    }
+
+    pub fn streamId(self: PendingH2Upgrade) u31 {
+        return self.request.stream_id;
+    }
+
+    pub fn target(self: PendingH2Upgrade) []const u8 {
+        return self.request.path;
+    }
+
+    pub fn scheme(self: PendingH2Upgrade) []const u8 {
+        return self.request.scheme;
+    }
+
+    pub fn authority(self: PendingH2Upgrade) ?[]const u8 {
+        return self.request.authority;
+    }
+
+    pub fn headers(
+        self: PendingH2Upgrade,
+    ) []const http2.Hpack.HeaderField {
+        return self.request.headers;
+    }
+
+    pub fn header(
+        self: PendingH2Upgrade,
+        name: []const u8,
+    ) ?[]const u8 {
+        for (self.request.headers) |field| {
+            if (std.ascii.eqlIgnoreCase(field.name, name)) return field.value;
+        }
+        return null;
+    }
+
+    pub fn accept(self: *PendingH2Upgrade) Error!H2Connection {
+        return self.acceptWithHeaders(&.{});
+    }
+
+    pub fn acceptWithHeaders(
+        self: *PendingH2Upgrade,
+        additional_headers: []const http2.Hpack.HeaderField,
+    ) Error!H2Connection {
+        const allocator = self.allocator;
+        try validateH2ServerExtraHeaders(additional_headers);
+        const negotiated_count: usize =
+            @as(usize, @intFromBool(self.selected_protocol != null)) +
+            @as(usize, @intFromBool(self.selected_extension != null));
+        const application_count = std.math.add(
+            usize,
+            self.options.extra_headers.len,
+            additional_headers.len,
+        ) catch return error.HeadersTooLarge;
+        const response_count = std.math.add(
+            usize,
+            application_count,
+            negotiated_count,
+        ) catch return error.HeadersTooLarge;
+        var response_stack: [handshake_storage.stack_capacity]http2.Hpack.HeaderField =
+            undefined;
+        const response_headers = try handshake_storage.acquire(
+            http2.Hpack.HeaderField,
+            allocator,
+            &response_stack,
+            response_count,
+        );
+        defer handshake_storage.release(
+            http2.Hpack.HeaderField,
+            allocator,
+            &response_stack,
+            response_headers,
+        );
+        var response_index: usize = 0;
+        if (self.selected_protocol) |protocol| {
+            response_headers[response_index] = .{
+                .name = "sec-websocket-protocol",
+                .value = protocol,
+            };
+            response_index += 1;
+        }
+        if (self.selected_extension) |extension| {
+            response_headers[response_index] = .{
+                .name = "sec-websocket-extensions",
+                .value = extension,
+            };
+            response_index += 1;
+        }
+        @memcpy(
+            response_headers[response_index..][0..self.options.extra_headers.len],
+            self.options.extra_headers,
+        );
+        response_index += self.options.extra_headers.len;
+        @memcpy(response_headers[response_index..], additional_headers);
+        if (self.deadline) |absolute| {
+            _ = try deadline_policy.usableAwake(
+                self.connection.io,
+                absolute,
+            );
+        }
+        const tunnel = try self.connection.acceptExtendedConnect(
+            self.request,
+            response_headers,
+        );
+
+        const options = self.options;
+        const selected_protocol = self.selected_protocol;
+        const negotiated_extension = self.negotiated_extension;
+        self.request.deinit(allocator);
+        if (self.selected_extension) |extension| allocator.free(extension);
+        self.* = undefined;
         return H2Connection.init(
             allocator,
             tunnel,
@@ -4915,15 +6312,82 @@ pub const H2Server = struct {
             options.compression_threshold,
         );
     }
+
+    /// Send a header-only final non-2xx response on this stream without
+    /// closing the parent connection. Use `rejectWithBody` when diagnostics
+    /// require DATA or trailers.
+    pub fn reject(
+        self: *PendingH2Upgrade,
+        status: u16,
+        response_headers: []const http2.Hpack.HeaderField,
+    ) Error!void {
+        return self.rejectWithBody(
+            status,
+            response_headers,
+            &.{},
+            &.{},
+        );
+    }
+
+    /// Reject this CONNECT stream with a bounded HTTP/2 response entity. The
+    /// parent connection remains usable; body retention on the client is
+    /// governed by its HTTP/2 `Limits.max_body_bytes`.
+    pub fn rejectWithBody(
+        self: *PendingH2Upgrade,
+        status: u16,
+        response_headers: []const http2.Hpack.HeaderField,
+        body: []const u8,
+        trailers: []const http2.Hpack.HeaderField,
+    ) Error!void {
+        if (status < 300 or status > 599) return error.InvalidStatus;
+        try validateH2RejectionHeaders(response_headers);
+        try validateH2RejectionHeaders(trailers);
+        if (self.deadline) |absolute| {
+            _ = try deadline_policy.usableAwake(
+                self.connection.io,
+                absolute,
+            );
+        }
+        try self.connection.rejectExtendedConnectWithBody(
+            self.request.stream_id,
+            status,
+            response_headers,
+            body,
+            trailers,
+        );
+        const allocator = self.allocator;
+        self.request.deinit(allocator);
+        if (self.selected_protocol) |protocol| allocator.free(protocol);
+        if (self.selected_extension) |extension| allocator.free(extension);
+        self.* = undefined;
+    }
+
+    pub fn forbidden(self: *PendingH2Upgrade) Error!void {
+        return self.reject(403, &.{});
+    }
+
+    pub fn notFound(self: *PendingH2Upgrade) Error!void {
+        return self.reject(404, &.{});
+    }
+
+    pub fn tooManyRequests(self: *PendingH2Upgrade) Error!void {
+        return self.reject(429, &.{});
+    }
 };
 
 /// Narrow test hook for constructing deliberately split WebSocket frames.
 /// Production callers should use the validated public message APIs.
-pub const testing = struct {
+pub const testing = if (builtin.is_test) struct {
     pub fn validateHttp1ClientExtraHeaders(
         headers: []const http1.Header,
     ) Error!void {
         return validateHttp1ClientExtraHeadersImpl(headers);
+    }
+
+    pub fn validateH2RejectionHeaders(
+        headers: []const http2.Hpack.HeaderField,
+    ) Error!void {
+        return handshake_headers.validateH2RejectionExtra(headers);
     }
 
     pub fn writeFrame(
@@ -4934,7 +6398,7 @@ pub const testing = struct {
     ) Error!void {
         return connection.writeFrameLocked(opcode, payload, fin);
     }
-};
+} else struct {};
 
 pub const H2ConnectOptions = struct {
     authority: ?[]const u8 = null,
@@ -4957,6 +6421,8 @@ pub const H2ConnectOptions = struct {
 
 pub const H2AcceptOptions = struct {
     protocols: []const []const u8 = &.{},
+    /// Reject the RFC 8441 handshake unless one of `protocols` was selected.
+    require_subprotocol: bool = false,
     /// RFC 8441 counterpart to `AcceptOptions.allowed_origins`.
     allowed_origins: []const []const u8 = &.{},
     extra_headers: []const http2.Hpack.HeaderField = &.{},
@@ -4966,28 +6432,7 @@ pub const H2AcceptOptions = struct {
     limits: Limits = .{},
 };
 
-fn validateOutgoingMessagePayload(opcode: websocket.Opcode, payload: []const u8) Error!void {
-    if (opcode == .text and !std.unicode.utf8ValidateSlice(payload)) return error.InvalidUtf8;
-}
-
-fn validateOutgoingFramePayload(opcode: websocket.Opcode, payload: []const u8) Error!void {
-    switch (opcode) {
-        // Application data frames must go through sendMessage/sendFragmented so
-        // text UTF-8 checks and negotiated permessage-deflate framing cannot be
-        // bypassed by the low-level control-frame helper.
-        .text, .binary => return error.InvalidFrame,
-        .close => try websocket.validateClosePayload(payload),
-        .ping, .pong => if (payload.len > 125) return error.InvalidControlFrame,
-        .continuation => return error.InvalidFrame,
-        _ => return error.InvalidFrame,
-    }
-}
-
-fn canSendOpcode(opcode: websocket.Opcode, close_sent: bool, close_received: bool) bool {
-    if (close_sent) return false;
-    if (close_received and opcode != .close) return false;
-    return true;
-}
+const canSendOpcode = message_state.canSendOpcode;
 
 /// Assemble a message directly into caller storage for either stream-backed
 /// WebSocket transport. Both connection types expose the same buffering and
@@ -5114,7 +6559,11 @@ fn receiveFrameIntoConnection(
         return error.ConnectionClosed;
     }
     try connection.ensureBufferedWithDeadline(2, deadline);
-    const second = connection.inbuf.items[1];
+    var available = message_buffer.unread(
+        &connection.inbuf,
+        connection.inbuf_consumed,
+    );
+    const second = available[1];
     var header_len: usize = 2;
     const len_code = second & 0x7f;
     if (len_code == 126) {
@@ -5124,8 +6573,11 @@ fn receiveFrameIntoConnection(
     }
     if ((second & 0x80) != 0) header_len += 4;
     try connection.ensureBufferedWithDeadline(header_len, deadline);
-
-    const header = try websocket.FrameHeader.parse(connection.inbuf.items);
+    available = message_buffer.unread(
+        &connection.inbuf,
+        connection.inbuf_consumed,
+    );
+    const header = try websocket.FrameHeader.parse(available);
     const payload_len = std.math.cast(
         usize,
         header.payload_len,
@@ -5144,6 +6596,10 @@ fn receiveFrameIntoConnection(
         payload_len,
     ) catch return error.PayloadTooLarge;
     try ensureIncomingFrameBuffered(connection, header, total_len, deadline);
+    available = message_buffer.unread(
+        &connection.inbuf,
+        connection.inbuf_consumed,
+    );
     const parse_options: websocket.ParseFrameOptions = switch (connection.role) {
         .client => .{
             .expect_mask = .unmasked,
@@ -5158,7 +6614,7 @@ fn receiveFrameIntoConnection(
     };
     const frame = try websocket.parseFrameInto(
         payload_out,
-        connection.inbuf.items[0..total_len],
+        available[0..total_len],
         parse_options,
     );
     connection.discardBuffered(frame.consumed);
@@ -5235,7 +6691,10 @@ fn ensureIncomingFrameBuffered(
         connection.incoming_frame_validated,
     );
     errdefer preserveIncomingFrameValidation(connection, validated);
-    while (connection.inbuf.items.len < total_len) {
+    while (message_buffer.unreadLen(
+        &connection.inbuf,
+        connection.inbuf_consumed,
+    ) < total_len) {
         if (validate_text) {
             try validateBufferedTextRange(
                 connection,
@@ -5245,7 +6704,13 @@ fn ensureIncomingFrameBuffered(
             );
         }
         try connection.ensureBufferedWithDeadline(
-            @min(total_len, connection.inbuf.items.len + 1),
+            @min(
+                total_len,
+                message_buffer.unreadLen(
+                    &connection.inbuf,
+                    connection.inbuf_consumed,
+                ) + 1,
+            ),
             deadline,
         );
     }
@@ -5279,9 +6744,13 @@ fn validateBufferedTextRange(
     validated: *usize,
     total_len: usize,
 ) Error!void {
-    const available_end = @min(connection.inbuf.items.len, total_len);
+    const available = message_buffer.unread(
+        &connection.inbuf,
+        connection.inbuf_consumed,
+    );
+    const available_end = @min(available.len, total_len);
     if (available_end <= validated.*) return;
-    const bytes = connection.inbuf.items[validated.*..available_end];
+    const bytes = available[validated.*..available_end];
     if (header.mask_key) |mask| {
         for (bytes, 0..) |byte, index| {
             try connection.incoming_text_utf8.feedByte(
@@ -5294,82 +6763,8 @@ fn validateBufferedTextRange(
     validated.* = available_end;
 }
 
-fn finishIncomingMessage(
-    allocator: std.mem.Allocator,
-    message: websocket.MessageAssembler.Message,
-    max_message_bytes: usize,
-) Error!OwnedMessage {
-    var payload = message.payload;
-    if (message.compressed) {
-        errdefer allocator.free(message.payload);
-        payload = try websocket.decompressMessage(allocator, message.payload, max_message_bytes);
-        allocator.free(message.payload);
-    }
-    errdefer allocator.free(payload);
-    if (message.opcode == .text and !std.unicode.utf8ValidateSlice(payload)) return error.InvalidUtf8;
-    return .{
-        .opcode = message.opcode,
-        .payload = payload,
-        .was_compressed = message.compressed,
-    };
-}
-
-fn validateOutgoingFragmentedText(
-    allocator: std.mem.Allocator,
-    fragments: []const []const u8,
-) Error!void {
-    _ = allocator;
-    if (!fragmentedTextIsValid(fragments)) return error.InvalidUtf8;
-}
-
-fn fragmentedPayloadLen(fragments: []const []const u8) Error!usize {
-    var total: usize = 0;
-    for (fragments) |fragment| {
-        total = std.math.add(usize, total, fragment.len) catch
-            return error.PayloadTooLarge;
-    }
-    return total;
-}
-
-/// Validate UTF-8 over discontiguous fragments without assembling a copy.
-fn fragmentedTextIsValid(fragments: []const []const u8) bool {
-    var sequence: [4]u8 = undefined;
-    var sequence_len: usize = 0;
-    var expected_len: usize = 0;
-    for (fragments) |fragment| {
-        for (fragment) |byte| {
-            if (sequence_len == 0) {
-                expected_len = std.unicode.utf8ByteSequenceLength(byte) catch
-                    return false;
-            }
-            sequence[sequence_len] = byte;
-            sequence_len += 1;
-            if (sequence_len == expected_len) {
-                _ = std.unicode.utf8Decode(
-                    sequence[0..expected_len],
-                ) catch return false;
-                sequence_len = 0;
-            }
-        }
-    }
-    return sequence_len == 0;
-}
-
-const FragmentRange = struct { start: usize, end: usize };
-
-fn compressedFragmentRange(total_len: usize, frame_count: usize, index: usize) FragmentRange {
-    std.debug.assert(frame_count != 0);
-    std.debug.assert(index < frame_count);
-    // permessage-deflate compresses the message as one DEFLATE stream.  RFC 6455
-    // fragmentation is then applied to the compressed byte stream, with RSV1 set
-    // only on the first frame; boundaries do not have to match caller-provided
-    // plaintext fragment boundaries.
-    const base = total_len / frame_count;
-    const extra = total_len % frame_count;
-    const start = index * base + @min(index, extra);
-    const len = base + @as(usize, if (index < extra) 1 else 0);
-    return .{ .start = start, .end = start + len };
-}
+const finishIncomingMessage = message_state.finishIncomingMessage;
+const compressedFragmentRange = message_state.compressedFragmentRange;
 
 const HttpHead = struct {
     head: []u8,
@@ -5382,6 +6777,128 @@ const HttpHead = struct {
     }
 };
 
+const HttpUpgradeResponseBytes = struct {
+    bytes: []u8,
+    /// Bytes following a successful 101 head belong to WebSocket framing.
+    /// Rejection responses instead consume their complete HTTP body here.
+    extra: ?[]u8,
+};
+
+fn readHttpUpgradeResponseBytes(
+    allocator: std.mem.Allocator,
+    transport: RuntimeTransport,
+    head: *HttpHead,
+    limits: Limits,
+    body_deadline: ?std.Io.Clock.Timestamp,
+) Error!HttpUpgradeResponseBytes {
+    var header_stack: [handshake_storage.stack_capacity]http1.Header =
+        undefined;
+    const header_storage = try handshake_storage.acquire(
+        http1.Header,
+        allocator,
+        &header_stack,
+        limits.max_response_headers,
+    );
+    defer handshake_storage.release(
+        http1.Header,
+        allocator,
+        &header_stack,
+        header_storage,
+    );
+    const parsed_head = try http1.parseResponseHead(
+        head.head,
+        header_storage,
+        http1HandshakeResponseParseOptions(limits),
+        .{ .request_method = .GET },
+    );
+    if (parsed_head.status == 101) {
+        const result: HttpUpgradeResponseBytes = .{
+            .bytes = head.head,
+            .extra = head.extra,
+        };
+        head.* = undefined;
+        return result;
+    }
+
+    var bytes: std.ArrayList(u8) = .empty;
+    errdefer bytes.deinit(allocator);
+    try bytes.ensureTotalCapacity(
+        allocator,
+        std.math.add(usize, head.head.len, head.extra.len) catch
+            return error.BodyTooLarge,
+    );
+    bytes.appendSliceAssumeCapacity(head.head);
+    bytes.appendSliceAssumeCapacity(head.extra);
+    const body_start = head.head.len;
+
+    var scratch: [4096]u8 = undefined;
+    if (http1_message_framing.responseHeadUsesCloseDelimitedBody(
+        head.head[0 .. head.head.len - 4],
+        .GET,
+    )) {
+        if (bytes.items.len - body_start > limits.max_rejection_body_bytes) {
+            return error.BodyTooLarge;
+        }
+        while (true) {
+            const count = if (body_deadline) |absolute|
+                try transport.readWithDeadline(&scratch, absolute)
+            else
+                try transport.read(&scratch);
+            if (count == 0) break;
+            const body_len = std.math.add(
+                usize,
+                bytes.items.len - body_start,
+                count,
+            ) catch return error.BodyTooLarge;
+            if (body_len > limits.max_rejection_body_bytes) {
+                return error.BodyTooLarge;
+            }
+            try bytes.appendSlice(allocator, scratch[0..count]);
+        }
+        return .{ .bytes = try bytes.toOwnedSlice(allocator), .extra = null };
+    }
+
+    const target_len = while (true) {
+        const len = http1_message_framing.messageTargetLength(
+            bytes.items,
+            head.head.len - 4,
+            limits.max_head_bytes,
+            limits.max_rejection_body_bytes,
+            .GET,
+        ) catch |err| switch (err) {
+            error.BufferTooShort => {
+                const count = if (body_deadline) |absolute|
+                    try transport.readWithDeadline(scratch[0..1], absolute)
+                else
+                    try transport.read(scratch[0..1]);
+                if (count == 0) return error.ConnectionClosed;
+                try bytes.appendSlice(allocator, scratch[0..count]);
+                continue;
+            },
+            else => |other| return other,
+        };
+        break len;
+    };
+    try bytes.ensureTotalCapacity(allocator, target_len);
+    while (bytes.items.len < target_len) {
+        const count = if (body_deadline) |absolute|
+            try transport.readWithDeadline(
+                scratch[0..@min(scratch.len, target_len - bytes.items.len)],
+                absolute,
+            )
+        else
+            try transport.read(
+                scratch[0..@min(scratch.len, target_len - bytes.items.len)],
+            );
+        if (count == 0) return error.ConnectionClosed;
+        try bytes.appendSlice(allocator, scratch[0..count]);
+    }
+    // Rejected connections are closed, so any bytes beyond this response are
+    // intentionally discarded rather than exposed as ambiguous pipeline data.
+    bytes.items.len = target_len;
+    return .{ .bytes = try bytes.toOwnedSlice(allocator), .extra = null };
+}
+
 fn writeHttpUpgradeRequest(
     allocator: std.mem.Allocator,
     transport: RuntimeTransport,
@@ -5389,17 +6906,36 @@ fn writeHttpUpgradeRequest(
     max_head_bytes: usize,
 ) Error!void {
     try http1.validateRequestTargetForMethod(options.method, options.target);
-    var headers: std.ArrayList(http1.Header) = .empty;
-    defer headers.deinit(allocator);
     var has_host = false;
     for (options.headers) |header| {
         if (header.eqlName("host")) has_host = true;
-        try headers.append(allocator, header);
     }
+    const header_count = std.math.add(
+        usize,
+        options.headers.len,
+        @intFromBool(!has_host and options.host != null),
+    ) catch return error.HeadersTooLarge;
+    var header_stack: [handshake_storage.stack_capacity]http1.Header =
+        undefined;
+    const headers = try handshake_storage.acquire(
+        http1.Header,
+        allocator,
+        &header_stack,
+        header_count,
+    );
+    defer handshake_storage.release(
+        http1.Header,
+        allocator,
+        &header_stack,
+        headers,
+    );
+    @memcpy(headers[0..options.headers.len], options.headers);
     if (!has_host) {
-        if (options.host) |host| try headers.append(allocator, .{ .name = "Host", .value = host });
+        if (options.host) |host| {
+            headers[options.headers.len] = .{ .name = "Host", .value = host };
+        }
     }
-    try http1.validateHostHeaderBlock(options.version, headers.items);
+    try http1.validateHostHeaderBlock(options.version, headers);
     // Preflight the exact bodyless request-head size before allocating the
     // serialization buffer. `extra_headers` is caller-controlled, so checking
     // only after encoding would not make max_head_bytes a memory bound.
@@ -5416,7 +6952,7 @@ fn writeHttpUpgradeRequest(
         return error.HeadersTooLarge;
     head_len = std.math.add(usize, head_len, 2) catch
         return error.HeadersTooLarge;
-    for (headers.items) |header| {
+    for (headers) |header| {
         head_len = std.math.add(usize, head_len, header.name.len) catch
             return error.HeadersTooLarge;
         head_len = std.math.add(usize, head_len, 2) catch
@@ -5433,7 +6969,15 @@ fn writeHttpUpgradeRequest(
 
     var encoded: std.ArrayList(u8) = .empty;
     defer encoded.deinit(allocator);
-    try http1.writeRequestChecked(&encoded, allocator, options.method, options.target, options.version, headers.items, options.body);
+    try http1.writeRequestChecked(
+        &encoded,
+        allocator,
+        options.method,
+        options.target,
+        options.version,
+        headers,
+        options.body,
+    );
     // Upgrade requests never carry a body, so the encoded request is exactly
     // the head. Enforce the public head limit before exposing any bytes to the
     // transport; otherwise custom fields could bypass the receive-side bound.
@@ -5468,8 +7012,25 @@ fn readHttpHeadFromTransport(
     max_head_bytes: usize,
     deadline: ?std.Io.Clock.Timestamp,
 ) Error!HttpHead {
+    return readHttpHeadFromTransportWithInitial(
+        allocator,
+        transport,
+        max_head_bytes,
+        deadline,
+        &.{},
+    );
+}
+
+fn readHttpHeadFromTransportWithInitial(
+    allocator: std.mem.Allocator,
+    transport: RuntimeTransport,
+    max_head_bytes: usize,
+    deadline: ?std.Io.Clock.Timestamp,
+    initial: []const u8,
+) Error!HttpHead {
     var bytes: std.ArrayList(u8) = .empty;
     defer bytes.deinit(allocator);
+    try bytes.appendSlice(allocator, initial);
     var scratch: [4096]u8 = undefined;
     while (true) {
         if (try findHttpHeadEndWithinLimit(bytes.items, max_head_bytes)) |head_end| {
@@ -5501,7 +7062,6 @@ fn handshakeDeadline(
         .tls => |connection| connection.io,
         .tls_vail => |connection| connection.io,
         .tls_server => |connection| connection.io,
-        .linux_io_uring => return error.TimedReadUnsupported,
     };
     return .fromNow(io, .{ .raw = timeout, .clock = .awake });
 }
@@ -5515,261 +7075,25 @@ fn findHttpHeadEndWithinLimit(bytes: []const u8, max_head_bytes: usize) Error!?u
     return null;
 }
 
-fn validateServerHandshake(
-    allocator: std.mem.Allocator,
-    response: http1.Response,
-    client_key: []const u8,
-    offered_protocols: []const []const u8,
-) Error!?[]u8 {
-    if (response.version != .http_1_1) return error.InvalidHandshake;
-    const upgrade = try requiredSingletonHeader(response.headers, "upgrade");
-    if (!std.ascii.eqlIgnoreCase(upgrade, "websocket")) return error.InvalidHandshake;
-    if (!hasHeader(response.headers, "connection")) return error.MissingHeader;
-    if (!headersContainToken(response.headers, "connection", "upgrade")) return error.InvalidHandshake;
-    if ((try http1.contentLength(response.headers)) != null) return error.InvalidHandshake;
-    for (response.headers) |header| {
-        if (header.eqlName("transfer-encoding")) return error.InvalidHandshake;
-    }
-    const accept = try requiredSingletonHeader(response.headers, "sec-websocket-accept");
-    const expected = websocket.acceptKey(client_key);
-    if (!std.mem.eql(u8, accept, &expected)) return error.InvalidHandshake;
-    _ = try websocket.ExtensionNegotiation.validateResponse(try optionalSingletonHeader(response.headers, "sec-websocket-extensions"));
-    if (try optionalSingletonHeader(response.headers, "sec-websocket-protocol")) |selected| {
-        const protocol = wire.trimOws(selected);
-        if (!websocket.validSubprotocolToken(protocol)) return error.InvalidSubprotocol;
-        for (offered_protocols) |offered| {
-            if (std.mem.eql(u8, protocol, offered)) return try allocator.dupe(u8, protocol);
-        }
-        return error.InvalidSubprotocol;
-    }
-    if (offered_protocols.len != 0) return error.InvalidSubprotocol;
-    return null;
-}
-
-fn requiredSingletonHeader(headers: []const http1.Header, name: []const u8) Error![]const u8 {
-    return (try optionalSingletonHeader(headers, name)) orelse error.MissingHeader;
-}
-
-fn optionalSingletonHeader(headers: []const http1.Header, name: []const u8) Error!?[]const u8 {
-    var found: ?[]const u8 = null;
-    for (headers) |header| {
-        if (!header.eqlName(name)) continue;
-        if (found != null) return error.InvalidHandshake;
-        found = header.value;
-    }
-    return found;
-}
-
-fn hasHeader(headers: []const http1.Header, name: []const u8) bool {
-    for (headers) |header| {
-        if (header.eqlName(name)) return true;
-    }
-    return false;
-}
-
-fn headersContainToken(headers: []const http1.Header, name: []const u8, token: []const u8) bool {
-    for (headers) |header| {
-        if (header.eqlName(name) and wire.containsToken(header.value, token)) return true;
-    }
-    return false;
-}
-
-fn validateH2ServerHandshake(
-    allocator: std.mem.Allocator,
-    headers: []const http2.Hpack.HeaderField,
-    offered_protocols: []const []const u8,
-) Error!?[]u8 {
-    try rejectH2ExtendedConnectLegacyHeaders(headers);
-    if (try optionalH2SingletonHeader(headers, "sec-websocket-version")) |_| return error.InvalidHandshake;
-    if (try optionalH2SingletonHeader(headers, "sec-websocket-protocol")) |selected| {
-        const protocol = wire.trimOws(selected);
-        if (!websocket.validSubprotocolToken(protocol)) return error.InvalidSubprotocol;
-        for (offered_protocols) |offered| {
-            if (std.mem.eql(u8, protocol, offered)) return try allocator.dupe(u8, protocol);
-        }
-        return error.InvalidSubprotocol;
-    }
-    if (offered_protocols.len != 0) return error.InvalidSubprotocol;
-    return null;
-}
-
-fn requiredH2SingletonHeader(headers: []const http2.Hpack.HeaderField, name: []const u8) Error![]const u8 {
-    return (try optionalH2SingletonHeader(headers, name)) orelse error.MissingHeader;
-}
-
-fn optionalH2SingletonHeader(headers: []const http2.Hpack.HeaderField, name: []const u8) Error!?[]const u8 {
-    var found: ?[]const u8 = null;
-    for (headers) |header| {
-        if (!std.ascii.eqlIgnoreCase(header.name, name)) continue;
-        if (found != null) return error.InvalidHandshake;
-        found = header.value;
-    }
-    return found;
-}
-
-fn validateHttp1ClientExtraHeadersImpl(headers: []const http1.Header) Error!void {
-    for (headers) |header| {
-        try http1.validateHeader(header);
-        if (http1ClientOwnedWebSocketHeader(header.name) or
-            http1ClientFramingHeader(header.name))
-        {
-            return error.InvalidHandshake;
-        }
-    }
-}
-
-fn http1ClientOwnedWebSocketHeader(name: []const u8) bool {
-    return std.ascii.eqlIgnoreCase(name, "host") or
-        std.ascii.eqlIgnoreCase(name, "upgrade") or
-        std.ascii.eqlIgnoreCase(name, "connection") or
-        std.ascii.eqlIgnoreCase(name, "sec-websocket-key") or
-        std.ascii.eqlIgnoreCase(name, "sec-websocket-accept") or
-        std.ascii.eqlIgnoreCase(name, "sec-websocket-version") or
-        std.ascii.eqlIgnoreCase(name, "sec-websocket-protocol") or
-        std.ascii.eqlIgnoreCase(name, "sec-websocket-extensions") or
-        std.ascii.eqlIgnoreCase(name, "origin");
-}
-
-fn http1ClientFramingHeader(name: []const u8) bool {
-    return std.ascii.eqlIgnoreCase(name, "content-length") or
-        std.ascii.eqlIgnoreCase(name, "transfer-encoding") or
-        std.ascii.eqlIgnoreCase(name, "trailer");
-}
-
-fn validateH2ClientExtraHeaders(headers: []const http2.Hpack.HeaderField) Error!void {
-    for (headers) |header| {
-        // RFC 8441 replaces the HTTP/1 key/accept challenge with HTTP/2
-        // extended CONNECT.  Keep runtime-owned fields out of caller-provided
-        // extras so a request cannot carry duplicate or legacy handshake state.
-        if (h2ClientOwnedWebSocketHeader(header.name) or h2LegacyHandshakeHeader(header.name)) return error.InvalidHandshake;
-    }
-}
-
-fn validateH2ServerExtraHeaders(headers: []const http2.Hpack.HeaderField) Error!void {
-    for (headers) |header| {
-        // The server helper derives protocol/extension response fields from the
-        // validated request and local options.  Reject caller-supplied copies for
-        // the same reason tungstenite rejects duplicate critical HTTP/1 headers.
-        if (std.ascii.eqlIgnoreCase(header.name, "sec-websocket-protocol") or
-            std.ascii.eqlIgnoreCase(header.name, "sec-websocket-extensions") or
-            std.ascii.eqlIgnoreCase(header.name, "sec-websocket-version") or
-            h2LegacyHandshakeHeader(header.name)) return error.InvalidHandshake;
-    }
-}
-
-fn rejectH2ExtendedConnectLegacyHeaders(headers: []const http2.Hpack.HeaderField) Error!void {
-    for (headers) |header| {
-        if (h2LegacyHandshakeHeader(header.name)) return error.InvalidHandshake;
-    }
-}
-
-fn h2ClientOwnedWebSocketHeader(name: []const u8) bool {
-    return std.ascii.eqlIgnoreCase(name, "sec-websocket-version") or
-        std.ascii.eqlIgnoreCase(name, "sec-websocket-protocol") or
-        std.ascii.eqlIgnoreCase(name, "sec-websocket-extensions");
-}
-
-fn h2LegacyHandshakeHeader(name: []const u8) bool {
-    return std.ascii.eqlIgnoreCase(name, "sec-websocket-key") or
-        std.ascii.eqlIgnoreCase(name, "sec-websocket-accept");
-}
-
-fn acceptH2Extensions(
-    allocator: std.mem.Allocator,
-    headers: []const http2.Hpack.HeaderField,
-    enable_permessage_deflate: bool,
-) Error!?[]u8 {
-    if (!enable_permessage_deflate) return null;
-    for (headers) |header| {
-        if (!std.ascii.eqlIgnoreCase(header.name, "sec-websocket-extensions")) continue;
-        if (try websocket.ExtensionNegotiation.accept(allocator, header.value, true)) |accepted| return accepted;
-    }
-    return null;
-}
-
-fn findH2Header(headers: []const http2.Hpack.HeaderField, name: []const u8) ?[]const u8 {
-    for (headers) |header| {
-        if (std.ascii.eqlIgnoreCase(header.name, name)) return header.value;
-    }
-    return null;
-}
-
-fn selectSubprotocol(allocator: std.mem.Allocator, requested_header: ?[]const u8, supported: []const []const u8) Error!?[]u8 {
-    try validateSupportedSubprotocols(supported);
-    const raw_requested = requested_header orelse return null;
-    var selected: ?[]const u8 = null;
-    var seen: std.ArrayList([]const u8) = .empty;
-    defer seen.deinit(allocator);
-    try considerSubprotocolHeader(allocator, raw_requested, supported, &selected, &seen);
-    if (selected) |protocol| return try allocator.dupe(u8, protocol);
-    return null;
-}
-
-fn selectHttp1Subprotocol(allocator: std.mem.Allocator, headers: []const http1.Header, supported: []const []const u8) Error!?[]u8 {
-    try validateSupportedSubprotocols(supported);
-    var selected: ?[]const u8 = null;
-    var seen: std.ArrayList([]const u8) = .empty;
-    defer seen.deinit(allocator);
-    for (headers) |header| {
-        if (!header.eqlName("sec-websocket-protocol")) continue;
-        // Sec-WebSocket-Protocol has 1#token grammar.  HTTP/1 field lines may
-        // arrive split rather than coalesced, so validate all occurrences and
-        // choose the first client-preferred protocol we support instead of
-        // silently ignoring later field lines.
-        try considerSubprotocolHeader(allocator, header.value, supported, &selected, &seen);
-    }
-    if (selected) |protocol| return try allocator.dupe(u8, protocol);
-    return null;
-}
-
-fn selectH2Subprotocol(allocator: std.mem.Allocator, headers: []const http2.Hpack.HeaderField, supported: []const []const u8) Error!?[]u8 {
-    try validateSupportedSubprotocols(supported);
-    var selected: ?[]const u8 = null;
-    var seen: std.ArrayList([]const u8) = .empty;
-    defer seen.deinit(allocator);
-    for (headers) |header| {
-        if (!std.ascii.eqlIgnoreCase(header.name, "sec-websocket-protocol")) continue;
-        try considerSubprotocolHeader(allocator, header.value, supported, &selected, &seen);
-    }
-    if (selected) |protocol| return try allocator.dupe(u8, protocol);
-    return null;
-}
-
-fn validateSupportedSubprotocols(supported: []const []const u8) Error!void {
-    for (supported) |protocol| {
-        if (!websocket.validSubprotocolToken(protocol)) return error.InvalidSubprotocol;
-    }
-}
-
-fn considerSubprotocolHeader(
-    allocator: std.mem.Allocator,
-    raw_requested: []const u8,
-    supported: []const []const u8,
-    selected: *?[]const u8,
-    seen: *std.ArrayList([]const u8),
-) Error!void {
-    var requested = std.mem.splitScalar(u8, raw_requested, ',');
-    while (requested.next()) |raw| {
-        const candidate = wire.trimOws(raw);
-        if (!websocket.validSubprotocolToken(candidate)) return error.InvalidSubprotocol;
-        for (seen.items) |previous| {
-            // The HTTP/1 upgrade validator already rejects duplicate requested
-            // subprotocol names.  Apply the same invariant to all selector
-            // helpers, including RFC 8441 extended CONNECT, so a peer cannot
-            // bias preference handling by repeating the same token in split
-            // header fields.
-            if (std.mem.eql(u8, previous, candidate)) return error.InvalidSubprotocol;
-        }
-        try seen.append(allocator, candidate);
-        if (selected.* != null) continue;
-        for (supported) |protocol| {
-            if (std.mem.eql(u8, candidate, protocol)) {
-                selected.* = protocol;
-                break;
-            }
-        }
-    }
-}
+const validateServerHandshake = handshake_headers.validateHttp1Server;
+const requiredSingletonHeader = handshake_headers.requiredHttp1;
+const optionalSingletonHeader = handshake_headers.optionalHttp1;
+const validateH2ServerHandshake = handshake_headers.validateH2Server;
+const requiredH2SingletonHeader = handshake_headers.requiredH2;
+const optionalH2SingletonHeader = handshake_headers.optionalH2;
+const validateHttp1ClientExtraHeadersImpl =
+    handshake_headers.validateHttp1ClientExtra;
+const validateUpgradeRejectionHeaders =
+    handshake_headers.validateHttp1RejectionExtra;
+const validateUpgradeAcceptHeaders =
+    handshake_headers.validateHttp1AcceptExtra;
+const validateH2ClientExtraHeaders = handshake_headers.validateH2ClientExtra;
+const validateH2ServerExtraHeaders = handshake_headers.validateH2ServerExtra;
+const validateH2RejectionHeaders = handshake_headers.validateH2RejectionExtra;
+const rejectH2ExtendedConnectLegacyHeaders = handshake_headers.rejectH2Legacy;
+const acceptH2Extensions = handshake_headers.acceptH2Extensions;
+const selectHttp1Subprotocol = handshake_headers.selectHttp1Subprotocol;
+const selectH2Subprotocol = handshake_headers.selectH2Subprotocol;
 
 fn readSome(io: std.Io, stream: net.Stream, buffer: []u8) net.Stream.Reader.Error!usize {
     var bufs = [_][]u8{buffer};
@@ -5783,25 +7107,6 @@ fn readSomeWithDeadline(
     deadline: std.Io.Clock.Timestamp,
 ) Error!usize {
     return stream_io.readSomeWithDeadline(io, stream, buffer, deadline);
-}
-
-fn setLinuxTcpNoDelay(fd: std.os.linux.fd_t) Error!void {
-    if (comptime builtin.os.tag != .linux) return;
-    const enabled: c_int = 1;
-    const bytes = std.mem.asBytes(&enabled);
-    const result = std.os.linux.setsockopt(
-        fd,
-        std.os.linux.IPPROTO.TCP,
-        std.os.linux.TCP.NODELAY,
-        bytes.ptr,
-        @intCast(bytes.len),
-    );
-    return switch (std.os.linux.errno(result)) {
-        .SUCCESS => {},
-        .NOMEM, .NOBUFS => error.SystemResources,
-        .NOPROTOOPT => error.ProtocolUnsupportedBySystem,
-        else => error.IoUringOperationFailed,
-    };
 }
 
 fn writeAllToStream(io: std.Io, stream: net.Stream, bytes: []const u8) net.Stream.Writer.Error!void {
@@ -6148,7 +7453,11 @@ test "WebSocket runtime client and server exchange over TCP" {
         allocator,
         io,
         .{ .ip4 = .loopback(0) },
-        .{ .max_head_bytes = 4096, .max_frame_bytes = 4096 },
+        .{
+            .max_head_bytes = 4096,
+            .max_frame_bytes = 5,
+            .max_message_bytes = 5,
+        },
     );
     defer server.deinit();
 
@@ -6172,6 +7481,10 @@ test "WebSocket runtime client and server exchange over TCP" {
             try std.testing.expect(frame.header.masked);
             try std.testing.expectEqualStrings("hello", frame.payload);
 
+            try std.testing.expectError(
+                error.MessageTooLarge,
+                connection.sendText("world!"),
+            );
             try connection.sendText("world");
 
             var close = try connection.receiveFrame();
@@ -6187,10 +7500,18 @@ test "WebSocket runtime client and server exchange over TCP" {
     var client = try Client.connect(allocator, io, server.address(), .{
         .host = "127.0.0.1",
         .target = "/chat",
-        .limits = .{ .max_head_bytes = 4096, .max_frame_bytes = 4096 },
+        .limits = .{
+            .max_head_bytes = 4096,
+            .max_frame_bytes = 5,
+            .max_message_bytes = 5,
+        },
     });
     defer client.close();
 
+    try std.testing.expectError(
+        error.MessageTooLarge,
+        client.sendText("hello!"),
+    );
     try client.sendText("hello");
     var response = try client.receiveFrame();
     defer response.deinit(allocator);
@@ -6520,83 +7841,6 @@ test "WebSocket client connects by ws URI" {
     try std.testing.expectError(error.UnsupportedScheme, Client.connectUri(allocator, io, "ftp://localhost/chat", .{}));
     try std.testing.expectError(error.InvalidUri, Client.connectUri(allocator, io, "ws:///missing-host", .{}));
     try std.testing.expectError(error.InvalidUri, Client.connectUri(allocator, io, "ws://user:pass@localhost/chat", .{}));
-}
-
-test "WebSocket client connects over Linux io_uring" {
-    if (comptime @import("builtin").os.tag != .linux) return error.SkipZigTest;
-
-    const allocator = std.testing.allocator;
-
-    var ring = std.os.linux.IoUring.init(16, 0) catch |err| switch (err) {
-        error.PermissionDenied, error.SystemOutdated => return error.SkipZigTest,
-        else => |e| return e,
-    };
-    defer ring.deinit();
-
-    var threaded = std.Io.Threaded.init(allocator, .{});
-    defer threaded.deinit();
-    const io = threaded.io();
-
-    var server = try Server.listen(
-        allocator,
-        io,
-        .{ .ip4 = .loopback(0) },
-        .{ .max_head_bytes = 4096, .max_frame_bytes = 4096, .max_message_bytes = 4096 },
-    );
-    defer server.deinit();
-
-    const Shared = struct {
-        server: *Server,
-        err: ?anyerror = null,
-
-        fn run(shared: *@This()) void {
-            runFallible(shared.server) catch |err| {
-                shared.err = err;
-            };
-        }
-
-        fn runFallible(server_ptr: *Server) !void {
-            var connection = try server_ptr.accept(.{
-                .protocols = &.{"chat.v1"},
-                .enable_permessage_deflate = true,
-            });
-            defer connection.close();
-            try std.testing.expectEqualStrings("chat.v1", connection.selected_protocol.?);
-            try std.testing.expect(connection.permessage_deflate);
-
-            var request = try connection.receiveMessage();
-            defer request.deinit(server_ptr.http.allocator);
-            try std.testing.expectEqualStrings("uring-websocket-hello", request.payload);
-            try connection.sendFragmented(.text, &.{ "uring ", "websocket ", "world" });
-
-            var close = try connection.receiveFrame();
-            defer close.deinit(server_ptr.http.allocator);
-            try std.testing.expectEqual(websocket.Opcode.close, close.header.opcode);
-        }
-    };
-
-    var shared = Shared{ .server = &server };
-    const thread = try std.Thread.spawn(.{}, Shared.run, .{&shared});
-
-    const uri = try std.fmt.allocPrint(allocator, "ws://127.0.0.1:{d}/uring-ws", .{server.address().ip4.port});
-    defer allocator.free(uri);
-    var client = try Client.connectUriLinuxIoUring(allocator, io, &ring, uri, .{
-        .protocols = &.{"chat.v1"},
-        .enable_permessage_deflate = true,
-        .limits = .{ .max_head_bytes = 4096, .max_frame_bytes = 4096, .max_message_bytes = 4096 },
-    });
-    defer client.close();
-    try std.testing.expectEqualStrings("chat.v1", client.selected_protocol.?);
-    try std.testing.expect(client.permessage_deflate);
-
-    try client.sendText("uring-websocket-hello");
-    var response = try client.receiveMessage();
-    defer response.deinit(allocator);
-    try std.testing.expectEqualStrings("uring websocket world", response.payload);
-    try client.sendClose(.normal_closure, "bye");
-
-    thread.join();
-    if (shared.err) |err| return err;
 }
 
 test "WebSocket client connects by bracketed IPv6 URI" {
@@ -7379,7 +8623,7 @@ test "WebSocket server rejects data sent with HTTP upgrade request" {
 test "WebSocket over HTTP/2 receiveFrameAuto replies to ping" {
     const allocator = std.testing.allocator;
 
-    var backend = try @import("../runtime.zig").Backend.initAuto(allocator, .evented_then_threaded);
+    var backend = try @import("../runtime.zig").Backend.initAuto(allocator, .zio_then_threaded);
     defer backend.deinit();
     const io = backend.io();
 
@@ -8118,7 +9362,7 @@ test "WebSocket over HTTP/2 deadline spans control frames" {
 test "WebSocket receiveFrameAuto replies to ping" {
     const allocator = std.testing.allocator;
 
-    var backend = try @import("../runtime.zig").Backend.initAuto(allocator, .evented_then_threaded);
+    var backend = try @import("../runtime.zig").Backend.initAuto(allocator, .zio_then_threaded);
     defer backend.deinit();
     const io = backend.io();
 
@@ -8494,7 +9738,7 @@ test "WebSocket receiveFrameAuto does not pong after sending close" {
 test "WebSocket runtime exposes typed close frames" {
     const allocator = std.testing.allocator;
 
-    var backend = try @import("../runtime.zig").Backend.initAuto(allocator, .evented_then_threaded);
+    var backend = try @import("../runtime.zig").Backend.initAuto(allocator, .zio_then_threaded);
     defer backend.deinit();
     const io = backend.io();
 
@@ -8775,85 +10019,80 @@ test "WebSocket runtimes validate outgoing text and close frames" {
     try std.testing.expectError(error.InvalidFrame, h2.sendFrame(.continuation, "bypass"));
 }
 
-test "WebSocket incoming message finalization frees failed payloads" {
-    const allocator = std.testing.allocator;
-    const compressed_text = "compressed provenance compressed provenance";
-    const compressed_wire = try websocket.compressMessage(
-        allocator,
-        compressed_text,
+test "WebSocket HTTP1 and HTTP2 sends enforce configured outbound limits" {
+    const limits: Limits = .{
+        .max_frame_bytes = 4,
+        .max_message_bytes = 6,
+    };
+
+    var connection = Connection{
+        .io = undefined,
+        .allocator = std.testing.allocator,
+        .stream = undefined,
+        .role = .client,
+        .permessage_deflate = true,
+        .limits = limits,
+    };
+    try std.testing.expectError(
+        error.MessageTooLarge,
+        connection.sendText("five!"),
     );
-    var compressed_message = try finishIncomingMessage(
-        allocator,
-        .{
-            .opcode = .text,
-            .payload = compressed_wire,
-            .compressed = true,
-        },
-        1024,
+    try std.testing.expectError(
+        error.MessageTooLarge,
+        connection.sendBinaryParts("abc", "de"),
     );
-    defer compressed_message.deinit(allocator);
-    try std.testing.expect(compressed_message.was_compressed);
-    try std.testing.expectEqualStrings(
-        compressed_text,
-        compressed_message.payload,
+    connection.permessage_deflate = false;
+    var in_place_payload = [_]u8{ 1, 2, 3, 4, 5 };
+    try std.testing.expectError(
+        error.MessageTooLarge,
+        connection.sendBinaryInPlace(&in_place_payload),
+    );
+    connection.permessage_deflate = true;
+    try std.testing.expectError(
+        error.MessageTooLarge,
+        connection.sendFragmented(.binary, &.{ "abc", "def", "g" }),
+    );
+    try std.testing.expectError(
+        error.MessageTooLarge,
+        connection.sendPing("five!"),
+    );
+    try std.testing.expectError(
+        error.MessageTooLarge,
+        connection.sendClose(.normal_closure, "abc"),
     );
 
-    const bad_deflate = try allocator.dupe(u8, &.{ 0xff, 0xff, 0xff });
-    try std.testing.expectError(error.InvalidFrame, finishIncomingMessage(allocator, .{
-        .opcode = .text,
-        .payload = bad_deflate,
-        .compressed = true,
-    }, 1024));
-
-    const bad_utf8 = try allocator.dupe(u8, "\xc0\x80");
-    try std.testing.expectError(error.InvalidUtf8, finishIncomingMessage(allocator, .{
-        .opcode = .text,
-        .payload = bad_utf8,
-        .compressed = false,
-    }, 1024));
-}
-
-test "WebSocket TCP receive storage uses bounded slab growth" {
-    const allocator = std.testing.allocator;
-    var buffer: std.ArrayList(u8) = .empty;
-    defer buffer.deinit(allocator);
-
-    const first = [_]u8{0xaa} ** 4104;
-    try appendTransportBytesPrecise(&buffer, allocator, &first);
-    try std.testing.expectEqual(first.len, buffer.items.len);
-    try std.testing.expectEqual(@as(usize, 4352), buffer.capacity);
-
-    buffer.clearRetainingCapacity();
-    const small = [_]u8{0xbb} ** 7;
-    try appendTransportBytesPrecise(&buffer, allocator, &small);
-    try std.testing.expectEqual(@as(usize, 4352), buffer.capacity);
-
-    const extra = [_]u8{0xcc} ** 4098;
-    try appendTransportBytesPrecise(&buffer, allocator, &extra);
-    try std.testing.expectEqual(small.len + extra.len, buffer.items.len);
-    try std.testing.expectEqual(@as(usize, 4352), buffer.capacity);
-
-    buffer.clearRetainingCapacity();
-    const large = [_]u8{0xdd} ** 20_001;
-    try appendTransportBytesPrecise(&buffer, allocator, &large);
-    try std.testing.expectEqual(large.len, buffer.items.len);
-    try std.testing.expect(buffer.capacity - large.len < 256);
-}
-
-fn checkWebSocketBoundedSlabGrowth(allocator: std.mem.Allocator) !void {
-    var buffer: std.ArrayList(u8) = .empty;
-    defer buffer.deinit(allocator);
-    try appendTransportBytesPrecise(&buffer, allocator, "header");
-    try appendTransportBytesPrecise(&buffer, allocator, "payload");
-    try std.testing.expectEqualStrings("headerpayload", buffer.items);
-    try std.testing.expect(buffer.capacity - buffer.items.len < 256);
-}
-
-test "WebSocket bounded slab growth is allocation-failure safe" {
-    try std.testing.checkAllAllocationFailures(
-        std.testing.allocator,
-        checkWebSocketBoundedSlabGrowth,
-        .{},
+    var h2 = H2Connection{
+        .allocator = std.testing.allocator,
+        .tunnel = undefined,
+        .role = .client,
+        .permessage_deflate = true,
+        .limits = limits,
+    };
+    try std.testing.expectError(
+        error.MessageTooLarge,
+        h2.sendBinary("five!"),
+    );
+    try std.testing.expectError(
+        error.MessageTooLarge,
+        h2.sendBinaryParts("abc", "de"),
+    );
+    h2.permessage_deflate = false;
+    try std.testing.expectError(
+        error.MessageTooLarge,
+        h2.sendBinaryInPlace(&in_place_payload),
+    );
+    h2.permessage_deflate = true;
+    try std.testing.expectError(
+        error.MessageTooLarge,
+        h2.sendFragmented(.binary, &.{ "abc", "def", "g" }),
+    );
+    try std.testing.expectError(
+        error.MessageTooLarge,
+        h2.sendPong("five!"),
+    );
+    try std.testing.expectError(
+        error.MessageTooLarge,
+        h2.sendClose(.normal_closure, "abc"),
     );
 }
 
@@ -8943,7 +10182,7 @@ test "WebSocket HTTP2 in-place send rejects unsupported modes" {
         .limits = .{ .max_frame_bytes = 0, .max_message_bytes = 0 },
     };
     try std.testing.expectError(
-        error.PayloadTooLarge,
+        error.MessageTooLarge,
         too_small.sendBinaryInPlace(&payload),
     );
 }
@@ -9199,6 +10438,11 @@ test "WebSocket HTTP upgrade reader enforces header byte limit at delimiter" {
 
 test {
     _ = h3;
+    _ = @import("runtime/message/tests/buffer.zig");
+    _ = @import("runtime/message/tests/state.zig");
+    _ = @import("runtime/handshake/capacity_tests.zig");
+    _ = @import("runtime/handshake/h1_attempt_tests.zig");
+    _ = @import("runtime/handshake/h2_admission_tests.zig");
     _ = @import("runtime/h3_tests.zig");
     _ = @import("runtime/unix_tests.zig");
     _ = @import("runtime/error_close_tests.zig");

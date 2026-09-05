@@ -43,13 +43,38 @@ test "WSS server completes verified WebSocket echo" {
         err: ?anyerror = null,
 
         fn run(shared: *@This()) void {
-            var connection = shared.server.accept(.{
+            var pending = shared.server.receiveUpgradeRequest(.{
                 .protocols = &.{"echo.v1"},
                 .require_subprotocol = true,
             }) catch |err| {
                 shared.err = err;
                 return;
             };
+            var pending_owned = true;
+            defer if (pending_owned) pending.deinit();
+            if (!std.mem.eql(u8, pending.target(), "/echo") or
+                !std.mem.eql(
+                    u8,
+                    pending.header("authorization") orelse "",
+                    "Bearer wss-admission",
+                ))
+            {
+                shared.err = error.InvalidHandshake;
+                return;
+            }
+            if (pending.peerCertificates() != null or
+                pending.negotiatedCipherSuite() !=
+                    .aes_128_gcm_sha256 or
+                pending.negotiatedTranscriptHash() != .sha256)
+            {
+                shared.err = error.InvalidCipherSuite;
+                return;
+            }
+            var connection = pending.accept() catch |err| {
+                shared.err = err;
+                return;
+            };
+            pending_owned = false;
             defer connection.close();
             if (connection.peerCertificates() != null) {
                 shared.err = error.UnexpectedPeerCertificate;
@@ -92,6 +117,10 @@ test "WSS server completes verified WebSocket echo" {
         uri,
         .{
             .protocols = &.{"echo.v1"},
+            .extra_headers = &.{.{
+                .name = "Authorization",
+                .value = "Bearer wss-admission",
+            }},
             .limits = .{
                 .max_head_bytes = 4096,
                 .max_frame_bytes = 4096,
@@ -192,6 +221,85 @@ test "WSS client connects to resolved address with separate TLS host" {
     var echoed = try client.receiveMessage();
     defer echoed.deinit(allocator);
     try std.testing.expectEqualStrings("resolved wss", echoed.payload);
+
+    thread.join();
+    joined = true;
+    if (shared.err) |err| return err;
+}
+
+test "WSS client attempt preserves rejected response metadata" {
+    const allocator = std.testing.allocator;
+    var threaded = std.Io.Threaded.init(allocator, .{});
+    defer threaded.deinit();
+    const io = threaded.io();
+
+    var certificate_der: [tls_testing.certificate_der_len]u8 = undefined;
+    try std.base64.standard.Decoder.decode(
+        &certificate_der,
+        tls_testing.certificate_base64,
+    );
+    const key_pair = try tls_testing.serverKeyPair();
+    var server = try runtime.TlsServer.listen(
+        allocator,
+        io,
+        .{ .ip4 = .loopback(0) },
+        .{ .identity = .{
+            .certificate_chain = &.{&certificate_der},
+            .signer = .{ .ecdsa_p256_sha256 = .{ .key_pair = key_pair } },
+        } },
+    );
+    defer server.deinit();
+
+    const Shared = struct {
+        server: *runtime.TlsServer,
+        err: ?anyerror = null,
+
+        fn run(self: *@This()) void {
+            var pending = self.server.receiveUpgradeRequestWithTimeout(
+                .{},
+                .fromSeconds(3),
+            ) catch |err| {
+                self.err = err;
+                return;
+            };
+            pending.reject(
+                401,
+                "Unauthorized",
+                &.{.{ .name = "WWW-Authenticate", .value = "Bearer" }},
+                "login required",
+            ) catch |err| {
+                self.err = err;
+            };
+        }
+    };
+    var shared = Shared{ .server = &server };
+    const thread = try std.Thread.spawn(.{}, Shared.run, .{&shared});
+    var joined = false;
+    defer if (!joined) thread.join();
+
+    var ca_bundle, var ca_lock = try localCaBundle(allocator, io);
+    defer ca_bundle.deinit(allocator);
+    const uri = try std.fmt.allocPrint(
+        allocator,
+        "wss://localhost:{d}/private",
+        .{server.address().ip4.port},
+    );
+    defer allocator.free(uri);
+    var attempt = try runtime.Client.connectUriTlsAttemptWithTimeout(
+        allocator,
+        io,
+        uri,
+        .{},
+        .{ .ca_bundle = .{ .bundle = &ca_bundle, .lock = &ca_lock } },
+        .fromSeconds(3),
+    );
+    defer attempt.deinit();
+    try std.testing.expectEqual(@as(u16, 401), attempt.status());
+    try std.testing.expectEqualStrings(
+        "Bearer",
+        attempt.responseHeader("www-authenticate").?,
+    );
+    try std.testing.expectEqualStrings("login required", attempt.body());
 
     thread.join();
     joined = true;

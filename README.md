@@ -8,12 +8,21 @@ starts with deterministic parsers, serializers, preallocated fixed-width wire-in
   unfolding, exact-allocation/empty-header owned-parse fast paths, strict allocation-free borrowed request/response head parsing into
   caller header storage with exact Content-Length pipeline offsets and
   method/status-aware response boundaries, request-target/status/reason-phrase start-line validation with method-specific asterisk/authority-form and no-fragment rules, status-forbidden response-body write rejection, keep-alive/upgrade handling, pipelined
-  byte buffering with exact-message ownership transfer, allocation-free caller-storage request-pipeline batch parsing and one-prefix consumption, reusable runtime header/trailer/encoding scratch for persistent connections, non-chunked header/body vectored writes, transactional batched response validation and one-flush pipeline writes, method-aware response body
+  byte buffering with exact-message ownership transfer, allocation-free caller-storage request-pipeline batch parsing and one-prefix consumption, reusable runtime header/trailer/encoding scratch for persistent connections, and aggregate Content-Length/Transfer-Encoding/chunk/trailer boundary decisions grouped under `http1/runtime/message/`, non-chunked header/body vectored writes, transactional batched response validation and one-flush pipeline writes, method-aware response body
   handling for HEAD and successful CONNECT, stateful incremental request/response writers with fixed-length or chunked framing, cross-write Content-Length enforcement, announced/merged trailers, exact response handoff, client-side `Expect: 100-continue` gating with early-final-response handoff, and connection-poisoning abandonment semantics, plus callback-based streaming request and response readers with owned heads/trailers, fixed/chunked/close-delimited framing, pipelined-suffix preservation, and no body-sized aggregation, Host/authority delimiter validation, strict authority-form CONNECT target delimiter/userinfo rejection, malformed absolute-form authority validation including bracketed IPv6, and CONNECT tunnel helpers, interim 1xx response skipping plus
   server-side `Expect: 100-continue` handling even when body bytes are pre-read with invalid-head suppression, pure-digit Content-Length enforcement,
   TE-over-CL precedence with parsed `Content-Length` stripping and mandatory connection retirement on ambiguous requests, ambiguous body-length rejection
   across repeated/coalesced `Content-Length`, unsupported transfer-coding and HTTP/1.0 transfer-coding rejection, strict-by-default opt-in Hyper-shaped repeated request-line SP, response-only whitespace-before-colon compatibility, and direction-specific invalid-header skipping that still rejects ambiguous NUL/CR boundaries,
+  Hyper-style default automatic server `Date` generation backed by a shared
+  allocation-free per-second cache, with explicit-field preservation, 1xx
+  exclusion, deterministic pure codec helpers, and an opt-out limit,
   and a blocking `std.Io.net` TCP client/server runtime with HTTP/1.1 default
+  keep-alive plus an opt-out serve policy that closes after one response,
+  a configurable serve-side request-header count bound, and automatic terminal
+  431 responses for request-head byte/count overflow while preserving the
+  original parser error for server supervision, plus terminal 400 responses
+  for malformed request-line/header/method/version/Host syntax and a configurable
+  request-target bound with terminal 414 responses,
   persistence, independent optional absolute request- and response-head
   deadlines across cleartext and TLS (without extending either deadline on
   partial input, with the response budget spanning interim 1xx heads, and
@@ -30,29 +39,78 @@ starts with deterministic parsers, serializers, preallocated fixed-width wire-in
   introspection, RFC 8446 post-handshake KeyUpdate with reciprocal-update
   handling and bounded peer control bursts, and vectored plaintext writes that
   coalesce protocol slices into bounded TLS records without a heap concatenation
-- HTTP/2 frame headers with direct parse/preallocated writes and full-frame direct writes, RFC-bounded SETTINGS validation, DATA/HEADERS (including PADDED/PRIORITY self-dependency checks)/PRIORITY/PUSH_PROMISE/CONTINUATION/RST_STREAM payload parsing, RFC 8336 single-probe exact-indexed ORIGIN origin-set state with exact-allocation/empty-payload parse fast paths, allocation-free/preallocated writes, empty-index membership and duplicate-entry skips, RFC 7838 single-probe exact-indexed ALTSVC connection/stream advertisements with allocation-free/preallocated writes, identical replacement skips and per-target replacement, and active-stream reset propagation, a bootstrap
-  HPACK static/literal encoder-decoder with RFC 7541 Huffman strings, preallocated prefix-integer writes, exact encode/decode output preallocation, retained runtime encode scratch, and preallocated empty/short/raw-preferred string write fast paths,
+- HTTP/2 frame headers with direct parse/preallocated writes and full-frame direct writes, with owned/borrowed transport I/O, envelope validation, fixed-frame encoding, and transactional HEADERS/CONTINUATION batching grouped under `http2/runtime/frame/`; RFC-bounded SETTINGS validation, DATA/HEADERS (including PADDED/PRIORITY self-dependency checks)/PRIORITY/PUSH_PROMISE/CONTINUATION/RST_STREAM payload parsing, RFC 8336 single-probe exact-indexed ORIGIN origin-set state with exact-allocation/empty-payload parse fast paths, allocation-free/preallocated writes, empty-index membership and duplicate-entry skips, RFC 7838 single-probe exact-indexed ALTSVC connection/stream advertisements with allocation-free/preallocated writes, identical replacement skips and per-target replacement, and active-stream reset propagation, a bootstrap
+  HPACK static/literal encoder-decoder with RFC 7541 Huffman strings, preallocated prefix-integer writes, exact encode/decode output preallocation, retained runtime encode scratch, preallocated empty/short/raw-preferred string write fast paths, and connection-owning server/client APIs that emit exact COMPRESSION_ERROR/PROTOCOL_ERROR/ENHANCE_YOUR_CALM GOAWAY frames for malformed HPACK, broken CONTINUATION sequences, or unterminated header floods while returning the original local error, plus stream-local PROTOCOL_ERROR/ENHANCE_YOUR_CALM resets for malformed or oversized admitted messages across aggregate, streaming, and batch paths with exact connection-credit restoration and sibling cleanup; a configurable connection-lifetime budget counts only library-generated peer-protocol-error resets and escalates excess churn to GOAWAY(ENHANCE_YOUR_CALM), without charging application cancellation, timeout cleanup, or REFUSED_STREAM admission control,
   pseudo-header and common-header static fast paths, internal empty-dynamic-table lookup skips, single-lookup
   dynamic insert indexing, O(1)
   FIFO dynamic-index eviction, and single-pass request/response pseudo-header
   and length extraction, plus
+  header lookup, Content-Length normalization, pseudo-header/URI/authority
+  validation, trailer rules, and response-body semantics grouped under
+  `http2/runtime/headers/`,
   exact dynamic-table indexing/size-update state for long-lived runtimes with local decoder table-size enforcement and automatic
   peer table-size update emission plus h2/hyper-style non-indexing for volatile or oversized fields and automatic
   never-index encoding for sensitive fields, fixed-control-frame and preallocated control-frame write fast paths, PING with opaque ACK matching plus explicit absolute-deadline round trips and a reusable single-reader inactivity-aware keep-alive driver with active/idle policy, monotonic probe payloads, connection-control processing and a configurable bounded FIFO preserving interleaved application frames, GOAWAY/WINDOW_UPDATE connection
-  management including interleaved SETTINGS/PING/WINDOW_UPDATE/PRIORITY handling and compacting interleaved request FIFO reuse, RFC 9218 SETTINGS_NO_RFC7540_PRIORITIES negotiation and client-only PRIORITY_UPDATE signaling with preallocated frame payload writes, indexed bounded pre-request buffering, allocation-free full-capacity rejection, identical-update skips, single-probe reservation/replacement, cached idle-request pruning/activation with empty-index checks, empty-update lookups/removals, and promised-push validation, active-stream RST_STREAM guarding, explicit opt-in PUSH_PROMISE promised-request/pushed-response lifecycle with preallocated PUSH_PROMISE frame writes, parent/promised-stream validation, single-lookup local push reservations with empty-index local lookup skips and promised-push queue indexing, indexed reserved/pending push lookups and releases with empty-index skips, O(1) cursor FIFO promised-request notification delivery, head/tail-cancel fast paths with empty-pending skips and targeted pending-index repair, and client RST_STREAM(CANCEL) refusal of reserved pushes, GOAWAY propagation and allocation-free GOAWAY emission during stream reads and post-GOAWAY request suppression/rejection, cached multi-set drain-floor checks, and same-control-stream GOAWAY emission with persistent control-stream offsets, default client server-push opt-out, connection- and stream-level flow-control enforcement including
+  management including interleaved SETTINGS/PING/WINDOW_UPDATE/PRIORITY handling and compacting interleaved request FIFO reuse, RFC 9218 SETTINGS_NO_RFC7540_PRIORITIES negotiation and client-only PRIORITY_UPDATE signaling with preallocated frame payload writes, indexed bounded pre-request buffering, allocation-free full-capacity rejection, identical-update skips, single-probe reservation/replacement, cached idle-request pruning/activation with empty-index checks, empty-update lookups/removals, and promised-push validation, active-stream RST_STREAM guarding, fixed-capacity plus minimum-duration local-reset history, and a connection-lifetime budget for peer-induced protocol-error resets that escalates excess churn to GOAWAY(ENHANCE_YOUR_CALM), explicit opt-in PUSH_PROMISE promised-request/pushed-response lifecycle with preallocated PUSH_PROMISE frame writes, parent/promised-stream validation, single-lookup local push reservations with empty-index local lookup skips and promised-push queue indexing, indexed reserved/pending push lookups and releases with empty-index skips, O(1) cursor FIFO promised-request notification delivery, head/tail-cancel fast paths with empty-pending skips and targeted pending-index repair, and client RST_STREAM(CANCEL) refusal of reserved pushes, GOAWAY propagation and allocation-free GOAWAY emission during stream reads and post-GOAWAY request suppression/rejection, cached multi-set drain-floor checks, and same-control-stream GOAWAY emission with persistent control-stream offsets, default client server-push opt-out, connection- and stream-level flow-control enforcement with signed bounded window arithmetic and zero-length DATA semantics isolated under `http2/runtime/flow/`, including
   transactional single-pass SETTINGS_INITIAL_WINDOW_SIZE updates, exact-allocation/empty SETTINGS parse fast paths, and allocation-conscious configurable advertisement, configurable SETTINGS_HEADER_TABLE_SIZE/SETTINGS_MAX_CONCURRENT_STREAMS/SETTINGS_MAX_FRAME_SIZE advertisement, bidirectional SETTINGS_MAX_CONCURRENT_STREAMS enforcement, SETTINGS_MAX_FRAME_SIZE and SETTINGS_MAX_HEADER_LIST_SIZE validation with inbound advertised-frame-size enforcement, RFC 9218 response DATA scheduling with dynamic PRIORITY_UPDATE precedence, single-pass urgency/exclusive-stream selection, sequential non-incremental stream-ID order, incremental round-robin sharing, and blocked-stream bypass,
   outbound frame splitting plus h2-style CONTINUATION chain flood, stream-id overflow, indexed active-stream tracking with single-probe activation, duplicate reserve skips, empty-index active checks, and empty-index release skips, wrong-direction HEADERS, and idle-stream DATA/WINDOW_UPDATE send limits, with stack-first request/response header descriptors, TCP_NODELAY, configurable connection/stream receive windows, vectored HEADERS+DATA and multi-DATA bursts, transactional bodyless multi-stream request/response batches with HPACK-state staging and out-of-order response reassembly, connection-level bulk frame read buffering, callback-based streaming request and response bodies with owned heads/trailers, stateful incremental request/response writers with transactional cross-chunk Content-Length enforcement, DATA/trailer finish, response handoff, and abandoned-writer cancellation, bounded early-response preservation while an upload waits on flow control with partial-write accounting and aggregate/streaming response transfer, strict streamed receive Content-Length accounting, callback-error RST_STREAM cancellation, and DATA sends that wait for WINDOW_UPDATE capacity
-  and inbound DATA consumers that account for full padded frame payloads with single-probe indexed stream-window state, empty-index membership skips, and restore connection/stream receive capacity,
+  and inbound DATA consumers that account for full padded frame payloads with single-probe indexed stream-window state, empty-index membership skips, restore connection/stream receive capacity, and optionally grow both receive targets from an allocation-free BDP estimator with reserved PING correlation and serialized SETTINGS acknowledgement,
   frame-envelope validation including fixed-size RST_STREAM and SETTINGS payload-multiple checks, stream-id direction/monotonicity validation, request/response trailers with forbidden-field rejection, pre-HEADERS frame ordering checks, bounded ordered interim 1xx observation across single and multiplexed client reads with request-index/stream-ID batch correlation and explicit server-side informational response sending, content-length
   validation with pure-digit Content-Length enforcement, indexed response-body semantics retention with single-probe updates, duplicate reserve skips, and empty-index lookup skips, HTTP/2 pseudo-header/lowercase field-name/value and control-character validation, `:method` token validation with case-sensitive HEAD/CONNECT/OPTIONS semantics and `:protocol` token validation,
   URI-like `:scheme`/origin-form `:path`/`:authority` validation with Host fallback and Host/`:authority` mismatch rejection,
-  connection-specific header rejection including `TE` rules,
+  connection-specific header rejection including `TE` rules and stack-first,
+  exact-capacity removal of every `Connection`-nominated hop-by-hop field
+  without a fixed field-count ceiling,
   status-forbidden response-body write rejection,
-  traditional CONNECT header-only tunnel acceptance with DATA tunnel helpers and strict `:authority`-only host:port pseudo-header rules, CONNECT body/Content-Length rules, and opt-in RFC 8441 extended CONNECT / `:protocol` handling with irreversible
+  Hyper-style default automatic server `date` generation for ordinary,
+  streaming, batched, pushed, and CONNECT final responses, with explicit-field
+  preservation, informational-response exclusion, and an opt-out limit,
+  traditional CONNECT header-only tunnel acceptance with DATA tunnel helpers and strict `:authority`-only host:port pseudo-header rules, CONNECT body/Content-Length rules, bounded Extended CONNECT rejection bodies/trailers with stream-local cleanup, and opt-in RFC 8441 extended CONNECT / `:protocol` handling with irreversible
   SETTINGS_ENABLE_CONNECT_PROTOCOL downgrade rejection,
   open/accept/reject tunnel helpers and DATA-frame tunnel read/write mapping, RFC 7540 h2c Upgrade client/server helpers that carry `HTTP2-Settings` and receive/respond on stream 1, a blocking prior-knowledge h2c client/server runtime with default `:authority` host/port synthesis and transport/URI-derived `:scheme`, and a native TLS 1.3 client/server runtime that requires negotiated `h2` ALPN and optionally authenticates clients with application-visible verified certificate chains,
   `http://` URI helpers with host-name DNS and IPv4/bracketed-IPv6 literal connect support, allocation-free HTTP/2 runtime SETTINGS/frame sends, and a `std.Io.async` concurrent server helper
 - HTTP/3 frame headers with preallocated generic writes and direct QUIC-varint emission, SETTINGS payload length reuse with preallocation/direct-varint writes and exact-allocation parsing, preallocated single-varint control frames, preallocated PUSH_PROMISE/push-stream prefixes/PRIORITY_UPDATE, preallocated DATAGRAM/Capsule, and unidirectional stream prefixes with preallocated small-varint write fast paths, request/response HEADERS+DATA helpers,
+  stack-first request/response/informational/Push-Promise header assembly with
+  exact allocation fallback instead of a hidden 64-field descriptor ceiling,
+  default automatic server `date` generation across development, protected, and
+  authenticated runtimes for aggregate, streaming, pushed, and CONNECT final
+  responses, with a shared allocation-free per-second cache, stack-first header
+  views, case-insensitive explicit-field preservation, 1xx exclusion, opt-out
+  controls, and no wall-clock dependency in the pure codec; final-response
+  owners can explicitly wait with a timeout/deadline for reliable QUIC recovery
+  to drain before destroying a short-lived session, while `serveConnection`
+  applies a configurable bounded drain automatically and multi-connection
+  endpoint callbacks resynchronize their send-side PTO timer after handlers,
+  with URI/DNS/connect-deadline policy and server response shaping split into
+  focused `runtime/client` and `runtime/server` submodules rather than growing
+  the central runtime file, including non-truncating stack-first multi-address
+  DNS collection, a shared runtime error layer for those submodules,
+  and request/Push/critical-stream scratch ownership isolated under
+  `runtime/send`, including an exact MTU-aware packetizer shared by handshake,
+  preconfigured protected, and cleartext runtimes that repacks and splits
+  oversized STREAM descriptors before datagram emission; the cleartext
+  adapter's bounded retained-DATAGRAM FIFO and
+  its ownership tests plus associated-stream receive/send/ID-cursor state are
+  isolated under `runtime/development`; QPACK connection state, focused
+  state-machine tests, dynamic request/response writer tests, and protected
+  QPACK request/response transport coverage are grouped under `runtime/qpack`;
+  indexed client/server
+  request lifecycle, response decode context, priority state, and graceful
+  GOAWAY drain boundaries are grouped under `runtime/stream`, with the runtime
+  root adapting only concrete readers; aggregate request/response reassembly,
+  reset FIFO state, and shared QPACK dependency inspection are nested under
+  `runtime/stream/buffered`; indexed outbound body state, Content-Length
+  accounting, lightweight flow limits, and reusable batch scratch are grouped
+  in `runtime/stream/outbound_body.zig`; incremental HEADERS/DATA/trailer
+  parsing and multiplexed active-reader/reset scheduling, with their focused
+  tests, live in `runtime/stream/reader.zig` and `runtime/stream/set.zig`; push
+  stream reassembly, promise binding, cancellation queues, and fair polling are
+  grouped under `runtime/stream/push`; cleartext aggregate request ownership
+  and peer-aware reassembly live in `runtime/development/request_buffer.zig`,
+  while per-peer parser/lifecycle/QPACK/response state is coordinated under
+  `runtime/development/server_peer`; role-aware control/QPACK stream
+  classification, transactional control-state application, GOAWAY/priority ID
+  checks, and critical-stream closure validation live under `runtime/control`,
   RFC 9297 Capsule Protocol TLV parsing/writing with preallocated direct-varint ArrayList and allocation-free
   caller-buffer encoding, `Capsule-Protocol` structured-field validation, and
   an incremental iterator for CONNECT stream data, borrowed and owning
@@ -67,10 +125,12 @@ starts with deterministic parsers, serializers, preallocated fixed-width wire-in
   lookups with pseudo-header and common-header fast paths,
   CANCEL_PUSH/PUSH_PROMISE/MAX_PUSH_ID/PRIORITY_UPDATE payload codecs with malformed-payload rejection, indexed per-ID control-state lookups with empty-index skips, identical priority-update skips, and single-probe priority replacement, and advertised MAX_PUSH_ID enforcement for received PUSH_PROMISE frames,
   RFC 9218 Priority field parsing/serialization,
-  request/response message encoding/decoding with ordered HEADERS/DATA/trailer handling, static or dynamic QPACK field-section decoding with indexed per-stream Section Acknowledgment/cancellation accounting with targeted index repair and prefix-skipping cancellation compaction, non-blocking Known-Received dynamic writers for request/response/interim/trailer sections with sensitive-field exclusion and speculative future inserts, inbound and outbound SETTINGS_MAX_FIELD_SECTION_SIZE enforcement, response-side PUSH_PROMISE tolerance, bounded ordered interim 1xx response observation on aggregate and incremental client paths, request-stream correlation for aggregate multiplexed reads, push-ID/parent-request/push-stream correlation for aggregate pushed responses, per-stream bounds for multiplexed and pushed responses, runtime emission before final and pushed responses, and forbidden trailer-field rejection,
+  request/response message encoding/decoding with ordered HEADERS/DATA/trailer handling, static or dynamic QPACK field-section decoding with indexed per-stream Section Acknowledgment/cancellation accounting with targeted index repair and prefix-skipping cancellation compaction, non-blocking Known-Received dynamic writers for request/response/interim/trailer sections with sensitive-field exclusion and speculative future inserts, inbound and outbound SETTINGS_MAX_FIELD_SECTION_SIZE enforcement, exact post-assembly and incremental receive signaling (`QPACK_DECOMPRESSION_FAILED` connection closes for malformed QPACK, connection closes for invalid frame sequences, and stream-local `H3_MESSAGE_ERROR` cancellation for malformed HTTP semantics while siblings remain usable), connection-wide enforcement of the locally advertised QPACK blocked-stream budget across buffered aggregate streams, active incremental readers, and push streams (including a zero-budget first dependency), constant-space client completion history using the shared HTTP/WebTransport bidirectional stream-ID allocation frontier rather than one tombstone per completed request, full aggregate, incremental, and detached-head PUSH_PROMISE request-field decoding with dynamic-section feedback, transactional aggregate and incremental request/response/push event admission with retryable local preflight failures, promise registration only after validation, queued QPACK feedback after send failures, and allocation-safe cleartext aggregate request ownership transfer, bounded ordered interim 1xx response observation on aggregate and incremental client paths, request-stream correlation for aggregate multiplexed reads, push-ID/parent-request/push-stream correlation for aggregate pushed responses, per-stream bounds for multiplexed and pushed responses, runtime emission before final and pushed responses, and forbidden trailer-field rejection,
   HEADERS-only dynamic request/response writers for incremental DATA sending
   with Content-Length generation/verification, parsed length reuse, and
-  CONNECT/204/304 body guards,
+  CONNECT/204/304 body guards, including detached Extended CONNECT FIN
+  detection that distinguishes a missing final HEADERS section from a
+  truncated HTTP/3 frame,
   an incremental message reader that emits owned request/response heads,
   reuses parsed pseudo-header/Content-Length lookups, preallocates aggregated
   DATA bodies from declared lengths under buffered-byte caps, exposes
@@ -93,7 +153,11 @@ starts with deterministic parsers, serializers, preallocated fixed-width wire-in
   plus `HandshakeClient.connectUri` / `requestUri` for public H3 client
   tooling; both server paths retain indexed bounded per-request-stream reassembly state
   so interleaved streams are not dropped, surface RESET_STREAM request
-  cancellation, and expose client/server cancel helpers that send
+  cancellation, distinguish an ended request with no initial HEADERS as
+  stream-local `H3_REQUEST_INCOMPLETE` while retaining sibling streams, and
+  classify an ended response without final HEADERS as stream-local
+  `H3_MESSAGE_ERROR` plus bounded 1xx overflow as `H3_EXCESSIVE_LOAD`, and
+  expose client/server cancel helpers that send
   RESET_STREAM+STOP_SENDING with conditional QPACK stream cancellation and empty-buffer skips. Servers
   also expose two-phase GOAWAY initiation/completion and drain-completion
   tracking over queued and indexed application-owned requests. Clients can send
@@ -158,7 +222,30 @@ starts with deterministic parsers, serializers, preallocated fixed-width wire-in
   and push-stream IDs, and can emit PUSH_PROMISE plus the corresponding
   unidirectional pushed response (with optional informational heads) with
   shared dynamic QPACK state, plus a
-  `std.Io.async` request receive helper for the development runtime
+  `std.Io.async` request receive helper for the development runtime. The
+  runtime internals are grouped by responsibility under `runtime/control/`,
+  `runtime/stream/`, `runtime/qpack/`, `runtime/send/`, and
+  `runtime/receive/`; server request-packet routing and RFC 9114/9204
+  connection-error classification are isolated there, including idempotent
+  duplicate RESET_STREAM handling and exact application close codes. Handshake
+  and lightweight protected clients also share one response/control/QPACK/Push
+  router, including prompt Insert Count Increment feedback. The
+  control/QPACK critical-stream receive and send logic
+  and development coordination remain grouped under `runtime/development/`,
+  and authenticated message, Push, streaming-head, DATA, and trailer emission
+  live with focused tests under those nested modules instead of continuing to
+  grow the runtime root. Multi-packet HTTP/3 sends distinguish zero-progress
+  failures from socket-visible partial sends: retryable preflight failures keep
+  state, progress-aware DATA batches commit only their accepted prefix, and
+  ambiguous message/Push/trailer partial sends fail the connection closed
+  rather than guessing delivery. The RFC 9218 complete-body scheduler owns its
+  stack-first candidate workspace and fixed packet staging under
+  `runtime/response_scheduler/core.zig`; staged packets retain their source response
+  index, so progress commits do not rescan or hash stream IDs.
+  Protected client/server integration coverage is split by responsibility under
+  `runtime/client/tests`, `runtime/server/tests`, `runtime/control/tests`, and
+  `runtime/stream/push/tests`, keeping the large runtime root focused on API and
+  orchestration rather than test fixtures.
 - gRPC over HTTP/2 with bounded 5-byte length-prefixed message framing,
   compressed-flag validation, eight-digit `grpc-timeout` parse/format with
   non-shortening deadline rounding, all canonical status codes, HTTP-to-gRPC
@@ -219,10 +306,10 @@ starts with deterministic parsers, serializers, preallocated fixed-width wire-in
   packet-number space ACK tracking with cached retained-packet counts, allocation-free single-range ACK ownership, first/newest/oldest-range fast paths, tail
   ACK-range append/removal fast paths, and bounded duplicate/old packet suppression,
   ACK range semantic validation plus zero-range decode skips and preallocated
-  ACK frame writes, empty-sent-space rejection, pre-oldest ACK prune skips,
-  monotonic sent-packet insertion fast paths, and indexed-or-sorted exact sent-packet lookup with tail fast paths,
+  ACK frame writes, empty-sent-space rejection, pre-oldest ACK prune skips, single-ACK packet transactional precheck reuse, and constant-time acknowledged-ECT versus ACK_ECN watermark checks that survive metadata compaction,
+  monotonic sent-packet insertion fast paths, best-effort indexed-or-sorted exact sent-packet lookup with tail fast paths and O(1) index invalidation after metadata compaction, and cached latest ordinary ACK-eliciting PTO anchors with PMTU-probe fallback scans,
   no-new-ACK short-circuiting with sorted-range scan breaks and lower-bound ACK probes, lookup-free tail-forget fast paths, cached sortedness for
-  ACK/loss scans, and single-pass ACK marking,
+  ACK/loss scans, single-pass ACK marking, pointer-based recovery compaction that recycles matches in place and copies only moved survivors, binary-searched clean single-range recovery ACK retirement with conservative retransmission/multi-range/unsorted fallback, plus single-pass outbound frame sizing/recovery/ACK/flight classification,
   receive-frame semantic preflight before multi-frame side effects, preallocated single-byte, single-, double-, triple-varint, fixed PATH, ACK_FREQUENCY, variable-payload, CRYPTO, STREAM, DATAGRAM, NEW_CONNECTION_ID, and close frame writes, and direct adaptive truncated packet-number
   encoding wired into 1-RTT ACK/STREAM exchange, indexed stream send/receive state with pre-reserved assume-capacity STREAM frame batches, preallocated receive-state clones, and empty non-FIN send no-ops, single-lookup flow creation and empty-index lookup skips,
   zero-consume skips, contiguous duplicate-overlap fast paths, conflict detection, offset reassembly, FIN, RESET_STREAM final-size validation, and STOP_SENDING
@@ -243,7 +330,10 @@ starts with deterministic parsers, serializers, preallocated fixed-width wire-in
   with one advisory BLOCKED emission per unchanged limit to avoid retry-loop
   packet storms and opt-in adaptive receive-window growth,
   stream-count flow control with MAX_STREAMS and STREAMS_BLOCKED handling plus
-  the same per-limit duplicate suppression for stream-count exhaustion,
+  the same per-limit duplicate suppression for stream-count exhaustion; peer
+  stream credit is returned only after both directions are terminal, including
+  acknowledgement of the local FIN/RESET, with early release requests flushed
+  automatically by the ACK receive path,
   protected 0-RTT long-header packet seal/open and preallocated frame datagram helpers with
   0-RTT packet-type restrictions, an indexed owning origin+ALPN session cache with
   cached transactional LRU eviction and stats, expired-hit eviction, independent TLS session copies, stable
@@ -347,7 +437,7 @@ starts with deterministic parsers, serializers, preallocated fixed-width wire-in
   1-RTT PING+PADDING probe packets wired to ACK/loss feedback with
   ordinary-send and recovery-retransmit size enforcement from the currently
   validated path MTU,
-  an indexed 1-RTT recovery queue with empty-payload preflight, single-lookup group/packet insertion, empty-index group/packet checks, cached newest retransmission packet numbers, and aggregate queue stats for PTO plus packet-threshold and time-threshold
+  a compact ordered 1-RTT recovery queue with empty-payload preflight, monotonic packet-number insertion fast paths, cached newest retransmission packet numbers, and aggregate queue stats for PTO plus packet-threshold and time-threshold
   retransmission of unacknowledged ack-eliciting frame payloads with single-pass
   ACK-range retirement, no-op ACK short-circuiting, O(1) tail ACK/copy removal and middle retransmission-copy retirement,
   single-pass sent-packet tracker stats, exact frame wire-length prediction,
@@ -362,8 +452,9 @@ starts with deterministic parsers, serializers, preallocated fixed-width wire-in
   opt-in Linux `UDP_GRO` receive coalescing with shared zero-copy segment
   ownership, preallocated 1-RTT frame payload encoding, in-place current-key 1-RTT decryption, reusable frame scratch,
   strict wire-order low-peak batch servicing, and bounded power-of-two
-  recovery-payload reuse with allocation-free ACK-time recycling, per-class
-  depth limits, and a global idle-byte cap,
+  recovery-payload reuse with allocation-free ACK-time recycling, four direct
+  per-class slots, payload-intrusive overflow free lists, and a global
+  idle-byte cap that lets the active size class absorb a complete ACK burst,
   endpoint-level connection-ID routing with single-probe registration and empty-length unregister skips,
   max-length-cached short-header dispatch with validated-key construction, empty-length long-header skips, unroutable zero-DCID long-header drops and static-key token derivation primitives for stable multi-connection
   demultiplexing wired into raw UDP receive routing and 1-RTT connection
@@ -375,12 +466,24 @@ starts with deterministic parsers, serializers, preallocated fixed-width wire-in
   transactional local-CID/reset-token issuance,
   transport/application CONNECTION_CLOSE state including frame-payload, ACK, ACK_FREQUENCY negotiation, DATAGRAM negotiation, stream-limit/state/flow-control/final-size/data-conflict, server-only frame, and selected semantic error close emission, indexed PATH_CHALLENGE/PATH_RESPONSE validation state with preallocated clone copies and empty-outstanding challenge/response lookup skips, single-lookup duplicate challenge/response suppression, and caller-storage batch drains/sends wired into 1-RTT,
   peer-migration helpers and authenticated non-probing packet receive handling
-  that honor disable_active_migration, preserve congestion/PMTU state for NAT
-  rebinding, apply a server preferred_address by selecting its CID/reset token
-  and peer IP/port, reset anti-amplification and PMTUD path state, queue PATH_CHALLENGE with single-lookup outstanding indexing, retain cursor-backed PATH_RESPONSE targets,
+  that honor disable_active_migration, preserve RTT while resetting
+  tuple-local congestion/PMTU/ECN/PTO state for NAT rebinding, apply a server
+  preferred_address by selecting its CID/reset token
+  and peer IP/port, apply server-only full-datagram anti-amplification
+  accounting, retain fixed-capacity per-candidate tuple budgets across
+  probing-to-active transitions, emit 1200-byte path-validation datagrams,
+  reset PMTUD path state, queue PATH_CHALLENGE with prepare/send/commit
+  transactional indexing, retain cursor-backed PATH_RESPONSE targets,
   cache path-validation deadlines, skip early timeout scans, requeue timed-out
-  challenges with single-lookup indexing, expose failed validation attempts in connection stats, and
-  validate the new path on a matching PATH_RESPONSE,
+  challenges with single-lookup indexing, atomically preflight timeout retry
+  storage, restore the last validated address/CID after validation failure,
+  retain exact PATH_RESPONSE source tuples across migration, select a valid
+  replacement when Retire Prior To removes the current peer CID, expose failed validation attempts in connection stats, and
+  validate the new path on a matching PATH_RESPONSE, retire redundant
+  same-path challenges and timers after that success, while sent-packet path
+  epochs keep delayed old-path ACK/loss from changing the active path's RTT,
+  congestion window, bytes in flight, PTO backoff, ECN, PMTU, or persistent
+  congestion state without dropping reliable retransmission ownership,
   batch PATH_CHALLENGE timeout deadline recomputation across burst expirations,
   streaming qlog 0.4 observability with RFC 7464 JSON-SEQ framing, strict JSON
   escaping, caller-visible sink failures, allocation-free event views, complete
@@ -399,7 +502,7 @@ starts with deterministic parsers, serializers, preallocated fixed-width wire-in
   failures,
   plus a blocking UDP endpoint runtime for frame datagrams with a
   `std.Io.async` concurrent receive helper
-- WebSocket handshakes with Host authority, body-framing rejection, duplicate-subprotocol and nonce validation, frame masking, strict frame/control
+- WebSocket handshakes with Host authority, body-framing rejection, duplicate-subprotocol and nonce validation, shared HTTP/1/RFC 8441 header policy isolated under `runtime/handshake`, HTTP/1 client attempts that preserve rejected status/headers/trailers/bounded body while legacy connect helpers retain `InvalidResponse`, two-phase TCP/Unix/WSS server admission that exposes path, headers, and authenticated TLS metadata before 101 and can accept with custom fields or return a closing 3xx-5xx response, plus RFC 8441 per-stream pending admission that exposes CONNECT metadata before 200 and can accept with custom fields or reject without closing sibling HTTP/2 streams, frame masking, strict frame/control
   validation including control/continuation RSV rejection, typed close-frame parse/write helpers and close payload checks, fragmented message assembly with aggregate
   message-size limits, automatic active-state PING→PONG and close echo/completed-close short-circuit handling plus tungstenite-style data-send/read suppression after receiving Close, deadline-aware frame reads and bounded graceful-close waits that surface peer close details without discarding in-flight application frames,
   caller-buffer frame/message receive for allocation-free uncompressed
@@ -423,7 +526,14 @@ starts with deterministic parsers, serializers, preallocated fixed-width wire-in
   Host/port synthesis, shared verified TLS client transport plus opt-in
   Ed25519/ECDSA/SM2 client identities, native TLS 1.3 WSS listeners with
   optional client authentication and concurrent serving, and RFC 8441
-  WebSocket-over-HTTP/2 adapters that negotiate `:protocol = websocket`,
+  WebSocket-over-HTTP/2 adapters with per-stream two-phase server admission and
+  client attempt results that preserve non-2xx status/headers/bounded body/trailers, plus equivalent
+  RFC 9220 client attempts (including caller-owned session restoration after a
+  fully drained rejected stream), pending admission before the HTTP/3 200
+  response that restores caller-owned server sessions after rejection or
+  abandonment, and HTTP/3 rejection helpers that send DATA/trailers with
+  automatic Content-Length while preserving sibling-stream reuse,
+  negotiate `:protocol = websocket`,
   subprotocols, permessage-deflate, reject duplicate/legacy critical handshake
   fields, and use transport-derived `:scheme` over an h2 DATA tunnel
 - MQTT 3.1.1/5 fixed headers, CONNECT/CONNACK with Last Will,
@@ -491,7 +601,9 @@ starts with deterministic parsers, serializers, preallocated fixed-width wire-in
   material plus negotiated cipher-suite/hash metadata on vail-backed HTTP/1
   servers, HTTP/2, WebSocket, and MQTT connections, including ordinary WSS
   clients that opt into vail without presenting a certificate, explicit
-  application traffic-key rotation plus update counters, and opt-in native MQTT TLS ALPN negotiation
+  application traffic-key rotation plus update counters, authenticated
+  close-notify EOF with explicit write-half shutdown and strict bare-EOF /
+  partial-record truncation errors, and opt-in native MQTT TLS ALPN negotiation
   with the selected protocol exposed per
   connection, and
   MQTT-over-WebSocket client/server adapters for MQTT 3.1.1 and MQTT 5, with
@@ -508,20 +620,36 @@ starts with deterministic parsers, serializers, preallocated fixed-width wire-in
   TLS authority verification, and
   QoS 2 exactly-once publish handshakes with unsolicited PUBREL rejection and negative-PUBREC receive-slot release, including MQTT v5 PUBACK/PUBREC/PUBREL/PUBCOMP reason-code/property validation with minimal reason-only encoding, dedicated UNSUBACK parsing, and negative publish acknowledgement propagation
 - WebTransport capsules, unidirectional stream headers, CONNECT metadata with client-bidi session-id validation and `Capsule-Protocol` request/response advertisement, and
-  datagram mapping, session lifecycle/counter state, protected-runtime
+  stack-first CONNECT metadata assembly with exact allocation fallback rather
+  than the former 57/62 additional-field ceilings, while
+  `SETTINGS_MAX_FIELD_SECTION_SIZE` remains the interoperable byte budget, and
+  datagram mapping with shared stack-first endpoint encoding and exact-size
+  allocation fallback under `webtransport/runtime/datagram/`, session
+  lifecycle/counter state, protected-runtime
   long-lived Extended CONNECT setup with bidirectional caller-buffer Capsule
   DATA, incremental WT_DRAIN_SESSION/WT_CLOSE_SESSION events, detailed and
   clean-FIN close, post-drain same-Session DATAGRAM traffic, and post-close
   operation rejection, plus a cleartext
-  development runtime over the HTTP/3 dev transport, a protected QUIC 1-RTT
+  development runtime over the HTTP/3 dev transport with STREAM/HEADERS/body/
+  cancellation send orchestration and retained DATAGRAM cloning grouped under
+  `http3/runtime/development/send.zig`, a protected QUIC 1-RTT
   runtime over protected HTTP/3 with automatic WebTransport/H3 DATAGRAM
-  SETTINGS advertisement and negotiation checks, and a handshake-backed
+  SETTINGS advertisement and negotiation checks, plus packet-order CONNECT
+  DATAGRAM routing/terminal/error handling under
+  `http3/runtime/datagram/routing.zig`, and a handshake-backed
   protected runtime that uses QUIC 1-RTT DATAGRAM send/receive queues with
   WebTransport payload-size accounting, batch receive helpers, modern
   `0x41 + Session ID` bidirectional and `0x54 + Session ID` unidirectional
   stream association, real-handshake bidi/uni open/send/receive with
   per-session limits, prevalidated transactional cross-stream packet-batch writes that
-  commit only the socket-visible prefix, shared HTTP/3/WT stream-ID allocation, and
+  commit only the socket-visible prefix, with indexed O(n) duplicate validation
+  and stable fixed-capacity priority selection under `runtime/stream/`, shared
+  HTTP/3/WT stream-ID allocation, and
+  CONNECT attempts across development, lightweight protected, authenticated,
+  and stateful protected runtimes that retain bounded non-2xx DATA/trailers,
+  paired with complete server rejection entities and stream-local cancellation
+  on overflow; authenticated blocking/dispatcher paths additionally provide
+  caller-owned client/server session restoration and sibling reuse, and
   WebTransport-style `stats`/`getStats` access to the underlying QUIC 1-RTT
   counters, plus an externally negotiated-key stateful runtime with the same
   recovery, congestion/flow-control, associated-stream, cancellation, and
@@ -538,9 +666,10 @@ starts with deterministic parsers, serializers, preallocated fixed-width wire-in
 The lower protocol layers remain codec-first so they can be fuzzed and embedded,
 but practical runtime APIs are being added in priority order. HTTP/1 now has
 blocking HTTP and HTTPS client/server-side transport helpers, HTTP/2 covers both
-prior-knowledge h2c and RFC h2c Upgrade client/server flows, WebSocket includes a
-blocking TCP runtime, and WebSocket clients also support WSS over the shared TLS
-client transport; QUIC has Initial
+prior-knowledge h2c and RFC h2c Upgrade client/server flows, WebSocket includes
+blocking TCP, Unix-domain and native TLS runtimes with pre-101 application
+admission, and WebSocket clients also support WSS over the shared TLS client
+transport; QUIC has Initial
 protection primitives plus a blocking UDP endpoint runtime for datagram/frame
 transport with endpoint-level Version Negotiation responses for unsupported
 long-header versions; MQTT has blocking TCP and WebSocket client/server
@@ -682,16 +811,17 @@ zig build interop-quic-quic-go -Doptimize=ReleaseFast
 # --tls before case IDs to run the same gate over native TLS 1.3 WSS.
 zig build interop-websocket-autobahn -Doptimize=ReleaseFast
 zig build interop-websocket-autobahn -Doptimize=ReleaseFast -- --tls
+# Drive the browser WebSocket API from Chrome against netz. The gate checks
+# Origin rejection/acceptance, subprotocol and permessage-deflate negotiation,
+# compressed text, binary data, automatic Pong, and a clean Close handshake.
+zig build interop-websocket-chrome -Doptimize=ReleaseFast
+zig build interop-websocket-chrome -Doptimize=ReleaseFast -- --tls
 zig build run-websocket-echo
 zig build run-http3-fetch
 zig build run-http3-fetch -- https://robotics.bytedance.com/ --verify
 zig build run-http3-fetch -- https://robotics.bytedance.com/ --verify --head
 # Optional diagnostic: performs a preliminary HTTPS HEAD Alt-Svc discovery.
 zig build run-http3-fetch -- https://robotics.bytedance.com/ --verify --discover
-# Linux only: raw std.os.linux.IoUring-backed clients
-zig build run-linux-io-uring-http1
-zig build run-linux-io-uring-http1-server
-zig build run-linux-io-uring-websocket
 ```
 
 `run-http3-handshake` is the self-contained local HTTP/3 counterpart to the
@@ -723,6 +853,7 @@ zig build bench-http3-handshake-transfer -Doptimize=ReleaseFast -- --iterations=
 zig build bench-http3-capsule -Doptimize=ReleaseFast
 zig build bench-http3-qpack -Doptimize=ReleaseFast
 zig build bench-websocket-frame -Doptimize=ReleaseFast
+zig build bench-websocket-receive-buffer -Doptimize=ReleaseFast
 zig build bench-mqtt-router -Doptimize=ReleaseFast
 zig build bench-quic-short-packet -Doptimize=ReleaseFast
 zig build bench-quic-padding-parse -Doptimize=ReleaseFast
@@ -731,8 +862,11 @@ zig build bench-quic-udp-batch -Doptimize=ReleaseFast
 zig build bench-quic-handshake-stream -Doptimize=ReleaseFast -- --iterations=3 --transfer-bytes=67108864 --streams=1 --verbose
 zig build bench-quic-handshake-stream -Doptimize=ReleaseFast -- --iterations=3 --transfer-bytes=67108864 --streams=4 --verbose
 taskset -c 0 zig build bench-quic-handshake-stream -Doptimize=ReleaseFast -- --mode=handshake --iterations=200 --skip-server-verification
+zig build bench-quic-handshake-stream -Doptimize=ReleaseFast -- --mode=lifecycle-churn --iterations=4096 --streams=16 --loss-pct=5
+zig build bench-quic-handshake-stream -Doptimize=ReleaseFast -- --mode=lifecycle-churn --iterations=4096 --streams=16 --reorder-every=5
 zig build bench-quic-one-rtt-send -Doptimize=ReleaseFast
 zig build bench-quic-one-rtt-receive -Doptimize=ReleaseFast
+taskset -c 0 zig build bench-quic-one-rtt-receive -Doptimize=ReleaseFast -- --mode=visitor --frame=stream --warmup=200 --iterations=5000
 zig build bench-quic-ack-ranges -Doptimize=ReleaseFast
 zig build bench-quic-stream-window -Doptimize=ReleaseFast
 ```
@@ -760,7 +894,10 @@ The aggregate `bench` step runs the current protocol microbenchmarks:
 - HTTP/3 QPACK dynamic-table churn with single-allocation name/value ownership,
 - WebSocket masked frame encoding with allocating, caller-buffer, and
   header-only streaming paths, plus retained no-context-takeover
-  permessage-deflate throughput and wire-size reporting,
+  permessage-deflate throughput and wire-size reporting; stream transports
+  share nested `runtime/message/` helpers for bounded-slab receive growth,
+  compressed-fragment partitioning, Close-state send admission, and owned
+  message finalization,
 - WebSocket persistent 4 KiB binary echo over one real upgraded connection,
   using caller-buffer receive and explicit in-place client masking, plus a
   negotiated permessage-deflate mode with logical-throughput reporting,
@@ -769,6 +906,9 @@ The aggregate `bench` step runs the current protocol microbenchmarks:
   and linear-time overlapping-subscription broker flush plans,
 - QUIC AES-128-GCM and ChaCha20-Poly1305 short-packet sealing with
   caller-provided storage versus the allocating convenience wrapper,
+- bounded QUIC DATAGRAM receive queuing in an O(1) ring under
+  `quic/one_rtt/datagram_queue.zig`, with exact one-time capacity reservation,
+  newest-data retention, packet-number rollback, and explicit payload ownership,
 - QUIC long PADDING run parsing for Initial padding and PMTUD/probe payloads,
 - QUIC-LB encrypted server-ID extraction with the draft's three-pass
   load-balancer optimization,
@@ -780,7 +920,12 @@ The aggregate `bench` step runs the current protocol microbenchmarks:
   coalesced receive versus plain per-datagram receive,
 - QUIC 1-RTT stateful sequential send versus stateful batched protection with
   reusable scratch, full recovery/flow accounting, and UDP GSO/sendmmsg
-  submission,
+  submission, with shared `one_rtt/frame_traits.zig` classification for
+  ACK-eliciting/in-flight/retransmission/ECN/path-validation/HANDSHAKE_DONE/ACK
+  watermark and STREAM-byte metadata,
+- stateless QUIC 1-RTT single-packet sizing and caller-buffer send with direct
+  frame encoding into the final packet's plaintext region followed by in-place
+  AEAD, while the ownership wrapper performs one exact packet allocation,
 - end-to-end QUIC 1-RTT UDP_GRO owning-batch cursor receive versus per-packet receive,
   including decryption, frame parsing, state application, and cleanup, plus a
   single-datagram in-place service path for state-only event loops.
@@ -839,18 +984,49 @@ var frame = try ws.receiveFrame();
 defer frame.deinit(allocator);
 ```
 
+Servers can inspect and reject the HTTP Upgrade before sending 101:
+
+```zig
+var pending = try server.receiveUpgradeRequest(.{});
+var pending_open = true;
+defer if (pending_open) pending.deinit();
+
+if (!std.mem.eql(u8, pending.target(), "/chat") or
+    !std.mem.eql(
+        u8,
+        pending.header("Authorization") orelse "",
+        "Bearer example-token",
+    ))
+{
+    try pending.reject(401, "Unauthorized", &.{
+        .{ .name = "WWW-Authenticate", .value = "Bearer" },
+    }, "authentication required\n");
+    pending_open = false;
+    return;
+}
+
+var ws = try pending.acceptWithHeaders(&.{
+    .{ .name = "X-Admission", .value = "accepted" },
+});
+pending_open = false;
+defer ws.close();
+```
+
+The pending value owns the transport until an outcome succeeds. TCP, Unix, and
+WSS listeners share this API; WSS additionally exposes verified peer
+certificates and negotiated cipher/hash metadata during admission.
+
 The HTTP and WebSocket URI helpers synthesize Host / `:authority` / `:scheme`
 from the URI and can connect to host names, IPv4 literals, and bracketed IPv6
 literals such as `http://[::1]:8080/` and `ws://[::1]:8080/chat`.
 
 On Zig 0.16, `std.Io.Uring` exists but its `std.Io.net` networking hooks are
-still unavailable. The portable runtimes therefore use the `std.Io` abstraction
-through `netz.runtime.Backend.initAuto(.evented_then_threaded)`, which keeps
-protocol modules on the `std.Io` abstraction and falls back to `std.Io.Threaded`
-when the pinned Zig stdlib cannot compile/use Evented networking. Linux-only
-HTTP/1 and cleartext WebSocket helpers (`requestUriLinuxIoUring` /
-`connectUriLinuxIoUring`) remain available for raw `std.os.linux.IoUring`
-experiments on IP-literal URIs; the Linux examples demonstrate those paths.
+still unavailable. All protocol runtimes nevertheless stay on the `std.Io`
+abstraction: `netz.runtime.Backend.initAuto(.zio_then_threaded)` uses zio's
+complete `std.Io` implementation (io_uring with automatic epoll fallback on
+Linux, plus portable backends elsewhere), and falls back to `std.Io.Threaded`
+if zio cannot initialize. Neither zio nor OS-specific rings leak into the HTTP,
+WebSocket, QUIC, or other protocol APIs.
 
 Handshake-backed WebTransport sessions expose the negotiated DATAGRAM budget so
 callers can avoid sending a payload the underlying QUIC peer will reject:

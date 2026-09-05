@@ -137,6 +137,16 @@ pub const StreamState = struct {
 /// the WebTransport SETTINGS limits and prevent HTTP/3 critical/request stream
 /// IDs from being treated as session streams.
 pub const StreamRegistry = struct {
+    const IndexEntry = struct {
+        position: usize,
+        last_batch_epoch: u64 = 0,
+    };
+
+    pub const BatchMark = struct {
+        stream: *StreamState,
+        first: bool,
+    };
+
     allocator: std.mem.Allocator,
     session_id: webtransport.SessionId,
     role: EndpointRole,
@@ -151,7 +161,8 @@ pub const StreamRegistry = struct {
     opened_peer_bidi: u64 = 0,
     opened_peer_uni: u64 = 0,
     streams: std.ArrayList(StreamState) = .empty,
-    index: std.AutoHashMapUnmanaged(u62, usize) = .empty,
+    index: std.AutoHashMapUnmanaged(u62, IndexEntry) = .empty,
+    batch_epoch: u64 = 0,
     /// Last productive stream for the incremental whichever-ready reader.
     /// Stable IDs remain valid when registry storage reallocates.
     incremental_poll_cursor: ?u62 = null,
@@ -325,9 +336,61 @@ pub const StreamRegistry = struct {
     }
 
     pub fn get(self: *StreamRegistry, stream_id: u62) ?*StreamState {
-        const position = self.index.get(stream_id) orelse return null;
+        const entry = self.index.get(stream_id) orelse return null;
+        const position = entry.position;
         if (position >= self.streams.items.len) return null;
         return &self.streams.items[position];
+    }
+
+    /// Start a transient batch-membership generation. Wrap is practically
+    /// unreachable, but clearing the private marks keeps the API correct even
+    /// after every nonzero generation has been consumed.
+    pub fn beginBatchEpoch(self: *StreamRegistry) u64 {
+        self.batch_epoch +%= 1;
+        if (self.batch_epoch == 0) {
+            var values = self.index.valueIterator();
+            while (values.next()) |entry| entry.last_batch_epoch = 0;
+            self.batch_epoch = 1;
+        }
+        return self.batch_epoch;
+    }
+
+    /// Mark one registered stream in `epoch` and report whether this is its
+    /// first occurrence. Used by runtime batching to validate duplicates and
+    /// track selected inputs without a second temporary hash set.
+    pub fn markForBatch(
+        self: *StreamRegistry,
+        stream_id: u62,
+        epoch: u64,
+    ) ?BatchMark {
+        if (epoch == 0 or epoch != self.batch_epoch) return null;
+        const entry = self.index.getPtr(stream_id) orelse return null;
+        if (entry.position >= self.streams.items.len or
+            self.streams.items[entry.position].stream_id != stream_id)
+        {
+            return null;
+        }
+        const first = entry.last_batch_epoch != epoch;
+        entry.last_batch_epoch = epoch;
+        return .{
+            .stream = &self.streams.items[entry.position],
+            .first = first,
+        };
+    }
+
+    pub fn markedForBatch(
+        self: *StreamRegistry,
+        stream_id: u62,
+        epoch: u64,
+    ) ?bool {
+        if (epoch == 0 or epoch != self.batch_epoch) return null;
+        const entry = self.index.get(stream_id) orelse return null;
+        if (entry.position >= self.streams.items.len or
+            self.streams.items[entry.position].stream_id != stream_id)
+        {
+            return null;
+        }
+        return entry.last_batch_epoch == epoch;
     }
 
     /// Update the application-visible send priority. Receive-only directions
@@ -378,7 +441,7 @@ pub const StreamRegistry = struct {
         self: *StreamRegistry,
         stream_id: u62,
     ) void {
-        const position = self.index.get(stream_id) orelse return;
+        const position = (self.index.get(stream_id) orelse return).position;
         std.debug.assert(position + 1 == self.streams.items.len);
         const stream_state = self.streams.items[position];
         std.debug.assert(!stream_state.locally_initiated);
@@ -480,7 +543,7 @@ pub const StreamRegistry = struct {
             direction,
             locally_initiated,
         ));
-        slot.value_ptr.* = position;
+        slot.value_ptr.* = .{ .position = position };
         return &self.streams.items[position];
     }
 };
@@ -532,6 +595,41 @@ test "WebTransport stream priority validates send direction and lifecycle" {
         error.UnknownStream,
         registry.setPriority(100, 1),
     );
+}
+
+test "WebTransport stream registry batch epochs track membership" {
+    var registry = try StreamRegistry.init(
+        std.testing.allocator,
+        .init(0),
+        .client,
+        .{},
+    );
+    defer registry.deinit();
+    const first = (try registry.openLocal(.bidirectional)).stream_id;
+    const second = (try registry.openLocal(.bidirectional)).stream_id;
+
+    const initial = registry.beginBatchEpoch();
+    try std.testing.expect(registry.markForBatch(first, initial).?.first);
+    try std.testing.expect(!registry.markForBatch(first, initial).?.first);
+    try std.testing.expectEqual(false, registry.markedForBatch(
+        second,
+        initial,
+    ).?);
+    try std.testing.expect(registry.markForBatch(999, initial) == null);
+
+    const next = registry.beginBatchEpoch();
+    try std.testing.expect(next != initial);
+    try std.testing.expectEqual(false, registry.markedForBatch(first, next).?);
+    try std.testing.expect(registry.markForBatch(first, next).?.first);
+
+    registry.batch_epoch = std.math.maxInt(u64);
+    const wrapped = registry.beginBatchEpoch();
+    try std.testing.expectEqual(@as(u64, 1), wrapped);
+    try std.testing.expectEqual(
+        false,
+        registry.markedForBatch(first, wrapped).?,
+    );
+    try std.testing.expect(registry.markForBatch(first, wrapped).?.first);
 }
 
 test "WebTransport local stream preflight commits without allocation" {

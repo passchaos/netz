@@ -16,9 +16,11 @@ const tls_record = vail.tls.record;
 pub const Error = record_io.Error || tls_record.Error ||
     vail.tls.secret.Error || error{
     ConnectionClosed,
+    InvalidTlsAlert,
     InvalidKeyUpdate,
     KeyUpdateLimitExceeded,
     KeyUpdateRequestPending,
+    PeerTlsAlert,
     UnexpectedTlsContent,
 };
 
@@ -58,7 +60,10 @@ pub const Stream = struct {
     // RFC 8446's ordering without deadlocking on an external protocol mutex.
     peer_update_response_pending: std.atomic.Value(bool) = .init(false),
     write_mutex: std.Io.Mutex = .init,
-    closed: bool = false,
+    peer_close_notify_received: bool = false,
+    peer_eof_without_notify: bool = false,
+    close_notify_sent: bool = false,
+    failed: bool = false,
 
     pub fn init(
         read_keys: tls_record.Keys,
@@ -128,32 +133,49 @@ pub const Stream = struct {
                 }
                 return count;
             }
-            if (self.closed) return error.ConnectionClosed;
+            if (self.peer_close_notify_received) return 0;
+            if (self.peer_eof_without_notify) return error.UnexpectedEof;
+            if (self.failed) return error.ConnectionClosed;
 
             var encoded: [record_io.max_record_len]u8 = undefined;
             const record_bytes = if (deadline) |value|
-                try record_io.readRecordWithDeadline(
+                record_io.readRecordWithDeadline(
                     io,
                     stream,
                     &encoded,
                     value,
                 )
             else
-                try record_io.readRecord(io, stream, &encoded);
+                record_io.readRecord(io, stream, &encoded);
+            const authenticated_record = record_bytes catch |err| {
+                if (err == error.UnexpectedEof) {
+                    self.peer_eof_without_notify = true;
+                } else if (err != error.Timeout and err != error.Canceled) {
+                    self.failed = true;
+                }
+                return err;
+            };
             var opened_storage: [
                 record_io.max_plaintext_len + 1
             ]u8 = undefined;
-            const opened = try self.read_keys.open(
+            const opened = self.read_keys.open(
                 self.read_sequence,
-                record_bytes,
+                authenticated_record,
                 &opened_storage,
-            );
-            self.read_sequence = try record_io.nextSequence(
+            ) catch |err| {
+                self.failed = true;
+                return err;
+            };
+            self.read_sequence = record_io.nextSequence(
                 self.read_sequence,
-            );
+            ) catch |err| {
+                self.failed = true;
+                return err;
+            };
             switch (opened.content_type) {
                 tls_record.content_type_application_data => {
                     if (self.post_handshake_len != 0) {
+                        self.failed = true;
                         return error.InvalidKeyUpdate;
                     }
                     // Empty records are valid TLS padding/noise and are not
@@ -173,21 +195,75 @@ pub const Stream = struct {
                     return count;
                 },
                 tls_record.content_type_alert => {
-                    self.closed = true;
-                    return error.ConnectionClosed;
+                    if (self.post_handshake_len != 0) {
+                        self.failed = true;
+                        return error.InvalidKeyUpdate;
+                    }
+                    if (try self.consumeAlert(
+                        opened_storage[0..opened.len],
+                    )) return 0;
+                    continue;
                 },
                 tls_record.content_type_handshake => {
-                    if (opened.len == 0) return error.InvalidKeyUpdate;
-                    try self.consumePostHandshake(
+                    if (opened.len == 0) {
+                        self.failed = true;
+                        return error.InvalidKeyUpdate;
+                    }
+                    self.consumePostHandshake(
                         io,
                         stream,
                         opened_storage[0..opened.len],
-                    );
+                    ) catch |err| {
+                        self.failed = true;
+                        return err;
+                    };
                     continue;
                 },
-                else => return error.UnexpectedTlsContent,
+                else => {
+                    self.failed = true;
+                    return error.UnexpectedTlsContent;
+                },
             }
         }
+    }
+
+    /// True only after an authenticated TLS close_notify was received. A raw
+    /// transport EOF and a truncated record never set this state.
+    pub fn receivedCloseNotify(self: *const Stream) bool {
+        return self.peer_close_notify_received;
+    }
+
+    pub fn shouldSendCloseNotify(self: *const Stream) bool {
+        return !self.close_notify_sent and !self.failed;
+    }
+
+    fn consumeAlert(self: *Stream, bytes: []const u8) Error!bool {
+        // RFC 8446 requires exactly one two-byte Alert message per record.
+        if (bytes.len != 2) {
+            self.failed = true;
+            return error.InvalidTlsAlert;
+        }
+        const level = bytes[0];
+        const description = bytes[1];
+        if (level != 1 and level != 2) {
+            self.failed = true;
+            return error.InvalidTlsAlert;
+        }
+        // RFC 8446 close_notify is the sole authenticated EOF signal. Keep
+        // receive and send directions separate so the application can finish
+        // its response and send a reciprocal close_notify.
+        if (description == 0) {
+            self.peer_close_notify_received = true;
+            return true;
+        }
+        // TLS 1.3 permits warning-level user_canceled before close_notify. It
+        // does not terminate the byte stream by itself.
+        if (level == 1 and description == 90) return false;
+        self.failed = true;
+        return if (level == 2)
+            error.PeerTlsAlert
+        else
+            error.InvalidTlsAlert;
     }
 
     fn consumePostHandshake(
@@ -257,7 +333,9 @@ pub const Stream = struct {
     ) Error!void {
         self.write_mutex.lockUncancelable(io);
         defer self.write_mutex.unlock(io);
-        if (self.closed) return error.ConnectionClosed;
+        if (self.close_notify_sent or self.failed) {
+            return error.ConnectionClosed;
+        }
         try self.respondToPeerUpdateUnlocked(io, stream);
         var offset: usize = 0;
         while (offset < bytes.len) {
@@ -287,7 +365,9 @@ pub const Stream = struct {
     ) Error!void {
         self.write_mutex.lockUncancelable(io);
         defer self.write_mutex.unlock(io);
-        if (self.closed) return error.ConnectionClosed;
+        if (self.close_notify_sent or self.failed) {
+            return error.ConnectionClosed;
+        }
         try self.respondToPeerUpdateUnlocked(io, stream);
         var first_offset: usize = 0;
         var second_offset: usize = 0;
@@ -334,7 +414,9 @@ pub const Stream = struct {
     ) Error!void {
         self.write_mutex.lockUncancelable(io);
         defer self.write_mutex.unlock(io);
-        if (self.closed) return error.ConnectionClosed;
+        if (self.close_notify_sent or self.failed) {
+            return error.ConnectionClosed;
+        }
         try self.respondToPeerUpdateUnlocked(io, stream);
         var part_index: usize = 0;
         var part_offset: usize = 0;
@@ -377,6 +459,8 @@ pub const Stream = struct {
     ) Error!void {
         self.write_mutex.lockUncancelable(io);
         defer self.write_mutex.unlock(io);
+        if (self.close_notify_sent) return;
+        if (self.failed) return error.ConnectionClosed;
         try self.respondToPeerUpdateUnlocked(io, stream);
         try self.writeRecord(
             io,
@@ -384,7 +468,7 @@ pub const Stream = struct {
             tls_record.content_type_alert,
             &.{ 1, 0 },
         );
-        self.closed = true;
+        self.close_notify_sent = true;
     }
 
     /// Send a TLS 1.3 KeyUpdate under the current write epoch, then rotate the
@@ -400,7 +484,9 @@ pub const Stream = struct {
     ) Error!void {
         self.write_mutex.lockUncancelable(io);
         defer self.write_mutex.unlock(io);
-        if (self.closed) return error.ConnectionClosed;
+        if (self.close_notify_sent or self.failed) {
+            return error.ConnectionClosed;
+        }
         if (request_peer_update and
             self.awaiting_peer_key_update.cmpxchgStrong(
                 false,
@@ -517,9 +603,251 @@ pub const Stream = struct {
         // fatal to framing; retaining the old counter would invite nonce reuse
         // if a caller incorrectly attempted to recover the connection.
         self.write_sequence = next_sequence;
-        try record_io.writeAll(io, stream, encoded[0..len]);
+        record_io.writeAll(io, stream, encoded[0..len]) catch |err| {
+            self.failed = true;
+            return err;
+        };
     }
 };
+
+fn testingRecordStream(
+    read_fill: u8,
+    write_fill: u8,
+) !Stream {
+    const suite = vail.tls.cipher_suite.Suite.aes_128_gcm_sha256;
+    var read_secret = try vail.tls.secret.Secret.init(
+        suite.hash(),
+        &([_]u8{read_fill} ** 32),
+    );
+    errdefer read_secret.deinit();
+    var write_secret = try vail.tls.secret.Secret.init(
+        suite.hash(),
+        &([_]u8{write_fill} ** 32),
+    );
+    errdefer write_secret.deinit();
+    var read_keys = try tls_record.Keys.derive(suite, read_secret);
+    errdefer read_keys.deinit();
+    var write_keys = try tls_record.Keys.derive(suite, write_secret);
+    errdefer write_keys.deinit();
+    return .init(
+        read_keys,
+        write_keys,
+        read_secret,
+        write_secret,
+    );
+}
+
+fn testingNetworkStreams(io: std.Io) ![2]net.Stream {
+    var listener = try (net.IpAddress{ .ip4 = .loopback(0) }).listen(
+        io,
+        .{ .reuse_address = true },
+    );
+    defer listener.deinit(io);
+    const first = try listener.socket.address.connect(
+        io,
+        .{ .mode = .stream },
+    );
+    errdefer first.close(io);
+    const second = try listener.accept(io);
+    return .{ first, second };
+}
+
+test "TLS record stream exposes authenticated close notify as EOF" {
+    var threaded = std.Io.Threaded.init(std.testing.allocator, .{});
+    defer threaded.deinit();
+    const io = threaded.io();
+    const streams = try testingNetworkStreams(io);
+    defer streams[0].close(io);
+    defer streams[1].close(io);
+
+    var sender = try testingRecordStream(0x22, 0x11);
+    defer sender.deinit();
+    var receiver = try testingRecordStream(0x11, 0x22);
+    defer receiver.deinit();
+
+    try sender.writeAll(io, streams[0], "body");
+    try sender.sendCloseNotify(io, streams[0]);
+    var buffer: [8]u8 = undefined;
+    const body_len = try receiver.read(io, streams[1], &buffer);
+    try std.testing.expectEqualStrings("body", buffer[0..body_len]);
+    try std.testing.expectEqual(
+        @as(usize, 0),
+        try receiver.read(io, streams[1], &buffer),
+    );
+    try std.testing.expect(receiver.receivedCloseNotify());
+    try std.testing.expectError(
+        error.ConnectionClosed,
+        sender.writeAll(io, streams[0], "late"),
+    );
+
+    // Receiving close_notify closes only the peer's write direction. The
+    // receiver may still finish its own application data before replying.
+    try receiver.writeAll(io, streams[1], "reply");
+    try receiver.sendCloseNotify(io, streams[1]);
+    const reply_len = try sender.read(io, streams[0], &buffer);
+    try std.testing.expectEqualStrings("reply", buffer[0..reply_len]);
+    try std.testing.expectEqual(
+        @as(usize, 0),
+        try sender.read(io, streams[0], &buffer),
+    );
+}
+
+test "TLS record stream rejects fatal and malformed alerts" {
+    const cases = [_]struct {
+        alert: [2]u8,
+        expected: anyerror,
+    }{
+        .{ .alert = .{ 2, 40 }, .expected = error.PeerTlsAlert },
+        .{ .alert = .{ 1, 40 }, .expected = error.InvalidTlsAlert },
+    };
+    for (cases) |case| {
+        var threaded = std.Io.Threaded.init(std.testing.allocator, .{});
+        defer threaded.deinit();
+        const io = threaded.io();
+        const streams = try testingNetworkStreams(io);
+        defer streams[0].close(io);
+        defer streams[1].close(io);
+        var sender = try testingRecordStream(0x22, 0x11);
+        defer sender.deinit();
+        var receiver = try testingRecordStream(0x11, 0x22);
+        defer receiver.deinit();
+
+        try sender.writeRecord(
+            io,
+            streams[0],
+            tls_record.content_type_alert,
+            &case.alert,
+        );
+        var byte: [1]u8 = undefined;
+        try std.testing.expectError(
+            case.expected,
+            receiver.read(io, streams[1], &byte),
+        );
+        try std.testing.expect(!receiver.receivedCloseNotify());
+        try std.testing.expectError(
+            error.ConnectionClosed,
+            receiver.read(io, streams[1], &byte),
+        );
+    }
+}
+
+test "TLS record stream accepts user canceled followed by close notify" {
+    var threaded = std.Io.Threaded.init(std.testing.allocator, .{});
+    defer threaded.deinit();
+    const io = threaded.io();
+    const streams = try testingNetworkStreams(io);
+    defer streams[0].close(io);
+    defer streams[1].close(io);
+    var sender = try testingRecordStream(0x22, 0x11);
+    defer sender.deinit();
+    var receiver = try testingRecordStream(0x11, 0x22);
+    defer receiver.deinit();
+
+    try sender.writeRecord(
+        io,
+        streams[0],
+        tls_record.content_type_alert,
+        &.{ 1, 90 },
+    );
+    try sender.writeRecord(
+        io,
+        streams[0],
+        tls_record.content_type_alert,
+        &.{ 1, 0 },
+    );
+    var byte: [1]u8 = undefined;
+    try std.testing.expectEqual(
+        @as(usize, 0),
+        try receiver.read(io, streams[1], &byte),
+    );
+    try std.testing.expect(receiver.receivedCloseNotify());
+}
+
+test "TLS record stream distinguishes socket EOF from record truncation" {
+    const cuts = [_]?usize{ null, 1, 4, 5, 10 };
+    for (cuts) |cut| {
+        var threaded = std.Io.Threaded.init(std.testing.allocator, .{});
+        defer threaded.deinit();
+        const io = threaded.io();
+        const streams = try testingNetworkStreams(io);
+        var sender_open = true;
+        defer if (sender_open) streams[0].close(io);
+        defer streams[1].close(io);
+        var sender = try testingRecordStream(0x22, 0x11);
+        defer sender.deinit();
+        var receiver = try testingRecordStream(0x11, 0x22);
+        defer receiver.deinit();
+
+        if (cut) |count| {
+            var encoded: [record_io.max_record_len]u8 = undefined;
+            const len = try sender.write_keys.seal(
+                sender.write_sequence,
+                tls_record.content_type_application_data,
+                "truncated",
+                &encoded,
+            );
+            try std.testing.expect(count < len);
+            try record_io.writeAll(io, streams[0], encoded[0..count]);
+        }
+        streams[0].close(io);
+        sender_open = false;
+
+        var byte: [1]u8 = undefined;
+        try std.testing.expectError(
+            if (cut == null) error.UnexpectedEof else error.TruncatedRecord,
+            receiver.read(io, streams[1], &byte),
+        );
+        try std.testing.expect(!receiver.receivedCloseNotify());
+        if (cut == null) {
+            try std.testing.expect(receiver.shouldSendCloseNotify());
+            try std.testing.expectError(
+                error.UnexpectedEof,
+                receiver.read(io, streams[1], &byte),
+            );
+        } else {
+            try std.testing.expect(!receiver.shouldSendCloseNotify());
+            try std.testing.expectError(
+                error.ConnectionClosed,
+                receiver.read(io, streams[1], &byte),
+            );
+        }
+    }
+}
+
+test "TLS record stream delivers authenticated data before later truncation" {
+    var threaded = std.Io.Threaded.init(std.testing.allocator, .{});
+    defer threaded.deinit();
+    const io = threaded.io();
+    const streams = try testingNetworkStreams(io);
+    var sender_open = true;
+    defer if (sender_open) streams[0].close(io);
+    defer streams[1].close(io);
+    var sender = try testingRecordStream(0x22, 0x11);
+    defer sender.deinit();
+    var receiver = try testingRecordStream(0x11, 0x22);
+    defer receiver.deinit();
+
+    try sender.writeAll(io, streams[0], "complete");
+    var encoded: [record_io.max_record_len]u8 = undefined;
+    const len = try sender.write_keys.seal(
+        sender.write_sequence,
+        tls_record.content_type_application_data,
+        "truncated",
+        &encoded,
+    );
+    try std.testing.expect(len > 8);
+    try record_io.writeAll(io, streams[0], encoded[0..8]);
+    streams[0].close(io);
+    sender_open = false;
+
+    var buffer: [16]u8 = undefined;
+    const count = try receiver.read(io, streams[1], &buffer);
+    try std.testing.expectEqualStrings("complete", buffer[0..count]);
+    try std.testing.expectError(
+        error.TruncatedRecord,
+        receiver.read(io, streams[1], &buffer),
+    );
+}
 
 test "TLS record stream reassembles and bounds peer KeyUpdate messages" {
     const suite = vail.tls.cipher_suite.Suite.aes_256_gcm_sha384;

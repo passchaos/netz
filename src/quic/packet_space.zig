@@ -348,12 +348,13 @@ pub const SentPacket = struct {
     sent_time_ns: ?u64 = null,
     pmtu_probe_size: ?usize = null,
     pmtu_probe_epoch: u32 = 0,
-    /// Path-generation marker for ordinary PMTU evidence.
+    /// Path-generation marker for path-local recovery and PMTU evidence.
     ///
     /// PMTU black-hole heuristics reset when the peer address changes, but ACK
     /// and loss processing can still drain old-path packets afterward. Keeping
-    /// the path epoch per sent packet lets `one_rtt` ignore stale ordinary
-    /// MTU-sized ACK/loss signals without special-casing probe identity.
+    /// the path epoch per sent packet lets `one_rtt` retire and retransmit old
+    /// packets without feeding their ACK/loss/RTT signals into the replacement
+    /// path's congestion controller.
     pmtu_path_epoch: u32 = 0,
     largest_acknowledged_sent: ?u64 = null,
     lost_generation: u32 = 0,
@@ -423,6 +424,11 @@ pub const SentPacketTracker = struct {
     largest_acknowledged: ?u64 = null,
     latest_ecn_counts: quic.EcnCounts = .{ .ect0_count = 0, .ect1_count = 0, .ecn_ce_count = 0 },
     ecn_largest_acknowledged: ?u64 = null,
+    /// Highest ECN-capable packet acknowledged so far. Comparing this
+    /// monotonic watermark with `ecn_largest_acknowledged` answers whether a
+    /// later cumulative ACK_ECN needs a baseline-only update without scanning
+    /// retained packet metadata (which may already have been compacted).
+    largest_acknowledged_ect: ?u64 = null,
     /// Deprecated compatibility latch preserved for older callers that
     /// explicitly disabled ECN validation on the packet-number-space tracker.
     ///
@@ -705,6 +711,7 @@ pub const SentPacketTracker = struct {
         const index = self.findPacketIndex(packet_number) orelse return false;
         if (!self.packets.items[index].acknowledged) {
             self.packets.items[index].acknowledged = true;
+            self.observeAcknowledgedEct(self.packets.items[index]);
             if (self.latest_ack_eliciting_in_flight_index == index) {
                 self.recomputeLatestAckElicitingInFlight();
             }
@@ -766,6 +773,12 @@ pub const SentPacketTracker = struct {
         ack_eliciting_packets: usize = 0,
         bytes: usize = 0,
         probe_bytes: usize = 0,
+        /// Path-local subset of the totals above. Protocol bookkeeping still
+        /// consumes every ACK/loss, while congestion state consumes only the
+        /// currently selected path epoch.
+        current_path_bytes: usize = 0,
+        current_path_probe_bytes: usize = 0,
+        current_path_ack_eliciting_packets: usize = 0,
         ect0_packets: usize = 0,
         ect1_packets: usize = 0,
         current_path_ect0_packets: usize = 0,
@@ -782,6 +795,10 @@ pub const SentPacketTracker = struct {
         active_pmtu_probe_epoch: u32 = 0,
         largest_pmtu_acked_packet_number: ?u64 = null,
         largest_pmtu_acked_datagram_size: ?usize = null,
+        current_path_largest_packet_number: ?u64 = null,
+        current_path_largest_sent_time_ns: ?u64 = null,
+        current_path_largest_nonprobe_packet_number: ?u64 = null,
+        current_path_largest_nonprobe_sent_time_ns: ?u64 = null,
         largest_nonprobe_packet_number: ?u64 = null,
         largest_nonprobe_datagram_size: ?usize = null,
         largest_nonprobe_sent_time_ns: ?u64 = null,
@@ -792,6 +809,35 @@ pub const SentPacketTracker = struct {
             if (self.largest_packet_number == null or packet_number > self.largest_packet_number.?) {
                 self.largest_packet_number = packet_number;
                 self.largest_sent_time_ns = sent_time_ns;
+            }
+        }
+
+        fn observeCurrentPath(
+            self: *AckResult,
+            packet_number: u64,
+            sent_time_ns: ?u64,
+        ) void {
+            if (self.current_path_largest_packet_number == null or
+                packet_number > self.current_path_largest_packet_number.?)
+            {
+                self.current_path_largest_packet_number = packet_number;
+                self.current_path_largest_sent_time_ns = sent_time_ns;
+            }
+        }
+
+        fn observeCurrentPathNonProbe(
+            self: *AckResult,
+            packet_number: u64,
+            sent_time_ns: ?u64,
+        ) void {
+            if (self.current_path_largest_nonprobe_packet_number == null or
+                packet_number >
+                    self.current_path_largest_nonprobe_packet_number.?)
+            {
+                self.current_path_largest_nonprobe_packet_number =
+                    packet_number;
+                self.current_path_largest_nonprobe_sent_time_ns =
+                    sent_time_ns;
             }
         }
 
@@ -885,6 +931,30 @@ pub const SentPacketTracker = struct {
         }
     };
 
+    /// Summary of ACK range validation performed before packet-level side
+    /// effects. The sent tracker and ACK range storage must remain unchanged
+    /// until the matching apply call consumes this token.
+    pub const ValidatedAck = struct {
+        largest_acknowledged: u64,
+        first_ack_range: u64,
+        ranges_ptr: usize,
+        ranges_len: usize,
+        current_path_epoch: ?u32,
+        precheck: AckPrecheck,
+
+        fn matches(
+            self: ValidatedAck,
+            ack: quic.AckFrame,
+            current_path_epoch: ?u32,
+        ) bool {
+            return self.largest_acknowledged == ack.largest_acknowledged and
+                self.first_ack_range == ack.first_ack_range and
+                self.ranges_ptr == @intFromPtr(ack.ranges.ptr) and
+                self.ranges_len == ack.ranges.len and
+                self.current_path_epoch == current_path_epoch;
+        }
+    };
+
     pub const RttSample = struct {
         latest_rtt_ns: u64,
         ack_delay_ns: u64,
@@ -913,10 +983,29 @@ pub const SentPacketTracker = struct {
     }
 
     pub fn ackRttSample(self: SentPacketTracker, ack: quic.AckFrame, now_ns: u64, ack_delay_exponent: u64) Error!?RttSample {
+        return self.ackRttSampleForPathEpoch(
+            ack,
+            now_ns,
+            ack_delay_exponent,
+            null,
+        );
+    }
+
+    pub fn ackRttSampleForPathEpoch(
+        self: SentPacketTracker,
+        ack: quic.AckFrame,
+        now_ns: u64,
+        ack_delay_exponent: u64,
+        current_path_epoch: ?u32,
+    ) Error!?RttSample {
         if (self.ackDoesNotAdvanceLargest(ack.largest_acknowledged)) return null;
         const packet = self.findSentPacket(ack.largest_acknowledged) orelse return null;
         if (packet.acknowledged) return null;
-        if (!self.ackContainsNewAckEliciting(ack)) return null;
+        if (!packetMatchesPathEpoch(packet, current_path_epoch)) return null;
+        if (!self.ackContainsNewAckElicitingForPathEpoch(
+            ack,
+            current_path_epoch,
+        )) return null;
         const sent_time = packet.sent_time_ns orelse return null;
         const latest_rtt = now_ns -| sent_time;
         return .{
@@ -939,6 +1028,25 @@ pub const SentPacketTracker = struct {
         pmtu_ack_threshold: ?usize,
         pmtu_path_epoch: ?u32,
     ) Error!AckResult {
+        return self.applyAckDetailedForProbeValidated(
+            ack,
+            active_probe_packet_number,
+            active_probe_epoch,
+            pmtu_ack_threshold,
+            pmtu_path_epoch,
+            null,
+        );
+    }
+
+    pub fn applyAckDetailedForProbeValidated(
+        self: *SentPacketTracker,
+        ack: quic.AckFrame,
+        active_probe_packet_number: ?u64,
+        active_probe_epoch: u32,
+        pmtu_ack_threshold: ?usize,
+        pmtu_path_epoch: ?u32,
+        validated: ?ValidatedAck,
+    ) Error!AckResult {
         if (self.packets.items.len == 0 and
             self.retired_acknowledged_through == null)
         {
@@ -948,7 +1056,12 @@ pub const SentPacketTracker = struct {
         const decoded = try decodeAckRanges(self.allocator, ack, &stack_ranges);
         defer decoded.deinit(self.allocator);
         const sorted = self.packetsSortedAscending();
-        const precheck = try self.precheckAckRanges(
+        const precheck = if (validated) |prevalidated| blk: {
+            if (!prevalidated.matches(ack, pmtu_path_epoch)) {
+                return error.InvalidAckFrame;
+            }
+            break :blk prevalidated.precheck;
+        } else try self.precheckAckRanges(
             decoded.ranges,
             sorted,
             pmtu_path_epoch,
@@ -994,6 +1107,14 @@ pub const SentPacketTracker = struct {
     /// mirrors mature stacks such as quicz/tquic and keeps malicious ACK ranges
     /// from advancing local state.
     pub fn validateAckCoversSentPackets(self: SentPacketTracker, ack: quic.AckFrame) Error!void {
+        _ = try self.validateAckForApply(ack, null);
+    }
+
+    pub fn validateAckForApply(
+        self: SentPacketTracker,
+        ack: quic.AckFrame,
+        current_path_epoch: ?u32,
+    ) Error!ValidatedAck {
         if (self.packets.items.len == 0) return error.InvalidAckFrame;
         var stack_ranges: [32]AckedRange = undefined;
         const decoded = try decodeAckRanges(
@@ -1002,11 +1123,19 @@ pub const SentPacketTracker = struct {
             &stack_ranges,
         );
         defer decoded.deinit(self.allocator);
-        _ = try self.precheckAckRanges(
+        const precheck = try self.precheckAckRanges(
             decoded.ranges,
             self.packetsSortedAscending(),
-            null,
+            current_path_epoch,
         );
+        return .{
+            .largest_acknowledged = ack.largest_acknowledged,
+            .first_ack_range = ack.first_ack_range,
+            .ranges_ptr = @intFromPtr(ack.ranges.ptr),
+            .ranges_len = ack.ranges.len,
+            .current_path_epoch = current_path_epoch,
+            .precheck = precheck,
+        };
     }
 
     pub fn validateAckEcnCounters(self: SentPacketTracker, counts: quic.EcnCounts) Error!void {
@@ -1166,19 +1295,9 @@ pub const SentPacketTracker = struct {
     pub fn hasAcknowledgedEctBeyondEcnWatermark(
         self: SentPacketTracker,
     ) bool {
-        const watermark = self.ecn_largest_acknowledged;
-        for (self.packets.items) |packet| {
-            if (!packet.acknowledged) continue;
-            if (watermark) |largest| {
-                if (packet.packet_number <= largest) continue;
-            }
-            if (packet.ecn == .ect0 or packet.ecn == .ect1 or
-                packet.ecn == .ce)
-            {
-                return true;
-            }
-        }
-        return false;
+        const acknowledged = self.largest_acknowledged_ect orelse return false;
+        const watermark = self.ecn_largest_acknowledged orelse return true;
+        return acknowledged > watermark;
     }
 
     fn precheckAckForPathEpoch(
@@ -1246,6 +1365,23 @@ pub const SentPacketTracker = struct {
         active_probe_packet_number: ?u64,
         active_probe_epoch: u32,
     ) AckResult {
+        return self.detectPacketThresholdLossForProbeAndPathEpoch(
+            largest_acknowledged,
+            packet_threshold,
+            active_probe_packet_number,
+            active_probe_epoch,
+            null,
+        );
+    }
+
+    pub fn detectPacketThresholdLossForProbeAndPathEpoch(
+        self: *SentPacketTracker,
+        largest_acknowledged: u64,
+        packet_threshold: u64,
+        active_probe_packet_number: ?u64,
+        active_probe_epoch: u32,
+        current_path_epoch: ?u32,
+    ) AckResult {
         if (packet_threshold == 0 or largest_acknowledged < packet_threshold) return .{};
         const largest_lost = largest_acknowledged - packet_threshold;
 
@@ -1294,6 +1430,24 @@ pub const SentPacketTracker = struct {
             if (packet.ack_eliciting) {
                 lost.ack_eliciting_packets += 1;
             }
+            if (packetMatchesPathEpoch(packet.*, current_path_epoch)) {
+                lost.observeCurrentPath(
+                    packet.packet_number,
+                    packet.sent_time_ns,
+                );
+                if (packet.pmtu_probe_size != null) {
+                    lost.current_path_probe_bytes += packet.bytes;
+                } else {
+                    lost.current_path_bytes += packet.bytes;
+                    lost.observeCurrentPathNonProbe(
+                        packet.packet_number,
+                        packet.sent_time_ns,
+                    );
+                }
+                if (packet.ack_eliciting) {
+                    lost.current_path_ack_eliciting_packets += 1;
+                }
+            }
         }
         if (cached_latest_lost) self.recomputeLatestAckElicitingInFlight();
         return lost;
@@ -1316,6 +1470,25 @@ pub const SentPacketTracker = struct {
         largest_acknowledged: ?u64,
         active_probe_packet_number: ?u64,
         active_probe_epoch: u32,
+    ) AckResult {
+        return self.detectTimeThresholdLossForProbeAndPathEpoch(
+            now_ns,
+            loss_delay_ns,
+            largest_acknowledged,
+            active_probe_packet_number,
+            active_probe_epoch,
+            null,
+        );
+    }
+
+    pub fn detectTimeThresholdLossForProbeAndPathEpoch(
+        self: *SentPacketTracker,
+        now_ns: u64,
+        loss_delay_ns: u64,
+        largest_acknowledged: ?u64,
+        active_probe_packet_number: ?u64,
+        active_probe_epoch: u32,
+        current_path_epoch: ?u32,
     ) AckResult {
         var lost: AckResult = .{};
         const generation = self.nextLossGeneration();
@@ -1374,6 +1547,24 @@ pub const SentPacketTracker = struct {
             if (packet.ack_eliciting) {
                 lost.ack_eliciting_packets += 1;
             }
+            if (packetMatchesPathEpoch(packet.*, current_path_epoch)) {
+                lost.observeCurrentPath(
+                    packet.packet_number,
+                    packet.sent_time_ns,
+                );
+                if (packet.pmtu_probe_size != null) {
+                    lost.current_path_probe_bytes += packet.bytes;
+                } else {
+                    lost.current_path_bytes += packet.bytes;
+                    lost.observeCurrentPathNonProbe(
+                        packet.packet_number,
+                        packet.sent_time_ns,
+                    );
+                }
+                if (packet.ack_eliciting) {
+                    lost.current_path_ack_eliciting_packets += 1;
+                }
+            }
         }
         if (cached_latest_lost) self.recomputeLatestAckElicitingInFlight();
         return lost;
@@ -1395,6 +1586,23 @@ pub const SentPacketTracker = struct {
         active_probe_packet_number: ?u64,
         active_probe_epoch: u32,
     ) ?u64 {
+        return self.timeThresholdLossDeadlineForProbeAndPathEpoch(
+            loss_delay_ns,
+            largest_acknowledged,
+            active_probe_packet_number,
+            active_probe_epoch,
+            null,
+        );
+    }
+
+    pub fn timeThresholdLossDeadlineForProbeAndPathEpoch(
+        self: SentPacketTracker,
+        loss_delay_ns: u64,
+        largest_acknowledged: ?u64,
+        active_probe_packet_number: ?u64,
+        active_probe_epoch: u32,
+        current_path_epoch: ?u32,
+    ) ?u64 {
         var deadline: ?u64 = null;
         const sorted_packets = self.packetsSortedAscending();
         if (sorted_packets and self.largestBeforeFirstPacket(largest_acknowledged)) return null;
@@ -1411,6 +1619,7 @@ pub const SentPacketTracker = struct {
                 continue;
             }
             if (packet.acknowledged or packet.lost or !packet.in_flight) continue;
+            if (!packetMatchesPathEpoch(packet, current_path_epoch)) continue;
             const sent_time = packet.sent_time_ns orelse continue;
             const lost_time = std.math.add(u64, sent_time, loss_delay_ns) catch std.math.maxInt(u64);
             if (deadline == null or lost_time < deadline.?) deadline = lost_time;
@@ -1433,6 +1642,91 @@ pub const SentPacketTracker = struct {
         return self.scanLatestAckElicitingInFlightSentTime();
     }
 
+    pub fn latestAckElicitingInFlightSentTimeForPathEpoch(
+        self: SentPacketTracker,
+        path_epoch: u32,
+    ) ?u64 {
+        if (self.latest_ack_eliciting_in_flight_index) |index| {
+            if (index < self.packets.items.len) {
+                const packet = self.packets.items[index];
+                if (packet.pmtu_path_epoch == path_epoch) {
+                    if (ackElicitingInFlightSentTime(packet)) |sent_time| {
+                        return sent_time;
+                    }
+                }
+            }
+        } else {
+            return null;
+        }
+        return self.scanLatestAckElicitingInFlightSentTimeForPathEpoch(
+            path_epoch,
+            false,
+        );
+    }
+
+    /// Latest ordinary ACK-eliciting packet in flight, excluding DPLPMTUD
+    /// probes whose independent search timer must not trigger generic PTO
+    /// retransmission. RFC 9221 DATAGRAM packets remain eligible here even
+    /// though their application bytes are not retransmittable.
+    pub fn latestNonProbeAckElicitingInFlightSentTime(
+        self: SentPacketTracker,
+    ) ?u64 {
+        // The tracker already caches the latest ACK-eliciting packet for the
+        // generic PTO query.  When that packet is ordinary application data it
+        // is necessarily also the latest non-probe packet, which is the common
+        // case.  Only a PMTU probe (or directly mutated test metadata) needs
+        // the full defensive scan below.
+        if (self.latest_ack_eliciting_in_flight_index) |index| {
+            if (index < self.packets.items.len) {
+                const packet = self.packets.items[index];
+                if (packet.pmtu_probe_size == null) {
+                    if (ackElicitingInFlightSentTime(packet)) |sent_time| {
+                        return sent_time;
+                    }
+                }
+            }
+        } else {
+            return null;
+        }
+
+        var latest: ?u64 = null;
+        const scan_start = if (self.packetsSortedAscending())
+            self.first_unacknowledged_index
+        else
+            0;
+        for (self.packets.items[scan_start..]) |packet| {
+            if (packet.pmtu_probe_size != null) continue;
+            const sent_time = ackElicitingInFlightSentTime(packet) orelse
+                continue;
+            if (latest == null or sent_time > latest.?) latest = sent_time;
+        }
+        return latest;
+    }
+
+    pub fn latestNonProbeAckElicitingInFlightSentTimeForPathEpoch(
+        self: SentPacketTracker,
+        path_epoch: u32,
+    ) ?u64 {
+        if (self.latest_ack_eliciting_in_flight_index) |index| {
+            if (index < self.packets.items.len) {
+                const packet = self.packets.items[index];
+                if (packet.pmtu_path_epoch == path_epoch and
+                    packet.pmtu_probe_size == null)
+                {
+                    if (ackElicitingInFlightSentTime(packet)) |sent_time| {
+                        return sent_time;
+                    }
+                }
+            }
+        } else {
+            return null;
+        }
+        return self.scanLatestAckElicitingInFlightSentTimeForPathEpoch(
+            path_epoch,
+            true,
+        );
+    }
+
     /// Return the longest contiguous lost-packet period that can establish
     /// RFC 9002 persistent congestion.
     ///
@@ -1449,6 +1743,21 @@ pub const SentPacketTracker = struct {
         largest_acknowledged: ?u64,
         after_packet_number: ?u64,
     ) ?PersistentCongestionPeriod {
+        return self.persistentCongestionPeriodForPathEpoch(
+            first_rtt_sample_sent_time_ns,
+            largest_acknowledged,
+            after_packet_number,
+            null,
+        );
+    }
+
+    pub fn persistentCongestionPeriodForPathEpoch(
+        self: SentPacketTracker,
+        first_rtt_sample_sent_time_ns: ?u64,
+        largest_acknowledged: ?u64,
+        after_packet_number: ?u64,
+        current_path_epoch: ?u32,
+    ) ?PersistentCongestionPeriod {
         const first_sample_time = first_rtt_sample_sent_time_ns orelse return null;
         if (after_packet_number) |after| {
             if (largest_acknowledged) |largest| {
@@ -1461,6 +1770,10 @@ pub const SentPacketTracker = struct {
         for (self.packets.items) |packet| {
             if (largest_acknowledged) |largest| {
                 if (packet.packet_number > largest) break;
+            }
+            if (!packetMatchesPathEpoch(packet, current_path_epoch)) {
+                current = null;
+                continue;
             }
 
             if (packet.acknowledged or !packet.lost) {
@@ -1700,6 +2013,7 @@ pub const SentPacketTracker = struct {
         else
             false;
         packet.acknowledged = true;
+        self.observeAcknowledgedEct(packet.*);
         cached_latest_acked.* = cached_latest_acked.* or was_cached_latest;
         result.packets += 1;
         result.observe(packet.packet_number, packet.sent_time_ns);
@@ -1729,6 +2043,27 @@ pub const SentPacketTracker = struct {
         }
         if (packet.ack_eliciting) {
             result.ack_eliciting_packets += 1;
+        }
+        if (packetMatchesPathEpoch(packet.*, pmtu_path_epoch)) {
+            result.observeCurrentPath(
+                packet.packet_number,
+                packet.sent_time_ns,
+            );
+            if (packet.in_flight and !packet.lost) {
+                result.current_path_bytes += packet.bytes;
+                if (packet.pmtu_probe_size != null) {
+                    result.current_path_probe_bytes += packet.bytes;
+                }
+            }
+            if (packet.pmtu_probe_size == null) {
+                result.observeCurrentPathNonProbe(
+                    packet.packet_number,
+                    packet.sent_time_ns,
+                );
+            }
+            if (packet.ack_eliciting) {
+                result.current_path_ack_eliciting_packets += 1;
+            }
         }
         if (packet.largest_acknowledged_sent) |largest_acknowledged| {
             if (result.largest_acknowledged_sent == null or
@@ -1771,6 +2106,18 @@ pub const SentPacketTracker = struct {
             }
         }
         return false;
+    }
+
+    fn observeAcknowledgedEct(self: *SentPacketTracker, packet: SentPacket) void {
+        switch (packet.ecn) {
+            .not_ect => return,
+            .ect0, .ect1, .ce => {},
+        }
+        if (self.largest_acknowledged_ect == null or
+            packet.packet_number > self.largest_acknowledged_ect.?)
+        {
+            self.largest_acknowledged_ect = packet.packet_number;
+        }
     }
 
     fn packetsSortedAscending(self: SentPacketTracker) bool {
@@ -1866,11 +2213,39 @@ pub const SentPacketTracker = struct {
         return latest;
     }
 
+    fn scanLatestAckElicitingInFlightSentTimeForPathEpoch(
+        self: SentPacketTracker,
+        path_epoch: u32,
+        exclude_probes: bool,
+    ) ?u64 {
+        var latest: ?u64 = null;
+        const scan_start = if (self.packetsSortedAscending())
+            self.first_unacknowledged_index
+        else
+            0;
+        for (self.packets.items[scan_start..]) |packet| {
+            if (packet.pmtu_path_epoch != path_epoch) continue;
+            if (exclude_probes and packet.pmtu_probe_size != null) continue;
+            const sent_time = ackElicitingInFlightSentTime(packet) orelse
+                continue;
+            if (latest == null or sent_time > latest.?) latest = sent_time;
+        }
+        return latest;
+    }
+
     fn ackElicitingInFlightSentTime(packet: SentPacket) ?u64 {
         if (!packet.ack_eliciting or !packet.in_flight or packet.acknowledged or packet.lost) {
             return null;
         }
         return packet.sent_time_ns;
+    }
+
+    fn packetMatchesPathEpoch(
+        packet: SentPacket,
+        current_path_epoch: ?u32,
+    ) bool {
+        const epoch = current_path_epoch orelse return true;
+        return packet.pmtu_path_epoch == epoch;
     }
 
     fn packetIndexHasUnusedCapacity(self: SentPacketTracker) bool {
@@ -1881,11 +2256,23 @@ pub const SentPacketTracker = struct {
     }
 
     fn ackContainsNewAckEliciting(self: SentPacketTracker, ack: quic.AckFrame) bool {
+        return self.ackContainsNewAckElicitingForPathEpoch(ack, null);
+    }
+
+    fn ackContainsNewAckElicitingForPathEpoch(
+        self: SentPacketTracker,
+        ack: quic.AckFrame,
+        current_path_epoch: ?u32,
+    ) bool {
         if (ack.largest_acknowledged < ack.first_ack_range) return false;
 
         var start = ack.largest_acknowledged - ack.first_ack_range;
         var end = ack.largest_acknowledged;
-        if (self.rangeContainsNewAckEliciting(start, end)) return true;
+        if (self.rangeContainsNewAckElicitingForPathEpoch(
+            start,
+            end,
+            current_path_epoch,
+        )) return true;
 
         for (ack.ranges) |range| {
             const skipped = std.math.add(u64, range.gap, 2) catch return false;
@@ -1893,13 +2280,30 @@ pub const SentPacketTracker = struct {
             end = start - skipped;
             if (end < range.ack_range_length) return false;
             start = end - range.ack_range_length;
-            if (self.rangeContainsNewAckEliciting(start, end)) return true;
+            if (self.rangeContainsNewAckElicitingForPathEpoch(
+                start,
+                end,
+                current_path_epoch,
+            )) return true;
         }
 
         return false;
     }
 
     fn rangeContainsNewAckEliciting(self: SentPacketTracker, start: u64, end: u64) bool {
+        return self.rangeContainsNewAckElicitingForPathEpoch(
+            start,
+            end,
+            null,
+        );
+    }
+
+    fn rangeContainsNewAckElicitingForPathEpoch(
+        self: SentPacketTracker,
+        start: u64,
+        end: u64,
+        current_path_epoch: ?u32,
+    ) bool {
         const sorted_packets = self.packetsSortedAscending();
         var index: usize = if (sorted_packets) self.lowerBoundPacketIndex(start) else 0;
         while (index < self.packets.items.len) : (index += 1) {
@@ -1910,6 +2314,7 @@ pub const SentPacketTracker = struct {
                 continue;
             }
             if (packet.acknowledged or !packet.ack_eliciting) continue;
+            if (!packetMatchesPathEpoch(packet, current_path_epoch)) continue;
             return true;
         }
         return false;
@@ -2001,9 +2406,12 @@ pub const SentPacketTracker = struct {
             self.retired_acknowledged_start = first;
         }
         self.retired_acknowledged_through = last;
-        for (self.packets.items[0..compact_count]) |packet| {
-            _ = self.packet_index.remove(packet.packet_number);
-        }
+        // The exact index is only a best-effort accelerator; every lookup has
+        // a sorted-array fallback. Compaction changes every retained index, so
+        // discard the sparse cache in one pass instead of removing the retired
+        // prefix and rewriting every survivor. Later sends repopulate it with
+        // correct indices as capacity permits.
+        self.packet_index.clearRetainingCapacity();
         const remaining = self.packets.items.len - compact_count;
         std.mem.copyForwards(
             SentPacket,
@@ -2016,7 +2424,6 @@ pub const SentPacketTracker = struct {
             self.latest_ack_eliciting_in_flight_index =
                 if (index < compact_count) null else index - compact_count;
         }
-        self.refreshPacketIndexFrom(0);
     }
 
     fn advanceFirstUnacknowledged(self: *SentPacketTracker) void {
@@ -2294,7 +2701,7 @@ test "QUIC packet space fast-rejects below oldest retained range" {
     try std.testing.expectEqual(@as(u64, 10), received.ranges.items[1].end);
 }
 
-test "QUIC sent packet tracker indexes exact packet lookups" {
+test "QUIC sent packet tracker preserves exact lookup behavior" {
     const allocator = std.testing.allocator;
     var sent = SentPacketTracker.init(allocator);
     defer sent.deinit();
@@ -2302,35 +2709,32 @@ test "QUIC sent packet tracker indexes exact packet lookups" {
     try sent.sentAt(0, true, 100, .not_ect, 1_000);
     try sent.sentAt(1, true, 200, .not_ect, 2_000);
     try sent.sentAt(2, true, 300, .not_ect, 3_000);
-    try std.testing.expectEqual(@as(usize, 3), sent.packet_index.count());
-    try std.testing.expectEqual(@as(?usize, 0), sent.packet_index.get(0));
-    try std.testing.expectEqual(@as(?usize, 1), sent.packet_index.get(1));
-    try std.testing.expectEqual(@as(?usize, 2), sent.packet_index.get(2));
     try std.testing.expectError(
         error.DuplicatePacket,
         sent.sent(1, true, 100),
     );
 
     try std.testing.expect(sent.markAcknowledged(2));
-    try std.testing.expect(sent.packets.items[sent.packet_index.get(2).?].acknowledged);
+    try std.testing.expect(sent.packets.items[2].acknowledged);
     try std.testing.expect(sent.forget(1));
-    try std.testing.expect(sent.packet_index.get(1) == null);
-    try std.testing.expectEqual(@as(?usize, 1), sent.packet_index.get(2));
+    try std.testing.expectEqual(@as(usize, 2), sent.packets.items.len);
+    try std.testing.expectEqual(@as(u64, 2), sent.packets.items[1].packet_number);
+    try std.testing.expect(sent.packets.items[1].acknowledged);
 
     const ack = quic.AckFrame{
         .largest_acknowledged = 2,
         .ack_delay = 1,
         .first_ack_range = 0,
     };
-    // The largest packet is already acknowledged above, so the indexed RTT
-    // lookup finds it and correctly suppresses a duplicate RTT sample.
+    // The largest packet is already acknowledged above, so exact lookup still
+    // finds it and correctly suppresses a duplicate RTT sample.
     try std.testing.expectEqual(
         @as(?SentPacketTracker.RttSample, null),
         try sent.ackRttSample(ack, 4_000, 3),
     );
 }
 
-test "QUIC sent packet tracker forgets tail without index slots" {
+test "QUIC sent packet tracker forgets pre-reserved tail" {
     const allocator = std.testing.allocator;
     var sent = SentPacketTracker.init(allocator);
     defer sent.deinit();
@@ -2338,12 +2742,10 @@ test "QUIC sent packet tracker forgets tail without index slots" {
     try sent.packets.ensureTotalCapacity(allocator, 2);
     try sent.sentAt(10, true, 100, .not_ect, 1_000);
     try sent.sentAt(11, true, 100, .not_ect, 2_000);
-    try std.testing.expectEqual(@as(usize, 0), sent.packet_index.count());
     try std.testing.expectEqual(@as(?usize, 1), sent.latest_ack_eliciting_in_flight_index);
 
-    // Some batch send paths pre-reserve packet metadata and deliberately avoid
-    // populating the exact lookup index.  Tail rollback should still be a
-    // direct pop, not a binary/linear lookup followed by the same pop.
+    // Batch send paths pre-reserve packet metadata. Tail rollback should still
+    // be a direct pop, not a binary/linear lookup followed by the same pop.
     try std.testing.expect(sent.forget(11));
     try std.testing.expectEqual(@as(usize, 1), sent.packets.items.len);
     try std.testing.expectEqual(@as(u64, 10), sent.packets.items[0].packet_number);
@@ -2401,7 +2803,39 @@ test "QUIC sent packet tracker exposes ACKed ECT beyond counter watermark" {
     try std.testing.expect(!sent.hasAcknowledgedEctBeyondEcnWatermark());
 }
 
-test "QUIC sent packet tracker finds tail without index slots" {
+test "QUIC sent packet tracker retains ACKed ECT watermark after metadata compaction" {
+    const allocator = std.testing.allocator;
+    var sent = SentPacketTracker.init(allocator);
+    defer sent.deinit();
+
+    const count = SentPacketTracker.compact_acknowledged_threshold;
+    for (0..count) |packet_number| {
+        try sent.sentWithEcn(packet_number, true, 1200, .ect0);
+    }
+    const plain_ack = quic.AckFrame{
+        .largest_acknowledged = count - 1,
+        .ack_delay = 0,
+        .first_ack_range = count - 1,
+    };
+    _ = try sent.applyAckDetailed(plain_ack);
+    try std.testing.expectEqual(@as(usize, 0), sent.packets.items.len);
+    try std.testing.expectEqual(
+        @as(?u64, count - 1),
+        sent.largest_acknowledged_ect,
+    );
+    try std.testing.expect(sent.hasAcknowledgedEctBeyondEcnWatermark());
+
+    var baseline_ack = plain_ack;
+    baseline_ack.ecn_counts = .{
+        .ect0_count = count,
+        .ect1_count = 0,
+        .ecn_ce_count = 0,
+    };
+    _ = try sent.applyAckDetailed(baseline_ack);
+    try std.testing.expect(!sent.hasAcknowledgedEctBeyondEcnWatermark());
+}
+
+test "QUIC sent packet tracker finds newest packet after pre-reservation" {
     const allocator = std.testing.allocator;
     var sent = SentPacketTracker.init(allocator);
     defer sent.deinit();
@@ -2409,11 +2843,8 @@ test "QUIC sent packet tracker finds tail without index slots" {
     try sent.packets.ensureTotalCapacity(allocator, 2);
     try sent.sentAt(20, true, 100, .not_ect, 1_000);
     try sent.sentAt(21, true, 100, .not_ect, 2_000);
-    try std.testing.expectEqual(@as(usize, 0), sent.packet_index.count());
-
     // ACK processing often targets the newest packet in a packet-number
-    // space.  Keep exact lookups on that path independent of whether the
-    // optional map index was populated by this send batch.
+    // space. Keep that exact lookup as a direct tail check.
     try std.testing.expect(sent.markAcknowledged(21));
     try std.testing.expect(sent.packets.items[1].acknowledged);
     try std.testing.expectEqual(@as(?u64, 21), sent.largestAcknowledged());
@@ -2526,6 +2957,38 @@ test "QUIC cumulative ACK cursor skips resolved packet prefix" {
         @as(usize, 6),
         sent.first_unacknowledged_index,
     );
+}
+
+test "QUIC sent packet tracker validated ACK token rejects a different frame" {
+    const allocator = std.testing.allocator;
+    var sent = SentPacketTracker.init(allocator);
+    defer sent.deinit();
+    try sent.sent(0, true, 100);
+    try sent.sent(1, true, 100);
+
+    const first = quic.AckFrame{
+        .largest_acknowledged = 0,
+        .ack_delay = 0,
+        .first_ack_range = 0,
+    };
+    const validated = try sent.validateAckForApply(first, 7);
+    try std.testing.expectError(
+        error.InvalidAckFrame,
+        sent.applyAckDetailedForProbeValidated(
+            .{
+                .largest_acknowledged = 1,
+                .ack_delay = 0,
+                .first_ack_range = 0,
+            },
+            null,
+            0,
+            null,
+            7,
+            validated,
+        ),
+    );
+    try std.testing.expect(!sent.packets.items[0].acknowledged);
+    try std.testing.expect(!sent.packets.items[1].acknowledged);
 }
 
 test "QUIC sent packet tracker compacts cumulative ACK metadata" {
@@ -2911,6 +3374,244 @@ test "QUIC sent packet tracker rejects mixed-path ACK_ECN that only covers curre
     );
 }
 
+test "QUIC sent packet tracker separates retired and current path ACK effects" {
+    const allocator = std.testing.allocator;
+    var sent = SentPacketTracker.init(allocator);
+    defer sent.deinit();
+
+    try sent.sentAtWithDatagramSizeAndPathEpoch(
+        0,
+        true,
+        100,
+        1200,
+        .not_ect,
+        1_000,
+        1,
+    );
+    try sent.sentAtWithDatagramSizeAndPathEpoch(
+        1,
+        true,
+        200,
+        1200,
+        .not_ect,
+        2_000,
+        2,
+    );
+
+    const old_ack = quic.AckFrame{
+        .largest_acknowledged = 0,
+        .ack_delay = 0,
+        .first_ack_range = 0,
+    };
+    try std.testing.expectEqual(
+        @as(?SentPacketTracker.RttSample, null),
+        try sent.ackRttSampleForPathEpoch(old_ack, 10_000, 3, 2),
+    );
+    const old_result = try sent.applyAckDetailedForProbe(
+        old_ack,
+        null,
+        0,
+        null,
+        2,
+    );
+    try std.testing.expectEqual(@as(usize, 1), old_result.packets);
+    try std.testing.expectEqual(@as(usize, 100), old_result.bytes);
+    try std.testing.expectEqual(@as(usize, 0), old_result.current_path_bytes);
+    try std.testing.expectEqual(
+        @as(usize, 0),
+        old_result.current_path_ack_eliciting_packets,
+    );
+    try std.testing.expectEqual(
+        @as(?u64, null),
+        old_result.current_path_largest_sent_time_ns,
+    );
+
+    const current_ack = quic.AckFrame{
+        .largest_acknowledged = 1,
+        .ack_delay = 0,
+        .first_ack_range = 0,
+    };
+    const sample = (try sent.ackRttSampleForPathEpoch(
+        current_ack,
+        12_000,
+        3,
+        2,
+    )).?;
+    try std.testing.expectEqual(@as(u64, 10_000), sample.latest_rtt_ns);
+    const current_result = try sent.applyAckDetailedForProbe(
+        current_ack,
+        null,
+        0,
+        null,
+        2,
+    );
+    try std.testing.expectEqual(@as(usize, 200), current_result.bytes);
+    try std.testing.expectEqual(
+        @as(usize, 200),
+        current_result.current_path_bytes,
+    );
+    try std.testing.expectEqual(
+        @as(usize, 1),
+        current_result.current_path_ack_eliciting_packets,
+    );
+    try std.testing.expectEqual(
+        @as(?u64, 2_000),
+        current_result.current_path_largest_sent_time_ns,
+    );
+}
+
+test "QUIC sent packet tracker reports mixed-path ACK totals separately" {
+    const allocator = std.testing.allocator;
+    var sent = SentPacketTracker.init(allocator);
+    defer sent.deinit();
+
+    try sent.sentAtWithDatagramSizeAndPathEpoch(
+        0,
+        true,
+        100,
+        1200,
+        .not_ect,
+        1_000,
+        1,
+    );
+    try sent.sentAtWithDatagramSizeAndPathEpoch(
+        1,
+        true,
+        200,
+        1200,
+        .not_ect,
+        2_000,
+        2,
+    );
+    const ack = quic.AckFrame{
+        .largest_acknowledged = 1,
+        .ack_delay = 0,
+        .first_ack_range = 1,
+    };
+    const sample = (try sent.ackRttSampleForPathEpoch(
+        ack,
+        12_000,
+        3,
+        2,
+    )).?;
+    try std.testing.expectEqual(@as(u64, 10_000), sample.latest_rtt_ns);
+    const result = try sent.applyAckDetailedForProbe(
+        ack,
+        null,
+        0,
+        null,
+        2,
+    );
+    try std.testing.expectEqual(@as(usize, 2), result.packets);
+    try std.testing.expectEqual(@as(usize, 300), result.bytes);
+    try std.testing.expectEqual(@as(usize, 200), result.current_path_bytes);
+    try std.testing.expectEqual(
+        @as(usize, 1),
+        result.current_path_ack_eliciting_packets,
+    );
+}
+
+test "QUIC sent packet tracker separates retired path loss effects" {
+    const allocator = std.testing.allocator;
+    var sent = SentPacketTracker.init(allocator);
+    defer sent.deinit();
+
+    try sent.sentAtWithDatagramSizeAndPathEpoch(
+        0,
+        true,
+        100,
+        1200,
+        .not_ect,
+        100,
+        1,
+    );
+    try sent.sentAtWithDatagramSizeAndPathEpoch(
+        1,
+        true,
+        100,
+        1200,
+        .not_ect,
+        200,
+        1,
+    );
+    try sent.sentAtWithDatagramSizeAndPathEpoch(
+        2,
+        true,
+        200,
+        1200,
+        .not_ect,
+        1_000,
+        2,
+    );
+    try sent.sentAtWithDatagramSizeAndPathEpoch(
+        3,
+        true,
+        200,
+        1200,
+        .not_ect,
+        1_100,
+        2,
+    );
+    try sent.sentAtWithDatagramSizeAndPathEpoch(
+        4,
+        true,
+        200,
+        1200,
+        .not_ect,
+        1_200,
+        2,
+    );
+
+    const packet_lost = sent.detectPacketThresholdLossForProbeAndPathEpoch(
+        4,
+        3,
+        null,
+        0,
+        2,
+    );
+    try std.testing.expectEqual(@as(usize, 2), packet_lost.packets);
+    try std.testing.expectEqual(@as(usize, 200), packet_lost.bytes);
+    try std.testing.expectEqual(
+        @as(usize, 0),
+        packet_lost.current_path_bytes,
+    );
+    try std.testing.expectEqual(
+        @as(?u64, 1_100),
+        sent.timeThresholdLossDeadlineForProbeAndPathEpoch(
+            100,
+            4,
+            null,
+            0,
+            2,
+        ),
+    );
+
+    const timed_lost = sent.detectTimeThresholdLossForProbeAndPathEpoch(
+        2_000,
+        100,
+        4,
+        null,
+        0,
+        2,
+    );
+    try std.testing.expectEqual(@as(usize, 3), timed_lost.packets);
+    try std.testing.expectEqual(@as(usize, 600), timed_lost.bytes);
+    try std.testing.expectEqual(
+        @as(usize, 600),
+        timed_lost.current_path_bytes,
+    );
+    const all_period = sent.persistentCongestionPeriod(0, 4, null).?;
+    try std.testing.expectEqual(@as(u64, 0), all_period.start_packet_number);
+    const current_period = sent.persistentCongestionPeriodForPathEpoch(
+        0,
+        4,
+        null,
+        2,
+    ).?;
+    try std.testing.expectEqual(@as(u64, 2), current_period.start_packet_number);
+    try std.testing.expectEqual(@as(u64, 4), current_period.end_packet_number);
+}
+
 test "QUIC sent packet tracker tolerates reordered ACK_ECN frames" {
     const allocator = std.testing.allocator;
     var sent = SentPacketTracker.init(allocator);
@@ -3039,6 +3740,52 @@ test "QUIC sent packet tracker reports latest ack-eliciting in-flight send time"
     try std.testing.expectEqual(
         @as(?u64, null),
         sent.stats().latest_ack_eliciting_in_flight_sent_time_ns,
+    );
+}
+
+test "QUIC sent packet tracker excludes PMTU from ordinary PTO anchor" {
+    const allocator = std.testing.allocator;
+    var sent = SentPacketTracker.init(allocator);
+    defer sent.deinit();
+
+    try sent.sentInFlightAtWithPmtu(
+        0,
+        true,
+        true,
+        1200,
+        .not_ect,
+        100,
+        1400,
+    );
+    try std.testing.expectEqual(
+        @as(?u64, null),
+        sent.latestNonProbeAckElicitingInFlightSentTime(),
+    );
+    try sent.sentAt(1, true, 20, .not_ect, 200);
+    try std.testing.expectEqual(
+        @as(?u64, 200),
+        sent.latestNonProbeAckElicitingInFlightSentTime(),
+    );
+    try sent.sentInFlightAtWithPmtu(
+        2,
+        true,
+        true,
+        1400,
+        .not_ect,
+        300,
+        1450,
+    );
+    // A newer PMTU probe owns the generic latest-packet cache, so the ordinary
+    // PTO query must fall back to the older application packet.
+    try std.testing.expectEqual(@as(?usize, 2), sent.latest_ack_eliciting_in_flight_index);
+    try std.testing.expectEqual(
+        @as(?u64, 200),
+        sent.latestNonProbeAckElicitingInFlightSentTime(),
+    );
+    _ = sent.markAcknowledged(1);
+    try std.testing.expectEqual(
+        @as(?u64, null),
+        sent.latestNonProbeAckElicitingInFlightSentTime(),
     );
 }
 

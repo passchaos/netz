@@ -3,6 +3,175 @@ const http3 = @import("../mod.zig");
 const runtime = @import("../runtime.zig");
 
 const net = std.Io.net;
+const large_header_value =
+    "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef";
+
+test "HTTP/3 dev runtime fragments large final headers within UDP MTU" {
+    const allocator = std.testing.allocator;
+    var threaded = std.Io.Threaded.init(allocator, .{});
+    defer threaded.deinit();
+    const io = threaded.io();
+    const limits: runtime.Limits = .{
+        .quic = .{ .max_datagram_size = 1200 },
+        .max_stream_frame_data = 1200,
+    };
+    var headers: [80]http3.Qpack.HeaderField = undefined;
+    for (&headers) |*header| {
+        header.* = .{
+            .name = "x-many",
+            .value = large_header_value,
+            .never_indexed = true,
+        };
+    }
+
+    var server = try runtime.Server.bind(
+        allocator,
+        io,
+        .{ .ip4 = .loopback(0) },
+        limits,
+    );
+    defer server.deinit();
+    const Shared = struct {
+        server: *runtime.Server,
+        headers: []const http3.Qpack.HeaderField,
+        err: ?anyerror = null,
+
+        fn run(self: *@This()) void {
+            self.runFallible() catch |err| {
+                self.err = err;
+            };
+        }
+
+        fn runFallible(self: *@This()) !void {
+            var request = try self.server.receiveRequestWithTimeout(
+                .fromSeconds(3),
+            );
+            defer request.deinit(self.server.quic_server.endpoint.allocator);
+            try self.server.sendResponse(request.from, request.stream_id, .{
+                .status = 200,
+                .headers = self.headers,
+                .body = "fragmented-finish",
+            });
+        }
+    };
+    var shared = Shared{ .server = &server, .headers = &headers };
+    const thread = try std.Thread.spawn(.{}, Shared.run, .{&shared});
+    var joined = false;
+    defer if (!joined) thread.join();
+
+    var client = try runtime.Client.connect(
+        allocator,
+        io,
+        .{ .ip4 = .loopback(0) },
+        server.address(),
+        limits,
+    );
+    defer client.deinit();
+    var response = try client.requestWithTimeout(.{
+        .method = "GET",
+        .path = "/large-final-head",
+        .authority = "localhost",
+    }, .fromSeconds(3));
+    defer response.deinit(allocator);
+    try std.testing.expectEqualStrings(
+        "fragmented-finish",
+        response.response.body,
+    );
+    var count: usize = 0;
+    for (response.response.headers) |header| {
+        count += @intFromBool(std.ascii.eqlIgnoreCase(
+            header.name,
+            "x-many",
+        ));
+    }
+    try std.testing.expectEqual(headers.len, count);
+
+    thread.join();
+    joined = true;
+    if (shared.err) |err| return err;
+}
+
+test "HTTP/3 dev aggregate request preserves ready state across allocation failure" {
+    const allocator = std.testing.allocator;
+    var threaded = std.Io.Threaded.init(allocator, .{});
+    defer threaded.deinit();
+    const io = threaded.io();
+
+    var server = try runtime.Server.bind(
+        allocator,
+        io,
+        .{ .ip4 = .loopback(0) },
+        .{},
+    );
+    defer server.deinit();
+    var client = try runtime.Client.connect(
+        allocator,
+        io,
+        .{ .ip4 = .loopback(0) },
+        server.address(),
+        .{},
+    );
+    defer client.deinit();
+
+    var encoded: std.ArrayList(u8) = .empty;
+    defer encoded.deinit(allocator);
+    try (http3.Request{
+        .method = "GET",
+        .path = "/retry-ready",
+        .authority = "localhost",
+    }).write(&encoded, allocator);
+    try client.quic_client.sendFrames(&.{.{ .stream = .{
+        .stream_id = 0,
+        .data = encoded.items,
+        .fin = true,
+    } }});
+    while (true) {
+        if (try server.request_streams.prepareReady(allocator)) |prepared_value| {
+            var prepared = prepared_value;
+            prepared.deinit(allocator);
+            break;
+        }
+        var datagram = try server.quic_server.receiveWithDeadline(.fromNow(
+            io,
+            .{ .raw = .fromSeconds(1), .clock = .awake },
+        ));
+        var owned = true;
+        defer if (owned) datagram.deinit(allocator);
+        if (try server.request_streams.insertDatagram(&datagram)) {
+            owned = false;
+        }
+    }
+
+    var failed_alloc = std.testing.FailingAllocator.init(
+        allocator,
+        .{ .fail_index = 0, .resize_fail_index = 0 },
+    );
+    try std.testing.expectError(
+        error.OutOfMemory,
+        server.request_streams.prepareReady(failed_alloc.allocator()),
+    );
+    try std.testing.expect(failed_alloc.has_induced_failure);
+    try std.testing.expectEqual(@as(usize, 1), server.request_streams.count());
+
+    var fail_decode = std.testing.FailingAllocator.init(
+        allocator,
+        .{ .fail_index = 1, .resize_fail_index = 0 },
+    );
+    server.quic_server.endpoint.allocator = fail_decode.allocator();
+    try std.testing.expectError(error.OutOfMemory, server.receiveRequest());
+    server.quic_server.endpoint.allocator = allocator;
+    try std.testing.expect(fail_decode.has_induced_failure);
+    try std.testing.expectEqual(
+        fail_decode.allocated_bytes,
+        fail_decode.freed_bytes,
+    );
+    try std.testing.expectEqual(@as(usize, 1), server.request_streams.count());
+
+    var request = try server.receiveRequest();
+    defer request.deinit(allocator);
+    try std.testing.expectEqualStrings("/retry-ready", request.request.path);
+    try std.testing.expect(server.request_streams.isEmpty());
+}
 
 test "HTTP/3 dev runtime serves concurrent clients end to end" {
     const allocator = std.testing.allocator;

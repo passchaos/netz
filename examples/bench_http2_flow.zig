@@ -10,10 +10,6 @@ const default_connection_window: u32 = 65_535;
 const default_warmups: usize = 5;
 const default_iterations: usize = 20;
 const application_chunk_size: usize = 16 * 1024;
-const response_headers = [_]netz.http2.Hpack.HeaderField{.{
-    .name = "date",
-    .value = "Mon, 17 Aug 2026 00:00:00 GMT",
-}};
 
 const Options = struct {
     parallel: usize = default_parallel,
@@ -23,6 +19,7 @@ const Options = struct {
     warmups: usize = default_warmups,
     iterations: usize = default_iterations,
     priority: bool = false,
+    adaptive: bool = false,
     stats: bool = false,
     cancel: bool = false,
     cancel_after: usize = 0,
@@ -48,10 +45,22 @@ pub fn main(init: std.process.Init) !void {
     defer allocator.free(response_body);
     @memset(response_body, 'x');
 
+    // Hyper's adaptive_window(true) deliberately replaces both configured
+    // initial windows with the RFC default. Keep this comparison shape exact
+    // even when fixed-window command-line values were also supplied.
+    const effective_stream_window: u32 = if (options.adaptive)
+        default_connection_window
+    else
+        options.stream_window;
+    const effective_connection_window: u32 = if (options.adaptive)
+        default_connection_window
+    else
+        options.connection_window;
     const limits: netz.http2.runtime.Limits = .{
         .max_body_bytes = options.body_bytes,
-        .initial_window_size = options.stream_window,
-        .initial_connection_window_size = options.connection_window,
+        .initial_window_size = effective_stream_window,
+        .initial_connection_window_size = effective_connection_window,
+        .adaptive_window = options.adaptive,
         .no_rfc7540_priorities = options.priority,
     };
     var threaded = std.Io.Threaded.init(allocator, .{});
@@ -69,10 +78,15 @@ pub fn main(init: std.process.Init) !void {
         server: *netz.http2.runtime.Server,
         options: Options,
         response_body: []const u8,
+        client_done: std.Io.Semaphore = .{},
         err: ?anyerror = null,
 
         fn run(shared: *@This()) void {
             runFallible(shared) catch |err| {
+                std.debug.print(
+                    "HTTP/2 flow benchmark server failed: {s}\n",
+                    .{@errorName(err)},
+                );
                 shared.err = err;
             };
         }
@@ -92,7 +106,6 @@ pub fn main(init: std.process.Init) !void {
             );
             defer shared.server.allocator.free(responses);
             @memset(responses, .{
-                .headers = &response_headers,
                 .body = shared.response_body,
             });
 
@@ -134,6 +147,10 @@ pub fn main(init: std.process.Init) !void {
                     );
                 }
             }
+            // Keep the transport alive until the client has consumed the last
+            // response (or abandoned the run). This barrier is outside the
+            // measured region and adds no protocol traffic.
+            try shared.client_done.wait(shared.server.io);
         }
     };
     var shared = Shared{
@@ -149,7 +166,8 @@ pub fn main(init: std.process.Init) !void {
         server.address(),
         limits,
     );
-    defer client.close();
+    var client_open = true;
+    defer if (client_open) client.close();
     const authority = try std.fmt.allocPrint(
         allocator,
         "127.0.0.1:{d}",
@@ -186,42 +204,70 @@ pub fn main(init: std.process.Init) !void {
 
     var checksum: usize = 0;
     var cancel_callbacks: usize = 0;
+    var benchmark_error: ?anyerror = null;
     const cancel_iterations = if (options.cancel)
         @min(options.iterations, @as(usize, 1))
     else
         options.iterations;
     const warmups = if (options.cancel) 0 else options.warmups;
-    for (0..warmups) |_| {
-        checksum +%= try exchange(
+    warmup_loop: for (0..warmups) |_| {
+        checksum +%= exchange(
             &client,
             requests,
             responses,
             body_bytes,
             allocator,
             options.body_bytes,
-        );
+        ) catch |err| {
+            std.debug.print(
+                "HTTP/2 flow benchmark client warmup failed: {s}\n",
+                .{@errorName(err)},
+            );
+            benchmark_error = err;
+            break :warmup_loop;
+        };
     }
     const started = nowNs(io);
-    for (0..cancel_iterations) |_| {
+    iteration_loop: for (0..cancel_iterations) |_| {
+        if (benchmark_error != null) break;
         if (options.cancel) {
-            cancel_callbacks += try cancelExchange(
+            cancel_callbacks += cancelExchange(
                 &client,
                 requests,
                 responses,
                 @max(options.cancel_after, 1),
-            );
+            ) catch |err| {
+                std.debug.print(
+                    "HTTP/2 flow benchmark client cancellation failed: {s}\n",
+                    .{@errorName(err)},
+                );
+                benchmark_error = err;
+                break :iteration_loop;
+            };
         } else {
-            checksum +%= try exchange(
+            checksum +%= exchange(
                 &client,
                 requests,
                 responses,
                 body_bytes,
                 allocator,
                 options.body_bytes,
-            );
+            ) catch |err| {
+                std.debug.print(
+                    "HTTP/2 flow benchmark client iteration failed: {s}\n",
+                    .{@errorName(err)},
+                );
+                benchmark_error = err;
+                break :iteration_loop;
+            };
         }
     }
     var elapsed = nowNs(io) -| started;
+    shared.client_done.post(io);
+    if (benchmark_error != null) {
+        client.close();
+        client_open = false;
+    }
     thread.join();
     if (options.cancel) {
         // Include server observation of every RST_STREAM in cancellation-race
@@ -229,6 +275,7 @@ pub fn main(init: std.process.Init) !void {
         elapsed = nowNs(io) -| started;
     }
     if (shared.err) |err| return err;
+    if (benchmark_error) |err| return err;
     const wire_body_bytes = if (options.cancel)
         0
     else
@@ -244,6 +291,7 @@ pub fn main(init: std.process.Init) !void {
         \\  response bytes/stream: {d}
         \\  initial stream window: {d}
         \\  initial connection window: {d}
+        \\  adaptive receive windows: {}
         \\  scheduler: {s}
         \\  cancellation race: {}
         \\  warmup iterations: {d}
@@ -256,8 +304,9 @@ pub fn main(init: std.process.Init) !void {
     , .{
         options.parallel,
         options.body_bytes,
-        options.stream_window,
-        options.connection_window,
+        effective_stream_window,
+        effective_connection_window,
+        options.adaptive,
         if (options.priority) "RFC 9218" else "round-robin",
         options.cancel,
         warmups,
@@ -387,6 +436,8 @@ fn parseOptions(init: std.process.Init) !Options {
             );
         } else if (std.mem.eql(u8, argument, "--priority")) {
             options.priority = true;
+        } else if (std.mem.eql(u8, argument, "--adaptive")) {
+            options.adaptive = true;
         } else if (std.mem.eql(u8, argument, "--stats")) {
             options.stats = true;
         } else if (std.mem.eql(u8, argument, "--cancel")) {

@@ -1,5 +1,7 @@
 const std = @import("std");
 const netz = @import("netz");
+const CountingAllocator = @import("support/counting_allocator.zig")
+    .CountingAllocator;
 
 const default_iterations: usize = 1;
 const default_body_bytes: usize = 64 * 1024;
@@ -16,6 +18,7 @@ const benchmark_min_flow_control_bytes: u64 = 256 * 1024 * 1024;
 // the 2/4/8/16/32 same-host scan.
 const benchmark_ack_eliciting_threshold: u64 = 4;
 const benchmark_max_ack_delay_us: u64 = 25_000;
+const benchmark_transfer_timeout: std.Io.Duration = .fromSeconds(30);
 const single_stream_one_rtt_datagram_size: usize = 8192;
 const single_stream_paced_body_chunk_bytes: usize = 7200;
 // Keep multi-stream packetization conservative: 8192 improves the 4-stream
@@ -64,6 +67,8 @@ pub fn main(init: std.process.Init) !void {
     const started = nowNs(io);
     var status_total: usize = 0;
     var bytes_total: usize = 0;
+    var recovery_cache_hits: u64 = 0;
+    var recovery_cache_misses: u64 = 0;
     for (0..config.iterations) |iteration| {
         const iteration_started = nowNs(io);
         const result = try runIteration(
@@ -83,6 +88,8 @@ pub fn main(init: std.process.Init) !void {
         }
         status_total += result.status_total;
         bytes_total += result.bytes_total;
+        recovery_cache_hits +|= result.recovery_cache_hits;
+        recovery_cache_misses +|= result.recovery_cache_misses;
     }
     const elapsed = nowNs(io) -| started;
 
@@ -114,7 +121,15 @@ pub fn main(init: std.process.Init) !void {
             "  stddev percent: {d:.2}\n",
         .{ summary.mean, summary.stddev, if (summary.mean == 0) 0 else summary.stddev * 100.0 / summary.mean },
     );
-    if (config.stats) stats_allocator.print();
+    if (config.stats) {
+        std.debug.print(
+            "recovery payload cache\n" ++
+                "  hits: {d}\n" ++
+                "  misses: {d}\n",
+            .{ recovery_cache_hits, recovery_cache_misses },
+        );
+        stats_allocator.snapshot().print();
+    }
 }
 
 const ThroughputSummary = struct {
@@ -146,6 +161,8 @@ fn summarizeThroughput(samples: []const f64) ThroughputSummary {
 const IterationResult = struct {
     status_total: usize,
     bytes_total: usize,
+    recovery_cache_hits: u64 = 0,
+    recovery_cache_misses: u64 = 0,
 };
 
 fn traceIteration(config: Config, iteration: usize, message: []const u8) void {
@@ -182,7 +199,6 @@ fn runIteration(
     const endpoint_datagram_size = transferEndpointDatagramSize(config);
     const one_rtt_datagram_size = transferOneRttDatagramSize(config);
     const paced_body_chunk_bytes = transferPacedBodyChunkBytes(config);
-    const round_robin_chunk_bytes = transferRoundRobinChunkBytes(config);
     const stream_buffer = transferStreamBufferBytes(config);
     const transport_parameters = transferTransportParameters(config);
     // Every DATA contribution has private prefix storage in both the single-
@@ -233,12 +249,13 @@ fn runIteration(
         server: *netz.http3.runtime.HandshakeServer,
         body_bytes: usize,
         streams: usize,
-        round_robin_chunk_bytes: usize,
         mode: Mode,
         body: []const u8,
         trace: bool,
         iteration: usize,
         ack_eliciting_threshold: u64,
+        recovery_cache_hits: u64 = 0,
+        recovery_cache_misses: u64 = 0,
         err: ?anyerror = null,
 
         fn run(shared: *@This()) void {
@@ -279,6 +296,17 @@ fn runIteration(
                     shared.iteration,
                 ),
             }
+            // Both modes end with reliable HTTP/3 response or GOAWAY bytes.
+            // Keep this short-lived session's transport pump alive until its
+            // recovery queue is empty before collecting stats and deinit.
+            try session.waitForRecoveryIdleWithTimeout(
+                benchmark_transfer_timeout,
+            );
+            const stats = session.established.connection.stats();
+            shared.recovery_cache_hits =
+                stats.recovery_queue_stats.payload_cache_hits;
+            shared.recovery_cache_misses =
+                stats.recovery_queue_stats.payload_cache_misses;
         }
     };
 
@@ -286,7 +314,6 @@ fn runIteration(
         .server = &server,
         .body_bytes = config.body_bytes,
         .streams = config.streams,
-        .round_robin_chunk_bytes = round_robin_chunk_bytes,
         .mode = config.mode,
         .body = transfer_body,
         .trace = config.trace_iteration,
@@ -349,20 +376,27 @@ fn runIteration(
         .download => {
             const download = try runDownloadClient(
                 allocator,
+                io,
                 &client,
                 config.body_bytes,
                 config.streams,
-                round_robin_chunk_bytes,
             );
             result.status_total += download.status;
             result.bytes_total += download.bytes;
         },
     }
+    const client_stats = client.established.connection.stats();
+    result.recovery_cache_hits +|=
+        client_stats.recovery_queue_stats.payload_cache_hits;
+    result.recovery_cache_misses +|=
+        client_stats.recovery_queue_stats.payload_cache_misses;
     traceIteration(config, iteration, "transfer done");
 
     thread.join();
     traceIteration(config, iteration, "server thread joined");
     if (shared.err) |err| return err;
+    result.recovery_cache_hits +|= shared.recovery_cache_hits;
+    result.recovery_cache_misses +|= shared.recovery_cache_misses;
     return result;
 }
 
@@ -579,8 +613,15 @@ fn runUploadClient(
     var status_total: usize = 0;
     var received: usize = 0;
     traceIteration(config, iteration, "upload receive responses start");
+    const deadline = std.Io.Clock.Timestamp.fromNow(
+        client.established.connection.endpoint.io,
+        .{
+            .raw = benchmark_transfer_timeout,
+            .clock = .awake,
+        },
+    );
     while (received < streams) {
-        var event = try client.receiveNextResponse();
+        var event = try client.receiveNextResponseWithDeadline(deadline);
         defer event.deinit(allocator);
         switch (event) {
             .response => |response| {
@@ -753,12 +794,11 @@ const DownloadResult = struct {
 
 fn runDownloadClient(
     allocator: std.mem.Allocator,
+    io: std.Io,
     client: *netz.http3.runtime.HandshakeClient,
     body_bytes: usize,
     streams: usize,
-    round_robin_chunk_bytes: usize,
 ) !DownloadResult {
-    _ = round_robin_chunk_bytes;
     const stream_ids = try allocator.alloc(u62, streams);
     defer allocator.free(stream_ids);
     for (stream_ids) |*stream_id| {
@@ -776,11 +816,19 @@ fn runDownloadClient(
             }},
         });
     }
-    return receiveDownloadBodies(allocator, client, stream_ids, body_bytes, streams);
+    return receiveDownloadBodies(
+        allocator,
+        io,
+        client,
+        stream_ids,
+        body_bytes,
+        streams,
+    );
 }
 
 fn receiveDownloadBodies(
     allocator: std.mem.Allocator,
+    io: std.Io,
     client: *netz.http3.runtime.HandshakeClient,
     stream_ids: []const u62,
     body_bytes: usize,
@@ -802,8 +850,12 @@ fn receiveDownloadBodies(
     var status_total: usize = 0;
     var total_read: usize = 0;
     var finished_count: usize = 0;
+    const deadline = std.Io.Clock.Timestamp.fromNow(io, .{
+        .raw = benchmark_transfer_timeout,
+        .clock = .awake,
+    });
     while (finished_count < streams) {
-        var event = try client.receiveNextResponseEvent();
+        var event = try client.receiveNextResponseEventWithDeadline(deadline);
         defer event.deinit(allocator);
         switch (event) {
             .message => |message| {
@@ -922,124 +974,6 @@ fn transferFlowControlBytes(config: Config) u64 {
         netz.quic.varint.max_value,
     );
 }
-
-const CountingAllocator = struct {
-    backing: std.mem.Allocator,
-    current_bytes: usize = 0,
-    peak_bytes: usize = 0,
-    total_allocated: usize = 0,
-    total_freed: usize = 0,
-    alloc_count: usize = 0,
-    free_count: usize = 0,
-    resize_count: usize = 0,
-    remap_count: usize = 0,
-    alloc_buckets: [bucket_count]usize = .{0} ** bucket_count,
-    alloc_bucket_bytes: [bucket_count]usize = .{0} ** bucket_count,
-
-    const bucket_count = 7;
-    const bucket_labels = [_][]const u8{ "<=64", "<=256", "<=1K", "<=4K", "<=16K", "<=64K", ">64K" };
-
-    const vtable: std.mem.Allocator.VTable = .{
-        .alloc = alloc,
-        .resize = resize,
-        .remap = remap,
-        .free = free,
-    };
-
-    fn init(backing: std.mem.Allocator) CountingAllocator {
-        return .{ .backing = backing };
-    }
-
-    fn allocator(self: *CountingAllocator) std.mem.Allocator {
-        return .{ .ptr = self, .vtable = &vtable };
-    }
-
-    fn alloc(ctx: *anyopaque, len: usize, alignment: std.mem.Alignment, ret_addr: usize) ?[*]u8 {
-        const self: *CountingAllocator = @ptrCast(@alignCast(ctx));
-        const ptr = self.backing.rawAlloc(len, alignment, ret_addr) orelse return null;
-        self.alloc_count += 1;
-        self.recordAllocBucket(len);
-        self.total_allocated += len;
-        self.current_bytes += len;
-        self.peak_bytes = @max(self.peak_bytes, self.current_bytes);
-        return ptr;
-    }
-
-    fn resize(ctx: *anyopaque, memory: []u8, alignment: std.mem.Alignment, new_len: usize, ret_addr: usize) bool {
-        const self: *CountingAllocator = @ptrCast(@alignCast(ctx));
-        if (!self.backing.rawResize(memory, alignment, new_len, ret_addr)) return false;
-        self.resize_count += 1;
-        self.recordResize(memory.len, new_len);
-        return true;
-    }
-
-    fn remap(ctx: *anyopaque, memory: []u8, alignment: std.mem.Alignment, new_len: usize, ret_addr: usize) ?[*]u8 {
-        const self: *CountingAllocator = @ptrCast(@alignCast(ctx));
-        const ptr = self.backing.rawRemap(memory, alignment, new_len, ret_addr) orelse return null;
-        self.remap_count += 1;
-        self.recordResize(memory.len, new_len);
-        return ptr;
-    }
-
-    fn free(ctx: *anyopaque, memory: []u8, alignment: std.mem.Alignment, ret_addr: usize) void {
-        const self: *CountingAllocator = @ptrCast(@alignCast(ctx));
-        self.free_count += 1;
-        self.total_freed += memory.len;
-        self.current_bytes -|= memory.len;
-        self.backing.rawFree(memory, alignment, ret_addr);
-    }
-
-    fn recordAllocBucket(self: *CountingAllocator, len: usize) void {
-        const index = bucketIndex(len);
-        self.alloc_buckets[index] += 1;
-        self.alloc_bucket_bytes[index] += len;
-    }
-
-    fn bucketIndex(len: usize) usize {
-        if (len <= 64) return 0;
-        if (len <= 256) return 1;
-        if (len <= 1024) return 2;
-        if (len <= 4096) return 3;
-        if (len <= 16 * 1024) return 4;
-        if (len <= 64 * 1024) return 5;
-        return 6;
-    }
-
-    fn recordResize(self: *CountingAllocator, old_len: usize, new_len: usize) void {
-        if (new_len > old_len) {
-            const delta = new_len - old_len;
-            self.total_allocated += delta;
-            self.current_bytes += delta;
-            self.peak_bytes = @max(self.peak_bytes, self.current_bytes);
-        } else {
-            const delta = old_len - new_len;
-            self.total_freed += delta;
-            self.current_bytes -|= delta;
-        }
-    }
-
-    fn print(self: CountingAllocator) void {
-        std.debug.print(
-            "allocator stats\n" ++
-                "  alloc count: {d}\n" ++
-                "  free count: {d}\n" ++
-                "  resize count: {d}\n" ++
-                "  remap count: {d}\n" ++
-                "  total allocated bytes: {d}\n" ++
-                "  total freed bytes: {d}\n" ++
-                "  live bytes: {d}\n" ++
-                "  peak live bytes: {d}\n",
-            .{ self.alloc_count, self.free_count, self.resize_count, self.remap_count, self.total_allocated, self.total_freed, self.current_bytes, self.peak_bytes },
-        );
-        std.debug.print("  allocation buckets:\n", .{});
-        for (bucket_labels, 0..) |label, index| {
-            std.debug.print(
-                "    {s}: count={d}, bytes={d}\n",
-                .{ label, self.alloc_buckets[index], self.alloc_bucket_bytes[index] },
-            );
-        }
-    }
-};
 
 const Config = struct {
     iterations: usize = default_iterations,

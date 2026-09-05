@@ -994,8 +994,10 @@ test "listener packet ACLs compose with broker policy" {
         }
     };
     const PrivatePolicy = struct {
+        io: std.Io,
         publish_calls: std.atomic.Value(usize) = .init(0),
         delivery_calls: std.atomic.Value(usize) = .init(0),
+        delivery_observed: std.Io.Event = .unset,
 
         fn publish(
             context_ptr: *anyopaque,
@@ -1033,6 +1035,7 @@ test "listener packet ACLs compose with broker policy" {
         ) bool {
             const self: *@This() = @ptrCast(@alignCast(context_ptr));
             _ = self.delivery_calls.fetchAdd(1, .monotonic);
+            self.delivery_observed.set(self.io);
             return !std.mem.eql(
                 u8,
                 authorization.topic,
@@ -1041,7 +1044,7 @@ test "listener packet ACLs compose with broker policy" {
         }
     };
     var global_policy: GlobalPolicy = .{};
-    var private_policy: PrivatePolicy = .{};
+    var private_policy = PrivatePolicy{ .io = io };
     var broker = try Broker.init(allocator, io, .{
         .limits = .{
             .max_connections = 4,
@@ -1161,6 +1164,12 @@ test "listener packet ACLs compose with broker policy" {
         private_unsuback.unsuback.reason_codes,
     );
     try public.publish("acl/private-hidden", "hidden", .{});
+    try private_policy.delivery_observed.waitTimeout(io, .{
+        .duration = .{
+            .raw = .fromSeconds(2),
+            .clock = .awake,
+        },
+    });
     // A PING response as the next packet proves the destination listener's
     // read policy suppressed the matching live delivery.
     try private.ping();

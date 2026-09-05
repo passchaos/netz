@@ -1229,6 +1229,7 @@ pub const Hpack = struct {
             .maintain_lookup_indexes = false,
         },
         max_dynamic_table_size: usize = default_dynamic_table_size,
+        last_decode_compression_error: bool = false,
 
         pub fn deinit(self: *Decoder, allocator: std.mem.Allocator) void {
             self.dynamic_table.deinit(allocator);
@@ -1305,6 +1306,8 @@ pub const Hpack = struct {
             max_header_fields: usize,
             max_header_list_size: usize,
         ) ![]HeaderField {
+            self.last_decode_compression_error = false;
+            var field_limit_exceeded = false;
             return decodeBlockOwnedWithDynamicTable(
                 allocator,
                 block,
@@ -1312,7 +1315,23 @@ pub const Hpack = struct {
                 self.max_dynamic_table_size,
                 max_header_fields,
                 max_header_list_size,
-            );
+                &field_limit_exceeded,
+            ) catch |err| switch (err) {
+                error.BufferTooShort,
+                error.IntegerOverflow,
+                error.InvalidEncoding,
+                error.HpackDynamicTableUnsupported,
+                => {
+                    self.last_decode_compression_error =
+                        !field_limit_exceeded;
+                    return err;
+                },
+                else => |other| return other,
+            };
+        }
+
+        pub fn lastDecodeWasCompressionError(self: Decoder) bool {
+            return self.last_decode_compression_error;
         }
     };
 
@@ -1864,7 +1883,9 @@ pub const Hpack = struct {
         max_dynamic_table_size: usize,
         max_header_fields: usize,
         max_header_list_size: usize,
+        field_limit_exceeded: *bool,
     ) ![]HeaderField {
+        field_limit_exceeded.* = false;
         var plan_fallback = std.heap.stackFallback(
             owned_plan_stack_fields * @sizeOf(OwnedFieldPlan),
             allocator,
@@ -2031,7 +2052,10 @@ pub const Hpack = struct {
         }
 
         if (header_list_too_large) return error.HeaderListTooLarge;
-        if (output_too_small) return error.BufferTooShort;
+        if (output_too_small) {
+            field_limit_exceeded.* = true;
+            return error.BufferTooShort;
+        }
         const fields = try allocator.alloc(HeaderField, plans.items.len);
         errdefer allocator.free(fields);
         if (fields.len == 0) return fields;
@@ -3600,6 +3624,35 @@ test "HTTP/2 HPACK owned decode preserves table state after output limits" {
     defer Hpack.freeOwnedFields(allocator, decoded);
     try std.testing.expectEqualStrings("compressible-value", decoded[0].value);
     try std.testing.expectEqualStrings("another-compressible-value", decoded[1].value);
+}
+
+test "HTTP/2 HPACK owned decoder distinguishes truncation from field limit" {
+    const allocator = std.testing.allocator;
+    var decoder = Hpack.Decoder{};
+    defer decoder.deinit(allocator);
+
+    try std.testing.expectError(
+        error.BufferTooShort,
+        decoder.decodeBlockOwnedWithLimit(
+            allocator,
+            &.{0xff},
+            8,
+            1024,
+        ),
+    );
+    try std.testing.expect(decoder.lastDecodeWasCompressionError());
+
+    const block = [_]u8{ 0x82, 0x84 };
+    try std.testing.expectError(
+        error.BufferTooShort,
+        decoder.decodeBlockOwnedWithLimit(
+            allocator,
+            &block,
+            1,
+            1024,
+        ),
+    );
+    try std.testing.expect(!decoder.lastDecodeWasCompressionError());
 }
 
 fn checkHpackOwnedDecodeScratchFallback(

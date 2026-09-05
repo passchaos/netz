@@ -147,14 +147,51 @@ pub const Publish = struct {
             filteredPropertiesEqual(self.properties, other.properties);
     }
 
-    pub fn view(self: Publish) mqtt.Publish {
+    /// Build the Application Message that may be routed at PUBREL time.
+    ///
+    /// Message Expiry starts when the upstream PUBLISH is staged, not when the
+    /// two-phase handshake reaches PUBREL. The returned properties therefore
+    /// replace the original interval with its remaining whole-second value.
+    /// `null` means the message expired and the transaction should advance to
+    /// its released tombstone without routing an Application Message.
+    pub fn asPublish(
+        self: Publish,
+        now: std.Io.Timestamp,
+        adjusted_properties: *std.ArrayList(mqtt.Property),
+    ) Error!?mqtt.Publish {
+        const remaining = remainingExpiry(
+            self.expiry_interval,
+            self.stored_at_ns,
+            now.nanoseconds,
+        );
+        if (remaining == 0) return null;
+
+        try adjusted_properties.ensureTotalCapacity(
+            self.allocator,
+            self.properties.len,
+        );
+        for (self.properties) |property| {
+            if (property == .four_byte and
+                property.four_byte.id == .message_expiry_interval)
+            {
+                adjusted_properties.appendAssumeCapacity(.{
+                    .four_byte = .{
+                        .id = .message_expiry_interval,
+                        .value = remaining.?,
+                    },
+                });
+            } else {
+                adjusted_properties.appendAssumeCapacity(property);
+            }
+        }
+
         return .{
             .dup = false,
             .qos = .exactly_once,
             .retain = self.retain,
             .topic = self.topic(),
             .packet_id = null,
-            .properties = self.properties,
+            .properties = adjusted_properties.items,
             .payload = self.payload(),
         };
     }
@@ -179,8 +216,12 @@ pub const Claim = struct {
     key: Key,
     publish: Publish,
 
-    pub fn view(self: Claim) mqtt.Publish {
-        return self.publish.view();
+    pub fn asPublish(
+        self: Claim,
+        now: std.Io.Timestamp,
+        adjusted_properties: *std.ArrayList(mqtt.Property),
+    ) Error!?mqtt.Publish {
+        return self.publish.asPublish(now, adjusted_properties);
     }
 
     /// Release an abandoned claim that cannot be committed or rolled back.
@@ -390,7 +431,31 @@ pub const Store = struct {
         const index = self.findIndex(key) orelse return null;
         const entry = self.entries.items[index];
         if (entry.phase != .pending or entry.publish == null) return null;
-        return entry.publish.?.view();
+        const publish = entry.publish.?;
+        return .{
+            .dup = false,
+            .qos = .exactly_once,
+            .retain = publish.retain,
+            .topic = publish.topic(),
+            .packet_id = null,
+            .properties = publish.properties,
+            .payload = publish.payload(),
+        };
+    }
+
+    /// Return an expiry-aware view of a pending message. The caller owns the
+    /// scratch property list, while topic, payload, and variable-sized property
+    /// values remain borrowed from the store until it is mutated.
+    pub fn pendingAsPublish(
+        self: *const Store,
+        key: Key,
+        now: std.Io.Timestamp,
+        adjusted_properties: *std.ArrayList(mqtt.Property),
+    ) Error!?mqtt.Publish {
+        const index = self.findIndex(key) orelse return null;
+        const entry = self.entries.items[index];
+        if (entry.phase != .pending or entry.publish == null) return null;
+        return entry.publish.?.asPublish(now, adjusted_properties);
     }
 
     pub fn getPhase(self: *const Store, key: Key) ?Phase {
@@ -754,6 +819,22 @@ fn propertyEqual(left: mqtt.Property, right: mqtt.Property) bool {
             std.mem.eql(u8, value.key, right.utf8_pair.key) and
             std.mem.eql(u8, value.value, right.utf8_pair.value),
     };
+}
+
+fn remainingExpiry(
+    interval: ?u32,
+    stored_at_ns: i96,
+    now_ns: i96,
+) ?u32 {
+    const value = interval orelse return null;
+    if (value == 0) return 0;
+    const elapsed_ns = @max(now_ns - stored_at_ns, 0);
+    const expiry_ns = @as(i96, value) * std.time.ns_per_s;
+    if (elapsed_ns >= expiry_ns) return 0;
+    const elapsed_seconds: u32 = @intCast(
+        @divTrunc(elapsed_ns, std.time.ns_per_s),
+    );
+    return value - elapsed_seconds;
 }
 
 fn remainingExpiryNs(

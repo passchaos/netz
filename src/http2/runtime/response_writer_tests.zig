@@ -112,6 +112,10 @@ test "HTTP/2 response writer streams with flow control and trailers" {
     for (second) |byte| expected_checksum +%= byte;
     try std.testing.expectEqual(expected_len, response.body_bytes);
     try std.testing.expectEqual(expected_len, consumer.bytes);
+    try std.testing.expectEqual(
+        @as(usize, 29),
+        runtime.testing.findHeader(response.headers, "date").?.len,
+    );
     try std.testing.expectEqual(expected_checksum, consumer.checksum);
     try std.testing.expect(consumer.calls > 2);
     try std.testing.expectEqual(@as(usize, 1), response.trailers.len);

@@ -43,6 +43,7 @@ struct Options {
     connection_window: u32,
     warmup: usize,
     iterations: usize,
+    adaptive: bool,
     stats: bool,
 }
 
@@ -68,9 +69,12 @@ fn main() {
             address_tx.send(listener.local_addr().unwrap()).unwrap();
             let (stream, _) = listener.accept().await.expect("accept");
             stream.set_nodelay(true).expect("server TCP_NODELAY");
-            server_http2::Builder::new(TokioExecutor)
+            let mut builder = server_http2::Builder::new(TokioExecutor);
+            builder
                 .initial_stream_window_size(options.stream_window)
                 .initial_connection_window_size(options.connection_window)
+                .adaptive_window(options.adaptive);
+            builder
                 .serve_connection(
                     TokioIo::new(stream),
                     service_fn(move |request: Request<Incoming>| {
@@ -106,9 +110,12 @@ fn main() {
     let mut sender = runtime.block_on(async move {
         let stream = TcpStream::connect(address).await.expect("connect");
         stream.set_nodelay(true).expect("client TCP_NODELAY");
-        let (sender, connection) = client_http2::Builder::new(TokioExecutor)
+        let mut builder = client_http2::Builder::new(TokioExecutor);
+        builder
             .initial_stream_window_size(options.stream_window)
             .initial_connection_window_size(options.connection_window)
+            .adaptive_window(options.adaptive);
+        let (sender, connection) = builder
             .handshake(TokioIo::new(stream))
             .await
             .expect("HTTP/2 handshake");
@@ -138,8 +145,19 @@ fn main() {
     println!("Hyper HTTP/2 flow-controlled response benchmark");
     println!("  parallel streams: {}", options.parallel);
     println!("  response bytes/stream: {}", options.body_bytes);
-    println!("  initial stream window: {}", options.stream_window);
-    println!("  initial connection window: {}", options.connection_window);
+    let effective_stream_window = if options.adaptive {
+        DEFAULT_CONNECTION_WINDOW
+    } else {
+        options.stream_window
+    };
+    let effective_connection_window = if options.adaptive {
+        DEFAULT_CONNECTION_WINDOW
+    } else {
+        options.connection_window
+    };
+    println!("  initial stream window: {effective_stream_window}");
+    println!("  initial connection window: {effective_connection_window}");
+    println!("  adaptive receive windows: {}", options.adaptive);
     println!("  warmup iterations: {}", options.warmup);
     println!("  iterations: {}", options.iterations);
     println!("  ns/batch: {}", elapsed_ns / options.iterations as u64);
@@ -188,6 +206,7 @@ fn parse_options() -> Options {
         connection_window: DEFAULT_CONNECTION_WINDOW,
         warmup: DEFAULT_WARMUP,
         iterations: DEFAULT_ITERATIONS,
+        adaptive: false,
         stats: false,
     };
     for argument in env::args().skip(1) {
@@ -203,6 +222,8 @@ fn parse_options() -> Options {
             options.warmup = value.parse().expect("warmup");
         } else if let Some(value) = argument.strip_prefix("--iterations=") {
             options.iterations = value.parse().expect("iterations");
+        } else if argument == "--adaptive" {
+            options.adaptive = true;
         } else if argument == "--stats" {
             options.stats = true;
         } else {

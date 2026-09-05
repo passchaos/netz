@@ -91,6 +91,10 @@ test "HTTP/2 explicit server push delivers promise and pushed response" {
     var pushed = try client.readPushedResponse(promise);
     defer pushed.deinit(allocator);
     try std.testing.expectEqualStrings("css", pushed.body);
+    try std.testing.expectEqual(
+        @as(usize, 29),
+        runtime.testing.findHeader(pushed.headers, "date").?.len,
+    );
 
     thread.join();
     if (shared.err) |err| return err;

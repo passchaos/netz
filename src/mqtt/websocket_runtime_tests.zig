@@ -1292,7 +1292,7 @@ test "MQTT reconnect client reuses WebSocket connector" {
     var connector = mqtt_ws.ReconnectConnector{
         .uri = uri,
         .options = .{
-            .mqtt = undefined,
+            .mqtt = .{ .client_id = "connector-placeholder" },
             .max_head_bytes = max_packet_size,
         },
     };
@@ -1314,10 +1314,12 @@ test "MQTT reconnect client reuses WebSocket connector" {
         &shutdown,
     );
     defer client.deinit();
-    var first = (try client.pollWithTimeout(.fromSeconds(2))).?;
+    var first = (try client.pollWithTimeout(.fromSeconds(10))) orelse
+        return error.TestExpectedConnectEvent;
     defer first.deinit(allocator);
     try std.testing.expect(first == .connected);
-    var second = (try client.pollWithTimeout(.fromSeconds(2))).?;
+    var second = (try client.pollWithTimeout(.fromSeconds(10))) orelse
+        return error.TestExpectedReconnectEvent;
     defer second.deinit(allocator);
     try std.testing.expect(second == .connected);
     try std.testing.expect(second.connected.session_present);
@@ -1393,7 +1395,7 @@ test "MQTT reconnect client reuses authenticated WSS connector" {
     var connector = mqtt_ws.ReconnectConnector{
         .uri = uri,
         .options = .{
-            .mqtt = undefined,
+            .mqtt = .{ .client_id = "connector-placeholder" },
             .tls = .{ .ca_bundle = .{
                 .bundle = &ca_bundle,
                 .lock = &ca_lock,
@@ -1417,9 +1419,12 @@ test "MQTT reconnect client reuses authenticated WSS connector" {
         &shutdown,
     );
     defer client.deinit();
-    var first = (try client.pollWithTimeout(.fromSeconds(2))).?;
+    var first = (try client.pollWithTimeout(.fromSeconds(10))) orelse
+        return error.TestExpectedConnectEvent;
     defer first.deinit(allocator);
-    var second = (try client.pollWithTimeout(.fromSeconds(2))).?;
+    try std.testing.expect(first == .connected);
+    var second = (try client.pollWithTimeout(.fromSeconds(10))) orelse
+        return error.TestExpectedReconnectEvent;
     defer second.deinit(allocator);
     try std.testing.expect(second == .connected);
     try std.testing.expect(second.connected.session_present);

@@ -12,11 +12,20 @@ pub fn build(b: *std.Build) void {
 
     const target = b.standardTargetOptions(.{});
     const optimize = b.standardOptimizeOption(.{});
+    const test_filters = b.option(
+        []const []const u8,
+        "test-filter",
+        "Run only tests whose name contains one of these substrings",
+    ) orelse &.{};
     const vail_dep = b.dependency("vail", .{
         .target = target,
         .optimize = optimize,
     });
     const vort_dep = b.dependency("vort", .{
+        .target = target,
+        .optimize = optimize,
+    });
+    const zio_dep = b.dependency("zio", .{
         .target = target,
         .optimize = optimize,
     });
@@ -28,6 +37,7 @@ pub fn build(b: *std.Build) void {
         .imports = &.{
             .{ .name = "vail", .module = vail_dep.module("vail") },
             .{ .name = "vort", .module = vort_dep.module("vort") },
+            .{ .name = "zio", .module = zio_dep.module("zio") },
         },
     });
 
@@ -37,7 +47,10 @@ pub fn build(b: *std.Build) void {
     });
     b.installArtifact(lib);
 
-    const lib_tests = b.addTest(.{ .root_module = netz_mod });
+    const lib_tests = b.addTest(.{
+        .root_module = netz_mod,
+        .filters = test_filters,
+    });
     const run_lib_tests = b.addRunArtifact(lib_tests);
 
     const package_tests = b.addTest(.{
@@ -47,6 +60,7 @@ pub fn build(b: *std.Build) void {
             .optimize = optimize,
             .imports = &.{.{ .name = "netz", .module = netz_mod }},
         }),
+        .filters = test_filters,
     });
     const run_package_tests = b.addRunArtifact(package_tests);
 
@@ -215,6 +229,28 @@ pub fn build(b: *std.Build) void {
         "Run external Autobahn against netz (pass --tls for WSS)",
     );
     websocket_autobahn_step.dependOn(&websocket_autobahn.step);
+
+    const websocket_chrome_server = b.addExecutable(.{
+        .name = "netz-websocket-chrome-server",
+        .root_module = b.createModule(.{
+            .root_source_file = b.path(
+                "tools/interop/websocket_chrome_server.zig",
+            ),
+            .target = target,
+            .optimize = optimize,
+            .imports = &.{.{ .name = "netz", .module = netz_mod }},
+        }),
+    });
+    const websocket_chrome = b.addSystemCommand(&.{
+        "tools/interop/websocket_chrome.sh",
+    });
+    websocket_chrome.addArtifactArg(websocket_chrome_server);
+    if (b.args) |args| websocket_chrome.addArgs(args);
+    const websocket_chrome_step = b.step(
+        "interop-websocket-chrome",
+        "Exercise HTTP/1 WebSocket interoperability with Chrome (pass --tls for WSS)",
+    );
+    websocket_chrome_step.dependOn(&websocket_chrome.step);
 
     const h2spec_server = b.addExecutable(.{
         .name = "netz-h2spec-server",
@@ -683,6 +719,12 @@ pub fn build(b: *std.Build) void {
             .description = "Benchmark WebSocket caller-buffer and streaming frame encoding",
         },
         .{
+            .exe_name = "netz-bench-websocket-receive-buffer",
+            .path = "src/websocket/runtime/message/bench_buffer.zig",
+            .run_step = "bench-websocket-receive-buffer",
+            .description = "Benchmark eager versus amortized WebSocket receive-buffer consumption",
+        },
+        .{
             .exe_name = "netz-bench-websocket-echo",
             .path = "examples/bench_websocket_echo.zig",
             .run_step = "bench-websocket-echo",
@@ -917,32 +959,6 @@ pub fn build(b: *std.Build) void {
             .description = "Benchmark stateless QUIC session ticket seal/open",
         },
     };
-    const linux_example_specs = [_]struct {
-        exe_name: []const u8,
-        path: []const u8,
-        run_step: []const u8,
-        description: []const u8,
-    }{
-        .{
-            .exe_name = "netz-linux-io-uring-http1",
-            .path = "examples/linux_io_uring_http1.zig",
-            .run_step = "run-linux-io-uring-http1",
-            .description = "Run the Linux io_uring HTTP/1 raw transport example",
-        },
-        .{
-            .exe_name = "netz-linux-io-uring-http1-server",
-            .path = "examples/linux_io_uring_http1_server.zig",
-            .run_step = "run-linux-io-uring-http1-server",
-            .description = "Run the Linux io_uring HTTP/1 server example",
-        },
-        .{
-            .exe_name = "netz-linux-io-uring-websocket",
-            .path = "examples/linux_io_uring_websocket.zig",
-            .run_step = "run-linux-io-uring-websocket",
-            .description = "Run the Linux io_uring WebSocket client example",
-        },
-    };
-
     const examples_step = b.step("examples", "Build all examples");
     const bench_step = b.step("bench", "Run all native protocol benchmarks");
     for (example_specs) |spec| {
@@ -963,25 +979,6 @@ pub fn build(b: *std.Build) void {
         run_step.dependOn(&run.step);
         if (std.mem.startsWith(u8, spec.run_step, "bench-")) {
             bench_step.dependOn(&run.step);
-        }
-    }
-    if (target.result.os.tag == .linux) {
-        for (linux_example_specs) |spec| {
-            const exe = b.addExecutable(.{
-                .name = spec.exe_name,
-                .root_module = b.createModule(.{
-                    .root_source_file = b.path(spec.path),
-                    .target = target,
-                    .optimize = optimize,
-                    .imports = &.{.{ .name = "netz", .module = netz_mod }},
-                }),
-            });
-            examples_step.dependOn(&exe.step);
-
-            const run = b.addRunArtifact(exe);
-            if (b.args) |args| run.addArgs(args);
-            const run_step = b.step(spec.run_step, spec.description);
-            run_step.dependOn(&run.step);
         }
     }
 }

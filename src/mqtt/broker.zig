@@ -1296,9 +1296,31 @@ pub const Broker = struct {
             try self.finalizePersistentChangeLocked(true, true);
             return .{ .disposition = .already_applied };
         }
-        const publish = self.bridge_qos2.getPending(key) orelse {
+        const release_now = std.Io.Clock.awake.now(self.io);
+        var adjusted_properties: std.ArrayList(mqtt.Property) = .empty;
+        defer adjusted_properties.deinit(self.allocator);
+        const maybe_publish = self.bridge_qos2.pendingAsPublish(
+            key,
+            release_now,
+            &adjusted_properties,
+        ) catch |err| {
             self.state_mutex.unlock(self.io);
-            return error.InvalidReleaseState;
+            return err;
+        };
+        const publish = maybe_publish orelse {
+            // PUBREL still completes an expired transaction. Persisting the
+            // tombstone before reporting success prevents a repeated PUBREL
+            // from reviving an Application Message whose lifetime elapsed.
+            if (!self.bridge_qos2.markReleased(key)) {
+                self.state_mutex.unlock(self.io);
+                return error.InvalidReleaseState;
+            }
+            self.recordPersistentChangeLocked(true);
+            self.state_mutex.unlock(self.io);
+            try self.finalizePersistentChangeLocked(true, true);
+            self.persistence_mutex.unlock(self.io);
+            persistence_locked = false;
+            return .{ .disposition = .applied };
         };
         const released_payload_len = publish.payload.len;
         var persistent_changed = false;
@@ -1307,7 +1329,7 @@ pub const Broker = struct {
             null,
             publish,
             null,
-            std.Io.Clock.awake.now(self.io),
+            release_now,
             &persistent_changed,
             &publication_effect_committed,
         ) catch |err| {

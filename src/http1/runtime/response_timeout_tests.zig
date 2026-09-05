@@ -1516,24 +1516,3 @@ test "HTTP/1 TLS client response head timeout covers records" {
     joined = true;
     if (shared.err) |err| return err;
 }
-
-test "HTTP/1 io_uring rejects unsupported response head timeout" {
-    if (comptime @import("builtin").os.tag != .linux) {
-        return error.SkipZigTest;
-    }
-    var ring = std.os.linux.IoUring.init(8, 0) catch |err| switch (err) {
-        error.PermissionDenied, error.SystemOutdated => return error.SkipZigTest,
-        else => |other| return other,
-    };
-    defer ring.deinit();
-    try std.testing.expectError(
-        error.TimedReadUnsupported,
-        runtime.Client.requestUriLinuxIoUring(
-            std.testing.allocator,
-            &ring,
-            "http://127.0.0.1:1/",
-            .{},
-            .{ .response_head_timeout = .fromMilliseconds(1) },
-        ),
-    );
-}

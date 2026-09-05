@@ -7,11 +7,6 @@ const default_body_bytes: usize = 1024 * 1024;
 const default_chunk_bytes: usize = 16 * 1024;
 const default_warmup_iterations: usize = 20;
 const default_iterations: usize = 100;
-const response_date = "Mon, 17 Aug 2026 00:00:00 GMT";
-const response_headers = [_]netz.http1.Header{.{
-    .name = "date",
-    .value = response_date,
-}};
 
 const Mode = enum {
     fixed,
@@ -107,7 +102,6 @@ pub fn main(init: std.process.Init) !void {
                 }
                 std.mem.doNotOptimizeAway(context.checksum);
                 var response = try connection.startResponse(.{
-                    .headers = &response_headers,
                     .body_length = if (shared.options.mode == .fixed)
                         shared.options.body_bytes
                     else

@@ -598,6 +598,20 @@ pub fn decodeDynamicBlockWithLimit(
     table: DynamicTable,
     max_field_section_size: u64,
 ) !DynamicBlockDecode {
+    return decodeDynamicBlockWithLimitInternal(
+        allocator,
+        block,
+        table,
+        max_field_section_size,
+    ) catch |err| return normalizeFieldSectionDecodeError(err);
+}
+
+fn decodeDynamicBlockWithLimitInternal(
+    allocator: std.mem.Allocator,
+    block: []const u8,
+    table: DynamicTable,
+    max_field_section_size: u64,
+) !DynamicBlockDecode {
     const prefix = try decodeFieldSectionPrefix(block, table);
     var cursor = wire.Cursor.init(block);
     cursor.pos = prefix.consumed;
@@ -746,6 +760,20 @@ pub fn decodeDynamicBlockOwnedWithLimit(
     table: DynamicTable,
     max_field_section_size: u64,
 ) !DynamicBlockDecode {
+    return decodeDynamicBlockOwnedWithLimitInternal(
+        allocator,
+        block,
+        table,
+        max_field_section_size,
+    ) catch |err| return normalizeFieldSectionDecodeError(err);
+}
+
+fn decodeDynamicBlockOwnedWithLimitInternal(
+    allocator: std.mem.Allocator,
+    block: []const u8,
+    table: DynamicTable,
+    max_field_section_size: u64,
+) !DynamicBlockDecode {
     const prefix = try decodeFieldSectionPrefix(block, table);
     if (prefix.required_insert_count > table.insert_count) {
         return error.QpackBlocked;
@@ -876,6 +904,16 @@ pub fn decodeDynamicBlockOwnedWithLimit(
         .fields = try builder.finish(),
         .required_insert_count = prefix.required_insert_count,
         .base = prefix.base,
+    };
+}
+
+fn normalizeFieldSectionDecodeError(err: anyerror) Error {
+    return switch (err) {
+        error.OutOfMemory => error.OutOfMemory,
+        error.ExcessiveLoad => error.ExcessiveLoad,
+        error.QpackBlocked => error.QpackBlocked,
+        error.QpackDecompressionFailed => error.QpackDecompressionFailed,
+        else => error.QpackDecompressionFailed,
     };
 }
 

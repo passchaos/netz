@@ -2,6 +2,7 @@ const std = @import("std");
 const wire = @import("../internal/wire.zig");
 const priority_field = @import("../internal/priority.zig");
 const quic = @import("../quic/mod.zig");
+const header_fields = @import("codec/header_storage.zig");
 
 pub const runtime = @import("runtime.zig");
 pub const capsule = @import("capsule.zig");
@@ -58,12 +59,25 @@ pub const ApplicationErrorCode = struct {
     /// RFC 9297 malformed HTTP Datagram association/context identifier.
     pub const datagram_error: u64 = 0x33;
     pub const no_error: u64 = 0x100;
+    pub const general_protocol_error: u64 = 0x101;
+    pub const internal_error: u64 = 0x102;
+    pub const stream_creation_error: u64 = 0x103;
+    pub const closed_critical_stream: u64 = 0x104;
+    pub const frame_unexpected: u64 = 0x105;
+    pub const frame_error: u64 = 0x106;
     pub const excessive_load: u64 = 0x107;
     pub const id_error: u64 = 0x108;
+    pub const settings_error: u64 = 0x109;
+    pub const missing_settings: u64 = 0x10a;
     pub const request_rejected: u64 = 0x10b;
     pub const request_cancelled: u64 = 0x10c;
     pub const request_incomplete: u64 = 0x10d;
     pub const message_error: u64 = 0x10e;
+    pub const connect_error: u64 = 0x10f;
+    pub const version_fallback: u64 = 0x110;
+    pub const qpack_decompression_failed: u64 = 0x200;
+    pub const qpack_encoder_stream_error: u64 = 0x201;
+    pub const qpack_decoder_stream_error: u64 = 0x202;
 };
 
 pub const AltSvcEndpoint = struct {
@@ -1945,8 +1959,14 @@ pub fn writePushPromiseDynamic(
     {
         return error.InvalidContentLength;
     }
-    var fields_buf: [64]Qpack.HeaderField = undefined;
-    const fields = try promised_request.headerFields(&fields_buf);
+    var fields_stack: [header_fields.stack_capacity]Qpack.HeaderField = undefined;
+    const fields_buf = try header_fields.acquire(
+        allocator,
+        &fields_stack,
+        try requestHeaderFieldCapacity(promised_request, 0),
+    );
+    defer header_fields.release(allocator, &fields_stack, fields_buf);
+    const fields = try promised_request.headerFields(fields_buf);
     try validateHeaderBlock(fields, .request);
     try validateFieldSectionSize(
         fields,
@@ -1976,12 +1996,26 @@ pub fn decodePushPromiseWithDynamicTable(
     settings: Settings,
     table: Qpack.DynamicTable,
 ) Error!DecodedPushPromise {
+    return decodePushPromiseWithFieldDecoder(
+        allocator,
+        payload,
+        settings,
+        .{ .dynamic = table },
+    );
+}
+
+fn decodePushPromiseWithFieldDecoder(
+    allocator: std.mem.Allocator,
+    payload: []const u8,
+    settings: Settings,
+    field_decoder: FieldSectionDecoder,
+) Error!DecodedPushPromise {
     const promise = try parsePushPromisePayload(payload);
-    var request = try decodeRequestHeadFieldSectionWithDynamicTable(
+    var request = try decodeRequestHeadFieldSection(
         allocator,
         promise.field_section,
         settings,
-        table,
+        field_decoder,
     );
     errdefer request.deinit(allocator);
     request.consumed = payload.len;
@@ -2288,6 +2322,33 @@ pub const ControlStream = struct {
 
 pub const Qpack = @import("qpack/mod.zig");
 
+fn requestHeaderFieldCapacity(request: Request, extra: usize) Error!usize {
+    const extended_connect = std.mem.eql(u8, request.method, "CONNECT") and
+        requestHasProtocolPseudo(request.headers);
+    var pseudo_count: usize = 1;
+    if (!std.mem.eql(u8, request.method, "CONNECT") or extended_connect) {
+        pseudo_count += 2;
+    }
+    pseudo_count += @intFromBool(request.authority != null);
+    return header_fields.capacity(
+        try header_fields.capacity(request.headers.len, pseudo_count),
+        extra,
+    );
+}
+
+fn responseHeaderFieldCapacity(response: Response, extra: usize) Error!usize {
+    return header_fields.capacity(
+        try header_fields.capacity(response.headers.len, 1),
+        extra,
+    );
+}
+
+fn informationalHeaderFieldCapacity(
+    response: InformationalResponse,
+) Error!usize {
+    return header_fields.capacity(response.headers.len, 1);
+}
+
 pub const Request = struct {
     method: []const u8,
     path: []const u8,
@@ -2315,8 +2376,14 @@ pub const Request = struct {
     }
 
     pub fn writeWithSettings(self: Request, list: *std.ArrayList(u8), allocator: std.mem.Allocator, peer_settings: Settings) Error!void {
-        var fields_buf: [64]Qpack.HeaderField = undefined;
-        var fields = try self.headerFields(&fields_buf);
+        var fields_stack: [header_fields.stack_capacity]Qpack.HeaderField = undefined;
+        const fields_buf = try header_fields.acquire(
+            allocator,
+            &fields_stack,
+            try requestHeaderFieldCapacity(self, 1),
+        );
+        defer header_fields.release(allocator, &fields_stack, fields_buf);
+        var fields = try self.headerFields(fields_buf);
         const extended_connect = std.mem.eql(u8, self.method, "CONNECT") and
             requestHasProtocolPseudo(self.headers);
         var content_length_buf: [32]u8 = undefined;
@@ -2328,7 +2395,7 @@ pub const Request = struct {
         )) {
             var field_count = fields.len;
             const content_length = std.fmt.bufPrint(&content_length_buf, "{}", .{self.body.len}) catch unreachable;
-            try appendHeaderField(&fields_buf, &field_count, .{ .name = "content-length", .value = content_length });
+            try appendHeaderField(fields_buf, &field_count, .{ .name = "content-length", .value = content_length });
             fields = fields_buf[0..field_count];
             declared_content_length = self.body.len;
         }
@@ -2355,8 +2422,14 @@ pub const Request = struct {
         stream_id: u64,
         encoder: anytype,
     ) Error!void {
-        var fields_buf: [64]Qpack.HeaderField = undefined;
-        var fields = try self.headerFields(&fields_buf);
+        var fields_stack: [header_fields.stack_capacity]Qpack.HeaderField = undefined;
+        const fields_buf = try header_fields.acquire(
+            allocator,
+            &fields_stack,
+            try requestHeaderFieldCapacity(self, 1),
+        );
+        defer header_fields.release(allocator, &fields_stack, fields_buf);
+        var fields = try self.headerFields(fields_buf);
         const extended_connect = std.mem.eql(u8, self.method, "CONNECT") and
             requestHasProtocolPseudo(self.headers);
         var content_length_buf: [32]u8 = undefined;
@@ -2372,7 +2445,7 @@ pub const Request = struct {
                 "{}",
                 .{self.body.len},
             ) catch unreachable;
-            try appendHeaderField(&fields_buf, &field_count, .{
+            try appendHeaderField(fields_buf, &field_count, .{
                 .name = "content-length",
                 .value = content_length,
             });
@@ -2422,8 +2495,14 @@ pub const Request = struct {
         if (self.body.len != 0 or self.trailers.len != 0) {
             return error.InvalidContentLength;
         }
-        var fields_buf: [64]Qpack.HeaderField = undefined;
-        var fields = try self.headerFields(&fields_buf);
+        var fields_stack: [header_fields.stack_capacity]Qpack.HeaderField = undefined;
+        const fields_buf = try header_fields.acquire(
+            allocator,
+            &fields_stack,
+            try requestHeaderFieldCapacity(self, 1),
+        );
+        defer header_fields.release(allocator, &fields_stack, fields_buf);
+        var fields = try self.headerFields(fields_buf);
         var content_length_buf: [32]u8 = undefined;
         const extended_connect = std.mem.eql(u8, self.method, "CONNECT") and
             requestHasProtocolPseudo(self.headers);
@@ -2457,7 +2536,7 @@ pub const Request = struct {
             return .{ .expected_length = 0, .body_allowed = false };
         }
         const effective_length = try applyStreamingContentLength(
-            &fields_buf,
+            fields_buf,
             &fields,
             body_length,
             &content_length_buf,
@@ -2579,9 +2658,15 @@ pub const Response = struct {
     }
 
     pub fn writeWithSettings(self: Response, list: *std.ArrayList(u8), allocator: std.mem.Allocator, peer_settings: Settings) Error!void {
-        var fields_buf: [64]Qpack.HeaderField = undefined;
+        var fields_stack: [header_fields.stack_capacity]Qpack.HeaderField = undefined;
+        const fields_buf = try header_fields.acquire(
+            allocator,
+            &fields_stack,
+            try responseHeaderFieldCapacity(self, 1),
+        );
+        defer header_fields.release(allocator, &fields_stack, fields_buf);
         var status_buf: [3]u8 = undefined;
-        var fields = try self.headerFields(&fields_buf, &status_buf);
+        var fields = try self.headerFields(fields_buf, &status_buf);
         var content_length_buf: [32]u8 = undefined;
         const semantics = responseSemantics(self);
         try stripSuccessfulConnectContentLength(&fields, self.status, semantics);
@@ -2594,7 +2679,7 @@ pub const Response = struct {
         )) {
             var field_count = fields.len;
             const content_length = std.fmt.bufPrint(&content_length_buf, "{}", .{self.body.len}) catch unreachable;
-            try appendHeaderField(&fields_buf, &field_count, .{ .name = "content-length", .value = content_length });
+            try appendHeaderField(fields_buf, &field_count, .{ .name = "content-length", .value = content_length });
             fields = fields_buf[0..field_count];
             declared_content_length = self.body.len;
         }
@@ -2638,9 +2723,15 @@ pub const Response = struct {
         stream_id: u64,
         encoder: anytype,
     ) Error!void {
-        var fields_buf: [64]Qpack.HeaderField = undefined;
+        var fields_stack: [header_fields.stack_capacity]Qpack.HeaderField = undefined;
+        const fields_buf = try header_fields.acquire(
+            allocator,
+            &fields_stack,
+            try responseHeaderFieldCapacity(self, 1),
+        );
+        defer header_fields.release(allocator, &fields_stack, fields_buf);
         var status_buf: [3]u8 = undefined;
-        var fields = try self.headerFields(&fields_buf, &status_buf);
+        var fields = try self.headerFields(fields_buf, &status_buf);
         var content_length_buf: [32]u8 = undefined;
         const semantics = responseSemantics(self);
         try stripSuccessfulConnectContentLength(&fields, self.status, semantics);
@@ -2657,7 +2748,7 @@ pub const Response = struct {
                 "{}",
                 .{self.body.len},
             ) catch unreachable;
-            try appendHeaderField(&fields_buf, &field_count, .{
+            try appendHeaderField(fields_buf, &field_count, .{
                 .name = "content-length",
                 .value = content_length,
             });
@@ -2713,9 +2804,15 @@ pub const Response = struct {
         if (self.body.len != 0 or self.trailers.len != 0) {
             return error.InvalidContentLength;
         }
-        var fields_buf: [64]Qpack.HeaderField = undefined;
+        var fields_stack: [header_fields.stack_capacity]Qpack.HeaderField = undefined;
+        const fields_buf = try header_fields.acquire(
+            allocator,
+            &fields_stack,
+            try responseHeaderFieldCapacity(self, 1),
+        );
+        defer header_fields.release(allocator, &fields_stack, fields_buf);
         var status_buf: [3]u8 = undefined;
-        var fields = try self.headerFields(&fields_buf, &status_buf);
+        var fields = try self.headerFields(fields_buf, &status_buf);
         const semantics = responseSemantics(self);
         const body_forbidden = responseSuppressesBody(
             self.status,
@@ -2736,7 +2833,7 @@ pub const Response = struct {
             const declared_content_length = if ((semantics.head or
                 self.status == 304) and body_length != null)
                 try applyStreamingContentLength(
-                    &fields_buf,
+                    fields_buf,
                     &fields,
                     body_length,
                     &content_length_buf,
@@ -2779,7 +2876,7 @@ pub const Response = struct {
         }
         var content_length_buf: [32]u8 = undefined;
         const effective_length = try applyStreamingContentLength(
-            &fields_buf,
+            fields_buf,
             &fields,
             body_length,
             &content_length_buf,
@@ -2806,7 +2903,7 @@ pub const Response = struct {
 };
 
 fn applyStreamingContentLength(
-    fields_buf: *[64]Qpack.HeaderField,
+    fields_buf: []Qpack.HeaderField,
     fields: *[]Qpack.HeaderField,
     requested: ?usize,
     content_length_buf: *[32]u8,
@@ -2957,9 +3054,15 @@ pub const InformationalResponse = struct {
     }
 
     pub fn writeWithSettings(self: InformationalResponse, list: *std.ArrayList(u8), allocator: std.mem.Allocator, peer_settings: Settings) Error!void {
-        var fields_buf: [64]Qpack.HeaderField = undefined;
+        var fields_stack: [header_fields.stack_capacity]Qpack.HeaderField = undefined;
+        const fields_buf = try header_fields.acquire(
+            allocator,
+            &fields_stack,
+            try informationalHeaderFieldCapacity(self),
+        );
+        defer header_fields.release(allocator, &fields_stack, fields_buf);
         var status_buf: [3]u8 = undefined;
-        const fields = try self.headerFields(&fields_buf, &status_buf);
+        const fields = try self.headerFields(fields_buf, &status_buf);
         try validateHeaderBlock(fields, .response);
         try validateFieldSectionSize(fields, peer_settings.max_field_section_size);
         try validateResponseBodyForStatus(self.status, fields, &.{}, &.{});
@@ -2974,9 +3077,15 @@ pub const InformationalResponse = struct {
         stream_id: u64,
         encoder: anytype,
     ) Error!void {
-        var fields_buf: [64]Qpack.HeaderField = undefined;
+        var fields_stack: [header_fields.stack_capacity]Qpack.HeaderField = undefined;
+        const fields_buf = try header_fields.acquire(
+            allocator,
+            &fields_stack,
+            try informationalHeaderFieldCapacity(self),
+        );
+        defer header_fields.release(allocator, &fields_stack, fields_buf);
         var status_buf: [3]u8 = undefined;
-        const fields = try self.headerFields(&fields_buf, &status_buf);
+        const fields = try self.headerFields(fields_buf, &status_buf);
         try validateHeaderBlock(fields, .response);
         try validateFieldSectionSize(fields, peer_settings.max_field_section_size);
         try validateResponseBodyForStatus(self.status, fields, &.{}, &.{});
@@ -3211,7 +3320,20 @@ pub fn decodeRequestHeadFieldSectionWithDynamicTable(
     settings: Settings,
     table: Qpack.DynamicTable,
 ) Error!DecodedRequestHead {
-    const field_decoder = FieldSectionDecoder{ .dynamic = table };
+    return decodeRequestHeadFieldSection(
+        allocator,
+        field_section,
+        settings,
+        .{ .dynamic = table },
+    );
+}
+
+fn decodeRequestHeadFieldSection(
+    allocator: std.mem.Allocator,
+    field_section: []const u8,
+    settings: Settings,
+    field_decoder: FieldSectionDecoder,
+) Error!DecodedRequestHead {
     const decoded = try field_decoder.decode(
         allocator,
         field_section,
@@ -3286,7 +3408,13 @@ pub fn decodeResponseHeadWithDynamicTableAndOptions(
     var acknowledgments: usize = 0;
     var informational_count: usize = 0;
     while (true) {
-        const frame = try firstHeadersFrame(bytes[offset..], .response);
+        const frame = try firstResponseHeadersFrame(
+            allocator,
+            bytes[offset..],
+            settings,
+            .{ .dynamic = table },
+        );
+        acknowledgments += frame.qpack_section_acknowledgments;
         var head = try decodeResponseHeadFieldSectionWithDynamicTable(
             allocator,
             frame.value.payload,
@@ -3385,6 +3513,49 @@ const FirstHeaders = struct {
     value: Frame,
     consumed: usize,
 };
+
+const FirstResponseHeaders = struct {
+    value: Frame,
+    consumed: usize,
+    qpack_section_acknowledgments: usize,
+};
+
+fn firstResponseHeadersFrame(
+    allocator: std.mem.Allocator,
+    bytes: []const u8,
+    settings: Settings,
+    field_decoder: FieldSectionDecoder,
+) Error!FirstResponseHeaders {
+    var offset: usize = 0;
+    var acknowledgments: usize = 0;
+    while (true) {
+        const frame = try Frame.parse(bytes[offset..]);
+        offset += frame.consumed;
+        if (frame.frame_type == FrameType.headers) {
+            return .{
+                .value = frame,
+                .consumed = offset,
+                .qpack_section_acknowledgments = acknowledgments,
+            };
+        }
+        if (frame.frame_type == FrameType.push_promise) {
+            var promise = try decodePushPromiseWithFieldDecoder(
+                allocator,
+                frame.payload,
+                settings,
+                field_decoder,
+            );
+            acknowledgments +=
+                promise.request.qpack_section_acknowledgments;
+            promise.deinit(allocator);
+        } else if (frame.frame_type == FrameType.data or
+            requestStreamForbiddenFrame(frame.frame_type))
+        {
+            return error.ExpectedHeadersFrame;
+        }
+        if (offset >= bytes.len) return error.BufferTooShort;
+    }
+}
 
 fn firstHeadersFrame(
     bytes: []const u8,
@@ -3507,7 +3678,7 @@ fn decodeRequestWithOptions(
         allocator,
         bytes,
         .request,
-        settings.max_field_section_size,
+        settings,
         field_decoder,
     );
     errdefer message.deinit(allocator);
@@ -3632,7 +3803,7 @@ fn decodeResponseWithFieldDecoder(
     var message = try decodeResponseMessage(
         allocator,
         bytes,
-        settings.max_field_section_size,
+        settings,
         field_decoder,
         options,
     );
@@ -3944,7 +4115,7 @@ fn parseStatusValue(value: []const u8) Error!u16 {
 fn decodeResponseMessage(
     allocator: std.mem.Allocator,
     bytes: []const u8,
-    max_field_section_size: u64,
+    settings: Settings,
     field_decoder: FieldSectionDecoder,
     options: ResponseDecodeOptions,
 ) Error!DecodedMessage {
@@ -3952,13 +4123,23 @@ fn decodeResponseMessage(
     // Invoke the observer before freeing an interim section, and retain only
     // the cumulative QPACK acknowledgment count needed by the final response.
     var offset: usize = 0;
-    var informational_acknowledgments: usize = 0;
+    var preceding_acknowledgments: usize = 0;
     var informational_count: usize = 0;
     while (true) {
         const frame = try Frame.parse(bytes[offset..]);
         if (frame.frame_type != FrameType.headers) {
             if (frame.frame_type == FrameType.data or requestStreamForbiddenFrame(frame.frame_type)) return error.ExpectedHeadersFrame;
-            if (frame.frame_type == FrameType.push_promise) _ = try parsePushPromisePayload(frame.payload);
+            if (frame.frame_type == FrameType.push_promise) {
+                var promise = try decodePushPromiseWithFieldDecoder(
+                    allocator,
+                    frame.payload,
+                    settings,
+                    field_decoder,
+                );
+                preceding_acknowledgments +=
+                    promise.request.qpack_section_acknowledgments;
+                promise.deinit(allocator);
+            }
             offset += frame.consumed;
             if (offset >= bytes.len) return error.MissingStatus;
             continue;
@@ -3966,12 +4147,15 @@ fn decodeResponseMessage(
         const decoded = try field_decoder.decode(
             allocator,
             frame.payload,
-            max_field_section_size,
+            settings.max_field_section_size,
         );
         var decoded_owned = true;
         defer if (decoded_owned) Qpack.freeDecodedFields(allocator, decoded.fields);
         try validateHeaderBlock(decoded.fields, .response);
-        try validateFieldSectionSize(decoded.fields, max_field_section_size);
+        try validateFieldSectionSize(
+            decoded.fields,
+            settings.max_field_section_size,
+        );
         const lookup = try responseHeaderLookup(decoded.fields);
         const status = lookup.status orelse return error.MissingStatus;
         if (status < 200) {
@@ -3987,7 +4171,8 @@ fn decodeResponseMessage(
                 &informational_count,
                 options.max_informational_responses,
             );
-            informational_acknowledgments += @intFromBool(decoded.requires_acknowledgment);
+            preceding_acknowledgments +=
+                @intFromBool(decoded.requires_acknowledgment);
             Qpack.freeDecodedFields(allocator, decoded.fields);
             decoded_owned = false;
             offset += frame.consumed;
@@ -3999,14 +4184,14 @@ fn decodeResponseMessage(
             allocator,
             bytes,
             .response,
-            max_field_section_size,
+            settings,
             field_decoder,
             decoded,
             offset + frame.consumed,
             lookup.content_length,
         );
         message.response_lookup = lookup;
-        message.qpack_section_acknowledgments += informational_acknowledgments;
+        message.qpack_section_acknowledgments += preceding_acknowledgments;
         return message;
     }
 }
@@ -4029,7 +4214,7 @@ fn decodeMessage(
     allocator: std.mem.Allocator,
     bytes: []const u8,
     kind: MessageStreamKind,
-    max_field_section_size: u64,
+    settings: Settings,
     field_decoder: FieldSectionDecoder,
 ) Error!DecodedMessage {
     var offset: usize = 0;
@@ -4053,11 +4238,14 @@ fn decodeMessage(
     const decoded_headers = try field_decoder.decode(
         allocator,
         headers_frame.payload,
-        max_field_section_size,
+        settings.max_field_section_size,
     );
     var headers_owned = true;
     errdefer if (headers_owned) Qpack.freeDecodedFields(allocator, decoded_headers.fields);
-    try validateFieldSectionSize(decoded_headers.fields, max_field_section_size);
+    try validateFieldSectionSize(
+        decoded_headers.fields,
+        settings.max_field_section_size,
+    );
     try validateHeaderBlock(
         decoded_headers.fields,
         switch (kind) {
@@ -4074,7 +4262,7 @@ fn decodeMessage(
         allocator,
         bytes,
         kind,
-        max_field_section_size,
+        settings,
         field_decoder,
         decoded_headers,
         offset + headers_frame.consumed,
@@ -4088,7 +4276,7 @@ fn decodeMessageAfterHeaders(
     allocator: std.mem.Allocator,
     bytes: []const u8,
     kind: MessageStreamKind,
-    max_field_section_size: u64,
+    settings: Settings,
     field_decoder: FieldSectionDecoder,
     decoded_headers: DecodedFieldSection,
     initial_consumed: usize,
@@ -4127,10 +4315,13 @@ fn decodeMessageAfterHeaders(
                 const decoded_trailers = try field_decoder.decode(
                     allocator,
                     frame.payload,
-                    max_field_section_size,
+                    settings.max_field_section_size,
                 );
                 errdefer Qpack.freeDecodedFields(allocator, decoded_trailers.fields);
-                try validateFieldSectionSize(decoded_trailers.fields, max_field_section_size);
+                try validateFieldSectionSize(
+                    decoded_trailers.fields,
+                    settings.max_field_section_size,
+                );
                 trailers = decoded_trailers.fields;
                 qpack_section_acknowledgments +=
                     @intFromBool(decoded_trailers.requires_acknowledgment);
@@ -4138,7 +4329,15 @@ fn decodeMessageAfterHeaders(
             },
             FrameType.push_promise => {
                 if (kind == .request or saw_trailers) return error.UnexpectedFrame;
-                _ = try parsePushPromisePayload(frame.payload);
+                var promise = try decodePushPromiseWithFieldDecoder(
+                    allocator,
+                    frame.payload,
+                    settings,
+                    field_decoder,
+                );
+                qpack_section_acknowledgments +=
+                    promise.request.qpack_section_acknowledgments;
+                promise.deinit(allocator);
             },
             else => if (requestStreamForbiddenFrame(frame.frame_type)) return error.UnexpectedFrame,
         }
@@ -6168,6 +6367,81 @@ test "HTTP/3 dynamic QPACK response counts informational and final acknowledgmen
     try std.testing.expectEqual(@as(usize, 2), decoded.qpack_section_acknowledgments);
 }
 
+test "HTTP/3 aggregate response decodes push promises and counts their acknowledgments" {
+    const allocator = std.testing.allocator;
+    var table = Qpack.DynamicTable.init(allocator, 512);
+    defer table.deinit();
+    try table.setCapacity(512);
+    _ = try table.insert("x-push-kind", "dynamic-asset");
+
+    var promise_block: std.ArrayList(u8) = .empty;
+    defer promise_block.deinit(allocator);
+    try Qpack.encodeDynamicBlock(&promise_block, allocator, &.{
+        .{ .name = ":method", .value = "GET" },
+        .{ .name = ":scheme", .value = "https" },
+        .{ .name = ":path", .value = "/asset.css" },
+        .{ .name = ":authority", .value = "example.test" },
+        .{ .name = "x-push-kind", .value = "dynamic-asset" },
+    }, table);
+    var encoded: std.ArrayList(u8) = .empty;
+    defer encoded.deinit(allocator);
+    try writePushPromiseFrame(
+        &encoded,
+        allocator,
+        3,
+        promise_block.items,
+    );
+    try (Response{ .status = 204 }).write(&encoded, allocator);
+
+    var decoded = try decodeResponseWithDynamicTable(
+        allocator,
+        encoded.items,
+        .{},
+        table,
+    );
+    defer decoded.deinit(allocator);
+    try std.testing.expectEqual(@as(u16, 204), decoded.status);
+    try std.testing.expectEqual(
+        @as(usize, 1),
+        decoded.qpack_section_acknowledgments,
+    );
+    var decoded_head = try decodeResponseHeadWithDynamicTable(
+        allocator,
+        encoded.items,
+        .{},
+        table,
+    );
+    defer decoded_head.deinit(allocator);
+    try std.testing.expectEqual(@as(u16, 204), decoded_head.status);
+    try std.testing.expectEqual(encoded.items.len, decoded_head.consumed);
+    try std.testing.expectEqual(
+        @as(usize, 1),
+        decoded_head.qpack_section_acknowledgments,
+    );
+
+    var malformed: std.ArrayList(u8) = .empty;
+    defer malformed.deinit(allocator);
+    // The prefix is complete and declares no dynamic dependency; the literal
+    // field line itself is truncated. This ensures aggregate decoding, not
+    // the dependency prepass, detects the malformed promise.
+    try writePushPromiseFrame(
+        &malformed,
+        allocator,
+        3,
+        &.{ 0x00, 0x00, 0x20 },
+    );
+    try (Response{ .status = 204 }).write(&malformed, allocator);
+    try std.testing.expectError(
+        error.QpackDecompressionFailed,
+        decodeResponseWithDynamicTable(
+            allocator,
+            malformed.items,
+            .{},
+            table,
+        ),
+    );
+}
+
 test "HTTP/3 dynamic heads decode before DATA and own fields" {
     const allocator = std.testing.allocator;
     var table = Qpack.DynamicTable.init(allocator, 512);
@@ -6557,7 +6831,20 @@ test "HTTP/3 message rejects bad frame order and content length" {
 
     var pushed_response: std.ArrayList(u8) = .empty;
     defer pushed_response.deinit(allocator);
-    try writePushPromiseFrame(&pushed_response, allocator, 0, "promised-headers");
+    var promised_headers: std.ArrayList(u8) = .empty;
+    defer promised_headers.deinit(allocator);
+    try Qpack.encodeLiteralBlock(&promised_headers, allocator, &.{
+        .{ .name = ":method", .value = "GET" },
+        .{ .name = ":scheme", .value = "https" },
+        .{ .name = ":path", .value = "/promised" },
+        .{ .name = ":authority", .value = "example.test" },
+    });
+    try writePushPromiseFrame(
+        &pushed_response,
+        allocator,
+        0,
+        promised_headers.items,
+    );
     header_block.clearRetainingCapacity();
     try Qpack.encodeLiteralBlock(&header_block, allocator, &.{.{ .name = ":status", .value = "200" }});
     try (Frame{ .frame_type = FrameType.headers, .payload = header_block.items, .consumed = 0 }).write(&pushed_response, allocator);
@@ -7135,5 +7422,6 @@ test "HTTP/3 response honors HEAD and CONNECT request semantics" {
 test {
     _ = runtime;
     _ = origin_pool;
+    _ = @import("codec/header_capacity_tests.zig");
     _ = @import("informational_tests.zig");
 }

@@ -9,7 +9,18 @@ pub const Limits = struct {
     /// Maximum number of HTTP/1 response headers accepted while parsing the
     /// server's 101 response on WS and WSS client paths.
     max_response_headers: usize = 100,
+    /// Maximum number of bodyless 1xx responses accepted before the final
+    /// Upgrade response. Status 101 is the final switching response.
+    max_informational_responses: usize = 16,
+    /// Maximum decoded body bytes retained from a rejected HTTP/1 Upgrade or
+    /// HTTP/3 Extended CONNECT. Successful upgrades are unaffected.
+    max_rejection_body_bytes: usize = 1024 * 1024,
+    /// Maximum payload bytes in an inbound wire frame or an outbound
+    /// caller-selected frame. Compressed sends also apply this bound to each
+    /// uncompressed application slice before allocating compressor scratch.
     max_frame_bytes: usize = 16 * 1024 * 1024,
+    /// Maximum logical application-message bytes before outbound compression
+    /// and after inbound decompression or fragment assembly.
     max_message_bytes: usize = 16 * 1024 * 1024,
     /// Optional absolute budget for the HTTP/1 Upgrade request/response head.
     /// Partial bytes do not renew it. TLS handshake time and Extended CONNECT
@@ -20,6 +31,114 @@ pub const Limits = struct {
     /// wait behind delayed ACK merely because a peer uses split writes.
     tcp_nodelay: bool = true,
 };
+
+pub const OutgoingValidationError = websocket.Error || error{
+    MessageTooLarge,
+};
+
+/// Validate one complete outbound application message before a transport
+/// acquires its send lock, allocates compressor scratch, or masks caller data.
+pub fn validateOutgoingMessage(
+    limits: Limits,
+    opcode: websocket.Opcode,
+    payload: []const u8,
+) OutgoingValidationError!void {
+    switch (opcode) {
+        .text, .binary => {},
+        else => return error.InvalidFrame,
+    }
+    try validateOutgoingMessageLength(limits, payload.len);
+    if (opcode == .text and !std.unicode.utf8ValidateSlice(payload)) {
+        return error.InvalidUtf8;
+    }
+}
+
+pub fn validateOutgoingMessageLength(
+    limits: Limits,
+    payload_len: usize,
+) error{MessageTooLarge}!void {
+    if (payload_len > limits.max_frame_bytes or
+        payload_len > limits.max_message_bytes)
+    {
+        return error.MessageTooLarge;
+    }
+}
+
+/// Validate borrowed slices that will be emitted as one binary frame.
+pub fn validateOutgoingMessageParts(
+    limits: Limits,
+    parts: []const []const u8,
+) OutgoingValidationError!usize {
+    const payload_len = try outgoingPayloadLen(parts);
+    try validateOutgoingMessageLength(limits, payload_len);
+    return payload_len;
+}
+
+/// Validate caller-selected wire fragments and their logical aggregate.
+pub fn validateOutgoingFragments(
+    limits: Limits,
+    opcode: websocket.Opcode,
+    fragments: []const []const u8,
+) OutgoingValidationError!usize {
+    switch (opcode) {
+        .text, .binary => {},
+        else => return error.InvalidFrame,
+    }
+    if (fragments.len == 0) return error.InvalidFrame;
+
+    var total: usize = 0;
+    for (fragments) |fragment| {
+        if (fragment.len > limits.max_frame_bytes) {
+            return error.MessageTooLarge;
+        }
+        total = std.math.add(usize, total, fragment.len) catch
+            return error.PayloadTooLarge;
+    }
+    if (total > limits.max_message_bytes) return error.MessageTooLarge;
+    if (opcode == .text and !fragmentedTextIsValid(fragments)) {
+        return error.InvalidUtf8;
+    }
+    return total;
+}
+
+/// Validate public Ping, Pong, and Close writes against both the configured
+/// frame bound and RFC 6455's stricter control-frame rules.
+pub fn validateOutgoingControlFrame(
+    limits: Limits,
+    opcode: websocket.Opcode,
+    payload: []const u8,
+) OutgoingValidationError!void {
+    switch (opcode) {
+        .close, .ping, .pong => {},
+        else => return error.InvalidFrame,
+    }
+    if (payload.len > limits.max_frame_bytes) {
+        return error.MessageTooLarge;
+    }
+    switch (opcode) {
+        .close => try websocket.validateClosePayload(payload),
+        .ping, .pong => if (payload.len > 125) {
+            return error.InvalidControlFrame;
+        },
+        else => unreachable,
+    }
+}
+
+fn outgoingPayloadLen(parts: []const []const u8) websocket.Error!usize {
+    var total: usize = 0;
+    for (parts) |part| {
+        total = std.math.add(usize, total, part.len) catch
+            return error.PayloadTooLarge;
+    }
+    return total;
+}
+
+fn fragmentedTextIsValid(fragments: []const []const u8) bool {
+    var validator: websocket.Utf8Validator = .{};
+    for (fragments) |fragment| validator.feed(fragment) catch return false;
+    validator.finish() catch return false;
+    return true;
+}
 
 pub const Role = enum {
     client,
@@ -190,4 +309,77 @@ test "WebSocket receive failures map to RFC 6455 Close codes" {
     );
     try std.testing.expect(closeCodeForReceiveError(error.Timeout) == null);
     try std.testing.expect(closeCodeForReceiveError(error.OutOfMemory) == null);
+}
+
+test "WebSocket outbound validation enforces frame and message limits" {
+    const limits: Limits = .{
+        .max_frame_bytes = 4,
+        .max_message_bytes = 6,
+    };
+
+    try validateOutgoingMessage(limits, .text, "four");
+    try std.testing.expectError(
+        error.MessageTooLarge,
+        validateOutgoingMessage(limits, .binary, "five!"),
+    );
+    // Size validation is constant-time and precedes UTF-8 scanning.
+    try std.testing.expectError(
+        error.MessageTooLarge,
+        validateOutgoingMessage(limits, .text, "abcd\xff"),
+    );
+    try std.testing.expectError(
+        error.InvalidUtf8,
+        validateOutgoingMessage(limits, .text, "\xff"),
+    );
+
+    try std.testing.expectEqual(
+        @as(usize, 4),
+        try validateOutgoingMessageParts(limits, &.{ "ab", "cd" }),
+    );
+    try std.testing.expectError(
+        error.MessageTooLarge,
+        validateOutgoingMessageParts(limits, &.{ "abc", "de" }),
+    );
+
+    try std.testing.expectEqual(
+        @as(usize, 6),
+        try validateOutgoingFragments(
+            limits,
+            .text,
+            &.{ "ab", "cdef" },
+        ),
+    );
+    try std.testing.expectError(
+        error.MessageTooLarge,
+        validateOutgoingFragments(limits, .binary, &.{"abcde"}),
+    );
+    try std.testing.expectError(
+        error.MessageTooLarge,
+        validateOutgoingFragments(
+            limits,
+            .binary,
+            &.{ "abc", "def", "g" },
+        ),
+    );
+}
+
+test "WebSocket outbound control validation honors configured frame limit" {
+    const limits: Limits = .{ .max_frame_bytes = 4 };
+    try validateOutgoingControlFrame(limits, .ping, "four");
+    try std.testing.expectError(
+        error.MessageTooLarge,
+        validateOutgoingControlFrame(limits, .pong, "five!"),
+    );
+    try std.testing.expectError(
+        error.InvalidControlFrame,
+        validateOutgoingControlFrame(
+            .{ .max_frame_bytes = 126 },
+            .ping,
+            "x" ** 126,
+        ),
+    );
+    try std.testing.expectError(
+        error.InvalidFrame,
+        validateOutgoingControlFrame(limits, .binary, ""),
+    );
 }

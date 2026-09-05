@@ -3,11 +3,19 @@ const netz = @import("netz");
 
 const batch_size: usize = 32;
 const payload_size: usize = 1024;
+// Mirror HTTP/3 DATA packetization, where a framing prefix and borrowed body
+// ranges can produce several adjacent STREAM descriptors for the same stream.
+const default_stream_fragments_per_packet: usize = 1;
+const max_stream_fragments_per_packet: usize = 16;
 const warmup_iterations: usize = 100;
 const measured_iterations: usize = 1_000;
 
-pub fn main() !void {
+pub fn main(init: std.process.Init) !void {
     const allocator = std.heap.smp_allocator;
+    const stream_fragments_per_packet = try parseStreamFragments(
+        init,
+        allocator,
+    );
     var threaded = std.Io.Threaded.init(allocator, .{});
     defer threaded.deinit();
     const io = threaded.io();
@@ -41,15 +49,24 @@ pub fn main() !void {
     var payload: [payload_size]u8 = undefined;
     for (&payload, 0..) |*byte, index| byte.* = @truncate(index);
 
-    var frame_storage: [batch_size][1]netz.quic.Frame = undefined;
+    var frame_storage: [batch_size][max_stream_fragments_per_packet]netz.quic.Frame =
+        undefined;
     var packets: [batch_size][]const netz.quic.Frame = undefined;
     for (&frame_storage, &packets, 0..) |*packet_frames, *packet, index| {
-        packet_frames[0] = .{ .stream = .{
-            .stream_id = 0,
-            .offset = index * payload.len,
-            .data = &payload,
-        } };
-        packet.* = packet_frames;
+        const fragment_size = payload.len / stream_fragments_per_packet;
+        for (packet_frames[0..stream_fragments_per_packet], 0..) |*frame, fragment_index| {
+            const start = fragment_index * fragment_size;
+            const end = if (fragment_index + 1 == stream_fragments_per_packet)
+                payload.len
+            else
+                start + fragment_size;
+            frame.* = .{ .stream = .{
+                .stream_id = 0,
+                .offset = index * payload.len + start,
+                .data = payload[start..end],
+            } };
+        }
+        packet.* = packet_frames[0..stream_fragments_per_packet];
     }
 
     var sequential = try netz.quic.one_rtt.Connection.init(
@@ -114,7 +131,7 @@ pub fn main() !void {
     const ratio_x100 = ratioTimes100(sequential_ns, batch_ns);
     std.debug.print(
         \\QUIC 1-RTT send benchmark
-        \\  iterations: {d}, packets/batch: {d}, payload bytes/packet: {d}
+        \\  iterations: {d}, packets/batch: {d}, STREAM descriptors/packet: {d}, payload bytes/packet: {d}
         \\  stateful batch GSO available after run: {}
         \\  stateful sequential: {d} ns/batch, {d} ns/packet
         \\  stateful batched:    {d} ns/batch, {d} ns/packet
@@ -124,6 +141,7 @@ pub fn main() !void {
     , .{
         measured_iterations,
         batch_size,
+        stream_fragments_per_packet,
         payload_size,
         batch_sender.gsoSendEnabled(),
         sequential_ns / measured_iterations,
@@ -164,6 +182,28 @@ fn runBatch(
 fn ratioTimes100(numerator: u64, denominator: u64) u64 {
     if (denominator == 0) return 0;
     return (numerator *| 100) / denominator;
+}
+
+fn parseStreamFragments(
+    init: std.process.Init,
+    allocator: std.mem.Allocator,
+) !usize {
+    var args = try std.process.Args.Iterator.initAllocator(
+        init.minimal.args,
+        allocator,
+    );
+    defer args.deinit();
+    _ = args.next();
+    var fragments = default_stream_fragments_per_packet;
+    while (args.next()) |arg| {
+        const prefix = "--stream-fragments=";
+        if (!std.mem.startsWith(u8, arg, prefix)) return error.InvalidArgument;
+        fragments = try std.fmt.parseInt(usize, arg[prefix.len..], 10);
+    }
+    if (fragments == 0 or fragments > max_stream_fragments_per_packet) {
+        return error.InvalidArgument;
+    }
+    return fragments;
 }
 
 fn nowNs(io: std.Io) u64 {

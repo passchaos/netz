@@ -327,7 +327,10 @@ test "HTTP/2 TLS listener rejects a client without h2 ALPN" {
         connection.deinit();
         return error.UnexpectedAlpn;
     } else |err| switch (err) {
-        error.ConnectionClosed => stream.close(io),
+        // The server rejected ALPN during its handshake and closed without an
+        // authenticated application-phase close_notify. Preserve that strict
+        // distinction instead of treating it as an orderly TLS EOF.
+        error.UnexpectedEof => stream.close(io),
         else => return err,
     }
 

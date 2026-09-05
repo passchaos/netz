@@ -40,7 +40,7 @@ test "WebSocket client and server exchange over a Unix socket" {
         err: ?anyerror = null,
 
         fn run(self: *@This()) void {
-            var connection = self.server.accept(.{
+            var pending = self.server.receiveUpgradeRequest(.{
                 .protocols = &.{"unix.test"},
                 .require_subprotocol = true,
                 .enable_permessage_deflate = true,
@@ -48,6 +48,23 @@ test "WebSocket client and server exchange over a Unix socket" {
                 self.err = err;
                 return;
             };
+            var pending_owned = true;
+            defer if (pending_owned) pending.deinit();
+            if (!std.mem.eql(u8, pending.target(), "/unix") or
+                !std.mem.eql(
+                    u8,
+                    pending.header("authorization") orelse "",
+                    "Bearer unix-admission",
+                ))
+            {
+                self.err = error.InvalidHandshake;
+                return;
+            }
+            var connection = pending.accept() catch |err| {
+                self.err = err;
+                return;
+            };
+            pending_owned = false;
             defer connection.close();
             var message = connection.receiveMessage() catch |err| {
                 self.err = err;
@@ -87,6 +104,10 @@ test "WebSocket client and server exchange over a Unix socket" {
             .host = "localhost",
             .target = "/unix",
             .protocols = &.{"unix.test"},
+            .extra_headers = &.{.{
+                .name = "Authorization",
+                .value = "Bearer unix-admission",
+            }},
             .enable_permessage_deflate = true,
             .limits = .{
                 .max_head_bytes = 4096,

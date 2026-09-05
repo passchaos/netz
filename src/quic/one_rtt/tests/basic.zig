@@ -141,6 +141,122 @@ fn sendPayloadForTest(
     try endpoint.sendBytes(peer, packet);
 }
 
+fn trafficSecretForSuiteForTest(
+    suite: quic.protection.CipherSuite,
+) quic.tls.secret.Secret {
+    return switch (suite.hash()) {
+        .sha256 => .fromSha256([_]u8{0x84} ** 32),
+        .sha384 => .fromSha384([_]u8{0x85} ** 48),
+        .sm3 => .fromSm3([_]u8{0x86} ** 32),
+    };
+}
+
+fn expectSingleStreamReceiveForSuite(
+    allocator: std.mem.Allocator,
+    io: std.Io,
+    suite: quic.protection.CipherSuite,
+) !void {
+    var server_endpoint = try quic.runtime.Endpoint.bind(
+        allocator,
+        io,
+        .{ .ip4 = .loopback(0) },
+        .{ .max_datagram_size = 4096 },
+    );
+    defer server_endpoint.deinit();
+    var client_endpoint = try quic.runtime.Endpoint.bind(
+        allocator,
+        io,
+        .{ .ip4 = .loopback(0) },
+        .{ .max_datagram_size = 4096 },
+    );
+    defer client_endpoint.deinit();
+
+    const keys = try quic.protection.deriveKeysForSecretForVersion(
+        quic.Version.version_1.wireValue(),
+        suite,
+        trafficSecretForSuiteForTest(suite),
+    );
+    const client_cid = [_]u8{ 0x81, 0x82, 0x83, 0x84 };
+    const server_cid = [_]u8{ 0x85, 0x86, 0x87, 0x88 };
+    var client = try one_rtt.Connection.init(&client_endpoint, .{
+        .peer = server_endpoint.address(),
+        .receive_keys = keys,
+        .send_keys = keys,
+        .local_connection_id = &client_cid,
+        .peer_connection_id = &server_cid,
+    });
+    defer client.deinit();
+    var server = try one_rtt.Connection.init(&server_endpoint, .{
+        .peer = client_endpoint.address(),
+        .receive_keys = keys,
+        .send_keys = keys,
+        .local_connection_id = &server_cid,
+        .peer_connection_id = &client_cid,
+        .local_endpoint = .server,
+    });
+    defer server.deinit();
+
+    try client.send(&[_]quic.Frame{.{ .stream = .{
+        .stream_id = 0,
+        .data = "suite stream",
+        .fin = true,
+    } }});
+    var packet = try server.receivePacket();
+    defer packet.deinit(allocator);
+    try std.testing.expectEqual(@as(usize, 1), packet.frames.len);
+    try std.testing.expectEqualStrings(
+        "suite stream",
+        packet.frames[0].stream.data,
+    );
+
+    var storage: [32]u8 = undefined;
+    const event = (try server.pollStreamId(0, &storage)) orelse
+        return error.TestUnexpectedResult;
+    try std.testing.expect(event == .data);
+    try std.testing.expectEqualStrings(
+        "suite stream",
+        storage[0..event.data.bytes],
+    );
+    try std.testing.expect(event.data.fin);
+
+    try client.initiateKeyUpdate();
+    try client.send(&[_]quic.Frame{.{ .stream = .{
+        .stream_id = 4,
+        .data = "updated suite stream",
+        .fin = true,
+    } }});
+    var updated = try server.receivePacket();
+    defer updated.deinit(allocator);
+    try std.testing.expect(updated.peer_initiated_key_update);
+    try std.testing.expect(updated.packet.key_phase);
+
+    const updated_event = (try server.pollStreamId(4, &storage)) orelse
+        return error.TestUnexpectedResult;
+    try std.testing.expect(updated_event == .data);
+    try std.testing.expectEqualStrings(
+        "updated suite stream",
+        storage[0..updated_event.data.bytes],
+    );
+    try std.testing.expect(updated_event.data.fin);
+}
+
+test "QUIC 1-RTT single STREAM receive and key update support every traffic suite" {
+    const allocator = std.testing.allocator;
+    var threaded = std.Io.Threaded.init(allocator, .{});
+    defer threaded.deinit();
+    const io = threaded.io();
+
+    const suites = [_]quic.protection.CipherSuite{
+        .aes_128_gcm_sha256,
+        .aes_256_gcm_sha384,
+        .chacha20_poly1305_sha256,
+        .sm4_gcm_sm3,
+    };
+    inline for (suites) |suite| {
+        try expectSingleStreamReceiveForSuite(allocator, io, suite);
+    }
+}
+
 test "QUIC 1-RTT consumes a preloaded coalesced-handshake suffix first" {
     const allocator = std.testing.allocator;
     var threaded = std.Io.Threaded.init(allocator, .{});
@@ -260,6 +376,164 @@ test "QUIC 1-RTT batch send protects consecutive packets" {
             try std.testing.expectEqual(@intFromEnum(expected), @intFromEnum(actual));
         }
     }
+}
+
+test "QUIC 1-RTT caller-buffer single send matches wire and allocates nothing" {
+    const allocator = std.testing.allocator;
+    var threaded = std.Io.Threaded.init(allocator, .{});
+    defer threaded.deinit();
+    const io = threaded.io();
+    var receiver = try quic.runtime.Endpoint.bind(
+        allocator,
+        io,
+        .{ .ip4 = .loopback(0) },
+        .{ .max_datagram_size = 4096 },
+    );
+    defer receiver.deinit();
+    var sender = try quic.runtime.Endpoint.bind(
+        allocator,
+        io,
+        .{ .ip4 = .loopback(0) },
+        .{ .max_datagram_size = 4096 },
+    );
+    defer sender.deinit();
+
+    const keys = quic.protection.deriveAes128Keys(
+        [_]u8{0x93} ** quic.protection.secret_len,
+    );
+    const frames = [_]quic.Frame{
+        .{ .ping = {} },
+        .{ .datagram = .{ .data = "caller storage", .length_present = true } },
+    };
+    const options: one_rtt.SendOptions = .{
+        .destination_connection_id = "single-cid",
+        .packet_number = 17,
+        .packet_number_len = 2,
+        .frames = &frames,
+    };
+    const sizes = try one_rtt.framePacketStorageSizes(options);
+    var packet_storage: [256]u8 = undefined;
+    try std.testing.expect(sizes.packet <= packet_storage.len);
+
+    var fail = std.testing.FailingAllocator.init(
+        allocator,
+        .{ .fail_index = 0 },
+    );
+    const original_allocator = sender.allocator;
+    sender.allocator = fail.allocator();
+    errdefer sender.allocator = original_allocator;
+    try one_rtt.sendFramesInto(
+        &sender,
+        receiver.address(),
+        keys,
+        options,
+        &packet_storage,
+    );
+    sender.allocator = original_allocator;
+    try std.testing.expect(!fail.has_induced_failure);
+
+    var received = try one_rtt.receive(
+        &receiver,
+        keys,
+        "single-cid".len,
+        17,
+        4,
+    );
+    defer received.deinit(allocator);
+    try std.testing.expectEqual(@as(u64, 17), received.packet.packet_number);
+    try std.testing.expectEqual(@as(usize, 2), received.frames.len);
+    try std.testing.expectEqualStrings(
+        "caller storage",
+        received.frames[1].datagram.data,
+    );
+}
+
+test "QUIC 1-RTT caller-buffer single send rejects short storage before I/O" {
+    const allocator = std.testing.allocator;
+    var threaded = std.Io.Threaded.init(allocator, .{});
+    defer threaded.deinit();
+    const io = threaded.io();
+    var endpoint = try quic.runtime.Endpoint.bind(
+        allocator,
+        io,
+        .{ .ip4 = .loopback(0) },
+        .{ .max_datagram_size = 4096 },
+    );
+    defer endpoint.deinit();
+    const keys = quic.protection.deriveAes128Keys(
+        [_]u8{0x94} ** quic.protection.secret_len,
+    );
+    const options: one_rtt.SendOptions = .{
+        .destination_connection_id = "cid",
+        .packet_number = 1,
+        .frames = &.{.{ .ping = {} }},
+    };
+    const sizes = try one_rtt.framePacketStorageSizes(options);
+    var packet: [64]u8 = undefined;
+    try std.testing.expectError(
+        error.BufferTooShort,
+        one_rtt.sendFramesInto(
+            &endpoint,
+            endpoint.address(),
+            keys,
+            options,
+            packet[0 .. sizes.packet - 1],
+        ),
+    );
+}
+
+test "QUIC 1-RTT compatibility single send allocates once" {
+    const allocator = std.testing.allocator;
+    var threaded = std.Io.Threaded.init(allocator, .{});
+    defer threaded.deinit();
+    const io = threaded.io();
+    var receiver = try quic.runtime.Endpoint.bind(
+        allocator,
+        io,
+        .{ .ip4 = .loopback(0) },
+        .{ .max_datagram_size = 4096 },
+    );
+    defer receiver.deinit();
+    var sender = try quic.runtime.Endpoint.bind(
+        allocator,
+        io,
+        .{ .ip4 = .loopback(0) },
+        .{ .max_datagram_size = 4096 },
+    );
+    defer sender.deinit();
+    const keys = quic.protection.deriveAes128Keys(
+        [_]u8{0x95} ** quic.protection.secret_len,
+    );
+    var fail = std.testing.FailingAllocator.init(
+        allocator,
+        .{ .fail_index = 1 },
+    );
+    const original_allocator = sender.allocator;
+    sender.allocator = fail.allocator();
+    errdefer sender.allocator = original_allocator;
+    try one_rtt.sendFrames(
+        &sender,
+        receiver.address(),
+        keys,
+        .{
+            .destination_connection_id = "receiver",
+            .packet_number = 3,
+            .frames = &.{.{ .ping = {} }},
+        },
+    );
+    sender.allocator = original_allocator;
+    try std.testing.expect(!fail.has_induced_failure);
+    try std.testing.expectEqual(@as(usize, 1), fail.alloc_index);
+
+    var received = try one_rtt.receive(
+        &receiver,
+        keys,
+        "receiver".len,
+        3,
+        2,
+    );
+    defer received.deinit(allocator);
+    try std.testing.expect(received.frames[0] == .ping);
 }
 
 test "QUIC 1-RTT connection greases and accepts the fixed bit" {
@@ -1055,6 +1329,14 @@ test "QUIC 1-RTT connection exposes stable stats counters" {
     try std.testing.expect(client.getSendStreamStats(0) == null);
     try std.testing.expect(client.streamStopped(0) == null);
     const initial_credit = client.streamSendCredit(0);
+    try std.testing.expectEqual(
+        initial_credit.connection,
+        client.connectionSendAvailable(),
+    );
+    try std.testing.expectEqual(
+        initial_credit.stream,
+        client.streamSendAvailable(0),
+    );
     try std.testing.expect(initial_credit.connection >= 5);
     try std.testing.expect(initial_credit.stream >= 5);
     try std.testing.expect(initial_credit.congestion > 0);
@@ -1104,6 +1386,14 @@ test "QUIC 1-RTT connection exposes stable stats counters" {
         send_stream_stats.send_available,
     );
     const remaining_credit = client.streamSendCredit(0);
+    try std.testing.expectEqual(
+        remaining_credit.connection,
+        client.connectionSendAvailable(),
+    );
+    try std.testing.expectEqual(
+        remaining_credit.stream,
+        client.streamSendAvailable(0),
+    );
     try std.testing.expectEqual(
         initial_credit.connection - 5,
         remaining_credit.connection,
@@ -1861,7 +2151,10 @@ test "QUIC 1-RTT connection accounts only new overlapping stream bytes" {
     try std.testing.expectEqual(@as(usize, 1), server.received.ranges.items.len);
     try std.testing.expect(server.closing());
     try std.testing.expectEqual(@intFromEnum(quic.TransportErrorCode.protocol_violation), server.close_info.?.error_code);
-    try std.testing.expectEqual(@as(u64, @intFromEnum(quic.FrameType.stream) | 0x02), server.close_info.?.frame_type);
+    try std.testing.expectEqual(
+        @as(u64, @intFromEnum(quic.FrameType.stream) | 0x06),
+        server.close_info.?.frame_type,
+    );
     try std.testing.expectEqualStrings("stream data", server.close_info.?.reason_phrase);
 }
 
@@ -1951,7 +2244,13 @@ test "QUIC 1-RTT connection preflights ACK frames before receive-side effects" {
                 .largest_acknowledged = 0,
                 .ack_delay = 0,
                 .first_ack_range = 0,
+                .ecn_counts = .{
+                    .ect0_count = 0,
+                    .ect1_count = 0,
+                    .ecn_ce_count = 0,
+                },
             } },
+            .{ .ping = {} },
         },
     });
 
@@ -1962,7 +2261,10 @@ test "QUIC 1-RTT connection preflights ACK frames before receive-side effects" {
     try std.testing.expectEqual(@as(u64, 0), client.expected_packet_number);
     try std.testing.expect(client.closing());
     try std.testing.expectEqual(@intFromEnum(quic.TransportErrorCode.protocol_violation), client.close_info.?.error_code);
-    try std.testing.expectEqual(@as(u64, @intFromEnum(quic.FrameType.ack)), client.close_info.?.frame_type);
+    try std.testing.expectEqual(
+        @as(u64, @intFromEnum(quic.FrameType.ack_ecn)),
+        client.close_info.?.frame_type,
+    );
     try std.testing.expectEqualStrings("ack", client.close_info.?.reason_phrase);
 }
 
@@ -1998,7 +2300,13 @@ test "QUIC 1-RTT connection preflights stream frames before receive-side effects
         .packet_number = 0,
         .frames = &[_]quic.Frame{
             .{ .stream = .{ .stream_id = 1, .data = "first", .fin = false } },
-            .{ .stream = .{ .stream_id = 5, .data = "over-limit", .fin = false } },
+            .{ .stream = .{
+                .stream_id = 5,
+                .offset = 7,
+                .data = "over-limit",
+                .fin = true,
+            } },
+            .{ .ping = {} },
         },
     });
 
@@ -2009,7 +2317,10 @@ test "QUIC 1-RTT connection preflights stream frames before receive-side effects
     try std.testing.expectEqual(@as(u64, 0), client.expected_packet_number);
     try std.testing.expect(client.closing());
     try std.testing.expectEqual(@intFromEnum(quic.TransportErrorCode.stream_limit_error), client.close_info.?.error_code);
-    try std.testing.expectEqual(@as(u64, @intFromEnum(quic.FrameType.stream) | 0x02), client.close_info.?.frame_type);
+    try std.testing.expectEqual(
+        @as(u64, @intFromEnum(quic.FrameType.stream) | 0x07),
+        client.close_info.?.frame_type,
+    );
     try std.testing.expectEqualStrings("stream limit", client.close_info.?.reason_phrase);
 }
 
@@ -2054,6 +2365,7 @@ test "QUIC 1-RTT connection rejects invalid unidirectional stream controls befor
         .frames = &[_]quic.Frame{
             .{ .stream = .{ .stream_id = 1, .data = "before-max-stream-error", .fin = false } },
             .{ .max_stream_data = .{ .stream_id = 3, .maximum_stream_data = 64 } },
+            .{ .ping = {} },
         },
     });
     try std.testing.expectError(error.StreamStateError, client.receivePacket());
@@ -2279,7 +2591,15 @@ test "QUIC 1-RTT receivePacketAt updates RTT from ACK" {
     });
     defer client.deinit();
 
-    try client.sent.sentAt(0, true, 1200, .not_ect, 1_000_000);
+    try client.sent.sentAtWithDatagramSizeAndPathEpoch(
+        0,
+        true,
+        1200,
+        1200,
+        .not_ect,
+        1_000_000,
+        one_rtt.testing.currentPathEpoch(&client),
+    );
     try one_rtt.sendFrames(&server_endpoint, client_endpoint.address(), keys, .{
         .destination_connection_id = &client_cid,
         .packet_number = 0,
@@ -2319,7 +2639,15 @@ test "QUIC 1-RTT connection updates RTT from ACK samples" {
     });
     defer connection.deinit();
 
-    try connection.sent.sentAt(0, true, 1200, .not_ect, 1_000_000);
+    try connection.sent.sentAtWithDatagramSizeAndPathEpoch(
+        0,
+        true,
+        1200,
+        1200,
+        .not_ect,
+        1_000_000,
+        one_rtt.testing.currentPathEpoch(&connection),
+    );
     const ack = quic.AckFrame{ .largest_acknowledged = 0, .ack_delay = 5, .first_ack_range = 0 };
     try std.testing.expect(try connection.updateRttFromAck(ack, 101_000_000));
     try std.testing.expect(connection.rtt_stats.has_measurement);
@@ -2331,7 +2659,15 @@ test "QUIC 1-RTT connection updates RTT from ACK samples" {
     try std.testing.expectEqual(@as(u64, 100_000_000), connection.rtt_stats.latest_rtt);
 
     connection.markTlsHandshakeComplete();
-    try connection.sent.sentAt(1, true, 1200, .not_ect, 201_000_000);
+    try connection.sent.sentAtWithDatagramSizeAndPathEpoch(
+        1,
+        true,
+        1200,
+        1200,
+        .not_ect,
+        201_000_000,
+        one_rtt.testing.currentPathEpoch(&connection),
+    );
     const ack2 = quic.AckFrame{ .largest_acknowledged = 1, .ack_delay = 5, .first_ack_range = 0 };
     try std.testing.expect(try connection.updateRttFromAck(ack2, 331_000_000));
     try std.testing.expect(connection.rtt_stats.smoothed_rtt > 100_000_000);

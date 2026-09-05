@@ -289,6 +289,11 @@ test "WebTransport development connect ignores informational responses" {
                         .name = "x-final",
                         .value = "selected",
                     }},
+                    .body = "after hint",
+                    .trailers = &.{.{
+                        .name = "x-trailer",
+                        .value = "complete",
+                    }},
                     .request_method = "CONNECT",
                     .extended_connect = true,
                 },
@@ -308,7 +313,11 @@ test "WebTransport development connect ignores informational responses" {
         .{
             .authority = "localhost",
             .path = "/informational",
-            .limits = test_limits,
+            .limits = blk: {
+                var limits = test_limits;
+                limits.max_rejection_body_bytes = 10;
+                break :blk limits;
+            },
         },
         futureDeadline(io),
     );
@@ -317,6 +326,16 @@ test "WebTransport development connect ignores informational responses" {
     try std.testing.expectEqualStrings(
         "selected",
         attempt.responseHeader("x-final").?,
+    );
+    try std.testing.expectEqualStrings(
+        "10",
+        attempt.responseHeader("content-length").?,
+    );
+    try std.testing.expectEqualStrings("after hint", attempt.body());
+    try std.testing.expectEqual(@as(usize, 1), attempt.trailers().len);
+    try std.testing.expectEqualStrings(
+        "complete",
+        attempt.trailers()[0].value,
     );
     try std.testing.expect(attempt.responseHeader("x-informational") == null);
 

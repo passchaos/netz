@@ -33,9 +33,18 @@ zig build bench-http3-handshake-transfer -Doptimize=ReleaseFast -- --iterations=
 zig build bench-http3-handshake-transfer -Doptimize=ReleaseFast -- --iterations=1 --body-bytes=16777216 --mode=upload --streams=4
 zig build bench-http3-handshake-transfer -Doptimize=ReleaseFast -- --iterations=1 --body-bytes=16777216 --mode=download --streams=4
 zig build bench-quic-one-rtt-send -Doptimize=ReleaseFast
+zig build bench-quic-one-rtt-send -Doptimize=ReleaseFast -- --stream-fragments=4
 zig build bench-quic-one-rtt-receive -Doptimize=ReleaseFast
+taskset -c 0 zig build bench-quic-one-rtt-receive -Doptimize=ReleaseFast -- --mode=visitor --frame=stream --warmup=200 --iterations=5000
 zig build bench-quic-udp-batch -Doptimize=ReleaseFast
+taskset -c 0 zig build bench-mqtt-tls -Doptimize=ReleaseFast
 ```
+
+Two 2026-09-04 post-close-semantics MQTT-over-TLS regression samples used one
+persistent native TLS 1.3 connection, 100 warmup exchanges, and 2,000 measured
+1-KiB QoS 1 publish/PUBACK round trips. They measured 11.693-11.812 us per
+operation and 84,658-85,518 operations/s on CPU 0. This is an internal hot-path
+guard for the shared vail record stream, not a cross-library performance claim.
 
 ## Current netz results
 
@@ -45,8 +54,9 @@ Captured on 2026-08-17. This benchmark mirrors
 `~/Work/hyper/benches/pipeline.rs::hello_world_16`: each iteration sends
 sixteen bodyless GET requests on one persistent loopback TCP connection and
 receives sixteen `"Hello, World!"` responses. Hyper automatically adds a
-29-byte Date value; netz supplies a same-length Date field so both responses
-are 89 wire bytes. Netz runs 200 untimed warmup batches before 2,000 measured
+29-byte Date value; netz now generates the same IMF-fixdate in its ordinary
+server path, so both responses are 89 wire bytes without benchmark-only headers.
+Netz runs 200 untimed warmup batches before 2,000 measured
 batches. CPU 0 pinning is required on this hybrid-core host; unpinned samples
 are not used for the comparison.
 
@@ -84,6 +94,20 @@ header/body vectored writes and one transactional response-batch flush. This is
 a focused HTTP/1 pipeline result, not a whole-library superiority claim. The
 implementation audit and remaining HTTP/1/HTTP/2 evidence are in
 `docs/hyper_parity.md`.
+
+The automatic-Date path was recaptured on 2026-09-04 with three CPU-0 runs:
+netz measured 0.733-0.750 us/request (11.73-12.00 us/batch), while Hyper
+measured 0.844-0.846 us/request (13.50-13.54 us/batch).
+HTTP/1 aggregate message-boundary logic now lives under
+`runtime/message/framing.zig`: head limits, Content-Length and
+Transfer-Encoding classification, decoded chunk limits, trailer limits,
+method-aware close-delimited responses, interim-response classification, and
+automatic 100-continue eligibility share one pure module and focused tests.
+The runtime also delegates legal HTTP/1.1 non-final transfer-coding responses
+directly to the core parser instead of sanitizing and reparsing the head,
+removing three temporary allocations while preserving Transfer-Encoding and
+stripping conflicting Content-Length. HTTP/1.0 Transfer-Encoding remains a
+hard error and has a real TCP regression.
 
 The same executable now accepts `--large-body`. With sixteen 64-KiB fixed
 responses, the runtime validates the whole pipeline but borrows bodies into a
@@ -125,8 +149,9 @@ Captured on 2026-08-17 against Hyper's
 `http2_consecutive_x1_empty`, `http2_consecutive_x1_req_10b`,
 `http2_consecutive_x1_req_100kb`, and `http2_parallel_x10_empty` benchmarks.
 Each scenario uses a persistent prior-knowledge connection and both processes
-were pinned to CPU 0. Netz supplies Hyper's same-length Date value, matches its
-1-MiB server receive windows, and uses untimed warmup so steady-state wire,
+were pinned to CPU 0. Netz and Hyper both generate Date through their default
+server paths, while netz matches Hyper's 1-MiB server receive windows and uses
+untimed warmup so steady-state wire,
 flow-control and calibration shapes match.
 
 ```sh
@@ -177,6 +202,66 @@ parallel x10, 1-MiB response/stream, max windows (2026-08-19):
   hyper: 2.957-3.035 ms/batch, 295.7-303.5 us/request
   netz batch-latency advantage: 1.77-1.82x
 ```
+
+A three-run 2026-09-04 CPU-0 post-change recapture of the first four shapes
+measured netz at 9.980-10.288 us, 10.516-10.525 us, 23.173-23.279 us and
+27.611-27.808 us/batch; matching Hyper spot samples were 12.514 us,
+41.012 ms, 37.168 us and 47.994 us/batch.
+Outbound HTTP/2 hop-by-hop filtering now lives in `runtime/headers/connection.zig` and
+collects every `Connection` field before mutating the header list. Common
+requests use eight stack entries instead of the former fixed 256-entry array;
+larger sets allocate their exact count. Tests cover a 257th late nomination,
+allocation-failure rollback, request-only `TE: trailers`, and request/response
+high-level wire paths. Three CPU-0 post-change runs measured the six standard
+shapes at 9.850-10.044 us, 10.270-10.397 us, 23.062-23.288 us,
+27.372-27.503 us/batch, 168.481-169.305 us/request, and
+169.684-170.277 us/request respectively, within the preceding ranges.
+The remaining pure HTTP/2 header logic now lives in the same nested hierarchy:
+`runtime/headers/message.zig` owns Content-Length parsing, pseudo-header order,
+URI/authority validation, trailer restrictions, request lookups, and
+request-aware response body semantics. Focused tests under
+`runtime/headers/tests/` cover those rules while real connection tests remain
+at the integration layer. This removes another 565 lines from `runtime.zig`
+without changing public types. Three CPU-0 post-extraction runs measured the
+six standard shapes at 9.802-9.992 us, 10.264-10.469 us, 23.112-23.242 us,
+27.437-27.504 us/batch, 169.371-171.263 us/request, and
+170.763-173.576 us/request respectively, within the previous ranges.
+HTTP/2's transport-facing frame boundary now follows the same nested layout:
+`runtime/frame/io.zig` owns borrowed/owned reads and scatter/gather writes,
+while `runtime/frame/wire.zig` owns envelope validation and direct fixed-frame
+and batch encoding. HEADERS plus CONTINUATION batches reserve their complete
+encoded size before appending, so allocator failure leaves the caller's batch
+unchanged and successful multi-frame assembly performs a single capacity
+check. Focused tests cover envelope rules, exact flags/payload partitioning,
+preallocated reuse, and allocation-failure rollback.
+The reader retains the measured 64-KiB coalescing window and grows exactly to
+the frame boundary only when a legal frame is larger. A trial 16-KiB default
+reduced idle capacity, but regressed the large-body benchmark by requiring an
+extra initial read, so it was rejected rather than trading throughput for a
+memory-only improvement. The audited Hyper/h2 generic framed reader starts at
+8 KiB, but its async scheduling and buffer ownership differ from this blocking
+runtime; the local fixed-CPU result remains the deciding evidence here.
+The connection/stream flow-window primitive now lives under
+`runtime/flow/window.zig`, matching the audited h2 model's signed window domain:
+SETTINGS reductions may make a stream negative, but arithmetic cannot escape
+the signed 32-bit protocol range. Zero-length DATA reservations and receives
+remain legal even while a stream window is negative, so an empty END_STREAM
+does not wait for credit it does not consume. Focused tests cover blocked send,
+receive violations, both bounds, and transactional failure.
+Three fixed-binary CPU-0 runs after the flow-window extraction measured the
+six standard shapes at 10.094-10.227 us, 10.490-10.584 us,
+23.210-23.398 us, 27.898-28.111 us/batch, 170.335-171.941 us/request, and
+175.235-176.246 us/request. This is a regression guard rather than a speedup
+claim; the change centralizes arithmetic and fixes edge semantics.
+Three fixed-binary CPU-0 runs after the extraction measured the six standard
+shapes at 10.022-10.066 us, 10.548-10.626 us, 23.229-23.273 us,
+27.626-27.768 us/batch, 168.581-169.911 us/request, and
+170.828-172.510 us/request respectively. These stay within the established
+range; the one-shot build invocation outliers were excluded because build and
+measurement were not isolated. After rejecting the smaller read-ahead trial,
+three final fixed-binary runs measured 9.923-10.035 us, 10.449-10.565 us,
+23.243-23.372 us, 27.951-28.156 us/batch, 167.797-168.067 us/request, and
+173.706-174.753 us/request.
 
 `strace` confirmed equal steady-state wire sizes: empty exchanges use 19-byte
 requests and 11-byte responses; POST exchanges use 43-byte requests and
@@ -258,6 +343,12 @@ five CPU-0-pinned samples:
   netz batch-latency advantage: 1.37-1.41x
 ```
 
+Three alternating 2026-09-04 runs with runtime-generated Date measured netz at
+7.586-7.660 ms/batch (1,305-1,318 MiB/s) and Hyper at
+10.155-10.196 ms/batch (980-984 MiB/s), a 1.33-1.34x latency advantage. A
+short-run A/B against the saved pre-change netz binary showed 7.487 ms median
+versus 7.482 ms with the former fixed field (0.07%, within run noise).
+
 The reusable change is a blocking-runtime multi-stream DATA scheduler: it
 reserves only bytes being emitted in the current round, rotates the starting
 stream after progress, and pumps SETTINGS/PING/WINDOW_UPDATE plus member-stream
@@ -320,7 +411,100 @@ QUIC 1-RTT send benchmark
   total packets/path: 32000
 ```
 
+The 1-RTT send path now centralizes frame classification in
+`one_rtt/frame_traits.zig`. Single-packet validation hands its collected traits
+to packet preparation instead of rescanning for ACK-eliciting, in-flight,
+retransmission, HANDSHAKE_DONE and largest-ACK metadata; batch preflight caches
+the same result and no longer rescans every packet for automatic ECN. Focused
+tests pin ACK/PADDING/close, unreliable DATAGRAM, path validation, STREAM byte
+totals and ACK watermark semantics. Three CPU-0 fixed-binary runs measured
+stateful sequential sends at 106.649-108.672 us/batch and batched sends at
+95.348-97.660 us/batch, preserving a 1.11x batch throughput advantage.
+The bounded QUIC DATAGRAM receive queue now lives in
+`one_rtt/datagram_queue.zig`. Its first successful admission reserves exactly
+the configured ring bound, so later enqueue/overwrite operations allocate
+nothing and retain no geometric capacity beyond policy. Tests exercise
+wrap-around removal by packet number, stable survivor order, capacity-one
+replacement, caller ownership after OOM, and newest-data retention. The public
+queue/drop counters and packet-routing API are unchanged.
+Stateless `one_rtt.sendFramesInto` now accepts one caller-owned final packet
+buffer, encodes frames directly into its plaintext region, seals AEAD in place,
+and submits it without heap allocation. Its exact sizing helper validates every
+frame before output mutation. The compatibility `sendFrames` wrapper now uses
+one exact packet allocation instead of separate plaintext and protected-packet
+allocations. A real UDP test proves caller-buffer transmission under a
+fail-first endpoint allocator, another proves the wrapper succeeds when only
+one allocation is permitted, and short-buffer rejection occurs before I/O.
+
 ### QUIC 1-RTT receive
+
+On 2026-09-05 the current-key receive paths were changed to compute the
+short-header protection mask once, using the negotiated cipher suite, and then
+reuse that preview for packet-number unmasking and AEAD open. A Key Phase
+mismatch leaves the complete datagram unchanged for the existing next/previous
+generation fallback. Five post-change CPU-0 samples measured 1.900-1.908
+us/packet for the allocating path (1.907 median), 1.403-1.417 us/packet for
+in-place service (1.409 median), and 1.396-1.404 us/packet for the borrowed
+visitor (1.400 median). The three immediately preceding samples had medians of
+1.958, 1.465, and 1.466 us/packet respectively: 2.6%, 3.8%, and 4.5% median
+reductions. GRO's median moved from 1.675 to 1.657 us/packet (1.1%). AES-128,
+AES-256, ChaCha20, and SM4 tests verify both successful open and byte-for-byte
+preservation on phase mismatch.
+
+The receive benchmark now accepts `--mode=all|gro|plain|service|visitor`,
+`--frame=padding|stream`, `--warmup=N`, and `--iterations=N`. The STREAM shape
+fills each 1,152-byte plaintext with one ordered stream-zero frame, drains it
+through `pollStreamId`, and verifies the exact byte total, so it includes the
+receive preflight and stream-buffer path that padding-only packets do not.
+
+For the common one-STREAM packet, receive preflight now builds only one
+`RecvState.Preflight` and a one-frame descriptor store. It retains the same
+stream-ID, final-size, overlap/conflict, receive-window, stream-credit, and
+connection-credit validation before the packet-number recorder or connection
+state mutates, while skipping unrelated multi-stream, connection-ID, and path
+validation shadows. Seven CPU-0, order-alternated 5,000-iteration A/B pairs
+measured the following integer ns/packet medians:
+
+| STREAM receive path | Before | After | Median reduction | Pair outcomes |
+| --- | ---: | ---: | ---: | ---: |
+| borrowed visitor | 1328 | 1308 | 1.5% | 7/7 faster |
+| in-place service | 1336 | 1298 | 2.8% | 7/7 faster |
+
+Five equivalent padding visitor pairs moved from a 1397 ns/packet baseline
+median to 1395 ns/packet, a noise-level 0.1% difference. An all-mode STREAM run
+after this first-stage preflight change measured GRO 1347, allocating plain
+1532, in-place service 1320, and borrowed visitor 1322 ns/packet over 270,000
+packets per path. These are internal same-host regression measurements, not a
+cross-library throughput comparison.
+
+The new connection-level suite test passes a FIN-terminated single STREAM and a
+second STREAM after a key-phase update through `Connection.receivePacket` for
+AES-128-GCM/SHA-256, AES-256-GCM/SHA-384, ChaCha20-Poly1305/SHA-256, and
+SM4-GCM/SM3. It exposed a stale SHA-2-only key-update helper in netz; key
+updates now use Vail's suite-aware QUIC traffic-secret derivation, including
+HKDF-SM3.
+
+`RecvState` now stores received-byte presence as a packed, capacity-retaining
+word bitmap rather than one `bool` byte per buffered payload byte. Ordered
+append grows and fills the new words once; overlap checks, sparse gap filling,
+cloning, and non-word-aligned prefix compaction use the same bit representation.
+Dedicated model and stream tests cover set/clear ranges across 64-bit
+boundaries, every prefix shift from 0 through 130 bits, sparse-tail gap filling,
+conflicts, FIN, and sliding receive windows. This cuts bitmap storage to about
+one eighth of the former representation.
+
+Measured immediately against the retained single-STREAM-preflight binary, five
+order-alternated visitor pairs reduced the median from 1324 to 1166 ns/packet
+(11.9%, 5/5 faster). A separate seven-pair service run reduced the median from
+1328 to 1172 ns/packet (11.7%, 7/7 faster). A 20,000-iteration final profile
+measured 1185 ns/packet; `compiler_rt.memset` fell from about 11.5% in the
+original STREAM profile to 0.22% of samples, `ReceivedBitmap.resize` accounted
+for 0.58%, and AEAD GHASH/CTR again dominated. A long padding-only comparison,
+which never enters stream storage, varied by about 0.9% between binaries and is
+treated as code-layout/system noise rather than a claimed effect.
+The final all-mode STREAM run measured GRO 1138, allocating plain 1387,
+in-place service 1161, and borrowed visitor 1166 ns/packet over 270,000 packets
+per path.
 
 ```text
 QUIC 1-RTT receive benchmark
@@ -381,6 +565,311 @@ QUIC UDP receive benchmark
 ```
 
 ### HTTP/3 real-handshake paced transfer
+
+HTTP/3 server responses now use the same runtime-generated Date policy as
+HTTP/1 and HTTP/2. Development, protected, and authenticated runtimes cover
+aggregate, streaming, Push, and CONNECT final responses; explicit fields win,
+informational responses omit the generated value, and pure codec calls remain
+deterministic. The short-lived response view is stack-first and marks generated
+Date values never-indexed to avoid QPACK dynamic-table churn. The response
+assembly and tests live in a focused `runtime/server/response.zig` module rather
+than adding more policy code to the large runtime root. Two CPU-0
+development-runtime smoke runs with the default enabled measured 11.078-11.154
+us/request (89,653-90,262 requests/s).
+
+A repeated 1 MiB real-handshake download exposed a short-lived-session race:
+the paced writer had submitted the final DATA/FIN packet, but the server then
+destroyed its unacknowledged recovery state before a dropped tail packet could
+be retransmitted. Handshake clients and servers now expose an explicit,
+deadline-bounded recovery-idle drain; ordinary response sends retain their
+low-latency socket-submission contract. A deterministic test drops the first
+DATA/FIN packet and requires PTO retransmission, exact response bytes, FIN, and
+an empty recovery queue. The benchmark uses the drain before teardown and one
+absolute 30-second client receive deadline. Five CPU-0 1 MiB download
+iterations then completed at 105.87-126.36 MiB/s (120.41 MiB/s mean, 6.18%
+standard deviation).
+The same recovery drain now covers upload response tails, and both benchmark
+directions use one absolute 30-second response budget. A two-iteration CPU-0
+1 MiB upload smoke completed at 145.48-151.32 MiB/s (148.40 MiB/s mean).
+The single-connection `serveConnection` convenience API now applies the same
+bounded drain automatically using a configurable five-second default. The
+multi-connection endpoint callback loop instead remains nonblocking and
+refreshes the selected dispatcher's aggregate timer after application sends,
+so its shared owner services the new PTO on a later loop turn. Focused tests
+cover invalid drain budgets and the no-timer-before-send / PTO-after-handler
+transition.
+As part of the same maintenance pass, HTTP/3 URI authority parsing, DNS
+deduplication, multi-address resolution, and absolute connect-budget helpers
+were moved into `runtime/client/uri.zig`, while the shared runtime error set
+moved to `runtime/error.zig`. Public `UriEndpoint`, `UriRequestOptions`,
+`uriEndpoint`, and `uriRequestTargetAlloc` names remain compatibility
+re-exports; URI, HTTP/3, and full-suite tests cover the extracted code.
+Multi-address DNS collection no longer silently discards unique results after
+the former fixed 32-address scratch fills. Lookup now runs as an asynchronous
+producer while the caller drains the standard 16-result queue, and unique
+addresses remain in a 16-entry stack collector before exact dynamic growth.
+Tests cover 40 unique results plus a duplicate through a 16-slot queue, spill
+OOM without corrupting the retained prefix, an empty closed queue, and real
+localhost lookup. Resolver errors are awaited before the empty-result check so
+specific DNS failures are not collapsed into `NoAddressReturned`.
+Reusable message, Push, and critical-stream send scratch now lives under
+`runtime/send/scratch.zig`; the root keeps private aliases so no public or hot
+path call shape changes. The HTTP/3 runtime root fell by roughly 450 lines
+across these extractions. QPACK encode/decode connection state and its private
+rollback/index/blocked-stream algorithms now live together in
+`runtime/qpack/state.zig`; fourteen pure state-machine and allocation-failure
+tests moved with them to `runtime/qpack/state_tests.zig`, while socket-backed
+integration tests remain at the runtime layer. The root keeps public type
+aliases plus only the two internal methods required by send rollback and the
+existing white-box cancellation check. A post-move QPACK sample measured
+827 ns/block and 25 ns/field, within the prior 816-905 ns/block range.
+The same send submodule now owns an MTU-aware packetizer shared by full
+handshake connections, the lightweight preconfigured-key protected runtime,
+and cleartext development endpoints.
+The fast path preserves the prior single-packet call for already fitting frame
+groups; the fallback measures the exact protected packet size, repacks adjacent
+frames, and splits an oversized STREAM descriptor without changing byte order
+or FIN.
+This fixes large HEADERS under the normal 1200-byte path MTU: an 80-request /
+80-response-header WebTransport handshake previously failed with
+`DatagramTooLarge`, and now completes without raising the configured MTU.
+Development and lightweight protected WebTransport runtimes have matching
+80+80 coverage. Handshake and protected cases explicitly use a 1200-byte
+datagram limit and 64-byte never-indexed values, so the regression cannot pass
+through QPACK repetition alone; the ordinary response case also verifies DATA
+and final FIN after fragmentation. A 256-byte field-section setting still
+rejects the set with `ExcessiveLoad`. CONNECT header assembly, protocol
+validation/response shaping, and admission/capacity tests are grouped under
+`webtransport/runtime/connect/`.
+The cleartext development request, response-head, response-prefix, body, and
+associated-stream send paths use the same complete-plan-before-send policy. An
+explicit 1200-byte UDP/STREAM configuration with 80 never-indexed 64-byte
+fields now completes both CONNECT and ordinary final response/body/FIN paths
+instead of surfacing `DatagramTooLarge`; deterministic planning failures remain
+rollback-safe before the first socket attempt.
+Their STREAM framing, streaming-head registration, informational response
+offset commit, body-chunk rollback, request cancellation, and retained
+DATAGRAM cloning now live together in `runtime/development/send.zig`. Tests
+verify contiguous STREAM offsets with exactly one final FIN and that a clone
+allocation failure leaves the source packet owned and the retained queue empty.
+Three CPU-0 development samples during a heavily loaded host measured
+12.910-15.323 us/request; the spread is retained only as a functional benchmark
+pass and does not replace the isolated range above.
+The complete development send helper set has now moved into that module,
+including whole-message packetization, response-prefix offsets, request
+cancellation, body-chunk state and retained DATAGRAM cloning. Cloning allocates
+the exact frame wire length and writes directly into final ownership instead
+of growing an ArrayList and converting it to another allocation. The runtime
+root is now 24,076 lines. A later loaded-host sample ranged
+12.992-21.114 us/request and is likewise not used for a performance verdict.
+The legacy single-stream development receive helper now lives in
+`runtime/development/receive.zig`, separate from the stricter multi-request
+buffer. On FIN-complete contiguous streams it transfers the reassembly
+ArrayList into the owned response instead of duplicating the complete HTTP/3
+message. Expected peer/stream filtering, irrelevant unidirectional-stream
+discard, deadline behavior, packet ownership, and the configured stream-buffer
+limit remain unchanged. A loaded-host CPU-0 smoke measured 14.155 us/request
+and is recorded only as functional evidence.
+Development request/response ownership and bounded batch result types now live
+in `runtime/development/message.zig`; public names remain aliases from the
+runtime root. Allocation-failure enumeration covers both batch arrays and
+their cleanup, while the existing concurrent server tests continue to access
+the same public fields and counters.
+The preconfigured-key protection scratch and packet-number/socket-prefix commit
+backend now live in `runtime/send/protected.zig`; `runtime.zig` retains a
+private type alias, so existing call shapes and white-box allocation checks stay
+unchanged while another roughly 160 lines leave the root. A packetizer unit
+test forces more than 64 output packets and verifies every packet stays within
+its MTU, offsets remain contiguous across batch flushes, bytes are unchanged,
+and FIN appears exactly once on the final fragment.
+Three CPU-0 `bench-http3-dev` samples after the shared packetizer measured
+10.879, 11.255, and 13.659 us/request (73,206-91,916 requests/s). This overlaps
+the prior 10.698, 11.060, and 13.624 us/request range, so the exact sizing
+preflight has no measurable stable small-message regression on this host.
+A final isolated three-run sample after every cleartext send path was connected
+to the packetizer measured 10.939, 11.042, and 11.568 us/request
+(86,438-91,408 requests/s), tightening that no-regression evidence.
+The bounded cleartext retained-DATAGRAM FIFO and its count/byte/ownership tests
+were also moved under `runtime/development/datagram_queue.zig`; cross-frame
+routing coverage remains with the integration layer. This keeps queue policy
+independent without creating a flat collection of additional runtime files.
+Development associated-stream receive reassembly, per-session/client send
+offsets, per-peer server ID cursors, prefix classification, and their lifecycle
+tests now live together in `runtime/development/streams.zig`. Public stream,
+match, direction, role, and debug-count names remain root aliases, while the
+runtime root sheds roughly another 700 lines.
+Client/server request lifecycle state and its white-box tests now live under
+`runtime/stream/lifecycle.zig`. The module owns outstanding/active indexes,
+request decode semantics, priorities, GOAWAY transitions, and drain-floor
+comparisons; `runtime.zig` supplies only reader adaptation and the three
+buffered-stream floor values. Public shutdown/retry enums remain root aliases,
+and callers use count/empty/state methods instead of reaching into arrays.
+This removes roughly 350 more lines from the root without changing wire paths.
+Aggregate protected/handshake request and response reassembly now lives under
+`runtime/stream/buffered/`, with request and response ownership separated and
+shared QPACK dependency inspection isolated in `common.zig`. Their indexing,
+ready selection, reset FIFO, and allocation-failure tests move with the
+implementation. Response reset routing now reserves all reset storage and
+checks QPACK dependencies before mutating either buffered or streaming state;
+an integration failure-injection test verifies that decoder-feedback OOM keeps
+the original stream indexed and retryable. This removes roughly another 700
+lines from `runtime.zig` without adding files to the crowded runtime root.
+Outbound body indexing, Content-Length accounting, lightweight flow-limit
+state, and DATA batch scratch now live in `runtime/stream/outbound_body.zig`
+with their indexing white-box test. Connection and protected send orchestration
+remain in the root until their transport-specific callbacks can be separated;
+callers no longer inspect the body's entry/index collections for lifecycle
+decisions.
+Incremental message parsing and multiplexed reader scheduling now live in
+`runtime/stream/reader.zig` and `runtime/stream/set.zig`; their parser, QPACK
+retry, index-repair, reset-FIFO, and fairness tests are colocated in dedicated
+test modules. The root accesses reader identity, detach readiness, decoded-head
+adoption, and receive-credit state through narrow methods, while development
+peer migration uses reserved bulk-adoption helpers rather than manipulating the
+set's arrays and indexes. Together with outbound body extraction this removes
+roughly another 1,900 lines from `runtime.zig`.
+Server-push receive state now lives in `runtime/stream/push/state.zig`, with
+promise/stream dual indexes, reordered prefix parsing, cancellation FIFO, and
+stable-ID round-robin scheduling hidden behind narrow lookup/iteration methods.
+Its five state-machine tests moved to the sibling `state_tests.zig`; the
+cancellation test now constructs real encoded push-stream prefixes rather than
+manually mutating internal maps.
+Role-aware HTTP/3 control-stream receive logic now lives in
+`runtime/control/receive.zig`, including GOAWAY ID checks, client/server-only
+frame validation, QPACK stream classification, critical-stream closure rules,
+and transactional rollback of a complete control update. Focused role, batched
+priority, and critical-stream tests live in `runtime/control/receive_tests.zig`;
+transport close-code and socket-offset tests remain in the integration layer.
+Control and QPACK critical-stream emission now lives beside it in
+`runtime/control/send.zig`. The module owns frame construction, SETTINGS and
+stream-prefix emission, priority and push controls, QPACK encoder instructions
+and decoder feedback, while continuing to use the shared packetizer and
+protected-send state directly. Splitting, scratch-reuse, and allocation-failure
+rollback tests moved to `runtime/control/send_tests.zig`; focused QPACK, HTTP/3,
+WebTransport, and WebSocket runs pass after the move. At this point the runtime
+root is 26,792 lines, down 7,181 lines (about 21%) from the 33,973-line start of
+this extraction pass, without adding more files to the crowded runtime root.
+Three post-move CPU-0 `bench-http3-dev` samples measured 10.904, 10.951, and
+10.942 us/request (91,307-91,708 requests/s), matching the preceding
+10.941-11.234 us/request range without a visible small-message regression.
+Pure dynamic QPACK request/response/streaming-head writer tests now live in
+`runtime/qpack/tests/writer.zig`, protected speculative-compression coverage is
+separate in `runtime/qpack/tests/integration.zig`, and request-priority admission/reconciliation
+coverage lives beside request routing under
+`runtime/receive/routing/tests/request.zig`. The development DATAGRAM
+coalescing/retention test likewise moved beside its send implementation. These
+moves remove test-only blocks from the runtime root without widening production
+APIs or changing wire behavior.
+Protected QPACK request/response transport cases are further separated into
+`runtime/qpack/tests/request_transport.zig` and `response_transport.zig`; Push
+control, event, aggregate/deadline, and send-scratch cases live under
+`runtime/stream/push/tests/`. Protected client response and deadline cases live
+under `runtime/client/tests/`, while server base, GRO, limits, lifecycle, receive,
+and streaming cases live under `runtime/server/tests/`. Across this pass the H3
+runtime root fell from 23,888 to 18,327 lines and from 88 to 42 inline test
+declarations, without changing exported protocol types or wire behavior.
+Authenticated request/response, Push, streaming-head, DATA, batch-progress, and
+trailer send orchestration is now split again under `runtime/send/message.zig`
+and `runtime/send/body.zig`, with focused white-box tests under
+`runtime/send/tests/`. Both handshake-backed and preconfigured-key callers keep
+their existing signatures through private root aliases. Protected batch send
+now validates `sent_count <= protected_count <= staged_count` before committing
+any HTTP/3 stream state, matching the full-connection invariant. The runtime
+root is now 25,276 lines, down 8,697 lines (about 26%) from the 33,973-line
+start of this extraction pass. Three CPU-0 post-split development samples
+measured 10.972, 10.904, and 10.895 us/request (91,139-91,776 requests/s), with
+no visible regression from the immediately preceding range.
+Server-side request packet routing and lifecycle/priority coordination now live
+in `runtime/receive/routing/request.zig`, with packet-level tests under the
+nested `runtime/receive/routing/tests/` directory. Repeated RESET_STREAM frames
+with the same peer, stream ID, and application code are idempotent while
+conflicting peers or codes are rejected, avoiding a duplicate-event assertion
+before the application consumes the first reset. RFC 9114/9204 connection-error
+classification and close emission are centralized in
+`runtime/receive/connection_error.zig`; handshake and lightweight protected
+client/server receive paths now emit the exact stream-creation,
+closed-critical-stream, frame, SETTINGS, ID, and QPACK application codes while
+local allocation/timeout/transport and request-stream message failures are not
+incorrectly promoted to connection errors. Wire/state tests cover both
+stateful and preconfigured-key close paths. The root is now 24,886 lines, down
+9,087 lines (about 27%) from 33,973. Three CPU-0
+development samples after the receive/error changes measured 11.413, 11.052,
+and 10.855 us/request (87,619-92,115 requests/s), within the established host
+variance.
+Handshake and lightweight protected clients now share the same response, Push,
+control, QPACK, and reset dispatcher in `runtime/receive/routing/response.zig`;
+the protected path no longer maintains a second frame-classification loop and
+now flushes Insert Count Increment feedback as soon as encoder-stream progress
+creates it. Tests accumulate QPACK decoder-stream bytes across packet boundaries
+instead of assuming that an increment and later section acknowledgment share a
+datagram. The runtime root is 24,530 lines after this extraction. Three CPU-0
+samples measured 11.189, 10.948, and 10.957 us/request
+(89,369-91,338 requests/s), within the preceding range.
+The response dispatcher is now the single implementation used by both
+handshake-backed and lightweight protected clients; the latter no longer
+duplicates control/QPACK/Push/reset classification and now flushes QPACK Insert
+Count Increment feedback immediately after processing encoder-stream packets.
+The migrated response-reset OOM test and a focused feedback-routing test live
+beside it. The runtime root is 24,519 lines after dead-helper cleanup; three
+CPU-0 samples measured 11.125, 10.965, and 10.950 us/request
+(89,881-91,317 requests/s), again within the established range.
+The shared HTTP/3 packetizer now treats a socket-visible prefix followed by an
+error as an ambiguous logical write: stateful connections install
+`H3_INTERNAL_ERROR`, and the lightweight protected sender becomes unusable, so
+callers cannot regenerate different QPACK/stream bytes at an already-visible
+offset. A zero-visible-prefix failure remains retryable, while the explicit
+body-batch progress API continues to commit only `sent_count` and retry its
+suffix. Fault-injection tests cover an in-batch partial send, a failure after a
+completed 64-packet batch, zero-progress retryability, and exact body-prefix
+commit. Five hot CPU-0 development samples measured 10.760-11.154 us/request
+(89,648-92,931 requests/s), with a 10.795 us/request median; an earlier cold,
+system-noisy sample reached 18.999 us/request and is not used as regression
+evidence.
+A follow-up switched the stateful packetizer itself to the explicit
+`sendManyProgress` result so internal reservation/accounting cannot be mistaken
+for socket-visible progress. Existing small-window/backpressure tests and the
+full suite pass with that correction. Three CPU-0 samples measured 10.924,
+11.018, and 11.497 us/request (86,976-91,537 requests/s), still overlapping the
+established range.
+HTTP/3 CONNECT DATAGRAM negotiation, send-side lifecycle checks, terminal
+observation, queue polling/draining, and authenticated packet-order routing now
+live beside the registry in `runtime/datagram/routing.zig`. The router preserves
+DATAGRAM order around FIN/RESET/CONNECTION_CLOSE, validates transport-dropped
+payloads, emits `H3_DATAGRAM_ERROR` for malformed Quarter Stream IDs, and keeps
+the first terminal state stable until queued payloads drain. Registry traversal
+uses narrow association accessors rather than exposing its storage layout. The
+five-run 1-MiB real-handshake download remained functional at 118.75 MiB/s mean
+on the loaded host; this is a regression smoke, not a new throughput claim.
+The cleartext aggregate request buffer now lives in
+`runtime/development/request_buffer.zig`. It exposes peer/stream metadata and a
+pre-reserved ownership-transfer callback to the per-peer streaming layer rather
+than exposing its entry array. Datagram validation now rejects a packet that
+mixes two request stream IDs before mutating either reassembler, covered by a
+dedicated transactional regression test.
+Cleartext server peer coordination now lives under
+`runtime/development/server_peer/`: each peer owns its buffered and streaming
+requests, lifecycle, QPACK state, outbound body state, response offsets, and
+send scratch. The root server retains socket locking and packet emission but
+uses semantic response/cancellation contexts instead of reconstructing peer
+state transitions from individual fields. Partial-request adoption and
+pre-admission reset handling tests move with the coordinator.
+Three CPU-0 `bench-http3-dev` smoke samples after the stream/development state
+extractions measured 10.872, 10.790, and 10.869 us/request
+(91,975-92,678 requests/s), within and slightly tighter than the prior
+10.939-11.568 us/request range. An unpinned run immediately after the full test
+suite measured 17.123 us/request and is retained only as scheduler-noise
+evidence, not as a regression signal.
+After moving the per-peer coordinator behind semantic response/cancellation
+interfaces, three further CPU-0 samples measured 11.234, 10.941, and
+11.062 us/request (89,010-91,393 requests/s), still within the same baseline.
+
+HTTP/3 codec header assembly previously used fixed 64-element descriptor
+arrays in request, response, streaming, informational, and Push Promise
+writers. Those paths now use a shared 16-element stack buffer with an exact
+allocation fallback, so ordinary messages reduce stack use while larger valid
+field sections no longer fail as `InvalidFrame`. Static, dynamic, streaming,
+informational, Push Promise, automatic-Date, and allocation-failure tests cover
+80 application headers plus their pseudo/default fields.
 
 `bench-http3-handshake-transfer` starts a loopback HTTP/3 server, creates a
 fresh QUIC/H3 client connection per iteration, streams a fixed-size body in the
@@ -514,6 +1003,34 @@ HTTP/3 real-handshake transfer benchmark
   MiB/s: 118
 ```
 
+After moving RFC 9218 scheduler offsets into candidate storage and carrying
+the originating response index beside each fixed packet-staging slot, a
+CPU-0-pinned three-iteration 16 MiB / 4-stream download regression run measured:
+
+```text
+per iteration: 54.75 / 55.19 / 55.16 MiB/s
+mean: 55.03 MiB/s
+stddev: 0.20 MiB/s (0.37%)
+status total: 2400
+verified body bytes: 50331648
+```
+
+The hot commit path no longer linearly scans small response sets or hashes
+large response sets to recover an index. Up to sixteen responses remain fully
+allocation-free at scheduler setup; larger sets now allocate one exact
+candidate array and one temporary duplicate-ID set instead of four separate
+work areas. A separate CPU-0 17-stream run forced that heap-backed path,
+verified all 17,825,792 body bytes and status total 3,400, and completed at
+53.97 MiB/s. Candidate refresh now accumulates the RFC 9218 selection in the
+same pass instead of rescanning the full array; the same pinned 17-stream shape
+then completed at 54.04 MiB/s. The roughly 0.13% difference is noise-level, so
+the result establishes no regression while the removed pass is retained as a
+direct CPU-work reduction for larger stream sets. Splitting QUIC's per-stream
+flow-control query from its connection/congestion/PMTU snapshot then removed
+three more repeated connection-level reads per response; the same shape measured
+54.23 MiB/s, likewise a no-regression result rather than a significant change.
+These are internal regression samples, not an equal-wire comparison with quicz.
+
 This is now a real-handshake, paced single-stream and 4-stream upload/download
 result with the same 16 MiB transfer size as the quicz reference benchmark
 family. It is still not a completion claim: the next evidence step is to close
@@ -616,8 +1133,8 @@ the sequential path is slightly faster with the small kernel receive queue.
 The API still provides exact protected-packet sizing, per-DATA prefix ownership,
 and socket-visible-prefix commit semantics for hosts that can absorb bursts.
 
-QUIC recovery now retains a bounded four-block stack per power-of-two payload
-class, with a global 1 MiB idle-byte cap. ACK/forget paths recycle without
+The first recovery-cache stage retained a bounded four-block stack per
+power-of-two payload class, with a global 1 MiB idle-byte cap. ACK/forget paths recycle without
 allocating, and retransmission candidates expose only the logical encoded
 payload rather than bucket slack. A 10-pair alternating CPU-0 A/B against
 commit `28e8698` was throughput-neutral:
@@ -640,6 +1157,151 @@ peak live:                83,950,631 B      94,586,109 B
 That is 8.5% fewer allocation calls, 16.9% fewer cumulative allocated bytes,
 and 11.2% lower peak live memory in the captured pair, without measurable
 throughput loss.
+
+The original four-block depth later became visible again after other hot-path
+allocations were removed: a thread-safe `--stats` rerun found 392-673 exact
+4096-byte allocations and 403-684 recovery-cache misses in three otherwise
+identical 16 MiB/four-stream uploads. The near one-to-one counts came from
+3000-byte STREAM payloads rounding to the 4-KiB cache class, then being released
+in ACK bursts deeper than four. Recovery storage now keeps four direct slots
+per class and links overflow blocks through their own inactive payload bytes.
+This keeps acquire/release O(1) and allocation-free, adds only one head pointer
+per size class, and retains the existing 1 MiB global cap instead of reserving
+large fixed slot arrays per connection. Size-isolation, full-budget, overflow,
+logical-prefix and deinit tests cover the new ownership scheme.
+
+CPU sampling of the same workload showed the larger remaining cost in
+`RecvState.Preflight.insertTracked`: ordered, non-overlapping STREAM frames
+still scanned every payload byte to prove they were new. Preflight now checks
+frame ranges first and counts an append beyond both retained and packet-local
+state in O(frames); overlapping/reordered frames retain the original bytewise
+conflict and duplicate accounting. A matched five-pair CPU-0 A/B, each process
+running five 16 MiB/four-stream iterations, measured 114.11 MiB/s mean for the
+cached old binary and 152.69 MiB/s after both changes, a 33.8% improvement
+(median improvement 33.5%). All 25 iterations in each side verified the exact
+80 MiB aggregate and status total. Thread-safe final telemetry made 839-900
+allocations with 304-349 exact 4-KiB allocations, versus the pre-change median
+1195 allocations and 603 exact 4-KiB allocations: reductions of 29.6% and
+49.6%. Median cumulative allocated bytes fell from 31.27 MB to 24.38 MB
+(22.0%), while median peak live bytes fell from 28.29 MB to 23.89 MB (15.5%).
+These stats include one 16 MiB transfer body retained by the benchmark.
+
+The next profile showed recovery ACK compaction spending about 12% of sampled
+cycles rebuilding two hash indexes after every range ACK. Those indexes were
+also maintained for every sent packet even though the hot ACK path already
+walks the ordered recovery queue. Removing both maps keeps monotonic new-packet
+validation O(1) through a cached maximum and uses bounded linear scans only for
+single-packet rollback/acknowledgement and handshake-group queries. A five-pair
+CPU-0 A/B of the same 16 MiB/four-stream workload measured 148.94 MiB/s mean
+with indexes and 191.33 MiB/s without them, a 28.5% improvement (27.5% at the
+median). Three serial 5%-loss runs remained within noise at 2.86-2.90 MiB/s,
+dropped exactly 25 of 504 datagrams, reported 25 transport losses, and verified
+all 4 MiB. Three `--stats` runs made 746-894 allocations (825 median) and
+280-341 exact 4-KiB allocations (284 median). Recovery-burst variance made
+cumulative and peak byte totals overlap the indexed samples, so no memory-byte
+claim is made for this second step. Ordered removal, ACK compaction,
+original/retransmission lookup and
+allocation-failure tests now assert behavior rather than internal map layout.
+
+The following current-source profile found the read-only loss-timer selector
+spending 13.5% of samples repeatedly scanning sent-packet metadata to find the
+latest ordinary ACK-eliciting PTO anchor. The tracker already cached the latest
+ACK-eliciting in-flight packet for generic PTO calculation, so the non-PMTU
+query now returns that entry directly when it is an ordinary packet and keeps
+the full scan only when a PMTU probe owns the cache or directly mutated test
+metadata violates the production invariant. In five alternating CPU-0 pairs of
+five 16 MiB/four-stream uploads, the exact pre-change binary averaged 181.29
+MiB/s (182.04 median) and the fast-path binary averaged 194.97 MiB/s (195.57
+median), improvements of 7.5% and 7.4%. Every side transferred 80 MiB and
+reported status total 4000. A post-change profile reduced
+`lossDetectionTimerDeadline` self samples from 13.5% to 2.0%. A 5%-loss run
+dropped exactly 25/504 datagrams, reported 25 transport losses, and verified
+all 4 MiB at 2.92 MiB/s. This step adds no allocation; telemetry retained the
+existing ACK-burst variance, so no memory improvement is claimed.
+
+That post-change profile also attributed 2.7% of samples to
+`hasAcknowledgedEctBeyondEcnWatermark`, which rescanned retained packet metadata
+after each ACK. The tracker now records the highest packet number ever
+acknowledged with ECT(0), ECT(1), or CE and compares it directly with the
+largest ACK covered by validated ECN counters. Besides making the query O(1),
+the monotonic watermark remains correct after acknowledged packet metadata is
+compacted; a dedicated regression crosses the 256-packet compaction threshold,
+then consumes the outstanding ACK_ECN baseline. Five alternating CPU-0 pairs
+against the exact PTO-fast-path binary measured 179.69 MiB/s mean (182.60
+median) before and 198.49 MiB/s mean (207.70 median) after, captured gains of
+10.5% and 13.7%. All 25 iterations on each side transferred exactly 80 MiB and
+reported status total 4000. The target scan disappeared from a normally
+completed post-change profile. A 5%-loss run still dropped exactly 25/504
+datagrams, reported 25 transport losses, and verified all 4 MiB. This state is
+allocation-free and no memory reduction is claimed.
+
+The packet-level validate-before-mutate pass and the later ACK application used
+to run `precheckAckRanges` twice over the same single-ACK packet. The preflight
+now returns a shape-bound validation token carrying its private summary; the
+apply path verifies the ACK fields, range-slice identity, and path epoch before
+reusing it. Multi-frame packets retain the original independent validation so
+no earlier frame can commit before a later malformed ACK is rejected. Five
+alternating CPU-0 pairs against the exact pre-change binary measured 198.23
+MiB/s mean (195.98 median) before and 205.85 MiB/s mean (202.65 median) after
+across two clean, order-balanced sets of ten one-iteration pairs, gains of 3.4%
+for both mean and median. Every run transferred 16 MiB and reported status
+total 800. `precheckAckRanges` fell from 5.35% to 1.67% of sampled cycles; a
+5%-loss run dropped exactly 25/504 datagrams, reported 25 transport losses, and
+verified all 4 MiB at 2.86 MiB/s.
+
+The remaining sent-packet exact index is deliberately best-effort because every
+lookup already falls back to binary search on the production-ordered metadata
+array. Prefix compaction previously removed every retired key and then rewrote
+every surviving map value. It now clears the map in O(1), retaining its
+allocation for later inserts while old retained packets use binary search. Two
+clean order-balanced sets of twenty one-iteration pairs measured 184.40 MiB/s
+mean for the retained repair path and 197.94 MiB/s after clear-on-compaction
+(+7.3%); medians were approximately 193.7 and 198.7 MiB/s (+2.6%). The
+`refreshPacketIndexFrom` symbol disappeared from the follow-up profile. A
+5%-loss run dropped exactly 25/504 datagrams, reported 25 transport losses, and
+verified all 4 MiB at 2.90 MiB/s.
+
+Recovery ACK compaction then stopped copying every `PendingDatagram` into a
+loop temporary and copying ACKed entries again before recycling. It now scans
+entries by pointer, recycles matches in place, and copies only survivors that
+actually move toward the queue head. A clean order-balanced set of twenty
+one-iteration pairs measured 212.30 MiB/s mean for the prior build and 230.49
+MiB/s for the pointer-based compaction (+8.6%); medians were 202.05 and 231.06
+MiB/s (+14.4%). The follow-up profile reduced ACK-apply self samples to 2.73%
+and left no standalone recovery-entry copy hotspot. A 5%-loss run dropped
+exactly 25/504 datagrams, reported 25 transport losses, and verified all 4 MiB
+at 2.90 MiB/s.
+
+The clean recovery queue now also records whether original packet numbers stay
+monotonic. When no retransmission copies exist, a single continuous ACK range
+uses two binary searches to locate the affected queue slice, recycles only that
+slice, and moves the trailing survivors once. Multi-range ACKs, retransmission
+groups, forgotten originals, and synthetic out-of-order insertion retain the
+existing per-entry membership scan. Two order-balanced sets totaling forty
+one-iteration process pairs completed 40/40 on both sides. The fixed prior
+binary averaged 222.69 MiB/s and the candidate averaged 231.80 MiB/s (+4.1%);
+the median within-pair ratio improved 2.2% (mean ratio +7.1%). The host showed
+distinct roughly 200 and 260 MiB/s scheduling modes, so the independently
+sorted median delta is intentionally not used as evidence. In the follow-up
+profile, recovery `entryAcked`/`containsRange` membership fell from about 2.5%
+inclusive to 0.51%, while the selected-slice retirement/move accounted for
+about 1.32%. Three direct 5%-loss runs each dropped exactly 25/504 datagrams,
+reported 25 transport losses, and verified all 4 MiB.
+
+Single-packet send preparation formerly walked the same frame slice separately
+for wire length, retransmittable length, ACK-eliciting/in-flight traits, pending
+HANDSHAKE_DONE detection, and the largest ACK carried. Those pure observations
+now share the existing wire-length pass; validation and flow-control mutation
+retain their original order. A clean order-balanced set of twenty one-iteration
+pairs measured 212.86 MiB/s mean before and 235.37 MiB/s after (+10.6%); all
+runs transferred exactly 16 MiB with status total 800. `Frame.wireLen` no longer
+appeared as a standalone top profile entry. A 5%-loss run still dropped exactly
+25/504 datagrams, reported 25 transport losses, and verified all 4 MiB.
+
+The benchmark's former local counter used plain integers across client/server
+threads and could undercount racing allocator calls. It now reuses the shared
+atomic counting allocator, reports exact sizes and recovery-cache hit/miss
+totals, and is the authoritative source for the numbers above.
 
 Receive preflight no longer clones the heap-backed path-validation state for
 every authenticated packet, and its distinct-stream shadow starts in fixed
@@ -752,7 +1414,9 @@ zig build bench-http3-handshake-transfer -Doptimize=ReleaseFast -- --iterations=
 zig build bench-http3-handshake-transfer -Doptimize=ReleaseFast -- --iterations=1 --body-bytes=67108864 --mode=upload --streams=1 --stats
 ```
 
-Current stats samples:
+Historical stats samples below predate the thread-safe shared counter and may
+undercount racing client/server allocations. They remain only as provenance;
+the post-fix 16 MiB/four-stream evidence above is authoritative.
 
 ```text
 16 MiB upload streams=1:
@@ -793,6 +1457,136 @@ still needs explicit per-send or per-stream lifetime isolation.
 
 Rejected experiments after validation:
 
+- Changing the aggregate timer-query chain from by-value to read-only pointer
+  receivers removed the large copies visible in generated code:
+  `nextTimerDeadline`'s stack frame fell from about 23 KiB to 152 bytes and
+  total `memcpy` self samples fell from 5.69% to 1.25%. End-to-end behavior did
+  not follow that micro-level improvement. In a strict serial, order-balanced
+  20-pair run the baseline completed 20/20 processes while the candidate
+  completed 19/20; across the 19 completed pairs mean throughput fell from
+  231.57 to 213.79 MiB/s (-7.7%) and median throughput fell from 259.05 to
+  208.44 MiB/s (-19.5%). A narrower follow-up kept every public receiver ABI
+  unchanged and used pointer helpers only inside the blocking timer pump. It
+  improved the 19 completed pairs by 2.9% mean/3.9% median, but still timed out
+  in 1/20 candidate processes while the baseline completed 20/20. Both
+  receiver variants were removed.
+- A narrower ACK experiment preserved the by-value `ValidatedAck` token but
+  added a pointer-based `SentPacketTracker` validation wrapper for the packet
+  preflight. It removed one tracker materialization and reduced the generated
+  validation stack frame, but did not show a stable end-to-end improvement
+  under concurrent host load. The wrapper was removed and no quantitative
+  claim is retained.
+- Combining PATH_CHALLENGE/PATH_RESPONSE counting in the general receive
+  preflight and carrying the challenge count into apply removed two frame-slice
+  scans, but did not show a stable end-to-end improvement under concurrent host
+  load. The count plumbing was removed and no quantitative claim is retained.
+- Splitting the large general receive preflight into a no-inline slow path let
+  single-ACK packets avoid its CID/PATH/STREAM stack storage and reduced the
+  hot apply function's generated stack frame from about 7.9 KiB to 3.4 KiB.
+  Opposite-order CPU-1 sets under concurrent host load did not agree, so the
+  unstable split was removed and no quantitative claim is retained.
+- Preparing the received-packet ACK-range insertion before frame validation and
+  committing that exact action afterward removed the second freshness lookup
+  while preserving validate-before-mutate semantics. Direct equivalence tests
+  covered append, extension, merge, insertion, bounded eviction, duplicate,
+  too-old, and ECN cases. End-to-end runs under concurrent host load were
+  neutral while `applyReceivedFramesForDestination` self samples increased, so
+  the token and tests were removed and no quantitative claim is retained.
+- Replacing the STREAM gap-fill tail loop with a standard-library scalar slice
+  search stopped updating `contiguous_end` for every present byte, but two
+  opposite-order CPU-1 sets under concurrent host load did not agree. The
+  original compact loop was restored and no quantitative claim is retained.
+- A follow-up explicitly scanned sixteen byte-bitmap flags at a time; generated
+  code used 128-bit loads and tests covered sparse tails, overlap, and
+  transactional receive. It still timed out in one candidate process while the
+  baseline completed every run, and its completed-pair median ratio was
+  slightly negative. The vector scan was removed.
+- Letting ACK-driven time-threshold loss skip the ordered prefix that the
+  immediately preceding packet-threshold pass had already marked reduced the
+  time-threshold function below the profile reporting cutoff while preserving
+  the two existing loss generations and callback order. The candidate timed
+  out in one of twenty reverse-order runs while the baseline completed all
+  runs, so the hint and its equivalence test were removed.
+- Hoisting a single recovery ACK range's fixed bounds out of the per-entry
+  retransmission fallback preserved exact 5% loss behavior across forty runs
+  per side, but the two opposite-order sets were neutral and disagreed in
+  mean/median direction. The duplicate compaction helper was removed.
+- Directly constructing the first ACK range for frames with no additional
+  ranges, while isolating the 32-range decode scratch in no-inline slow helpers,
+  reduced the common validation stack frame from about 1080 to 664 bytes. Two
+  opposite-order CPU-1 sets completed 40/40 processes per side, but their
+  median within-pair changes were -0.37% and +0.30%; the apparent aggregate
+  mean gain followed the host's bimodal scheduling rather than a stable pair
+  improvement. The split decode path was removed.
+- Passing the validated-ACK summary by pointer instead of by-value optional
+  preserved all focused tests but regressed a clean order-balanced 20-pair run
+  from 202.26 to 200.48 MiB/s mean (median -1.2%). The pointer ABI was removed.
+- Moving largest-ACK watermark updates to the range level and passing known
+  packet indices into `markPacketAcknowledged` removed redundant per-packet
+  comparisons, but a clean order-balanced 20-pair run regressed from 211.65 to
+  208.91 MiB/s mean (median -2.0%). The change was removed.
+- A single-STREAM-packet preflight specialization used one-entry stack shadows
+  and skipped the general CID/path setup while preserving full STREAM, final
+  size, flow-control, and duplicate validation. A clean order-balanced 20-pair
+  run was neutral at 205.41 versus 206.12 MiB/s mean, with an unchanged median
+  (200.27 versus 200.18 MiB/s), so the duplicate path was removed.
+- Lazily copying the peer/local connection-ID preflight pools only when a
+  NEW_CONNECTION_ID or RETIRE_CONNECTION_ID frame appeared passed CID, STREAM,
+  and transactional preflight tests, but a clean order-balanced 20-pair run was
+  effectively neutral: 195.98 versus 197.45 MiB/s mean, while the median moved
+  from 198.70 to 197.23 MiB/s. The branchy optional shadows were removed.
+- Extending the validated-ACK token with a cached
+  `newly_acked_ack_eliciting` decision removed the RTT helper's range scan, but
+  a clean order-balanced 20-pair run was neutral at 196.72 versus 196.58 MiB/s
+  and the candidate timed out once while the baseline did not. The extension
+  was removed.
+- Treating only the dense STREAM prefix as implicitly present, while retaining
+  byte flags for sparse tails, passed receive/preflight tests but regressed a
+  clean order-balanced 20-pair run from 200.02 to 192.23 MiB/s mean (-3.9%);
+  the median moved from 200.37 to 198.56 MiB/s. The fast path was removed.
+- Extending the single-ACK validation token to replace the separate plain-ACK
+  ECN fallback precheck passed focused tests but regressed a clean,
+  order-balanced 20-pair run from 202.38 to 199.37 MiB/s mean (median -1.7%).
+  The extension was removed while retaining token reuse for ACK application.
+- Packing the STREAM receive-presence bitmap from one byte per stream byte to
+  one bit preserved cross-word gap filling, compaction, overlap, preflight and
+  sliding-window tests, but a clean order-balanced ten-pair run regressed from
+  210.44 to 183.60 MiB/s mean and 209.38 to 182.21 MiB/s median. The packed
+  representation was removed; linear byte flags remain faster on this CPU.
+- Removing `SentPacketTracker`'s best-effort exact hash index passed focused
+  lookup, rollback, and allocation tests and reduced first server 1-RTT-send
+  allocations from four to three. In a clean process-level-timeout comparison,
+  however, the indexed baseline completed all five runs while the no-index
+  candidate timed out in two of five. The prototype was removed; throughput
+  samples captured while earlier timed-out benchmark processes were still live
+  are intentionally not reported.
+- Splitting ACK coverage validation into a count-only preflight avoided reading
+  ECN and acknowledgement fields during the packet-level transactional pass,
+  but five alternating 16 MiB/four-stream samples averaged 201.85 MiB/s for
+  the retained shared precheck and 197.56 MiB/s for the specialized version
+  (-2.1%; median -3.9%). The duplicate helper was removed.
+- An earlier attempt to widen `AckResult` with the plain-ACK ECN decision also
+  passed focused tests but showed no stable throughput improvement. It was
+  removed; its measurements overlapped later-discovered stray benchmark
+  processes and are not retained as quantitative evidence.
+- Treating an empty STREAM receive bitmap as an implicitly contiguous retained
+  buffer removed the per-chunk boolean `memset` from ordered traffic and
+  materialized the bitmap only after a gap. It passed receive, overlap,
+  preflight, and sliding-window tests, but five alternating 16 MiB/four-stream
+  samples fell from 196.47 to 178.38 MiB/s mean (-9.2%). The representation
+  change and its tests were removed.
+- Starting the read-only time-threshold deadline scan at the existing
+  `first_unacknowledged_index` cursor was correct for sorted production packet
+  metadata and retained the full-scan fallback for synthetic out-of-order
+  insertion, but did not show a stable end-to-end improvement. The change and
+  its tests were removed; contaminated measurements from before stray benchmark
+  processes were discovered are intentionally omitted.
+- Replacing ACK-time recovery-index rebuilding with either a lazy queue-head
+  cursor or targeted updates for moved entries preserved all recovery tests but
+  regressed the same 16 MiB/four-stream benchmark. Five alternating process
+  pairs measured 151.41 MiB/s for the retained full rebuild versus 147.93
+  MiB/s for targeted updates; the cursor variant was similarly slower and more
+  variable. Both experiments were removed.
 - Reusing a single shared DATA payload scratch buffer, per-stream payload
   scratch, and pre-sizing each temporary DATA payload all reduced single-stream
   allocation counts, but they caused 64 MiB 4-stream validation timeouts or
@@ -995,6 +1789,40 @@ zero live bytes, and returned the expected final ID 399,996 and checksum
 19,999,800,000. This is a stream-reservation microbenchmark, not evidence for
 wire-level open/close throughput.
 
+The on-wire `--mode=lifecycle-churn` path now optionally injects loss or
+reordering in both directions after handshake completion. Its lifecycle pump
+waits on both UDP endpoints in one readiness operation, bounded by the earliest
+transport timer on either connection and one absolute awake-clock benchmark
+deadline. This avoids both a fixed 1 ms polling quantum in the clean path and
+starving reverse ACKs until PTO. Every run verifies the exact FIN/reset split,
+last stream ID, checksum, cumulative MAX_STREAMS renewal, and deterministic
+per-direction fault counts. A 128-stream/16-credit smoke completed clean, 5%
+loss, and every-fifth-datagram reordering runs in 6.01, 8.17, and 4.11 ms of
+timed lifecycle work. The loss run considered/dropped 276/14 client datagrams
+and 284/16 server datagrams; the reorder run held exactly 45 of 228 and 45 of
+227 respectively. These short unpinned runs are correctness and scheduler
+regression evidence, not throughput comparisons. Reproduce them with:
+
+```sh
+zig build bench-quic-handshake-stream -Doptimize=ReleaseFast -- \
+  --mode=lifecycle-churn --iterations=128 --streams=16
+zig build bench-quic-handshake-stream -Doptimize=ReleaseFast -- \
+  --mode=lifecycle-churn --iterations=128 --streams=16 --loss-pct=5
+zig build bench-quic-handshake-stream -Doptimize=ReleaseFast -- \
+  --mode=lifecycle-churn --iterations=128 --streams=16 --reorder-every=5
+```
+
+After adding path-epoch recovery isolation, CPU-pinned 256-stream reruns
+completed with the same exact 128 FIN / 128 reset split, final stream ID 1020,
+and checksum 26,496. The 5% bidirectional-loss run considered/dropped 556/27
+client and 562/28 server datagrams, reported 11/18 transport losses, and
+completed at 18,924-23,812 streams/s. The every-fifth-datagram reorder run held
+91/455 client and 90/454 server datagrams and completed at 26,016-35,446
+streams/s.
+These remain deterministic fault/recovery checks rather than cross-stack speed
+claims. A 4,096-stream loss run exceeded the benchmark's fixed 30-second
+deadline and is not used as performance evidence.
+
 ### Raw QUIC four-connection aggregate throughput
 
 Captured on 2026-08-20 with the same shape as quicz's thread-per-connection
@@ -1147,7 +1975,7 @@ One real HTTP/1 upgraded connection performs 20 warmup and 200 measured binary
 echoes. Both implementations use mutable client input, masked requests,
 unmasked responses, caller/reader-owned receive storage, and copy each echo
 back to the next send buffer. Handshake time is excluded; this comparison uses
-the ordinary TCP runtime rather than the io_uring adapter.
+the public backend-neutral `std.Io` TCP runtime.
 
 Twenty alternating CPU-0 samples with TCP_NODELAY enabled on both clients:
 
@@ -1375,6 +2203,47 @@ cleartext development transport. It validates modern bidirectional association
 data, >1-packet stream fragmentation, per-session stream credit and shared
 HTTP/3/WebTransport stream-ID allocation. The DATAGRAM number remains a netz
 baseline; no equivalent same-command quicz/wtransport result was captured.
+The cross-stream writer now keeps batch membership generations in the existing
+stream registry index. Duplicate validation is linear and allocation-free,
+selected checks are O(1), and the all-prefix-sent steady path scans candidates
+once while maintaining a fixed stable-priority top-64 window. The prefix path
+continues to re-evaluate credit after each association write and now marks before
+that write, preventing a newly blocked high-priority stream from starving its
+siblings. A CPU-0 64-stream/16-KiB smoke verified all 1,048,576 bytes across 320
+partial writes with checksum 133,693,440; repeated fixed-binary throughput varied
+19-40 MiB/s, so only correctness/no-deadlock is claimed.
+Development and lightweight protected endpoint sends now share one stack-first
+WebTransport DATAGRAM codec under `runtime/datagram/`: payloads whose Quarter
+Stream ID plus body fit 4 KiB need no WebTransport-layer allocation, while
+larger payloads allocate their exact wire size once. Previously only the
+development endpoint had the stack path; protected sends always grew an
+ArrayList before QUIC protection. Tests cover wire parity, invalid-session
+preflight before allocation, allocation-free common encoding, and exact
+fallback OOM. Owned QUIC/protected/handshake DATAGRAM lifetimes are colocated
+in the same nested module without moving mutable QUIC connection state.
+Three fixed-binary CPU-0 cleartext DATAGRAM runs after the extraction measured
+7.940-8.103 us/roundtrip (246,820-251,883 datagrams/s) with the exact existing
+checksum. This is an internal regression range; it does not isolate the new
+protected-only allocation removal and is not an external throughput ratio.
+
+The same executable accepts `--burst` to exercise the authenticated HTTP/3
+WebTransport runtime and its deadline-bounded congestion backpressure:
+
+```sh
+zig build bench-webtransport-datagram -Doptimize=ReleaseFast -- \
+  --burst --iterations=1000 --send-timeout-ms=1000
+```
+
+A final post-change smoke attempted, sent, and received all 1,000 DATAGRAMs
+with zero timeouts. The 35-byte workload measured 5.808 us p50 / 15.416 us
+p99 send latency, 5.11 logical MiB/s, and the exact checksum 3,549,000. This is an
+internal backpressure regression baseline, not a cross-stack throughput claim.
+The original cleartext ping-pong mode and output remain the default.
+After the protected stack-send integration, the same 1,000-DATAGRAM bounded
+burst again attempted/sent/received all 1,000 with zero timeout and checksum
+3,549,000. The loaded-host sample was 10.483 us p50 / 17.998 us p99 and
+3.32 logical MiB/s, so it is recorded as lifecycle evidence rather than a new
+performance baseline.
 
 The multi-stream benchmark now scales connection credit with stream count and
 exposes stream-window/datagram/pacing controls. Four 4-MiB streams with 1-MiB
@@ -1451,6 +2320,20 @@ runs, but only DATAGRAM currently retains a direct performance verdict. STREAM
 needs equivalent endpoint CPU placement after the single-CPU scheduling audit.
 HTTP/3 remains separate because it includes H3 framing, QPACK, and session
 bookkeeping and has no equal-wire quicz reference.
+
+WebSocket stream transports now share `runtime/message/buffer.zig` and
+`runtime/message/state.zig` for bounded 256-byte-slab receive growth,
+compressed-fragment partitioning, Close-state admission, and owned message
+finalization. The common growth helper now computes its rounded capacity with
+checked addition, so an unrepresentable request returns OOM instead of wrapping
+in optimized builds. Allocation-failure, overflow, compression-provenance,
+invalid-deflate, invalid-UTF-8, and balanced-fragment tests live beside those
+helpers rather than in the runtime root. Public frame/message limit semantics
+are unchanged.
+A CPU-0 fixed-binary 4-KiB echo check after the extraction produced
+9.574-16.533 us/roundtrip while unrelated host load was active. The spread is
+too wide for a performance verdict, so it is retained only as a functional
+benchmark pass and does not replace the isolated ranges above.
 
 ## Gaps before a completion audit can pass
 

@@ -129,6 +129,7 @@ fn exerciseReaderRefusal(path: ReaderPath) !void {
         .max_concurrent_streams = 1,
         .max_frame_payload = 4096,
         .max_body_bytes = 4096,
+        .max_local_error_reset_streams = 0,
         .enable_connect_protocol = path == .extended_connect,
     };
     var server = try runtime.Server.listen(

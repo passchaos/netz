@@ -5,6 +5,7 @@ pub const Error = error{
     NoPendingPathResponse,
     NoPendingPathChallenge,
     UnknownPathResponse,
+    DuplicatePathChallenge,
 } || std.mem.Allocator.Error;
 
 pub const default_max_challenge_transmissions: u8 = 3;
@@ -14,6 +15,13 @@ pub const Challenge = struct {
     transmissions: u8 = 0,
     sent_time_ns: ?u64 = null,
     deadline_ns: ?u64 = null,
+    path_epoch: u32 = 0,
+};
+
+pub const TimeoutResult = struct {
+    expired: usize = 0,
+    failed: usize = 0,
+    failed_current_path: bool = false,
 };
 
 const RemovedChallenge = struct {
@@ -87,7 +95,7 @@ pub const State = struct {
     pending_responses: Fifo([8]u8) = .{},
     pending_challenges: Fifo(Challenge) = .{},
     outstanding_challenges: std.ArrayList(Challenge) = .empty,
-    failed_challenges: std.ArrayList(Challenge) = .empty,
+    failed_challenge_count: usize = 0,
     /// PATH_CHALLENGE/PATH_RESPONSE payloads are only 8 bytes, so keep value
     /// indexes for duplicate suppression and response matching. The FIFO lists
     /// still define send order, while these maps keep packet receive paths from
@@ -106,7 +114,6 @@ pub const State = struct {
         self.pending_responses.deinit(self.allocator);
         self.pending_challenges.deinit(self.allocator);
         self.outstanding_challenges.deinit(self.allocator);
-        self.failed_challenges.deinit(self.allocator);
         self.pending_response_index.deinit(self.allocator);
         self.pending_challenge_index.deinit(self.allocator);
         self.outstanding_challenge_index.deinit(self.allocator);
@@ -124,8 +131,7 @@ pub const State = struct {
         out.pending_challenges.appendSliceAssumeCapacity(pending_challenges);
         try out.outstanding_challenges.ensureUnusedCapacity(allocator, self.outstanding_challenges.items.len);
         out.outstanding_challenges.appendSliceAssumeCapacity(self.outstanding_challenges.items);
-        try out.failed_challenges.ensureUnusedCapacity(allocator, self.failed_challenges.items.len);
-        out.failed_challenges.appendSliceAssumeCapacity(self.failed_challenges.items);
+        out.failed_challenge_count = self.failed_challenge_count;
         try out.rebuildIndexes();
         out.max_challenge_transmissions = self.max_challenge_transmissions;
         return out;
@@ -213,18 +219,30 @@ pub const State = struct {
     };
 
     pub fn queueChallenge(self: *State, data: [8]u8) Error!void {
+        _ = try self.queueChallengeForPath(data, 0);
+    }
+
+    pub fn queueChallengeForPath(
+        self: *State,
+        data: [8]u8,
+        path_epoch: u32,
+    ) Error!bool {
         if (self.outstanding_challenge_index.count() != 0 and
-            self.outstanding_challenge_index.contains(data)) return;
+            self.outstanding_challenge_index.contains(data)) return false;
         const slot = try self.pending_challenge_index.getOrPut(
             self.allocator,
             data,
         );
-        if (slot.found_existing) return;
+        if (slot.found_existing) return false;
         errdefer _ = self.pending_challenge_index.remove(data);
 
         try self.pending_challenges.ensureUnusedCapacity(self.allocator, 1);
-        self.pending_challenges.appendAssumeCapacity(.{ .data = data });
+        self.pending_challenges.appendAssumeCapacity(.{
+            .data = data,
+            .path_epoch = path_epoch,
+        });
         slot.value_ptr.* = {};
+        return true;
     }
 
     pub fn receiveChallenge(self: *State, data: [8]u8) Error!bool {
@@ -279,24 +297,27 @@ pub const State = struct {
     }
 
     pub fn nextChallengeFrameAt(self: *State, now_ns: ?u64, timeout_ns: ?u64) Error!quic.Frame {
-        if (self.pending_challenges.len() == 0) return error.NoPendingPathChallenge;
-        const data = self.peekPendingChallengeData();
-        const slot = try self.outstanding_challenge_index.getOrPut(
-            self.allocator,
-            data,
-        );
-        std.debug.assert(!slot.found_existing);
-        errdefer _ = self.outstanding_challenge_index.remove(data);
-        try self.outstanding_challenges.ensureUnusedCapacity(self.allocator, 1);
-        const challenge = self.popPendingChallengeToOutstanding(
-            now_ns,
-            timeout_ns,
-            slot.value_ptr,
-        );
-        return .{ .path_challenge = .{ .data = challenge.data } };
+        var frames: [1]quic.Frame = undefined;
+        if (try self.prepareChallengeFrames(&frames) == 0) {
+            return error.NoPendingPathChallenge;
+        }
+        self.commitChallengeFrames(1, now_ns, timeout_ns, 0);
+        return frames[0];
     }
 
     pub fn nextChallengeFramesAt(self: *State, out: []quic.Frame, now_ns: ?u64, timeout_ns: ?u64) Error!usize {
+        const count = try self.prepareChallengeFrames(out);
+        self.commitChallengeFrames(count, now_ns, timeout_ns, 0);
+        return count;
+    }
+
+    /// Reserve all state required to expose pending PATH_CHALLENGE frames
+    /// without consuming them. Call `commitChallengeFrames` only after the
+    /// corresponding packet has been accepted by the transport.
+    pub fn prepareChallengeFrames(
+        self: *State,
+        out: []quic.Frame,
+    ) Error!usize {
         const count = @min(out.len, self.pendingChallengeCount());
         if (count == 0) return 0;
         try self.outstanding_challenges.ensureUnusedCapacity(self.allocator, count);
@@ -306,30 +327,54 @@ pub const State = struct {
         ) orelse return error.OutOfMemory;
         try self.outstanding_challenge_index.ensureUnusedCapacity(self.allocator, outstanding_capacity);
 
-        var written: usize = 0;
-        while (written < count) : (written += 1) {
+        const pending = self.pending_challenges.activeConst();
+        for (pending[0..count], out[0..count]) |challenge, *frame| {
+            frame.* = .{ .path_challenge = .{ .data = challenge.data } };
+        }
+        return count;
+    }
+
+    /// Commit a successfully sent prefix previously returned by
+    /// `prepareChallengeFrames`. Capacity was reserved during prepare, so this
+    /// transition cannot fail after bytes become visible on the network.
+    pub fn commitChallengeFrames(
+        self: *State,
+        count: usize,
+        now_ns: ?u64,
+        timeout_ns: ?u64,
+        path_epoch: u32,
+    ) void {
+        std.debug.assert(count <= self.pendingChallengeCount());
+        for (0..count) |_| {
             const data = self.peekPendingChallengeData();
-            const slot = self.outstanding_challenge_index.getOrPutAssumeCapacity(data);
+            const slot = self.outstanding_challenge_index
+                .getOrPutAssumeCapacity(data);
             std.debug.assert(!slot.found_existing);
-            const challenge = self.popPendingChallengeToOutstanding(
+            _ = self.popPendingChallengeToOutstanding(
                 now_ns,
                 timeout_ns,
+                path_epoch,
                 slot.value_ptr,
             );
-            out[written] = .{ .path_challenge = .{ .data = challenge.data } };
         }
-        return written;
     }
 
     pub fn receiveResponse(self: *State, data: [8]u8) Error!void {
-        if (!self.receiveResponseValidated(data)) return error.UnknownPathResponse;
+        if (!self.receiveResponseValidated(data))
+            return error.UnknownPathResponse;
     }
 
     pub fn receiveResponseValidated(self: *State, data: [8]u8) bool {
-        if (self.outstanding_challenge_index.count() == 0) return false;
-        const index = self.outstanding_challenge_index.get(data) orelse return false;
-        _ = self.removeOutstandingChallenge(index);
-        return true;
+        return self.takeResponseValidated(data) != null;
+    }
+
+    /// Consume a matching response and return the challenge metadata needed
+    /// by connection-level path ownership checks.
+    pub fn takeResponseValidated(self: *State, data: [8]u8) ?Challenge {
+        if (self.outstanding_challenge_index.count() == 0) return null;
+        const index = self.outstanding_challenge_index.get(data) orelse
+            return null;
+        return self.removeOutstandingChallenge(index);
     }
 
     pub fn pendingResponseCount(self: *const State) usize {
@@ -345,7 +390,20 @@ pub const State = struct {
     }
 
     pub fn failedChallengeCount(self: *const State) usize {
-        return self.failed_challenges.items.len;
+        return self.failed_challenge_count;
+    }
+
+    pub fn hasChallengeForPathEpoch(
+        self: *const State,
+        path_epoch: u32,
+    ) bool {
+        for (self.pending_challenges.activeConst()) |challenge| {
+            if (challenge.path_epoch == path_epoch) return true;
+        }
+        for (self.outstanding_challenges.items) |challenge| {
+            if (challenge.path_epoch == path_epoch) return true;
+        }
+        return false;
     }
 
     pub fn earliestChallengeDeadline(self: *const State) ?u64 {
@@ -353,11 +411,49 @@ pub const State = struct {
     }
 
     pub fn checkTimeouts(self: *State, now_ns: u64) Error!usize {
-        const earliest_deadline = self.earliest_outstanding_deadline_ns orelse
-            return 0;
-        if (now_ns < earliest_deadline) return 0;
+        return (try self.checkTimeoutsForPathEpoch(now_ns, null)).expired;
+    }
 
-        var expired: usize = 0;
+    /// Expire validation work while retaining enough path ownership
+    /// information for a single-active-path connection to decide whether it
+    /// must fall back. Challenges from a superseded path are abandoned rather
+    /// than rebound to the current path when retransmitted.
+    pub fn checkTimeoutsForPathEpoch(
+        self: *State,
+        now_ns: u64,
+        current_path_epoch: ?u32,
+    ) Error!TimeoutResult {
+        const earliest_deadline = self.earliest_outstanding_deadline_ns orelse
+            return .{};
+        if (now_ns < earliest_deadline) return .{};
+
+        var result: TimeoutResult = .{};
+        var retry_count: usize = 0;
+        for (self.outstanding_challenges.items) |challenge| {
+            const deadline = challenge.deadline_ns orelse continue;
+            if (now_ns < deadline) continue;
+            if (current_path_epoch) |current| {
+                if (challenge.path_epoch != 0 and
+                    challenge.path_epoch != current) continue;
+            }
+            if (challenge.transmissions < self.max_challenge_transmissions) {
+                retry_count += 1;
+            }
+        }
+        // Reserve the entire retry transition before removing any expired
+        // challenge. An allocator failure must leave timeout state unchanged.
+        try self.pending_challenges.ensureUnusedCapacity(
+            self.allocator,
+            retry_count,
+        );
+        const retry_capacity = std.math.cast(
+            @TypeOf(self.pending_challenge_index).Size,
+            retry_count,
+        ) orelse return error.OutOfMemory;
+        try self.pending_challenge_index.ensureUnusedCapacity(
+            self.allocator,
+            retry_capacity,
+        );
         // Multiple PATH_CHALLENGEs often share a retransmission deadline.  Do
         // not rebuild the cached minimum after every swapRemove; the scan works
         // from per-challenge deadlines, so one recompute at the end preserves
@@ -374,52 +470,98 @@ pub const State = struct {
                 continue;
             }
 
+            if (current_path_epoch) |current| {
+                const challenge_epoch =
+                    self.outstanding_challenges.items[i].path_epoch;
+                if (challenge_epoch != 0 and challenge_epoch != current) {
+                    const removed = self
+                        .removeOutstandingChallengeDeferredDeadline(i);
+                    deadline_recompute_needed = deadline_recompute_needed or
+                        removed.removed_cached_deadline;
+                    result.expired += 1;
+                    continue;
+                }
+            }
+
             const will_fail = self.outstanding_challenges.items[i].transmissions >=
                 self.max_challenge_transmissions;
             if (will_fail) {
-                try self.failed_challenges.ensureUnusedCapacity(self.allocator, 1);
-                const removed = self.removeOutstandingChallengeDeferredDeadline(i);
+                const removed = self
+                    .removeOutstandingChallengeDeferredDeadline(i);
                 deadline_recompute_needed = deadline_recompute_needed or
                     removed.removed_cached_deadline;
-                var challenge = removed.challenge;
-                challenge.sent_time_ns = null;
-                challenge.deadline_ns = null;
-                expired += 1;
-                self.failed_challenges.appendAssumeCapacity(challenge);
+                result.expired += 1;
+                result.failed += 1;
+                if (current_path_epoch) |current| {
+                    result.failed_current_path =
+                        result.failed_current_path or
+                        removed.challenge.path_epoch == current;
+                }
+                self.failed_challenge_count +|= 1;
             } else {
-                try self.pending_challenges.ensureUnusedCapacity(self.allocator, 1);
                 const data = self.outstanding_challenges.items[i].data;
-                const slot = try self.pending_challenge_index.getOrPut(
-                    self.allocator,
-                    data,
-                );
+                const slot = self.pending_challenge_index
+                    .getOrPutAssumeCapacity(data);
                 std.debug.assert(!slot.found_existing);
-                errdefer _ = self.pending_challenge_index.remove(data);
                 const removed = self.removeOutstandingChallengeDeferredDeadline(i);
                 deadline_recompute_needed = deadline_recompute_needed or
                     removed.removed_cached_deadline;
                 var challenge = removed.challenge;
                 challenge.sent_time_ns = null;
                 challenge.deadline_ns = null;
-                expired += 1;
+                result.expired += 1;
                 self.pending_challenges.appendAssumeCapacity(challenge);
                 slot.value_ptr.* = {};
             }
         }
         if (deadline_recompute_needed) self.recomputeOutstandingDeadline();
-        return expired;
+        return result;
+    }
+
+    /// Drop validation attempts owned by superseded paths without disturbing
+    /// queued PATH_RESPONSE frames. Storage and indexes are retained for reuse.
+    pub fn abandonAllChallenges(self: *State) void {
+        self.pending_challenges.items.clearRetainingCapacity();
+        self.pending_challenges.head = 0;
+        self.pending_challenge_index.clearRetainingCapacity();
+        self.outstanding_challenges.clearRetainingCapacity();
+        self.outstanding_challenge_index.clearRetainingCapacity();
+        self.earliest_outstanding_deadline_ns = null;
+    }
+
+    pub fn abandonPendingChallengesExceptPathEpoch(
+        self: *State,
+        path_epoch: u32,
+    ) void {
+        var write: usize = 0;
+        for (self.pending_challenges.activeConst()) |challenge| {
+            if (challenge.path_epoch != path_epoch) continue;
+            self.pending_challenges.items.items[write] = challenge;
+            write += 1;
+        }
+        self.pending_challenges.items.items.len = write;
+        self.pending_challenges.head = 0;
+        self.pending_challenge_index.clearRetainingCapacity();
+        for (self.pending_challenges.items.items) |challenge| {
+            self.pending_challenge_index.putAssumeCapacityNoClobber(
+                challenge.data,
+                {},
+            );
+        }
     }
 
     fn popPendingChallengeToOutstanding(
         self: *State,
         now_ns: ?u64,
         timeout_ns: ?u64,
+        path_epoch: u32,
         index_slot: *usize,
     ) Challenge {
         var challenge = self.pending_challenges.popFront().?;
         _ = self.pending_challenge_index.remove(challenge.data);
         challenge.transmissions +|= 1;
         challenge.sent_time_ns = now_ns;
+        if (challenge.path_epoch == 0) challenge.path_epoch = path_epoch;
         if (now_ns) |now| {
             if (timeout_ns) |timeout| {
                 challenge.deadline_ns = std.math.add(
@@ -763,6 +905,43 @@ test "QUIC path validation timeout scan handles swapped challenges" {
     try std.testing.expectEqual(@as(usize, 1), state.outstandingChallengeCount());
     try std.testing.expectEqual(@as(usize, 0), try state.checkTimeouts(999));
     try std.testing.expectEqual(@as(usize, 1), try state.checkTimeouts(1_000));
+}
+
+test "QUIC path validation timeout allocation failure is transactional" {
+    const allocator = std.testing.allocator;
+    var state = State.init(allocator);
+    defer state.deinit();
+
+    const superseded = [_]u8{ 'o', 0, 0, 0, 0, 0, 0, 1 };
+    const current = [_]u8{ 'n', 0, 0, 0, 0, 0, 0, 2 };
+    _ = try state.queueChallengeForPath(superseded, 1);
+    _ = try state.queueChallengeForPath(current, 2);
+    var frames: [2]quic.Frame = undefined;
+    try std.testing.expectEqual(
+        @as(usize, 2),
+        try state.nextChallengeFramesAt(&frames, 100, 50),
+    );
+
+    // Force the retry transition to allocate even though the original queue
+    // retained capacity after its items moved to outstanding storage.
+    state.pending_challenges.items.deinit(allocator);
+    state.pending_challenges.items = .empty;
+    state.pending_challenge_index.deinit(allocator);
+    state.pending_challenge_index = .empty;
+    var failing = std.testing.FailingAllocator.init(allocator, .{
+        .fail_index = 0,
+    });
+    state.allocator = failing.allocator();
+    defer state.allocator = allocator;
+
+    try std.testing.expectError(
+        error.OutOfMemory,
+        state.checkTimeoutsForPathEpoch(150, 2),
+    );
+    try std.testing.expectEqual(@as(usize, 0), state.pendingChallengeCount());
+    try std.testing.expectEqual(@as(usize, 2), state.outstandingChallengeCount());
+    try std.testing.expectEqual(@as(usize, 0), state.failedChallengeCount());
+    try std.testing.expectEqual(@as(?u64, 150), state.earliestChallengeDeadline());
 }
 
 test "QUIC path validation suppresses duplicate pending and outstanding challenges" {

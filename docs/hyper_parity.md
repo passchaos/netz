@@ -1,4 +1,4 @@
-# netz vs `~/Work/hyper` HTTP/1 and HTTP/2 audit
+# netz vs `~/Work/hyper` HTTP/1, HTTP/2 and HTTP/3 audit
 
 This audit tracks direct same-host evidence for the HTTP/1 and HTTP/2 portion
 of the netz improvement goal. Hyper's benchmark definitions are used where
@@ -9,8 +9,9 @@ possible instead of comparing unrelated codec microbenchmarks.
 Hyper's `benches/pipeline.rs::hello_world_16` sends sixteen identical
 bodyless requests on one TCP connection and enables `pipeline_flush(true)` for
 sixteen `"Hello, World!"` responses. Hyper automatically adds a 29-byte Date
-value, so the netz benchmark supplies the same-length field and sends the same
-89 response bytes per request. Netz performs 200 untimed warmup batches before
+value. Netz now generates the same current IMF-fixdate through its ordinary
+server path, so the benchmark no longer injects a fixed field and still sends
+the same 89 response bytes per request. Netz performs 200 untimed warmup batches before
 its 2,000 measured batches, matching the calibration intent of Rust's Bencher.
 
 Equivalent netz command:
@@ -49,26 +50,61 @@ netz bench-http1-pipeline:
 
 Netz is about 1.11-1.22x faster in this captured workload.
 
+A 2026-09-04 three-run CPU-0 recapture after switching the benchmark to the
+runtime-generated Date measured netz at 0.733-0.750 us/request
+(11.73-12.00 us/batch) and Hyper at 13.50-13.54 us/batch
+(0.844-0.846 us/request). Netz remained about 1.13-1.15x faster.
+
 ## Implementation evidence
 
 The result is backed by reusable runtime changes rather than a pre-rendered
 benchmark response:
 
+- HTTP/1, HTTP/2 and HTTP/3 server limits enable an automatic `Date` response
+  field by default and allow it to be disabled. All three protocols share one allocation-free
+  thread-local IMF-fixdate cache that refreshes only when the real-clock second
+  changes. Explicit caller fields win case-insensitively; interim 1xx responses
+  omit the generated field (HTTP/1 101 remains a final upgrade response); pure
+  HTTP/1 and HTTP/3 codec helpers remain deterministic and wall-clock-free;
+- ordinary, streaming and batched HTTP/1 responses, plus ordinary, streaming,
+  bodyless/body batches, pushed responses and traditional/extended CONNECT in
+  HTTP/2, all use the same production defaulting path. Batch preflight includes
+  the generated field in header-size validation before reading the clock or
+  mutating HPACK state, and one cached value is synchronously consumed for the
+  whole batch;
+- HTTP/3 development, preconfigured-protection, and authenticated-handshake
+  runtimes add the same default to aggregate and streaming final responses,
+  including both the parent and pushed response in server push and successful
+  Extended CONNECT. Informational heads remain untouched, explicit `date` wins
+  case-insensitively, and generated values are QPACK never-indexed so a
+  once-per-second field cannot churn the dynamic table. Common header lists use
+  stack storage with exact allocation fallback;
 - persistent clients/connections retain request/response header descriptors,
   trailer rendering and encoding buffers;
 - server `Limits.request_head_timeout` applies one absolute deadline to each
   request head over TCP or TLS, starts while the connection is idle before its
   first byte, does not reset on trickled bytes, resets for each persistent
   request (and each unbuffered member of a pipeline batch), and stops before
-  body reads; unsupported raw io_uring use fails explicitly rather than
-  silently dropping the policy;
+  body reads; protocol transports remain behind `std.Io`, so deadline behavior
+  is not split across an OS-specific public API;
+- connection-owning HTTP/1 `serve*` helpers expose
+  `Limits.max_request_headers` and map request-head byte/count overflow to a
+  terminal `431 Request Header Fields Too Large` response with
+  `Connection: close`, matching Hyper's server parse-error behavior. The
+  handler is never called, `serveUntil` still reports the original
+  `HeadersTooLarge` or `TooManyHeaders` to its observer, and lower-level
+  `readRequest(ParseOptions)` remains caller-controlled. Malformed request
+  lines, methods, versions, header syntax, and Host validation similarly map
+  to terminal 400 responses. Internal head/body phase tracking keeps malformed
+  or oversized chunked trailers, timeouts, EOF, TLS, and body-framing failures
+  from being reflected. An independent
+  `Limits.max_request_target_bytes` bound maps request-target overflow to
+  terminal 414 without conflating it with the aggregate head-byte limit;
 - client `Limits.response_head_timeout` applies one absolute deadline from the
   first required response byte through the final response head. Partial bytes
   and informational 1xx heads do not renew it, while body reads remain outside
   the budget. The same policy covers aggregate and streaming responses,
-  Expect/100-continue, CONNECT and generic Upgrade over cleartext and TLS; the
-  raw io_uring helper rejects its unsupported timed-read configuration before
-  opening a socket;
+  Expect/100-continue, CONNECT and generic Upgrade over cleartext and TLS;
 - non-chunked bodies are borrowed and sent with header+body vectored TCP I/O
   (or one TLS flush) instead of copied into a temporary whole-message buffer;
 - `Connection.writeResponses` validates and flushes a response pipeline in one
@@ -199,7 +235,7 @@ Both use one persistent connection, current-thread event loops, TCP_NODELAY,
 borrowed streaming receive. Fixed mode sends one exact Content-Length body per
 direction. Chunked mode preserves 64 application chunks of 16 KiB per
 direction; Hyper's `StreamBody` and netz's `writeChunks` retain those same
-boundaries. Both include the same Date value.
+boundaries. Both now obtain their Date value from their normal server runtime.
 
 Commands:
 
@@ -228,6 +264,10 @@ chunked, 64 x 16 KiB each direction:
   hyper: 414.64-417.45 us/round-trip, 4,790-4,823 aggregate MiB/s
   netz is about 1.45-1.47x faster
 ```
+
+A three-run 2026-09-04 fixed-mode recapture with netz's generated Date measured
+268.93-274.31 us/round-trip for netz and 287.20-288.11 us for Hyper, retaining
+an approximately 1.05-1.07x latency advantage.
 
 H1 enables TCP_NODELAY, fixed readers deliver socket bytes directly to
 callbacks, chunk descriptors and vectored slice lists retain connection
@@ -335,6 +375,11 @@ its buffered request suffix. The Hyper process gate exercises both endpoint
 roles over cleartext and TLS with protocol `netz-test`, bidirectional opaque
 payloads, and an immediate server preface; the netz-server direction uses
 Hyper's generic `upgrade::on`/`with_upgrades` path rather than WebSocket code.
+The WebSocket HTTP/1 client additionally exposes a typed `ConnectAttempt`: an
+application can inspect a rejected status, headers, decoded trailers, and a
+bounded Content-Length/chunked/close-delimited body before mapping it to the
+legacy `InvalidResponse` error. Successful attempts retain the normal 101
+validation and exact buffered-byte handoff.
 
 ## HTTP/2 consecutive and parallel round trips
 
@@ -367,6 +412,8 @@ taskset -c 0 "$HYPER_H2_BENCH" \
 ```
 
 The reference revision/toolchain are the same as the HTTP/1 comparison above.
+Both servers now generate Date through their default production response path;
+the netz benchmark contains no benchmark-only Date field.
 Syscall traces verified equal steady-state wire shapes:
 
 - empty: 19-byte request and 11-byte response for each implementation;
@@ -413,6 +460,13 @@ http2_parallel_x10_res_1mb (2026-08-19):
          295.7-303.5 us/request
   netz is about 1.77-1.82x faster per batch
 ```
+
+A 2026-09-04 three-run CPU-0 recapture of the four direct Hyper benchmark
+shapes after removing netz's fixed Date produced 9.980-10.288 us,
+10.516-10.525 us, 23.173-23.279 us and 27.611-27.808 us/batch respectively.
+Corresponding Hyper spot samples were 12.514 us, 41.012 ms, 37.168 us and
+47.994 us/batch. The real automatic-Date path therefore preserves the earlier
+ordering; the five-run ranges above remain the primary baseline.
 
 For the response case, Hyper supplies one `Full<Bytes>` per stream. The locked
 h2 0.4.15 scheduler splits it at the default 16-KiB frame limit and requeues
@@ -477,6 +531,19 @@ Reusable implementation changes behind these H2 results:
   arriving, and sends RST_STREAM(CANCEL) when the callback fails, matching
   Hyper's `Incoming` frame-stream lifecycle without requiring an async body
   object;
+- `Limits.max_local_error_reset_streams` mirrors h2/Hyper's connection-lifetime
+  defense against peer-driven reset churn. It defaults to 1024, counts only
+  RST_STREAM generated by the library for a peer-caused stream protocol error,
+  and turns the next such reset into
+  `GOAWAY(ENHANCE_YOUR_CALM, "too_many_internal_resets")`. `null` disables
+  the guard; application cancellation, timeout cleanup, and capacity-driven
+  REFUSED_STREAM do not consume it;
+- Hyper's `max_send_buffer_size` bounds DATA retained by its asynchronous
+  per-stream send queue. Netz's blocking writers do not own such a queue: they
+  borrow caller slices only until each flow-controlled transport write returns,
+  and report partial progress when peer input interrupts duplex writes. Adding
+  the same-named limit here would constrain caller chunk size rather than bound
+  retained memory, so it is intentionally not exposed;
 - `startResponse` returns a stateful `ResponseWriter` for server-side streaming
   bodies. Separate writes preserve flow-control backpressure, cumulative
   Content-Length is validated before each frame is sent, DATA FIN and trailers
@@ -560,11 +627,50 @@ hyper: 10.192-10.379 ms/10-stream batch
 netz is about 1.37-1.41x faster per batch
 ```
 
+With automatic Date generated by the product path, three alternating
+CPU-0-pinned runs on 2026-09-04 measured netz at 7.586-7.660 ms/batch
+(1,305-1,318 MiB/s) and Hyper at 10.155-10.196 ms/batch
+(980-984 MiB/s), a 1.33-1.34x latency advantage. An additional alternating
+short-run A/B against the saved pre-change netz binary measured 7.487 ms median
+with automatic Date versus 7.482 ms with the former fixed field, a 0.07%
+difference inside normal run noise.
+
 This evidence covers normal WINDOW_UPDATE-driven completion and round-robin
 progress. End-to-end tests separately verify a member-stream reset is observed
 while the server is blocked on response credit. It remains one synchronous
 loopback shape, not a claim about all priorities, cancellation races or network
 conditions.
+
+The runtime also exposes opt-in `Limits.adaptive_window`, with a configurable
+`adaptive_window_max` (16 MiB by default), for the receive side of either role.
+It follows Hyper's BDP policy without floating-point or estimator allocation:
+DATA starts a reserved-namespace PING sample, a matching ACK grows the target
+when the sampled bytes reach two thirds of the previous estimate, and stable
+samples progressively back off probe frequency. Connection growth is sent as
+WINDOW_UPDATE and stream growth as SETTINGS_INITIAL_WINDOW_SIZE. SETTINGS are
+serialized: growth measured before the initial or previous SETTINGS ACK is
+max-coalesced, and existing plus future receive-stream windows switch together
+only after the combined wire write succeeds. Stale/unrelated PING ACKs cannot
+mutate the estimator, and public PING APIs reject the internal namespace.
+
+Both flow harnesses accept `--adaptive` and, like Hyper's public builder,
+override fixed-window arguments with 65,535-byte stream and connection starting
+windows. Their same-process topology, body, parallelism, warmup, measurement,
+checksum, TCP_NODELAY and CPU placement are otherwise matched. The netz
+harness uses a measurement-external in-process semaphore after the last response,
+so its server cannot race client-side final flow-control writes without adding
+PING traffic to the measured wire shape. A 40-process stress run completed
+without a premature close. Five alternating CPU-0-pinned ReleaseFast runs on
+2026-09-03, each with ten parallel 1-MiB responses, five warmups and twenty
+measured batches, produced 2.687-3.056 ms/batch for netz (2.714 ms median) and
+5.137-5.325 ms/batch for Hyper (5.261 ms median): netz was 1.94x faster at the
+median. Every run verified the same 262,144,000-byte checksum. Three telemetry
+runs used 1,623-1,630 netz allocations and 1,288,070 peak live bytes versus
+35,999-36,319 Hyper allocations and 1,383,265-1,522,926 peak live bytes. Netz
+therefore used about 95.5% fewer allocation calls, 99.4% fewer cumulative
+allocated bytes, and 6.9-15.4% less peak live memory; its 1,162,243-byte
+pre-teardown live count was 8.4% higher than Hyper's 1,072,615 bytes. These are
+matched loopback workload results, not universal throughput or memory claims.
 
 ### RFC 9218 priority-aware response scheduling
 
@@ -613,9 +719,9 @@ connection credit while a more urgent stream has no stream credit.
 
 | Area | netz | hyper |
 | --- | --- | --- |
-| HTTP/1 client/server | Blocking std.Io, native TLS 1.3 client/server, io_uring experiments, persistent/pipelined serving, bounded concurrent TCP/Unix/TLS listeners, long-running supervisors with cancellation plus accept/connection error policy, configurable DNS/TCP connect, TLS handshake, and caller-owned absolute per-request-head deadlines over TCP/TLS, stateful fixed/chunked writers, client/server Expect/100-continue, observable bounded informational responses, and callback-streaming fixed/chunked/close-delimited readers. A caller-owned request deadline preserves a partial head for an explicit later retry, while configured Slowloris protection retains its fail-closed connection policy. A thread-safe bounded HTTP/HTTPS client pool reuses idle connections per scheme/authority, exposes exclusive leases for streaming APIs, caps the combined idle/leased/connecting population, reports that live count, and offers relative/absolute FIFO capacity waits with wakeups on release, failure, eviction and close. It also enforces a monotonic idle timeout, evicts least-recently-used idle entries, discards non-reusable responses, and retries a stale reused connection once only for idempotent methods. Certificate-verified HTTPS interop with Hyper is exercised in both endpoint roles | Async runtime integration, mature ecosystem and generic Body polling; its server header-read timeout has equivalent absolute per-head semantics |
+| HTTP/1 client/server | Backend-neutral `std.Io`, native TLS 1.3 client/server, persistent/pipelined serving, bounded concurrent TCP/Unix/TLS listeners, long-running supervisors with cancellation plus accept/connection error policy, configurable DNS/TCP connect, TLS handshake, and caller-owned absolute per-request-head deadlines over TCP/TLS, stateful fixed/chunked writers, client/server Expect/100-continue, observable bounded informational responses, and callback-streaming fixed/chunked/close-delimited readers. A caller-owned request deadline preserves a partial head for an explicit later retry, while configured Slowloris protection retains its fail-closed connection policy. A thread-safe bounded HTTP/HTTPS client pool reuses idle connections per scheme/authority, exposes exclusive leases for streaming APIs, caps the combined idle/leased/connecting population, reports that live count, and offers relative/absolute FIFO capacity waits with wakeups on release, failure, eviction and close. It also enforces a monotonic idle timeout, evicts least-recently-used idle entries, discards non-reusable responses, and retries a stale reused connection once only for idempotent methods. Certificate-verified HTTPS interop with Hyper is exercised in both endpoint roles | Async runtime integration, mature ecosystem and generic Body polling; its server header-read timeout has equivalent absolute per-head semantics |
 | HTTP/1 strictness | Host/authority, TE/CL, CONNECT/HEAD/status body semantics, trailers, 100-continue, ordered 1xx observation and bounded interim chains | Mature RFC behavior and broad production use |
-| HTTP/2 | Prior-knowledge TCP/Unix client/server, h2c Upgrade, and native TLS 1.3 client/server with mandatory `h2` ALPN, optional/required client authentication, and separate resolved-address plus TLS-host/authority connection; configurable DNS/TCP connect budgets; bounded concurrent and long-running supervised TCP/Unix/TLS serving; an authority-keyed, total/idle-bounded exclusive connection pool for cleartext and verified TLS that reuses HPACK state, offers FIFO timeout/deadline capacity waits, retries a stale reused socket once only for idempotent methods, and discards GOAWAY, active-stream and push-capable connections; HPACK, bounded ordered informational callbacks, push, priorities, flow control, graceful GOAWAY draining, public Last-Stream-ID retry classification, tunnels/RFC 8441, explicit absolute-deadline PING round trips, and single-reader inactivity-aware keep-alive cycles with active/idle policy; certificate-verified TLS interop with Hyper/h2 is exercised in both endpoint roles, including 1xx, push, and push opt-out | Tokio h2 integration and production client/server, including automatic background keep-alive interval/timeout/idle policy |
+| HTTP/2 | Prior-knowledge TCP/Unix client/server, h2c Upgrade, and native TLS 1.3 client/server with mandatory `h2` ALPN, optional/required client authentication, and separate resolved-address plus TLS-host/authority connection; configurable DNS/TCP connect budgets; bounded concurrent and long-running supervised TCP/Unix/TLS serving; an authority-keyed, total/idle-bounded exclusive connection pool for cleartext and verified TLS that reuses HPACK state, offers FIFO timeout/deadline capacity waits, retries a stale reused socket once only for idempotent methods, and discards GOAWAY, active-stream and push-capable connections; HPACK, bounded ordered informational callbacks, push, priorities, fixed or opt-in BDP-adaptive receive flow control, graceful GOAWAY draining, public Last-Stream-ID retry classification, tunnels/RFC 8441, explicit absolute-deadline PING round trips, and single-reader inactivity-aware keep-alive cycles with active/idle policy; certificate-verified TLS interop with Hyper/h2 is exercised in both endpoint roles, including 1xx, push, and push opt-out | Tokio h2 integration and production client/server, including automatic BDP-adaptive receive flow control and background keep-alive interval/timeout/idle policy |
 | HTTP/1 direct pipeline sample | 0.711-0.752 us/request pinned | 0.836-0.866 us/request pinned |
 | HTTP/1 fixed 1-MiB duplex | 268.72-270.10 us/op pinned | 288.61-293.14 us/op pinned |
 | HTTP/1 chunked 1-MiB duplex | 284.04-286.06 us/op pinned | 414.64-417.45 us/op pinned |
@@ -684,7 +790,13 @@ their reserved capacity slot.
 
 Native HTTP/1 vail TLS client and server connections expose their authenticated
 peer chain, negotiated ALPN/cipher suite/hash, RFC 8446 exporter, explicit
-KeyUpdate and update counters. The client keeps the standard-library HTTPS
+KeyUpdate and update counters. They also expose explicit TLS write-half close
+and authenticated peer-close state. The record stream maps a valid
+`close_notify` to byte-stream EOF, keeps fatal or malformed alerts as errors,
+and distinguishes transport EOF before a record from a partially received TLS
+record. Receiving `close_notify` does not disable the local write direction, so
+servers can finish an HTTP response and send their reciprocal notification.
+The client keeps the standard-library HTTPS
 path as its compatibility default and offers `connectVailTlsHost` /
 `requestUriVailTls` when those advanced features are required. CONNECT/Upgrade
 tunnels preserve the vail connection and KeyUpdate access after the HTTP parser
@@ -764,6 +876,25 @@ HPACK, and the final successful response head; timeout cancels the stream and
 makes discarded aggregate state ineligible for pooled reuse. The server reader
 carries one deadline through the complete request header block and preserves a
 partially received frame for retry when no stream has yet been admitted.
+Client attempt variants also preserve a final non-2xx status, owned response
+headers, bounded DATA body, and final trailers instead of collapsing
+authentication, redirect, and retry policy into `InvalidStatus`. Rejected
+streams are fully drained and retired so the same HTTP/2 connection remains
+available for a later sibling request; body overflow cancels only that stream,
+and the compatibility methods still drain the rejection before requiring a 2xx
+tunnel. The server's matching rejection helper uses ordinary HTTP/2 response
+framing and derives Content-Length from the supplied body.
+The RFC 9220 adapter now applies the same rejection-entity contract over
+HTTP/3: attempt values retain bounded DATA and trailers, reject oversized
+declared Content-Length before body allocation, skip informational heads, and
+fully drain compatibility failures. Its server-side `rejectWithBody` uses the
+paced aggregate writer so flow-control recovery, generated Content-Length, and
+trailers share normal HTTP/3 response semantics. A caller-owned H3 session is
+restored after a complete rejection and remains usable for sibling requests; a
+limit failure cancels only the offending CONNECT stream. Caller-owned server
+sessions are likewise restored after an explicit rejection or an abandoned
+pending decision; the latter reports only that CONNECT's cancellation before a
+sibling request proceeds.
 Aggregate and callback-streaming server request readers now provide the same
 relative-timeout and absolute-deadline forms across initial headers, DATA,
 trailers, interleaved connection control, and queued complete sibling requests.
@@ -875,12 +1006,14 @@ fallback only for larger diagnostics. The public helpers retain ArrayList
 compatibility while wire-parity and short-buffer tests cover the direct form.
 Late DATA, HEADERS, and duplicate RST_STREAM frames for locally reset streams
 are ignored through a bounded, configurable `Limits.max_reset_stream_history`
-ring with an O(1) membership index. The default retains 64 stream IDs, while
-zero disables tolerance; unlike
-Rust h2's time-based reset retention this stays deterministic under a blocking
-runtime without an always-running timer task. Capacity is reserved before a
-RST_STREAM becomes visible, including batch cancellation, so allocation failure
-cannot leave wire and local reset state inconsistent.
+FIFO with an O(1) membership index. The default retains up to 64 stream IDs
+for at least `Limits.reset_stream_duration` (one second by default), while zero
+capacity disables tolerance. Expired entries are reclaimed lazily without a
+background timer; when the fixed capacity is full, a newer reset is left
+untracked rather than evicting an older stream before its retention deadline.
+Capacity is reserved before a RST_STREAM becomes visible, including batch
+cancellation, so allocation failure cannot leave wire and local reset state
+inconsistent.
 When a valid peer request exceeds the advertised local concurrent-stream
 limit, every server request reader now consumes and decodes its complete HPACK
 field section, sends `RST_STREAM(REFUSED_STREAM)`, and continues serving the
@@ -920,17 +1053,58 @@ keep-alive, cancellation and GOAWAY gate remains green.
 
 ## Remaining evidence
 
-The cleartext persistent server now treats peer EOF at an empty request
+The persistent server now treats peer EOF at an empty request
 boundary as orderly retirement instead of a connection failure. A client may
 send one or more complete HTTP/1 requests, shut down its write half, and still
 receive every response; `serve` then returns the completed request count and
 `serveUntil` reuses its worker without notifying the connection-error observer.
 This does not relax request framing: a partial head, short Content-Length body,
 or unterminated chunked body still fails with `ConnectionClosed`, and public
-`serveOne` retains its existing empty-EOF error contract. TLS is deliberately
-unchanged because its current `ConnectionClosed` classification combines
-close_notify, fatal alerts, physical EOF, and truncated TLS records; treating
-that aggregate signal as a clean HTTP boundary would hide truncation.
+`serveOne` retains its existing empty-EOF error contract. Native TLS now has
+the same HTTP boundary behavior without weakening record authentication:
+authenticated `close_notify` is EOF, bare transport EOF is eligible for the
+empty-request-boundary exception only, and a partial TLS record or fatal alert
+remains an error. Close-delimited HTTPS response bodies complete only on
+`close_notify`; a bare EOF fails with `UnexpectedEof`. Real TLS tests cover a
+complete request followed by client close-notify, partial request head/fixed
+body/chunked body followed by close-notify, idle raw EOF, and a one-byte TLS
+record prefix followed by EOF. Record-level tests additionally cover fatal and
+malformed alerts, `user_canceled` followed by `close_notify`, header/payload
+truncation, and authenticated application data delivered before later
+truncation.
+Server limits now also expose Hyper-style `keep_alive = false` for the
+connection-owning `serve*` helpers. It overrides an application-supplied
+`Connection: keep-alive`, writes `Connection: close`, completes the current
+response, and retires without dispatching an already buffered pipeline suffix.
+Direct `readRequest`/`writeResponse` users retain explicit lifecycle control,
+and the default remains persistent.
+Connection-owning HTTP/2 server APIs now also reflect request-read protocol
+failures on the wire before returning the original local error. Malformed HPACK
+emits `GOAWAY(COMPRESSION_ERROR)`, while a broken HEADERS/CONTINUATION sequence
+emits `GOAWAY(PROTOCOL_ERROR)`. Direct `readRequest` remains write-free for
+callers that own connection policy. The HPACK decoder records whether a shared
+`BufferTooShort` came from malformed input or only the configured output-field
+limit, preserving the public error contract without misclassifying resource
+policy as compression failure. Real h2c tests cover `serveOne` and
+`serveConcurrent`, exact GOAWAY codes, original server-side errors, and zero
+handler invocation. Once a request stream has been admitted, malformed request
+headers, pseudo-header omissions, negotiated Extended CONNECT violations, and
+Content-Length mismatches instead receive `RST_STREAM(PROTOCOL_ERROR)`; the
+server returns the original local error and can continue serving a sibling
+stream on the same connection. Direct request readers retain explicit wire
+policy.
+Client aggregate and streaming response readers now apply the symmetric rule:
+malformed response fields, status, or Content-Length reset only the affected
+stream with `PROTOCOL_ERROR`; configured response-size overflow uses
+`ENHANCE_YOUR_CALM`; malformed HPACK or a broken CONTINUATION chain remains a
+connection-level GOAWAY. Batch readers send the precise reset for the offending
+member and `CANCEL` for other unfinished members in one write, while completed
+and peer-reset members are left untouched. Too many informational responses
+use `ENHANCE_YOUR_CALM`; an unterminated continuation flood is likewise a
+connection error because the next frame boundary cannot be recovered. Rejected
+DATA restores its already-consumed connection receive credit before stream
+cleanup. Real h2c tests cover aggregate, streaming, and batch response paths,
+sibling reuse, and connection-error precedence.
 
 1. Add a cancellation-race benchmark that combines reset timing with the
    priority-aware flow scheduler. **Completed:** `bench-http2-flow --priority

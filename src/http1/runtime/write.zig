@@ -243,6 +243,7 @@ fn prepareStreamingRequest(
         ),
         &scratch.content_length,
         &scratch.trailer_value,
+        null,
     );
     try encodeRequestHead(allocator, options, scratch);
     return .{
@@ -264,6 +265,20 @@ fn prepareStreamingRequest(
 fn prepareStreamingResponse(
     allocator: std.mem.Allocator,
     options: StreamingResponseOptions,
+    scratch: *Scratch,
+) Error!StreamingHead {
+    return prepareStreamingResponseWithDefaultDate(
+        allocator,
+        options,
+        null,
+        scratch,
+    );
+}
+
+fn prepareStreamingResponseWithDefaultDate(
+    allocator: std.mem.Allocator,
+    options: StreamingResponseOptions,
+    default_date: ?[]const u8,
     scratch: *Scratch,
 ) Error!StreamingHead {
     if (options.version == .http_0_9) return error.InvalidVersion;
@@ -363,6 +378,7 @@ fn prepareStreamingResponse(
         ),
         &scratch.content_length,
         &scratch.trailer_value,
+        if (responseStatusIsFinal(options.status)) default_date else null,
     );
     try encodeStreamingResponseHead(allocator, options, scratch);
 
@@ -641,6 +657,7 @@ pub fn prepareRequest(
         ),
         &scratch.content_length,
         &scratch.trailer_value,
+        null,
     );
 
     try encodeRequestHead(allocator, options, scratch);
@@ -664,9 +681,44 @@ pub fn prepareResponse(
     options: ResponseOptions,
     scratch: *Scratch,
 ) Error!MessageParts {
+    return prepareResponseWithDefaultDate(
+        allocator,
+        options,
+        null,
+        scratch,
+    );
+}
+
+/// Runtime-only response preparation with an optional generated Date value.
+/// The pure codec entry point above intentionally remains deterministic.
+pub fn prepareServerResponse(
+    allocator: std.mem.Allocator,
+    options: ResponseOptions,
+    default_date: ?[]const u8,
+    scratch: *Scratch,
+) Error!MessageParts {
+    return prepareResponseWithDefaultDate(
+        allocator,
+        options,
+        if (responseStatusIsFinal(options.status)) default_date else null,
+        scratch,
+    );
+}
+
+fn prepareResponseWithDefaultDate(
+    allocator: std.mem.Allocator,
+    options: ResponseOptions,
+    default_date: ?[]const u8,
+    scratch: *Scratch,
+) Error!MessageParts {
     if (options.version == .http_0_9) return error.InvalidVersion;
     scratch.reset();
-    const framing = try prepareResponseFraming(allocator, options, scratch);
+    const framing = try prepareResponseFraming(
+        allocator,
+        options,
+        default_date,
+        scratch,
+    );
     try encodeResponseHead(allocator, options, scratch);
 
     if (framing.suppress_body) {
@@ -696,6 +748,39 @@ pub fn prepareResponseParts(
     responses: []const ResponseOptions,
     scratch: *Scratch,
 ) Error![]const []const u8 {
+    return prepareResponsePartsWithDefaultDate(
+        allocator,
+        responses,
+        null,
+        scratch,
+    );
+}
+
+/// Runtime-only batch preparation with one cached Date value shared by every
+/// final response that does not already provide the field.
+pub fn prepareServerResponseParts(
+    allocator: std.mem.Allocator,
+    responses: []const ResponseOptions,
+    default_date: ?[]const u8,
+    scratch: *Scratch,
+) Error![]const []const u8 {
+    // `default_date` may borrow a thread-local cache. Every encoded head is
+    // copied into Scratch before this function returns, so callers can refresh
+    // that cache immediately after the synchronous preparation completes.
+    return prepareResponsePartsWithDefaultDate(
+        allocator,
+        responses,
+        default_date,
+        scratch,
+    );
+}
+
+fn prepareResponsePartsWithDefaultDate(
+    allocator: std.mem.Allocator,
+    responses: []const ResponseOptions,
+    default_date: ?[]const u8,
+    scratch: *Scratch,
+) Error![]const []const u8 {
     scratch.batch_encoded.clearRetainingCapacity();
     scratch.batch_parts.clearRetainingCapacity();
     scratch.batch_part_descriptors.clearRetainingCapacity();
@@ -712,6 +797,10 @@ pub fn prepareResponseParts(
         const framing = try prepareResponseFraming(
             allocator,
             response,
+            if (responseStatusIsFinal(response.status))
+                default_date
+            else
+                null,
             scratch,
         );
         try encodeResponseHead(allocator, response, scratch);
@@ -776,6 +865,7 @@ const ResponseFraming = struct {
 fn prepareResponseFraming(
     allocator: std.mem.Allocator,
     options: ResponseOptions,
+    default_date: ?[]const u8,
     scratch: *Scratch,
 ) Error!ResponseFraming {
     if (options.version == .http_0_9) return error.InvalidVersion;
@@ -817,6 +907,7 @@ fn prepareResponseFraming(
         ),
         &scratch.content_length,
         &scratch.trailer_value,
+        default_date,
     );
     return .{
         .use_chunked = use_chunked,
@@ -1017,11 +1108,12 @@ fn appendDefaultedHeaders(
     add_default_content_length: bool,
     len_buf: *[32]u8,
     trailer_value: *std.ArrayList(u8),
+    default_date: ?[]const u8,
 ) Error!void {
     var has_content_length = false;
     var has_transfer_encoding = false;
     var has_trailer = false;
-    try list.ensureUnusedCapacity(allocator, headers.len + 2);
+    try list.ensureUnusedCapacity(allocator, headers.len + 3);
     for (headers) |header| {
         if (header.eqlName("content-length")) has_content_length = true;
         if (header.eqlName("transfer-encoding")) {
@@ -1061,6 +1153,15 @@ fn appendDefaultedHeaders(
             .value = rendered,
         });
     }
+    if (default_date) |value| {
+        if (!hasHeader(headers, "date")) {
+            list.appendAssumeCapacity(.{ .name = "Date", .value = value });
+        }
+    }
+}
+
+fn responseStatusIsFinal(status: u16) bool {
+    return status == 101 or status >= 200;
 }
 
 fn shouldDefaultRequestContentLength(
@@ -1398,6 +1499,24 @@ pub const streaming = struct {
         scratch: *Scratch,
     ) Error!Head {
         return prepareStreamingResponse(allocator, options, scratch);
+    }
+
+    /// Runtime-only streaming response preparation with an optional generated
+    /// Date value. The Date slice is consumed while encoding the returned head.
+    pub fn prepareServerResponse(
+        allocator: std.mem.Allocator,
+        options: StreamingResponseOptions,
+        default_date: ?[]const u8,
+        scratch: *Scratch,
+    ) Error!Head {
+        // The returned head owns the rendered field bytes in Scratch rather
+        // than borrowing `default_date`.
+        return prepareStreamingResponseWithDefaultDate(
+            allocator,
+            options,
+            default_date,
+            scratch,
+        );
     }
 
     /// Encode the unique terminating chunk and merged trailer field lines.

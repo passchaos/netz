@@ -5,6 +5,25 @@ const quic = @import("../../quic/mod.zig");
 
 const net = std.Io.net;
 
+const DropArmedDatagram = struct {
+    armed: std.atomic.Value(bool) = .init(false),
+    dropped: std.atomic.Value(usize) = .init(0),
+
+    fn shouldDrop(context: *anyopaque, _: []const u8) bool {
+        const self: *DropArmedDatagram = @ptrCast(@alignCast(context));
+        if (self.armed.cmpxchgStrong(
+            true,
+            false,
+            .acq_rel,
+            .acquire,
+        ) == null) {
+            _ = self.dropped.fetchAdd(1, .monotonic);
+            return true;
+        }
+        return false;
+    }
+};
+
 test "HTTP/3 handshake server timeout bounds the first Initial wait" {
     const allocator = std.testing.allocator;
     var threaded = std.Io.Threaded.init(allocator, .{});
@@ -46,6 +65,7 @@ test "HTTP/3 handshake serveConnection handles bounded persistent requests" {
     const original_dcid = [_]u8{ 0x41, 0x42, 0x43, 0x44, 0x45, 0x46, 0x47, 0x48 };
     const client_cid = [_]u8{ 0x49, 0x4a, 0x4b, 0x4c };
     const server_cid = [_]u8{ 0x4d, 0x4e, 0x4f, 0x50 };
+    var drop: DropArmedDatagram = .{};
     var server = try runtime.HandshakeServer.bind(
         allocator,
         io,
@@ -53,6 +73,10 @@ test "HTTP/3 handshake serveConnection handles bounded persistent requests" {
         .{ .quic = .{
             .max_datagram_size = 4096,
             .max_frames_per_datagram = 16,
+            .send_interceptor = .{
+                .context = &drop,
+                .should_drop = DropArmedDatagram.shouldDrop,
+            },
         } },
         .{ .handshake = .{
             .local_connection_id = &server_cid,
@@ -64,6 +88,7 @@ test "HTTP/3 handshake serveConnection handles bounded persistent requests" {
 
     const Context = struct {
         calls: usize = 0,
+        drop: *DropArmedDatagram = undefined,
 
         fn handle(
             self: *@This(),
@@ -81,6 +106,7 @@ test "HTTP/3 handshake serveConnection handles bounded persistent requests" {
                 };
             }
             if (std.mem.eql(u8, request.request.path, "/second")) {
+                self.drop.armed.store(true, .release);
                 return .{
                     .status = 202,
                     .body = "second-response",
@@ -113,6 +139,7 @@ test "HTTP/3 handshake serveConnection handles bounded persistent requests" {
     };
 
     var shared = Shared{ .server = &server };
+    shared.context.drop = &drop;
     const server_thread = try std.Thread.spawn(.{}, Shared.run, .{&shared});
 
     var client = try runtime.HandshakeClient.connect(
@@ -178,6 +205,7 @@ test "HTTP/3 handshake serveConnection handles bounded persistent requests" {
     if (shared.err) |err| return err;
     try std.testing.expectEqual(@as(?usize, 2), shared.served);
     try std.testing.expectEqual(@as(usize, 2), shared.context.calls);
+    try std.testing.expectEqual(@as(usize, 1), drop.dropped.load(.acquire));
 }
 
 fn responseHeader(

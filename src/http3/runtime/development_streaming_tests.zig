@@ -62,6 +62,14 @@ fn expectResponse(
                         @as(?usize, expected_body.len),
                         response.content_length,
                     );
+                    var date: ?[]const u8 = null;
+                    for (response.headers) |header| {
+                        if (std.ascii.eqlIgnoreCase(header.name, "date")) {
+                            date = header.value;
+                        }
+                    }
+                    try std.testing.expectEqual(@as(usize, 29), date.?.len);
+                    try std.testing.expectEqualStrings("GMT", date.?[26..]);
                     saw_head = true;
                 },
                 .request => return error.TestUnexpectedResult,

@@ -17,6 +17,7 @@ pub const Error = wire.Error || error{
     BufferTooShort,
     TooManyHeaders,
     MalformedStartLine,
+    UriTooLong,
     MalformedHeader,
     InvalidMethod,
     InvalidVersion,
@@ -95,6 +96,9 @@ pub const Version = enum {
 
 pub const ParseOptions = struct {
     max_headers: usize = 100,
+    /// Maximum request-target bytes. Pure parsing remains unlimited unless a
+    /// caller such as the connection-owning server supplies a policy.
+    max_request_target_bytes: usize = std.math.maxInt(usize),
     allow_obs_fold: bool = false,
     /// Accept a headerless HTTP/0.9 response body on client response paths.
     /// This is deliberately response-only and disabled by default, matching
@@ -433,6 +437,9 @@ pub fn parseRequestHead(
         parsed.start_line,
         options.allow_multiple_spaces_in_request_line_delimiters,
     );
+    if (request_line.target.len > options.max_request_target_bytes) {
+        return error.UriTooLong;
+    }
     const method = try Method.parse(request_line.method);
     try validateRequestTargetForMethod(method, request_line.target);
     const version = try Version.parse(request_line.version);
@@ -597,6 +604,9 @@ pub fn parseRequest(allocator: std.mem.Allocator, bytes: []const u8, options: Pa
         request_line,
         options.allow_multiple_spaces_in_request_line_delimiters,
     );
+    if (request_parts.target.len > options.max_request_target_bytes) {
+        return error.UriTooLong;
+    }
     const method = try Method.parse(request_parts.method);
     try validateRequestTargetForMethod(method, request_parts.target);
     const version = try Version.parse(request_parts.version);
@@ -2218,6 +2228,29 @@ test "HTTP/1 validates start-line components" {
     try std.testing.expectError(error.MalformedStartLine, writeRequestChecked(&encoded, allocator, .GET, "/\r\nHost: evil", .http_1_1, &.{}, ""));
     try std.testing.expectError(error.MalformedStartLine, writeResponseChecked(&encoded, allocator, .http_1_1, 200, "OK\r\nX: evil", &.{}, ""));
     try std.testing.expectError(error.InvalidStatus, writeResponseChecked(&encoded, allocator, .http_1_1, 42, "Nope", &.{}, ""));
+}
+
+test "HTTP/1 request target length is caller-configurable" {
+    const allocator = std.testing.allocator;
+    const raw = "GET /long-path HTTP/1.1\r\nHost: example.com\r\n\r\n";
+
+    var accepted = try parseRequest(allocator, raw, .{});
+    defer accepted.deinit(allocator);
+    try std.testing.expectEqualStrings("/long-path", accepted.target);
+
+    try std.testing.expectError(
+        error.UriTooLong,
+        parseRequest(allocator, raw, .{
+            .max_request_target_bytes = 8,
+        }),
+    );
+    var headers: [4]Header = undefined;
+    try std.testing.expectError(
+        error.UriTooLong,
+        parseRequestHead(raw, &headers, .{
+            .max_request_target_bytes = 8,
+        }),
+    );
 }
 
 test "HTTP/1 Hyper-shaped parser compatibility switches remain scoped" {

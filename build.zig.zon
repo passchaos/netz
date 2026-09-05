@@ -6,6 +6,10 @@
     .dependencies = .{
         .vail = .{ .path = "../vail" },
         .vort = .{ .path = "../vort" },
+        .zio = .{
+            .url = "git+https://github.com/lalinsky/zio#v0.17.0",
+            .hash = "zio-0.17.0-xHbVVI_jJQC3YbgU7JydwAV7MuASkOTd73YqBaKlFFUz",
+        },
     },
     .paths = .{
         "build.zig",

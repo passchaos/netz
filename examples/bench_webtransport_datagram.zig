@@ -1,11 +1,22 @@
 const std = @import("std");
 const netz = @import("netz");
 
-const iterations: usize = 10_000;
+const default_iterations: usize = 10_000;
 
-pub fn main() !void {
+const Config = struct {
+    iterations: usize = default_iterations,
+    send_timeout_ms: i64 = 1000,
+    burst: bool = false,
+};
+
+pub fn main(init: std.process.Init) !void {
     const allocator = std.heap.smp_allocator;
+    const config = try parseArgs(init, allocator);
+    if (config.burst) return runBurst(allocator, config);
+    return runPingPong(allocator, config.iterations);
+}
 
+fn runPingPong(allocator: std.mem.Allocator, iterations: usize) !void {
     var threaded = std.Io.Threaded.init(allocator, .{});
     defer threaded.deinit();
     const io = threaded.io();
@@ -17,6 +28,7 @@ pub fn main() !void {
 
     const Shared = struct {
         server: *netz.webtransport.runtime.Server,
+        iterations: usize,
         err: ?anyerror = null,
         handled: usize = 0,
 
@@ -30,7 +42,7 @@ pub fn main() !void {
             var accepted = try shared.server.accept();
             defer accepted.deinit(shared.server.h3.quic_server.endpoint.allocator);
 
-            while (shared.handled < iterations) : (shared.handled += 1) {
+            while (shared.handled < shared.iterations) : (shared.handled += 1) {
                 var datagram = try shared.server.receiveDatagram();
                 defer datagram.deinit(shared.server.h3.quic_server.endpoint.allocator);
                 if (datagram.datagram.session_id.value != accepted.session_id.value) {
@@ -45,7 +57,7 @@ pub fn main() !void {
         }
     };
 
-    var shared = Shared{ .server = &server };
+    var shared = Shared{ .server = &server, .iterations = iterations };
     const thread = try std.Thread.spawn(.{}, Shared.run, .{&shared});
 
     var client = try netz.webtransport.runtime.ClientSession.connect(
@@ -103,6 +115,262 @@ pub fn main() !void {
         elapsed / datagrams,
         datagrams_per_second,
     });
+}
+
+fn runBurst(allocator: std.mem.Allocator, config: Config) !void {
+    try runBurstHandshake(allocator, config);
+}
+
+fn runBurstHandshake(allocator: std.mem.Allocator, config: Config) !void {
+    var threaded = std.Io.Threaded.init(allocator, .{});
+    defer threaded.deinit();
+    const io = threaded.io();
+    const original_dcid =
+        [_]u8{ 0x57, 0x54, 0x44, 0x01, 0x57, 0x54, 0x44, 0x02 };
+    const client_cid = [_]u8{ 0x57, 0x54, 0x44, 0x03 };
+    const server_cid = [_]u8{ 0x57, 0x54, 0x44, 0x04 };
+    var server = try netz.webtransport.runtime.HandshakeServer.bind(
+        allocator,
+        io,
+        .{ .ip4 = .loopback(0) },
+        .{ .http3 = .{ .quic = .{
+            .max_datagram_size = 4096,
+            .max_frames_per_datagram = 8,
+        } } },
+        .{ .handshake = .{
+            .local_connection_id = &server_cid,
+            .random = [_]u8{0x45} ** 32,
+            .x25519_secret_key = [_]u8{0x46} ** 32,
+        } },
+    );
+    defer server.deinit();
+
+    const Shared = struct {
+        server: *netz.webtransport.runtime.HandshakeServer,
+        sent: *std.atomic.Value(usize),
+        done: *std.Io.Event,
+        received: usize = 0,
+        checksum: u64 = 0,
+        err: ?anyerror = null,
+
+        fn run(self: *@This()) void {
+            self.runFallible() catch |err| {
+                self.err = err;
+            };
+        }
+
+        fn runFallible(self: *@This()) !void {
+            var accepted = try self.server.accept();
+            defer accepted.deinit();
+            var post_done_timeouts: usize = 0;
+            while (!self.done.isSet() or
+                self.received < self.sent.load(.acquire))
+            {
+                var datagram = accepted.receiveDatagramWithTimeout(
+                    .fromMilliseconds(10),
+                ) catch |err| switch (err) {
+                    error.Timeout => {
+                        if (self.done.isSet()) {
+                            post_done_timeouts += 1;
+                            if (post_done_timeouts == 100) {
+                                return error.MissingDatagram;
+                            }
+                        }
+                        continue;
+                    },
+                    else => return err,
+                };
+                post_done_timeouts = 0;
+                defer datagram.deinit(
+                    accepted.h3.established.connection.endpoint.allocator,
+                );
+                self.received += 1;
+                for (datagram.datagram.payload) |byte| self.checksum +%= byte;
+            }
+        }
+    };
+    var sent: std.atomic.Value(usize) = .init(0);
+    var done: std.Io.Event = .unset;
+    var shared = Shared{
+        .server = &server,
+        .sent = &sent,
+        .done = &done,
+    };
+    const thread = try std.Thread.spawn(.{}, Shared.run, .{&shared});
+    var joined = false;
+    defer if (!joined) {
+        done.set(io);
+        thread.join();
+    };
+
+    var client = try netz.webtransport.runtime.HandshakeClientSession.connect(
+        allocator,
+        io,
+        .{ .ip4 = .loopback(0) },
+        server.address(),
+        .{
+            .authority = "localhost",
+            .path = "/bench-wt-burst",
+            .limits = .{ .http3 = .{ .quic = .{
+                .max_datagram_size = 4096,
+                .max_frames_per_datagram = 8,
+            } } },
+            .h3 = .{ .handshake = .{
+                .original_destination_connection_id = &original_dcid,
+                .local_connection_id = &client_cid,
+                .server_name = "localhost",
+                .random = [_]u8{0x47} ** 32,
+                .x25519_secret_key = [_]u8{0x48} ** 32,
+            } },
+        },
+    );
+    defer client.deinit();
+    const result = try runBurstSends(
+        allocator,
+        io,
+        &client,
+        &sent,
+        config,
+    );
+    done.set(io);
+    thread.join();
+    joined = true;
+    if (shared.err) |err| return err;
+    if (shared.received != result.sent) return error.InvalidDatagramCount;
+    var expected_checksum: u64 = 0;
+    for ("webtransport bounded burst datagram") |byte| {
+        expected_checksum +%= byte;
+    }
+    expected_checksum *%= result.sent;
+    if (shared.checksum != expected_checksum) return error.InvalidChecksum;
+    printBurstResult(result, shared.received, shared.checksum);
+}
+
+const BurstSendResult = struct {
+    attempted: usize,
+    sent: usize,
+    timed_out: usize,
+    payload_bytes: usize,
+    elapsed_ns: u64,
+    p50_ns: u64,
+    p99_ns: u64,
+};
+
+fn runBurstSends(
+    allocator: std.mem.Allocator,
+    io: std.Io,
+    client: *netz.webtransport.runtime.HandshakeClientSession,
+    sent_count: *std.atomic.Value(usize),
+    config: Config,
+) !BurstSendResult {
+    const payload = "webtransport bounded burst datagram";
+    const latencies = try allocator.alloc(u64, config.iterations);
+    defer allocator.free(latencies);
+    const started = nowNs(io);
+    var success_count: usize = 0;
+    var timeout_count: usize = 0;
+    const timeout = std.Io.Duration.fromMilliseconds(
+        config.send_timeout_ms,
+    );
+    for (0..config.iterations) |_| {
+        const send_started = nowNs(io);
+        client.sendDatagramWithTimeout(payload, timeout) catch |err|
+            switch (err) {
+                error.Timeout => {
+                    timeout_count += 1;
+                    continue;
+                },
+                else => return err,
+            };
+        latencies[success_count] = nowNs(io) -| send_started;
+        success_count += 1;
+        sent_count.store(success_count, .release);
+    }
+    const elapsed = nowNs(io) -| started;
+    if (success_count == 0) return error.BenchmarkTimeout;
+    const samples = latencies[0..success_count];
+    std.mem.sort(u64, samples, {}, lessThanU64);
+    return .{
+        .attempted = config.iterations,
+        .sent = success_count,
+        .timed_out = timeout_count,
+        .payload_bytes = payload.len,
+        .elapsed_ns = elapsed,
+        .p50_ns = percentile(samples, 50, 100),
+        .p99_ns = percentile(samples, 99, 100),
+    };
+}
+
+fn printBurstResult(
+    result: BurstSendResult,
+    received: usize,
+    checksum: u64,
+) void {
+    std.debug.print(
+        "WebTransport real-handshake bounded DATAGRAM burst: attempted={d} " ++
+            "sent={d} timed_out={d} received={d} payload_bytes={d} " ++
+            "logical_MiB/s={d:.2} send_p50_ns={d} send_p99_ns={d} " ++
+            "checksum={d}\n",
+        .{
+            result.attempted,
+            result.sent,
+            result.timed_out,
+            received,
+            result.payload_bytes,
+            mibPerSecond(
+                result.sent * result.payload_bytes,
+                result.elapsed_ns,
+            ),
+            result.p50_ns,
+            result.p99_ns,
+            checksum,
+        },
+    );
+}
+
+fn parseArgs(init: std.process.Init, allocator: std.mem.Allocator) !Config {
+    var args = try std.process.Args.Iterator.initAllocator(
+        init.minimal.args,
+        allocator,
+    );
+    defer args.deinit();
+    _ = args.next();
+    var config: Config = .{};
+    while (args.next()) |arg| {
+        if (std.mem.eql(u8, arg, "--burst")) {
+            config.burst = true;
+        } else if (std.mem.startsWith(u8, arg, "--iterations=")) {
+            config.iterations = try std.fmt.parseInt(
+                usize,
+                arg["--iterations=".len..],
+                10,
+            );
+            if (config.iterations == 0) return error.InvalidArgument;
+        } else if (std.mem.startsWith(u8, arg, "--send-timeout-ms=")) {
+            config.send_timeout_ms = try std.fmt.parseInt(
+                i64,
+                arg["--send-timeout-ms=".len..],
+                10,
+            );
+            if (config.send_timeout_ms == 0) return error.InvalidArgument;
+        } else return error.InvalidArgument;
+    }
+    return config;
+}
+
+fn lessThanU64(_: void, a: u64, b: u64) bool {
+    return a < b;
+}
+
+fn percentile(sorted: []const u64, numerator: usize, denominator: usize) u64 {
+    const rank = (sorted.len * numerator + denominator - 1) / denominator;
+    return sorted[@min(sorted.len - 1, @max(@as(usize, 1), rank) - 1)];
+}
+
+fn mibPerSecond(bytes: usize, elapsed_ns: u64) f64 {
+    if (elapsed_ns == 0) return 0;
+    return (@as(f64, @floatFromInt(bytes)) / (1024.0 * 1024.0)) /
+        (@as(f64, @floatFromInt(elapsed_ns)) / std.time.ns_per_s);
 }
 
 fn nowNs(io: std.Io) u64 {

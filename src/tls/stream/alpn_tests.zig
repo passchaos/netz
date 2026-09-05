@@ -298,7 +298,7 @@ test "TLS stream rejects ALPN without a shared protocol" {
         // The server detects the missing overlap before emitting its encrypted
         // flight, so the client observes the peer close rather than a selected
         // protocol it could validate locally.
-        error.ConnectionClosed => stream.close(io),
+        error.UnexpectedEof => stream.close(io),
         else => return err,
     }
 

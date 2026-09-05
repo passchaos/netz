@@ -14,9 +14,6 @@ pub const initial_salt_v2 = [_]u8{
 };
 
 const HkdfSha256 = std.crypto.kdf.hkdf.HkdfSha256;
-const HkdfSha384 = std.crypto.kdf.hkdf.Hkdf(
-    std.crypto.auth.hmac.sha2.HmacSha384,
-);
 const traffic_crypto = vail.quic.traffic_crypto;
 const TlsSecret = vail.tls.secret.Secret;
 
@@ -266,6 +263,21 @@ pub const OpenedShortPacketView = struct {
     spin_bit: bool,
     key_phase: bool,
     payload: []u8,
+};
+
+/// A phase mismatch leaves the caller's packet byte-for-byte unchanged, so a
+/// connection can safely retry it through next/previous key generations.
+pub const CurrentKeyOpenResult = union(enum) {
+    opened: OpenedShortPacketView,
+    key_phase_mismatch: bool,
+};
+
+const ShortHeaderPreview = struct {
+    first_byte: u8,
+    packet_number_len: u8,
+    packet_number_offset: usize,
+    key_phase: bool,
+    mask: [header_protection_mask_len]u8,
 };
 
 pub const ShortPacketKeyUpdateKeys = struct {
@@ -591,10 +603,16 @@ fn nextPacketProtectionKeysWithLabels(
     current: PacketProtectionKeys,
     labels: HkdfLabels,
 ) PacketProtectionKeys {
-    const next_secret = nextTrafficSecretValue(
+    const next_secret = traffic_crypto.nextTrafficSecret(
+        current.suite,
         current.traffic_secret,
-        labels.ku,
-    );
+        .{
+            .key = labels.key,
+            .iv = labels.iv,
+            .hp = labels.hp,
+            .ku = labels.ku,
+        },
+    ) catch unreachable;
     var next = deriveKeysWithLabels(
         current.suite,
         next_secret,
@@ -698,6 +716,20 @@ pub fn peekShortPacketKeyPhaseForKeysWithFixedBitPolicy(
     destination_connection_id_len: usize,
     allow_zero_fixed_bit: bool,
 ) Error!bool {
+    return (try previewShortHeaderForKeysWithFixedBitPolicy(
+        keys,
+        packet,
+        destination_connection_id_len,
+        allow_zero_fixed_bit,
+    )).key_phase;
+}
+
+fn previewShortHeaderForKeysWithFixedBitPolicy(
+    keys: PacketProtectionKeys,
+    packet: []const u8,
+    destination_connection_id_len: usize,
+    allow_zero_fixed_bit: bool,
+) Error!ShortHeaderPreview {
     if (destination_connection_id_len > 20) return error.InvalidInitialPacket;
     if (packet.len < 1 + destination_connection_id_len + 1 + aead_tag_len or
         (packet[0] & 0x80) != 0 or
@@ -719,7 +751,17 @@ pub fn peekShortPacketKeyPhaseForKeysWithFixedBitPolicy(
         return error.InvalidInitialPacket;
     }
     try validateShortHeaderReservedBits(first);
-    return (first & 0x04) != 0;
+    const packet_number_len: u8 = (first & 0x03) + 1;
+    if (pn_offset + packet_number_len > packet.len) {
+        return error.InvalidPacketNumberLength;
+    }
+    return .{
+        .first_byte = first,
+        .packet_number_len = packet_number_len,
+        .packet_number_offset = pn_offset,
+        .key_phase = (first & 0x04) != 0,
+        .mask = mask,
+    };
 }
 
 pub fn applyHeaderProtectionMask(
@@ -831,29 +873,6 @@ fn asVailKeys(keys: PacketProtectionKeys) traffic_crypto.Keys {
         .key = suite_key,
         .iv = keys.iv,
         .hp = suite_hp,
-    };
-}
-
-fn nextTrafficSecretValue(
-    current: TlsSecret,
-    label: []const u8,
-) TlsSecret {
-    return switch (current.hash) {
-        .sha256 => .fromSha256(std.crypto.tls.hkdfExpandLabel(
-            HkdfSha256,
-            current.sha256() catch unreachable,
-            label,
-            "",
-            32,
-        )),
-        .sha384 => .fromSha384(std.crypto.tls.hkdfExpandLabel(
-            HkdfSha384,
-            current.sha384() catch unreachable,
-            label,
-            "",
-            48,
-        )),
-        .sm3 => unreachable,
     };
 }
 
@@ -1567,42 +1586,45 @@ pub fn openShortPacketWithFixedBitPolicy(
     expected_packet_number: u64,
     allow_zero_fixed_bit: bool,
 ) Error!OpenedShortPacket {
-    if (destination_connection_id_len > 20) return error.InvalidInitialPacket;
+    return openShortPacketAfterPreview(
+        allocator,
+        keys,
+        packet,
+        expected_packet_number,
+        try previewShortHeaderForKeysWithFixedBitPolicy(
+            keys,
+            packet,
+            destination_connection_id_len,
+            allow_zero_fixed_bit,
+        ),
+    );
+}
+
+fn openShortPacketAfterPreview(
+    allocator: std.mem.Allocator,
+    keys: PacketProtectionKeys,
+    packet: []const u8,
+    expected_packet_number: u64,
+    preview: ShortHeaderPreview,
+) Error!OpenedShortPacket {
     const bytes = try allocator.dupe(u8, packet);
     defer allocator.free(bytes);
-    if (bytes.len < 1 + destination_connection_id_len + 1 + aead_tag_len or
-        (bytes[0] & 0x80) != 0 or
-        (!allow_zero_fixed_bit and (bytes[0] & 0x40) == 0))
-    {
-        return error.InvalidInitialPacket;
-    }
-    const pn_offset = 1 + destination_connection_id_len;
-    try removeHeaderProtectionForKeys(keys, .short, bytes, pn_offset);
-    if ((bytes[0] & 0x80) != 0 or
-        (!allow_zero_fixed_bit and (bytes[0] & 0x40) == 0))
-    {
-        return error.InvalidInitialPacket;
-    }
-    try validateShortHeaderReservedBits(bytes[0]);
-    const spin_bit = (bytes[0] & 0x20) != 0;
-    const key_phase = (bytes[0] & 0x04) != 0;
-    const pn_len = @as(usize, (bytes[0] & 0x03) + 1);
-    const payload_offset = pn_offset + pn_len;
-    if (bytes.len < payload_offset + aead_tag_len) return error.InvalidInitialPacket;
-    const packet_number = try reconstructPacketNumber(expected_packet_number, bytes[pn_offset..payload_offset]);
-    const ciphertext = bytes[payload_offset .. bytes.len - aead_tag_len];
-    const tag = bytes[bytes.len - aead_tag_len ..][0..aead_tag_len].*;
-    const payload = try allocator.alloc(u8, ciphertext.len);
+    const view = try openShortPacketInPlaceAfterPreview(
+        keys,
+        bytes,
+        expected_packet_number,
+        preview,
+    );
+    const payload = try allocator.dupe(u8, view.payload);
     errdefer allocator.free(payload);
-    try openPayload(keys, packet_number, bytes[0..payload_offset], ciphertext, tag, payload);
-    const dcid = try allocator.dupe(u8, bytes[1..pn_offset]);
+    const dcid = try allocator.dupe(u8, view.destination_connection_id);
     errdefer allocator.free(dcid);
     return .{
         .destination_connection_id = dcid,
-        .packet_number = packet_number,
-        .fixed_bit = (bytes[0] & 0x40) != 0,
-        .spin_bit = spin_bit,
-        .key_phase = key_phase,
+        .packet_number = view.packet_number,
+        .fixed_bit = view.fixed_bit,
+        .spin_bit = view.spin_bit,
+        .key_phase = view.key_phase,
         .payload = payload,
     };
 }
@@ -1636,24 +1658,60 @@ pub fn openShortPacketInPlaceWithFixedBitPolicy(
     expected_packet_number: u64,
     allow_zero_fixed_bit: bool,
 ) Error!OpenedShortPacketView {
-    if (destination_connection_id_len > 20) return error.InvalidInitialPacket;
-    if (packet.len < 1 + destination_connection_id_len + 1 + aead_tag_len or
-        (packet[0] & 0x80) != 0 or
-        (!allow_zero_fixed_bit and (packet[0] & 0x40) == 0))
-    {
-        return error.InvalidInitialPacket;
+    return openShortPacketInPlaceAfterPreview(
+        keys,
+        packet,
+        expected_packet_number,
+        try previewShortHeaderForKeysWithFixedBitPolicy(
+            keys,
+            packet,
+            destination_connection_id_len,
+            allow_zero_fixed_bit,
+        ),
+    );
+}
+
+/// Open a current-generation short packet using one header-protection mask.
+/// A phase mismatch is detected before the packet is mutated.
+pub fn openShortPacketInPlaceForKeyPhaseWithFixedBitPolicy(
+    keys: PacketProtectionKeys,
+    current_key_phase: bool,
+    packet: []u8,
+    destination_connection_id_len: usize,
+    expected_packet_number: u64,
+    allow_zero_fixed_bit: bool,
+) Error!CurrentKeyOpenResult {
+    const preview = try previewShortHeaderForKeysWithFixedBitPolicy(
+        keys,
+        packet,
+        destination_connection_id_len,
+        allow_zero_fixed_bit,
+    );
+    if (preview.key_phase != current_key_phase) {
+        return .{ .key_phase_mismatch = preview.key_phase };
     }
-    const pn_offset = 1 + destination_connection_id_len;
-    try removeHeaderProtectionForKeys(keys, .short, packet, pn_offset);
-    if ((packet[0] & 0x80) != 0 or
-        (!allow_zero_fixed_bit and (packet[0] & 0x40) == 0))
-    {
-        return error.InvalidInitialPacket;
+    return .{ .opened = try openShortPacketInPlaceAfterPreview(
+        keys,
+        packet,
+        expected_packet_number,
+        preview,
+    ) };
+}
+
+fn openShortPacketInPlaceAfterPreview(
+    keys: PacketProtectionKeys,
+    packet: []u8,
+    expected_packet_number: u64,
+    preview: ShortHeaderPreview,
+) Error!OpenedShortPacketView {
+    packet[0] = preview.first_byte;
+    const pn_offset = preview.packet_number_offset;
+    const pn_len = @as(usize, preview.packet_number_len);
+    for (packet[pn_offset .. pn_offset + pn_len], 0..) |*byte, index| {
+        byte.* ^= preview.mask[index + 1];
     }
-    try validateShortHeaderReservedBits(packet[0]);
     const spin_bit = (packet[0] & 0x20) != 0;
-    const key_phase = (packet[0] & 0x04) != 0;
-    const pn_len = @as(usize, (packet[0] & 0x03) + 1);
+    const key_phase = preview.key_phase;
     const payload_offset = pn_offset + pn_len;
     if (packet.len < payload_offset + aead_tag_len) return error.InvalidInitialPacket;
     const packet_number = try reconstructPacketNumber(expected_packet_number, packet[pn_offset..payload_offset]);
@@ -1717,21 +1775,21 @@ pub fn openShortPacketWithKeyUpdateAndFixedBitPolicy(
     expected_packet_number: u64,
     allow_zero_fixed_bit: bool,
 ) Error!OpenedShortPacketWithKeyUpdate {
-    const key_phase = try peekShortPacketKeyPhaseForKeysWithFixedBitPolicy(
+    const preview = try previewShortHeaderForKeysWithFixedBitPolicy(
         keys.current,
         packet,
         destination_connection_id_len,
         allow_zero_fixed_bit,
     );
+    const key_phase = preview.key_phase;
     if (key_phase == keys.current_key_phase) {
         return .{
-            .packet = try openShortPacketWithFixedBitPolicy(
+            .packet = try openShortPacketAfterPreview(
                 allocator,
                 keys.current,
                 packet,
-                destination_connection_id_len,
                 expected_packet_number,
-                allow_zero_fixed_bit,
+                preview,
             ),
             .peer_initiated_key_update = false,
         };

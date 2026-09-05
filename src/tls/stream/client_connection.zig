@@ -420,7 +420,7 @@ pub const Connection = struct {
     }
 
     pub fn deinit(self: *Connection) void {
-        if (!self.records.closed) {
+        if (self.records.shouldSendCloseNotify()) {
             self.records.sendCloseNotify(self.io, self.stream) catch {};
         }
         self.records.deinit();
@@ -493,6 +493,15 @@ pub const Connection = struct {
         self: *const Connection,
     ) record_stream.KeyUpdateCounts {
         return self.records.keyUpdateCounts();
+    }
+
+    /// Send an orderly TLS write-half close while retaining the receive side.
+    pub fn sendCloseNotify(self: *Connection) Error!void {
+        try self.records.sendCloseNotify(self.io, self.stream);
+    }
+
+    pub fn receivedCloseNotify(self: *const Connection) bool {
+        return self.records.receivedCloseNotify();
     }
 
     pub fn read(self: *Connection, out: []u8) Error!usize {

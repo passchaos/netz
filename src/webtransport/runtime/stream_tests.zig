@@ -290,7 +290,7 @@ test "WebTransport batch validation rejects duplicates before I/O" {
     };
     try std.testing.expectError(
         error.DuplicateStream,
-        @import("stream_batch.zig").validate(&registry, &writes),
+        @import("stream/batch.zig").validate(&registry, &writes),
     );
     try std.testing.expect(!stream.prefix_sent);
     try std.testing.expectEqual(@as(u64, 0), stream.send_offset);

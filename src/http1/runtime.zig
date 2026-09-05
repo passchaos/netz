@@ -1,22 +1,28 @@
 const std = @import("std");
-const builtin = @import("builtin");
 const http1 = @import("mod.zig");
 const runtime_write = @import("runtime/write.zig");
 const body_writer = @import("runtime/body_writer.zig");
 const body_reader = @import("runtime/body_reader.zig");
+const message_framing = @import("runtime/message/framing.zig");
 const stream_io = @import("../internal/stream_io.zig");
 const deadline_policy = @import("../internal/deadline.zig");
+const http_date = @import("../internal/http_date.zig");
 const tcp_connect = @import("../internal/tcp_connect.zig");
 const socket_options = @import("../internal/socket_options.zig");
 const tls_stream = @import("../tls/mod.zig").stream;
-const wire = @import("../internal/wire.zig");
 const vail = @import("vail");
 
 const net = std.Io.net;
-const linux = std.os.linux;
-const posix = std.posix;
 const tls = std.crypto.tls;
 const CertificateBundle = std.crypto.Certificate.Bundle;
+
+const messageTargetLength = message_framing.messageTargetLength;
+const findHttpHeadEndWithinLimit = message_framing.findHeadEndWithinLimit;
+const responseHeadUsesCloseDelimitedBody =
+    message_framing.responseHeadUsesCloseDelimitedBody;
+const informationalResponseToSkip = message_framing.informationalResponseToSkip;
+const requestShouldSendContinue = message_framing.requestShouldSendContinue;
+const RequestReadStage = enum { head, body };
 
 pub const Error = http1.Error || tls_stream.Error || error{
     HeadersTooLarge,
@@ -27,14 +33,10 @@ pub const Error = http1.Error || tls_stream.Error || error{
     SocketOptionFailed,
     UnsupportedScheme,
     UnsupportedEndpoint,
-    UnsupportedIoBackend,
-    IoUringOperationFailed,
-    UnexpectedCompletion,
     ConnectionBusy,
     ConnectionUnusable,
     InvalidWriterState,
     InvalidServeOptions,
-    TimedReadUnsupported,
     TooManyInformationalResponses,
     PostHandshakeTlsUnavailable,
 } || net.IpAddress.ListenError || net.IpAddress.ConnectError ||
@@ -52,6 +54,12 @@ fn setTcpNoDelay(stream: net.Stream) Error!void {
 
 pub const Limits = struct {
     max_head_bytes: usize = 64 * 1024,
+    /// Maximum request fields accepted by connection-owning `serve*` helpers.
+    /// Direct read APIs continue to use their explicit `ParseOptions`.
+    max_request_headers: usize = 100,
+    /// Maximum request-target bytes accepted by connection-owning `serve*`
+    /// helpers, matching Hyper's URI safety bound.
+    max_request_target_bytes: usize = std.math.maxInt(u16) - 1,
     max_body_bytes: usize = 16 * 1024 * 1024,
     /// Optional absolute budget for each request head. The deadline begins
     /// when a server read first needs transport bytes and is not extended by
@@ -73,6 +81,14 @@ pub const Limits = struct {
     /// frame coalescer, so a complete chunk followed by a small terminator or
     /// response can otherwise stall behind Linux delayed ACKs.
     tcp_nodelay: bool = true,
+    /// Add a current IMF-fixdate Date field to server final responses that do
+    /// not already contain one. The shared value is cached once per second.
+    auto_date_header: bool = true,
+    /// Permit the connection-owning `serve*` helpers to process another
+    /// request after a response. Disabling this forces `Connection: close` on
+    /// every served response and retires after the current exchange; direct
+    /// read/write APIs remain caller-controlled.
+    keep_alive: bool = true,
 };
 
 pub const TlsCaBundle = struct {
@@ -126,8 +142,6 @@ pub const InformationalObserver = struct {
         response: InformationalResponseHead,
     ) void,
 };
-
-pub const LinuxIoUringHandle = if (builtin.os.tag == .linux) linux.IoUring else opaque {};
 
 pub const UriEndpoint = struct {
     allocator: std.mem.Allocator,
@@ -721,6 +735,18 @@ pub const TlsClientConnection = struct {
         buffer: []u8,
         deadline: std.Io.Clock.Timestamp,
     ) Error!usize {
+        if (buffer.len == 0) return 0;
+        // TLS may have decrypted an entire record to satisfy an earlier short
+        // read. Consume that plaintext before consulting the socket deadline:
+        // returning already-owned bytes performs no blocking I/O and must not
+        // fail merely because the caller's deadline expired meanwhile.
+        const buffered = self.client.reader.buffered();
+        if (buffered.len != 0) {
+            const count = @min(buffer.len, buffered.len);
+            @memcpy(buffer[0..count], buffered[0..count]);
+            self.client.reader.toss(count);
+            return count;
+        }
         _ = try deadline_policy.usableAwake(self.io, deadline);
         std.debug.assert(self.timed_read_deadline == null);
         self.timed_read_deadline = deadline;
@@ -890,7 +916,6 @@ const RuntimeTransport = union(enum) {
     tls_client: *TlsClientConnection,
     tls_vail: *tls_stream.ClientConnection,
     tls_server: *tls_stream.ServerConnection,
-    linux_io_uring: LinuxIoUringStream,
 
     fn read(self: RuntimeTransport, buffer: []u8) Error!usize {
         return switch (self) {
@@ -898,7 +923,6 @@ const RuntimeTransport = union(enum) {
             .tls_client => |conn| conn.read(buffer),
             .tls_vail => |conn| conn.read(buffer),
             .tls_server => |conn| conn.read(buffer),
-            .linux_io_uring => |transport| transport.read(buffer),
         };
     }
 
@@ -917,10 +941,6 @@ const RuntimeTransport = union(enum) {
             .tls_client => |conn| conn.readWithDeadline(buffer, deadline),
             .tls_vail => |conn| conn.readWithDeadline(buffer, deadline),
             .tls_server => |conn| conn.readWithDeadline(buffer, deadline),
-            // The raw io_uring adapter currently has no linked-timeout read.
-            // Reject an explicitly configured deadline instead of silently
-            // weakening the server's admission policy.
-            .linux_io_uring => error.TimedReadUnsupported,
         };
     }
 
@@ -933,7 +953,6 @@ const RuntimeTransport = union(enum) {
             .tls_client => |conn| conn.io,
             .tls_vail => |conn| conn.io,
             .tls_server => |conn| conn.io,
-            .linux_io_uring => return error.TimedReadUnsupported,
         };
         return .fromNow(io, .{ .raw = duration, .clock = .awake });
     }
@@ -944,7 +963,6 @@ const RuntimeTransport = union(enum) {
             .tls_client => |conn| conn.writeAll(bytes),
             .tls_vail => |conn| conn.writeAll(bytes),
             .tls_server => |conn| conn.writeAll(bytes),
-            .linux_io_uring => |transport| transport.writeAll(bytes),
         };
     }
 
@@ -965,12 +983,6 @@ const RuntimeTransport = union(enum) {
             .tls_client => |conn| conn.writeAllParts(header, body),
             .tls_vail => |conn| conn.writeAllParts(header, body),
             .tls_server => |conn| conn.writeAllParts(header, body),
-            // The raw io_uring adapter currently accepts one slice per SQE.
-            // Two sends still avoid a body-sized temporary allocation.
-            .linux_io_uring => |transport| {
-                try transport.writeAll(header);
-                try transport.writeAll(body);
-            },
         };
     }
 
@@ -987,11 +999,6 @@ const RuntimeTransport = union(enum) {
             .tls_client => |conn| conn.writeAllSlices(parts),
             .tls_vail => |conn| conn.writeAllSlices(parts),
             .tls_server => |conn| conn.writeAllSlices(parts),
-            // io_uring's adapter owns one buffer per send SQE. Preserve the
-            // borrowed-slice behavior without allocating a concatenation.
-            .linux_io_uring => |transport| {
-                for (parts) |part| try transport.writeAll(part);
-            },
         };
     }
 
@@ -1001,7 +1008,6 @@ const RuntimeTransport = union(enum) {
             .tls_client => |conn| conn.deinit(),
             .tls_vail => |conn| conn.deinit(),
             .tls_server => |conn| conn.deinit(),
-            .linux_io_uring => |transport| transport.close(),
         }
     }
 };
@@ -1025,303 +1031,6 @@ fn mapHttpTimedReadError(err: stream_io.TimedReadError) Error {
 const WriteScratch = runtime_write.Scratch;
 const StreamingBodyWriter = body_writer.Writer(Error);
 const StreamingBodyReader = body_reader.Reader(Error);
-
-pub const LinuxIoUringStream = if (builtin.os.tag == .linux) struct {
-    ring: *linux.IoUring,
-    fd: linux.fd_t,
-
-    const Completion = enum(u64) {
-        connect = 1,
-        send = 2,
-        recv = 3,
-        close = 4,
-        accept = 5,
-    };
-
-    pub fn connect(self: LinuxIoUringStream, address: net.IpAddress) Error!void {
-        var storage: PosixAddress = undefined;
-        const address_len = ipAddressToPosix(&address, &storage);
-        _ = self.ring.connect(@intFromEnum(Completion.connect), self.fd, &storage.any, address_len) catch return error.IoUringOperationFailed;
-        _ = try self.submitOne(.connect);
-    }
-
-    pub fn read(self: LinuxIoUringStream, buffer: []u8) Error!usize {
-        if (buffer.len == 0) return 0;
-        _ = self.ring.recv(@intFromEnum(Completion.recv), self.fd, .{ .buffer = buffer }, 0) catch return error.IoUringOperationFailed;
-        const cqe = try self.submitOne(.recv);
-        if (cqe.res < 0) return error.IoUringOperationFailed;
-        return @intCast(cqe.res);
-    }
-
-    pub fn writeAll(self: LinuxIoUringStream, bytes: []const u8) Error!void {
-        var offset: usize = 0;
-        while (offset < bytes.len) {
-            _ = self.ring.send(@intFromEnum(Completion.send), self.fd, bytes[offset..], 0) catch return error.IoUringOperationFailed;
-            const cqe = try self.submitOne(.send);
-            if (cqe.res <= 0) return error.ConnectionClosed;
-            offset += @intCast(cqe.res);
-        }
-    }
-
-    pub fn close(self: LinuxIoUringStream) void {
-        closeLinuxIoUringFd(self.ring, self.fd);
-    }
-
-    fn submitOne(self: LinuxIoUringStream, expected: Completion) Error!linux.io_uring_cqe {
-        _ = self.ring.submit_and_wait(1) catch return error.IoUringOperationFailed;
-        const cqe = self.ring.copy_cqe() catch return error.IoUringOperationFailed;
-        if (cqe.user_data != @intFromEnum(expected)) return error.UnexpectedCompletion;
-        if (cqe.err() != .SUCCESS) return error.IoUringOperationFailed;
-        return cqe;
-    }
-} else struct {
-    pub fn read(_: @This(), _: []u8) Error!usize {
-        return error.UnsupportedIoBackend;
-    }
-
-    pub fn writeAll(_: @This(), _: []const u8) Error!void {
-        return error.UnsupportedIoBackend;
-    }
-
-    pub fn close(_: @This()) void {}
-};
-
-const PosixAddress = if (builtin.os.tag == .linux) extern union {
-    any: posix.sockaddr,
-    in: posix.sockaddr.in,
-    in6: posix.sockaddr.in6,
-} else void;
-
-fn closeLinuxIoUringFd(ring: *LinuxIoUringHandle, fd: linux.fd_t) void {
-    if (comptime builtin.os.tag != .linux) return;
-    _ = ring.close(@intFromEnum(LinuxIoUringStream.Completion.close), fd) catch {
-        _ = linux.close(fd);
-        return;
-    };
-    _ = (LinuxIoUringStream{ .ring = ring, .fd = fd }).submitOne(.close) catch {
-        _ = linux.close(fd);
-    };
-}
-
-fn setLinuxSocketOption(fd: linux.fd_t, level: i32, opt_name: u32, option: u32) Error!void {
-    const bytes: []const u8 = @ptrCast(&option);
-    const rc = linux.setsockopt(fd, level, opt_name, bytes.ptr, @intCast(bytes.len));
-    return switch (linux.errno(rc)) {
-        .SUCCESS => {},
-        .BADF => error.IoUringOperationFailed,
-        .FAULT => error.IoUringOperationFailed,
-        .INVAL => error.IoUringOperationFailed,
-        .NOMEM => error.SystemResources,
-        .NOPROTOOPT => error.ProtocolUnsupportedBySystem,
-        .NOTSOCK => error.IoUringOperationFailed,
-        else => error.IoUringOperationFailed,
-    };
-}
-
-fn bindLinuxSocket(fd: linux.fd_t, address: net.IpAddress) Error!void {
-    var storage: PosixAddress = undefined;
-    const len = ipAddressToPosix(&address, &storage);
-    const rc = linux.bind(fd, &storage.any, len);
-    return switch (linux.errno(rc)) {
-        .SUCCESS => {},
-        .ACCES, .PERM => error.AccessDenied,
-        .ADDRINUSE => error.AddressInUse,
-        .ADDRNOTAVAIL => error.AddressUnavailable,
-        .AFNOSUPPORT => error.AddressFamilyUnsupported,
-        .BADF => error.IoUringOperationFailed,
-        .INVAL => error.IoUringOperationFailed,
-        .LOOP => error.IoUringOperationFailed,
-        .NAMETOOLONG => error.IoUringOperationFailed,
-        .NOENT => error.IoUringOperationFailed,
-        .NOMEM => error.SystemResources,
-        .NOTDIR => error.IoUringOperationFailed,
-        .ROFS => error.AccessDenied,
-        else => error.IoUringOperationFailed,
-    };
-}
-
-fn listenLinuxSocket(fd: linux.fd_t, backlog: u31) Error!void {
-    const rc = linux.listen(fd, backlog);
-    return switch (linux.errno(rc)) {
-        .SUCCESS => {},
-        .ADDRINUSE => error.AddressInUse,
-        .BADF => error.IoUringOperationFailed,
-        .DESTADDRREQ => error.IoUringOperationFailed,
-        .INVAL => error.IoUringOperationFailed,
-        .NOTSOCK => error.IoUringOperationFailed,
-        .OPNOTSUPP => error.SocketModeUnsupported,
-        else => error.IoUringOperationFailed,
-    };
-}
-
-fn linuxSocketName(fd: linux.fd_t) Error!net.IpAddress {
-    var storage: PosixAddress = undefined;
-    var len: linux.socklen_t = @sizeOf(PosixAddress);
-    const rc = linux.getsockname(fd, &storage.any, &len);
-    return switch (linux.errno(rc)) {
-        .SUCCESS => addressFromPosix(&storage),
-        .BADF => error.IoUringOperationFailed,
-        .FAULT => error.IoUringOperationFailed,
-        .INVAL => error.IoUringOperationFailed,
-        .NOTSOCK => error.IoUringOperationFailed,
-        else => error.IoUringOperationFailed,
-    };
-}
-
-fn addressFromPosix(posix_address: *const PosixAddress) net.IpAddress {
-    return switch (posix_address.any.family) {
-        linux.AF.INET => .{ .ip4 = .{
-            .port = std.mem.bigToNative(u16, posix_address.in.port),
-            .bytes = @bitCast(posix_address.in.addr),
-        } },
-        linux.AF.INET6 => .{ .ip6 = .{
-            .port = std.mem.bigToNative(u16, posix_address.in6.port),
-            .bytes = posix_address.in6.addr,
-            .flow = posix_address.in6.flowinfo,
-            .interface = .{ .index = posix_address.in6.scope_id },
-        } },
-        else => .{ .ip4 = .loopback(0) },
-    };
-}
-
-fn ipAddressToPosix(address: *const net.IpAddress, storage: *PosixAddress) posix.socklen_t {
-    return switch (address.*) {
-        .ip4 => |ip4| {
-            storage.in = .{
-                .port = std.mem.nativeToBig(u16, ip4.port),
-                .addr = @bitCast(ip4.bytes),
-            };
-            return @sizeOf(posix.sockaddr.in);
-        },
-        .ip6 => |ip6| {
-            storage.in6 = .{
-                .port = std.mem.nativeToBig(u16, ip6.port),
-                .flowinfo = ip6.flow,
-                .addr = ip6.bytes,
-                .scope_id = ip6.interface.index,
-            };
-            return @sizeOf(posix.sockaddr.in6);
-        },
-    };
-}
-
-fn createLinuxTcpSocket(address: net.IpAddress) Error!linux.fd_t {
-    const family: u32 = switch (address) {
-        .ip4 => linux.AF.INET,
-        .ip6 => linux.AF.INET6,
-    };
-    const rc = linux.socket(family, linux.SOCK.STREAM | linux.SOCK.CLOEXEC, linux.IPPROTO.TCP);
-    return switch (linux.errno(rc)) {
-        .SUCCESS => @intCast(rc),
-        .ACCES, .PERM => error.AccessDenied,
-        .AFNOSUPPORT => error.AddressFamilyUnsupported,
-        .MFILE => error.ProcessFdQuotaExceeded,
-        .NFILE => error.SystemFdQuotaExceeded,
-        .NOMEM => error.SystemResources,
-        .PROTONOSUPPORT => error.ProtocolUnsupportedBySystem,
-        else => error.IoUringOperationFailed,
-    };
-}
-
-pub fn connectIpLinuxIoUring(ring: *LinuxIoUringHandle, address: net.IpAddress) Error!LinuxIoUringStream {
-    if (comptime builtin.os.tag != .linux) return error.UnsupportedIoBackend;
-
-    const fd = try createLinuxTcpSocket(address);
-    var stream = LinuxIoUringStream{ .ring = ring, .fd = fd };
-    errdefer stream.close();
-    try stream.connect(address);
-    return stream;
-}
-
-pub const LinuxIoUringServer = if (builtin.os.tag == .linux) struct {
-    allocator: std.mem.Allocator,
-    ring: *LinuxIoUringHandle,
-    fd: linux.fd_t,
-    address: net.IpAddress,
-    limits: Limits = .{},
-
-    pub fn listen(
-        allocator: std.mem.Allocator,
-        ring: *LinuxIoUringHandle,
-        bind_address: net.IpAddress,
-        limits: Limits,
-        options: net.IpAddress.ListenOptions,
-    ) Error!LinuxIoUringServer {
-        if (options.mode != .stream or options.protocol != .tcp) return error.SocketModeUnsupported;
-        const fd = try createLinuxTcpSocket(bind_address);
-        errdefer _ = linux.close(fd);
-        if (options.reuse_address) {
-            try setLinuxSocketOption(fd, linux.SOL.SOCKET, linux.SO.REUSEADDR, 1);
-            try setLinuxSocketOption(fd, linux.SOL.SOCKET, linux.SO.REUSEPORT, 1);
-        }
-        try bindLinuxSocket(fd, bind_address);
-        try listenLinuxSocket(fd, options.kernel_backlog);
-        return .{
-            .allocator = allocator,
-            .ring = ring,
-            .fd = fd,
-            .address = try linuxSocketName(fd),
-            .limits = limits,
-        };
-    }
-
-    pub fn deinit(self: *LinuxIoUringServer) void {
-        closeLinuxIoUringFd(self.ring, self.fd);
-        self.* = undefined;
-    }
-
-    pub fn accept(self: *LinuxIoUringServer) Error!LinuxIoUringConnection {
-        var storage: PosixAddress = undefined;
-        var len: linux.socklen_t = @sizeOf(PosixAddress);
-        _ = self.ring.accept(@intFromEnum(LinuxIoUringStream.Completion.accept), self.fd, &storage.any, &len, linux.SOCK.CLOEXEC) catch return error.IoUringOperationFailed;
-        const cqe = try (LinuxIoUringStream{ .ring = self.ring, .fd = self.fd }).submitOne(.accept);
-        if (cqe.res < 0) return error.IoUringOperationFailed;
-        return .{
-            .allocator = self.allocator,
-            .stream = .{ .ring = self.ring, .fd = @intCast(cqe.res) },
-            .limits = self.limits,
-        };
-    }
-};
-
-pub const LinuxIoUringConnection = if (builtin.os.tag == .linux) struct {
-    allocator: std.mem.Allocator,
-    stream: LinuxIoUringStream,
-    limits: Limits = .{},
-    inbuf: std.ArrayList(u8) = .empty,
-    write_scratch: WriteScratch = .{},
-
-    pub fn close(self: *LinuxIoUringConnection) void {
-        self.inbuf.deinit(self.allocator);
-        self.write_scratch.deinit(self.allocator);
-        self.stream.close();
-        self.* = undefined;
-    }
-
-    pub fn readRequest(self: *LinuxIoUringConnection, options: http1.ParseOptions) Error!OwnedRequest {
-        if (self.limits.request_head_timeout != null) {
-            return error.TimedReadUnsupported;
-        }
-        return readRequestFromTransportBuffered(
-            self.allocator,
-            .{ .linux_io_uring = self.stream },
-            self.limits,
-            options,
-            &self.inbuf,
-            null,
-        );
-    }
-
-    pub fn writeResponse(self: *LinuxIoUringConnection, response: ResponseOptions) Error!void {
-        try writeResponseToTransportScratch(
-            self.allocator,
-            .{ .linux_io_uring = self.stream },
-            response,
-            &self.write_scratch,
-        );
-    }
-};
-
 pub const Server = struct {
     io: std.Io,
     listener: net.Server,
@@ -1372,7 +1081,7 @@ pub const Server = struct {
     pub fn serveOne(self: *Server, context: anytype, comptime handler: anytype) Error!void {
         var connection = try self.accept();
         defer connection.close();
-        try connection.serveOne(context, handler);
+        _ = try connection.serveOne(context, handler);
     }
 
     pub fn serveConnection(self: *Server, context: anytype, comptime handler: anytype, max_requests: usize) Error!usize {
@@ -1818,13 +1527,12 @@ fn serveAcceptedConcurrent(
     for (results) |*result| {
         var connection = try server.accept();
         errdefer connection.close();
-        const task = ServeTask(HandlerContext){
+        const task = ServeTask(HandlerContext, handler){
             .connection = connection,
             .context = context,
-            .handler = handler,
             .result = result,
         };
-        group.async(io, ServeTask(HandlerContext).run, .{task});
+        group.async(io, ServeTask(HandlerContext, handler).run, .{task});
     }
 
     try group.await(io);
@@ -1993,29 +1701,22 @@ fn waitForServeEvent(
     try event.wait(io);
 }
 
-fn ServeTask(comptime HandlerContext: type) type {
+fn ServeTask(
+    comptime HandlerContext: type,
+    comptime handler: *const fn (
+        *HandlerContext,
+        http1.Request,
+    ) Error!ResponseOptions,
+) type {
     return struct {
         connection: Connection,
         context: *HandlerContext,
-        handler: *const fn (*HandlerContext, http1.Request) Error!ResponseOptions,
         result: *?anyerror,
 
         fn run(task: @This()) std.Io.Cancelable!void {
             var connection = task.connection;
             defer connection.close();
-
-            var request = connection.readRequest(.{}) catch |err| {
-                task.result.* = err;
-                return;
-            };
-            defer request.deinit(connection.allocator);
-
-            var response = task.handler(task.context, request.request) catch |err| {
-                task.result.* = err;
-                return;
-            };
-            if (response.request_method == null) response.request_method = request.request.method;
-            connection.writeResponse(response) catch |err| {
+            _ = connection.serveOne(task.context, handler) catch |err| {
                 task.result.* = err;
                 return;
             };
@@ -3639,65 +3340,6 @@ pub const Client = struct {
         );
     }
 
-    /// Linux-only HTTP/1 client path backed directly by `std.os.linux.IoUring`.
-    ///
-    /// Zig 0.16 exposes a `std.Io.Uring` backend, but its `std.Io.net` vtable
-    /// does not yet implement TCP listen/connect/read/write.  This helper uses
-    /// the lower-level `std.os.linux.IoUring` operations directly and then
-    /// feeds the same runtime parser/serializer used by the normal TCP client.
-    /// It intentionally supports only literal IP URI authorities (`127.0.0.1`
-    /// and bracketed IPv6 such as `[::1]`) because DNS lookup still belongs to
-    /// the higher-level `std.Io.net` abstraction.
-    pub fn requestUriLinuxIoUring(
-        allocator: std.mem.Allocator,
-        ring: *LinuxIoUringHandle,
-        uri_text: []const u8,
-        request_options: RequestOptions,
-        limits: Limits,
-    ) Error!OwnedResponse {
-        if (comptime builtin.os.tag != .linux) return error.UnsupportedIoBackend;
-        if (limits.response_head_timeout != null) {
-            // The raw adapter has no linked timeout operation. Fail before
-            // creating or writing a socket rather than silently weakening a
-            // caller-specified response policy.
-            return error.TimedReadUnsupported;
-        }
-
-        const uri = std.Uri.parse(uri_text) catch return error.InvalidUri;
-        if (!std.ascii.eqlIgnoreCase(uri.scheme, "http")) return error.UnsupportedScheme;
-        const target = try uriTargetAlloc(allocator, uri);
-        defer allocator.free(target);
-        var endpoint = try uriEndpoint(allocator, uri, 80);
-        defer endpoint.deinit();
-        const address = switch (endpoint.target) {
-            .ip => |address| address,
-            .host => return error.UnsupportedEndpoint,
-        };
-
-        var uring_transport = try connectIpLinuxIoUring(ring, address);
-        var fd_open = true;
-        errdefer if (fd_open) uring_transport.close();
-        var options = request_options;
-        options.target = target;
-        if (options.host == null) options.host = endpoint.authority;
-        try writeRequestToTransport(allocator, .{ .linux_io_uring = uring_transport }, options);
-
-        var inbuf: std.ArrayList(u8) = .empty;
-        defer inbuf.deinit(allocator);
-        var response = try readResponseFromTransportBufferedForRequest(
-            allocator,
-            .{ .linux_io_uring = uring_transport },
-            limits,
-            .{},
-            &inbuf,
-            request_options.method,
-        );
-        errdefer response.deinit(allocator);
-        uring_transport.close();
-        fd_open = false;
-        return response;
-    }
-
     pub fn openConnectTunnel(self: *Client, target: []const u8, headers: []const http1.Header) Error!Tunnel {
         try self.writer_state.ensureAvailable();
         try http1.validateConnectTarget(target);
@@ -3982,16 +3624,25 @@ pub const Connection = struct {
     }
 
     pub fn readRequest(self: *Connection, options: http1.ParseOptions) Error!OwnedRequest {
+        return self.readRequestInternal(options, null);
+    }
+
+    fn readRequestInternal(
+        self: *Connection,
+        options: http1.ParseOptions,
+        failure_stage: ?*RequestReadStage,
+    ) Error!OwnedRequest {
         try self.writer_state.ensureReadable();
         try self.beginRequestHeadDeadline();
         defer self.request_head_deadline = null;
-        return readRequestFromTransportBuffered(
+        return readRequestFromTransportBufferedWithStage(
             self.allocator,
             self.transport(),
             self.limits,
             options,
             &self.inbuf,
             self.request_head_deadline,
+            failure_stage,
         ) catch |read_err| {
             if (read_err == error.Timeout) self.writer_state.phase = .unusable;
             return read_err;
@@ -4287,6 +3938,7 @@ pub const Connection = struct {
             self.allocator,
             self.transport(),
             response,
+            self.defaultResponseDate(),
             &self.write_scratch,
         );
     }
@@ -4304,9 +3956,10 @@ pub const Connection = struct {
             self.writer_state.phase = .idle;
         };
 
-        const prepared = try runtime_write.streaming.prepareResponse(
+        const prepared = try runtime_write.streaming.prepareServerResponse(
             self.allocator,
             options,
+            self.defaultResponseDate(),
             &self.write_scratch,
         );
         const announced_trailers = self.write_scratch.trailer_headers.items;
@@ -4346,8 +3999,14 @@ pub const Connection = struct {
             self.allocator,
             self.transport(),
             responses,
+            self.defaultResponseDate(),
             &self.write_scratch,
         );
+    }
+
+    fn defaultResponseDate(self: *const Connection) ?[]const u8 {
+        if (!self.limits.auto_date_header) return null;
+        return http_date.valueNow(self.io);
     }
 
     pub fn serveOne(self: *Connection, context: anytype, comptime handler: anytype) Error!bool {
@@ -4355,11 +4014,13 @@ pub const Connection = struct {
             error.ConnectionClosed;
     }
 
-    /// Serve-loop-only tri-state: null is an orderly cleartext EOF before any
+    /// Serve-loop-only tri-state: null is an orderly transport EOF before any
     /// byte of a new request; false finishes one exchange and retires; true
-    /// permits another exchange. Keeping the read catch here prevents a
-    /// handler or response-write ConnectionClosed from being mistaken for a
-    /// clean peer half-close.
+    /// permits another exchange. TLS close_notify is authenticated EOF. A raw
+    /// TLS EOF is also safe only at this empty HTTP boundary; a partial TLS
+    /// record has its own error and is never accepted. Keeping the read catch
+    /// here prevents handler or response-write failures from being mistaken
+    /// for a clean peer half-close.
     fn serveOneInternal(
         self: *Connection,
         context: anytype,
@@ -4367,17 +4028,64 @@ pub const Connection = struct {
     ) Error!?bool {
         if (self.graceful_shutdown_requested) return false;
         const boundary_was_empty = self.inbuf.items.len == 0;
-        var request = self.readRequest(.{}) catch |err| {
-            // TLS currently maps close_notify, fatal alerts, physical EOF and
-            // truncated records onto ConnectionClosed. Until that layer has a
-            // reliable orderly-close signal, only raw TCP/Unix stream EOF is
-            // safe to classify as a clean HTTP request boundary.
-            if (err == error.ConnectionClosed and
-                self.tls_server_conn == null and
+        var failure_stage: RequestReadStage = .head;
+        var request = self.readRequestInternal(.{
+            .max_headers = self.limits.max_request_headers,
+            .max_request_target_bytes = self.limits.max_request_target_bytes,
+        }, &failure_stage) catch |err| {
+            const transport_eof = if (self.tls_server_conn) |tls_connection|
+                (err == error.ConnectionClosed and
+                    tls_connection.receivedCloseNotify()) or
+                    err == error.UnexpectedEof
+            else
+                err == error.ConnectionClosed;
+            if (transport_eof and
                 boundary_was_empty and
                 self.inbuf.items.len == 0)
             {
                 return null;
+            }
+            const automatic_response: ?ResponseOptions = if (failure_stage != .head) null else switch (err) {
+                error.HeadersTooLarge, error.TooManyHeaders => .{
+                    .status = 431,
+                    .reason = "Request Header Fields Too Large",
+                    .headers = &.{.{
+                        .name = "Connection",
+                        .value = "close",
+                    }},
+                },
+                error.MalformedStartLine,
+                error.MalformedHeader,
+                error.InvalidMethod,
+                error.InvalidVersion,
+                error.InvalidHost,
+                => .{
+                    .status = 400,
+                    .reason = "Bad Request",
+                    .headers = &.{.{
+                        .name = "Connection",
+                        .value = "close",
+                    }},
+                },
+                error.UriTooLong => .{
+                    .status = 414,
+                    .reason = "URI Too Long",
+                    .headers = &.{.{
+                        .name = "Connection",
+                        .value = "close",
+                    }},
+                },
+                else => null,
+            };
+            if (automatic_response) |response| {
+                // The connection-owning server can safely emit this standard
+                // response because no application response has started. Keep
+                // the original parse error for serveUntil observers.
+                self.writeResponse(response) catch |write_err| {
+                    self.writer_state.phase = .unusable;
+                    return write_err;
+                };
+                self.writer_state.phase = .unusable;
             }
             return err;
         };
@@ -4401,14 +4109,14 @@ pub const Connection = struct {
             self.allocator,
             request,
             response,
-            self.graceful_shutdown_requested,
+            self.graceful_shutdown_requested or !self.limits.keep_alive,
         );
         defer adjusted.deinit(self.allocator);
         response = adjusted.response;
         if (response.request_method == null) response.request_method = request.method;
         const response_keep_alive = responseOptionsKeepAlive(response);
         try self.writeResponse(response);
-        if (self.graceful_shutdown_requested) {
+        if (self.graceful_shutdown_requested or !self.limits.keep_alive) {
             self.writer_state.phase = .unusable;
             return false;
         }
@@ -5570,7 +5278,28 @@ fn readRequestFromTransportBuffered(
     inbuf: *std.ArrayList(u8),
     head_deadline: ?std.Io.Clock.Timestamp,
 ) Error!OwnedRequest {
-    const bytes = try readMessageBytesBufferedWithContext(
+    return readRequestFromTransportBufferedWithStage(
+        allocator,
+        transport,
+        limits,
+        options,
+        inbuf,
+        head_deadline,
+        null,
+    );
+}
+
+fn readRequestFromTransportBufferedWithStage(
+    allocator: std.mem.Allocator,
+    transport: RuntimeTransport,
+    limits: Limits,
+    options: http1.ParseOptions,
+    inbuf: *std.ArrayList(u8),
+    head_deadline: ?std.Io.Clock.Timestamp,
+    failure_stage: ?*RequestReadStage,
+) Error!OwnedRequest {
+    if (failure_stage) |stage| stage.* = .head;
+    const bytes = readMessageBytesBufferedWithContext(
         allocator,
         transport,
         limits,
@@ -5582,7 +5311,20 @@ fn readRequestFromTransportBuffered(
         false,
         head_deadline,
         null,
-    );
+    ) catch |err| {
+        if (failure_stage) |stage| {
+            if (err == error.HeadersTooLarge) {
+                if (findHttpHeadEndWithinLimit(
+                    inbuf.items,
+                    limits.max_head_bytes,
+                ) catch null != null) {
+                    stage.* = .body;
+                }
+            }
+        }
+        return err;
+    };
+    if (failure_stage) |stage| stage.* = .body;
     errdefer allocator.free(bytes);
     var request = try http1.parseRequest(allocator, bytes, options);
     errdefer request.deinit(allocator);
@@ -6134,114 +5876,14 @@ fn parseResponseForRuntime(
         };
     }
     if (request_method) |method| {
-        return http1.parseResponseForRequest(allocator, bytes, options, method) catch |err| switch (err) {
-            error.InvalidTransferEncoding => try parseNonChunkedTransferResponse(allocator, bytes, options, method),
-            else => |e| return e,
-        };
+        return http1.parseResponseForRequest(
+            allocator,
+            bytes,
+            options,
+            method,
+        );
     }
-    return http1.parseResponse(allocator, bytes, options) catch |err| switch (err) {
-        error.InvalidTransferEncoding => try parseNonChunkedTransferResponse(allocator, bytes, options, null),
-        else => |e| return e,
-    };
-}
-
-fn parseNonChunkedTransferResponse(
-    allocator: std.mem.Allocator,
-    bytes: []const u8,
-    options: http1.ParseOptions,
-    request_method: ?http1.Method,
-) Error!http1.Response {
-    const head_end = std.mem.indexOf(u8, bytes, "\r\n\r\n") orelse return error.BufferTooShort;
-    const head = bytes[0..head_end];
-    if (responseHeadForbidsBody(head, request_method)) return error.InvalidTransferEncoding;
-    if ((try transferEncodingState(head)) != .non_chunked) return error.InvalidTransferEncoding;
-
-    var sanitized: std.ArrayList(u8) = .empty;
-    errdefer sanitized.deinit(allocator);
-    try appendHeadWithoutHeaders(&sanitized, allocator, head, &.{ "transfer-encoding", "content-length" });
-    try sanitized.appendSlice(allocator, "\r\n\r\n");
-    const sanitized_storage = try sanitized.toOwnedSlice(allocator);
-    errdefer allocator.free(sanitized_storage);
-
-    var response = if (request_method) |method|
-        try http1.parseResponseForRequest(allocator, sanitized_storage, options, method)
-    else
-        try http1.parseResponse(allocator, sanitized_storage, options);
-    errdefer response.deinit(allocator);
-    try attachRuntimeHeaderStorage(allocator, &response, sanitized_storage);
-    try appendOriginalHeaderLines(allocator, &response, head, "transfer-encoding");
-
-    const body_start = head_end + 4;
-    response.body = bytes[body_start..];
-    response.body_framing = .close_delimited;
-    response.consumed = bytes.len;
-    return response;
-}
-
-fn attachRuntimeHeaderStorage(allocator: std.mem.Allocator, response: *http1.Response, storage: []u8) Error!void {
-    const old = response.header_value_storage;
-    const combined = try allocator.alloc([]u8, old.len + 1);
-    @memcpy(combined[0..old.len], old);
-    combined[old.len] = storage;
-    allocator.free(old);
-    response.header_value_storage = combined;
-}
-
-fn appendOriginalHeaderLines(
-    allocator: std.mem.Allocator,
-    response: *http1.Response,
-    head: []const u8,
-    name: []const u8,
-) Error!void {
-    var count: usize = 0;
-    var lines = std.mem.splitSequence(u8, head, "\r\n");
-    _ = lines.next();
-    while (lines.next()) |line| {
-        const colon = std.mem.indexOfScalar(u8, line, ':') orelse continue;
-        if (std.ascii.eqlIgnoreCase(line[0..colon], name)) count += 1;
-    }
-    if (count == 0) return;
-
-    const old = response.headers;
-    const combined = try allocator.alloc(http1.Header, old.len + count);
-    @memcpy(combined[0..old.len], old);
-
-    var out_index = old.len;
-    lines = std.mem.splitSequence(u8, head, "\r\n");
-    _ = lines.next();
-    while (lines.next()) |line| {
-        const colon = std.mem.indexOfScalar(u8, line, ':') orelse continue;
-        if (!std.ascii.eqlIgnoreCase(line[0..colon], name)) continue;
-        const value = wire.trimOws(line[colon + 1 ..]);
-        try http1.validateHeader(.{ .name = line[0..colon], .value = value });
-        combined[out_index] = .{ .name = line[0..colon], .value = value };
-        out_index += 1;
-    }
-    allocator.free(old);
-    response.headers = combined;
-}
-
-fn appendHeadWithoutHeaders(list: *std.ArrayList(u8), allocator: std.mem.Allocator, head: []const u8, names: []const []const u8) Error!void {
-    var lines = std.mem.splitSequence(u8, head, "\r\n");
-    const status_line = lines.next() orelse return error.InvalidResponse;
-    try list.appendSlice(allocator, status_line);
-    while (lines.next()) |line| {
-        const colon = std.mem.indexOfScalar(u8, line, ':') orelse {
-            try list.appendSlice(allocator, "\r\n");
-            try list.appendSlice(allocator, line);
-            continue;
-        };
-        if (headerNameInList(line[0..colon], names)) continue;
-        try list.appendSlice(allocator, "\r\n");
-        try list.appendSlice(allocator, line);
-    }
-}
-
-fn headerNameInList(name: []const u8, names: []const []const u8) bool {
-    for (names) |candidate| {
-        if (std.ascii.eqlIgnoreCase(name, candidate)) return true;
-    }
-    return false;
+    return http1.parseResponse(allocator, bytes, options);
 }
 
 fn applyCloseDelimitedResponseBody(response: *http1.Response, bytes: []const u8, request_method: ?http1.Method) void {
@@ -6294,6 +5936,7 @@ fn writeResponseToTransport(allocator: std.mem.Allocator, transport: RuntimeTran
         allocator,
         transport,
         options,
+        null,
         &scratch,
     );
 }
@@ -6302,11 +5945,13 @@ fn writeResponseToTransportScratch(
     allocator: std.mem.Allocator,
     transport: RuntimeTransport,
     options: ResponseOptions,
+    default_date: ?[]const u8,
     scratch: *WriteScratch,
 ) Error!void {
-    const parts = try runtime_write.prepareResponse(
+    const parts = try runtime_write.prepareServerResponse(
         allocator,
         options,
+        default_date,
         scratch,
     );
     try transport.writeAllParts(parts.header, parts.body);
@@ -6316,12 +5961,14 @@ fn writeResponsesToTransportScratch(
     allocator: std.mem.Allocator,
     transport: RuntimeTransport,
     responses: []const ResponseOptions,
+    default_date: ?[]const u8,
     scratch: *WriteScratch,
 ) Error!void {
     if (responseBatchBodyBytes(responses) > response_batch_borrow_threshold) {
-        const parts = try runtime_write.prepareResponseParts(
+        const parts = try runtime_write.prepareServerResponseParts(
             allocator,
             responses,
+            default_date,
             scratch,
         );
         try transport.writeAllSlices(parts);
@@ -6331,6 +5978,7 @@ fn writeResponsesToTransportScratch(
         allocator,
         transport,
         responses,
+        default_date,
         scratch,
     );
 }
@@ -6347,11 +5995,13 @@ fn writeResponsesCoalesced(
     allocator: std.mem.Allocator,
     transport: RuntimeTransport,
     responses: []const ResponseOptions,
+    default_date: ?[]const u8,
     scratch: *WriteScratch,
 ) Error!void {
-    const parts = try runtime_write.prepareResponseParts(
+    const parts = try runtime_write.prepareServerResponseParts(
         allocator,
         responses,
+        default_date,
         scratch,
     );
     scratch.encoded.clearRetainingCapacity();
@@ -7097,6 +6747,7 @@ test "HTTP/1 response batch validation is transactional" {
             allocator,
             .{ .tcp = .{ .io = undefined, .stream = undefined } },
             &responses,
+            null,
             &scratch,
         ),
     );
@@ -7184,298 +6835,6 @@ fn discardPrefix(list: *std.ArrayList(u8), len: usize) void {
     list.shrinkRetainingCapacity(remaining.len);
 }
 
-fn messageTargetLength(
-    bytes: []const u8,
-    head_end: usize,
-    max_head_bytes: usize,
-    max_body_bytes: usize,
-    request_method: ?http1.Method,
-) Error!usize {
-    const body_start = std.math.add(usize, head_end, 4) catch
-        return error.HeadersTooLarge;
-    if (body_start > bytes.len) return error.BufferTooShort;
-    const head = bytes[0..head_end];
-    if (responseHeadForbidsBody(head, request_method)) return body_start;
-    switch (try transferEncodingState(head)) {
-        .none => {},
-        .chunked => {
-            const wire_len = try chunkedWireLength(
-                bytes[body_start..],
-                max_head_bytes,
-                max_body_bytes,
-            );
-            return std.math.add(usize, body_start, wire_len) catch
-                return error.BodyTooLarge;
-        },
-        .non_chunked => {
-            if (request_method == null) return error.InvalidTransferEncoding;
-            return body_start;
-        },
-    }
-    if (try contentLengthFromHead(head)) |len| {
-        if (len > max_body_bytes) return error.BodyTooLarge;
-        return std.math.add(usize, body_start, len) catch
-            return error.ContentLengthOverflow;
-    }
-    return body_start;
-}
-
-fn findHttpHeadEndWithinLimit(bytes: []const u8, max_head_bytes: usize) Error!?usize {
-    if (std.mem.indexOf(u8, bytes, "\r\n\r\n")) |head_end| {
-        if (head_end + 4 > max_head_bytes) return error.HeadersTooLarge;
-        return head_end;
-    }
-    if (bytes.len >= max_head_bytes) return error.HeadersTooLarge;
-    return null;
-}
-
-const TransferEncodingState = enum { none, chunked, non_chunked };
-
-fn transferEncodingState(head: []const u8) Error!TransferEncodingState {
-    var saw_transfer_encoding = false;
-    var saw_chunked = false;
-    var saw_non_chunked = false;
-    var final_is_chunked = false;
-    var lines = std.mem.splitSequence(u8, head, "\r\n");
-    _ = lines.next();
-    while (lines.next()) |line| {
-        const colon = std.mem.indexOfScalar(u8, line, ':') orelse continue;
-        if (!std.ascii.eqlIgnoreCase(line[0..colon], "transfer-encoding")) continue;
-        saw_transfer_encoding = true;
-        var tokens = std.mem.splitScalar(u8, line[colon + 1 ..], ',');
-        while (tokens.next()) |raw| {
-            const token = wire.trimOws(raw);
-            if (token.len == 0) return error.InvalidTransferEncoding;
-            const is_chunked = std.ascii.eqlIgnoreCase(token, "chunked");
-            if (is_chunked) {
-                if (saw_chunked) return error.InvalidTransferEncoding;
-                saw_chunked = true;
-            } else {
-                saw_non_chunked = true;
-            }
-            final_is_chunked = is_chunked;
-        }
-    }
-    if (!saw_transfer_encoding) return .none;
-    if (saw_chunked and final_is_chunked) return .chunked;
-    if (saw_non_chunked) return .non_chunked;
-    if (saw_chunked) return .non_chunked;
-    return error.InvalidTransferEncoding;
-}
-
-fn contentLengthFromHead(head: []const u8) Error!?usize {
-    var found: ?usize = null;
-    var lines = std.mem.splitSequence(u8, head, "\r\n");
-    _ = lines.next();
-    while (lines.next()) |line| {
-        const colon = std.mem.indexOfScalar(u8, line, ':') orelse continue;
-        if (!std.ascii.eqlIgnoreCase(line[0..colon], "content-length")) continue;
-        var parts = std.mem.splitScalar(u8, line[colon + 1 ..], ',');
-        while (parts.next()) |raw_part| {
-            const part = wire.trimOws(raw_part);
-            if (part.len == 0) return error.InvalidContentLength;
-            for (part) |byte| {
-                if (!std.ascii.isDigit(byte)) return error.InvalidContentLength;
-            }
-            const parsed = std.fmt.parseInt(usize, part, 10) catch |err| switch (err) {
-                error.InvalidCharacter => return error.InvalidContentLength,
-                error.Overflow => return error.ContentLengthOverflow,
-            };
-            if (found) |existing| {
-                if (existing != parsed) return error.ConflictingContentLength;
-            } else {
-                found = parsed;
-            }
-        }
-    }
-    return found;
-}
-
-fn responseHeadUsesCloseDelimitedBody(head: []const u8, request_method: ?http1.Method) bool {
-    if (responseHeadForbidsBody(head, request_method)) return false;
-    const te = transferEncodingState(head) catch return false;
-    if (te == .chunked) return false;
-    if (te == .non_chunked) return true;
-    if (findHeaderValue(head, "content-length") != null) return false;
-    return true;
-}
-
-fn responseHeadForbidsBody(head: []const u8, request_method: ?http1.Method) bool {
-    var lines = std.mem.splitSequence(u8, head, "\r\n");
-    const status_line = lines.next() orelse return false;
-    var parts = std.mem.splitScalar(u8, status_line, ' ');
-    _ = parts.next() orelse return false;
-    const status_s = parts.next() orelse return false;
-    if (status_s.len != 3) return false;
-    const status = std.fmt.parseInt(u16, status_s, 10) catch return false;
-    if ((status >= 100 and status < 200) or status == 204 or status == 304) return true;
-    if (request_method == null) return false;
-    return switch (request_method.?) {
-        .HEAD => true,
-        .CONNECT => status >= 200 and status < 300,
-        else => false,
-    };
-}
-
-fn informationalResponseToSkip(status: u16) bool {
-    // RFC 9110 allows one or more interim 1xx responses before the final
-    // response.  101 is deliberately not skipped because it transfers the
-    // connection to the upgraded protocol.
-    return status >= 100 and status < 200 and status != 101;
-}
-
-fn requestShouldSendContinue(head: []const u8) bool {
-    if (!requestHeadIsHttp11(head)) return false;
-    if (!requestExpectIsOnlyContinue(head)) return false;
-    if (!requestHeadHasValidHost(head)) return false;
-    return requestHeadHasBody(head);
-}
-
-fn requestExpectIsOnlyContinue(head: []const u8) bool {
-    var found = false;
-    var lines = std.mem.splitSequence(u8, head, "\r\n");
-    _ = lines.next();
-    while (lines.next()) |line| {
-        const colon = std.mem.indexOfScalar(u8, line, ':') orelse continue;
-        if (!std.ascii.eqlIgnoreCase(line[0..colon], "expect")) continue;
-        if (found) return false;
-        found = true;
-        // Hyper only recognizes an exact 100-continue expectation.  Be equally
-        // conservative: comma-separated or unknown expectations require the
-        // application to decide, not this auto-continue fast path.
-        if (!std.ascii.eqlIgnoreCase(wire.trimOws(line[colon + 1 ..]), "100-continue")) return false;
-    }
-    return found;
-}
-
-fn requestHeadHasValidHost(head: []const u8) bool {
-    var found = false;
-    var lines = std.mem.splitSequence(u8, head, "\r\n");
-    _ = lines.next();
-    while (lines.next()) |line| {
-        const colon = std.mem.indexOfScalar(u8, line, ':') orelse continue;
-        if (!std.ascii.eqlIgnoreCase(line[0..colon], "host")) continue;
-        if (found) return false;
-        found = true;
-        http1.validateHostValue(line[colon + 1 ..]) catch return false;
-    }
-    return found;
-}
-
-fn requestHeadIsHttp11(head: []const u8) bool {
-    const first_line_end = std.mem.indexOf(u8, head, "\r\n") orelse head.len;
-    return std.mem.endsWith(u8, head[0..first_line_end], " HTTP/1.1");
-}
-
-fn requestHeadHasBody(head: []const u8) bool {
-    if ((transferEncodingState(head) catch .none) == .chunked) return true;
-    if (contentLengthFromHead(head) catch null) |len| return len > 0;
-    return false;
-}
-
-fn chunkedWireLength(
-    body: []const u8,
-    max_head_bytes: usize,
-    max_body_bytes: usize,
-) Error!usize {
-    var pos: usize = 0;
-    var decoded_total: usize = 0;
-    var extension_bytes: usize = 0;
-    while (true) {
-        const remaining = body[pos..];
-        const line_end = std.mem.indexOf(u8, remaining, "\r\n") orelse {
-            // Keep aggregate reads bounded by the same per-line allowance as
-            // the streaming reader. The extra 32 bytes leave room for a full
-            // usize chunk size and syntax around the cumulative extensions.
-            if (remaining.len >= http1.max_chunk_extension_bytes + 32) {
-                return error.ChunkExtensionTooLarge;
-            }
-            return error.BufferTooShort;
-        };
-        const line = remaining[0..line_end];
-        const line_wire_len = std.math.add(usize, line_end, 2) catch
-            return error.ChunkSizeOverflow;
-        const next_pos = std.math.add(usize, pos, line_wire_len) catch
-            return error.ChunkSizeOverflow;
-        const semi = std.mem.indexOfScalar(u8, line, ';') orelse line.len;
-        if (semi != line.len) {
-            extension_bytes = std.math.add(usize, extension_bytes, line.len - semi) catch return error.ChunkExtensionTooLarge;
-            if (extension_bytes > http1.max_chunk_extension_bytes) return error.ChunkExtensionTooLarge;
-            try validateAggregateChunkExtension(line[semi + 1 ..]);
-        }
-        const size = try http1.parseChunkSize(
-            try aggregateChunkSizePart(line[0..semi]),
-        );
-        decoded_total = std.math.add(usize, decoded_total, size) catch return error.BodyTooLarge;
-        if (decoded_total > max_body_bytes) return error.BodyTooLarge;
-        pos = next_pos;
-        if (size == 0) {
-            const trailer_len = try chunkedTrailerWireLength(
-                body[pos..],
-                max_head_bytes,
-            );
-            return std.math.add(usize, pos, trailer_len) catch
-                return error.HeadersTooLarge;
-        }
-        const data_end = std.math.add(usize, pos, size) catch
-            return error.ChunkSizeOverflow;
-        const required_end = std.math.add(usize, data_end, 2) catch
-            return error.ChunkSizeOverflow;
-        if (body.len < required_end) return error.BufferTooShort;
-        if (!std.mem.eql(u8, body[data_end..required_end], "\r\n")) {
-            return error.InvalidChunk;
-        }
-        pos = required_end;
-    }
-}
-
-fn aggregateChunkSizePart(raw_size: []const u8) Error![]const u8 {
-    if (raw_size.len == 0) return error.InvalidChunk;
-    var end: usize = 0;
-    while (end < raw_size.len and std.ascii.isHex(raw_size[end])) : (end += 1) {}
-    if (end == 0) return error.InvalidChunk;
-    for (raw_size[end..]) |byte| {
-        if (byte != ' ' and byte != '\t') return error.InvalidChunk;
-    }
-    return raw_size[0..end];
-}
-
-fn validateAggregateChunkExtension(extension: []const u8) Error!void {
-    for (extension) |byte| {
-        // CR/LF is only valid as the delimiter already removed by the caller.
-        // Rejecting embedded line breaks prevents alternate chunk boundaries.
-        if (byte == '\r' or byte == '\n') return error.InvalidChunk;
-    }
-}
-
-fn chunkedTrailerWireLength(
-    trailers: []const u8,
-    max_head_bytes: usize,
-) Error!usize {
-    if (std.mem.startsWith(u8, trailers, "\r\n")) {
-        if (2 > max_head_bytes) return error.HeadersTooLarge;
-        return 2;
-    }
-    if (std.mem.indexOf(u8, trailers, "\r\n\r\n")) |end| {
-        const len = std.math.add(usize, end, 4) catch
-            return error.HeadersTooLarge;
-        if (len > max_head_bytes) return error.HeadersTooLarge;
-        return len;
-    }
-    if (trailers.len >= max_head_bytes) return error.HeadersTooLarge;
-    return error.BufferTooShort;
-}
-
-fn findHeaderValue(head: []const u8, name: []const u8) ?[]const u8 {
-    var lines = std.mem.splitSequence(u8, head, "\r\n");
-    _ = lines.next();
-    while (lines.next()) |line| {
-        const colon = std.mem.indexOfScalar(u8, line, ':') orelse continue;
-        if (std.ascii.eqlIgnoreCase(line[0..colon], name)) return wire.trimOws(line[colon + 1 ..]);
-    }
-    return null;
-}
-
 fn readSome(io: std.Io, stream: net.Stream, buffer: []u8) net.Stream.Reader.Error!usize {
     var bufs = [_][]u8{buffer};
     return io.vtable.netRead(io.userdata, stream.socket.handle, &bufs);
@@ -7502,7 +6861,7 @@ fn writeAllToStream(io: std.Io, stream: net.Stream, bytes: []const u8) net.Strea
 test "HTTP/1 runtime accepts matching absolute-form target" {
     const allocator = std.testing.allocator;
 
-    var backend = try @import("../runtime.zig").Backend.initAuto(allocator, .evented_then_threaded);
+    var backend = try @import("../runtime.zig").Backend.initAuto(allocator, .zio_then_threaded);
     defer backend.deinit();
     const io = backend.io();
 
@@ -8031,138 +7390,6 @@ test "HTTP/1 client sends request to bracketed IPv6 URI" {
     thread.join();
     if (shared.err) |err| return err;
     try std.testing.expectEqualStrings("ipv6-uri-ok", response.response.body);
-}
-
-test "HTTP/1 Linux io_uring server accepts request" {
-    if (comptime builtin.os.tag != .linux) return error.SkipZigTest;
-
-    const allocator = std.testing.allocator;
-
-    var ring = linux.IoUring.init(16, 0) catch |err| switch (err) {
-        error.PermissionDenied, error.SystemOutdated => return error.SkipZigTest,
-        else => |e| return e,
-    };
-    defer ring.deinit();
-
-    var threaded = std.Io.Threaded.init(allocator, .{});
-    defer threaded.deinit();
-    const io = threaded.io();
-
-    var server = try LinuxIoUringServer.listen(
-        allocator,
-        &ring,
-        .{ .ip4 = .loopback(0) },
-        .{ .max_head_bytes = 4096, .max_body_bytes = 4096 },
-        .{ .reuse_address = true },
-    );
-    defer server.deinit();
-
-    const Shared = struct {
-        server: *LinuxIoUringServer,
-        err: ?anyerror = null,
-
-        fn run(shared: *@This()) void {
-            runFallible(shared.server) catch |err| {
-                shared.err = err;
-            };
-        }
-
-        fn runFallible(server_ptr: *LinuxIoUringServer) !void {
-            var connection = try server_ptr.accept();
-            defer connection.close();
-
-            var request = try connection.readRequest(.{});
-            defer request.deinit(server_ptr.allocator);
-            try std.testing.expectEqualStrings("/uring-server", request.request.target);
-            try connection.writeResponse(.{
-                .body = "uring-server-ok",
-                .request_method = request.request.method,
-            });
-        }
-    };
-
-    var shared = Shared{ .server = &server };
-    const thread = try std.Thread.spawn(.{}, Shared.run, .{&shared});
-
-    const uri = try std.fmt.allocPrint(allocator, "http://127.0.0.1:{d}/uring-server", .{server.address.ip4.port});
-    defer allocator.free(uri);
-    var response = try Client.requestUri(allocator, io, uri, .{}, .{
-        .max_head_bytes = 4096,
-        .max_body_bytes = 4096,
-    });
-    defer response.deinit(allocator);
-
-    thread.join();
-    if (shared.err) |err| return err;
-    try std.testing.expectEqual(@as(u16, 200), response.response.status);
-    try std.testing.expectEqualStrings("uring-server-ok", response.response.body);
-}
-
-test "HTTP/1 Linux io_uring client sends request to IP URI" {
-    if (comptime builtin.os.tag != .linux) return error.SkipZigTest;
-
-    const allocator = std.testing.allocator;
-
-    var ring = linux.IoUring.init(16, 0) catch |err| switch (err) {
-        error.PermissionDenied, error.SystemOutdated => return error.SkipZigTest,
-        else => |e| return e,
-    };
-    defer ring.deinit();
-
-    var threaded = std.Io.Threaded.init(allocator, .{});
-    defer threaded.deinit();
-    const io = threaded.io();
-
-    var server = try Server.listen(
-        allocator,
-        io,
-        .{ .ip4 = .loopback(0) },
-        .{ .max_head_bytes = 4096, .max_body_bytes = 4096 },
-    );
-    defer server.deinit();
-
-    const Shared = struct {
-        server: *Server,
-        err: ?anyerror = null,
-
-        fn run(shared: *@This()) void {
-            runFallible(shared.server) catch |err| {
-                shared.err = err;
-            };
-        }
-
-        fn runFallible(server_ptr: *Server) !void {
-            var connection = try server_ptr.accept();
-            defer connection.close();
-
-            var request = try connection.readRequest(.{});
-            defer request.deinit(server_ptr.allocator);
-            try std.testing.expectEqualStrings("/uring-runtime", request.request.target);
-            var expected_host: [64]u8 = undefined;
-            const rendered_host = try std.fmt.bufPrint(&expected_host, "127.0.0.1:{d}", .{server_ptr.address().ip4.port});
-            try std.testing.expectEqualStrings(rendered_host, request.request.header("host").?);
-            try connection.writeResponse(.{
-                .body = "uring-runtime-ok",
-                .request_method = request.request.method,
-            });
-        }
-    };
-
-    var shared = Shared{ .server = &server };
-    const thread = try std.Thread.spawn(.{}, Shared.run, .{&shared});
-
-    const uri = try std.fmt.allocPrint(allocator, "http://127.0.0.1:{d}/uring-runtime", .{server.address().ip4.port});
-    defer allocator.free(uri);
-    var response = try Client.requestUriLinuxIoUring(allocator, &ring, uri, .{}, .{
-        .max_head_bytes = 4096,
-        .max_body_bytes = 4096,
-    });
-    defer response.deinit(allocator);
-
-    thread.join();
-    if (shared.err) |err| return err;
-    try std.testing.expectEqual(@as(u16, 200), response.response.status);
-    try std.testing.expectEqualStrings("uring-runtime-ok", response.response.body);
 }
 
 test "HTTP/1 server sends 100 Continue before reading expected body" {
@@ -8895,7 +8122,7 @@ test "HTTP/1 async std.Io server handles concurrent clients" {
 test "HTTP/1 serveConnection handles keep-alive requests" {
     const allocator = std.testing.allocator;
 
-    var backend = try @import("../runtime.zig").Backend.initAuto(allocator, .evented_then_threaded);
+    var backend = try @import("../runtime.zig").Backend.initAuto(allocator, .zio_then_threaded);
     defer backend.deinit();
     const io = backend.io();
 
@@ -8961,10 +8188,108 @@ test "HTTP/1 serveConnection handles keep-alive requests" {
     try std.testing.expectEqual(@as(usize, 2), shared.context.count);
 }
 
+test "HTTP/1 serveConnection can disable keep-alive without consuming pipeline suffix" {
+    const allocator = std.testing.allocator;
+    var threaded = std.Io.Threaded.init(allocator, .{
+        .async_limit = .unlimited,
+    });
+    defer threaded.deinit();
+    const io = threaded.io();
+
+    var server = try Server.listen(
+        allocator,
+        io,
+        .{ .ip4 = .loopback(0) },
+        .{
+            .max_head_bytes = 4096,
+            .max_body_bytes = 4096,
+            .keep_alive = false,
+        },
+    );
+    defer server.deinit();
+
+    const Context = struct {
+        count: usize = 0,
+
+        fn handle(ctx: *@This(), request: http1.Request) Error!ResponseOptions {
+            ctx.count += 1;
+            if (!std.mem.eql(u8, "/first", request.target)) {
+                return error.InvalidResponse;
+            }
+            return .{
+                .headers = &.{.{
+                    .name = "Connection",
+                    .value = "keep-alive",
+                }},
+                .body = "one",
+            };
+        }
+    };
+
+    const Shared = struct {
+        server: *Server,
+        context: Context = .{},
+        served: usize = 0,
+        err: ?anyerror = null,
+
+        fn run(self: *@This()) void {
+            self.runFallible() catch |err| {
+                self.err = err;
+            };
+        }
+
+        fn runFallible(self: *@This()) !void {
+            self.served = try self.server.serveConnection(
+                &self.context,
+                Context.handle,
+                8,
+            );
+        }
+    };
+
+    var shared = Shared{ .server = &server };
+    const thread = try std.Thread.spawn(.{}, Shared.run, .{&shared});
+    var joined = false;
+    defer if (!joined) thread.join();
+
+    const stream = try server.address().connect(io, .{ .mode = .stream });
+    defer stream.close(io);
+    try writeRequestToStream(allocator, io, stream, .{
+        .target = "/first",
+        .headers = &.{.{ .name = "Host", .value = "localhost" }},
+    });
+    // Queue a second complete request before reading the first response. The
+    // disabled serve policy must not dispatch this buffered suffix.
+    try writeRequestToStream(allocator, io, stream, .{
+        .target = "/second",
+        .headers = &.{.{ .name = "Host", .value = "localhost" }},
+    });
+
+    var inbuf: std.ArrayList(u8) = .empty;
+    defer inbuf.deinit(allocator);
+    var first = try readResponseFromStreamBuffered(
+        allocator,
+        io,
+        stream,
+        .{ .max_head_bytes = 4096, .max_body_bytes = 4096 },
+        .{},
+        &inbuf,
+    );
+    defer first.deinit(allocator);
+    try std.testing.expectEqualStrings("one", first.response.body);
+    try std.testing.expect(!first.response.keepAlive());
+
+    thread.join();
+    joined = true;
+    if (shared.err) |err| return err;
+    try std.testing.expectEqual(@as(usize, 1), shared.served);
+    try std.testing.expectEqual(@as(usize, 1), shared.context.count);
+}
+
 test "HTTP/1 serveConnection adds close for request close" {
     const allocator = std.testing.allocator;
 
-    var backend = try @import("../runtime.zig").Backend.initAuto(allocator, .evented_then_threaded);
+    var backend = try @import("../runtime.zig").Backend.initAuto(allocator, .zio_then_threaded);
     defer backend.deinit();
     const io = backend.io();
 
@@ -9106,7 +8431,7 @@ test "HTTP/1 serveConnection retires TE plus CL requests before pipeline suffix"
 test "HTTP/1 serveConnection fixes HTTP/1.0 keep-alive response" {
     const allocator = std.testing.allocator;
 
-    var backend = try @import("../runtime.zig").Backend.initAuto(allocator, .evented_then_threaded);
+    var backend = try @import("../runtime.zig").Backend.initAuto(allocator, .zio_then_threaded);
     defer backend.deinit();
     const io = backend.io();
 
@@ -9728,6 +9053,61 @@ test "HTTP/1 client treats non-chunked response transfer coding as close-delimit
     try std.testing.expectEqualStrings("close-delimited-body", response.response.body);
 }
 
+test "HTTP/1 client rejects Transfer-Encoding on HTTP/1.0 response" {
+    const allocator = std.testing.allocator;
+
+    var threaded = std.Io.Threaded.init(allocator, .{});
+    defer threaded.deinit();
+    const io = threaded.io();
+
+    var server = try Server.listen(
+        allocator,
+        io,
+        .{ .ip4 = .loopback(0) },
+        .{ .max_head_bytes = 4096, .max_body_bytes = 4096 },
+    );
+    defer server.deinit();
+
+    const Shared = struct {
+        server: *Server,
+        err: ?anyerror = null,
+
+        fn run(shared: *@This()) void {
+            runFallible(shared.server) catch |err| {
+                shared.err = err;
+            };
+        }
+
+        fn runFallible(server_ptr: *Server) !void {
+            var connection = try server_ptr.accept();
+            defer connection.close();
+            var request = try connection.readRequest(.{});
+            defer request.deinit(server_ptr.allocator);
+            try writeAllToStream(
+                server_ptr.io,
+                connection.stream,
+                "HTTP/1.0 200 OK\r\nTransfer-Encoding: gzip\r\n\r\nbody",
+            );
+        }
+    };
+
+    var shared = Shared{ .server = &server };
+    const thread = try std.Thread.spawn(.{}, Shared.run, .{&shared});
+
+    var client = try Client.connect(allocator, io, server.address(), .{});
+    defer client.close();
+    try std.testing.expectError(
+        error.InvalidTransferEncoding,
+        client.request(.{
+            .target = "/http10-te",
+            .headers = &.{.{ .name = "Host", .value = "127.0.0.1" }},
+        }),
+    );
+
+    thread.join();
+    if (shared.err) |err| return err;
+}
+
 test "HTTP/1 status-forbidden body preserves pipelined response without request context" {
     const allocator = std.testing.allocator;
 
@@ -10109,32 +9489,6 @@ test "HTTP/1 runtime validates outbound request and response framing before writ
     );
 }
 
-test "HTTP/1 runtime target length rejects ambiguous head framing" {
-    const conflicting = "HTTP/1.1 200 OK\r\nContent-Length: 5\r\nContent-Length: 6\r\n\r\nhello!";
-    const conflicting_head_end = std.mem.indexOf(u8, conflicting, "\r\n\r\n").?;
-    try std.testing.expectError(error.ConflictingContentLength, messageTargetLength(conflicting, conflicting_head_end, 1024, 1024, null));
-
-    const coalesced = "HTTP/1.1 200 OK\r\nContent-Length: 5, 5\r\n\r\nhello";
-    const coalesced_head_end = std.mem.indexOf(u8, coalesced, "\r\n\r\n").?;
-    try std.testing.expectEqual(coalesced.len, try messageTargetLength(coalesced, coalesced_head_end, 1024, 1024, null));
-
-    const signed_length = "HTTP/1.1 200 OK\r\nContent-Length: +5\r\n\r\nhello";
-    const signed_length_head_end = std.mem.indexOf(u8, signed_length, "\r\n\r\n").?;
-    try std.testing.expectError(error.InvalidContentLength, messageTargetLength(signed_length, signed_length_head_end, 1024, 1024, null));
-
-    const stacked_te = "HTTP/1.1 200 OK\r\nTransfer-Encoding: gzip, chunked\r\n\r\n5\r\nhello\r\n0\r\n\r\n";
-    const stacked_te_head_end = std.mem.indexOf(u8, stacked_te, "\r\n\r\n").?;
-    try std.testing.expectEqual(stacked_te.len, try messageTargetLength(stacked_te, stacked_te_head_end, 1024, 1024, null));
-
-    const non_final_chunked = "HTTP/1.1 200 OK\r\nTransfer-Encoding: chunked, gzip\r\n\r\n0\r\n\r\n";
-    const non_final_chunked_head_end = std.mem.indexOf(u8, non_final_chunked, "\r\n\r\n").?;
-    try std.testing.expectError(error.InvalidTransferEncoding, messageTargetLength(non_final_chunked, non_final_chunked_head_end, 1024, 1024, null));
-
-    const signed_chunk = "HTTP/1.1 200 OK\r\nTransfer-Encoding: chunked\r\n\r\n+5\r\nhello\r\n0\r\n\r\n";
-    const signed_chunk_head_end = std.mem.indexOf(u8, signed_chunk, "\r\n\r\n").?;
-    try std.testing.expectError(error.InvalidChunk, messageTargetLength(signed_chunk, signed_chunk_head_end, 1024, 1024, null));
-}
-
 test "HTTP/0.9 aggregate body reader is opt in and bounded" {
     const allocator = std.testing.allocator;
     // Public parsing keeps legacy responses strict by default and exposes the
@@ -10166,70 +9520,6 @@ test "HTTP/0.9 aggregate body reader is opt in and bounded" {
     ));
 }
 
-test "HTTP/1 aggregate chunk limits count decoded payload only" {
-    const head = "POST / HTTP/1.1\r\nHost: example\r\nTransfer-Encoding: chunked\r\n\r\n";
-    const head_end = std.mem.indexOf(u8, head, "\r\n\r\n").?;
-
-    const exact = head ++ "2;ignored=yes\r\nab\r\n3  \r\ncde\r\n0\r\n\r\n";
-    try std.testing.expectEqual(
-        exact.len,
-        try messageTargetLength(exact, head_end, 1024, 5, null),
-    );
-
-    const empty = head ++ "0\r\n\r\n";
-    try std.testing.expectEqual(
-        empty.len,
-        try messageTargetLength(empty, head_end, 1024, 0, null),
-    );
-
-    // The payload is absent: rejection happens immediately after the size line
-    // is parsed, rather than waiting for the declared bytes to arrive.
-    try std.testing.expectError(
-        error.BodyTooLarge,
-        messageTargetLength(head ++ "6\r\n", head_end, 1024, 5, null),
-    );
-}
-
-test "HTTP/1 aggregate chunk framing and trailers have independent limits" {
-    const head = "POST / HTTP/1.1\r\nHost: example\r\nTransfer-Encoding: chunked\r\n\r\n";
-    const head_end = std.mem.indexOf(u8, head, "\r\n\r\n").?;
-    const trailer_fields = "Digest: abc\r\n\r\n";
-    const trailer = "0\r\nDigest: abc\r\n\r\n";
-    try std.testing.expectEqual(
-        (head ++ trailer).len,
-        try messageTargetLength(
-            head ++ trailer,
-            head_end,
-            trailer_fields.len,
-            0,
-            null,
-        ),
-    );
-    try std.testing.expectError(
-        error.HeadersTooLarge,
-        messageTargetLength(
-            head ++ trailer,
-            head_end,
-            trailer_fields.len - 1,
-            0,
-            null,
-        ),
-    );
-
-    var incomplete: std.ArrayList(u8) = .empty;
-    defer incomplete.deinit(std.testing.allocator);
-    try incomplete.appendSlice(std.testing.allocator, head ++ "1;");
-    try incomplete.appendNTimes(
-        std.testing.allocator,
-        'a',
-        http1.max_chunk_extension_bytes + 30,
-    );
-    try std.testing.expectError(
-        error.ChunkExtensionTooLarge,
-        messageTargetLength(incomplete.items, head_end, 1024, 1, null),
-    );
-}
-
 test "HTTP/1 buffered aggregate chunk limit ignores pipeline suffix" {
     const allocator = std.testing.allocator;
     const first = "POST /first HTTP/1.1\r\nHost: example\r\nTransfer-Encoding: chunked\r\n\r\n5\r\nhello\r\n0\r\n\r\n";
@@ -10254,16 +9544,6 @@ test "HTTP/1 buffered aggregate chunk limit ignores pipeline suffix" {
     defer allocator.free(bytes);
     try std.testing.expectEqualStrings(first, bytes);
     try std.testing.expectEqualStrings(second, inbuf.items);
-}
-
-test "HTTP/1 runtime enforces header byte limit at delimiter" {
-    const exact = "GET / HTTP/1.1\r\nHost: example\r\n\r\n";
-    try std.testing.expectEqual(@as(?usize, exact.len - 4), try findHttpHeadEndWithinLimit(exact, exact.len));
-    try std.testing.expectError(error.HeadersTooLarge, findHttpHeadEndWithinLimit(exact, exact.len - 1));
-
-    const incomplete = "GET / HTTP/1.1\r\nHost: example";
-    try std.testing.expectEqual(@as(?usize, null), try findHttpHeadEndWithinLimit(incomplete, incomplete.len + 1));
-    try std.testing.expectError(error.HeadersTooLarge, findHttpHeadEndWithinLimit(incomplete, incomplete.len));
 }
 
 test "HTTP/1 non-buffered request reader preserves pipelined bytes on socket" {
@@ -10441,6 +9721,7 @@ test "HTTP/1 non-buffered chunked reader accepts exact and zero body limits" {
 }
 
 test {
+    _ = @import("runtime/message/tests/framing.zig");
     _ = @import("runtime/unix_tests.zig");
     _ = @import("runtime/http09_tests.zig");
     _ = @import("runtime/body_reader_tests.zig");
@@ -10451,4 +9732,6 @@ test {
     _ = @import("runtime/tls_client_deadline_tests.zig");
     _ = @import("runtime/server_lifecycle_tests.zig");
     _ = @import("runtime/half_close_tests.zig");
+    _ = @import("runtime/tls_close_tests.zig");
+    _ = @import("runtime/date_tests.zig");
 }

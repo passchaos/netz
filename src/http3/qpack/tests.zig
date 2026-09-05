@@ -1085,6 +1085,33 @@ test "HTTP/3 QPACK rejects non-minimal required insert count" {
     }
 }
 
+test "HTTP/3 QPACK normalizes malformed field-section wire errors" {
+    const allocator = std.testing.allocator;
+    var table = Qpack.DynamicTable.init(allocator, 256);
+    defer table.deinit();
+    try table.setCapacity(256);
+
+    // A complete HEADERS payload can still contain a truncated QPACK prefix
+    // or field-line integer/string. Those are decompression failures, not
+    // generic HTTP/3 frame truncation errors.
+    for ([_][]const u8{
+        &.{},
+        &.{0x00},
+        &.{ 0x00, 0x00, 0x3f },
+        &.{ 0x00, 0x00, 0x21, 0x7f },
+    }) |block| {
+        try std.testing.expectError(
+            error.QpackDecompressionFailed,
+            Qpack.decodeDynamicBlockOwnedWithLimit(
+                allocator,
+                block,
+                table,
+                std.math.maxInt(u64),
+            ),
+        );
+    }
+}
+
 test "HTTP/3 QPACK decoder instructions round trip and reject zero increment" {
     const allocator = std.testing.allocator;
     const instructions = [_]Qpack.DecoderInstruction{

@@ -5,12 +5,17 @@
 //! share the RFC 6455 codec and no-context-takeover permessage-deflate engine.
 
 const std = @import("std");
+const builtin = @import("builtin");
 const websocket = @import("../mod.zig");
 const common = @import("common.zig");
 const compression_scratch = @import("compression_scratch.zig");
 const origin_policy = @import("origin_policy.zig");
+const handshake_headers = @import("handshake/headers.zig");
+const handshake_storage = @import("handshake/storage.zig");
+const message_buffer = @import("message/buffer.zig");
 const deadline_policy = @import("../../internal/deadline.zig");
 const http3 = @import("../../http3/mod.zig");
+const rejection_drain_timeout: std.Io.Duration = .fromSeconds(5);
 
 pub const PingEvent = common.PingEvent;
 pub const CloseHandshakeEvent = common.CloseHandshakeEvent;
@@ -53,6 +58,8 @@ pub const UriConnectOptions = struct {
 
 pub const AcceptOptions = struct {
     protocols: []const []const u8 = &.{},
+    /// Reject the RFC 9220 handshake unless one of `protocols` was selected.
+    require_subprotocol: bool = false,
     allowed_origins: []const []const u8 = &.{},
     extra_headers: []const http3.Qpack.HeaderField = &.{},
     enable_permessage_deflate: bool = false,
@@ -65,11 +72,18 @@ pub const ServerConnection = Connection(.server);
 
 /// Result of an authenticated RFC 9220 attempt before the application chooses
 /// whether a non-2xx response should become a typed rejection. Response
-/// metadata remains owned and inspectable until `deinit` or `requireAccepted`.
+/// metadata, bounded body, and trailers remain owned and inspectable until
+/// `deinit` or `requireAccepted`.
 pub const ConnectAttempt = struct {
     h3: ?http3.runtime.HandshakeClient,
+    /// Non-null when the attempt temporarily owns a caller-supplied session.
+    /// `deinit` restores it after abandoning only this CONNECT stream.
+    restore_to: ?*http3.runtime.HandshakeClient = null,
     stream_id: u62,
     response: http3.DecodedResponseHead,
+    response_body: []u8 = &.{},
+    response_trailers: []http3.Qpack.HeaderField = &.{},
+    stream_complete: bool = false,
     options: ConnectOptions,
 
     pub fn accepted(self: ConnectAttempt) bool {
@@ -92,15 +106,39 @@ pub const ConnectAttempt = struct {
         return null;
     }
 
+    pub fn body(self: ConnectAttempt) []const u8 {
+        return self.response_body;
+    }
+
+    pub fn trailers(
+        self: ConnectAttempt,
+    ) []const http3.Qpack.HeaderField {
+        return self.response_trailers;
+    }
+
     pub fn deinit(self: *ConnectAttempt) void {
         const allocator = self.h3.?.allocator;
         self.response.deinit(allocator);
-        if (self.h3) |*client| client.deinit();
+        allocator.free(self.response_body);
+        http3.Qpack.freeDecodedFields(allocator, self.response_trailers);
+        if (self.h3) |*client| {
+            if (self.restore_to) |destination| {
+                if (!self.stream_complete) {
+                    client.abandonExtendedConnect(self.stream_id);
+                }
+                destination.* = client.*;
+            } else {
+                client.deinit();
+            }
+        }
         self.* = undefined;
     }
 
     pub fn requireAccepted(self: *ConnectAttempt) Error!ClientConnection {
         if (!self.accepted()) return error.InvalidResponse;
+        std.debug.assert(self.response_body.len == 0);
+        std.debug.assert(self.response_trailers.len == 0);
+        std.debug.assert(!self.stream_complete);
         const selected_protocol = try validateServerHandshake(
             self.h3.?.allocator,
             self.response.headers,
@@ -147,6 +185,7 @@ pub fn Connection(comptime role: common.Role) type {
         limits: common.Limits,
         selected_protocol: ?[]u8 = null,
         inbuf: std.ArrayList(u8) = .empty,
+        inbuf_consumed: usize = 0,
         /// Serializes complete WebSocket frame sequences and the reusable
         /// compression encoder. HTTP/3 may split one message across many QUIC
         /// packets, so locking only individual DATA writes would still permit
@@ -254,16 +293,27 @@ pub fn Connection(comptime role: common.Role) type {
         }
 
         pub fn sendText(self: *Self, text: []const u8) Error!void {
-            if (!std.unicode.utf8ValidateSlice(text)) return error.InvalidUtf8;
+            if (self.closeSent() or self.closeReceived()) {
+                return error.ConnectionClosed;
+            }
+            try common.validateOutgoingMessage(self.limits, .text, text);
             self.send_mutex.lockUncancelable(self.io());
             defer self.send_mutex.unlock(self.io());
-            try self.sendDataFrameLocked(.text, text);
+            try self.sendDataFrameValidatedLocked(.text, text);
         }
 
         pub fn sendBinary(self: *Self, payload: []const u8) Error!void {
+            if (self.closeSent() or self.closeReceived()) {
+                return error.ConnectionClosed;
+            }
+            try common.validateOutgoingMessage(
+                self.limits,
+                .binary,
+                payload,
+            );
             self.send_mutex.lockUncancelable(self.io());
             defer self.send_mutex.unlock(self.io());
-            try self.sendDataFrameLocked(.binary, payload);
+            try self.sendDataFrameValidatedLocked(.binary, payload);
         }
 
         /// Mask a mutable client payload in place and send it without the
@@ -275,9 +325,12 @@ pub fn Connection(comptime role: common.Role) type {
             self: *Self,
             payload: []u8,
         ) Error!void {
+            try self.validateBinaryInPlace(payload.len);
             self.send_mutex.lockUncancelable(self.io());
             defer self.send_mutex.unlock(self.io());
-            try self.validateBinaryInPlace(payload.len);
+            if (self.closeSent() or self.closeReceived()) {
+                return error.ConnectionClosed;
+            }
 
             var mask_key: [4]u8 = undefined;
             try std.Io.randomSecure(self.io(), &mask_key);
@@ -305,11 +358,10 @@ pub fn Connection(comptime role: common.Role) type {
             if (self.closeSent() or self.closeReceived()) {
                 return error.ConnectionClosed;
             }
-            if (payload_len > self.limits.max_frame_bytes or
-                payload_len > self.limits.max_message_bytes)
-            {
-                return error.MessageTooLarge;
-            }
+            try common.validateOutgoingMessageLength(
+                self.limits,
+                payload_len,
+            );
         }
 
         /// Send two borrowed slices as one binary WebSocket message. The H3
@@ -322,25 +374,22 @@ pub fn Connection(comptime role: common.Role) type {
             first: []const u8,
             second: []const u8,
         ) Error!void {
+            if (self.closeSent() or self.closeReceived()) {
+                return error.ConnectionClosed;
+            }
+            const parts = [_][]const u8{ first, second };
+            const payload_len = try common.validateOutgoingMessageParts(
+                self.limits,
+                &parts,
+            );
             self.send_mutex.lockUncancelable(self.io());
             defer self.send_mutex.unlock(self.io());
             if (self.closeSent() or self.closeReceived()) {
                 return error.ConnectionClosed;
             }
-            const payload_len = std.math.add(
-                usize,
-                first.len,
-                second.len,
-            ) catch return error.PayloadTooLarge;
-            if (payload_len > self.limits.max_frame_bytes or
-                payload_len > self.limits.max_message_bytes)
-            {
-                return error.MessageTooLarge;
-            }
             if (self.permessage_deflate and
                 payload_len >= self.compression_threshold)
             {
-                const parts = [_][]const u8{ first, second };
                 const compressed = try self.compressMessageParts(
                     &parts,
                     payload_len,
@@ -372,26 +421,18 @@ pub fn Connection(comptime role: common.Role) type {
             opcode: websocket.Opcode,
             fragments: []const []const u8,
         ) Error!void {
-            if (opcode != .text and opcode != .binary) {
-                return error.InvalidFrame;
+            if (self.closeSent() or self.closeReceived()) {
+                return error.ConnectionClosed;
             }
+            const total = try common.validateOutgoingFragments(
+                self.limits,
+                opcode,
+                fragments,
+            );
             self.send_mutex.lockUncancelable(self.io());
             defer self.send_mutex.unlock(self.io());
             if (self.closeSent() or self.closeReceived()) {
                 return error.ConnectionClosed;
-            }
-            if (fragments.len == 0) return error.InvalidFrame;
-            const total = try fragmentedPayloadLen(fragments);
-            for (fragments) |fragment| {
-                if (fragment.len > self.limits.max_frame_bytes) {
-                    return error.MessageTooLarge;
-                }
-            }
-            if (total > self.limits.max_message_bytes) {
-                return error.MessageTooLarge;
-            }
-            if (opcode == .text and !validateFragmentedText(fragments)) {
-                return error.InvalidUtf8;
             }
             if (self.permessage_deflate and
                 total >= self.compression_threshold)
@@ -457,6 +498,11 @@ pub fn Connection(comptime role: common.Role) type {
             deadline: std.Io.Clock.Timestamp,
         ) Error!PingEvent {
             _ = try deadline_policy.usableAwake(self.io(), deadline);
+            try common.validateOutgoingControlFrame(
+                self.limits,
+                .ping,
+                payload,
+            );
             {
                 self.send_mutex.lockUncancelable(self.io());
                 defer self.send_mutex.unlock(self.io());
@@ -500,6 +546,11 @@ pub fn Connection(comptime role: common.Role) type {
                 &storage,
                 .{ .code = code, .reason = reason },
             );
+            try common.validateOutgoingControlFrame(
+                self.limits,
+                .close,
+                payload,
+            );
             self.send_mutex.lockUncancelable(self.io());
             defer self.send_mutex.unlock(self.io());
             try self.sendControlFrameLocked(.close, payload);
@@ -515,6 +566,11 @@ pub fn Connection(comptime role: common.Role) type {
             const payload = try websocket.writeClosePayloadInto(
                 &storage,
                 close_frame,
+            );
+            try common.validateOutgoingControlFrame(
+                self.limits,
+                .close,
+                payload,
             );
             self.send_mutex.lockUncancelable(self.io());
             defer self.send_mutex.unlock(self.io());
@@ -607,6 +663,11 @@ pub fn Connection(comptime role: common.Role) type {
                 const payload = try websocket.writeClosePayloadInto(
                     &storage,
                     close_frame,
+                );
+                try common.validateOutgoingControlFrame(
+                    self.limits,
+                    .close,
+                    payload,
                 );
                 {
                     self.send_mutex.lockUncancelable(self.io());
@@ -876,7 +937,11 @@ pub fn Connection(comptime role: common.Role) type {
                 return error.ConnectionClosed;
             }
             try self.ensureBuffered(2, deadline);
-            const second = self.inbuf.items[1];
+            var available = message_buffer.unread(
+                &self.inbuf,
+                self.inbuf_consumed,
+            );
+            const second = available[1];
             var header_len: usize = 2;
             const length_code = second & 0x7f;
             if (length_code == 126) {
@@ -886,8 +951,11 @@ pub fn Connection(comptime role: common.Role) type {
             }
             if ((second & 0x80) != 0) header_len += 4;
             try self.ensureBuffered(header_len, deadline);
-
-            const header = try websocket.FrameHeader.parse(self.inbuf.items);
+            available = message_buffer.unread(
+                &self.inbuf,
+                self.inbuf_consumed,
+            );
+            const header = try websocket.FrameHeader.parse(available);
             const payload_len = std.math.cast(
                 usize,
                 header.payload_len,
@@ -906,6 +974,10 @@ pub fn Connection(comptime role: common.Role) type {
                 payload_len,
             ) catch return error.PayloadTooLarge;
             try self.ensureBuffered(total_len, deadline);
+            available = message_buffer.unread(
+                &self.inbuf,
+                self.inbuf_consumed,
+            );
             const options: websocket.ParseFrameOptions = switch (role) {
                 .client => .{
                     .expect_mask = .unmasked,
@@ -920,7 +992,7 @@ pub fn Connection(comptime role: common.Role) type {
             };
             const frame = try websocket.parseFrameInto(
                 payload_out,
-                self.inbuf.items[0..total_len],
+                available[0..total_len],
                 options,
             );
             self.discardBuffered(frame.consumed);
@@ -1051,7 +1123,11 @@ pub fn Connection(comptime role: common.Role) type {
                 return error.ConnectionClosed;
             }
             try self.ensureBuffered(2, deadline);
-            const second = self.inbuf.items[1];
+            var available = message_buffer.unread(
+                &self.inbuf,
+                self.inbuf_consumed,
+            );
+            const second = available[1];
             var header_len: usize = 2;
             const length_code = second & 0x7f;
             if (length_code == 126) {
@@ -1061,8 +1137,11 @@ pub fn Connection(comptime role: common.Role) type {
             }
             if ((second & 0x80) != 0) header_len += 4;
             try self.ensureBuffered(header_len, deadline);
-
-            const header = try websocket.FrameHeader.parse(self.inbuf.items);
+            available = message_buffer.unread(
+                &self.inbuf,
+                self.inbuf_consumed,
+            );
+            const header = try websocket.FrameHeader.parse(available);
             const payload_len = std.math.cast(
                 usize,
                 header.payload_len,
@@ -1076,6 +1155,10 @@ pub fn Connection(comptime role: common.Role) type {
                 payload_len,
             ) catch return error.PayloadTooLarge;
             try self.ensureBuffered(total_len, deadline);
+            available = message_buffer.unread(
+                &self.inbuf,
+                self.inbuf_consumed,
+            );
             const options: websocket.ParseFrameOptions = switch (role) {
                 .client => .{
                     .expect_mask = .unmasked,
@@ -1090,7 +1173,7 @@ pub fn Connection(comptime role: common.Role) type {
             };
             const frame = try websocket.parseFrameOptions(
                 self.allocator,
-                self.inbuf.items[0..total_len],
+                available[0..total_len],
                 options,
             );
             self.discardBuffered(frame.consumed);
@@ -1115,18 +1198,13 @@ pub fn Connection(comptime role: common.Role) type {
             self.sendClose(code, "") catch {};
         }
 
-        fn sendDataFrameLocked(
+        fn sendDataFrameValidatedLocked(
             self: *Self,
             opcode: websocket.Opcode,
             payload: []const u8,
         ) Error!void {
             if (self.closeSent() or self.closeReceived()) {
                 return error.ConnectionClosed;
-            }
-            if (payload.len > self.limits.max_frame_bytes or
-                payload.len > self.limits.max_message_bytes)
-            {
-                return error.MessageTooLarge;
             }
             if (self.permessage_deflate and
                 payload.len >= self.compression_threshold)
@@ -1151,6 +1229,11 @@ pub fn Connection(comptime role: common.Role) type {
             opcode: websocket.Opcode,
             payload: []const u8,
         ) Error!void {
+            try common.validateOutgoingControlFrame(
+                self.limits,
+                opcode,
+                payload,
+            );
             self.send_mutex.lockUncancelable(self.io());
             defer self.send_mutex.unlock(self.io());
             try self.sendControlFrameLocked(opcode, payload);
@@ -1413,12 +1496,17 @@ pub fn Connection(comptime role: common.Role) type {
             required: usize,
             deadline: ?std.Io.Clock.Timestamp,
         ) Error!void {
-            while (self.inbuf.items.len < required) {
+            while (message_buffer.unreadLen(
+                &self.inbuf,
+                self.inbuf_consumed,
+            ) < required) {
                 if (self.receive_finished) return error.ConnectionClosed;
                 var scratch: [16 * 1024]u8 = undefined;
                 const count = try self.readPayloadChunk(&scratch, deadline);
                 if (count == 0) continue;
-                try self.inbuf.appendSlice(
+                try message_buffer.appendAfterConsumed(
+                    &self.inbuf,
+                    &self.inbuf_consumed,
                     self.allocator,
                     scratch[0..count],
                 );
@@ -1458,16 +1546,17 @@ pub fn Connection(comptime role: common.Role) type {
                 },
                 .server => while (true) {
                     var event = if (deadline) |absolute|
-                        try self.h3.receiveRequestEventWithDeadline(absolute)
+                        try self.h3.receiveRequestEventForWithDeadline(
+                            self.stream_id,
+                            absolute,
+                        )
                     else
-                        try self.h3.receiveRequestEvent();
+                        try self.h3.receiveRequestEventFor(self.stream_id);
                     defer event.deinit(self.allocator);
                     switch (event) {
                         .reset => return error.ConnectionClosed,
                         .message => |message| {
-                            if (message.stream_id != self.stream_id) {
-                                return error.InvalidHandshake;
-                            }
+                            std.debug.assert(message.stream_id == self.stream_id);
                             switch (message.value) {
                                 .data_available => {
                                     const count = try self.h3.readRequestData(
@@ -1489,13 +1578,11 @@ pub fn Connection(comptime role: common.Role) type {
         }
 
         fn discardBuffered(self: *Self, len: usize) void {
-            if (len == self.inbuf.items.len) {
-                self.inbuf.clearRetainingCapacity();
-                return;
-            }
-            const remaining = self.inbuf.items[len..];
-            @memmove(self.inbuf.items[0..remaining.len], remaining);
-            self.inbuf.shrinkRetainingCapacity(remaining.len);
+            _ = message_buffer.discardPrefix(
+                &self.inbuf,
+                &self.inbuf_consumed,
+                len,
+            );
         }
 
         fn io(self: *const Self) std.Io {
@@ -1510,8 +1597,24 @@ pub const Client = struct {
         h3: *http3.runtime.HandshakeClient,
         options: ConnectOptions,
     ) Error!ClientConnection {
+        var attempt = try connectSessionAttempt(allocator, h3, options);
+        errdefer attempt.deinit();
+        return attempt.requireAccepted();
+    }
+
+    pub fn connectSessionAttempt(
+        allocator: std.mem.Allocator,
+        h3: *http3.runtime.HandshakeClient,
+        options: ConnectOptions,
+    ) Error!ConnectAttempt {
         h3.options.local_settings.enable_connect_protocol = true;
-        return connectEstablishedBefore(allocator, h3, options, null);
+        return connectAttemptEstablishedBefore(
+            allocator,
+            h3,
+            options,
+            null,
+            h3,
+        );
     }
 
     /// Complete RFC 9220 negotiation on an existing HTTP/3 connection before
@@ -1523,16 +1626,33 @@ pub const Client = struct {
         options: ConnectOptions,
         deadline: std.Io.Clock.Timestamp,
     ) Error!ClientConnection {
+        var attempt = try connectSessionAttemptWithDeadline(
+            allocator,
+            h3,
+            options,
+            deadline,
+        );
+        errdefer attempt.deinit();
+        return attempt.requireAccepted();
+    }
+
+    pub fn connectSessionAttemptWithDeadline(
+        allocator: std.mem.Allocator,
+        h3: *http3.runtime.HandshakeClient,
+        options: ConnectOptions,
+        deadline: std.Io.Clock.Timestamp,
+    ) Error!ConnectAttempt {
         const absolute = try deadline_policy.usableAwake(
             h3.established.connection.endpoint.io,
             deadline,
         );
         h3.options.local_settings.enable_connect_protocol = true;
-        return connectEstablishedBefore(
+        return connectAttemptEstablishedBefore(
             allocator,
             h3,
             options,
             absolute,
+            h3,
         );
     }
 
@@ -1544,6 +1664,24 @@ pub const Client = struct {
     ) Error!ClientConnection {
         if (timeout.nanoseconds <= 0) return error.Timeout;
         return connectSessionWithDeadline(
+            allocator,
+            h3,
+            options,
+            .fromNow(
+                h3.established.connection.endpoint.io,
+                .{ .raw = timeout, .clock = .awake },
+            ),
+        );
+    }
+
+    pub fn connectSessionAttemptWithTimeout(
+        allocator: std.mem.Allocator,
+        h3: *http3.runtime.HandshakeClient,
+        options: ConnectOptions,
+        timeout: std.Io.Duration,
+    ) Error!ConnectAttempt {
+        if (timeout.nanoseconds <= 0) return error.Timeout;
+        return connectSessionAttemptWithDeadline(
             allocator,
             h3,
             options,
@@ -1597,7 +1735,13 @@ pub const Client = struct {
             h3_options_with_connect,
         );
         errdefer h3.deinit();
-        return connectAttemptEstablishedBefore(allocator, &h3, options, null);
+        return connectAttemptEstablishedBefore(
+            allocator,
+            &h3,
+            options,
+            null,
+            null,
+        );
     }
 
     /// Establish QUIC/TLS and finish the RFC 9220 Extended CONNECT under one
@@ -1656,6 +1800,7 @@ pub const Client = struct {
             &h3,
             options,
             absolute,
+            null,
         );
     }
 
@@ -1873,31 +2018,17 @@ pub const Client = struct {
                 .limits = options.limits,
             },
             deadline,
+            null,
         );
     }
 };
-
-fn connectEstablishedBefore(
-    allocator: std.mem.Allocator,
-    h3: *http3.runtime.HandshakeClient,
-    options: ConnectOptions,
-    deadline: ?std.Io.Clock.Timestamp,
-) Error!ClientConnection {
-    var attempt = try connectAttemptEstablishedBefore(
-        allocator,
-        h3,
-        options,
-        deadline,
-    );
-    errdefer attempt.deinit();
-    return attempt.requireAccepted();
-}
 
 fn connectAttemptEstablishedBefore(
     allocator: std.mem.Allocator,
     h3: *http3.runtime.HandshakeClient,
     options: ConnectOptions,
     deadline: ?std.Io.Clock.Timestamp,
+    restore_to: ?*http3.runtime.HandshakeClient,
 ) Error!ConnectAttempt {
     try validateClientExtraHeaders(options.extra_headers);
     try validateProtocols(options.protocols);
@@ -1908,41 +2039,60 @@ fn connectAttemptEstablishedBefore(
     if (!peer_settings.enable_connect_protocol) {
         return error.ExtendedConnectDisabled;
     }
-    var fields: std.ArrayList(http3.Qpack.HeaderField) = .empty;
-    defer fields.deinit(allocator);
-    try fields.append(allocator, .{
-        .name = ":protocol",
-        .value = "websocket",
-    });
-    try fields.append(allocator, .{
+    var protocol_value_stack: [handshake_headers.protocol_value_stack_capacity]u8 = undefined;
+    var protocol_value = try handshake_headers.prepareProtocolValue(
+        allocator,
+        options.protocols,
+        &protocol_value_stack,
+    );
+    defer protocol_value.deinit(allocator);
+    const field_count = std.math.add(
+        usize,
+        2 + @as(usize, @intFromBool(protocol_value.value.len != 0)) +
+            @as(usize, @intFromBool(options.origin != null)) +
+            @as(usize, @intFromBool(options.enable_permessage_deflate)),
+        options.extra_headers.len,
+    ) catch return error.PayloadTooLarge;
+    var fields_stack: [handshake_storage.stack_capacity]http3.Qpack.HeaderField = undefined;
+    const fields = try handshake_storage.acquire(
+        http3.Qpack.HeaderField,
+        allocator,
+        &fields_stack,
+        field_count,
+    );
+    defer handshake_storage.release(
+        http3.Qpack.HeaderField,
+        allocator,
+        &fields_stack,
+        fields,
+    );
+    var field_index: usize = 0;
+    fields[field_index] = .{ .name = ":protocol", .value = "websocket" };
+    field_index += 1;
+    fields[field_index] = .{
         .name = "sec-websocket-version",
         .value = "13",
-    });
-    var protocol_value: std.ArrayList(u8) = .empty;
-    defer protocol_value.deinit(allocator);
-    for (options.protocols, 0..) |protocol, index| {
-        if (!websocket.validSubprotocolToken(protocol)) {
-            return error.InvalidSubprotocol;
-        }
-        if (index != 0) try protocol_value.appendSlice(allocator, ", ");
-        try protocol_value.appendSlice(allocator, protocol);
-    }
-    if (protocol_value.items.len != 0) {
-        try fields.append(allocator, .{
+    };
+    field_index += 1;
+    if (protocol_value.value.len != 0) {
+        fields[field_index] = .{
             .name = "sec-websocket-protocol",
-            .value = protocol_value.items,
-        });
+            .value = protocol_value.value,
+        };
+        field_index += 1;
     }
     if (options.origin) |origin| {
-        try fields.append(allocator, .{ .name = "origin", .value = origin });
+        fields[field_index] = .{ .name = "origin", .value = origin };
+        field_index += 1;
     }
     if (options.enable_permessage_deflate) {
-        try fields.append(allocator, .{
+        fields[field_index] = .{
             .name = "sec-websocket-extensions",
             .value = "permessage-deflate; server_no_context_takeover; client_no_context_takeover",
-        });
+        };
+        field_index += 1;
     }
-    try fields.appendSlice(allocator, options.extra_headers);
+    @memcpy(fields[field_index..], options.extra_headers);
     if (deadline) |absolute| {
         // Header construction is local work but remains part of the caller's
         // operation. Do not emit CONNECT after its absolute budget elapsed.
@@ -1956,8 +2106,11 @@ fn connectAttemptEstablishedBefore(
         .path = options.path,
         .scheme = "https",
         .authority = options.authority,
-        .headers = fields.items,
+        .headers = fields,
     }, null);
+    errdefer if (restore_to != null) {
+        h3.abandonExtendedConnect(stream_id);
+    };
     var response = if (deadline) |absolute|
         try receiveResponseHeadWithDeadline(h3, stream_id, absolute)
     else
@@ -1966,12 +2119,33 @@ fn connectAttemptEstablishedBefore(
     if (!h3.control.settings.peer.enable_connect_protocol) {
         return error.ExtendedConnectDisabled;
     }
+    var body: []u8 = &.{};
+    var trailers: []http3.Qpack.HeaderField = &.{};
+    var stream_complete = false;
+    if (response.status < 200 or response.status >= 300) {
+        const rejection = try receiveRejectionBodyBefore(
+            h3,
+            stream_id,
+            response.content_length,
+            options.limits.max_rejection_body_bytes,
+            deadline,
+        );
+        body = rejection.body;
+        trailers = rejection.trailers;
+        stream_complete = true;
+    }
+    errdefer allocator.free(body);
+    errdefer http3.Qpack.freeDecodedFields(allocator, trailers);
     const owned_h3 = h3.*;
     h3.* = undefined;
     return .{
         .h3 = owned_h3,
+        .restore_to = restore_to,
         .stream_id = stream_id,
         .response = response,
+        .response_body = body,
+        .response_trailers = trailers,
+        .stream_complete = stream_complete,
         .options = options,
     };
 }
@@ -2010,14 +2184,9 @@ pub const Server = struct {
         self: *Server,
         options: AcceptOptions,
     ) Error!ServerConnection {
-        var h3 = try self.transport.accept();
-        errdefer h3.deinit();
-        return acceptServerSessionBefore(
-            self.transport.allocator,
-            &h3,
-            options,
-            null,
-        );
+        var pending = try self.receiveUpgradeRequest(options);
+        errdefer pending.deinit();
+        return pending.accept();
     }
 
     /// Carry one absolute deadline through QUIC/TLS, peer SETTINGS, the first
@@ -2031,14 +2200,12 @@ pub const Server = struct {
             self.transport.quic_server.endpoint.io,
             deadline,
         );
-        var h3 = try self.transport.acceptWithDeadline(absolute);
-        errdefer h3.deinit();
-        return acceptServerSessionBefore(
-            self.transport.allocator,
-            &h3,
+        var pending = try self.receiveUpgradeRequestWithDeadline(
             options,
             absolute,
         );
+        errdefer pending.deinit();
+        return pending.accept();
     }
 
     pub fn acceptWithTimeout(
@@ -2056,12 +2223,75 @@ pub const Server = struct {
         );
     }
 
+    /// Receive and validate an RFC 9220 CONNECT without sending 200. This
+    /// server-level form transfers the complete HTTP/3 session to the pending
+    /// decision, matching the ownership of `ServerConnection`.
+    pub fn receiveUpgradeRequest(
+        self: *Server,
+        options: AcceptOptions,
+    ) Error!PendingUpgrade {
+        var h3 = try self.transport.accept();
+        errdefer h3.deinit();
+        return receiveServerUpgradeBefore(
+            self.transport.allocator,
+            &h3,
+            options,
+            null,
+            null,
+        );
+    }
+
+    pub fn receiveUpgradeRequestWithDeadline(
+        self: *Server,
+        options: AcceptOptions,
+        deadline: std.Io.Clock.Timestamp,
+    ) Error!PendingUpgrade {
+        const absolute = try deadline_policy.usableAwake(
+            self.transport.quic_server.endpoint.io,
+            deadline,
+        );
+        var h3 = try self.transport.acceptWithDeadline(absolute);
+        errdefer h3.deinit();
+        return receiveServerUpgradeBefore(
+            self.transport.allocator,
+            &h3,
+            options,
+            absolute,
+            null,
+        );
+    }
+
+    pub fn receiveUpgradeRequestWithTimeout(
+        self: *Server,
+        options: AcceptOptions,
+        timeout: std.Io.Duration,
+    ) Error!PendingUpgrade {
+        if (timeout.nanoseconds <= 0) return error.Timeout;
+        return self.receiveUpgradeRequestWithDeadline(
+            options,
+            .fromNow(
+                self.transport.quic_server.endpoint.io,
+                .{ .raw = timeout, .clock = .awake },
+            ),
+        );
+    }
+
     pub fn acceptSession(
         allocator: std.mem.Allocator,
         h3: *http3.runtime.HandshakeServerSession,
         options: AcceptOptions,
     ) Error!ServerConnection {
-        return acceptServerSessionBefore(allocator, h3, options, null);
+        var pending = try receiveServerUpgradeBefore(
+            allocator,
+            h3,
+            options,
+            null,
+            h3,
+        );
+        return pending.accept() catch |err| {
+            pending.restoreSession();
+            return err;
+        };
     }
 
     pub fn acceptSessionWithDeadline(
@@ -2074,12 +2304,17 @@ pub const Server = struct {
             h3.established.connection.endpoint.io,
             deadline,
         );
-        return acceptServerSessionBefore(
+        var pending = try receiveServerUpgradeBefore(
             allocator,
             h3,
             options,
             absolute,
+            h3,
         );
+        return pending.accept() catch |err| {
+            pending.restoreSession();
+            return err;
+        };
     }
 
     pub fn acceptSessionWithTimeout(
@@ -2099,14 +2334,66 @@ pub const Server = struct {
             ),
         );
     }
+
+    pub fn receiveSessionUpgradeRequest(
+        allocator: std.mem.Allocator,
+        h3: *http3.runtime.HandshakeServerSession,
+        options: AcceptOptions,
+    ) Error!PendingUpgrade {
+        return receiveServerUpgradeBefore(
+            allocator,
+            h3,
+            options,
+            null,
+            h3,
+        );
+    }
+
+    pub fn receiveSessionUpgradeRequestWithDeadline(
+        allocator: std.mem.Allocator,
+        h3: *http3.runtime.HandshakeServerSession,
+        options: AcceptOptions,
+        deadline: std.Io.Clock.Timestamp,
+    ) Error!PendingUpgrade {
+        const absolute = try deadline_policy.usableAwake(
+            h3.established.connection.endpoint.io,
+            deadline,
+        );
+        return receiveServerUpgradeBefore(
+            allocator,
+            h3,
+            options,
+            absolute,
+            h3,
+        );
+    }
+
+    pub fn receiveSessionUpgradeRequestWithTimeout(
+        allocator: std.mem.Allocator,
+        h3: *http3.runtime.HandshakeServerSession,
+        options: AcceptOptions,
+        timeout: std.Io.Duration,
+    ) Error!PendingUpgrade {
+        if (timeout.nanoseconds <= 0) return error.Timeout;
+        return receiveSessionUpgradeRequestWithDeadline(
+            allocator,
+            h3,
+            options,
+            .fromNow(
+                h3.established.connection.endpoint.io,
+                .{ .raw = timeout, .clock = .awake },
+            ),
+        );
+    }
 };
 
-fn acceptServerSessionBefore(
+fn receiveServerUpgradeBefore(
     allocator: std.mem.Allocator,
     h3: *http3.runtime.HandshakeServerSession,
     options: AcceptOptions,
     deadline: ?std.Io.Clock.Timestamp,
-) Error!ServerConnection {
+    restore_to: ?*http3.runtime.HandshakeServerSession,
+) Error!PendingUpgrade {
     if (deadline) |absolute| {
         _ = try deadline_policy.usableAwake(
             h3.established.connection.endpoint.io,
@@ -2118,7 +2405,8 @@ fn acceptServerSessionBefore(
         try receiveRequestHeadWithDeadline(h3, absolute)
     else
         try receiveRequestHead(h3);
-    defer request.head.deinit(allocator);
+    errdefer request.head.deinit(allocator);
+    errdefer h3.rejectRequest(request.stream_id) catch {};
     try validateRequestHandshake(
         request.head,
         options.allowed_origins,
@@ -2129,62 +2417,261 @@ fn acceptServerSessionBefore(
         options.protocols,
     );
     errdefer if (selected_protocol) |protocol| allocator.free(protocol);
+    if (options.require_subprotocol and selected_protocol == null) {
+        return error.InvalidSubprotocol;
+    }
     const selected_extension = try acceptExtensions(
         allocator,
         request.head.headers,
         options.enable_permessage_deflate,
     );
-    defer if (selected_extension) |extension| allocator.free(extension);
+    errdefer if (selected_extension) |extension| allocator.free(extension);
     const negotiated_extension = if (selected_extension) |extension|
         try websocket.ExtensionNegotiation.validateResponse(extension)
     else
         websocket.ExtensionNegotiation{};
     try validateServerExtraHeaders(options.extra_headers);
-    var headers: std.ArrayList(http3.Qpack.HeaderField) = .empty;
-    defer headers.deinit(allocator);
-    if (selected_protocol) |protocol| {
-        try headers.append(allocator, .{
-            .name = "sec-websocket-protocol",
-            .value = protocol,
-        });
-    }
-    if (selected_extension) |extension| {
-        try headers.append(allocator, .{
-            .name = "sec-websocket-extensions",
-            .value = extension,
-        });
-    }
-    try headers.appendSlice(allocator, options.extra_headers);
-    if (deadline) |absolute| {
-        // Request validation and extension selection remain within the same
-        // admission budget; never send a successful response after expiry.
-        _ = try deadline_policy.usableAwake(
-            h3.established.connection.endpoint.io,
-            absolute,
-        );
-    }
-    try h3.startResponse(
-        request.stream_id,
-        .{
-            .status = 200,
-            .headers = headers.items,
-            .request_method = "CONNECT",
-            .extended_connect = true,
-        },
-        null,
-    );
     const owned_h3 = h3.*;
     h3.* = undefined;
-    return .init(
-        allocator,
-        request.stream_id,
-        owned_h3,
-        options.limits,
-        selected_protocol,
-        negotiated_extension,
-        options.compression_threshold,
-    );
+    return .{
+        .allocator = allocator,
+        .h3 = owned_h3,
+        .restore_to = restore_to,
+        .options = options,
+        .deadline = deadline,
+        .request = request,
+        .selected_protocol = selected_protocol,
+        .selected_extension = selected_extension,
+        .negotiated_extension = negotiated_extension,
+    };
 }
+
+/// A validated RFC 9220 request awaiting application admission. The value
+/// temporarily owns the complete HTTP/3 session because the current WebSocket
+/// adapter uses a single-owner QUIC receive loop. Caller-supplied sessions are
+/// restored after rejection or destruction; acceptance transfers ownership to
+/// the resulting WebSocket connection.
+pub const PendingUpgrade = struct {
+    allocator: std.mem.Allocator,
+    h3: http3.runtime.HandshakeServerSession,
+    restore_to: ?*http3.runtime.HandshakeServerSession = null,
+    options: AcceptOptions,
+    deadline: ?std.Io.Clock.Timestamp,
+    request: RequestHead,
+    selected_protocol: ?[]u8,
+    selected_extension: ?[]u8,
+    negotiated_extension: websocket.ExtensionNegotiation,
+
+    pub fn deinit(self: *PendingUpgrade) void {
+        self.h3.rejectRequest(self.request.stream_id) catch {};
+        self.finish(false);
+    }
+
+    fn restoreSession(self: *PendingUpgrade) void {
+        std.debug.assert(self.restore_to != null);
+        self.finish(false);
+    }
+
+    fn finish(self: *PendingUpgrade, drain_before_close: bool) void {
+        const allocator = self.allocator;
+        self.request.head.deinit(allocator);
+        if (self.selected_protocol) |protocol| allocator.free(protocol);
+        if (self.selected_extension) |extension| allocator.free(extension);
+        if (self.restore_to) |destination| {
+            destination.* = self.h3;
+        } else {
+            if (drain_before_close) {
+                if (self.deadline) |absolute| {
+                    self.h3.waitForRecoveryIdleWithDeadline(absolute) catch {};
+                } else {
+                    self.h3.waitForRecoveryIdleWithTimeout(
+                        rejection_drain_timeout,
+                    ) catch {};
+                }
+            }
+            self.h3.deinit();
+        }
+        self.* = undefined;
+    }
+
+    pub fn streamId(self: PendingUpgrade) u62 {
+        return self.request.stream_id;
+    }
+
+    pub fn target(self: PendingUpgrade) []const u8 {
+        return self.request.head.path;
+    }
+
+    pub fn authority(self: PendingUpgrade) ?[]const u8 {
+        return self.request.head.authority;
+    }
+
+    pub fn headers(self: PendingUpgrade) []const http3.Qpack.HeaderField {
+        return self.request.head.headers;
+    }
+
+    pub fn header(self: PendingUpgrade, name: []const u8) ?[]const u8 {
+        for (self.request.head.headers) |field| {
+            if (std.ascii.eqlIgnoreCase(field.name, name)) return field.value;
+        }
+        return null;
+    }
+
+    pub fn accept(self: *PendingUpgrade) Error!ServerConnection {
+        return self.acceptWithHeaders(&.{});
+    }
+
+    pub fn acceptWithHeaders(
+        self: *PendingUpgrade,
+        additional_headers: []const http3.Qpack.HeaderField,
+    ) Error!ServerConnection {
+        const allocator = self.allocator;
+        try validateServerExtraHeaders(additional_headers);
+        const application_count = std.math.add(
+            usize,
+            self.options.extra_headers.len,
+            additional_headers.len,
+        ) catch return error.PayloadTooLarge;
+        const header_count = std.math.add(
+            usize,
+            @as(usize, @intFromBool(self.selected_protocol != null)) +
+                @as(usize, @intFromBool(self.selected_extension != null)),
+            application_count,
+        ) catch return error.PayloadTooLarge;
+        var headers_stack: [handshake_storage.stack_capacity]http3.Qpack.HeaderField = undefined;
+        const response_headers = try handshake_storage.acquire(
+            http3.Qpack.HeaderField,
+            allocator,
+            &headers_stack,
+            header_count,
+        );
+        defer handshake_storage.release(
+            http3.Qpack.HeaderField,
+            allocator,
+            &headers_stack,
+            response_headers,
+        );
+        var header_index: usize = 0;
+        if (self.selected_protocol) |protocol| {
+            response_headers[header_index] = .{
+                .name = "sec-websocket-protocol",
+                .value = protocol,
+            };
+            header_index += 1;
+        }
+        if (self.selected_extension) |extension| {
+            response_headers[header_index] = .{
+                .name = "sec-websocket-extensions",
+                .value = extension,
+            };
+            header_index += 1;
+        }
+        @memcpy(
+            response_headers[header_index..][0..self.options.extra_headers.len],
+            self.options.extra_headers,
+        );
+        header_index += self.options.extra_headers.len;
+        @memcpy(response_headers[header_index..], additional_headers);
+        if (self.deadline) |absolute| {
+            // Request validation and extension selection remain within the same
+            // admission budget; never send a successful response after expiry.
+            _ = try deadline_policy.usableAwake(
+                self.h3.established.connection.endpoint.io,
+                absolute,
+            );
+        }
+        try self.h3.startResponse(
+            self.request.stream_id,
+            .{
+                .status = 200,
+                .headers = response_headers,
+                .request_method = "CONNECT",
+                .extended_connect = true,
+            },
+            null,
+        );
+        const stream_id = self.request.stream_id;
+        const options = self.options;
+        const selected_protocol = self.selected_protocol;
+        const negotiated_extension = self.negotiated_extension;
+        self.request.head.deinit(allocator);
+        if (self.selected_extension) |extension| allocator.free(extension);
+        const owned_h3 = self.h3;
+        self.* = undefined;
+        return .init(
+            allocator,
+            stream_id,
+            owned_h3,
+            options.limits,
+            selected_protocol,
+            negotiated_extension,
+            options.compression_threshold,
+        );
+    }
+
+    /// Send a header-only final non-2xx response on this CONNECT stream. Use
+    /// `rejectWithBody` when diagnostics require DATA or trailers.
+    pub fn reject(
+        self: *PendingUpgrade,
+        status: u16,
+        response_headers: []const http3.Qpack.HeaderField,
+    ) Error!void {
+        return self.rejectWithBody(
+            status,
+            response_headers,
+            &.{},
+            &.{},
+        );
+    }
+
+    /// Reject this CONNECT stream with an HTTP/3 response entity. Client-side
+    /// retention is governed by `Limits.max_rejection_body_bytes`.
+    pub fn rejectWithBody(
+        self: *PendingUpgrade,
+        status: u16,
+        response_headers: []const http3.Qpack.HeaderField,
+        body: []const u8,
+        trailers: []const http3.Qpack.HeaderField,
+    ) Error!void {
+        if (status < 300 or status > 599) return error.InvalidStatus;
+        try validateServerExtraHeaders(response_headers);
+        try validateServerExtraHeaders(trailers);
+        const response: http3.Response = .{
+            .status = status,
+            .headers = response_headers,
+            .body = body,
+            .trailers = trailers,
+            .request_method = "CONNECT",
+            .extended_connect = true,
+        };
+        if (self.deadline) |absolute| {
+            try self.h3.sendResponsePacedWithDeadline(
+                self.request.stream_id,
+                response,
+                absolute,
+            );
+        } else {
+            try self.h3.sendResponsePaced(
+                self.request.stream_id,
+                response,
+            );
+        }
+        try self.h3.finishRejectedRequest(self.request.stream_id);
+        self.finish(true);
+    }
+
+    pub fn forbidden(self: *PendingUpgrade) Error!void {
+        return self.reject(403, &.{});
+    }
+
+    pub fn notFound(self: *PendingUpgrade) Error!void {
+        return self.reject(404, &.{});
+    }
+
+    pub fn tooManyRequests(self: *PendingUpgrade) Error!void {
+        return self.reject(429, &.{});
+    }
+};
 
 const RequestHead = struct {
     stream_id: u62,
@@ -2258,6 +2745,7 @@ fn receiveResponseHeadBefore(
         switch (event) {
             .head => |*head| {
                 if (head.* != .response) return error.InvalidHandshake;
+                if (head.response.status < 200) continue;
                 const owned = head.response;
                 event = .finished;
                 return owned;
@@ -2265,6 +2753,96 @@ fn receiveResponseHeadBefore(
             else => return error.InvalidHandshake,
         }
     }
+}
+
+const RejectionEntity = struct {
+    body: []u8,
+    trailers: []http3.Qpack.HeaderField,
+};
+
+fn finalizeRejectionBody(
+    body: *std.ArrayList(u8),
+    allocator: std.mem.Allocator,
+    content_length: ?usize,
+) std.mem.Allocator.Error![]u8 {
+    if (content_length != null) return body.toOwnedSliceAssert();
+    return body.toOwnedSlice(allocator);
+}
+
+fn receiveRejectionBodyBefore(
+    h3: *http3.runtime.HandshakeClient,
+    stream_id: u62,
+    content_length: ?usize,
+    max_body_bytes: usize,
+    deadline: ?std.Io.Clock.Timestamp,
+) Error!RejectionEntity {
+    if ((content_length orelse 0) > max_body_bytes) {
+        return error.MessageTooLarge;
+    }
+    var body: std.ArrayList(u8) = .empty;
+    errdefer body.deinit(h3.allocator);
+    if (content_length) |expected| {
+        // A validated declared length lets fragmented DATA land in one exact
+        // allocation instead of repeatedly growing the retained rejection.
+        try body.ensureTotalCapacityPrecise(h3.allocator, expected);
+    }
+    var trailers: []http3.Qpack.HeaderField = &.{};
+    errdefer http3.Qpack.freeDecodedFields(h3.allocator, trailers);
+    var scratch: [16 * 1024]u8 = undefined;
+
+    while (true) {
+        var event = (if (deadline) |absolute|
+            try h3.receiveResponseEventWithDeadline(stream_id, absolute)
+        else
+            try h3.receiveResponseEvent(stream_id)) orelse continue;
+        defer event.deinit(h3.allocator);
+        switch (event) {
+            .data_available => {
+                const remaining = max_body_bytes -| body.items.len;
+                const read = try h3.readResponseData(
+                    stream_id,
+                    scratch[0..@min(scratch.len, remaining +| 1)],
+                );
+                if (read > remaining) return error.MessageTooLarge;
+                try body.appendSlice(h3.allocator, scratch[0..read]);
+            },
+            .trailers => |value| {
+                if (trailers.len != 0) return error.InvalidHandshake;
+                trailers = value.fields;
+                event = .finished;
+            },
+            .finished => break,
+            .push_promise => continue,
+            .head => return error.InvalidHandshake,
+        }
+    }
+    return .{
+        .body = try finalizeRejectionBody(
+            &body,
+            h3.allocator,
+            content_length,
+        ),
+        .trailers = trailers,
+    };
+}
+
+test "WebSocket H3 declared rejection body retains one exact allocation" {
+    const allocator = std.testing.allocator;
+    var tracking = std.testing.FailingAllocator.init(allocator, .{});
+    var body: std.ArrayList(u8) = .empty;
+    errdefer body.deinit(tracking.allocator());
+
+    try body.ensureTotalCapacityPrecise(tracking.allocator(), 9);
+    try body.appendSlice(tracking.allocator(), "try");
+    try body.appendSlice(tracking.allocator(), " later");
+    const owned = try finalizeRejectionBody(
+        &body,
+        tracking.allocator(),
+        9,
+    );
+    defer tracking.allocator().free(owned);
+    try std.testing.expectEqualStrings("try later", owned);
+    try std.testing.expectEqual(@as(usize, 1), tracking.allocations);
 }
 
 fn validateRequestHandshake(
@@ -2321,38 +2899,11 @@ fn selectSubprotocol(
     headers: []const http3.Qpack.HeaderField,
     supported: []const []const u8,
 ) Error!?[]u8 {
-    try validateProtocols(supported);
-    var selected: ?[]const u8 = null;
-    var seen: std.ArrayList([]const u8) = .empty;
-    defer seen.deinit(allocator);
-    for (headers) |header| {
-        if (!std.ascii.eqlIgnoreCase(
-            header.name,
-            "sec-websocket-protocol",
-        )) continue;
-        var requested = std.mem.splitScalar(u8, header.value, ',');
-        while (requested.next()) |raw| {
-            const candidate = std.mem.trim(u8, raw, " \t");
-            if (!websocket.validSubprotocolToken(candidate)) {
-                return error.InvalidSubprotocol;
-            }
-            for (seen.items) |previous| {
-                if (std.mem.eql(u8, previous, candidate)) {
-                    return error.InvalidSubprotocol;
-                }
-            }
-            try seen.append(allocator, candidate);
-            if (selected != null) continue;
-            for (supported) |protocol| {
-                if (std.mem.eql(u8, candidate, protocol)) {
-                    selected = protocol;
-                    break;
-                }
-            }
-        }
-    }
-    if (selected) |protocol| return try allocator.dupe(u8, protocol);
-    return null;
+    return handshake_headers.selectSubprotocol(
+        allocator,
+        headers,
+        supported,
+    );
 }
 
 fn validateProtocols(protocols: []const []const u8) Error!void {
@@ -2387,6 +2938,7 @@ fn validateOrigin(
     headers: []const http3.Qpack.HeaderField,
     allowed: []const []const u8,
 ) Error!void {
+    if (allowed.len == 0) return;
     const origin = try optionalHeader(headers, "origin");
     return origin_policy.validateValue(origin, allowed);
 }
@@ -2461,15 +3013,6 @@ fn optionalHeader(
     return found;
 }
 
-fn fragmentedPayloadLen(fragments: []const []const u8) Error!usize {
-    var total: usize = 0;
-    for (fragments) |fragment| {
-        total = std.math.add(usize, total, fragment.len) catch
-            return error.PayloadTooLarge;
-    }
-    return total;
-}
-
 fn validateFragmentedText(fragments: []const []const u8) bool {
     var validator: websocket.Utf8Validator = .{};
     for (fragments) |fragment| validator.feed(fragment) catch return false;
@@ -2493,7 +3036,7 @@ fn compressedFragmentRange(
     return .{ .start = start, .end = start + len };
 }
 
-pub const testing = struct {
+pub const testing = if (builtin.is_test) struct {
     pub const FragmentRangeForTest = FragmentRange;
 
     pub fn validateBinaryInPlace(
@@ -2525,4 +3068,4 @@ pub const testing = struct {
     ) FragmentRangeForTest {
         return compressedFragmentRange(total_len, frame_count, index);
     }
-};
+} else struct {};

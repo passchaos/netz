@@ -1,4 +1,6 @@
 test {
+    _ = @import("datagram_queue.zig");
+    _ = @import("frame_traits.zig");
     _ = @import("basic.zig");
     _ = @import("crypto_path.zig");
     _ = @import("handshake_status.zig");

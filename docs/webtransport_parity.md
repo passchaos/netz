@@ -106,7 +106,7 @@ WebTransport DATAGRAM round trip and transport statistics.
 
 | Area | netz | `~/Work/quicz` | `~/Work/wtransport` |
 | --- | --- | --- | --- |
-| CONNECT / SETTINGS | Handshake, protected and dev runtimes; every server exposes a two-phase request object with authority/path/origin/header inspection, custom success headers, and typed 403/404/429 or generic 3xx-5xx rejection. Every client can send validated custom CONNECT headers, retain accepted response metadata, and opt into an attempt API that preserves non-2xx status and headers. Handshake and protected CONNECT streams remain open for Capsule Protocol traffic | Codec/session helpers | Production async endpoint/session with request inspection and accept/reject methods |
+| CONNECT / SETTINGS | Handshake, protected and dev runtimes; every server exposes a two-phase request object with authority/path/origin/header inspection, custom success headers, and typed 403/404/429 or generic 3xx-5xx rejection. Every client can send validated custom CONNECT headers, retain accepted response metadata, and opt into an attempt API that preserves non-2xx status, headers, bounded DATA, and trailers. Every pending server type can emit the complete rejection entity. CONNECT metadata uses a 16-field stack-first view with exact allocation fallback instead of fixed 57/62 additional-field ceilings; SETTINGS_MAX_FIELD_SECTION_SIZE remains the byte limit. Handshake and protected CONNECT streams remain open for Capsule Protocol traffic | Codec/session helpers | Production async endpoint/session with request inspection and accept/reject methods |
 | DATAGRAM | Dev, protected, real-handshake, batch receive, payload budget/stats | Codec/session counters | Production send/receive |
 | Bidirectional streams | Real-handshake open/send, reverse direction, whole-FIN compatibility receive plus caller-buffer incremental reads, reset/stop, lifecycle/limits and per-send-stream priority; the cleartext development runtime also supports both initiators, reverse-direction data, fragmented modern `0x41` association, coordinated IDs, per-session limits, and timeout/deadline-bounded whole-FIN receive; standalone handshake sessions expose timeout/deadline-bounded opens backed by QUIC stream credit; bounded batch writes select higher-priority streams first with stable equal-priority order; a concurrent sibling survives cancellation loss in external interop | Session registry and old-draft prefix codec | Production async bidi streams with read/reset/stop and Quinn-backed send priority; interoperates with netz while another stream is being cancelled |
 | Unidirectional streams | Real-handshake both directions, incremental reads, mapped reset/stop, lifecycle/limits and send priority; the cleartext development runtime supports both initiators, fragmented `0x54` association, coordinated IDs, per-session limits, and timeout/deadline-bounded whole-FIN receive; standalone handshake sessions expose timeout/deadline-bounded opens backed by QUIC stream credit; external interop drops netz's first STOP_SENDING and requires exact-code peer observation after recovery | Session registry and header codec | Production async uni streams with read/reset/stop and send priority; exact mapped codes are verified against netz |
@@ -128,6 +128,22 @@ shared HTTP/3 stream-ID cursors, bounded FIN-complete reassembly, and
 `StreamRegistry` local/peer limits. The development surface intentionally
 does not claim the stateful runtime's flow control, recovery, incremental
 reads, RESET_STREAM, or STOP_SENDING guarantees. It remains a deterministic
+adapter for codec, routing, and lifecycle integration tests.
+
+CONNECT request and success-response assembly is centralized under
+`runtime/connect/headers.zig`. Common requests stay on a 16-field stack buffer;
+larger valid sets allocate exactly once, with allocation failure occurring
+before a 2xx response can become observable. Development, lightweight
+protected, and authenticated handshake tests each exchange 80 request and 80
+response application fields. Protected and handshake cases use an explicit
+1200-byte datagram limit and never-indexed 64-byte values, exercising real
+STREAM fragmentation instead of relying on repeated-field compression. A
+separate small-budget test rejects the same
+shape with `ExcessiveLoad`, confirming that the protocol boundary is the peer's
+`SETTINGS_MAX_FIELD_SECTION_SIZE`, not an adapter-specific field count. The
+admission and capacity tests live beside that helper under `runtime/connect/`
+instead of adding more flat runtime siblings.
+
 development/test transport with no QUIC handshake, authentication, encryption,
 or congestion recovery; production users should use the handshake-backed
 runtime.
@@ -156,6 +172,21 @@ absolute application deadline spans unrelated QUIC packets while earlier PTO,
 delayed-ACK, keep-alive, path-validation, idle and close timers continue to
 run; neither transport maintenance nor control traffic renews the caller's
 budget.
+Authenticated standalone sessions now expose symmetric
+`sendDatagramWithTimeout` / `sendDatagramWithDeadline` calls. They wait for
+QUIC congestion and pacing capacity while using the existing HTTP/3 packet
+visitor, so ACK progress cannot bypass control/QPACK, associated DATAGRAM, or
+detached CONNECT routing. Timeout retains no hidden application queue and does
+not increment the sent-DATAGRAM count; callers may retry explicitly. The
+stateful protected client facade forwards the same API. Shared-endpoint
+sessions instead expose `trySendDatagramWithTimeout` /
+`trySendDatagramWithDeadline`: these never read the shared UDP socket and
+return `CongestionLimited` so the sole `EndpointServer.receive*` owner can
+route more packets before retrying the same absolute deadline. The underlying
+QUIC recovery path also distinguishes ACK-eliciting, in-flight DATAGRAM
+packets from retransmittable payload: a lost pure DATAGRAM causes a fresh PING
+PTO probe, while a mixed STREAM+DATAGRAM packet retains only the reliable
+frames. RFC 9221 application bytes are never replayed.
 Standalone `HandshakeClientSession` and `AcceptedHandshakeSession` stream opens
 now have matching timeout and absolute-deadline forms. Registry capacity and
 the cumulative per-session WebTransport limit are preflighted before either a
@@ -166,8 +197,11 @@ invalid/expired deadline consumes neither registry state nor transport ID; the
 focused stateful-preconfigured test also covers successful bounded opens when
 initial transport credit is available. QUIC-level tests separately exercise an
 actual wait for a cumulative `MAX_STREAMS` update. Standalone sessions expose
-`releaseCompletedPeerStream` to return terminal peer stream credit while
-retaining cumulative WebTransport registry accounting. The endpoint-accepted
+`releaseCompletedPeerStream` to request terminal peer stream credit while
+retaining cumulative WebTransport registry accounting. Bidirectional credit is
+emitted only after the local FIN/RESET and preceding reliable data are
+acknowledged; an early request is completed automatically by the QUIC ACK path.
+The endpoint-accepted
 variant is deliberately nonblocking: it only inspects buffered state, sends a
 credit update when ready, and refreshes the dispatcher timer without reading
 UDP. It now forwards the same authenticated metadata that is valid on the
@@ -248,6 +282,16 @@ stream through QUIC's stateful packet batch, orders candidates by signed stream
 priority with stable equal-priority ordering, and commits registry/caller offsets
 only for the socket-visible prefix. This provides allocation-free concurrent
 stream progress without hiding flow control behind per-stream write-all tasks.
+Batch duplicate validation and selected membership use generation marks stored
+with the registry's existing stream index, so validation is O(streams), adds no
+temporary allocation, and still rejects every item before association-prefix
+I/O. Prefix setup retains dynamic per-selection credit checks; once all prefixes
+are present, the steady path scans credit once and maintains a fixed top-64
+stable priority window instead of repeatedly rescanning all writes. Marking a
+stream before prefix transmission also prevents a high-priority prefix that
+exhausts its stream window from being selected forever in the same batch. The
+implementation and focused white-box tests are grouped under
+`runtime/stream/batch.zig` and `runtime/stream/tests/batch.zig`.
 The runtime maps
 WebTransport's 32-bit application error space into HTTP/3 codes while skipping
 reserved codepoints and exposes both mapped and raw values on receive.
@@ -288,6 +332,11 @@ streams, 1-MiB per-stream windows and 8-KiB datagrams measured 188-195 MiB/s
 aggregate, versus the obsolete 26 MiB/s result from the 128-KiB connection-
 credit/4-KiB-datagram configuration. Batch validation occurs before any
 association prefix is sent, so a bad later stream cannot expose a partial batch.
+A CPU-0 64-stream smoke transferred and verified 1 MiB with 320 partial writes
+and checksum 133,693,440 after the indexed validation/selection change. Repeated
+fixed-binary samples varied from 19 to 40 MiB/s under host scheduling noise, so
+they are retained only as completion and no-deadlock evidence rather than a new
+throughput baseline.
 
 Accepted stateful server sessions and authenticated/stateful client sessions
 now expose dispatcher-oriented
@@ -365,6 +414,24 @@ that stream:
   every non-terminal associated stream direction.
 - malformed close length/UTF-8 resets the CONNECT stream with H3_MESSAGE_ERROR.
 
+Local session close now treats CONNECT as a bidirectional stream rather than
+retiring its association when the local FIN is submitted. Client, standalone
+server, and shared-endpoint server sessions retain receive routing until the
+peer CLOSE/FIN/reset is consumed, so a caller can send CLOSE and then await the
+peer's terminal acknowledgement without `UnexpectedStream`. New streams and
+DATAGRAM sends still fail immediately through the closed session state. Shared
+endpoint sessions remain addressable until explicit connection removal; after
+their terminal event is delivered they stop producing application events but
+retain detached HTTP/3 routing for late ACK/terminal packets. Association
+storage is finally released by session or endpoint teardown; until then its
+stable terminal state rejects receives precisely and drops late datagrams.
+Packet routing records FIN, RESET_STREAM, and connection close even when a
+packet carries no DATAGRAM, so a DATAGRAM arriving in a later packet is dropped
+before queue allocation. The client paced-send progress path also carries the
+complete detached-association registry: if a CLOSE/FIN arrives while a request
+body or close capsule is blocked on QUIC flow control, it remains owned by the
+WebTransport control reader while MAX_STREAM_DATA can unblock the send.
+
 The CONNECT stream uses a fixed-size incremental state machine. HTTP/3 DATA
 frame headers and Capsule Protocol varints may split at any byte boundary;
 unknown capsule values are skipped without allocation or whole-value buffering.
@@ -391,6 +458,11 @@ maximum legal CLOSE capsule and retains bytes after the first event, including
 DRAIN and a 1024-byte-reason CLOSE in one DATA payload. Clean FIN maps to
 close code zero; partial capsules at FIN fail, malformed capsules cancel the
 request with H3_MESSAGE_ERROR, and operations after local close fail.
+Lightweight protected server session reads are now targeted by CONNECT stream
+ID, matching the development and stateful transports. A ready ordinary HTTP/3
+sibling remains buffered for its own consumer instead of being mistaken for
+invalid WebTransport control data; the protected end-to-end test interleaves
+that sibling and completes both exchanges independently.
 
 The protected end-to-end test fragments HTTP/3 across five-byte QUIC STREAM
 payloads, receives DRAIN, exchanges a DATAGRAM after that advisory event,
@@ -399,6 +471,32 @@ with FIN. Thus a pass cannot be explained by a CONNECT stream that ended
 immediately after status 200. Associated bidi/uni streams and SESSION_GONE
 cleanup remain on the production-oriented handshake runtime because the
 lightweight protected transport does not own a stateful recovery connection.
+
+All client attempt types retain the non-2xx body and trailers under
+`Limits.max_rejection_body_bytes`; declared-length and unknown-length overflow
+cancel the incomplete CONNECT, while a complete entity needs no contradictory
+reset. A declared Content-Length reserves the retained body exactly once, so
+fragmented rejection DATA does not geometrically grow its allocation;
+unknown-length entities retain the bounded incremental path. The development
+and lightweight protected pending types expose matching
+`rejectWithBody` helpers, including automatic Content-Length and trailers, and
+dropping a protected pending decision retires its bounded H3 request state.
+Authenticated clients can also open WebTransport through a caller-owned HTTP/3
+session with `connectSession*` and `connectSessionAttempt*`. Ownership is moved
+only while the attempt is live: success transfers the H3 session into the
+WebTransport session, while a complete rejection restores the caller's session
+without an extra cancellation. Legacy helpers still return `SessionRejected`,
+but only after draining the entity. The authenticated pending server API uses
+the HTTP/3 paced writer for the same complete rejection entity. A
+dispatcher pending attempt waits for the complete rejection and preserves DATA
+already coalesced behind the head. Real QUIC/TLS regressions cover explicit and
+legacy rejection, body/trailer ownership, overflow, and a successful sibling
+request on the reused connection. Server-side `acceptSession*` and
+`receiveSessionRequestFromSession*` provide the symmetric caller-owned entry
+points: an accepted session keeps ownership, while explicit rejection returns
+the H3 session when its `RejectedHandshakeSession` is destroyed and dropping a
+pending decision rejects only that CONNECT before restoring the session. A
+real handshake test exercises both outcomes and then serves a sibling request.
 
 ## Remaining gaps
 
@@ -410,9 +508,10 @@ lightweight protected transport does not own a stateful recovery connection.
    retains that timestamp while routing unrelated connections, completing
    handshakes, and servicing transport timers. Its relative-timeout wrapper
    converts once at entry and follows the same path.
-2. Expose associated bidi/uni stream APIs on preconfigured protected and
-   development runtimes. Protected CONNECT/Capsule lifecycle is now
-   long-lived, but the lightweight protected HTTP/3 runtime deliberately lacks
+2. Expose associated bidi/uni stream APIs on the lightweight preconfigured
+   protected runtime. The development runtime now has peer-and-session-routed
+   bidi/uni APIs, while protected CONNECT/Capsule lifecycle is long-lived but
+   its lightweight HTTP/3 transport deliberately lacks
    a full `one_rtt.Connection`; association streams must not be advertised
    until ACK, recovery, flow control and reset/stop state share one connection
    owner. Its existing session-control path now has timeout and absolute-
@@ -470,3 +569,11 @@ lightweight protected transport does not own a stateful recovery connection.
    three times under reordering. It requires exact delivered-byte/reset
    accounting and at least one injected fault per run. This is
    lifecycle/recovery evidence rather than a cross-stack throughput comparison.
+
+The whole-stream and caller-buffer incremental receive pollers enumerate QUIC
+receive streams through a fixed 256-ID stack page, but that page is not a
+protocol limit. Dedicated regressions populate 256 unrelated peer streams and
+place the matching WebTransport stream in the next physical table slot. Both
+the whole-stream poller and the incremental poller find the second-page target;
+the latter also starts from a stale round-robin cursor and proves the wrapped
+scan still crosses the page boundary.

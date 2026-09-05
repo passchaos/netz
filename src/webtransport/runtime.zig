@@ -6,14 +6,19 @@ const round_robin = @import("../internal/round_robin.zig");
 const deadline_policy = @import("../internal/deadline.zig");
 
 const net = std.Io.net;
-const datagram_stack_capacity: usize = 4096;
+const connect_headers = @import("runtime/connect/headers.zig");
+const datagram_codec = @import("runtime/datagram/codec.zig");
+const datagram_owned = @import("runtime/datagram/owned.zig");
+const datagram_send = @import("runtime/datagram/send.zig");
 const session_control = @import("runtime/session_control.zig");
 const protected_control =
     @import("runtime/protected_session_control.zig");
-const stream_batch = @import("runtime/stream_batch.zig");
+const stream_batch = @import("runtime/stream/batch.zig");
 const development_stream = @import("runtime/development_stream.zig");
 
 test {
+    _ = @import("runtime/connect/admission_tests.zig");
+    _ = @import("runtime/connect/capacity_tests.zig");
     _ = @import("runtime/endpoint_dispatcher_tests.zig");
     _ = @import("runtime/endpoint_server_tests.zig");
     _ = @import("runtime/development_lifecycle_tests.zig");
@@ -23,6 +28,7 @@ test {
 pub const Error = webtransport.Error || http3.runtime.Error ||
     quic.runtime.ReceiveTimeoutError || error{
     InvalidConnect,
+    MessageTooLarge,
     SessionRejected,
     MissingDatagram,
     InvalidSessionState,
@@ -37,13 +43,12 @@ pub const HandshakeFailure = http3.runtime.HandshakeFailure;
 pub const Limits = struct {
     http3: http3.runtime.Limits = .{},
     max_session_streams: usize = 128,
+    /// Maximum response-body bytes retained from a rejected Extended CONNECT
+    /// across the development, protected, and authenticated runtimes.
+    /// Successful sessions are unaffected.
+    max_rejection_body_bytes: usize = 1024 * 1024,
 };
 
-// HTTP/3's request/response convenience encoders use a 64-field stack array.
-// Leave room for four request pseudo-fields or the response :status field,
-// plus the protocol fields inserted by this adapter.
-const max_additional_connect_request_headers: usize = 57;
-const max_additional_connect_response_headers: usize = 62;
 pub const max_connection_close_reason: usize = 1024;
 
 pub const Server = struct {
@@ -403,6 +408,14 @@ pub const ProtectedServer = struct {
         errdefer request_head.deinit(
             self.h3.quic_server.endpoint.allocator,
         );
+        // The protected H3 parser has already admitted this stream. Retire it
+        // if WebTransport-specific validation fails so malformed CONNECTs do
+        // not pin bounded request state until server teardown.
+        errdefer self.h3.rejectRequest(
+            request.from,
+            request.stream_id,
+        ) catch {};
+        try validateConnectRequest(request_head);
         try webtransport.ensureDatagramsNegotiated(self.h3.config.local_settings, self.h3.control.settings.peer);
         const session_id = webtransport.SessionId.init(request.stream_id);
         if (!session_id.isClientInitiatedBidirectional()) return error.InvalidConnect;
@@ -536,16 +549,17 @@ pub const ProtectedServer = struct {
     ) ReceiveTimeoutError!ProtectedSessionRead {
         while (true) {
             var event = if (deadline) |absolute|
-                try self.h3.receiveRequestEventWithDeadline(absolute)
+                try self.h3.receiveRequestEventForWithDeadline(
+                    session_id.value,
+                    absolute,
+                )
             else
-                try self.h3.receiveRequestEvent();
+                try self.h3.receiveRequestEventFor(session_id.value);
             defer event.deinit(self.h3.quic_server.endpoint.allocator);
             switch (event) {
                 .reset => return error.InvalidSessionState,
                 .message => |message| {
-                    if (message.stream_id != session_id.value) {
-                        return error.InvalidSessionState;
-                    }
+                    std.debug.assert(message.stream_id == session_id.value);
                     switch (message.value) {
                         .data_available => {
                             const count = try self.h3.readRequestData(
@@ -624,15 +638,20 @@ pub const PendingSession = struct {
         self: *PendingSession,
         additional_headers: []const http3.Qpack.HeaderField,
     ) Error!AcceptedSession {
-        try validateAdditionalConnectHeaders(additional_headers, .response);
-        var response_headers: [max_additional_connect_response_headers + 1]http3.Qpack.HeaderField = undefined;
-        response_headers[0] = http3.capsule.protocol_header;
-        @memcpy(response_headers[1..][0..additional_headers.len], additional_headers);
+        const allocator = self.server.h3.quic_server.endpoint.allocator;
+        var header_stack: [connect_headers.stack_capacity]http3.Qpack.HeaderField =
+            undefined;
+        var prepared_headers = try connect_headers.prepareResponse(
+            allocator,
+            additional_headers,
+            &header_stack,
+        );
+        defer prepared_headers.deinit(allocator);
         // Allocate every fallible per-session resource before the success
         // response becomes observable. A failure therefore leaves the pending
         // request rejectable instead of advertising an unusable session.
         var streams = try initDevelopmentStreamRegistry(
-            self.server.h3.quic_server.endpoint.allocator,
+            allocator,
             self.session_id,
             .server,
             self.server.max_session_streams,
@@ -644,9 +663,7 @@ pub const PendingSession = struct {
         try self.server.h3.startResponse(
             self.request.from,
             self.request.stream_id,
-            connectResponseWithHeaders(
-                response_headers[0 .. additional_headers.len + 1],
-            ),
+            connectResponseWithHeaders(prepared_headers.fields),
             null,
         );
         const server = self.server;
@@ -669,21 +686,43 @@ pub const PendingSession = struct {
         status: u16,
         response_headers: []const http3.Qpack.HeaderField,
     ) Error!RejectedSession {
+        return self.rejectWithBody(
+            status,
+            response_headers,
+            &.{},
+            &.{},
+        );
+    }
+
+    pub fn rejectWithBody(
+        self: *PendingSession,
+        status: u16,
+        response_headers: []const http3.Qpack.HeaderField,
+        body: []const u8,
+        trailers: []const http3.Qpack.HeaderField,
+    ) Error!RejectedSession {
         if (status < 300 or status > 599) return error.InvalidStatus;
         try validateAdditionalConnectHeaders(response_headers, .response);
-        // This request entered H3's persistent-streaming mode. Use its matching
-        // response path rather than the aggregate sender, then release the
-        // retained request/parser state after the final response is committed.
-        try self.server.h3.startResponse(
+        try validateAdditionalConnectHeaders(trailers, .response);
+        try self.server.h3.sendResponse(
             self.request.from,
             self.request.stream_id,
-            .{ .status = status, .headers = response_headers },
-            0,
+            .{
+                .status = status,
+                .headers = response_headers,
+                .body = body,
+                .trailers = trailers,
+                .request_method = "CONNECT",
+                .extended_connect = true,
+            },
         );
-        try self.server.h3.finishRequest(
+        // The complete final response is now observable, so cleanup must not
+        // turn this into an error that makes a caller's pending defer emit a
+        // contradictory cancellation. Missing state is already retired.
+        self.server.h3.finishRequest(
             self.request.from,
             self.request.stream_id,
-        );
+        ) catch {};
         const request = self.request;
         const session_id = self.session_id;
         self.* = undefined;
@@ -729,6 +768,12 @@ pub const PendingProtectedSession = struct {
     session_id: webtransport.SessionId,
 
     pub fn deinit(self: *PendingProtectedSession) void {
+        // Dropping an admission decision rejects the persistent CONNECT and
+        // releases its protected H3 parser/lifecycle state.
+        self.server.h3.rejectRequest(
+            self.request.from,
+            self.request.stream_id,
+        ) catch {};
         self.request.deinit(
             self.server.h3.quic_server.endpoint.allocator,
         );
@@ -771,18 +816,21 @@ pub const PendingProtectedSession = struct {
         self: *PendingProtectedSession,
         additional_headers: []const http3.Qpack.HeaderField,
     ) Error!AcceptedProtectedSession {
-        try validateAdditionalConnectHeaders(additional_headers, .response);
-        var response_headers: [max_additional_connect_response_headers + 1]http3.Qpack.HeaderField = undefined;
-        response_headers[0] = http3.capsule.protocol_header;
-        @memcpy(response_headers[1..][0..additional_headers.len], additional_headers);
+        const allocator = self.server.h3.quic_server.endpoint.allocator;
+        var header_stack: [connect_headers.stack_capacity]http3.Qpack.HeaderField =
+            undefined;
+        var prepared_headers = try connect_headers.prepareResponse(
+            allocator,
+            additional_headers,
+            &header_stack,
+        );
+        defer prepared_headers.deinit(allocator);
         // Extended CONNECT is the session control stream. Keep both
         // directions open; aggregate sendResponse would terminate it.
         try self.server.h3.startResponse(
             self.request.from,
             self.request.stream_id,
-            connectResponseWithHeaders(
-                response_headers[0 .. additional_headers.len + 1],
-            ),
+            connectResponseWithHeaders(prepared_headers.fields),
             null,
         );
         const request = self.request;
@@ -802,13 +850,39 @@ pub const PendingProtectedSession = struct {
         status: u16,
         response_headers: []const http3.Qpack.HeaderField,
     ) Error!RejectedProtectedSession {
+        return self.rejectWithBody(
+            status,
+            response_headers,
+            &.{},
+            &.{},
+        );
+    }
+
+    pub fn rejectWithBody(
+        self: *PendingProtectedSession,
+        status: u16,
+        response_headers: []const http3.Qpack.HeaderField,
+        body: []const u8,
+        trailers: []const http3.Qpack.HeaderField,
+    ) Error!RejectedProtectedSession {
         if (status < 300 or status > 599) return error.InvalidStatus;
         try validateAdditionalConnectHeaders(response_headers, .response);
+        try validateAdditionalConnectHeaders(trailers, .response);
         try self.server.h3.sendResponse(
             self.request.from,
             self.request.stream_id,
-            .{ .status = status, .headers = response_headers },
+            .{
+                .status = status,
+                .headers = response_headers,
+                .body = body,
+                .trailers = trailers,
+                .request_method = "CONNECT",
+                .extended_connect = true,
+            },
         );
+        // Preserve the wire-visible rejection as the terminal decision even
+        // when its request bookkeeping was already retired by the writer.
+        self.server.h3.finishRequest(self.request.stream_id) catch {};
         const request = self.request;
         const session_id = self.session_id;
         self.* = undefined;
@@ -1273,6 +1347,94 @@ pub const HandshakeServer = struct {
             .{ .raw = timeout, .clock = .awake },
         ));
     }
+
+    pub fn acceptSession(
+        h3: *http3.runtime.HandshakeServerSession,
+        limits: Limits,
+    ) Error!AcceptedHandshakeSession {
+        var pending = try receiveSessionRequestFromSession(h3, limits);
+        return pending.accept() catch |err| {
+            pending.restoreSession();
+            return err;
+        };
+    }
+
+    pub fn acceptSessionWithDeadline(
+        h3: *http3.runtime.HandshakeServerSession,
+        limits: Limits,
+        deadline: std.Io.Clock.Timestamp,
+    ) ReceiveTimeoutError!AcceptedHandshakeSession {
+        var pending = try receiveSessionRequestFromSessionWithDeadline(
+            h3,
+            limits,
+            deadline,
+        );
+        return pending.accept() catch |err| {
+            pending.restoreSession();
+            return err;
+        };
+    }
+
+    pub fn acceptSessionWithTimeout(
+        h3: *http3.runtime.HandshakeServerSession,
+        limits: Limits,
+        timeout: std.Io.Duration,
+    ) ReceiveTimeoutError!AcceptedHandshakeSession {
+        if (timeout.nanoseconds <= 0) return error.Timeout;
+        return acceptSessionWithDeadline(
+            h3,
+            limits,
+            .fromNow(h3.established.connection.endpoint.io, .{
+                .raw = timeout,
+                .clock = .awake,
+            }),
+        );
+    }
+
+    pub fn receiveSessionRequestFromSession(
+        h3: *http3.runtime.HandshakeServerSession,
+        limits: Limits,
+    ) Error!PendingHandshakeSession {
+        return receiveStatefulSessionRequestBefore(
+            h3,
+            limits,
+            null,
+            h3,
+        );
+    }
+
+    pub fn receiveSessionRequestFromSessionWithDeadline(
+        h3: *http3.runtime.HandshakeServerSession,
+        limits: Limits,
+        deadline: std.Io.Clock.Timestamp,
+    ) ReceiveTimeoutError!PendingHandshakeSession {
+        const absolute = try deadline_policy.usableAwake(
+            h3.established.connection.endpoint.io,
+            deadline,
+        );
+        return receiveStatefulSessionRequestBefore(
+            h3,
+            limits,
+            absolute,
+            h3,
+        );
+    }
+
+    pub fn receiveSessionRequestFromSessionWithTimeout(
+        h3: *http3.runtime.HandshakeServerSession,
+        limits: Limits,
+        timeout: std.Io.Duration,
+    ) ReceiveTimeoutError!PendingHandshakeSession {
+        if (timeout.nanoseconds <= 0) return error.Timeout;
+        return receiveSessionRequestFromSessionWithDeadline(
+            h3,
+            limits,
+            .fromNow(h3.established.connection.endpoint.io, .{
+                .raw = timeout,
+                .clock = .awake,
+            }),
+        );
+    }
 };
 
 /// In-progress WebTransport admission after QUIC/TLS has completed.
@@ -1336,11 +1498,12 @@ pub const HandshakeAdmission = struct {
                         message.value = .finished;
                         const h3 = self.h3;
                         const limits = self.limits;
+                        const deadline = self.deadline;
                         self.* = undefined;
                         return .{ .h3 = h3, .limits = limits, .request = .{
                             .stream_id = message.stream_id,
                             .request = request,
-                        }, .session_id = session_id };
+                        }, .session_id = session_id, .deadline = deadline };
                     },
                     else => return error.InvalidConnect,
                 },
@@ -1491,6 +1654,41 @@ pub const EndpointAcceptedSession = struct {
         );
         try self.h3.sendConnectDatagram(self.session_id.value, payload);
         try self.refreshTimer();
+    }
+
+    /// Attempt one bounded DATAGRAM send without reading the endpoint's shared
+    /// UDP socket. If congestion is exhausted, callers must continue driving
+    /// `EndpointServer.receive*` and retry before the same deadline; this
+    /// preserves the dispatcher's single-owner routing invariant.
+    pub fn trySendDatagramWithTimeout(
+        self: *EndpointAcceptedSession,
+        payload: []const u8,
+        timeout: std.Io.Duration,
+    ) EndpointServerError!void {
+        if (timeout.nanoseconds <= 0) return error.Timeout;
+        return self.trySendDatagramWithDeadline(payload, .fromNow(
+            self.h3.established.connection.endpoint.io,
+            .{ .raw = timeout, .clock = .awake },
+        ));
+    }
+
+    pub fn trySendDatagramWithDeadline(
+        self: *EndpointAcceptedSession,
+        payload: []const u8,
+        deadline: std.Io.Clock.Timestamp,
+    ) EndpointServerError!void {
+        try self.control.ensureOpen();
+        try webtransport.ensureDatagramsNegotiated(
+            self.h3.options.local_settings,
+            self.h3.control.settings.peer,
+        );
+        const result = self.h3.trySendConnectDatagramWithDeadline(
+            self.session_id.value,
+            payload,
+            deadline,
+        );
+        try self.refreshTimer();
+        try result;
     }
 
     pub fn openBidirectionalStream(
@@ -1730,12 +1928,10 @@ pub const EndpointAcceptedSession = struct {
             capsule,
             true,
         );
-        self.h3.closeConnectDatagramAssociation(
-            self.session_id.value,
-        ) catch |err| switch (err) {
-            error.UnexpectedStream => {},
-            else => return err,
-        };
+        // Local FIN closes only our send direction. Keep the CONNECT
+        // association registered until the peer's receive direction reaches
+        // FIN/reset so the endpoint can still route its close acknowledgement
+        // and any datagram that preceded that terminal signal.
         try self.control.recordLocalClose(code);
         try session_control.terminateStreams(
             &self.h3.established.connection,
@@ -1936,13 +2132,14 @@ pub const EndpointServer = struct {
         // Reserve every allocation before emitting status 200. Once the peer
         // observes acceptance this state transition must be infallible.
         try self.sessions.ensureUnusedCapacity(self.allocator, 1);
-        try validateAdditionalConnectHeaders(additional_headers, .response);
-        var response_headers: [max_additional_connect_response_headers + 1]http3.Qpack.HeaderField = undefined;
-        response_headers[0] = http3.capsule.protocol_header;
-        @memcpy(
-            response_headers[1..][0..additional_headers.len],
+        var header_stack: [connect_headers.stack_capacity]http3.Qpack.HeaderField =
+            undefined;
+        var prepared_headers = try connect_headers.prepareResponse(
+            self.allocator,
             additional_headers,
+            &header_stack,
         );
+        defer prepared_headers.deinit(self.allocator);
         var streams = try initHandshakeStreamRegistry(
             self.allocator,
             source.session_id,
@@ -1965,9 +2162,7 @@ pub const EndpointServer = struct {
         );
         try source.h3.startResponse(
             source.session_id.value,
-            connectResponseWithHeaders(
-                response_headers[0 .. additional_headers.len + 1],
-            ),
+            connectResponseWithHeaders(prepared_headers.fields),
             null,
         );
         try source.h3.detachRequestStream(source.session_id.value);
@@ -2389,6 +2584,12 @@ pub const EndpointServer = struct {
         target: *EndpointAcceptedSession,
         stream_buffer: []u8,
     ) Error!?EndpointSessionEvent {
+        // Accepted sessions remain in the endpoint map until the application
+        // removes their connection. Once the peer terminal event has been
+        // delivered, do not poll stream/DATAGRAM APIs whose association is no
+        // longer application-visible. The retained HTTP/3 association still
+        // lets the dispatcher process late ACKs and reject late datagrams.
+        if (target.control.terminal_reported) return null;
         if (try target.control.poll(
             &target.h3.established.connection,
         )) |event| {
@@ -2464,12 +2665,6 @@ fn finishEndpointSessionEvent(
     event: SessionEvent,
 ) Error!void {
     if (event == .closed or event == .reset) {
-        target.h3.closeConnectDatagramAssociation(
-            target.session_id.value,
-        ) catch |err| switch (err) {
-            error.UnexpectedStream => {},
-            else => return err,
-        };
         if (event == .closed and !target.control.local_close_sent) {
             try target.h3.sendResponseBodyPaced(
                 target.session_id.value,
@@ -2478,6 +2673,11 @@ fn finishEndpointSessionEvent(
             );
             target.control.local_close_sent = true;
         }
+        // Keep the detached association registered while this accepted
+        // session remains owned by the shared endpoint. Later ACK-only
+        // packets still need the detached HTTP/3 visitor, and the registry's
+        // terminal state silently drops datagrams after FIN/reset. Session
+        // teardown performs the final unregister.
         try session_control.terminateStreams(
             &target.h3.established.connection,
             &target.streams,
@@ -2884,20 +3084,39 @@ pub const OwnedHandshakeConnectRequest = struct {
 
 /// A validated WebTransport CONNECT request awaiting application admission.
 ///
-/// This value owns the HTTP/3 session and decoded request head. It must be
-/// consumed by `accept`, `acceptWithHeaders`, or `reject`, or explicitly
-/// destroyed with `deinit`. This two-phase shape lets authentication, routing,
-/// Origin policy, and load shedding run before a success response is sent.
+/// This value temporarily owns the HTTP/3 session and decoded request head. It
+/// must be consumed by `accept`, `acceptWithHeaders`, or `reject`, or explicitly
+/// destroyed with `deinit`. Caller-supplied sessions are restored after
+/// rejection or destruction; acceptance transfers them to the WebTransport
+/// session.
 pub const PendingHandshakeSession = struct {
     h3: http3.runtime.HandshakeServerSession,
+    restore_to: ?*http3.runtime.HandshakeServerSession = null,
     request: OwnedHandshakeConnectRequest,
     session_id: webtransport.SessionId,
     limits: Limits,
+    deadline: ?std.Io.Clock.Timestamp = null,
 
     pub fn deinit(self: *PendingHandshakeSession) void {
+        if (self.restore_to != null) {
+            self.h3.rejectRequest(self.session_id.value) catch {};
+        }
+        self.finish();
+    }
+
+    fn restoreSession(self: *PendingHandshakeSession) void {
+        std.debug.assert(self.restore_to != null);
+        self.finish();
+    }
+
+    fn finish(self: *PendingHandshakeSession) void {
         const allocator = self.h3.established.connection.endpoint.allocator;
         self.request.deinit(allocator);
-        self.h3.deinit();
+        if (self.restore_to) |destination| {
+            destination.* = self.h3;
+        } else {
+            self.h3.deinit();
+        }
         self.* = undefined;
     }
 
@@ -2937,13 +3156,23 @@ pub const PendingHandshakeSession = struct {
         self: *PendingHandshakeSession,
         additional_headers: []const http3.Qpack.HeaderField,
     ) Error!AcceptedHandshakeSession {
-        try validateAdditionalConnectHeaders(additional_headers, .response);
-        var response_headers: [max_additional_connect_response_headers + 1]http3.Qpack.HeaderField = undefined;
-        response_headers[0] = http3.capsule.protocol_header;
-        @memcpy(response_headers[1..][0..additional_headers.len], additional_headers);
-        const all_headers = response_headers[0 .. additional_headers.len + 1];
+        const allocator = self.h3.established.connection.endpoint.allocator;
+        var header_stack: [connect_headers.stack_capacity]http3.Qpack.HeaderField =
+            undefined;
+        var prepared_headers = try connect_headers.prepareResponse(
+            allocator,
+            additional_headers,
+            &header_stack,
+        );
+        defer prepared_headers.deinit(allocator);
+        if (self.deadline) |absolute| {
+            _ = try deadline_policy.usableAwake(
+                self.h3.established.connection.endpoint.io,
+                absolute,
+            );
+        }
         var streams = try initHandshakeStreamRegistry(
-            self.h3.established.connection.endpoint.allocator,
+            allocator,
             self.session_id,
             .server,
             self.h3.options.local_settings,
@@ -2962,7 +3191,7 @@ pub const PendingHandshakeSession = struct {
         );
         try self.h3.startResponse(
             self.session_id.value,
-            connectResponseWithHeaders(all_headers),
+            connectResponseWithHeaders(prepared_headers.fields),
             null,
         );
         try self.h3.detachRequestStream(self.session_id.value);
@@ -2986,18 +3215,54 @@ pub const PendingHandshakeSession = struct {
         status: u16,
         response_headers: []const http3.Qpack.HeaderField,
     ) Error!RejectedHandshakeSession {
+        return self.rejectWithBody(
+            status,
+            response_headers,
+            &.{},
+            &.{},
+        );
+    }
+
+    /// Reject the CONNECT with ordinary HTTP/3 DATA and final trailers.
+    pub fn rejectWithBody(
+        self: *PendingHandshakeSession,
+        status: u16,
+        response_headers: []const http3.Qpack.HeaderField,
+        body: []const u8,
+        trailers: []const http3.Qpack.HeaderField,
+    ) Error!RejectedHandshakeSession {
         if (status < 300 or status > 599) return error.InvalidStatus;
         try validateAdditionalConnectHeaders(response_headers, .response);
-        try self.h3.sendResponse(self.session_id.value, .{
+        try validateAdditionalConnectHeaders(trailers, .response);
+        const response: http3.Response = .{
             .status = status,
             .headers = response_headers,
-        });
+            .body = body,
+            .trailers = trailers,
+            .request_method = "CONNECT",
+            .extended_connect = true,
+        };
+        if (self.deadline) |absolute| {
+            try self.h3.sendResponsePacedWithDeadline(
+                self.session_id.value,
+                response,
+                absolute,
+            );
+        } else {
+            try self.h3.sendResponsePaced(
+                self.session_id.value,
+                response,
+            );
+        }
+        try self.h3.finishRejectedRequest(self.session_id.value);
         const h3 = self.h3;
+        const restore_to = self.restore_to;
         const request = self.request;
         const session_id = self.session_id;
         self.* = undefined;
         return .{
             .h3 = h3,
+            .restore_to = restore_to,
             .request = request,
             .session_id = session_id,
             .status = status,
@@ -3028,6 +3293,7 @@ pub const PendingHandshakeSession = struct {
 /// to service ACK/PTO progress instead of dropping the response immediately.
 pub const RejectedHandshakeSession = struct {
     h3: http3.runtime.HandshakeServerSession,
+    restore_to: ?*http3.runtime.HandshakeServerSession = null,
     request: OwnedHandshakeConnectRequest,
     session_id: webtransport.SessionId,
     status: u16,
@@ -3035,7 +3301,11 @@ pub const RejectedHandshakeSession = struct {
     pub fn deinit(self: *RejectedHandshakeSession) void {
         const allocator = self.h3.established.connection.endpoint.allocator;
         self.request.deinit(allocator);
-        self.h3.deinit();
+        if (self.restore_to) |destination| {
+            destination.* = self.h3;
+        } else {
+            self.h3.deinit();
+        }
         self.* = undefined;
     }
 
@@ -3246,6 +3516,37 @@ pub const AcceptedHandshakeSession = struct {
         try self.control.ensureOpen();
         try webtransport.ensureDatagramsNegotiated(self.h3.options.local_settings, self.h3.control.settings.peer);
         try self.h3.sendConnectDatagram(self.session_id.value, payload);
+    }
+
+    /// Wait for QUIC congestion and pacing capacity while retaining one total
+    /// timeout across all HTTP/3 progress needed to free it.
+    pub fn sendDatagramWithTimeout(
+        self: *AcceptedHandshakeSession,
+        payload: []const u8,
+        timeout: std.Io.Duration,
+    ) ReceiveTimeoutError!void {
+        if (timeout.nanoseconds <= 0) return error.Timeout;
+        return self.sendDatagramWithDeadline(payload, .fromNow(
+            self.h3.established.connection.endpoint.io,
+            .{ .raw = timeout, .clock = .awake },
+        ));
+    }
+
+    pub fn sendDatagramWithDeadline(
+        self: *AcceptedHandshakeSession,
+        payload: []const u8,
+        deadline: std.Io.Clock.Timestamp,
+    ) ReceiveTimeoutError!void {
+        try self.control.ensureOpen();
+        try webtransport.ensureDatagramsNegotiated(
+            self.h3.options.local_settings,
+            self.h3.control.settings.peer,
+        );
+        try self.h3.sendConnectDatagramWithDeadline(
+            self.session_id.value,
+            payload,
+            deadline,
+        );
     }
 
     pub fn maxDatagramPayloadSize(self: AcceptedHandshakeSession) ?usize {
@@ -3707,12 +4008,9 @@ pub const AcceptedHandshakeSession = struct {
             capsule,
             true,
         );
-        self.h3.closeConnectDatagramAssociation(
-            self.session_id.value,
-        ) catch |err| switch (err) {
-            error.UnexpectedStream => {},
-            else => return err,
-        };
+        // Preserve receive-side routing after the local half-close. The
+        // terminal event handler retires the association once peer FIN/reset
+        // has been consumed.
         try self.control.recordLocalClose(code);
         try session_control.terminateStreams(
             &self.h3.established.connection,
@@ -3761,12 +4059,6 @@ pub const AcceptedHandshakeSession = struct {
         event: SessionEvent,
     ) Error!void {
         if (event == .closed or event == .reset) {
-            self.h3.closeConnectDatagramAssociation(
-                self.session_id.value,
-            ) catch |err| switch (err) {
-                error.UnexpectedStream => {},
-                else => return err,
-            };
             if (event == .closed and !self.control.local_close_sent) {
                 try self.h3.sendResponseBodyPaced(
                     self.session_id.value,
@@ -3775,6 +4067,9 @@ pub const AcceptedHandshakeSession = struct {
                 );
                 self.control.local_close_sent = true;
             }
+            // Retain the terminal association until session teardown so late
+            // datagrams are discarded by terminal state instead of becoming
+            // unknown-association traffic.
             try session_control.terminateStreams(
                 &self.h3.established.connection,
                 &self.streams,
@@ -3933,12 +4228,15 @@ pub const ClientSession = struct {
         options: ConnectOptions,
         deadline: ?std.Io.Clock.Timestamp,
     ) ReceiveTimeoutError!ConnectAttempt {
-        var header_buf: [max_additional_connect_request_headers + 3]http3.Qpack.HeaderField = undefined;
-        const headers = try connectRequestHeadersWithAdditional(
+        var header_stack: [connect_headers.stack_capacity]http3.Qpack.HeaderField =
+            undefined;
+        var prepared_headers = try connect_headers.prepareRequest(
+            allocator,
             options.origin,
             options.headers,
-            &header_buf,
+            &header_stack,
         );
+        defer prepared_headers.deinit(allocator);
         var h3_client = try http3.runtime.Client.connect(allocator, io, local_address, server, options.limits.http3);
         errdefer h3_client.deinit();
         const session_stream_id = try h3_client.startRequest(.{
@@ -3946,10 +4244,8 @@ pub const ClientSession = struct {
             .path = options.path,
             .scheme = "https",
             .authority = options.authority,
-            .headers = headers,
+            .headers = prepared_headers.fields,
         }, null);
-        // Once the request head is observable, every later setup error must
-        // terminate that stream before the temporary client is destroyed.
         errdefer h3_client.cancelRequest(
             session_stream_id,
             http3.ApplicationErrorCode.request_cancelled,
@@ -3958,21 +4254,23 @@ pub const ClientSession = struct {
             try receiveDevelopmentConnectAttemptResponseBefore(
                 &h3_client,
                 session_stream_id,
+                options.limits.max_rejection_body_bytes,
                 absolute,
             )
         else
             try receiveDevelopmentConnectAttemptResponse(
                 &h3_client,
                 session_stream_id,
+                options.limits.max_rejection_body_bytes,
             );
         errdefer response.deinit(allocator);
-        if (response.status >= 200 and response.status < 300) {
-            try validateOptionalCapsuleProtocol(response.headers);
-        }
         return .{
             .h3 = h3_client,
             .session_id = .init(session_stream_id),
-            .response = response,
+            .response = response.head,
+            .response_body = response.body,
+            .response_trailers = response.trailers,
+            .stream_complete = response.stream_complete,
             .max_session_streams = options.limits.max_session_streams,
         };
     }
@@ -4306,6 +4604,9 @@ pub const ConnectAttempt = struct {
     h3: ?http3.runtime.Client,
     session_id: webtransport.SessionId,
     response: http3.DecodedResponseHead,
+    response_body: []u8 = &.{},
+    response_trailers: []http3.Qpack.HeaderField = &.{},
+    stream_complete: bool = false,
     max_session_streams: usize,
 
     pub fn accepted(self: ConnectAttempt) bool {
@@ -4323,6 +4624,14 @@ pub const ConnectAttempt = struct {
         return findHeader(self.response.headers, name);
     }
 
+    pub fn body(self: ConnectAttempt) []const u8 {
+        return self.response_body;
+    }
+
+    pub fn trailers(self: ConnectAttempt) []const http3.Qpack.HeaderField {
+        return self.response_trailers;
+    }
+
     pub fn sessionId(self: ConnectAttempt) webtransport.SessionId {
         return self.session_id;
     }
@@ -4333,16 +4642,21 @@ pub const ConnectAttempt = struct {
         // response. Release its local state without sending a contradictory
         // reset after that response; accepted attempts transfer the live state
         // to ClientSession through requireAccepted().
-        if (!self.accepted()) {
+        if (!self.accepted() and !self.stream_complete) {
             self.h3.?.finishRequest(self.session_id.value) catch {};
         }
         self.response.deinit(allocator);
+        allocator.free(self.response_body);
+        http3.Qpack.freeDecodedFields(allocator, self.response_trailers);
         if (self.h3) |*h3| h3.deinit();
         self.* = undefined;
     }
 
     pub fn requireAccepted(self: *ConnectAttempt) Error!ClientSession {
         if (!self.accepted()) return error.SessionRejected;
+        std.debug.assert(self.response_body.len == 0);
+        std.debug.assert(self.response_trailers.len == 0);
+        std.debug.assert(!self.stream_complete);
         var streams = try initDevelopmentStreamRegistry(
             self.h3.?.quic_client.endpoint.allocator,
             self.session_id,
@@ -4372,6 +4686,100 @@ pub const HandshakeClientSession = struct {
     response: http3.DecodedResponseHead,
     streams: webtransport.StreamRegistry,
     control: session_control.Control,
+
+    /// Open WebTransport on an existing authenticated HTTP/3 connection. The
+    /// caller retains `h3` on failure and transfers it on success.
+    pub fn connectSession(
+        h3: *http3.runtime.HandshakeClient,
+        options: ConnectOptions,
+    ) Error!HandshakeClientSession {
+        var attempt = try connectSessionAttempt(h3, options);
+        errdefer attempt.deinit();
+        return attempt.requireAccepted();
+    }
+
+    pub fn connectSessionAttempt(
+        h3: *http3.runtime.HandshakeClient,
+        options: ConnectOptions,
+    ) Error!HandshakeConnectAttempt {
+        return connectStatefulAttempt(
+            h3,
+            options.authority,
+            options.path,
+            options.origin,
+            options.headers,
+            options.limits,
+            null,
+            h3,
+        );
+    }
+
+    pub fn connectSessionWithDeadline(
+        h3: *http3.runtime.HandshakeClient,
+        options: ConnectOptions,
+        deadline: std.Io.Clock.Timestamp,
+    ) Error!HandshakeClientSession {
+        var attempt = try connectSessionAttemptWithDeadline(
+            h3,
+            options,
+            deadline,
+        );
+        errdefer attempt.deinit();
+        return attempt.requireAccepted();
+    }
+
+    pub fn connectSessionAttemptWithDeadline(
+        h3: *http3.runtime.HandshakeClient,
+        options: ConnectOptions,
+        deadline: std.Io.Clock.Timestamp,
+    ) Error!HandshakeConnectAttempt {
+        const absolute = try deadline_policy.usableAwake(
+            h3.established.connection.endpoint.io,
+            deadline,
+        );
+        return connectStatefulAttempt(
+            h3,
+            options.authority,
+            options.path,
+            options.origin,
+            options.headers,
+            options.limits,
+            absolute,
+            h3,
+        );
+    }
+
+    pub fn connectSessionWithTimeout(
+        h3: *http3.runtime.HandshakeClient,
+        options: ConnectOptions,
+        timeout: std.Io.Duration,
+    ) Error!HandshakeClientSession {
+        if (timeout.nanoseconds <= 0) return error.Timeout;
+        return connectSessionWithDeadline(
+            h3,
+            options,
+            .fromNow(
+                h3.established.connection.endpoint.io,
+                .{ .raw = timeout, .clock = .awake },
+            ),
+        );
+    }
+
+    pub fn connectSessionAttemptWithTimeout(
+        h3: *http3.runtime.HandshakeClient,
+        options: ConnectOptions,
+        timeout: std.Io.Duration,
+    ) Error!HandshakeConnectAttempt {
+        if (timeout.nanoseconds <= 0) return error.Timeout;
+        return connectSessionAttemptWithDeadline(
+            h3,
+            options,
+            .fromNow(
+                h3.established.connection.endpoint.io,
+                .{ .raw = timeout, .clock = .awake },
+            ),
+        );
+    }
 
     pub fn connect(
         allocator: std.mem.Allocator,
@@ -4450,6 +4858,7 @@ pub const HandshakeClientSession = struct {
             options.headers,
             options.limits,
             null,
+            null,
         );
     }
 
@@ -4483,6 +4892,7 @@ pub const HandshakeClientSession = struct {
             options.headers,
             options.limits,
             deadline,
+            null,
         );
     }
 
@@ -4693,6 +5103,7 @@ pub const HandshakeClientSession = struct {
             options.headers,
             options.limits,
             null,
+            null,
         );
     }
 
@@ -4733,6 +5144,7 @@ pub const HandshakeClientSession = struct {
             options.headers,
             options.limits,
             deadline,
+            null,
         );
     }
 
@@ -4897,6 +5309,7 @@ pub const HandshakeClientSession = struct {
             options.headers,
             options.limits,
             deadline,
+            null,
         );
     }
 
@@ -5037,6 +5450,37 @@ pub const HandshakeClientSession = struct {
         try self.control.ensureOpen();
         try webtransport.ensureDatagramsNegotiated(self.h3.options.local_settings, self.h3.control.settings.peer);
         try self.h3.sendConnectDatagram(self.session_id.value, payload);
+    }
+
+    /// Wait for QUIC congestion and pacing capacity while preserving HTTP/3
+    /// control and detached CONNECT routing under one total timeout.
+    pub fn sendDatagramWithTimeout(
+        self: *HandshakeClientSession,
+        payload: []const u8,
+        timeout: std.Io.Duration,
+    ) ReceiveTimeoutError!void {
+        if (timeout.nanoseconds <= 0) return error.Timeout;
+        return self.sendDatagramWithDeadline(payload, .fromNow(
+            self.h3.established.connection.endpoint.io,
+            .{ .raw = timeout, .clock = .awake },
+        ));
+    }
+
+    pub fn sendDatagramWithDeadline(
+        self: *HandshakeClientSession,
+        payload: []const u8,
+        deadline: std.Io.Clock.Timestamp,
+    ) ReceiveTimeoutError!void {
+        try self.control.ensureOpen();
+        try webtransport.ensureDatagramsNegotiated(
+            self.h3.options.local_settings,
+            self.h3.control.settings.peer,
+        );
+        try self.h3.sendConnectDatagramWithDeadline(
+            self.session_id.value,
+            payload,
+            deadline,
+        );
     }
 
     pub fn receiveDatagram(self: *HandshakeClientSession) Error!OwnedHandshakeDatagram {
@@ -5573,12 +6017,9 @@ pub const HandshakeClientSession = struct {
             capsule,
             true,
         );
-        self.h3.closeConnectDatagramAssociation(
-            self.session_id.value,
-        ) catch |err| switch (err) {
-            error.UnexpectedStream => {},
-            else => return err,
-        };
+        // A local FIN does not close the peer-to-client direction. Retain the
+        // association so receiveSessionEvent can process the peer's terminal
+        // capsule/FIN; finishPolledSessionEvent performs final retirement.
         try self.control.recordLocalClose(code);
         try session_control.terminateStreams(
             &self.h3.established.connection,
@@ -5647,12 +6088,6 @@ pub const HandshakeClientSession = struct {
         event: SessionEvent,
     ) Error!void {
         if (event == .closed or event == .reset) {
-            self.h3.closeConnectDatagramAssociation(
-                self.session_id.value,
-            ) catch |err| switch (err) {
-                error.UnexpectedStream => {},
-                else => return err,
-            };
             if (event == .closed and !self.control.local_close_sent) {
                 try self.h3.sendRequestBodyPaced(
                     self.session_id.value,
@@ -5661,6 +6096,8 @@ pub const HandshakeClientSession = struct {
                 );
                 self.control.local_close_sent = true;
             }
+            // Keep the terminal association until deinit so late packets are
+            // classified and dropped without reviving application state.
             try session_control.terminateStreams(
                 &self.h3.established.connection,
                 &self.streams,
@@ -5695,9 +6132,15 @@ pub const PendingHandshakeConnect = struct {
     session_id: webtransport.SessionId,
     limits: Limits,
     pending_datagram_registered: bool = false,
+    rejection: ?HandshakeConnectResponse = null,
+    rejection_body: std.ArrayList(u8) = .empty,
 
     pub fn deinit(self: *PendingHandshakeConnect) void {
         if (self.h3) |*h3| {
+            if (self.rejection) |*rejection| {
+                rejection.deinit(h3.allocator);
+            }
+            self.rejection_body.deinit(h3.allocator);
             if (self.pending_datagram_registered) {
                 h3.cancelPendingConnectDatagramAssociation(
                     self.session_id.value,
@@ -5722,6 +6165,9 @@ pub const PendingHandshakeConnect = struct {
         self: *PendingHandshakeConnect,
         packet: *const quic.one_rtt.ReceivedPacket,
     ) Error!void {
+        if (self.rejection != null) {
+            return self.h3.?.processResponsePacket(packet);
+        }
         var registered_now = false;
         if (!self.pending_datagram_registered) {
             try self.h3.?.registerPendingConnectDatagramAssociation(
@@ -5752,11 +6198,7 @@ pub const PendingHandshakeConnect = struct {
         // QUIC packet reordering. Do not consume it until SETTINGS is ready,
         // because `requireAccepted` must validate negotiated WebTransport and
         // DATAGRAM capabilities against that same connection state.
-        if (!self.h3.?.control.settings.received) return null;
-        var response = (try pollHandshakeConnectAttemptResponse(
-            &self.h3.?,
-            self.session_id.value,
-        )) orelse return null;
+        var response = (try self.pollConnectResponse()) orelse return null;
         errdefer response.deinit(self.h3.?.allocator);
         const h3 = self.h3.?;
         self.h3 = null;
@@ -5766,7 +6208,10 @@ pub const PendingHandshakeConnect = struct {
         return .{
             .h3 = h3,
             .session_id = self.session_id,
-            .response = response,
+            .response = response.head,
+            .response_body = response.body,
+            .response_trailers = response.trailers,
+            .stream_complete = response.stream_complete,
             .limits = self.limits,
         };
     }
@@ -5780,11 +6225,11 @@ pub const PendingHandshakeConnect = struct {
         dispatcher: *quic.endpoint_dispatcher.Dispatcher,
         handle: quic.endpoint_dispatcher.ConnectionHandle,
     ) Error!?HandshakeConnectAttempt {
-        if (!self.h3.?.control.settings.received) return null;
-        var ready_response = (try pollHandshakeConnectAttemptResponse(
-            &self.h3.?,
-            self.session_id.value,
-        )) orelse return null;
+        var ready_response = (self.pollConnectResponse() catch |err| {
+            _ = dispatcher.unregisterConnection(handle) catch
+                return error.InvalidDispatcherState;
+            return err;
+        }) orelse return null;
         errdefer ready_response.deinit(self.h3.?.allocator);
         // Moving a by-value attempt would briefly make the route point at a
         // return-value temporary. Unregister first; the accepted promotion
@@ -5800,16 +6245,99 @@ pub const PendingHandshakeConnect = struct {
         return .{
             .h3 = h3,
             .session_id = self.session_id,
-            .response = ready_response,
+            .response = ready_response.head,
+            .response_body = ready_response.body,
+            .response_trailers = ready_response.trailers,
+            .stream_complete = ready_response.stream_complete,
             .limits = self.limits,
         };
+    }
+
+    fn pollConnectResponse(
+        self: *PendingHandshakeConnect,
+    ) Error!?HandshakeConnectResponse {
+        const h3 = &self.h3.?;
+        if (self.rejection == null) {
+            if (!h3.control.settings.received) return null;
+            var head = (try pollHandshakeConnectAttemptResponse(
+                h3,
+                self.session_id.value,
+            )) orelse return null;
+            if (head.status >= 200 and head.status < 300) {
+                return .{ .head = head };
+            }
+            if ((head.content_length orelse 0) >
+                self.limits.max_rejection_body_bytes)
+            {
+                head.deinit(h3.allocator);
+                return error.MessageTooLarge;
+            }
+            self.rejection = .{ .head = head };
+            if (head.content_length) |expected| {
+                try self.rejection_body.ensureTotalCapacityPrecise(
+                    h3.allocator,
+                    expected,
+                );
+            }
+            h3.cancelPendingConnectDatagramAssociation(
+                self.session_id.value,
+            );
+            self.pending_datagram_registered = false;
+        }
+
+        while (try h3.pollResponseEvent(self.session_id.value)) |event_value| {
+            var event = event_value;
+            defer event.deinit(h3.allocator);
+            switch (event) {
+                .data_available => {
+                    const remaining = self.limits.max_rejection_body_bytes -|
+                        self.rejection_body.items.len;
+                    var scratch: [16 * 1024]u8 = undefined;
+                    const read = try h3.readResponseData(
+                        self.session_id.value,
+                        scratch[0..@min(scratch.len, remaining +| 1)],
+                    );
+                    if (read > remaining) return error.MessageTooLarge;
+                    try self.rejection_body.appendSlice(
+                        h3.allocator,
+                        scratch[0..read],
+                    );
+                },
+                .trailers => |value| {
+                    if (self.rejection.?.trailers.len != 0) {
+                        return error.InvalidConnect;
+                    }
+                    self.rejection.?.trailers = value.fields;
+                    event = .finished;
+                },
+                .finished => {
+                    const body = try finalizeRejectionBody(
+                        &self.rejection_body,
+                        h3.allocator,
+                        self.rejection.?.head.content_length,
+                    );
+                    var completed = self.rejection.?;
+                    self.rejection = null;
+                    completed.body = body;
+                    completed.stream_complete = true;
+                    return completed;
+                },
+                .push_promise => continue,
+                .head => return error.InvalidConnect,
+            }
+        }
+        return null;
     }
 };
 
 pub const HandshakeConnectAttempt = struct {
     h3: ?http3.runtime.HandshakeClient,
+    restore_to: ?*http3.runtime.HandshakeClient = null,
     session_id: webtransport.SessionId,
     response: http3.DecodedResponseHead,
+    response_body: []u8 = &.{},
+    response_trailers: []http3.Qpack.HeaderField = &.{},
+    stream_complete: bool = false,
     limits: Limits,
 
     pub fn accepted(self: HandshakeConnectAttempt) bool {
@@ -5827,10 +6355,31 @@ pub const HandshakeConnectAttempt = struct {
         return findHeader(self.response.headers, name);
     }
 
+    pub fn body(self: HandshakeConnectAttempt) []const u8 {
+        return self.response_body;
+    }
+
+    pub fn trailers(
+        self: HandshakeConnectAttempt,
+    ) []const http3.Qpack.HeaderField {
+        return self.response_trailers;
+    }
+
     pub fn deinit(self: *HandshakeConnectAttempt) void {
         const allocator = self.h3.?.allocator;
         self.response.deinit(allocator);
-        if (self.h3) |*h3| h3.deinit();
+        allocator.free(self.response_body);
+        http3.Qpack.freeDecodedFields(allocator, self.response_trailers);
+        if (self.h3) |*h3| {
+            if (self.restore_to) |destination| {
+                if (!self.stream_complete) {
+                    h3.abandonExtendedConnect(self.session_id.value);
+                }
+                destination.* = h3.*;
+            } else {
+                h3.deinit();
+            }
+        }
         self.* = undefined;
     }
 
@@ -5838,6 +6387,9 @@ pub const HandshakeConnectAttempt = struct {
         self: *HandshakeConnectAttempt,
     ) Error!HandshakeClientSession {
         if (!self.accepted()) return error.SessionRejected;
+        std.debug.assert(self.response_body.len == 0);
+        std.debug.assert(self.response_trailers.len == 0);
+        std.debug.assert(!self.stream_complete);
         var h3 = &self.h3.?;
         try webtransport.ensureDatagramsNegotiated(
             h3.options.local_settings,
@@ -6019,12 +6571,15 @@ pub const ProtectedClientSession = struct {
         options: ProtectedConnectOptions,
         deadline: ?std.Io.Clock.Timestamp,
     ) Error!ProtectedConnectAttempt {
-        var header_buf: [max_additional_connect_request_headers + 3]http3.Qpack.HeaderField = undefined;
-        const headers = try connectRequestHeadersWithAdditional(
+        var header_stack: [connect_headers.stack_capacity]http3.Qpack.HeaderField =
+            undefined;
+        var prepared_headers = try connect_headers.prepareRequest(
+            allocator,
             options.origin,
             options.headers,
-            &header_buf,
+            &header_stack,
         );
+        defer prepared_headers.deinit(allocator);
         var h3_client = try http3.runtime.ProtectedClient.connect(allocator, io, local_address, server, options.limits.http3, webTransportProtectedConfig(options.config));
         errdefer h3_client.deinit();
         const session_stream_id = try h3_client.startRequest(.{
@@ -6032,8 +6587,12 @@ pub const ProtectedClientSession = struct {
             .path = options.path,
             .scheme = "https",
             .authority = options.authority,
-            .headers = headers,
+            .headers = prepared_headers.fields,
         }, null);
+        errdefer h3_client.cancelRequest(
+            session_stream_id,
+            http3.ApplicationErrorCode.request_cancelled,
+        ) catch {};
         // A response stream is allowed to race ahead of the server control
         // stream. The H3 client retains it while SETTINGS is awaited, and the
         // same absolute timestamp bounds both protocol phases.
@@ -6041,26 +6600,30 @@ pub const ProtectedClientSession = struct {
             try h3_client.receivePeerSettingsWithDeadline(absolute)
         else
             try h3_client.receivePeerSettings();
-        var response_head = if (deadline) |absolute|
+        var response = if (deadline) |absolute|
             try receiveProtectedConnectAttemptResponseBefore(
                 &h3_client,
                 session_stream_id,
+                options.limits.max_rejection_body_bytes,
                 absolute,
             )
         else
             try receiveProtectedConnectAttemptResponse(
                 &h3_client,
                 session_stream_id,
+                options.limits.max_rejection_body_bytes,
             );
-        errdefer response_head.deinit(allocator);
-        if (response_head.status >= 200 and response_head.status < 300) {
-            try validateOptionalCapsuleProtocol(response_head.headers);
+        errdefer response.deinit(allocator);
+        if (response.head.status >= 200 and response.head.status < 300) {
             try webtransport.ensureDatagramsNegotiated(h3_client.config.local_settings, h3_client.control.settings.peer);
         }
         return .{
             .h3 = h3_client,
             .session_id = .init(session_stream_id),
-            .response = response_head,
+            .response = response.head,
+            .response_body = response.body,
+            .response_trailers = response.trailers,
+            .stream_complete = response.stream_complete,
         };
     }
 
@@ -6297,6 +6860,9 @@ pub const ProtectedConnectAttempt = struct {
     h3: ?http3.runtime.ProtectedClient,
     session_id: webtransport.SessionId,
     response: http3.DecodedResponseHead,
+    response_body: []u8 = &.{},
+    response_trailers: []http3.Qpack.HeaderField = &.{},
+    stream_complete: bool = false,
 
     pub fn accepted(self: ProtectedConnectAttempt) bool {
         return self.response.status >= 200 and self.response.status < 300;
@@ -6313,9 +6879,21 @@ pub const ProtectedConnectAttempt = struct {
         return findHeader(self.response.headers, name);
     }
 
+    pub fn body(self: ProtectedConnectAttempt) []const u8 {
+        return self.response_body;
+    }
+
+    pub fn trailers(
+        self: ProtectedConnectAttempt,
+    ) []const http3.Qpack.HeaderField {
+        return self.response_trailers;
+    }
+
     pub fn deinit(self: *ProtectedConnectAttempt) void {
         const allocator = self.h3.?.quic_client.endpoint.allocator;
         self.response.deinit(allocator);
+        allocator.free(self.response_body);
+        http3.Qpack.freeDecodedFields(allocator, self.response_trailers);
         if (self.h3) |*h3| h3.deinit();
         self.* = undefined;
     }
@@ -6324,6 +6902,9 @@ pub const ProtectedConnectAttempt = struct {
         self: *ProtectedConnectAttempt,
     ) Error!ProtectedClientSession {
         if (!self.accepted()) return error.SessionRejected;
+        std.debug.assert(self.response_body.len == 0);
+        std.debug.assert(self.response_trailers.len == 0);
+        std.debug.assert(!self.stream_complete);
         const control = protected_control.Reader.init(
             try session_control.Control.init(self.session_id),
         );
@@ -7054,6 +7635,22 @@ pub const StatefulProtectedClientSession = struct {
         return self.session.sendDatagram(payload);
     }
 
+    pub fn sendDatagramWithTimeout(
+        self: *StatefulProtectedClientSession,
+        payload: []const u8,
+        timeout: std.Io.Duration,
+    ) ReceiveTimeoutError!void {
+        return self.session.sendDatagramWithTimeout(payload, timeout);
+    }
+
+    pub fn sendDatagramWithDeadline(
+        self: *StatefulProtectedClientSession,
+        payload: []const u8,
+        deadline: std.Io.Clock.Timestamp,
+    ) ReceiveTimeoutError!void {
+        return self.session.sendDatagramWithDeadline(payload, deadline);
+    }
+
     pub fn receiveDatagram(
         self: *StatefulProtectedClientSession,
     ) Error!OwnedHandshakeDatagram {
@@ -7216,6 +7813,16 @@ pub const StatefulProtectedConnectAttempt = struct {
         return self.attempt.responseHeader(name);
     }
 
+    pub fn body(self: StatefulProtectedConnectAttempt) []const u8 {
+        return self.attempt.body();
+    }
+
+    pub fn trailers(
+        self: StatefulProtectedConnectAttempt,
+    ) []const http3.Qpack.HeaderField {
+        return self.attempt.trailers();
+    }
+
     pub fn deinit(self: *StatefulProtectedConnectAttempt) void {
         self.attempt.deinit();
         self.* = undefined;
@@ -7262,6 +7869,7 @@ fn connectStatefulAttempt(
     additional_headers: []const http3.Qpack.HeaderField,
     limits: Limits,
     deadline: ?std.Io.Clock.Timestamp,
+    restore_to: ?*http3.runtime.HandshakeClient,
 ) Error!HandshakeConnectAttempt {
     const session_id = try startStatefulConnect(
         h3_client,
@@ -7270,6 +7878,9 @@ fn connectStatefulAttempt(
         origin,
         additional_headers,
     );
+    errdefer if (restore_to != null) {
+        h3_client.abandonExtendedConnect(session_id.value);
+    };
     // A response stream can race ahead of the server control stream. Retain
     // it in HTTP/3 state while completing SETTINGS, instead of exposing a
     // successful CONNECT that cannot yet be validated as WebTransport.
@@ -7278,24 +7889,30 @@ fn connectStatefulAttempt(
     else
         try h3_client.receivePeerSettings();
     const allocator = h3_client.allocator;
-    var response_head = if (deadline) |absolute|
+    var response = if (deadline) |absolute|
         try receiveHandshakeConnectAttemptResponseBefore(
             h3_client,
             session_id.value,
+            limits.max_rejection_body_bytes,
             absolute,
         )
     else
         try receiveHandshakeConnectAttemptResponse(
             h3_client,
             session_id.value,
+            limits.max_rejection_body_bytes,
         );
-    errdefer response_head.deinit(allocator);
+    errdefer response.deinit(allocator);
     const owned_h3 = h3_client.*;
     h3_client.* = undefined;
     return .{
         .h3 = owned_h3,
+        .restore_to = restore_to,
         .session_id = session_id,
-        .response = response_head,
+        .response = response.head,
+        .response_body = response.body,
+        .response_trailers = response.trailers,
+        .stream_complete = response.stream_complete,
         .limits = limits,
     };
 }
@@ -7307,18 +7924,22 @@ fn startStatefulConnect(
     origin: []const u8,
     additional_headers: []const http3.Qpack.HeaderField,
 ) Error!webtransport.SessionId {
-    var header_buf: [max_additional_connect_request_headers + 3]http3.Qpack.HeaderField = undefined;
-    const headers = try connectRequestHeadersWithAdditional(
+    const allocator = h3_client.allocator;
+    var header_stack: [connect_headers.stack_capacity]http3.Qpack.HeaderField =
+        undefined;
+    var prepared_headers = try connect_headers.prepareRequest(
+        allocator,
         origin,
         additional_headers,
-        &header_buf,
+        &header_stack,
     );
+    defer prepared_headers.deinit(allocator);
     const stream_id = try h3_client.startRequest(.{
         .method = "CONNECT",
         .path = path,
         .scheme = "https",
         .authority = authority,
-        .headers = headers,
+        .headers = prepared_headers.fields,
     }, null);
     return webtransport.SessionId.init(stream_id);
 }
@@ -7332,7 +7953,7 @@ fn receiveStatefulSessionRequest(
     session: *http3.runtime.HandshakeServerSession,
     limits: Limits,
 ) Error!PendingHandshakeSession {
-    return receiveStatefulSessionRequestBefore(session, limits, null);
+    return receiveStatefulSessionRequestBefore(session, limits, null, null);
 }
 
 fn receiveStatefulSessionRequestWithDeadline(
@@ -7340,13 +7961,19 @@ fn receiveStatefulSessionRequestWithDeadline(
     limits: Limits,
     deadline: std.Io.Clock.Timestamp,
 ) ReceiveTimeoutError!PendingHandshakeSession {
-    return receiveStatefulSessionRequestBefore(session, limits, deadline);
+    return receiveStatefulSessionRequestBefore(
+        session,
+        limits,
+        deadline,
+        null,
+    );
 }
 
 fn receiveStatefulSessionRequestBefore(
     session: *http3.runtime.HandshakeServerSession,
     limits: Limits,
     deadline: ?std.Io.Clock.Timestamp,
+    restore_to: ?*http3.runtime.HandshakeServerSession,
 ) ReceiveTimeoutError!PendingHandshakeSession {
     try session.ensureSettingsSent();
     var request = if (deadline) |absolute|
@@ -7368,12 +7995,14 @@ fn receiveStatefulSessionRequestBefore(
     session.* = undefined;
     return .{
         .h3 = owned_h3,
+        .restore_to = restore_to,
         .request = .{
             .stream_id = request.stream_id,
             .request = request.head,
         },
         .session_id = session_id,
         .limits = limits,
+        .deadline = deadline,
     };
 }
 
@@ -7407,7 +8036,6 @@ fn receiveHandshakeConnectRequestBefore(
             .message => |*message| switch (message.value) {
                 .head => |*head| {
                     if (head.* != .request) return error.InvalidConnect;
-                    try validateConnectRequest(head.request);
                     const owned = head.request;
                     message.value = .finished;
                     return .{
@@ -7438,7 +8066,6 @@ fn receiveProtectedConnectRequest(
             .message => |*message| switch (message.value) {
                 .head => |*head| {
                     if (head.* != .request) return error.InvalidConnect;
-                    try validateConnectRequest(head.request);
                     const owned = head.request;
                     message.value = .finished;
                     return .{
@@ -7480,47 +8107,74 @@ fn receiveProtectedConnectRequestBefore(
     }
 }
 
+const HandshakeConnectResponse = struct {
+    head: http3.DecodedResponseHead,
+    body: []u8 = &.{},
+    trailers: []http3.Qpack.HeaderField = &.{},
+    stream_complete: bool = false,
+
+    fn deinit(
+        self: *HandshakeConnectResponse,
+        allocator: std.mem.Allocator,
+    ) void {
+        self.head.deinit(allocator);
+        allocator.free(self.body);
+        http3.Qpack.freeDecodedFields(allocator, self.trailers);
+        self.* = undefined;
+    }
+};
+
 fn receiveHandshakeConnectAttemptResponse(
     client: *http3.runtime.HandshakeClient,
     stream_id: u62,
-) Error!http3.DecodedResponseHead {
-    while (true) {
-        var event = (try client.receiveResponseEvent(stream_id)) orelse
-            continue;
-        defer event.deinit(client.allocator);
-        switch (event) {
-            .head => |*head| {
-                if (head.* != .response) return error.InvalidConnect;
-                if (head.response.status >= 200 and
-                    head.response.status < 300)
-                {
-                    try validateOptionalCapsuleProtocol(
-                        head.response.headers,
-                    );
-                }
-                const owned = head.response;
-                event = .finished;
-                return owned;
-            },
-            else => return error.InvalidConnect,
-        }
-    }
+    max_body_bytes: usize,
+) Error!HandshakeConnectResponse {
+    return receiveConnectAttemptResponseUntil(
+        client,
+        stream_id,
+        max_body_bytes,
+        null,
+    ) catch |err| switch (err) {
+        error.Timeout, error.ConcurrencyUnavailable => unreachable,
+        else => |other| return @errorCast(other),
+    };
 }
 
 fn receiveHandshakeConnectAttemptResponseBefore(
     client: *http3.runtime.HandshakeClient,
     stream_id: u62,
+    max_body_bytes: usize,
     deadline: std.Io.Clock.Timestamp,
-) Error!http3.DecodedResponseHead {
+) Error!HandshakeConnectResponse {
+    return receiveConnectAttemptResponseUntil(
+        client,
+        stream_id,
+        max_body_bytes,
+        deadline,
+    );
+}
+
+fn receiveConnectAttemptResponseUntil(
+    client: anytype,
+    stream_id: u62,
+    max_body_bytes: usize,
+    deadline: ?std.Io.Clock.Timestamp,
+) ReceiveTimeoutError!HandshakeConnectResponse {
+    const allocator = if (comptime @TypeOf(client) ==
+        *http3.runtime.HandshakeClient)
+        client.allocator
+    else
+        client.quic_client.endpoint.allocator;
     while (true) {
-        var event = (try client.receiveResponseEventWithDeadline(
-            stream_id,
-            deadline,
-        )) orelse continue;
-        defer event.deinit(client.allocator);
+        var event = (if (deadline) |absolute|
+            try client.receiveResponseEventWithDeadline(stream_id, absolute)
+        else
+            try client.receiveResponseEvent(stream_id)) orelse continue;
+        defer event.deinit(allocator);
         switch (event) {
             .head => |*head| {
                 if (head.* != .response) return error.InvalidConnect;
+                if (head.response.status < 200) continue;
                 if (head.response.status >= 200 and
                     head.response.status < 300)
                 {
@@ -7528,11 +8182,117 @@ fn receiveHandshakeConnectAttemptResponseBefore(
                 }
                 const owned = head.response;
                 event = .finished;
-                return owned;
+                if (owned.status >= 200 and owned.status < 300) {
+                    return .{ .head = owned };
+                }
+                var result = HandshakeConnectResponse{ .head = owned };
+                errdefer result.deinit(allocator);
+                const rejection = try receiveRejectionEntityUntil(
+                    client,
+                    allocator,
+                    stream_id,
+                    owned.content_length,
+                    max_body_bytes,
+                    deadline,
+                );
+                result.body = rejection.body;
+                result.trailers = rejection.trailers;
+                result.stream_complete = true;
+                return result;
             },
             else => return error.InvalidConnect,
         }
     }
+}
+
+const HandshakeRejectionEntity = struct {
+    body: []u8,
+    trailers: []http3.Qpack.HeaderField,
+};
+
+fn finalizeRejectionBody(
+    body: *std.ArrayList(u8),
+    allocator: std.mem.Allocator,
+    content_length: ?usize,
+) std.mem.Allocator.Error![]u8 {
+    if (content_length != null) return body.toOwnedSliceAssert();
+    return body.toOwnedSlice(allocator);
+}
+
+fn receiveRejectionEntityUntil(
+    client: anytype,
+    allocator: std.mem.Allocator,
+    stream_id: u62,
+    content_length: ?usize,
+    max_body_bytes: usize,
+    deadline: ?std.Io.Clock.Timestamp,
+) ReceiveTimeoutError!HandshakeRejectionEntity {
+    if ((content_length orelse 0) > max_body_bytes) {
+        return error.MessageTooLarge;
+    }
+    var body: std.ArrayList(u8) = .empty;
+    errdefer body.deinit(allocator);
+    if (content_length) |expected| {
+        // The stream reader enforces the declared final length. Reserve it
+        // exactly once so split rejection DATA does not grow geometrically.
+        try body.ensureTotalCapacityPrecise(allocator, expected);
+    }
+    var trailers: []http3.Qpack.HeaderField = &.{};
+    errdefer http3.Qpack.freeDecodedFields(allocator, trailers);
+    var scratch: [16 * 1024]u8 = undefined;
+    while (true) {
+        var event = (if (deadline) |absolute|
+            try client.receiveResponseEventWithDeadline(stream_id, absolute)
+        else
+            try client.receiveResponseEvent(stream_id)) orelse continue;
+        defer event.deinit(allocator);
+        switch (event) {
+            .data_available => {
+                const remaining = max_body_bytes -| body.items.len;
+                const read = try client.readResponseData(
+                    stream_id,
+                    scratch[0..@min(scratch.len, remaining +| 1)],
+                );
+                if (read > remaining) return error.MessageTooLarge;
+                try body.appendSlice(allocator, scratch[0..read]);
+            },
+            .trailers => |value| {
+                if (trailers.len != 0) return error.InvalidConnect;
+                trailers = value.fields;
+                event = .finished;
+            },
+            .finished => break,
+            .push_promise => continue,
+            .head => return error.InvalidConnect,
+        }
+    }
+    return .{
+        .body = try finalizeRejectionBody(
+            &body,
+            allocator,
+            content_length,
+        ),
+        .trailers = trailers,
+    };
+}
+
+test "WebTransport declared rejection body retains one exact allocation" {
+    const allocator = std.testing.allocator;
+    var tracking = std.testing.FailingAllocator.init(allocator, .{});
+    var body: std.ArrayList(u8) = .empty;
+    errdefer body.deinit(tracking.allocator());
+
+    try body.ensureTotalCapacityPrecise(tracking.allocator(), 9);
+    try body.appendSlice(tracking.allocator(), "try");
+    try body.appendSlice(tracking.allocator(), " later");
+    const owned = try finalizeRejectionBody(
+        &body,
+        tracking.allocator(),
+        9,
+    );
+    defer tracking.allocator().free(owned);
+    try std.testing.expectEqualStrings("try later", owned);
+    try std.testing.expectEqual(@as(usize, 1), tracking.allocations);
 }
 
 fn pollHandshakeConnectAttemptResponse(
@@ -7551,306 +8311,76 @@ fn pollHandshakeConnectAttemptResponse(
 fn receiveProtectedConnectAttemptResponse(
     client: *http3.runtime.ProtectedClient,
     stream_id: u62,
-) Error!http3.DecodedResponseHead {
-    while (true) {
-        var event = (try client.receiveResponseEvent(stream_id)) orelse
-            continue;
-        defer event.deinit(client.quic_client.endpoint.allocator);
-        switch (event) {
-            .head => |*head| {
-                if (head.* != .response) return error.InvalidConnect;
-                const owned = head.response;
-                event = .finished;
-                return owned;
-            },
-            else => return error.InvalidConnect,
-        }
-    }
+    max_body_bytes: usize,
+) Error!HandshakeConnectResponse {
+    return receiveConnectAttemptResponseUntil(
+        client,
+        stream_id,
+        max_body_bytes,
+        null,
+    ) catch |err| switch (err) {
+        error.Timeout, error.ConcurrencyUnavailable => unreachable,
+        else => |other| return @errorCast(other),
+    };
 }
 
 fn receiveDevelopmentConnectAttemptResponse(
     client: *http3.runtime.Client,
     stream_id: u62,
-) Error!http3.DecodedResponseHead {
-    while (true) {
-        var event = (try client.receiveResponseEvent(stream_id)) orelse
-            continue;
-        defer event.deinit(client.quic_client.endpoint.allocator);
-        switch (event) {
-            .head => |*head| {
-                if (head.* != .response) return error.InvalidConnect;
-                // RFC 9114 permits any bounded sequence of informational
-                // responses. They are not an admission decision; continue on
-                // the same stream until the first final response arrives.
-                if (head.response.status < 200) continue;
-                const owned = head.response;
-                event = .finished;
-                return owned;
-            },
-            else => return error.InvalidConnect,
-        }
-    }
+    max_body_bytes: usize,
+) Error!HandshakeConnectResponse {
+    return receiveConnectAttemptResponseUntil(
+        client,
+        stream_id,
+        max_body_bytes,
+        null,
+    ) catch |err| switch (err) {
+        error.Timeout, error.ConcurrencyUnavailable => unreachable,
+        else => |other| return @errorCast(other),
+    };
 }
 
 fn receiveDevelopmentConnectAttemptResponseBefore(
     client: *http3.runtime.Client,
     stream_id: u62,
+    max_body_bytes: usize,
     deadline: std.Io.Clock.Timestamp,
-) ReceiveTimeoutError!http3.DecodedResponseHead {
-    while (true) {
-        var event = (try client.receiveResponseEventWithDeadline(
-            stream_id,
-            deadline,
-        )) orelse continue;
-        defer event.deinit(client.quic_client.endpoint.allocator);
-        switch (event) {
-            .head => |*head| {
-                if (head.* != .response) return error.InvalidConnect;
-                if (head.response.status < 200) continue;
-                const owned = head.response;
-                event = .finished;
-                return owned;
-            },
-            else => return error.InvalidConnect,
-        }
-    }
+) ReceiveTimeoutError!HandshakeConnectResponse {
+    return receiveConnectAttemptResponseUntil(
+        client,
+        stream_id,
+        max_body_bytes,
+        deadline,
+    );
 }
 
 fn receiveProtectedConnectAttemptResponseBefore(
     client: *http3.runtime.ProtectedClient,
     stream_id: u62,
+    max_body_bytes: usize,
     deadline: std.Io.Clock.Timestamp,
-) Error!http3.DecodedResponseHead {
-    while (true) {
-        var event = (try client.receiveResponseEventWithDeadline(
-            stream_id,
-            deadline,
-        )) orelse continue;
-        defer event.deinit(client.quic_client.endpoint.allocator);
-        switch (event) {
-            .head => |*head| {
-                if (head.* != .response) return error.InvalidConnect;
-                const owned = head.response;
-                event = .finished;
-                return owned;
-            },
-            else => return error.InvalidConnect,
-        }
-    }
+) Error!HandshakeConnectResponse {
+    return receiveConnectAttemptResponseUntil(
+        client,
+        stream_id,
+        max_body_bytes,
+        deadline,
+    );
 }
 
-fn validateConnectRequest(request: anytype) Error!void {
-    if (!std.mem.eql(u8, request.method, "CONNECT")) return error.InvalidConnect;
-    if (!std.mem.eql(u8, request.scheme, "https")) {
-        return error.InvalidConnect;
-    }
-    if (request.authority == null or request.authority.?.len == 0 or
-        request.path.len == 0)
-    {
-        return error.InvalidConnect;
-    }
-    if (!std.mem.eql(u8, findHeader(request.headers, ":protocol") orelse "", "webtransport")) {
-        return error.InvalidConnect;
-    }
-    try validateOptionalCapsuleProtocol(request.headers);
-}
+const validateConnectRequest = connect_headers.validateRequest;
+const connectResponseWithHeaders = connect_headers.response;
+const validateConnectResponse = connect_headers.validateResponse;
+const AdditionalHeaderContext = connect_headers.Context;
+const validateAdditionalConnectHeaders = connect_headers.validate;
+const validateOptionalCapsuleProtocol =
+    connect_headers.validateOptionalCapsule;
 
-fn connectResponse() http3.Response {
-    return connectResponseWithHeaders(&.{http3.capsule.protocol_header});
-}
-
-fn connectResponseWithHeaders(
-    headers: []const http3.Qpack.HeaderField,
-) http3.Response {
-    return .{
-        .status = 200,
-        .headers = headers,
-        .request_method = "CONNECT",
-        .extended_connect = true,
-    };
-}
-
-fn validateConnectResponse(response: anytype) Error!void {
-    if (response.status < 200 or response.status >= 300) {
-        return error.SessionRejected;
-    }
-    try validateOptionalCapsuleProtocol(response.headers);
-}
-
-const AdditionalHeaderContext = enum { request, response };
-
-fn validateAdditionalConnectHeaders(
-    headers: []const http3.Qpack.HeaderField,
-    context: AdditionalHeaderContext,
-) Error!void {
-    const max_headers = switch (context) {
-        .request => max_additional_connect_request_headers,
-        .response => max_additional_connect_response_headers,
-    };
-    if (headers.len > max_headers) return error.InvalidFrame;
-    for (headers) |header| {
-        try validateAdditionalHeaderSyntax(header);
-        // Pseudo-fields are constructed from typed options, and the adapter
-        // owns Capsule-Protocol negotiation. Prevent generic metadata from
-        // smuggling a duplicate or contradictory reserved field.
-        if (std.mem.startsWith(u8, header.name, ":") or
-            std.ascii.eqlIgnoreCase(
-                header.name,
-                http3.capsule.header_name,
-            ) or
-            std.ascii.eqlIgnoreCase(header.name, "content-length") or
-            (context == .request and
-                std.ascii.eqlIgnoreCase(header.name, "origin")))
-        {
-            return error.InvalidHeader;
-        }
-    }
-}
-
-fn validateAdditionalHeaderSyntax(
-    header: http3.Qpack.HeaderField,
-) Error!void {
-    if (header.name.len == 0) return error.InvalidHeader;
-    for (header.name) |byte| {
-        if (!std.ascii.isLower(byte) and
-            !std.ascii.isDigit(byte) and
-            switch (byte) {
-                '!', '#', '$', '%', '&', '\'', '*', '+', '-', '.', '^', '_', '`', '|', '~' => false,
-                else => true,
-            })
-        {
-            return error.InvalidHeader;
-        }
-    }
-    for (header.value) |byte| {
-        if ((byte < 0x20 and byte != '\t') or byte == 0x7f) {
-            return error.InvalidHeader;
-        }
-    }
-}
-
-fn validateOptionalCapsuleProtocol(
-    headers: []const http3.Qpack.HeaderField,
-) Error!void {
-    // Modern WebTransport peers such as wtransport use DATA capsules as an
-    // intrinsic part of the extended CONNECT protocol and omit the older
-    // Capsule-Protocol field. Continue advertising it for draft peers, but if
-    // a peer explicitly supplies the field it must still be the true item.
-    if (findHeader(headers, http3.capsule.header_name) == null) return;
-    if (!(http3.capsule.protocolEnabled(headers) catch
-        return error.InvalidConnect))
-    {
-        return error.InvalidConnect;
-    }
-}
-
-fn connectRequestHeaders(origin: []const u8, out: *[3]http3.Qpack.HeaderField) []const http3.Qpack.HeaderField {
-    var count: usize = 0;
-    out[count] = .{ .name = ":protocol", .value = "webtransport" };
-    count += 1;
-    out[count] = http3.capsule.protocol_header;
-    count += 1;
-    // Keep the historical "/" default from ConnectOptions as "not supplied";
-    // real WebTransport clients can pass an Origin value and have it carried in
-    // the CONNECT request for server-side policy checks.
-    if (origin.len != 0 and !std.mem.eql(u8, origin, "/")) {
-        out[count] = .{ .name = "origin", .value = origin };
-        count += 1;
-    }
-    return out[0..count];
-}
-
-fn connectRequestHeadersWithAdditional(
-    origin: []const u8,
-    additional: []const http3.Qpack.HeaderField,
-    out: *[max_additional_connect_request_headers + 3]http3.Qpack.HeaderField,
-) Error![]const http3.Qpack.HeaderField {
-    try validateAdditionalConnectHeaders(additional, .request);
-    var count: usize = 0;
-    out[count] = .{ .name = ":protocol", .value = "webtransport" };
-    count += 1;
-    out[count] = http3.capsule.protocol_header;
-    count += 1;
-    if (origin.len != 0 and !std.mem.eql(u8, origin, "/")) {
-        out[count] = .{ .name = "origin", .value = origin };
-        count += 1;
-    }
-    @memcpy(out[count..][0..additional.len], additional);
-    return out[0 .. count + additional.len];
-}
-
-pub const OwnedDatagram = struct {
-    quic_datagram: quic.runtime.OwnedDatagram,
-    datagram: webtransport.Datagram,
-
-    pub fn deinit(self: *OwnedDatagram, allocator: std.mem.Allocator) void {
-        self.quic_datagram.deinit(allocator);
-        self.* = undefined;
-    }
-};
-
-pub const OwnedProtectedDatagram = struct {
-    packet: quic.one_rtt.ReceivedPacket,
-    datagram: webtransport.Datagram,
-
-    pub fn deinit(self: *OwnedProtectedDatagram, allocator: std.mem.Allocator) void {
-        self.packet.deinit(allocator);
-        self.* = undefined;
-    }
-};
-
-pub const OwnedHandshakeDatagram = struct {
-    /// Owned application payload. The RFC 9297 Quarter Stream ID prefix is
-    /// removed by HTTP/3's association demultiplexer before this value is made
-    /// visible to WebTransport.
-    bytes: []u8,
-    datagram: webtransport.Datagram,
-
-    pub fn deinit(self: *OwnedHandshakeDatagram, allocator: std.mem.Allocator) void {
-        allocator.free(self.bytes);
-        self.* = undefined;
-    }
-};
-
-pub const OwnedHandshakeDatagramBatch = struct {
-    allocator: std.mem.Allocator,
-    datagrams: []?OwnedHandshakeDatagram,
-    errors: []?anyerror,
-
-    pub fn deinit(self: *OwnedHandshakeDatagramBatch) void {
-        for (self.datagrams) |*datagram| {
-            if (datagram.*) |*owned| owned.deinit(self.allocator);
-        }
-        self.allocator.free(self.datagrams);
-        self.allocator.free(self.errors);
-        self.* = undefined;
-    }
-
-    pub fn firstError(self: OwnedHandshakeDatagramBatch) ?anyerror {
-        for (self.errors) |err| {
-            if (err) |value| return value;
-        }
-        return null;
-    }
-
-    pub fn receivedCount(self: OwnedHandshakeDatagramBatch) usize {
-        var count: usize = 0;
-        for (self.datagrams) |datagram| {
-            if (datagram != null) count += 1;
-        }
-        return count;
-    }
-};
-
-fn parseDatagramFromOwnedQuicDatagram(
-    datagram: quic.runtime.OwnedDatagram,
-) Error!webtransport.Datagram {
-    for (datagram.frames) |frame| {
-        if (frame != .datagram) continue;
-        return try webtransport.Datagram.parse(frame.datagram.data);
-    }
-    return error.MissingDatagram;
-}
+pub const OwnedDatagram = datagram_owned.Datagram;
+pub const OwnedProtectedDatagram = datagram_owned.Protected;
+pub const OwnedHandshakeDatagram = datagram_owned.Handshake;
+pub const OwnedHandshakeDatagramBatch = datagram_owned.HandshakeBatch;
+const parseDatagramFromOwnedQuicDatagram = datagram_owned.parseQuic;
 
 const handshake_stream = @import("runtime/stream.zig");
 const incremental_stream = @import("runtime/stream_incremental.zig");
@@ -7891,38 +8421,7 @@ fn developmentWritableStream(
     return stream;
 }
 
-fn sendDatagramFromEndpoint(
-    endpoint: *quic.runtime.Endpoint,
-    to: net.IpAddress,
-    session_id: webtransport.SessionId,
-    payload: []const u8,
-) Error!void {
-    var storage: [datagram_stack_capacity]u8 = undefined;
-    if (try encodeDatagramIntoStack(&storage, session_id, payload)) |encoded| {
-        const frames = [_]quic.Frame{.{ .datagram = .{ .data = encoded, .length_present = true } }};
-        try endpoint.sendFrames(to, &frames);
-        return;
-    }
-
-    var encoded: std.ArrayList(u8) = .empty;
-    defer encoded.deinit(endpoint.allocator);
-    try (webtransport.Datagram{ .session_id = session_id, .payload = payload }).write(&encoded, endpoint.allocator);
-    const frames = [_]quic.Frame{.{ .datagram = .{ .data = encoded.items, .length_present = true } }};
-    try endpoint.sendFrames(to, &frames);
-}
-
-fn encodeDatagramIntoStack(
-    storage: *[datagram_stack_capacity]u8,
-    session_id: webtransport.SessionId,
-    payload: []const u8,
-) Error!?[]const u8 {
-    if (!session_id.isClientInitiatedBidirectional()) return error.InvalidSessionId;
-    const prefix = try quic.varint.encodeInto(storage, session_id.quarterStreamId());
-    const total_len = std.math.add(usize, prefix.len, payload.len) catch return error.IntegerOverflow;
-    if (total_len > storage.len) return null;
-    @memcpy(storage[prefix.len..total_len], payload);
-    return storage[0..total_len];
-}
+const sendDatagramFromEndpoint = datagram_send.development;
 
 test "WebTransport DATAGRAM waiter recovers a lost control packet" {
     const allocator = std.testing.allocator;
@@ -8088,19 +8587,7 @@ fn receiveHandshakePeerConnectionCloseUntil(
 /// owning shape. The registry has already stripped and validated the Quarter
 /// Stream ID, so the same allocation can be retained without re-encoding or
 /// copying it merely to reconstruct the WebTransport view.
-fn ownedHandshakeDatagram(
-    owned: http3.runtime.OwnedConnectDatagram,
-    session_id: webtransport.SessionId,
-) OwnedHandshakeDatagram {
-    std.debug.assert(owned.stream_id == session_id.value);
-    return .{
-        .bytes = owned.payload,
-        .datagram = .{
-            .session_id = session_id,
-            .payload = owned.payload,
-        },
-    };
-}
+const ownedHandshakeDatagram = datagram_owned.fromConnect;
 
 /// Wire-only test peer helper. Stateful WebTransport APIs must send through
 /// HTTP/3's association registry; this deliberately unregistered connection
@@ -8212,26 +8699,7 @@ fn receiveManyHandshakeDatagramsUntil(
     };
 }
 
-fn sendProtectedDatagramFromEndpoint(
-    endpoint: *quic.runtime.Endpoint,
-    to: net.IpAddress,
-    keys: quic.protection.PacketProtectionKeys,
-    destination_connection_id: []const u8,
-    packet_number: *u64,
-    session_id: webtransport.SessionId,
-    payload: []const u8,
-) Error!void {
-    var encoded: std.ArrayList(u8) = .empty;
-    defer encoded.deinit(endpoint.allocator);
-    try (webtransport.Datagram{ .session_id = session_id, .payload = payload }).write(&encoded, endpoint.allocator);
-    const frames = [_]quic.Frame{.{ .datagram = .{ .data = encoded.items, .length_present = true } }};
-    try quic.one_rtt.sendFrames(endpoint, to, keys, .{
-        .destination_connection_id = destination_connection_id,
-        .packet_number = packet_number.*,
-        .frames = &frames,
-    });
-    packet_number.* += 1;
-}
+const sendProtectedDatagramFromEndpoint = datagram_send.protected;
 
 fn receiveProtectedDatagramFromEndpoint(
     endpoint: *quic.runtime.Endpoint,
@@ -8296,113 +8764,6 @@ fn findHeader(headers: []const http3.Qpack.HeaderField, name: []const u8) ?[]con
         if (std.ascii.eqlIgnoreCase(header.name, name)) return header.value;
     }
     return null;
-}
-
-test "WebTransport runtime CONNECT headers advertise Capsule-Protocol" {
-    var default_buf: [3]http3.Qpack.HeaderField = undefined;
-    const default_headers = connectRequestHeaders("/", &default_buf);
-    try std.testing.expectEqual(@as(usize, 2), default_headers.len);
-    try std.testing.expectEqualStrings("webtransport", findHeader(default_headers, ":protocol").?);
-    try std.testing.expect(try http3.capsule.protocolEnabled(default_headers));
-    try validateConnectRequest(.{
-        .method = "CONNECT",
-        .scheme = "https",
-        .path = "/",
-        .authority = @as(?[]const u8, "example.com"),
-        .headers = default_headers,
-    });
-
-    var origin_buf: [3]http3.Qpack.HeaderField = undefined;
-    const origin_headers = connectRequestHeaders("https://example.com", &origin_buf);
-    try std.testing.expectEqual(@as(usize, 3), origin_headers.len);
-    try std.testing.expectEqualStrings("https://example.com", findHeader(origin_headers, "origin").?);
-    try std.testing.expect(try http3.capsule.protocolEnabled(origin_headers));
-    try validateConnectRequest(.{
-        .method = "CONNECT",
-        .scheme = "https",
-        .path = "/",
-        .authority = @as(?[]const u8, "example.com"),
-        .headers = origin_headers,
-    });
-
-    const missing_capsule = [_]http3.Qpack.HeaderField{
-        .{ .name = ":protocol", .value = "webtransport" },
-    };
-    try validateConnectRequest(.{
-        .method = "CONNECT",
-        .scheme = "https",
-        .path = "/",
-        .authority = @as(?[]const u8, "example.com"),
-        .headers = &missing_capsule,
-    });
-    const false_capsule = [_]http3.Qpack.HeaderField{
-        .{ .name = ":protocol", .value = "webtransport" },
-        .{ .name = "capsule-protocol", .value = "?0" },
-    };
-    try std.testing.expectError(
-        error.InvalidConnect,
-        validateConnectRequest(.{
-            .method = "CONNECT",
-            .scheme = "https",
-            .path = "/",
-            .authority = @as(?[]const u8, "example.com"),
-            .headers = &false_capsule,
-        }),
-    );
-    try std.testing.expectError(
-        error.InvalidConnect,
-        validateConnectRequest(.{
-            .method = "CONNECT",
-            .scheme = "http",
-            .path = "/",
-            .authority = @as(?[]const u8, "example.com"),
-            .headers = default_headers,
-        }),
-    );
-
-    const response = connectResponse();
-    try validateConnectResponse(response);
-    try std.testing.expect(try http3.capsule.protocolEnabled(response.headers));
-    try validateConnectResponse(.{
-        .status = 200,
-        .headers = &[_]http3.Qpack.HeaderField{},
-    });
-    try std.testing.expectError(
-        error.SessionRejected,
-        validateConnectResponse(.{
-            .status = 403,
-            .headers = &[_]http3.Qpack.HeaderField{},
-        }),
-    );
-    try std.testing.expectError(
-        error.InvalidHeader,
-        validateAdditionalConnectHeaders(&.{.{
-            .name = ":path",
-            .value = "/override",
-        }}, .request),
-    );
-    try std.testing.expectError(
-        error.InvalidHeader,
-        validateAdditionalConnectHeaders(&.{.{
-            .name = "Capsule-Protocol",
-            .value = "?0",
-        }}, .response),
-    );
-    try std.testing.expectError(
-        error.InvalidHeader,
-        validateAdditionalConnectHeaders(&.{.{
-            .name = "content-length",
-            .value = "0",
-        }}, .response),
-    );
-    const too_many = [_]http3.Qpack.HeaderField{.{
-        .name = "x-extra",
-        .value = "value",
-    }} ** (max_additional_connect_request_headers + 1);
-    try std.testing.expectError(
-        error.InvalidFrame,
-        validateAdditionalConnectHeaders(&too_many, .request),
-    );
 }
 
 test "WebTransport cleartext accept validates CONNECT session id direction" {
@@ -8519,10 +8880,15 @@ test "WebTransport development runtime sends explicit rejection" {
             var pending = try self.server.receiveSessionRequest();
             var pending_owned = true;
             defer if (pending_owned) pending.deinit();
-            var rejected = try pending.reject(429, &.{.{
-                .name = "retry-after",
-                .value = "5",
-            }});
+            var rejected = try pending.rejectWithBody(
+                429,
+                &.{.{
+                    .name = "retry-after",
+                    .value = "5",
+                }},
+                "slow down",
+                &.{.{ .name = "x-final", .value = "true" }},
+            );
             pending_owned = false;
             defer rejected.deinit(
                 self.server.h3.quic_server.endpoint.allocator,
@@ -8543,6 +8909,7 @@ test "WebTransport development runtime sends explicit rejection" {
             .path = "/busy",
             .limits = .{
                 .http3 = .{ .quic = .{ .max_datagram_size = 4096 } },
+                .max_rejection_body_bytes = 9,
             },
         },
     );
@@ -8553,12 +8920,304 @@ test "WebTransport development runtime sends explicit rejection" {
         "5",
         attempt.responseHeader("retry-after").?,
     );
+    try std.testing.expectEqualStrings(
+        "9",
+        attempt.responseHeader("content-length").?,
+    );
+    try std.testing.expectEqualStrings("slow down", attempt.body());
+    try std.testing.expectEqual(@as(usize, 1), attempt.trailers().len);
+    try std.testing.expectEqualStrings(
+        "x-final",
+        attempt.trailers()[0].name,
+    );
+    try std.testing.expectEqualStrings(
+        "true",
+        attempt.trailers()[0].value,
+    );
     try std.testing.expectError(
         error.SessionRejected,
         attempt.requireAccepted(),
     );
 
     thread.join();
+    if (shared.err) |err| return err;
+}
+
+test "WebTransport development rejected CONNECT enforces body limit" {
+    const allocator = std.testing.allocator;
+    var threaded = std.Io.Threaded.init(allocator, .{});
+    defer threaded.deinit();
+    const io = threaded.io();
+
+    var server = try Server.bind(
+        allocator,
+        io,
+        .{ .ip4 = .loopback(0) },
+        .{ .http3 = .{ .quic = .{ .max_datagram_size = 4096 } } },
+    );
+    defer server.deinit();
+    const Shared = struct {
+        server: *Server,
+        err: ?anyerror = null,
+
+        fn run(self: *@This()) void {
+            self.runFallible() catch |err| {
+                self.err = err;
+            };
+        }
+
+        fn runFallible(self: *@This()) !void {
+            var pending = try self.server.receiveSessionRequest();
+            var pending_owned = true;
+            defer if (pending_owned) pending.deinit();
+            var rejected = try pending.rejectWithBody(
+                413,
+                &.{},
+                "12345",
+                &.{},
+            );
+            pending_owned = false;
+            defer rejected.deinit(
+                self.server.h3.quic_server.endpoint.allocator,
+            );
+        }
+    };
+    var shared = Shared{ .server = &server };
+    const thread = try std.Thread.spawn(.{}, Shared.run, .{&shared});
+    var joined = false;
+    defer if (!joined) thread.join();
+
+    try std.testing.expectError(
+        error.MessageTooLarge,
+        ClientSession.connectAttempt(
+            allocator,
+            io,
+            .{ .ip4 = .loopback(0) },
+            server.address(),
+            .{
+                .authority = "localhost",
+                .path = "/too-large",
+                .limits = .{
+                    .http3 = .{
+                        .quic = .{ .max_datagram_size = 4096 },
+                    },
+                    .max_rejection_body_bytes = 4,
+                },
+            },
+        ),
+    );
+
+    thread.join();
+    joined = true;
+    if (shared.err) |err| return err;
+}
+
+test "WebTransport protected runtime sends explicit rejection entity" {
+    const allocator = std.testing.allocator;
+    var threaded = std.Io.Threaded.init(allocator, .{});
+    defer threaded.deinit();
+    const io = threaded.io();
+
+    const client_cid = [_]u8{ 0xfa, 0xce, 0x20, 0x01 };
+    const server_cid = [_]u8{ 0xfa, 0xce, 0x20, 0x02 };
+    const client_keys = quic.protection.deriveAes128Keys(
+        [_]u8{0xe3} ** quic.protection.secret_len,
+    );
+    const server_keys = quic.protection.deriveAes128Keys(
+        [_]u8{0xe4} ** quic.protection.secret_len,
+    );
+
+    var server = try ProtectedServer.bind(
+        allocator,
+        io,
+        .{ .ip4 = .loopback(0) },
+        .{ .http3 = .{ .quic = .{ .max_datagram_size = 4096 } } },
+        .{
+            .receive_keys = client_keys,
+            .send_keys = server_keys,
+            .local_connection_id = &server_cid,
+            .peer_connection_id = &client_cid,
+            .max_frames_per_packet = 1,
+            .max_stream_frame_data = 3,
+        },
+    );
+    defer server.deinit();
+
+    const Shared = struct {
+        server: *ProtectedServer,
+        err: ?anyerror = null,
+
+        fn run(self: *@This()) void {
+            self.runFallible() catch |err| {
+                self.err = err;
+            };
+        }
+
+        fn runFallible(self: *@This()) !void {
+            var pending = try self.server.receiveSessionRequest();
+            var pending_owned = true;
+            defer if (pending_owned) pending.deinit();
+            var rejected = try pending.rejectWithBody(
+                503,
+                &.{.{ .name = "retry-after", .value = "7" }},
+                "try later",
+                &.{.{ .name = "x-final", .value = "protected" }},
+            );
+            pending_owned = false;
+            defer rejected.deinit(
+                self.server.h3.quic_server.endpoint.allocator,
+            );
+            try std.testing.expectEqual(@as(u16, 503), rejected.status);
+        }
+    };
+    var shared = Shared{ .server = &server };
+    const thread = try std.Thread.spawn(.{}, Shared.run, .{&shared});
+    var joined = false;
+    defer if (!joined) thread.join();
+
+    var attempt = try ProtectedClientSession.connectAttempt(
+        allocator,
+        io,
+        .{ .ip4 = .loopback(0) },
+        server.address(),
+        .{
+            .authority = "localhost",
+            .path = "/protected-busy",
+            .limits = .{
+                .http3 = .{ .quic = .{ .max_datagram_size = 4096 } },
+                .max_rejection_body_bytes = 9,
+            },
+            .config = .{
+                .receive_keys = server_keys,
+                .send_keys = client_keys,
+                .local_connection_id = &client_cid,
+                .peer_connection_id = &server_cid,
+                .max_frames_per_packet = 1,
+                .max_stream_frame_data = 3,
+            },
+        },
+    );
+    defer attempt.deinit();
+    try std.testing.expect(!attempt.accepted());
+    try std.testing.expectEqual(@as(u16, 503), attempt.status());
+    try std.testing.expectEqualStrings(
+        "7",
+        attempt.responseHeader("retry-after").?,
+    );
+    try std.testing.expectEqualStrings(
+        "9",
+        attempt.responseHeader("content-length").?,
+    );
+    try std.testing.expectEqualStrings("try later", attempt.body());
+    try std.testing.expectEqual(@as(usize, 1), attempt.trailers().len);
+    try std.testing.expectEqualStrings(
+        "x-final",
+        attempt.trailers()[0].name,
+    );
+    try std.testing.expectEqualStrings(
+        "protected",
+        attempt.trailers()[0].value,
+    );
+    try std.testing.expectError(
+        error.SessionRejected,
+        attempt.requireAccepted(),
+    );
+
+    thread.join();
+    joined = true;
+    if (shared.err) |err| return err;
+}
+
+test "WebTransport protected pending deinit retires request capacity" {
+    const allocator = std.testing.allocator;
+    var threaded = std.Io.Threaded.init(allocator, .{});
+    defer threaded.deinit();
+    const io = threaded.io();
+
+    const client_cid = [_]u8{ 0xfa, 0xce, 0x21, 0x01 };
+    const server_cid = [_]u8{ 0xfa, 0xce, 0x21, 0x02 };
+    const client_keys = quic.protection.deriveAes128Keys(
+        [_]u8{0xe5} ** quic.protection.secret_len,
+    );
+    const server_keys = quic.protection.deriveAes128Keys(
+        [_]u8{0xe6} ** quic.protection.secret_len,
+    );
+    const limits: Limits = .{ .http3 = .{
+        .quic = .{ .max_datagram_size = 4096 },
+        .max_concurrent_request_streams = 1,
+    } };
+    const server_config: http3.runtime.ProtectedConfig = .{
+        .receive_keys = client_keys,
+        .send_keys = server_keys,
+        .local_connection_id = &server_cid,
+        .peer_connection_id = &client_cid,
+    };
+    const client_config: http3.runtime.ProtectedConfig = .{
+        .receive_keys = server_keys,
+        .send_keys = client_keys,
+        .local_connection_id = &client_cid,
+        .peer_connection_id = &server_cid,
+        .local_settings = webtransport.defaultSettings(.{}),
+    };
+
+    var server = try ProtectedServer.bind(
+        allocator,
+        io,
+        .{ .ip4 = .loopback(0) },
+        limits,
+        server_config,
+    );
+    defer server.deinit();
+    const Shared = struct {
+        server: *ProtectedServer,
+        err: ?anyerror = null,
+
+        fn run(self: *@This()) void {
+            self.runFallible() catch |err| {
+                self.err = err;
+            };
+        }
+
+        fn runFallible(self: *@This()) !void {
+            for (0..2) |_| {
+                var pending = try self.server.receiveSessionRequest();
+                pending.deinit();
+            }
+        }
+    };
+    var shared = Shared{ .server = &server };
+    const thread = try std.Thread.spawn(.{}, Shared.run, .{&shared});
+    var joined = false;
+    defer if (!joined) thread.join();
+
+    var client = try http3.runtime.ProtectedClient.connect(
+        allocator,
+        io,
+        .{ .ip4 = .loopback(0) },
+        server.address(),
+        limits.http3,
+        client_config,
+    );
+    defer client.deinit();
+    for (0..2) |index| {
+        const stream_id = try client.startRequest(.{
+            .method = "CONNECT",
+            .path = if (index == 0) "/drop-one" else "/drop-two",
+            .scheme = "https",
+            .authority = "localhost",
+            .headers = &.{
+                .{ .name = ":protocol", .value = "webtransport" },
+                http3.capsule.protocol_header,
+            },
+        }, null);
+        try std.testing.expectError(
+            error.RequestRejected,
+            client.receiveResponseEvent(stream_id),
+        );
+    }
+
+    thread.join();
+    joined = true;
     if (shared.err) |err| return err;
 }
 
@@ -8655,6 +9314,7 @@ test "WebTransport protected runtime CONNECT and datagrams over QUIC 1-RTT" {
         server: *ProtectedServer,
         io: std.Io,
         initial_timeout_done: std.Io.Event = .unset,
+        sibling_stream_id: u62 = 4,
         err: ?anyerror = null,
 
         fn run(shared: *@This()) void {
@@ -8716,6 +9376,36 @@ test "WebTransport protected runtime CONNECT and datagrams over QUIC 1-RTT" {
             try std.testing.expectEqualStrings(
                 expected_control,
                 control_buffer[0..control_len],
+            );
+            // The ordinary request was ready first. The targeted session read
+            // above must leave its events buffered for this explicit sibling
+            // consumer rather than returning InvalidSessionState.
+            var sibling_head = try server_ptr.h3
+                .receiveRequestEventForWithTimeout(
+                shared.sibling_stream_id,
+                .fromSeconds(1),
+            );
+            defer sibling_head.deinit(allocator);
+            try std.testing.expect(sibling_head == .message);
+            try std.testing.expect(sibling_head.message.value == .head);
+            try std.testing.expectEqualStrings(
+                "/protected-sibling",
+                sibling_head.message.value.head.request.path,
+            );
+            var sibling_finished = try server_ptr.h3
+                .receiveRequestEventForWithTimeout(
+                shared.sibling_stream_id,
+                .fromSeconds(1),
+            );
+            defer sibling_finished.deinit(allocator);
+            try std.testing.expect(sibling_finished == .message);
+            try std.testing.expect(
+                sibling_finished.message.value == .finished,
+            );
+            try server_ptr.h3.sendResponse(
+                accepted.request.from,
+                shared.sibling_stream_id,
+                .{ .status = 204 },
             );
             try accepted.drain(server_ptr);
             var datagram = try server_ptr.receiveDatagram();
@@ -8790,7 +9480,22 @@ test "WebTransport protected runtime CONNECT and datagrams over QUIC 1-RTT" {
         client.responseHeader("x-protected-admission").?,
     );
 
+    const sibling_stream_id = try client.h3.sendRequest(.{
+        .method = "GET",
+        .path = "/protected-sibling",
+        .authority = "localhost",
+    });
+    try std.testing.expectEqual(shared.sibling_stream_id, sibling_stream_id);
     try client.sendSessionData("protected-client-control", false);
+    var sibling_response = try client.h3.receiveResponseWithTimeout(
+        sibling_stream_id,
+        .fromSeconds(1),
+    );
+    defer sibling_response.deinit(allocator);
+    try std.testing.expectEqual(
+        @as(u16, 204),
+        sibling_response.response.status,
+    );
     const drain = try client.receiveSessionEvent();
     try std.testing.expect(drain == .draining);
     try client.sendDatagram("protected-client-dgram");
@@ -9334,8 +10039,22 @@ test "WebTransport stateful preconfigured runtime exchanges associated streams" 
         error.InvalidSessionState,
         client.openUnidirectionalStream(),
     );
+    try std.testing.expectError(
+        error.InvalidSessionState,
+        client.sendDatagram("after-close"),
+    );
+    try std.testing.expect(client.session.h3.hasConnectDatagramAssociation(
+        client.session.session_id.value,
+    ));
     const peer_fin = try client.receiveSessionEvent();
     try std.testing.expect(peer_fin == .closed);
+    try std.testing.expect(client.session.h3.hasConnectDatagramAssociation(
+        client.session.session_id.value,
+    ));
+    try std.testing.expectError(
+        error.ConnectDatagramAssociationClosed,
+        client.receiveDatagram(),
+    );
 
     thread.join();
     joined = true;
@@ -9520,6 +10239,145 @@ test "WebTransport handshake runtime CONNECT and datagrams over QUIC handshake" 
     try std.testing.expect(stats.packets_received > 0);
 
     thread.join();
+    if (shared.err) |err| return err;
+}
+
+test "WebTransport bounded DATAGRAM send waits for congestion ACK" {
+    const allocator = std.testing.allocator;
+    var threaded = std.Io.Threaded.init(allocator, .{
+        .async_limit = .unlimited,
+    });
+    defer threaded.deinit();
+    const io = threaded.io();
+
+    const original_dcid =
+        [_]u8{ 0x62, 0x64, 0x67, 0x01, 0x62, 0x64, 0x67, 0x02 };
+    const client_cid = [_]u8{ 0x62, 0x64, 0x67, 0x03 };
+    const server_cid = [_]u8{ 0x62, 0x64, 0x67, 0x04 };
+    var server = try HandshakeServer.bind(
+        allocator,
+        io,
+        .{ .ip4 = .loopback(0) },
+        .{ .http3 = .{ .quic = .{
+            .max_datagram_size = 4096,
+            .max_frames_per_datagram = 8,
+        } } },
+        .{
+            .handshake = .{
+                .local_connection_id = &server_cid,
+                .random = [_]u8{0x63} ** 32,
+                .x25519_secret_key = [_]u8{0x64} ** 32,
+            },
+        },
+    );
+    defer server.deinit();
+
+    const Shared = struct {
+        server: *HandshakeServer,
+        release_receive: std.Io.Event = .unset,
+        err: ?anyerror = null,
+
+        fn run(self: *@This()) void {
+            self.runFallible() catch |err| {
+                self.err = err;
+            };
+        }
+
+        fn runFallible(self: *@This()) !void {
+            var accepted = try self.server.accept();
+            defer accepted.deinit();
+            const before = accepted.stats();
+            try std.testing.expectError(
+                error.Timeout,
+                accepted.sendDatagramWithTimeout("not-sent", .zero),
+            );
+            try std.testing.expectEqual(
+                before.datagrams_sent,
+                accepted.stats().datagrams_sent,
+            );
+            try self.release_receive.wait(self.server.h3.quic_server.endpoint.io);
+            var first = try accepted.receiveDatagram();
+            defer first.deinit(
+                accepted.h3.established.connection.endpoint.allocator,
+            );
+            try std.testing.expectEqualStrings(
+                "fill-window",
+                first.datagram.payload,
+            );
+            var second = try accepted.receiveDatagram();
+            defer second.deinit(
+                accepted.h3.established.connection.endpoint.allocator,
+            );
+            try std.testing.expectEqualStrings(
+                "after-ack",
+                second.datagram.payload,
+            );
+            try accepted.sendDatagramWithTimeout(
+                "server-bounded",
+                .fromSeconds(5),
+            );
+        }
+    };
+    var shared = Shared{ .server = &server };
+    const thread = try std.Thread.spawn(.{}, Shared.run, .{&shared});
+    var joined = false;
+    defer if (!joined) thread.join();
+
+    var client = try HandshakeClientSession.connect(
+        allocator,
+        io,
+        .{ .ip4 = .loopback(0) },
+        server.address(),
+        .{
+            .authority = "localhost",
+            .path = "/wt-bounded-datagram",
+            .limits = .{ .http3 = .{ .quic = .{
+                .max_datagram_size = 4096,
+                .max_frames_per_datagram = 8,
+            } } },
+            .h3 = .{ .handshake = .{
+                .original_destination_connection_id = &original_dcid,
+                .local_connection_id = &client_cid,
+                .server_name = "localhost",
+                .random = [_]u8{0x65} ** 32,
+                .x25519_secret_key = [_]u8{0x66} ** 32,
+            } },
+        },
+    );
+    defer client.deinit();
+
+    try client.sendDatagram("fill-window");
+    quic.one_rtt.testing.clampCongestionWindowToBytesInFlight(
+        &client.h3.established.connection,
+    );
+    const before = client.stats();
+    try std.testing.expectError(
+        error.Timeout,
+        client.sendDatagramWithTimeout("not-sent", .zero),
+    );
+    try std.testing.expectEqual(
+        before.datagrams_sent,
+        client.stats().datagrams_sent,
+    );
+
+    shared.release_receive.set(io);
+    try client.sendDatagramWithTimeout(
+        "after-ack",
+        .fromSeconds(5),
+    );
+    try std.testing.expectEqual(
+        before.datagrams_sent + 1,
+        client.stats().datagrams_sent,
+    );
+    var response = try client.receiveDatagramWithTimeout(.fromSeconds(5));
+    defer response.deinit(allocator);
+    try std.testing.expectEqualStrings(
+        "server-bounded",
+        response.datagram.payload,
+    );
+
+    thread.join();
+    joined = true;
     if (shared.err) |err| return err;
 }
 
@@ -9720,10 +10578,13 @@ test "WebTransport bounded DATAGRAM batch retains partial progress" {
 }
 
 test {
+    _ = @import("runtime/datagram/tests/codec.zig");
+    _ = @import("runtime/datagram/tests/send.zig");
     _ = @import("runtime/stream_tests.zig");
+    _ = @import("runtime/stream/tests/batch.zig");
+    _ = @import("runtime/stream/pagination_tests.zig");
     _ = @import("runtime/development_control_tests.zig");
     _ = stream_batch;
     _ = @import("runtime/session_control_tests.zig");
-    _ = @import("runtime/admission_tests.zig");
     _ = @import("runtime/connection_close_tests.zig");
 }

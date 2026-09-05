@@ -19,7 +19,15 @@ pub const Error = net.Stream.Reader.Error ||
         ConnectionClosed,
         RecordTooLarge,
         SequenceOverflow,
+        TruncatedRecord,
+        UnexpectedEof,
     } || stream_io.TimedReadError;
+
+const ExactReadResult = enum {
+    complete,
+    eof,
+    truncated,
+};
 
 pub fn readRecord(
     io: std.Io,
@@ -29,19 +37,23 @@ pub fn readRecord(
     if (buffer.len < vail.tls.record.header_len) {
         return error.RecordTooLarge;
     }
-    try readExact(
+    switch (try readExact(
         io,
         stream,
         buffer[0..vail.tls.record.header_len],
-    );
+    )) {
+        .complete => {},
+        .eof => return error.UnexpectedEof,
+        .truncated => return error.TruncatedRecord,
+    }
     const payload_len = std.mem.readInt(u16, buffer[3..5], .big);
     const total_len = vail.tls.record.header_len + payload_len;
     if (total_len > buffer.len) return error.RecordTooLarge;
-    try readExact(
+    if (try readExact(
         io,
         stream,
         buffer[vail.tls.record.header_len..total_len],
-    );
+    ) != .complete) return error.TruncatedRecord;
     return buffer[0..total_len];
 }
 
@@ -57,21 +69,25 @@ pub fn readRecordWithDeadline(
     if (buffer.len < vail.tls.record.header_len) {
         return error.RecordTooLarge;
     }
-    try readExactWithDeadline(
+    switch (try readExactWithDeadline(
         io,
         stream,
         buffer[0..vail.tls.record.header_len],
         deadline,
-    );
+    )) {
+        .complete => {},
+        .eof => return error.UnexpectedEof,
+        .truncated => return error.TruncatedRecord,
+    }
     const payload_len = std.mem.readInt(u16, buffer[3..5], .big);
     const total_len = vail.tls.record.header_len + payload_len;
     if (total_len > buffer.len) return error.RecordTooLarge;
-    try readExactWithDeadline(
+    if (try readExactWithDeadline(
         io,
         stream,
         buffer[vail.tls.record.header_len..total_len],
         deadline,
-    );
+    ) != .complete) return error.TruncatedRecord;
     return buffer[0..total_len];
 }
 
@@ -103,7 +119,7 @@ fn readExact(
     io: std.Io,
     stream: net.Stream,
     out: []u8,
-) Error!void {
+) Error!ExactReadResult {
     var offset: usize = 0;
     while (offset < out.len) {
         var bufs = [_][]u8{out[offset..]};
@@ -112,9 +128,12 @@ fn readExact(
             stream.socket.handle,
             &bufs,
         );
-        if (count == 0) return error.ConnectionClosed;
+        if (count == 0) {
+            return if (offset == 0) .eof else .truncated;
+        }
         offset += count;
     }
+    return .complete;
 }
 
 fn readExactWithDeadline(
@@ -122,7 +141,7 @@ fn readExactWithDeadline(
     stream: net.Stream,
     out: []u8,
     deadline: std.Io.Clock.Timestamp,
-) Error!void {
+) Error!ExactReadResult {
     var offset: usize = 0;
     while (offset < out.len) {
         const count = try stream_io.readSomeWithDeadline(
@@ -131,7 +150,10 @@ fn readExactWithDeadline(
             out[offset..],
             deadline,
         );
-        if (count == 0) return error.ConnectionClosed;
+        if (count == 0) {
+            return if (offset == 0) .eof else .truncated;
+        }
         offset += count;
     }
+    return .complete;
 }

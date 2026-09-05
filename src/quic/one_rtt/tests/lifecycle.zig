@@ -1404,22 +1404,42 @@ test "QUIC 1-RTT stateful batch commits stream flow and recovery" {
     });
     defer server.deinit();
 
-    const first = [_]quic.Frame{.{ .stream = .{
-        .stream_id = 0,
-        .offset = 0,
-        .data = "first",
-    } }};
-    const second = [_]quic.Frame{.{ .stream = .{
-        .stream_id = 0,
+    const first = [_]quic.Frame{
+        .{ .stream = .{
+            .stream_id = 0,
+            .offset = 0,
+            .data = "fi",
+        } },
+        .{ .stream = .{
+            .stream_id = 0,
+            .offset = 2,
+            .data = "rst",
+        } },
+    };
+    const second = [_]quic.Frame{
+        .{ .stream = .{
+            .stream_id = 0,
+            .offset = 5,
+            .data = "second",
+            .fin = true,
+        } },
+        .{ .stream = .{
+            .stream_id = 4,
+            .offset = 0,
+            .data = "other",
+        } },
+    };
+    const third = [_]quic.Frame{.{ .stream = .{
+        .stream_id = 4,
         .offset = 5,
-        .data = "second",
+        .data = &.{},
         .fin = true,
     } }};
-    const packets = [_][]const quic.Frame{ &first, &second };
+    const packets = [_][]const quic.Frame{ &first, &second, &third };
     try client.sendMany(&packets);
 
-    try std.testing.expectEqual(@as(u64, 2), client.next_packet_number);
-    try std.testing.expectEqual(@as(u64, 11), client.send_flow.used);
+    try std.testing.expectEqual(@as(u64, 3), client.next_packet_number);
+    try std.testing.expectEqual(@as(u64, 16), client.send_flow.used);
     try std.testing.expectEqual(
         @as(u64, 11),
         one_rtt.testing.sendStreamUsed(&client, 0).?,
@@ -1428,17 +1448,31 @@ test "QUIC 1-RTT stateful batch commits stream flow and recovery" {
         @as(u64, 11),
         one_rtt.testing.sendStreamHighestSentEnd(&client, 0).?,
     );
-    try std.testing.expectEqual(@as(usize, 2), client.pendingRecoveryCount());
-    try std.testing.expectEqual(@as(usize, 2), client.sent.packets.items.len);
+    try std.testing.expectEqual(
+        @as(u64, 5),
+        one_rtt.testing.sendStreamUsed(&client, 4).?,
+    );
+    try std.testing.expectEqual(
+        @as(?u64, 5),
+        one_rtt.testing.sendStreamFinalSize(&client, 4),
+    );
+    try std.testing.expectEqual(@as(usize, 3), client.pendingRecoveryCount());
+    try std.testing.expectEqual(@as(usize, 3), client.sent.packets.items.len);
 
     var received0 = try server.receivePacket();
     defer received0.deinit(allocator);
     var received1 = try server.receivePacket();
     defer received1.deinit(allocator);
+    var received2 = try server.receivePacket();
+    defer received2.deinit(allocator);
     try std.testing.expectEqual(@as(u64, 0), received0.packet.packet_number);
     try std.testing.expectEqualStrings(
-        "first",
+        "fi",
         received0.frames[0].stream.data,
+    );
+    try std.testing.expectEqualStrings(
+        "rst",
+        received0.frames[1].stream.data,
     );
     try std.testing.expectEqual(@as(u64, 1), received1.packet.packet_number);
     try std.testing.expectEqualStrings(
@@ -1446,6 +1480,13 @@ test "QUIC 1-RTT stateful batch commits stream flow and recovery" {
         received1.frames[0].stream.data,
     );
     try std.testing.expect(received1.frames[0].stream.fin);
+    try std.testing.expectEqualStrings(
+        "other",
+        received1.frames[1].stream.data,
+    );
+    try std.testing.expectEqual(@as(u64, 2), received2.packet.packet_number);
+    try std.testing.expectEqual(@as(usize, 0), received2.frames[0].stream.data.len);
+    try std.testing.expect(received2.frames[0].stream.fin);
 }
 
 test "QUIC 1-RTT future packet length includes pending handshake done" {

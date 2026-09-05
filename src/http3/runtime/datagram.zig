@@ -139,6 +139,14 @@ pub const Registry = struct {
         return self.index.count() != 0 and self.index.contains(stream_id);
     }
 
+    pub fn associationCount(self: Registry) usize {
+        return self.associations.items.len;
+    }
+
+    pub fn associationStreamId(self: Registry, index: usize) u62 {
+        return self.associations.items[index].stream_id;
+    }
+
     pub fn register(self: *Registry, stream_id: u62) !void {
         try validateStreamId(stream_id);
         if (self.contains(stream_id)) return error.UnexpectedStream;
@@ -185,6 +193,12 @@ pub const Registry = struct {
         const index = self.index.get(stream_id) orelse return;
         if (self.associations.items[index].terminal == null) {
             self.associations.items[index].terminal = state;
+        }
+    }
+
+    pub fn markAllTerminal(self: *Registry, state: Terminal) void {
+        for (self.associations.items) |*association| {
+            if (association.terminal == null) association.terminal = state;
         }
     }
 

@@ -70,6 +70,14 @@ test "WebTransport endpoint server exposes stable session API" {
         "keyUpdateAwaitingAck",
     ));
     try std.testing.expect(@hasDecl(
+        runtime.EndpointAcceptedSession,
+        "trySendDatagramWithTimeout",
+    ));
+    try std.testing.expect(@hasDecl(
+        runtime.EndpointAcceptedSession,
+        "trySendDatagramWithDeadline",
+    ));
+    try std.testing.expect(@hasDecl(
         http3.runtime.EndpointServer,
         "promotedSession",
     ));
@@ -730,6 +738,7 @@ test "WebTransport URI deadline includes Extended CONNECT response" {
 
     const Shared = struct {
         server: *runtime.HandshakeServer,
+        deadline: std.Io.Clock.Timestamp,
         err: ?anyerror = null,
 
         fn run(self: *@This()) void {
@@ -741,14 +750,25 @@ test "WebTransport URI deadline includes Extended CONNECT response" {
         fn runFallible(self: *@This()) !void {
             var pending = try self.server.receiveSessionRequest();
             defer pending.deinit();
+            // Receiving the CONNECT request proves QUIC/TLS completed before
+            // the caller's deadline. Keep the response pending until after
+            // that exact timestamp so this test cannot accidentally measure
+            // a slow handshake as a response-phase timeout.
+            try self.deadline.wait(
+                self.server.h3.quic_server.endpoint.io,
+            );
             try std.Io.sleep(
                 self.server.h3.quic_server.endpoint.io,
-                .fromMilliseconds(150),
+                .fromMilliseconds(25),
                 .awake,
             );
         }
     };
-    var shared = Shared{ .server = &server };
+    const deadline = std.Io.Clock.Timestamp.fromNow(io, .{
+        .raw = .fromSeconds(1),
+        .clock = .awake,
+    });
+    var shared = Shared{ .server = &server, .deadline = deadline };
     const thread = try std.Thread.spawn(.{}, Shared.run, .{&shared});
     var joined = false;
     defer if (!joined) thread.join();
@@ -778,10 +798,7 @@ test "WebTransport URI deadline includes Extended CONNECT response" {
                     },
                 },
             } },
-            .fromNow(io, .{
-                .raw = .fromMilliseconds(50),
-                .clock = .awake,
-            }),
+            deadline,
         ),
     );
 
@@ -1092,11 +1109,14 @@ test "WebTransport endpoint server owns concurrent real sessions" {
                         expected,
                         datagram.datagram.payload,
                     );
-                    try accepted.sendDatagram(if (std.mem.eql(
-                        u8,
-                        expected,
-                        "one",
-                    )) "echo-one" else "echo-two");
+                    try accepted.trySendDatagramWithTimeout(
+                        if (std.mem.eql(
+                            u8,
+                            expected,
+                            "one",
+                        )) "echo-one" else "echo-two",
+                        .fromSeconds(1),
+                    );
                     received_datagrams += 1;
                 },
                 .stream => |stream| {

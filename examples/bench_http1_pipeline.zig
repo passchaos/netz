@@ -10,14 +10,6 @@ const request =
     "\r\n";
 const default_response_body_bytes: usize = "Hello, World!".len;
 const large_response_body_bytes: usize = 64 * 1024;
-// Hyper's HTTP/1 server automatically adds a 29-byte IMF-fixdate. Keep the
-// exact 89-byte response wire size in this same-shape benchmark rather than
-// giving netz a smaller 52-byte response workload.
-const response_date = "Mon, 17 Aug 2026 00:00:00 GMT";
-const response_headers = [_]netz.http1.Header{.{
-    .name = "date",
-    .value = response_date,
-}};
 pub fn main(init: std.process.Init) !void {
     const allocator = std.heap.smp_allocator;
     const response_body_bytes = parseResponseBodyBytes(init) catch
@@ -35,8 +27,8 @@ pub fn main(init: std.process.Init) !void {
         "HTTP/1.1 200 OK\r\n".len +
         "Content-Length: \r\n".len +
         content_length.len +
-        "date: ".len +
-        response_date.len +
+        "Date: ".len +
+        29 +
         "\r\n".len +
         "\r\n".len +
         response_body.len;
@@ -88,7 +80,6 @@ pub fn main(init: std.process.Init) !void {
                 | {
                     if (body.len != 0) return error.UnexpectedRequestBody;
                     response_options.* = .{
-                        .headers = &response_headers,
                         .body = shared.response_body,
                         .request_method = head.method,
                     };

@@ -751,22 +751,3 @@ test "HTTP/1 low-level timeout wrappers reject zero before I/O" {
         server.acceptStreamWithTimeout(undefined, .zero),
     );
 }
-
-test "HTTP/1 io_uring rejects an unsupported request head timeout" {
-    if (comptime @import("builtin").os.tag != .linux) {
-        return error.SkipZigTest;
-    }
-    var connection = runtime.LinuxIoUringConnection{
-        .allocator = std.testing.allocator,
-        .stream = undefined,
-        .limits = .{ .request_head_timeout = .fromMilliseconds(1) },
-    };
-    defer {
-        connection.inbuf.deinit(std.testing.allocator);
-        connection.write_scratch.deinit(std.testing.allocator);
-    }
-    try std.testing.expectError(
-        error.TimedReadUnsupported,
-        connection.readRequest(.{}),
-    );
-}

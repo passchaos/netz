@@ -6,6 +6,7 @@ const runtime = @import("../runtime.zig");
 const Observation = struct {
     statuses: [2]u16 = undefined,
     headers_valid: bool = true,
+    saw_automatic_date: bool = false,
     count: usize = 0,
 
     fn observe(
@@ -30,6 +31,8 @@ const Observation = struct {
             findHeader(response.headers, expected_name) orelse "",
             expected_value,
         );
+        self.saw_automatic_date = self.saw_automatic_date or
+            findHeader(response.headers, "date") != null;
         self.statuses[self.count] = response.status;
         self.count += 1;
     }
@@ -278,7 +281,12 @@ test "HTTP/3 protected client observes and bounds informational responses" {
         observation.statuses[0..observation.count],
     );
     try std.testing.expect(observation.headers_valid);
+    try std.testing.expect(!observation.saw_automatic_date);
     try std.testing.expectEqualStrings("final", response.response.body);
+    const date = findHeader(response.response.headers, "date") orelse
+        return error.TestUnexpectedResult;
+    try std.testing.expectEqual(@as(usize, 29), date.len);
+    try std.testing.expectEqualStrings("GMT", date[26..]);
 
     try std.testing.expectError(
         error.TooManyInformationalResponses,
@@ -397,7 +405,11 @@ test "HTTP/3 authenticated informational deadline variants validate and deliver"
     defer response.deinit(allocator);
     try std.testing.expectEqual(@as(usize, 1), observation.count);
     try std.testing.expectEqual(@as(u16, 103), observation.statuses[0]);
+    try std.testing.expect(!observation.saw_automatic_date);
     try std.testing.expectEqualStrings("late", response.response.body);
+    try std.testing.expect(
+        findHeader(response.response.headers, "date") != null,
+    );
 
     thread.join();
     joined = true;
@@ -602,4 +614,118 @@ test "HTTP/3 protected aggregate push correlates informational responses" {
             entry.status,
         );
     }
+}
+
+test "HTTP/3 protected push 1xx overflow stops only the push stream" {
+    const allocator = std.testing.allocator;
+    var threaded = std.Io.Threaded.init(allocator, .{});
+    defer threaded.deinit();
+    const io = threaded.io();
+    const client_cid = [_]u8{ 0x21, 0x22, 0x23, 0x24 };
+    const server_cid = [_]u8{ 0x31, 0x32, 0x33, 0x34 };
+    const client_keys = quic.protection.deriveAes128Keys(
+        [_]u8{0x41} ** quic.protection.secret_len,
+    );
+    const server_keys = quic.protection.deriveAes128Keys(
+        [_]u8{0x51} ** quic.protection.secret_len,
+    );
+    var server = try runtime.ProtectedServer.bind(
+        allocator,
+        io,
+        .{ .ip4 = .loopback(0) },
+        .{ .quic = .{
+            .max_datagram_size = 4096,
+            .max_frames_per_datagram = 8,
+        } },
+        .{
+            .receive_keys = client_keys,
+            .send_keys = server_keys,
+            .local_connection_id = &server_cid,
+            .peer_connection_id = &client_cid,
+        },
+    );
+    defer server.deinit();
+    var client = try runtime.ProtectedClient.connect(
+        allocator,
+        io,
+        .{ .ip4 = .loopback(0) },
+        server.address(),
+        .{ .quic = .{
+            .max_datagram_size = 4096,
+            .max_frames_per_datagram = 8,
+        } },
+        .{
+            .receive_keys = server_keys,
+            .send_keys = client_keys,
+            .local_connection_id = &client_cid,
+            .peer_connection_id = &server_cid,
+            .max_informational_responses = 1,
+        },
+    );
+    defer client.deinit();
+
+    try client.sendMaxPushId(0);
+    const request_stream_id = try client.sendRequest(.{
+        .method = "GET",
+        .path = "/push-limit",
+        .authority = "localhost",
+    });
+    var request = try server.receiveRequest();
+    defer request.deinit(allocator);
+    const push_stream_id = try server.sendResponseWithPush(
+        request.from,
+        request.stream_id,
+        .{ .status = 204 },
+        .{
+            .push_id = 0,
+            .request = .{
+                .method = "GET",
+                .path = "/too-many-hints.css",
+                .authority = "localhost",
+            },
+            .informational = &.{
+                .{ .status = 103 },
+                .{ .status = 102 },
+            },
+            .response = .{ .status = 200, .body = "unused" },
+        },
+    );
+    var parent = try client.receiveResponse(request_stream_id);
+    defer parent.deinit(allocator);
+    try std.testing.expectEqual(@as(u16, 204), parent.response.status);
+
+    var first = try client.receivePushEvent();
+    defer first.deinit(allocator);
+    try std.testing.expectEqual(@as(u16, 103), first.value.head.response.status);
+    try std.testing.expectError(
+        error.TooManyInformationalResponses,
+        client.receivePushEvent(),
+    );
+
+    var saw_stop = false;
+    var saw_close = false;
+    while (!saw_stop) {
+        var packet = try quic.one_rtt.receive(
+            &server.quic_server.endpoint,
+            client_keys,
+            server_cid.len,
+            server.expected_packet_number,
+            8,
+        );
+        defer packet.deinit(allocator);
+        server.expected_packet_number = packet.packet.packet_number + 1;
+        for (packet.frames) |frame| switch (frame) {
+            .stop_sending => |stop| if (stop.stream_id == push_stream_id) {
+                try std.testing.expectEqual(
+                    @as(u64, http3.ApplicationErrorCode.excessive_load),
+                    stop.application_error_code,
+                );
+                saw_stop = true;
+            },
+            .application_close => saw_close = true,
+            else => {},
+        };
+    }
+    try std.testing.expect(!saw_close);
+    try std.testing.expectEqual(@as(usize, 0), client.push_streams.entryCount());
 }

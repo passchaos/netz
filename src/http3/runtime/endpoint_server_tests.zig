@@ -28,6 +28,247 @@ test "HTTP/3 endpoint server exposes bounded callback loop API" {
     try std.testing.expect(@hasDecl(runtime, "EndpointServeOptions"));
 }
 
+test "HTTP/3 handshake server rejects a non-positive recovery drain budget" {
+    var threaded = std.Io.Threaded.init(std.testing.allocator, .{});
+    defer threaded.deinit();
+    try std.testing.expectError(
+        error.InvalidHandshakeRecovery,
+        runtime.HandshakeServer.bind(
+            std.testing.allocator,
+            threaded.io(),
+            .{ .ip4 = .loopback(0) },
+            .{},
+            .{
+                .handshake = .{ .local_connection_id = "invalid-drain" },
+                .serve_connection_recovery_drain_timeout = .zero,
+            },
+        ),
+    );
+}
+
+test "HTTP/3 endpoint callback refreshes timers after application sends" {
+    const allocator = std.testing.allocator;
+    var threaded = std.Io.Threaded.init(allocator, .{});
+    defer threaded.deinit();
+    const io = threaded.io();
+
+    var server = try runtime.HandshakeServer.bind(
+        allocator,
+        io,
+        .{ .ip4 = .loopback(0) },
+        .{},
+        .{ .handshake = .{ .local_connection_id = "timer-server" } },
+    );
+    defer server.deinit();
+    var endpoint = try runtime.EndpointServer.init(&server, .{});
+    defer endpoint.deinit();
+
+    const session_ptr = try allocator.create(runtime.HandshakeServerSession);
+    errdefer allocator.destroy(session_ptr);
+    session_ptr.* = try runtime.HandshakeServerSession.initPreconfigured(
+        &server.quic_server.endpoint,
+        .{ .ip4 = .loopback(9102) },
+        .{},
+        .{
+            .receive_keys = quic.protection.deriveAes128Keys(
+                [_]u8{0xd1} ** quic.protection.secret_len,
+            ),
+            .send_keys = quic.protection.deriveAes128Keys(
+                [_]u8{0xd2} ** quic.protection.secret_len,
+            ),
+            .local_connection_id = "timer-active",
+            .peer_connection_id = "timer-peer",
+        },
+    );
+    var session_owned = true;
+    defer if (session_owned) {
+        session_ptr.deinit();
+        allocator.destroy(session_ptr);
+    };
+    const connection_handle: quic.endpoint_dispatcher.ConnectionHandle = 78;
+    try endpoint.dispatcher.registerConnection(
+        connection_handle,
+        &session_ptr.established.connection,
+    );
+    const slot = try endpoint.sessions.getOrPut(allocator, connection_handle);
+    try std.testing.expect(!slot.found_existing);
+    slot.value_ptr.* = .{
+        .dispatcher = endpoint.dispatcher,
+        .allocator = allocator,
+        .handle = connection_handle,
+        .session = session_ptr,
+    };
+    session_owned = false;
+
+    // Registration sees no pending recovery and therefore has no timer. The
+    // callback creates reliable work without an intervening inbound packet.
+    try std.testing.expect(endpoint.dispatcher.nextTimerDeadline() == null);
+    const Context = struct {
+        fn handle(
+            _: *@This(),
+            _: *runtime.EndpointServer,
+            event: runtime.EndpointServeEvent,
+        ) !void {
+            try std.testing.expect(event == .request);
+            try event.request.session.established.connection.send(&.{.{
+                .ping = {},
+            }});
+        }
+    };
+    var context: Context = .{};
+    var request_event = runtime.EndpointServerEvent{ .request = .{
+        .connection_handle = connection_handle,
+        .request = .{ .reset = .{
+            .from = .{ .ip4 = .loopback(9102) },
+            .stream_id = 0,
+            .application_error_code = 0,
+        } },
+    } };
+    defer request_event.deinit(allocator);
+    // Exercise the same callback-and-refresh boundary as serveUntil without a
+    // network handshake or timing race.
+    try runtime.EndpointServer.testing.dispatchServeEvent(
+        &endpoint,
+        Context,
+        &context,
+        &request_event,
+        Context.handle,
+    );
+    const timer = endpoint.dispatcher.nextTimerDeadline() orelse
+        return error.TestUnexpectedResult;
+    try std.testing.expectEqual(connection_handle, timer.connection_id);
+    try std.testing.expectEqual(
+        quic.one_rtt.TimerDeadlineKind.pto,
+        timer.timer.kind,
+    );
+
+    const TakeContext = struct {
+        handle: quic.endpoint_dispatcher.ConnectionHandle,
+        taken: ?runtime.PromotedHandshakeSession = null,
+
+        fn run(
+            self: *@This(),
+            server_value: *runtime.EndpointServer,
+            _: *runtime.EndpointTransportEvent,
+        ) !void {
+            self.taken = server_value.takeSession(self.handle) orelse
+                return error.TestUnexpectedResult;
+        }
+    };
+    var take_context = TakeContext{ .handle = connection_handle };
+    var take_event = runtime.EndpointTransportEvent{
+        .connected = connection_handle,
+    };
+    defer take_event.deinit(allocator);
+    // A protocol adapter may transfer the session during its callback. The
+    // common post-callback refresh must not touch the removed owner.
+    try runtime.EndpointServer.testing.dispatchTransportServeEvent(
+        &endpoint,
+        TakeContext,
+        &take_context,
+        &take_event,
+        TakeContext.run,
+    );
+    try std.testing.expectEqual(@as(usize, 0), endpoint.connectionCount());
+    var taken = take_context.taken orelse return error.TestUnexpectedResult;
+    take_context.taken = null;
+    taken.deinit();
+    try std.testing.expectEqual(
+        @as(usize, 0),
+        endpoint.dispatcher.connectionCount(),
+    );
+}
+
+test "HTTP/3 endpoint transport callback refreshes timers after adapter sends" {
+    const allocator = std.testing.allocator;
+    var threaded = std.Io.Threaded.init(allocator, .{});
+    defer threaded.deinit();
+    const io = threaded.io();
+
+    var server = try runtime.HandshakeServer.bind(
+        allocator,
+        io,
+        .{ .ip4 = .loopback(0) },
+        .{},
+        .{ .handshake = .{ .local_connection_id = "transport-timer-server" } },
+    );
+    defer server.deinit();
+    var endpoint = try runtime.EndpointServer.init(&server, .{});
+    defer endpoint.deinit();
+
+    const session_ptr = try allocator.create(runtime.HandshakeServerSession);
+    errdefer allocator.destroy(session_ptr);
+    session_ptr.* = try runtime.HandshakeServerSession.initPreconfigured(
+        &server.quic_server.endpoint,
+        .{ .ip4 = .loopback(9103) },
+        .{},
+        .{
+            .receive_keys = quic.protection.deriveAes128Keys(
+                [_]u8{0xe1} ** quic.protection.secret_len,
+            ),
+            .send_keys = quic.protection.deriveAes128Keys(
+                [_]u8{0xe2} ** quic.protection.secret_len,
+            ),
+            .local_connection_id = "timer-active",
+            .peer_connection_id = "timer-peer",
+        },
+    );
+    var session_owned = true;
+    defer if (session_owned) {
+        session_ptr.deinit();
+        allocator.destroy(session_ptr);
+    };
+    const connection_handle: quic.endpoint_dispatcher.ConnectionHandle = 79;
+    try endpoint.dispatcher.registerConnection(
+        connection_handle,
+        &session_ptr.established.connection,
+    );
+    const slot = try endpoint.sessions.getOrPut(allocator, connection_handle);
+    try std.testing.expect(!slot.found_existing);
+    slot.value_ptr.* = .{
+        .dispatcher = endpoint.dispatcher,
+        .allocator = allocator,
+        .handle = connection_handle,
+        .session = session_ptr,
+    };
+    session_owned = false;
+    try std.testing.expect(endpoint.dispatcher.nextTimerDeadline() == null);
+
+    const Context = struct {
+        handle: quic.endpoint_dispatcher.ConnectionHandle,
+
+        fn run(
+            self: *@This(),
+            server_value: *runtime.EndpointServer,
+            event: *runtime.EndpointTransportEvent,
+        ) !void {
+            try std.testing.expect(event.* == .connected);
+            const session = server_value.session(self.handle) orelse
+                return error.TestUnexpectedResult;
+            try session.established.connection.send(&.{.{ .ping = {} }});
+        }
+    };
+    var context = Context{ .handle = connection_handle };
+    var event = runtime.EndpointTransportEvent{
+        .connected = connection_handle,
+    };
+    defer event.deinit(allocator);
+    try runtime.EndpointServer.testing.dispatchTransportServeEvent(
+        &endpoint,
+        Context,
+        &context,
+        &event,
+        Context.run,
+    );
+    const timer = endpoint.dispatcher.nextTimerDeadline() orelse
+        return error.TestUnexpectedResult;
+    try std.testing.expectEqual(connection_handle, timer.connection_id);
+    try std.testing.expectEqual(
+        quic.one_rtt.TimerDeadlineKind.pto,
+        timer.timer.kind,
+    );
+}
+
 test "HTTP/3 endpoint server validates receive deadlines" {
     const allocator = std.testing.allocator;
     var threaded = std.Io.Threaded.init(allocator, .{

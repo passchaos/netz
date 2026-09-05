@@ -3,13 +3,6 @@ const netz = @import("netz");
 
 const warmup_iterations: usize = 1_000;
 const iterations: usize = 2_000;
-// Hyper's server inserts Date and then references it from the HPACK dynamic
-// table. Supplying the same-length field makes steady-state responses 11 wire
-// bytes in both benchmarks instead of netz's otherwise smaller 10-byte frame.
-const response_headers = [_]netz.http2.Hpack.HeaderField{.{
-    .name = "date",
-    .value = "Mon, 17 Aug 2026 00:00:00 GMT",
-}};
 const request_body = "ssssssssss";
 const request_body_100kb = "x" ** (100 * 1024);
 const parallel_chunk = "x" ** (10 * 1024);
@@ -132,7 +125,6 @@ pub fn main() !void {
                             break :stream request.stream_id;
                         };
                         try connection.writeResponse(stream_id, .{
-                            .headers = &response_headers,
                             .body = scenario.response_body,
                         });
                     }
@@ -141,7 +133,6 @@ pub fn main() !void {
                     var responses: [10]netz.http2.runtime.ResponseOptions =
                         undefined;
                     @memset(&responses, .{
-                        .headers = &response_headers,
                         .body = scenario.response_body,
                     });
                     for (0..scenario_iterations) |_| {

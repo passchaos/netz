@@ -3,10 +3,22 @@ const netz = @import("netz");
 
 const batch_size: usize = 54;
 const payload_size: usize = 1152;
-const iterations: usize = 1_000;
+const default_iterations: usize = 1_000;
+const default_warmup_iterations: usize = 100;
 
-pub fn main() !void {
+const Mode = enum { all, gro, plain, service, visitor };
+const FrameShape = enum { padding, stream };
+
+const Options = struct {
+    mode: Mode = .all,
+    iterations: usize = default_iterations,
+    warmup_iterations: usize = default_warmup_iterations,
+    frame: FrameShape = .padding,
+};
+
+pub fn main(init: std.process.Init) !void {
     const allocator = std.heap.smp_allocator;
+    const options = try parseOptions(init, allocator);
     var threaded = std.Io.Threaded.init(allocator, .{});
     defer threaded.deinit();
     const io = threaded.io();
@@ -14,6 +26,71 @@ pub fn main() !void {
     const keys = netz.quic.protection.deriveAes128Keys([_]u8{0xb7} ** netz.quic.protection.secret_len);
     const client_cid = [_]u8{ 0xb1, 0xb2, 0xb3, 0xb4 };
     const server_cid = [_]u8{ 0xb5, 0xb6, 0xb7, 0xb8 };
+
+    if (options.mode != .all) {
+        _ = try measureMode(
+            allocator,
+            io,
+            keys,
+            client_cid,
+            server_cid,
+            options.mode,
+            options.frame,
+            options.warmup_iterations,
+        );
+        const elapsed = try measureMode(
+            allocator,
+            io,
+            keys,
+            client_cid,
+            server_cid,
+            options.mode,
+            options.frame,
+            options.iterations,
+        );
+        const total_packets = options.iterations * batch_size;
+        std.debug.print(
+            "QUIC 1-RTT receive benchmark: mode={s} frame={s} warmup={d} iterations={d} " ++
+                "packets={d} ns/packet={d}\n",
+            .{
+                @tagName(options.mode),
+                @tagName(options.frame),
+                options.warmup_iterations,
+                options.iterations,
+                total_packets,
+                elapsed / total_packets,
+            },
+        );
+        return;
+    }
+
+    if (options.warmup_iterations != 0) {
+        _ = measureMode(
+            allocator,
+            io,
+            keys,
+            client_cid,
+            server_cid,
+            .gro,
+            options.frame,
+            options.warmup_iterations,
+        ) catch |err| switch (err) {
+            error.GroUnavailable => 0,
+            else => |other| return other,
+        };
+        inline for (.{ Mode.plain, Mode.service, Mode.visitor }) |mode| {
+            _ = try measureMode(
+                allocator,
+                io,
+                keys,
+                client_cid,
+                server_cid,
+                mode,
+                options.frame,
+                options.warmup_iterations,
+            );
+        }
+    }
 
     const gro_ns = measure(
         allocator,
@@ -23,6 +100,8 @@ pub fn main() !void {
         server_cid,
         true,
         false,
+        options.frame,
+        options.iterations,
     ) catch |err| switch (err) {
         error.GroUnavailable => null,
         else => |e| return e,
@@ -35,6 +114,8 @@ pub fn main() !void {
         server_cid,
         false,
         false,
+        options.frame,
+        options.iterations,
     );
     const service_ns = try measure(
         allocator,
@@ -44,6 +125,8 @@ pub fn main() !void {
         server_cid,
         false,
         true,
+        options.frame,
+        options.iterations,
     );
     const visitor_ns = try measureVisitor(
         allocator,
@@ -51,13 +134,15 @@ pub fn main() !void {
         keys,
         client_cid,
         server_cid,
+        options.frame,
+        options.iterations,
     );
-    const total_packets = iterations * batch_size;
+    const total_packets = options.iterations * batch_size;
     if (gro_ns) |gro| {
         const ratio_x100 = ratioTimes100(plain_ns, gro);
         std.debug.print(
             \\QUIC 1-RTT receive benchmark
-            \\  iterations: {d}, packets/batch: {d}, payload bytes/packet: {d}
+            \\  frame: {s}, iterations: {d}, packets/batch: {d}, payload bytes/packet: {d}
             \\  GRO batch:    {d} ns/batch, {d} ns/packet
             \\  plain packet: {d} ns/batch, {d} ns/packet
             \\  in-place service: {d} ns/batch, {d} ns/packet
@@ -66,16 +151,17 @@ pub fn main() !void {
             \\  total packets/path: {d}
             \\
         , .{
-            iterations,
+            @tagName(options.frame),
+            options.iterations,
             batch_size,
             payload_size,
-            gro / iterations,
+            gro / options.iterations,
             gro / total_packets,
-            plain_ns / iterations,
+            plain_ns / options.iterations,
             plain_ns / total_packets,
-            service_ns / iterations,
+            service_ns / options.iterations,
             service_ns / total_packets,
-            visitor_ns / iterations,
+            visitor_ns / options.iterations,
             visitor_ns / total_packets,
             ratio_x100 / 100,
             ratio_x100 % 100,
@@ -84,7 +170,7 @@ pub fn main() !void {
     } else {
         std.debug.print(
             \\QUIC 1-RTT receive benchmark
-            \\  iterations: {d}, packets/batch: {d}, payload bytes/packet: {d}
+            \\  frame: {s}, iterations: {d}, packets/batch: {d}, payload bytes/packet: {d}
             \\  GRO batch:    unavailable on this endpoint
             \\  plain packet: {d} ns/batch, {d} ns/packet
             \\  in-place service: {d} ns/batch, {d} ns/packet
@@ -92,14 +178,15 @@ pub fn main() !void {
             \\  total packets/path: {d}
             \\
         , .{
-            iterations,
+            @tagName(options.frame),
+            options.iterations,
             batch_size,
             payload_size,
-            plain_ns / iterations,
+            plain_ns / options.iterations,
             plain_ns / total_packets,
-            service_ns / iterations,
+            service_ns / options.iterations,
             service_ns / total_packets,
-            visitor_ns / iterations,
+            visitor_ns / options.iterations,
             visitor_ns / total_packets,
             total_packets,
         });
@@ -112,6 +199,8 @@ fn measureVisitor(
     keys: netz.quic.protection.PacketProtectionKeys,
     client_cid: [4]u8,
     server_cid: [4]u8,
+    frame_shape: FrameShape,
+    iteration_count: usize,
 ) !u64 {
     var server_endpoint = try netz.quic.runtime.Endpoint.bind(
         allocator,
@@ -137,45 +226,125 @@ fn measureVisitor(
     });
     defer server.deinit();
 
-    const payload = [_]u8{0x01} ++ [_]u8{0x00} ** (payload_size - 1);
+    var payload_storage: [batch_size][payload_size]u8 = undefined;
     var packet_storage: [batch_size * 1400]u8 = undefined;
     var datagrams: [batch_size][]const u8 = undefined;
     var total_ns: u64 = 0;
     var first_packet_number: u64 = 0;
+    var stream_offset: u64 = 0;
     var observed_frames: usize = 0;
-    for (0..iterations) |_| {
+    var observed_stream_bytes: usize = 0;
+    for (0..iteration_count) |_| {
         _ = try sealPacketBatch(
             &packet_storage,
+            &payload_storage,
             &datagrams,
             keys,
             &server_cid,
             first_packet_number,
-            &payload,
+            frame_shape,
+            &stream_offset,
         );
         try client_endpoint.sendManyBytes(server_endpoint.address(), &datagrams);
 
         const started = nowNs(io);
         for (0..batch_size) |_| {
+            var context = VisitContext{
+                .connection = &server,
+                .frame_shape = frame_shape,
+                .observed_frames = &observed_frames,
+                .observed_stream_bytes = &observed_stream_bytes,
+            };
             try server.visitPacketAt(
                 started,
-                &observed_frames,
-                countVisitedFrames,
+                &context,
+                observePacket,
             );
         }
         total_ns +|= nowNs(io) -| started;
         first_packet_number += batch_size;
     }
-    if (observed_frames != iterations * batch_size) {
+    if (observed_frames != iteration_count * batch_size) {
+        return error.UnexpectedPacketCount;
+    }
+    if (frame_shape == .stream and observed_stream_bytes != stream_offset) {
         return error.UnexpectedPacketCount;
     }
     return total_ns;
 }
 
-fn countVisitedFrames(
-    count: *usize,
+fn measureMode(
+    allocator: std.mem.Allocator,
+    io: std.Io,
+    keys: netz.quic.protection.PacketProtectionKeys,
+    client_cid: [4]u8,
+    server_cid: [4]u8,
+    mode: Mode,
+    frame_shape: FrameShape,
+    iteration_count: usize,
+) !u64 {
+    return switch (mode) {
+        .gro => measure(
+            allocator,
+            io,
+            keys,
+            client_cid,
+            server_cid,
+            true,
+            false,
+            frame_shape,
+            iteration_count,
+        ),
+        .plain => measure(
+            allocator,
+            io,
+            keys,
+            client_cid,
+            server_cid,
+            false,
+            false,
+            frame_shape,
+            iteration_count,
+        ),
+        .service => measure(
+            allocator,
+            io,
+            keys,
+            client_cid,
+            server_cid,
+            false,
+            true,
+            frame_shape,
+            iteration_count,
+        ),
+        .visitor => measureVisitor(
+            allocator,
+            io,
+            keys,
+            client_cid,
+            server_cid,
+            frame_shape,
+            iteration_count,
+        ),
+        .all => error.InvalidArgument,
+    };
+}
+
+const VisitContext = struct {
+    connection: *netz.quic.one_rtt.Connection,
+    frame_shape: FrameShape,
+    observed_frames: *usize,
+    observed_stream_bytes: *usize,
+};
+
+fn observePacket(
+    context: *VisitContext,
     packet: netz.quic.one_rtt.ReceivedPacketView,
-) error{}!void {
-    count.* += @intFromBool(packet.frames.len != 0);
+) !void {
+    context.observed_frames.* += @intFromBool(packet.frames.len != 0);
+    if (context.frame_shape == .stream) {
+        context.observed_stream_bytes.* += try drainStream(context.connection);
+    }
 }
 
 fn measure(
@@ -186,6 +355,8 @@ fn measure(
     server_cid: [4]u8,
     enable_gro: bool,
     service_in_place: bool,
+    frame_shape: FrameShape,
+    iteration_count: usize,
 ) !u64 {
     var server_endpoint = try netz.quic.runtime.Endpoint.bind(
         allocator,
@@ -216,19 +387,23 @@ fn measure(
     });
     defer server.deinit();
 
-    const payload = [_]u8{0x01} ++ [_]u8{0x00} ** (payload_size - 1);
+    var payload_storage: [batch_size][payload_size]u8 = undefined;
     var packet_storage: [batch_size * 1400]u8 = undefined;
     var datagrams: [batch_size][]const u8 = undefined;
     var total_ns: u64 = 0;
     var first_packet_number: u64 = 0;
-    for (0..iterations) |_| {
+    var stream_offset: u64 = 0;
+    var observed_stream_bytes: usize = 0;
+    for (0..iteration_count) |_| {
         const written = try sealPacketBatch(
             &packet_storage,
+            &payload_storage,
             &datagrams,
             keys,
             &server_cid,
             first_packet_number,
-            &payload,
+            frame_shape,
+            &stream_offset,
         );
         _ = written;
         try client_endpoint.sendManyBytes(server_endpoint.address(), &datagrams);
@@ -246,38 +421,104 @@ fn measure(
             if (consumed != batch_size) {
                 return error.UnexpectedPacketCount;
             }
+            if (frame_shape == .stream) {
+                observed_stream_bytes += try drainStream(&server);
+            }
         } else if (service_in_place) {
             for (0..batch_size) |_| {
                 try server.servicePacketAt(started);
+                if (frame_shape == .stream) {
+                    observed_stream_bytes += try drainStream(&server);
+                }
             }
         } else {
             for (0..batch_size) |_| {
                 var received = try server.receivePacketAt(started);
                 defer received.deinit(allocator);
+                if (frame_shape == .stream) {
+                    observed_stream_bytes += try drainStream(&server);
+                }
             }
         }
         total_ns +|= nowNs(io) -| started;
         first_packet_number += batch_size;
     }
+    if (frame_shape == .stream and observed_stream_bytes != stream_offset) {
+        return error.UnexpectedPacketCount;
+    }
     return total_ns;
+}
+
+fn parseOptions(init: std.process.Init, allocator: std.mem.Allocator) !Options {
+    var args = try std.process.Args.Iterator.initAllocator(
+        init.minimal.args,
+        allocator,
+    );
+    defer args.deinit();
+    _ = args.next();
+    var options: Options = .{};
+    while (args.next()) |arg| {
+        if (std.mem.startsWith(u8, arg, "--mode=")) {
+            options.mode = std.meta.stringToEnum(
+                Mode,
+                arg["--mode=".len..],
+            ) orelse return error.InvalidArgument;
+        } else if (std.mem.startsWith(u8, arg, "--iterations=")) {
+            options.iterations = try std.fmt.parseInt(
+                usize,
+                arg["--iterations=".len..],
+                10,
+            );
+        } else if (std.mem.startsWith(u8, arg, "--warmup=")) {
+            options.warmup_iterations = try std.fmt.parseInt(
+                usize,
+                arg["--warmup=".len..],
+                10,
+            );
+        } else if (std.mem.startsWith(u8, arg, "--frame=")) {
+            options.frame = std.meta.stringToEnum(
+                FrameShape,
+                arg["--frame=".len..],
+            ) orelse return error.InvalidArgument;
+        } else {
+            return error.InvalidArgument;
+        }
+    }
+    if (options.iterations == 0) return error.InvalidArgument;
+    return options;
 }
 
 fn sealPacketBatch(
     storage: []u8,
+    payload_storage: *[batch_size][payload_size]u8,
     datagrams: *[batch_size][]const u8,
     keys: netz.quic.protection.PacketProtectionKeys,
     destination_connection_id: []const u8,
     first_packet_number: u64,
-    payload: []const u8,
+    frame_shape: FrameShape,
+    stream_offset: *u64,
 ) !usize {
+    const first_payload = try fillPayload(
+        &payload_storage[0],
+        frame_shape,
+        stream_offset,
+    );
     const packet_len = try netz.quic.protection.shortPacketLen(.{
         .destination_connection_id = destination_connection_id,
         .packet_number = first_packet_number,
         .packet_number_len = 4,
-        .payload = payload,
+        .payload = first_payload,
     });
     var offset: usize = 0;
     for (datagrams, 0..) |*datagram, index| {
+        const payload = if (index == 0)
+            first_payload
+        else
+            try fillPayload(
+                &payload_storage[index],
+                frame_shape,
+                stream_offset,
+            );
         const packet_number = first_packet_number + index;
         datagram.* = try netz.quic.protection.sealShortPacketInto(
             storage[offset..][0..packet_len],
@@ -292,6 +533,54 @@ fn sealPacketBatch(
         offset += packet_len;
     }
     return offset;
+}
+
+fn fillPayload(
+    out: *[payload_size]u8,
+    frame_shape: FrameShape,
+    stream_offset: *u64,
+) ![]const u8 {
+    if (frame_shape == .padding) {
+        out[0] = @intFromEnum(netz.quic.FrameType.ping);
+        @memset(out[1..], @intFromEnum(netz.quic.FrameType.padding));
+        return out;
+    }
+
+    const stream_data = [_]u8{0x5a} ** payload_size;
+    var data_len = payload_size - 8;
+    while (true) {
+        const frame = netz.quic.Frame{ .stream = .{
+            .stream_id = 0,
+            .offset = stream_offset.*,
+            .data = stream_data[0..data_len],
+        } };
+        const frame_len = try frame.wireLen();
+        if (frame_len == payload_size) {
+            var fixed = std.heap.FixedBufferAllocator.init(out);
+            var encoded = try std.ArrayList(u8).initCapacity(
+                fixed.allocator(),
+                payload_size,
+            );
+            try frame.write(&encoded, fixed.allocator());
+            stream_offset.* += data_len;
+            return encoded.items;
+        }
+        if (frame_len > payload_size) {
+            data_len -= frame_len - payload_size;
+        } else {
+            data_len += payload_size - frame_len;
+        }
+    }
+}
+
+fn drainStream(connection: *netz.quic.one_rtt.Connection) !usize {
+    var buffer: [payload_size]u8 = undefined;
+    var total: usize = 0;
+    while (try connection.pollStreamId(0, &buffer)) |event| switch (event) {
+        .data => |data| total += data.bytes,
+        .reset => return error.UnexpectedPacketCount,
+    };
+    return total;
 }
 
 fn ratioTimes100(numerator: u64, denominator: u64) u64 {

@@ -705,6 +705,66 @@ test "QUIC short packet key phase peek does not mutate ciphertext" {
     try std.testing.expectEqualSlices(u8, before, sealed);
 }
 
+test "QUIC current-key in-place open preserves mismatched phase bytes" {
+    const allocator = std.testing.allocator;
+    const suites = [_]protection.CipherSuite{
+        .aes_128_gcm_sha256,
+        .aes_256_gcm_sha384,
+        .chacha20_poly1305_sha256,
+        .sm4_gcm_sm3,
+    };
+    const options: protection.ShortPacketOptions = .{
+        .destination_connection_id = "phase-check",
+        .packet_number = 91,
+        .packet_number_len = 3,
+        .key_phase = true,
+        .payload = "leave ciphertext intact on phase mismatch",
+    };
+    inline for (suites) |suite| {
+        const keys = try protection.deriveKeysForSecretForVersion(
+            version_1_wire_for_test,
+            suite,
+            trafficSecretForSuiteForTest(suite),
+        );
+        const sealed = try protection.sealShortPacket(allocator, keys, options);
+        defer allocator.free(sealed);
+        const storage = try allocator.dupe(u8, sealed);
+        defer allocator.free(storage);
+        const before = try allocator.dupe(u8, storage);
+        defer allocator.free(before);
+
+        const mismatch = try protection
+            .openShortPacketInPlaceForKeyPhaseWithFixedBitPolicy(
+            keys,
+            false,
+            storage,
+            options.destination_connection_id.len,
+            options.packet_number,
+            false,
+        );
+        try std.testing.expectEqual(
+            protection.CurrentKeyOpenResult.key_phase_mismatch,
+            std.meta.activeTag(mismatch),
+        );
+        try std.testing.expect(mismatch.key_phase_mismatch);
+        try std.testing.expectEqualSlices(u8, before, storage);
+
+        const opened = try protection
+            .openShortPacketInPlaceForKeyPhaseWithFixedBitPolicy(
+            keys,
+            true,
+            storage,
+            options.destination_connection_id.len,
+            options.packet_number,
+            false,
+        );
+        try std.testing.expectEqualStrings(
+            options.payload,
+            opened.opened.payload,
+        );
+    }
+}
+
 test "QUIC short packet in-place sealing reuses caller storage" {
     const keys = protection.deriveAes128Keys([_]u8{0x9c} ** protection.secret_len);
     const options: protection.ShortPacketOptions = .{

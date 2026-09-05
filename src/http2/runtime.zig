@@ -2,20 +2,77 @@ const std = @import("std");
 const http2 = @import("mod.zig");
 const http1 = @import("../http1/mod.zig");
 const http1_runtime = http1.runtime;
-const frame_io = @import("runtime/frame_io.zig");
+const frame_io = @import("runtime/frame/io.zig");
+const frame_wire = @import("runtime/frame/wire.zig");
+const flow_window = @import("runtime/flow/window.zig");
+const outbound_headers = @import("runtime/headers/connection.zig");
+const message_headers = @import("runtime/headers/message.zig");
 const push = @import("runtime/push.zig");
 const priority_runtime = @import("runtime/priority.zig");
 const response_scheduler = @import(
     "runtime/response_scheduler.zig",
 );
+const bdp = @import("runtime/bdp.zig");
 const stream_io = @import("../internal/stream_io.zig");
 const deadline_policy = @import("../internal/deadline.zig");
+const http_date = @import("../internal/http_date.zig");
 const tcp_connect = @import("../internal/tcp_connect.zig");
 const socket_options = @import("../internal/socket_options.zig");
 const tls_stream = @import("../tls/mod.zig").stream;
 const vail = @import("vail");
 
 const net = std.Io.net;
+
+const ResponseBodySemantics = message_headers.ResponseBodySemantics;
+const ResponseHeaderLookup = message_headers.ResponseHeaderLookup;
+const HeaderBlockKind = message_headers.HeaderBlockKind;
+const RequestHeaderLookup = message_headers.RequestHeaderLookup;
+const contentLength = message_headers.contentLength;
+const responseHeaderLookup = message_headers.responseHeaderLookup;
+const validateContentLength = message_headers.validateContentLength;
+const validateExpectedContentLength =
+    message_headers.validateExpectedContentLength;
+const validateDeclaredRequestLength =
+    message_headers.validateDeclaredRequestLength;
+const requestShouldDefaultContentLength =
+    message_headers.requestShouldDefaultContentLength;
+const stripSuccessfulConnectContentLength =
+    message_headers.stripSuccessfulConnectContentLength;
+const validateHeaderListSize = message_headers.validateHeaderListSize;
+const validateHeaderBlock = message_headers.validateHeaderBlock;
+const methodIsHead = message_headers.methodIsHead;
+const methodIsConnect = message_headers.methodIsConnect;
+const responseForbidsBody = message_headers.responseForbidsBody;
+const responseSemanticsFromMethod =
+    message_headers.responseSemanticsFromMethod;
+const responseWriteSuppressesBodySemantics =
+    message_headers.responseWriteSuppressesBodySemantics;
+const validateResponseBodyForStatus =
+    message_headers.validateResponseBodyForStatus;
+const validateResponseBodyForStatusWithLength =
+    message_headers.validateResponseBodyForStatusWithLength;
+const validateResponseBodyForRequestSemantics =
+    message_headers.validateResponseBodyForRequestSemantics;
+const validateResponseBodyForRequestSemanticsWithLength =
+    message_headers.validateResponseBodyForRequestSemanticsWithLength;
+const validateDeclaredResponseLength =
+    message_headers.validateDeclaredResponseLength;
+const validateDeclaredResponseLengthValue =
+    message_headers.validateDeclaredResponseLengthValue;
+const responseShouldDefaultContentLength =
+    message_headers.responseShouldDefaultContentLength;
+const responseShouldDefaultContentLengthValue =
+    message_headers.responseShouldDefaultContentLengthValue;
+const informationalResponseToSkip = message_headers.informationalResponseToSkip;
+const statusIsInformational = message_headers.statusIsInformational;
+const requestHeaderLookup = message_headers.requestHeaderLookup;
+const findHeader = message_headers.findHeader;
+const clientInitiatedStreamId = frame_wire.clientInitiatedStreamId;
+const encodeFrameHeader = frame_wire.encodeHeader;
+const encodeWindowUpdateFrame = frame_wire.encodeWindowUpdate;
+const appendFrameBytes = frame_wire.appendFrame;
+const appendHeaderBlockBytes = frame_wire.appendHeaderBlock;
+const writeFrameTransport = frame_io.writeTransport;
 
 pub const Error = http2.Error || http1_runtime.Error || tls_stream.Error || error{
     ConnectionClosed,
@@ -45,11 +102,47 @@ pub const RequestTimeoutError = Error || std.Io.Timeout.Error;
 
 const ReadExactError = net.Stream.Reader.Error || error{ConnectionClosed};
 
+const ServeReadConnectionError = enum {
+    compression,
+    frame_sequence,
+    excessive_header_block,
+};
+
+const ServeReadStreamError = struct {
+    stream_id: u31,
+    code: http2.ErrorCode,
+};
+
+fn serveRequestStreamErrorCode(err: anyerror) ?http2.ErrorCode {
+    return switch (err) {
+        error.InvalidHeader,
+        error.MissingPseudoHeader,
+        error.InvalidContentLength,
+        error.ExtendedConnectDisabled,
+        => .protocol_error,
+        else => null,
+    };
+}
+
+fn responseStreamErrorCode(err: anyerror) ?http2.ErrorCode {
+    return switch (err) {
+        error.InvalidHeader,
+        error.MissingPseudoHeader,
+        error.InvalidStatus,
+        error.InvalidContentLength,
+        => .protocol_error,
+        error.MessageTooLarge,
+        error.TooManyInformationalResponses,
+        => .enhance_your_calm,
+        else => null,
+    };
+}
+
 const flag_end_stream: u8 = 0x1;
 const flag_ack: u8 = 0x1;
 const flag_end_headers: u8 = 0x4;
-const default_flow_window: i64 = 65_535;
-const max_flow_window: i64 = std.math.maxInt(i31);
+const default_flow_window = flow_window.default_value;
+const max_flow_window = flow_window.max_value;
 const default_max_frame_size: usize = 16 * 1024;
 const max_max_frame_size: usize = 16_777_215;
 const default_max_header_list_size: usize = 16 * 1024;
@@ -164,7 +257,7 @@ const RuntimeTransport = union(enum) {
         };
     }
 
-    fn writeAllParts(
+    pub fn writeAllParts(
         self: RuntimeTransport,
         header: []const u8,
         payload: []const u8,
@@ -290,6 +383,11 @@ pub const Limits = struct {
     /// SETTINGS_INITIAL_WINDOW_SIZE, which applies per stream.
     initial_connection_window_size: u32 =
         @intCast(default_flow_window),
+    /// Adapt receive windows from measured DATA throughput and a dedicated
+    /// PING RTT sample. Disabled by default so configured fixed-window wire
+    /// behavior remains unchanged.
+    adaptive_window: bool = false,
+    adaptive_window_max: u32 = bdp.default_max_window,
     max_concurrent_streams: ?u32 = null,
     max_frame_size: usize = default_max_frame_size,
     max_header_list_size: usize = default_max_header_list_size,
@@ -306,11 +404,20 @@ pub const Limits = struct {
     /// HEADERS, and duplicate RST_STREAM frames can be discarded without
     /// terminating the connection. Zero disables this tolerance.
     max_reset_stream_history: usize = 64,
+    /// Minimum time that a tracked locally-reset stream remains eligible for
+    /// late-frame tolerance. Expired entries are reclaimed lazily when the
+    /// history needs capacity or a retained ID is queried.
+    reset_stream_duration: std.Io.Duration = .fromSeconds(1),
     /// Maximum remotely-reset requests allowed to remain in the pending-accept
     /// queue. Those requests no longer count toward stream concurrency, so a
     /// peer can otherwise churn reset-after-HEADERS requests and retain owned
     /// request allocations until the application reaches them.
     max_pending_accept_reset_streams: usize = 20,
+    /// Maximum RST_STREAM frames generated because the peer caused a
+    /// stream-local protocol error over the lifetime of one connection. The
+    /// count never decreases: reaching the limit turns the next such reset
+    /// into GOAWAY(ENHANCE_YOUR_CALM). `null` disables this DoS guard.
+    max_local_error_reset_streams: ?usize = 1024,
     /// Absolute budget for DNS resolution plus all TCP connection attempts.
     /// TLS and HTTP/2 handshake timeouts remain independent.
     connect_timeout: ?std.Io.Duration = null,
@@ -327,6 +434,9 @@ pub const Limits = struct {
     /// Explicitly opt in to HTTP/2 server push. The client otherwise sends
     /// SETTINGS_ENABLE_PUSH=0 and rejects PUSH_PROMISE.
     enable_push: bool = false,
+    /// Add an IMF-fixdate `date` field to final server responses that do not
+    /// already provide one. This matches Hyper's default server behavior.
+    auto_date_header: bool = true,
     /// Advertise RFC 9218 SETTINGS_NO_RFC7540_PRIORITIES=1. This allows a
     /// client to use PRIORITY_UPDATE and tells the peer that legacy dependency
     /// signals are intentionally ignored.
@@ -1445,7 +1555,10 @@ fn ServeTask(comptime HandlerContext: type) type {
             var connection = task.connection;
             defer connection.close();
 
+            connection.serve_read_connection_error = null;
+            connection.serve_read_stream_error = null;
             var request = connection.readRequest() catch |err| {
+                connection.sendServeReadError(err);
                 task.result.* = err;
                 return;
             };
@@ -2591,7 +2704,7 @@ pub const Client = struct {
             }
             if ((frame.frame.header.flags & flag_ack) != 0) {
                 saw_settings_ack = true;
-                connection.awaiting_settings_ack = false;
+                try connection.applySettingsAck();
             } else {
                 saw_server_settings = true;
                 const settings = try http2.parseSettings(
@@ -2858,46 +2971,16 @@ pub const Role = enum {
     server,
 };
 
-pub const FlowWindow = struct {
-    value: i64 = default_flow_window,
-
-    pub fn available(self: FlowWindow) usize {
-        if (self.value <= 0) return 0;
-        return std.math.cast(usize, self.value) orelse std.math.maxInt(usize);
-    }
-
-    pub fn reserve(self: *FlowWindow, amount: usize) Error!void {
-        const delta = std.math.cast(i64, amount) orelse return error.MessageTooLarge;
-        if (delta > self.value) return error.FlowControlBlocked;
-        self.value -= delta;
-    }
-
-    pub fn receive(self: *FlowWindow, amount: usize) Error!void {
-        const delta = std.math.cast(i64, amount) orelse return error.MessageTooLarge;
-        if (delta > self.value) return error.FlowControlViolation;
-        self.value -= delta;
-    }
-
-    pub fn update(self: *FlowWindow, increment: u31) Error!void {
-        const next = std.math.add(i64, self.value, increment) catch return error.FlowControlViolation;
-        // RFC 9113 requires a FLOW_CONTROL_ERROR when a WINDOW_UPDATE would
-        // make a connection or stream flow-control window exceed 2^31-1.  Do
-        // not saturate here: a saturated window lets peers continue after a
-        // protocol violation and hides bugs in local capacity accounting.
-        if (next > max_flow_window) return error.FlowControlViolation;
-        self.value = next;
-    }
-
-    pub fn adjust(self: *FlowWindow, delta: i64) Error!void {
-        const next = std.math.add(i64, self.value, delta) catch return error.FlowControlViolation;
-        if (next > max_flow_window) return error.FlowControlViolation;
-        self.value = next;
-    }
-};
+pub const FlowWindow = flow_window.Window;
 
 const StreamWindowEntry = struct {
     stream_id: u31,
     window: FlowWindow = .{},
+};
+
+const LocallyResetStream = struct {
+    stream_id: u31,
+    reset_at_ns: i96,
 };
 
 pub const PromisedRequest = push.PromisedRequest;
@@ -2951,6 +3034,8 @@ pub const Connection = struct {
     next_client_stream_id: u31 = 1,
     send_connection_window: FlowWindow = .{},
     recv_connection_window: FlowWindow = .{},
+    recv_connection_window_target: u32 = @intCast(default_flow_window),
+    recv_stream_window_target: u32 = @intCast(default_flow_window),
     send_stream_windows: std.ArrayList(StreamWindowEntry) = .empty,
     send_stream_window_index: std.AutoHashMapUnmanaged(u31, usize) = .empty,
     recv_stream_windows: std.ArrayList(StreamWindowEntry) = .empty,
@@ -3034,6 +3119,9 @@ pub const Connection = struct {
     peer_priority_setting_seen: bool = false,
     peer_initial_settings_applied: bool = false,
     awaiting_settings_ack: bool = false,
+    adaptive_window: ?bdp.Estimator = null,
+    adaptive_pending_stream_target: ?u32 = null,
+    adaptive_queued_target: ?u32 = null,
     last_peer_client_stream_id: u31 = 0,
     /// Highest peer request accepted for application processing. Keep this
     /// separate from the observed-stream cursor because REFUSED_STREAM closes
@@ -3055,20 +3143,29 @@ pub const Connection = struct {
     /// a later call. Fail closed instead of allowing subsequent operations or
     /// pooled reuse against ambiguous connection state.
     aggregate_timeout_unusable: bool = false,
+    /// Several frame and HPACK parsers share low-level errors such as
+    /// BufferTooShort. Preserve only protocol failures whose RFC connection
+    /// error mapping is known, rather than guessing from the public error tag.
+    serve_read_connection_error: ?ServeReadConnectionError = null,
+    serve_read_stream_error: ?ServeReadStreamError = null,
     pending_accept_reset_overflowed: bool = false,
     pending_requests: std.ArrayList(PendingRequest) = .empty,
     pending_request_head: usize = 0,
     pending_accept_reset_streams: usize = 0,
+    /// Lifetime count of resets emitted for peer-caused stream protocol
+    /// errors. Application cancellation, timeouts, and REFUSED_STREAM do not
+    /// consume this budget.
+    local_error_reset_streams: usize = 0,
     peer_origins: std.ArrayList([]u8) = .empty,
     peer_origin_index: std.StringHashMapUnmanaged(usize) = .empty,
     alternative_services: std.ArrayList(AlternativeService) = .empty,
     alternative_service_index: AltSvcIndex = .empty,
     /// Peers may have stream frames in flight when RST_STREAM reaches them. A
-    /// bounded recent-ID ring lets another response reader discard those late
-    /// frames without adding attacker-controlled, connection-lifetime memory.
-    locally_reset_streams: std.ArrayList(u31) = .empty,
+    /// bounded timestamped FIFO lets another response reader discard those
+    /// late frames for a minimum duration without connection-lifetime growth.
+    locally_reset_streams: std.ArrayList(LocallyResetStream) = .empty,
     locally_reset_stream_index: std.AutoHashMapUnmanaged(u31, void) = .empty,
-    locally_reset_stream_next: usize = 0,
+    locally_reset_stream_head: usize = 0,
     /// Most recently consumed peer reset. Readers still return
     /// `error.StreamReset`; protocol adapters can take this payload
     /// immediately afterward to preserve the wire reason in their own error
@@ -3924,7 +4021,11 @@ pub const Connection = struct {
             });
         }
         fields.appendSliceAssumeCapacity(request_options.headers);
-        stripConnectionHeaders(&fields, .request);
+        try outbound_headers.stripConnectionHeaders(
+            self.allocator,
+            &fields,
+            .request,
+        );
         var content_length_buf: [32]u8 = undefined;
         if (requestShouldDefaultContentLength(request_options.method, fields.items, request_options.body.len)) {
             const content_length = std.fmt.bufPrint(&content_length_buf, "{}", .{request_options.body.len}) catch unreachable;
@@ -4037,7 +4138,11 @@ pub const Connection = struct {
             });
         }
         fields.appendSliceAssumeCapacity(request_options.headers);
-        stripConnectionHeaders(&fields, .request);
+        try outbound_headers.stripConnectionHeaders(
+            self.allocator,
+            &fields,
+            .request,
+        );
 
         const declared_length = try contentLength(fields.items);
         const expected_length = request_options.body_length orelse
@@ -4142,7 +4247,13 @@ pub const Connection = struct {
             staged_encoder.deinit(self.allocator);
         };
         var started: usize = 0;
+        var requests_written = false;
         errdefer {
+            if (requests_written) {
+                self.writeBatchResponseResets(
+                    states[0..started],
+                ) catch {};
+            }
             for (states[0..started]) |*state| {
                 self.releaseLocalStream(state.stream_id);
                 state.deinit(self.allocator);
@@ -4165,6 +4276,7 @@ pub const Connection = struct {
         self.hpack_encoder.deinit(self.allocator);
         self.hpack_encoder = staged_encoder;
         staged_encoder_owned = false;
+        requests_written = true;
 
         try self.readResponseBatch(states, informational);
         for (states, responses) |*state, *response| {
@@ -4405,7 +4517,13 @@ pub const Connection = struct {
             staged_encoder.deinit(self.allocator);
         };
         var started: usize = 0;
+        var responses_pending = false;
         errdefer {
+            if (responses_pending) {
+                self.writeBatchResponseResets(
+                    states[0..started],
+                ) catch {};
+            }
             // Before staged HPACK state is committed no HEADERS were written,
             // so local stream IDs roll back with the transaction. Once the
             // write succeeds, IDs remain consumed on later I/O failures.
@@ -4487,6 +4605,7 @@ pub const Connection = struct {
         );
         body_write_succeeded = true;
         reserved_connection_bytes = 0;
+        responses_pending = true;
 
         try self.readResponseBatch(states, informational);
         for (states, responses) |*state, *response| {
@@ -4560,7 +4679,11 @@ pub const Connection = struct {
             });
         }
         fields.appendSliceAssumeCapacity(request_options.headers);
-        stripConnectionHeaders(&fields, .request);
+        try outbound_headers.stripConnectionHeaders(
+            self.allocator,
+            &fields,
+            .request,
+        );
         var content_length_buf: [32]u8 = undefined;
         if (requestShouldDefaultContentLength(
             request_options.method,
@@ -4843,7 +4966,11 @@ pub const Connection = struct {
             });
         }
         fields.appendSliceAssumeCapacity(request_options.headers);
-        stripConnectionHeaders(&fields, .request);
+        try outbound_headers.stripConnectionHeaders(
+            self.allocator,
+            &fields,
+            .request,
+        );
         var content_length_buf: [32]u8 = undefined;
         if (requestShouldDefaultContentLength(
             request_options.method,
@@ -4923,8 +5050,24 @@ pub const Connection = struct {
         states: []BatchResponseState,
         informational: ?BatchInformationalObserver,
     ) Error!void {
+        self.serve_read_connection_error = null;
+        self.serve_read_stream_error = null;
+        var current_stream_id: ?u31 = null;
+        errdefer |err| if (self.serve_read_connection_error == null) {
+            if (current_stream_id) |stream_id| {
+                const code: ?http2.ErrorCode =
+                    if (err == error.UnexpectedFrame)
+                        .protocol_error
+                    else
+                        responseStreamErrorCode(err);
+                if (code) |value| {
+                    self.recordResponseStreamReadError(stream_id, value);
+                }
+            }
+        };
         var remaining = states.len;
         while (remaining != 0) {
+            current_stream_id = null;
             var frame = try self.readOwnedFrame();
             defer frame.deinit(self.allocator);
             if (try self.handleConnectionFrame(frame.frame)) continue;
@@ -4944,6 +5087,7 @@ pub const Connection = struct {
                 frame.frame.header.stream_id,
             ) orelse return error.UnexpectedFrame;
             const state = &states[state_index];
+            current_stream_id = state.stream_id;
             if (state.done) return error.UnexpectedFrame;
             switch (frame.frame.header.frame_type) {
                 .push_promise => {
@@ -4997,14 +5141,24 @@ pub const Connection = struct {
                         {
                             return error.InvalidContentLength;
                         }
-                        try notifyBatchInformationalResponse(
-                            informational,
-                            state_index,
-                            state.stream_id,
-                            .{ .headers = headers, .status = status },
+                        countInformationalResponse(
                             &state.informational_count,
                             self.limits.max_informational_responses,
-                        );
+                        ) catch {
+                            self.recordResponseStreamReadError(
+                                state.stream_id,
+                                .enhance_your_calm,
+                            );
+                            return error.TooManyInformationalResponses;
+                        };
+                        if (informational) |observer| {
+                            observer.on_response(
+                                observer.context,
+                                state_index,
+                                state.stream_id,
+                                .{ .headers = headers, .status = status },
+                            );
+                        }
                         freeHeaders(self.allocator, headers);
                         continue;
                     }
@@ -5049,6 +5203,9 @@ pub const Connection = struct {
                         frame.frame,
                     );
                     if (state.forbids_body and data.data.len != 0) {
+                        self.releaseConnectionCapacity(
+                            frame.frame.payload.len,
+                        ) catch {};
                         return error.InvalidContentLength;
                     }
                     const body_len = std.math.add(
@@ -5057,10 +5214,16 @@ pub const Connection = struct {
                         data.data.len,
                     ) catch return error.MessageTooLarge;
                     if (body_len > self.limits.max_body_bytes) {
+                        self.releaseConnectionCapacity(
+                            frame.frame.payload.len,
+                        ) catch {};
                         return error.MessageTooLarge;
                     }
                     try state.body.appendSlice(self.allocator, data.data);
-                    try self.maybeReleaseReceivedCapacity(state.stream_id);
+                    try self.maybeReleaseReceivedCapacity(
+                        state.stream_id,
+                        (frame.frame.header.flags & flag_end_stream) != 0,
+                    );
                     if ((frame.frame.header.flags & flag_end_stream) != 0) {
                         try validateExpectedContentLength(
                             state.content_length,
@@ -5075,6 +5238,7 @@ pub const Connection = struct {
                         frame.frame,
                     );
                     try self.recordResetStream(reset);
+                    state.done = true;
                     return error.StreamReset;
                 },
                 else => return error.UnexpectedFrame,
@@ -5095,8 +5259,12 @@ pub const Connection = struct {
         context: anytype,
         comptime consume: anytype,
     ) !void {
+        self.serve_read_connection_error = null;
+        self.serve_read_stream_error = null;
+        var current_stream_id: ?u31 = null;
         var remaining = states.len;
         while (remaining != 0) {
+            current_stream_id = null;
             const frame = try self.readFrameScratch();
             if (try self.handleConnectionFrame(frame)) continue;
             if (frame.header.frame_type == .goaway) {
@@ -5117,6 +5285,7 @@ pub const Connection = struct {
                 frame.header.stream_id,
             ) orelse return error.UnexpectedFrame;
             const state = &states[state_index];
+            current_stream_id = state.stream_id;
             if (state.done) return error.UnexpectedFrame;
             switch (frame.header.frame_type) {
                 .push_promise => {
@@ -5141,14 +5310,26 @@ pub const Connection = struct {
                             freeHeaders(self.allocator, state.trailers);
                             state.trailers = &.{};
                         };
-                        try validateHeaderBlock(
+                        validateHeaderBlock(
                             state.trailers,
                             .response_trailers,
-                        );
-                        try validateExpectedContentLength(
+                        ) catch |err| {
+                            self.recordResponseStreamReadError(
+                                state.stream_id,
+                                .protocol_error,
+                            );
+                            return err;
+                        };
+                        validateExpectedContentLength(
                             state.content_length,
                             state.body_bytes,
-                        );
+                        ) catch |err| {
+                            self.recordResponseStreamReadError(
+                                state.stream_id,
+                                .protocol_error,
+                            );
+                            return err;
+                        };
                         state.done = true;
                         remaining -= 1;
                         trailers_owned = false;
@@ -5160,29 +5341,60 @@ pub const Connection = struct {
                     errdefer if (!headers_owned_by_state) {
                         freeHeaders(self.allocator, headers);
                     };
-                    try validateHeaderBlock(headers, .response);
+                    validateHeaderBlock(headers, .response) catch |err| {
+                        self.recordResponseStreamReadError(
+                            state.stream_id,
+                            .protocol_error,
+                        );
+                        return err;
+                    };
                     const lookup = try responseHeaderLookup(headers);
-                    const status_text = lookup.status orelse
+                    const status_text = lookup.status orelse {
+                        self.recordResponseStreamReadError(
+                            state.stream_id,
+                            .protocol_error,
+                        );
                         return error.MissingPseudoHeader;
+                    };
                     const status = std.fmt.parseInt(
                         u16,
                         status_text,
                         10,
-                    ) catch return error.InvalidStatus;
+                    ) catch {
+                        self.recordResponseStreamReadError(
+                            state.stream_id,
+                            .protocol_error,
+                        );
+                        return error.InvalidStatus;
+                    };
                     if (informationalResponseToSkip(status)) {
                         if ((frame.header.flags & flag_end_stream) != 0 or
                             lookup.content_length != null)
                         {
+                            self.recordResponseStreamReadError(
+                                state.stream_id,
+                                .protocol_error,
+                            );
                             return error.InvalidContentLength;
                         }
-                        try notifyBatchInformationalResponse(
-                            informational,
-                            state_index,
-                            state.stream_id,
-                            .{ .headers = headers, .status = status },
+                        countInformationalResponse(
                             &state.informational_count,
                             self.limits.max_informational_responses,
-                        );
+                        ) catch {
+                            self.recordResponseStreamReadError(
+                                state.stream_id,
+                                .enhance_your_calm,
+                            );
+                            return error.TooManyInformationalResponses;
+                        };
+                        if (informational) |observer| {
+                            observer.on_response(
+                                observer.context,
+                                state_index,
+                                state.stream_id,
+                                .{ .headers = headers, .status = status },
+                            );
+                        }
                         freeHeaders(self.allocator, headers);
                         continue;
                     }
@@ -5199,6 +5411,10 @@ pub const Connection = struct {
                     if ((lookup.content_length orelse 0) >
                         self.limits.max_body_bytes)
                     {
+                        self.recordResponseStreamReadError(
+                            state.stream_id,
+                            .enhance_your_calm,
+                        );
                         return error.MessageTooLarge;
                     }
                     if (state.forbids_body) {
@@ -5208,19 +5424,33 @@ pub const Connection = struct {
                         if (traditional_connect and
                             (lookup.content_length orelse 0) != 0)
                         {
+                            self.recordResponseStreamReadError(
+                                state.stream_id,
+                                .protocol_error,
+                            );
                             return error.InvalidContentLength;
                         }
                         if ((statusIsInformational(status) or status == 204) and
                             lookup.content_length != null)
                         {
+                            self.recordResponseStreamReadError(
+                                state.stream_id,
+                                .protocol_error,
+                            );
                             return error.InvalidContentLength;
                         }
                     }
                     if ((frame.header.flags & flag_end_stream) != 0) {
-                        try validateExpectedContentLength(
+                        validateExpectedContentLength(
                             lookup.content_length,
                             0,
-                        );
+                        ) catch |err| {
+                            self.recordResponseStreamReadError(
+                                state.stream_id,
+                                .protocol_error,
+                            );
+                            return err;
+                        };
                         state.done = true;
                         remaining -= 1;
                     }
@@ -5232,6 +5462,13 @@ pub const Connection = struct {
                         frame,
                     );
                     if (state.forbids_body and data.data.len != 0) {
+                        self.releaseConnectionCapacity(
+                            frame.payload.len,
+                        ) catch {};
+                        self.recordResponseStreamReadError(
+                            state.stream_id,
+                            .protocol_error,
+                        );
                         return error.InvalidContentLength;
                     }
                     state.body_bytes = std.math.add(
@@ -5240,6 +5477,13 @@ pub const Connection = struct {
                         data.data.len,
                     ) catch return error.MessageTooLarge;
                     if (state.body_bytes > self.limits.max_body_bytes) {
+                        self.releaseConnectionCapacity(
+                            frame.payload.len,
+                        ) catch {};
+                        self.recordResponseStreamReadError(
+                            current_stream_id.?,
+                            .enhance_your_calm,
+                        );
                         return error.MessageTooLarge;
                     }
                     if (data.data.len != 0) {
@@ -5267,12 +5511,21 @@ pub const Connection = struct {
                             return err;
                         };
                     }
-                    try self.maybeReleaseReceivedCapacity(state.stream_id);
+                    try self.maybeReleaseReceivedCapacity(
+                        state.stream_id,
+                        (frame.header.flags & flag_end_stream) != 0,
+                    );
                     if ((frame.header.flags & flag_end_stream) != 0) {
-                        try validateExpectedContentLength(
+                        validateExpectedContentLength(
                             state.content_length,
                             state.body_bytes,
-                        );
+                        ) catch |err| {
+                            self.recordResponseStreamReadError(
+                                state.stream_id,
+                                .protocol_error,
+                            );
+                            return err;
+                        };
                         state.done = true;
                         remaining -= 1;
                     }
@@ -5280,6 +5533,7 @@ pub const Connection = struct {
                 .rst_stream => {
                     const reset = try http2.ResetStreamPayload.parse(frame);
                     try self.recordResetStream(reset);
+                    state.done = true;
                     return error.StreamReset;
                 },
                 else => return error.UnexpectedFrame,
@@ -5295,6 +5549,20 @@ pub const Connection = struct {
         self: *Connection,
         states: []const BatchResponseState,
     ) Error!void {
+        if (self.serve_read_connection_error != null) {
+            self.sendServeReadError(error.InvalidFrame);
+            return;
+        }
+        var has_local_error_reset = false;
+        if (self.serve_read_stream_error) |stream_error| {
+            for (states) |state| {
+                if (!state.done and state.stream_id == stream_error.stream_id) {
+                    has_local_error_reset = true;
+                    break;
+                }
+            }
+        }
+        if (has_local_error_reset) try self.ensureLocalErrorResetBudget();
         try self.prepareLocallyResetStreams(states.len);
         const batch = &self.write_batch;
         batch.clearRetainingCapacity();
@@ -5304,12 +5572,24 @@ pub const Connection = struct {
                 batch,
                 self.allocator,
                 state.stream_id,
-                .cancel,
+                if (self.serve_read_stream_error) |stream_error|
+                    if (stream_error.stream_id == state.stream_id)
+                        stream_error.code
+                    else
+                        .cancel
+                else
+                    .cancel,
             );
         }
         if (batch.items.len != 0) {
-            try self.transportForIo().writeAll(batch.items);
+            self.transportForIo().writeAll(batch.items) catch |err| {
+                if (has_local_error_reset) {
+                    self.aggregate_timeout_unusable = true;
+                }
+                return err;
+            };
         }
+        if (has_local_error_reset) self.local_error_reset_streams +|= 1;
         for (states) |state| {
             if (!state.done) {
                 self.rememberLocallyResetStreamAssumeCapacity(
@@ -5557,7 +5837,18 @@ pub const Connection = struct {
     }
 
     pub fn openExtendedConnect(self: *Connection, options: RequestOptions) Error!ExtendedConnectResponse {
-        return self.openExtendedConnectUntil(options, null);
+        var attempt = try self.openExtendedConnectAttemptUntil(options, null);
+        errdefer attempt.deinit(self.allocator);
+        return attempt.requireAccepted();
+    }
+
+    /// Open an Extended CONNECT stream while preserving a final non-2xx
+    /// response for application authentication, redirect, or retry policy.
+    pub fn openExtendedConnectAttempt(
+        self: *Connection,
+        options: RequestOptions,
+    ) Error!ExtendedConnectAttempt {
+        return self.openExtendedConnectAttemptUntil(options, null);
     }
 
     /// Open an RFC 8441-style Extended CONNECT stream and wait for its final
@@ -5569,7 +5860,21 @@ pub const Connection = struct {
         deadline: std.Io.Clock.Timestamp,
     ) ResponseTimeoutError!ExtendedConnectResponse {
         _ = try deadline_policy.usableAwake(self.io, deadline);
-        return self.openExtendedConnectUntil(options, deadline);
+        var attempt = try self.openExtendedConnectAttemptUntil(
+            options,
+            deadline,
+        );
+        errdefer attempt.deinit(self.allocator);
+        return attempt.requireAccepted();
+    }
+
+    pub fn openExtendedConnectAttemptWithDeadline(
+        self: *Connection,
+        options: RequestOptions,
+        deadline: std.Io.Clock.Timestamp,
+    ) ResponseTimeoutError!ExtendedConnectAttempt {
+        _ = try deadline_policy.usableAwake(self.io, deadline);
+        return self.openExtendedConnectAttemptUntil(options, deadline);
     }
 
     pub fn openExtendedConnectWithTimeout(
@@ -5584,11 +5889,23 @@ pub const Connection = struct {
         );
     }
 
-    fn openExtendedConnectUntil(
+    pub fn openExtendedConnectAttemptWithTimeout(
+        self: *Connection,
+        options: RequestOptions,
+        timeout: std.Io.Duration,
+    ) ResponseTimeoutError!ExtendedConnectAttempt {
+        if (timeout.nanoseconds <= 0) return error.Timeout;
+        return self.openExtendedConnectAttemptWithDeadline(
+            options,
+            .fromNow(self.io, .{ .raw = timeout, .clock = .awake }),
+        );
+    }
+
+    fn openExtendedConnectAttemptUntil(
         self: *Connection,
         options: RequestOptions,
         deadline: ?std.Io.Clock.Timestamp,
-    ) ResponseTimeoutError!ExtendedConnectResponse {
+    ) ResponseTimeoutError!ExtendedConnectAttempt {
         if (self.role != .client) return error.UnexpectedFrame;
         var request_options = options;
         if (request_options.authority == null) request_options.authority = self.default_authority;
@@ -5629,7 +5946,11 @@ pub const Connection = struct {
             });
         }
         fields.appendSliceAssumeCapacity(request_options.headers);
-        stripConnectionHeaders(&fields, .request);
+        try outbound_headers.stripConnectionHeaders(
+            self.allocator,
+            &fields,
+            .request,
+        );
         try validateHeaderBlock(fields.items, .request);
 
         const stream_id = try self.reserveNextClientStreamId();
@@ -5641,7 +5962,7 @@ pub const Connection = struct {
             _ = try deadline_policy.usableAwake(self.io, absolute);
         }
         try self.writeHeaders(stream_id, fields.items, false);
-        return self.readExtendedConnectResponseUntil(stream_id, deadline);
+        return self.readExtendedConnectAttemptUntil(stream_id, deadline);
     }
 
     pub fn openConnectTunnel(self: *Connection, options: RequestOptions) Error!ExtendedConnectResponse {
@@ -5680,7 +6001,11 @@ pub const Connection = struct {
             });
         }
         fields.appendSliceAssumeCapacity(request_options.headers);
-        stripConnectionHeaders(&fields, .request);
+        try outbound_headers.stripConnectionHeaders(
+            self.allocator,
+            &fields,
+            .request,
+        );
         try validateHeaderBlock(fields.items, .request);
 
         const stream_id = try self.reserveNextClientStreamId();
@@ -5854,10 +6179,38 @@ pub const Connection = struct {
         status: u16,
         response_headers: []const http2.Hpack.HeaderField,
     ) Error!void {
+        return self.rejectExtendedConnectWithBody(
+            stream_id,
+            status,
+            response_headers,
+            &.{},
+            &.{},
+        );
+    }
+
+    /// Reject an Extended CONNECT request with an ordinary HTTP response
+    /// entity. The stream ends after DATA or trailers while the parent HTTP/2
+    /// connection remains available for sibling requests.
+    pub fn rejectExtendedConnectWithBody(
+        self: *Connection,
+        stream_id: u31,
+        status: u16,
+        response_headers: []const http2.Hpack.HeaderField,
+        body: []const u8,
+        trailers: []const http2.Hpack.HeaderField,
+    ) Error!void {
         if (self.role != .server) return error.UnexpectedFrame;
-        if (status < 300 or statusIsInformational(status)) return error.InvalidStatus;
-        try self.writeExtendedConnectResponse(stream_id, status, response_headers, true);
-        self.releasePeerStream(stream_id);
+        if (status < 300 or statusIsInformational(status)) {
+            return error.InvalidStatus;
+        }
+        try self.writeResponseInternal(stream_id, .{
+            .status = status,
+            .headers = response_headers,
+            .body = body,
+            .trailers = trailers,
+            .request_method = "CONNECT",
+            .extended_connect = true,
+        }, true);
     }
 
     pub fn readRequest(self: *Connection) Error!OwnedRequest {
@@ -5898,6 +6251,16 @@ pub const Connection = struct {
         if (self.role != .server) return error.UnexpectedFrame;
         if (self.popPendingRequest()) |pending| return pending;
         var active_stream_id: ?u31 = null;
+        errdefer |err| if (self.serve_read_connection_error == null) {
+            if (active_stream_id) |stream_id| {
+                if (serveRequestStreamErrorCode(err)) |code| {
+                    self.serve_read_stream_error = .{
+                        .stream_id = stream_id,
+                        .code = code,
+                    };
+                }
+            }
+        };
         errdefer |err| if (err == error.Timeout) {
             // Request headers/body/trailers are stack-owned during aggregation.
             // Once a stream has been admitted, a retry cannot reconstruct that
@@ -6025,6 +6388,8 @@ pub const Connection = struct {
                                             );
                                             try self.maybeReleaseReceivedCapacity(
                                                 stream_id,
+                                                (owned.frame.header.flags &
+                                                    flag_end_stream) != 0,
                                             );
                                             if ((owned.frame.header.flags &
                                                 flag_end_stream) != 0) break;
@@ -6557,7 +6922,10 @@ pub const Connection = struct {
                                     return err;
                                 };
                             }
-                            try self.maybeReleaseReceivedCapacity(stream_id);
+                            try self.maybeReleaseReceivedCapacity(
+                                stream_id,
+                                (frame.header.flags & flag_end_stream) != 0,
+                            );
                             if ((frame.header.flags & flag_end_stream) != 0) {
                                 break;
                             }
@@ -6829,6 +7197,7 @@ pub const Connection = struct {
                     }
                     try self.maybeReleaseReceivedCapacity(
                         frame.header.stream_id,
+                        (frame.header.flags & flag_end_stream) != 0,
                     );
                     if ((frame.header.flags & flag_end_stream) != 0) {
                         try self.finishBatchStreamingRequest(
@@ -6990,7 +7359,6 @@ pub const Connection = struct {
             ),
             deadline,
         );
-        try validateFrameEnvelope(borrowed.frame);
         if (self.last_peer_frame_at != null) {
             self.last_peer_frame_at = std.Io.Clock.awake.now(self.io);
         }
@@ -7582,7 +7950,10 @@ pub const Connection = struct {
             .payload = body.items[old_len..new_len],
         };
         _ = try self.receiveDataPayload(stream_id, frame);
-        try self.maybeReleaseReceivedCapacity(stream_id);
+        try self.maybeReleaseReceivedCapacity(
+            stream_id,
+            (header.flags & flag_end_stream) != 0,
+        );
         return .{
             .direct_data = (header.flags & flag_end_stream) != 0,
         };
@@ -7773,6 +8144,137 @@ pub const Connection = struct {
         };
     }
 
+    fn appendAutomaticDateHeader(
+        self: *Connection,
+        fields: *std.ArrayList(http2.Hpack.HeaderField),
+    ) void {
+        if (findHeader(fields.items, "date") != null) return;
+        const date = if (self.limits.auto_date_header)
+            http_date.valueNow(self.io)
+        else
+            null;
+        appendAutomaticDateHeaderValue(fields, date);
+    }
+
+    /// Validate one batch member without reading the clock or mutating the
+    /// live HPACK encoder. Batch APIs run this for every member before taking
+    /// their shared automatic Date value, preserving validate-before-I/O.
+    fn validateResponseBatchMember(
+        self: *Connection,
+        stream_id: u31,
+        options: ResponseOptions,
+        bodyless: bool,
+    ) Error!bool {
+        if (bodyless and
+            (options.body.len != 0 or options.trailers.len != 0))
+        {
+            return error.InvalidContentLength;
+        }
+        if (!bodyless and options.trailers.len != 0) {
+            return error.InvalidContentLength;
+        }
+        if (options.status < 100 or options.status > 999 or
+            statusIsInformational(options.status))
+        {
+            return error.InvalidStatus;
+        }
+        const semantics = self.responseSemanticsFor(stream_id, options);
+        if (!bodyless and responseWriteSuppressesBodySemantics(
+            options.status,
+            semantics,
+        )) {
+            return error.InvalidContentLength;
+        }
+
+        var status_buf: [3]u8 = undefined;
+        const status = std.fmt.bufPrint(
+            &status_buf,
+            "{}",
+            .{options.status},
+        ) catch return error.InvalidStatus;
+        var fields_stack: [16]http2.Hpack.HeaderField = undefined;
+        const fields_capacity = std.math.add(
+            usize,
+            options.headers.len,
+            3,
+        ) catch return error.MessageTooLarge;
+        const fields_buffer = try stackFirstHeaderFieldBuffer(
+            self.allocator,
+            &fields_stack,
+            fields_capacity,
+        );
+        defer freeStackFirstHeaderFieldBuffer(
+            self.allocator,
+            &fields_stack,
+            fields_buffer,
+        );
+        var fields: std.ArrayList(http2.Hpack.HeaderField) =
+            .initBuffer(fields_buffer);
+        fields.appendAssumeCapacity(.{ .name = ":status", .value = status });
+        fields.appendSliceAssumeCapacity(options.headers);
+        try outbound_headers.stripConnectionHeaders(
+            self.allocator,
+            &fields,
+            .response,
+        );
+        if (semantics.traditional_connect and
+            options.status >= 200 and options.status < 300)
+        {
+            try stripSuccessfulConnectContentLength(&fields);
+        }
+        const declared_length = try contentLength(fields.items);
+        try validateResponseBodyForStatusWithLength(
+            options.status,
+            declared_length,
+            options.body,
+            &.{},
+        );
+        try validateResponseBodyForRequestSemanticsWithLength(
+            options.status,
+            semantics,
+            declared_length,
+            options.body,
+            &.{},
+        );
+        try validateDeclaredResponseLengthValue(
+            options.status,
+            semantics,
+            declared_length,
+            options.body.len,
+        );
+        if (responseShouldDefaultContentLengthValue(
+            options.status,
+            semantics,
+            declared_length,
+            options.body.len,
+        )) {
+            var content_length_buf: [32]u8 = undefined;
+            const value = std.fmt.bufPrint(
+                &content_length_buf,
+                "{}",
+                .{options.body.len},
+            ) catch unreachable;
+            fields.appendAssumeCapacity(.{
+                .name = "content-length",
+                .value = value,
+            });
+        }
+        const needs_automatic_date = self.limits.auto_date_header and
+            findHeader(fields.items, "date") == null;
+        // Account for the implicit field before touching the wall clock. The
+        // actual same-sized value is fetched only after every batch member
+        // passes this validation phase.
+        if (needs_automatic_date) {
+            fields.appendAssumeCapacity(.{
+                .name = "date",
+                .value = "Thu, 01 Jan 1970 00:00:00 GMT",
+            });
+        }
+        try validateHeaderBlock(fields.items, .response);
+        try validateHeaderListSize(fields.items, self.peer_max_header_list_size);
+        return needs_automatic_date;
+    }
+
     pub fn writeResponse(self: *Connection, stream_id: u31, options: ResponseOptions) Error!void {
         return self.writeResponseInternal(stream_id, options, true);
     }
@@ -7795,7 +8297,7 @@ pub const Connection = struct {
         const fields_capacity = std.math.add(
             usize,
             options.headers.len,
-            2,
+            3,
         ) catch return error.MessageTooLarge;
         const fields_buffer = if (fields_capacity <= fields_stack.len)
             fields_stack[0..fields_capacity]
@@ -7815,7 +8317,11 @@ pub const Connection = struct {
             .value = status,
         });
         fields.appendSliceAssumeCapacity(options.headers);
-        stripConnectionHeaders(&fields, .response);
+        try outbound_headers.stripConnectionHeaders(
+            self.allocator,
+            &fields,
+            .response,
+        );
         if (semantics.traditional_connect and options.status >= 200 and options.status < 300) {
             try stripSuccessfulConnectContentLength(&fields);
         }
@@ -7832,6 +8338,7 @@ pub const Connection = struct {
         }
         try validateHeaderBlock(fields.items, .response);
         try validateHeaderBlock(options.trailers, .response_trailers);
+        self.appendAutomaticDateHeader(&fields);
         if (!suppress_body and
             options.body.len != 0 and
             options.trailers.len == 0)
@@ -7906,7 +8413,7 @@ pub const Connection = struct {
         const fields_capacity = std.math.add(
             usize,
             options.headers.len,
-            2,
+            3,
         ) catch return error.MessageTooLarge;
         const fields_buffer = if (fields_capacity <= fields_stack.len)
             fields_stack[0..fields_capacity]
@@ -7925,7 +8432,11 @@ pub const Connection = struct {
             .value = status,
         });
         fields.appendSliceAssumeCapacity(options.headers);
-        stripConnectionHeaders(&fields, .response);
+        try outbound_headers.stripConnectionHeaders(
+            self.allocator,
+            &fields,
+            .response,
+        );
         if (semantics.traditional_connect and
             options.status >= 200 and options.status < 300)
         {
@@ -7944,6 +8455,7 @@ pub const Connection = struct {
             return error.InvalidContentLength;
         }
         try validateHeaderBlock(fields.items, .response);
+        self.appendAutomaticDateHeader(&fields);
 
         // HEAD/204/304 and successful traditional CONNECT end at HEADERS.
         // An ordinary zero-length response stays open so the writer may choose
@@ -7996,6 +8508,16 @@ pub const Connection = struct {
             }
         }
 
+        var needs_automatic_date = false;
+        for (stream_ids, responses) |stream_id, options| {
+            needs_automatic_date =
+                try self.validateResponseBatchMember(
+                    stream_id,
+                    options,
+                    true,
+                ) or needs_automatic_date;
+        }
+
         const batch = &self.write_batch;
         batch.clearRetainingCapacity();
         var staged_encoder = try self.hpack_encoder.clone(self.allocator);
@@ -8003,16 +8525,11 @@ pub const Connection = struct {
         defer if (staged_encoder_owned) {
             staged_encoder.deinit(self.allocator);
         };
+        const automatic_date = if (needs_automatic_date)
+            http_date.valueNow(self.io)
+        else
+            null;
         for (stream_ids, responses) |stream_id, options| {
-            if (options.body.len != 0 or options.trailers.len != 0) {
-                return error.InvalidContentLength;
-            }
-            if (options.status < 100 or options.status > 999 or
-                statusIsInformational(options.status))
-            {
-                return error.InvalidStatus;
-            }
-
             var status_buf: [3]u8 = undefined;
             const status = std.fmt.bufPrint(
                 &status_buf,
@@ -8025,7 +8542,7 @@ pub const Connection = struct {
             const fields_capacity = std.math.add(
                 usize,
                 options.headers.len,
-                1,
+                2,
             ) catch return error.MessageTooLarge;
             const fields_buffer = if (fields_capacity <= fields_stack.len)
                 fields_stack[0..fields_capacity]
@@ -8044,7 +8561,11 @@ pub const Connection = struct {
                 .value = status,
             });
             fields.appendSliceAssumeCapacity(options.headers);
-            stripConnectionHeaders(&fields, .response);
+            try outbound_headers.stripConnectionHeaders(
+                self.allocator,
+                &fields,
+                .response,
+            );
             if (semantics.traditional_connect and
                 options.status >= 200 and options.status < 300)
             {
@@ -8070,6 +8591,7 @@ pub const Connection = struct {
                 declared_length,
                 0,
             );
+            appendAutomaticDateHeaderValue(&fields, automatic_date);
             try validateHeaderBlock(fields.items, .response);
             try validateHeaderListSize(
                 fields.items,
@@ -8120,6 +8642,7 @@ pub const Connection = struct {
         if (stream_ids.len == 0) return;
         if (body_chunk_size == 0) return error.InvalidFrameSize;
 
+        var needs_automatic_date = false;
         for (stream_ids, responses, 0..) |stream_id, options, index| {
             if (!self.outboundStreamIsActive(stream_id)) {
                 return error.InvalidStreamId;
@@ -8127,16 +8650,12 @@ pub const Connection = struct {
             for (stream_ids[0..index]) |prior| {
                 if (prior == stream_id) return error.InvalidStreamId;
             }
-            if (options.trailers.len != 0) {
-                return error.InvalidContentLength;
-            }
-            const semantics = self.responseSemanticsFor(stream_id, options);
-            if (responseWriteSuppressesBodySemantics(
-                options.status,
-                semantics,
-            )) {
-                return error.InvalidContentLength;
-            }
+            needs_automatic_date =
+                try self.validateResponseBatchMember(
+                    stream_id,
+                    options,
+                    false,
+                ) or needs_automatic_date;
         }
 
         var views_stack: [16]BatchDataView = undefined;
@@ -8195,12 +8714,17 @@ pub const Connection = struct {
         defer if (staged_encoder_owned) {
             staged_encoder.deinit(self.allocator);
         };
+        const automatic_date = if (needs_automatic_date)
+            http_date.valueNow(self.io)
+        else
+            null;
         for (stream_ids, responses) |stream_id, options| {
             try self.appendResponseHeadToBatch(
                 stream_id,
                 options,
                 batch,
                 &staged_encoder,
+                automatic_date,
             );
         }
 
@@ -8449,6 +8973,7 @@ pub const Connection = struct {
         options: ResponseOptions,
         batch: *std.ArrayList(u8),
         encoder: *http2.Hpack.Encoder,
+        automatic_date: ?*const [http_date.value_len]u8,
     ) Error!void {
         if (options.status < 100 or options.status > 999 or
             statusIsInformational(options.status))
@@ -8467,7 +8992,7 @@ pub const Connection = struct {
         const fields_capacity = std.math.add(
             usize,
             options.headers.len,
-            2,
+            3,
         ) catch return error.MessageTooLarge;
         const fields_buffer = if (fields_capacity <= fields_stack.len)
             fields_stack[0..fields_capacity]
@@ -8486,7 +9011,11 @@ pub const Connection = struct {
             .value = status,
         });
         fields.appendSliceAssumeCapacity(options.headers);
-        stripConnectionHeaders(&fields, .response);
+        try outbound_headers.stripConnectionHeaders(
+            self.allocator,
+            &fields,
+            .response,
+        );
         const declared_length = try contentLength(fields.items);
         try validateResponseBodyForStatusWithLength(
             options.status,
@@ -8525,6 +9054,7 @@ pub const Connection = struct {
             });
         }
         try validateHeaderBlock(fields.items, .response);
+        appendAutomaticDateHeaderValue(&fields, automatic_date);
         try validateHeaderListSize(
             fields.items,
             self.peer_max_header_list_size,
@@ -8647,7 +9177,12 @@ pub const Connection = struct {
         context: *HandlerContext,
         comptime handler: *const fn (*HandlerContext, OwnedRequest) Error!ResponseOptions,
     ) Error!u31 {
-        var owned_request = try self.readRequest();
+        self.serve_read_connection_error = null;
+        self.serve_read_stream_error = null;
+        var owned_request = self.readRequest() catch |err| {
+            self.sendServeReadError(err);
+            return err;
+        };
         const stream_id = owned_request.stream_id;
         defer owned_request.deinit(self.allocator);
         var response = try handler(context, owned_request);
@@ -8655,6 +9190,34 @@ pub const Connection = struct {
         response.extended_connect = owned_request.protocol != null;
         try self.writeResponse(stream_id, response);
         return stream_id;
+    }
+
+    fn sendServeReadError(self: *Connection, _: anyerror) void {
+        if (self.serve_read_connection_error == null) {
+            if (self.serve_read_stream_error) |stream_error| {
+                self.writeLocalErrorResetStream(
+                    stream_error.stream_id,
+                    stream_error.code,
+                ) catch {};
+                self.releasePeerStream(stream_error.stream_id);
+                self.forgetStreamWindows(stream_error.stream_id);
+            }
+            return;
+        }
+        const mapping: struct {
+            code: http2.ErrorCode,
+            debug_data: []const u8,
+        } = switch (self.serve_read_connection_error orelse return) {
+            .compression => .{ .code = .compression_error, .debug_data = "hpack-decode" },
+            .frame_sequence => .{ .code = .protocol_error, .debug_data = "frame-sequence" },
+            .excessive_header_block => .{ .code = .enhance_your_calm, .debug_data = "header-block-limit" },
+        };
+        self.aggregate_timeout_unusable = true;
+        self.sendGoAway(
+            self.lastPeerProcessedStreamId(),
+            mapping.code,
+            mapping.debug_data,
+        ) catch {};
     }
 
     pub fn serve(
@@ -8682,7 +9245,11 @@ pub const Connection = struct {
         defer fields.deinit(self.allocator);
         try fields.append(self.allocator, .{ .name = ":status", .value = status });
         for (headers) |header| try fields.append(self.allocator, header);
-        stripConnectionHeaders(&fields, .response);
+        try outbound_headers.stripConnectionHeaders(
+            self.allocator,
+            &fields,
+            .response,
+        );
         try validateResponseBodyForStatus(status_code, fields.items, &.{}, &.{});
         try validateHeaderBlock(fields.items, .response);
         // HTTP/2 informational responses never end the stream; the final
@@ -8696,7 +9263,7 @@ pub const Connection = struct {
     /// payload. Use `pingWithTimeout` for liveness probes against peers that
     /// may remain connected without ever answering.
     pub fn ping(self: *Connection, data: [8]u8) Error![8]u8 {
-        if (std.mem.eql(u8, &data, &graceful_shutdown_ping_payload)) {
+        if (reservedInternalPingPayload(data)) {
             return error.InvalidFrame;
         }
         return self.pingUntil(data, null);
@@ -8715,7 +9282,7 @@ pub const Connection = struct {
         timeout: std.Io.Duration,
     ) Error![8]u8 {
         if (timeout.nanoseconds <= 0) return error.Timeout;
-        if (std.mem.eql(u8, &data, &graceful_shutdown_ping_payload)) {
+        if (reservedInternalPingPayload(data)) {
             return error.InvalidFrame;
         }
         const deadline = std.Io.Clock.Timestamp.fromNow(
@@ -8735,7 +9302,7 @@ pub const Connection = struct {
         deadline: std.Io.Clock.Timestamp,
     ) Error![8]u8 {
         const absolute = try deadline_policy.usableAwake(self.io, deadline);
-        if (std.mem.eql(u8, &data, &graceful_shutdown_ping_payload)) {
+        if (reservedInternalPingPayload(data)) {
             return error.InvalidFrame;
         }
         return self.pingUntil(data, absolute);
@@ -8998,6 +9565,7 @@ pub const Connection = struct {
                 }
                 const ack_payload =
                     (try http2.PingPayload.parse(borrowed.frame)).data;
+                try self.applyAdaptivePingAck(ack_payload);
                 // Rust h2 keeps outstanding user/shutdown PING payloads and
                 // only completes the operation when the ACK echoes that exact
                 // opaque value. Unknown ACKs are legal on the wire, but
@@ -9076,8 +9644,12 @@ pub const Connection = struct {
                 return error.UnexpectedFrame;
             }
             const ping_payload = try http2.PingPayload.parse(frame.frame);
-            if ((frame.frame.header.flags & flag_ack) != 0) continue;
+            if ((frame.frame.header.flags & flag_ack) != 0) {
+                try self.applyAdaptivePingAck(ping_payload.data);
+                continue;
+            }
             try writeFrameTransport(self.allocator, self.transportForIo(), .ping, flag_ack, 0, &ping_payload.data);
+            if (bdp.isProbePayload(ping_payload.data)) continue;
             return ping_payload.data;
         }
     }
@@ -9221,6 +9793,21 @@ pub const Connection = struct {
         self.forgetStreamWindows(stream_id);
     }
 
+    /// Best-effort cleanup for an admitted Extended CONNECT stream whose
+    /// protocol adapter is being dropped before a final response. Unlike
+    /// `sendResetStream`, local state is released even if the reset cannot be
+    /// written, so an infallible adapter destructor cannot leak stream credit.
+    pub fn abandonExtendedConnect(
+        self: *Connection,
+        stream_id: u31,
+    ) void {
+        if (!self.outboundStreamIsActive(stream_id)) return;
+        self.writeResetStreamFrame(stream_id, .cancel) catch {};
+        self.releaseLocalStream(stream_id);
+        self.releasePeerStream(stream_id);
+        self.forgetStreamWindows(stream_id);
+    }
+
     pub fn readResetStream(self: *Connection) Error!OwnedResetStream {
         return self.readResetStreamUntil(null);
     }
@@ -9289,15 +9876,74 @@ pub const Connection = struct {
         self.rememberLocallyResetStreamAssumeCapacity(stream_id);
     }
 
+    fn writeLocalErrorResetStream(
+        self: *Connection,
+        stream_id: u31,
+        error_code: http2.ErrorCode,
+    ) Error!void {
+        try self.ensureLocalErrorResetBudget();
+        self.writeResetStreamFrame(stream_id, error_code) catch |err| {
+            // A transport write does not report whether a prefix reached the
+            // peer. Never append more HTTP/2 frames to a possibly partial RST.
+            self.aggregate_timeout_unusable = true;
+            return err;
+        };
+        self.local_error_reset_streams +|= 1;
+    }
+
+    fn ensureLocalErrorResetBudget(self: *Connection) Error!void {
+        const limit = self.limits.max_local_error_reset_streams orelse return;
+        if (self.local_error_reset_streams < limit) return;
+
+        self.aggregate_timeout_unusable = true;
+        self.sendGoAway(
+            self.lastPeerProcessedStreamId(),
+            .enhance_your_calm,
+            "too_many_internal_resets",
+        ) catch {};
+        return error.ConnectionGoAway;
+    }
+
     fn prepareLocallyResetStreams(
         self: *Connection,
         additional: usize,
     ) std.mem.Allocator.Error!void {
         const limit = self.limits.max_reset_stream_history;
-        if (limit == 0 or self.locally_reset_streams.items.len >= limit) return;
+        if (limit == 0) return;
+        const retained = self.locallyResetStreamCount();
+        if (retained < limit) {
+            self.compactLocallyResetStreams();
+            const desired = @min(limit, retained +| additional);
+            try self.locally_reset_streams.ensureTotalCapacity(
+                self.allocator,
+                desired,
+            );
+            try self.locally_reset_stream_index.ensureTotalCapacity(
+                self.allocator,
+                @intCast(desired),
+            );
+            return;
+        }
+        return self.prepareLocallyResetStreamsAt(
+            additional,
+            std.Io.Clock.awake.now(self.io).nanoseconds,
+        );
+    }
+
+    fn prepareLocallyResetStreamsAt(
+        self: *Connection,
+        additional: usize,
+        now_ns: i96,
+    ) std.mem.Allocator.Error!void {
+        const limit = self.limits.max_reset_stream_history;
+        if (limit == 0) return;
+        self.pruneExpiredLocallyResetStreams(now_ns);
+        const retained = self.locallyResetStreamCount();
+        if (retained >= limit) return;
+        self.compactLocallyResetStreams();
         const desired = @min(
             limit,
-            self.locally_reset_streams.items.len +| additional,
+            retained +| additional,
         );
         try self.locally_reset_streams.ensureTotalCapacity(
             self.allocator,
@@ -9313,33 +9959,91 @@ pub const Connection = struct {
         self: *Connection,
         stream_id: u31,
     ) void {
-        if (self.locally_reset_stream_index.contains(stream_id)) return;
+        self.rememberLocallyResetStreamAtAssumeCapacity(
+            stream_id,
+            std.Io.Clock.awake.now(self.io).nanoseconds,
+        );
+    }
+
+    fn rememberLocallyResetStreamAtAssumeCapacity(
+        self: *Connection,
+        stream_id: u31,
+        now_ns: i96,
+    ) void {
         const limit = self.limits.max_reset_stream_history;
         if (limit == 0) return;
-        if (self.locally_reset_streams.items.len < limit) {
-            self.locally_reset_streams.appendAssumeCapacity(stream_id);
-            self.locally_reset_stream_index.putAssumeCapacityNoClobber(
-                stream_id,
-                {},
-            );
-            return;
-        }
-        _ = self.locally_reset_stream_index.remove(
-            self.locally_reset_streams.items[self.locally_reset_stream_next],
-        );
-        self.locally_reset_streams.items[self.locally_reset_stream_next] =
-            stream_id;
+        self.pruneExpiredLocallyResetStreams(now_ns);
+        if (self.locally_reset_stream_index.contains(stream_id)) return;
+        if (self.locallyResetStreamCount() >= limit) return;
+        self.compactLocallyResetStreams();
+        self.locally_reset_streams.appendAssumeCapacity(.{
+            .stream_id = stream_id,
+            .reset_at_ns = now_ns,
+        });
         self.locally_reset_stream_index.putAssumeCapacityNoClobber(
             stream_id,
             {},
         );
-        self.locally_reset_stream_next =
-            (self.locally_reset_stream_next + 1) %
-            limit;
     }
 
-    fn wasLocallyReset(self: *const Connection, stream_id: u31) bool {
+    fn wasLocallyReset(self: *Connection, stream_id: u31) bool {
+        if (self.locally_reset_stream_index.count() == 0) return false;
+        return self.wasLocallyResetAt(
+            stream_id,
+            std.Io.Clock.awake.now(self.io).nanoseconds,
+        );
+    }
+
+    fn wasLocallyResetAt(
+        self: *Connection,
+        stream_id: u31,
+        now_ns: i96,
+    ) bool {
+        if (!self.locally_reset_stream_index.contains(stream_id)) return false;
+        self.pruneExpiredLocallyResetStreams(now_ns);
         return self.locally_reset_stream_index.contains(stream_id);
+    }
+
+    fn locallyResetStreamCount(self: *const Connection) usize {
+        return self.locally_reset_streams.items.len -
+            self.locally_reset_stream_head;
+    }
+
+    fn pruneExpiredLocallyResetStreams(
+        self: *Connection,
+        now_ns: i96,
+    ) void {
+        const retention_ns = self.limits.reset_stream_duration.nanoseconds;
+        while (self.locally_reset_stream_head <
+            self.locally_reset_streams.items.len)
+        {
+            const oldest = self.locally_reset_streams.items[
+                self.locally_reset_stream_head
+            ];
+            if (now_ns <= oldest.reset_at_ns or
+                now_ns - oldest.reset_at_ns <= retention_ns) return;
+            _ = self.locally_reset_stream_index.remove(oldest.stream_id);
+            self.locally_reset_stream_head += 1;
+        }
+        if (self.locally_reset_stream_head ==
+            self.locally_reset_streams.items.len)
+        {
+            self.locally_reset_streams.clearRetainingCapacity();
+            self.locally_reset_stream_head = 0;
+        }
+    }
+
+    fn compactLocallyResetStreams(self: *Connection) void {
+        const head = self.locally_reset_stream_head;
+        if (head == 0) return;
+        const retained = self.locally_reset_streams.items[head..];
+        std.mem.copyForwards(
+            LocallyResetStream,
+            self.locally_reset_streams.items[0..retained.len],
+            retained,
+        );
+        self.locally_reset_streams.items.len = retained.len;
+        self.locally_reset_stream_head = 0;
     }
 
     fn discardLateFrameForLocallyResetStream(
@@ -9347,7 +10051,24 @@ pub const Connection = struct {
         frame: http2.Frame,
     ) Error!bool {
         if (frame.header.stream_id == 0 or
-            !self.wasLocallyReset(frame.header.stream_id))
+            self.locally_reset_stream_index.count() == 0 or
+            !self.locally_reset_stream_index.contains(frame.header.stream_id))
+        {
+            return false;
+        }
+        return self.discardLateFrameForLocallyResetStreamAt(
+            frame,
+            std.Io.Clock.awake.now(self.io).nanoseconds,
+        );
+    }
+
+    fn discardLateFrameForLocallyResetStreamAt(
+        self: *Connection,
+        frame: http2.Frame,
+        now_ns: i96,
+    ) Error!bool {
+        if (frame.header.stream_id == 0 or
+            !self.wasLocallyResetAt(frame.header.stream_id, now_ns))
         {
             return false;
         }
@@ -9849,17 +10570,50 @@ pub const Connection = struct {
         const charged_len = frame.payload.len;
         try self.recv_connection_window.receive(charged_len);
         errdefer self.recv_connection_window.update(@intCast(charged_len)) catch unreachable;
-        try (try self.recvStreamWindow(stream_id)).receive(charged_len);
+        const stream_window = try self.recvStreamWindow(stream_id);
+        try stream_window.receive(charged_len);
+        errdefer stream_window.update(@intCast(charged_len)) catch
+            unreachable;
+        if (self.adaptive_window) |*estimator| {
+            if (estimator.recordData(
+                charged_len,
+                awakeNowNanos(self.io),
+            )) |ping_payload| {
+                writeFrameTransport(
+                    self.allocator,
+                    self.transportForIo(),
+                    .ping,
+                    0,
+                    0,
+                    &ping_payload,
+                ) catch |err| {
+                    estimator.cancelProbe(ping_payload);
+                    return err;
+                };
+            }
+        }
+        // A previously queued target can have been deferred because an
+        // existing stream was too close to the protocol maximum. DATA just
+        // reduced that window, so retry before returning it to the caller.
+        if (!self.awaiting_settings_ack and
+            self.adaptive_queued_target != null)
+        {
+            try self.sendQueuedAdaptiveWindowUpdate();
+        }
         return data;
     }
 
-    fn maybeReleaseReceivedCapacity(self: *Connection, stream_id: u31) Error!void {
+    fn maybeReleaseReceivedCapacity(
+        self: *Connection,
+        stream_id: u31,
+        end_stream: bool,
+    ) Error!void {
         const connection_target: usize =
-            self.limits.initial_connection_window_size;
+            self.receiveConnectionWindowTarget();
         const connection_low_watermark = connection_target / 2;
         const conn_available = self.recv_connection_window.available();
         const stream_window = try self.recvStreamWindow(stream_id);
-        const stream_target: usize = self.limits.initial_window_size;
+        const stream_target: usize = self.receiveStreamWindowTarget();
         const stream_low_watermark = stream_target / 2;
         const stream_available = stream_window.available();
         const connection_increment: ?u31 =
@@ -9869,7 +10623,8 @@ pub const Connection = struct {
             else
                 null;
         const stream_increment: ?u31 =
-            if (stream_available <= stream_low_watermark and
+            if (!end_stream and
+            stream_available <= stream_low_watermark and
             stream_available < stream_target)
                 @intCast(stream_target - stream_available)
             else
@@ -9967,11 +10722,7 @@ pub const Connection = struct {
                 return error.UnexpectedFrame;
             }
             const update = try http2.WindowUpdatePayload.parse(frame.frame);
-            if (update.stream_id == 0) {
-                try self.send_connection_window.update(update.increment);
-            } else {
-                try (try self.sendStreamWindow(update.stream_id)).update(update.increment);
-            }
+            try self.applyWindowUpdate(update);
             return .{ .frame = frame, .window_update = update };
         }
     }
@@ -10000,7 +10751,12 @@ pub const Connection = struct {
         informational: ?InformationalObserver,
         deadline: ?std.Io.Clock.Timestamp,
     ) Error!OwnedResponse {
+        self.serve_read_connection_error = null;
+        self.serve_read_stream_error = null;
         defer self.releaseLocalStream(stream_id);
+        errdefer |err| if (err != error.Timeout) {
+            self.sendResponseReadError(stream_id, err);
+        };
         errdefer |err| if (err == error.Timeout) {
             // Unlike the incremental response-event APIs, this aggregate call
             // keeps partially decoded headers/body only on its stack. Preserve
@@ -10100,9 +10856,20 @@ pub const Connection = struct {
                 .data => {
                     if (headers == null) return error.UnexpectedFrame;
                     const data = try self.receiveDataPayload(stream_id, frame.frame);
-                    if (body.items.len + data.data.len > self.limits.max_body_bytes) return error.MessageTooLarge;
+                    if (body.items.len + data.data.len > self.limits.max_body_bytes) {
+                        // The DATA payload already consumed connection credit.
+                        // A stream-local size rejection must restore that shared
+                        // credit before terminating this response.
+                        self.releaseConnectionCapacity(
+                            frame.frame.payload.len,
+                        ) catch {};
+                        return error.MessageTooLarge;
+                    }
                     try body.appendSlice(self.allocator, data.data);
-                    try self.maybeReleaseReceivedCapacity(stream_id);
+                    try self.maybeReleaseReceivedCapacity(
+                        stream_id,
+                        (frame.frame.header.flags & flag_end_stream) != 0,
+                    );
                     if ((frame.frame.header.flags & flag_end_stream) != 0) {
                         if (headers != null) try validateExpectedContentLength(response_content_length, body.items.len);
                         break;
@@ -10127,6 +10894,49 @@ pub const Connection = struct {
             .body = try body.toOwnedSlice(self.allocator),
             .trailers = trailers,
         };
+    }
+
+    fn sendResponseReadError(
+        self: *Connection,
+        stream_id: u31,
+        err: anyerror,
+    ) void {
+        if (self.serve_read_connection_error != null) {
+            self.sendServeReadError(err);
+            return;
+        }
+        const code = responseStreamErrorCode(err) orelse return;
+        self.writeLocalErrorResetStream(stream_id, code) catch {};
+        self.forgetStreamWindows(stream_id);
+    }
+
+    fn recordResponseStreamReadError(
+        self: *Connection,
+        stream_id: u31,
+        code: http2.ErrorCode,
+    ) void {
+        if (self.serve_read_connection_error != null) return;
+        self.serve_read_stream_error = .{
+            .stream_id = stream_id,
+            .code = code,
+        };
+    }
+
+    fn sendRecordedResponseReadError(
+        self: *Connection,
+        stream_id: u31,
+    ) void {
+        if (self.serve_read_connection_error != null) {
+            self.sendServeReadError(error.InvalidFrame);
+            return;
+        }
+        const stream_error = self.serve_read_stream_error orelse return;
+        std.debug.assert(stream_error.stream_id == stream_id);
+        self.writeLocalErrorResetStream(
+            stream_id,
+            stream_error.code,
+        ) catch {};
+        self.forgetStreamWindows(stream_id);
     }
 
     /// Consume one active client response as borrowed DATA events.
@@ -10175,11 +10985,19 @@ pub const Connection = struct {
         context: anytype,
         comptime begin: anytype,
         comptime consume: anytype,
-    ) !StreamingResponse {
+    ) anyerror!StreamingResponse {
         const stream_id = pending.stream_id;
+        self.serve_read_connection_error = null;
+        self.serve_read_stream_error = null;
         defer self.releaseLocalStream(stream_id);
         var completed = false;
         var callback_failed = false;
+        errdefer if (!callback_failed and
+            (self.serve_read_connection_error != null or
+                self.serve_read_stream_error != null))
+        {
+            self.sendRecordedResponseReadError(stream_id);
+        };
         // Bounded reads fail closed whenever discarded parser or transport
         // state makes resumption unsafe. Callback rejection is the exception:
         // even error.Timeout from a callback remains stream-local because the
@@ -10254,20 +11072,41 @@ pub const Connection = struct {
                     errdefer if (decoded_owned) {
                         freeHeaders(self.allocator, decoded);
                     };
-                    try validateHeaderBlock(decoded, .response);
+                    validateHeaderBlock(decoded, .response) catch |err| {
+                        self.recordResponseStreamReadError(
+                            stream_id,
+                            .protocol_error,
+                        );
+                        return err;
+                    };
                     const lookup = try responseHeaderLookup(decoded);
-                    const status_text = lookup.status orelse
+                    const status_text = lookup.status orelse {
+                        self.recordResponseStreamReadError(
+                            stream_id,
+                            .protocol_error,
+                        );
                         return error.MissingPseudoHeader;
+                    };
                     const status = std.fmt.parseInt(
                         u16,
                         status_text,
                         10,
-                    ) catch return error.InvalidStatus;
+                    ) catch {
+                        self.recordResponseStreamReadError(
+                            stream_id,
+                            .protocol_error,
+                        );
+                        return error.InvalidStatus;
+                    };
                     if (informationalResponseToSkip(status)) {
                         if ((frame.header.flags & flag_end_stream) != 0) {
                             return error.UnexpectedFrame;
                         }
                         if (lookup.content_length != null) {
+                            self.recordResponseStreamReadError(
+                                stream_id,
+                                .protocol_error,
+                            );
                             return error.InvalidContentLength;
                         }
                         try notifyInformationalResponse(
@@ -10309,12 +11148,20 @@ pub const Connection = struct {
                         if (traditional_connect and
                             (lookup.content_length orelse 0) != 0)
                         {
+                            self.recordResponseStreamReadError(
+                                stream_id,
+                                .protocol_error,
+                            );
                             return error.InvalidContentLength;
                         }
                         if ((statusIsInformational(status) or
                             status == 204) and
                             lookup.content_length != null)
                         {
+                            self.recordResponseStreamReadError(
+                                stream_id,
+                                .protocol_error,
+                            );
                             return error.InvalidContentLength;
                         }
                         if (!traditional_connect and
@@ -10330,6 +11177,10 @@ pub const Connection = struct {
                     if ((expected_body_len orelse 0) >
                         self.limits.max_body_bytes)
                     {
+                        self.recordResponseStreamReadError(
+                            stream_id,
+                            .enhance_your_calm,
+                        );
                         return error.MessageTooLarge;
                     }
                     if ((frame.header.flags & flag_end_stream) != 0) {
@@ -10352,6 +11203,13 @@ pub const Connection = struct {
                         data.data.len,
                     ) catch return error.MessageTooLarge;
                     if (body_bytes > self.limits.max_body_bytes) {
+                        self.releaseConnectionCapacity(
+                            frame.payload.len,
+                        ) catch {};
+                        self.recordResponseStreamReadError(
+                            stream_id,
+                            .enhance_your_calm,
+                        );
                         return error.MessageTooLarge;
                     }
                     if (data.data.len != 0) {
@@ -10376,7 +11234,10 @@ pub const Connection = struct {
                             return err;
                         };
                     }
-                    try self.maybeReleaseReceivedCapacity(stream_id);
+                    try self.maybeReleaseReceivedCapacity(
+                        stream_id,
+                        (frame.header.flags & flag_end_stream) != 0,
+                    );
                     if ((frame.header.flags & flag_end_stream) != 0) {
                         try validateExpectedContentLength(
                             expected_body_len,
@@ -10483,7 +11344,10 @@ pub const Connection = struct {
                         return error.MessageTooLarge;
                     }
                     try body.appendSlice(self.allocator, data.data);
-                    try self.maybeReleaseReceivedCapacity(stream_id);
+                    try self.maybeReleaseReceivedCapacity(
+                        stream_id,
+                        (frame.frame.header.flags & flag_end_stream) != 0,
+                    );
                     if ((frame.frame.header.flags & flag_end_stream) != 0) {
                         break;
                     }
@@ -10510,18 +11374,23 @@ pub const Connection = struct {
     }
 
     fn readExtendedConnectResponse(self: *Connection, stream_id: u31) Error!ExtendedConnectResponse {
-        return self.readExtendedConnectResponseUntil(stream_id, null) catch |err|
+        var attempt = self.readExtendedConnectAttemptUntil(
+            stream_id,
+            null,
+        ) catch |err|
             switch (err) {
                 error.Timeout => unreachable,
                 else => |other| return @errorCast(other),
             };
+        errdefer attempt.deinit(self.allocator);
+        return attempt.requireAccepted();
     }
 
-    fn readExtendedConnectResponseUntil(
+    fn readExtendedConnectAttemptUntil(
         self: *Connection,
         stream_id: u31,
         deadline: ?std.Io.Clock.Timestamp,
-    ) ResponseTimeoutError!ExtendedConnectResponse {
+    ) ResponseTimeoutError!ExtendedConnectAttempt {
         errdefer |err| if (err == error.Timeout) {
             // An aggregate CONNECT wait cannot resume after discarding decoded
             // informational heads or a partial HPACK block. Cancel the stream
@@ -10529,6 +11398,18 @@ pub const Connection = struct {
             self.failTimedOutResponse(stream_id);
         };
         var informational_count: usize = 0;
+        var headers: ?[]http2.Hpack.HeaderField = null;
+        errdefer if (headers) |value| freeHeaders(self.allocator, value);
+        var trailers: []http2.Hpack.HeaderField = &.{};
+        errdefer freeHeaders(self.allocator, trailers);
+        var body: std.ArrayList(u8) = .empty;
+        errdefer body.deinit(self.allocator);
+        var status_value: ?u16 = null;
+        var expected_body_len: ?usize = null;
+        var rejection_started = false;
+        errdefer |err| if (rejection_started and err != error.Timeout) {
+            self.abandonExtendedConnect(stream_id);
+        };
         while (true) {
             var frame = try self.readOwnedFrameWithDeadline(deadline);
             defer frame.deinit(self.allocator);
@@ -10541,13 +11422,35 @@ pub const Connection = struct {
             if (frame.frame.header.stream_id != stream_id) return error.UnexpectedFrame;
             switch (frame.frame.header.frame_type) {
                 .headers => {
-                    const headers = try self.readHeaderBlockUntil(
+                    if (headers != null) {
+                        if ((frame.frame.header.flags & flag_end_stream) == 0) {
+                            return error.UnexpectedFrame;
+                        }
+                        try validateExpectedContentLength(
+                            expected_body_len,
+                            body.items.len,
+                        );
+                        trailers = try self.readHeaderBlockUntil(
+                            frame.frame,
+                            deadline,
+                        );
+                        try validateHeaderBlock(
+                            trailers,
+                            .response_trailers,
+                        );
+                        break;
+                    }
+
+                    const decoded = try self.readHeaderBlockUntil(
                         frame.frame,
                         deadline,
                     );
-                    errdefer freeHeaders(self.allocator, headers);
-                    try validateHeaderBlock(headers, .response);
-                    const lookup = try responseHeaderLookup(headers);
+                    var decoded_owned = true;
+                    errdefer if (decoded_owned) {
+                        freeHeaders(self.allocator, decoded);
+                    };
+                    try validateHeaderBlock(decoded, .response);
+                    const lookup = try responseHeaderLookup(decoded);
                     const status_s = lookup.status orelse return error.MissingPseudoHeader;
                     const status = std.fmt.parseInt(u16, status_s, 10) catch return error.InvalidStatus;
                     if (informationalResponseToSkip(status)) {
@@ -10555,33 +11458,141 @@ pub const Connection = struct {
                         if (lookup.content_length != null) return error.InvalidContentLength;
                         try notifyInformationalResponse(
                             null,
-                            .{ .headers = headers, .status = status },
+                            .{ .headers = decoded, .status = status },
                             &informational_count,
                             self.limits.max_informational_responses,
                         );
-                        freeHeaders(self.allocator, headers);
+                        freeHeaders(self.allocator, decoded);
+                        decoded_owned = false;
                         continue;
                     }
-                    if (status < 200 or status > 299) return error.InvalidStatus;
-                    if ((lookup.content_length orelse 0) != 0) return error.InvalidContentLength;
-                    if ((frame.frame.header.flags & flag_end_stream) != 0) return error.ConnectionClosed;
+                    if (status < 200 or status > 599) {
+                        return error.InvalidStatus;
+                    }
+                    const accepted = status < 300;
+                    const ended =
+                        (frame.frame.header.flags & flag_end_stream) != 0;
                     if (deadline) |absolute| {
                         _ = try deadline_policy.usableAwake(
                             self.io,
                             absolute,
                         );
                     }
-                    return .{
-                        .status = status,
-                        .headers = headers,
-                        .tunnel = .{ .connection = self, .stream_id = stream_id },
-                    };
+                    if (accepted) {
+                        if ((lookup.content_length orelse 0) != 0) {
+                            return error.InvalidContentLength;
+                        }
+                        if (ended) return error.ConnectionClosed;
+                        decoded_owned = false;
+                        return .{
+                            .status = status,
+                            .headers = decoded,
+                            .body = &.{},
+                            .trailers = &.{},
+                            .tunnel = .{
+                                .connection = self,
+                                .stream_id = stream_id,
+                            },
+                        };
+                    }
+
+                    rejection_started = true;
+                    headers = decoded;
+                    decoded_owned = false;
+                    status_value = status;
+                    expected_body_len = lookup.content_length;
+                    const rejection_forbids_body = responseForbidsBody(
+                        status,
+                        "CONNECT",
+                        true,
+                    );
+                    if (rejection_forbids_body) {
+                        if (!ended) {
+                            try self.consumeForbiddenResponseBodyUntil(
+                                stream_id,
+                                deadline,
+                            );
+                        }
+                        break;
+                    }
+                    if ((expected_body_len orelse 0) >
+                        self.limits.max_body_bytes) return error.MessageTooLarge;
+                    if (ended) {
+                        try validateExpectedContentLength(
+                            expected_body_len,
+                            0,
+                        );
+                        break;
+                    }
                 },
-                .data => return error.UnexpectedFrame,
-                .rst_stream => return error.StreamReset,
+                .data => {
+                    if (headers == null) return error.UnexpectedFrame;
+                    const parsed_data = try http2.DataPayload.parse(
+                        frame.frame,
+                    );
+                    const next_len = std.math.add(
+                        usize,
+                        body.items.len,
+                        parsed_data.data.len,
+                    ) catch return error.MessageTooLarge;
+                    if (next_len > self.limits.max_body_bytes) {
+                        _ = try self.receiveDataPayload(
+                            stream_id,
+                            frame.frame,
+                        );
+                        try self.releaseConnectionCapacity(
+                            frame.frame.payload.len,
+                        );
+                        return error.MessageTooLarge;
+                    }
+                    const data = try self.receiveDataPayload(
+                        stream_id,
+                        frame.frame,
+                    );
+                    var data_credit_held = true;
+                    errdefer if (data_credit_held) {
+                        self.releaseConnectionCapacity(
+                            frame.frame.payload.len,
+                        ) catch {};
+                    };
+                    try body.appendSlice(self.allocator, data.data);
+                    const ended =
+                        (frame.frame.header.flags & flag_end_stream) != 0;
+                    if (ended) {
+                        try validateExpectedContentLength(
+                            expected_body_len,
+                            body.items.len,
+                        );
+                    }
+                    try self.maybeReleaseReceivedCapacity(
+                        stream_id,
+                        ended,
+                    );
+                    data_credit_held = false;
+                    if (ended) break;
+                },
+                .rst_stream => {
+                    const reset = try http2.ResetStreamPayload.parse(
+                        frame.frame,
+                    );
+                    try self.recordResetStream(reset);
+                    return error.StreamReset;
+                },
                 else => continue,
             }
         }
+
+        self.releaseLocalStream(stream_id);
+        self.forgetResponseSemantics(stream_id);
+        self.forgetStreamWindows(stream_id);
+        rejection_started = false;
+        return .{
+            .status = status_value orelse return error.MissingPseudoHeader,
+            .headers = headers orelse return error.MissingPseudoHeader,
+            .body = try body.toOwnedSlice(self.allocator),
+            .trailers = trailers,
+            .tunnel = null,
+        };
     }
 
     fn validatePushPromiseForClientStream(self: Connection, frame: http2.Frame) Error!http2.PushPromisePayload {
@@ -10692,8 +11703,16 @@ pub const Connection = struct {
             switch (frame.frame.header.frame_type) {
                 .data => {
                     const data = try self.receiveDataPayload(stream_id, frame.frame);
-                    try self.maybeReleaseReceivedCapacity(stream_id);
-                    if (data.data.len != 0) return error.InvalidContentLength;
+                    if (data.data.len != 0) {
+                        self.releaseConnectionCapacity(
+                            frame.frame.payload.len,
+                        ) catch {};
+                        return error.InvalidContentLength;
+                    }
+                    try self.maybeReleaseReceivedCapacity(
+                        stream_id,
+                        (frame.frame.header.flags & flag_end_stream) != 0,
+                    );
                     if ((frame.frame.header.flags & flag_end_stream) != 0) return;
                 },
                 .headers => return error.InvalidContentLength,
@@ -10848,7 +11867,7 @@ pub const Connection = struct {
         const fields_capacity = std.math.add(
             usize,
             response_headers.len,
-            1,
+            2,
         ) catch return error.MessageTooLarge;
         const fields_buffer = try stackFirstHeaderFieldBuffer(
             self.allocator,
@@ -10864,12 +11883,19 @@ pub const Connection = struct {
             .initBuffer(fields_buffer);
         fields.appendAssumeCapacity(.{ .name = ":status", .value = status });
         fields.appendSliceAssumeCapacity(response_headers);
-        stripConnectionHeaders(&fields, .response);
+        try outbound_headers.stripConnectionHeaders(
+            self.allocator,
+            &fields,
+            .response,
+        );
         try validateResponseBodyForStatus(status_code, fields.items, &.{}, &.{});
         if (status_code >= 200 and status_code < 300) {
             try stripSuccessfulConnectContentLength(&fields);
         }
         try validateHeaderBlock(fields.items, .response);
+        if (!statusIsInformational(status_code)) {
+            self.appendAutomaticDateHeader(&fields);
+        }
         try self.writeHeaders(stream_id, fields.items, end_stream);
     }
 
@@ -10881,6 +11907,45 @@ pub const Connection = struct {
         return self.handleConnectionFrame(frame);
     }
 
+    fn applyWindowUpdate(
+        self: *Connection,
+        update: http2.WindowUpdatePayload,
+    ) Error!void {
+        if (update.stream_id == 0) {
+            self.send_connection_window.update(update.increment) catch |err| {
+                if (err != error.FlowControlViolation) return err;
+                // A connection-window overflow terminates the whole HTTP/2
+                // connection with the precise RFC 9113 wire error.
+                self.aggregate_timeout_unusable = true;
+                self.sendGoAway(
+                    self.lastPeerProcessedStreamId(),
+                    .flow_control_error,
+                    "connection-window-overflow",
+                ) catch {};
+                return error.ConnectionGoAway;
+            };
+            return;
+        }
+        if (self.streamIsIdle(update.stream_id)) {
+            // WINDOW_UPDATE on an idle stream is a connection-level protocol
+            // error. Updates for closed streams remain ignorable.
+            return error.InvalidFrame;
+        }
+        if (!self.outboundStreamIsActive(update.stream_id)) return;
+        (try self.sendStreamWindow(update.stream_id)).update(
+            update.increment,
+        ) catch |err| {
+            if (err != error.FlowControlViolation) return err;
+            try self.writeLocalErrorResetStream(
+                update.stream_id,
+                .flow_control_error,
+            );
+            self.releaseLocalStream(update.stream_id);
+            self.releasePeerStream(update.stream_id);
+            self.forgetStreamWindows(update.stream_id);
+        };
+    }
+
     fn handleConnectionFrame(self: *Connection, frame: http2.Frame) Error!bool {
         if (try self.discardLateFrameForLocallyResetStream(frame)) {
             return true;
@@ -10888,8 +11953,7 @@ pub const Connection = struct {
         switch (frame.header.frame_type) {
             .settings => {
                 if ((frame.header.flags & flag_ack) != 0) {
-                    if (!self.awaiting_settings_ack) return error.InvalidFrame;
-                    self.awaiting_settings_ack = false;
+                    try self.applySettingsAck();
                 } else {
                     const settings = try http2.parseSettings(self.allocator, frame.payload);
                     defer self.allocator.free(settings);
@@ -10902,49 +11966,14 @@ pub const Connection = struct {
                 const ping_payload = try http2.PingPayload.parse(frame);
                 if ((frame.header.flags & flag_ack) == 0) {
                     try writeFrameTransport(self.allocator, self.transportForIo(), .ping, flag_ack, 0, &ping_payload.data);
+                } else {
+                    try self.applyAdaptivePingAck(ping_payload.data);
                 }
                 return true;
             },
             .window_update => {
                 const update = try http2.WindowUpdatePayload.parse(frame);
-                if (update.stream_id == 0) {
-                    self.send_connection_window.update(
-                        update.increment,
-                    ) catch |err| {
-                        if (err != error.FlowControlViolation) return err;
-                        // A connection-window overflow terminates the whole
-                        // HTTP/2 connection with FLOW_CONTROL_ERROR. Emit the
-                        // precise wire code here rather than forcing adapters
-                        // to reverse-map a generic runtime error.
-                        try self.sendGoAway(
-                            self.lastPeerProcessedStreamId(),
-                            .flow_control_error,
-                            "connection-window-overflow",
-                        );
-                        return error.ConnectionGoAway;
-                    };
-                } else if (self.streamIsIdle(update.stream_id)) {
-                    // WINDOW_UPDATE on an idle stream is a connection-level
-                    // protocol error. Updates for closed streams remain
-                    // ignorable, while active streams adjust send credit.
-                    return error.InvalidFrame;
-                } else if (self.outboundStreamIsActive(update.stream_id)) {
-                    (try self.sendStreamWindow(update.stream_id)).update(
-                        update.increment,
-                    ) catch |err| {
-                        if (err != error.FlowControlViolation) return err;
-                        // Stream-window overflow is isolated to that stream.
-                        // Close it with RST_STREAM and retain the connection
-                        // for other streams.
-                        try self.writeResetStreamFrame(
-                            update.stream_id,
-                            .flow_control_error,
-                        );
-                        self.releaseLocalStream(update.stream_id);
-                        self.releasePeerStream(update.stream_id);
-                        self.forgetStreamWindows(update.stream_id);
-                    };
-                }
+                try self.applyWindowUpdate(update);
                 return true;
             },
             .priority => {
@@ -11127,12 +12156,26 @@ pub const Connection = struct {
             deadline,
             raw_continuations,
         );
-        return decodeOwnedHeaders(
+        return self.hpack_decoder.decodeBlockOwnedWithLimit(
             self.allocator,
             block,
-            self.limits,
-            &self.hpack_decoder,
-        );
+            self.limits.max_header_fields,
+            self.limits.max_header_list_size,
+        ) catch |err| {
+            const compression_error =
+                self.hpack_decoder.lastDecodeWasCompressionError();
+            self.serve_read_connection_error = if (compression_error)
+                .compression
+            else
+                null;
+            if (compression_error) self.aggregate_timeout_unusable = true;
+            return switch (err) {
+                error.BufferTooShort,
+                error.HeaderListTooLarge,
+                => error.MessageTooLarge,
+                else => |other| other,
+            };
+        };
     }
 
     fn collectHeaderBlockUntil(
@@ -11147,6 +12190,11 @@ pub const Connection = struct {
             if (priority.stream_dependency == first.header.stream_id) return error.InvalidFrame;
         }
         var flags = first.header.flags;
+        const header_block_limit = std.math.mul(
+            usize,
+            self.limits.max_frame_payload,
+            self.limits.max_header_fields +| 1,
+        ) catch std.math.maxInt(usize);
         const block = if ((flags & flag_end_headers) != 0)
             first_headers.header_block
         else blk: {
@@ -11155,10 +12203,10 @@ pub const Connection = struct {
                 self.allocator,
                 first_headers.header_block,
             );
-            if (self.header_block_scratch.items.len >
-                self.limits.max_frame_payload *
-                    @as(usize, self.limits.max_header_fields + 1))
-            {
+            if (self.header_block_scratch.items.len > header_block_limit) {
+                self.serve_read_connection_error =
+                    .excessive_header_block;
+                self.aggregate_timeout_unusable = true;
                 return error.MessageTooLarge;
             }
             var continuation_count: usize = 0;
@@ -11172,20 +12220,38 @@ pub const Connection = struct {
                 if (frame.frame.header.frame_type != .continuation or
                     frame.frame.header.stream_id != first.header.stream_id)
                 {
+                    self.serve_read_connection_error = .frame_sequence;
                     return error.UnexpectedFrame;
                 }
                 continuation_count += 1;
                 if (continuation_count > max_continuations) {
+                    if ((frame.frame.header.flags & flag_end_headers) == 0) {
+                        self.serve_read_connection_error =
+                            .excessive_header_block;
+                        self.aggregate_timeout_unusable = true;
+                    } else {
+                        self.recordResponseStreamReadError(
+                            first.header.stream_id,
+                            .enhance_your_calm,
+                        );
+                    }
                     return error.MessageTooLarge;
                 }
                 try self.header_block_scratch.appendSlice(
                     self.allocator,
                     frame.frame.payload,
                 );
-                if (self.header_block_scratch.items.len >
-                    self.limits.max_frame_payload *
-                        @as(usize, self.limits.max_header_fields + 1))
-                {
+                if (self.header_block_scratch.items.len > header_block_limit) {
+                    if ((frame.frame.header.flags & flag_end_headers) == 0) {
+                        self.serve_read_connection_error =
+                            .excessive_header_block;
+                        self.aggregate_timeout_unusable = true;
+                    } else {
+                        self.recordResponseStreamReadError(
+                            first.header.stream_id,
+                            .enhance_your_calm,
+                        );
+                    }
                     return error.MessageTooLarge;
                 }
                 flags = frame.frame.header.flags;
@@ -11692,6 +12758,135 @@ pub const Connection = struct {
         }
     }
 
+    fn applyAdaptivePingAck(
+        self: *Connection,
+        payload: [8]u8,
+    ) Error!void {
+        const estimator = if (self.adaptive_window) |*value| value else return;
+        const ack = estimator.acknowledge(payload, awakeNowNanos(self.io));
+        if (!ack.matched) return;
+        if (ack.target) |target| try self.queueAdaptiveWindowTarget(target);
+    }
+
+    fn queueAdaptiveWindowTarget(
+        self: *Connection,
+        target: u32,
+    ) Error!void {
+        if (target <= self.recv_stream_window_target and
+            target <= self.recv_connection_window_target) return;
+        self.adaptive_queued_target = if (self.adaptive_queued_target) |old|
+            @max(old, target)
+        else
+            target;
+        if (!self.awaiting_settings_ack) {
+            try self.sendQueuedAdaptiveWindowUpdate();
+        }
+    }
+
+    fn sendQueuedAdaptiveWindowUpdate(self: *Connection) Error!void {
+        const target = self.adaptive_queued_target orelse return;
+        if (try self.sendAdaptiveWindowUpdate(target)) {
+            self.adaptive_queued_target = null;
+        }
+    }
+
+    fn applySettingsAck(self: *Connection) Error!void {
+        if (!self.awaiting_settings_ack) return error.InvalidFrame;
+        self.awaiting_settings_ack = false;
+        self.adaptive_pending_stream_target = null;
+        try self.sendQueuedAdaptiveWindowUpdate();
+    }
+
+    fn sendAdaptiveWindowUpdate(
+        self: *Connection,
+        target: u32,
+    ) Error!bool {
+        if (target <= self.recv_stream_window_target and
+            target <= self.recv_connection_window_target) return true;
+        if (self.awaiting_settings_ack) return false;
+        if (target > std.math.maxInt(i31)) return error.InvalidSetting;
+
+        var connection_increment: ?u31 = null;
+        if (target > self.recv_connection_window_target) {
+            const increment: u31 = @intCast(
+                target - self.recv_connection_window_target,
+            );
+            const next = std.math.add(
+                i64,
+                self.recv_connection_window.value,
+                increment,
+            ) catch return error.FlowControlViolation;
+            // Explicit application releases can leave more connection credit
+            // than the adaptive target needs. In that case advancing the
+            // logical refill target without another WINDOW_UPDATE avoids a
+            // wire overflow while preserving the already-larger peer credit.
+            if (next <= max_flow_window) connection_increment = increment;
+        }
+        const stream_delta: i64 = @as(i64, target) -
+            self.recv_stream_window_target;
+        for (self.recv_stream_windows.items) |entry| {
+            const next = std.math.add(
+                i64,
+                entry.window.value,
+                stream_delta,
+            ) catch return error.FlowControlViolation;
+            // SETTINGS_INITIAL_WINDOW_SIZE applies to every existing stream.
+            // Defer the whole update until DATA consumption makes it safe; a
+            // selective stream adjustment would desynchronize peer state.
+            if (next > max_flow_window) return false;
+        }
+        var settings_payload: [6]u8 = undefined;
+        std.mem.writeInt(
+            u16,
+            settings_payload[0..2],
+            @intFromEnum(http2.SettingId.initial_window_size),
+            .big,
+        );
+        std.mem.writeInt(u32, settings_payload[2..6], target, .big);
+        var encoded: [
+            http2.FrameHeader.encoded_len + 4 +
+                http2.FrameHeader.encoded_len + settings_payload.len
+        ]u8 = undefined;
+        var encoded_len: usize = 0;
+        if (connection_increment) |increment| {
+            try encodeWindowUpdateFrame(
+                encoded[0 .. http2.FrameHeader.encoded_len + 4],
+                0,
+                increment,
+            );
+            encoded_len += http2.FrameHeader.encoded_len + 4;
+        }
+        try encodeFrameHeader(
+            encoded[encoded_len..][0..http2.FrameHeader.encoded_len],
+            .settings,
+            0,
+            0,
+            settings_payload.len,
+        );
+        encoded_len += http2.FrameHeader.encoded_len;
+        @memcpy(
+            encoded[encoded_len..][0..settings_payload.len],
+            &settings_payload,
+        );
+        encoded_len += settings_payload.len;
+        try self.transportForIo().writeAll(encoded[0..encoded_len]);
+
+        if (connection_increment) |increment| {
+            try self.recv_connection_window.update(increment);
+        }
+        self.recv_connection_window_target = @max(
+            self.recv_connection_window_target,
+            target,
+        );
+        for (self.recv_stream_windows.items) |*entry| {
+            try entry.window.adjust(stream_delta);
+        }
+        self.recv_stream_window_target = target;
+        self.adaptive_pending_stream_target = target;
+        self.awaiting_settings_ack = true;
+        return true;
+    }
+
     fn applyInitialWindowSize(self: *Connection, value: u32) Error!void {
         if (value > std.math.maxInt(i31)) return error.InvalidSetting;
         const new_window: i64 = value;
@@ -11842,6 +13037,19 @@ pub const Connection = struct {
         self.hpack_decoder.setMaxDynamicTableSize(self.allocator, self.limits.header_table_size);
         self.recv_connection_window.value =
             self.limits.initial_connection_window_size;
+        self.recv_connection_window_target =
+            self.limits.initial_connection_window_size;
+        self.recv_stream_window_target = self.limits.initial_window_size;
+        self.adaptive_window = if (self.limits.adaptive_window)
+            bdp.Estimator.init(
+                // Match Hyper's policy: samples grow the stream window. The
+                // connection target may start larger and joins once the
+                // estimate overtakes it.
+                self.limits.initial_window_size,
+                self.limits.adaptive_window_max,
+            )
+        else
+            null;
     }
 
     fn outboundFramePayloadLimit(self: Connection) usize {
@@ -11849,6 +13057,20 @@ pub const Connection = struct {
         // `limits.max_frame_payload` remains a local/test ceiling used by this
         // minimal runtime to force small fragments, so use the stricter value.
         return @max(@as(usize, 1), @min(self.peer_max_frame_size, self.limits.max_frame_payload));
+    }
+
+    fn receiveConnectionWindowTarget(self: Connection) u32 {
+        return if (self.adaptive_window != null)
+            self.recv_connection_window_target
+        else
+            self.limits.initial_connection_window_size;
+    }
+
+    fn receiveStreamWindowTarget(self: Connection) u32 {
+        return if (self.adaptive_window != null)
+            self.recv_stream_window_target
+        else
+            self.limits.initial_window_size;
     }
 
     fn sendStreamWindow(self: *Connection, stream_id: u31) Error!*FlowWindow {
@@ -11920,7 +13142,9 @@ pub const Connection = struct {
         const index = self.recv_stream_windows.items.len;
         self.recv_stream_windows.appendAssumeCapacity(.{
             .stream_id = stream_id,
-            .window = .{ .value = @intCast(self.limits.initial_window_size) },
+            .window = .{ .value = @intCast(
+                self.receiveStreamWindowTarget(),
+            ) },
         });
         slot.value_ptr.* = index;
         return &self.recv_stream_windows.items[index].window;
@@ -12007,12 +13231,6 @@ const StreamResponseSemantics = struct {
     traditional_connect: bool = false,
     extended_connect: bool = false,
     priority: http2.ExtensiblePriority = .{},
-};
-
-const ResponseBodySemantics = struct {
-    head: bool = false,
-    traditional_connect: bool = false,
-    extended_connect: bool = false,
 };
 
 fn uriTargetAlloc(allocator: std.mem.Allocator, uri: std.Uri) Error![]u8 {
@@ -13190,6 +14408,7 @@ pub const ClientDuplexStream = struct {
                     if (payload.data.len == 0) {
                         try self.connection.maybeReleaseReceivedCapacity(
                             self.stream_id,
+                            end_stream,
                         );
                         if (end_stream) {
                             self.response_finished_reported = true;
@@ -13200,6 +14419,7 @@ pub const ClientDuplexStream = struct {
                     }
                     try self.connection.maybeReleaseReceivedCapacity(
                         self.stream_id,
+                        end_stream,
                     );
                     const data = payload.data;
                     frame_owned = false;
@@ -13696,6 +14916,7 @@ pub const ServerDuplexStream = struct {
                     if (payload.data.len == 0) {
                         try self.connection.maybeReleaseReceivedCapacity(
                             self.stream_id,
+                            end_stream,
                         );
                         if (end_stream) {
                             self.request_finished_reported = true;
@@ -13706,6 +14927,7 @@ pub const ServerDuplexStream = struct {
                     }
                     try self.connection.maybeReleaseReceivedCapacity(
                         self.stream_id,
+                        end_stream,
                     );
                     const data = payload.data;
                     frame_owned = false;
@@ -13930,6 +15152,57 @@ pub const ExtendedConnectResponse = struct {
     }
 };
 
+/// Final response to an Extended CONNECT attempt. A successful 2xx response
+/// owns a tunnel; a rejected response owns its complete bounded HTTP response
+/// metadata/body and has already retired the local HTTP/2 stream.
+pub const ExtendedConnectAttempt = struct {
+    status: u16,
+    headers: []http2.Hpack.HeaderField,
+    body: []u8 = &.{},
+    trailers: []http2.Hpack.HeaderField = &.{},
+    tunnel: ?Tunnel,
+
+    pub fn accepted(self: ExtendedConnectAttempt) bool {
+        return self.tunnel != null;
+    }
+
+    pub fn responseHeader(
+        self: ExtendedConnectAttempt,
+        name: []const u8,
+    ) ?[]const u8 {
+        return findHeader(self.headers, name);
+    }
+
+    pub fn deinit(
+        self: *ExtendedConnectAttempt,
+        allocator: std.mem.Allocator,
+    ) void {
+        const tunnel = self.tunnel;
+        freeHeaders(allocator, self.headers);
+        allocator.free(self.body);
+        freeHeaders(allocator, self.trailers);
+        self.* = undefined;
+        if (tunnel) |value| {
+            value.connection.abandonExtendedConnect(value.stream_id);
+        }
+    }
+
+    pub fn requireAccepted(
+        self: *ExtendedConnectAttempt,
+    ) Error!ExtendedConnectResponse {
+        const tunnel = self.tunnel orelse return error.InvalidStatus;
+        const response: ExtendedConnectResponse = .{
+            .status = self.status,
+            .headers = self.headers,
+            .tunnel = tunnel,
+        };
+        std.debug.assert(self.body.len == 0);
+        std.debug.assert(self.trailers.len == 0);
+        self.* = undefined;
+        return response;
+    }
+};
+
 pub const OwnedTunnelData = struct {
     frame: OwnedFrame,
     data: []const u8,
@@ -14062,8 +15335,11 @@ pub const Tunnel = struct {
             switch (frame.frame.header.frame_type) {
                 .data => {
                     const payload = try self.connection.receiveDataPayload(self.stream_id, frame.frame);
-                    try self.connection.maybeReleaseReceivedCapacity(self.stream_id);
                     const end_stream = (frame.frame.header.flags & flag_end_stream) != 0;
+                    try self.connection.maybeReleaseReceivedCapacity(
+                        self.stream_id,
+                        end_stream,
+                    );
                     return .{
                         .frame = frame,
                         .data = payload.data,
@@ -14159,21 +15435,14 @@ pub const OwnedWindowUpdate = struct {
     }
 };
 
-pub const OwnedFrame = struct {
-    bytes: []u8,
-    frame: http2.Frame,
-
-    pub fn deinit(self: *OwnedFrame, allocator: std.mem.Allocator) void {
-        allocator.free(self.bytes);
-        self.* = undefined;
-    }
-};
+pub const OwnedFrame = frame_io.OwnedFrame;
 
 fn readFrame(allocator: std.mem.Allocator, io: std.Io, stream: net.Stream, limits: Limits) Error!OwnedFrame {
-    return readFrameTransport(
+    return frame_io.readOwned(
         allocator,
-        tcpTransport(io, stream),
-        limits,
+        io,
+        stream,
+        @min(limits.max_frame_payload, limits.max_frame_size),
     );
 }
 
@@ -14182,11 +15451,10 @@ fn readFrameTransport(
     transport: RuntimeTransport,
     limits: Limits,
 ) Error!OwnedFrame {
-    return readFrameTransportWithDeadline(
+    return frame_io.readOwnedTransport(
         allocator,
         transport,
-        limits,
-        null,
+        @min(limits.max_frame_payload, limits.max_frame_size),
     );
 }
 
@@ -14196,31 +15464,12 @@ fn readFrameTransportWithDeadline(
     limits: Limits,
     deadline: ?std.Io.Clock.Timestamp,
 ) Error!OwnedFrame {
-    var header_buf: [@intCast(http2.FrameHeader.encoded_len)]u8 = undefined;
-    try readExactTransportWithDeadline(
+    return frame_io.readOwnedTransportWithDeadline(
+        allocator,
         transport,
-        &header_buf,
+        @min(limits.max_frame_payload, limits.max_frame_size),
         deadline,
     );
-    const header = try http2.FrameHeader.parse(&header_buf);
-    const payload_len: usize = header.length;
-    // SETTINGS_MAX_FRAME_SIZE is the receive ceiling we advertise to the peer.
-    // Keep the older max_frame_payload guard as a local allocation/test budget,
-    // but enforce the stricter of the two before allocating the payload buffer.
-    const inbound_payload_limit = @min(limits.max_frame_payload, limits.max_frame_size);
-    if (payload_len > inbound_payload_limit) return error.MessageTooLarge;
-
-    const bytes = try allocator.alloc(u8, header_buf.len + payload_len);
-    errdefer allocator.free(bytes);
-    @memcpy(bytes[0..header_buf.len], &header_buf);
-    try readExactTransportWithDeadline(
-        transport,
-        bytes[header_buf.len..],
-        deadline,
-    );
-    const frame = try http2.Frame.parse(bytes);
-    try validateFrameEnvelope(frame);
-    return .{ .bytes = bytes, .frame = frame };
 }
 
 fn writeConnectionErrorGoAway(
@@ -14256,56 +15505,6 @@ fn writeConnectionErrorGoAwayTransport(
     try transport.writeAll(encoded.items);
 }
 
-fn validateFrameEnvelope(frame: http2.Frame) Error!void {
-    if (frame.payload.len != @as(usize, frame.header.length)) return error.InvalidFrame;
-
-    const stream_id = frame.header.stream_id;
-    switch (frame.header.frame_type) {
-        .data,
-        .headers,
-        .continuation,
-        => if (stream_id == 0) return error.InvalidFrame,
-
-        .priority => {
-            if (stream_id == 0 or frame.payload.len != 5) return error.InvalidFrame;
-        },
-
-        .rst_stream => {
-            if (stream_id == 0 or frame.payload.len != 4) return error.InvalidFrame;
-        },
-
-        .settings => {
-            if (stream_id != 0) return error.InvalidFrame;
-            if ((frame.header.flags & flag_ack) != 0) {
-                if (frame.payload.len != 0) return error.InvalidFrame;
-            } else if (frame.payload.len % 6 != 0) return error.InvalidFrame;
-        },
-        .ping => {
-            if (stream_id != 0 or frame.payload.len != 8) return error.InvalidFrame;
-        },
-        .goaway => {
-            if (stream_id != 0 or frame.payload.len < 8) return error.InvalidFrame;
-        },
-        .priority_update => {
-            if (stream_id != 0 or frame.payload.len < 4) {
-                return error.InvalidFrame;
-            }
-        },
-        .altsvc, .origin => {},
-        .window_update => {
-            if (frame.payload.len != 4) return error.InvalidFrame;
-            const increment = std.mem.readInt(u32, frame.payload[0..4], .big) & 0x7fff_ffff;
-            if (increment == 0) return error.InvalidFrame;
-        },
-        .push_promise => if (stream_id == 0) return error.InvalidFrame,
-        _ => {},
-    }
-}
-
-fn clientInitiatedStreamId(stream_id: u31) bool {
-    return stream_id != 0 and (stream_id & 1) == 1;
-}
-
 fn writeFrame(
     allocator: std.mem.Allocator,
     io: std.Io,
@@ -14325,132 +15524,6 @@ fn writeFrame(
     );
 }
 
-fn writeFrameTransport(
-    allocator: std.mem.Allocator,
-    transport: RuntimeTransport,
-    frame_type: http2.FrameType,
-    flags: u8,
-    stream_id: u31,
-    payload: []const u8,
-) Error!void {
-    _ = allocator;
-    var header: [http2.FrameHeader.encoded_len]u8 = undefined;
-    try encodeFrameHeader(
-        &header,
-        frame_type,
-        flags,
-        stream_id,
-        payload.len,
-    );
-    try transport.writeAllParts(&header, payload);
-}
-
-fn encodeFrameHeader(
-    header: *[http2.FrameHeader.encoded_len]u8,
-    frame_type: http2.FrameType,
-    flags: u8,
-    stream_id: u31,
-    payload_length: usize,
-) Error!void {
-    const payload_len = std.math.cast(u24, payload_length) orelse
-        return error.InvalidFrameSize;
-    header[0] = @truncate(payload_len >> 16);
-    header[1] = @truncate(payload_len >> 8);
-    header[2] = @truncate(payload_len);
-    header[3] = @intFromEnum(frame_type);
-    header[4] = flags;
-    std.mem.writeInt(u32, header[5..9], @as(u32, stream_id), .big);
-}
-
-fn encodeWindowUpdateFrame(
-    output: []u8,
-    stream_id: u31,
-    increment: u31,
-) Error!void {
-    std.debug.assert(output.len == http2.FrameHeader.encoded_len + 4);
-    const header: *[http2.FrameHeader.encoded_len]u8 =
-        @ptrCast(output.ptr);
-    try encodeFrameHeader(
-        header,
-        .window_update,
-        0,
-        stream_id,
-        4,
-    );
-    std.mem.writeInt(
-        u32,
-        output[http2.FrameHeader.encoded_len..][0..4],
-        increment,
-        .big,
-    );
-}
-
-fn appendFrameBytes(
-    batch: *std.ArrayList(u8),
-    allocator: std.mem.Allocator,
-    frame_type: http2.FrameType,
-    flags: u8,
-    stream_id: u31,
-    payload: []const u8,
-) Error!void {
-    const total_len = std.math.add(
-        usize,
-        http2.FrameHeader.encoded_len,
-        payload.len,
-    ) catch return error.InvalidFrameSize;
-    const start = batch.items.len;
-    try batch.ensureUnusedCapacity(allocator, total_len);
-    batch.items.len = start + total_len;
-    const header = batch.items[start..][0..http2.FrameHeader.encoded_len];
-    const header_array: *[http2.FrameHeader.encoded_len]u8 =
-        @ptrCast(header.ptr);
-    try encodeFrameHeader(
-        header_array,
-        frame_type,
-        flags,
-        stream_id,
-        payload.len,
-    );
-    @memcpy(
-        batch.items[start + http2.FrameHeader.encoded_len ..][0..payload.len],
-        payload,
-    );
-}
-
-fn appendHeaderBlockBytes(
-    batch: *std.ArrayList(u8),
-    allocator: std.mem.Allocator,
-    stream_id: u31,
-    block: []const u8,
-    end_stream: bool,
-    chunk_size: usize,
-) Error!void {
-    std.debug.assert(chunk_size != 0);
-    const first_len = @min(block.len, chunk_size);
-    try appendFrameBytes(
-        batch,
-        allocator,
-        .headers,
-        (if (first_len == block.len) flag_end_headers else 0) |
-            (if (end_stream) flag_end_stream else 0),
-        stream_id,
-        block[0..first_len],
-    );
-    var offset = first_len;
-    while (offset < block.len) {
-        const end = @min(block.len, offset + chunk_size);
-        try appendFrameBytes(
-            batch,
-            allocator,
-            .continuation,
-            if (end == block.len) flag_end_headers else 0,
-            stream_id,
-            block[offset..end],
-        );
-        offset = end;
-    }
-}
-
 fn validateLocalLimits(limits: Limits) Error!void {
     if (limits.initial_window_size > std.math.maxInt(i31)) return error.InvalidSetting;
     if (limits.initial_connection_window_size < default_flow_window or
@@ -14458,10 +15531,21 @@ fn validateLocalLimits(limits: Limits) Error!void {
     {
         return error.InvalidSetting;
     }
+    if (limits.adaptive_window and
+        (limits.adaptive_window_max < limits.initial_window_size or
+            limits.adaptive_window_max <
+                limits.initial_connection_window_size or
+            limits.adaptive_window_max > std.math.maxInt(i31)))
+    {
+        return error.InvalidSetting;
+    }
     if (limits.max_frame_size < default_max_frame_size or limits.max_frame_size > max_max_frame_size) return error.InvalidSetting;
     if (limits.max_continuation_frames) |limit| if (limit == 0) return error.InvalidSetting;
     if (limits.max_idle_priority_updates == 0) return error.InvalidSetting;
     if (limits.max_pending_ping_frames == 0) return error.InvalidSetting;
+    if (limits.reset_stream_duration.nanoseconds < 0) {
+        return error.InvalidSetting;
+    }
 }
 
 fn calcMaxContinuationFrames(header_max: usize, frame_max: usize) usize {
@@ -14564,6 +15648,18 @@ fn freeStackFirstHeaderFieldBuffer(
     if (fields.ptr != stack.ptr) allocator.free(fields);
 }
 
+fn appendAutomaticDateHeaderValue(
+    fields: *std.ArrayList(http2.Hpack.HeaderField),
+    date: ?*const [http_date.value_len]u8,
+) void {
+    const value = date orelse return;
+    if (findHeader(fields.items, "date") != null) return;
+    fields.appendAssumeCapacity(.{
+        .name = "date",
+        .value = value,
+    });
+}
+
 fn freeHeaders(allocator: std.mem.Allocator, headers: []http2.Hpack.HeaderField) void {
     if (headers.len != 0) {
         if (headers[0].block_storage != null) {
@@ -14576,657 +15672,6 @@ fn freeHeaders(allocator: std.mem.Allocator, headers: []http2.Hpack.HeaderField)
         allocator.free(header.value);
     }
     allocator.free(headers);
-}
-
-fn contentLength(headers: []const http2.Hpack.HeaderField) Error!?usize {
-    var found: ?usize = null;
-    for (headers) |header| {
-        if (!std.ascii.eqlIgnoreCase(header.name, "content-length")) continue;
-        try parseContentLengthHeaderValue(header.value, &found);
-    }
-    return found;
-}
-
-fn parseContentLengthHeaderValue(value: []const u8, found: *?usize) Error!void {
-    var parts = std.mem.splitScalar(u8, value, ',');
-    while (parts.next()) |raw_part| {
-        const part = std.mem.trim(u8, raw_part, " \t");
-        if (part.len == 0) return error.InvalidContentLength;
-        for (part) |byte| {
-            if (!std.ascii.isDigit(byte)) return error.InvalidContentLength;
-        }
-        const parsed = std.fmt.parseInt(usize, part, 10) catch return error.InvalidContentLength;
-        if (found.*) |existing| {
-            if (existing != parsed) return error.InvalidContentLength;
-        } else {
-            found.* = parsed;
-        }
-    }
-}
-
-const ResponseHeaderLookup = struct {
-    status: ?[]const u8 = null,
-    content_length: ?usize = null,
-};
-
-fn responseHeaderLookup(headers: []const http2.Hpack.HeaderField) Error!ResponseHeaderLookup {
-    var lookup: ResponseHeaderLookup = .{};
-    for (headers) |header| {
-        if (std.ascii.eqlIgnoreCase(header.name, ":status")) {
-            if (lookup.status == null) lookup.status = header.value;
-            continue;
-        }
-        if (!std.ascii.eqlIgnoreCase(header.name, "content-length")) continue;
-        try parseContentLengthHeaderValue(header.value, &lookup.content_length);
-    }
-    return lookup;
-}
-
-fn validateContentLength(headers: []const http2.Hpack.HeaderField, actual: usize) Error!void {
-    try validateExpectedContentLength(try contentLength(headers), actual);
-}
-
-fn validateExpectedContentLength(expected: ?usize, actual: usize) Error!void {
-    if (expected) |value| {
-        if (value != actual) return error.InvalidContentLength;
-    }
-}
-
-fn validateDeclaredRequestLength(headers: []const http2.Hpack.HeaderField, body_len: usize) Error!void {
-    if (try contentLength(headers)) |expected| {
-        if (expected != body_len) return error.InvalidContentLength;
-    }
-}
-
-fn requestShouldDefaultContentLength(method: []const u8, headers: []const http2.Hpack.HeaderField, body_len: usize) bool {
-    if (methodIsConnect(method)) return false;
-    // Match Hyper's h2 request shaping: exact non-empty bodies always get a
-    // length, and bodyless methods with defined payload semantics (for example
-    // POST/PUT/PATCH) get an explicit `content-length: 0`.  The explicit zero
-    // preserves application intent for methods where an empty payload is
-    // materially different from a method that normally carries no payload.
-    if (body_len == 0 and !methodHasDefinedPayloadSemantics(method)) return false;
-    return (contentLength(headers) catch return false) == null;
-}
-
-fn stripConnectionHeaders(headers: *std.ArrayList(http2.Hpack.HeaderField), kind: HeaderBlockKind) void {
-    var connection_values: [256][]const u8 = undefined;
-    var connection_value_count: usize = 0;
-    for (headers.items) |header| {
-        if (!std.ascii.eqlIgnoreCase(header.name, "connection")) continue;
-        if (connection_value_count < connection_values.len) {
-            connection_values[connection_value_count] = header.value;
-            connection_value_count += 1;
-        }
-    }
-
-    var write_index: usize = 0;
-    for (headers.items, 0..) |header, read_index| {
-        // Hyper strips outbound HTTP/1 hop-by-hop metadata before handing a
-        // header map to h2. Do the same at the convenience writer boundary so
-        // callers that forward HTTP/1 headers do not have to pre-filter every
-        // field.  This compacts in one pass instead of repeatedly shifting the
-        // tail with orderedRemove when forwarded header maps contain many
-        // hop-by-hop fields.
-        if (stripConnectionHeaderAt(headers.items, read_index, kind, connection_values[0..connection_value_count])) continue;
-        headers.items[write_index] = header;
-        write_index += 1;
-    }
-    headers.shrinkRetainingCapacity(write_index);
-}
-
-fn stripSuccessfulConnectContentLength(headers: *std.ArrayList(http2.Hpack.HeaderField)) Error!void {
-    const declared = try contentLength(headers.items) orelse return;
-    if (declared != 0) return error.InvalidContentLength;
-
-    var write_index: usize = 0;
-    for (headers.items) |header| {
-        if (std.ascii.eqlIgnoreCase(header.name, "content-length")) {
-            // Hyper allows `content-length: 0` on successful CONNECT responses
-            // for peer compatibility, but strips it before sending such a
-            // response itself.  The stream is a tunnel after the 2xx HEADERS, so
-            // retaining even a zero representation length is misleading metadata.
-            continue;
-        }
-        headers.items[write_index] = header;
-        write_index += 1;
-    }
-    headers.shrinkRetainingCapacity(write_index);
-}
-
-fn stripConnectionHeaderAt(headers: []const http2.Hpack.HeaderField, index: usize, kind: HeaderBlockKind, connection_values: []const []const u8) bool {
-    const header = headers[index];
-    if (std.ascii.eqlIgnoreCase(header.name, "connection")) return true;
-    if (connectionSpecificHeaderName(header.name)) return true;
-    if (std.ascii.eqlIgnoreCase(header.name, "te") and (kind != .request or !std.ascii.eqlIgnoreCase(std.mem.trim(u8, header.value, " \t"), "trailers"))) return true;
-
-    for (connection_values) |value| {
-        var tokens = std.mem.splitScalar(u8, value, ',');
-        while (tokens.next()) |raw_token| {
-            const token = std.mem.trim(u8, raw_token, " \t");
-            if (token.len != 0 and std.ascii.eqlIgnoreCase(header.name, token)) return true;
-        }
-    }
-    return false;
-}
-
-fn validateHeaderListSize(headers: []const http2.Hpack.HeaderField, max_size: usize) Error!void {
-    var total: usize = 0;
-    for (headers) |header| {
-        // RFC 9113 measures SETTINGS_MAX_HEADER_LIST_SIZE as the uncompressed
-        // field section size: name bytes + value bytes + 32 bytes overhead per
-        // field.  Enforcing the same accounting protects both inbound decoded
-        // headers and outbound headers constrained by the peer's SETTINGS.
-        total = std.math.add(usize, total, header.name.len) catch return error.MessageTooLarge;
-        total = std.math.add(usize, total, header.value.len) catch return error.MessageTooLarge;
-        total = std.math.add(usize, total, 32) catch return error.MessageTooLarge;
-        if (total > max_size) return error.MessageTooLarge;
-    }
-}
-
-const HeaderBlockKind = enum {
-    request,
-    response,
-    request_trailers,
-    response_trailers,
-};
-
-fn validateHeaderBlock(headers: []const http2.Hpack.HeaderField, kind: HeaderBlockKind) Error!void {
-    var saw_regular = false;
-    var seen_method = false;
-    var seen_scheme = false;
-    var seen_path = false;
-    var seen_authority = false;
-    var seen_protocol = false;
-    var seen_status = false;
-    var method_value: ?[]const u8 = null;
-    var scheme_value: ?[]const u8 = null;
-    var path_value: ?[]const u8 = null;
-    var authority_value: ?[]const u8 = null;
-    var protocol_value: ?[]const u8 = null;
-    var status_value: ?[]const u8 = null;
-    var host_value: ?[]const u8 = null;
-
-    for (headers) |header| {
-        try validateHeaderName(header.name);
-        try validateHeaderValue(header.value);
-        const pseudo = std.mem.startsWith(u8, header.name, ":");
-        if (pseudo) {
-            if (saw_regular) return error.InvalidHeader;
-            switch (kind) {
-                .request => {
-                    try markRequestPseudo(header.name, &seen_method, &seen_scheme, &seen_path, &seen_authority, &seen_protocol);
-                    if (std.mem.eql(u8, header.name, ":method")) method_value = header.value;
-                    if (std.mem.eql(u8, header.name, ":scheme")) scheme_value = header.value;
-                    if (std.mem.eql(u8, header.name, ":path")) path_value = header.value;
-                    if (std.mem.eql(u8, header.name, ":authority")) authority_value = header.value;
-                    if (std.mem.eql(u8, header.name, ":protocol")) protocol_value = header.value;
-                },
-                .response => {
-                    try markResponsePseudo(header.name, &seen_status);
-                    if (std.mem.eql(u8, header.name, ":status")) status_value = header.value;
-                },
-                .request_trailers, .response_trailers => return error.InvalidHeader,
-            }
-            continue;
-        }
-        saw_regular = true;
-
-        if (kind == .request_trailers or kind == .response_trailers) {
-            if (forbiddenTrailerFieldName(header.name)) return error.InvalidHeader;
-        }
-        if (std.ascii.eqlIgnoreCase(header.name, "connection")) {
-            // RFC 9113 inherits the HTTP/1.1 Connection token rule: anything
-            // nominated by Connection is connection-specific and forbidden in
-            // HTTP/2.  Rejecting the field itself is stricter than stripping and
-            // prevents peers from smuggling hop-by-hop semantics through a block
-            // that another endpoint might forward.
-            return error.InvalidHeader;
-        }
-        if (connectionSpecificHeaderName(header.name)) return error.InvalidHeader;
-        if (std.ascii.eqlIgnoreCase(header.name, "te")) {
-            switch (kind) {
-                .request => if (!std.ascii.eqlIgnoreCase(std.mem.trim(u8, header.value, " \t"), "trailers")) return error.InvalidHeader,
-                else => return error.InvalidHeader,
-            }
-        }
-        if (std.ascii.eqlIgnoreCase(header.name, "host")) {
-            if (host_value != null) return error.InvalidHeader;
-            host_value = header.value;
-        }
-    }
-
-    switch (kind) {
-        .request => {
-            if (!seen_method) return error.MissingPseudoHeader;
-            const method_present = method_value orelse return error.MissingPseudoHeader;
-            try validateHttpToken(method_present);
-            if (scheme_value) |scheme| try validateUriScheme(scheme);
-            if (path_value) |path| try validateUriPath(method_present, path);
-            if (authority_value) |authority| try validateRequestAuthority(authority);
-            if (host_value) |host| try validateRequestAuthority(host);
-            if (authority_value) |authority| {
-                if (host_value) |host| {
-                    // RFC 9113 allows translating HTTP/1 Host into HTTP/2, but
-                    // an HTTP/2 block that carries both names must not describe
-                    // two different authorities.  Hyper/h2 builds a single URI
-                    // authority; reject disagreement before forwarding can pick
-                    // a different origin than application code observes.
-                    if (!std.ascii.eqlIgnoreCase(authority, host)) return error.InvalidHeader;
-                }
-            }
-            if (protocol_value) |protocol| {
-                try validateHttpToken(protocol);
-                const method = method_value orelse return error.MissingPseudoHeader;
-                if (!methodIsConnect(method)) return error.InvalidHeader;
-                if (!seen_scheme or !seen_path) return error.MissingPseudoHeader;
-                if (!seen_authority and host_value == null) return error.MissingPseudoHeader;
-            } else if (method_value) |method| {
-                if (methodIsConnect(method)) {
-                    if (!seen_authority) return error.MissingPseudoHeader;
-                    if (seen_scheme or seen_path) return error.InvalidHeader;
-                    try validateConnectAuthority(authority_value.?);
-                } else if (!seen_scheme or !seen_path) return error.MissingPseudoHeader;
-            }
-        },
-        .response => {
-            if (!seen_status) return error.MissingPseudoHeader;
-            const status = status_value orelse return error.MissingPseudoHeader;
-            if (status.len != 3) return error.InvalidStatus;
-            for (status) |byte| if (!std.ascii.isDigit(byte)) return error.InvalidStatus;
-            const parsed_status = std.fmt.parseInt(u16, status, 10) catch return error.InvalidStatus;
-            if (parsed_status < 100) return error.InvalidStatus;
-            if (parsed_status == 101) return error.InvalidStatus;
-        },
-        .request_trailers, .response_trailers => {},
-    }
-}
-
-fn validateHeaderName(name: []const u8) Error!void {
-    if (name.len == 0) return error.InvalidHeader;
-    if (name[0] == ':') {
-        if (name.len == 1) return error.InvalidHeader;
-        for (name[1..]) |byte| {
-            if (byte >= 'A' and byte <= 'Z') return error.InvalidHeader;
-            if (!validHeaderNameByte(byte)) return error.InvalidHeader;
-        }
-        return;
-    }
-    for (name) |byte| {
-        if (byte >= 'A' and byte <= 'Z') return error.InvalidHeader;
-        if (!validHeaderNameByte(byte)) return error.InvalidHeader;
-    }
-}
-
-fn validateHeaderValue(value: []const u8) Error!void {
-    for (value) |byte| {
-        if ((byte < 0x20 and byte != '\t') or byte == 0x7f) return error.InvalidHeader;
-    }
-}
-
-fn validateHttpToken(value: []const u8) Error!void {
-    if (value.len == 0) return error.InvalidHeader;
-    for (value) |byte| {
-        if (!isHttpTchar(byte)) return error.InvalidHeader;
-    }
-}
-
-fn methodIsHead(method: []const u8) bool {
-    return std.mem.eql(u8, method, "HEAD");
-}
-
-fn methodIsConnect(method: []const u8) bool {
-    return std.mem.eql(u8, method, "CONNECT");
-}
-
-fn methodHasDefinedPayloadSemantics(method: []const u8) bool {
-    return !std.mem.eql(u8, method, "GET") and
-        !methodIsHead(method) and
-        !std.mem.eql(u8, method, "DELETE") and
-        !methodIsConnect(method);
-}
-
-fn methodIsOptions(method: []const u8) bool {
-    return std.mem.eql(u8, method, "OPTIONS");
-}
-
-fn isHttpTchar(byte: u8) bool {
-    return std.ascii.isAlphanumeric(byte) or switch (byte) {
-        '!', '#', '$', '%', '&', '\'', '*', '+', '-', '.', '^', '_', '`', '|', '~' => true,
-        else => false,
-    };
-}
-
-fn validateUriScheme(scheme: []const u8) Error!void {
-    if (scheme.len == 0) return error.InvalidHeader;
-    if (!std.ascii.isAlphabetic(scheme[0])) return error.InvalidHeader;
-    for (scheme[1..]) |byte| {
-        if (!(std.ascii.isAlphanumeric(byte) or byte == '+' or byte == '-' or byte == '.')) return error.InvalidHeader;
-    }
-}
-
-fn validateUriPath(method: []const u8, path: []const u8) Error!void {
-    if (path.len == 0) return error.InvalidHeader;
-    if (std.mem.eql(u8, path, "*")) {
-        if (!methodIsOptions(method)) return error.InvalidHeader;
-        return;
-    }
-    if (path[0] != '/') return error.InvalidHeader;
-    var saw_fragment = false;
-    for (path) |byte| {
-        if (byte <= 0x20 or byte == 0x7f) return error.InvalidHeader;
-        if (byte == '\\') return error.InvalidHeader;
-        if (byte == '#') saw_fragment = true;
-    }
-    // URI fragments identify client-side secondary resources and are not sent
-    // in request-targets.  Reject instead of accepting/truncating so origin
-    // servers and intermediaries do not disagree on cache keys.
-    if (saw_fragment) return error.InvalidHeader;
-}
-
-fn validateRequestAuthority(authority: []const u8) Error!void {
-    if (authority.len == 0) return error.InvalidHeader;
-    for (authority) |byte| {
-        if (byte <= 0x20 or byte == 0x7f or byte == '/' or byte == '\\' or byte == '?' or byte == '#' or byte == '@') return error.InvalidHeader;
-    }
-
-    if (authority[0] == '[') {
-        const end = std.mem.indexOfScalar(u8, authority, ']') orelse return error.InvalidHeader;
-        if (end <= 1) return error.InvalidHeader;
-        if (end + 1 < authority.len and authority[end + 1] != ':') return error.InvalidHeader;
-        if (end + 1 == authority.len) return;
-        try validateAuthorityPort(authority[end + 2 ..]);
-        return;
-    }
-
-    if (std.mem.indexOfScalar(u8, authority, '[') != null or
-        std.mem.indexOfScalar(u8, authority, ']') != null) return error.InvalidHeader;
-    const first_colon = std.mem.indexOfScalar(u8, authority, ':');
-    if (first_colon) |colon| {
-        if (colon == 0) return error.InvalidHeader;
-        if (std.mem.indexOfScalar(u8, authority[colon + 1 ..], ':') != null) return error.InvalidHeader;
-        try validateAuthorityPort(authority[colon + 1 ..]);
-    }
-}
-
-fn validateAuthorityPort(port: []const u8) Error!void {
-    if (port.len == 0) return error.InvalidHeader;
-    for (port) |byte| {
-        if (!std.ascii.isDigit(byte)) return error.InvalidHeader;
-    }
-    const parsed_port = std.fmt.parseInt(u32, port, 10) catch return error.InvalidHeader;
-    if (parsed_port > std.math.maxInt(u16)) return error.InvalidHeader;
-}
-
-fn validHeaderNameByte(byte: u8) bool {
-    return std.ascii.isLower(byte) or std.ascii.isDigit(byte) or switch (byte) {
-        '!', '#', '$', '%', '&', '\'', '*', '+', '-', '.', '^', '_', '`', '|', '~' => true,
-        else => false,
-    };
-}
-
-fn markRequestPseudo(
-    name: []const u8,
-    seen_method: *bool,
-    seen_scheme: *bool,
-    seen_path: *bool,
-    seen_authority: *bool,
-    seen_protocol: *bool,
-) Error!void {
-    if (std.mem.eql(u8, name, ":method")) return markOnce(seen_method);
-    if (std.mem.eql(u8, name, ":scheme")) return markOnce(seen_scheme);
-    if (std.mem.eql(u8, name, ":path")) return markOnce(seen_path);
-    if (std.mem.eql(u8, name, ":authority")) return markOnce(seen_authority);
-    if (std.mem.eql(u8, name, ":protocol")) return markOnce(seen_protocol);
-    return error.InvalidHeader;
-}
-
-fn markResponsePseudo(name: []const u8, seen_status: *bool) Error!void {
-    if (std.mem.eql(u8, name, ":status")) return markOnce(seen_status);
-    return error.InvalidHeader;
-}
-
-fn markOnce(seen: *bool) Error!void {
-    if (seen.*) return error.InvalidHeader;
-    seen.* = true;
-}
-
-fn validateConnectAuthority(authority: []const u8) Error!void {
-    try validateRequestAuthority(authority);
-    const port: []const u8 = if (authority[0] == '[') blk: {
-        const end = std.mem.indexOfScalar(u8, authority, ']') orelse return error.InvalidHeader;
-        if (end <= 1 or end + 2 > authority.len or authority[end + 1] != ':') return error.InvalidHeader;
-        break :blk authority[end + 2 ..];
-    } else blk: {
-        const colon = std.mem.lastIndexOfScalar(u8, authority, ':') orelse return error.InvalidHeader;
-        if (colon == 0 or colon + 1 >= authority.len) return error.InvalidHeader;
-        if (std.mem.indexOfScalar(u8, authority[0..colon], ':') != null) return error.InvalidHeader;
-        break :blk authority[colon + 1 ..];
-    };
-    try validateAuthorityPort(port);
-}
-
-fn connectionSpecificHeaderName(name: []const u8) bool {
-    return std.ascii.eqlIgnoreCase(name, "keep-alive") or
-        std.ascii.eqlIgnoreCase(name, "proxy-connection") or
-        std.ascii.eqlIgnoreCase(name, "transfer-encoding") or
-        std.ascii.eqlIgnoreCase(name, "upgrade");
-}
-
-fn forbiddenTrailerFieldName(name: []const u8) bool {
-    return std.ascii.eqlIgnoreCase(name, "authorization") or
-        std.ascii.eqlIgnoreCase(name, "cache-control") or
-        std.ascii.eqlIgnoreCase(name, "content-encoding") or
-        std.ascii.eqlIgnoreCase(name, "content-length") or
-        std.ascii.eqlIgnoreCase(name, "content-range") or
-        std.ascii.eqlIgnoreCase(name, "content-type") or
-        std.ascii.eqlIgnoreCase(name, "host") or
-        std.ascii.eqlIgnoreCase(name, "max-forwards") or
-        std.ascii.eqlIgnoreCase(name, "set-cookie") or
-        std.ascii.eqlIgnoreCase(name, "trailer") or
-        std.ascii.eqlIgnoreCase(name, "transfer-encoding") or
-        std.ascii.eqlIgnoreCase(name, "te");
-}
-
-fn responseForbidsBody(status: u16, request_method: []const u8, extended_connect: bool) bool {
-    if ((status >= 100 and status < 200) or status == 204 or status == 304) return true;
-    if (methodIsHead(request_method)) return true;
-    if (!extended_connect and methodIsConnect(request_method) and status >= 200 and status < 300) return true;
-    return false;
-}
-
-fn responseSemanticsFromMethod(method: []const u8, extended_connect: bool) ResponseBodySemantics {
-    return .{
-        .head = methodIsHead(method),
-        .traditional_connect = methodIsConnect(method) and !extended_connect,
-        .extended_connect = methodIsConnect(method) and extended_connect,
-    };
-}
-
-fn responseWriteSuppressesBodySemantics(status: u16, semantics: ResponseBodySemantics) bool {
-    if ((status >= 100 and status < 200) or status == 204 or status == 304) return true;
-    if (semantics.head) return true;
-    if (semantics.traditional_connect and status >= 200 and status < 300) return true;
-    return false;
-}
-
-fn validateResponseBodyForStatus(
-    status: u16,
-    headers: []const http2.Hpack.HeaderField,
-    body: []const u8,
-    trailers: []const http2.Hpack.HeaderField,
-) Error!void {
-    try validateResponseBodyForStatusWithLength(
-        status,
-        try contentLength(headers),
-        body,
-        trailers,
-    );
-}
-
-fn validateResponseBodyForStatusWithLength(
-    status: u16,
-    declared_content_length: ?usize,
-    body: []const u8,
-    trailers: []const http2.Hpack.HeaderField,
-) Error!void {
-    if (!((status >= 100 and status < 200) or status == 204 or status == 304)) return;
-    if (body.len != 0 or trailers.len != 0) return error.InvalidContentLength;
-    // As in HTTP/1, 304 may describe the selected representation length, but
-    // 1xx and 204 responses terminate at the HEADERS block and must not carry a
-    // Content-Length that could be mistaken for DATA on this stream.
-    if (status != 304 and declared_content_length != null) return error.InvalidContentLength;
-}
-
-fn validateResponseBodyForRequestSemantics(
-    status: u16,
-    semantics: ResponseBodySemantics,
-    headers: []const http2.Hpack.HeaderField,
-    body: []const u8,
-    trailers: []const http2.Hpack.HeaderField,
-) Error!void {
-    try validateResponseBodyForRequestSemanticsWithLength(
-        status,
-        semantics,
-        try contentLength(headers),
-        body,
-        trailers,
-    );
-}
-
-fn validateResponseBodyForRequestSemanticsWithLength(
-    status: u16,
-    semantics: ResponseBodySemantics,
-    declared_content_length: ?usize,
-    body: []const u8,
-    trailers: []const http2.Hpack.HeaderField,
-) Error!void {
-    if (semantics.head) {
-        if (trailers.len != 0) return error.InvalidContentLength;
-        if (declared_content_length) |len| {
-            if (body.len != 0 and len != body.len) return error.InvalidContentLength;
-        }
-        return;
-    }
-    if (semantics.traditional_connect and status >= 200 and status < 300) {
-        // Successful traditional CONNECT switches the stream into tunnel mode:
-        // HTTP response DATA/trailers would be interpreted as tunnel bytes by
-        // the peer. Reject them at the server writer boundary rather than
-        // silently framing an ambiguous response.
-        if (body.len != 0 or trailers.len != 0) return error.InvalidContentLength;
-        if ((declared_content_length orelse 0) != 0) return error.InvalidContentLength;
-    }
-}
-
-fn validateDeclaredResponseLength(
-    status: u16,
-    semantics: ResponseBodySemantics,
-    headers: []const http2.Hpack.HeaderField,
-    body_len: usize,
-) Error!void {
-    try validateDeclaredResponseLengthValue(
-        status,
-        semantics,
-        try contentLength(headers),
-        body_len,
-    );
-}
-
-fn validateDeclaredResponseLengthValue(
-    status: u16,
-    semantics: ResponseBodySemantics,
-    declared_content_length: ?usize,
-    body_len: usize,
-) Error!void {
-    if ((status >= 100 and status < 200) or status == 204) return;
-    if (semantics.traditional_connect and status >= 200 and status < 300) return;
-    if (declared_content_length) |len| {
-        // 304 and HEAD responses may describe the selected representation, so
-        // only require equality when an actual DATA body is sent.  For normal
-        // responses, writing a declared length that differs from DATA bytes
-        // leaves peers waiting or causes them to reject the stream.
-        if (body_len != 0 and len != body_len) return error.InvalidContentLength;
-        if (body_len == 0 and status != 304 and !semantics.head and len != 0) return error.InvalidContentLength;
-    }
-}
-
-fn responseShouldDefaultContentLength(
-    status: u16,
-    semantics: ResponseBodySemantics,
-    headers: []const http2.Hpack.HeaderField,
-    body_len: usize,
-) bool {
-    return responseShouldDefaultContentLengthValue(
-        status,
-        semantics,
-        contentLength(headers) catch return false,
-        body_len,
-    );
-}
-
-fn responseShouldDefaultContentLengthValue(
-    status: u16,
-    semantics: ResponseBodySemantics,
-    declared_content_length: ?usize,
-    body_len: usize,
-) bool {
-    if (body_len == 0) return false;
-    if (responseWriteSuppressesBodySemantics(status, semantics)) return false;
-    return declared_content_length == null;
-}
-
-fn informationalResponseToSkip(status: u16) bool {
-    return statusIsInformational(status) and status != 101;
-}
-
-fn statusIsInformational(status: u16) bool {
-    return status >= 100 and status < 200;
-}
-
-const RequestHeaderLookup = struct {
-    method: ?[]const u8 = null,
-    path: ?[]const u8 = null,
-    scheme: ?[]const u8 = null,
-    authority: ?[]const u8 = null,
-    host: ?[]const u8 = null,
-    protocol: ?[]const u8 = null,
-    priority: ?[]const u8 = null,
-    content_length: ?usize = null,
-
-    fn requestAuthority(self: RequestHeaderLookup) ?[]const u8 {
-        return self.authority orelse self.host;
-    }
-};
-
-fn requestHeaderLookup(headers: []const http2.Hpack.HeaderField) Error!RequestHeaderLookup {
-    var lookup: RequestHeaderLookup = .{};
-    for (headers) |header| {
-        if (std.ascii.eqlIgnoreCase(header.name, ":method")) {
-            if (lookup.method == null) lookup.method = header.value;
-        } else if (std.ascii.eqlIgnoreCase(header.name, ":path")) {
-            if (lookup.path == null) lookup.path = header.value;
-        } else if (std.ascii.eqlIgnoreCase(header.name, ":scheme")) {
-            if (lookup.scheme == null) lookup.scheme = header.value;
-        } else if (std.ascii.eqlIgnoreCase(header.name, ":authority")) {
-            if (lookup.authority == null) lookup.authority = header.value;
-        } else if (std.ascii.eqlIgnoreCase(header.name, "host")) {
-            if (lookup.host == null) lookup.host = header.value;
-        } else if (std.ascii.eqlIgnoreCase(header.name, ":protocol")) {
-            if (lookup.protocol == null) lookup.protocol = header.value;
-        } else if (std.ascii.eqlIgnoreCase(header.name, "priority")) {
-            if (lookup.priority == null) lookup.priority = header.value;
-        } else if (std.ascii.eqlIgnoreCase(header.name, "content-length")) {
-            try parseContentLengthHeaderValue(header.value, &lookup.content_length);
-        }
-    }
-    return lookup;
-}
-
-fn findHeader(headers: []const http2.Hpack.HeaderField, name: []const u8) ?[]const u8 {
-    for (headers) |header| {
-        if (std.ascii.eqlIgnoreCase(header.name, name)) return header.value;
-    }
-    return null;
 }
 
 pub const testing = struct {
@@ -15477,6 +15922,17 @@ fn optionalHttp1SingletonHeader(headers: []const http1.Header, name: []const u8)
         found = header.value;
     }
     return found;
+}
+
+fn awakeNowNanos(io: std.Io) u64 {
+    const now = std.Io.Clock.awake.now(io).nanoseconds;
+    if (now <= 0) return 0;
+    return std.math.cast(u64, now) orelse std.math.maxInt(u64);
+}
+
+fn reservedInternalPingPayload(data: [8]u8) bool {
+    return std.mem.eql(u8, &data, &graceful_shutdown_ping_payload) or
+        bdp.isProbePayload(data);
 }
 
 fn headersContainHttpToken(headers: []const http1.Header, name: []const u8, needle: []const u8) bool {
@@ -16026,7 +16482,14 @@ test "HTTP/2 h2c runtime client and server exchange over TCP" {
     defer stream_window.deinit(allocator);
     try std.testing.expectEqual(@as(u31, 1), stream_window.window_update.stream_id);
     try std.testing.expectEqual(@as(u31, 1024), stream_window.window_update.increment);
-    try std.testing.expectEqual(@as(i64, default_flow_window + 1024 - "ping".len), (try client.sendStreamWindow(1)).value);
+    // The response closed stream 1 before this late WINDOW_UPDATE arrived.
+    // Return the frame to the explicit observer, but do not mutate the
+    // retained closed-stream window. RFC 9113 permits ignoring this race.
+    try std.testing.expect(client.send_stream_window_index.contains(1));
+    try std.testing.expectEqual(
+        @as(i64, default_flow_window - "ping".len),
+        (try client.sendStreamWindow(1)).value,
+    );
     var goaway = try client.readGoAway();
     defer goaway.deinit(allocator);
     try std.testing.expectEqual(http2.ErrorCode.no_error, goaway.goaway.error_code);
@@ -16036,7 +16499,7 @@ test "HTTP/2 h2c runtime client and server exchange over TCP" {
 test "HTTP/2 serveConnection handles sequential requests" {
     const allocator = std.testing.allocator;
 
-    var backend = try @import("../runtime.zig").Backend.initAuto(allocator, .evented_then_threaded);
+    var backend = try @import("../runtime.zig").Backend.initAuto(allocator, .zio_then_threaded);
     defer backend.deinit();
     const io = backend.io();
 
@@ -17485,6 +17948,114 @@ test "HTTP/2 readWindowUpdate records interleaved GOAWAY" {
     if (shared.err) |err| return err;
 }
 
+test "HTTP/2 readWindowUpdate enforces local error reset budget" {
+    const allocator = std.testing.allocator;
+
+    var threaded = std.Io.Threaded.init(allocator, .{
+        .async_limit = .unlimited,
+    });
+    defer threaded.deinit();
+    const io = threaded.io();
+    const limits: Limits = .{
+        .max_frame_payload = 4096,
+        .max_body_bytes = 4096,
+        .max_local_error_reset_streams = 1,
+    };
+    var server = try Server.listen(
+        allocator,
+        io,
+        .{ .ip4 = .loopback(0) },
+        limits,
+    );
+    defer server.deinit();
+
+    const Shared = struct {
+        server: *Server,
+        err: ?anyerror = null,
+
+        fn run(self: *@This()) void {
+            self.runFallible() catch |err| {
+                self.err = err;
+            };
+        }
+
+        fn runFallible(self: *@This()) !void {
+            var connection = try self.server.accept();
+            defer connection.close();
+            const overflow = [_]u8{ 0, 0, 0, 1 };
+
+            try writeFrame(
+                self.server.allocator,
+                self.server.io,
+                connection.stream,
+                .window_update,
+                0,
+                1,
+                &overflow,
+            );
+            var reset = try connection.readResetStreamWithTimeout(
+                .fromSeconds(2),
+            );
+            defer reset.deinit(self.server.allocator);
+            try std.testing.expectEqual(@as(u31, 1), reset.reset.stream_id);
+            try std.testing.expectEqual(
+                http2.ErrorCode.flow_control_error,
+                reset.reset.error_code,
+            );
+
+            try writeFrame(
+                self.server.allocator,
+                self.server.io,
+                connection.stream,
+                .window_update,
+                0,
+                3,
+                &overflow,
+            );
+            var goaway = try connection.readGoAwayWithTimeout(
+                .fromSeconds(2),
+            );
+            defer goaway.deinit(self.server.allocator);
+            try std.testing.expectEqual(@as(u31, 0), goaway.goaway.last_stream_id);
+            try std.testing.expectEqual(
+                http2.ErrorCode.enhance_your_calm,
+                goaway.goaway.error_code,
+            );
+            try std.testing.expectEqualStrings(
+                "too_many_internal_resets",
+                goaway.goaway.debug_data,
+            );
+        }
+    };
+
+    var shared = Shared{ .server = &server };
+    const thread = try std.Thread.spawn(.{}, Shared.run, .{&shared});
+    var joined = false;
+    defer if (!joined) thread.join();
+
+    var client = try Client.connect(allocator, io, server.address(), limits);
+    defer client.close();
+    try client.addActiveLocalStream(1);
+    try client.addActiveLocalStream(3);
+    (try client.sendStreamWindow(1)).value = max_flow_window;
+    (try client.sendStreamWindow(3)).value = max_flow_window;
+
+    var first = try client.readWindowUpdateWithTimeout(.fromSeconds(2));
+    defer first.deinit(allocator);
+    try std.testing.expectEqual(@as(u31, 1), first.window_update.stream_id);
+    try std.testing.expectEqual(@as(usize, 1), client.local_error_reset_streams);
+
+    try std.testing.expectError(
+        error.ConnectionGoAway,
+        client.readWindowUpdateWithTimeout(.fromSeconds(2)),
+    );
+    try std.testing.expect(client.aggregate_timeout_unusable);
+
+    thread.join();
+    joined = true;
+    if (shared.err) |err| return err;
+}
+
 test "HTTP/2 readGoAway handles interleaved PING" {
     const allocator = std.testing.allocator;
 
@@ -18762,6 +19333,8 @@ test "HTTP/2 client observes bounded informational responses in order" {
         fn observe(context_ptr: *anyopaque, head: StreamingResponseHead) void {
             const self: *@This() = @ptrCast(@alignCast(context_ptr));
             self.statuses[self.count] = head.status;
+            self.valid_headers = self.valid_headers and
+                findHeader(head.headers, "date") == null;
             const expected_name = if (head.status == 103)
                 "link"
             else
@@ -18807,6 +19380,10 @@ test "HTTP/2 client observes bounded informational responses in order" {
     );
     try std.testing.expect(aggregate_observer.valid_headers);
     try std.testing.expectEqualStrings("final", aggregate.body);
+    try std.testing.expectEqual(
+        @as(usize, http_date.value_len),
+        findHeader(aggregate.headers, "date").?.len,
+    );
 
     var streaming_observer = Observer{};
     var body_bytes: usize = 0;
@@ -18918,6 +19495,583 @@ test "HTTP/2 client rejects 101 switching protocols response" {
     try std.testing.expectError(error.InvalidStatus, client.request(.{
         .method = "GET",
         .path = "/bad-101-h2",
+        .authority = "localhost",
+    }));
+
+    thread.join();
+    if (shared.err) |err| return err;
+}
+
+test "HTTP/2 client resets malformed response stream and reuses connection" {
+    const allocator = std.testing.allocator;
+    var threaded = std.Io.Threaded.init(allocator, .{});
+    defer threaded.deinit();
+    const io = threaded.io();
+    var server = try Server.listen(
+        allocator,
+        io,
+        .{ .ip4 = .loopback(0) },
+        .{ .max_frame_payload = 4096 },
+    );
+    defer server.deinit();
+
+    const Shared = struct {
+        server: *Server,
+        saw_reset: bool = false,
+        err: ?anyerror = null,
+
+        fn run(shared: *@This()) void {
+            runFallible(shared) catch |err| {
+                shared.err = err;
+            };
+        }
+
+        fn runFallible(shared: *@This()) !void {
+            var connection = try shared.server.accept();
+            defer connection.close();
+            var first = try connection.readRequest();
+            defer first.deinit(shared.server.allocator);
+            try connection.writeHeaders(first.stream_id, &.{
+                .{ .name = ":status", .value = "200" },
+                .{ .name = "connection", .value = "close" },
+            }, true);
+            var reset = try connection.readResetStream();
+            defer reset.deinit(shared.server.allocator);
+            try std.testing.expectEqual(first.stream_id, reset.reset.stream_id);
+            try std.testing.expectEqual(http2.ErrorCode.protocol_error, reset.reset.error_code);
+            shared.saw_reset = true;
+
+            var second = try connection.readRequest();
+            defer second.deinit(shared.server.allocator);
+            try std.testing.expectEqualStrings("/good-after-bad-response", second.path);
+            try connection.writeResponse(second.stream_id, .{
+                .status = 204,
+            });
+        }
+    };
+
+    var shared = Shared{ .server = &server };
+    const thread = try std.Thread.spawn(.{}, Shared.run, .{&shared});
+    var client = try Client.connect(allocator, io, server.address(), .{
+        .max_frame_payload = 4096,
+    });
+    defer client.close();
+
+    try std.testing.expectError(error.InvalidHeader, client.request(.{
+        .path = "/bad-response",
+        .authority = "localhost",
+    }));
+    var response = try client.request(.{
+        .path = "/good-after-bad-response",
+        .authority = "localhost",
+    });
+    defer response.deinit(allocator);
+    try std.testing.expectEqual(@as(u16, 204), response.status);
+
+    thread.join();
+    if (shared.err) |err| return err;
+    try std.testing.expect(shared.saw_reset);
+}
+
+test "HTTP/2 streaming client resets malformed response and reuses connection" {
+    const allocator = std.testing.allocator;
+    var threaded = std.Io.Threaded.init(allocator, .{});
+    defer threaded.deinit();
+    const io = threaded.io();
+    var server = try Server.listen(
+        allocator,
+        io,
+        .{ .ip4 = .loopback(0) },
+        .{ .max_frame_payload = 4096 },
+    );
+    defer server.deinit();
+
+    const Shared = struct {
+        server: *Server,
+        err: ?anyerror = null,
+
+        fn run(shared: *@This()) void {
+            runFallible(shared) catch |err| {
+                shared.err = err;
+            };
+        }
+
+        fn runFallible(shared: *@This()) !void {
+            var connection = try shared.server.accept();
+            defer connection.close();
+            var first = try connection.readRequest();
+            defer first.deinit(shared.server.allocator);
+            try connection.writeHeaders(first.stream_id, &.{
+                .{ .name = ":status", .value = "204" },
+                .{ .name = "content-length", .value = "0" },
+            }, true);
+            var reset = try connection.readResetStream();
+            defer reset.deinit(shared.server.allocator);
+            try std.testing.expectEqual(first.stream_id, reset.reset.stream_id);
+            try std.testing.expectEqual(http2.ErrorCode.protocol_error, reset.reset.error_code);
+
+            var second = try connection.readRequest();
+            defer second.deinit(shared.server.allocator);
+            try std.testing.expectEqualStrings("/streaming-sibling", second.path);
+            try connection.writeResponse(second.stream_id, .{
+                .status = 204,
+            });
+        }
+    };
+
+    var shared = Shared{ .server = &server };
+    const thread = try std.Thread.spawn(.{}, Shared.run, .{&shared});
+    var client = try Client.connect(allocator, io, server.address(), .{
+        .max_frame_payload = 4096,
+    });
+    defer client.close();
+
+    try std.testing.expectError(error.InvalidContentLength, client.requestStreaming(
+        .{ .path = "/bad-streaming-response", .authority = "localhost" },
+        {},
+        struct {
+            fn consume(_: void, _: []const u8) !void {}
+        }.consume,
+    ));
+    var response = try client.request(.{
+        .path = "/streaming-sibling",
+        .authority = "localhost",
+    });
+    defer response.deinit(allocator);
+    try std.testing.expectEqual(@as(u16, 204), response.status);
+
+    thread.join();
+    if (shared.err) |err| return err;
+}
+
+test "HTTP/2 aggregate batch resets malformed member cancels sibling and reuses connection" {
+    const allocator = std.testing.allocator;
+    var threaded = std.Io.Threaded.init(allocator, .{});
+    defer threaded.deinit();
+    const io = threaded.io();
+    var server = try Server.listen(
+        allocator,
+        io,
+        .{ .ip4 = .loopback(0) },
+        .{ .max_frame_payload = 4096 },
+    );
+    defer server.deinit();
+
+    const Shared = struct {
+        server: *Server,
+        err: ?anyerror = null,
+
+        fn run(shared: *@This()) void {
+            runFallible(shared) catch |err| {
+                shared.err = err;
+            };
+        }
+
+        fn runFallible(shared: *@This()) !void {
+            var connection = try shared.server.accept();
+            defer connection.close();
+            var first = try connection.readRequest();
+            defer first.deinit(shared.server.allocator);
+            var second = try connection.readRequest();
+            defer second.deinit(shared.server.allocator);
+            try std.testing.expectEqual(@as(u31, 1), first.stream_id);
+            try std.testing.expectEqual(@as(u31, 3), second.stream_id);
+
+            try connection.writeHeaders(first.stream_id, &.{
+                .{ .name = ":status", .value = "200" },
+                .{ .name = "connection", .value = "close" },
+            }, true);
+            var first_reset = try connection.readResetStream();
+            defer first_reset.deinit(shared.server.allocator);
+            var second_reset = try connection.readResetStream();
+            defer second_reset.deinit(shared.server.allocator);
+            try std.testing.expectEqual(@as(u31, 1), first_reset.reset.stream_id);
+            try std.testing.expectEqual(http2.ErrorCode.protocol_error, first_reset.reset.error_code);
+            try std.testing.expectEqual(@as(u31, 3), second_reset.reset.stream_id);
+            try std.testing.expectEqual(http2.ErrorCode.cancel, second_reset.reset.error_code);
+
+            var third = try connection.readRequest();
+            defer third.deinit(shared.server.allocator);
+            try std.testing.expectEqual(@as(u31, 5), third.stream_id);
+            try connection.writeResponse(third.stream_id, .{ .status = 204 });
+        }
+    };
+
+    var shared = Shared{ .server = &server };
+    const thread = try std.Thread.spawn(.{}, Shared.run, .{&shared});
+    var client = try Client.connect(allocator, io, server.address(), .{
+        .max_frame_payload = 4096,
+    });
+    defer client.close();
+
+    var responses: [2]OwnedResponse = undefined;
+    try std.testing.expectError(error.InvalidHeader, client.requestBatchInto(
+        &.{
+            .{ .path = "/bad-batch-response", .authority = "localhost" },
+            .{ .path = "/cancelled-batch-sibling", .authority = "localhost" },
+        },
+        &responses,
+    ));
+    var third = try client.request(.{
+        .path = "/after-batch-error",
+        .authority = "localhost",
+    });
+    defer third.deinit(allocator);
+    try std.testing.expectEqual(@as(u16, 204), third.status);
+
+    thread.join();
+    if (shared.err) |err| return err;
+}
+
+test "HTTP/2 streaming batch resets malformed member and cancels sibling" {
+    const allocator = std.testing.allocator;
+    var threaded = std.Io.Threaded.init(allocator, .{});
+    defer threaded.deinit();
+    const io = threaded.io();
+    var server = try Server.listen(
+        allocator,
+        io,
+        .{ .ip4 = .loopback(0) },
+        .{ .max_frame_payload = 4096 },
+    );
+    defer server.deinit();
+
+    const Shared = struct {
+        server: *Server,
+        err: ?anyerror = null,
+
+        fn run(shared: *@This()) void {
+            runFallible(shared) catch |err| {
+                shared.err = err;
+            };
+        }
+
+        fn runFallible(shared: *@This()) !void {
+            var connection = try shared.server.accept();
+            defer connection.close();
+            var first = try connection.readRequest();
+            defer first.deinit(shared.server.allocator);
+            var second = try connection.readRequest();
+            defer second.deinit(shared.server.allocator);
+            try std.testing.expectEqual(@as(u31, 1), first.stream_id);
+            try std.testing.expectEqual(@as(u31, 3), second.stream_id);
+
+            try connection.writeHeaders(first.stream_id, &.{
+                .{ .name = ":status", .value = "204" },
+                .{ .name = "content-length", .value = "0" },
+            }, true);
+            var first_reset = try connection.readResetStream();
+            defer first_reset.deinit(shared.server.allocator);
+            var second_reset = try connection.readResetStream();
+            defer second_reset.deinit(shared.server.allocator);
+            try std.testing.expectEqual(@as(u31, 1), first_reset.reset.stream_id);
+            try std.testing.expectEqual(http2.ErrorCode.protocol_error, first_reset.reset.error_code);
+            try std.testing.expectEqual(@as(u31, 3), second_reset.reset.stream_id);
+            try std.testing.expectEqual(http2.ErrorCode.cancel, second_reset.reset.error_code);
+        }
+    };
+
+    var shared = Shared{ .server = &server };
+    const thread = try std.Thread.spawn(.{}, Shared.run, .{&shared});
+    var client = try Client.connect(allocator, io, server.address(), .{
+        .max_frame_payload = 4096,
+    });
+    defer client.close();
+
+    var responses: [2]StreamingResponse = undefined;
+    try std.testing.expectError(
+        error.InvalidContentLength,
+        client.requestBatchStreamingInto(
+            &.{
+                .{ .path = "/bad-streaming-batch", .authority = "localhost" },
+                .{ .path = "/cancel-streaming-sibling", .authority = "localhost" },
+            },
+            &responses,
+            {},
+            struct {
+                fn consume(_: void, _: usize, _: []const u8) !void {}
+            }.consume,
+        ),
+    );
+
+    thread.join();
+    if (shared.err) |err| return err;
+}
+
+test "HTTP/2 aggregate batch maps malformed HPACK to one GOAWAY" {
+    const allocator = std.testing.allocator;
+    var threaded = std.Io.Threaded.init(allocator, .{});
+    defer threaded.deinit();
+    const io = threaded.io();
+    var server = try Server.listen(
+        allocator,
+        io,
+        .{ .ip4 = .loopback(0) },
+        .{ .max_frame_payload = 4096 },
+    );
+    defer server.deinit();
+
+    const Shared = struct {
+        server: *Server,
+        err: ?anyerror = null,
+
+        fn run(shared: *@This()) void {
+            runFallible(shared) catch |err| {
+                shared.err = err;
+            };
+        }
+
+        fn runFallible(shared: *@This()) !void {
+            var connection = try shared.server.accept();
+            defer connection.close();
+            var first = try connection.readRequest();
+            defer first.deinit(shared.server.allocator);
+            var second = try connection.readRequest();
+            defer second.deinit(shared.server.allocator);
+            try writeFrame(
+                shared.server.allocator,
+                shared.server.io,
+                connection.stream,
+                .headers,
+                flag_end_headers | flag_end_stream,
+                first.stream_id,
+                &.{0x80},
+            );
+            var goaway = try readFrame(
+                shared.server.allocator,
+                shared.server.io,
+                connection.stream,
+                connection.limits,
+            );
+            defer goaway.deinit(shared.server.allocator);
+            try std.testing.expectEqual(
+                http2.FrameType.goaway,
+                goaway.frame.header.frame_type,
+            );
+            try std.testing.expectEqual(
+                http2.ErrorCode.compression_error,
+                (try http2.GoAwayPayload.parse(goaway.frame)).error_code,
+            );
+        }
+    };
+
+    var shared = Shared{ .server = &server };
+    const thread = try std.Thread.spawn(.{}, Shared.run, .{&shared});
+    var client = try Client.connect(allocator, io, server.address(), .{
+        .max_frame_payload = 4096,
+    });
+    defer client.close();
+
+    var responses: [2]OwnedResponse = undefined;
+    try std.testing.expectError(error.InvalidEncoding, client.requestBatchInto(
+        &.{
+            .{ .path = "/bad-batch-hpack", .authority = "localhost" },
+            .{ .path = "/hpack-sibling", .authority = "localhost" },
+        },
+        &responses,
+    ));
+
+    thread.join();
+    if (shared.err) |err| return err;
+}
+
+test "HTTP/2 aggregate batch does not reset an already peer-reset member" {
+    const allocator = std.testing.allocator;
+    var threaded = std.Io.Threaded.init(allocator, .{});
+    defer threaded.deinit();
+    const io = threaded.io();
+    var server = try Server.listen(
+        allocator,
+        io,
+        .{ .ip4 = .loopback(0) },
+        .{ .max_frame_payload = 4096 },
+    );
+    defer server.deinit();
+
+    const Shared = struct {
+        server: *Server,
+        err: ?anyerror = null,
+
+        fn run(shared: *@This()) void {
+            runFallible(shared) catch |err| {
+                shared.err = err;
+            };
+        }
+
+        fn runFallible(shared: *@This()) !void {
+            var connection = try shared.server.accept();
+            defer connection.close();
+            var first = try connection.readRequest();
+            defer first.deinit(shared.server.allocator);
+            var second = try connection.readRequest();
+            defer second.deinit(shared.server.allocator);
+            try connection.sendResetStream(first.stream_id, .refused_stream);
+
+            // The peer-originated reset already closed stream 1. Batch cleanup
+            // should send exactly one local cancellation for stream 3.
+            var sibling_reset = try connection.readResetStream();
+            defer sibling_reset.deinit(shared.server.allocator);
+            try std.testing.expectEqual(second.stream_id, sibling_reset.reset.stream_id);
+            try std.testing.expectEqual(http2.ErrorCode.cancel, sibling_reset.reset.error_code);
+        }
+    };
+
+    var shared = Shared{ .server = &server };
+    const thread = try std.Thread.spawn(.{}, Shared.run, .{&shared});
+    var client = try Client.connect(allocator, io, server.address(), .{
+        .max_frame_payload = 4096,
+    });
+    defer client.close();
+
+    var responses: [2]OwnedResponse = undefined;
+    try std.testing.expectError(error.StreamReset, client.requestBatchInto(
+        &.{
+            .{ .path = "/peer-reset", .authority = "localhost" },
+            .{ .path = "/cancel-after-peer-reset", .authority = "localhost" },
+        },
+        &responses,
+    ));
+
+    thread.join();
+    if (shared.err) |err| return err;
+}
+
+test "HTTP/2 client maps malformed response HPACK to COMPRESSION_ERROR GOAWAY" {
+    const allocator = std.testing.allocator;
+    var threaded = std.Io.Threaded.init(allocator, .{});
+    defer threaded.deinit();
+    const io = threaded.io();
+    var server = try Server.listen(
+        allocator,
+        io,
+        .{ .ip4 = .loopback(0) },
+        .{ .max_frame_payload = 4096 },
+    );
+    defer server.deinit();
+
+    const Shared = struct {
+        server: *Server,
+        saw_goaway: bool = false,
+        err: ?anyerror = null,
+
+        fn run(shared: *@This()) void {
+            runFallible(shared) catch |err| {
+                shared.err = err;
+            };
+        }
+
+        fn runFallible(shared: *@This()) !void {
+            var connection = try shared.server.accept();
+            defer connection.close();
+            var request = try connection.readRequest();
+            defer request.deinit(shared.server.allocator);
+            try writeFrame(
+                shared.server.allocator,
+                shared.server.io,
+                connection.stream,
+                .headers,
+                flag_end_headers | flag_end_stream,
+                request.stream_id,
+                &.{0x80},
+            );
+            var goaway = try connection.readGoAway();
+            defer goaway.deinit(shared.server.allocator);
+            try std.testing.expectEqual(
+                http2.ErrorCode.compression_error,
+                goaway.goaway.error_code,
+            );
+            shared.saw_goaway = true;
+        }
+    };
+
+    var shared = Shared{ .server = &server };
+    const thread = try std.Thread.spawn(.{}, Shared.run, .{&shared});
+    var client = try Client.connect(allocator, io, server.address(), .{
+        .max_frame_payload = 4096,
+    });
+    defer client.close();
+    try std.testing.expectError(error.InvalidEncoding, client.request(.{
+        .path = "/bad-response-hpack",
+        .authority = "localhost",
+    }));
+
+    thread.join();
+    if (shared.err) |err| return err;
+    try std.testing.expect(shared.saw_goaway);
+}
+
+test "HTTP/2 client maps cross-stream response CONTINUATION to PROTOCOL_ERROR GOAWAY" {
+    const allocator = std.testing.allocator;
+    var threaded = std.Io.Threaded.init(allocator, .{});
+    defer threaded.deinit();
+    const io = threaded.io();
+    var server = try Server.listen(
+        allocator,
+        io,
+        .{ .ip4 = .loopback(0) },
+        .{ .max_frame_payload = 4096 },
+    );
+    defer server.deinit();
+
+    const Shared = struct {
+        server: *Server,
+        err: ?anyerror = null,
+
+        fn run(shared: *@This()) void {
+            runFallible(shared) catch |err| {
+                shared.err = err;
+            };
+        }
+
+        fn runFallible(shared: *@This()) !void {
+            var connection = try shared.server.accept();
+            defer connection.close();
+            var request = try connection.readRequest();
+            defer request.deinit(shared.server.allocator);
+            try writeFrame(
+                shared.server.allocator,
+                shared.server.io,
+                connection.stream,
+                .headers,
+                0,
+                request.stream_id,
+                &.{0x88},
+            );
+            try writeFrame(
+                shared.server.allocator,
+                shared.server.io,
+                connection.stream,
+                .continuation,
+                flag_end_headers,
+                request.stream_id + 2,
+                &.{},
+            );
+            var wire_error = try readFrame(
+                shared.server.allocator,
+                shared.server.io,
+                connection.stream,
+                connection.limits,
+            );
+            defer wire_error.deinit(shared.server.allocator);
+            try std.testing.expectEqual(
+                http2.FrameType.goaway,
+                wire_error.frame.header.frame_type,
+            );
+            try std.testing.expectEqual(
+                http2.ErrorCode.protocol_error,
+                (try http2.GoAwayPayload.parse(wire_error.frame)).error_code,
+            );
+        }
+    };
+
+    var shared = Shared{ .server = &server };
+    const thread = try std.Thread.spawn(.{}, Shared.run, .{&shared});
+    var client = try Client.connect(allocator, io, server.address(), .{
+        .max_frame_payload = 4096,
+    });
+    defer client.close();
+    try std.testing.expectError(error.UnexpectedFrame, client.request(.{
+        .path = "/bad-response-continuation",
         .authority = "localhost",
     }));
 
@@ -19409,6 +20563,290 @@ test "HTTP/2 runtime rejects malformed CONTINUATION sequence" {
     thread.join();
     if (shared.err) |err| return err;
     try std.testing.expect(shared.saw_expected);
+}
+
+test "HTTP/2 serveOne maps malformed HPACK to COMPRESSION_ERROR GOAWAY" {
+    const allocator = std.testing.allocator;
+    var threaded = std.Io.Threaded.init(allocator, .{});
+    defer threaded.deinit();
+    const io = threaded.io();
+
+    var server = try Server.listen(
+        allocator,
+        io,
+        .{ .ip4 = .loopback(0) },
+        .{ .max_frame_payload = 4096 },
+    );
+    defer server.deinit();
+
+    const Context = struct {
+        calls: usize = 0,
+
+        fn handle(ctx: *@This(), _: OwnedRequest) Error!ResponseOptions {
+            ctx.calls += 1;
+            return .{};
+        }
+    };
+    const Shared = struct {
+        server: *Server,
+        context: Context = .{},
+        saw_expected: bool = false,
+        err: ?anyerror = null,
+
+        fn run(shared: *@This()) void {
+            var connection = shared.server.accept() catch |err| {
+                shared.err = err;
+                return;
+            };
+            defer connection.close();
+            _ = connection.serveOne(
+                Context,
+                &shared.context,
+                Context.handle,
+            ) catch |err| {
+                if (err == error.InvalidEncoding) {
+                    shared.saw_expected = true;
+                    return;
+                }
+                shared.err = err;
+                return;
+            };
+            shared.err = error.UnexpectedFrame;
+        }
+    };
+
+    var shared = Shared{ .server = &server };
+    const thread = try std.Thread.spawn(.{}, Shared.run, .{&shared});
+
+    var client = try Client.connect(allocator, io, server.address(), .{
+        .max_frame_payload = 4096,
+    });
+    defer client.close();
+    // Indexed representation with index zero is invalid HPACK.
+    try writeFrame(allocator, io, client.stream, .headers, flag_end_headers | flag_end_stream, 1, &.{0x80});
+    var goaway = try client.readGoAway();
+    defer goaway.deinit(allocator);
+    try std.testing.expectEqual(http2.ErrorCode.compression_error, goaway.goaway.error_code);
+    try std.testing.expectEqualStrings("hpack-decode", goaway.goaway.debug_data);
+
+    thread.join();
+    if (shared.err) |err| return err;
+    try std.testing.expect(shared.saw_expected);
+    try std.testing.expectEqual(@as(usize, 0), shared.context.calls);
+}
+
+test "HTTP/2 serveOne maps malformed CONTINUATION to PROTOCOL_ERROR GOAWAY" {
+    const allocator = std.testing.allocator;
+    var threaded = std.Io.Threaded.init(allocator, .{});
+    defer threaded.deinit();
+    const io = threaded.io();
+
+    var server = try Server.listen(
+        allocator,
+        io,
+        .{ .ip4 = .loopback(0) },
+        .{ .max_frame_payload = 4096 },
+    );
+    defer server.deinit();
+
+    const Context = struct {
+        calls: usize = 0,
+
+        fn handle(ctx: *@This(), _: OwnedRequest) Error!ResponseOptions {
+            ctx.calls += 1;
+            return .{};
+        }
+    };
+    const Shared = struct {
+        server: *Server,
+        context: Context = .{},
+        saw_expected: bool = false,
+        err: ?anyerror = null,
+
+        fn run(shared: *@This()) void {
+            var connection = shared.server.accept() catch |err| {
+                shared.err = err;
+                return;
+            };
+            defer connection.close();
+            _ = connection.serveOne(
+                Context,
+                &shared.context,
+                Context.handle,
+            ) catch |err| {
+                if (err == error.UnexpectedFrame) {
+                    shared.saw_expected = true;
+                    return;
+                }
+                shared.err = err;
+                return;
+            };
+            shared.err = error.UnexpectedFrame;
+        }
+    };
+
+    var shared = Shared{ .server = &server };
+    const thread = try std.Thread.spawn(.{}, Shared.run, .{&shared});
+
+    var client = try Client.connect(allocator, io, server.address(), .{
+        .max_frame_payload = 4096,
+    });
+    defer client.close();
+    var block: std.ArrayList(u8) = .empty;
+    defer block.deinit(allocator);
+    try http2.Hpack.encodeLiteralBlock(&block, allocator, &.{
+        .{ .name = ":method", .value = "GET" },
+        .{ .name = ":path", .value = "/bad-continuation-goaway" },
+        .{ .name = ":scheme", .value = "http" },
+    });
+    const split = block.items.len / 2;
+    try writeFrame(allocator, io, client.stream, .headers, flag_end_stream, 1, block.items[0..split]);
+    try writeFrame(allocator, io, client.stream, .continuation, flag_end_headers, 3, block.items[split..]);
+    var goaway = try client.readGoAway();
+    defer goaway.deinit(allocator);
+    try std.testing.expectEqual(http2.ErrorCode.protocol_error, goaway.goaway.error_code);
+    try std.testing.expectEqualStrings("frame-sequence", goaway.goaway.debug_data);
+
+    thread.join();
+    if (shared.err) |err| return err;
+    try std.testing.expect(shared.saw_expected);
+    try std.testing.expectEqual(@as(usize, 0), shared.context.calls);
+}
+
+test "HTTP/2 serveOne maps unterminated continuation flood to ENHANCE_YOUR_CALM GOAWAY" {
+    const allocator = std.testing.allocator;
+    var threaded = std.Io.Threaded.init(allocator, .{});
+    defer threaded.deinit();
+    const io = threaded.io();
+    var server = try Server.listen(
+        allocator,
+        io,
+        .{ .ip4 = .loopback(0) },
+        .{ .max_frame_payload = 4096, .max_continuation_frames = 1 },
+    );
+    defer server.deinit();
+
+    const Context = struct {
+        calls: usize = 0,
+        fn handle(ctx: *@This(), _: OwnedRequest) Error!ResponseOptions {
+            ctx.calls += 1;
+            return .{};
+        }
+    };
+    const Shared = struct {
+        server: *Server,
+        context: Context = .{},
+        saw_expected: bool = false,
+        err: ?anyerror = null,
+        fn run(shared: *@This()) void {
+            var connection = shared.server.accept() catch |err| {
+                shared.err = err;
+                return;
+            };
+            defer connection.close();
+            _ = connection.serveOne(
+                Context,
+                &shared.context,
+                Context.handle,
+            ) catch |err| {
+                if (err == error.MessageTooLarge) {
+                    shared.saw_expected = true;
+                    return;
+                }
+                shared.err = err;
+                return;
+            };
+            shared.err = error.UnexpectedFrame;
+        }
+    };
+
+    var shared = Shared{ .server = &server };
+    const thread = try std.Thread.spawn(.{}, Shared.run, .{&shared});
+    var client = try Client.connect(allocator, io, server.address(), .{
+        .max_frame_payload = 4096,
+    });
+    defer client.close();
+    try writeFrame(allocator, io, client.stream, .headers, flag_end_stream, 1, &.{0x82});
+    try writeFrame(allocator, io, client.stream, .continuation, 0, 1, &.{0x84});
+    try writeFrame(allocator, io, client.stream, .continuation, 0, 1, &.{0x86});
+    var wire_error = try readFrame(
+        allocator,
+        io,
+        client.stream,
+        client.limits,
+    );
+    defer wire_error.deinit(allocator);
+    try std.testing.expectEqual(http2.FrameType.goaway, wire_error.frame.header.frame_type);
+    const goaway = try http2.GoAwayPayload.parse(wire_error.frame);
+    try std.testing.expectEqual(http2.ErrorCode.enhance_your_calm, goaway.error_code);
+    try std.testing.expectEqualStrings("header-block-limit", goaway.debug_data);
+
+    thread.join();
+    if (shared.err) |err| return err;
+    try std.testing.expect(shared.saw_expected);
+    try std.testing.expectEqual(@as(usize, 0), shared.context.calls);
+}
+
+test "HTTP/2 serveConcurrent maps malformed HPACK to COMPRESSION_ERROR GOAWAY" {
+    const allocator = std.testing.allocator;
+    var threaded = std.Io.Threaded.init(allocator, .{ .async_limit = .unlimited });
+    defer threaded.deinit();
+    const io = threaded.io();
+
+    var server = try Server.listen(
+        allocator,
+        io,
+        .{ .ip4 = .loopback(0) },
+        .{ .max_frame_payload = 4096 },
+    );
+    defer server.deinit();
+
+    const Context = struct {
+        calls: usize = 0,
+
+        pub fn handle(ctx: *@This(), _: OwnedRequest) Error!ResponseOptions {
+            ctx.calls += 1;
+            return .{};
+        }
+    };
+    const Shared = struct {
+        server: *Server,
+        context: Context = .{},
+        result: ?ConcurrentServeResult = null,
+        err: ?anyerror = null,
+
+        fn run(shared: *@This()) void {
+            shared.result = shared.server.serveConcurrent(
+                Context,
+                &shared.context,
+                Context.handle,
+                1,
+            ) catch |err| {
+                shared.err = err;
+                return;
+            };
+        }
+    };
+
+    var shared = Shared{ .server = &server };
+    const thread = try std.Thread.spawn(.{}, Shared.run, .{&shared});
+
+    var client = try Client.connect(allocator, io, server.address(), .{
+        .max_frame_payload = 4096,
+    });
+    defer client.close();
+    try writeFrame(allocator, io, client.stream, .headers, flag_end_headers | flag_end_stream, 1, &.{0x80});
+    var goaway = try client.readGoAway();
+    defer goaway.deinit(allocator);
+    try std.testing.expectEqual(http2.ErrorCode.compression_error, goaway.goaway.error_code);
+
+    thread.join();
+    if (shared.err) |err| return err;
+    var result = shared.result orelse return error.UnexpectedFrame;
+    defer result.deinit();
+    try std.testing.expectEqual(error.InvalidEncoding, result.firstError().?);
+    try std.testing.expectEqual(@as(usize, 0), result.successCount());
+    try std.testing.expectEqual(@as(usize, 0), shared.context.calls);
 }
 
 test "HTTP/2 runtime rejects server-initiated request stream ids" {
@@ -20315,6 +21753,176 @@ test "HTTP/2 runtime rejects inbound connection-specific headers" {
     try std.testing.expect(shared.saw_expected);
 }
 
+test "HTTP/2 serveOne resets malformed request stream and serves sibling" {
+    const allocator = std.testing.allocator;
+    var threaded = std.Io.Threaded.init(allocator, .{});
+    defer threaded.deinit();
+    const io = threaded.io();
+    var server = try Server.listen(
+        allocator,
+        io,
+        .{ .ip4 = .loopback(0) },
+        .{ .max_frame_payload = 4096 },
+    );
+    defer server.deinit();
+
+    const Context = struct {
+        calls: usize = 0,
+
+        fn handle(ctx: *@This(), request: OwnedRequest) Error!ResponseOptions {
+            ctx.calls += 1;
+            if (!std.mem.eql(u8, request.path, "/good-after-reset")) {
+                return error.UnexpectedFrame;
+            }
+            return .{ .status = 204 };
+        }
+    };
+    const Shared = struct {
+        server: *Server,
+        context: Context = .{},
+        saw_bad_header: bool = false,
+        err: ?anyerror = null,
+
+        fn run(shared: *@This()) void {
+            var connection = shared.server.accept() catch |err| {
+                shared.err = err;
+                return;
+            };
+            defer connection.close();
+            _ = connection.serveOne(
+                Context,
+                &shared.context,
+                Context.handle,
+            ) catch |err| {
+                if (err == error.InvalidHeader) {
+                    shared.saw_bad_header = true;
+                } else {
+                    shared.err = err;
+                    return;
+                }
+            };
+            _ = connection.serveOne(
+                Context,
+                &shared.context,
+                Context.handle,
+            ) catch |err| {
+                shared.err = err;
+            };
+        }
+    };
+
+    var shared = Shared{ .server = &server };
+    const thread = try std.Thread.spawn(.{}, Shared.run, .{&shared});
+    var client = try Client.connect(allocator, io, server.address(), .{
+        .max_frame_payload = 4096,
+    });
+    defer client.close();
+
+    var encoder = http2.Hpack.Encoder{};
+    defer encoder.deinit(allocator);
+    var bad_block: std.ArrayList(u8) = .empty;
+    defer bad_block.deinit(allocator);
+    try encoder.encodeBlock(&bad_block, allocator, &.{
+        .{ .name = ":method", .value = "GET" },
+        .{ .name = ":path", .value = "/bad" },
+        .{ .name = ":scheme", .value = "http" },
+        .{ .name = "connection", .value = "close" },
+    });
+    try writeFrame(allocator, io, client.stream, .headers, flag_end_headers | flag_end_stream, 1, bad_block.items);
+
+    var good_block: std.ArrayList(u8) = .empty;
+    defer good_block.deinit(allocator);
+    try encoder.encodeBlock(&good_block, allocator, &.{
+        .{ .name = ":method", .value = "GET" },
+        .{ .name = ":path", .value = "/good-after-reset" },
+        .{ .name = ":scheme", .value = "http" },
+    });
+    try writeFrame(allocator, io, client.stream, .headers, flag_end_headers | flag_end_stream, 3, good_block.items);
+
+    var reset = try client.readResetStream();
+    defer reset.deinit(allocator);
+    try std.testing.expectEqual(@as(u31, 1), reset.reset.stream_id);
+    try std.testing.expectEqual(http2.ErrorCode.protocol_error, reset.reset.error_code);
+    var response = try client.readResponse(3, "GET", false, null);
+    defer response.deinit(allocator);
+    try std.testing.expectEqual(@as(u16, 204), response.status);
+
+    thread.join();
+    if (shared.err) |err| return err;
+    try std.testing.expect(shared.saw_bad_header);
+    try std.testing.expectEqual(@as(usize, 1), shared.context.calls);
+}
+
+test "HTTP/2 serveOne resets content-length mismatch after request DATA" {
+    const allocator = std.testing.allocator;
+    var threaded = std.Io.Threaded.init(allocator, .{});
+    defer threaded.deinit();
+    const io = threaded.io();
+    var server = try Server.listen(
+        allocator,
+        io,
+        .{ .ip4 = .loopback(0) },
+        .{ .max_frame_payload = 4096 },
+    );
+    defer server.deinit();
+
+    const Context = struct {
+        fn handle(_: *@This(), _: OwnedRequest) Error!ResponseOptions {
+            return error.UnexpectedFrame;
+        }
+    };
+    const Shared = struct {
+        server: *Server,
+        context: Context = .{},
+        saw_expected: bool = false,
+        err: ?anyerror = null,
+
+        fn run(shared: *@This()) void {
+            var connection = shared.server.accept() catch |err| {
+                shared.err = err;
+                return;
+            };
+            defer connection.close();
+            _ = connection.serveOne(
+                Context,
+                &shared.context,
+                Context.handle,
+            ) catch |err| {
+                if (err == error.InvalidContentLength) {
+                    shared.saw_expected = true;
+                    return;
+                }
+                shared.err = err;
+                return;
+            };
+            shared.err = error.UnexpectedFrame;
+        }
+    };
+
+    var shared = Shared{ .server = &server };
+    const thread = try std.Thread.spawn(.{}, Shared.run, .{&shared});
+    var client = try Client.connect(allocator, io, server.address(), .{
+        .max_frame_payload = 4096,
+    });
+    defer client.close();
+
+    try client.writeHeaders(1, &.{
+        .{ .name = ":method", .value = "POST" },
+        .{ .name = ":path", .value = "/short" },
+        .{ .name = ":scheme", .value = "http" },
+        .{ .name = "content-length", .value = "5" },
+    }, false);
+    try client.writeData(1, "four", true);
+    var reset = try client.readResetStream();
+    defer reset.deinit(allocator);
+    try std.testing.expectEqual(@as(u31, 1), reset.reset.stream_id);
+    try std.testing.expectEqual(http2.ErrorCode.protocol_error, reset.reset.error_code);
+
+    thread.join();
+    if (shared.err) |err| return err;
+    try std.testing.expect(shared.saw_expected);
+}
+
 test "HTTP/2 high-level writers strip outbound connection-specific headers" {
     const allocator = std.testing.allocator;
 
@@ -20413,6 +22021,124 @@ test "HTTP/2 high-level writers strip outbound connection-specific headers" {
     try std.testing.expectEqualStrings("kept", findHeader(response.headers, "x-response-end-to-end") orelse return error.MissingPseudoHeader);
 }
 
+test "HTTP/2 high-level writer strips a late Connection nomination" {
+    const allocator = std.testing.allocator;
+    var threaded = std.Io.Threaded.init(allocator, .{});
+    defer threaded.deinit();
+    const io = threaded.io();
+
+    var request_headers: [259]http2.Hpack.HeaderField = undefined;
+    for (request_headers[0..256]) |*header| {
+        header.* = .{ .name = "connection", .value = "x-decoy" };
+    }
+    request_headers[256] = .{
+        .name = "connection",
+        .value = "x-late-hop",
+    };
+    request_headers[257] = .{
+        .name = "x-late-hop",
+        .value = "must-not-cross-h2",
+    };
+    request_headers[258] = .{ .name = "x-kept", .value = "yes" };
+
+    var server = try Server.listen(
+        allocator,
+        io,
+        .{ .ip4 = .loopback(0) },
+        .{
+            .max_header_fields = 512,
+            .max_header_list_size = 64 * 1024,
+        },
+    );
+    defer server.deinit();
+
+    const Shared = struct {
+        server: *Server,
+        err: ?anyerror = null,
+
+        fn run(self: *@This()) void {
+            self.runFallible() catch |err| {
+                self.err = err;
+            };
+        }
+
+        fn runFallible(self: *@This()) !void {
+            var connection = try self.server.accept();
+            defer connection.close();
+            var request = try connection.readRequest();
+            defer request.deinit(self.server.allocator);
+            try std.testing.expect(findHeader(
+                request.headers,
+                "connection",
+            ) == null);
+            try std.testing.expect(findHeader(
+                request.headers,
+                "x-late-hop",
+            ) == null);
+            try std.testing.expectEqualStrings(
+                "yes",
+                findHeader(request.headers, "x-kept") orelse
+                    return error.MissingPseudoHeader,
+            );
+
+            var response_headers: [259]http2.Hpack.HeaderField = undefined;
+            for (response_headers[0..256]) |*header| {
+                header.* = .{
+                    .name = "connection",
+                    .value = "x-response-decoy",
+                };
+            }
+            response_headers[256] = .{
+                .name = "connection",
+                .value = "x-response-late",
+            };
+            response_headers[257] = .{
+                .name = "x-response-late",
+                .value = "must-not-cross-h2",
+            };
+            response_headers[258] = .{
+                .name = "x-response-kept",
+                .value = "yes",
+            };
+            try connection.writeResponse(request.stream_id, .{
+                .headers = &response_headers,
+            });
+        }
+    };
+    var shared = Shared{ .server = &server };
+    const thread = try std.Thread.spawn(.{}, Shared.run, .{&shared});
+
+    var client = try Client.connect(allocator, io, server.address(), .{
+        .max_header_fields = 512,
+        .max_header_list_size = 64 * 1024,
+    });
+    defer client.close();
+    var response = try client.request(.{
+        .method = "GET",
+        .path = "/late-nomination",
+        .authority = "localhost",
+        .headers = &request_headers,
+    });
+    defer response.deinit(allocator);
+    try std.testing.expectEqual(@as(u16, 200), response.status);
+    try std.testing.expect(findHeader(
+        response.headers,
+        "connection",
+    ) == null);
+    try std.testing.expect(findHeader(
+        response.headers,
+        "x-response-late",
+    ) == null);
+    try std.testing.expectEqualStrings(
+        "yes",
+        findHeader(response.headers, "x-response-kept") orelse
+            return error.MissingPseudoHeader,
+    );
+
+    thread.join();
+    if (shared.err) |err| return err;
+}
+
 test "HTTP/2 stripConnectionHeaders compacts nominated hop-by-hop fields" {
     const allocator = std.testing.allocator;
     var headers: std.ArrayList(http2.Hpack.HeaderField) = .empty;
@@ -20428,7 +22154,11 @@ test "HTTP/2 stripConnectionHeaders compacts nominated hop-by-hop fields" {
         .{ .name = "x-keep-b", .value = "b" },
     });
 
-    stripConnectionHeaders(&headers, .request);
+    try outbound_headers.stripConnectionHeaders(
+        allocator,
+        &headers,
+        .request,
+    );
     try std.testing.expectEqual(@as(usize, 3), headers.items.len);
     try std.testing.expectEqualStrings("x-keep-a", headers.items[0].name);
     try std.testing.expectEqualStrings("te", headers.items[1].name);
@@ -20493,53 +22223,7 @@ test "HTTP/2 high-level request writer preserves TE trailers" {
     try std.testing.expectEqualStrings("ok", response.body);
 }
 
-test "HTTP/2 header validation rejects connection-specific headers" {
-    const bad_te_request = [_]http2.Hpack.HeaderField{
-        .{ .name = ":method", .value = "GET" },
-        .{ .name = ":path", .value = "/bad-te" },
-        .{ .name = ":scheme", .value = "https" },
-        .{ .name = ":authority", .value = "localhost" },
-        .{ .name = "te", .value = "gzip" },
-    };
-    try std.testing.expectError(error.InvalidHeader, validateHeaderBlock(&bad_te_request, .request));
-
-    const bad_transfer_encoding_request = [_]http2.Hpack.HeaderField{
-        .{ .name = ":method", .value = "GET" },
-        .{ .name = ":path", .value = "/bad-transfer-encoding" },
-        .{ .name = ":scheme", .value = "https" },
-        .{ .name = ":authority", .value = "localhost" },
-        .{ .name = "transfer-encoding", .value = "chunked" },
-    };
-    try std.testing.expectError(error.InvalidHeader, validateHeaderBlock(&bad_transfer_encoding_request, .request));
-
-    try std.testing.expectError(error.InvalidHeader, validateHeaderBlock(&.{
-        .{ .name = "te", .value = "trailers" },
-    }, .request_trailers));
-    try std.testing.expectError(error.InvalidHeader, validateHeaderBlock(&.{
-        .{ .name = "content-length", .value = "5" },
-    }, .request_trailers));
-    try std.testing.expectError(error.InvalidHeader, validateHeaderBlock(&.{
-        .{ .name = ":status", .value = "200" },
-        .{ .name = "te", .value = "trailers" },
-    }, .response));
-    try std.testing.expectError(error.InvalidHeader, validateHeaderBlock(&.{
-        .{ .name = ":status", .value = "200" },
-        .{ .name = "connection", .value = "x-hop" },
-    }, .response));
-    try std.testing.expectError(error.InvalidHeader, validateHeaderBlock(&.{
-        .{ .name = ":method", .value = "GET" },
-        .{ .name = ":path", .value = "/bad-value" },
-        .{ .name = ":scheme", .value = "https" },
-        .{ .name = ":authority", .value = "localhost" },
-        .{ .name = "x-bad", .value = "ok\r\ninjected: yes" },
-    }, .request));
-
-    try std.testing.expectError(error.InvalidContentLength, validateDeclaredRequestLength(&.{
-        .{ .name = "content-length", .value = "5" },
-    }, "pong".len));
-}
-
-test "HTTP/2 runtime validates pseudo headers and lowercase names" {
+test "HTTP/2 runtime rejects invalid wire and outbound header names" {
     const allocator = std.testing.allocator;
 
     var threaded = std.Io.Threaded.init(allocator, .{});
@@ -20631,241 +22315,6 @@ test "HTTP/2 runtime validates pseudo headers and lowercase names" {
         .authority = "localhost",
         .headers = &.{.{ .name = ":status", .value = "200" }},
     }));
-
-    const connect_missing_authority = [_]http2.Hpack.HeaderField{
-        .{ .name = ":method", .value = "CONNECT" },
-    };
-    try std.testing.expectError(error.MissingPseudoHeader, validateHeaderBlock(&connect_missing_authority, .request));
-
-    const connect_with_path_scheme = [_]http2.Hpack.HeaderField{
-        .{ .name = ":method", .value = "CONNECT" },
-        .{ .name = ":authority", .value = "example.com:443" },
-        .{ .name = ":scheme", .value = "https" },
-        .{ .name = ":path", .value = "/" },
-    };
-    try std.testing.expectError(error.InvalidHeader, validateHeaderBlock(&connect_with_path_scheme, .request));
-
-    const connect_ipv6 = [_]http2.Hpack.HeaderField{
-        .{ .name = ":method", .value = "CONNECT" },
-        .{ .name = ":authority", .value = "[2001:db8::1]:443" },
-    };
-    try validateHeaderBlock(&connect_ipv6, .request);
-
-    const connect_no_port = [_]http2.Hpack.HeaderField{
-        .{ .name = ":method", .value = "CONNECT" },
-        .{ .name = ":authority", .value = "example.com" },
-    };
-    try std.testing.expectError(error.InvalidHeader, validateHeaderBlock(&connect_no_port, .request));
-
-    const connect_bad_port = [_]http2.Hpack.HeaderField{
-        .{ .name = ":method", .value = "CONNECT" },
-        .{ .name = ":authority", .value = "example.com:65536" },
-    };
-    try std.testing.expectError(error.InvalidHeader, validateHeaderBlock(&connect_bad_port, .request));
-
-    const lowercase_connect_authority_only = [_]http2.Hpack.HeaderField{
-        .{ .name = ":method", .value = "connect" },
-        .{ .name = ":authority", .value = "example.com:443" },
-    };
-    try std.testing.expectError(error.MissingPseudoHeader, validateHeaderBlock(&lowercase_connect_authority_only, .request));
-
-    const lowercase_connect_origin_form = [_]http2.Hpack.HeaderField{
-        .{ .name = ":method", .value = "connect" },
-        .{ .name = ":path", .value = "/ordinary-extension-method" },
-        .{ .name = ":scheme", .value = "https" },
-        .{ .name = ":authority", .value = "example.com" },
-    };
-    try validateHeaderBlock(&lowercase_connect_origin_form, .request);
-
-    const lowercase_options_asterisk = [_]http2.Hpack.HeaderField{
-        .{ .name = ":method", .value = "options" },
-        .{ .name = ":path", .value = "*" },
-        .{ .name = ":scheme", .value = "https" },
-    };
-    try std.testing.expectError(error.InvalidHeader, validateHeaderBlock(&lowercase_options_asterisk, .request));
-
-    const empty_method = [_]http2.Hpack.HeaderField{
-        .{ .name = ":method", .value = "" },
-        .{ .name = ":path", .value = "/" },
-        .{ .name = ":scheme", .value = "https" },
-    };
-    try std.testing.expectError(error.InvalidHeader, validateHeaderBlock(&empty_method, .request));
-
-    const invalid_method_token = [_]http2.Hpack.HeaderField{
-        .{ .name = ":method", .value = "GET /" },
-        .{ .name = ":path", .value = "/" },
-        .{ .name = ":scheme", .value = "https" },
-    };
-    try std.testing.expectError(error.InvalidHeader, validateHeaderBlock(&invalid_method_token, .request));
-
-    const empty_path = [_]http2.Hpack.HeaderField{
-        .{ .name = ":method", .value = "GET" },
-        .{ .name = ":path", .value = "" },
-        .{ .name = ":scheme", .value = "https" },
-    };
-    try std.testing.expectError(error.InvalidHeader, validateHeaderBlock(&empty_path, .request));
-
-    const response_lookup_headers = [_]http2.Hpack.HeaderField{
-        .{ .name = ":status", .value = "204" },
-        .{ .name = "content-length", .value = "0, 0" },
-    };
-    const response_lookup = try responseHeaderLookup(&response_lookup_headers);
-    try std.testing.expectEqualStrings("204", response_lookup.status.?);
-    try std.testing.expectEqual(@as(?usize, 0), response_lookup.content_length);
-
-    const bad_status = [_]http2.Hpack.HeaderField{
-        .{ .name = ":status", .value = "20x" },
-    };
-    try std.testing.expectError(error.InvalidStatus, validateHeaderBlock(&bad_status, .response));
-
-    const low_status = [_]http2.Hpack.HeaderField{
-        .{ .name = ":status", .value = "099" },
-    };
-    try std.testing.expectError(error.InvalidStatus, validateHeaderBlock(&low_status, .response));
-
-    const switching_protocols = [_]http2.Hpack.HeaderField{
-        .{ .name = ":status", .value = "101" },
-    };
-    try std.testing.expectError(error.InvalidStatus, validateHeaderBlock(&switching_protocols, .response));
-
-    const connection_header = [_]http2.Hpack.HeaderField{
-        .{ .name = ":method", .value = "GET" },
-        .{ .name = ":path", .value = "/connection" },
-        .{ .name = ":scheme", .value = "https" },
-        .{ .name = "connection", .value = "keep-alive" },
-    };
-    try std.testing.expectError(error.InvalidHeader, validateHeaderBlock(&connection_header, .request));
-
-    const embedded_colon_name = [_]http2.Hpack.HeaderField{
-        .{ .name = ":method", .value = "GET" },
-        .{ .name = ":path", .value = "/embedded-colon" },
-        .{ .name = ":scheme", .value = "https" },
-        .{ .name = "bad:name", .value = "value" },
-    };
-    try std.testing.expectError(error.InvalidHeader, validateHeaderBlock(&embedded_colon_name, .request));
-
-    const malformed_pseudo_name = [_]http2.Hpack.HeaderField{
-        .{ .name = ":method", .value = "GET" },
-        .{ .name = ":path", .value = "/malformed-pseudo" },
-        .{ .name = ":scheme", .value = "https" },
-        .{ .name = ":bad:name", .value = "value" },
-    };
-    try std.testing.expectError(error.InvalidHeader, validateHeaderBlock(&malformed_pseudo_name, .request));
-
-    const host_only = [_]http2.Hpack.HeaderField{
-        .{ .name = ":method", .value = "GET" },
-        .{ .name = ":path", .value = "/host-only" },
-        .{ .name = ":scheme", .value = "https" },
-        .{ .name = "host", .value = "example.com" },
-    };
-    try validateHeaderBlock(&host_only, .request);
-    try std.testing.expectEqualStrings("example.com", requestAuthority(&host_only).?);
-    const host_lookup = try requestHeaderLookup(&host_only);
-    try std.testing.expectEqualStrings("GET", host_lookup.method.?);
-    try std.testing.expectEqualStrings("/host-only", host_lookup.path.?);
-    try std.testing.expectEqualStrings("https", host_lookup.scheme.?);
-    try std.testing.expectEqualStrings("example.com", host_lookup.requestAuthority().?);
-
-    const lookup_with_length = [_]http2.Hpack.HeaderField{
-        .{ .name = ":method", .value = "POST" },
-        .{ .name = ":path", .value = "/lookup" },
-        .{ .name = ":scheme", .value = "https" },
-        .{ .name = "content-length", .value = "5, 5" },
-        .{ .name = "priority", .value = "u=1" },
-    };
-    const parsed_lookup = try requestHeaderLookup(&lookup_with_length);
-    try std.testing.expectEqual(@as(?usize, 5), parsed_lookup.content_length);
-    try std.testing.expectEqualStrings("u=1", parsed_lookup.priority.?);
-
-    const matching_authorities = [_]http2.Hpack.HeaderField{
-        .{ .name = ":method", .value = "GET" },
-        .{ .name = ":path", .value = "/matching-authorities" },
-        .{ .name = ":scheme", .value = "https" },
-        .{ .name = ":authority", .value = "EXAMPLE.com:443" },
-        .{ .name = "host", .value = "example.COM:443" },
-    };
-    try validateHeaderBlock(&matching_authorities, .request);
-
-    const mismatched_authorities = [_]http2.Hpack.HeaderField{
-        .{ .name = ":method", .value = "GET" },
-        .{ .name = ":path", .value = "/mismatched-authorities" },
-        .{ .name = ":scheme", .value = "https" },
-        .{ .name = ":authority", .value = "origin.example" },
-        .{ .name = "host", .value = "proxy.example" },
-    };
-    try std.testing.expectError(error.InvalidHeader, validateHeaderBlock(&mismatched_authorities, .request));
-
-    const invalid_scheme = [_]http2.Hpack.HeaderField{
-        .{ .name = ":method", .value = "GET" },
-        .{ .name = ":path", .value = "/invalid-scheme" },
-        .{ .name = ":scheme", .value = "https://" },
-    };
-    try std.testing.expectError(error.InvalidHeader, validateHeaderBlock(&invalid_scheme, .request));
-
-    const invalid_path = [_]http2.Hpack.HeaderField{
-        .{ .name = ":method", .value = "GET" },
-        .{ .name = ":path", .value = "relative" },
-        .{ .name = ":scheme", .value = "https" },
-    };
-    try std.testing.expectError(error.InvalidHeader, validateHeaderBlock(&invalid_path, .request));
-
-    const query_only_path = [_]http2.Hpack.HeaderField{
-        .{ .name = ":method", .value = "GET" },
-        .{ .name = ":path", .value = "?q=1" },
-        .{ .name = ":scheme", .value = "https" },
-    };
-    try std.testing.expectError(error.InvalidHeader, validateHeaderBlock(&query_only_path, .request));
-
-    const origin_form_with_query = [_]http2.Hpack.HeaderField{
-        .{ .name = ":method", .value = "GET" },
-        .{ .name = ":path", .value = "/?q=1" },
-        .{ .name = ":scheme", .value = "https" },
-    };
-    try validateHeaderBlock(&origin_form_with_query, .request);
-
-    const fragment_path = [_]http2.Hpack.HeaderField{
-        .{ .name = ":method", .value = "GET" },
-        .{ .name = ":path", .value = "/resource#fragment" },
-        .{ .name = ":scheme", .value = "https" },
-    };
-    try std.testing.expectError(error.InvalidHeader, validateHeaderBlock(&fragment_path, .request));
-
-    const invalid_authority = [_]http2.Hpack.HeaderField{
-        .{ .name = ":method", .value = "GET" },
-        .{ .name = ":path", .value = "/invalid-authority" },
-        .{ .name = ":scheme", .value = "https" },
-        .{ .name = ":authority", .value = "user@example.com" },
-    };
-    try std.testing.expectError(error.InvalidHeader, validateHeaderBlock(&invalid_authority, .request));
-
-    const invalid_authority_port = [_]http2.Hpack.HeaderField{
-        .{ .name = ":method", .value = "GET" },
-        .{ .name = ":path", .value = "/invalid-authority-port" },
-        .{ .name = ":scheme", .value = "https" },
-        .{ .name = ":authority", .value = "example.com:65536" },
-    };
-    try std.testing.expectError(error.InvalidHeader, validateHeaderBlock(&invalid_authority_port, .request));
-
-    const bad_response_value = [_]http2.Hpack.HeaderField{
-        .{ .name = ":status", .value = "200" },
-        .{ .name = "x-bad", .value = "bad\x7fvalue" },
-    };
-    try std.testing.expectError(error.InvalidHeader, validateHeaderBlock(&bad_response_value, .response));
-
-    const invalid_request_trailer = [_]http2.Hpack.HeaderField{
-        .{ .name = "content-type", .value = "text/plain" },
-    };
-    try std.testing.expectError(error.InvalidHeader, validateHeaderBlock(&invalid_request_trailer, .request_trailers));
-
-    const invalid_response_trailer = [_]http2.Hpack.HeaderField{
-        .{ .name = "set-cookie", .value = "a=b" },
-    };
-    try std.testing.expectError(error.InvalidHeader, validateHeaderBlock(&invalid_response_trailer, .response_trailers));
-
-    try std.testing.expect(responseForbidsBody(200, "HEAD", false));
-    try std.testing.expect(!responseForbidsBody(200, "head", false));
-    try std.testing.expect(responseForbidsBody(200, "CONNECT", false));
-    try std.testing.expect(!responseForbidsBody(200, "connect", false));
 }
 
 test "HTTP/2 async std.Io server handles concurrent h2c clients" {
@@ -21419,6 +22868,151 @@ test "HTTP/2 response writer defaults content-length for known body" {
     try std.testing.expectEqual(@as(u16, 200), response.status);
     try std.testing.expectEqualStrings("known-body", response.body);
     try std.testing.expectEqualStrings("10", findHeader(response.headers, "content-length") orelse return error.MissingPseudoHeader);
+    const date = findHeader(response.headers, "date") orelse
+        return error.MissingPseudoHeader;
+    try std.testing.expectEqual(@as(usize, http_date.value_len), date.len);
+    try std.testing.expectEqualStrings("GMT", date[26..]);
+}
+
+test "HTTP/2 server preserves explicit Date and can disable automatic Date" {
+    const allocator = std.testing.allocator;
+    var threaded = std.Io.Threaded.init(allocator, .{});
+    defer threaded.deinit();
+    const io = threaded.io();
+
+    var server = try Server.listen(
+        allocator,
+        io,
+        .{ .ip4 = .loopback(0) },
+        .{},
+    );
+    defer server.deinit();
+
+    const Shared = struct {
+        server: *Server,
+        err: ?anyerror = null,
+
+        fn run(self: *@This()) void {
+            self.runFallible() catch |err| {
+                self.err = err;
+            };
+        }
+
+        fn runFallible(self: *@This()) !void {
+            var connection = try self.server.accept();
+            defer connection.close();
+            var first = try connection.readRequest();
+            defer first.deinit(self.server.allocator);
+            try connection.writeResponse(first.stream_id, .{
+                .headers = &.{.{
+                    .name = "date",
+                    .value = "Sun, 06 Nov 1994 08:49:37 GMT",
+                }},
+            });
+            connection.limits.auto_date_header = false;
+            var second = try connection.readRequest();
+            defer second.deinit(self.server.allocator);
+            try connection.writeResponse(second.stream_id, .{});
+        }
+    };
+    var shared = Shared{ .server = &server };
+    const thread = try std.Thread.spawn(.{}, Shared.run, .{&shared});
+
+    var client = try Client.connect(allocator, io, server.address(), .{});
+    defer client.close();
+    var explicit = try client.request(.{
+        .path = "/explicit-date",
+        .authority = "localhost",
+    });
+    defer explicit.deinit(allocator);
+    try std.testing.expectEqualStrings(
+        "Sun, 06 Nov 1994 08:49:37 GMT",
+        findHeader(explicit.headers, "date").?,
+    );
+    var disabled = try client.request(.{
+        .path = "/disabled-date",
+        .authority = "localhost",
+    });
+    defer disabled.deinit(allocator);
+    try std.testing.expect(findHeader(disabled.headers, "date") == null);
+
+    thread.join();
+    if (shared.err) |err| return err;
+}
+
+test "HTTP/2 automatic Date appends without allocation after HPACK warmup" {
+    const allocator = std.testing.allocator;
+    var encoder = http2.Hpack.Encoder{};
+    defer encoder.deinit(allocator);
+    const date = "Sun, 06 Nov 1994 08:49:37 GMT".*;
+    var fields_storage: [2]http2.Hpack.HeaderField = undefined;
+    var fields: std.ArrayList(http2.Hpack.HeaderField) =
+        .initBuffer(&fields_storage);
+
+    fields.appendAssumeCapacity(.{ .name = ":status", .value = "200" });
+    appendAutomaticDateHeaderValue(&fields, &date);
+    _ = try encoder.encodeBlockRetained(allocator, fields.items);
+
+    fields.clearRetainingCapacity();
+    fields.appendAssumeCapacity(.{ .name = ":status", .value = "200" });
+    appendAutomaticDateHeaderValue(&fields, &date);
+    var no_alloc = std.testing.FailingAllocator.init(
+        allocator,
+        .{ .fail_index = 0 },
+    );
+    _ = try encoder.encodeBlockRetained(no_alloc.allocator(), fields.items);
+    try std.testing.expect(!no_alloc.has_induced_failure);
+    try std.testing.expectEqual(@as(usize, 2), fields.items.len);
+    try std.testing.expectEqualStrings("date", fields.items[1].name);
+    try std.testing.expectEqualStrings(&date, fields.items[1].value);
+}
+
+test "HTTP/2 batch Date preflight reports only missing retained fields" {
+    var connection = Connection{
+        .io = undefined,
+        .allocator = std.testing.allocator,
+        .stream = undefined,
+        .role = .server,
+    };
+    defer {
+        connection.response_semantics.deinit(std.testing.allocator);
+        connection.response_semantics_index.deinit(std.testing.allocator);
+        connection.hpack_decoder.deinit(std.testing.allocator);
+        connection.hpack_encoder.deinit(std.testing.allocator);
+    }
+
+    try std.testing.expect(try connection.validateResponseBatchMember(
+        1,
+        .{},
+        true,
+    ));
+    try std.testing.expect(!(try connection.validateResponseBatchMember(
+        1,
+        .{ .headers = &.{.{
+            .name = "date",
+            .value = "Sun, 06 Nov 1994 08:49:37 GMT",
+        }} },
+        true,
+    )));
+    // A field nominated by Connection is removed before this decision.
+    try std.testing.expect(try connection.validateResponseBatchMember(
+        1,
+        .{ .headers = &.{
+            .{ .name = "connection", .value = "date" },
+            .{
+                .name = "date",
+                .value = "Sun, 06 Nov 1994 08:49:37 GMT",
+            },
+        } },
+        true,
+    ));
+
+    connection.limits.auto_date_header = false;
+    try std.testing.expect(!(try connection.validateResponseBatchMember(
+        1,
+        .{},
+        true,
+    )));
 }
 
 test "HTTP/2 client accepts zero Content-Length on successful CONNECT tunnel" {
@@ -21543,6 +23137,134 @@ test "HTTP/2 CONNECT tunnel skips valid informational responses" {
     thread.join();
     if (shared.err) |err| return err;
     try std.testing.expectEqual(@as(u16, 200), response.status);
+    const date = findHeader(response.headers, "date") orelse
+        return error.MissingPseudoHeader;
+    try std.testing.expectEqual(@as(usize, http_date.value_len), date.len);
+    try std.testing.expectEqualStrings("GMT", date[26..]);
+}
+
+test "HTTP/2 CONNECT informational response omits automatic Date" {
+    const allocator = std.testing.allocator;
+    var threaded = std.Io.Threaded.init(allocator, .{});
+    defer threaded.deinit();
+    const io = threaded.io();
+
+    var server = try Server.listen(
+        allocator,
+        io,
+        .{ .ip4 = .loopback(0) },
+        .{
+            .enable_connect_protocol = true,
+            .max_frame_payload = 4096,
+            .max_body_bytes = 4096,
+        },
+    );
+    defer server.deinit();
+
+    const Shared = struct {
+        server: *Server,
+        err: ?anyerror = null,
+
+        fn run(self: *@This()) void {
+            self.runFallible() catch |err| {
+                self.err = err;
+            };
+        }
+
+        fn runFallible(self: *@This()) !void {
+            var connection = try self.server.accept();
+            defer connection.close();
+            var request = try connection.readExtendedConnectRequest(
+                "websocket",
+            );
+            defer request.deinit(self.server.allocator);
+            try connection.writeExtendedConnectResponse(
+                request.stream_id,
+                103,
+                &.{.{
+                    .name = "link",
+                    .value = "</proxy-hint>; rel=preload",
+                }},
+                false,
+            );
+            try connection.writeExtendedConnectResponse(
+                request.stream_id,
+                200,
+                &.{},
+                false,
+            );
+        }
+    };
+
+    const HeadReader = struct {
+        fn read(
+            connection: *Connection,
+            decoder: *http2.Hpack.Decoder,
+        ) ![]http2.Hpack.HeaderField {
+            while (true) {
+                var frame = try connection.readOwnedFrame();
+                defer frame.deinit(connection.allocator);
+                if (try connection.handleConnectionFrame(frame.frame)) {
+                    continue;
+                }
+                if (frame.frame.header.frame_type != .headers) {
+                    return error.UnexpectedFrame;
+                }
+                if ((frame.frame.header.flags & flag_end_headers) == 0) {
+                    return error.UnexpectedFrame;
+                }
+                const payload = try http2.HeadersPayload.parse(frame.frame);
+                return decoder.decodeBlockOwnedWithLimit(
+                    connection.allocator,
+                    payload.header_block,
+                    connection.limits.max_header_fields,
+                    connection.limits.max_header_list_size,
+                );
+            }
+        }
+    };
+
+    var shared = Shared{ .server = &server };
+    const thread = try std.Thread.spawn(.{}, Shared.run, .{&shared});
+    var joined = false;
+    defer if (!joined) thread.join();
+
+    var client = try Client.connect(allocator, io, server.address(), .{});
+    defer client.close();
+    try std.testing.expect(client.peer_enable_connect_protocol);
+    const stream_id = try client.reserveNextClientStreamId();
+    try client.writeHeaders(stream_id, &.{
+        .{ .name = ":method", .value = "CONNECT" },
+        .{ .name = ":scheme", .value = "http" },
+        .{ .name = ":path", .value = "/chat" },
+        .{ .name = ":authority", .value = "localhost" },
+        .{ .name = ":protocol", .value = "websocket" },
+    }, false);
+
+    var decoder: http2.Hpack.Decoder = .{};
+    defer decoder.deinit(allocator);
+    const informational = try HeadReader.read(&client, &decoder);
+    defer freeHeaders(allocator, informational);
+    try std.testing.expectEqualStrings(
+        "103",
+        findHeader(informational, ":status").?,
+    );
+    try std.testing.expect(findHeader(informational, "date") == null);
+
+    const final = try HeadReader.read(&client, &decoder);
+    defer freeHeaders(allocator, final);
+    try std.testing.expectEqualStrings(
+        "200",
+        findHeader(final, ":status").?,
+    );
+    const date = findHeader(final, "date") orelse
+        return error.MissingPseudoHeader;
+    try std.testing.expectEqual(@as(usize, http_date.value_len), date.len);
+    try std.testing.expectEqualStrings("GMT", date[26..]);
+
+    thread.join();
+    joined = true;
+    if (shared.err) |err| return err;
 }
 
 test "HTTP/2 CONNECT tunnel rejects content-length on informational response" {
@@ -21667,6 +23389,10 @@ test "HTTP/2 runtime accepts multipart traditional CONNECT DATA tunnel" {
     defer response.deinit(allocator);
     try std.testing.expectEqual(@as(u16, 200), response.status);
     try std.testing.expect(findHeader(response.headers, "content-length") == null);
+    try std.testing.expectEqual(
+        @as(usize, http_date.value_len),
+        findHeader(response.headers, "date").?.len,
+    );
 
     var tunnel = response.tunnel;
     try tunnel.writeParts("client ", "tunnel bytes", false);
@@ -22124,26 +23850,6 @@ test "HTTP/2 extended CONNECT requires peer opt-in" {
     try validateHeaderBlock(&extended_host_fallback, .request);
 }
 
-test "HTTP/2 flow window blocks and updates" {
-    var window = FlowWindow{ .value = 4 };
-    try std.testing.expectEqual(@as(usize, 4), window.available());
-    try window.reserve(4);
-    try std.testing.expectEqual(@as(i64, 0), window.value);
-    try std.testing.expectEqual(@as(usize, 0), window.available());
-    try std.testing.expectError(error.FlowControlBlocked, window.reserve(1));
-    try window.update(8);
-    try window.reserve(3);
-    try std.testing.expectEqual(@as(i64, 5), window.value);
-    window.value = max_flow_window;
-    try std.testing.expectError(error.FlowControlViolation, window.update(1));
-    try std.testing.expectEqual(max_flow_window, window.value);
-
-    var recv = FlowWindow{ .value = 2 };
-    try std.testing.expectError(error.FlowControlViolation, recv.receive(3));
-    try recv.receive(2);
-    try std.testing.expectEqual(@as(i64, 0), recv.value);
-}
-
 test "HTTP/2 padded DATA charges full frame payload to receive windows" {
     var connection = Connection{
         .io = undefined,
@@ -22182,6 +23888,99 @@ test "HTTP/2 padded DATA charges full frame payload to receive windows" {
     try std.testing.expectEqualStrings("ok", data.data);
     try std.testing.expectEqual(@as(i64, 0), connection.recv_connection_window.value);
     try std.testing.expectEqual(@as(i64, 0), (try connection.recvStreamWindow(1)).value);
+}
+
+test "HTTP/2 empty DATA is legal while stream window is negative" {
+    const allocator = std.testing.allocator;
+    var connection = Connection{
+        .io = undefined,
+        .allocator = allocator,
+        .stream = undefined,
+        .role = .server,
+    };
+    defer {
+        connection.send_stream_windows.deinit(allocator);
+        connection.send_stream_window_index.deinit(allocator);
+        connection.recv_stream_windows.deinit(allocator);
+        connection.recv_stream_window_index.deinit(allocator);
+        connection.hpack_decoder.deinit(allocator);
+        connection.hpack_encoder.deinit(allocator);
+    }
+    connection.recv_connection_window.value = -7;
+    const stream_window = try connection.recvStreamWindow(1);
+    stream_window.value = -11;
+
+    const data = try connection.receiveDataPayload(1, .{
+        .header = .{
+            .length = 0,
+            .frame_type = .data,
+            .flags = flag_end_stream,
+            .stream_id = 1,
+        },
+        .payload = &.{},
+    });
+    try std.testing.expectEqual(@as(usize, 0), data.data.len);
+    try std.testing.expectEqual(@as(i64, -7), connection.recv_connection_window.value);
+    try std.testing.expectEqual(@as(i64, -11), stream_window.value);
+}
+
+test "HTTP/2 final DATA returns connection credit without stream update" {
+    const allocator = std.testing.allocator;
+    const RecordingWriter = struct {
+        bytes: [32]u8 = undefined,
+        len: usize = 0,
+
+        fn write(
+            context: ?*anyopaque,
+            _: net.Socket.Handle,
+            bytes: []const u8,
+            _: []const []const u8,
+            _: usize,
+        ) net.Stream.Writer.Error!usize {
+            const self: *@This() = @ptrCast(@alignCast(context.?));
+            const count = @min(bytes.len, self.bytes.len - self.len);
+            if (count == 0) return error.SocketUnconnected;
+            @memcpy(self.bytes[self.len..][0..count], bytes[0..count]);
+            self.len += count;
+            return count;
+        }
+    };
+
+    var threaded = std.Io.Threaded.init(allocator, .{});
+    defer threaded.deinit();
+    var writer: RecordingWriter = .{};
+    var vtable = threaded.io().vtable.*;
+    vtable.netWrite = RecordingWriter.write;
+    var connection = Connection{
+        .io = .{ .userdata = &writer, .vtable = &vtable },
+        .allocator = allocator,
+        .stream = undefined,
+        .role = .client,
+        .recv_connection_window = .{ .value = 20_000 },
+        .recv_connection_window_target = 65_535,
+        .recv_stream_window_target = 65_535,
+        .adaptive_window = bdp.Estimator.init(65_535, 1024 * 1024),
+    };
+    defer {
+        connection.recv_stream_windows.deinit(allocator);
+        connection.recv_stream_window_index.deinit(allocator);
+    }
+    (try connection.recvStreamWindow(1)).value = 20_000;
+
+    try connection.maybeReleaseReceivedCapacity(1, true);
+
+    try std.testing.expectEqual(
+        @as(usize, http2.FrameHeader.encoded_len + 4),
+        writer.len,
+    );
+    const frame = try http2.Frame.parse(writer.bytes[0..writer.len]);
+    const update = try http2.WindowUpdatePayload.parse(frame);
+    try std.testing.expectEqual(@as(u31, 0), update.stream_id);
+    try std.testing.expectEqual(@as(u31, 45_535), update.increment);
+    try std.testing.expectEqual(
+        @as(i64, 20_000),
+        (try connection.recvStreamWindow(1)).value,
+    );
 }
 
 test "HTTP/2 DATA send waits for WINDOW_UPDATE capacity" {
@@ -22272,7 +24071,139 @@ test "HTTP/2 DATA send waits for WINDOW_UPDATE capacity" {
     if (shared.err) |err| return err;
 }
 
-test "HTTP/2 request batch reorders out-of-order responses" {
+test "HTTP/2 local protocol error reset budget closes real connection" {
+    const allocator = std.testing.allocator;
+
+    var threaded = std.Io.Threaded.init(allocator, .{
+        .async_limit = .unlimited,
+    });
+    defer threaded.deinit();
+    const io = threaded.io();
+    const limits: Limits = .{
+        .max_frame_payload = 4096,
+        .max_body_bytes = 4096,
+        .max_local_error_reset_streams = 1,
+    };
+
+    var server = try Server.listen(
+        allocator,
+        io,
+        .{ .ip4 = .loopback(0) },
+        limits,
+    );
+    defer server.deinit();
+
+    const Shared = struct {
+        server: *Server,
+        io: std.Io,
+        ready: std.Io.Event = .unset,
+        err: ?anyerror = null,
+
+        fn run(self: *@This()) void {
+            self.runFallible() catch |err| {
+                self.err = err;
+                self.ready.set(self.io);
+            };
+        }
+
+        fn runFallible(self: *@This()) !void {
+            var connection = try self.server.accept();
+            defer connection.close();
+
+            var first = try connection.readRequest();
+            defer first.deinit(self.server.allocator);
+            var second = try connection.readRequest();
+            defer second.deinit(self.server.allocator);
+            try std.testing.expectEqual(@as(u31, 1), first.stream_id);
+            try std.testing.expectEqual(@as(u31, 3), second.stream_id);
+            (try connection.sendStreamWindow(first.stream_id)).value =
+                max_flow_window;
+            (try connection.sendStreamWindow(second.stream_id)).value =
+                max_flow_window;
+            self.ready.set(self.io);
+
+            if (connection.readRequestWithTimeout(.fromSeconds(2))) |request| {
+                var unexpected = request;
+                unexpected.deinit(self.server.allocator);
+                return error.TestUnexpectedResult;
+            } else |err| {
+                try std.testing.expectEqual(
+                    error.ConnectionGoAway,
+                    err,
+                );
+            }
+            try std.testing.expectEqual(
+                @as(usize, 1),
+                connection.local_error_reset_streams,
+            );
+            try std.testing.expect(connection.aggregate_timeout_unusable);
+        }
+    };
+
+    var shared = Shared{ .server = &server, .io = io };
+    const thread = try std.Thread.spawn(.{}, Shared.run, .{&shared});
+    var joined = false;
+    defer if (!joined) thread.join();
+
+    var client = try Client.connect(allocator, io, server.address(), limits);
+    defer client.close();
+    _ = try client.sendCompleteRequest(.{
+        .path = "/first",
+        .authority = "localhost",
+    });
+    _ = try client.sendCompleteRequest(.{
+        .path = "/second",
+        .authority = "localhost",
+    });
+    try shared.ready.wait(io);
+    if (shared.err) |err| return err;
+
+    const overflow = [_]u8{ 0, 0, 0, 1 };
+    try writeFrame(
+        allocator,
+        io,
+        client.stream,
+        .window_update,
+        0,
+        1,
+        &overflow,
+    );
+    try writeFrame(
+        allocator,
+        io,
+        client.stream,
+        .window_update,
+        0,
+        3,
+        &overflow,
+    );
+
+    var reset = try client.readResetStreamWithTimeout(.fromSeconds(2));
+    defer reset.deinit(allocator);
+    try std.testing.expectEqual(@as(u31, 1), reset.reset.stream_id);
+    try std.testing.expectEqual(
+        http2.ErrorCode.flow_control_error,
+        reset.reset.error_code,
+    );
+
+    var goaway = try client.readGoAwayWithTimeout(.fromSeconds(2));
+    defer goaway.deinit(allocator);
+    try std.testing.expectEqual(@as(u31, 3), goaway.goaway.last_stream_id);
+    try std.testing.expectEqual(
+        http2.ErrorCode.enhance_your_calm,
+        goaway.goaway.error_code,
+    );
+    try std.testing.expectEqualStrings(
+        "too_many_internal_resets",
+        goaway.goaway.debug_data,
+    );
+
+    thread.join();
+    joined = true;
+    if (shared.err) |err| return err;
+}
+
+test "HTTP/2 response batch reorders out-of-order responses" {
     const allocator = std.testing.allocator;
 
     var threaded = std.Io.Threaded.init(allocator, .{});
@@ -22364,6 +24295,12 @@ test "HTTP/2 request batch reorders out-of-order responses" {
         "/three",
         findHeader(responses[2].headers, "x-path").?,
     );
+    for (responses) |response| {
+        const date = findHeader(response.headers, "date") orelse
+            return error.MissingPseudoHeader;
+        try std.testing.expectEqual(@as(usize, http_date.value_len), date.len);
+        try std.testing.expectEqualStrings("GMT", date[26..]);
+    }
     try std.testing.expectEqual(@as(usize, 0), client.active_local_streams.items.len);
 
     thread.join();
@@ -22767,50 +24704,6 @@ test "HTTP/2 streaming request consumes body without aggregation" {
     try std.testing.expectEqual(expected_checksum, shared.checksum);
 }
 
-test "HTTP/2 buffered frame reader preserves coalesced suffix" {
-    const allocator = std.testing.allocator;
-    var raw: std.ArrayList(u8) = .empty;
-    try (http2.Frame{
-        .header = .{
-            .length = 0,
-            .frame_type = .ping,
-            .flags = flag_ack,
-            .stream_id = 0,
-        },
-        .payload = "12345678",
-    }).write(&raw, allocator);
-    try (http2.Frame{
-        .header = .{
-            .length = 0,
-            .frame_type = .headers,
-            .flags = flag_end_headers | flag_end_stream,
-            .stream_id = 1,
-        },
-        .payload = &.{0x82},
-    }).write(&raw, allocator);
-
-    var connection = Connection{
-        .io = undefined,
-        .allocator = allocator,
-        .stream = undefined,
-        .role = .server,
-        .frame_reader = .{ .buffer = raw },
-    };
-    defer connection.frame_reader.deinit(allocator);
-
-    const first = try connection.readBufferedFrame();
-    try std.testing.expectEqual(http2.FrameType.ping, first.frame.header.frame_type);
-    try std.testing.expectEqualStrings("12345678", first.frame.payload);
-    const second = try connection.readBufferedFrame();
-    try std.testing.expectEqual(http2.FrameType.headers, second.frame.header.frame_type);
-    try std.testing.expectEqual(@as(u31, 1), second.frame.header.stream_id);
-    try std.testing.expectEqualSlices(u8, &.{0x82}, second.frame.payload);
-    try std.testing.expectEqual(
-        connection.frame_reader.buffer.items.len,
-        connection.frame_reader.start,
-    );
-}
-
 test "HTTP/2 streaming pending request cleans up callback failure" {
     const allocator = std.testing.allocator;
     const headers = try allocator.alloc(http2.Hpack.HeaderField, 3);
@@ -23019,7 +24912,12 @@ test "HTTP/2 response batch validates transactionally" {
     );
     try std.testing.expect(connection.outboundStreamIsActive(1));
     try std.testing.expect(connection.outboundStreamIsActive(3));
-    try std.testing.expect(connection.write_batch.items.len != 0);
+    // Full preflight rejects the invalid member before staging any HPACK or
+    // wire bytes, which is stronger than merely allowing partial scratch.
+    try std.testing.expectEqual(
+        @as(usize, 0),
+        connection.write_batch.items.len,
+    );
     try std.testing.expectEqual(
         @as(usize, 0),
         connection.hpack_encoder.dynamic_table.entries.items.len,
@@ -23172,6 +25070,317 @@ test "HTTP/2 SETTINGS_INITIAL_WINDOW_SIZE updates stream send windows" {
     try std.testing.expectEqual(@as(i64, 70_000), connection.peer_initial_stream_window);
     try std.testing.expectEqual(@as(i64, 100), (try connection.sendStreamWindow(1)).value);
     try std.testing.expectEqual(max_flow_window, (try connection.sendStreamWindow(3)).value);
+}
+
+test "HTTP/2 adaptive window queues behind initial SETTINGS ACK" {
+    const allocator = std.testing.allocator;
+    const adaptive_target: u32 = 100_000;
+    const sample_bytes: usize = adaptive_target / 2;
+    const final_bytes: usize = 1;
+
+    var threaded = std.Io.Threaded.init(allocator, .{});
+    defer threaded.deinit();
+    const io = threaded.io();
+
+    var server = try Server.listen(
+        allocator,
+        io,
+        .{ .ip4 = .loopback(0) },
+        .{
+            .max_frame_payload = 64 * 1024,
+            .max_body_bytes = 128 * 1024,
+            .adaptive_window = true,
+            .adaptive_window_max = 1024 * 1024,
+        },
+    );
+    defer server.deinit();
+
+    const Shared = struct {
+        server: *Server,
+        err: ?anyerror = null,
+
+        fn run(shared: *@This()) void {
+            runFallible(shared) catch |err| {
+                shared.err = err;
+            };
+        }
+
+        fn runFallible(shared: *@This()) !void {
+            var connection = try shared.server.accept();
+            defer connection.close();
+            try std.testing.expect(connection.awaiting_settings_ack);
+
+            var request = try connection.readRequest();
+            defer request.deinit(shared.server.allocator);
+            try std.testing.expectEqualStrings(
+                "/adaptive-window",
+                request.path,
+            );
+            try std.testing.expectEqual(
+                sample_bytes + final_bytes,
+                request.body.len,
+            );
+
+            // The BDP ACK arrived before the initial SETTINGS ACK. Processing
+            // the latter emitted exactly one merged adaptive update and began
+            // a fresh SETTINGS acknowledgement wait.
+            try std.testing.expect(connection.awaiting_settings_ack);
+            try std.testing.expectEqual(
+                @as(?u32, adaptive_target),
+                connection.adaptive_pending_stream_target,
+            );
+            try std.testing.expectEqual(
+                @as(?u32, null),
+                connection.adaptive_queued_target,
+            );
+            try std.testing.expectEqual(
+                adaptive_target,
+                connection.recv_connection_window_target,
+            );
+            try std.testing.expectEqual(
+                adaptive_target,
+                connection.recv_stream_window_target,
+            );
+            try std.testing.expect(
+                (try connection.recvStreamWindow(1)).value >
+                    default_flow_window,
+            );
+            try std.testing.expectEqual(
+                @as(i64, adaptive_target),
+                (try connection.recvStreamWindow(3)).value,
+            );
+
+            const user_ping = [_]u8{ 6, 2, 6, 4, 3, 3, 8, 3 };
+            const observed = try connection.readPing();
+            try std.testing.expectEqualSlices(u8, &user_ping, &observed);
+            try std.testing.expect(!connection.awaiting_settings_ack);
+            try std.testing.expectEqual(
+                @as(?u32, null),
+                connection.adaptive_pending_stream_target,
+            );
+        }
+    };
+
+    var shared = Shared{ .server = &server };
+    const thread = try std.Thread.spawn(.{}, Shared.run, .{&shared});
+
+    const stream = try server.address().connect(io, .{ .mode = .stream });
+    defer stream.close(io);
+    try writeAll(io, stream, http2.connection_preface);
+    try writeFrame(allocator, io, stream, .settings, 0, 0, &.{});
+
+    var server_settings = try readFrame(allocator, io, stream, .{});
+    defer server_settings.deinit(allocator);
+    try std.testing.expectEqual(
+        http2.FrameType.settings,
+        server_settings.frame.header.frame_type,
+    );
+    try std.testing.expectEqual(
+        @as(u8, 0),
+        server_settings.frame.header.flags & flag_ack,
+    );
+    var server_ack = try readFrame(allocator, io, stream, .{});
+    defer server_ack.deinit(allocator);
+    try std.testing.expectEqual(
+        http2.FrameType.settings,
+        server_ack.frame.header.frame_type,
+    );
+    try std.testing.expect(server_ack.frame.header.flags & flag_ack != 0);
+
+    var request_block: std.ArrayList(u8) = .empty;
+    defer request_block.deinit(allocator);
+    try http2.Hpack.encodeLiteralBlock(&request_block, allocator, &.{
+        .{ .name = ":method", .value = "POST" },
+        .{ .name = ":path", .value = "/adaptive-window" },
+        .{ .name = ":scheme", .value = "http" },
+        .{ .name = ":authority", .value = "localhost" },
+        .{ .name = "content-length", .value = "50001" },
+    });
+    try writeFrame(
+        allocator,
+        io,
+        stream,
+        .headers,
+        flag_end_headers,
+        1,
+        request_block.items,
+    );
+    var data: [default_max_frame_size]u8 = undefined;
+    @memset(&data, 'd');
+    try writeFrame(allocator, io, stream, .data, 0, 1, &data);
+    try writeFrame(allocator, io, stream, .data, 0, 1, &data);
+    try writeFrame(allocator, io, stream, .data, 0, 1, &data);
+    try writeFrame(
+        allocator,
+        io,
+        stream,
+        .data,
+        0,
+        1,
+        data[0 .. sample_bytes - 3 * default_max_frame_size],
+    );
+
+    var probe_payload: ?[8]u8 = null;
+    while (probe_payload == null) {
+        var frame = try readFrame(allocator, io, stream, .{});
+        defer frame.deinit(allocator);
+        if (frame.frame.header.frame_type == .ping) {
+            try std.testing.expectEqual(
+                @as(u8, 0),
+                frame.frame.header.flags & flag_ack,
+            );
+            probe_payload = (try http2.PingPayload.parse(frame.frame)).data;
+            try std.testing.expect(bdp.isProbePayload(probe_payload.?));
+        }
+    }
+
+    // Deliberately acknowledge the probe before the server's initial
+    // SETTINGS. The target must remain queued until that older transaction is
+    // acknowledged. The final DATA keeps readRequest alive long enough to
+    // process both control frames first.
+    try writeFrame(
+        allocator,
+        io,
+        stream,
+        .ping,
+        flag_ack,
+        0,
+        &probe_payload.?,
+    );
+    try writeFrame(allocator, io, stream, .settings, flag_ack, 0, &.{});
+    try writeFrame(
+        allocator,
+        io,
+        stream,
+        .data,
+        flag_end_stream,
+        1,
+        "!",
+    );
+
+    var saw_connection_growth = false;
+    var saw_adaptive_settings = false;
+    while (!saw_adaptive_settings) {
+        var frame = try readFrame(allocator, io, stream, .{});
+        defer frame.deinit(allocator);
+        switch (frame.frame.header.frame_type) {
+            .window_update => {
+                const update = try http2.WindowUpdatePayload.parse(
+                    frame.frame,
+                );
+                if (update.stream_id == 0 and
+                    update.increment ==
+                        adaptive_target - default_flow_window)
+                {
+                    saw_connection_growth = true;
+                }
+            },
+            .settings => {
+                try std.testing.expectEqual(
+                    @as(u8, 0),
+                    frame.frame.header.flags & flag_ack,
+                );
+                const settings = try http2.parseSettings(
+                    allocator,
+                    frame.frame.payload,
+                );
+                defer allocator.free(settings);
+                for (settings) |setting| {
+                    if (setting.id == .initial_window_size and
+                        setting.value == adaptive_target)
+                    {
+                        saw_adaptive_settings = true;
+                    }
+                }
+            },
+            else => {},
+        }
+    }
+    try std.testing.expect(saw_connection_growth);
+
+    try writeFrame(allocator, io, stream, .settings, flag_ack, 0, &.{});
+    // Internal probe-shaped requests are acknowledged as connection control
+    // and cannot escape through the public user-PING receive API.
+    try writeFrame(
+        allocator,
+        io,
+        stream,
+        .ping,
+        0,
+        0,
+        &probe_payload.?,
+    );
+    const user_ping = [_]u8{ 6, 2, 6, 4, 3, 3, 8, 3 };
+    try writeFrame(allocator, io, stream, .ping, 0, 0, &user_ping);
+    while (true) {
+        var frame = try readFrame(allocator, io, stream, .{});
+        defer frame.deinit(allocator);
+        if (frame.frame.header.frame_type != .ping or
+            frame.frame.header.flags & flag_ack == 0) continue;
+        const echoed = (try http2.PingPayload.parse(frame.frame)).data;
+        if (bdp.isProbePayload(echoed)) continue;
+        try std.testing.expectEqualSlices(u8, &user_ping, &echoed);
+        break;
+    }
+
+    thread.join();
+    if (shared.err) |err| return err;
+}
+
+test "HTTP/2 adaptive window coalesces pending targets" {
+    var connection = Connection{
+        .io = undefined,
+        .allocator = std.testing.allocator,
+        .stream = undefined,
+        .role = .client,
+        .awaiting_settings_ack = true,
+    };
+    defer {
+        connection.send_stream_windows.deinit(std.testing.allocator);
+        connection.send_stream_window_index.deinit(std.testing.allocator);
+        connection.recv_stream_windows.deinit(std.testing.allocator);
+        connection.recv_stream_window_index.deinit(std.testing.allocator);
+        connection.hpack_decoder.deinit(std.testing.allocator);
+        connection.hpack_encoder.deinit(std.testing.allocator);
+    }
+
+    try connection.queueAdaptiveWindowTarget(100_000);
+    try connection.queueAdaptiveWindowTarget(80_000);
+    try connection.queueAdaptiveWindowTarget(120_000);
+    try std.testing.expectEqual(
+        @as(?u32, 120_000),
+        connection.adaptive_queued_target,
+    );
+    try std.testing.expectEqual(
+        @as(u32, @intCast(default_flow_window)),
+        connection.recv_connection_window_target,
+    );
+    try std.testing.expectEqual(
+        @as(u32, @intCast(default_flow_window)),
+        connection.recv_stream_window_target,
+    );
+}
+
+test "HTTP/2 user PING rejects the adaptive probe namespace" {
+    var estimator = bdp.Estimator.init(65_535, bdp.default_max_window);
+    const probe = estimator.recordData(1, 0) orelse
+        return error.TestUnexpectedResult;
+    var connection = Connection{
+        .io = undefined,
+        .allocator = std.testing.allocator,
+        .stream = undefined,
+        .role = .client,
+    };
+    defer {
+        connection.send_stream_windows.deinit(std.testing.allocator);
+        connection.send_stream_window_index.deinit(std.testing.allocator);
+        connection.recv_stream_windows.deinit(std.testing.allocator);
+        connection.recv_stream_window_index.deinit(std.testing.allocator);
+        connection.hpack_decoder.deinit(std.testing.allocator);
+        connection.hpack_encoder.deinit(std.testing.allocator);
+    }
+
+    try std.testing.expectError(error.InvalidFrame, connection.ping(probe));
 }
 
 test "HTTP/2 client connect handles interleaved PING before settings" {
@@ -23633,6 +25842,13 @@ test "HTTP/2 client drains buffered sibling after reset peer close" {
         writes: usize = 0,
         fail_with_network_down: bool = false,
 
+        fn now(
+            _: ?*anyopaque,
+            _: std.Io.Clock,
+        ) std.Io.Timestamp {
+            return .zero;
+        }
+
         fn write(
             context: ?*anyopaque,
             _: net.Socket.Handle,
@@ -23651,6 +25867,7 @@ test "HTTP/2 client drains buffered sibling after reset peer close" {
     defer threaded.deinit();
     var writer: ClosedWriter = .{};
     var closed_vtable = threaded.io().vtable.*;
+    closed_vtable.now = ClosedWriter.now;
     closed_vtable.netWrite = ClosedWriter.write;
     const closed_io = std.Io{
         .userdata = &writer,
@@ -23672,8 +25889,8 @@ test "HTTP/2 client drains buffered sibling after reset peer close" {
         connection.hpack_decoder.deinit(allocator);
         connection.frame_reader.deinit(allocator);
     }
-    try connection.prepareLocallyResetStreams(1);
-    connection.rememberLocallyResetStreamAssumeCapacity(1);
+    try connection.prepareLocallyResetStreamsAt(1, 0);
+    connection.rememberLocallyResetStreamAtAssumeCapacity(1, 0);
 
     var response = try connection.readResponse(3, "GET", false, null);
     defer response.deinit(allocator);
@@ -23821,7 +26038,7 @@ test "HTTP/2 reset retirement clears both stream windows" {
     try std.testing.expect(!connection.recv_stream_window_index.contains(1));
 }
 
-test "HTTP/2 local reset history honors its configured bound" {
+test "HTTP/2 local reset history honors capacity and retention duration" {
     const allocator = std.testing.allocator;
     var connection = Connection{
         .io = undefined,
@@ -23835,36 +26052,49 @@ test "HTTP/2 local reset history honors its configured bound" {
         connection.locally_reset_stream_index.deinit(allocator);
     }
 
-    try connection.prepareLocallyResetStreams(3);
+    const second: i96 = std.time.ns_per_s;
+    try connection.prepareLocallyResetStreamsAt(3, 0);
     try std.testing.expect(connection.locally_reset_streams.capacity >= 2);
-    connection.rememberLocallyResetStreamAssumeCapacity(1);
-    connection.rememberLocallyResetStreamAssumeCapacity(3);
+    connection.rememberLocallyResetStreamAtAssumeCapacity(1, 0);
+    connection.rememberLocallyResetStreamAtAssumeCapacity(3, 0);
     try std.testing.expectEqual(
-        connection.locally_reset_streams.items.len,
+        connection.locallyResetStreamCount(),
         connection.locally_reset_stream_index.count(),
     );
-    // Duplicate resets neither consume another slot nor advance eviction.
-    connection.rememberLocallyResetStreamAssumeCapacity(1);
+    // Duplicate resets do not consume another slot.
+    connection.rememberLocallyResetStreamAtAssumeCapacity(1, second / 2);
     try std.testing.expectEqual(
         @as(usize, 2),
-        connection.locally_reset_streams.items.len,
+        connection.locallyResetStreamCount(),
     );
-    connection.rememberLocallyResetStreamAssumeCapacity(5);
+    // Capacity pressure cannot evict IDs before their minimum retention time.
+    connection.rememberLocallyResetStreamAtAssumeCapacity(5, second / 2);
     try std.testing.expectEqual(
-        connection.locally_reset_streams.items.len,
+        connection.locallyResetStreamCount(),
         connection.locally_reset_stream_index.count(),
     );
-    try std.testing.expect(!connection.wasLocallyReset(1));
-    try std.testing.expect(connection.wasLocallyReset(3));
-    try std.testing.expect(connection.wasLocallyReset(5));
-    connection.rememberLocallyResetStreamAssumeCapacity(7);
+    try std.testing.expect(connection.wasLocallyResetAt(1, second));
+    try std.testing.expect(connection.wasLocallyResetAt(3, second));
+    try std.testing.expect(!connection.wasLocallyResetAt(5, second));
+
+    // Expiration is strict: exactly one second remains tolerated, while the
+    // first later nanosecond reclaims both FIFO entries for new resets.
+    connection.rememberLocallyResetStreamAtAssumeCapacity(5, second + 1);
+    connection.rememberLocallyResetStreamAtAssumeCapacity(7, second + 1);
     try std.testing.expectEqual(
-        connection.locally_reset_streams.items.len,
+        connection.locallyResetStreamCount(),
         connection.locally_reset_stream_index.count(),
     );
-    try std.testing.expect(!connection.wasLocallyReset(3));
-    try std.testing.expect(connection.wasLocallyReset(5));
-    try std.testing.expect(connection.wasLocallyReset(7));
+    try std.testing.expect(!connection.wasLocallyResetAt(1, second + 1));
+    try std.testing.expect(!connection.wasLocallyResetAt(3, second + 1));
+    try std.testing.expect(connection.wasLocallyResetAt(5, second + 1));
+    try std.testing.expect(connection.wasLocallyResetAt(7, second + 1));
+
+    // An expired duplicate is a fresh reset and receives a new retention
+    // deadline instead of being discarded by a stale hash hit.
+    connection.rememberLocallyResetStreamAtAssumeCapacity(5, 2 * second + 2);
+    try std.testing.expect(connection.wasLocallyResetAt(5, 3 * second + 2));
+    try std.testing.expect(!connection.wasLocallyResetAt(5, 3 * second + 3));
 }
 
 test "HTTP/2 local reset history may be disabled" {
@@ -23881,13 +26111,13 @@ test "HTTP/2 local reset history may be disabled" {
         connection.locally_reset_stream_index.deinit(allocator);
     }
 
-    try connection.prepareLocallyResetStreams(1);
-    connection.rememberLocallyResetStreamAssumeCapacity(1);
+    try connection.prepareLocallyResetStreamsAt(1, 0);
+    connection.rememberLocallyResetStreamAtAssumeCapacity(1, 0);
     try std.testing.expectEqual(
         @as(usize, 0),
         connection.locally_reset_streams.capacity,
     );
-    try std.testing.expect(!connection.wasLocallyReset(1));
+    try std.testing.expect(!connection.wasLocallyResetAt(1, 0));
 }
 
 test "HTTP/2 configured reset history controls late-frame tolerance" {
@@ -23905,22 +26135,22 @@ test "HTTP/2 configured reset history controls late-frame tolerance" {
         connection.hpack_decoder.deinit(allocator);
     }
 
-    try connection.prepareLocallyResetStreams(2);
-    connection.rememberLocallyResetStreamAssumeCapacity(1);
-    connection.rememberLocallyResetStreamAssumeCapacity(3);
-    try std.testing.expect(!try connection
-        .discardLateFrameForLocallyResetStream(.{
+    try connection.prepareLocallyResetStreamsAt(2, 0);
+    connection.rememberLocallyResetStreamAtAssumeCapacity(1, 0);
+    connection.rememberLocallyResetStreamAtAssumeCapacity(3, 0);
+    const reset_payload = [_]u8{ 0, 0, 0, 8 };
+    try std.testing.expect(try connection
+        .discardLateFrameForLocallyResetStreamAt(.{
         .header = .{
-            .length = 0,
+            .length = reset_payload.len,
             .frame_type = .rst_stream,
             .flags = 0,
             .stream_id = 1,
         },
-        .payload = &.{},
-    }));
-    const reset_payload = [_]u8{ 0, 0, 0, 8 };
-    try std.testing.expect(try connection
-        .discardLateFrameForLocallyResetStream(.{
+        .payload = &reset_payload,
+    }, 0));
+    try std.testing.expect(!try connection
+        .discardLateFrameForLocallyResetStreamAt(.{
         .header = .{
             .length = reset_payload.len,
             .frame_type = .rst_stream,
@@ -23928,7 +26158,252 @@ test "HTTP/2 configured reset history controls late-frame tolerance" {
             .stream_id = 3,
         },
         .payload = &reset_payload,
-    }));
+    }, 0));
+}
+
+test "HTTP/2 local protocol error reset budget emits terminal GOAWAY" {
+    const allocator = std.testing.allocator;
+    const RecordingWriter = struct {
+        bytes: std.ArrayList(u8) = .empty,
+
+        fn write(
+            context: ?*anyopaque,
+            _: net.Socket.Handle,
+            header: []const u8,
+            data: []const []const u8,
+            splat: usize,
+        ) net.Stream.Writer.Error!usize {
+            const self: *@This() = @ptrCast(@alignCast(context.?));
+            var total = header.len;
+            self.bytes.appendSlice(allocator, header) catch
+                return error.SystemResources;
+            for (data[0 .. data.len - 1]) |part| {
+                total += part.len;
+                self.bytes.appendSlice(allocator, part) catch
+                    return error.SystemResources;
+            }
+            var repeated: usize = 0;
+            while (repeated < splat) : (repeated += 1) {
+                total += data[data.len - 1].len;
+                self.bytes.appendSlice(
+                    allocator,
+                    data[data.len - 1],
+                ) catch return error.SystemResources;
+            }
+            return total;
+        }
+    };
+
+    var threaded = std.Io.Threaded.init(allocator, .{});
+    defer threaded.deinit();
+    var writer: RecordingWriter = .{};
+    defer writer.bytes.deinit(allocator);
+    var vtable = threaded.io().vtable.*;
+    vtable.netWrite = RecordingWriter.write;
+    var connection = Connection{
+        .io = .{ .userdata = &writer, .vtable = &vtable },
+        .allocator = allocator,
+        .stream = undefined,
+        .role = .server,
+        .limits = .{ .max_local_error_reset_streams = 1 },
+        .last_peer_processed_stream_id = 3,
+    };
+    defer {
+        connection.locally_reset_streams.deinit(allocator);
+        connection.locally_reset_stream_index.deinit(allocator);
+    }
+
+    try connection.writeLocalErrorResetStream(
+        1,
+        .flow_control_error,
+    );
+    try std.testing.expectEqual(
+        @as(usize, 1),
+        connection.local_error_reset_streams,
+    );
+    try std.testing.expect(!connection.aggregate_timeout_unusable);
+
+    const reset_frame = try http2.Frame.parse(writer.bytes.items);
+    try std.testing.expectEqual(
+        http2.FrameType.rst_stream,
+        reset_frame.header.frame_type,
+    );
+    const reset = try http2.ResetStreamPayload.parse(reset_frame);
+    try std.testing.expectEqual(@as(u31, 1), reset.stream_id);
+    try std.testing.expectEqual(
+        http2.ErrorCode.flow_control_error,
+        reset.error_code,
+    );
+
+    try std.testing.expectError(
+        error.ConnectionGoAway,
+        connection.writeLocalErrorResetStream(3, .protocol_error),
+    );
+    try std.testing.expectEqual(
+        @as(usize, 1),
+        connection.local_error_reset_streams,
+    );
+    try std.testing.expect(connection.aggregate_timeout_unusable);
+
+    const goaway_frame = try http2.Frame.parse(
+        writer.bytes.items[reset_frame.consumed()..],
+    );
+    try std.testing.expectEqual(
+        http2.FrameType.goaway,
+        goaway_frame.header.frame_type,
+    );
+    const goaway = try http2.GoAwayPayload.parse(goaway_frame);
+    try std.testing.expectEqual(@as(u31, 3), goaway.last_stream_id);
+    try std.testing.expectEqual(
+        http2.ErrorCode.enhance_your_calm,
+        goaway.error_code,
+    );
+    try std.testing.expectEqualStrings(
+        "too_many_internal_resets",
+        goaway.debug_data,
+    );
+    try std.testing.expectEqual(
+        writer.bytes.items.len,
+        reset_frame.consumed() + goaway_frame.consumed(),
+    );
+}
+
+test "HTTP/2 application reset does not consume protocol error budget" {
+    const allocator = std.testing.allocator;
+    const RecordingWriter = struct {
+        bytes: [http2.ResetStreamPayload.encoded_len]u8 = undefined,
+        len: usize = 0,
+
+        fn write(
+            context: ?*anyopaque,
+            _: net.Socket.Handle,
+            header: []const u8,
+            _: []const []const u8,
+            _: usize,
+        ) net.Stream.Writer.Error!usize {
+            const self: *@This() = @ptrCast(@alignCast(context.?));
+            const count = @min(header.len, self.bytes.len - self.len);
+            if (count == 0) return error.SocketUnconnected;
+            @memcpy(self.bytes[self.len..][0..count], header[0..count]);
+            self.len += count;
+            return count;
+        }
+    };
+
+    var threaded = std.Io.Threaded.init(allocator, .{});
+    defer threaded.deinit();
+    var writer: RecordingWriter = .{};
+    var vtable = threaded.io().vtable.*;
+    vtable.netWrite = RecordingWriter.write;
+    var connection = Connection{
+        .io = .{ .userdata = &writer, .vtable = &vtable },
+        .allocator = allocator,
+        .stream = undefined,
+        .role = .client,
+        .limits = .{ .max_local_error_reset_streams = 0 },
+    };
+    defer {
+        connection.active_local_streams.deinit(allocator);
+        connection.active_local_index.deinit(allocator);
+        connection.locally_reset_streams.deinit(allocator);
+        connection.locally_reset_stream_index.deinit(allocator);
+    }
+    try connection.addActiveLocalStream(1);
+
+    try connection.sendResetStream(1, .cancel);
+    try std.testing.expectEqual(@as(usize, 0), connection.local_error_reset_streams);
+    try std.testing.expect(!connection.aggregate_timeout_unusable);
+    const frame = try http2.Frame.parse(writer.bytes[0..writer.len]);
+    const reset = try http2.ResetStreamPayload.parse(frame);
+    try std.testing.expectEqual(http2.ErrorCode.cancel, reset.error_code);
+}
+
+test "HTTP/2 local protocol error reset budget may be disabled" {
+    const allocator = std.testing.allocator;
+    const RecordingWriter = struct {
+        bytes: [2 * http2.ResetStreamPayload.encoded_len]u8 = undefined,
+        len: usize = 0,
+
+        fn write(
+            context: ?*anyopaque,
+            _: net.Socket.Handle,
+            header: []const u8,
+            _: []const []const u8,
+            _: usize,
+        ) net.Stream.Writer.Error!usize {
+            const self: *@This() = @ptrCast(@alignCast(context.?));
+            const count = @min(header.len, self.bytes.len - self.len);
+            if (count == 0) return error.SocketUnconnected;
+            @memcpy(self.bytes[self.len..][0..count], header[0..count]);
+            self.len += count;
+            return count;
+        }
+    };
+
+    var threaded = std.Io.Threaded.init(allocator, .{});
+    defer threaded.deinit();
+    var writer: RecordingWriter = .{};
+    var vtable = threaded.io().vtable.*;
+    vtable.netWrite = RecordingWriter.write;
+    var connection = Connection{
+        .io = .{ .userdata = &writer, .vtable = &vtable },
+        .allocator = allocator,
+        .stream = undefined,
+        .role = .server,
+        .limits = .{ .max_local_error_reset_streams = null },
+    };
+    defer {
+        connection.locally_reset_streams.deinit(allocator);
+        connection.locally_reset_stream_index.deinit(allocator);
+    }
+
+    try connection.writeLocalErrorResetStream(1, .protocol_error);
+    try connection.writeLocalErrorResetStream(3, .flow_control_error);
+    try std.testing.expectEqual(@as(usize, 2), connection.local_error_reset_streams);
+    try std.testing.expect(!connection.aggregate_timeout_unusable);
+    try std.testing.expectEqual(@sizeOf(@TypeOf(writer.bytes)), writer.len);
+}
+
+test "HTTP/2 failed protocol error reset write is terminal and uncounted" {
+    const FailingWriter = struct {
+        writes: usize = 0,
+
+        fn write(
+            context: ?*anyopaque,
+            _: net.Socket.Handle,
+            header: []const u8,
+            _: []const []const u8,
+            _: usize,
+        ) net.Stream.Writer.Error!usize {
+            const self: *@This() = @ptrCast(@alignCast(context.?));
+            self.writes += 1;
+            if (self.writes == 1) return @min(header.len, 4);
+            return error.NetworkDown;
+        }
+    };
+
+    var threaded = std.Io.Threaded.init(std.testing.allocator, .{});
+    defer threaded.deinit();
+    var writer: FailingWriter = .{};
+    var vtable = threaded.io().vtable.*;
+    vtable.netWrite = FailingWriter.write;
+    var connection = Connection{
+        .io = .{ .userdata = &writer, .vtable = &vtable },
+        .allocator = std.testing.allocator,
+        .stream = undefined,
+        .role = .server,
+    };
+    defer {
+        connection.locally_reset_streams.deinit(std.testing.allocator);
+        connection.locally_reset_stream_index.deinit(std.testing.allocator);
+    }
+
+    try std.testing.expectError(
+        error.NetworkDown,
+        connection.writeLocalErrorResetStream(1, .protocol_error),
+    );
+    try std.testing.expectEqual(@as(usize, 0), connection.local_error_reset_streams);
+    try std.testing.expect(connection.aggregate_timeout_unusable);
 }
 
 test "HTTP/2 reset history allocation failure precedes wire write" {
@@ -23985,7 +26460,7 @@ test "HTTP/2 reset history allocation failure precedes wire write" {
     connection.allocator = allocator;
     try std.testing.expectEqual(@as(usize, 0), writer.writes);
     try std.testing.expect(connection.outboundStreamIsActive(1));
-    try std.testing.expect(!connection.wasLocallyReset(1));
+    try std.testing.expect(!connection.wasLocallyResetAt(1, 0));
 }
 
 test "HTTP/2 refusal reserves reset history before consuming headers" {
@@ -24047,7 +26522,7 @@ test "HTTP/2 refusal reserves reset history before consuming headers" {
     try std.testing.expectEqual(@as(usize, 0), writer.writes);
     try std.testing.expectEqual(@as(u31, 1), connection.last_peer_client_stream_id);
     try std.testing.expect(connection.aggregate_timeout_unusable);
-    try std.testing.expect(!connection.wasLocallyReset(3));
+    try std.testing.expect(!connection.wasLocallyResetAt(3, 0));
 }
 
 test "HTTP/2 refusal write failure makes later request reads terminal" {
@@ -24113,7 +26588,7 @@ test "HTTP/2 refusal write failure makes later request reads terminal" {
     );
     try std.testing.expect(connection.aggregate_timeout_unusable);
     try std.testing.expectError(error.ConnectionClosed, connection.readRequest());
-    try std.testing.expect(!connection.wasLocallyReset(3));
+    try std.testing.expect(!connection.wasLocallyResetAt(3, 0));
 }
 
 test "HTTP/2 refusal decode failure makes later request reads terminal" {
@@ -24355,6 +26830,16 @@ test "HTTP/2 local max concurrent streams limits peer opened streams" {
     try std.testing.expectEqual(@as(usize, 0), connection.active_peer_streams.items.len);
     try connection.reservePeerStream(5);
     try std.testing.expectError(error.InvalidStatus, connection.rejectExtendedConnect(5, 200, &.{}));
+    try std.testing.expectError(
+        error.InvalidContentLength,
+        connection.rejectExtendedConnectWithBody(
+            5,
+            304,
+            &.{},
+            "not allowed",
+            &.{},
+        ),
+    );
     try std.testing.expectEqual(@as(usize, 1), connection.active_peer_streams.items.len);
     connection.releasePeerStream(5);
     try std.testing.expectEqual(@as(usize, 0), connection.active_peer_streams.items.len);
@@ -24580,6 +27065,17 @@ test "HTTP/2 runtime rejects invalid local SETTINGS limits" {
     try std.testing.expectError(error.InvalidSetting, validateLocalLimits(.{
         .max_pending_ping_frames = 0,
     }));
+    try std.testing.expectError(error.InvalidSetting, validateLocalLimits(.{
+        .reset_stream_duration = .fromNanoseconds(-1),
+    }));
+    try std.testing.expectError(error.InvalidSetting, validateLocalLimits(.{
+        .adaptive_window = true,
+        .adaptive_window_max = 1024,
+    }));
+    try std.testing.expectError(error.InvalidSetting, validateLocalLimits(.{
+        .adaptive_window = true,
+        .adaptive_window_max = @as(u32, std.math.maxInt(i31)) + 1,
+    }));
     try validateLocalLimits(.{
         .initial_window_size = std.math.maxInt(i31),
         .initial_connection_window_size = std.math.maxInt(i31),
@@ -24687,70 +27183,6 @@ test "HTTP/2 runtime applies local HPACK decoder table limit" {
     defer block.deinit(std.testing.allocator);
     try block.appendSlice(std.testing.allocator, &.{ 0x3f, 0x02 }); // Dynamic table size update value 33 > local limit.
     try std.testing.expectError(error.InvalidEncoding, connection.hpack_decoder.decodeBlock(std.testing.allocator, block.items));
-}
-
-test "HTTP/2 runtime validates frame envelope rules" {
-    try validateFrameEnvelope(.{
-        .header = .{ .length = 0, .frame_type = .data, .flags = flag_end_stream, .stream_id = 1 },
-        .payload = &.{},
-    });
-    try validateFrameEnvelope(.{
-        .header = .{ .length = 0, .frame_type = .settings, .flags = flag_ack, .stream_id = 0 },
-        .payload = &.{},
-    });
-    try validateFrameEnvelope(.{
-        .header = .{ .length = 6, .frame_type = .settings, .flags = 0, .stream_id = 0 },
-        .payload = &.{ 0, 1, 0, 0, 0, 0 },
-    });
-    try validateFrameEnvelope(.{
-        .header = .{ .length = 4, .frame_type = .rst_stream, .flags = 0, .stream_id = 1 },
-        .payload = &.{ 0, 0, 0, 8 },
-    });
-
-    try std.testing.expectError(error.InvalidFrame, validateFrameEnvelope(.{
-        .header = .{ .length = 1, .frame_type = .data, .flags = 0, .stream_id = 1 },
-        .payload = &.{},
-    }));
-    try std.testing.expectError(error.InvalidFrame, validateFrameEnvelope(.{
-        .header = .{ .length = 0, .frame_type = .data, .flags = 0, .stream_id = 0 },
-        .payload = &.{},
-    }));
-    try std.testing.expectError(error.InvalidFrame, validateFrameEnvelope(.{
-        .header = .{ .length = 1, .frame_type = .settings, .flags = flag_ack, .stream_id = 0 },
-        .payload = &.{0},
-    }));
-    try std.testing.expectError(error.InvalidFrame, validateFrameEnvelope(.{
-        .header = .{ .length = 5, .frame_type = .settings, .flags = 0, .stream_id = 0 },
-        .payload = &.{ 0, 1, 0, 0, 0 },
-    }));
-    try std.testing.expectError(error.InvalidFrame, validateFrameEnvelope(.{
-        .header = .{ .length = 0, .frame_type = .settings, .flags = 0, .stream_id = 1 },
-        .payload = &.{},
-    }));
-    try std.testing.expectError(error.InvalidFrame, validateFrameEnvelope(.{
-        .header = .{ .length = 3, .frame_type = .rst_stream, .flags = 0, .stream_id = 1 },
-        .payload = &.{ 0, 0, 0 },
-    }));
-    try std.testing.expectError(error.InvalidFrame, validateFrameEnvelope(.{
-        .header = .{ .length = 7, .frame_type = .ping, .flags = 0, .stream_id = 0 },
-        .payload = &.{ 0, 1, 2, 3, 4, 5, 6 },
-    }));
-    try std.testing.expectError(error.InvalidFrame, validateFrameEnvelope(.{
-        .header = .{ .length = 8, .frame_type = .ping, .flags = 0, .stream_id = 1 },
-        .payload = &.{ 0, 1, 2, 3, 4, 5, 6, 7 },
-    }));
-    try std.testing.expectError(error.InvalidFrame, validateFrameEnvelope(.{
-        .header = .{ .length = 4, .frame_type = .window_update, .flags = 0, .stream_id = 1 },
-        .payload = &.{ 0, 0, 0, 0 },
-    }));
-    try std.testing.expectError(error.InvalidFrame, validateFrameEnvelope(.{
-        .header = .{ .length = 4, .frame_type = .priority, .flags = 0, .stream_id = 1 },
-        .payload = &.{ 0, 0, 0, 0 },
-    }));
-    try std.testing.expectError(error.InvalidFrame, validateFrameEnvelope(.{
-        .header = .{ .length = 8, .frame_type = .goaway, .flags = 0, .stream_id = 1 },
-        .payload = &.{ 0, 0, 0, 0, 0, 0, 0, 0 },
-    }));
 }
 
 test "HTTP/2 runtime enforces header list size limits" {
@@ -24956,6 +27388,10 @@ test "HTTP/2 runtime advertises configured initial SETTINGS" {
 }
 
 test {
+    _ = @import("runtime/frame/tests/io.zig");
+    _ = @import("runtime/frame/tests/wire.zig");
+    _ = @import("runtime/flow/tests/window.zig");
+    _ = @import("runtime/headers/tests/message.zig");
     _ = @import("runtime/tls_tests.zig");
     _ = @import("runtime/push_tests.zig");
     _ = @import("runtime/priority_tests.zig");

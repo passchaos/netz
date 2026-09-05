@@ -1,4 +1,5 @@
 const std = @import("std");
+const builtin = @import("builtin");
 const netz = @import("netz");
 const CountingAllocator = @import("support/counting_allocator.zig")
     .CountingAllocator;
@@ -192,6 +193,15 @@ const IterationResult = struct {
     reorder_held: usize = 0,
     corrupt_considered: usize = 0,
     corrupted: usize = 0,
+    reverse_loss_considered: usize = 0,
+    reverse_loss_dropped: usize = 0,
+    reverse_reorder_considered: usize = 0,
+    reverse_reorder_held: usize = 0,
+    server_packets_lost: u64 = 0,
+    lifecycle_fin_count: usize = 0,
+    lifecycle_reset_count: usize = 0,
+    lifecycle_last_stream_id: u64 = 0,
+    lifecycle_checksum: u64 = 0,
 };
 
 const Summary = struct {
@@ -310,7 +320,14 @@ fn runIteration(
         .half_rtt_us = config.rtt_us / 2,
         .io = io,
     };
+    var reverse_loss_state = LossState{
+        .state = .init(0x9abc_def0),
+        .drop_pct = config.loss_pct,
+        .half_rtt_us = config.rtt_us / 2,
+        .io = io,
+    };
     var reorder_state = ReorderState{ .every = config.reorder_every };
+    var reverse_reorder_state = ReorderState{ .every = config.reorder_every };
     var corrupt_state = CorruptState{ .every = config.corrupt_every };
     const endpoint_limits: netz.quic.runtime.Limits = .{
         .max_datagram_size = max_datagram_size,
@@ -319,15 +336,36 @@ fn runIteration(
         .enable_gso_send = false,
         .enable_gro_receive = false,
     };
+    const lifecycle_loss = config.mode == .lifecycle_churn and
+        config.loss_pct != 0;
+    const lifecycle_reorder = config.mode == .lifecycle_churn and
+        config.reorder_every != 0;
+    var server_endpoint_limits = endpoint_limits;
     var client_endpoint_limits = endpoint_limits;
-    if (config.mode == .loss) client_endpoint_limits.send_interceptor = .{
-        .context = &loss_state,
-        .should_drop = LossState.shouldDrop,
-    };
-    if (config.mode == .reorder) client_endpoint_limits.send_interceptor = .{
-        .context = &reorder_state,
-        .should_hold = ReorderState.shouldHold,
-    };
+    if (config.mode == .loss or lifecycle_loss) {
+        client_endpoint_limits.send_interceptor = .{
+            .context = &loss_state,
+            .should_drop = LossState.shouldDrop,
+        };
+    }
+    if (lifecycle_loss) {
+        server_endpoint_limits.send_interceptor = .{
+            .context = &reverse_loss_state,
+            .should_drop = LossState.shouldDrop,
+        };
+    }
+    if (config.mode == .reorder or lifecycle_reorder) {
+        client_endpoint_limits.send_interceptor = .{
+            .context = &reorder_state,
+            .should_hold = ReorderState.shouldHold,
+        };
+    }
+    if (lifecycle_reorder) {
+        server_endpoint_limits.send_interceptor = .{
+            .context = &reverse_reorder_state,
+            .should_hold = ReorderState.shouldHold,
+        };
+    }
     if (config.mode == .corrupt) client_endpoint_limits.send_interceptor = .{
         .context = &corrupt_state,
         .corrupt = CorruptState.corrupt,
@@ -347,7 +385,7 @@ fn runIteration(
         allocator,
         io,
         .{ .ip4 = .loopback(0) },
-        endpoint_limits,
+        server_endpoint_limits,
     );
     defer server_endpoint.deinit();
     var client_endpoint = try netz.quic.runtime.Endpoint.bind(
@@ -593,16 +631,41 @@ fn runIteration(
             return error.ServerFailed;
         defer server_established.deinit();
         if (config.mode == .lifecycle_churn) {
+            if (lifecycle_loss) {
+                loss_state.enabled.store(true, .release);
+                reverse_loss_state.enabled.store(true, .release);
+            }
+            if (lifecycle_reorder) {
+                reorder_state.enabled.store(true, .release);
+                reverse_reorder_state.enabled.store(true, .release);
+            }
             const result = try runLifecycleChurnRounds(
                 &established.connection,
                 &server_established.connection,
                 config,
+                if (lifecycle_reorder) &reorder_state else null,
+                if (lifecycle_reorder) &reverse_reorder_state else null,
             );
+            const client_stats = established.connection.stats();
+            const server_stats = server_established.connection.stats();
             return .{
                 .elapsed_ns = result.elapsed_ns,
-                .client_stats = established.connection.stats(),
+                .client_stats = client_stats,
                 .gso_enabled = client_endpoint.gsoSendEnabled(),
                 .payload_bytes_received = result.streams_completed,
+                .loss_considered = loss_state.considered.load(.monotonic),
+                .loss_dropped = loss_state.dropped.load(.monotonic),
+                .reorder_considered = reorder_state.considered.load(.monotonic),
+                .reorder_held = reorder_state.held.load(.monotonic),
+                .reverse_loss_considered = reverse_loss_state.considered.load(.monotonic),
+                .reverse_loss_dropped = reverse_loss_state.dropped.load(.monotonic),
+                .reverse_reorder_considered = reverse_reorder_state.considered.load(.monotonic),
+                .reverse_reorder_held = reverse_reorder_state.held.load(.monotonic),
+                .server_packets_lost = server_stats.packets_lost,
+                .lifecycle_fin_count = result.fin_count,
+                .lifecycle_reset_count = result.reset_count,
+                .lifecycle_last_stream_id = result.last_stream_id,
+                .lifecycle_checksum = result.checksum,
             };
         }
         const result = try runEchoRounds(
@@ -785,12 +848,18 @@ const StreamChurnResult = struct { elapsed_ns: u64, opened: usize };
 const LifecycleChurnResult = struct {
     elapsed_ns: u64,
     streams_completed: usize,
+    fin_count: usize,
+    reset_count: usize,
+    last_stream_id: u64,
+    checksum: u64,
 };
 
 fn runLifecycleChurnRounds(
     client: *netz.quic.one_rtt.Connection,
     server: *netz.quic.one_rtt.Connection,
     config: Config,
+    client_reorder: ?*ReorderState,
+    server_reorder: ?*ReorderState,
 ) !LifecycleChurnResult {
     var stream_ids: [max_streams]u64 = undefined;
     var expected_reset: [max_streams]bool = undefined;
@@ -800,6 +869,13 @@ fn runLifecycleChurnRounds(
     var checksum: u64 = 0;
     var last_stream_id: u64 = 0;
     const started = nowNs(client.endpoint.io);
+    const deadline = std.Io.Clock.Timestamp.fromNow(
+        client.endpoint.io,
+        .{
+            .clock = .awake,
+            .raw = .fromNanoseconds(transfer_timeout_ns),
+        },
+    );
 
     while (completed < config.iterations) {
         const batch_count = @min(
@@ -827,114 +903,81 @@ fn runLifecycleChurnRounds(
         }
 
         var server_terminal: u64 = 0;
-        while (@popCount(server_terminal) < batch_count) {
-            var packet = try server.receivePacket();
-            defer packet.deinit(server.endpoint.allocator);
-            for (packet.frames) |frame| switch (frame) {
-                .stream => |stream| {
-                    const index = lifecycleBatchIndex(
-                        stream_ids[0..batch_count],
-                        stream.stream_id,
-                    ) orelse return error.InvalidLifecycleStream;
-                    const bit = @as(u64, 1) << @intCast(index);
-                    if ((server_terminal & bit) != 0 or
-                        expected_reset[index] or
-                        !stream.fin or
-                        stream.data.len != 1 or
-                        stream.data[0] != @as(u8, @truncate(completed + index)))
-                    {
-                        return error.InvalidLifecycleStream;
-                    }
-                    try server.releaseReceivedCapacity(stream.stream_id, 1);
-                    try server.send(&.{.{ .stream = .{
-                        .stream_id = stream.stream_id,
-                        .data = stream.data,
-                        .fin = true,
-                    } }});
-                    server_terminal |= bit;
-                },
-                .reset_stream => |reset| {
-                    const index = lifecycleBatchIndex(
-                        stream_ids[0..batch_count],
-                        reset.stream_id,
-                    ) orelse return error.InvalidLifecycleStream;
-                    const bit = @as(u64, 1) << @intCast(index);
-                    if ((server_terminal & bit) != 0 or
-                        !expected_reset[index] or
-                        reset.final_size != 0 or
-                        reset.application_error_code !=
-                            lifecycleResetCode(completed + index))
-                    {
-                        return error.InvalidLifecycleStream;
-                    }
-                    try server.resetStream(
-                        reset.stream_id,
-                        reset.application_error_code,
-                    );
-                    server_terminal |= bit;
-                },
-                else => {},
-            };
-        }
-        try server.sendAck(0);
-        // The production batch API coalesces each lifecycle group into one
-        // cumulative MAX_STREAMS packet instead of one packet per stream.
-        const released = try server.releaseCompletedPeerStreams(
-            stream_ids[0..batch_count],
-        );
-        if (released.streams_released != batch_count or !released.update_sent) {
-            return error.InvalidLifecycleStream;
-        }
-
         var client_terminal: u64 = 0;
+        var server_released = false;
+        var client_acked_terminal = false;
         const expected_limit = @as(u64, @intCast(config.streams)) +
             @as(u64, @intCast(completed + batch_count));
         while (@popCount(client_terminal) < batch_count or
             client.peer_max_streams_bidi < expected_limit)
         {
-            var packet = try client.receivePacket();
-            defer packet.deinit(client.endpoint.allocator);
-            for (packet.frames) |frame| switch (frame) {
-                .stream => |stream| {
-                    const index = lifecycleBatchIndex(
-                        stream_ids[0..batch_count],
-                        stream.stream_id,
-                    ) orelse return error.InvalidLifecycleStream;
-                    const bit = @as(u64, 1) << @intCast(index);
-                    if ((client_terminal & bit) != 0 or
-                        expected_reset[index] or
-                        !stream.fin or
-                        stream.data.len != 1 or
-                        stream.data[0] != @as(u8, @truncate(completed + index)))
-                    {
-                        return error.InvalidLifecycleStream;
-                    }
-                    try client.releaseReceivedCapacity(stream.stream_id, 1);
-                    checksum +%= stream.data[0];
-                    client_terminal |= bit;
-                },
-                .reset_stream => |reset| {
-                    const index = lifecycleBatchIndex(
-                        stream_ids[0..batch_count],
-                        reset.stream_id,
-                    ) orelse return error.InvalidLifecycleStream;
-                    const bit = @as(u64, 1) << @intCast(index);
-                    if ((client_terminal & bit) != 0 or
-                        !expected_reset[index] or
-                        reset.final_size != 0 or
-                        reset.application_error_code !=
-                            lifecycleResetCode(completed + index))
-                    {
-                        return error.InvalidLifecycleStream;
-                    }
-                    checksum +%= reset.application_error_code;
-                    client_terminal |= bit;
-                },
-                else => {},
-            };
+            try drainLifecycleServerEvents(
+                server,
+                stream_ids[0..batch_count],
+                expected_reset[0..batch_count],
+                completed,
+                &server_terminal,
+            );
+            if (!server_released and
+                @popCount(server_terminal) == batch_count)
+            {
+                try server.sendAck(0);
+                const released = try server.releaseCompletedPeerStreams(
+                    stream_ids[0..batch_count],
+                );
+                if (released.streams_released > batch_count) {
+                    return error.InvalidLifecycleStream;
+                }
+                server_released = true;
+            }
+            try drainLifecycleClientEvents(
+                client,
+                stream_ids[0..batch_count],
+                expected_reset[0..batch_count],
+                completed,
+                &client_terminal,
+                &checksum,
+            );
+            if (!client_acked_terminal and
+                @popCount(client_terminal) == batch_count)
+            {
+                // A peer-initiated bidirectional stream frees concurrency only
+                // after its response FIN/RESET is acknowledged. One cumulative
+                // ACK lets the server's deferred release emit MAX_STREAMS.
+                try client.sendAck(0);
+                client_acked_terminal = true;
+            }
+            if (@popCount(client_terminal) == batch_count and
+                client.peer_max_streams_bidi >= expected_limit)
+            {
+                break;
+            }
+            // Keep the phase's expected receiver first while waiting on both
+            // endpoint sockets and both timer sets. This lets reverse ACKs
+            // advance immediately without adding a periodic polling quantum.
+            if (@popCount(server_terminal) < batch_count) {
+                try serviceLifecycleConnection(
+                    server,
+                    client,
+                    deadline,
+                    config.verbose,
+                );
+            } else {
+                try serviceLifecycleConnection(
+                    client,
+                    server,
+                    deadline,
+                    config.verbose,
+                );
+            }
         }
-        try client.sendAck(0);
         completed += batch_count;
+    }
+    if (client_reorder) |state| state.enabled.store(false, .release);
+    if (server_reorder) |state| state.enabled.store(false, .release);
+    if (client_reorder != null or server_reorder != null) {
+        try client.send(&.{.{ .ping = {} }});
+        try server.send(&.{.{ .ping = {} }});
     }
 
     const elapsed = nowNs(client.endpoint.io) -| started;
@@ -968,7 +1011,359 @@ fn runLifecycleChurnRounds(
     return .{
         .elapsed_ns = elapsed,
         .streams_completed = completed,
+        .fin_count = fin_count,
+        .reset_count = reset_count,
+        .last_stream_id = last_stream_id,
+        .checksum = checksum,
     };
+}
+
+fn serviceLifecycleConnection(
+    receiver: *netz.quic.one_rtt.Connection,
+    timer_peer: *netz.quic.one_rtt.Connection,
+    deadline: std.Io.Clock.Timestamp,
+    verbose: bool,
+) !void {
+    const io = receiver.endpoint.io;
+    const now = std.Io.Clock.Timestamp.now(io, .awake);
+    if (timestampReached(now, deadline)) {
+        return error.BenchmarkTimeout;
+    }
+
+    const now_ns = nowNs(io);
+    if (try serviceLifecyclePendingPacket(receiver)) return;
+    if (try serviceLifecyclePendingPacket(timer_peer)) return;
+    const receiver_timer_blocked = try serviceDueLifecycleTimers(
+        receiver,
+        now_ns,
+    );
+    const peer_timer_blocked = try serviceDueLifecycleTimers(
+        timer_peer,
+        now_ns,
+    );
+
+    var receive_deadline = deadline;
+    if (!receiver_timer_blocked) if (lifecycleTimerTimestamp(receiver)) |candidate| {
+        if (timestampBefore(candidate, receive_deadline)) {
+            receive_deadline = candidate;
+        }
+    };
+    if (!peer_timer_blocked) if (lifecycleTimerTimestamp(timer_peer)) |candidate| {
+        if (timestampBefore(candidate, receive_deadline)) {
+            receive_deadline = candidate;
+        }
+    };
+
+    // Both endpoints own independent UDP sockets and timer sets. A single
+    // readiness wait covers either socket under the earliest of both transport
+    // timers and the application deadline. No periodic poll tick or losing-task
+    // thread remains after the first datagram completes.
+    const ready = try waitForLifecycleSockets(
+        receiver,
+        timer_peer,
+        receive_deadline,
+    );
+    if (ready.first) try serviceLifecyclePacket(receiver);
+    if (ready.second) try serviceLifecyclePacket(timer_peer);
+    if (!ready.first and !ready.second) {
+        const after = std.Io.Clock.Timestamp.now(io, .awake);
+        if (timestampReached(after, deadline)) {
+            printLifecycleTimeout(verbose, receiver, timer_peer);
+            return error.BenchmarkTimeout;
+        }
+        const after_ns = nowNs(io);
+        _ = try serviceDueLifecycleTimers(receiver, after_ns);
+        _ = try serviceDueLifecycleTimers(timer_peer, after_ns);
+    }
+}
+
+fn serviceLifecyclePendingPacket(
+    connection: *netz.quic.one_rtt.Connection,
+) !bool {
+    var packet = (try connection.receivePendingPacket()) orelse return false;
+    defer packet.deinit(connection.endpoint.allocator);
+    _ = try connection.retransmitPacketThresholdLosses(
+        netz.quic.one_rtt.max_batch_packets,
+    );
+    _ = connection.sendAckForPacketsIfNeeded((&packet)[0..1]) catch {};
+    return true;
+}
+
+const LifecycleReady = struct { first: bool = false, second: bool = false };
+
+fn waitForLifecycleSockets(
+    first_connection: *netz.quic.one_rtt.Connection,
+    second_connection: *netz.quic.one_rtt.Connection,
+    deadline: std.Io.Clock.Timestamp,
+) !LifecycleReady {
+    if (comptime builtin.os.tag == .windows or builtin.os.tag == .wasi) {
+        return waitForLifecycleSocketsConcurrent(
+            first_connection,
+            second_connection,
+            deadline,
+        );
+    }
+    const first = first_connection.endpoint;
+    const second = second_connection.endpoint;
+    var descriptors = [_]std.posix.pollfd{
+        .{
+            .fd = first.socket.handle,
+            .events = std.posix.POLL.IN | std.posix.POLL.ERR,
+            .revents = 0,
+        },
+        .{
+            .fd = second.socket.handle,
+            .events = std.posix.POLL.IN | std.posix.POLL.ERR,
+            .revents = 0,
+        },
+    };
+    const ready = while (true) {
+        const remaining = std.Io.Clock.Timestamp.now(
+            first.io,
+            .awake,
+        ).durationTo(deadline).raw.nanoseconds;
+        if (remaining <= 0) break 0;
+        const milliseconds = @divTrunc(
+            remaining + (std.time.ns_per_ms - 1),
+            std.time.ns_per_ms,
+        );
+        break try std.posix.poll(
+            &descriptors,
+            @intCast(@min(milliseconds, std.math.maxInt(i32))),
+        );
+    };
+    if (ready == 0) return .{};
+    return .{
+        .first = descriptors[0].revents != 0,
+        .second = descriptors[1].revents != 0,
+    };
+}
+
+fn waitForLifecycleSocketsConcurrent(
+    first: *netz.quic.one_rtt.Connection,
+    second: *netz.quic.one_rtt.Connection,
+    deadline: std.Io.Clock.Timestamp,
+) !LifecycleReady {
+    const Result = union(enum) { first: ?anyerror, second: ?anyerror };
+    var result_buffer: [2]Result = undefined;
+    var select: std.Io.Select(Result) = .init(
+        first.endpoint.io,
+        &result_buffer,
+    );
+    defer select.cancelDiscard();
+    try select.concurrent(
+        .first,
+        serviceLifecycleEndpointUntil,
+        .{ first, deadline },
+    );
+    try select.concurrent(
+        .second,
+        serviceLifecycleEndpointUntil,
+        .{ second, deadline },
+    );
+    return switch (try select.await()) {
+        .first => |maybe_err| if (maybe_err) |err| switch (err) {
+            error.Timeout => .{},
+            else => return err,
+        } else .{ .first = true },
+        .second => |maybe_err| if (maybe_err) |err| switch (err) {
+            error.Timeout => .{},
+            else => return err,
+        } else .{ .second = true },
+    };
+}
+
+fn serviceLifecycleEndpointUntil(
+    connection: *netz.quic.one_rtt.Connection,
+    deadline: std.Io.Clock.Timestamp,
+) ?anyerror {
+    const endpoint = connection.endpoint;
+    var bytes = endpoint.receiveBytesWithDeadline(deadline) catch |err|
+        return err;
+    defer bytes.deinit(endpoint.allocator);
+    connection.preloadReceivedDatagram(
+        bytes.from,
+        bytes.bytes,
+        bytes.ecn,
+    ) catch |err| return err;
+    return null;
+}
+
+fn serviceLifecyclePacket(
+    connection: *netz.quic.one_rtt.Connection,
+) !void {
+    try connection.visitPacketAt(
+        nowNs(connection.endpoint.io),
+        connection,
+        acknowledgeLifecyclePacket,
+    );
+}
+
+fn acknowledgeLifecyclePacket(
+    connection: *netz.quic.one_rtt.Connection,
+    packet: netz.quic.one_rtt.ReceivedPacketView,
+) !void {
+    _ = try connection.retransmitPacketThresholdLosses(
+        netz.quic.one_rtt.max_batch_packets,
+    );
+    _ = connection.sendAckForPacketIfNeeded(
+        packet.packet_number,
+        packet.frames,
+    ) catch {};
+}
+
+fn serviceDueLifecycleTimers(
+    connection: *netz.quic.one_rtt.Connection,
+    now_ns: u64,
+) !bool {
+    while (connection.nextTimerDeadline()) |timer| {
+        if (timer.deadline_ns > now_ns) return false;
+        _ = connection.serviceNextTimerAt(now_ns) catch |err| switch (err) {
+            // Congestion can advance only after a receive, so do not let the
+            // already-due timer turn the two-socket wait into a busy loop.
+            error.CongestionLimited => return true,
+            // Pacing is time-based. A short fault-path-only delay preserves a
+            // future retry without reintroducing the old 1 ms clean-path tick.
+            error.PacingLimited => {
+                try std.Io.sleep(
+                    connection.endpoint.io,
+                    .fromMicroseconds(10),
+                    .awake,
+                );
+                return false;
+            },
+            else => return err,
+        };
+    }
+    return false;
+}
+
+fn lifecycleTimerTimestamp(
+    connection: *const netz.quic.one_rtt.Connection,
+) ?std.Io.Clock.Timestamp {
+    const timer = connection.nextTimerDeadline() orelse return null;
+    return .{
+        .clock = .awake,
+        .raw = .fromNanoseconds(
+            std.math.cast(i96, timer.deadline_ns) orelse
+                std.math.maxInt(i96),
+        ),
+    };
+}
+
+fn timestampBefore(
+    lhs: std.Io.Clock.Timestamp,
+    rhs: std.Io.Clock.Timestamp,
+) bool {
+    return lhs.durationTo(rhs).raw.nanoseconds > 0;
+}
+
+fn printLifecycleTimeout(
+    verbose: bool,
+    receiver: *const netz.quic.one_rtt.Connection,
+    timer_peer: *const netz.quic.one_rtt.Connection,
+) void {
+    if (!verbose) return;
+    std.debug.print(
+        "  lifecycle timeout: receiver_timer={any}, peer_timer={any}, receiver_stats={any}, peer_stats={any}\n",
+        .{
+            receiver.nextTimerDeadline(),
+            timer_peer.nextTimerDeadline(),
+            receiver.stats(),
+            timer_peer.stats(),
+        },
+    );
+}
+
+fn timestampReached(
+    now: std.Io.Clock.Timestamp,
+    deadline: std.Io.Clock.Timestamp,
+) bool {
+    return now.durationTo(deadline).raw.nanoseconds <= 0;
+}
+
+fn drainLifecycleServerEvents(
+    server: *netz.quic.one_rtt.Connection,
+    stream_ids: []const u64,
+    expected_reset: []const bool,
+    completed: usize,
+    terminal: *u64,
+) !void {
+    var payload: [1]u8 = undefined;
+    for (stream_ids, 0..) |stream_id, index| {
+        const bit = @as(u64, 1) << @intCast(index);
+        if ((terminal.* & bit) != 0) continue;
+        const event = (try server.pollStreamId(
+            @intCast(stream_id),
+            &payload,
+        )) orelse continue;
+        switch (event) {
+            .data => |data| {
+                if (expected_reset[index] or !data.fin or data.bytes != 1 or
+                    payload[0] != @as(u8, @truncate(completed + index)))
+                {
+                    return error.InvalidLifecycleStream;
+                }
+                try server.send(&.{.{ .stream = .{
+                    .stream_id = stream_id,
+                    .data = payload[0..1],
+                    .fin = true,
+                } }});
+            },
+            .reset => |reset| {
+                if (!expected_reset[index] or reset.final_size != 0 or
+                    reset.application_error_code !=
+                        lifecycleResetCode(completed + index))
+                {
+                    return error.InvalidLifecycleStream;
+                }
+                try server.resetStream(
+                    stream_id,
+                    reset.application_error_code,
+                );
+            },
+        }
+        terminal.* |= bit;
+    }
+}
+
+fn drainLifecycleClientEvents(
+    client: *netz.quic.one_rtt.Connection,
+    stream_ids: []const u64,
+    expected_reset: []const bool,
+    completed: usize,
+    terminal: *u64,
+    checksum: *u64,
+) !void {
+    var payload: [1]u8 = undefined;
+    for (stream_ids, 0..) |stream_id, index| {
+        const bit = @as(u64, 1) << @intCast(index);
+        if ((terminal.* & bit) != 0) continue;
+        const event = (try client.pollStreamId(
+            @intCast(stream_id),
+            &payload,
+        )) orelse continue;
+        switch (event) {
+            .data => |data| {
+                if (expected_reset[index] or !data.fin or data.bytes != 1 or
+                    payload[0] != @as(u8, @truncate(completed + index)))
+                {
+                    return error.InvalidLifecycleStream;
+                }
+                checksum.* +%= payload[0];
+            },
+            .reset => |reset| {
+                if (!expected_reset[index] or reset.final_size != 0 or
+                    reset.application_error_code !=
+                        lifecycleResetCode(completed + index))
+                {
+                    return error.InvalidLifecycleStream;
+                }
+                checksum.* +%= reset.application_error_code;
+            },
+        }
+        terminal.* |= bit;
+    }
 }
 
 fn lifecycleBatchIndex(stream_ids: []const u64, target: u64) ?usize {
@@ -1247,6 +1642,11 @@ fn parseArgs(
     var config: Config = .{};
     var iterations_set = false;
     var streams_set = false;
+    var loss_pct_set = false;
+    var rtt_us_set = false;
+    var reorder_every_set = false;
+    var corrupt_every_set = false;
+    var reset_every_set = false;
     while (args.next()) |arg| {
         if (std.mem.eql(u8, arg, "--mode=upload")) {
             config.mode = .upload;
@@ -1294,24 +1694,29 @@ fn parseArgs(
                 arg["--loss-pct=".len..],
                 10,
             );
+            loss_pct_set = true;
         } else if (std.mem.startsWith(u8, arg, "--rtt-us=")) {
             config.rtt_us = try std.fmt.parseInt(
                 u64,
                 arg["--rtt-us=".len..],
                 10,
             );
+            rtt_us_set = true;
         } else if (std.mem.startsWith(u8, arg, "--reorder-every=")) {
             config.reorder_every = try parsePositiveUsize(
                 arg["--reorder-every=".len..],
             );
+            reorder_every_set = true;
         } else if (std.mem.startsWith(u8, arg, "--corrupt-every=")) {
             config.corrupt_every = try parsePositiveUsize(
                 arg["--corrupt-every=".len..],
             );
+            corrupt_every_set = true;
         } else if (std.mem.startsWith(u8, arg, "--reset-every=")) {
             config.reset_every = try parsePositiveUsize(
                 arg["--reset-every=".len..],
             );
+            reset_every_set = true;
         } else if (std.mem.eql(u8, arg, "--verbose")) {
             config.verbose = true;
         } else if (std.mem.eql(u8, arg, "--stats")) {
@@ -1366,7 +1771,37 @@ fn parseArgs(
     if (config.mode == .lifecycle_churn and config.reset_every == 0) {
         return error.InvalidArgument;
     }
+    if (config.mode == .lifecycle_churn and
+        @as(u128, config.iterations) + config.streams >
+            netz.quic.max_stream_count)
+    {
+        return error.InvalidArgument;
+    }
+    const lifecycle = config.mode == .lifecycle_churn;
+    if (loss_pct_set and config.mode != .loss and !lifecycle) {
+        return error.InvalidArgument;
+    }
+    if (rtt_us_set and
+        ((config.mode != .loss and !lifecycle) or config.loss_pct == 0))
+    {
+        return error.InvalidArgument;
+    }
+    if (reorder_every_set and config.mode != .reorder and !lifecycle) {
+        return error.InvalidArgument;
+    }
+    if (corrupt_every_set and config.mode != .corrupt) {
+        return error.InvalidArgument;
+    }
+    if (reset_every_set and !lifecycle) return error.InvalidArgument;
+    if (lifecycle and config.loss_pct != 0 and
+        config.reorder_every != 0)
+    {
+        return error.InvalidArgument;
+    }
     if (config.mode == .reorder and config.reorder_every < 2) {
+        return error.InvalidArgument;
+    }
+    if (lifecycle and config.reorder_every == 1) {
         return error.InvalidArgument;
     }
     if (config.mode == .corrupt and config.corrupt_every < 2) {
@@ -1432,6 +1867,91 @@ fn runLifecycleChurnBenchmark(
     if (result.payload_bytes_received != config.iterations) {
         return error.InvalidStreamCount;
     }
+    const expected_resets = config.iterations / config.reset_every;
+    const expected_fins = config.iterations - expected_resets;
+    const expected_last_stream_id =
+        (@as(u64, @intCast(config.iterations)) - 1) * 4;
+    const expected_checksum = lifecycleExpectedChecksum(config);
+    if (result.lifecycle_fin_count != expected_fins or
+        result.lifecycle_reset_count != expected_resets or
+        result.lifecycle_last_stream_id != expected_last_stream_id or
+        result.lifecycle_checksum != expected_checksum)
+    {
+        return error.InvalidLifecycleResult;
+    }
+    if (config.loss_pct != 0 and
+        (result.loss_considered == 0 or
+            result.reverse_loss_considered == 0 or
+            result.loss_dropped != lifecycleExpectedLossDrops(
+                0x1234_5678,
+                result.loss_considered,
+                config.loss_pct,
+            ) or
+            result.reverse_loss_dropped != lifecycleExpectedLossDrops(
+                0x9abc_def0,
+                result.reverse_loss_considered,
+                config.loss_pct,
+            )))
+    {
+        return error.MissingLifecycleLoss;
+    }
+    if (config.reorder_every != 0 and
+        (result.reorder_considered == 0 or
+            result.reverse_reorder_considered == 0 or
+            result.reorder_held !=
+                result.reorder_considered / config.reorder_every or
+            result.reverse_reorder_held !=
+                result.reverse_reorder_considered / config.reorder_every))
+    {
+        return error.MissingLifecycleReorder;
+    }
+    std.debug.print(
+        "  loss percent: {d}\n" ++
+            "  reorder every: {d}\n" ++
+            "  configured RTT us: {d}\n" ++
+            "  client datagrams considered/dropped/held: {d}/{d}/{d}\n" ++
+            "  server datagrams considered/dropped/held: {d}/{d}/{d}\n" ++
+            "  client/server transport packets lost: {d}/{d}\n" ++
+            "  lifecycle result verified: true\n",
+        .{
+            config.loss_pct,
+            config.reorder_every,
+            config.rtt_us,
+            result.loss_considered +| result.reorder_considered,
+            result.loss_dropped,
+            result.reorder_held,
+            result.reverse_loss_considered +|
+                result.reverse_reorder_considered,
+            result.reverse_loss_dropped,
+            result.reverse_reorder_held,
+            result.client_stats.packets_lost,
+            result.server_packets_lost,
+        },
+    );
+}
+
+fn lifecycleExpectedChecksum(config: Config) u64 {
+    var checksum: u64 = 0;
+    for (0..config.iterations) |ordinal| {
+        if ((ordinal + 1) % config.reset_every == 0) {
+            checksum +%= lifecycleResetCode(ordinal);
+        } else {
+            checksum +%= @as(u8, @truncate(ordinal));
+        }
+    }
+    return checksum;
+}
+
+fn lifecycleExpectedLossDrops(seed: u64, considered: usize, pct: u8) usize {
+    var state = seed;
+    var dropped: usize = 0;
+    for (0..considered) |_| {
+        state ^= state << 13;
+        state ^= state >> 7;
+        state ^= state << 17;
+        dropped += @intFromBool(state % 100 < pct);
+    }
+    return dropped;
 }
 
 fn runAggregateBenchmark(

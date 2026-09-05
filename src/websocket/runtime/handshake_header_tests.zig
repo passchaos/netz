@@ -20,6 +20,29 @@ fn writeAll(io: std.Io, stream: net.Stream, bytes: []const u8) !void {
     }
 }
 
+fn readSomeWithDeadline(
+    io: std.Io,
+    stream: net.Stream,
+    buffer: []u8,
+    deadline: std.Io.Clock.Timestamp,
+) !usize {
+    var buffers = [_][]u8{buffer};
+    const result = try io.operateTimeout(
+        .{ .file_read_streaming = .{
+            .file = .{
+                .handle = stream.socket.handle,
+                .flags = .{ .nonblocking = false },
+            },
+            .data = &buffers,
+        } },
+        .{ .deadline = deadline },
+    );
+    return result.file_read_streaming catch |err| switch (err) {
+        error.EndOfStream => 0,
+        else => return @errorCast(err),
+    };
+}
+
 fn appendExtraHeaderLines(
     headers: *std.ArrayList(u8),
     allocator: std.mem.Allocator,
@@ -168,6 +191,572 @@ test "WebSocket client sends custom HTTP upgrade headers" {
     joined = true;
     if (shared.err) |err| return err;
     try std.testing.expect(shared.saw_headers);
+}
+
+test "WebSocket server admits an inspected upgrade before sending 101" {
+    const allocator = std.testing.allocator;
+    var threaded = std.Io.Threaded.init(allocator, .{
+        .async_limit = .unlimited,
+    });
+    defer threaded.deinit();
+    const io = threaded.io();
+
+    var server = try runtime.Server.listen(
+        allocator,
+        io,
+        .{ .ip4 = .loopback(0) },
+        .{ .max_head_bytes = 4096, .max_frame_bytes = 4096 },
+    );
+    defer server.deinit();
+
+    const Shared = struct {
+        server: *runtime.Server,
+        request_inspected: std.Io.Event = .unset,
+        permit_upgrade: std.Io.Event = .unset,
+        err: ?anyerror = null,
+
+        fn run(self: *@This()) void {
+            self.runFallible() catch |err| {
+                self.err = err;
+                self.request_inspected.set(self.server.http.io);
+            };
+        }
+
+        fn runFallible(self: *@This()) !void {
+            var pending = try self.server.receiveUpgradeRequest(.{
+                .protocols = &.{"chat.v1"},
+                .require_subprotocol = true,
+            });
+            var pending_owned = true;
+            defer if (pending_owned) pending.deinit();
+            try std.testing.expectEqualStrings(
+                "/authorized?room=7",
+                pending.target(),
+            );
+            try std.testing.expectEqualStrings(
+                "Bearer websocket-token",
+                pending.header("authorization").?,
+            );
+            try std.testing.expectEqualStrings(
+                "session=abc123",
+                pending.header("cookie").?,
+            );
+            try std.testing.expect(pending.peerCertificates() == null);
+            try std.testing.expect(pending.negotiatedCipherSuite() == null);
+            try std.testing.expect(
+                pending.negotiatedTranscriptHash() == null,
+            );
+            try std.testing.expect(pending.headers().len >= 7);
+            self.request_inspected.set(self.server.http.io);
+            try self.permit_upgrade.wait(self.server.http.io);
+
+            var connection = try pending.acceptWithHeaders(&.{.{
+                .name = "X-Admission",
+                .value = "accepted",
+            }});
+            pending_owned = false;
+            defer connection.close();
+            var message = try connection.receiveMessage();
+            defer message.deinit(allocator);
+            try std.testing.expectEqualStrings("authorized", message.payload);
+            try connection.sendText("accepted");
+        }
+    };
+
+    var shared = Shared{ .server = &server };
+    const thread = try std.Thread.spawn(.{}, Shared.run, .{&shared});
+    var joined = false;
+    defer if (!joined) {
+        shared.permit_upgrade.set(io);
+        thread.join();
+    };
+
+    const stream = try server.address().connect(io, .{ .mode = .stream });
+    defer stream.close(io);
+    try writeAll(
+        io,
+        stream,
+        "GET /authorized?room=7 HTTP/1.1\r\n" ++
+            "Host: localhost\r\n" ++
+            "Upgrade: websocket\r\n" ++
+            "Connection: Upgrade\r\n" ++
+            "Sec-WebSocket-Key: dGhlIHNhbXBsZSBub25jZQ==\r\n" ++
+            "Sec-WebSocket-Version: 13\r\n" ++
+            "Sec-WebSocket-Protocol: chat.v1\r\n" ++
+            "Authorization: Bearer websocket-token\r\n" ++
+            "Cookie: session=abc123\r\n" ++
+            "\r\n",
+    );
+    try shared.request_inspected.wait(io);
+    var before_response: [1]u8 = undefined;
+    try std.testing.expectError(
+        error.Timeout,
+        readSomeWithDeadline(
+            io,
+            stream,
+            &before_response,
+            .fromNow(
+                io,
+                .{ .raw = .fromMilliseconds(20), .clock = .awake },
+            ),
+        ),
+    );
+    shared.permit_upgrade.set(io);
+
+    var response =
+        try http1_runtime.readResponseFromStreamForRequestWithTimeout(
+            allocator,
+            io,
+            stream,
+            .{ .max_head_bytes = 4096, .max_body_bytes = 0 },
+            .{ .max_headers = 16 },
+            .GET,
+            .fromSeconds(1),
+        );
+    defer response.deinit(allocator);
+    try std.testing.expectEqual(@as(u16, 101), response.response.status);
+    try std.testing.expectEqualStrings(
+        "accepted",
+        response.response.header("x-admission").?,
+    );
+    try std.testing.expectEqualStrings(
+        "chat.v1",
+        response.response.header("sec-websocket-protocol").?,
+    );
+
+    var frame_bytes: std.ArrayList(u8) = .empty;
+    defer frame_bytes.deinit(allocator);
+    try websocket.writeFrame(
+        &frame_bytes,
+        allocator,
+        .text,
+        "authorized",
+        .{ .mask_key = .{ 1, 2, 3, 4 } },
+    );
+    try writeAll(io, stream, frame_bytes.items);
+    var reply_storage: [10]u8 = undefined;
+    var reply_len: usize = 0;
+    while (reply_len < reply_storage.len) {
+        const count = try readSomeWithDeadline(
+            io,
+            stream,
+            reply_storage[reply_len..],
+            .fromNow(io, .{ .raw = .fromSeconds(1), .clock = .awake }),
+        );
+        if (count == 0) return error.ConnectionClosed;
+        reply_len += count;
+        const header = websocket.FrameHeader.parse(
+            reply_storage[0..reply_len],
+        ) catch |err| switch (err) {
+            error.BufferTooShort => continue,
+            else => return err,
+        };
+        if (reply_len < header.header_len + header.payload_len) continue;
+        var reply = try websocket.parseFrameOptions(
+            allocator,
+            reply_storage[0 .. header.header_len + header.payload_len],
+            .{ .expect_mask = .unmasked },
+        );
+        defer reply.deinit(allocator);
+        try std.testing.expectEqualStrings("accepted", reply.payload);
+        break;
+    }
+
+    thread.join();
+    joined = true;
+    if (shared.err) |err| return err;
+}
+
+test "WebSocket server sends inspected HTTP rejection without 101" {
+    const allocator = std.testing.allocator;
+    var threaded = std.Io.Threaded.init(allocator, .{
+        .async_limit = .unlimited,
+    });
+    defer threaded.deinit();
+    const io = threaded.io();
+    var server = try runtime.Server.listen(
+        allocator,
+        io,
+        .{ .ip4 = .loopback(0) },
+        .{ .max_head_bytes = 4096, .max_frame_bytes = 4096 },
+    );
+    defer server.deinit();
+
+    const Shared = struct {
+        server: *runtime.Server,
+        err: ?anyerror = null,
+
+        fn run(self: *@This()) void {
+            self.runFallible() catch |err| {
+                self.err = err;
+            };
+        }
+
+        fn runFallible(self: *@This()) !void {
+            var pending = try self.server.receiveUpgradeRequest(.{});
+            var pending_owned = true;
+            defer if (pending_owned) pending.deinit();
+            try std.testing.expectEqualStrings(
+                "/private",
+                pending.target(),
+            );
+            try pending.reject(
+                401,
+                "Unauthorized",
+                &.{.{
+                    .name = "WWW-Authenticate",
+                    .value = "Bearer realm=chat",
+                }},
+                "denied",
+            );
+            pending_owned = false;
+        }
+    };
+
+    var shared = Shared{ .server = &server };
+    const thread = try std.Thread.spawn(.{}, Shared.run, .{&shared});
+    var joined = false;
+    defer if (!joined) thread.join();
+
+    var http_client = try http1_runtime.Client.connect(
+        allocator,
+        io,
+        server.address(),
+        .{ .max_head_bytes = 4096, .max_body_bytes = 4096 },
+    );
+    defer http_client.close();
+    var response = try http_client.request(.{
+        .target = "/private",
+        .host = "localhost",
+        .headers = &.{
+            .{ .name = "Upgrade", .value = "websocket" },
+            .{ .name = "Connection", .value = "Upgrade" },
+            .{
+                .name = "Sec-WebSocket-Key",
+                .value = "dGhlIHNhbXBsZSBub25jZQ==",
+            },
+            .{ .name = "Sec-WebSocket-Version", .value = "13" },
+            .{ .name = "Authorization", .value = "Bearer denied" },
+        },
+    });
+    defer response.deinit(allocator);
+    try std.testing.expectEqual(@as(u16, 401), response.response.status);
+    try std.testing.expectEqualStrings(
+        "Bearer realm=chat",
+        response.response.header("www-authenticate").?,
+    );
+    try std.testing.expectEqualStrings("denied", response.response.body);
+    try std.testing.expect(response.response.header("upgrade") == null);
+    try std.testing.expect(!response.response.keepAlive());
+
+    thread.join();
+    joined = true;
+    if (shared.err) |err| return err;
+}
+
+test "WebSocket pending upgrade rejects unsafe response fields transactionally" {
+    const allocator = std.testing.allocator;
+    var threaded = std.Io.Threaded.init(allocator, .{
+        .async_limit = .unlimited,
+    });
+    defer threaded.deinit();
+    const io = threaded.io();
+    var server = try runtime.Server.listen(
+        allocator,
+        io,
+        .{ .ip4 = .loopback(0) },
+        .{ .max_head_bytes = 4096, .max_frame_bytes = 4096 },
+    );
+    defer server.deinit();
+
+    const Shared = struct {
+        server: *runtime.Server,
+        validation_finished: std.Io.Event = .unset,
+        release_pending: std.Io.Event = .unset,
+        err: ?anyerror = null,
+
+        fn run(self: *@This()) void {
+            self.runFallible() catch |err| {
+                self.err = err;
+                self.validation_finished.set(self.server.http.io);
+                self.release_pending.set(self.server.http.io);
+            };
+        }
+
+        fn runFallible(self: *@This()) !void {
+            var pending = try self.server.receiveUpgradeRequest(.{});
+            defer pending.deinit();
+            try std.testing.expectError(
+                error.InvalidHandshake,
+                pending.acceptWithHeaders(&.{.{
+                    .name = "Sec-WebSocket-Accept",
+                    .value = "duplicate",
+                }}),
+            );
+            try std.testing.expectError(
+                error.InvalidHandshake,
+                pending.reject(401, "Unauthorized", &.{.{
+                    .name = "Content-Length",
+                    .value = "999",
+                }}, "denied"),
+            );
+            try std.testing.expectEqualStrings(
+                "Bearer retained",
+                pending.header("authorization").?,
+            );
+            self.validation_finished.set(self.server.http.io);
+            try self.release_pending.wait(self.server.http.io);
+        }
+    };
+
+    var shared = Shared{ .server = &server };
+    const thread = try std.Thread.spawn(.{}, Shared.run, .{&shared});
+    var joined = false;
+    defer if (!joined) {
+        shared.release_pending.set(io);
+        thread.join();
+    };
+
+    const stream = try server.address().connect(io, .{ .mode = .stream });
+    defer stream.close(io);
+    try writeAll(
+        io,
+        stream,
+        "GET /transactional HTTP/1.1\r\n" ++
+            "Host: localhost\r\n" ++
+            "Upgrade: websocket\r\n" ++
+            "Connection: Upgrade\r\n" ++
+            "Sec-WebSocket-Key: dGhlIHNhbXBsZSBub25jZQ==\r\n" ++
+            "Sec-WebSocket-Version: 13\r\n" ++
+            "Authorization: Bearer retained\r\n" ++
+            "\r\n",
+    );
+    try shared.validation_finished.wait(io);
+    if (shared.err) |err| return err;
+    var response_byte: [1]u8 = undefined;
+    try std.testing.expectError(
+        error.Timeout,
+        readSomeWithDeadline(
+            io,
+            stream,
+            &response_byte,
+            .fromNow(
+                io,
+                .{ .raw = .fromMilliseconds(20), .clock = .awake },
+            ),
+        ),
+    );
+    shared.release_pending.set(io);
+
+    thread.join();
+    joined = true;
+}
+
+test "WebSocket pending upgrade preserves one handshake deadline" {
+    const allocator = std.testing.allocator;
+    var threaded = std.Io.Threaded.init(allocator, .{
+        .async_limit = .unlimited,
+    });
+    defer threaded.deinit();
+    const io = threaded.io();
+    var server = try runtime.Server.listen(
+        allocator,
+        io,
+        .{ .ip4 = .loopback(0) },
+        .{ .max_head_bytes = 4096, .max_frame_bytes = 4096 },
+    );
+    defer server.deinit();
+
+    const Shared = struct {
+        server: *runtime.Server,
+        request_received: std.Io.Event = .unset,
+        try_accept: std.Io.Event = .unset,
+        err: ?anyerror = null,
+
+        fn run(self: *@This()) void {
+            self.runFallible() catch |err| {
+                self.err = err;
+                self.request_received.set(self.server.http.io);
+            };
+        }
+
+        fn runFallible(self: *@This()) !void {
+            var pending = try self.server.receiveUpgradeRequestWithTimeout(
+                .{},
+                .fromMilliseconds(40),
+            );
+            defer pending.deinit();
+            self.request_received.set(self.server.http.io);
+            try self.try_accept.wait(self.server.http.io);
+            try std.testing.expectError(error.Timeout, pending.accept());
+        }
+    };
+
+    var shared = Shared{ .server = &server };
+    const thread = try std.Thread.spawn(.{}, Shared.run, .{&shared});
+    var joined = false;
+    defer if (!joined) {
+        shared.try_accept.set(io);
+        thread.join();
+    };
+
+    const stream = try server.address().connect(io, .{ .mode = .stream });
+    defer stream.close(io);
+    try writeAll(
+        io,
+        stream,
+        "GET /deadline HTTP/1.1\r\n" ++
+            "Host: localhost\r\n" ++
+            "Upgrade: websocket\r\n" ++
+            "Connection: Upgrade\r\n" ++
+            "Sec-WebSocket-Key: dGhlIHNhbXBsZSBub25jZQ==\r\n" ++
+            "Sec-WebSocket-Version: 13\r\n" ++
+            "\r\n",
+    );
+    try shared.request_received.wait(io);
+    try std.Io.sleep(io, .fromMilliseconds(60), .awake);
+    shared.try_accept.set(io);
+
+    thread.join();
+    joined = true;
+    if (shared.err) |err| return err;
+}
+
+test "WebSocket pending listener closes an accepted stream after deadline" {
+    const allocator = std.testing.allocator;
+    var threaded = std.Io.Threaded.init(allocator, .{
+        .async_limit = .unlimited,
+    });
+    defer threaded.deinit();
+    const io = threaded.io();
+    var server = try runtime.Server.listen(
+        allocator,
+        io,
+        .{ .ip4 = .loopback(0) },
+        .{ .max_head_bytes = 4096, .max_frame_bytes = 4096 },
+    );
+    defer server.deinit();
+
+    const Shared = struct {
+        server: *runtime.Server,
+        waiting: std.Io.Event = .unset,
+        err: ?anyerror = null,
+
+        fn run(self: *@This()) void {
+            const deadline = std.Io.Clock.Timestamp.fromNow(
+                self.server.http.io,
+                .{
+                    .raw = .fromMilliseconds(40),
+                    .clock = .awake,
+                },
+            );
+            self.waiting.set(self.server.http.io);
+            var pending = self.server.receiveUpgradeRequestWithDeadline(
+                .{},
+                deadline,
+            ) catch |err| {
+                self.err = err;
+                return;
+            };
+            defer pending.deinit();
+            self.err = error.UnexpectedUpgrade;
+        }
+    };
+
+    var shared = Shared{ .server = &server };
+    const thread = try std.Thread.spawn(.{}, Shared.run, .{&shared});
+    var joined = false;
+    defer if (!joined) thread.join();
+
+    try shared.waiting.wait(io);
+    try std.Io.sleep(io, .fromMilliseconds(60), .awake);
+    const stream = try server.address().connect(io, .{ .mode = .stream });
+    defer stream.close(io);
+    var byte: [1]u8 = undefined;
+    try std.testing.expectEqual(
+        @as(usize, 0),
+        try readSomeWithDeadline(
+            io,
+            stream,
+            &byte,
+            .fromNow(
+                io,
+                .{ .raw = .fromSeconds(1), .clock = .awake },
+            ),
+        ),
+    );
+
+    thread.join();
+    joined = true;
+    try std.testing.expectEqual(error.Timeout, shared.err.?);
+}
+
+test "WebSocket pending upgrade validates decisions before consuming ownership" {
+    const allocator = std.testing.allocator;
+    var threaded = std.Io.Threaded.init(allocator, .{});
+    defer threaded.deinit();
+    const io = threaded.io();
+    var server = try runtime.Server.listen(
+        allocator,
+        io,
+        .{ .ip4 = .loopback(0) },
+        .{ .max_head_bytes = 4096, .max_frame_bytes = 4096 },
+    );
+    defer server.deinit();
+
+    const Shared = struct {
+        server: *runtime.Server,
+        err: ?anyerror = null,
+
+        fn run(self: *@This()) void {
+            self.runFallible() catch |err| {
+                self.err = err;
+            };
+        }
+
+        fn runFallible(self: *@This()) !void {
+            var pending = try self.server.receiveUpgradeRequest(.{});
+            defer pending.deinit();
+            try std.testing.expectError(
+                error.InvalidStatus,
+                pending.reject(299, "Not a rejection", &.{}, &.{}),
+            );
+            try std.testing.expectEqualStrings(
+                "/still-pending",
+                pending.target(),
+            );
+            try std.testing.expectError(
+                error.InvalidHandshake,
+                pending.acceptWithHeaders(&.{.{
+                    .name = "Content-Length",
+                    .value = "0",
+                }}),
+            );
+            try std.testing.expectEqualStrings(
+                "/still-pending",
+                pending.target(),
+            );
+        }
+    };
+
+    var shared = Shared{ .server = &server };
+    const thread = try std.Thread.spawn(.{}, Shared.run, .{&shared});
+    var client = try server.address().connect(io, .{ .mode = .stream });
+    defer client.close(io);
+    try writeAll(
+        io,
+        client,
+        "GET /still-pending HTTP/1.1\r\n" ++
+            "Host: localhost\r\n" ++
+            "Upgrade: websocket\r\n" ++
+            "Connection: Upgrade\r\n" ++
+            "Sec-WebSocket-Key: dGhlIHNhbXBsZSBub25jZQ==\r\n" ++
+            "Sec-WebSocket-Version: 13\r\n" ++
+            "\r\n",
+    );
+
+    thread.join();
+    if (shared.err) |err| return err;
 }
 
 test "WebSocket client rejects unsafe custom HTTP upgrade headers" {

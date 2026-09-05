@@ -6,7 +6,7 @@ pub fn main() !void {
     defer _ = gpa.deinit();
     const allocator = gpa.allocator();
 
-    var backend = try netz.runtime.Backend.initAuto(allocator, .evented_then_threaded);
+    var backend = try netz.runtime.Backend.initAuto(allocator, .zio_then_threaded);
     defer backend.deinit();
     const io = backend.io();
     std.debug.print("std.Io backend: {t}\n", .{backend.kind});

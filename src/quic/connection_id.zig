@@ -205,6 +205,52 @@ pub const PeerPool = struct {
         entry.in_use = true;
     }
 
+    /// Return pool-owned storage for a peer connection ID that has actually
+    /// been used. Path fallback must not retain a config slice across peer CID
+    /// retirement and replacement.
+    pub fn activeConnectionId(
+        self: *const PeerPool,
+        connection_id: []const u8,
+    ) ?[]const u8 {
+        for (&self.entries) |*entry| {
+            if (!entry.occupied or !entry.in_use) continue;
+            if (std.mem.eql(u8, entry.slice(), connection_id)) {
+                return entry.slice();
+            }
+        }
+        return null;
+    }
+
+    /// Select a usable destination CID for a path. Prefer the path's previous
+    /// CID, then consume a fresh peer-issued CID, and only reuse another active
+    /// CID when no unused value remains.
+    pub fn selectForPath(
+        self: *PeerPool,
+        preferred: []const u8,
+    ) ?[]const u8 {
+        if (self.activeConnectionId(preferred)) |connection_id| {
+            return connection_id;
+        }
+        var oldest_unused: ?*Entry = null;
+        for (&self.entries) |*entry| {
+            if (!entry.occupied or entry.in_use) continue;
+            if (oldest_unused == null or
+                entry.sequence_number < oldest_unused.?.sequence_number)
+            {
+                oldest_unused = entry;
+            }
+        }
+        if (oldest_unused) |entry| {
+            entry.in_use = true;
+            self.in_use_count += 1;
+            return entry.slice();
+        }
+        for (&self.entries) |*entry| {
+            if (entry.occupied and entry.in_use) return entry.slice();
+        }
+        return null;
+    }
+
     pub fn detectStatelessReset(self: *const PeerPool, datagram: []const u8) ?u64 {
         const candidate = quic.stateless_reset.tokenCandidate(datagram) orelse
             return null;
@@ -564,6 +610,22 @@ test "QUIC peer CID pool enables initial reset token after negotiation" {
     try std.testing.expectError(
         error.DuplicateResetToken,
         pool.add(1, "other-cid", token),
+    );
+}
+
+test "QUIC peer CID pool selects replacement when preferred CID was retired" {
+    var pool = PeerPool{};
+    try pool.addInitial("initial");
+    try pool.add(1, "replacement", [_]u8{1} ** 16);
+    try pool.retirePriorTo(1);
+
+    const selected = pool.selectForPath("initial") orelse
+        return error.UnknownConnectionId;
+    try std.testing.expectEqualStrings("replacement", selected);
+    try std.testing.expectEqual(@as(usize, 1), pool.in_use_count);
+    try std.testing.expectEqualStrings(
+        "replacement",
+        pool.selectForPath("initial").?,
     );
 }
 

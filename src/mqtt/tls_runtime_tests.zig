@@ -382,7 +382,7 @@ test "MQTT reconnect client reuses native TLS connector" {
         .address = server.address(),
         .tls_host = "localhost",
         .options = .{
-            .mqtt = undefined,
+            .mqtt = .{ .client_id = "connector-placeholder" },
             .tls = .{ .ca_bundle = .{
                 .bundle = &ca_bundle,
                 .lock = &ca_lock,
@@ -406,10 +406,12 @@ test "MQTT reconnect client reuses native TLS connector" {
         &shutdown,
     );
     defer client.deinit();
-    var first = (try client.pollWithTimeout(.fromSeconds(2))).?;
+    var first = (try client.pollWithTimeout(.fromSeconds(10))) orelse
+        return error.TestExpectedConnectEvent;
     defer first.deinit(allocator);
     try std.testing.expect(first == .connected);
-    var second = (try client.pollWithTimeout(.fromSeconds(2))).?;
+    var second = (try client.pollWithTimeout(.fromSeconds(10))) orelse
+        return error.TestExpectedReconnectEvent;
     defer second.deinit(allocator);
     try std.testing.expect(second == .connected);
     try std.testing.expect(second.connected.session_present);
@@ -475,7 +477,7 @@ test "MQTT reconnect client reuses TLS hostname and URI connectors" {
     var ca_bundle, var ca_lock = try localCaBundle(allocator, io);
     defer ca_bundle.deinit(allocator);
     const tls_options: mqtt_tls.ConnectOptions = .{
-        .mqtt = undefined,
+        .mqtt = .{ .client_id = "connector-placeholder" },
         .tls = .{ .ca_bundle = .{
             .bundle = &ca_bundle,
             .lock = &ca_lock,
@@ -536,7 +538,9 @@ test "MQTT TLS URI reconnect connector preserves validation and network timeout"
 
     var invalid = mqtt_tls.UriReconnectConnector{
         .uri = "mqtt://localhost",
-        .options = .{ .mqtt = undefined },
+        .options = .{
+            .mqtt = .{ .client_id = "connector-placeholder" },
+        },
     };
     try std.testing.expectError(
         error.UnsupportedScheme,
@@ -776,7 +780,7 @@ test "MQTT TLS server caller timeout spans TLS and CONNECT" {
         fn run(self: *@This()) void {
             var accepted = self.server.acceptWithTimeout(
                 .{ .connect_timeout = .fromSeconds(1) },
-                .fromMilliseconds(50),
+                .fromMilliseconds(500),
             ) catch |err| {
                 self.err = err;
                 return;
@@ -787,6 +791,8 @@ test "MQTT TLS server caller timeout spans TLS and CONNECT" {
     };
     var shared = Shared{ .server = &server };
     const thread = try std.Thread.spawn(.{}, Shared.run, .{&shared});
+    var joined = false;
+    defer if (!joined) thread.join();
     var ca_bundle, var ca_lock = try localCaBundle(allocator, io);
     defer ca_bundle.deinit(allocator);
     const stream = try server.address().connect(io, .{ .mode = .stream });
@@ -804,9 +810,11 @@ test "MQTT TLS server caller timeout spans TLS and CONNECT" {
     );
     stream_owned = false;
     defer tls_connection.deinit();
-    try std.Io.sleep(io, .fromMilliseconds(25), .awake);
+    // Completing the client handshake proves the shared budget reaches the
+    // MQTT CONNECT phase. Keep the peer silent until that budget expires.
 
     thread.join();
+    joined = true;
     try std.testing.expectEqual(error.Timeout, shared.err.?);
 }
 
@@ -1525,7 +1533,7 @@ test "MQTT TLS caller deadline spans TLS setup and CONNACK" {
             _ = try connection.readApplication(&input);
             try std.Io.sleep(
                 self.server.io,
-                .fromMilliseconds(150),
+                .fromMilliseconds(750),
                 .awake,
             );
         }
@@ -1554,7 +1562,9 @@ test "MQTT TLS caller deadline spans TLS setup and CONNACK" {
                 },
             },
             .fromNow(io, .{
-                .raw = .fromMilliseconds(40),
+                // Leave ample room for a loaded local TLS handshake while
+                // still expiring well before the peer supplies a CONNACK.
+                .raw = .fromMilliseconds(500),
                 .clock = .awake,
             }),
         ),

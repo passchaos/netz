@@ -592,24 +592,40 @@ test "QUIC client handshake receives through one socket owner" {
     const original_dcid = "client-dispatch";
     const client_cid = "client-route";
     const server_cid = "server-route";
-    var inbox = try quic.handshake_inbox.Inbox.init(
+    var client_inbox = try quic.handshake_inbox.Inbox.init(
         allocator,
         io,
         &.{client_cid},
         server_endpoint.address(),
-        4096,
+        32,
     );
-    defer inbox.deinit();
+    defer client_inbox.deinit();
+    var server_inbox = try quic.handshake_inbox.Inbox.init(
+        allocator,
+        io,
+        &.{ original_dcid, server_cid },
+        client_endpoint.address(),
+        32,
+    );
+    defer server_inbox.deinit();
+    const deadline = std.Io.Clock.Timestamp.fromNow(io, .{
+        .raw = .fromSeconds(2),
+        .clock = .awake,
+    });
 
     const Server = struct {
         endpoint: *quic.runtime.Endpoint,
+        inbox: *quic.handshake_inbox.Inbox,
         initial: quic.runtime.OwnedBytes,
+        deadline: std.Io.Clock.Timestamp,
+        done: std.atomic.Value(bool) = .init(false),
         established: ?handshake.EstablishedConnection = null,
         err: ?anyerror = null,
 
         fn run(self: *@This()) void {
-            self.established = handshake.acceptFromInitial(
+            self.established = handshake.acceptFromInitialSourceWithDeadline(
                 self.endpoint,
+                self.inbox.datagramSource(),
                 self.initial,
                 .{
                     .local_connection_id = server_cid,
@@ -621,22 +637,26 @@ test "QUIC client handshake receives through one socket owner" {
                         .max_duration_ms = 2_000,
                     },
                 },
+                self.deadline,
             ) catch |err| {
                 self.err = err;
+                self.done.store(true, .release);
                 return;
             };
+            self.done.store(true, .release);
         }
     };
     const Client = struct {
         endpoint: *quic.runtime.Endpoint,
         inbox: *quic.handshake_inbox.Inbox,
         server: std.Io.net.IpAddress,
+        deadline: std.Io.Clock.Timestamp,
         done: std.atomic.Value(bool) = .init(false),
         established: ?handshake.EstablishedConnection = null,
         err: ?anyerror = null,
 
         fn run(self: *@This()) void {
-            self.established = handshake.connectFrom(
+            self.established = handshake.connectFromWithDeadline(
                 self.endpoint,
                 self.inbox.datagramSource(),
                 self.server,
@@ -652,6 +672,7 @@ test "QUIC client handshake receives through one socket owner" {
                         .max_duration_ms = 2_000,
                     },
                 },
+                self.deadline,
             ) catch |err| {
                 self.err = err;
                 self.done.store(true, .release);
@@ -660,83 +681,159 @@ test "QUIC client handshake receives through one socket owner" {
             self.done.store(true, .release);
         }
     };
+    const ClientOwner = struct {
+        endpoint: *quic.runtime.Endpoint,
+        inbox: *quic.handshake_inbox.Inbox,
+        done: *std.atomic.Value(bool),
+        deadline: std.Io.Clock.Timestamp,
+        err: ?anyerror = null,
+
+        fn run(self: *@This()) void {
+            while (!self.done.load(.acquire)) {
+                const remaining = self.deadline.durationFromNow(
+                    self.endpoint.io,
+                ).raw.nanoseconds;
+                if (remaining <= 0) {
+                    if (self.done.load(.acquire)) return;
+                    self.err = error.Timeout;
+                    self.inbox.close();
+                    return;
+                }
+                var datagram = self.endpoint.receiveBytesTimeout(.{
+                    .duration = .{
+                        .clock = .awake,
+                        .raw = .fromNanoseconds(@min(
+                            remaining,
+                            20 * std.time.ns_per_ms,
+                        )),
+                    },
+                }) catch |err| switch (err) {
+                    error.Timeout => {
+                        if (self.done.load(.acquire)) return;
+                        continue;
+                    },
+                    else => {
+                        if (self.done.load(.acquire)) return;
+                        self.err = err;
+                        self.inbox.close();
+                        return;
+                    },
+                };
+                self.inbox.push(datagram) catch |err| {
+                    datagram.deinit(self.endpoint.allocator);
+                    self.err = err;
+                    self.inbox.close();
+                    return;
+                };
+            }
+        }
+    };
 
     var client = Client{
         .endpoint = &client_endpoint,
-        .inbox = &inbox,
+        .inbox = &client_inbox,
         .server = server_endpoint.address(),
+        .deadline = deadline,
     };
     const client_thread = try std.Thread.spawn(.{}, Client.run, .{&client});
-    // The client handshake can emit several Initial datagrams when the test
-    // suite is heavily loaded. Pick the first valid Initial explicitly so the
-    // server worker never starts from an unrelated/retransmitted datagram and
-    // never owns an unbounded first socket read.
-    var initial: quic.runtime.OwnedBytes = undefined;
-    while (true) {
-        var candidate = server_endpoint.receiveBytesTimeout(.{
-            .duration = .{
-                .clock = .awake,
-                .raw = .fromSeconds(2),
-            },
-        }) catch |err| {
-            inbox.close();
-            client_thread.join();
-            return err;
-        };
-        const header = quic.LongHeader.parse(candidate.bytes) catch {
-            candidate.deinit(allocator);
-            continue;
-        };
-        if (header.packet_type == .initial and
-            std.mem.eql(
-                u8,
-                header.destination_connection_id,
-                original_dcid,
-            ))
-        {
-            initial = candidate;
-            break;
-        }
-        candidate.deinit(allocator);
-    }
+    var client_owner = ClientOwner{
+        .endpoint = &client_endpoint,
+        .inbox = &client_inbox,
+        .done = &client.done,
+        .deadline = deadline,
+    };
+    const client_owner_thread = try std.Thread.spawn(
+        .{},
+        ClientOwner.run,
+        .{&client_owner},
+    );
+
+    var dispatcher = quic.endpoint_dispatcher.Dispatcher.init(
+        allocator,
+        &server_endpoint,
+    );
+    defer dispatcher.deinit();
+    const versions = [_]u32{
+        quic.Version.version_1.wireValue(),
+        quic.Version.version_2.wireValue(),
+    };
+    var admission = try dispatcher.receiveWithDeadline(
+        &versions,
+        deadline,
+    );
+    defer admission.deinit(allocator);
+    try std.testing.expect(admission == .new_initial);
+    const initial = admission.takeNewInitial() orelse
+        return error.TestUnexpectedResult;
+    try dispatcher.registerPendingHandshake(81, &server_inbox);
     var server = Server{
         .endpoint = &server_endpoint,
+        .inbox = &server_inbox,
         .initial = initial,
+        .deadline = deadline,
     };
     const server_thread = try std.Thread.spawn(.{}, Server.run, .{&server});
 
-    var owner_err: ?anyerror = null;
-    owner: while (!client.done.load(.acquire)) {
-        var datagram = client_endpoint.receiveBytesTimeout(.{
-            .duration = .{
+    var server_owner_err: ?anyerror = null;
+    while (!server.done.load(.acquire)) {
+        const remaining = deadline.durationFromNow(io).raw.nanoseconds;
+        if (remaining <= 0) {
+            if (server.done.load(.acquire)) break;
+            server_owner_err = error.Timeout;
+            break;
+        }
+        var event = dispatcher.receiveTimeout(
+            &versions,
+            .{ .duration = .{
                 .clock = .awake,
-                .raw = .fromMilliseconds(20),
+                .raw = .fromNanoseconds(@min(
+                    remaining,
+                    20 * std.time.ns_per_ms,
+                )),
+            } },
+        ) catch |err| switch (err) {
+            error.Timeout => {
+                if (server.done.load(.acquire)) break;
+                continue;
             },
-        }) catch |err| switch (err) {
-            error.Timeout => continue,
             else => {
-                owner_err = err;
-                break :owner;
+                if (server.done.load(.acquire)) break;
+                server_owner_err = err;
+                break;
             },
         };
-        inbox.push(datagram) catch |err| {
-            datagram.deinit(allocator);
-            owner_err = err;
-            break :owner;
-        };
+        if (event != .pending_handshake or
+            event.pending_handshake != 81)
+        {
+            event.deinit(allocator);
+            server_owner_err = error.TestUnexpectedResult;
+            break;
+        }
+        event.deinit(allocator);
     }
 
-    if (!client.done.load(.acquire)) inbox.close();
+    if (!server.done.load(.acquire)) server_inbox.close();
+    if (!client.done.load(.acquire)) client_inbox.close();
     client_thread.join();
+    client_owner_thread.join();
     server_thread.join();
-    if (owner_err) |err| return err;
+    defer if (client.established) |*established| established.deinit();
+    defer if (server.established) |*established| established.deinit();
     if (client.err) |err| return err;
     if (server.err) |err| return err;
+    if (client.established == null) {
+        if (client_owner.err) |err| return err;
+    }
+    if (server.established == null) {
+        if (server_owner_err) |err| return err;
+    }
     var client_established = client.established orelse
         return error.TestUnexpectedResult;
+    client.established = null;
     defer client_established.deinit();
     var server_established = server.established orelse
         return error.TestUnexpectedResult;
+    server.established = null;
     defer server_established.deinit();
     try std.testing.expectEqualStrings("h3", client_established.alpn);
     try std.testing.expectEqualStrings("h3", server_established.alpn);
