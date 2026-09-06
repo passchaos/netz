@@ -7134,6 +7134,10 @@ pub const HandshakeClient = struct {
     /// Socket-reading convenience methods fail closed in this mode; callers
     /// inject routed packets and use the `*Once` polling surface instead.
     dispatcher_bound: bool = false,
+    /// A best-effort dispatcher-side cleanup can retire HTTP/3 bookkeeping
+    /// without successfully emitting every QUIC terminal frame. Such a
+    /// connection must be discarded rather than returned to an idle pool.
+    reuse_safe: bool = true,
     peer: net.IpAddress,
     allocator: std.mem.Allocator,
     established: quic.handshake.EstablishedConnection,
@@ -8087,6 +8091,7 @@ pub const HandshakeClient = struct {
     /// into the next lease. A GOAWAY or QUIC close state is never reusable.
     pub fn isReusable(self: *const HandshakeClient) bool {
         return self.control.peer_goaway_id == null and
+            self.reuse_safe and
             !self.established.connection.closed() and
             !self.established.connection.closing() and
             !self.established.connection.draining() and
@@ -11235,6 +11240,10 @@ pub const HandshakeClient = struct {
         self: *HandshakeClient,
         stream_id: u62,
     ) void {
+        if (self.dispatcher_bound) {
+            self.abandonExtendedConnectOnce(stream_id);
+            return;
+        }
         var cancel_qpack = self.response_streams
             .requiresQpackCancellation(
             stream_id,
@@ -11256,6 +11265,47 @@ pub const HandshakeClient = struct {
             http3.ApplicationErrorCode.request_cancelled,
             cancel_qpack,
         ) catch {};
+        _ = self.established.connection
+            .requestCompletedLocalStreamRelease(stream_id) catch false;
+        self.connect_datagrams.unregister(stream_id);
+        self.qpack_encode.abandonStream(stream_id);
+        self.response_streams.remove(stream_id);
+        self.streaming_responses.remove(stream_id);
+        _ = self.request_lifecycle.finish(stream_id) catch false;
+        _ = self.outbound_bodies.finish(stream_id);
+    }
+
+    /// Best-effort Extended CONNECT cleanup for a dispatcher-owned endpoint.
+    /// At most one UDP send is attempted; pacing, congestion, or flow-control
+    /// refusal never sleeps or reads the shared socket. Local HTTP/3 ownership
+    /// is retired even when the wire cancellation cannot be submitted.
+    pub fn abandonExtendedConnectOnce(
+        self: *HandshakeClient,
+        stream_id: u62,
+    ) void {
+        var cancel_qpack = self.response_streams
+            .requiresQpackCancellation(
+            stream_id,
+            self.qpack_decode.table,
+        ) catch false;
+        cancel_qpack = cancel_qpack or
+            (self.streaming_responses.hasUnacknowledgedDynamicSection(
+                stream_id,
+                self.qpack_decode.table,
+            ) catch false);
+        const cancelled = blk: {
+            self.established.connection.tryCancelStream(
+                stream_id,
+                http3.ApplicationErrorCode.request_cancelled,
+            ) catch break :blk false;
+            break :blk true;
+        };
+        // Emitting the QPACK decoder-stream cancellation would require a
+        // second packet. Retire this connection instead of leaking queued
+        // feedback into a future lease.
+        if (!cancelled or cancel_qpack) {
+            self.reuse_safe = false;
+        }
         _ = self.established.connection
             .requestCompletedLocalStreamRelease(stream_id) catch false;
         self.connect_datagrams.unregister(stream_id);

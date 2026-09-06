@@ -3085,6 +3085,7 @@ test "WebTransport client CONNECT polling defers paced feedback and credit" {
         &dispatcher,
         handle,
     )) == null);
+    try std.testing.expect(pending.h3.?.dispatcherBound());
     try std.testing.expectEqual(@as(usize, 1), dispatcher.connectionCount());
     try std.testing.expectEqual(@as(usize, 0), fixed_io.sleep_calls);
     try std.testing.expectEqual(packet_number, pending.connection().next_packet_number);
@@ -3170,6 +3171,126 @@ test "WebTransport client CONNECT polling defers paced feedback and credit" {
     session.deinit();
     session_owned = false;
     try std.testing.expectEqual(@as(usize, 0), dispatcher.connectionCount());
+}
+
+test "WebTransport dispatcher CONNECT attempt deinit never waits for pacing" {
+    const allocator = std.testing.allocator;
+    var threaded = std.Io.Threaded.init(allocator, .{});
+    defer threaded.deinit();
+    const io = threaded.io();
+
+    var endpoint = try quic.runtime.Endpoint.bind(
+        allocator,
+        io,
+        .{ .ip4 = .loopback(0) },
+        .{ .max_datagram_size = 4096 },
+    );
+    defer endpoint.deinit();
+    var peer_endpoint = try quic.runtime.Endpoint.bind(
+        allocator,
+        io,
+        .{ .ip4 = .loopback(0) },
+        .{ .max_datagram_size = 4096 },
+    );
+    defer peer_endpoint.deinit();
+    const keys = quic.protection.deriveAes128Keys(
+        [_]u8{0xaf} ** quic.protection.secret_len,
+    );
+    const settings = webtransport.defaultSettings(.{});
+    var h3 = try http3.runtime.HandshakeClient.initEstablished(
+        &endpoint,
+        peer_endpoint.address(),
+        try quic.handshake.establishPreconfigured(
+            &endpoint,
+            peer_endpoint.address(),
+            .client,
+            .{
+                .receive_keys = keys,
+                .send_keys = keys,
+                .local_connection_id = "wt-attempt-client",
+                .peer_connection_id = "wt-attempt-server",
+                .one_rtt = .{
+                    .max_datagram_size = 1200,
+                    .pacing_max_burst_packets = 1,
+                },
+            },
+        ),
+        .{ .local_settings = settings },
+    );
+    h3.control.settings.markSent(settings);
+    h3.control.settings.markReceived(settings);
+    const stream_id = try h3.startRequest(.{
+        .method = "CONNECT",
+        .path = "/abandon",
+        .authority = "localhost",
+        .headers = &.{.{
+            .name = ":protocol",
+            .value = "webtransport",
+        }},
+    }, null);
+    try h3.bindDispatcher();
+
+    const empty_headers = try allocator.alloc(http3.Qpack.HeaderField, 0);
+    const empty_body = try allocator.alloc(u8, 0);
+    const empty_trailers = try allocator.alloc(http3.Qpack.HeaderField, 0);
+    var restored: http3.runtime.HandshakeClient = undefined;
+    var attempt = runtime.HandshakeConnectAttempt{
+        .h3 = h3,
+        .restore_to = &restored,
+        .session_id = .init(stream_id),
+        .response = .{
+            .status = 200,
+            .headers = empty_headers,
+            .content_length = null,
+            .body_allowed = true,
+            .consumed = 0,
+            .qpack_section_acknowledgments = 0,
+        },
+        .response_body = empty_body,
+        .response_trailers = empty_trailers,
+        .limits = .{},
+    };
+    var restored_owned = false;
+    defer if (restored_owned) restored.deinit();
+
+    var dispatcher = quic.endpoint_dispatcher.Dispatcher.init(
+        allocator,
+        &endpoint,
+    );
+    defer dispatcher.deinit();
+    const handle: quic.endpoint_dispatcher.ConnectionHandle = 41;
+    try dispatcher.registerConnection(
+        handle,
+        &attempt.h3.?.established.connection,
+    );
+    attempt.dispatcher_registered = true;
+    attempt.dispatcher = &dispatcher;
+    attempt.dispatcher_handle = handle;
+
+    var fixed_io = FixedClockIo{
+        .delegate = endpoint.io,
+        .now_ns = 6_000_000,
+    };
+    var fixed_vtable = endpoint.io.vtable.*;
+    fixed_vtable.now = FixedClockIo.now;
+    fixed_vtable.sleep = FixedClockIo.sleep;
+    fixed_vtable.netSend = FixedClockIo.netSend;
+    endpoint.io = .{ .userdata = &fixed_io, .vtable = &fixed_vtable };
+    defer endpoint.io = fixed_io.delegate;
+    quic.one_rtt.testing.exhaustPacingAt(
+        &attempt.h3.?.established.connection,
+        @intCast(fixed_io.now_ns),
+    );
+
+    attempt.deinit();
+    restored_owned = true;
+    try std.testing.expectEqual(@as(usize, 0), dispatcher.connectionCount());
+    try std.testing.expectEqual(@as(usize, 0), fixed_io.sleep_calls);
+    try std.testing.expectEqual(
+        @as(usize, 0),
+        http3.runtime.testing.clientRequestCount(&restored),
+    );
+    try std.testing.expect(!restored.isReusable());
 }
 
 test "WebTransport dispatcher client stream polls do not wait for credit" {

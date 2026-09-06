@@ -6723,6 +6723,7 @@ pub const PendingHandshakeConnect = struct {
         dispatcher: *quic.endpoint_dispatcher.Dispatcher,
         handle: quic.endpoint_dispatcher.ConnectionHandle,
     ) Error!?HandshakeConnectAttempt {
+        if (!self.h3.?.dispatcherBound()) try self.h3.?.bindDispatcher();
         const maybe_response = self.pollConnectResponse(true) catch |err| {
             _ = dispatcher.unregisterConnection(handle) catch
                 return error.InvalidDispatcherState;
@@ -6916,7 +6917,10 @@ pub const HandshakeConnectAttempt = struct {
     pub fn requireAccepted(
         self: *HandshakeConnectAttempt,
     ) Error!HandshakeClientSession {
-        if (self.dispatcher_registered) return error.InvalidDispatcherState;
+        if (!self.accepted()) return error.SessionRejected;
+        if (self.dispatcher_registered or self.h3.?.dispatcherBound()) {
+            return error.InvalidDispatcherState;
+        }
         return self.requireAcceptedInternal(false);
     }
 

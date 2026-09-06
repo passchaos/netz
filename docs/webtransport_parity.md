@@ -450,6 +450,11 @@ with `InvalidDispatcherState` on this object rather than competing for the
 shared UDP socket. Incremental and whole-stream reads preserve transport bytes
 until receive credit commits, while terminal cleanup advances at most one FIN,
 RESET_STREAM, or STOP_SENDING packet per endpoint turn.
+Dispatcher-driven CONNECT polling now binds that invariant before parsing the
+response. Abandoning a returned attempt performs at most one cancellation send
+and never sleeps or reads UDP; if pacing prevents the terminal frames from
+being emitted, local HTTP/3 bookkeeping is still released and the connection
+is marked non-reusable instead of returning latent stream state to a pool.
 `beginConnectFrom` now composes the preceding phase as well: a sole endpoint
 owner can feed a CID-bound handshake inbox, receive a pending WebTransport
 CONNECT on the caller-owned endpoint, then register and drive it through the

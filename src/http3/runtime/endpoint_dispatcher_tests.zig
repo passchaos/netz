@@ -1209,6 +1209,90 @@ test "HTTP/3 request once send preserves its stream across pacing" {
     );
 }
 
+test "HTTP/3 dispatcher-bound abandon never waits for pacing" {
+    const allocator = std.testing.allocator;
+    var threaded = std.Io.Threaded.init(allocator, .{});
+    defer threaded.deinit();
+    const io = threaded.io();
+
+    var peer_endpoint = try quic.runtime.Endpoint.bind(
+        allocator,
+        io,
+        .{ .ip4 = .loopback(0) },
+        .{ .max_datagram_size = 4096 },
+    );
+    defer peer_endpoint.deinit();
+    var endpoint = try quic.runtime.Endpoint.bind(
+        allocator,
+        io,
+        .{ .ip4 = .loopback(0) },
+        .{ .max_datagram_size = 4096 },
+    );
+    defer endpoint.deinit();
+    const client_keys = quic.protection.deriveAes128Keys(
+        [_]u8{0xd7} ** quic.protection.secret_len,
+    );
+    const server_keys = quic.protection.deriveAes128Keys(
+        [_]u8{0xd8} ** quic.protection.secret_len,
+    );
+    var client = try runtime.HandshakeClient.initEstablished(
+        &endpoint,
+        peer_endpoint.address(),
+        try quic.handshake.establishPreconfigured(
+            &endpoint,
+            peer_endpoint.address(),
+            .client,
+            .{
+                .receive_keys = server_keys,
+                .send_keys = client_keys,
+                .local_connection_id = "once-abandon-client",
+                .peer_connection_id = "once-abandon-server",
+                .one_rtt = .{
+                    .max_datagram_size = 1200,
+                    .pacing_max_burst_packets = 1,
+                },
+            },
+        ),
+        .{},
+    );
+    defer client.deinit();
+
+    var fixed_io = FixedClockIo{
+        .delegate = endpoint.io,
+        .now_ns = 5_000_000,
+    };
+    var fixed_vtable = endpoint.io.vtable.*;
+    fixed_vtable.now = FixedClockIo.now;
+    fixed_vtable.sleep = FixedClockIo.sleep;
+    fixed_vtable.netSend = FixedClockIo.netSend;
+    endpoint.io = .{ .userdata = &fixed_io, .vtable = &fixed_vtable };
+    defer endpoint.io = fixed_io.delegate;
+
+    const stream_id = try client.startRequest(.{
+        .method = "CONNECT",
+        .path = "/abandon",
+        .authority = "localhost",
+        .headers = &.{.{
+            .name = ":protocol",
+            .value = "webtransport",
+        }},
+    }, null);
+    try std.testing.expectEqual(@as(u62, 0), stream_id);
+    try client.bindDispatcher();
+    quic.one_rtt.testing.exhaustPacingAt(
+        &client.established.connection,
+        @intCast(fixed_io.now_ns),
+    );
+
+    client.abandonExtendedConnect(stream_id);
+    try std.testing.expectEqual(@as(usize, 0), fixed_io.sleep_calls);
+    try std.testing.expectEqual(
+        @as(usize, 0),
+        runtime.testing.clientRequestCount(&client),
+    );
+    try std.testing.expect(!client.isReusable());
+}
+
 test "HTTP/3 flow-blocked request retry retains response semantics" {
     const allocator = std.testing.allocator;
     var threaded = std.Io.Threaded.init(allocator, .{});

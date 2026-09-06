@@ -588,7 +588,10 @@ integration are explicitly nonblocking: `pollResponseEventOnce`,
 and their matching response/push DATA helpers preserve unread bytes while
 receive credit, QPACK feedback, or STOP_SENDING is paced. Terminal response
 and push events remain reconstructible and are delivered exactly once after
-the endpoint owner advances the connection timer.
+the endpoint owner advances the connection timer. Dispatcher-bound Extended
+CONNECT attempts also use one-shot cancellation during adapter cleanup; a
+pacing failure cannot block deinitialization and instead makes the connection
+ineligible for reuse after local request state is retired.
 
 The endpoint foundation now includes a concrete single-receive-owner
 `quic.endpoint_dispatcher.Dispatcher`. It owns established-connection CID
