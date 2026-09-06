@@ -976,6 +976,29 @@ pub const ServerDuplex = struct {
         try self.transport.reset(code);
     }
 
+    /// Wait for cancellation after the request half reached END_STREAM while
+    /// the server-streaming response remains open. Only this duplex owner may
+    /// read connection frames during the wait.
+    pub fn waitForPeerReset(
+        self: *ServerDuplex,
+    ) Error!http2.ResetStreamPayload {
+        return self.transport.waitForPeerReset();
+    }
+
+    pub fn waitForPeerResetWithTimeout(
+        self: *ServerDuplex,
+        timeout: std.Io.Duration,
+    ) Error!http2.ResetStreamPayload {
+        return self.transport.waitForPeerResetWithTimeout(timeout);
+    }
+
+    pub fn waitForPeerResetWithDeadline(
+        self: *ServerDuplex,
+        deadline: std.Io.Clock.Timestamp,
+    ) Error!http2.ResetStreamPayload {
+        return self.transport.waitForPeerResetWithDeadline(deadline);
+    }
+
     fn finishRequestDecoder(self: *ServerDuplex) Error!void {
         try self.decoder.finish();
     }

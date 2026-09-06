@@ -776,6 +776,126 @@ test "gRPC duplex preserves trailers-only status before request FIN" {
     if (shared.err) |err| return err;
 }
 
+test "gRPC server duplex observes cancellation after request FIN" {
+    const allocator = std.testing.allocator;
+    var threaded = std.Io.Threaded.init(allocator, .{});
+    defer threaded.deinit();
+    const io = threaded.io();
+    const limits: http2.runtime.Limits = .{
+        .max_frame_payload = 64,
+        .max_body_bytes = 4096,
+    };
+    var server = try http2.runtime.Server.listen(
+        allocator,
+        io,
+        .{ .ip4 = .loopback(0) },
+        limits,
+    );
+    defer server.deinit();
+
+    const Shared = struct {
+        server: *http2.runtime.Server,
+        response_started: std.Io.Event = .unset,
+        err: ?anyerror = null,
+
+        fn consume(_: void, _: codec.DecodedMessage) !void {
+            return error.UnexpectedMessage;
+        }
+
+        fn run(self: *@This()) void {
+            self.runFallible() catch |err| {
+                self.err = err;
+            };
+        }
+
+        fn runFallible(self: *@This()) !void {
+            var connection = try self.server.accept();
+            defer connection.close();
+            var stream = try duplex.acceptDuplex(
+                &connection,
+                self.server.allocator,
+                1024,
+            );
+            var stream_live = true;
+            defer if (stream_live) stream.deinit();
+            var finished = try stream.readRequestEvent({}, consume);
+            defer finished.deinit();
+            try std.testing.expectEqual(
+                @as(usize, 0),
+                finished.finished.message_count,
+            );
+            try stream.startResponse(.{});
+            self.response_started.set(self.server.io);
+            const reset = try stream.waitForPeerResetWithTimeout(
+                .fromSeconds(2),
+            );
+            try std.testing.expectEqual(
+                http2.ErrorCode.cancel,
+                reset.error_code,
+            );
+            stream.deinit();
+            stream_live = false;
+
+            var next = try connection.readRequest();
+            defer next.deinit(self.server.allocator);
+            try std.testing.expectEqualStrings("next", next.body);
+            try connection.writeResponse(next.stream_id, .{
+                .status = 204,
+                .request_method = next.method,
+            });
+        }
+    };
+
+    var shared = Shared{ .server = &server };
+    const thread = try std.Thread.spawn(.{}, Shared.run, .{&shared});
+    var joined = false;
+    defer if (!joined) thread.join();
+    var connection = try http2.runtime.Client.connect(
+        allocator,
+        io,
+        server.address(),
+        limits,
+    );
+    defer connection.close();
+    var stream = try duplex.startDuplex(
+        &connection,
+        allocator,
+        .{
+            .path = "/demo.Watch/Stream",
+            .authority = "localhost",
+        },
+    );
+    var stream_live = true;
+    defer if (stream_live) stream.deinit();
+    try std.testing.expectEqual(
+        duplex.WriteResult.complete,
+        try stream.finishRequest(),
+    );
+    try shared.response_started.waitTimeout(
+        io,
+        .{ .duration = .{
+            .raw = .fromSeconds(2),
+            .clock = .awake,
+        } },
+    );
+    try stream.reset(.cancel);
+    stream.deinit();
+    stream_live = false;
+
+    var next = try connection.request(.{
+        .method = "POST",
+        .path = "/next",
+        .authority = "localhost",
+        .body = "next",
+    });
+    defer next.deinit(allocator);
+    try std.testing.expectEqual(@as(u16, 204), next.status);
+
+    thread.join();
+    joined = true;
+    if (shared.err) |err| return err;
+}
+
 test "gRPC duplex callback failure resets once and connection is reusable" {
     const allocator = std.testing.allocator;
     var threaded = std.Io.Threaded.init(allocator, .{});

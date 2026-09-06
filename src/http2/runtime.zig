@@ -14848,6 +14848,71 @@ pub const ServerDuplexStream = struct {
         return self.readRequestEventUntil(deadline);
     }
 
+    /// Wait for the peer to cancel a response that remains open after the
+    /// complete request half has already been consumed. This is the server-
+    /// streaming counterpart to `readRequestEvent`: connection-control and
+    /// sibling-stream frames are preserved while this stream waits for its
+    /// terminal RST_STREAM.
+    pub fn waitForPeerReset(
+        self: *ServerDuplexStream,
+    ) Error!http2.ResetStreamPayload {
+        return self.waitForPeerResetUntil(null);
+    }
+
+    pub fn waitForPeerResetWithTimeout(
+        self: *ServerDuplexStream,
+        timeout: std.Io.Duration,
+    ) Error!http2.ResetStreamPayload {
+        if (timeout.nanoseconds <= 0) return error.Timeout;
+        return self.waitForPeerResetWithDeadline(.fromNow(
+            self.connection.io,
+            .{ .raw = timeout, .clock = .awake },
+        ));
+    }
+
+    pub fn waitForPeerResetWithDeadline(
+        self: *ServerDuplexStream,
+        deadline: std.Io.Clock.Timestamp,
+    ) Error!http2.ResetStreamPayload {
+        _ = try deadline_policy.usableAwake(self.connection.io, deadline);
+        return self.waitForPeerResetUntil(deadline);
+    }
+
+    fn waitForPeerResetUntil(
+        self: *ServerDuplexStream,
+        deadline: ?std.Io.Clock.Timestamp,
+    ) Error!http2.ResetStreamPayload {
+        if (!self.request_finished) return error.UnexpectedFrame;
+        if (self.released or self.response_finished) {
+            return error.ConnectionClosed;
+        }
+        while (true) {
+            var frame = try self.connection
+                .readOwnedFrameForDuplexWithDeadline(deadline);
+            var frame_owned = true;
+            defer if (frame_owned) frame.deinit(self.connection.allocator);
+            if (try self.connection.handleConnectionFrame(frame.frame)) {
+                continue;
+            }
+            if (frame.frame.header.frame_type == .goaway) continue;
+            if (frame.frame.header.stream_id != self.stream_id) {
+                try self.connection.queueDuplexSiblingFrameUntil(frame);
+                frame_owned = false;
+                continue;
+            }
+            if (frame.frame.header.frame_type != .rst_stream) {
+                return error.UnexpectedFrame;
+            }
+            const peer_reset = try http2.ResetStreamPayload.parse(frame.frame);
+            try self.connection.recordResetStream(peer_reset);
+            self.request_finished = true;
+            self.request_finished_reported = true;
+            self.response_finished = true;
+            self.release();
+            return peer_reset;
+        }
+    }
+
     fn readRequestEventUntil(
         self: *ServerDuplexStream,
         deadline: ?std.Io.Clock.Timestamp,

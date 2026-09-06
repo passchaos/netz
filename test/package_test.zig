@@ -114,6 +114,10 @@ test "public modules are reachable" {
         "acceptDuplexWithDeadline",
     ));
     try std.testing.expect(@hasDecl(
+        netz.grpc.ServerDuplex,
+        "waitForPeerReset",
+    ));
+    try std.testing.expect(@hasDecl(
         netz.grpc,
         "MessageStreamDecoder",
     ));
