@@ -30,6 +30,66 @@ test "gRPC retry policy rejects unsafe bounds" {
     invalid.retryable_status_codes = &.{.ok};
     try std.testing.expectError(error.InvalidRetryPolicy, invalid.validate());
 }
+
+test "gRPC retry throttler matches milli-token threshold and recovery" {
+    var throttler = try grpc.RetryThrottler.init(4, 1.6);
+    try std.testing.expectEqual(@as(u64, 4000), throttler.milliTokens());
+    try std.testing.expect(throttler.recordFailure());
+    throttler.recordSuccess();
+    try std.testing.expectEqual(@as(u64, 4000), throttler.milliTokens());
+    try std.testing.expect(throttler.recordFailure());
+    try std.testing.expect(!throttler.recordFailure());
+    try std.testing.expect(!throttler.recordFailure());
+    try std.testing.expect(!throttler.recordFailure());
+    try std.testing.expect(!throttler.recordFailure());
+    try std.testing.expectEqual(@as(u64, 0), throttler.milliTokens());
+    throttler.recordSuccess();
+    throttler.recordSuccess();
+    try std.testing.expectEqual(@as(u64, 3200), throttler.milliTokens());
+    try std.testing.expect(throttler.recordFailure());
+    try std.testing.expectEqual(@as(u64, 2200), throttler.milliTokens());
+}
+
+test "gRPC retry throttler rejects invalid configuration" {
+    try std.testing.expectError(
+        error.InvalidRetryPolicy,
+        grpc.RetryThrottler.init(0, 1),
+    );
+    try std.testing.expectError(
+        error.InvalidRetryPolicy,
+        grpc.RetryThrottler.init(1, 0),
+    );
+    try std.testing.expectError(
+        error.InvalidRetryPolicy,
+        grpc.RetryThrottler.init(1, std.math.nan(f64)),
+    );
+}
+
+test "gRPC retry throttler updates saturate across threads" {
+    var throttler = try grpc.RetryThrottler.init(100, 0.5);
+    const Worker = struct {
+        fn fail(value: *grpc.RetryThrottler) void {
+            for (0..1000) |_| _ = value.recordFailure();
+        }
+
+        fn succeed(value: *grpc.RetryThrottler) void {
+            for (0..1000) |_| value.recordSuccess();
+        }
+    };
+    var failures: [4]std.Thread = undefined;
+    for (&failures) |*thread| {
+        thread.* = try std.Thread.spawn(.{}, Worker.fail, .{&throttler});
+    }
+    for (&failures) |thread| thread.join();
+    try std.testing.expectEqual(@as(u64, 0), throttler.milliTokens());
+
+    var successes: [4]std.Thread = undefined;
+    for (&successes) |*thread| {
+        thread.* = try std.Thread.spawn(.{}, Worker.succeed, .{&throttler});
+    }
+    for (&successes) |thread| thread.join();
+    try std.testing.expectEqual(@as(u64, 100_000), throttler.milliTokens());
+}
 const unaryCall = grpc.unaryCall;
 const statusFromHttp = grpc.statusFromHttp;
 const statusFromHttp2Error = grpc.statusFromHttp2Error;

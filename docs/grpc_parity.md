@@ -49,7 +49,10 @@ existing HTTP/2 runtime:
   `grpc-previous-rpc-attempts` metadata. Retries occur only for trailers-only
   responses before the call is committed; one absolute `std.Io` awake-clock
   deadline bounds every attempt and backoff while each retry advertises the
-  remaining `grpc-timeout`,
+  remaining `grpc-timeout`. An optional thread-safe channel/service throttler
+  applies gRPC's milli-token algorithm, debiting configured retryable failures
+  before eligibility and replenishing successful RPCs without exceeding its
+  maximum,
 - sequential request/response message-stream helpers over HTTP/2
   `RequestWriter`, `ResponseWriter`, and borrowed DATA callbacks,
 - sequential client-stream deadlines captured once before request setup and
@@ -260,8 +263,8 @@ upstream gRPC Core's `ServerEarlyReturnTest`.
    empty-stream completion, cancellation, and deadline behavior against netz.
    A broader upstream matrix, including reverse custom metadata and TLS, remains
    future work.
-3. Add retry throttling/service-config parsing, generated service/client
-   bindings, and broader conformance/
+3. Add service-config parsing, generated service/client bindings, and broader
+   conformance/
    interop runners. Reflection accepts standard descriptor sets directly and
    is covered by an independent official `grpc_cli` process-boundary gate.
    Health `Check` and `Watch` transport semantics are implemented, including

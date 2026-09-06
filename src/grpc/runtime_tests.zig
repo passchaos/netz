@@ -264,6 +264,80 @@ test "gRPC h2c unary retry honors negative server pushback" {
     try std.testing.expectEqual(@as(usize, 1), shared.attempts);
 }
 
+test "gRPC h2c unary retry throttling suppresses a new attempt" {
+    const allocator = std.testing.allocator;
+    var threaded = std.Io.Threaded.init(allocator, .{});
+    defer threaded.deinit();
+    const io = threaded.io();
+    var server = try grpc.runtime.Server.listen(
+        allocator,
+        io,
+        .{ .ip4 = .loopback(0) },
+        .{ .max_frame_payload = 4096, .max_body_bytes = 4096 },
+        1024,
+    );
+    defer server.deinit();
+
+    const Shared = struct {
+        server: *grpc.runtime.Server,
+        attempts: usize = 0,
+        err: ?anyerror = null,
+
+        fn run(self: *@This()) void {
+            var connection = self.server.accept() catch |err| {
+                self.err = err;
+                return;
+            };
+            defer connection.deinit();
+            var request = connection.readUnary() catch |err| {
+                self.err = err;
+                return;
+            };
+            defer request.deinit();
+            self.attempts += 1;
+            connection.writeUnary(request.request.stream_id, .{
+                .status = .unavailable,
+                .trailers_only = true,
+            }) catch |err| {
+                self.err = err;
+            };
+        }
+    };
+    var shared = Shared{ .server = &server };
+    const thread = try std.Thread.spawn(.{}, Shared.run, .{&shared});
+    var joined = false;
+    defer if (!joined) thread.join();
+
+    var throttler = try grpc.RetryThrottler.init(2, 1);
+    var client = try grpc.runtime.Client.connect(
+        allocator,
+        io,
+        server.address(),
+        .{ .max_frame_payload = 4096, .max_body_bytes = 4096 },
+    );
+    defer client.deinit();
+    var response = try client.unaryWithRetry(.{
+        .path = "/demo.Retry/Unary",
+        .authority = "localhost",
+        .message = "once",
+    }, .{
+        .max_attempts = 5,
+        .initial_backoff = .fromMilliseconds(1),
+        .max_backoff = .fromMilliseconds(10),
+        .backoff_multiplier = 2,
+        .retryable_status_codes = &.{.unavailable},
+        .throttler = &throttler,
+    });
+    defer response.deinit();
+    try std.testing.expectEqual(grpc.Status.unavailable, response.status);
+
+    thread.join();
+    joined = true;
+    if (shared.err) |err| return err;
+    try std.testing.expectEqual(@as(usize, 1), shared.attempts);
+    try std.testing.expectEqual(@as(u64, 1000), throttler.milliTokens());
+}
+
 test "gRPC h2c unary retry does not replay a committed response" {
     const allocator = std.testing.allocator;
     var threaded = std.Io.Threaded.init(allocator, .{});

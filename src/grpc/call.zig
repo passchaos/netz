@@ -181,6 +181,11 @@ pub const RetryPolicy = struct {
     max_backoff: std.Io.Duration,
     backoff_multiplier: f64,
     retryable_status_codes: []const Status,
+    /// Optional token bucket shared by calls to the same logical backend.
+    /// A retryable failure consumes one token before retry eligibility is
+    /// decided; an OK response restores `token_ratio` up to the configured
+    /// maximum.
+    throttler: ?*RetryThrottler = null,
 
     pub fn validate(self: RetryPolicy) Error!void {
         // gRPC Core clamps service-config retry attempts to five. Rejecting an
@@ -205,6 +210,83 @@ pub const RetryPolicy = struct {
             if (candidate == status) return true;
         }
         return false;
+    }
+};
+
+/// Thread-safe channel-level retry throttle using gRPC's milli-token model.
+///
+/// `max_tokens` starts full. Every configured retryable failure removes one
+/// token, and retries remain allowed only while the new balance is above half
+/// full. Successful RPCs restore `token_ratio`, capped at the maximum.
+pub const RetryThrottler = struct {
+    max_milli_tokens: u64,
+    milli_token_ratio: u64,
+    milli_tokens: std.atomic.Value(u64),
+
+    pub fn init(
+        max_tokens: u32,
+        token_ratio: f64,
+    ) Error!RetryThrottler {
+        if (max_tokens == 0 or !std.math.isFinite(token_ratio) or
+            token_ratio <= 0)
+        {
+            return error.InvalidRetryPolicy;
+        }
+        const scaled_ratio = token_ratio * 1000.0;
+        if (!std.math.isFinite(scaled_ratio) or scaled_ratio < 1.0 or
+            scaled_ratio > @as(f64, @floatFromInt(std.math.maxInt(u32))))
+        {
+            return error.InvalidRetryPolicy;
+        }
+        const max_milli_tokens = @as(u64, max_tokens) * 1000;
+        return .{
+            .max_milli_tokens = max_milli_tokens,
+            .milli_token_ratio = @intFromFloat(@floor(scaled_ratio)),
+            .milli_tokens = .init(max_milli_tokens),
+        };
+    }
+
+    /// Record a retryable failure and return whether another attempt is
+    /// permitted by the resulting balance.
+    pub fn recordFailure(self: *RetryThrottler) bool {
+        var current = self.milli_tokens.load(.monotonic);
+        while (true) {
+            const next = current -| 1000;
+            if (self.milli_tokens.cmpxchgWeak(
+                current,
+                next,
+                .monotonic,
+                .monotonic,
+            )) |observed| {
+                current = observed;
+            } else {
+                return next > self.max_milli_tokens / 2;
+            }
+        }
+    }
+
+    pub fn recordSuccess(self: *RetryThrottler) void {
+        var current = self.milli_tokens.load(.monotonic);
+        while (true) {
+            const next = @min(
+                current +| self.milli_token_ratio,
+                self.max_milli_tokens,
+            );
+            if (self.milli_tokens.cmpxchgWeak(
+                current,
+                next,
+                .monotonic,
+                .monotonic,
+            )) |observed| {
+                current = observed;
+            } else {
+                return;
+            }
+        }
+    }
+
+    pub fn milliTokens(self: *const RetryThrottler) u64 {
+        return self.milli_tokens.load(.monotonic);
     }
 };
 
@@ -296,11 +378,16 @@ pub fn unaryCallWithRetry(
             if (attempts == 0) null else attempts,
         );
         attempts += 1;
-        if (attempts >= policy.max_attempts or
-            !retryableTrailersOnly(response, policy))
-        {
+        if (response.status == .ok) {
+            if (policy.throttler) |throttler| throttler.recordSuccess();
             return response;
         }
+        if (!retryableStatus(response, policy)) return response;
+        if (policy.throttler) |throttler| {
+            if (!throttler.recordFailure()) return response;
+        }
+        if (attempts >= policy.max_attempts or
+            !retryableTrailersOnly(response)) return response;
 
         const pushback = retryPushback(response);
         if (pushback == .stop) return response;
@@ -332,11 +419,14 @@ const RetryPushback = union(enum) {
 
 fn retryableTrailersOnly(
     response: UnaryResponse,
-    policy: RetryPolicy,
 ) bool {
     const transport = response.transport orelse return false;
-    return policy.contains(response.status) and transport.trailers_only and
+    return transport.trailers_only and
         findHeader(transport.headers, "grpc-status") != null;
+}
+
+fn retryableStatus(response: UnaryResponse, policy: RetryPolicy) bool {
+    return response.transport != null and policy.contains(response.status);
 }
 
 fn retryPushback(response: UnaryResponse) RetryPushback {
