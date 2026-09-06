@@ -12,6 +12,7 @@ pub const stream = @import("stream/mod.zig");
 pub const call = @import("call.zig");
 pub const runtime = @import("runtime.zig");
 pub const health = @import("health.zig");
+pub const reflection = @import("reflection.zig");
 
 pub const Error = stream.Error;
 pub const Status = wire.Status;
@@ -88,4 +89,5 @@ test {
     _ = runtime;
     _ = stream;
     _ = health;
+    _ = reflection;
 }

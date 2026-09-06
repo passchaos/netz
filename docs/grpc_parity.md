@@ -82,6 +82,11 @@ existing HTTP/2 runtime:
   TLS, with incremental status delivery before END_STREAM, timeout/deadline
   reads, explicit client `RST_STREAM(CANCEL)`, server cancellation observation,
   and connection reuse after a canceled watch.
+- self-contained gRPC Server Reflection v1/v1alpha wire codecs and a
+  thread-safe opaque-descriptor registry covering file, symbol, extension,
+  extension-number, and service-list queries, including transitive dependency
+  expansion and standard embedded `NOT_FOUND`/`UNIMPLEMENTED` responses. The
+  bidirectional HTTP/2 service adapter remains the next integration step.
 
 Payloads intentionally remain opaque. This keeps gRPC transport reusable with
 generated or dynamic protobuf implementations; the user-owned
@@ -206,7 +211,8 @@ upstream gRPC Core's `ServerEarlyReturnTest`.
    A broader upstream matrix, including reverse custom metadata and TLS, remains
    future work.
 3. Add higher-level application cancellation and streaming deadline policy,
-   retry policy, reflection, and broader conformance/interop runners. Health
+   retry policy, reflection transport integration, and broader conformance/
+   interop runners. Health
    `Check` and `Watch` transport semantics are implemented, including
    incremental Watch delivery and cancellation, but automatic client Watch
    reconnection/backoff remains application policy. Unary transport deadlines
