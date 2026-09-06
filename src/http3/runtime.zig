@@ -8247,12 +8247,19 @@ pub const HandshakeClient = struct {
             return error.StreamCreationError;
         }
         const lifecycle_exists = self.request_lifecycle.contains(stream_id);
+        const extended_connect = requestHasProtocol(request_options.headers);
         if (!lifecycle_exists) {
             try self.request_lifecycle.open(
                 stream_id,
                 request_options.method,
-                requestHasProtocol(request_options.headers),
+                extended_connect,
             );
+        } else if (!self.request_lifecycle.matchesRequest(
+            stream_id,
+            request_options.method,
+            extended_connect,
+        )) {
+            return error.UnexpectedStream;
         }
         errdefer if (!lifecycle_exists) {
             // A zero-byte transport stream may have been materialized by a

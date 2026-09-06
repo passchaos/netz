@@ -141,6 +141,24 @@ pub const Client = struct {
         };
     }
 
+    pub fn matchesRequest(
+        self: Client,
+        stream_id: u62,
+        method: []const u8,
+        extended_connect: bool,
+    ) bool {
+        const index = self.outstanding_index.get(stream_id) orelse
+            return false;
+        if (index >= self.semantics.items.len or
+            self.semantics.items[index].stream_id != stream_id)
+        {
+            return false;
+        }
+        const value = self.semantics.items[index];
+        return value.extended_connect == extended_connect and
+            std.mem.eql(u8, value.method, method);
+    }
+
     pub fn finish(
         self: *Client,
         stream_id: u62,
