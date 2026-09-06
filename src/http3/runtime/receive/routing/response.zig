@@ -103,12 +103,19 @@ pub fn routePacket(
                 const stream_id: u62 = @intCast(
                     frame.reset_stream.stream_id,
                 );
+                const tracked_push = pushes.containsStream(stream_id);
                 if (try pushes.hasUnacknowledgedDynamicSection(
                     stream_id,
                     state.qpack_decode.table,
                 )) {
                     try state.qpack_decode.recordStreamCancellation(stream_id);
                     flush_qpack_feedback = true;
+                }
+                if (tracked_push) {
+                    if (state.connection) |connection| {
+                        _ = try connection
+                            .requestCompletedPeerStreamRelease(stream_id);
+                    }
                 }
                 pushes.removeByStreamId(stream_id);
             }

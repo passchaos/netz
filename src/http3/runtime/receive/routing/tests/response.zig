@@ -6,6 +6,7 @@ const qpack_state = @import("../../../qpack/state.zig");
 const buffered_response = @import("../../../stream/buffered/response.zig");
 const stream_lifecycle = @import("../../../stream/lifecycle.zig");
 const streaming_set = @import("../../../stream/set.zig");
+const push_state = @import("../../../stream/push/state.zig");
 
 const net = std.Io.net;
 const QpackDecodeState = qpack_state.QpackDecodeState;
@@ -13,6 +14,7 @@ const QpackEncodeState = qpack_state.QpackEncodeState;
 const ResponseStreamSet = buffered_response.Set;
 const StreamingResponseSet = streaming_set.Set;
 const ClientRequestLifecycle = stream_lifecycle.Client;
+const PushStreamSet = push_state.Set;
 
 test "HTTP/3 response reset preserves buffered stream when QPACK feedback allocation fails" {
     const allocator = std.testing.allocator;
@@ -135,6 +137,103 @@ test "HTTP/3 response router requests QPACK insert-count feedback" {
     ));
     try std.testing.expectEqual(@as(u64, 1), qpack_decode.table.insert_count);
     try std.testing.expect(qpack_decode.pendingDecoderInstructions().len != 0);
+}
+
+test "HTTP/3 push reset requests QUIC stream retirement" {
+    const allocator = std.testing.allocator;
+    var threaded = std.Io.Threaded.init(allocator, .{});
+    defer threaded.deinit();
+    var endpoint = try quic.runtime.Endpoint.bind(
+        allocator,
+        threaded.io(),
+        .{ .ip4 = .loopback(0) },
+        .{ .max_datagram_size = 4096 },
+    );
+    defer endpoint.deinit();
+    const keys = quic.protection.deriveAes128Keys(
+        [_]u8{0xc3} ** quic.protection.secret_len,
+    );
+    var connection = try quic.one_rtt.Connection.init(&endpoint, .{
+        .peer = endpoint.address(),
+        .receive_keys = keys,
+        .send_keys = keys,
+        .local_connection_id = "push-reset-client",
+        .peer_connection_id = "push-reset-server",
+        .initial_receive_max_streams_uni = 1,
+        .enable_pacing = false,
+    });
+    defer connection.deinit();
+
+    var control: http3.ControlState = .{};
+    defer control.deinit(allocator);
+    control.settings.markSent(.{});
+    control.settings.markReceived(.{});
+    control.local_max_push_id = 0;
+    var qpack_decode = QpackDecodeState.init(allocator, 0, 1024);
+    defer qpack_decode.deinit();
+    var qpack_encode = QpackEncodeState.initAwaitingPeerSettings(allocator, 1024);
+    defer qpack_encode.deinit();
+    var responses = ResponseStreamSet.init(allocator, 1024, 1);
+    defer responses.deinit();
+    var pushes = PushStreamSet.init(allocator, 1, 1024, .{});
+    defer pushes.deinit();
+    try pushes.reservePromisesThrough(0);
+    try pushes.registerPromise(0, 0);
+
+    var prefix: std.ArrayList(u8) = .empty;
+    defer prefix.deinit(allocator);
+    try quic.varint.encode(&prefix, allocator, @intFromEnum(http3.StreamType.push));
+    try quic.varint.encode(&prefix, allocator, 0);
+    const stream_frame = quic.Frame{ .stream = .{
+        .stream_id = 3,
+        .data = prefix.items,
+    } };
+    try quic.one_rtt.testing.applyReceivedFrames(
+        &connection,
+        0,
+        &.{stream_frame},
+        null,
+        .not_ect,
+    );
+
+    var state: response_routing.State = .{
+        .allocator = allocator,
+        .connection = &connection,
+        .control = &control,
+        .qpack_decode = &qpack_decode,
+        .qpack_encode = &qpack_encode,
+        .max_blocked_streams = 0,
+        .response_streams = &responses,
+        .streaming_responses = null,
+        .push_streams = &pushes,
+        .request_lifecycle = null,
+    };
+    _ = try response_routing.routePacket(
+        &state,
+        .{ .ip4 = .loopback(443) },
+        &.{stream_frame},
+    );
+    try std.testing.expect(pushes.containsStream(3));
+
+    const reset = quic.Frame{ .reset_stream = .{
+        .stream_id = 3,
+        .application_error_code = http3.ApplicationErrorCode.request_cancelled,
+        .final_size = prefix.items.len,
+    } };
+    try quic.one_rtt.testing.applyReceivedFrames(
+        &connection,
+        1,
+        &.{reset},
+        null,
+        .not_ect,
+    );
+    _ = try response_routing.routePacket(
+        &state,
+        .{ .ip4 = .loopback(443) },
+        &.{reset},
+    );
+    try std.testing.expect(connection.peerStreamClosed(3));
+    try std.testing.expect(!pushes.containsStream(3));
 }
 
 test "HTTP/3 response router enforces blocked budget across buffered and streaming sets" {

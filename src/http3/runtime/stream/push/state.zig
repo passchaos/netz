@@ -227,6 +227,21 @@ pub const Set = struct {
         return (self.findByStreamId(stream_id) orelse return null).from;
     }
 
+    pub fn containsStream(self: *Set, stream_id: u62) bool {
+        return self.findByStreamId(stream_id) != null;
+    }
+
+    /// Borrow the active reader for transport flow-credit and retirement
+    /// integration. The pointer is invalidated by entry insertion/removal.
+    pub fn readerForStream(
+        self: *Set,
+        stream_id: u62,
+    ) ?*Reader {
+        const entry = self.findByStreamId(stream_id) orelse return null;
+        if (entry.reader) |*reader| return reader;
+        return null;
+    }
+
     pub fn promiseCount(self: Set) usize {
         return self.promises.items.len;
     }

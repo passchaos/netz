@@ -5729,6 +5729,8 @@ pub const HandshakeServerSession = struct {
             &self.qpack_encoder_send,
             &self.qpack_encoder_prefix_sent,
         );
+        _ = try self.established.connection
+            .requestCompletedLocalStreamRelease(push_stream_id);
         self.sent_push_ids.appendAssumeCapacity(push.push_id);
         self.peer_promised_push_ids.appendAssumeCapacity(push.push_id);
         self.next_push_stream_id = next_push_stream_id;
@@ -9342,6 +9344,14 @@ pub const HandshakeClient = struct {
             self.flushResponsePacketFeedback() catch {};
         }
         if (event.value == .finished) {
+            if (self.push_streams.readerForStream(event.stream_id)) |reader| {
+                try releaseStreamingReaderCapacity(
+                    &self.established.connection,
+                    reader,
+                );
+            }
+            _ = try self.established.connection
+                .requestCompletedPeerStreamRelease(event.stream_id);
             self.push_streams.removeFinished(ready.index);
         }
         return event;
@@ -16617,6 +16627,11 @@ test "HTTP/3 handshake client streams promised push response" {
             try std.testing.expect(
                 session.push_send_scratch.frames.capacity != 0,
             );
+            while (!session.established.connection
+                .localStreamClosed(push_stream_id))
+            {
+                try session.pollControlWithTimeout(.fromSeconds(2));
+            }
         }
     };
 
@@ -16670,6 +16685,9 @@ test "HTTP/3 handshake client streams promised push response" {
         "handshake-asset",
         pushed.response.body,
     );
+    try std.testing.expect(client.established.connection
+        .peerStreamClosed(pushed.stream_id));
+    try std.testing.expect(client.push_streams.hasPromise(pushed.push_id));
     try std.testing.expectEqual(@as(usize, 2), observation.count);
     for (observation.statuses, 0..) |status, index| {
         try std.testing.expectEqual(@as(u64, 1), observation.push_ids[index]);
