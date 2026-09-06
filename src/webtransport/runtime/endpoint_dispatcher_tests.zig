@@ -530,7 +530,7 @@ test "WebTransport endpoint stream write leaves UDP receive to dispatcher" {
     try std.testing.expect(stream.local_fin);
 }
 
-test "WebTransport endpoint stream cancellation does not wait for pacing" {
+test "WebTransport endpoint control and datagram sends do not wait for pacing" {
     const allocator = std.testing.allocator;
     var threaded = std.Io.Threaded.init(allocator, .{});
     defer threaded.deinit();
@@ -572,6 +572,7 @@ test "WebTransport endpoint stream cancellation does not wait for pacing" {
     defer h3.deinit();
     h3.control.settings.markSent(settings);
     h3.control.settings.markReceived(settings);
+    try h3.connect_datagrams.register(0);
     var streams = try handshake_stream.initRegistry(
         allocator,
         .init(0),
@@ -626,7 +627,10 @@ test "WebTransport endpoint stream cancellation does not wait for pacing" {
     };
     defer server_endpoint.io = fixed_io.delegate;
 
-    const fill = [_]quic.Frame{.{ .padding = .{ .len = 1160 } }};
+    const fill = [_]quic.Frame{
+        .{ .stream = .{ .stream_id = stopped_stream_id, .data = &.{} } },
+        .{ .padding = .{ .len = 1150 } },
+    };
     try h3.established.connection.sendAt(&fill, 1_000_000);
     const next_packet_number = h3.established.connection.next_packet_number;
     try std.testing.expectError(
@@ -701,6 +705,74 @@ test "WebTransport endpoint stream cancellation does not wait for pacing" {
     try std.testing.expectEqual(@as(usize, 0), fixed_io.sleep_calls);
     try std.testing.expectEqual(@as(usize, 3), fixed_io.send_calls);
     try std.testing.expect(stopped_stream.stop_sent != null);
+
+    const before_datagram = accepted.stats();
+    const datagram_packet_number =
+        h3.established.connection.next_packet_number;
+    try std.testing.expectError(
+        error.PacingLimited,
+        accepted.sendDatagram("single-attempt"),
+    );
+    try std.testing.expectEqual(@as(usize, 0), fixed_io.sleep_calls);
+    try std.testing.expectEqual(
+        datagram_packet_number,
+        h3.established.connection.next_packet_number,
+    );
+    try std.testing.expectEqual(
+        before_datagram.datagrams_sent,
+        accepted.stats().datagrams_sent,
+    );
+    const datagram_timer = dispatcher.nextTimerDeadline() orelse
+        return error.TestUnexpectedResult;
+    try std.testing.expectEqual(
+        quic.one_rtt.TimerDeadlineKind.pacing,
+        datagram_timer.timer.kind,
+    );
+    fixed_io.now_ns = @intCast(datagram_timer.timer.deadline_ns);
+    _ = (try dispatcher.serviceNextTimerAt(
+        datagram_timer.timer.deadline_ns,
+    )) orelse return error.TestUnexpectedResult;
+    try accepted.sendDatagram("single-attempt");
+    try std.testing.expectEqual(
+        before_datagram.datagrams_sent + 1,
+        accepted.stats().datagrams_sent,
+    );
+
+    const bounded_deadline = std.Io.Clock.Timestamp.fromNow(
+        server_endpoint.io,
+        .{ .raw = .fromSeconds(1), .clock = .awake },
+    );
+    try std.testing.expectError(
+        error.PacingLimited,
+        accepted.trySendDatagramWithDeadline(
+            "bounded-attempt",
+            bounded_deadline,
+        ),
+    );
+    try std.testing.expectEqual(@as(usize, 0), fixed_io.sleep_calls);
+    try std.testing.expectEqual(
+        before_datagram.datagrams_sent + 1,
+        accepted.stats().datagrams_sent,
+    );
+    const bounded_timer = dispatcher.nextTimerDeadline() orelse
+        return error.TestUnexpectedResult;
+    try std.testing.expectEqual(
+        quic.one_rtt.TimerDeadlineKind.pacing,
+        bounded_timer.timer.kind,
+    );
+    fixed_io.now_ns = @intCast(bounded_timer.timer.deadline_ns);
+    _ = (try dispatcher.serviceNextTimerAt(
+        bounded_timer.timer.deadline_ns,
+    )) orelse return error.TestUnexpectedResult;
+    try accepted.trySendDatagramWithDeadline(
+        "bounded-attempt",
+        bounded_deadline,
+    );
+    try std.testing.expectEqual(@as(usize, 0), fixed_io.sleep_calls);
+    try std.testing.expectEqual(
+        before_datagram.datagrams_sent + 2,
+        accepted.stats().datagrams_sent,
+    );
 }
 
 test "WebTransport client handshake and CONNECT share one socket owner" {

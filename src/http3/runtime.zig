@@ -5427,6 +5427,17 @@ pub const HandshakeServerSession = struct {
         try self.established.connection.sendDatagram(encoded);
     }
 
+    /// Submit one CONNECT DATAGRAM without sleeping or reading UDP.
+    pub fn trySendConnectDatagram(
+        self: *HandshakeServerSession,
+        stream_id: u62,
+        payload: []const u8,
+    ) Error!void {
+        try self.validateConnectDatagramSend(stream_id, payload);
+        const encoded = try self.connect_datagrams.encode(stream_id, payload);
+        try self.established.connection.trySendDatagram(encoded);
+    }
+
     pub fn sendConnectDatagramWithTimeout(
         self: *HandshakeServerSession,
         stream_id: u62,
@@ -5476,8 +5487,9 @@ pub const HandshakeServerSession = struct {
     }
 
     /// One deadline-bounded attempt for a shared endpoint owner. This method
-    /// never reads UDP; `CongestionLimited` tells the dispatcher loop to route
-    /// more packets before retrying with the same deadline.
+    /// never reads UDP or sleeps; congestion and pacing backpressure tell the
+    /// dispatcher loop to route packets or service its timer before retrying
+    /// with the same deadline.
     pub fn trySendConnectDatagramWithDeadline(
         self: *HandshakeServerSession,
         stream_id: u62,
@@ -5487,7 +5499,7 @@ pub const HandshakeServerSession = struct {
         _ = try deadline_policy.usableAwake(self.connectionIo(), deadline);
         try self.validateConnectDatagramSend(stream_id, payload);
         const encoded = try self.connect_datagrams.encode(stream_id, payload);
-        try self.established.connection.trySendDatagramWithDeadline(
+        try self.established.connection.trySendDatagramOnceWithDeadline(
             encoded,
             deadline,
         );

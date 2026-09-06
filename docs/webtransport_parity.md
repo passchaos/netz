@@ -181,8 +181,11 @@ not increment the sent-DATAGRAM count; callers may retry explicitly. The
 stateful protected client facade forwards the same API. Shared-endpoint
 sessions instead expose `trySendDatagramWithTimeout` /
 `trySendDatagramWithDeadline`: these never read the shared UDP socket and
-return `CongestionLimited` so the sole `EndpointServer.receive*` owner can
-route more packets before retrying the same absolute deadline. The underlying
+return congestion or pacing backpressure so the sole
+`EndpointServer.receive*` owner can route packets or service its pacing timer
+before retrying the same absolute deadline. The endpoint's plain
+`sendDatagram` is likewise a single attempt rather than a hidden blocking
+convenience loop. The underlying
 QUIC recovery path also distinguishes ACK-eliciting, in-flight DATAGRAM
 packets from retransmittable payload: a lost pure DATAGRAM causes a fresh PING
 PTO probe, while a mixed STREAM+DATAGRAM packet retains only the reliable

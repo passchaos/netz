@@ -2001,6 +2001,19 @@ pub const Connection = struct {
         self.datagrams_sent_count +|= 1;
     }
 
+    /// Attempt one unreliable DATAGRAM send without sleeping or receiving.
+    /// Event-loop owners can retry after congestion or the exposed pacing
+    /// deadline while preserving exactly-once application accounting.
+    pub fn trySendDatagram(self: *Connection, data: []const u8) Error!void {
+        try self.validateDatagramSend(data);
+        const frames = [_]quic.Frame{.{ .datagram = .{
+            .data = data,
+            .length_present = true,
+        } }};
+        try self.trySend(&frames);
+        self.datagrams_sent_count +|= 1;
+    }
+
     /// Send one unreliable DATAGRAM, waiting for congestion credit for at
     /// most `timeout`. No application send queue is retained: timeout means
     /// this payload was not submitted and may be retried by the caller.
@@ -2079,6 +2092,35 @@ pub const Connection = struct {
             self.datagrams_sent_count +|= 1;
             return;
         }
+    }
+
+    /// Perform exactly one DATAGRAM send attempt under a caller-owned
+    /// deadline. Unlike `trySendDatagramWithDeadline`, pacing never sleeps:
+    /// it returns `PacingLimited`, or `Timeout` when the earliest retry would
+    /// already exhaust the caller's budget.
+    pub fn trySendDatagramOnceWithDeadline(
+        self: *Connection,
+        data: []const u8,
+        deadline: std.Io.Clock.Timestamp,
+    ) (Error || quic.runtime.ReceiveTimeoutError)!void {
+        if (deadline.clock != .awake or
+            deadline.durationFromNow(self.endpoint.io).raw.nanoseconds <= 0)
+        {
+            return error.Timeout;
+        }
+        self.trySendDatagram(data) catch |err| switch (err) {
+            error.PacingLimited => {
+                const pacing_deadline =
+                    self.pacing_blocked_until_ns orelse return err;
+                const caller_ns = std.math.cast(
+                    u64,
+                    deadline.raw.nanoseconds,
+                ) orelse std.math.maxInt(u64);
+                if (pacing_deadline >= caller_ns) return error.Timeout;
+                return err;
+            },
+            else => |other| return other,
+        };
     }
 
     fn validateDatagramSend(self: Connection, data: []const u8) Error!void {

@@ -1643,6 +1643,8 @@ pub const EndpointAcceptedSession = struct {
         return self.h3.keyUpdateAwaitingAck();
     }
 
+    /// Attempt one DATAGRAM send without waiting or reading the shared socket.
+    /// Congestion and pacing are returned to the endpoint event loop.
     pub fn sendDatagram(
         self: *EndpointAcceptedSession,
         payload: []const u8,
@@ -1652,8 +1654,12 @@ pub const EndpointAcceptedSession = struct {
             self.h3.options.local_settings,
             self.h3.control.settings.peer,
         );
-        try self.h3.sendConnectDatagram(self.session_id.value, payload);
+        const result = self.h3.trySendConnectDatagram(
+            self.session_id.value,
+            payload,
+        );
         try self.refreshTimer();
+        try result;
     }
 
     /// Attempt one bounded DATAGRAM send without reading the endpoint's shared
