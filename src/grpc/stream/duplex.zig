@@ -87,6 +87,7 @@ pub const ClientEvent = union(enum) {
 const PendingMessage = struct {
     bytes: []u8,
     offset: usize = 0,
+    end_stream: bool = false,
 
     fn deinit(self: *PendingMessage, allocator: std.mem.Allocator) void {
         allocator.free(self.bytes);
@@ -193,12 +194,31 @@ pub const ClientDuplex = struct {
         return self.resumeMessage();
     }
 
+    /// Encode one final request message and set END_STREAM on its last wire
+    /// byte. If peer activity interrupts a flow-control wait, `resumeMessage`
+    /// retains both the exact suffix and the final-message intent.
+    pub fn writeFinalMessage(
+        self: *ClientDuplex,
+        payload: []const u8,
+    ) Error!WriteResult {
+        try self.ensureWritable();
+        if (self.pending_message != null) return error.InvalidStreamState;
+        self.pending_message = .{
+            .bytes = try encodeMessageAlloc(self.allocator, self.encoder, payload),
+            .end_stream = true,
+        };
+        return self.resumeMessage();
+    }
+
     /// Continue the exact unsent suffix after a response event interrupted a
     /// flow-control-blocked write.
     pub fn resumeMessage(self: *ClientDuplex) Error!WriteResult {
         try self.ensureWritable();
         const pending = if (self.pending_message) |*value| value else return error.InvalidStreamState;
-        const result = self.transport.write(pending.bytes[pending.offset..]) catch |err| {
+        const result = (if (pending.end_stream)
+            self.transport.finishRequestData(pending.bytes[pending.offset..])
+        else
+            self.transport.write(pending.bytes[pending.offset..])) catch |err| {
             // Only a successful `response_available` result has a precise,
             // resumable byte count. Any transport error can have unknown wire
             // progress, so retrying would risk duplicating message bytes.

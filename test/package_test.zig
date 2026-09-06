@@ -140,6 +140,10 @@ test "public modules are reachable" {
     try std.testing.expect(@hasDecl(netz.grpc, "startDuplex"));
     try std.testing.expect(@hasDecl(netz.grpc, "acceptDuplex"));
     try std.testing.expect(@hasDecl(netz.grpc.ClientDuplex, "writeMessage"));
+    try std.testing.expect(@hasDecl(
+        netz.grpc.ClientDuplex,
+        "writeFinalMessage",
+    ));
     try std.testing.expect(@hasDecl(netz.grpc.ClientDuplex, "resumeMessage"));
     try std.testing.expect(@hasDecl(
         netz.grpc.ClientDuplex,

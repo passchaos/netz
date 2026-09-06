@@ -573,7 +573,7 @@ test "gRPC duplex interleaves a response before request FIN" {
             var second = try stream.readRequestEvent(self, consume);
             defer second.deinit();
             try std.testing.expectEqual(@as(usize, 1), second.messages.count);
-            try std.testing.expect(!second.messages.end_stream);
+            try std.testing.expect(second.messages.end_stream);
 
             var finished = try stream.readRequestEvent(self, consume);
             defer finished.deinit();
@@ -653,11 +653,7 @@ test "gRPC duplex interleaves a response before request FIN" {
 
     try std.testing.expectEqual(
         duplex.WriteResult.complete,
-        try stream.writeMessage("two"),
-    );
-    try std.testing.expectEqual(
-        duplex.WriteResult.complete,
-        try stream.finishRequest(),
+        try stream.writeFinalMessage("two"),
     );
     var second_reply = try stream.readResponseEvent(
         &collector,
