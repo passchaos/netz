@@ -236,6 +236,92 @@ test "HTTP/3 request router ignores late STREAM after QUIC reclamation" {
     try std.testing.expectEqual(@as(usize, 0), lifecycle.count());
 }
 
+test "HTTP/3 request reset automatically registers QUIC retirement" {
+    const allocator = std.testing.allocator;
+    var threaded = std.Io.Threaded.init(allocator, .{});
+    defer threaded.deinit();
+    var endpoint = try quic.runtime.Endpoint.bind(
+        allocator,
+        threaded.io(),
+        .{ .ip4 = .loopback(0) },
+        .{ .max_datagram_size = 4096 },
+    );
+    defer endpoint.deinit();
+    const keys = quic.protection.deriveAes128Keys(
+        [_]u8{0xc2} ** quic.protection.secret_len,
+    );
+    var connection = try quic.one_rtt.Connection.init(&endpoint, .{
+        .peer = endpoint.address(),
+        .receive_keys = keys,
+        .send_keys = keys,
+        .local_connection_id = "reset-route-server",
+        .peer_connection_id = "reset-route-client",
+        .initial_receive_max_streams_bidi = 1,
+        .local_endpoint = .server,
+        .enable_pacing = false,
+    });
+    defer connection.deinit();
+
+    const reset = quic.Frame{ .reset_stream = .{
+        .stream_id = 0,
+        .application_error_code = http3.ApplicationErrorCode.request_cancelled,
+        .final_size = 0,
+    } };
+    try quic.one_rtt.testing.applyReceivedFrames(
+        &connection,
+        0,
+        &.{reset},
+        null,
+        .not_ect,
+    );
+
+    var control: http3.ControlState = .{};
+    defer control.deinit(allocator);
+    var qpack_decode = QpackDecodeState.init(allocator, 0, 1024);
+    defer qpack_decode.deinit();
+    var qpack_encode = QpackEncodeState.initAwaitingPeerSettings(allocator, 1024);
+    defer qpack_encode.deinit();
+    var buffered = RequestStreamSet.init(allocator, 1024, 1);
+    defer buffered.deinit();
+    var streaming = StreamingRequestSet.init(allocator, 1, 1024, .{}, .request);
+    defer streaming.deinit();
+    var lifecycle = ServerRequestLifecycle.init(allocator);
+    defer lifecycle.deinit();
+
+    const routed = (try request_routing.applyServerRequestPacketFrames(
+        .{ .ip4 = .loopback(443) },
+        &.{reset},
+        allocator,
+        &control,
+        &qpack_decode,
+        &qpack_encode,
+        0,
+        &buffered,
+        &streaming,
+        &lifecycle,
+        .{ .connection = &connection },
+        &.{},
+        null,
+        null,
+    )) orelse return error.TestUnexpectedResult;
+    try std.testing.expectEqual(@as(u62, 0), routed.stream_id);
+    try std.testing.expect(!connection.peerStreamClosed(0));
+
+    try connection.resetStream(0, http3.ApplicationErrorCode.request_cancelled);
+    try quic.one_rtt.testing.applyReceivedFrames(
+        &connection,
+        1,
+        &.{.{ .ack = .{
+            .largest_acknowledged = 0,
+            .ack_delay = 0,
+            .first_ack_range = 0,
+        } }},
+        null,
+        .not_ect,
+    );
+    try std.testing.expect(connection.peerStreamClosed(0));
+}
+
 test "HTTP/3 request router enforces blocked budget across buffered and streaming sets" {
     const allocator = std.testing.allocator;
     const from: std.Io.net.IpAddress = .{ .ip4 = .loopback(443) };

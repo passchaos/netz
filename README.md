@@ -206,7 +206,10 @@ starts with deterministic parsers, serializers, preallocated fixed-width wire-in
   consumed protocol offsets to both QUIC flow-control levels, compact the
   transport overlap-validation window, keep reset and cancelled-push FIFO queues
   on O(1) cursor pops, and emit ACK/MAX_DATA/MAX_STREAM_DATA so bodies can
-  continue beyond their initially negotiated stream credit. Both
+  continue beyond their initially negotiated stream credit. Stateful servers
+  also register peer request-stream retirement when aggregate or incremental
+  parsing reaches FIN; after the response FIN/RESET is acknowledged, QUIC
+  automatically returns MAX_STREAMS and reclaims the copied transport buffer. Both
   protected clients also maintain persistent MAX_PUSH_ID/CANCEL_PUSH control
   state with monotonic advertisement, per-ID cancellation retention and empty-cancel lookup skips, local
   STOP_SENDING of active cancelled pushes, single-probe cancellation recording,

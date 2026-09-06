@@ -109,16 +109,16 @@ pub const ServerRequestIdValidator = union(enum) {
         };
     }
 
-    pub fn releaseCompletedPeerStream(
+    pub fn requestCompletedPeerStreamRelease(
         self: @This(),
         stream_id: u62,
-    ) Error!void {
-        switch (self) {
+    ) Error!bool {
+        return switch (self) {
             .connection => |connection| {
-                _ = try connection.releaseCompletedPeerStream(stream_id);
+                return connection.requestCompletedPeerStreamRelease(stream_id);
             },
-            .static_limit => {},
-        }
+            .static_limit => true,
+        };
     }
 };
 

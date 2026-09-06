@@ -4306,6 +4306,12 @@ pub const Connection = struct {
         return self.recovery.pendingCount();
     }
 
+    /// Whether recovery still protects application/control delivery rather
+    /// than only idempotent receive-credit advertisements.
+    pub fn pendingDeliveryRecovery(self: Connection) bool {
+        return self.recovery.hasPendingDeliveryFrames();
+    }
+
     pub fn sendAck(self: *Connection, ack_delay: u64) Error!void {
         var stack_ranges: [quic.packet_space.ReceivedPacketTracker.stack_ack_range_capacity]quic.AckRange = undefined;
         var heap_ranges: ?[]quic.AckRange = null;
@@ -4599,6 +4605,43 @@ pub const Connection = struct {
         return result.update_sent;
     }
 
+    /// Register an application-level peer-stream retirement request.
+    ///
+    /// Unlike `releaseCompletedPeerStream`, this accepts a fully received FIN
+    /// even when the transport buffer has not been consumed directly. Upper
+    /// protocols that copied or parsed the complete message can therefore
+    /// relinquish those retained bytes without an extra transport read. The
+    /// request is completed after the local half and its reliable data are
+    /// acknowledged. Automatic credit-send failures remain pending and retry
+    /// from the aggregate connection timer.
+    ///
+    /// Returns false while the receive half is still incomplete.
+    pub fn requestCompletedPeerStreamRelease(
+        self: *Connection,
+        stream_id: u64,
+    ) Error!bool {
+        if (streamInitiatedByLocal(self.config.local_endpoint, stream_id)) {
+            return error.StreamStateError;
+        }
+        if (self.isClosedPeerStream(stream_id)) return true;
+        const recv_stream = self.findRecvStreamEntry(stream_id) orelse
+            return error.StreamStateError;
+        if (recv_stream.reset == null and
+            !recv_stream.recv_state.receivedComplete())
+        {
+            return false;
+        }
+        if (!recv_stream.stream_count_release_requested) {
+            recv_stream.stream_count_release_requested = true;
+            self.pending_peer_stream_credit_releases += 1;
+        }
+        const now_ns = self.monotonicNowNs();
+        self.flushRequestedPeerStreamCreditsAt(now_ns) catch |err| {
+            self.schedulePeerStreamCreditRetry(err, now_ns);
+        };
+        return true;
+    }
+
     /// Return stream-count credit for several terminal peer streams at once.
     ///
     /// At most one MAX_STREAMS frame per direction is emitted, so closing a
@@ -4724,7 +4767,11 @@ pub const Connection = struct {
         if (self.isClosedPeerStream(stream_id)) return .released;
         const recv_stream = self.findRecvStreamEntry(stream_id) orelse
             return error.StreamStateError;
-        if (!recv_stream.recv_state.complete() and recv_stream.reset == null) {
+        const receive_terminal = recv_stream.reset != null or
+            recv_stream.recv_state.complete() or
+            (recv_stream.stream_count_release_requested and
+                recv_stream.recv_state.receivedComplete());
+        if (!receive_terminal) {
             return .receive_not_terminal;
         }
         if (streamDirection(stream_id) == .bidirectional) {

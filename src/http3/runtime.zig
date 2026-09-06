@@ -4831,6 +4831,8 @@ pub const HandshakeServerSession = struct {
             request.qpack_section_acknowledgments,
         );
         try prepareServerRequestReceived(&self.request_lifecycle);
+        _ = try self.established.connection
+            .requestCompletedPeerStreamRelease(assembled.stream_id);
         self.qpack_decode.acknowledgeSectionsAssumeCapacity(
             assembled.stream_id,
             request.qpack_section_acknowledgments,
@@ -6584,7 +6586,10 @@ pub const HandshakeServerSession = struct {
     }
 
     /// Drive ACK, loss, PTO, flow-control, and HTTP/3 control processing until
-    /// every reliable packet currently retained by QUIC has been delivered.
+    /// every packet required to deliver the completed response has been
+    /// acknowledged. Pure MAX_DATA/MAX_STREAMS updates remain under QUIC's
+    /// normal recovery timer but do not prolong a short-lived server whose
+    /// final application data is already safe.
     /// Response writers return after socket submission so persistent servers
     /// do not pay an ACK round trip per response; short-lived owners should
     /// drain before destroying the session so a dropped final DATA/FIN remains
@@ -6605,7 +6610,7 @@ pub const HandshakeServerSession = struct {
         deadline: std.Io.Clock.Timestamp,
     ) ReceiveTimeoutError!void {
         _ = try deadline_policy.usableAwake(self.connectionIo(), deadline);
-        while (self.established.connection.pendingRecoveryCount() != 0) {
+        while (self.established.connection.pendingDeliveryRecovery()) {
             try self.receiveRequestPacketUntil(deadline);
         }
     }
@@ -6640,6 +6645,8 @@ pub const HandshakeServerSession = struct {
                 },
             );
         } else if (event == .finished) {
+            _ = try self.established.connection
+                .requestCompletedPeerStreamRelease(stream_id);
             self.streaming_requests.remove(stream_id);
         }
         return .{ .message = .{
@@ -9715,7 +9722,7 @@ pub const HandshakeClient = struct {
     /// Process one transport packet for SETTINGS/ORIGIN/GOAWAY progress
     /// without waiting for an application response event.
     pub fn pollControl(self: *HandshakeClient) Error!void {
-        try self.receiveResponsePacket();
+        try self.receiveProgress();
     }
 
     pub fn pollControlWithTimeout(

@@ -5018,6 +5018,14 @@ test "public modules are reachable" {
     ));
     try std.testing.expect(@hasDecl(
         netz.quic.one_rtt.Connection,
+        "requestCompletedPeerStreamRelease",
+    ));
+    try std.testing.expect(@hasDecl(
+        netz.quic.one_rtt.Connection,
+        "pendingDeliveryRecovery",
+    ));
+    try std.testing.expect(@hasDecl(
+        netz.quic.one_rtt.Connection,
         "receivedStreamIdsAfterInto",
     ));
     try std.testing.expect(@hasField(netz.quic.one_rtt.ConnectionStats, "sent_packet_stats"));

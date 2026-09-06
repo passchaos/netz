@@ -477,8 +477,17 @@ pub const RecvState = struct {
     }
 
     pub fn complete(self: RecvState) bool {
+        return self.receivedComplete() and
+            self.read_offset >= self.final_size.?;
+    }
+
+    /// Whether FIN and every byte through its final size have arrived. This
+    /// deliberately does not require the application cursor to reach FIN; an
+    /// upper protocol that has copied or otherwise committed the complete
+    /// message can explicitly relinquish the retained transport bytes.
+    pub fn receivedComplete(self: RecvState) bool {
         const final_size = self.final_size orelse return false;
-        return self.contiguous_end >= final_size and self.read_offset >= final_size;
+        return self.contiguous_end >= final_size;
     }
 
     fn compactConsumedPrefix(self: *RecvState) void {

@@ -340,6 +340,29 @@ pub const Queue = struct {
         return self.abandonStreamFrames(stream_id, .closed);
     }
 
+    /// Whether recovery still owns data whose delivery matters to a completed
+    /// application operation. Pure receive-credit updates are excluded: they
+    /// remain retransmittable in the queue, but a short-lived server that has
+    /// delivered its final response need not wait for their acknowledgement.
+    pub fn hasPendingDeliveryFrames(self: *const Queue) bool {
+        for (self.pending.items) |entry| {
+            var remaining = entry.payload();
+            while (remaining.len != 0) {
+                const parsed = quic.parseFrame(remaining) catch unreachable;
+                switch (parsed.frame) {
+                    .max_data,
+                    .max_stream_data,
+                    .max_streams_bidi,
+                    .max_streams_uni,
+                    => {},
+                    else => return true,
+                }
+                remaining = remaining[parsed.consumed..];
+            }
+        }
+        return false;
+    }
+
     const AbandonStreamFrames = enum { data, closed };
 
     fn abandonStreamFrames(
@@ -893,6 +916,33 @@ test "QUIC recovery drops stale closed-stream controls only" {
     try std.testing.expect(parsed.frame == .stream_data_blocked);
     try std.testing.expectEqual(@as(u64, 8), parsed.frame.stream_data_blocked.stream_id);
     try std.testing.expectEqual(kept.payload.len, parsed.consumed);
+}
+
+test "QUIC recovery delivery drain ignores pure receive credit" {
+    const allocator = std.testing.allocator;
+    var queue = Queue.init(allocator);
+    defer queue.deinit();
+
+    var credit: std.ArrayList(u8) = .empty;
+    defer credit.deinit(allocator);
+    try (quic.Frame{ .max_data = .{ .maximum_data = 64 } })
+        .write(&credit, allocator);
+    try (quic.Frame{ .max_streams_bidi = .{ .maximum_streams = 2 } })
+        .write(&credit, allocator);
+    _ = try queue.trackSent(0, credit.items);
+    try std.testing.expect(!queue.hasPendingDeliveryFrames());
+
+    var response: std.ArrayList(u8) = .empty;
+    defer response.deinit(allocator);
+    try (quic.Frame{ .stream = .{
+        .stream_id = 0,
+        .data = "response",
+        .fin = true,
+    } }).write(&response, allocator);
+    _ = try queue.trackSent(1, response.items);
+    try std.testing.expect(queue.hasPendingDeliveryFrames());
+    try std.testing.expect(queue.acknowledgePacketNumber(1));
+    try std.testing.expect(!queue.hasPendingDeliveryFrames());
 }
 
 test "QUIC recovery uninitialized tracking rejects empty payload transactionally" {

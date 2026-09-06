@@ -175,7 +175,8 @@ pub fn applyServerRequestPacketFrames(
             if (!replaces_stream and
                 request_id_validator.requestReceptionStopped(stream_id))
             {
-                try request_id_validator.releaseCompletedPeerStream(stream_id);
+                _ = try request_id_validator
+                    .requestCompletedPeerStreamRelease(stream_id);
                 continue;
             }
             var cancel_qpack = try request_streams
@@ -217,6 +218,8 @@ pub fn applyServerRequestPacketFrames(
             }
             request_streams.remove(stream_id);
             finishServerRequest(control, request_lifecycle, stream_id);
+            _ = try request_id_validator
+                .requestCompletedPeerStreamRelease(stream_id);
             if (first_reset == null) {
                 first_reset = .{
                     .from = from,
@@ -287,7 +290,8 @@ pub fn applyServerRequestPacketFrames(
         if (!tracked and
             request_id_validator.requestReceptionStopped(stream_id))
         {
-            try request_id_validator.releaseCompletedPeerStream(stream_id);
+            _ = try request_id_validator
+                .requestCompletedPeerStreamRelease(stream_id);
             continue;
         }
         if (rejectByLocalGoAway(control.*, .server, stream_id)) {

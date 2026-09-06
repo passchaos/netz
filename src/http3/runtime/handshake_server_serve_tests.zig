@@ -208,6 +208,141 @@ test "HTTP/3 handshake serveConnection handles bounded persistent requests" {
     try std.testing.expectEqual(@as(usize, 1), drop.dropped.load(.acquire));
 }
 
+test "HTTP/3 handshake server automatically retires completed request streams" {
+    const allocator = std.testing.allocator;
+    var threaded = std.Io.Threaded.init(allocator, .{
+        .async_limit = .unlimited,
+    });
+    defer threaded.deinit();
+    const io = threaded.io();
+
+    var server_endpoint = try quic.runtime.Endpoint.bind(
+        allocator,
+        io,
+        .{ .ip4 = .loopback(0) },
+        .{ .max_datagram_size = 4096 },
+    );
+    defer server_endpoint.deinit();
+    const client_keys = quic.protection.deriveAes128Keys(
+        [_]u8{0xd1} ** quic.protection.secret_len,
+    );
+    const server_keys = quic.protection.deriveAes128Keys(
+        [_]u8{0xd2} ** quic.protection.secret_len,
+    );
+    var single_stream_parameters = quic.practical_transport_parameters;
+    single_stream_parameters.initial_max_streams_bidi = 1;
+    const client_cid = "retire-h3-client";
+    const server_cid = "retire-h3-server";
+
+    var client = try runtime.HandshakeClient.initPreconfigured(
+        allocator,
+        io,
+        .{ .ip4 = .loopback(0) },
+        server_endpoint.address(),
+        .{ .quic = .{ .max_datagram_size = 4096 } },
+        .{},
+        .{
+            .receive_keys = server_keys,
+            .send_keys = client_keys,
+            .local_connection_id = client_cid,
+            .peer_connection_id = server_cid,
+            .local_transport_parameters = single_stream_parameters,
+            .peer_transport_parameters = single_stream_parameters,
+            .one_rtt = .{ .enable_pacing = false },
+        },
+    );
+    defer client.deinit();
+    var server = try runtime.HandshakeServerSession.initPreconfigured(
+        &server_endpoint,
+        client.address(),
+        .{},
+        .{
+            .receive_keys = client_keys,
+            .send_keys = server_keys,
+            .local_connection_id = server_cid,
+            .peer_connection_id = client_cid,
+            .local_transport_parameters = single_stream_parameters,
+            .peer_transport_parameters = single_stream_parameters,
+            .one_rtt = .{ .enable_pacing = false },
+        },
+    );
+    defer server.deinit();
+
+    const rounds = 4;
+    const Shared = struct {
+        session: *runtime.HandshakeServerSession,
+        err: ?anyerror = null,
+
+        fn run(self: *@This()) void {
+            self.runFallible() catch |err| {
+                self.err = err;
+            };
+        }
+
+        fn runFallible(self: *@This()) !void {
+            for (0..rounds) |round| {
+                var request = try self.session.receiveRequest();
+                defer request.deinit(
+                    self.session.established.connection.endpoint.allocator,
+                );
+                const expected_stream_id: u62 = @intCast(round * 4);
+                try std.testing.expectEqual(
+                    expected_stream_id,
+                    request.stream_id,
+                );
+                try self.session.sendResponse(request.stream_id, .{
+                    .status = 204,
+                });
+                while (!self.session.established.connection
+                    .peerStreamClosed(request.stream_id))
+                {
+                    try self.session.pollControl();
+                }
+            }
+        }
+    };
+    var shared = Shared{ .session = &server };
+    const server_thread = try std.Thread.spawn(.{}, Shared.run, .{&shared});
+    var joined = false;
+    defer if (!joined) server_thread.join();
+
+    for (0..rounds) |round| {
+        const stream_id = try client.sendRequest(.{
+            .method = "GET",
+            .path = "/retire",
+            .authority = "localhost",
+        });
+        try std.testing.expectEqual(@as(u62, @intCast(round * 4)), stream_id);
+        var response = try client.receiveResponse(stream_id);
+        response.deinit(allocator);
+        const needed_credit: u64 = @intCast(round + 2);
+        while (client.established.connection.peer_max_streams_bidi <
+            needed_credit)
+        {
+            try client.pollControl();
+        }
+    }
+
+    server_thread.join();
+    joined = true;
+    if (shared.err) |err| return err;
+    const stats = server.established.connection.stats();
+    // The three long-lived HTTP/3 control/QPACK streams remain active in each
+    // direction; only the four completed request streams are reclaimed.
+    try std.testing.expectEqual(@as(usize, 3), stats.active_receive_streams);
+    try std.testing.expectEqual(@as(usize, 3), stats.active_send_streams);
+    try std.testing.expectEqual(@as(usize, 1), stats.closed_peer_stream_ranges);
+    for (0..rounds) |round| {
+        const stream_id: u62 = @intCast(round * 4);
+        try std.testing.expect(server.established.connection
+            .peerStreamClosed(stream_id));
+        try std.testing.expect(server.established.connection
+            .recvStreamStats(stream_id) == null);
+        try std.testing.expect(server.established.connection
+            .sendStreamStats(stream_id) == null);
+    }
+}
+
 fn responseHeader(
     headers: []const http3.Qpack.HeaderField,
     name: []const u8,

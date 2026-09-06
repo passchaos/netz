@@ -2611,6 +2611,71 @@ test "QUIC 1-RTT connection releases reset and unidirectional peer stream credit
     try std.testing.expectEqual(@as(u64, 2), uni_credit.frames[0].max_streams_uni.maximum_streams);
 }
 
+test "QUIC application retirement consumes a fully received peer stream" {
+    const allocator = std.testing.allocator;
+    var threaded = std.Io.Threaded.init(allocator, .{});
+    defer threaded.deinit();
+    var endpoint = try quic.runtime.Endpoint.bind(
+        allocator,
+        threaded.io(),
+        .{ .ip4 = .loopback(0) },
+        .{ .max_datagram_size = 4096 },
+    );
+    defer endpoint.deinit();
+    const keys = quic.protection.deriveAes128Keys(
+        [_]u8{0xbd} ** quic.protection.secret_len,
+    );
+    var connection = try one_rtt.Connection.init(&endpoint, .{
+        .peer = endpoint.address(),
+        .receive_keys = keys,
+        .send_keys = keys,
+        .local_connection_id = "retire-server",
+        .peer_connection_id = "retire-client",
+        .initial_receive_max_data = 8,
+        .receive_window = 8,
+        .initial_receive_max_streams_uni = 1,
+        .local_endpoint = .server,
+        .enable_pacing = false,
+    });
+    defer connection.deinit();
+
+    try one_rtt.testing.applyReceivedFrames(
+        &connection,
+        0,
+        &.{.{ .stream = .{ .stream_id = 2, .data = "partial" } }},
+        null,
+        .not_ect,
+    );
+    try std.testing.expect(!try connection
+        .requestCompletedPeerStreamRelease(2));
+    try std.testing.expectEqual(
+        one_rtt.PeerStreamLifecycle.active,
+        connection.peerStreamLifecycle(2),
+    );
+
+    try one_rtt.testing.applyReceivedFrames(
+        &connection,
+        1,
+        &.{.{ .stream = .{
+            .stream_id = 2,
+            .offset = "partial".len,
+            .data = "!",
+            .fin = true,
+        } }},
+        null,
+        .not_ect,
+    );
+    try std.testing.expectEqual(
+        @as(usize, "partial!".len),
+        connection.availableReceivedStream(2).?.len,
+    );
+    try std.testing.expect(try connection
+        .requestCompletedPeerStreamRelease(2));
+    try std.testing.expect(connection.peerStreamClosed(2));
+    try std.testing.expectEqual(@as(usize, 0), connection.stats().active_receive_streams);
+    try std.testing.expectEqual(@as(u64, 16), connection.recv_flow.limit);
+}
+
 test "QUIC 1-RTT connection compacts long peer stream churn into closed ranges" {
     const allocator = std.testing.allocator;
 
