@@ -343,6 +343,128 @@ test "HTTP/3 handshake server automatically retires completed request streams" {
     }
 }
 
+test "HTTP/3 handshake client automatically retires completed response streams" {
+    const allocator = std.testing.allocator;
+    var threaded = std.Io.Threaded.init(allocator, .{
+        .async_limit = .unlimited,
+    });
+    defer threaded.deinit();
+    const io = threaded.io();
+
+    var server_endpoint = try quic.runtime.Endpoint.bind(
+        allocator,
+        io,
+        .{ .ip4 = .loopback(0) },
+        .{ .max_datagram_size = 4096 },
+    );
+    defer server_endpoint.deinit();
+    const client_keys = quic.protection.deriveAes128Keys(
+        [_]u8{0xd3} ** quic.protection.secret_len,
+    );
+    const server_keys = quic.protection.deriveAes128Keys(
+        [_]u8{0xd4} ** quic.protection.secret_len,
+    );
+    const client_cid = "local-gc-h3-client";
+    const server_cid = "local-gc-h3-server";
+
+    var client = try runtime.HandshakeClient.initPreconfigured(
+        allocator,
+        io,
+        .{ .ip4 = .loopback(0) },
+        server_endpoint.address(),
+        .{ .quic = .{ .max_datagram_size = 4096 } },
+        .{},
+        .{
+            .receive_keys = server_keys,
+            .send_keys = client_keys,
+            .local_connection_id = client_cid,
+            .peer_connection_id = server_cid,
+            .one_rtt = .{ .enable_pacing = false },
+        },
+    );
+    defer client.deinit();
+    var server = try runtime.HandshakeServerSession.initPreconfigured(
+        &server_endpoint,
+        client.address(),
+        .{},
+        .{
+            .receive_keys = client_keys,
+            .send_keys = server_keys,
+            .local_connection_id = server_cid,
+            .peer_connection_id = client_cid,
+            .one_rtt = .{ .enable_pacing = false },
+        },
+    );
+    defer server.deinit();
+
+    const rounds = 4;
+    const Shared = struct {
+        session: *runtime.HandshakeServerSession,
+        stop: *std.Io.Event,
+        err: ?anyerror = null,
+
+        fn run(self: *@This()) void {
+            self.runFallible() catch |err| {
+                self.err = err;
+            };
+        }
+
+        fn runFallible(self: *@This()) !void {
+            for (0..rounds) |_| {
+                var request = self.session.receiveRequestWithTimeout(
+                    .fromSeconds(2),
+                ) catch |err| switch (err) {
+                    error.Timeout => if (self.stop.isSet()) return else return err,
+                    else => return err,
+                };
+                defer request.deinit(
+                    self.session.established.connection.endpoint.allocator,
+                );
+                try self.session.sendResponse(request.stream_id, .{
+                    .status = 204,
+                });
+            }
+        }
+    };
+    var stop: std.Io.Event = .unset;
+    var shared = Shared{ .session = &server, .stop = &stop };
+    const server_thread = try std.Thread.spawn(.{}, Shared.run, .{&shared});
+    var joined = false;
+    defer if (!joined) {
+        stop.set(io);
+        server_thread.join();
+    };
+
+    for (0..rounds) |round| {
+        const stream_id = try client.sendRequest(.{
+            .method = "GET",
+            .path = "/local-gc",
+            .authority = "localhost",
+        });
+        var response = try client.receiveResponse(stream_id);
+        response.deinit(allocator);
+        try std.testing.expect(client.established.connection
+            .localStreamClosed(stream_id));
+        try std.testing.expectEqual(
+            @as(usize, 3),
+            client.established.connection.stats().active_send_streams,
+        );
+        try std.testing.expectEqual(
+            @as(usize, 3),
+            client.established.connection.stats().active_receive_streams,
+        );
+        try std.testing.expectEqual(
+            @as(usize, 1),
+            client.established.connection.stats().closed_local_stream_ranges,
+        );
+        try std.testing.expectEqual(@as(u62, @intCast(round * 4)), stream_id);
+    }
+
+    server_thread.join();
+    joined = true;
+    if (shared.err) |err| return err;
+}
+
 fn responseHeader(
     headers: []const http3.Qpack.HeaderField,
     name: []const u8,

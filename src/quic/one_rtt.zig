@@ -285,6 +285,9 @@ const StreamFlowEntry = struct {
     final_size: ?u64 = null,
     stopped: ?StopSendingInfo = null,
     reset_sent: ?StreamResetInfo = null,
+    /// The application no longer needs this locally initiated stream. State
+    /// is reclaimed once every applicable send/receive half is terminal.
+    release_requested: bool = false,
 };
 
 const StreamRecvFlowEntry = struct {
@@ -415,6 +418,7 @@ pub const ConnectionStats = struct {
     active_send_streams: usize,
     active_receive_streams: usize,
     closed_peer_stream_ranges: usize,
+    closed_local_stream_ranges: usize,
     datagrams_sent: u64,
     datagrams_received: u64,
     datagrams_dropped_incoming: u64,
@@ -502,6 +506,12 @@ pub const StreamRead = union(enum) {
 };
 
 pub const PeerStreamLifecycle = enum {
+    unknown,
+    active,
+    closed,
+};
+
+pub const StreamLifecycle = enum {
     unknown,
     active,
     closed,
@@ -685,7 +695,7 @@ fn appendPendingAck(
     return combined;
 }
 const timer_blocked_receive_backoff_ns: u64 = std.time.ns_per_ms;
-const peer_stream_credit_retry_backoff_ns = [_]u64{
+const stream_release_retry_backoff_ns = [_]u64{
     1 * std.time.ns_per_ms,
     2 * std.time.ns_per_ms,
     4 * std.time.ns_per_ms,
@@ -735,9 +745,12 @@ pub const Connection = struct {
     stream_recv_index: std.AutoHashMapUnmanaged(u64, usize) = .empty,
     closed_peer_bidi_streams: closed_streams.Set = .{},
     closed_peer_uni_streams: closed_streams.Set = .{},
+    closed_local_bidi_streams: closed_streams.Set = .{},
+    closed_local_uni_streams: closed_streams.Set = .{},
     pending_peer_stream_credit_releases: usize = 0,
-    peer_stream_credit_retry_deadline_ns: ?u64 = null,
-    peer_stream_credit_retry_attempts: u8 = 0,
+    pending_local_stream_releases: usize = 0,
+    stream_release_retry_deadline_ns: ?u64 = null,
+    stream_release_retry_attempts: u8 = 0,
     last_recv_stream_index: ?usize = null,
     stream_poll_cursor: usize = 0,
     close_info: ?CloseInfo = null,
@@ -970,6 +983,8 @@ pub const Connection = struct {
         self.stream_recv_index.deinit(self.endpoint.allocator);
         self.closed_peer_bidi_streams.deinit(self.endpoint.allocator);
         self.closed_peer_uni_streams.deinit(self.endpoint.allocator);
+        self.closed_local_bidi_streams.deinit(self.endpoint.allocator);
+        self.closed_local_uni_streams.deinit(self.endpoint.allocator);
         self.path_response_targets.deinit(self.endpoint.allocator);
         self.datagram_recv_queue.deinit(self.endpoint.allocator);
         self.send_frame_buffer.deinit(self.endpoint.allocator);
@@ -2120,6 +2135,8 @@ pub const Connection = struct {
             .active_receive_streams = self.stream_recv_flows.items.len,
             .closed_peer_stream_ranges = self.closed_peer_bidi_streams.rangeCount() +
                 self.closed_peer_uni_streams.rangeCount(),
+            .closed_local_stream_ranges = self.closed_local_bidi_streams.rangeCount() +
+                self.closed_local_uni_streams.rangeCount(),
             .datagrams_sent = self.datagrams_sent_count,
             .datagrams_received = self.datagrams_received_count,
             .datagrams_dropped_incoming = self.datagrams_dropped_incoming_count,
@@ -2345,7 +2362,7 @@ pub const Connection = struct {
         self: Connection,
         stream_id: u64,
     ) u64 {
-        return if (self.isClosedPeerStream(stream_id))
+        return if (self.isClosedStream(stream_id))
             0
         else if (self.stream_send_index.count() == 0)
             self.initialSendStreamDataLimit(stream_id)
@@ -2449,7 +2466,7 @@ pub const Connection = struct {
     /// typed helper matching `kind` when the deadline becomes due.
     pub fn nextTimerDeadline(self: Connection) ?TimerDeadline {
         var next: ?TimerDeadline = null;
-        if (self.peer_stream_credit_retry_deadline_ns) |deadline| {
+        if (self.stream_release_retry_deadline_ns) |deadline| {
             considerTimerDeadline(&next, .{
                 .kind = .peer_stream_credit,
                 .deadline_ns = deadline,
@@ -2532,9 +2549,9 @@ pub const Connection = struct {
                 try self.serviceAckDelayTimerAt(now_ns);
             },
             .peer_stream_credit => {
-                self.peer_stream_credit_retry_deadline_ns = null;
-                self.flushRequestedPeerStreamCreditsAt(now_ns) catch |err| {
-                    self.schedulePeerStreamCreditRetry(err, now_ns);
+                self.stream_release_retry_deadline_ns = null;
+                self.flushRequestedStreamReleasesAt(now_ns) catch |err| {
+                    self.scheduleStreamReleaseRetry(err, now_ns);
                 };
             },
             .loss_time, .pto => {
@@ -4299,6 +4316,7 @@ pub const Connection = struct {
         {
             self.pto_jitter_state.rearm();
         }
+        self.reclaimRequestedLocalStreamsAfterAck();
         return marked_sent or removed_recovery;
     }
 
@@ -4636,10 +4654,42 @@ pub const Connection = struct {
             self.pending_peer_stream_credit_releases += 1;
         }
         const now_ns = self.monotonicNowNs();
-        self.flushRequestedPeerStreamCreditsAt(now_ns) catch |err| {
-            self.schedulePeerStreamCreditRetry(err, now_ns);
+        self.flushRequestedStreamReleasesAt(now_ns) catch |err| {
+            self.scheduleStreamReleaseRetry(err, now_ns);
         };
         return true;
+    }
+
+    /// Register retirement of a locally initiated stream after its upper
+    /// protocol has consumed or copied the terminal peer response. No
+    /// MAX_STREAMS update is generated because the peer owns that credit.
+    /// Reclamation waits for the local FIN/RESET recovery to clear, and for a
+    /// bidirectional receive half to reach FIN/RESET. Calling before the peer
+    /// half is terminal records the request so a later FIN/RESET completes it.
+    ///
+    /// Returns true only when the stream was reclaimed immediately; false
+    /// means the request is retained until a missing terminal/ACK condition
+    /// arrives.
+    pub fn requestCompletedLocalStreamRelease(
+        self: *Connection,
+        stream_id: u64,
+    ) Error!bool {
+        if (!streamInitiatedByLocal(self.config.local_endpoint, stream_id)) {
+            return error.StreamStateError;
+        }
+        if (self.isClosedLocalStream(stream_id)) return true;
+        const send_stream = self.findSendStreamEntry(stream_id) orelse
+            return error.StreamStateError;
+        if (!send_stream.release_requested) {
+            try self.prepareClosedLocalStreamInsert(streamDirection(stream_id));
+            send_stream.release_requested = true;
+            self.pending_local_stream_releases += 1;
+        }
+        const now_ns = self.monotonicNowNs();
+        self.flushRequestedStreamReleasesAt(now_ns) catch |err| {
+            self.scheduleStreamReleaseRetry(err, now_ns);
+        };
+        return self.isClosedLocalStream(stream_id);
     }
 
     /// Return stream-count credit for several terminal peer streams at once.
@@ -4803,6 +4853,45 @@ pub const Connection = struct {
         };
     }
 
+    fn isClosedLocalStream(self: Connection, stream_id: u64) bool {
+        if (!streamInitiatedByLocal(self.config.local_endpoint, stream_id)) {
+            return false;
+        }
+        const sequence = stream_id >> 2;
+        return switch (streamDirection(stream_id)) {
+            .bidirectional => self.closed_local_bidi_streams.contains(sequence),
+            .unidirectional => self.closed_local_uni_streams.contains(sequence),
+        };
+    }
+
+    fn isClosedStream(self: Connection, stream_id: u64) bool {
+        return if (streamInitiatedByLocal(self.config.local_endpoint, stream_id))
+            self.isClosedLocalStream(stream_id)
+        else
+            self.isClosedPeerStream(stream_id);
+    }
+
+    /// Whether a locally initiated stream has been fully retired and compacted.
+    pub fn localStreamClosed(self: Connection, stream_id: u64) bool {
+        return self.isClosedLocalStream(stream_id);
+    }
+
+    /// Classify any stream without exposing active-table layout.
+    pub fn streamLifecycle(
+        self: Connection,
+        stream_id: u64,
+    ) StreamLifecycle {
+        if (self.isClosedStream(stream_id)) return .closed;
+        if ((self.stream_send_index.count() != 0 and
+            self.stream_send_index.contains(stream_id)) or
+            (self.stream_recv_index.count() != 0 and
+                self.stream_recv_index.contains(stream_id)))
+        {
+            return .active;
+        }
+        return .unknown;
+    }
+
     /// Whether a peer-initiated stream has been fully released and compacted.
     /// Late stream-control/data frames for such an ID are ignored by transport.
     pub fn peerStreamClosed(self: Connection, stream_id: u64) bool {
@@ -4814,15 +4903,14 @@ pub const Connection = struct {
         self: Connection,
         stream_id: u64,
     ) PeerStreamLifecycle {
-        if (self.isClosedPeerStream(stream_id)) return .closed;
-        if ((self.stream_send_index.count() != 0 and
-            self.stream_send_index.contains(stream_id)) or
-            (self.stream_recv_index.count() != 0 and
-                self.stream_recv_index.contains(stream_id)))
-        {
-            return .active;
+        if (streamInitiatedByLocal(self.config.local_endpoint, stream_id)) {
+            return .unknown;
         }
-        return .unknown;
+        return switch (self.streamLifecycle(stream_id)) {
+            .unknown => .unknown,
+            .active => .active,
+            .closed => .closed,
+        };
     }
 
     fn prepareClosedPeerStreamInsert(
@@ -4838,6 +4926,116 @@ pub const Connection = struct {
             self.endpoint.allocator,
             uni_count,
         );
+    }
+
+    fn prepareClosedLocalStreamInsert(
+        self: *Connection,
+        direction: StreamDirection,
+    ) std.mem.Allocator.Error!void {
+        const reserve = self.pending_local_stream_releases + 1;
+        switch (direction) {
+            .bidirectional => try self.closed_local_bidi_streams.prepareInsert(
+                self.endpoint.allocator,
+                reserve,
+            ),
+            .unidirectional => try self.closed_local_uni_streams.prepareInsert(
+                self.endpoint.allocator,
+                reserve,
+            ),
+        }
+    }
+
+    fn localStreamReadyForReclaim(
+        self: *Connection,
+        stream_id: u64,
+    ) bool {
+        const send_stream = self.findSendStreamEntry(stream_id) orelse
+            return false;
+        if (!send_stream.release_requested or
+            (send_stream.final_size == null and send_stream.reset_sent == null))
+        {
+            return false;
+        }
+        if (self.recovery.hasPendingStreamData(stream_id) or
+            (send_stream.reset_sent != null and
+                self.recovery.hasPendingResetStream(stream_id)))
+        {
+            return false;
+        }
+        if (streamDirection(stream_id) == .unidirectional) return true;
+        const recv_stream = self.findRecvStreamEntry(stream_id) orelse
+            return false;
+        return recv_stream.reset != null or recv_stream.recv_state.receivedComplete();
+    }
+
+    fn flushRequestedLocalStreamReleasesAt(
+        self: *Connection,
+        now_ns: u64,
+    ) Error!void {
+        if (self.pending_local_stream_releases == 0) return;
+        var next_recv_flow = self.recv_flow;
+        for (self.stream_send_flows.items) |*send_stream| {
+            const stream_id = send_stream.stream_id;
+            if (!streamInitiatedByLocal(self.config.local_endpoint, stream_id) or
+                !self.localStreamReadyForReclaim(stream_id))
+            {
+                continue;
+            }
+            if (self.findRecvStreamEntry(stream_id)) |recv_stream| {
+                _ = next_recv_flow.consume(
+                    recv_stream.flow.highest_received -| recv_stream.flow.consumed,
+                );
+            }
+        }
+        if (next_recv_flow.limit != self.recv_flow.limit) {
+            const frames = [_]quic.Frame{next_recv_flow.maxDataFrame()};
+            try self.sendTrackedFramesEcnAt(&frames, .not_ect, now_ns);
+        }
+        self.recv_flow = next_recv_flow;
+
+        var index: usize = 0;
+        while (index < self.stream_send_flows.items.len) {
+            const stream_id = self.stream_send_flows.items[index].stream_id;
+            if (!streamInitiatedByLocal(self.config.local_endpoint, stream_id) or
+                !self.localStreamReadyForReclaim(stream_id))
+            {
+                index += 1;
+                continue;
+            }
+            self.reclaimLocalStreamAssumeCapacity(stream_id);
+            // swapRemove installed an unchecked entry at this index.
+        }
+    }
+
+    fn reclaimRequestedLocalStreamsAfterAck(self: *Connection) void {
+        if (self.pending_local_stream_releases == 0) return;
+        const now_ns = self.monotonicNowNs();
+        self.flushRequestedLocalStreamReleasesAt(now_ns) catch |err| {
+            self.scheduleStreamReleaseRetry(err, now_ns);
+        };
+    }
+
+    fn reclaimLocalStreamAssumeCapacity(
+        self: *Connection,
+        stream_id: u64,
+    ) void {
+        std.debug.assert(streamInitiatedByLocal(
+            self.config.local_endpoint,
+            stream_id,
+        ));
+        const sequence = stream_id >> 2;
+        switch (streamDirection(stream_id)) {
+            .bidirectional => self.closed_local_bidi_streams
+                .insertAssumeCapacity(sequence),
+            .unidirectional => self.closed_local_uni_streams
+                .insertAssumeCapacity(sequence),
+        }
+        if (self.findRecvStreamEntry(stream_id) != null) {
+            self.removeRecvStreamEntry(stream_id);
+        }
+        _ = self.recovery.abandonClosedStreamFrames(stream_id);
+        self.pending_local_stream_releases -= 1;
+        self.removeSendStreamEntry(stream_id);
     }
 
     fn reclaimPeerStreamAssumeCapacity(
@@ -4907,12 +5105,7 @@ pub const Connection = struct {
         self: *Connection,
         now_ns: u64,
     ) Error!void {
-        if (self.pending_peer_stream_credit_releases == 0 or
-            self.close_info != null or self.idle_timed_out)
-        {
-            self.clearPeerStreamCreditRetry();
-            return;
-        }
+        if (self.pending_peer_stream_credit_releases == 0) return;
         var bidi_released: u64 = 0;
         var uni_released: u64 = 0;
         for (self.stream_recv_flows.items) |*recv_stream| {
@@ -4924,10 +5117,7 @@ pub const Connection = struct {
                 .unidirectional => uni_released += 1,
             }
         }
-        if (bidi_released == 0 and uni_released == 0) {
-            self.clearPeerStreamCreditRetry();
-            return;
-        }
+        if (bidi_released == 0 and uni_released == 0) return;
 
         const next_bidi = advanceStreamLimit(
             self.recv_max_streams_bidi,
@@ -4997,42 +5187,55 @@ pub const Connection = struct {
         }
         self.recv_max_streams_bidi = next_bidi;
         self.recv_max_streams_uni = next_uni;
-        self.clearPeerStreamCreditRetry();
     }
 
-    fn clearPeerStreamCreditRetry(self: *Connection) void {
-        self.peer_stream_credit_retry_deadline_ns = null;
-        self.peer_stream_credit_retry_attempts = 0;
+    fn flushRequestedStreamReleasesAt(
+        self: *Connection,
+        now_ns: u64,
+    ) Error!void {
+        if (self.close_info != null or self.idle_timed_out) {
+            self.clearStreamReleaseRetry();
+            return;
+        }
+        try self.flushRequestedPeerStreamCreditsAt(now_ns);
+        try self.flushRequestedLocalStreamReleasesAt(now_ns);
+        self.clearStreamReleaseRetry();
     }
 
-    fn schedulePeerStreamCreditRetry(
+    fn clearStreamReleaseRetry(self: *Connection) void {
+        self.stream_release_retry_deadline_ns = null;
+        self.stream_release_retry_attempts = 0;
+    }
+
+    fn scheduleStreamReleaseRetry(
         self: *Connection,
         err: Error,
         now_ns: u64,
     ) void {
-        if (self.pending_peer_stream_credit_releases == 0 or
+        if ((self.pending_peer_stream_credit_releases == 0 and
+            self.pending_local_stream_releases == 0) or
             self.close_info != null or self.idle_timed_out)
         {
-            self.clearPeerStreamCreditRetry();
+            self.clearStreamReleaseRetry();
             return;
         }
         if (err == error.PacingLimited) {
             if (self.pacing_blocked_until_ns) |deadline| {
                 if (deadline > now_ns) {
-                    self.peer_stream_credit_retry_deadline_ns = deadline;
+                    self.stream_release_retry_deadline_ns = deadline;
                     return;
                 }
             }
         }
         const index = @min(
-            @as(usize, self.peer_stream_credit_retry_attempts),
-            peer_stream_credit_retry_backoff_ns.len - 1,
+            @as(usize, self.stream_release_retry_attempts),
+            stream_release_retry_backoff_ns.len - 1,
         );
-        self.peer_stream_credit_retry_attempts +|= 1;
-        self.peer_stream_credit_retry_deadline_ns = std.math.add(
+        self.stream_release_retry_attempts +|= 1;
+        self.stream_release_retry_deadline_ns = std.math.add(
             u64,
             now_ns,
-            peer_stream_credit_retry_backoff_ns[index],
+            stream_release_retry_backoff_ns[index],
         ) catch std.math.maxInt(u64);
     }
 
@@ -8072,6 +8275,7 @@ pub const Connection = struct {
                     }
                     self.observeRecoveryMetrics(now_ns);
                     _ = try self.recovery.applyAck(frame.ack);
+                    self.reclaimRequestedLocalStreamsAfterAck();
                     if (handshake_done_group) |group_id| {
                         self.handshake_status.onRecoveryUpdated(
                             self.recovery.containsGroupId(group_id),
@@ -8098,7 +8302,7 @@ pub const Connection = struct {
                 },
                 .max_data => |max_data| self.send_flow.updateLimit(max_data.maximum_data),
                 .max_stream_data => |max_stream_data| {
-                    if (self.isClosedPeerStream(max_stream_data.stream_id) or
+                    if (self.isClosedStream(max_stream_data.stream_id) or
                         self.sendStreamTerminal(max_stream_data.stream_id))
                     {
                         continue;
@@ -8149,11 +8353,11 @@ pub const Connection = struct {
                     }
                 },
                 .reset_stream => |reset| {
-                    if (self.isClosedPeerStream(reset.stream_id)) continue;
+                    if (self.isClosedStream(reset.stream_id)) continue;
                     try self.receiveResetStream(reset);
                 },
                 .stop_sending => |stop| {
-                    if (self.isClosedPeerStream(stop.stream_id) or
+                    if (self.isClosedStream(stop.stream_id) or
                         self.sendStreamTerminal(stop.stream_id)) continue;
                     try self.receiveStopSending(stop);
                 },
@@ -8181,7 +8385,7 @@ pub const Connection = struct {
                     .state = .draining,
                 }),
                 .stream => |stream| {
-                    if (self.isClosedPeerStream(stream.stream_id)) continue;
+                    if (self.isClosedStream(stream.stream_id)) continue;
                     var recv_stream = try self.recvStreamFlow(stream.stream_id);
                     const reset_received = recv_stream.reset != null;
                     const data_len = std.math.cast(u64, stream.data.len) orelse return error.InvalidFrameLength;
@@ -8215,12 +8419,12 @@ pub const Connection = struct {
         }
         triggering_frame_index.* = null;
         const credit_now_ns = now_ns orelse self.monotonicNowNs();
-        self.flushRequestedPeerStreamCreditsAt(credit_now_ns) catch |err| {
+        self.flushRequestedStreamReleasesAt(credit_now_ns) catch |err| {
             // ACK and stream state above are already committed. Treat this
             // internal credit packet like an event-loop send: preserve the
             // pending release and arm an independent retry instead of making
             // the authenticated packet appear rejected to the caller.
-            self.schedulePeerStreamCreditRetry(err, credit_now_ns);
+            self.scheduleStreamReleaseRetry(err, credit_now_ns);
         };
     }
 
@@ -8240,7 +8444,10 @@ pub const Connection = struct {
             return validated;
         }
         if (frames.len == 1 and frames[0] == .stream) {
-            if (self.isClosedPeerStream(frames[0].stream.stream_id)) {
+            if (self.isClosedStream(frames[0].stream.stream_id)) {
+                try self.validateStreamReceiveFrameId(
+                    frames[0].stream.stream_id,
+                );
                 triggering_frame_index.* = null;
                 return null;
             }
@@ -8306,8 +8513,20 @@ pub const Connection = struct {
                     // multi-frame packets.
                     try self.sent.validateAckCoversSentPackets(ack);
                 },
-                .stream => |stream| if (!self.isClosedPeerStream(stream.stream_id)) try self.validateStreamFramePrecondition(stream, &recv_streams, &recv_streams_allocated, &stream_frames, &recv_data_total),
-                .reset_stream => |reset| if (!self.isClosedPeerStream(reset.stream_id)) try self.validateResetStreamPrecondition(reset, &recv_streams, &recv_streams_allocated, &stream_frames, &recv_data_total),
+                .stream => |stream| {
+                    if (self.isClosedStream(stream.stream_id)) {
+                        try self.validateStreamReceiveFrameId(stream.stream_id);
+                    } else {
+                        try self.validateStreamFramePrecondition(stream, &recv_streams, &recv_streams_allocated, &stream_frames, &recv_data_total);
+                    }
+                },
+                .reset_stream => |reset| {
+                    if (self.isClosedStream(reset.stream_id)) {
+                        try self.validateStreamReceiveFrameId(reset.stream_id);
+                    } else {
+                        try self.validateResetStreamPrecondition(reset, &recv_streams, &recv_streams_allocated, &stream_frames, &recv_data_total);
+                    }
+                },
                 .stream_data_blocked => |blocked| try self.validateStreamReceiveFrameId(blocked.stream_id),
                 .max_stream_data => |max_stream_data| try self.validateStreamSendControlId(max_stream_data.stream_id),
                 .stop_sending => |stop| try self.validateStreamSendControlId(stop.stream_id),
@@ -9373,7 +9592,7 @@ pub const Connection = struct {
 
     fn sendStreamEntry(self: *Connection, stream_id: u64) Error!*StreamFlowEntry {
         if (self.findSendStreamEntry(stream_id)) |entry| return entry;
-        if (self.isClosedPeerStream(stream_id)) return error.StreamStateError;
+        if (self.isClosedStream(stream_id)) return error.StreamStateError;
         if (streamInitiatedByLocal(self.config.local_endpoint, stream_id)) {
             try self.validateLocalStreamCount(stream_id);
             // Preserve the historical direct-STREAM API: using a local ID can
@@ -9435,7 +9654,7 @@ pub const Connection = struct {
             }
             return;
         }
-        if (self.isClosedPeerStream(stream.stream_id)) {
+        if (self.isClosedStream(stream.stream_id)) {
             return error.StreamStateError;
         }
         if (!streamHasSendSide(self.config.local_endpoint, stream.stream_id)) return error.StreamStateError;
@@ -9532,7 +9751,7 @@ pub const Connection = struct {
 
     fn recvStreamFlow(self: *Connection, stream_id: u64) Error!*StreamRecvFlowEntry {
         if (self.findRecvStreamEntry(stream_id)) |entry| return entry;
-        if (self.isClosedPeerStream(stream_id)) return error.StreamStateError;
+        if (self.isClosedStream(stream_id)) return error.StreamStateError;
         try self.validateStreamReceiveFrameId(stream_id);
         try self.validatePeerStreamCount(stream_id);
         const initial_limit = self.initialReceiveStreamDataLimit(stream_id);
@@ -9589,7 +9808,7 @@ pub const Connection = struct {
 
     fn validateStreamReceiveFrameId(self: *Connection, stream_id: u64) Error!void {
         if (!streamHasReceiveSide(self.config.local_endpoint, stream_id)) return error.StreamStateError;
-        if (self.isClosedPeerStream(stream_id)) return;
+        if (self.isClosedStream(stream_id)) return;
         if (streamInitiatedByLocal(self.config.local_endpoint, stream_id)) {
             // STREAM/RESET/STREAM_DATA_BLOCKED on a locally initiated
             // bidirectional stream is valid only after the local endpoint has
@@ -9603,7 +9822,7 @@ pub const Connection = struct {
 
     fn validateStreamSendControlId(self: *Connection, stream_id: u64) Error!void {
         if (!streamHasSendSide(self.config.local_endpoint, stream_id)) return error.StreamStateError;
-        if (self.isClosedPeerStream(stream_id)) return;
+        if (self.isClosedStream(stream_id)) return;
         if (streamInitiatedByLocal(self.config.local_endpoint, stream_id)) {
             if (self.findSendStreamEntry(stream_id) == null) return error.StreamStateError;
             return;

@@ -341,7 +341,9 @@ starts with deterministic parsers, serializers, preallocated fixed-width wire-in
   watermark, sparse closures use merged ranges, stale recovery frames are
   removed, failed automatic credit sends retain state behind an aggregate
   connection-timer retry, and stable ID-based receive pagination survives swap
-  removal,
+  removal. Locally initiated request streams use the same compressed history
+  and ACK-gated reclamation after their peer response reaches FIN/RESET, so
+  long-lived HTTP/3 clients retain active work rather than historical streams,
   protected 0-RTT long-header packet seal/open and preallocated frame datagram helpers with
   0-RTT packet-type restrictions, an indexed owning origin+ALPN session cache with
   cached transactional LRU eviction and stats, expired-hit eviction, independent TLS session copies, stable

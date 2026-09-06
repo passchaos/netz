@@ -5012,6 +5012,7 @@ test "public modules are reachable" {
     try std.testing.expect(@hasDecl(netz.quic.one_rtt.Connection, "getSendStreamStats"));
     try std.testing.expect(@hasDecl(netz.quic.one_rtt.Connection, "getRecvStreamStats"));
     try std.testing.expect(@hasDecl(netz.quic.one_rtt, "PeerStreamLifecycle"));
+    try std.testing.expect(@hasDecl(netz.quic.one_rtt, "StreamLifecycle"));
     try std.testing.expect(@hasDecl(
         netz.quic.one_rtt.Connection,
         "peerStreamLifecycle",
@@ -5034,6 +5035,19 @@ test "public modules are reachable" {
     try std.testing.expect(@hasField(netz.quic.one_rtt.ConnectionStats, "active_send_streams"));
     try std.testing.expect(@hasField(netz.quic.one_rtt.ConnectionStats, "active_receive_streams"));
     try std.testing.expect(@hasField(netz.quic.one_rtt.ConnectionStats, "closed_peer_stream_ranges"));
+    try std.testing.expect(@hasField(netz.quic.one_rtt.ConnectionStats, "closed_local_stream_ranges"));
+    try std.testing.expect(@hasDecl(
+        netz.quic.one_rtt.Connection,
+        "requestCompletedLocalStreamRelease",
+    ));
+    try std.testing.expect(@hasDecl(
+        netz.quic.one_rtt.Connection,
+        "localStreamClosed",
+    ));
+    try std.testing.expect(@hasDecl(
+        netz.quic.one_rtt.Connection,
+        "streamLifecycle",
+    ));
     try std.testing.expect(@hasDecl(netz.quic.one_rtt.Connection, "takeQlogError"));
     try std.testing.expectEqual(@as(usize, 16), netz.quic.protection.aes_128_key_len);
     try std.testing.expect(@hasDecl(netz.http3.Qpack, "DynamicTable"));

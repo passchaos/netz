@@ -8111,6 +8111,8 @@ pub const HandshakeClient = struct {
             deadline,
         ) catch |err| switch (err) {
             error.RequestCancelled, error.RequestRejected => {
+                _ = try self.established.connection
+                    .requestCompletedLocalStreamRelease(stream_id);
                 _ = self.request_lifecycle.finishAssumeCapacity(stream_id);
                 _ = self.outbound_bodies.finish(stream_id);
                 self.qpack_encode.abandonStream(stream_id);
@@ -8203,6 +8205,8 @@ pub const HandshakeClient = struct {
             assembled.stream_id,
             response.qpack_section_acknowledgments,
         );
+        _ = try self.established.connection
+            .requestCompletedLocalStreamRelease(stream_id);
         self.response_streams.remove(stream_id);
         _ = self.request_lifecycle.finishAssumeCapacity(stream_id);
         _ = self.outbound_bodies.finish(stream_id);
@@ -8502,7 +8506,7 @@ pub const HandshakeClient = struct {
         if (self.response_streams.resetFor(stream_id)) |code| {
             try self.request_lifecycle.prepareFinish();
             _ = self.response_streams.takeReset(stream_id);
-            self.finishStreamingResponse(stream_id);
+            try self.finishStreamingResponse(stream_id);
             self.flushResponsePacketFeedback() catch {};
             return if (code == http3.ApplicationErrorCode.request_rejected)
                 error.RequestRejected
@@ -9552,7 +9556,7 @@ pub const HandshakeClient = struct {
             }
             try self.request_lifecycle.prepareFinish();
             _ = self.response_streams.takeReset(reset.stream_id);
-            self.finishStreamingResponse(reset.stream_id);
+            try self.finishStreamingResponse(reset.stream_id);
             self.flushResponsePacketFeedback() catch {};
             return .{ .reset = .{
                 .stream_id = reset.stream_id,
@@ -9897,6 +9901,8 @@ pub const HandshakeClient = struct {
             application_error_code,
             cancel_qpack,
         );
+        _ = try self.established.connection
+            .requestCompletedLocalStreamRelease(stream_id);
     }
 
     /// Best-effort cleanup for an Extended CONNECT adapter that is abandoned
@@ -9928,6 +9934,8 @@ pub const HandshakeClient = struct {
             http3.ApplicationErrorCode.request_cancelled,
             cancel_qpack,
         ) catch {};
+        _ = self.established.connection
+            .requestCompletedLocalStreamRelease(stream_id) catch false;
         self.connect_datagrams.unregister(stream_id);
         self.qpack_encode.abandonStream(stream_id);
         self.response_streams.remove(stream_id);
@@ -10036,6 +10044,8 @@ pub const HandshakeClient = struct {
         const code = self.response_streams.resetFor(stream_id) orelse return;
         try self.request_lifecycle.prepareFinish();
         _ = self.response_streams.takeReset(stream_id);
+        _ = try self.established.connection
+            .requestCompletedLocalStreamRelease(stream_id);
         _ = self.request_lifecycle.finishAssumeCapacity(stream_id);
         _ = self.outbound_bodies.finish(stream_id);
         self.qpack_encode.abandonStream(stream_id);
@@ -10070,14 +10080,22 @@ pub const HandshakeClient = struct {
             self.sendQpackFeedback() catch {};
         }
         if (event == .finished) {
-            self.finishStreamingResponse(stream_id);
+            try self.finishStreamingResponse(stream_id);
         }
     }
 
     fn finishStreamingResponse(
         self: *HandshakeClient,
         stream_id: u62,
-    ) void {
+    ) Error!void {
+        if (self.streaming_responses.find(stream_id)) |active| {
+            try releaseStreamingReaderCapacity(
+                &self.established.connection,
+                &active.reader,
+            );
+        }
+        _ = try self.established.connection
+            .requestCompletedLocalStreamRelease(stream_id);
         // Detached CONNECT readers are removed from `streaming_responses` and
         // retain their association until explicit close or peer FIN/reset.
         if (self.streaming_responses.find(stream_id) != null) {
