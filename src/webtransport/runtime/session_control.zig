@@ -132,6 +132,24 @@ pub const Control = struct {
         self: *Control,
         connection: *quic.one_rtt.Connection,
     ) Error!?Event {
+        return self.pollInternal(connection, false);
+    }
+
+    /// Inspect buffered CONNECT-stream capsules without waiting for pacing.
+    /// Parser state and QUIC receive bytes remain unchanged when a required
+    /// MAX_DATA/MAX_STREAM_DATA update cannot be submitted.
+    pub fn pollOnce(
+        self: *Control,
+        connection: *quic.one_rtt.Connection,
+    ) Error!?Event {
+        return self.pollInternal(connection, true);
+    }
+
+    fn pollInternal(
+        self: *Control,
+        connection: *quic.one_rtt.Connection,
+        single_attempt: bool,
+    ) Error!?Event {
         const available = connection.availableReceivedStream(
             self.session_id.value,
         ) orelse &.{};
@@ -141,10 +159,17 @@ pub const Control = struct {
                 self.* = snapshot;
                 return err;
             };
-            connection.releaseReceivedCapacity(
-                self.session_id.value,
-                result.consumed,
-            ) catch |err| {
+            const release_result = if (single_attempt)
+                connection.tryReleaseReceivedCapacity(
+                    self.session_id.value,
+                    result.consumed,
+                )
+            else
+                connection.releaseReceivedCapacity(
+                    self.session_id.value,
+                    result.consumed,
+                );
+            release_result catch |err| {
                 self.* = snapshot;
                 return err;
             };

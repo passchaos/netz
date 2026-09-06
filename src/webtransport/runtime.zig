@@ -2696,9 +2696,16 @@ pub const EndpointServer = struct {
         // longer application-visible. The retained HTTP/3 association still
         // lets the dispatcher process late ACKs and reject late datagrams.
         if (!target.control.terminal_reported) {
-            if (try target.control.poll(
+            const control_event = target.control.pollOnce(
                 &target.h3.established.connection,
-            )) |event| {
+            ) catch |err| switch (err) {
+                error.PacingLimited,
+                error.CongestionLimited,
+                error.FlowControlBlocked,
+                => return null,
+                else => return err,
+            };
+            if (control_event) |event| {
                 try finishEndpointSessionEvent(target, event);
                 return .{ .session = event };
             }
@@ -2713,7 +2720,7 @@ pub const EndpointServer = struct {
             };
         if (close_progress == .submitted) return null;
         if (target.control.terminal_reported) return null;
-        if (try incremental_stream.poll(
+        if (try incremental_stream.pollOnce(
             &target.h3.established.connection,
             &target.streams,
             target.session_id,

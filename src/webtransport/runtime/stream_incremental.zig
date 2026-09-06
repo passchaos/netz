@@ -163,6 +163,28 @@ pub fn poll(
     session_id: webtransport.SessionId,
     out: []u8,
 ) Error!?Read {
+    return pollInternal(connection, registry, session_id, out, false);
+}
+
+/// Poll one buffered stream event without waiting for receive-credit pacing.
+/// Application bytes are returned only after the matching QUIC receive cursor
+/// has committed, so retrying never duplicates a delivered payload.
+pub fn pollOnce(
+    connection: *quic.one_rtt.Connection,
+    registry: *webtransport.StreamRegistry,
+    session_id: webtransport.SessionId,
+    out: []u8,
+) Error!?Read {
+    return pollInternal(connection, registry, session_id, out, true);
+}
+
+fn pollInternal(
+    connection: *quic.one_rtt.Connection,
+    registry: *webtransport.StreamRegistry,
+    session_id: webtransport.SessionId,
+    out: []u8,
+    single_attempt: bool,
+) Error!?Read {
     if (try pollKnownStopped(connection, registry)) |event| return event;
 
     var stream_ids: [256]u62 = undefined;
@@ -177,6 +199,7 @@ pub fn poll(
                 session_id,
                 stream_id,
                 out,
+                single_attempt,
             )) |event| return event;
         }
         if (ids.len != 0) after = ids[ids.len - 1];
@@ -198,6 +221,7 @@ pub fn poll(
                 session_id,
                 stream_id,
                 out,
+                single_attempt,
             )) |event| return event;
         }
         if (ids.len != 0) after = ids[ids.len - 1];
@@ -211,6 +235,7 @@ fn pollStreamId(
     session_id: webtransport.SessionId,
     stream_id: u62,
     out: []u8,
+    single_attempt: bool,
 ) Error!?Read {
     // Association-prefix parsing, rather than numeric guesses, distinguishes
     // HTTP/3 critical/push streams from WebTransport.
@@ -221,6 +246,7 @@ fn pollStreamId(
         session_id,
         stream_id,
         out,
+        single_attempt,
     ) orelse return null;
     registry.incremental_poll_cursor = switch (event) {
         inline else => |value| value.stream_id,
@@ -234,6 +260,7 @@ fn pollStream(
     session_id: webtransport.SessionId,
     stream_id: u62,
     out: []u8,
+    single_attempt: bool,
 ) Error!?Read {
     // A session can mix whole-stream and incremental consumption as long as a
     // single receive direction never changes mode. Skip streams claimed by
@@ -242,13 +269,28 @@ fn pollStream(
     if (registry.get(stream_id)) |registered| {
         if (registered.receive_mode == .whole) return null;
     }
-    const stream = try association.identify(
-        connection,
-        registry,
-        session_id,
-        stream_id,
-        .incremental,
-    ) orelse return null;
+    const stream = (if (single_attempt)
+        association.identifyOnce(
+            connection,
+            registry,
+            session_id,
+            stream_id,
+            .incremental,
+        )
+    else
+        association.identify(
+            connection,
+            registry,
+            session_id,
+            stream_id,
+            .incremental,
+        )) catch |err| switch (err) {
+        error.PacingLimited,
+        error.CongestionLimited,
+        error.FlowControlBlocked,
+        => return null,
+        else => return err,
+    } orelse return null;
 
     if (connection.sendStreamStats(stream_id)) |stats| {
         if (stats.reset) |reset_info| {
@@ -295,15 +337,34 @@ fn pollStream(
     if (available.len != 0) {
         const count = @min(out.len, available.len);
         @memcpy(out[0..count], available[0..count]);
-        try connection.releaseReceivedCapacity(stream_id, count);
-        const after = connection.recvStreamStats(stream_id).?;
-        const fin = after.reset == null and
-            after.final_size != null and
-            after.bytes_read == after.final_size.?;
-        if (fin) {
-            _ = try association.requestTransportRetirement(connection, stream);
-        }
+        const fin = recv_stats.reset == null and
+            recv_stats.final_size != null and
+            recv_stats.bytes_read + count == recv_stats.final_size.?;
+        const previous_stream = stream.*;
         try registry.recordReceived(stream_id, count, fin);
+        const release_result = if (single_attempt)
+            connection.tryReleaseReceivedCapacity(stream_id, count)
+        else
+            connection.releaseReceivedCapacity(stream_id, count);
+        release_result catch |err| switch (err) {
+            error.PacingLimited,
+            error.CongestionLimited,
+            error.FlowControlBlocked,
+            => {
+                stream.* = previous_stream;
+                return null;
+            },
+            else => {
+                stream.* = previous_stream;
+                return err;
+            },
+        };
+        if (fin) {
+            _ = association.requestTransportRetirement(
+                connection,
+                stream,
+            ) catch unreachable;
+        }
         return dataEvent(stream, stream_id, count, fin);
     }
     if (recv_stats.final_size != null and

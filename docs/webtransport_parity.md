@@ -287,6 +287,9 @@ sized prefixes and remain retryable across dispatcher pacing turns.
 Malformed request cleanup submits RESET_STREAM and STOP_SENDING atomically in
 one packet; if pacing rejects that packet, the parser state remains available
 for the next endpoint turn instead of blocking or exposing partial cleanup.
+Accepted-session polling applies the same rule to CONNECT capsules and
+associated stream data: receive-credit backpressure rolls back parser/registry
+state and delays the application event until a later dispatcher turn.
 
 ## Important interoperability correction
 

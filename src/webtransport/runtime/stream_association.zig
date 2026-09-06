@@ -44,6 +44,44 @@ pub fn identify(
     stream_id: u62,
     receive_mode: webtransport.ReceiveMode,
 ) Error!?*webtransport.StreamState {
+    return identifyInternal(
+        connection,
+        registry,
+        session_id,
+        stream_id,
+        receive_mode,
+        false,
+    );
+}
+
+/// Identify an associated stream without waiting while returning prefix
+/// receive credit. A backpressure failure removes a newly registered stream,
+/// leaving the prefix available for an identical endpoint retry.
+pub fn identifyOnce(
+    connection: *quic.one_rtt.Connection,
+    registry: *webtransport.StreamRegistry,
+    session_id: webtransport.SessionId,
+    stream_id: u62,
+    receive_mode: webtransport.ReceiveMode,
+) Error!?*webtransport.StreamState {
+    return identifyInternal(
+        connection,
+        registry,
+        session_id,
+        stream_id,
+        receive_mode,
+        true,
+    );
+}
+
+fn identifyInternal(
+    connection: *quic.one_rtt.Connection,
+    registry: *webtransport.StreamRegistry,
+    session_id: webtransport.SessionId,
+    stream_id: u62,
+    receive_mode: webtransport.ReceiveMode,
+    single_attempt: bool,
+) Error!?*webtransport.StreamState {
     std.debug.assert(receive_mode != .unset);
     const direction: webtransport.StreamDirection =
         if (quic.StreamId.init(stream_id).direction() == .bidirectional)
@@ -95,10 +133,11 @@ pub fn identify(
         if (receive_mode == .incremental) {
             // Association bytes count toward QUIC credit but are never exposed
             // as WebTransport application bytes.
-            connection.releaseReceivedCapacity(
-                stream_id,
-                prefix_len,
-            ) catch |err| {
+            const release_result = if (single_attempt)
+                connection.tryReleaseReceivedCapacity(stream_id, prefix_len)
+            else
+                connection.releaseReceivedCapacity(stream_id, prefix_len);
+            release_result catch |err| {
                 // Registry insertion must be transactional with prefix-credit
                 // consumption. Otherwise a failed MAX_* send leaves a peer
                 // stream registered as incremental even though its prefix is
