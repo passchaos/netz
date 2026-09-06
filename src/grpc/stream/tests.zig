@@ -874,7 +874,7 @@ test "gRPC server duplex observes cancellation after request FIN" {
             .clock = .awake,
         } },
     );
-    try stream.reset(.cancel);
+    try stream.cancel();
     stream.deinit();
     stream_live = false;
 
@@ -886,6 +886,304 @@ test "gRPC server duplex observes cancellation after request FIN" {
     });
     defer next.deinit(allocator);
     try std.testing.expectEqual(@as(u16, 204), next.status);
+
+    thread.join();
+    joined = true;
+    if (shared.err) |err| return err;
+}
+
+test "gRPC duplex RPC deadline cancels a silent response" {
+    const allocator = std.testing.allocator;
+    var threaded = std.Io.Threaded.init(allocator, .{});
+    defer threaded.deinit();
+    const io = threaded.io();
+    const limits: http2.runtime.Limits = .{
+        .max_frame_payload = 64,
+        .max_body_bytes = 4096,
+    };
+    var server = try http2.runtime.Server.listen(
+        allocator,
+        io,
+        .{ .ip4 = .loopback(0) },
+        limits,
+    );
+    defer server.deinit();
+
+    const Shared = struct {
+        server: *http2.runtime.Server,
+        err: ?anyerror = null,
+
+        fn consume(_: void, _: codec.DecodedMessage) !void {
+            return error.UnexpectedMessage;
+        }
+
+        fn run(self: *@This()) void {
+            self.runFallible() catch |err| {
+                self.err = err;
+            };
+        }
+
+        fn runFallible(self: *@This()) !void {
+            var connection = try self.server.accept();
+            defer connection.close();
+            var stream = try duplex.acceptDuplex(
+                &connection,
+                self.server.allocator,
+                1024,
+            );
+            defer stream.deinit();
+            var finished = try stream.readRequestEvent({}, consume);
+            defer finished.deinit();
+            try std.testing.expect(finished == .finished);
+            const reset = try stream.waitForPeerResetWithTimeout(
+                .fromSeconds(2),
+            );
+            try std.testing.expectEqual(
+                http2.ErrorCode.cancel,
+                reset.error_code,
+            );
+        }
+    };
+    const Consumer = struct {
+        fn consume(_: void, _: codec.DecodedMessage) !void {
+            return error.UnexpectedMessage;
+        }
+    };
+    var shared = Shared{ .server = &server };
+    const thread = try std.Thread.spawn(.{}, Shared.run, .{&shared});
+    var joined = false;
+    defer if (!joined) thread.join();
+    var connection = try http2.runtime.Client.connect(
+        allocator,
+        io,
+        server.address(),
+        limits,
+    );
+    defer connection.close();
+    var stream = try duplex.startDuplex(
+        &connection,
+        allocator,
+        .{
+            .path = "/demo.Deadline/Stream",
+            .authority = "localhost",
+            .timeout = try wire.Timeout.init(100, .millisecond),
+        },
+    );
+    defer stream.deinit();
+    try std.testing.expectEqual(
+        duplex.WriteResult.complete,
+        try stream.finishRequest(),
+    );
+    try std.testing.expectError(
+        error.Timeout,
+        stream.readResponseEvent({}, Consumer.consume),
+    );
+    try std.testing.expectError(
+        error.ConnectionClosed,
+        stream.readResponseEvent({}, Consumer.consume),
+    );
+
+    thread.join();
+    joined = true;
+    if (shared.err) |err| return err;
+}
+
+test "gRPC duplex RPC deadline bounds flow control wait" {
+    const allocator = std.testing.allocator;
+    var threaded = std.Io.Threaded.init(allocator, .{});
+    defer threaded.deinit();
+    const io = threaded.io();
+    const limits: http2.runtime.Limits = .{
+        .max_frame_payload = 64,
+        .max_body_bytes = 4096,
+        .initial_window_size = 5,
+    };
+    var server = try http2.runtime.Server.listen(
+        allocator,
+        io,
+        .{ .ip4 = .loopback(0) },
+        limits,
+    );
+    defer server.deinit();
+
+    const Shared = struct {
+        server: *http2.runtime.Server,
+        err: ?anyerror = null,
+
+        fn consume(_: void, _: codec.DecodedMessage) !void {
+            return error.UnexpectedMessage;
+        }
+
+        fn run(self: *@This()) void {
+            self.runFallible() catch |err| {
+                self.err = err;
+            };
+        }
+
+        fn runFallible(self: *@This()) !void {
+            var connection = try self.server.accept();
+            defer connection.close();
+            try std.Io.sleep(
+                self.server.io,
+                .fromMilliseconds(200),
+                .awake,
+            );
+            var stream = try duplex.acceptDuplex(
+                &connection,
+                self.server.allocator,
+                1024,
+            );
+            defer stream.deinit();
+            while (true) {
+                var event = try stream.readRequestEventWithTimeout(
+                    .fromSeconds(2),
+                    {},
+                    consume,
+                );
+                defer event.deinit();
+                switch (event) {
+                    .reset => |reset| {
+                        try std.testing.expectEqual(
+                            http2.ErrorCode.cancel,
+                            reset.error_code,
+                        );
+                        break;
+                    },
+                    .messages => {},
+                    .finished => return error.UnexpectedFrame,
+                }
+            }
+        }
+    };
+    var shared = Shared{ .server = &server };
+    const thread = try std.Thread.spawn(.{}, Shared.run, .{&shared});
+    var joined = false;
+    defer if (!joined) thread.join();
+    var connection = try http2.runtime.Client.connect(
+        allocator,
+        io,
+        server.address(),
+        limits,
+    );
+    defer connection.close();
+    var stream = try duplex.startDuplex(
+        &connection,
+        allocator,
+        .{
+            .path = "/demo.Deadline/Stream",
+            .authority = "localhost",
+            .timeout = try wire.Timeout.init(50, .millisecond),
+        },
+    );
+    defer stream.deinit();
+    try std.testing.expectError(
+        error.Timeout,
+        stream.writeMessage("blocked"),
+    );
+
+    thread.join();
+    joined = true;
+    if (shared.err) |err| return err;
+}
+
+test "gRPC duplex shorter read timeout preserves the RPC" {
+    const allocator = std.testing.allocator;
+    var threaded = std.Io.Threaded.init(allocator, .{});
+    defer threaded.deinit();
+    const io = threaded.io();
+    const limits: http2.runtime.Limits = .{
+        .max_frame_payload = 64,
+        .max_body_bytes = 4096,
+    };
+    var server = try http2.runtime.Server.listen(
+        allocator,
+        io,
+        .{ .ip4 = .loopback(0) },
+        limits,
+    );
+    defer server.deinit();
+
+    const Shared = struct {
+        server: *http2.runtime.Server,
+        err: ?anyerror = null,
+
+        fn consume(_: void, _: codec.DecodedMessage) !void {
+            return error.UnexpectedMessage;
+        }
+
+        fn run(self: *@This()) void {
+            self.runFallible() catch |err| {
+                self.err = err;
+            };
+        }
+
+        fn runFallible(self: *@This()) !void {
+            var connection = try self.server.accept();
+            defer connection.close();
+            var stream = try duplex.acceptDuplex(
+                &connection,
+                self.server.allocator,
+                1024,
+            );
+            defer stream.deinit();
+            var finished = try stream.readRequestEvent({}, consume);
+            defer finished.deinit();
+            try std.Io.sleep(
+                self.server.io,
+                .fromMilliseconds(30),
+                .awake,
+            );
+            try stream.finish(.unavailable, "later", &.{}, &.{});
+        }
+    };
+    const Consumer = struct {
+        fn consume(_: void, _: codec.DecodedMessage) !void {
+            return error.UnexpectedMessage;
+        }
+    };
+    var shared = Shared{ .server = &server };
+    const thread = try std.Thread.spawn(.{}, Shared.run, .{&shared});
+    var joined = false;
+    defer if (!joined) thread.join();
+    var connection = try http2.runtime.Client.connect(
+        allocator,
+        io,
+        server.address(),
+        limits,
+    );
+    defer connection.close();
+    var stream = try duplex.startDuplex(
+        &connection,
+        allocator,
+        .{
+            .path = "/demo.Deadline/Stream",
+            .authority = "localhost",
+            .timeout = try wire.Timeout.init(1, .second),
+        },
+    );
+    defer stream.deinit();
+    try std.testing.expectEqual(
+        duplex.WriteResult.complete,
+        try stream.finishRequest(),
+    );
+    try std.testing.expectError(
+        error.Timeout,
+        stream.readResponseEventWithTimeout(
+            .fromMilliseconds(1),
+            {},
+            Consumer.consume,
+        ),
+    );
+    var terminal = try stream.readResponseEvent({}, Consumer.consume);
+    defer terminal.deinit(allocator);
+    try std.testing.expectEqual(
+        wire.Status.unavailable,
+        terminal.terminal.status,
+    );
+    try std.testing.expectEqualStrings(
+        "later",
+        terminal.terminal.status_message,
+    );
 
     thread.join();
     joined = true;

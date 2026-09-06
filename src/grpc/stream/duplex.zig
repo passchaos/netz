@@ -162,6 +162,7 @@ pub const ClientDuplex = struct {
     pending_message: ?PendingMessage = null,
     pending_terminal: ?Response = null,
     receive_state: ReceiveState = .active,
+    deadline: ?std.Io.Clock.Timestamp = null,
 
     pub fn deinit(self: *ClientDuplex) void {
         if (self.decoder) |*decoder| decoder.deinit();
@@ -215,14 +216,25 @@ pub const ClientDuplex = struct {
     pub fn resumeMessage(self: *ClientDuplex) Error!WriteResult {
         try self.ensureWritable();
         const pending = if (self.pending_message) |*value| value else return error.InvalidStreamState;
-        const result = (if (pending.end_stream)
+        const result = (if (self.deadline) |deadline|
+            if (pending.end_stream)
+                self.transport.finishRequestDataWithDeadline(
+                    pending.bytes[pending.offset..],
+                    deadline,
+                )
+            else
+                self.transport.writeWithDeadline(
+                    pending.bytes[pending.offset..],
+                    deadline,
+                )
+        else if (pending.end_stream)
             self.transport.finishRequestData(pending.bytes[pending.offset..])
         else
             self.transport.write(pending.bytes[pending.offset..])) catch |err| {
             // Only a successful `response_available` result has a precise,
             // resumable byte count. Any transport error can have unknown wire
             // progress, so retrying would risk duplicating message bytes.
-            self.fail(.internal_error);
+            self.fail(if (err == error.Timeout) .cancel else .internal_error);
             return err;
         };
         if (result.written > pending.bytes.len - pending.offset) {
@@ -248,8 +260,11 @@ pub const ClientDuplex = struct {
     pub fn finishRequest(self: *ClientDuplex) Error!WriteResult {
         try self.ensureWritable();
         if (self.pending_message != null) return error.InvalidStreamState;
-        const result = self.transport.finishRequest() catch |err| {
-            self.fail(.internal_error);
+        const result = (if (self.deadline) |deadline|
+            self.transport.finishRequestWithDeadline(deadline)
+        else
+            self.transport.finishRequest()) catch |err| {
+            self.fail(if (err == error.Timeout) .cancel else .internal_error);
             return err;
         };
         return if (result.response_available) .peer_event else .complete;
@@ -266,12 +281,21 @@ pub const ClientDuplex = struct {
         try self.transport.reset(code);
     }
 
+    pub fn cancel(self: *ClientDuplex) Error!void {
+        return self.reset(.cancel);
+    }
+
     pub fn readResponseEvent(
         self: *ClientDuplex,
         context: anytype,
         comptime consume: anytype,
     ) !ClientEvent {
-        return self.readResponseEventUntil(null, context, consume);
+        return self.readResponseEventWithRpcDeadline(
+            self.deadline,
+            self.deadline != null,
+            context,
+            consume,
+        );
     }
 
     pub fn readResponseEventWithTimeout(
@@ -281,11 +305,15 @@ pub const ClientDuplex = struct {
         comptime consume: anytype,
     ) !ClientEvent {
         if (timeout.nanoseconds <= 0) return error.Timeout;
-        return self.readResponseEventWithDeadline(
-            .fromNow(self.transport.connection.io, .{
+        const requested = std.Io.Clock.Timestamp.fromNow(
+            self.transport.connection.io,
+            .{
                 .raw = timeout,
                 .clock = .awake,
-            }),
+            },
+        );
+        return self.readResponseEventWithDeadline(
+            requested,
             context,
             consume,
         );
@@ -297,29 +325,24 @@ pub const ClientDuplex = struct {
         context: anytype,
         comptime consume: anytype,
     ) !ClientEvent {
-        if (self.pending_terminal) |response| {
-            self.pending_terminal = null;
-            self.receive_state = .terminal_delivered;
-            return .{ .terminal = response };
-        }
-        if (self.receive_state != .active) return error.ConnectionClosed;
-        const event = self.transport.readResponseEventWithDeadline(
-            deadline,
-        ) catch |err| {
-            if (err != error.Timeout) self.fail(.internal_error);
-            return err;
-        };
-        return self.readResponseEventTransport(
-            event,
-            deadline,
+        if (deadline.clock != .awake) return error.Timeout;
+        const effective = earlierDeadline(self.deadline, deadline);
+        const rpc_limited = if (self.deadline) |rpc_deadline|
+            !std.Io.Clock.Timestamp.compare(deadline, .lt, rpc_deadline)
+        else
+            false;
+        return self.readResponseEventWithRpcDeadline(
+            effective,
+            rpc_limited,
             context,
             consume,
         );
     }
 
-    fn readResponseEventUntil(
+    fn readResponseEventWithRpcDeadline(
         self: *ClientDuplex,
         deadline: ?std.Io.Clock.Timestamp,
+        cancel_on_timeout: bool,
         context: anytype,
         comptime consume: anytype,
     ) !ClientEvent {
@@ -333,7 +356,11 @@ pub const ClientDuplex = struct {
             &self.transport,
             deadline,
         ) catch |err| {
-            if (err != error.Timeout) self.fail(.internal_error);
+            if (err == error.Timeout) {
+                if (cancel_on_timeout) self.fail(.cancel);
+            } else {
+                self.fail(.internal_error);
+            }
             return err;
         };
         return self.readResponseEventTransport(
@@ -618,13 +645,14 @@ pub fn startDuplex(
     allocator: std.mem.Allocator,
     options: RequestOptions,
 ) Error!ClientDuplex {
+    const started = try sequential.startClientDuplexTransport(
+        connection,
+        allocator,
+        options,
+    );
     return .{
         .allocator = allocator,
-        .transport = try sequential.startClientDuplexTransport(
-            connection,
-            allocator,
-            options,
-        ),
+        .transport = started.transport,
         .encoder = .{
             .allocator = allocator,
             .algorithm = options.compression,
@@ -633,6 +661,7 @@ pub fn startDuplex(
         },
         .accepted_encodings = options.accepted_encodings,
         .max_message_size = options.max_message_size,
+        .deadline = started.deadline,
     };
 }
 
@@ -1186,6 +1215,18 @@ fn readClientTransportEvent(
         transport.readResponseEventWithDeadline(value)
     else
         transport.readResponseEvent();
+}
+
+fn earlierDeadline(
+    rpc: ?std.Io.Clock.Timestamp,
+    requested: std.Io.Clock.Timestamp,
+) std.Io.Clock.Timestamp {
+    const rpc_deadline = rpc orelse return requested;
+    return if (std.Io.Clock.Timestamp.compare(
+        rpc_deadline,
+        .lt,
+        requested,
+    )) rpc_deadline else requested;
 }
 
 fn readServerTransportEvent(

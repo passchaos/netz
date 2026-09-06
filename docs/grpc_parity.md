@@ -59,6 +59,11 @@ existing HTTP/2 runtime:
 - step-driven bidirectional streams whose single owner alternates request and
   response progress without racing the connection frame reader, including a
   server reply before request FIN and a later client message on the same RPC,
+- bidirectional client deadlines captured once before request setup and
+  enforced across flow-control writes, request half-close, and response-event
+  reads. An RPC-deadline timeout sends `RST_STREAM(CANCEL)` and makes later
+  operations terminal, while a caller-selected shorter read timeout remains
+  resumable; explicit `cancel` uses the same stream-local reset path,
 - callback-borrowed decoded messages with owned initial/trailing metadata,
   resumable byte-exact writes when flow control exposes a peer event, and
   independently tracked request/response half closes,
@@ -255,9 +260,8 @@ upstream gRPC Core's `ServerEarlyReturnTest`.
    empty-stream completion, cancellation, and deadline behavior against netz.
    A broader upstream matrix, including reverse custom metadata and TLS, remains
    future work.
-3. Add higher-level duplex application-deadline policy, retry
-   throttling/service-config parsing, generated service/client bindings, and
-   broader conformance/
+3. Add retry throttling/service-config parsing, generated service/client
+   bindings, and broader conformance/
    interop runners. Reflection accepts standard descriptor sets directly and
    is covered by an independent official `grpc_cli` process-boundary gate.
    Health `Check` and `Watch` transport semantics are implemented, including

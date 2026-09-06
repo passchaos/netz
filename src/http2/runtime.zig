@@ -12558,10 +12558,30 @@ pub const Connection = struct {
         end_stream: bool,
         written: *usize,
     ) Error!void {
+        return self.writeDataDuplexTrackedUntil(
+            stream_id,
+            data,
+            end_stream,
+            written,
+            null,
+        );
+    }
+
+    fn writeDataDuplexTrackedUntil(
+        self: *Connection,
+        stream_id: u31,
+        data: []const u8,
+        end_stream: bool,
+        written: *usize,
+        deadline: ?std.Io.Clock.Timestamp,
+    ) Error!void {
         if (!self.outboundStreamIsActive(stream_id)) {
             return error.InvalidStreamId;
         }
         written.* = 0;
+        if (deadline) |absolute| {
+            _ = try deadline_policy.usableAwake(self.io, absolute);
+        }
         // For a client these are response frames for the active request and
         // must be surfaced before another write. A server may instead have
         // queued sibling request frames while a long-lived response owns the
@@ -12593,7 +12613,10 @@ pub const Connection = struct {
                 stream_window.available(),
             );
             if (available_credit == 0) {
-                self.waitForDuplexSendCapacity(stream_id) catch |err| {
+                self.waitForDuplexSendCapacityUntil(
+                    stream_id,
+                    deadline,
+                ) catch |err| {
                     written.* = offset;
                     return err;
                 };
@@ -12621,10 +12644,18 @@ pub const Connection = struct {
         self: *Connection,
         stream_id: u31,
     ) Error!void {
+        return self.waitForDuplexSendCapacityUntil(stream_id, null);
+    }
+
+    fn waitForDuplexSendCapacityUntil(
+        self: *Connection,
+        stream_id: u31,
+        deadline: ?std.Io.Clock.Timestamp,
+    ) Error!void {
         while (self.send_connection_window.available() == 0 or
             (try self.sendStreamWindow(stream_id)).available() == 0)
         {
-            var frame = try self.readOwnedFrameForDuplexWithDeadline(null);
+            var frame = try self.readOwnedFrameForDuplexWithDeadline(deadline);
             var frame_owned = true;
             defer if (frame_owned) frame.deinit(self.allocator);
             if (try self.handleConnectionFrame(frame.frame)) continue;
@@ -14275,7 +14306,16 @@ pub const ClientDuplexStream = struct {
         self: *ClientDuplexStream,
         data: []const u8,
     ) Error!DuplexWriteResult {
-        return self.writeRequestSlices(&.{data}, false);
+        return self.writeRequestSlicesUntil(&.{data}, false, null);
+    }
+
+    pub fn writeWithDeadline(
+        self: *ClientDuplexStream,
+        data: []const u8,
+        deadline: std.Io.Clock.Timestamp,
+    ) ResponseTimeoutError!DuplexWriteResult {
+        _ = try deadline_policy.usableAwake(self.connection.io, deadline);
+        return self.writeRequestSlicesUntil(&.{data}, false, deadline);
     }
 
     pub fn writeParts(
@@ -14290,6 +14330,13 @@ pub const ClientDuplexStream = struct {
         self: *ClientDuplexStream,
     ) Error!DuplexWriteResult {
         return self.finishRequestData(&.{});
+    }
+
+    pub fn finishRequestWithDeadline(
+        self: *ClientDuplexStream,
+        deadline: std.Io.Clock.Timestamp,
+    ) ResponseTimeoutError!DuplexWriteResult {
+        return self.finishRequestDataWithDeadline(&.{}, deadline);
     }
 
     pub fn requestFinished(self: ClientDuplexStream) bool {
@@ -14317,7 +14364,16 @@ pub const ClientDuplexStream = struct {
         self: *ClientDuplexStream,
         data: []const u8,
     ) Error!DuplexWriteResult {
-        return self.writeRequestSlices(&.{data}, true);
+        return self.writeRequestSlicesUntil(&.{data}, true, null);
+    }
+
+    pub fn finishRequestDataWithDeadline(
+        self: *ClientDuplexStream,
+        data: []const u8,
+        deadline: std.Io.Clock.Timestamp,
+    ) ResponseTimeoutError!DuplexWriteResult {
+        _ = try deadline_policy.usableAwake(self.connection.io, deadline);
+        return self.writeRequestSlicesUntil(&.{data}, true, deadline);
     }
 
     pub fn finishRequestParts(
@@ -14351,8 +14407,20 @@ pub const ClientDuplexStream = struct {
         slices: []const []const u8,
         end_stream: bool,
     ) Error!DuplexWriteResult {
+        return self.writeRequestSlicesUntil(slices, end_stream, null);
+    }
+
+    fn writeRequestSlicesUntil(
+        self: *ClientDuplexStream,
+        slices: []const []const u8,
+        end_stream: bool,
+        deadline: ?std.Io.Clock.Timestamp,
+    ) Error!DuplexWriteResult {
         if (self.request_finished or self.released) {
             return error.ConnectionClosed;
+        }
+        if (deadline) |absolute| {
+            _ = try deadline_policy.usableAwake(self.connection.io, absolute);
         }
         var additional: usize = 0;
         for (slices) |slice| {
@@ -14371,11 +14439,12 @@ pub const ClientDuplexStream = struct {
         }
         if (additional == 0) {
             var sent: usize = 0;
-            self.connection.writeDataDuplexTracked(
+            self.connection.writeDataDuplexTrackedUntil(
                 self.stream_id,
                 &.{},
                 end_stream,
                 &sent,
+                deadline,
             ) catch |err| switch (err) {
                 error.ResponseAvailable => return .{
                     .written = 0,
@@ -14396,11 +14465,12 @@ pub const ClientDuplexStream = struct {
             if (slice.len == 0) continue;
             remaining_non_empty -= 1;
             var sent: usize = 0;
-            self.connection.writeDataDuplexTracked(
+            self.connection.writeDataDuplexTrackedUntil(
                 self.stream_id,
                 slice,
                 end_stream and remaining_non_empty == 0,
                 &sent,
+                deadline,
             ) catch |err| switch (err) {
                 error.ResponseAvailable => {
                     written += sent;

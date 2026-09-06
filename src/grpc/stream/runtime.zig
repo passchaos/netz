@@ -301,19 +301,25 @@ pub fn startClient(
 /// Start the HTTP/2 request and transfer it to the step-driven duplex owner.
 /// Kept here so sequential and duplex calls cannot drift in their gRPC header
 /// construction or compression negotiation.
+pub const ClientDuplexTransport = struct {
+    transport: http2.runtime.ClientDuplexStream,
+    deadline: ?std.Io.Clock.Timestamp,
+};
+
 pub fn startClientDuplexTransport(
     connection: *http2.runtime.Connection,
     allocator: std.mem.Allocator,
     options: RequestOptions,
-) Error!http2.runtime.ClientDuplexStream {
+) Error!ClientDuplexTransport {
     var writer = try startClient(connection, allocator, options);
     errdefer writer.deinit();
     const transport = try writer.transport.beginDuplex();
+    const deadline = writer.deadline;
     // beginDuplex has transferred both HTTP/2 halves and made the writer
     // inert. Marking this local value undefined documents that it must not run
     // its cancellation deinitializer after the transfer.
     writer = undefined;
-    return transport;
+    return .{ .transport = transport, .deadline = deadline };
 }
 
 fn resetResponse(
