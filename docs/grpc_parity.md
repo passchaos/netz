@@ -131,7 +131,14 @@ one-shot netz server for each scenario:
 zig build interop-grpc-cpp-client -Doptimize=ReleaseFast
 ```
 
-By default the gate verifies `~/Work/grpc` is at
+Run the independent Server Reflection gate, with upstream's official
+`grpc_cli` querying a one-shot netz h2c server:
+
+```sh
+zig build interop-grpc-reflection -Doptimize=ReleaseFast
+```
+
+By default the C++ server gate verifies `~/Work/grpc` is at
 `03d65cc67c450ccbb58a8a45627c4da83a886ccd`, builds
 `//test/cpp/interop:interop_server` with Bazel, starts it with insecure
 credentials on a temporary loopback port, and bounds both readiness and client
@@ -164,6 +171,23 @@ Bazel 8.7.0, and GCC. It built upstream's `interop_client` and verified
 requires both the C++ client's successful exit and a netz marker proving that
 the expected request completion, cancellation, or deadline condition was
 observed; this prevents a client-only result from masking a server-side fault.
+
+The reflection gate passed on 2026-09-07 against the same pinned upstream
+revision, Bazel 8.7.0, and GCC. It generates a standard descriptor set with the
+system `protoc`, imports it into the netz registry, and requires official
+`grpc_cli` queries to discover both reflection protocol versions plus the
+fixture service, list its unary method, and render its request message type.
+Every query also requires a server-side completion marker. The successful
+command on this host was:
+
+```sh
+BAZEL=/tmp/bazel87-netz CC=/usr/bin/gcc GRPC_CPP_BUILD_TIMEOUT=20m \
+  zig build interop-grpc-reflection -Doptimize=ReleaseFast
+```
+
+Set `GRPC_CLI` to a prebuilt official client to skip its Bazel build. Otherwise
+the gate verifies `GRPC_ROOT` is at the pinned revision and that the selected
+`BAZEL` matches upstream's checked-in `.bazelversion`.
 
 The netz client exercises upstream's canonical `FullDuplexCall` contract:
 
@@ -222,9 +246,9 @@ upstream gRPC Core's `ServerEarlyReturnTest`.
    future work.
 3. Add higher-level application cancellation and streaming deadline policy,
    retry policy, generated service/client bindings, and broader conformance/
-   interop runners. Reflection accepts standard descriptor sets directly, but
-   an independent grpc reflection client remains useful external evidence. Health
-   `Check` and `Watch` transport semantics are implemented, including
+   interop runners. Reflection accepts standard descriptor sets directly and
+   is covered by an independent official `grpc_cli` process-boundary gate.
+   Health `Check` and `Watch` transport semantics are implemented, including
    incremental Watch delivery and cancellation, but automatic client Watch
    reconnection/backoff remains application policy. Unary transport deadlines
    are already enforced locally as described above.

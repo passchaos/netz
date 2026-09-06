@@ -351,6 +351,29 @@ pub fn build(b: *std.Build) void {
         &grpc_cpp_client_interop.step,
     );
 
+    const grpc_reflection_server = b.addExecutable(.{
+        .name = "netz-grpc-reflection-server",
+        .root_module = b.createModule(.{
+            .root_source_file = b.path(
+                "tools/interop/grpc_reflection_server.zig",
+            ),
+            .target = target,
+            .optimize = optimize,
+            .imports = &.{.{ .name = "netz", .module = netz_mod }},
+        }),
+    });
+    const grpc_reflection_interop = b.addSystemCommand(
+        &.{"tools/interop/grpc_reflection.sh"},
+    );
+    grpc_reflection_interop.addArtifactArg(grpc_reflection_server);
+    const grpc_reflection_interop_step = b.step(
+        "interop-grpc-reflection",
+        "Run upstream grpc_cli against netz reflection",
+    );
+    grpc_reflection_interop_step.dependOn(
+        &grpc_reflection_interop.step,
+    );
+
     const http2_h2_push_client = b.addExecutable(.{
         .name = "netz-http2-h2-push-client",
         .root_module = b.createModule(.{
