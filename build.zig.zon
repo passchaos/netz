@@ -10,6 +10,10 @@
             .url = "git+https://github.com/lalinsky/zio#v0.17.0",
             .hash = "zio-0.17.0-xHbVVI_jJQC3YbgU7JydwAV7MuASkOTd73YqBaKlFFUz",
         },
+        .pbz = .{
+            .path = "../pbz",
+            .lazy = true,
+        },
     },
     .paths = .{
         "build.zig",

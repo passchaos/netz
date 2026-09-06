@@ -267,9 +267,9 @@ starts with deterministic parsers, serializers, preallocated fixed-width wire-in
   per-message compression, trailers-only errors, decoded-message ownership,
   truncated-message stream reset, typed early `grpc-status` handoff when a
   flow-control-blocked upload receives server trailers, and `grpc-status`
-  enforcement; protobuf codecs remain an application-layer
-  choice so the transport can integrate with `~/project-z/pbz` without a hard
-  dependency
+  enforcement, plus `grpc.pbz.ClientTransport` for plugging the generated pbz
+  service client directly into all four gRPC RPC shapes; protobuf remains an
+  application-layer choice and pbz is only a lazy integration dependency
 - QUIC varints with encode length reuse, preallocated direct writes, long-header parsing, stream IDs, transport parameters, and core
   frame codecs (STREAM, CRYPTO, ACK, close, DATAGRAM, flow-control frames) with one-byte control-frame, direct single-/multi-varint, varint-payload, STREAM, DATAGRAM, NEW_CONNECTION_ID, and ACK_FREQUENCY write/length, fixed PATH, STREAM flag-byte, reset/stop, NEW_TOKEN, NEW_CONNECTION_ID, CRYPTO, MAX_DATA, stream flow-control, close, ACK/ACK_ECN, DATAGRAM, and ACK_FREQUENCY frame-type write fast paths, frame-payload close-error classification, shortest-form frame-type enforcement, empty non-FIN STREAM no-op rejection, stream-count bounds on MAX_STREAMS/STREAMS_BLOCKED and
   RFC 9000 packet-type legality checks for Initial/Handshake/0-RTT/1-RTT, typed

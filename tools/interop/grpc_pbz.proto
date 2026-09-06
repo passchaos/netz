@@ -1,0 +1,14 @@
+syntax = "proto3";
+package demo.binding;
+
+message Event {
+  int32 id = 1;
+  string note = 2;
+}
+
+service Pipe {
+  rpc Get(Event) returns (Event);
+  rpc Upload(stream Event) returns (Event);
+  rpc Watch(Event) returns (stream Event);
+  rpc Chat(stream Event) returns (stream Event);
+}

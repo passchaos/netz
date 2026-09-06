@@ -374,6 +374,60 @@ pub fn build(b: *std.Build) void {
         &grpc_reflection_interop.step,
     );
 
+    if (b.lazyDependency("pbz", .{
+        .target = target,
+        .optimize = optimize,
+    })) |pbz_dep| {
+        const generate_grpc_pbz = b.addSystemCommand(&.{"protoc"});
+        generate_grpc_pbz.addPrefixedArtifactArg(
+            "--plugin=protoc-gen-pbz=",
+            pbz_dep.artifact("protoc-gen-pbz"),
+        );
+        generate_grpc_pbz.addArg("--proto_path=tools/interop");
+        const grpc_pbz_output = generate_grpc_pbz
+            .addPrefixedOutputDirectoryArg(
+            "--pbz_out=",
+            "grpc-pbz-generated",
+        );
+        generate_grpc_pbz.addFileInput(b.path(
+            "tools/interop/grpc_pbz.proto",
+        ));
+        generate_grpc_pbz.addArg("grpc_pbz.proto");
+        const grpc_pbz_module = b.createModule(.{
+            .root_source_file = grpc_pbz_output.path(
+                b,
+                "grpc_pbz.pb.zig",
+            ),
+            .target = target,
+            .optimize = optimize,
+            .imports = &.{.{
+                .name = "pbz",
+                .module = pbz_dep.module("pbz"),
+            }},
+        });
+        const grpc_pbz_interop = b.addExecutable(.{
+            .name = "netz-grpc-pbz-interop",
+            .root_module = b.createModule(.{
+                .root_source_file = b.path(
+                    "tools/interop/grpc_pbz.zig",
+                ),
+                .target = target,
+                .optimize = optimize,
+                .imports = &.{
+                    .{ .name = "netz", .module = netz_mod },
+                    .{ .name = "grpc_pb", .module = grpc_pbz_module },
+                },
+            }),
+        });
+        grpc_pbz_interop.step.dependOn(&generate_grpc_pbz.step);
+        const run_grpc_pbz_interop = b.addRunArtifact(grpc_pbz_interop);
+        const grpc_pbz_interop_step = b.step(
+            "interop-grpc-pbz",
+            "Generate pbz bindings and exercise all four gRPC RPC shapes",
+        );
+        grpc_pbz_interop_step.dependOn(&run_grpc_pbz_interop.step);
+    }
+
     const http2_h2_push_client = b.addExecutable(.{
         .name = "netz-http2-h2-push-client",
         .root_module = b.createModule(.{

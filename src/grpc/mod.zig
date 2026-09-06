@@ -14,6 +14,7 @@ pub const runtime = @import("runtime.zig");
 pub const health = @import("health.zig");
 pub const reflection = @import("reflection.zig");
 pub const service_config = @import("service_config.zig");
+pub const pbz = @import("pbz.zig");
 
 pub const Error = stream.Error;
 pub const Status = wire.Status;
@@ -96,4 +97,5 @@ test {
     _ = health;
     _ = reflection;
     _ = service_config;
+    _ = pbz;
 }

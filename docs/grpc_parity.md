@@ -121,7 +121,13 @@ existing HTTP/2 runtime:
   owns each decoded response beyond the DATA callback, supports timeout retry
   and explicit cancellation, and finishes with OK after request half-close.
   Malformed requests terminate with `INVALID_ARGUMENT`; cancellation releases
-  the stream while preserving the HTTP/2 connection for later RPCs.
+  the stream while preserving the HTTP/2 connection for later RPCs,
+- a dependency-free `grpc.pbz.ClientTransport(Service)` adapter for the generic
+  clients emitted by `protoc-gen-pbz`. It constructs canonical fully-qualified
+  method paths and maps unary, client-streaming, server-streaming, and
+  bidirectional methods onto the owning gRPC runtime with typed generated
+  request encoding and response decoding. `pbz` remains a lazy integration
+  dependency rather than a requirement of the core transport.
 
 Payloads intentionally remain opaque. This keeps gRPC transport reusable with
 generated or dynamic protobuf implementations; the user-owned
@@ -161,6 +167,13 @@ Run the independent Server Reflection gate, with upstream's official
 
 ```sh
 zig build interop-grpc-reflection -Doptimize=ReleaseFast
+```
+
+Generate pbz bindings and exercise all four generated client RPC shapes over
+one real h2c channel:
+
+```sh
+zig build interop-grpc-pbz -Doptimize=ReleaseFast
 ```
 
 By default the C++ server gate verifies `~/Work/grpc` is at
@@ -255,9 +268,10 @@ upstream gRPC Core's `ServerEarlyReturnTest`.
 
 ## Remaining work before broad gRPC parity
 
-1. Build generated service/client bindings on `pbz`, including declarative
-   method shapes, application cancellation, and async/concurrent scheduling
-   policies above the intentionally single-owner duplex step loop.
+1. The generated pbz client now has a netz transport adapter for all four RPC
+   shapes. Add the symmetric generated Handler-to-server adapter and richer
+   typed failure details; async/concurrent scheduling policy remains above the
+   intentionally single-owner duplex step loop.
 2. Transport composition is now covered: `grpc.runtime.Client`,
    `grpc.runtime.Server`, and `grpc.runtime.TlsServer` own persistent HTTP/2
    channels. The TLS path enforces `h2` ALPN and retains certificate-
@@ -269,8 +283,8 @@ upstream gRPC Core's `ServerEarlyReturnTest`.
    empty-stream completion, cancellation, and deadline behavior against netz.
    A broader upstream matrix, including reverse custom metadata and TLS, remains
    future work.
-3. Add generated service/client bindings and broader conformance/
-   interop runners. Reflection accepts standard descriptor sets directly and
+3. Add broader conformance/interop runners. Reflection accepts standard
+   descriptor sets directly and
    is covered by an independent official `grpc_cli` process-boundary gate.
    Health `Check` and `Watch` transport semantics are implemented, including
    incremental Watch delivery and cancellation, but automatic client Watch
