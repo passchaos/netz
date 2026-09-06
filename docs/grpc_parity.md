@@ -43,6 +43,13 @@ existing HTTP/2 runtime:
   enforced locally with the awake clock across request setup and the complete
   HTTP/2 exchange; expiration returns `error.Timeout` and emits
   `RST_STREAM(CANCEL)`, while a null timeout remains unbounded,
+- explicit opt-in unary retry policies for replay-safe methods, with at most
+  five total attempts, configured retryable status codes, exponential jittered
+  backoff, server `grpc-retry-pushback-ms`, and standard
+  `grpc-previous-rpc-attempts` metadata. Retries occur only for trailers-only
+  responses before the call is committed; one absolute `std.Io` awake-clock
+  deadline bounds every attempt and backoff while each retry advertises the
+  remaining `grpc-timeout`,
 - sequential request/response message-stream helpers over HTTP/2
   `RequestWriter`, `ResponseWriter`, and borrowed DATA callbacks,
 - step-driven bidirectional streams whose single owner alternates request and
@@ -245,7 +252,8 @@ upstream gRPC Core's `ServerEarlyReturnTest`.
    A broader upstream matrix, including reverse custom metadata and TLS, remains
    future work.
 3. Add higher-level application cancellation and streaming deadline policy,
-   retry policy, generated service/client bindings, and broader conformance/
+   retry throttling/service-config parsing, generated service/client bindings,
+   and broader conformance/
    interop runners. Reflection accepts standard descriptor sets directly and
    is covered by an independent official `grpc_cli` process-boundary gate.
    Health `Check` and `Watch` transport semantics are implemented, including

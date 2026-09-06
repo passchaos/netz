@@ -76,6 +76,22 @@ pub const Client = struct {
         );
     }
 
+    /// Retry one explicitly replay-safe unary RPC on this persistent channel.
+    /// No retry occurs unless the caller supplies a policy and the server
+    /// returns a configured trailers-only status.
+    pub fn unaryWithRetry(
+        self: *Client,
+        options: call.UnaryCallOptions,
+        policy: call.RetryPolicy,
+    ) Error!call.UnaryResponse {
+        return call.unaryCallWithRetry(
+            &self.connection,
+            self.connection.allocator,
+            options,
+            policy,
+        );
+    }
+
     pub fn healthCheck(
         self: *Client,
         options: health.CheckOptions,

@@ -71,10 +71,12 @@ pub const acceptDuplexWithDeadline = stream.acceptDuplexWithDeadline;
 
 pub const UnaryRequest = call.UnaryRequest;
 pub const UnaryCallOptions = call.UnaryCallOptions;
+pub const RetryPolicy = call.RetryPolicy;
 pub const UnaryResponse = call.UnaryResponse;
 pub const UnaryResponseOptions = call.UnaryResponseOptions;
 pub const parseUnaryRequest = call.parseUnaryRequest;
 pub const unaryCall = call.unaryCall;
+pub const unaryCallWithRetry = call.unaryCallWithRetry;
 pub const writeUnaryResponse = call.writeUnaryResponse;
 pub const statusFromHttp = call.statusFromHttp;
 pub const statusFromHttp2Error = call.statusFromHttp2Error;

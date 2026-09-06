@@ -14,6 +14,7 @@ pub const Error = wire.Error || metadata_mod.Error ||
     InvalidGrpcRequest,
     InvalidMetadata,
     InvalidMessageCount,
+    InvalidRetryPolicy,
 };
 
 const Status = wire.Status;
@@ -167,6 +168,46 @@ pub const UnaryCallOptions = struct {
     max_message_size: usize = 16 * 1024 * 1024,
 };
 
+/// Explicit retry policy for replay-safe unary RPCs.
+///
+/// `max_attempts` includes the original request. Matching status codes are
+/// retried only when they arrive in a trailers-only response, before the RPC
+/// is committed by response headers or a message. This mirrors gRPC service
+/// config retry semantics without assuming that every unary method is safe to
+/// replay.
+pub const RetryPolicy = struct {
+    max_attempts: u8,
+    initial_backoff: std.Io.Duration,
+    max_backoff: std.Io.Duration,
+    backoff_multiplier: f64,
+    retryable_status_codes: []const Status,
+
+    pub fn validate(self: RetryPolicy) Error!void {
+        // gRPC Core clamps service-config retry attempts to five. Rejecting an
+        // out-of-range direct API value is less surprising than silently
+        // changing application policy.
+        if (self.max_attempts < 2 or self.max_attempts > 5 or
+            self.initial_backoff.nanoseconds <= 0 or
+            self.max_backoff.nanoseconds <= 0 or
+            !std.math.isFinite(self.backoff_multiplier) or
+            self.backoff_multiplier <= 0 or
+            self.retryable_status_codes.len == 0)
+        {
+            return error.InvalidRetryPolicy;
+        }
+        for (self.retryable_status_codes) |status| {
+            if (status == .ok) return error.InvalidRetryPolicy;
+        }
+    }
+
+    fn contains(self: RetryPolicy, status: Status) bool {
+        for (self.retryable_status_codes) |candidate| {
+            if (candidate == status) return true;
+        }
+        return false;
+    }
+};
+
 pub const UnaryResponse = struct {
     allocator: std.mem.Allocator,
     /// Null when the peer reset the stream before a complete HTTP response.
@@ -204,6 +245,179 @@ pub fn unaryCall(
         })
     else
         null;
+    return unaryCallAttempt(
+        connection,
+        allocator,
+        options,
+        deadline,
+        options.timeout,
+        null,
+    );
+}
+
+/// Execute a replay-safe unary RPC with an explicit bounded retry policy.
+///
+/// The original `timeout`, when present, becomes one absolute awake-clock
+/// deadline shared by all attempts and backoff sleeps. Every retry sends the
+/// remaining budget as `grpc-timeout` and its standard
+/// `grpc-previous-rpc-attempts` metadata. Transport errors and committed
+/// responses are never retried implicitly.
+pub fn unaryCallWithRetry(
+    connection: *http2.runtime.Connection,
+    allocator: std.mem.Allocator,
+    options: UnaryCallOptions,
+    policy: RetryPolicy,
+) Error!UnaryResponse {
+    try policy.validate();
+    const deadline: ?std.Io.Clock.Timestamp = if (options.timeout) |timeout|
+        std.Io.Clock.Timestamp.fromNow(connection.io, .{
+            .raw = timeout.duration(),
+            .clock = .awake,
+        })
+    else
+        null;
+    var attempts: u8 = 0;
+    var backoff = cappedBackoff(
+        policy.initial_backoff,
+        policy.max_backoff,
+    );
+    while (true) {
+        const timeout_header: ?Timeout = if (deadline) |absolute| blk: {
+            const remaining = absolute.durationFromNow(connection.io).raw;
+            if (remaining.nanoseconds <= 0) return error.Timeout;
+            break :blk try Timeout.fromDuration(remaining);
+        } else null;
+        var response = try unaryCallAttempt(
+            connection,
+            allocator,
+            options,
+            deadline,
+            timeout_header,
+            if (attempts == 0) null else attempts,
+        );
+        attempts += 1;
+        if (attempts >= policy.max_attempts or
+            !retryableTrailersOnly(response, policy))
+        {
+            return response;
+        }
+
+        const pushback = retryPushback(response);
+        if (pushback == .stop) return response;
+        const delay = switch (pushback) {
+            .stop => unreachable,
+            .delay => |value| blk: {
+                backoff = cappedBackoff(
+                    policy.initial_backoff,
+                    policy.max_backoff,
+                );
+                break :blk value;
+            },
+            .absent => blk: {
+                const value = jitteredBackoff(connection.io, backoff);
+                backoff = nextBackoff(backoff, policy);
+                break :blk value;
+            },
+        };
+        response.deinit();
+        try sleepForRetry(connection.io, delay, deadline);
+    }
+}
+
+const RetryPushback = union(enum) {
+    absent,
+    stop,
+    delay: std.Io.Duration,
+};
+
+fn retryableTrailersOnly(
+    response: UnaryResponse,
+    policy: RetryPolicy,
+) bool {
+    const transport = response.transport orelse return false;
+    return policy.contains(response.status) and transport.trailers_only and
+        findHeader(transport.headers, "grpc-status") != null;
+}
+
+fn retryPushback(response: UnaryResponse) RetryPushback {
+    const transport = response.transport orelse return .stop;
+    const raw = findHeader(
+        transport.headers,
+        "grpc-retry-pushback-ms",
+    ) orelse return .absent;
+    const milliseconds = std.fmt.parseInt(i64, raw, 10) catch return .stop;
+    if (milliseconds < 0) return .stop;
+    return .{ .delay = .fromMilliseconds(milliseconds) };
+}
+
+fn cappedBackoff(
+    value: std.Io.Duration,
+    maximum: std.Io.Duration,
+) std.Io.Duration {
+    return if (value.nanoseconds < maximum.nanoseconds) value else maximum;
+}
+
+fn nextBackoff(
+    current: std.Io.Duration,
+    policy: RetryPolicy,
+) std.Io.Duration {
+    const scaled = @as(f64, @floatFromInt(current.nanoseconds)) *
+        policy.backoff_multiplier;
+    const maximum: f64 = @floatFromInt(policy.max_backoff.nanoseconds);
+    if (!std.math.isFinite(scaled) or scaled >= maximum) {
+        return policy.max_backoff;
+    }
+    return .fromNanoseconds(@intFromFloat(@ceil(scaled)));
+}
+
+fn jitteredBackoff(io: std.Io, backoff: std.Io.Duration) std.Io.Duration {
+    var random_bytes: [2]u8 = undefined;
+    std.Io.random(io, &random_bytes);
+    const per_mille: u16 = 800 +
+        std.mem.readInt(u16, &random_bytes, .little) % 401;
+    const scaled = @as(f64, @floatFromInt(backoff.nanoseconds)) *
+        @as(f64, @floatFromInt(per_mille)) / 1000.0;
+    const maximum: f64 = @floatFromInt(std.math.maxInt(i96));
+    if (!std.math.isFinite(scaled) or scaled >= maximum) {
+        return std.Io.Duration.max;
+    }
+    return .fromNanoseconds(@intFromFloat(scaled));
+}
+
+fn sleepForRetry(
+    io: std.Io,
+    delay: std.Io.Duration,
+    deadline: ?std.Io.Clock.Timestamp,
+) Error!void {
+    if (deadline) |absolute| {
+        const remaining = absolute.durationFromNow(io).raw;
+        if (remaining.nanoseconds <= 0) return error.Timeout;
+        if (delay.nanoseconds >= remaining.nanoseconds) {
+            try std.Io.sleep(io, remaining, .awake);
+            return error.Timeout;
+        }
+    }
+    if (delay.nanoseconds > 0) {
+        try std.Io.sleep(io, delay, .awake);
+    }
+}
+
+/// Execute one unary attempt under a caller-owned absolute deadline.
+///
+/// Retry orchestration uses this entry point so every attempt inherits the
+/// original RPC budget while advertising its remaining budget and attempt
+/// number on the wire. `previous_attempts` is omitted for the first attempt.
+fn unaryCallAttempt(
+    connection: *http2.runtime.Connection,
+    allocator: std.mem.Allocator,
+    options: UnaryCallOptions,
+    deadline: ?std.Io.Clock.Timestamp,
+    timeout_header: ?Timeout,
+    previous_attempts: ?u8,
+) Error!UnaryResponse {
+    if ((deadline == null) != (timeout_header == null)) {
+        return error.InvalidTimeout;
+    }
     if (options.message.len > options.max_message_size) {
         return error.GrpcMessageTooLarge;
     }
@@ -239,7 +453,7 @@ pub fn unaryCall(
         std.math.add(
             usize,
             binary_metadata.fields.len,
-            5,
+            5 + @as(usize, @intFromBool(previous_attempts != null)),
         ) catch return error.MessageTooLarge,
     ) catch return error.MessageTooLarge;
     const buffer = if (header_count <= header_storage.len)
@@ -260,10 +474,22 @@ pub fn unaryCall(
         .value = "trailers",
     });
     var timeout_buffer: [9]u8 = undefined;
-    if (options.timeout) |timeout| {
+    if (timeout_header) |timeout| {
         headers.appendAssumeCapacity(.{
             .name = "grpc-timeout",
             .value = try timeout.formatInto(&timeout_buffer),
+        });
+    }
+    var previous_attempts_buffer: [3]u8 = undefined;
+    if (previous_attempts) |attempts| {
+        if (attempts == 0) return error.InvalidMetadata;
+        headers.appendAssumeCapacity(.{
+            .name = "grpc-previous-rpc-attempts",
+            .value = std.fmt.bufPrint(
+                &previous_attempts_buffer,
+                "{d}",
+                .{attempts},
+            ) catch return error.InvalidMetadata,
         });
     }
     if (options.compression != .identity) {
@@ -326,6 +552,9 @@ pub const UnaryResponseOptions = struct {
     initial_binary_metadata: []const metadata_mod.BinaryMetadata = &.{},
     /// Raw trailing metadata encoded into gRPC response trailers.
     trailing_binary_metadata: []const metadata_mod.BinaryMetadata = &.{},
+    /// Optional server retry push-back in milliseconds. A negative value
+    /// tells conforming clients not to retry this response.
+    retry_pushback_ms: ?i64 = null,
     trailers_only: bool = false,
 };
 
@@ -409,7 +638,8 @@ pub fn writeUnaryResponse(
             trailing_binary.fields.len,
         ) catch return error.MessageTooLarge,
         @as(usize, 1) +
-            @intFromBool(options.status_message != null),
+            @intFromBool(options.status_message != null) +
+            @intFromBool(options.retry_pushback_ms != null),
     ) catch return error.MessageTooLarge;
     var initial_storage: [16]http2.Hpack.HeaderField = undefined;
     const initial_base = std.math.add(
@@ -479,6 +709,17 @@ pub fn writeUnaryResponse(
         trailing.appendAssumeCapacity(.{
             .name = "grpc-message",
             .value = encoded_status_message,
+        });
+    }
+    var retry_pushback_buffer: [21]u8 = undefined;
+    if (options.retry_pushback_ms) |milliseconds| {
+        trailing.appendAssumeCapacity(.{
+            .name = "grpc-retry-pushback-ms",
+            .value = std.fmt.bufPrint(
+                &retry_pushback_buffer,
+                "{d}",
+                .{milliseconds},
+            ) catch unreachable,
         });
     }
     trailing.appendSliceAssumeCapacity(options.trailing_metadata);

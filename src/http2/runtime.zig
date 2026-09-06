@@ -10773,6 +10773,7 @@ pub const Connection = struct {
         var response_status: ?u16 = null;
         var response_content_length: ?usize = null;
         var informational_count: usize = 0;
+        var trailers_only = false;
 
         while (true) {
             var frame = try self.readOwnedFrameWithDeadline(deadline);
@@ -10849,6 +10850,7 @@ pub const Connection = struct {
                         }
                         if ((frame.frame.header.flags & flag_end_stream) != 0) {
                             try validateExpectedContentLength(lookup.content_length, 0);
+                            trailers_only = true;
                             break;
                         }
                     }
@@ -10893,6 +10895,7 @@ pub const Connection = struct {
             .status = status,
             .body = try body.toOwnedSlice(self.allocator),
             .trailers = trailers,
+            .trailers_only = trailers_only,
         };
     }
 
@@ -13359,6 +13362,9 @@ pub const OwnedResponse = struct {
     status: u16,
     body: []u8,
     trailers: []http2.Hpack.HeaderField = &.{},
+    /// The final response head carried END_STREAM, so no DATA or trailing
+    /// HEADERS could have committed an upper-layer response.
+    trailers_only: bool = false,
 
     pub fn deinit(self: *OwnedResponse, allocator: std.mem.Allocator) void {
         freeHeaders(allocator, self.headers);

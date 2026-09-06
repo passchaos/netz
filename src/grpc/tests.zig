@@ -10,6 +10,26 @@ const encodeStatusMessageAlloc = grpc.encodeStatusMessageAlloc;
 const decodeStatusMessageAlloc = grpc.decodeStatusMessageAlloc;
 const parseUnaryRequest = grpc.parseUnaryRequest;
 const writeUnaryResponse = grpc.writeUnaryResponse;
+
+test "gRPC retry policy rejects unsafe bounds" {
+    const valid = grpc.RetryPolicy{
+        .max_attempts = 2,
+        .initial_backoff = .fromMilliseconds(1),
+        .max_backoff = .fromSeconds(1),
+        .backoff_multiplier = 2,
+        .retryable_status_codes = &.{.unavailable},
+    };
+    try valid.validate();
+    var invalid = valid;
+    invalid.max_attempts = 6;
+    try std.testing.expectError(error.InvalidRetryPolicy, invalid.validate());
+    invalid = valid;
+    invalid.initial_backoff = .zero;
+    try std.testing.expectError(error.InvalidRetryPolicy, invalid.validate());
+    invalid = valid;
+    invalid.retryable_status_codes = &.{.ok};
+    try std.testing.expectError(error.InvalidRetryPolicy, invalid.validate());
+}
 const unaryCall = grpc.unaryCall;
 const statusFromHttp = grpc.statusFromHttp;
 const statusFromHttp2Error = grpc.statusFromHttp2Error;
