@@ -6,6 +6,10 @@
 //! `std.Io`-backed gRPC endpoint.
 
 const std = @import("std");
+const http2 = @import("../http2/mod.zig");
+const call = @import("call.zig");
+const metadata_mod = @import("metadata.zig");
+const wire = @import("wire.zig");
 
 pub const check_path = "/grpc.health.v1.Health/Check";
 pub const watch_path = "/grpc.health.v1.Health/Watch";
@@ -34,6 +38,25 @@ pub const Request = struct {
 
 pub const Response = struct {
     status: ServingStatus = .unknown,
+};
+
+pub const CheckOptions = struct {
+    service: []const u8 = "",
+    authority: ?[]const u8 = null,
+    scheme: ?[]const u8 = null,
+    timeout: ?wire.Timeout = null,
+    metadata: []const http2.Hpack.HeaderField = &.{},
+    binary_metadata: []const metadata_mod.BinaryMetadata = &.{},
+    max_message_size: usize = 16 * 1024 * 1024,
+};
+
+pub const CheckResult = union(enum) {
+    response: Response,
+    rpc_failure: wire.Status,
+};
+
+pub const CheckError = Error || call.Error || error{
+    NotHealthCheckRequest,
 };
 
 pub fn encodeRequestAlloc(
@@ -104,6 +127,88 @@ pub fn decodeResponse(bytes: []const u8) Error!Response {
         }
     }
     return response;
+}
+
+/// Perform the standard unary Health `Check` RPC over an existing HTTP/2
+/// connection. A non-OK gRPC status is returned as `rpc_failure`; malformed
+/// successful payloads remain protocol errors.
+pub fn check(
+    connection: *http2.runtime.Connection,
+    allocator: std.mem.Allocator,
+    options: CheckOptions,
+) CheckError!CheckResult {
+    const request = try encodeRequestAlloc(allocator, .{
+        .service = options.service,
+    });
+    defer allocator.free(request);
+    var response = try call.unaryCall(connection, allocator, .{
+        .path = check_path,
+        .authority = options.authority,
+        .scheme = options.scheme,
+        .message = request,
+        .timeout = options.timeout,
+        .metadata = options.metadata,
+        .binary_metadata = options.binary_metadata,
+        .max_message_size = options.max_message_size,
+    });
+    defer response.deinit();
+
+    if (response.status != .ok) {
+        if (response.message != null) return error.InvalidMessageCount;
+        return .{ .rpc_failure = response.status };
+    }
+    const message = response.message orelse return error.InvalidMessageCount;
+    const decoded = try decodeResponse(message.payload);
+    if (decoded.status == .service_unknown) {
+        return error.InvalidServingStatus;
+    }
+    return .{ .response = decoded };
+}
+
+/// Validate and answer one already-decoded unary Health `Check` request.
+/// Unknown services use the standard trailers-only `NOT_FOUND` response;
+/// malformed protobuf requests use `INVALID_ARGUMENT`.
+pub fn writeCheckResponse(
+    connection: *http2.runtime.Connection,
+    allocator: std.mem.Allocator,
+    registry: *Registry,
+    request: *const call.UnaryRequest,
+) CheckError!void {
+    if (!std.mem.eql(u8, request.path, check_path) or
+        !std.mem.eql(u8, request.service, "grpc.health.v1.Health") or
+        !std.mem.eql(u8, request.method, "Check"))
+    {
+        return error.NotHealthCheckRequest;
+    }
+    const decoded = decodeRequest(request.message.payload) catch |err|
+        switch (err) {
+            error.OutOfMemory => return error.OutOfMemory,
+            else => return call.writeUnaryResponse(
+                connection,
+                allocator,
+                request.stream_id,
+                .{
+                    .status = .invalid_argument,
+                    .status_message = "could not parse request",
+                    .trailers_only = true,
+                },
+            ),
+        };
+    const status_value = (try registry.status(decoded.service)) orelse {
+        return call.writeUnaryResponse(connection, allocator, request.stream_id, .{
+            .status = .not_found,
+            .status_message = "service name unknown",
+            .trailers_only = true,
+        });
+    };
+    const encoded = try encodeResponseAlloc(allocator, .{
+        .status = status_value,
+    });
+    defer allocator.free(encoded);
+    return call.writeUnaryResponse(connection, allocator, request.stream_id, .{
+        .message = encoded,
+        .request_accepted_encodings = request.accepted_encodings,
+    });
 }
 
 pub const Snapshot = struct {

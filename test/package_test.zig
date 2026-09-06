@@ -52,11 +52,17 @@ test "public modules are reachable" {
     try std.testing.expect(@hasDecl(netz.grpc, "health"));
     try std.testing.expect(@hasDecl(netz.grpc.health, "Registry"));
     try std.testing.expect(@hasDecl(netz.grpc.health, "WatchCursor"));
+    try std.testing.expect(@hasDecl(netz.grpc.health, "CheckOptions"));
+    try std.testing.expect(@hasDecl(netz.grpc.health, "check"));
     try std.testing.expect(@hasDecl(netz.grpc.runtime, "Client"));
     try std.testing.expect(@hasDecl(netz.grpc.runtime, "Server"));
     try std.testing.expect(@hasDecl(netz.grpc.runtime.Server, "accept"));
     try std.testing.expect(@hasDecl(netz.grpc.runtime.Client, "connectTlsHost"));
     try std.testing.expect(@hasDecl(netz.grpc.runtime.Client, "unary"));
+    try std.testing.expect(@hasDecl(
+        netz.grpc.runtime.Client,
+        "healthCheck",
+    ));
     try std.testing.expect(@hasDecl(
         netz.grpc.runtime.Client,
         "startStreaming",
@@ -82,6 +88,10 @@ test "public modules are reachable" {
     try std.testing.expect(@hasDecl(
         netz.grpc.runtime.ServerConnection,
         "writeUnary",
+    ));
+    try std.testing.expect(@hasDecl(
+        netz.grpc.runtime.ServerConnection,
+        "writeHealthCheck",
     ));
     try std.testing.expect(@hasDecl(
         netz.grpc.runtime.ServerConnection,

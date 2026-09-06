@@ -7,6 +7,7 @@
 const std = @import("std");
 const http2 = @import("../http2/mod.zig");
 const call = @import("call.zig");
+const health = @import("health.zig");
 const streaming = @import("stream/runtime.zig");
 const duplex = @import("stream/duplex.zig");
 
@@ -68,6 +69,17 @@ pub const Client = struct {
         options: call.UnaryCallOptions,
     ) Error!call.UnaryResponse {
         return call.unaryCall(
+            &self.connection,
+            self.connection.allocator,
+            options,
+        );
+    }
+
+    pub fn healthCheck(
+        self: *Client,
+        options: health.CheckOptions,
+    ) health.CheckError!health.CheckResult {
+        return health.check(
             &self.connection,
             self.connection.allocator,
             options,
@@ -233,6 +245,19 @@ pub const ServerConnection = struct {
             self.connection.allocator,
             stream_id,
             options,
+        );
+    }
+
+    pub fn writeHealthCheck(
+        self: *ServerConnection,
+        registry: *health.Registry,
+        request: *const OwnedUnaryRequest,
+    ) health.CheckError!void {
+        return health.writeCheckResponse(
+            &self.connection,
+            self.connection.allocator,
+            registry,
+            &request.request,
         );
     }
 

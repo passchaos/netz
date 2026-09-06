@@ -71,6 +71,13 @@ existing HTTP/2 runtime:
 - typed duplex terminal events for both `grpc-status` trailers (including a
   true trailers-only early response) and peer `RST_STREAM`; a terminal early
   response closes the still-open upload before yielding the owned result.
+- standard `grpc.health.v1.Health/Check` protobuf messages and unary client/
+  server helpers over persistent h2c and TLS channels, including the 200-byte
+  service-name bound, `NOT_FOUND` for unknown services, and
+  `INVALID_ARGUMENT` for malformed requests,
+- a concurrent health registry with the standard default `SERVING` status,
+  per-service updates/removal, graceful shutdown, and timeout/deadline-aware
+  Watch cursors that emit an immediate snapshot and subsequent status changes.
 
 Payloads intentionally remain opaque. This keeps gRPC transport reusable with
 generated or dynamic protobuf implementations; the user-owned
@@ -195,9 +202,12 @@ upstream gRPC Core's `ServerEarlyReturnTest`.
    A broader upstream matrix, including reverse custom metadata and TLS, remains
    future work.
 3. Add higher-level application cancellation and streaming deadline policy,
-   retry policy, health checking, reflection, and broader conformance/interop
-   runners. Unary transport deadlines are already enforced locally as described
-   above.
+   retry policy, reflection, and broader conformance/interop runners. Health
+   `Check` and the concurrent state/cursor semantics needed by `Watch` are now
+   implemented. A transport-level `Watch` adapter still needs incremental
+   message delivery without waiting for END_STREAM, cancellation, and retry/
+   backoff policy; it is not claimed as complete. Unary transport deadlines
+   are already enforced locally as described above.
 
 The current tests establish unary, sequential streaming, and single-owner
 step-driven bidirectional streaming; this is still not broad gRPC Core feature
