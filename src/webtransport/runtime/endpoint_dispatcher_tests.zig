@@ -9,6 +9,46 @@ const ObservedBatchSend =
     @import("../../quic/one_rtt/tests/observed_batch_send.zig")
         .ObservedBatchSend;
 
+const FixedClockIo = struct {
+    delegate: std.Io,
+    now_ns: i96,
+    send_calls: usize = 0,
+    sleep_calls: usize = 0,
+
+    fn now(
+        userdata: ?*anyopaque,
+        _: std.Io.Clock,
+    ) std.Io.Timestamp {
+        const self: *FixedClockIo = @ptrCast(@alignCast(userdata));
+        return .fromNanoseconds(self.now_ns);
+    }
+
+    fn sleep(
+        userdata: ?*anyopaque,
+        _: std.Io.Timeout,
+    ) std.Io.Cancelable!void {
+        const self: *FixedClockIo = @ptrCast(@alignCast(userdata));
+        self.sleep_calls += 1;
+        return error.Canceled;
+    }
+
+    fn netSend(
+        userdata: ?*anyopaque,
+        socket_handle: std.Io.net.Socket.Handle,
+        messages: []std.Io.net.OutgoingMessage,
+        flags: std.Io.net.SendFlags,
+    ) struct { ?std.Io.net.Socket.SendError, usize } {
+        const self: *FixedClockIo = @ptrCast(@alignCast(userdata));
+        self.send_calls += 1;
+        return self.delegate.vtable.netSend(
+            self.delegate.userdata,
+            socket_handle,
+            messages,
+            flags,
+        );
+    }
+};
+
 test "WebTransport endpoint poll mirrors automatic stream-credit retry timer" {
     const allocator = std.testing.allocator;
     var threaded = std.Io.Threaded.init(allocator, .{});
@@ -488,6 +528,179 @@ test "WebTransport endpoint stream write leaves UDP receive to dispatcher" {
     try std.testing.expectEqual(@as(u64, 1), stream.bytes_sent);
     try accepted.finishStream(stream_id);
     try std.testing.expect(stream.local_fin);
+}
+
+test "WebTransport endpoint stream cancellation does not wait for pacing" {
+    const allocator = std.testing.allocator;
+    var threaded = std.Io.Threaded.init(allocator, .{});
+    defer threaded.deinit();
+    const io = threaded.io();
+
+    var server_endpoint = try quic.runtime.Endpoint.bind(
+        allocator,
+        io,
+        .{ .ip4 = .loopback(0) },
+        .{ .max_datagram_size = 4096 },
+    );
+    defer server_endpoint.deinit();
+    var peer_endpoint = try quic.runtime.Endpoint.bind(
+        allocator,
+        io,
+        .{ .ip4 = .loopback(0) },
+        .{ .max_datagram_size = 4096 },
+    );
+    defer peer_endpoint.deinit();
+    const keys = quic.protection.deriveAes128Keys(
+        [_]u8{0xef} ** quic.protection.secret_len,
+    );
+    const settings = webtransport.defaultSettings(.{});
+    var h3 = try http3.runtime.HandshakeServerSession.initPreconfigured(
+        &server_endpoint,
+        peer_endpoint.address(),
+        .{ .local_settings = settings },
+        .{
+            .receive_keys = keys,
+            .send_keys = keys,
+            .local_connection_id = "wt-control-server",
+            .peer_connection_id = "wt-control-client",
+            .one_rtt = .{
+                .max_datagram_size = 1200,
+                .pacing_max_burst_packets = 1,
+            },
+        },
+    );
+    defer h3.deinit();
+    h3.control.settings.markSent(settings);
+    h3.control.settings.markReceived(settings);
+    var streams = try handshake_stream.initRegistry(
+        allocator,
+        .init(0),
+        .server,
+        settings,
+        settings,
+        8,
+        1,
+        null,
+    );
+    var streams_owned = true;
+    defer if (streams_owned) streams.deinit();
+    var dispatcher = quic.endpoint_dispatcher.Dispatcher.init(
+        allocator,
+        &server_endpoint,
+    );
+    defer dispatcher.deinit();
+    const handle: quic.endpoint_dispatcher.ConnectionHandle = 13;
+    try dispatcher.registerConnection(handle, &h3.established.connection);
+    var accepted = runtime.EndpointAcceptedSession{
+        .handle = handle,
+        .dispatcher = &dispatcher,
+        .h3 = &h3,
+        .request = undefined,
+        .session_id = .init(0),
+        .streams = streams,
+        .control = try session_control.Control.init(.init(0)),
+    };
+    streams_owned = false;
+    defer accepted.streams.deinit();
+    const reset_stream_id = try accepted.openBidirectionalStream();
+    const stopped_stream_id: u62 = 0;
+    const stopped_stream = try accepted.streams.registerPeer(
+        stopped_stream_id,
+        .bidirectional,
+    );
+
+    // Freeze std.Io's awake clock so a blocking pacing loop cannot make
+    // progress. The one-attempt endpoint methods must return PacingLimited
+    // without ever invoking the wrapped sleep operation.
+    var fixed_io = FixedClockIo{
+        .delegate = server_endpoint.io,
+        .now_ns = 1_000_000,
+    };
+    var fixed_vtable = server_endpoint.io.vtable.*;
+    fixed_vtable.now = FixedClockIo.now;
+    fixed_vtable.sleep = FixedClockIo.sleep;
+    fixed_vtable.netSend = FixedClockIo.netSend;
+    server_endpoint.io = .{
+        .userdata = &fixed_io,
+        .vtable = &fixed_vtable,
+    };
+    defer server_endpoint.io = fixed_io.delegate;
+
+    const fill = [_]quic.Frame{.{ .padding = .{ .len = 1160 } }};
+    try h3.established.connection.sendAt(&fill, 1_000_000);
+    const next_packet_number = h3.established.connection.next_packet_number;
+    try std.testing.expectError(
+        error.PacingLimited,
+        accepted.resetStream(reset_stream_id, 41),
+    );
+    try std.testing.expectEqual(@as(usize, 0), fixed_io.sleep_calls);
+    try std.testing.expectEqual(@as(usize, 1), fixed_io.send_calls);
+    try std.testing.expectEqual(
+        next_packet_number,
+        h3.established.connection.next_packet_number,
+    );
+    try std.testing.expect(
+        accepted.streams.get(reset_stream_id).?.send_reset == null,
+    );
+    try std.testing.expect(
+        h3.established.connection.sendStreamStats(reset_stream_id).?.reset ==
+            null,
+    );
+    const reset_timer = dispatcher.nextTimerDeadline() orelse
+        return error.TestUnexpectedResult;
+    try std.testing.expectEqual(handle, reset_timer.connection_id);
+    try std.testing.expectEqual(
+        quic.one_rtt.TimerDeadlineKind.pacing,
+        reset_timer.timer.kind,
+    );
+    fixed_io.now_ns = @intCast(reset_timer.timer.deadline_ns);
+    const reset_timer_event = (try dispatcher.serviceNextTimerAt(
+        reset_timer.timer.deadline_ns,
+    )) orelse return error.TestUnexpectedResult;
+    try std.testing.expectEqual(
+        quic.one_rtt.TimerDeadlineKind.pacing,
+        reset_timer_event.timer.kind,
+    );
+    try accepted.resetStream(reset_stream_id, 41);
+    try std.testing.expect(
+        accepted.streams.get(reset_stream_id).?.send_reset != null,
+    );
+
+    const reset_packet_number = h3.established.connection.next_packet_number;
+    try std.testing.expectError(
+        error.PacingLimited,
+        accepted.stopStream(stopped_stream_id, 42),
+    );
+    try std.testing.expectEqual(@as(usize, 0), fixed_io.sleep_calls);
+    try std.testing.expectEqual(
+        reset_packet_number,
+        h3.established.connection.next_packet_number,
+    );
+    try std.testing.expect(stopped_stream.stop_sent == null);
+    try std.testing.expect(
+        h3.established.connection.recvStreamStats(stopped_stream_id).?
+            .stop_sending_sent == null,
+    );
+
+    const stop_timer = dispatcher.nextTimerDeadline() orelse
+        return error.TestUnexpectedResult;
+    try std.testing.expectEqual(handle, stop_timer.connection_id);
+    try std.testing.expectEqual(
+        quic.one_rtt.TimerDeadlineKind.pacing,
+        stop_timer.timer.kind,
+    );
+    fixed_io.now_ns = @intCast(stop_timer.timer.deadline_ns);
+    const stop_timer_event = (try dispatcher.serviceNextTimerAt(
+        stop_timer.timer.deadline_ns,
+    )) orelse return error.TestUnexpectedResult;
+    try std.testing.expectEqual(
+        quic.one_rtt.TimerDeadlineKind.pacing,
+        stop_timer_event.timer.kind,
+    );
+    try accepted.stopStream(stopped_stream_id, 42);
+    try std.testing.expectEqual(@as(usize, 0), fixed_io.sleep_calls);
+    try std.testing.expectEqual(@as(usize, 3), fixed_io.send_calls);
+    try std.testing.expect(stopped_stream.stop_sent != null);
 }
 
 test "WebTransport client handshake and CONNECT share one socket owner" {

@@ -1,6 +1,6 @@
 //! Endpoint-level timer scheduling for caller-owned QUIC 1-RTT connections.
 //!
-//! `one_rtt.Connection` already collapses loss/PTO, ACK-delay,
+//! `one_rtt.Connection` already collapses pacing, loss/PTO, ACK-delay,
 //! path-validation, keep-alive, idle, close, and key-discard work into one
 //! `nextTimerDeadline()` selector.  This helper mirrors those per-connection
 //! deadlines at an endpoint/event-loop boundary so a multi-connection owner can

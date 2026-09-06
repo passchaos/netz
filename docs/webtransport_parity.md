@@ -300,8 +300,9 @@ API. Standalone `writeStream` waits for positive transport credit but submits
 at most one packet-sized application prefix and returns its actual length,
 allowing callers to round-robin many active streams; `finishStream` submits FIN
 independently. Shared-endpoint `writeStream`, `writeStreams`, `sendStream`, and
-`finishStream` instead make one socket-free attempt and return flow-control,
-congestion, or pacing backpressure to the sole `EndpointServer.receive*` owner.
+`finishStream`, `resetStream`, and `stopStream` instead make one socket-free
+attempt and return flow-control, congestion, or pacing backpressure to the sole
+`EndpointServer.receive*` owner.
 An initial `writeStream` may commit only the association prefix and return zero
 application bytes; retrying the unchanged payload after dispatcher progress is
 therefore unambiguous. Endpoint `sendStream` is atomic and single-packet, while

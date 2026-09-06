@@ -94,6 +94,28 @@ pub fn reset(
     stream.send_reset = .fromHttp3(http3_code);
 }
 
+/// Abort the local send direction once without sleeping for QUIC pacing.
+/// Registry state changes only after the RESET_STREAM packet is submitted.
+pub fn resetOnce(
+    connection: *quic.one_rtt.Connection,
+    registry: *webtransport.StreamRegistry,
+    stream_id: u62,
+    application_error_code: u32,
+) Error!void {
+    const stream = registry.get(stream_id) orelse
+        return error.UnknownStream;
+    if (stream.direction == .unidirectional and
+        !stream.locally_initiated)
+    {
+        return error.InvalidStreamState;
+    }
+    const http3_code =
+        webtransport.applicationErrorCodeToHttp3(application_error_code);
+    try connection.tryResetStream(stream_id, http3_code);
+    try association.requestAfterSendTerminal(connection, stream);
+    stream.send_reset = .fromHttp3(http3_code);
+}
+
 /// Cancel the peer send direction with a mapped WebTransport error code.
 pub fn stop(
     connection: *quic.one_rtt.Connection,
@@ -111,6 +133,27 @@ pub fn stop(
     const http3_code =
         webtransport.applicationErrorCodeToHttp3(application_error_code);
     try connection.sendStopSending(stream_id, http3_code);
+    stream.stop_sent = .fromHttp3(http3_code);
+}
+
+/// Cancel the peer send direction once without sleeping for QUIC pacing.
+/// Registry state changes only after STOP_SENDING reaches the socket.
+pub fn stopOnce(
+    connection: *quic.one_rtt.Connection,
+    registry: *webtransport.StreamRegistry,
+    stream_id: u62,
+    application_error_code: u32,
+) Error!void {
+    const stream = registry.get(stream_id) orelse
+        return error.UnknownStream;
+    if (stream.direction == .unidirectional and
+        stream.locally_initiated)
+    {
+        return error.InvalidStreamState;
+    }
+    const http3_code =
+        webtransport.applicationErrorCodeToHttp3(application_error_code);
+    try connection.trySendStopSending(stream_id, http3_code);
     stream.stop_sent = .fromHttp3(http3_code);
 }
 

@@ -640,6 +640,7 @@ pub const LossDetectionTimerDeadline = struct {
 };
 
 pub const TimerDeadlineKind = enum {
+    pacing,
     ack_delay,
     peer_stream_credit,
     loss_time,
@@ -2481,6 +2482,12 @@ pub const Connection = struct {
     /// typed helper matching `kind` when the deadline becomes due.
     pub fn nextTimerDeadline(self: Connection) ?TimerDeadline {
         var next: ?TimerDeadline = null;
+        if (self.pacing_blocked_until_ns) |deadline| {
+            considerTimerDeadline(&next, .{
+                .kind = .pacing,
+                .deadline_ns = deadline,
+            });
+        }
         if (self.stream_release_retry_deadline_ns) |deadline| {
             considerTimerDeadline(&next, .{
                 .kind = .peer_stream_credit,
@@ -2566,6 +2573,10 @@ pub const Connection = struct {
         if (now_ns < deadline.deadline_ns) return null;
 
         switch (deadline.kind) {
+            // Pacing is application-owned pending work rather than a queued
+            // transport frame. Clearing the hint emits one endpoint timer
+            // event so the application can retry without spinning.
+            .pacing => self.pacing_blocked_until_ns = null,
             .ack_delay => {
                 try self.serviceAckDelayTimerAt(now_ns);
             },
@@ -4579,12 +4590,64 @@ pub const Connection = struct {
     }
 
     pub fn resetStream(self: *Connection, stream_id: u64, application_error_code: u64) Error!void {
+        try self.resetStreamAt(stream_id, application_error_code, null);
+    }
+
+    /// Attempt one RESET_STREAM send without sleeping for pacing. The stream
+    /// remains writable when the packet cannot be submitted, so an event-loop
+    /// owner can retry after its next transport-progress notification.
+    pub fn tryResetStream(
+        self: *Connection,
+        stream_id: u64,
+        application_error_code: u64,
+    ) Error!void {
+        try self.resetStreamAt(
+            stream_id,
+            application_error_code,
+            self.monotonicNowNs(),
+        );
+    }
+
+    fn resetStreamAt(
+        self: *Connection,
+        stream_id: u64,
+        application_error_code: u64,
+        sent_time_ns: ?u64,
+    ) Error!void {
         try self.validateNextPacketNumber();
         const entry = try self.sendStreamEntry(stream_id);
-        try self.sendResetStream(stream_id, application_error_code, entry.highest_sent_end);
+        try self.sendResetStreamAt(
+            stream_id,
+            application_error_code,
+            entry.highest_sent_end,
+            sent_time_ns,
+        );
     }
 
     pub fn sendStopSending(self: *Connection, stream_id: u64, application_error_code: u64) Error!void {
+        try self.sendStopSendingAt(stream_id, application_error_code, null);
+    }
+
+    /// Attempt one STOP_SENDING send without sleeping for pacing. The receive
+    /// direction is marked stopped only after the packet reaches the socket.
+    pub fn trySendStopSending(
+        self: *Connection,
+        stream_id: u64,
+        application_error_code: u64,
+    ) Error!void {
+        try self.sendStopSendingAt(
+            stream_id,
+            application_error_code,
+            self.monotonicNowNs(),
+        );
+    }
+
+    fn sendStopSendingAt(
+        self: *Connection,
+        stream_id: u64,
+        application_error_code: u64,
+        sent_time_ns: ?u64,
+    ) Error!void {
         try self.validateNextPacketNumber();
         var recv_stream = try self.recvStreamFlow(stream_id);
         const info: StopSendingInfo = .{ .application_error_code = application_error_code };
@@ -4596,7 +4659,10 @@ pub const Connection = struct {
             .stream_id = stream_id,
             .application_error_code = application_error_code,
         } }};
-        try self.sendTrackedFrames(&frames);
+        if (sent_time_ns) |now_ns|
+            try self.sendTrackedFramesEcnAt(&frames, .not_ect, now_ns)
+        else
+            try self.sendTrackedFrames(&frames);
         recv_stream.stop_sending_sent = info;
     }
 
@@ -9194,6 +9260,21 @@ pub const Connection = struct {
     }
 
     fn sendResetStream(self: *Connection, stream_id: u64, application_error_code: u64, final_size: u64) Error!void {
+        try self.sendResetStreamAt(
+            stream_id,
+            application_error_code,
+            final_size,
+            null,
+        );
+    }
+
+    fn sendResetStreamAt(
+        self: *Connection,
+        stream_id: u64,
+        application_error_code: u64,
+        final_size: u64,
+        sent_time_ns: ?u64,
+    ) Error!void {
         const entry = try self.sendStreamEntry(stream_id);
         const info: StreamResetInfo = .{
             .application_error_code = application_error_code,
@@ -9209,7 +9290,10 @@ pub const Connection = struct {
             .application_error_code = application_error_code,
             .final_size = final_size,
         } }};
-        try self.sendTrackedFrames(&frames);
+        if (sent_time_ns) |now_ns|
+            try self.sendTrackedFramesEcnAt(&frames, .not_ect, now_ns)
+        else
+            try self.sendTrackedFrames(&frames);
         _ = self.recovery.abandonStreamData(stream_id);
         entry.reset_sent = info;
     }

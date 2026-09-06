@@ -1882,32 +1882,38 @@ pub const EndpointAcceptedSession = struct {
         return released;
     }
 
+    /// Attempt RESET_STREAM once without waiting for pacing or reading the
+    /// shared endpoint socket. Retry after dispatcher transport progress.
     pub fn resetStream(
         self: *EndpointAcceptedSession,
         stream_id: u62,
         application_error_code: u32,
     ) EndpointServerError!void {
-        try resetHandshakeSessionStream(
+        const result = incremental_stream.resetOnce(
             &self.h3.established.connection,
             &self.streams,
             stream_id,
             application_error_code,
         );
         try self.refreshTimer();
+        try result;
     }
 
+    /// Attempt STOP_SENDING once without waiting for pacing or reading the
+    /// shared endpoint socket. Retry after dispatcher transport progress.
     pub fn stopStream(
         self: *EndpointAcceptedSession,
         stream_id: u62,
         application_error_code: u32,
     ) EndpointServerError!void {
-        try stopHandshakeSessionStream(
+        const result = incremental_stream.stopOnce(
             &self.h3.established.connection,
             &self.streams,
             stream_id,
             application_error_code,
         );
         try self.refreshTimer();
+        try result;
     }
 
     pub fn drain(self: *EndpointAcceptedSession) EndpointServerError!void {
