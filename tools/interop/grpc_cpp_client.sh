@@ -93,9 +93,15 @@ if [[ ! -x "$client" ]]; then
   echo "grpc-cpp interop client is not executable: $client" >&2
   exit 127
 fi
+cat >"$work/netz-ca.pem" <<'EOF'
+-----BEGIN CERTIFICATE-----
+MIIBMDCB1qADAgECAgISNDAKBggqhkjOPQQDAjAUMRIwEAYDVQQDDAlsb2NhbGhvc3QwHhcNMjYwMTAxMDAwMDAwWhcNMzYwMTAxMDAwMDAwWjAUMRIwEAYDVQQDDAlsb2NhbGhvc3QwWTATBgcqhkjOPQIBBggqhkjOPQMBBwNCAARawLjuCeZXZ7tsfTRAu+FcuRLUr+ELbhoX/6Hs0fLlSZe0NNZYPUqZa65oYGMMs9Ud19Qc/RZMzn4vZv5+EakUoxgwFjAUBgNVHREEDTALgglsb2NhbGhvc3QwCgYIKoZIzj0EAwIDSQAwRgIhAJFAj+UlV/FOGaVRnB/9l7wXgSet0zn4CdgFIckqC1hEAiEApPR1fJT2M9PVNn3fwdZBboKEoWrUYLVy6sMvbrhNjKU=
+-----END CERTIFICATE-----
+EOF
 
 run_case() {
   local scenario=$1
+  local transport=$2
   local port server_log client_log
   port=$(python3 - <<'PY'
 import socket
@@ -104,13 +110,30 @@ with socket.socket() as sock:
     print(sock.getsockname()[1])
 PY
   )
-  server_log="$work/server-$scenario.log"
-  client_log="$work/client-$scenario.log"
+  server_log="$work/server-$transport-$scenario.log"
+  client_log="$work/client-$transport-$scenario.log"
 
-  "$server" "$port" "$scenario" >"$server_log" 2>&1 &
+  local server_args=("$port" "$scenario")
+  local client_args=(
+    --server_host=127.0.0.1
+    --server_port="$port"
+    --test_case="$scenario"
+  )
+  if [[ "$transport" == tls ]]; then
+    server_args+=(--tls)
+    client_args+=(
+      --use_tls=true
+      --use_test_ca=false
+      --server_host_override=localhost
+    )
+  else
+    client_args+=(--use_tls=false)
+  fi
+
+  "$server" "${server_args[@]}" >"$server_log" 2>&1 &
   server_pid=$!
   for _ in $(seq 1 200); do
-    if grep -Fq "netz grpc server ready: port=$port scenario=$scenario" "$server_log"; then
+    if grep -Fq "netz grpc server ready: port=$port scenario=$scenario transport=$transport" "$server_log"; then
       break
     fi
     if ! kill -0 "$server_pid" 2>/dev/null; then
@@ -119,43 +142,54 @@ PY
     fi
     sleep 0.05
   done
-  if ! grep -Fq "netz grpc server ready: port=$port scenario=$scenario" "$server_log"; then
+  if ! grep -Fq "netz grpc server ready: port=$port scenario=$scenario transport=$transport" "$server_log"; then
     echo "timed out waiting for netz server readiness for $scenario" >&2
     return 1
   fi
 
-  timeout "$case_timeout" "$client" \
-    --server_host=127.0.0.1 \
-    --server_port="$port" \
-    --use_tls=false \
-    --test_case="$scenario" >"$client_log" 2>&1
+  GRPC_DEFAULT_SSL_ROOTS_FILE_PATH="$work/netz-ca.pem" \
+    timeout "$case_timeout" "$client" "${client_args[@]}" \
+    >"$client_log" 2>&1
 
   # The client process exiting successfully is its assertion result. Require
   # the independent server to have observed the expected terminal condition
   # as well, so a client-only success cannot weaken cancellation/deadline tests.
   for _ in $(seq 1 200); do
-    if grep -Fq "netz grpc server completed: scenario=$scenario" "$server_log"; then
+    if grep -Fq "netz grpc server completed: scenario=$scenario transport=$transport" "$server_log"; then
       break
     fi
     if ! kill -0 "$server_pid" 2>/dev/null; then break; fi
     sleep 0.05
   done
-  if ! grep -Fq "netz grpc server completed: scenario=$scenario" "$server_log"; then
+  if ! grep -Fq "netz grpc server completed: scenario=$scenario transport=$transport" "$server_log"; then
+    if [[ "$transport" == tls &&
+          "$scenario" == timeout_on_sleeping_server ]] &&
+       ! grep -Fq "netz grpc server accepted: scenario=$scenario transport=$transport" "$server_log" &&
+       kill -0 "$server_pid" 2>/dev/null; then
+      # The upstream case uses a hard-coded 1 ms end-to-end deadline. It can
+      # therefore succeed with local DEADLINE_EXCEEDED before TLS accept
+      # finishes and before an RPC exists for the netz server to drain.
+      cleanup_server
+      echo "grpc-cpp client interoperated with netz: transport=$transport scenario=$scenario outcome=local-deadline-before-tls-accept"
+      return
+    fi
     echo "netz server did not complete $scenario" >&2
     return 1
   fi
   wait "$server_pid"
   server_pid=
-  echo "grpc-cpp client interoperated with netz: scenario=$scenario"
+  echo "grpc-cpp client interoperated with netz: transport=$transport scenario=$scenario"
 }
 
-for scenario in \
-  ping_pong \
-  empty_stream \
-  cancel_after_first_response \
-  timeout_on_sleeping_server
-do
-  run_case "$scenario"
+for transport in h2c tls; do
+  for scenario in \
+    ping_pong \
+    empty_stream \
+    cancel_after_first_response \
+    timeout_on_sleeping_server
+  do
+    run_case "$scenario" "$transport"
+  done
 done
 
-echo 'grpc-cpp client interoperated with netz: transport=h2c ping_pong=true empty_stream=true cancel=CANCEL deadline=DEADLINE_EXCEEDED'
+echo 'grpc-cpp client interoperated with netz: transport=h2c+tls ping_pong=true empty_stream=true cancel=CANCEL deadline=DEADLINE_EXCEEDED certificate=verified alpn=h2'

@@ -324,7 +324,7 @@ pub fn build(b: *std.Build) void {
     grpc_cpp_interop.addArtifactArg(grpc_cpp_client);
     const grpc_cpp_interop_step = b.step(
         "interop-grpc-cpp",
-        "Run netz gRPC h2c client against upstream gRPC C++",
+        "Run netz gRPC h2c/TLS client against upstream gRPC C++",
     );
     grpc_cpp_interop_step.dependOn(&grpc_cpp_interop.step);
 
@@ -345,7 +345,7 @@ pub fn build(b: *std.Build) void {
     grpc_cpp_client_interop.addArtifactArg(grpc_cpp_server);
     const grpc_cpp_client_interop_step = b.step(
         "interop-grpc-cpp-client",
-        "Run upstream gRPC C++ client against netz gRPC h2c server",
+        "Run upstream gRPC C++ client against netz gRPC h2c/TLS server",
     );
     grpc_cpp_client_interop_step.dependOn(
         &grpc_cpp_client_interop.step,

@@ -61,6 +61,28 @@ pub const Client = struct {
         ) };
     }
 
+    /// Connect to an already resolved address while validating TLS against a
+    /// separate DNS name. This keeps service discovery independent from SNI
+    /// and certificate identity without weakening verification.
+    pub fn connectTlsAddress(
+        allocator: std.mem.Allocator,
+        io: std.Io,
+        address: net.IpAddress,
+        tls_host: []const u8,
+        authority: []const u8,
+        options: ClientOptions,
+    ) Error!Client {
+        return .{ .connection = try http2.runtime.Client.connectTlsAddress(
+            allocator,
+            io,
+            address,
+            tls_host,
+            authority,
+            options.limits,
+            options.tls,
+        ) };
+    }
+
     pub fn deinit(self: *Client) void {
         self.connection.close();
         self.* = undefined;

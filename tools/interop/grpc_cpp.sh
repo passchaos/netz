@@ -133,6 +133,66 @@ fi
 
 timeout 30s "$client" "$port" >"$work/client.log" 2>&1
 grep -Fq \
-  'netz gRPC client interoperated with grpc-cpp: transport=h2c ping_pong=4 metadata=initial+trailing-bin cancel=CANCEL reuse=true deadline=DEADLINE_EXCEEDED' \
+  'netz gRPC client interoperated with grpc-cpp: transport=h2c ping_pong=4 metadata=initial+trailing-bin cancel=CANCEL reuse=true deadline=DEADLINE_EXCEEDED-or-local-timeout+CANCEL' \
   "$work/client.log"
 cat "$work/client.log"
+
+kill -INT "$server_pid" 2>/dev/null || true
+wait "$server_pid" 2>/dev/null || true
+server_pid=
+
+port=$(python3 - <<'PY'
+import socket
+with socket.socket() as sock:
+    sock.bind(("127.0.0.1", 0))
+    print(sock.getsockname()[1])
+PY
+)
+ca_file="$grpc_root/src/core/tsi/test_creds/ca.pem"
+cert_file="$grpc_root/src/core/tsi/test_creds/server1.pem"
+key_file="$grpc_root/src/core/tsi/test_creds/server1.key"
+for file in "$ca_file" "$cert_file" "$key_file"; do
+  if [[ ! -s "$file" ]]; then
+    echo "missing upstream gRPC TLS fixture: $file" >&2
+    exit 1
+  fi
+done
+
+"$server" --port="$port" --use_tls=true \
+  --tls_cert_file="$cert_file" --tls_key_file="$key_file" \
+  >"$work/server-tls.log" 2>&1 &
+server_pid=$!
+for _ in $(seq 1 200); do
+  if grep -Fq "Server listening on 0.0.0.0:$port" \
+      "$work/server-tls.log"; then
+    break
+  fi
+  if ! kill -0 "$server_pid" 2>/dev/null; then
+    echo 'grpc-cpp TLS interop server exited before readiness' >&2
+    exit 1
+  fi
+  sleep 0.05
+done
+if ! grep -Fq "Server listening on 0.0.0.0:$port" \
+    "$work/server-tls.log"; then
+  if ! python3 - "$port" <<'PY'
+import socket
+import sys
+try:
+    with socket.create_connection(("127.0.0.1", int(sys.argv[1])), 1):
+        pass
+except OSError:
+    raise SystemExit(1)
+PY
+  then
+    echo 'timed out waiting for grpc-cpp TLS server readiness' >&2
+    exit 1
+  fi
+fi
+
+timeout 30s "$client" "$port" "$ca_file" \
+  >"$work/client-tls.log" 2>&1
+grep -Fq \
+  'netz gRPC client interoperated with grpc-cpp: transport=tls ping_pong=4 metadata=initial+trailing-bin cancel=CANCEL reuse=true deadline=DEADLINE_EXCEEDED-or-local-timeout+CANCEL' \
+  "$work/client-tls.log"
+cat "$work/client-tls.log"

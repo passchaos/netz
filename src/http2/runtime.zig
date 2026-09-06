@@ -14773,6 +14773,11 @@ pub const DuplexRequestEvent = union(enum) {
     }
 };
 
+pub const DuplexRequestDrainResult = union(enum) {
+    finished,
+    reset: http2.ResetStreamPayload,
+};
+
 /// Server counterpart to `ClientDuplexStream`. Request metadata is owned by
 /// this object while request DATA arrives stepwise and response DATA may be
 /// written between receive steps.
@@ -15045,6 +15050,29 @@ pub const ServerDuplexStream = struct {
     ) Error!DuplexRequestEvent {
         _ = try deadline_policy.usableAwake(self.connection.io, deadline);
         return self.readRequestEventUntil(deadline);
+    }
+
+    /// Discard the remaining request body after the response half has ended.
+    /// The caller supplies an independent cleanup deadline; DATA still passes
+    /// through normal HTTP/2 validation and flow-control accounting.
+    pub fn drainRequestAfterResponseWithDeadline(
+        self: *ServerDuplexStream,
+        deadline: std.Io.Clock.Timestamp,
+    ) Error!DuplexRequestDrainResult {
+        if (!self.response_finished) return error.UnexpectedFrame;
+        _ = try deadline_policy.usableAwake(self.connection.io, deadline);
+        if (self.request_finished) return .finished;
+        while (true) {
+            var event = try self.readRequestEventUntil(deadline);
+            defer event.deinit(self.connection.allocator);
+            switch (event) {
+                .data => if (self.request_finished) return .finished,
+                .trailers, .finished => return .finished,
+                .reset => |reset_value| {
+                    return .{ .reset = reset_value };
+                },
+            }
+        }
     }
 
     /// Wait for the peer to cancel a response that remains open after the

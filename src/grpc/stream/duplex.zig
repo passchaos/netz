@@ -692,6 +692,8 @@ pub const ServerEvent = union(enum) {
     }
 };
 
+pub const RequestDrainResult = http2.runtime.DuplexRequestDrainResult;
+
 pub const ServerDuplex = struct {
     allocator: std.mem.Allocator,
     transport: http2.runtime.ServerDuplexStream,
@@ -1041,6 +1043,26 @@ pub const ServerDuplex = struct {
         self.discardReceiveState();
         self.receive_state = .failed;
         try self.transport.reset(code);
+    }
+
+    /// Drain the request half after an early terminal response. The cleanup
+    /// deadline is intentionally independent of the RPC's `grpc-timeout`,
+    /// which has normally expired before a deadline status is sent. This
+    /// duplex remains the connection's sole frame reader while sibling and
+    /// connection-control frames retain their normal HTTP/2 handling.
+    pub fn drainRequestAfterResponseWithDeadline(
+        self: *ServerDuplex,
+        cleanup_deadline: std.Io.Clock.Timestamp,
+    ) !RequestDrainResult {
+        if (!self.transport.responseFinished()) {
+            return error.InvalidStreamState;
+        }
+        if (cleanup_deadline.clock != .awake) return error.Timeout;
+        self.discardReceiveState();
+        const result = try self.transport
+            .drainRequestAfterResponseWithDeadline(cleanup_deadline);
+        self.receive_state = .terminal_delivered;
+        return result;
     }
 
     /// Wait for cancellation after the request half reached END_STREAM while

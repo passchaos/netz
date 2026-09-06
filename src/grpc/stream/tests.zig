@@ -711,6 +711,25 @@ test "gRPC duplex preserves trailers-only status before request FIN" {
                 return;
             };
             defer stream.deinit();
+            stream.deadline = std.Io.Clock.Timestamp.fromNow(
+                self.server.io,
+                .{
+                    .raw = .fromNanoseconds(1),
+                    .clock = .awake,
+                },
+            );
+            std.Io.sleep(
+                self.server.io,
+                .fromMilliseconds(1),
+                .awake,
+            ) catch |err| {
+                self.err = err;
+                return;
+            };
+            if (!stream.deadlineExpired()) {
+                self.err = error.ExpectedExpiredDeadline;
+                return;
+            }
             stream.finish(
                 .permission_denied,
                 "not allowed",
@@ -718,7 +737,23 @@ test "gRPC duplex preserves trailers-only status before request FIN" {
                 &.{},
             ) catch |err| {
                 self.err = err;
+                return;
             };
+            const drained = stream.drainRequestAfterResponseWithDeadline(
+                std.Io.Clock.Timestamp.fromNow(self.server.io, .{
+                    .raw = .fromSeconds(5),
+                    .clock = .awake,
+                }),
+            ) catch |err| {
+                self.err = err;
+                return;
+            };
+            switch (drained) {
+                .finished => {},
+                .reset => {
+                    self.err = error.UnexpectedReset;
+                },
+            }
         }
     };
     const Consumer = struct {

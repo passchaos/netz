@@ -26,6 +26,7 @@ pub const ClientDuplex = duplex.ClientDuplex;
 pub const startDuplex = duplex.startDuplex;
 pub const DuplexRequestTerminal = duplex.RequestTerminal;
 pub const ServerDuplexEvent = duplex.ServerEvent;
+pub const ServerRequestDrainResult = duplex.RequestDrainResult;
 pub const ServerDuplex = duplex.ServerDuplex;
 pub const acceptDuplex = duplex.acceptDuplex;
 pub const acceptDuplexWithTimeout = duplex.acceptDuplexWithTimeout;

@@ -102,6 +102,10 @@ existing HTTP/2 runtime:
 - typed duplex terminal events for both `grpc-status` trailers (including a
   true trailers-only early response) and peer `RST_STREAM`; a terminal early
   response closes the still-open upload before yielding the owned result.
+  Servers can finish an early response and then drain the request half under
+  an independent cleanup deadline, preserving the committed gRPC status while
+  safely consuming a late FIN or peer reset instead of overwriting it with an
+  extra teardown-time `RST_STREAM(CANCEL)`.
 - standard `grpc.health.v1.Health/Check` protobuf messages and unary client/
   server helpers over persistent h2c and TLS channels, including the 200-byte
   service-name bound, `NOT_FOUND` for unknown services, and
@@ -192,39 +196,46 @@ shapes over one real h2c channel, including typed handler failure mapping:
 zig build interop-grpc-pbz -Doptimize=ReleaseFast
 ```
 
-By default the C++ server gate verifies `~/Work/grpc` is at
+By default both C++ gates verify `~/Work/grpc` is at
 `03d65cc67c450ccbb58a8a45627c4da83a886ccd`, builds
-`//test/cpp/interop:interop_server` with Bazel, starts it with insecure
-credentials on a temporary loopback port, and bounds both readiness and client
-execution. Set `GRPC_ROOT` to use the same pinned source revision elsewhere, or
-set `GRPC_CPP_INTEROP_SERVER` to an already-built server executable. `BAZEL`
+the relevant `//test/cpp/interop` executable with Bazel, and bounds both
+readiness and execution. The forward gate runs the upstream server first over
+h2c and then over TLS with upstream's CA/server fixtures; netz connects to the
+loopback address while independently validating `foo.test.google.fr` and ALPN
+`h2`. The reverse gate runs each scenario against separate h2c and TLS netz
+server processes; the official client verifies the deterministic localhost
+certificate. Set `GRPC_ROOT` to use the same pinned source revision elsewhere,
+or set `GRPC_CPP_INTEROP_SERVER`/`GRPC_CPP_INTEROP_CLIENT` to an already-built
+executable. `BAZEL`
 may select a non-default Bazel/Bazelisk executable; the script verifies it
 matches upstream's checked-in `.bazelversion`. The harness is reproducible even
 when a host lacks that exact Bazel release, but such a host cannot establish an
 external pass until the pinned tool or a prebuilt server is supplied.
 
-On 2026-09-02 the full gate passed against upstream commit
+On 2026-09-07 both bidirectional TLS gates passed against upstream commit
 `03d65cc67c450ccbb58a8a45627c4da83a886ccd` using Bazel 8.7.0 and GCC on
 Linux x86_64. The pinned Bazel output root was placed on tmpfs because this
 host's disk-backed extraction stalled in journal waits; that is a host build
 performance workaround, not a protocol exception. The successful command was:
 
 ```sh
-BAZEL=/tmp/bazel87-netz CC=/usr/bin/gcc GRPC_CPP_BUILD_TIMEOUT=3m \
-  timeout 5m zig build interop-grpc-cpp -Doptimize=ReleaseFast
+BAZEL=/tmp/bazel87-netz CC=/usr/bin/gcc GRPC_CPP_BUILD_TIMEOUT=20m \
+  zig build interop-grpc-cpp -Doptimize=ReleaseFast
+BAZEL=/tmp/bazel87-netz CC=/usr/bin/gcc GRPC_CPP_BUILD_TIMEOUT=20m \
+  zig build interop-grpc-cpp-client -Doptimize=ReleaseFast
 ```
 
 The independent C++ server build completed all 3492 Bazel actions and the
 process-boundary client reported all four scenarios below as successful. Large
 responses crossed multiple HTTP/2 DATA frames, additionally exercising decoder
 progress events that contain a message fragment but no completed gRPC message.
-The reverse gate also passed on 2026-09-02 with the same upstream revision,
-Bazel 8.7.0, and GCC. It built upstream's `interop_client` and verified
-`ping_pong`, `empty_stream`, `cancel_after_first_response`, and
-`timeout_on_sleeping_server` against separate netz server processes. Each case
-requires both the C++ client's successful exit and a netz marker proving that
-the expected request completion, cancellation, or deadline condition was
-observed; this prevents a client-only result from masking a server-side fault.
+The reverse gate builds upstream's `interop_client` and verifies `ping_pong`,
+`empty_stream`, `cancel_after_first_response`, and
+`timeout_on_sleeping_server` over both transports. Each case requires both the
+C++ client's successful exit and a netz marker proving the expected terminal
+condition. For the upstream test's hard-coded 1 ms TLS deadline, the harness
+also records the legitimate race where the client reaches local
+`DEADLINE_EXCEEDED` before the TLS accept finishes and no server RPC exists.
 
 The reflection gate passed on 2026-09-07 against the same pinned upstream
 revision, Bazel 8.7.0, and GCC. It generates a standard descriptor set with the
@@ -295,10 +306,10 @@ upstream gRPC Core's `ServerEarlyReturnTest`.
    connection, and the owning h2c wrappers also compose multi-message request
    and response streams. A focused grpc-cpp gate is now available for external
    server checks of full duplex, metadata, cancellation/channel reuse, and
-   deadline propagation. The reverse gate covers upstream-client ping-pong,
-   empty-stream completion, cancellation, and deadline behavior against netz.
-   A broader upstream matrix, including reverse custom metadata and TLS, remains
-   future work.
+   deadline propagation over h2c and certificate-verified TLS. The reverse gate
+   covers upstream-client ping-pong, empty-stream completion, cancellation, and
+   deadline behavior against netz over both transports. A broader upstream
+   matrix, including reverse custom metadata, remains future work.
 3. Add broader conformance/interop runners. Reflection accepts standard
    descriptor sets directly and
    is covered by an independent official `grpc_cli` process-boundary gate.

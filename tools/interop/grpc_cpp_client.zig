@@ -25,9 +25,13 @@ const trailing_metadata_value = [_]u8{ 0x0a, 0x0b, 0x0a, 0x0b, 0x0a, 0x0b };
 
 pub fn main(init: std.process.Init) !void {
     const args = try init.minimal.args.toSlice(init.arena.allocator());
-    if (args.len != 2) return error.InvalidArgument;
+    if (args.len != 2 and args.len != 3) return error.InvalidArgument;
     const port = try std.fmt.parseInt(u16, args[1], 10);
     if (port == 0) return error.InvalidArgument;
+    const tls_enabled = args.len == 3;
+    if (tls_enabled and !std.Io.Dir.path.isAbsolute(args[2])) {
+        return error.InvalidArgument;
+    }
 
     const allocator = std.heap.c_allocator;
     var threaded = std.Io.Threaded.init(allocator, .{});
@@ -38,19 +42,52 @@ pub fn main(init: std.process.Init) !void {
     // transport and gRPC bounds deliberately close to that fixture rather
     // than accepting the library defaults as an accidental unbounded oracle.
     const message_limit = messages.max_payload_size + 64;
-    var client = try netz.grpc.runtime.Client.connect(
-        allocator,
-        io,
-        .{ .ip4 = .loopback(port) },
-        .{
-            .max_frame_payload = 64 * 1024,
-            .max_body_bytes = message_limit,
-            .initial_window_size = 512 * 1024,
-            .initial_connection_window_size = 2 * 1024 * 1024,
-            .handshake_timeout = .fromSeconds(5),
-        },
-    );
+    const limits: netz.http2.runtime.Limits = .{
+        .max_frame_payload = 64 * 1024,
+        .max_body_bytes = message_limit,
+        .initial_window_size = 512 * 1024,
+        .initial_connection_window_size = 2 * 1024 * 1024,
+        .handshake_timeout = .fromSeconds(5),
+    };
+    var ca_bundle: std.crypto.Certificate.Bundle = .empty;
+    defer ca_bundle.deinit(allocator);
+    var ca_lock: std.Io.RwLock = .init;
+    if (tls_enabled) {
+        try ca_bundle.addCertsFromFilePathAbsolute(
+            allocator,
+            io,
+            std.Io.Clock.real.now(io),
+            args[2],
+        );
+    }
+    var client = if (tls_enabled)
+        try netz.grpc.runtime.Client.connectTlsAddress(
+            allocator,
+            io,
+            .{ .ip4 = .loopback(port) },
+            "foo.test.google.fr",
+            authority,
+            .{
+                .limits = limits,
+                .tls = .{ .ca_bundle = .{
+                    .bundle = &ca_bundle,
+                    .lock = &ca_lock,
+                } },
+            },
+        )
+    else
+        try netz.grpc.runtime.Client.connect(
+            allocator,
+            io,
+            .{ .ip4 = .loopback(port) },
+            limits,
+        );
     defer client.deinit();
+    if (tls_enabled and
+        !std.mem.eql(u8, client.negotiatedAlpn() orelse "", "h2"))
+    {
+        return error.InvalidAlpn;
+    }
 
     try runPingPong(allocator, &client, message_limit);
     try runCustomMetadata(allocator, &client, message_limit);
@@ -58,10 +95,11 @@ pub fn main(init: std.process.Init) !void {
     try runSleepingDeadline(allocator, &client, message_limit);
 
     std.debug.print(
-        "netz gRPC client interoperated with grpc-cpp: transport=h2c " ++
+        "netz gRPC client interoperated with grpc-cpp: transport={s} " ++
             "ping_pong=4 metadata=initial+trailing-bin " ++
-            "cancel=CANCEL reuse=true deadline=DEADLINE_EXCEEDED\n",
-        .{},
+            "cancel=CANCEL reuse=true " ++
+            "deadline=DEADLINE_EXCEEDED-or-local-timeout+CANCEL\n",
+        .{if (tls_enabled) "tls" else "h2c"},
     );
 }
 
@@ -210,7 +248,15 @@ fn runSleepingDeadline(
     );
     defer allocator.free(request);
     try writeMessageFully(allocator, &stream, request, &observer);
-    try readThroughTerminal(allocator, &stream, &observer);
+    readThroughTerminal(allocator, &stream, &observer) catch |err| switch (err) {
+        error.Timeout => {
+            if (observer.message_count != 0) {
+                return error.InvalidDeadlineResponse;
+            }
+            return;
+        },
+        else => return err,
+    };
     if (observer.message_count != 0 or
         observer.terminal_status != .deadline_exceeded)
     {

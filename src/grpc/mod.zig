@@ -66,6 +66,7 @@ pub const ClientDuplex = stream.ClientDuplex;
 pub const startDuplex = stream.startDuplex;
 pub const DuplexRequestTerminal = stream.DuplexRequestTerminal;
 pub const ServerDuplexEvent = stream.ServerDuplexEvent;
+pub const ServerRequestDrainResult = stream.ServerRequestDrainResult;
 pub const ServerDuplex = stream.ServerDuplex;
 pub const acceptDuplex = stream.acceptDuplex;
 pub const acceptDuplexWithTimeout = stream.acceptDuplexWithTimeout;

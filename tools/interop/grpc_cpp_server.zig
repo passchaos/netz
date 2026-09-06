@@ -22,38 +22,93 @@ const Scenario = enum {
 
 pub fn main(init: std.process.Init) !void {
     const args = try init.minimal.args.toSlice(init.arena.allocator());
-    if (args.len != 3) return error.InvalidArgument;
+    if (args.len != 3 and args.len != 4) return error.InvalidArgument;
     const port = try std.fmt.parseInt(u16, args[1], 10);
     if (port == 0) return error.InvalidArgument;
     const scenario = try Scenario.parse(args[2]);
+    const tls_enabled = args.len == 4 and
+        std.mem.eql(u8, args[3], "--tls");
+    if (args.len == 4 and !tls_enabled) return error.InvalidArgument;
 
     const allocator = std.heap.c_allocator;
     var threaded = std.Io.Threaded.init(allocator, .{});
     defer threaded.deinit();
     const io = threaded.io();
 
-    var server = try netz.grpc.runtime.Server.listen(
-        allocator,
-        io,
-        .{ .ip4 = .loopback(port) },
-        .{
-            .max_frame_payload = 64 * 1024,
-            .max_body_bytes = message_limit,
-            .initial_window_size = 512 * 1024,
-            .initial_connection_window_size = 2 * 1024 * 1024,
-            .handshake_timeout = .fromSeconds(5),
-        },
-        message_limit,
+    const limits: netz.http2.runtime.Limits = .{
+        .max_frame_payload = 64 * 1024,
+        .max_body_bytes = message_limit,
+        .initial_window_size = 512 * 1024,
+        .initial_connection_window_size = 2 * 1024 * 1024,
+        .handshake_timeout = .fromSeconds(5),
+    };
+    var certificate_der: [netz.tls.testing.certificate_der_len]u8 = undefined;
+    try std.base64.standard.Decoder.decode(
+        &certificate_der,
+        netz.tls.testing.certificate_base64,
     );
-    defer server.deinit();
+    const key_pair = try netz.tls.testing.serverKeyPair();
+    var clear_server: netz.grpc.runtime.Server = undefined;
+    var tls_server: netz.grpc.runtime.TlsServer = undefined;
+    if (tls_enabled) {
+        tls_server = try .listen(
+            allocator,
+            io,
+            .{ .ip4 = .loopback(port) },
+            .{
+                .transport = .{
+                    .identity = .{
+                        .certificate_chain = &.{&certificate_der},
+                        .signer = .{ .ecdsa_p256_sha256 = .{
+                            .key_pair = key_pair,
+                        } },
+                    },
+                    .limits = limits,
+                },
+                .max_message_size = message_limit,
+            },
+        );
+    } else {
+        clear_server = try .listen(
+            allocator,
+            io,
+            .{ .ip4 = .loopback(port) },
+            limits,
+            message_limit,
+        );
+    }
+    defer if (tls_enabled) tls_server.deinit() else clear_server.deinit();
 
     std.debug.print(
-        "netz grpc server ready: port={d} scenario={s}\n",
-        .{ port, @tagName(scenario) },
+        "netz grpc server ready: port={d} scenario={s} transport={s}\n",
+        .{ port, @tagName(scenario), if (tls_enabled) "tls" else "h2c" },
     );
 
-    var connection = try server.accept();
+    var connection = if (tls_enabled)
+        tls_server.accept() catch |err| {
+            if (scenario == .timeout_on_sleeping_server and
+                err == error.UnexpectedEof)
+            {
+                std.debug.print(
+                    "netz grpc server completed: scenario={s} transport=tls outcome=local-deadline-before-tls-accept\n",
+                    .{@tagName(scenario)},
+                );
+                return;
+            }
+            return err;
+        }
+    else
+        try clear_server.accept();
     defer connection.deinit();
+    std.debug.print(
+        "netz grpc server accepted: scenario={s} transport={s}\n",
+        .{ @tagName(scenario), if (tls_enabled) "tls" else "h2c" },
+    );
+    if (tls_enabled and
+        !std.mem.eql(u8, connection.negotiatedAlpn() orelse "", "h2"))
+    {
+        return error.InvalidAlpn;
+    }
     var stream = try connection.acceptDuplex();
     defer stream.deinit();
     if (!std.mem.eql(u8, stream.path, service_path)) {
@@ -63,8 +118,8 @@ pub fn main(init: std.process.Init) !void {
 
     try serveScenario(allocator, io, &stream, scenario);
     std.debug.print(
-        "netz grpc server completed: scenario={s}\n",
-        .{@tagName(scenario)},
+        "netz grpc server completed: scenario={s} transport={s}\n",
+        .{ @tagName(scenario), if (tls_enabled) "tls" else "h2c" },
     );
 }
 
@@ -191,7 +246,37 @@ fn serveSleepingDeadline(
         .clock = .awake,
     });
     while (true) {
-        var event = try readEvent(stream, queue, watchdog);
+        var event = readEvent(stream, queue, watchdog) catch |err| switch (err) {
+            error.Timeout => {
+                try stream.finish(
+                    .deadline_exceeded,
+                    "deadline exceeded",
+                    &.{},
+                    &.{},
+                );
+                const cleanup_deadline = std.Io.Clock.Timestamp.fromNow(
+                    io,
+                    .{
+                        .raw = .fromSeconds(5),
+                        .clock = .awake,
+                    },
+                );
+                const drained = try stream
+                    .drainRequestAfterResponseWithDeadline(cleanup_deadline);
+                switch (drained) {
+                    .finished => return,
+                    .reset => |reset| {
+                        if (reset.error_code != .cancel and
+                            reset.error_code != .no_error)
+                        {
+                            return error.UnexpectedReset;
+                        }
+                        return;
+                    },
+                }
+            },
+            else => return err,
+        };
         defer event.deinit();
         switch (event) {
             .messages => {
