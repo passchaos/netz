@@ -35,6 +35,8 @@ pub const ClientOptions = struct {
     metadata: []const http2.Hpack.HeaderField = &.{},
     binary_metadata: []const metadata.BinaryMetadata = &.{},
     max_message_size: usize = 16 * 1024 * 1024,
+    max_request_message_size: ?usize = null,
+    max_response_message_size: ?usize = null,
     retry_policy: ?grpc_call.RetryPolicy = null,
     service_config: ?*service_config.ServiceConfig = null,
 };
@@ -147,9 +149,13 @@ pub fn ClientTransport(comptime Service: type) type {
             try self.requireMethod(service_name, method_name, true, false);
             const path = try self.methodPathAlloc(allocator, method_name);
             defer allocator.free(path);
-            var writer = try self.client.startStreaming(
-                self.streamingOptions(path),
-            );
+            var writer = if (self.options.service_config) |config|
+                try self.client.startStreamingWithServiceConfig(
+                    self.streamingOptions(path),
+                    config,
+                )
+            else
+                try self.client.startStreaming(self.streamingOptions(path));
             defer writer.deinit();
             var output = SingleResponse.init(allocator);
             errdefer output.deinit();
@@ -215,7 +221,13 @@ pub fn ClientTransport(comptime Service: type) type {
         ) !void {
             const path = try self.methodPathAlloc(allocator, method_name);
             defer allocator.free(path);
-            var rpc = try self.client.startDuplex(self.streamingOptions(path));
+            var rpc = if (self.options.service_config) |config|
+                try self.client.startDuplexWithServiceConfig(
+                    self.streamingOptions(path),
+                    config,
+                )
+            else
+                try self.client.startDuplex(self.streamingOptions(path));
             defer rpc.deinit();
             var collector = ResponseSink(
                 @TypeOf(responses),
@@ -276,7 +288,13 @@ pub fn ClientTransport(comptime Service: type) type {
         ) !void {
             const path = try self.methodPathAlloc(allocator, method_name);
             defer allocator.free(path);
-            var rpc = try self.client.startDuplex(self.streamingOptions(path));
+            var rpc = if (self.options.service_config) |config|
+                try self.client.startDuplexWithServiceConfig(
+                    self.streamingOptions(path),
+                    config,
+                )
+            else
+                try self.client.startDuplex(self.streamingOptions(path));
             defer rpc.deinit();
             var collector = ResponseSink(
                 @TypeOf(responses),
@@ -472,6 +490,8 @@ pub fn ClientTransport(comptime Service: type) type {
                 .metadata = self.options.metadata,
                 .binary_metadata = self.options.binary_metadata,
                 .max_message_size = self.options.max_message_size,
+                .max_request_message_size = self.options.max_request_message_size,
+                .max_response_message_size = self.options.max_response_message_size,
             };
         }
 
@@ -487,6 +507,8 @@ pub fn ClientTransport(comptime Service: type) type {
                 .metadata = self.options.metadata,
                 .binary_metadata = self.options.binary_metadata,
                 .max_message_size = self.options.max_message_size,
+                .max_request_message_size = self.options.max_request_message_size,
+                .max_response_message_size = self.options.max_response_message_size,
             };
         }
 

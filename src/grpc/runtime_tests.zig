@@ -1477,6 +1477,137 @@ test "gRPC sequential stream deadline bounds response wait" {
     if (shared.err) |err| return err;
 }
 
+test "gRPC service config applies streaming request and response limits" {
+    const allocator = std.testing.allocator;
+    var threaded = std.Io.Threaded.init(allocator, .{});
+    defer threaded.deinit();
+    const io = threaded.io();
+    const limits: http2.runtime.Limits = .{
+        .max_frame_payload = 64,
+        .max_body_bytes = 4096,
+    };
+    var server = try grpc.runtime.Server.listen(
+        allocator,
+        io,
+        .{ .ip4 = .loopback(0) },
+        limits,
+        1024,
+    );
+    defer server.deinit();
+
+    const Shared = struct {
+        server: *grpc.runtime.Server,
+        err: ?anyerror = null,
+
+        fn consume(_: void, message: grpc.StreamingMessage) !void {
+            try std.testing.expectEqualStrings("ok", message.payload);
+        }
+
+        fn run(self: *@This()) void {
+            self.runFallible() catch |err| {
+                self.err = err;
+            };
+        }
+
+        fn runFallible(self: *@This()) !void {
+            var connection = try self.server.accept();
+            defer connection.deinit();
+            var rejected = try connection.acceptDuplexWithTimeout(
+                .fromSeconds(2),
+            );
+            defer rejected.deinit();
+            var canceled = try rejected.readRequestEventWithTimeout(
+                .fromSeconds(2),
+                {},
+                consume,
+            );
+            defer canceled.deinit();
+            try std.testing.expect(canceled == .reset);
+            try std.testing.expectEqual(
+                http2.ErrorCode.cancel,
+                canceled.reset.error_code,
+            );
+            var request = try connection.readStreaming({}, consume);
+            defer request.deinit();
+            try std.testing.expect(request.timeout != null);
+            try std.testing.expect(
+                request.timeout.?.duration().nanoseconds <=
+                    2 * std.time.ns_per_s,
+            );
+            var response = try connection.startStreamingResponse(
+                request.transport.stream_id,
+                .{ .request_accepted_encodings = request.accepted_encodings },
+            );
+            defer response.deinit();
+            try response.writeMessage("four");
+            try response.finishOk();
+
+            var next = try connection.readUnary();
+            defer next.deinit();
+            try std.testing.expectEqualStrings(
+                "/demo.Stream/Ok",
+                next.request.path,
+            );
+            try connection.writeUnary(next.request.stream_id, .{
+                .message = "ok",
+            });
+        }
+    };
+    const Consumer = struct {
+        fn consume(_: void, _: grpc.StreamingMessage) !void {}
+    };
+    var shared = Shared{ .server = &server };
+    const thread = try std.Thread.spawn(.{}, Shared.run, .{&shared});
+    var joined = false;
+    defer if (!joined) thread.join();
+    var config = try grpc.ServiceConfig.parse(allocator,
+        \\{"methodConfig": [{"name": [{"service": "demo.Stream"}],
+        \\ "timeout": "2s", "maxRequestMessageBytes": 3,
+        \\ "maxResponseMessageBytes": 3}]}
+    );
+    defer config.deinit();
+    var client = try grpc.runtime.Client.connect(
+        allocator,
+        io,
+        server.address(),
+        limits,
+    );
+    defer client.deinit();
+    var rejected = try client.startStreamingWithServiceConfig(.{
+        .path = "/demo.Stream/Upload",
+        .authority = "localhost",
+    }, &config);
+    try std.testing.expectError(
+        error.GrpcMessageTooLarge,
+        rejected.writeMessage("four"),
+    );
+    try rejected.cancel();
+    rejected.deinit();
+
+    var stream = try client.startStreamingWithServiceConfig(.{
+        .path = "/demo.Stream/Upload",
+        .authority = "localhost",
+    }, &config);
+    defer stream.deinit();
+    try stream.writeMessage("ok");
+    try stream.finish();
+    try std.testing.expectError(
+        error.GrpcMessageTooLarge,
+        stream.readResponse({}, Consumer.consume),
+    );
+    var next = try client.unaryWithServiceConfig(.{
+        .path = "/demo.Stream/Ok",
+        .authority = "localhost",
+        .message = "ok",
+    }, &config);
+    defer next.deinit();
+    try std.testing.expectEqualStrings("ok", next.message.?.payload);
+
+    thread.join();
+    joined = true;
+    if (shared.err) |err| return err;
+}
+
 test "gRPC h2c reflection serves ordered v1 queries" {
     const allocator = std.testing.allocator;
     var threaded = std.Io.Threaded.init(allocator, .{});

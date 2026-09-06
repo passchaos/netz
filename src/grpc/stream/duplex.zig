@@ -657,10 +657,10 @@ pub fn startDuplex(
             .allocator = allocator,
             .algorithm = options.compression,
             .compression_level = options.compression_level,
-            .max_message_size = options.max_message_size,
+            .max_message_size = options.requestMessageLimit(),
         },
         .accepted_encodings = options.accepted_encodings,
-        .max_message_size = options.max_message_size,
+        .max_message_size = options.responseMessageLimit(),
         .deadline = started.deadline,
     };
 }

@@ -145,12 +145,18 @@ pub fn main(init: std.process.Init) !void {
         .{ .max_frame_payload = 128, .max_body_bytes = 4096 },
     );
     defer client.deinit();
+    var service_config = try netz.grpc.ServiceConfig.parse(allocator,
+        \\{"methodConfig": [{"name": [{"service": "demo.binding.Pipe"}],
+        \\ "timeout": "2s", "maxRequestMessageBytes": 4096,
+        \\ "maxResponseMessageBytes": "4096"}]}
+    );
+    defer service_config.deinit();
     const Transport = netz.grpc.pbz.ClientTransport(Pipe);
     const GeneratedClient = Pipe.Client(Transport);
     var generated_client = GeneratedClient.init(try Transport.init(&client, .{
         .package = grpc_pb.proto_package,
         .authority = "localhost",
-        .timeout = try netz.grpc.Timeout.init(2, .second),
+        .service_config = &service_config,
     }));
     defer generated_client.transport.deinit();
 

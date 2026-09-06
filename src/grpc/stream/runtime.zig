@@ -30,7 +30,25 @@ pub const RequestOptions = struct {
     timeout: ?wire.Timeout = null,
     metadata: []const http2.Hpack.HeaderField = &.{},
     binary_metadata: []const metadata.BinaryMetadata = &.{},
+    /// Compatibility ceiling used for both directions unless a directional
+    /// limit below is stricter.
     max_message_size: usize = 16 * 1024 * 1024,
+    max_request_message_size: ?usize = null,
+    max_response_message_size: ?usize = null,
+
+    pub fn requestMessageLimit(self: RequestOptions) usize {
+        return @min(
+            self.max_message_size,
+            self.max_request_message_size orelse self.max_message_size,
+        );
+    }
+
+    pub fn responseMessageLimit(self: RequestOptions) usize {
+        return @min(
+            self.max_message_size,
+            self.max_response_message_size orelse self.max_message_size,
+        );
+    }
 };
 
 pub const ClientWriter = struct {
@@ -290,10 +308,10 @@ pub fn startClient(
             .allocator = allocator,
             .algorithm = options.compression,
             .compression_level = options.compression_level,
-            .max_message_size = options.max_message_size,
+            .max_message_size = options.requestMessageLimit(),
         },
         .accepted_encodings = options.accepted_encodings,
-        .max_message_size = options.max_message_size,
+        .max_message_size = options.responseMessageLimit(),
         .deadline = deadline,
     };
 }

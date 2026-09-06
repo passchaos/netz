@@ -60,9 +60,11 @@ existing HTTP/2 runtime:
   service-config fields are ignored, and a more-specific config without a
   retry policy deliberately disables a broader inherited retry. Method
   `timeout`, `maxRequestMessageBytes`, and `maxResponseMessageBytes` are also
-  applied to unary calls, taking the stricter bound when the caller supplied
-  its own timeout or directional message limit; recognized `waitForReady` is
-  rejected until the channel owns a reconnect policy,
+  applied to unary, sequential-streaming, and duplex calls, taking the stricter
+  bound when the caller supplied its own timeout or directional message limit.
+  Streaming policies do not silently enable retry without a complete replay
+  buffer; recognized `waitForReady` is rejected until the channel owns a
+  reconnect policy,
 - sequential request/response message-stream helpers over HTTP/2
   `RequestWriter`, `ResponseWriter`, and borrowed DATA callbacks,
 - sequential client-stream deadlines captured once before request setup and
