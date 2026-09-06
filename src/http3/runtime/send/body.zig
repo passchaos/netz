@@ -232,6 +232,60 @@ pub fn trySendConnectionBodyChunk(
     if (fin) _ = bodies.finish(stream_id);
 }
 
+/// Submit several borrowed slices as one HTTP/3 DATA frame and one QUIC
+/// packet. The complete contribution is transactional: any validation or send
+/// failure leaves the body length, STREAM offset, and FIN state unchanged.
+pub fn trySendConnectionBodyParts(
+    connection: *quic.one_rtt.Connection,
+    bodies: *OutboundBodySet,
+    stream_id: u62,
+    parts: []const []const u8,
+    fin: bool,
+    options: anytype,
+) Error!void {
+    var data_len: usize = 0;
+    for (parts) |part| {
+        data_len = std.math.add(usize, data_len, part.len) catch
+            return error.InvalidContentLength;
+    }
+    if (data_len == 0) {
+        return trySendConnectionBodyChunk(
+            connection,
+            bodies,
+            stream_id,
+            &.{},
+            fin,
+            options,
+        );
+    }
+
+    const entry = bodies.find(stream_id) orelse return error.UnexpectedStream;
+    var staged = entry.*;
+    try bodies.prepareChunkForEntry(&staged, data_len, fin);
+    bodies.frame_scratch.clearRetainingCapacity();
+    if (!try body_batch.appendDataStreamPartFrames(
+        &staged.send,
+        &bodies.frame_scratch,
+        connection.endpoint.allocator,
+        &bodies.data_prefix_scratch,
+        parts,
+        fin,
+        options.max_stream_frame_data,
+        options.max_frames_per_packet,
+    )) return error.DatagramTooLarge;
+    if (bodies.frame_scratch.items.len == 0 or
+        try connection.packetLenForFramesAtOffset(
+            0,
+            bodies.frame_scratch.items,
+        ) > connection.currentSendDatagramSize())
+    {
+        return error.DatagramTooLarge;
+    }
+    try connection.trySend(bodies.frame_scratch.items);
+    entry.* = staged;
+    if (fin) _ = bodies.finish(stream_id);
+}
+
 pub fn sendConnectionBodyBatchPaced(
     connection: *quic.one_rtt.Connection,
     bodies: *OutboundBodySet,

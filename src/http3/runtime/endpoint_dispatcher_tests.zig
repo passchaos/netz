@@ -6,6 +6,7 @@ const quic = @import("../../quic/mod.zig");
 const FixedClockIo = struct {
     delegate: std.Io,
     now_ns: i96,
+    send_calls: usize = 0,
     sleep_calls: usize = 0,
 
     fn now(
@@ -32,6 +33,7 @@ const FixedClockIo = struct {
         flags: std.Io.net.SendFlags,
     ) struct { ?std.Io.net.Socket.SendError, usize } {
         const self: *FixedClockIo = @ptrCast(@alignCast(userdata));
+        self.send_calls += 1;
         return self.delegate.vtable.netSend(
             self.delegate.userdata,
             socket_handle,
@@ -1291,6 +1293,112 @@ test "HTTP/3 dispatcher-bound abandon never waits for pacing" {
         runtime.testing.clientRequestCount(&client),
     );
     try std.testing.expect(!client.isReusable());
+}
+
+test "HTTP/3 request body parts remain transactional across pacing" {
+    const allocator = std.testing.allocator;
+    var threaded = std.Io.Threaded.init(allocator, .{});
+    defer threaded.deinit();
+    const io = threaded.io();
+
+    var peer_endpoint = try quic.runtime.Endpoint.bind(
+        allocator,
+        io,
+        .{ .ip4 = .loopback(0) },
+        .{ .max_datagram_size = 4096 },
+    );
+    defer peer_endpoint.deinit();
+    var endpoint = try quic.runtime.Endpoint.bind(
+        allocator,
+        io,
+        .{ .ip4 = .loopback(0) },
+        .{ .max_datagram_size = 4096 },
+    );
+    defer endpoint.deinit();
+    const client_keys = quic.protection.deriveAes128Keys(
+        [_]u8{0xa7} ** quic.protection.secret_len,
+    );
+    const server_keys = quic.protection.deriveAes128Keys(
+        [_]u8{0xa8} ** quic.protection.secret_len,
+    );
+    var client = try runtime.HandshakeClient.initEstablished(
+        &endpoint,
+        peer_endpoint.address(),
+        try quic.handshake.establishPreconfigured(
+            &endpoint,
+            peer_endpoint.address(),
+            .client,
+            .{
+                .receive_keys = server_keys,
+                .send_keys = client_keys,
+                .local_connection_id = "parts-client",
+                .peer_connection_id = "parts-server",
+                .one_rtt = .{
+                    .max_datagram_size = 1200,
+                    .pacing_max_burst_packets = 1,
+                },
+            },
+        ),
+        .{},
+    );
+    defer client.deinit();
+
+    var fixed_io = FixedClockIo{
+        .delegate = endpoint.io,
+        .now_ns = 7_000_000,
+    };
+    var fixed_vtable = endpoint.io.vtable.*;
+    fixed_vtable.now = FixedClockIo.now;
+    fixed_vtable.sleep = FixedClockIo.sleep;
+    fixed_vtable.netSend = FixedClockIo.netSend;
+    endpoint.io = .{ .userdata = &fixed_io, .vtable = &fixed_vtable };
+    defer endpoint.io = fixed_io.delegate;
+
+    const stream_id = try client.startRequest(.{
+        .method = "POST",
+        .path = "/parts",
+        .authority = "localhost",
+    }, 6);
+    const before = client.outbound_bodies.find(stream_id).?.*;
+    const sends_before_blocked = fixed_io.send_calls;
+    quic.one_rtt.testing.exhaustPacingAt(
+        &client.established.connection,
+        @intCast(fixed_io.now_ns),
+    );
+    try std.testing.expectError(
+        error.PacingLimited,
+        client.trySendRequestBodyParts(
+            stream_id,
+            &.{ "one", &.{}, "two" },
+            true,
+        ),
+    );
+    const after = client.outbound_bodies.find(stream_id).?.*;
+    try std.testing.expectEqual(before.written, after.written);
+    try std.testing.expectEqual(before.send.next_offset, after.send.next_offset);
+    try std.testing.expectEqual(before.send.fin_sent, after.send.fin_sent);
+    try std.testing.expectEqual(sends_before_blocked, fixed_io.send_calls);
+    try std.testing.expectEqual(@as(usize, 0), fixed_io.sleep_calls);
+
+    const timer = client.established.connection.nextTimerDeadline() orelse
+        return error.TestUnexpectedResult;
+    try std.testing.expectEqual(quic.one_rtt.TimerDeadlineKind.pacing, timer.kind);
+    fixed_io.now_ns = @intCast(timer.deadline_ns);
+    _ = (try client.established.connection.serviceNextTimerAt(
+        timer.deadline_ns,
+    )) orelse return error.TestUnexpectedResult;
+    const sends_before_retry = fixed_io.send_calls;
+    try client.trySendRequestBodyParts(
+        stream_id,
+        &.{ "one", &.{}, "two" },
+        true,
+    );
+    try std.testing.expectEqual(
+        sends_before_retry + 1,
+        fixed_io.send_calls,
+    );
+    try std.testing.expect(client.outbound_bodies.find(stream_id) == null);
+    try std.testing.expectEqual(@as(usize, 0), fixed_io.sleep_calls);
 }
 
 test "HTTP/3 flow-blocked request retry retains response semantics" {

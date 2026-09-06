@@ -831,6 +831,12 @@ for socket-visible progress. Existing small-window/backpressure tests and the
 full suite pass with that correction. Three CPU-0 samples measured 10.924,
 11.018, and 11.497 us/request (86,976-91,537 requests/s), still overlapping the
 established range.
+Shared-endpoint HTTP/3 uploads now accept multiple borrowed body slices as one
+DATA frame and one QUIC packet without concatenating the payload. A fixed-clock
+regression verifies zero socket calls and unchanged body/STREAM/FIN state when
+pacing rejects the attempt, followed by exactly one socket call for the same
+slices after timer progress. This is syscall and retry-accounting evidence; no
+throughput claim is made without a stable comparative benchmark.
 HTTP/3 CONNECT DATAGRAM negotiation, send-side lifecycle checks, terminal
 observation, queue polling/draining, and authenticated packet-order routing now
 live beside the registry in `runtime/datagram/routing.zig`. The router preserves

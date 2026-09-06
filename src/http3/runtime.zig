@@ -191,6 +191,7 @@ const pacedBodyChunkLimit = body_sender.pacedBodyChunkLimit;
 const responseBodySendCapacity = body_sender.responseBodySendCapacity;
 const pacedProtectedBodyChunkLimit = body_sender.pacedProtectedBodyChunkLimit;
 const sendConnectionBodyChunk = body_sender.sendConnectionBodyChunk;
+const trySendConnectionBodyParts = body_sender.trySendConnectionBodyParts;
 const trySendConnectionBodyChunk = body_sender.trySendConnectionBodyChunk;
 const sendConnectionBodyBatchPaced = body_sender.sendConnectionBodyBatchPaced;
 const sendConnectionBodyBatchPacedProgress =
@@ -8469,6 +8470,29 @@ pub const HandshakeClient = struct {
             &self.outbound_bodies,
             stream_id,
             data,
+            fin,
+            self.options,
+        );
+    }
+
+    /// Submit several borrowed slices as one DATA frame and one QUIC packet
+    /// without waiting for pacing or reading UDP. The entire contribution is
+    /// retryable after backpressure because no offset is committed unless the
+    /// packet reaches the endpoint.
+    pub fn trySendRequestBodyParts(
+        self: *HandshakeClient,
+        stream_id: u62,
+        parts: []const []const u8,
+        fin: bool,
+    ) Error!void {
+        if (!self.request_lifecycle.contains(stream_id)) {
+            return error.UnexpectedStream;
+        }
+        try trySendConnectionBodyParts(
+            &self.established.connection,
+            &self.outbound_bodies,
+            stream_id,
+            parts,
             fin,
             self.options,
         );

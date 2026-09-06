@@ -199,6 +199,21 @@ pub fn Pool(comptime Runtime: type) type {
                 );
             }
 
+            pub fn trySendRequestBodyParts(
+                self: *Lease,
+                stream_id: u62,
+                parts: []const []const u8,
+                fin: bool,
+            ) !void {
+                if (!self.active) return error.InvalidLease;
+                defer self.pool.refresh(self.handle) catch {};
+                try self.client().trySendRequestBodyParts(
+                    stream_id,
+                    parts,
+                    fin,
+                );
+            }
+
             pub fn release(self: *Lease) void {
                 std.debug.assert(self.active);
                 self.pool.release(self.handle);

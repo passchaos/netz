@@ -192,8 +192,11 @@ test "HTTP/3 shared pool routes two origins through one endpoint" {
         .path = "/a",
         .authority = "localhost",
     }, "upload-a".len);
-    try lease_a.trySendRequestBody(stream_a, "upload-", false);
-    try lease_a.trySendRequestBody(stream_a, "a", false);
+    try lease_a.trySendRequestBodyParts(
+        stream_a,
+        &.{ "up", "load", "-", "a" },
+        false,
+    );
     try lease_a.tryFinishRequestTrailers(stream_a, &.{.{
         .name = "x-upload",
         .value = "complete",
