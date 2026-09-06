@@ -216,6 +216,9 @@ application-state poll, including null and error results, so a failed
 automatic MAX_STREAMS send or protocol-error control work cannot leave a
 deadline visible only inside the connection while the single UDP owner blocks
 indefinitely.
+Its routed-packet boundary performs the same post-adapter synchronization for
+accepted, pending, rejected, and newly arriving CONNECT sessions, including
+protocol parse errors that replace an earlier QUIC timer with close state.
 The endpoint-accepted
 variant is deliberately nonblocking: it only inspects buffered state, sends a
 credit update when ready, and refreshes the dispatcher timer without reading

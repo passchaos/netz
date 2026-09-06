@@ -418,6 +418,114 @@ test "WebTransport endpoint server validates receive deadlines" {
     );
 }
 
+test "WebTransport endpoint packet error disarms stale transport timer" {
+    const allocator = std.testing.allocator;
+    var threaded = std.Io.Threaded.init(allocator, .{});
+    defer threaded.deinit();
+    const io = threaded.io();
+
+    var server = try runtime.HandshakeServer.bind(
+        allocator,
+        io,
+        .{ .ip4 = .loopback(0) },
+        .{ .http3 = .{ .quic = .{ .max_datagram_size = 4096 } } },
+        .{ .handshake = .{ .local_connection_id = "wt-packet-root" } },
+    );
+    defer server.deinit();
+    var endpoint = try runtime.EndpointServer.init(&server, .{});
+    defer endpoint.deinit();
+    const client_keys = quic.protection.deriveAes128Keys(
+        [_]u8{0xeb} ** quic.protection.secret_len,
+    );
+    const server_keys = quic.protection.deriveAes128Keys(
+        [_]u8{0xec} ** quic.protection.secret_len,
+    );
+    const client_cid = "wt-packet-client";
+    const server_cid = "wt-packet-server";
+    var client = try http3.runtime.HandshakeClient.initPreconfigured(
+        allocator,
+        io,
+        .{ .ip4 = .loopback(0) },
+        endpoint.address(),
+        .{ .quic = .{ .max_datagram_size = 4096 } },
+        .{},
+        .{
+            .receive_keys = server_keys,
+            .send_keys = client_keys,
+            .local_connection_id = client_cid,
+            .peer_connection_id = server_cid,
+            .one_rtt = .{ .enable_pacing = false },
+        },
+    );
+    defer client.deinit();
+    const session = try allocator.create(
+        http3.runtime.HandshakeServerSession,
+    );
+    var session_owned = true;
+    defer if (session_owned) {
+        session.deinit();
+        allocator.destroy(session);
+    };
+    session.* = try http3.runtime.HandshakeServerSession.initPreconfigured(
+        &server.h3.quic_server.endpoint,
+        client.address(),
+        .{},
+        .{
+            .receive_keys = client_keys,
+            .send_keys = server_keys,
+            .local_connection_id = server_cid,
+            .peer_connection_id = client_cid,
+            .one_rtt = .{ .enable_pacing = false },
+        },
+    );
+    const handle: quic.endpoint_dispatcher.ConnectionHandle = 91;
+    try endpoint.h3.dispatcher.registerConnection(
+        handle,
+        &session.established.connection,
+    );
+    const slot = try endpoint.h3.sessions.getOrPut(allocator, handle);
+    try std.testing.expect(!slot.found_existing);
+    slot.value_ptr.* = .{
+        .dispatcher = endpoint.h3.dispatcher,
+        .allocator = allocator,
+        .handle = handle,
+        .session = session,
+    };
+    session_owned = false;
+
+    try session.established.connection.send(&.{.{ .ping = {} }});
+    try endpoint.h3.dispatcher.refreshConnectionTimer(handle);
+    const before = endpoint.h3.dispatcher.nextTimerDeadline() orelse
+        return error.TestUnexpectedResult;
+    try std.testing.expectEqual(handle, before.connection_id);
+    try std.testing.expectEqual(
+        quic.one_rtt.TimerDeadlineKind.pto,
+        before.timer.kind,
+    );
+
+    try client.established.connection.send(&.{.{ .stream = .{
+        .stream_id = 2,
+        .data = &.{@intFromEnum(http3.StreamType.control)},
+        .fin = true,
+    } }});
+    var buffer: [1]u8 = undefined;
+    try std.testing.expectError(
+        error.ClosedCriticalStream,
+        endpoint.receiveOnce(
+            &.{quic.Version.version_1.wireValue()},
+            .{ .clock = .awake, .raw = .fromSeconds(1) },
+            &buffer,
+        ),
+    );
+    try std.testing.expect(session.established.connection.closing());
+    try std.testing.expect(
+        session.established.connection.nextTimerDeadline() == null,
+    );
+    try std.testing.expect(
+        endpoint.h3.dispatcher.nextTimerDeadline() == null,
+    );
+}
+
 test "WebTransport server deadline spans QUIC TLS and Extended CONNECT" {
     const allocator = std.testing.allocator;
     var threaded = std.Io.Threaded.init(allocator, .{

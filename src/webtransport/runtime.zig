@@ -2429,56 +2429,21 @@ pub const EndpointServer = struct {
             },
             .packet => |*packet| {
                 const handle = packet.connection_handle;
-                if (self.sessions.get(handle)) |session_value| {
-                    try session_value.h3.processDetachedRequestPacket(
-                        session_value.session_id.value,
-                        &packet.packet,
-                    );
-                    return self.pollAcceptedSessions(stream_buffer);
-                }
-                if (self.pending.get(handle)) |pending_value| {
-                    try pending_value.h3.processRequestPacket(
-                        &packet.packet,
-                    );
-                    return null;
-                }
-                if (self.rejected.contains(handle)) {
-                    const h3 = self.h3.session(handle) orelse
-                        return error.InvalidSessionState;
-                    try h3.processRequestPacket(&packet.packet);
-                    while (try h3.pollRequestEvent()) |ignored_value| {
-                        var ignored = ignored_value;
-                        ignored.deinit(self.allocator);
-                    }
-                    return null;
-                }
-                const h3 = self.h3.session(handle) orelse
-                    return error.InvalidSessionState;
-                try h3.processRequestPacket(&packet.packet);
-                const request = (try pollEndpointConnectHead(h3)) orelse
-                    return null;
-                errdefer {
-                    var owned = request.request;
-                    owned.deinit(self.allocator);
-                }
-                const pending = try self.allocator.create(
-                    EndpointPendingSession,
-                );
-                errdefer self.allocator.destroy(pending);
-                const slot = try self.pending.getOrPut(
-                    self.allocator,
+                var result = self.processRoutedPacket(
                     handle,
-                );
-                if (slot.found_existing) return error.InvalidSessionState;
-                pending.* = .{
-                    .handle = handle,
-                    .h3 = h3,
-                    .request = request.request,
-                    .session_id = request.session_id,
-                    .limits = self.limits,
+                    &packet.packet,
+                    stream_buffer,
+                ) catch |err| {
+                    // HTTP/3/WebTransport parsing can queue transport control
+                    // or close frames before surfacing an error. The QUIC
+                    // dispatcher refreshed before handing out this packet, so
+                    // mirror the complete adapter result before returning it.
+                    try self.h3.dispatcher.refreshConnectionTimer(handle);
+                    return err;
                 };
-                slot.value_ptr.* = pending;
-                return .{ .session_request = handle };
+                errdefer if (result) |*owned| owned.deinit(self.allocator);
+                try self.h3.dispatcher.refreshConnectionTimer(handle);
+                return result;
             },
             .unrouted => {
                 const unrouted = event.unrouted;
@@ -2487,6 +2452,57 @@ pub const EndpointServer = struct {
             },
         }
         return null;
+    }
+
+    fn processRoutedPacket(
+        self: *EndpointServer,
+        handle: quic.endpoint_dispatcher.ConnectionHandle,
+        packet: *const quic.one_rtt.ReceivedPacket,
+        stream_buffer: []u8,
+    ) EndpointServerError!?EndpointServerEvent {
+        if (self.sessions.get(handle)) |session_value| {
+            try session_value.h3.processDetachedRequestPacket(
+                session_value.session_id.value,
+                packet,
+            );
+            return self.pollAcceptedSessions(stream_buffer);
+        }
+        if (self.pending.get(handle)) |pending_value| {
+            try pending_value.h3.processRequestPacket(packet);
+            return null;
+        }
+        if (self.rejected.contains(handle)) {
+            const h3 = self.h3.session(handle) orelse
+                return error.InvalidSessionState;
+            try h3.processRequestPacket(packet);
+            while (try h3.pollRequestEvent()) |ignored_value| {
+                var ignored = ignored_value;
+                ignored.deinit(self.allocator);
+            }
+            return null;
+        }
+        const h3 = self.h3.session(handle) orelse
+            return error.InvalidSessionState;
+        try h3.processRequestPacket(packet);
+        const request = (try pollEndpointConnectHead(h3)) orelse
+            return null;
+        errdefer {
+            var owned = request.request;
+            owned.deinit(self.allocator);
+        }
+        const pending = try self.allocator.create(EndpointPendingSession);
+        errdefer self.allocator.destroy(pending);
+        const slot = try self.pending.getOrPut(self.allocator, handle);
+        if (slot.found_existing) return error.InvalidSessionState;
+        pending.* = .{
+            .handle = handle,
+            .h3 = h3,
+            .request = request.request,
+            .session_id = request.session_id,
+            .limits = self.limits,
+        };
+        slot.value_ptr.* = pending;
+        return .{ .session_request = handle };
     }
 
     fn pollAcceptedSessions(

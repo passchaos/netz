@@ -3659,7 +3659,11 @@ pub const EndpointServer = struct {
                 const target = self.sessions.getPtr(
                     packet.connection_handle,
                 ) orelse return error.UnknownConnectionHandle;
-                try target.session.processRequestPacket(&packet.packet);
+                try self.processSessionPacket(
+                    packet.connection_handle,
+                    target,
+                    &packet.packet,
+                );
             },
             .unrouted => {
                 const unrouted = event.unrouted;
@@ -3668,6 +3672,26 @@ pub const EndpointServer = struct {
             },
         }
         return self.pollRequestAcrossSessions();
+    }
+
+    fn processSessionPacket(
+        self: *EndpointServer,
+        handle: quic.endpoint_dispatcher.ConnectionHandle,
+        promoted: *PromotedHandshakeSession,
+        packet: *const quic.one_rtt.ReceivedPacket,
+    ) HandshakeAdmissionError!void {
+        promoted.session.processRequestPacket(packet) catch |err| {
+            // HTTP/3 parsing can queue RESET_STREAM, STOP_SENDING, QPACK
+            // feedback, or CONNECTION_CLOSE before surfacing an error. The
+            // dispatcher refreshed before handing out this packet, so mirror
+            // the post-parser state even on failure.
+            try self.refreshTimerIfOwned(handle);
+            return err;
+        };
+        // A successful parser pass can likewise emit ACK/QPACK/flow-control
+        // work. Refresh this exact connection before a ready sibling request
+        // can make round-robin polling return early.
+        try self.refreshTimerIfOwned(handle);
     }
 
     /// Run the single-owner endpoint loop until `shutdown` is set. Request
