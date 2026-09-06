@@ -130,8 +130,10 @@ existing HTTP/2 runtime:
   with typed generated request/response codecs. Handler failures become a
   configurable non-OK gRPC status. Generated clients preserve owned status
   text, optional HTTP status, and optional HTTP/2 reset reason across
-  `RpcFailed`, with borrow-or-take APIs; `pbz` remains a lazy integration
-  dependency rather than a requirement of the core transport.
+  `RpcFailed`, with borrow-or-take APIs. Malformed protobuf and wrong unary
+  request cardinality produce trailers-only `INVALID_ARGUMENT` while
+  preserving the channel; `pbz` remains a lazy integration dependency rather
+  than a requirement of the core transport.
 
 Payloads intentionally remain opaque. This keeps gRPC transport reusable with
 generated or dynamic protobuf implementations; the user-owned

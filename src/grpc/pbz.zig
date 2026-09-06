@@ -19,6 +19,7 @@ pub const Error = error{
     InvalidServiceName,
     InvalidTransportOptions,
     InvalidMethodShape,
+    InvalidRequestPayload,
     UnknownMethod,
     RpcFailed,
 };
@@ -617,7 +618,8 @@ pub fn ServerTransport(comptime Service: type, comptime Handler: type) type {
             );
 
             if (!Method.client_streaming and !Method.server_streaming) {
-                const request = try requests.single();
+                const request = requests.single() catch |err|
+                    return self.finishRequestError(rpc, err);
                 var response = @call(
                     .auto,
                     @field(Handler, Method.name),
@@ -626,7 +628,11 @@ pub fn ServerTransport(comptime Service: type, comptime Handler: type) type {
                         self.connection.connection.allocator,
                         request,
                     },
-                ) catch |err| return self.finishHandlerError(rpc, err);
+                ) catch |err| return self.finishDispatchError(
+                    rpc,
+                    &requests,
+                    err,
+                );
                 defer response.deinit(self.connection.connection.allocator);
                 try responses.append(
                     self.connection.connection.allocator,
@@ -643,7 +649,11 @@ pub fn ServerTransport(comptime Service: type, comptime Handler: type) type {
                         self.connection.connection.allocator,
                         &requests,
                     },
-                ) catch |err| return self.finishHandlerError(rpc, err);
+                ) catch |err| return self.finishDispatchError(
+                    rpc,
+                    &requests,
+                    err,
+                );
                 defer response.deinit(self.connection.connection.allocator);
                 try responses.append(
                     self.connection.connection.allocator,
@@ -652,7 +662,8 @@ pub fn ServerTransport(comptime Service: type, comptime Handler: type) type {
             } else if (!Method.client_streaming and
                 Method.server_streaming)
             {
-                const request = try requests.single();
+                const request = requests.single() catch |err|
+                    return self.finishRequestError(rpc, err);
                 @call(
                     .auto,
                     @field(Handler, Method.name),
@@ -662,7 +673,11 @@ pub fn ServerTransport(comptime Service: type, comptime Handler: type) type {
                         request,
                         &responses,
                     },
-                ) catch |err| return self.finishHandlerError(rpc, err);
+                ) catch |err| return self.finishDispatchError(
+                    rpc,
+                    &requests,
+                    err,
+                );
             } else {
                 @call(
                     .auto,
@@ -673,7 +688,11 @@ pub fn ServerTransport(comptime Service: type, comptime Handler: type) type {
                         &requests,
                         &responses,
                     },
-                ) catch |err| return self.finishHandlerError(rpc, err);
+                ) catch |err| return self.finishDispatchError(
+                    rpc,
+                    &requests,
+                    err,
+                );
             }
             try responses.finish();
             return .ok;
@@ -691,6 +710,33 @@ pub fn ServerTransport(comptime Service: type, comptime Handler: type) type {
                 &.{},
             );
             return self.options.handler_error_status;
+        }
+
+        fn finishDispatchError(
+            self: Self,
+            rpc: *stream.ServerDuplex,
+            requests: anytype,
+            err: anyerror,
+        ) !wire.Status {
+            if (requests.invalid_payload or err == error.InvalidRequestPayload) {
+                return self.finishRequestError(rpc, err);
+            }
+            return self.finishHandlerError(rpc, err);
+        }
+
+        fn finishRequestError(
+            self: Self,
+            rpc: *stream.ServerDuplex,
+            _: anyerror,
+        ) !wire.Status {
+            _ = self;
+            try rpc.finish(
+                .invalid_argument,
+                "could not parse request",
+                &.{},
+                &.{},
+            );
+            return .invalid_argument;
         }
 
         fn responseOptions(
@@ -767,6 +813,7 @@ fn ServerRequestIterator(comptime Message: type) type {
         next_index: usize = 0,
         released_index: usize = 0,
         finished: bool = false,
+        invalid_payload: bool = false,
 
         fn init(
             allocator: std.mem.Allocator,
@@ -783,6 +830,7 @@ fn ServerRequestIterator(comptime Message: type) type {
         }
 
         pub fn next(self: *@This()) !?Message {
+            if (self.invalid_payload) return error.InvalidRequestPayload;
             while (self.released_index < self.next_index) {
                 self.messages.items[self.released_index].deinit(
                     self.allocator,
@@ -799,6 +847,7 @@ fn ServerRequestIterator(comptime Message: type) type {
             {
                 try self.pump();
             }
+            if (self.invalid_payload) return error.InvalidRequestPayload;
             if (self.next_index == self.messages.items.len) return null;
             defer self.next_index += 1;
             return self.messages.items[self.next_index];
@@ -806,8 +855,9 @@ fn ServerRequestIterator(comptime Message: type) type {
 
         fn single(self: *@This()) !Message {
             while (!self.finished) try self.pump();
+            if (self.invalid_payload) return error.InvalidRequestPayload;
             if (self.messages.items.len != 1) {
-                return error.InvalidMethodShape;
+                return error.InvalidRequestPayload;
             }
             self.next_index = 1;
             return self.messages.items[0];
@@ -830,10 +880,20 @@ fn ServerRequestIterator(comptime Message: type) type {
             self: *@This(),
             message: stream.DecodedMessage,
         ) !void {
-            try self.messages.append(
+            if (self.invalid_payload) return;
+            const decoded = Message.decodeOwned(
                 self.allocator,
-                try Message.decodeOwned(self.allocator, message.payload),
-            );
+                message.payload,
+            ) catch |err| {
+                if (err == error.OutOfMemory) return err;
+                self.invalid_payload = true;
+                return;
+            };
+            self.messages.append(self.allocator, decoded) catch |err| {
+                var owned = decoded;
+                owned.deinit(self.allocator);
+                return err;
+            };
         }
     };
 }

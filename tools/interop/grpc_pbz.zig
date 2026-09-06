@@ -108,8 +108,8 @@ const ServerState = struct {
             .package = grpc_pb.proto_package,
             .handler_error_status = .invalid_argument,
         });
-        for (0..6) |index| {
-            const expected: netz.grpc.Status = if (index == 4)
+        for (0..7) |index| {
+            const expected: netz.grpc.Status = if (index == 4 or index == 5)
                 .invalid_argument
             else
                 .ok;
@@ -215,6 +215,21 @@ pub fn main(init: std.process.Init) !void {
     var owned_failure = generated_client.transport.takeFailure().?;
     defer owned_failure.deinit();
     try std.testing.expect(generated_client.transport.lastFailure() == null);
+
+    var malformed = try client.unary(.{
+        .path = "/demo.binding.Pipe/Get",
+        .authority = "localhost",
+        .message = &.{ 0x12, 0x02, 'x' },
+    });
+    defer malformed.deinit();
+    try std.testing.expectEqual(
+        netz.grpc.Status.invalid_argument,
+        malformed.status,
+    );
+    try std.testing.expectEqualStrings(
+        "could not parse request",
+        malformed.status_message,
+    );
 
     unary_request.id = 8;
     var recovered = try generated_client.Get(allocator, unary_request);
