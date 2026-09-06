@@ -1764,11 +1764,12 @@ pub const EndpointAcceptedSession = struct {
         if (reason.len > max_connection_close_reason) {
             return error.InvalidSessionState;
         }
-        try self.h3.established.connection.closeApplication(
+        const result = self.h3.established.connection.closeApplication(
             error_code,
             reason,
         );
         try self.refreshTimer();
+        try result;
     }
 
     pub fn writeStream(

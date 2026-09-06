@@ -219,6 +219,10 @@ indefinitely.
 Its routed-packet boundary performs the same post-adapter synchronization for
 accepted, pending, rejected, and newly arriving CONNECT sessions, including
 protocol parse errors that replace an earlier QUIC timer with close state.
+Endpoint-level `closeConnection` also refreshes the dispatcher before returning
+a socket error: QUIC deliberately commits closing state even if its first
+CONNECTION_CLOSE datagram cannot be sent, so the shared owner can still expire
+that connection after the transport's three-PTO closing period.
 The endpoint-accepted
 variant is deliberately nonblocking: it only inspects buffered state, sends a
 credit update when ready, and refreshes the dispatcher timer without reading
