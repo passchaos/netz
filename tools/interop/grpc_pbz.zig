@@ -108,7 +108,7 @@ const ServerState = struct {
             .package = grpc_pb.proto_package,
             .handler_error_status = .invalid_argument,
         });
-        for (0..5) |index| {
+        for (0..6) |index| {
             const expected: netz.grpc.Status = if (index == 4)
                 .invalid_argument
             else
@@ -150,6 +150,7 @@ pub fn main(init: std.process.Init) !void {
         .authority = "localhost",
         .timeout = try netz.grpc.Timeout.init(2, .second),
     }));
+    defer generated_client.transport.deinit();
 
     var unary_request = Event.init();
     unary_request.id = 7;
@@ -200,6 +201,30 @@ pub fn main(init: std.process.Init) !void {
         netz.grpc.Status.invalid_argument,
         generated_client.transport.lastStatus().?,
     );
+    const borrowed_failure = generated_client.transport.lastFailure().?;
+    try std.testing.expectEqual(
+        netz.grpc.Status.invalid_argument,
+        borrowed_failure.status,
+    );
+    try std.testing.expectEqualStrings(
+        "generated handler failed",
+        borrowed_failure.status_message,
+    );
+    try std.testing.expectEqual(@as(?u16, 200), borrowed_failure.http_status);
+    try std.testing.expect(borrowed_failure.reset == null);
+    var owned_failure = generated_client.transport.takeFailure().?;
+    defer owned_failure.deinit();
+    try std.testing.expect(generated_client.transport.lastFailure() == null);
+
+    unary_request.id = 8;
+    var recovered = try generated_client.Get(allocator, unary_request);
+    defer recovered.deinit(allocator);
+    try std.testing.expectEqual(@as(i32, 108), recovered.id);
+    try std.testing.expectEqual(
+        netz.grpc.Status.ok,
+        generated_client.transport.lastStatus().?,
+    );
+    try std.testing.expect(generated_client.transport.lastFailure() == null);
 
     server_thread.join();
     if (server_state.err) |err| return err;

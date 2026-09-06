@@ -48,6 +48,19 @@ pub const ServerOptions = struct {
     handler_error_message: ?[]const u8 = "generated handler failed",
 };
 
+pub const RpcFailure = struct {
+    allocator: std.mem.Allocator,
+    status: wire.Status,
+    status_message: []u8,
+    reset: ?http2.ResetStreamPayload = null,
+    http_status: ?u16 = null,
+
+    pub fn deinit(self: *RpcFailure) void {
+        self.allocator.free(self.status_message);
+        self.* = undefined;
+    }
+};
+
 /// Adapter accepted directly by a generated `Service.Client(Transport)`.
 ///
 /// A streaming response sink implements `append(allocator, message)`. The
@@ -61,6 +74,7 @@ pub fn ClientTransport(comptime Service: type) type {
         client: *runtime.Client,
         options: ClientOptions,
         last_status: ?wire.Status = null,
+        last_failure: ?RpcFailure = null,
 
         const Self = @This();
 
@@ -78,6 +92,11 @@ pub fn ClientTransport(comptime Service: type) type {
             return .{ .client = client, .options = options };
         }
 
+        pub fn deinit(self: *Self) void {
+            self.clearFailure();
+            self.* = undefined;
+        }
+
         pub fn call(
             self: *Self,
             allocator: std.mem.Allocator,
@@ -85,7 +104,7 @@ pub fn ClientTransport(comptime Service: type) type {
             method_name: []const u8,
             request_payload: []const u8,
         ) ![]u8 {
-            self.last_status = null;
+            self.beginCall();
             try self.requireMethod(service_name, method_name, false, false);
             const path = try self.methodPathAlloc(allocator, method_name);
             defer allocator.free(path);
@@ -105,7 +124,10 @@ pub fn ClientTransport(comptime Service: type) type {
                 );
             defer response.deinit();
             self.last_status = response.status;
-            if (response.status != .ok) return error.RpcFailed;
+            if (response.status != .ok) {
+                try self.recordUnaryFailure(&response);
+                return error.RpcFailed;
+            }
             return allocator.dupe(
                 u8,
                 (response.message orelse return error.InvalidMethodShape)
@@ -120,7 +142,7 @@ pub fn ClientTransport(comptime Service: type) type {
             method_name: []const u8,
             requests: anytype,
         ) ![]u8 {
-            self.last_status = null;
+            self.beginCall();
             try self.requireMethod(service_name, method_name, true, false);
             const path = try self.methodPathAlloc(allocator, method_name);
             defer allocator.free(path);
@@ -159,7 +181,7 @@ pub fn ClientTransport(comptime Service: type) type {
             request_payload: []const u8,
             responses: anytype,
         ) !void {
-            self.last_status = null;
+            self.beginCall();
             try self.requireService(service_name);
             inline for (@typeInfo(Service).@"struct".decls) |decl| {
                 const candidate = @field(Service, decl.name);
@@ -220,7 +242,7 @@ pub fn ClientTransport(comptime Service: type) type {
             requests: anytype,
             responses: anytype,
         ) !void {
-            self.last_status = null;
+            self.beginCall();
             try self.requireService(service_name);
             inline for (@typeInfo(Service).@"struct".decls) |decl| {
                 const candidate = @field(Service, decl.name);
@@ -324,6 +346,9 @@ pub fn ClientTransport(comptime Service: type) type {
             switch (event) {
                 .terminal => |terminal| {
                     self.last_status = terminal.status;
+                    if (terminal.status != .ok) {
+                        try self.recordDuplexFailure(&terminal);
+                    }
                     return true;
                 },
                 .informational, .initial_metadata, .messages => return false,
@@ -336,7 +361,10 @@ pub fn ClientTransport(comptime Service: type) type {
             output: *SingleResponse,
         ) ![]u8 {
             self.last_status = response.status;
-            if (response.status != .ok) return error.RpcFailed;
+            if (response.status != .ok) {
+                try self.recordStreamingFailure(response);
+                return error.RpcFailed;
+            }
             return output.take() orelse error.InvalidMethodShape;
         }
 
@@ -344,9 +372,86 @@ pub fn ClientTransport(comptime Service: type) type {
             return self.last_status;
         }
 
+        /// Borrow the most recent typed RPC failure until the next call,
+        /// `takeFailure`, or `deinit`.
+        pub fn lastFailure(self: *const Self) ?*const RpcFailure {
+            return if (self.last_failure) |*failure| failure else null;
+        }
+
+        /// Transfer ownership of the most recent failure to the caller.
+        pub fn takeFailure(self: *Self) ?RpcFailure {
+            const failure = self.last_failure;
+            self.last_failure = null;
+            return failure;
+        }
+
         fn requireOkStatus(self: Self) Error!void {
             if ((self.last_status orelse return error.InvalidMethodShape) !=
                 .ok) return error.RpcFailed;
+        }
+
+        fn beginCall(self: *Self) void {
+            self.last_status = null;
+            self.clearFailure();
+        }
+
+        fn clearFailure(self: *Self) void {
+            if (self.last_failure) |*failure| failure.deinit();
+            self.last_failure = null;
+        }
+
+        fn recordUnaryFailure(
+            self: *Self,
+            response: *const grpc_call.UnaryResponse,
+        ) !void {
+            self.last_failure = .{
+                .allocator = self.client.connection.allocator,
+                .status = response.status,
+                .status_message = try self.client.connection.allocator.dupe(
+                    u8,
+                    response.status_message,
+                ),
+                .reset = response.reset,
+                .http_status = if (response.transport) |transport|
+                    transport.status
+                else
+                    null,
+            };
+        }
+
+        fn recordStreamingFailure(
+            self: *Self,
+            response: *const stream.Response,
+        ) !void {
+            self.last_failure = .{
+                .allocator = self.client.connection.allocator,
+                .status = response.status,
+                .status_message = try self.client.connection.allocator.dupe(
+                    u8,
+                    response.status_message,
+                ),
+                .reset = response.reset,
+                .http_status = if (response.transport) |transport|
+                    transport.status
+                else
+                    null,
+            };
+        }
+
+        fn recordDuplexFailure(
+            self: *Self,
+            response: *const stream.DuplexResponse,
+        ) !void {
+            self.last_failure = .{
+                .allocator = self.client.connection.allocator,
+                .status = response.status,
+                .status_message = try self.client.connection.allocator.dupe(
+                    u8,
+                    response.status_message,
+                ),
+                .reset = response.reset,
+                .http_status = if (response.head) |head| head.status else null,
+            };
         }
 
         fn unaryOptions(
@@ -512,11 +617,7 @@ pub fn ServerTransport(comptime Service: type, comptime Handler: type) type {
             );
 
             if (!Method.client_streaming and !Method.server_streaming) {
-                const request = (try requests.next()) orelse
-                    return error.InvalidMethodShape;
-                if (try requests.next() != null) {
-                    return error.InvalidMethodShape;
-                }
+                const request = try requests.single();
                 var response = @call(
                     .auto,
                     @field(Handler, Method.name),
@@ -551,11 +652,7 @@ pub fn ServerTransport(comptime Service: type, comptime Handler: type) type {
             } else if (!Method.client_streaming and
                 Method.server_streaming)
             {
-                const request = (try requests.next()) orelse
-                    return error.InvalidMethodShape;
-                if (try requests.next() != null) {
-                    return error.InvalidMethodShape;
-                }
+                const request = try requests.single();
                 @call(
                     .auto,
                     @field(Handler, Method.name),
@@ -705,6 +802,15 @@ fn ServerRequestIterator(comptime Message: type) type {
             if (self.next_index == self.messages.items.len) return null;
             defer self.next_index += 1;
             return self.messages.items[self.next_index];
+        }
+
+        fn single(self: *@This()) !Message {
+            while (!self.finished) try self.pump();
+            if (self.messages.items.len != 1) {
+                return error.InvalidMethodShape;
+            }
+            self.next_index = 1;
+            return self.messages.items[0];
         }
 
         fn pump(self: *@This()) !void {

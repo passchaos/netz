@@ -128,8 +128,10 @@ existing HTTP/2 runtime:
   fully-qualified method paths and map unary, client-streaming,
   server-streaming, and bidirectional methods onto the owning gRPC runtime
   with typed generated request/response codecs. Handler failures become a
-  configurable non-OK gRPC status; `pbz` remains a lazy integration dependency
-  rather than a requirement of the core transport.
+  configurable non-OK gRPC status. Generated clients preserve owned status
+  text, optional HTTP status, and optional HTTP/2 reset reason across
+  `RpcFailed`, with borrow-or-take APIs; `pbz` remains a lazy integration
+  dependency rather than a requirement of the core transport.
 
 Payloads intentionally remain opaque. This keeps gRPC transport reusable with
 generated or dynamic protobuf implementations; the user-owned
@@ -271,9 +273,9 @@ upstream gRPC Core's `ServerEarlyReturnTest`.
 ## Remaining work before broad gRPC parity
 
 1. Generated pbz clients and handlers now have netz transport adapters for all
-   four RPC shapes. Richer application-defined typed failure details and
-   async/concurrent scheduling policy remain above the intentionally
-   single-owner duplex step loop.
+   four RPC shapes, including owned typed failure details. Async/concurrent
+   scheduling policy remains above the intentionally single-owner duplex step
+   loop.
 2. Transport composition is now covered: `grpc.runtime.Client`,
    `grpc.runtime.Server`, and `grpc.runtime.TlsServer` own persistent HTTP/2
    channels. The TLS path enforces `h2` ALPN and retains certificate-
