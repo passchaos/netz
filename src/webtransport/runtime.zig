@@ -1567,6 +1567,9 @@ pub const EndpointAcceptedSession = struct {
     session_id: webtransport.SessionId,
     streams: webtransport.StreamRegistry,
     control: session_control.Control,
+    /// A peer CLOSE was already reported to the application; the endpoint
+    /// still owes the CONNECT response FIN and retries it from later turns.
+    close_response_pending: bool = false,
 
     pub fn sessionId(self: EndpointAcceptedSession) webtransport.SessionId {
         return self.session_id;
@@ -1945,7 +1948,16 @@ pub const EndpointAcceptedSession = struct {
         code: u32,
         reason: []const u8,
     ) EndpointServerError!void {
-        if (self.control.local_close_sent) return;
+        if (self.control.local_close_sent) {
+            const result = session_control.terminateStreamsOnce(
+                &self.h3.established.connection,
+                &self.streams,
+            );
+            try self.refreshTimer();
+            _ = try result;
+            return;
+        }
+        try self.control.ensureOpen();
         var encoded: [4 + session_control.max_close_reason + 16]u8 =
             undefined;
         const capsule = try session_control.writeCloseInto(
@@ -1953,20 +1965,20 @@ pub const EndpointAcceptedSession = struct {
             code,
             reason,
         );
-        try self.h3.sendResponseBodyPaced(
+        const result = self.h3.trySendResponseBody(
             self.session_id.value,
             capsule,
             true,
         );
+        result catch |err| {
+            try self.refreshTimer();
+            return err;
+        };
         // Local FIN closes only our send direction. Keep the CONNECT
         // association registered until the peer's receive direction reaches
         // FIN/reset so the endpoint can still route its close acknowledgement
         // and any datagram that preceded that terminal signal.
         try self.control.recordLocalClose(code);
-        try session_control.terminateStreams(
-            &self.h3.established.connection,
-            &self.streams,
-        );
         try self.refreshTimer();
     }
 
@@ -2665,13 +2677,24 @@ pub const EndpointServer = struct {
         // delivered, do not poll stream/DATAGRAM APIs whose association is no
         // longer application-visible. The retained HTTP/3 association still
         // lets the dispatcher process late ACKs and reject late datagrams.
-        if (target.control.terminal_reported) return null;
-        if (try target.control.poll(
-            &target.h3.established.connection,
-        )) |event| {
-            try finishEndpointSessionEvent(target, event);
-            return .{ .session = event };
+        if (!target.control.terminal_reported) {
+            if (try target.control.poll(
+                &target.h3.established.connection,
+            )) |event| {
+                try finishEndpointSessionEvent(target, event);
+                return .{ .session = event };
+            }
         }
+        const close_progress = advanceEndpointCloseOnce(target) catch |err|
+            switch (err) {
+                error.FlowControlBlocked,
+                error.CongestionLimited,
+                error.PacingLimited,
+                => return null,
+                else => |other| return other,
+            };
+        if (close_progress == .submitted) return null;
+        if (target.control.terminal_reported) return null;
         if (try incremental_stream.poll(
             &target.h3.established.connection,
             &target.streams,
@@ -2742,23 +2765,44 @@ fn finishEndpointSessionEvent(
 ) Error!void {
     if (event == .closed or event == .reset) {
         if (event == .closed and !target.control.local_close_sent) {
-            try target.h3.sendResponseBodyPaced(
-                target.session_id.value,
-                &.{},
-                true,
-            );
-            target.control.local_close_sent = true;
+            // Deliver the peer event even when its response FIN is currently
+            // paced or flow-control blocked. The next endpoint turn owns the
+            // retry and cannot consume another socket receive here.
+            target.close_response_pending = true;
         }
         // Keep the detached association registered while this accepted
         // session remains owned by the shared endpoint. Later ACK-only
         // packets still need the detached HTTP/3 visitor, and the registry's
         // terminal state silently drops datagrams after FIN/reset. Session
         // teardown performs the final unregister.
-        try session_control.terminateStreams(
-            &target.h3.established.connection,
-            &target.streams,
-        );
     }
+}
+
+fn advanceEndpointCloseOnce(
+    target: *EndpointAcceptedSession,
+) Error!session_control.TerminateProgress {
+    if (target.close_response_pending) {
+        target.h3.trySendResponseBody(
+            target.session_id.value,
+            &.{},
+            true,
+        ) catch |err| switch (err) {
+            error.RequestCancelled, error.RequestRejected => {},
+            else => |other| return other,
+        };
+        target.close_response_pending = false;
+        target.control.local_close_sent = true;
+        return .submitted;
+    }
+    if (!target.control.local_close_sent and
+        !target.control.terminal_reported)
+    {
+        return .complete;
+    }
+    return session_control.terminateStreamsOnce(
+        &target.h3.established.connection,
+        &target.streams,
+    );
 }
 
 pub const AcceptedSession = struct {

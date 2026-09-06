@@ -90,8 +90,8 @@ pub fn reset(
     const http3_code =
         webtransport.applicationErrorCodeToHttp3(application_error_code);
     try connection.resetStream(stream_id, http3_code);
-    try association.requestAfterSendTerminal(connection, stream);
     stream.send_reset = .fromHttp3(http3_code);
+    try association.requestAfterSendTerminal(connection, stream);
 }
 
 /// Abort the local send direction once without sleeping for QUIC pacing.
@@ -112,8 +112,8 @@ pub fn resetOnce(
     const http3_code =
         webtransport.applicationErrorCodeToHttp3(application_error_code);
     try connection.tryResetStream(stream_id, http3_code);
-    try association.requestAfterSendTerminal(connection, stream);
     stream.send_reset = .fromHttp3(http3_code);
+    try association.requestAfterSendTerminal(connection, stream);
 }
 
 /// Cancel the peer send direction with a mapped WebTransport error code.

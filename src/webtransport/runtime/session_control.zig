@@ -10,6 +10,7 @@ const std = @import("std");
 const webtransport = @import("../mod.zig");
 const http3 = @import("../../http3/mod.zig");
 const quic = @import("../../quic/mod.zig");
+const association = @import("stream_association.zig");
 
 pub const max_close_reason: usize = 1024;
 
@@ -448,4 +449,51 @@ pub fn terminateStreams(
             );
         }
     }
+}
+
+pub const TerminateProgress = enum { complete, submitted };
+
+/// Submit at most one RESET_STREAM or STOP_SENDING needed to terminate this
+/// session's associated streams. Successful per-stream state is retained, so
+/// an endpoint loop can call this repeatedly after pacing or ACK progress.
+pub fn terminateStreamsOnce(
+    connection: *quic.one_rtt.Connection,
+    registry: *webtransport.StreamRegistry,
+) Error!TerminateProgress {
+    for (registry.registered()) |*stream| {
+        const has_send_side = stream.direction == .bidirectional or
+            stream.locally_initiated;
+        if (has_send_side and
+            !stream.local_fin and
+            stream.send_reset == null and
+            stream.stopped == null)
+        {
+            try connection.tryResetStream(
+                stream.stream_id,
+                webtransport.ApplicationErrorCode.session_gone,
+            );
+            stream.send_reset = .fromHttp3(
+                webtransport.ApplicationErrorCode.session_gone,
+            );
+            try association.requestAfterSendTerminal(connection, stream);
+            return .submitted;
+        }
+        const has_receive_side = stream.direction == .bidirectional or
+            !stream.locally_initiated;
+        if (has_receive_side and
+            !stream.peer_fin and
+            stream.receive_reset == null and
+            stream.stop_sent == null)
+        {
+            try connection.trySendStopSending(
+                stream.stream_id,
+                webtransport.ApplicationErrorCode.session_gone,
+            );
+            stream.stop_sent = .fromHttp3(
+                webtransport.ApplicationErrorCode.session_gone,
+            );
+            return .submitted;
+        }
+    }
+    return .complete;
 }

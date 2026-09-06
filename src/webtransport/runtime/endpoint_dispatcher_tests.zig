@@ -610,10 +610,20 @@ test "WebTransport endpoint control and datagram sends do not wait for pacing" {
     streams_owned = false;
     defer accepted.streams.deinit();
     const reset_stream_id = try accepted.openBidirectionalStream();
-    const stopped_stream_id: u62 = 0;
-    const stopped_stream = try accepted.streams.registerPeer(
+    const stopped_stream_id: u62 = 4;
+    _ = try accepted.streams.registerPeer(
         stopped_stream_id,
         .bidirectional,
+    );
+    const close_send_id: u62 = 15;
+    _ = try accepted.streams.registerLocal(
+        close_send_id,
+        .unidirectional,
+    );
+    const close_receive_id: u62 = 14;
+    const close_receive = try accepted.streams.registerPeer(
+        close_receive_id,
+        .unidirectional,
     );
 
     // Freeze std.Io's awake clock so a blocking pacing loop cannot make
@@ -634,7 +644,7 @@ test "WebTransport endpoint control and datagram sends do not wait for pacing" {
     defer server_endpoint.io = fixed_io.delegate;
 
     const fill = [_]quic.Frame{
-        .{ .stream = .{ .stream_id = stopped_stream_id, .data = &.{} } },
+        .{ .stream = .{ .stream_id = 0, .data = &.{} } },
         .{ .padding = .{ .len = 1150 } },
     };
     try h3.established.connection.sendAt(&fill, 1_000_000);
@@ -686,7 +696,9 @@ test "WebTransport endpoint control and datagram sends do not wait for pacing" {
         reset_packet_number,
         h3.established.connection.next_packet_number,
     );
-    try std.testing.expect(stopped_stream.stop_sent == null);
+    try std.testing.expect(
+        accepted.streams.get(stopped_stream_id).?.stop_sent == null,
+    );
     try std.testing.expect(
         h3.established.connection.recvStreamStats(stopped_stream_id).?
             .stop_sending_sent == null,
@@ -710,7 +722,9 @@ test "WebTransport endpoint control and datagram sends do not wait for pacing" {
     try accepted.stopStream(stopped_stream_id, 42);
     try std.testing.expectEqual(@as(usize, 0), fixed_io.sleep_calls);
     try std.testing.expectEqual(@as(usize, 3), fixed_io.send_calls);
-    try std.testing.expect(stopped_stream.stop_sent != null);
+    try std.testing.expect(
+        accepted.streams.get(stopped_stream_id).?.stop_sent != null,
+    );
 
     const before_datagram = accepted.stats();
     const datagram_packet_number =
@@ -804,6 +818,257 @@ test "WebTransport endpoint control and datagram sends do not wait for pacing" {
     try std.testing.expect(
         h3.outbound_bodies.find(0).?.send.next_offset > body_offset,
     );
+
+    // Keep the earlier bidi cancellation fixtures out of close cleanup so
+    // this section has exactly one send-only and one receive-only stream.
+    accepted.streams.get(reset_stream_id).?.peer_fin = true;
+    accepted.streams.get(stopped_stream_id).?.local_fin = true;
+    const close_body_offset =
+        h3.outbound_bodies.find(0).?.send.next_offset;
+    try std.testing.expectError(
+        error.PacingLimited,
+        accepted.close(71, "single-attempt close"),
+    );
+    try std.testing.expectEqual(@as(usize, 0), fixed_io.sleep_calls);
+    try std.testing.expect(!accepted.control.local_close_sent);
+    try std.testing.expectEqual(
+        close_body_offset,
+        h3.outbound_bodies.find(0).?.send.next_offset,
+    );
+
+    const close_timer = dispatcher.nextTimerDeadline() orelse
+        return error.TestUnexpectedResult;
+    try std.testing.expectEqual(
+        quic.one_rtt.TimerDeadlineKind.pacing,
+        close_timer.timer.kind,
+    );
+    fixed_io.now_ns = @intCast(close_timer.timer.deadline_ns);
+    _ = (try dispatcher.serviceNextTimerAt(
+        close_timer.timer.deadline_ns,
+    )) orelse return error.TestUnexpectedResult;
+    try accepted.close(71, "single-attempt close");
+    try std.testing.expect(accepted.control.local_close_sent);
+    try std.testing.expect(accepted.control.state.closed);
+    try std.testing.expect(h3.outbound_bodies.find(0) == null);
+    try std.testing.expect(
+        accepted.streams.get(close_send_id).?.send_reset == null,
+    );
+    try std.testing.expect(close_receive.stop_sent == null);
+
+    // Each later invocation advances at most one stream-control packet. A
+    // paced failure commits neither registry state nor a packet number.
+    const cleanup_packet_number =
+        h3.established.connection.next_packet_number;
+    try std.testing.expectError(
+        error.PacingLimited,
+        accepted.close(71, "ignored after capsule commit"),
+    );
+    try std.testing.expectEqual(@as(usize, 0), fixed_io.sleep_calls);
+    try std.testing.expectEqual(
+        cleanup_packet_number,
+        h3.established.connection.next_packet_number,
+    );
+    try std.testing.expect(
+        accepted.streams.get(close_send_id).?.send_reset == null,
+    );
+    const reset_close_timer = dispatcher.nextTimerDeadline() orelse
+        return error.TestUnexpectedResult;
+    fixed_io.now_ns = @intCast(reset_close_timer.timer.deadline_ns);
+    _ = (try dispatcher.serviceNextTimerAt(
+        reset_close_timer.timer.deadline_ns,
+    )) orelse return error.TestUnexpectedResult;
+    try accepted.close(71, "ignored after capsule commit");
+    try std.testing.expect(
+        accepted.streams.get(close_send_id).?.send_reset != null,
+    );
+    try std.testing.expect(close_receive.stop_sent == null);
+
+    try std.testing.expectError(
+        error.PacingLimited,
+        accepted.close(71, "ignored after capsule commit"),
+    );
+    const stop_close_timer = dispatcher.nextTimerDeadline() orelse
+        return error.TestUnexpectedResult;
+    fixed_io.now_ns = @intCast(stop_close_timer.timer.deadline_ns);
+    _ = (try dispatcher.serviceNextTimerAt(
+        stop_close_timer.timer.deadline_ns,
+    )) orelse return error.TestUnexpectedResult;
+    try accepted.close(71, "ignored after capsule commit");
+    try std.testing.expect(close_receive.stop_sent != null);
+    const send_calls_after_cleanup = fixed_io.send_calls;
+    try accepted.close(71, "ignored after capsule commit");
+    try std.testing.expectEqual(
+        send_calls_after_cleanup,
+        fixed_io.send_calls,
+    );
+    try std.testing.expectEqual(@as(usize, 0), fixed_io.sleep_calls);
+}
+
+test "WebTransport endpoint reports peer close before paced response FIN" {
+    const allocator = std.testing.allocator;
+    var threaded = std.Io.Threaded.init(allocator, .{});
+    defer threaded.deinit();
+    const io = threaded.io();
+
+    var server_endpoint = try quic.runtime.Endpoint.bind(
+        allocator,
+        io,
+        .{ .ip4 = .loopback(0) },
+        .{ .max_datagram_size = 4096 },
+    );
+    defer server_endpoint.deinit();
+    var peer_endpoint = try quic.runtime.Endpoint.bind(
+        allocator,
+        io,
+        .{ .ip4 = .loopback(0) },
+        .{ .max_datagram_size = 4096 },
+    );
+    defer peer_endpoint.deinit();
+    const keys = quic.protection.deriveAes128Keys(
+        [_]u8{0xf0} ** quic.protection.secret_len,
+    );
+    const settings = webtransport.defaultSettings(.{});
+    var h3 = try http3.runtime.HandshakeServerSession.initPreconfigured(
+        &server_endpoint,
+        peer_endpoint.address(),
+        .{ .local_settings = settings },
+        .{
+            .receive_keys = keys,
+            .send_keys = keys,
+            .local_connection_id = "wt-peer-close-server",
+            .peer_connection_id = "wt-peer-close-client",
+            .one_rtt = .{
+                .max_datagram_size = 1200,
+                .pacing_max_burst_packets = 1,
+            },
+        },
+    );
+    defer h3.deinit();
+    h3.control.settings.markSent(settings);
+    h3.control.settings.markReceived(settings);
+    try h3.outbound_bodies.reserveOpen(0);
+    h3.outbound_bodies.appendOpenAssumeCapacity(
+        0,
+        quic.stream_state.SendState.init(0),
+        null,
+    );
+    var streams = try handshake_stream.initRegistry(
+        allocator,
+        .init(0),
+        .server,
+        settings,
+        settings,
+        8,
+        1,
+        null,
+    );
+    var streams_owned = true;
+    defer if (streams_owned) streams.deinit();
+    var dispatcher = quic.endpoint_dispatcher.Dispatcher.init(
+        allocator,
+        &server_endpoint,
+    );
+    defer dispatcher.deinit();
+    const handle: quic.endpoint_dispatcher.ConnectionHandle = 14;
+    try dispatcher.registerConnection(handle, &h3.established.connection);
+    var accepted = runtime.EndpointAcceptedSession{
+        .handle = handle,
+        .dispatcher = &dispatcher,
+        .h3 = &h3,
+        .request = undefined,
+        .session_id = .init(0),
+        .streams = streams,
+        .control = try session_control.Control.init(.init(0)),
+    };
+    streams_owned = false;
+    defer accepted.streams.deinit();
+
+    var fixed_io = FixedClockIo{
+        .delegate = server_endpoint.io,
+        .now_ns = 1_000_000,
+    };
+    var fixed_vtable = server_endpoint.io.vtable.*;
+    fixed_vtable.now = FixedClockIo.now;
+    fixed_vtable.sleep = FixedClockIo.sleep;
+    fixed_vtable.netSend = FixedClockIo.netSend;
+    server_endpoint.io = .{
+        .userdata = &fixed_io,
+        .vtable = &fixed_vtable,
+    };
+    defer server_endpoint.io = fixed_io.delegate;
+
+    try h3.established.connection.sendAt(
+        &.{.{ .padding = .{ .len = 1160 } }},
+        1_000_000,
+    );
+    var close_capsule: [4 + session_control.max_close_reason + 16]u8 =
+        undefined;
+    const capsule = try session_control.writeCloseInto(
+        &close_capsule,
+        88,
+        "peer done",
+    );
+    var data_frame: [4 + session_control.max_close_reason + 32]u8 = undefined;
+    const data_len = try writeDataFrame(&data_frame, capsule);
+    try quic.one_rtt.testing.applyReceivedFrames(
+        &h3.established.connection,
+        0,
+        &.{.{ .stream = .{
+            .stream_id = 0,
+            .data = data_frame[0..data_len],
+            .fin = true,
+        } }},
+        1_000_000,
+        .not_ect,
+    );
+
+    var buffer: [1]u8 = undefined;
+    var event = (try runtime.EndpointServer.testing
+        .pollAcceptedSessionEntry(&accepted, &buffer)) orelse
+        return error.TestUnexpectedResult;
+    defer event.deinit(allocator);
+    try std.testing.expect(event == .session);
+    try std.testing.expect(event.session == .closed);
+    try std.testing.expectEqual(@as(u32, 88), event.session.closed.code);
+    try std.testing.expectEqualStrings(
+        "peer done",
+        event.session.closed.reason,
+    );
+    try std.testing.expect(accepted.control.terminal_reported);
+    try std.testing.expect(accepted.close_response_pending);
+    try std.testing.expect(!accepted.control.local_close_sent);
+    try std.testing.expectEqual(@as(usize, 0), fixed_io.sleep_calls);
+
+    try std.testing.expect(
+        (try runtime.EndpointServer.testing.pollAcceptedSessionEntry(
+            &accepted,
+            &buffer,
+        )) == null,
+    );
+    try std.testing.expect(accepted.close_response_pending);
+    try std.testing.expect(!accepted.control.local_close_sent);
+    try std.testing.expectEqual(@as(usize, 0), fixed_io.sleep_calls);
+    const timer = dispatcher.nextTimerDeadline() orelse
+        return error.TestUnexpectedResult;
+    try std.testing.expectEqual(
+        quic.one_rtt.TimerDeadlineKind.pacing,
+        timer.timer.kind,
+    );
+
+    fixed_io.now_ns = @intCast(timer.timer.deadline_ns);
+    _ = (try dispatcher.serviceNextTimerAt(
+        timer.timer.deadline_ns,
+    )) orelse return error.TestUnexpectedResult;
+    try std.testing.expect(
+        (try runtime.EndpointServer.testing.pollAcceptedSessionEntry(
+            &accepted,
+            &buffer,
+        )) == null,
+    );
+    try std.testing.expect(!accepted.close_response_pending);
+    try std.testing.expect(accepted.control.local_close_sent);
+    try std.testing.expect(h3.outbound_bodies.find(0) == null);
+    try std.testing.expectEqual(@as(usize, 0), fixed_io.sleep_calls);
 }
 
 test "WebTransport client handshake and CONNECT share one socket owner" {

@@ -309,6 +309,10 @@ attempt and return flow-control, congestion, or pacing backpressure to the sole
 The endpoint `drain` method applies the same single-packet rule to its Capsule
 and commits the HTTP/3 body offset and local draining state only after the
 packet reaches the socket.
+Endpoint `close` likewise sends its CLOSE capsule and FIN once, then advances
+at most one associated-stream RESET/STOP per later call or endpoint poll. Each
+successful control packet is committed independently, so pacing, congestion,
+or socket failure cannot duplicate the capsule or abandon the unsent suffix.
 An initial `writeStream` may commit only the association prefix and return zero
 application bytes; retrying the unchanged payload after dispatcher progress is
 therefore unambiguous. Endpoint `sendStream` is atomic and single-packet, while
