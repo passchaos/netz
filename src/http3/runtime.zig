@@ -2865,6 +2865,10 @@ pub const testing = struct {
     ) {
         return handshakeRecoveryBefore(io, deadline, configured);
     }
+
+    pub fn clientRequestCount(client: *const HandshakeClient) usize {
+        return client.request_lifecycle.count();
+    }
 };
 
 pub const HandshakeServerOptions = struct {
@@ -8235,17 +8239,34 @@ pub const HandshakeClient = struct {
         if (!self.control.acceptsRequestStream(stream_id)) {
             return error.GoAwayReceived;
         }
-        if (self.established.connection.nextLocalBidirectionalStreamId() !=
-            stream_id)
-        {
+        const transport_next = self.established.connection
+            .nextLocalBidirectionalStreamId();
+        const retrying_reserved_stream = transport_next == next_stream_id and
+            self.established.connection.sendStreamStats(stream_id) != null;
+        if (transport_next != stream_id and !retrying_reserved_stream) {
             return error.StreamCreationError;
         }
-        try self.request_lifecycle.open(
-            stream_id,
-            request_options.method,
-            requestHasProtocol(request_options.headers),
-        );
-        errdefer _ = self.request_lifecycle.finish(stream_id) catch false;
+        const lifecycle_exists = self.request_lifecycle.contains(stream_id);
+        if (!lifecycle_exists) {
+            try self.request_lifecycle.open(
+                stream_id,
+                request_options.method,
+                requestHasProtocol(request_options.headers),
+            );
+        }
+        errdefer if (!lifecycle_exists) {
+            // A zero-byte transport stream may have been materialized by a
+            // flow-control preflight. Keep its request semantics so the exact
+            // same stream ID can be retried without colliding namespaces.
+            const keep_for_retry = if (self.established.connection
+                .sendStreamStats(stream_id)) |stats|
+                stats.highest_sent_offset == 0 and stats.final_size == null
+            else
+                false;
+            if (!keep_for_retry) {
+                _ = self.request_lifecycle.finish(stream_id) catch false;
+            }
+        };
         try self.ensureSettingsSentOnce();
         try trySendConnectionRequestLiteral(
             &self.established.connection,
@@ -8256,7 +8277,7 @@ pub const HandshakeClient = struct {
             self.control.settings.peer,
         );
         self.next_stream_id = next_stream_id;
-        self.request_lifecycle.markAllocated(stream_id);
+        if (!lifecycle_exists) self.request_lifecycle.markAllocated(stream_id);
         return stream_id;
     }
 
