@@ -146,6 +146,108 @@ test "WebTransport endpoint poll mirrors automatic stream-credit retry timer" {
     try std.testing.expect(h3.established.connection.peerStreamClosed(2));
 }
 
+test "WebTransport endpoint poll refreshes timers before returning an error" {
+    const allocator = std.testing.allocator;
+    var threaded = std.Io.Threaded.init(allocator, .{});
+    defer threaded.deinit();
+    const io = threaded.io();
+
+    var server_endpoint = try quic.runtime.Endpoint.bind(
+        allocator,
+        io,
+        .{ .ip4 = .loopback(0) },
+        .{ .max_datagram_size = 4096 },
+    );
+    defer server_endpoint.deinit();
+    const keys = quic.protection.deriveAes128Keys(
+        [_]u8{0xe8} ** quic.protection.secret_len,
+    );
+    const settings = webtransport.defaultSettings(.{});
+    var h3 = try http3.runtime.HandshakeServerSession.initPreconfigured(
+        &server_endpoint,
+        .{ .ip4 = .loopback(9105) },
+        .{ .local_settings = settings },
+        .{
+            .receive_keys = keys,
+            .send_keys = keys,
+            .local_connection_id = "wt-error-server",
+            .peer_connection_id = "wt-error-client",
+            .one_rtt = .{ .enable_pacing = false },
+        },
+    );
+    defer h3.deinit();
+    h3.control.settings.markSent(settings);
+    h3.control.settings.markReceived(settings);
+    var streams = try handshake_stream.initRegistry(
+        allocator,
+        .init(0),
+        .server,
+        settings,
+        settings,
+        8,
+        null,
+        null,
+    );
+    var streams_owned = true;
+    defer if (streams_owned) streams.deinit();
+    var dispatcher = quic.endpoint_dispatcher.Dispatcher.init(
+        allocator,
+        &server_endpoint,
+    );
+    defer dispatcher.deinit();
+    const handle: quic.endpoint_dispatcher.ConnectionHandle = 10;
+    try dispatcher.registerConnection(handle, &h3.established.connection);
+    var accepted = runtime.EndpointAcceptedSession{
+        .handle = handle,
+        .dispatcher = &dispatcher,
+        .h3 = &h3,
+        .request = undefined,
+        .session_id = .init(0),
+        .streams = streams,
+        .control = try session_control.Control.init(.init(0)),
+    };
+    streams_owned = false;
+    defer accepted.streams.deinit();
+
+    // Leave a Capsule type varint incomplete at a clean HTTP/3 DATA-frame
+    // boundary, then deliver FIN. Polling must report InvalidCapsule. A PING
+    // submitted since registration supplies unmirrored recovery work whose
+    // PTO must still reach the endpoint before that error escapes.
+    try std.testing.expect((try accepted.control.feed(&.{
+        0x00,
+        0x01,
+        0x40,
+    })) == null);
+    try quic.one_rtt.testing.applyReceivedFrames(
+        &h3.established.connection,
+        0,
+        &.{.{ .stream = .{
+            .stream_id = accepted.session_id.value,
+            .data = &.{},
+            .fin = true,
+        } }},
+        null,
+        .not_ect,
+    );
+    try h3.established.connection.send(&.{.{ .ping = {} }});
+    const connection_timer = h3.established.connection
+        .nextTimerDeadline() orelse return error.TestUnexpectedResult;
+    try std.testing.expect(dispatcher.nextTimerDeadline() == null);
+
+    var buffer: [1]u8 = undefined;
+    try std.testing.expectError(
+        error.InvalidCapsule,
+        runtime.EndpointServer.testing.pollAcceptedSessionEntry(
+            &accepted,
+            &buffer,
+        ),
+    );
+    const endpoint_timer = dispatcher.nextTimerDeadline() orelse
+        return error.TestUnexpectedResult;
+    try std.testing.expectEqual(handle, endpoint_timer.connection_id);
+    try std.testing.expectEqual(connection_timer, endpoint_timer.timer);
+}
+
 test "WebTransport client handshake and CONNECT share one socket owner" {
     const allocator = std.testing.allocator;
     var threaded = std.Io.Threaded.init(allocator, .{});

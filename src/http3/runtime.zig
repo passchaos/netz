@@ -3805,7 +3805,14 @@ pub const EndpointServer = struct {
         _: quic.endpoint_dispatcher.ConnectionHandle,
         promoted: *PromotedHandshakeSession,
     ) HandshakeAdmissionError!?StreamingRequestEvent {
-        const event = try promoted.session.pollRequestEvent();
+        var event = promoted.session.pollRequestEvent() catch |err| {
+            // Protocol errors can queue RESET_STREAM, STOP_SENDING, QPACK
+            // feedback, or CONNECTION_CLOSE before they are surfaced. Do not
+            // strand that recovery work outside the endpoint timer heap.
+            try promoted.dispatcher.refreshConnectionTimer(promoted.handle);
+            return err;
+        };
+        errdefer if (event) |*owned| owned.deinit(promoted.allocator);
         // Polling can return receive credit, emit QPACK feedback, retire a
         // completed request stream, or arm a retry after an automatic credit
         // send fails. The dispatcher last refreshed when it delivered the

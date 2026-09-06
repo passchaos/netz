@@ -408,6 +408,80 @@ test "HTTP/3 endpoint request poll mirrors automatic stream-credit retry timer" 
     );
 }
 
+test "HTTP/3 endpoint request poll refreshes timers before returning an error" {
+    const allocator = std.testing.allocator;
+    var threaded = std.Io.Threaded.init(allocator, .{});
+    defer threaded.deinit();
+    const io = threaded.io();
+
+    var server_endpoint = try quic.runtime.Endpoint.bind(
+        allocator,
+        io,
+        .{ .ip4 = .loopback(0) },
+        .{ .max_datagram_size = 4096 },
+    );
+    defer server_endpoint.deinit();
+    const keys = quic.protection.deriveAes128Keys(
+        [_]u8{0xe5} ** quic.protection.secret_len,
+    );
+    var session = try runtime.HandshakeServerSession.initPreconfigured(
+        &server_endpoint,
+        .{ .ip4 = .loopback(9104) },
+        .{},
+        .{
+            .receive_keys = keys,
+            .send_keys = keys,
+            .local_connection_id = "poll-error-server",
+            .peer_connection_id = "poll-error-client",
+            .one_rtt = .{ .enable_pacing = false },
+        },
+    );
+    defer session.deinit();
+    var dispatcher = quic.endpoint_dispatcher.Dispatcher.init(
+        allocator,
+        &server_endpoint,
+    );
+    defer dispatcher.deinit();
+    const handle: quic.endpoint_dispatcher.ConnectionHandle = 81;
+    try dispatcher.registerConnection(handle, &session.established.connection);
+    var promoted = runtime.PromotedHandshakeSession{
+        .dispatcher = &dispatcher,
+        .allocator = allocator,
+        .handle = handle,
+        .session = &session,
+        .registered = false,
+    };
+
+    // Simulate application work performed since the last dispatcher event.
+    // The subsequent protocol poll fails before returning an event, but the
+    // endpoint must still mirror this reliable packet's PTO.
+    try session.established.connection.send(&.{.{ .ping = {} }});
+    const connection_timer = session.established.connection
+        .nextTimerDeadline() orelse return error.TestUnexpectedResult;
+    try std.testing.expectEqual(
+        quic.one_rtt.TimerDeadlineKind.pto,
+        connection_timer.kind,
+    );
+    try std.testing.expect(dispatcher.nextTimerDeadline() == null);
+
+    var failed_alloc = std.testing.FailingAllocator.init(
+        allocator,
+        .{ .fail_index = 0, .resize_fail_index = 0 },
+    );
+    session.qpack_decode.allocator = failed_alloc.allocator();
+    defer session.qpack_decode.allocator = allocator;
+    try std.testing.expectError(
+        error.OutOfMemory,
+        runtime.EndpointServer.testing.pollSessionRequestEntry(&promoted),
+    );
+    try std.testing.expect(failed_alloc.has_induced_failure);
+
+    const endpoint_timer = dispatcher.nextTimerDeadline() orelse
+        return error.TestUnexpectedResult;
+    try std.testing.expectEqual(handle, endpoint_timer.connection_id);
+    try std.testing.expectEqual(connection_timer, endpoint_timer.timer);
+}
+
 test "HTTP/3 endpoint server validates receive deadlines" {
     const allocator = std.testing.allocator;
     var threaded = std.Io.Threaded.init(allocator, .{

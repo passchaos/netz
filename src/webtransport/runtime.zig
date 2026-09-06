@@ -2540,7 +2540,16 @@ pub const EndpointServer = struct {
         accepted: *EndpointAcceptedSession,
         stream_buffer: []u8,
     ) EndpointServerError!?EndpointSessionEvent {
-        const event = try pollEndpointSession(accepted, stream_buffer);
+        var event = pollEndpointSession(accepted, stream_buffer) catch |err| {
+            // A failing protocol poll can still queue transport control or
+            // close frames. Preserve its error while ensuring the shared
+            // endpoint observes the resulting recovery deadline.
+            try accepted.refreshTimer();
+            return err;
+        };
+        errdefer if (event) |*owned| {
+            owned.deinit(accepted.h3.established.connection.endpoint.allocator);
+        };
         // Polling can consume stream bytes, emit receive credit/MAX_STREAMS,
         // or arm a retry after an automatic credit send fails. Mirror the
         // resulting aggregate connection deadline before the endpoint blocks
