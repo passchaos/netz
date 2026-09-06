@@ -331,9 +331,36 @@ test "HTTP/3 push cancellation queue reuses consumed FIFO slots" {
     try std.testing.expect(pushes.takeCancelledStream() == null);
     try std.testing.expectEqual(@as(usize, 0), pushes.cancelledStreamCount());
     try std.testing.expectEqual(@as(usize, 0), pushes.entryCount());
-    try std.testing.expectEqual(@as(usize, 4), pushes.promiseCount());
+    try std.testing.expectEqual(@as(usize, 0), pushes.promiseCount());
+    try std.testing.expectEqual(@as(usize, 1), pushes.completedPromiseRangeCount());
+    for ([_]u64{ 1, 2, 3, 4 }) |push_id| {
+        try std.testing.expect(pushes.hasPromise(push_id));
+    }
 
     var table = http3.Qpack.DynamicTable.init(allocator, 0);
     defer table.deinit();
     try std.testing.expect((try pushes.next(table, 0, 4)) == null);
+}
+
+test "HTTP/3 completed push history preserves sparse IDs compactly" {
+    const allocator = std.testing.allocator;
+    var pushes = PushSet.init(allocator, 8, 512, .{});
+    defer pushes.deinit();
+    try pushes.reservePromisesThrough(7);
+
+    for ([_]u64{ 7, 1, 5, 3 }) |push_id| {
+        try pushes.registerPromise(push_id, 0);
+        try pushes.observePeerCancellation(push_id);
+    }
+    try std.testing.expectEqual(@as(usize, 0), pushes.promiseCount());
+    try std.testing.expectEqual(@as(usize, 4), pushes.completedPromiseRangeCount());
+    for ([_]u64{ 1, 3, 5, 7 }) |push_id| {
+        try std.testing.expect(pushes.hasPromise(push_id));
+        // A duplicate promise after completion is idempotently ignored.
+        try pushes.registerPromise(push_id, 4);
+    }
+    for ([_]u64{ 0, 2, 4, 6 }) |push_id| {
+        try std.testing.expect(!pushes.hasPromise(push_id));
+    }
+    try std.testing.expectEqual(@as(usize, 0), pushes.promiseCount());
 }

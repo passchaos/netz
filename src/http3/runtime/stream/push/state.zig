@@ -1,6 +1,7 @@
 const std = @import("std");
 const http3 = @import("../../../mod.zig");
 const quic = @import("../../../../quic/mod.zig");
+const closed_ranges = @import("../../../../quic/one_rtt/closed_streams.zig");
 const wire = @import("../../../../internal/wire.zig");
 const Error = @import("../../error.zig").Error;
 const reader_module = @import("../reader.zig");
@@ -111,7 +112,6 @@ pub const Set = struct {
         const State = enum {
             promised,
             active,
-            finished,
         };
 
         push_id: u64,
@@ -134,6 +134,10 @@ pub const Set = struct {
     last_error_stream_id: ?u62 = null,
     promises: std.ArrayList(Promise) = .empty,
     promise_index: std.AutoHashMapUnmanaged(u64, usize) = .empty,
+    /// Exact lifetime history without one tombstone per completed push. RFC
+    /// 9114 only recommends sequential Push IDs, so retain sparse merged
+    /// ranges rather than assuming every lower ID was used.
+    completed_promises: closed_ranges.Set = .{},
     cancelled_stream_ids: std.ArrayList(u62) = .empty,
     cancelled_stream_head: usize = 0,
     max_streams: usize,
@@ -179,6 +183,7 @@ pub const Set = struct {
         self.push_index.deinit(self.allocator);
         self.promises.deinit(self.allocator);
         self.promise_index.deinit(self.allocator);
+        self.completed_promises.deinit(self.allocator);
         self.cancelled_stream_ids.deinit(self.allocator);
         self.* = undefined;
     }
@@ -258,7 +263,12 @@ pub const Set = struct {
     }
 
     pub fn hasPromise(self: Set, push_id: u64) bool {
-        return self.findPromise(push_id) != null;
+        return self.completed_promises.contains(push_id) or
+            self.findPromise(push_id) != null;
+    }
+
+    pub fn completedPromiseRangeCount(self: Set) usize {
+        return self.completed_promises.rangeCount();
     }
 
     pub fn reservePromisesThrough(
@@ -289,6 +299,7 @@ pub const Set = struct {
         // RFC 9114 permits the same push to be promised by multiple request
         // streams. The first parent remains the canonical correlation exposed
         // on push events.
+        if (self.completed_promises.contains(push_id)) return;
         if (self.promises.items.len == self.promises.capacity) {
             if (self.promise_index.contains(push_id)) return;
             // MAX_PUSH_ID reserves one slot for every legal unique ID before
@@ -296,8 +307,16 @@ pub const Set = struct {
             // after the request reader has transactionally consumed bytes.
             return error.ExcessiveLoad;
         }
+        if (self.promise_index.contains(push_id)) return;
+        // Every active promise can later become a disjoint completed range.
+        // Reserve for all of them now so FIN/reset/cancellation retirement is
+        // allocation-free after transport/application state has committed.
+        try self.completed_promises.prepareInsert(
+            self.allocator,
+            self.promises.items.len + 1,
+        );
         const slot = self.promise_index.getOrPutAssumeCapacity(push_id);
-        if (slot.found_existing) return;
+        std.debug.assert(!slot.found_existing);
         const index = self.promises.items.len;
         self.promises.appendAssumeCapacity(.{
             .push_id = push_id,
@@ -564,10 +583,8 @@ pub const Set = struct {
         self: *Set,
         push_id: u64,
     ) Error!void {
-        const promise = self.findPromise(push_id) orelse
-            return error.UnexpectedStream;
-        if (promise.state == .finished) return;
-        promise.state = .finished;
+        if (self.completed_promises.contains(push_id)) return;
+        _ = self.findPromise(push_id) orelse return error.UnexpectedStream;
         if (self.findByPushId(push_id)) |entry| {
             const stream_id: u62 = @intCast(entry.streamId());
             if (self.cancelled_stream_head != 0 and
@@ -584,6 +601,7 @@ pub const Set = struct {
             self.cancelled_stream_ids.appendAssumeCapacity(stream_id);
             self.removeStream(stream_id);
         }
+        self.retirePromiseAssumeCapacity(push_id);
     }
 
     pub fn takeCancelledStream(self: *Set) ?u62 {
@@ -611,8 +629,7 @@ pub const Set = struct {
 
     pub fn removeFinished(self: *Set, index: usize) void {
         const push_id = self.entries.items[index].push_id.?;
-        const promise = self.findPromise(push_id) orelse unreachable;
-        promise.state = .finished;
+        self.retirePromiseAssumeCapacity(push_id);
         var removed = self.takeEntryAt(index);
         removed.deinit();
     }
@@ -636,8 +653,8 @@ pub const Set = struct {
     pub fn failStream(self: *Set, stream_id: u62) void {
         const entry = self.findByStreamId(stream_id) orelse return;
         if (entry.push_id) |push_id| {
-            if (self.findPromise(push_id)) |promise| {
-                promise.state = .finished;
+            if (self.findPromise(push_id) != null) {
+                self.retirePromiseAssumeCapacity(push_id);
             }
         }
         self.removeStream(stream_id);
@@ -710,8 +727,9 @@ pub const Set = struct {
             if (existing_index != entry_index) return error.DuplicatePushId;
         }
         if (self.findPromise(push_id)) |promise| {
-            if (promise.state == .finished) return error.DuplicatePushId;
             promise.state = .active;
+        } else if (self.completed_promises.contains(push_id)) {
+            return error.DuplicatePushId;
         }
     }
 
@@ -731,5 +749,17 @@ pub const Set = struct {
         const index = self.promise_index.get(push_id) orelse return null;
         if (index >= self.promises.items.len) return null;
         return &self.promises.items[index];
+    }
+
+    fn retirePromiseAssumeCapacity(self: *Set, push_id: u64) void {
+        const index = self.promise_index.get(push_id) orelse return;
+        self.completed_promises.insertAssumeCapacity(push_id);
+        _ = self.promise_index.remove(push_id);
+        const last_index = self.promises.items.len - 1;
+        _ = self.promises.swapRemove(index);
+        if (index != last_index) {
+            const moved = self.promises.items[index];
+            self.promise_index.getPtr(moved.push_id).?.* = index;
+        }
     }
 };
