@@ -293,6 +293,9 @@ state and delays the application event until a later dispatcher turn.
 At the QUIC layer, a received STOP_SENDING records its mandatory RESET_STREAM
 response and attempts it once. Pacing or transient send failure arms a distinct
 dispatcher timer, so packet routing never waits and the reset is not forgotten.
+Stale STREAMS_BLOCKED frames follow the same pattern: the current MAX_STREAMS
+limits are coalesced into one response attempt and retained behind a dedicated
+timer when transport backpressure prevents immediate delivery.
 
 ## Important interoperability correction
 

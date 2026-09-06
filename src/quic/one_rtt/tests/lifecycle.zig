@@ -1155,6 +1155,119 @@ test "QUIC STOP_SENDING defers paced automatic reset" {
     try std.testing.expectEqual(@as(u64, 7), reset.final_size);
 }
 
+test "QUIC STREAMS_BLOCKED response is dispatcher retryable" {
+    const allocator = std.testing.allocator;
+    var threaded = std.Io.Threaded.init(allocator, .{});
+    defer threaded.deinit();
+    const io = threaded.io();
+
+    var local_endpoint = try quic.runtime.Endpoint.bind(
+        allocator,
+        io,
+        .{ .ip4 = .loopback(0) },
+        .{ .max_datagram_size = 4096 },
+    );
+    defer local_endpoint.deinit();
+    var peer_endpoint = try quic.runtime.Endpoint.bind(
+        allocator,
+        io,
+        .{ .ip4 = .loopback(0) },
+        .{ .max_datagram_size = 4096 },
+    );
+    defer peer_endpoint.deinit();
+    const keys = quic.protection.deriveAes128Keys(
+        [_]u8{0x4d} ** quic.protection.secret_len,
+    );
+    var connection = try one_rtt.Connection.init(&local_endpoint, .{
+        .peer = peer_endpoint.address(),
+        .receive_keys = keys,
+        .send_keys = keys,
+        .local_connection_id = "blocked-server",
+        .peer_connection_id = "blocked-client",
+        .local_endpoint = .server,
+        .initial_receive_max_streams_bidi = 4,
+        .max_datagram_size = 1200,
+        .pacing_max_burst_packets = 1,
+    });
+    defer connection.deinit();
+    var peer = try one_rtt.Connection.init(&peer_endpoint, .{
+        .peer = local_endpoint.address(),
+        .receive_keys = keys,
+        .send_keys = keys,
+        .local_connection_id = "blocked-client",
+        .peer_connection_id = "blocked-server",
+        .local_endpoint = .client,
+        .enable_pacing = false,
+    });
+    defer peer.deinit();
+    var dispatcher = quic.endpoint_dispatcher.Dispatcher.init(
+        allocator,
+        &local_endpoint,
+    );
+    defer dispatcher.deinit();
+    const handle: quic.endpoint_dispatcher.ConnectionHandle = 93;
+    try dispatcher.registerConnection(handle, &connection);
+
+    var fixed_io = FixedClockIo{
+        .delegate = local_endpoint.io,
+        .now_ns = 1_000_000,
+    };
+    var fixed_vtable = local_endpoint.io.vtable.*;
+    fixed_vtable.now = FixedClockIo.now;
+    fixed_vtable.sleep = FixedClockIo.sleep;
+    local_endpoint.io = .{
+        .userdata = &fixed_io,
+        .vtable = &fixed_vtable,
+    };
+    defer local_endpoint.io = fixed_io.delegate;
+
+    try connection.sendAt(
+        &.{.{ .padding = .{ .len = 1160 } }},
+        @intCast(fixed_io.now_ns),
+    );
+    var fill = try peer.receivePacket();
+    defer fill.deinit(allocator);
+    const packet_number = connection.next_packet_number;
+    try one_rtt.testing.applyReceivedFrames(
+        &connection,
+        0,
+        &.{.{ .streams_blocked_bidi = .{ .maximum_streams = 1 } }},
+        @intCast(fixed_io.now_ns),
+        .not_ect,
+    );
+    try dispatcher.refreshConnectionTimer(handle);
+    try std.testing.expectEqual(@as(usize, 0), fixed_io.sleep_calls);
+    try std.testing.expectEqual(
+        packet_number,
+        connection.next_packet_number,
+    );
+    const timer = dispatcher.nextTimerDeadline() orelse
+        return error.TestUnexpectedResult;
+    try std.testing.expectEqual(handle, timer.connection_id);
+    try std.testing.expectEqual(
+        one_rtt.TimerDeadlineKind.streams_blocked_response,
+        timer.timer.kind,
+    );
+
+    fixed_io.now_ns = @intCast(timer.timer.deadline_ns);
+    const serviced = (try dispatcher.serviceNextTimerAt(
+        timer.timer.deadline_ns,
+    )) orelse return error.TestUnexpectedResult;
+    try std.testing.expectEqual(
+        one_rtt.TimerDeadlineKind.streams_blocked_response,
+        serviced.timer.kind,
+    );
+    try std.testing.expectEqual(@as(usize, 0), fixed_io.sleep_calls);
+    var response = try peer.receivePacket();
+    defer response.deinit(allocator);
+    try std.testing.expectEqual(@as(usize, 1), response.frames.len);
+    try std.testing.expect(response.frames[0] == .max_streams_bidi);
+    try std.testing.expectEqual(
+        @as(u64, 4),
+        response.frames[0].max_streams_bidi.maximum_streams,
+    );
+}
+
 test "QUIC 1-RTT connection applies sparse ACK ranges from peer" {
     const allocator = std.testing.allocator;
 

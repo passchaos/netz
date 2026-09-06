@@ -641,6 +641,7 @@ pub const LossDetectionTimerDeadline = struct {
 
 pub const TimerDeadlineKind = enum {
     stop_sending_reset,
+    streams_blocked_response,
     pacing,
     ack_delay,
     peer_stream_credit,
@@ -759,6 +760,10 @@ pub const Connection = struct {
     pending_stop_sending_resets: usize = 0,
     stop_sending_reset_retry_deadline_ns: ?u64 = null,
     stop_sending_reset_retry_attempts: u8 = 0,
+    pending_streams_blocked_bidi_response: bool = false,
+    pending_streams_blocked_uni_response: bool = false,
+    streams_blocked_response_retry_deadline_ns: ?u64 = null,
+    streams_blocked_response_retry_attempts: u8 = 0,
     pending_peer_stream_credit_releases: usize = 0,
     pending_local_stream_releases: usize = 0,
     stream_release_retry_deadline_ns: ?u64 = null,
@@ -2563,6 +2568,12 @@ pub const Connection = struct {
                 .deadline_ns = deadline,
             });
         }
+        if (self.streams_blocked_response_retry_deadline_ns) |deadline| {
+            considerTimerDeadline(&next, .{
+                .kind = .streams_blocked_response,
+                .deadline_ns = deadline,
+            });
+        }
         if (self.pacing_blocked_until_ns) |deadline| {
             considerTimerDeadline(&next, .{
                 .kind = .pacing,
@@ -2658,6 +2669,12 @@ pub const Connection = struct {
                 self.stop_sending_reset_retry_deadline_ns = null;
                 self.flushPendingStopSendingResetAt(now_ns) catch |err| {
                     self.scheduleStopSendingResetRetry(err, now_ns);
+                };
+            },
+            .streams_blocked_response => {
+                self.streams_blocked_response_retry_deadline_ns = null;
+                self.flushPendingStreamsBlockedResponseAt(now_ns) catch |err| {
+                    self.scheduleStreamsBlockedResponseRetry(err, now_ns);
                 };
             },
             // Pacing is application-owned pending work rather than a queued
@@ -5091,6 +5108,17 @@ pub const Connection = struct {
         }
         self.recv_max_streams_bidi = next_bidi;
         self.recv_max_streams_uni = next_uni;
+        if (bidi_released != 0) {
+            self.pending_streams_blocked_bidi_response = false;
+        }
+        if (uni_released != 0) {
+            self.pending_streams_blocked_uni_response = false;
+        }
+        if (!self.pending_streams_blocked_bidi_response and
+            !self.pending_streams_blocked_uni_response)
+        {
+            self.clearStreamsBlockedResponseRetry();
+        }
         return .{
             .streams_released = released,
             .update_sent = frame_count != 0,
@@ -5507,6 +5535,17 @@ pub const Connection = struct {
         }
         self.recv_max_streams_bidi = next_bidi;
         self.recv_max_streams_uni = next_uni;
+        if (bidi_released != 0) {
+            self.pending_streams_blocked_bidi_response = false;
+        }
+        if (uni_released != 0) {
+            self.pending_streams_blocked_uni_response = false;
+        }
+        if (!self.pending_streams_blocked_bidi_response and
+            !self.pending_streams_blocked_uni_response)
+        {
+            self.clearStreamsBlockedResponseRetry();
+        }
     }
 
     fn flushRequestedStreamReleasesAt(
@@ -5623,6 +5662,77 @@ pub const Connection = struct {
         );
         self.stop_sending_reset_retry_attempts +|= 1;
         self.stop_sending_reset_retry_deadline_ns = std.math.add(
+            u64,
+            now_ns,
+            stream_release_retry_backoff_ns[index],
+        ) catch std.math.maxInt(u64);
+    }
+
+    fn flushPendingStreamsBlockedResponseAt(
+        self: *Connection,
+        now_ns: u64,
+    ) Error!void {
+        if (!self.pending_streams_blocked_bidi_response and
+            !self.pending_streams_blocked_uni_response)
+        {
+            self.clearStreamsBlockedResponseRetry();
+            return;
+        }
+        var frames: [2]quic.Frame = undefined;
+        var count: usize = 0;
+        if (self.pending_streams_blocked_bidi_response) {
+            frames[count] = .{ .max_streams_bidi = .{
+                .maximum_streams = self.recv_max_streams_bidi,
+            } };
+            count += 1;
+        }
+        if (self.pending_streams_blocked_uni_response) {
+            frames[count] = .{ .max_streams_uni = .{
+                .maximum_streams = self.recv_max_streams_uni,
+            } };
+            count += 1;
+        }
+        try self.sendTrackedFramesEcnAt(
+            frames[0..count],
+            .not_ect,
+            now_ns,
+        );
+        self.pending_streams_blocked_bidi_response = false;
+        self.pending_streams_blocked_uni_response = false;
+        self.clearStreamsBlockedResponseRetry();
+    }
+
+    fn clearStreamsBlockedResponseRetry(self: *Connection) void {
+        self.streams_blocked_response_retry_deadline_ns = null;
+        self.streams_blocked_response_retry_attempts = 0;
+    }
+
+    fn scheduleStreamsBlockedResponseRetry(
+        self: *Connection,
+        err: Error,
+        now_ns: u64,
+    ) void {
+        if ((!self.pending_streams_blocked_bidi_response and
+            !self.pending_streams_blocked_uni_response) or
+            self.close_info != null or self.idle_timed_out)
+        {
+            self.clearStreamsBlockedResponseRetry();
+            return;
+        }
+        if (err == error.PacingLimited) {
+            if (self.pacing_blocked_until_ns) |deadline| {
+                if (deadline > now_ns) {
+                    self.streams_blocked_response_retry_deadline_ns = deadline;
+                    return;
+                }
+            }
+        }
+        const index = @min(
+            @as(usize, self.streams_blocked_response_retry_attempts),
+            stream_release_retry_backoff_ns.len - 1,
+        );
+        self.streams_blocked_response_retry_attempts +|= 1;
+        self.streams_blocked_response_retry_deadline_ns = std.math.add(
             u64,
             now_ns,
             stream_release_retry_backoff_ns[index],
@@ -8832,6 +8942,9 @@ pub const Connection = struct {
         self.flushPendingStopSendingResetAt(credit_now_ns) catch |err| {
             self.scheduleStopSendingResetRetry(err, credit_now_ns);
         };
+        self.flushPendingStreamsBlockedResponseAt(credit_now_ns) catch |err| {
+            self.scheduleStreamsBlockedResponseRetry(err, credit_now_ns);
+        };
         self.flushRequestedStreamReleasesAt(credit_now_ns) catch |err| {
             // ACK and stream state above are already committed. Treat this
             // internal credit packet like an event-loop send: preserve the
@@ -9363,11 +9476,10 @@ pub const Connection = struct {
             .unidirectional => self.recv_max_streams_uni,
         };
         if (maximum_streams < current_limit) {
-            const frame = switch (direction) {
-                .bidirectional => quic.Frame{ .max_streams_bidi = .{ .maximum_streams = current_limit } },
-                .unidirectional => quic.Frame{ .max_streams_uni = .{ .maximum_streams = current_limit } },
-            };
-            try self.sendTrackedFrames(&[_]quic.Frame{frame});
+            switch (direction) {
+                .bidirectional => self.pending_streams_blocked_bidi_response = true,
+                .unidirectional => self.pending_streams_blocked_uni_response = true,
+            }
         }
     }
 
