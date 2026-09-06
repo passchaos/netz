@@ -58,6 +58,7 @@ test "HTTP/3 shared pool routes two origins through one endpoint" {
     const ServerWorker = struct {
         server: *runtime.HandshakeServer,
         expected_path: []const u8,
+        expected_body: []const u8 = &.{},
         body: []const u8,
         err: ?anyerror = null,
 
@@ -78,6 +79,26 @@ test "HTTP/3 shared pool routes two origins through one endpoint" {
                 self.err = error.TestUnexpectedResult;
                 return;
             }
+            if (!std.mem.eql(u8, request.request.body, self.expected_body)) {
+                self.err = error.TestUnexpectedResult;
+                return;
+            }
+            if (self.expected_body.len != 0 and
+                (request.request.trailers.len != 1 or
+                    !std.mem.eql(
+                        u8,
+                        request.request.trailers[0].name,
+                        "x-upload",
+                    ) or
+                    !std.mem.eql(
+                        u8,
+                        request.request.trailers[0].value,
+                        "complete",
+                    )))
+            {
+                self.err = error.TestUnexpectedResult;
+                return;
+            }
             session.sendResponse(request.stream_id, .{
                 .status = 200,
                 .body = self.body,
@@ -89,6 +110,7 @@ test "HTTP/3 shared pool routes two origins through one endpoint" {
     var worker_a = ServerWorker{
         .server = &server_a,
         .expected_path = "/a",
+        .expected_body = "upload-a",
         .body = "origin-a",
     };
     var worker_b = ServerWorker{
@@ -117,6 +139,10 @@ test "HTTP/3 shared pool routes two origins through one endpoint" {
                 .initial_pto_ms = 20,
                 .max_pto_ms = 40,
                 .max_duration_ms = 2_000,
+            },
+            .initial_one_rtt_config = .{
+                .max_datagram_size = 1200,
+                .enable_pacing = false,
             },
         }, .connect_timeout = .fromSeconds(3) },
     });
@@ -161,11 +187,17 @@ test "HTTP/3 shared pool routes two origins through one endpoint" {
     try std.testing.expectEqual(@as(usize, 2), pool.routeCount());
     try std.testing.expectEqual(@as(usize, 0), pool.pendingHandshakeCount());
 
-    const stream_a = try lease_a.sendRequest(.{
-        .method = "GET",
+    const stream_a = try lease_a.tryStartRequest(.{
+        .method = "POST",
         .path = "/a",
         .authority = "localhost",
-    });
+    }, "upload-a".len);
+    try lease_a.trySendRequestBody(stream_a, "upload-", false);
+    try lease_a.trySendRequestBody(stream_a, "a", false);
+    try lease_a.tryFinishRequestTrailers(stream_a, &.{.{
+        .name = "x-upload",
+        .value = "complete",
+    }});
     const stream_b = try lease_b.sendRequest(.{
         .method = "GET",
         .path = "/b",

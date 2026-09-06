@@ -578,7 +578,11 @@ before atomic dispatcher promotion, and idle reuse/global LRU eviction retain
 the configured connection cap. Only the pool's `receive*` methods own UDP
 receive; leases send through single-attempt helpers, expose stable connection
 handles for response correlation, and reject client methods that would start a
-competing receive loop. The authenticated client primitives supporting that
+competing receive loop. Leases provide one-attempt complete requests and
+streaming uploads (`tryStartRequest`, `trySendRequestBody`, and
+`tryFinishRequestTrailers`), with literal/static QPACK request sections so a
+retry never commits encoder dependencies separately from the request packet.
+The authenticated client primitives supporting that
 integration are explicitly nonblocking: `pollResponseEventOnce`,
 `pollNextResponseEventOnce`, and `pollPushEventOnce` never receive or sleep,
 and their matching response/push DATA helpers preserve unread bytes while

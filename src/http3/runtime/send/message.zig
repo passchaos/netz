@@ -133,6 +133,94 @@ pub fn trySendConnectionRequestLiteral(
     try connection.trySend(scratch.frames.items);
 }
 
+pub fn trySendConnectionStreamingRequestHeadLiteral(
+    connection: *quic.one_rtt.Connection,
+    scratch: *StreamMessageSendScratch,
+    bodies: *OutboundBodySet,
+    stream_id: u62,
+    request: http3.Request,
+    body_length: ?usize,
+    options: anytype,
+    peer_settings: http3.Settings,
+) Error!void {
+    scratch.reset();
+    const streaming = try request.writeStreamingHead(
+        &scratch.encoded,
+        connection.endpoint.allocator,
+        peer_settings,
+        body_length,
+    );
+    const retain_body_state = streaming.body_allowed and
+        (streaming.expected_length == null or
+            streaming.expected_length.? != 0);
+    if (retain_body_state) try bodies.reserveOpen(stream_id);
+    var send = quic.stream_state.SendState.init(stream_id);
+    try send.appendFrames(
+        &scratch.frames,
+        connection.endpoint.allocator,
+        scratch.encoded.items,
+        options.max_stream_frame_data,
+        !retain_body_state,
+    );
+    if (scratch.frames.items.len == 0 or
+        scratch.frames.items.len >
+            @max(@as(usize, 1), options.max_frames_per_packet) or
+        try connection.packetLenForFramesAtOffset(
+            0,
+            scratch.frames.items,
+        ) > connection.currentSendDatagramSize())
+    {
+        return error.DatagramTooLarge;
+    }
+    try connection.trySend(scratch.frames.items);
+    if (retain_body_state) {
+        bodies.appendOpenAssumeCapacity(
+            stream_id,
+            send,
+            streaming.expected_length,
+        );
+    }
+}
+
+pub fn trySendConnectionTrailersLiteral(
+    connection: *quic.one_rtt.Connection,
+    bodies: *OutboundBodySet,
+    scratch: *StreamMessageSendScratch,
+    stream_id: u62,
+    trailers: []const http3.Qpack.HeaderField,
+    peer_settings: http3.Settings,
+    options: anytype,
+) Error!void {
+    const entry = try bodies.prepareTrailers(stream_id);
+    var staged = entry.*;
+    scratch.reset();
+    try http3.writeTrailers(
+        &scratch.encoded,
+        connection.endpoint.allocator,
+        trailers,
+        peer_settings,
+    );
+    try staged.send.appendFrames(
+        &scratch.frames,
+        connection.endpoint.allocator,
+        scratch.encoded.items,
+        options.max_stream_frame_data,
+        true,
+    );
+    if (scratch.frames.items.len == 0 or
+        scratch.frames.items.len >
+            @max(@as(usize, 1), options.max_frames_per_packet) or
+        try connection.packetLenForFramesAtOffset(
+            0,
+            scratch.frames.items,
+        ) > connection.currentSendDatagramSize())
+    {
+        return error.DatagramTooLarge;
+    }
+    try connection.trySend(scratch.frames.items);
+    _ = bodies.finish(stream_id);
+}
+
 pub fn sendConnectionResponseSequence(
     connection: *quic.one_rtt.Connection,
     scratch: *StreamMessageSendScratch,

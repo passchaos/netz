@@ -202,6 +202,8 @@ const sendProtectedBodyChunk = body_sender.sendProtectedBodyChunk;
 const sendConnectionMessage = message_sender.sendConnectionMessage;
 const trySendConnectionRequestLiteral =
     message_sender.trySendConnectionRequestLiteral;
+const trySendConnectionStreamingRequestHeadLiteral =
+    message_sender.trySendConnectionStreamingRequestHeadLiteral;
 const sendConnectionResponseSequence =
     message_sender.sendConnectionResponseSequence;
 const trySendConnectionResponseHeadLiteral =
@@ -215,6 +217,8 @@ const sendProtectedPush = message_sender.sendProtectedPush;
 const sendConnectionStreamingHead = message_sender.sendConnectionStreamingHead;
 const sendProtectedStreamingHead = message_sender.sendProtectedStreamingHead;
 const sendConnectionTrailers = message_sender.sendConnectionTrailers;
+const trySendConnectionTrailersLiteral =
+    message_sender.trySendConnectionTrailersLiteral;
 const sendProtectedTrailers = message_sender.sendProtectedTrailers;
 const RequestStreamReset = request_routing.RequestStreamReset;
 const requestResetError = request_routing.requestResetError;
@@ -8361,6 +8365,68 @@ pub const HandshakeClient = struct {
         return stream_id;
     }
 
+    /// Begin an incrementally-written request without waiting for pacing or
+    /// reading UDP. The literal/static QPACK head must fit in one transport
+    /// packet; a failed send retains a zero-byte stream for identical retry.
+    pub fn tryStartRequest(
+        self: *HandshakeClient,
+        request_options: http3.Request,
+        body_length: ?usize,
+    ) Error!u62 {
+        const stream_id = self.next_stream_id;
+        const next_stream_id = std.math.add(u62, stream_id, 4) catch
+            return error.StreamCreationError;
+        if (!self.control.acceptsRequestStream(stream_id)) {
+            return error.GoAwayReceived;
+        }
+        const transport_next = self.established.connection
+            .nextLocalBidirectionalStreamId();
+        const retrying_reserved_stream = transport_next == next_stream_id and
+            self.established.connection.sendStreamStats(stream_id) != null;
+        if (transport_next != stream_id and !retrying_reserved_stream) {
+            return error.StreamCreationError;
+        }
+        const lifecycle_exists = self.request_lifecycle.contains(stream_id);
+        const extended_connect = requestHasProtocol(request_options.headers);
+        if (!lifecycle_exists) {
+            try self.request_lifecycle.open(
+                stream_id,
+                request_options.method,
+                extended_connect,
+            );
+        } else if (!self.request_lifecycle.matchesRequest(
+            stream_id,
+            request_options.method,
+            extended_connect,
+        )) {
+            return error.UnexpectedStream;
+        }
+        errdefer if (!lifecycle_exists) {
+            const keep_for_retry = if (self.established.connection
+                .sendStreamStats(stream_id)) |stats|
+                stats.highest_sent_offset == 0 and stats.final_size == null
+            else
+                false;
+            if (!keep_for_retry) {
+                _ = self.request_lifecycle.finish(stream_id) catch false;
+            }
+        };
+        try self.ensureSettingsSentOnce();
+        try trySendConnectionStreamingRequestHeadLiteral(
+            &self.established.connection,
+            &self.stream_send_scratch,
+            &self.outbound_bodies,
+            stream_id,
+            request_options,
+            body_length,
+            self.options,
+            self.control.settings.peer,
+        );
+        self.next_stream_id = next_stream_id;
+        if (!lifecycle_exists) self.request_lifecycle.markAllocated(stream_id);
+        return stream_id;
+    }
+
     pub fn sendRequestBody(
         self: *HandshakeClient,
         stream_id: u62,
@@ -8568,6 +8634,27 @@ pub const HandshakeClient = struct {
             &self.qpack_encode,
             &self.qpack_encoder_send,
             &self.qpack_encoder_prefix_sent,
+            self.options,
+        );
+    }
+
+    /// Finish a streaming request with literal/static-QPACK trailers in one
+    /// nonblocking transport attempt.
+    pub fn tryFinishRequestTrailers(
+        self: *HandshakeClient,
+        stream_id: u62,
+        trailers: []const http3.Qpack.HeaderField,
+    ) Error!void {
+        if (!self.request_lifecycle.contains(stream_id)) {
+            return error.UnexpectedStream;
+        }
+        try trySendConnectionTrailersLiteral(
+            &self.established.connection,
+            &self.outbound_bodies,
+            &self.stream_send_scratch,
+            stream_id,
+            trailers,
+            self.control.settings.peer,
             self.options,
         );
     }

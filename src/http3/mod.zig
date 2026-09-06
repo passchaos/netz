@@ -2414,6 +2414,78 @@ pub const Request = struct {
         try writeHeadersAndData(list, allocator, fields, self.body, self.trailers);
     }
 
+    /// Encode only the initial request HEADERS using literal/static QPACK.
+    /// This is the allocation-staged counterpart used by event-loop runtimes
+    /// that must submit the resulting stream prefix in one nonblocking send.
+    pub fn writeStreamingHead(
+        self: Request,
+        list: *std.ArrayList(u8),
+        allocator: std.mem.Allocator,
+        peer_settings: Settings,
+        body_length: ?usize,
+    ) Error!struct { expected_length: ?usize, body_allowed: bool } {
+        if (self.body.len != 0 or self.trailers.len != 0) {
+            return error.InvalidContentLength;
+        }
+        var fields_stack: [header_fields.stack_capacity]Qpack.HeaderField =
+            undefined;
+        const fields_buf = try header_fields.acquire(
+            allocator,
+            &fields_stack,
+            try requestHeaderFieldCapacity(self, 1),
+        );
+        defer header_fields.release(allocator, &fields_stack, fields_buf);
+        var fields = try self.headerFields(fields_buf);
+        var content_length_buf: [32]u8 = undefined;
+        const extended_connect = std.mem.eql(u8, self.method, "CONNECT") and
+            requestHasProtocolPseudo(self.headers);
+        const plain_connect = std.mem.eql(u8, self.method, "CONNECT") and
+            !extended_connect;
+        if (plain_connect) {
+            if (body_length) |length| {
+                if (length != 0) return error.InvalidContentLength;
+            }
+            const declared_content_length = try contentLength(fields);
+            try validateHeaderBlock(fields, .request);
+            try validateFieldSectionSize(
+                fields,
+                peer_settings.max_field_section_size,
+            );
+            try validateRequestBodyForMethodValue(
+                self.method,
+                extended_connect,
+                declared_content_length,
+                &.{},
+                &.{},
+            );
+            try writeHeadersFrame(list, allocator, fields);
+            return .{ .expected_length = 0, .body_allowed = false };
+        }
+        const effective_length = try applyStreamingContentLength(
+            fields_buf,
+            &fields,
+            body_length,
+            &content_length_buf,
+        );
+        try validateHeaderBlock(fields, .request);
+        try validateFieldSectionSize(
+            fields,
+            peer_settings.max_field_section_size,
+        );
+        try validateRequestBodyForMethodValue(
+            self.method,
+            extended_connect,
+            effective_length,
+            &.{},
+            &.{},
+        );
+        try writeHeadersFrame(list, allocator, fields);
+        return .{
+            .expected_length = effective_length,
+            .body_allowed = true,
+        };
+    }
+
     pub fn writeDynamic(
         self: Request,
         list: *std.ArrayList(u8),
@@ -4014,6 +4086,21 @@ pub fn writeTrailersDynamic(
         encoder,
     );
     try queueIndexableFields(encoder, trailers);
+}
+
+pub fn writeTrailers(
+    list: *std.ArrayList(u8),
+    allocator: std.mem.Allocator,
+    trailers: []const Qpack.HeaderField,
+    peer_settings: Settings,
+) Error!void {
+    if (trailers.len == 0) return error.InvalidHeader;
+    try validateHeaderBlock(trailers, .trailers);
+    try validateFieldSectionSize(
+        trailers,
+        peer_settings.max_field_section_size,
+    );
+    try writeHeadersFrame(list, allocator, trailers);
 }
 
 fn writeHeadersAndData(

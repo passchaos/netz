@@ -176,6 +176,29 @@ pub fn Pool(comptime Runtime: type) type {
                 try self.client().trySendRequestBody(stream_id, data, fin);
             }
 
+            pub fn tryStartRequest(
+                self: *Lease,
+                request: http3.Request,
+                body_length: ?usize,
+            ) !u62 {
+                if (!self.active) return error.InvalidLease;
+                defer self.pool.refresh(self.handle) catch {};
+                return self.client().tryStartRequest(request, body_length);
+            }
+
+            pub fn tryFinishRequestTrailers(
+                self: *Lease,
+                stream_id: u62,
+                trailers: []const http3.Qpack.HeaderField,
+            ) !void {
+                if (!self.active) return error.InvalidLease;
+                defer self.pool.refresh(self.handle) catch {};
+                try self.client().tryFinishRequestTrailers(
+                    stream_id,
+                    trailers,
+                );
+            }
+
             pub fn release(self: *Lease) void {
                 std.debug.assert(self.active);
                 self.pool.release(self.handle);

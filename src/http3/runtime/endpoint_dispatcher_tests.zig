@@ -1306,3 +1306,142 @@ test "HTTP/3 flow-blocked request retry retains response semantics" {
         runtime.testing.clientRequestCount(&client),
     );
 }
+
+test "HTTP/3 streaming request once sends retry every stage" {
+    const allocator = std.testing.allocator;
+    var threaded = std.Io.Threaded.init(allocator, .{});
+    defer threaded.deinit();
+    const io = threaded.io();
+
+    var peer_endpoint = try quic.runtime.Endpoint.bind(
+        allocator,
+        io,
+        .{ .ip4 = .loopback(0) },
+        .{ .max_datagram_size = 4096 },
+    );
+    defer peer_endpoint.deinit();
+    var endpoint = try quic.runtime.Endpoint.bind(
+        allocator,
+        io,
+        .{ .ip4 = .loopback(0) },
+        .{ .max_datagram_size = 4096 },
+    );
+    defer endpoint.deinit();
+    const client_keys = quic.protection.deriveAes128Keys(
+        [_]u8{0xa7} ** quic.protection.secret_len,
+    );
+    const server_keys = quic.protection.deriveAes128Keys(
+        [_]u8{0xa8} ** quic.protection.secret_len,
+    );
+    var client = try runtime.HandshakeClient.initEstablished(
+        &endpoint,
+        peer_endpoint.address(),
+        try quic.handshake.establishPreconfigured(
+            &endpoint,
+            peer_endpoint.address(),
+            .client,
+            .{
+                .receive_keys = server_keys,
+                .send_keys = client_keys,
+                .local_connection_id = "stream-once-client",
+                .peer_connection_id = "stream-once-server",
+                .one_rtt = .{
+                    .max_datagram_size = 1200,
+                    .pacing_max_burst_packets = 1,
+                },
+            },
+        ),
+        .{},
+    );
+    defer client.deinit();
+    var fixed_io = FixedClockIo{
+        .delegate = endpoint.io,
+        .now_ns = 4_000_000,
+    };
+    var fixed_vtable = endpoint.io.vtable.*;
+    fixed_vtable.now = FixedClockIo.now;
+    fixed_vtable.sleep = FixedClockIo.sleep;
+    fixed_vtable.netSend = FixedClockIo.netSend;
+    endpoint.io = .{ .userdata = &fixed_io, .vtable = &fixed_vtable };
+    defer endpoint.io = fixed_io.delegate;
+
+    try client.ensureSettingsSentOnce();
+    quic.one_rtt.testing.exhaustPacingAt(
+        &client.established.connection,
+        @intCast(fixed_io.now_ns),
+    );
+    try std.testing.expectError(error.PacingLimited, client.tryStartRequest(.{
+        .method = "POST",
+        .path = "/stream",
+        .authority = "localhost",
+    }, 1));
+    try std.testing.expectEqual(@as(u62, 0), client.next_stream_id);
+    try std.testing.expectEqual(
+        @as(usize, 0),
+        runtime.testing.clientRequestCount(&client),
+    );
+    try std.testing.expect(client.outbound_bodies.find(0) == null);
+
+    var timer = client.established.connection.nextTimerDeadline() orelse
+        return error.TestUnexpectedResult;
+    fixed_io.now_ns = @intCast(timer.deadline_ns);
+    _ = (try client.established.connection.serviceNextTimerAt(
+        timer.deadline_ns,
+    )) orelse return error.TestUnexpectedResult;
+    const stream_id = try client.tryStartRequest(.{
+        .method = "POST",
+        .path = "/stream",
+        .authority = "localhost",
+    }, 1);
+    try std.testing.expectEqual(@as(u62, 0), stream_id);
+    try std.testing.expect(client.outbound_bodies.find(stream_id) != null);
+
+    quic.one_rtt.testing.exhaustPacingAt(
+        &client.established.connection,
+        @intCast(fixed_io.now_ns),
+    );
+    try std.testing.expectError(
+        error.PacingLimited,
+        client.trySendRequestBody(stream_id, "x", false),
+    );
+    try std.testing.expectEqual(
+        @as(usize, 0),
+        client.outbound_bodies.find(stream_id).?.written,
+    );
+    timer = client.established.connection.nextTimerDeadline() orelse
+        return error.TestUnexpectedResult;
+    fixed_io.now_ns = @intCast(timer.deadline_ns);
+    _ = (try client.established.connection.serviceNextTimerAt(
+        timer.deadline_ns,
+    )) orelse return error.TestUnexpectedResult;
+    try client.trySendRequestBody(stream_id, "x", false);
+    try std.testing.expectEqual(
+        @as(usize, 1),
+        client.outbound_bodies.find(stream_id).?.written,
+    );
+
+    quic.one_rtt.testing.exhaustPacingAt(
+        &client.established.connection,
+        @intCast(fixed_io.now_ns),
+    );
+    try std.testing.expectError(
+        error.PacingLimited,
+        client.tryFinishRequestTrailers(stream_id, &.{.{
+            .name = "x-upload",
+            .value = "complete",
+        }}),
+    );
+    try std.testing.expect(client.outbound_bodies.find(stream_id) != null);
+    timer = client.established.connection.nextTimerDeadline() orelse
+        return error.TestUnexpectedResult;
+    fixed_io.now_ns = @intCast(timer.deadline_ns);
+    _ = (try client.established.connection.serviceNextTimerAt(
+        timer.deadline_ns,
+    )) orelse return error.TestUnexpectedResult;
+    try client.tryFinishRequestTrailers(stream_id, &.{.{
+        .name = "x-upload",
+        .value = "complete",
+    }});
+    try std.testing.expect(client.outbound_bodies.find(stream_id) == null);
+    try std.testing.expectEqual(@as(usize, 0), fixed_io.sleep_calls);
+}
