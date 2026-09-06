@@ -361,6 +361,9 @@ pub const CloseInfo = struct {
     state: CloseState = .closing,
     started_ms: ?u64 = null,
     expires_ms: ?u64 = null,
+    response_deadline_ns: ?u64 = null,
+    response_packet_threshold: u8 = 1,
+    response_packets: u8 = 0,
 
     pub fn deinit(self: *CloseInfo, allocator: std.mem.Allocator) void {
         allocator.free(self.reason_phrase);
@@ -646,6 +649,7 @@ pub const TimerDeadlineKind = enum {
     keep_alive,
     idle_timeout,
     close,
+    close_response,
     key_discard,
 };
 
@@ -2523,6 +2527,12 @@ pub const Connection = struct {
                 .deadline_ns = millisToNanos(deadline),
             });
         }
+        if (self.closeResponseDeadline()) |deadline| {
+            considerTimerDeadline(&next, .{
+                .kind = .close_response,
+                .deadline_ns = deadline,
+            });
+        }
         if (self.oneRttKeyDiscardDeadline()) |deadline| {
             if (deadline >= 0) {
                 considerTimerDeadline(&next, .{
@@ -2599,6 +2609,12 @@ pub const Connection = struct {
             },
             .close => {
                 _ = self.checkCloseExpired(nanosToMillisFloor(now_ns));
+            },
+            .close_response => {
+                self.close_info.?.response_deadline_ns = null;
+                self.resendClose() catch {
+                    self.scheduleCloseResponseAt(now_ns);
+                };
             },
             .key_discard => {
                 _ = self.discardExpiredOneRttKeys(
@@ -6005,6 +6021,12 @@ pub const Connection = struct {
         return if (self.close_info) |close_info| close_info.expires_ms else null;
     }
 
+    fn closeResponseDeadline(self: Connection) ?u64 {
+        const close_info = self.close_info orelse return null;
+        if (close_info.state != .closing) return null;
+        return close_info.response_deadline_ns;
+    }
+
     /// Return the first peer CONNECTION_CLOSE observed by this connection.
     ///
     /// Local close state is replaced with the peer's diagnostics when the peer
@@ -6032,6 +6054,7 @@ pub const Connection = struct {
             const deadline = close_info.expires_ms orelse return false;
             if (now_ms < deadline) return false;
             close_info.state = .closed;
+            close_info.response_deadline_ns = null;
             return true;
         }
         return false;
@@ -7802,8 +7825,19 @@ pub const Connection = struct {
         return self.receiveRoutedDatagramOrDropAfterCloseAt(routed, self.monotonicNowNs());
     }
 
+    /// Process an active connection normally, while retaining CID ownership
+    /// through closing/draining without surfacing a fatal receive error. A
+    /// current-path datagram observed during closing schedules a rate-limited
+    /// CONNECTION_CLOSE response; draining remains strictly silent.
     pub fn receiveRoutedDatagramOrDropAfterCloseAt(self: *Connection, routed: quic.runtime.RoutedBytes, now_ns: ?u64) Error!?ReceivedPacket {
-        if (self.close_info != null or self.idle_timed_out) return null;
+        if (self.close_info != null or self.idle_timed_out) {
+            if (now_ns) |timestamp| {
+                if (self.config.peer.eql(&routed.datagram.from)) {
+                    self.noteCloseDatagramAt(timestamp);
+                }
+            }
+            return null;
+        }
         return try self.receiveRoutedDatagramAt(routed, now_ns);
     }
 
@@ -9273,6 +9307,8 @@ pub const Connection = struct {
                     self.peer_close_frame_received = true;
                 }
                 existing.state = .draining;
+                existing.response_deadline_ns = null;
+                existing.response_packets = 0;
                 existing.started_ms = timing.now_ms;
                 existing.expires_ms = closeExpiryMillis(
                     timing.now_ms,
@@ -9323,10 +9359,40 @@ pub const Connection = struct {
         };
     }
 
+    fn noteCloseDatagramAt(self: *Connection, now_ns: u64) void {
+        const close_info = if (self.close_info) |*value| value else return;
+        if (close_info.state != .closing or
+            close_info.response_deadline_ns != null)
+        {
+            return;
+        }
+        close_info.response_packets +|= 1;
+        if (close_info.response_packets <
+            close_info.response_packet_threshold)
+        {
+            return;
+        }
+        close_info.response_packets = 0;
+        close_info.response_packet_threshold *|= 2;
+        self.scheduleCloseResponseAt(now_ns);
+    }
+
+    fn scheduleCloseResponseAt(self: *Connection, now_ns: u64) void {
+        const close_info = if (self.close_info) |*value| value else return;
+        if (close_info.state != .closing) return;
+        close_info.response_deadline_ns = std.math.add(
+            u64,
+            now_ns,
+            self.rtt_stats.smoothedOrInitial(),
+        ) catch std.math.maxInt(u64);
+    }
+
     fn enterStatelessResetDraining(self: *Connection, now_ms: ?u64, pto_ms: ?u64) Error!void {
         const timing = self.closeTiming(now_ms, pto_ms);
         if (self.close_info) |*close_info| {
             close_info.state = .draining;
+            close_info.response_deadline_ns = null;
+            close_info.response_packets = 0;
             close_info.started_ms = timing.now_ms;
             close_info.expires_ms = closeExpiryMillis(
                 timing.now_ms,
@@ -10747,6 +10813,10 @@ pub const testing = struct {
             .frame_type = close_info.frame_type,
             .reason_phrase = close_info.reason_phrase,
         };
+    }
+
+    pub fn closeResponseDeadline(connection: *const Connection) ?u64 {
+        return connection.closeResponseDeadline();
     }
 
     pub const handshake_done_test_stack_capacity =

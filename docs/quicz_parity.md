@@ -502,6 +502,14 @@ multi-connection loop error, while retaining the connection's close-expiry
 timer. If the current datagram itself triggers a transport close, the original
 validation error remains visible and the newly installed close timer is synced
 before it returns.
+Closing connections now respond to current-path datagrams through a dedicated
+timer rather than parsing application frames or retransmitting immediately.
+The first response requires one packet, subsequent thresholds double to 2, 4,
+8, and so on, and each response is delayed by one smoothed RTT. A failed socket
+send rearms the same bounded retry without losing the three-PTO hard expiry; a
+draining connection never schedules or emits a response. This follows the
+rate-limited closing model audited in s2n-quic while keeping endpoint routing
+and all waits on the `std.Io` abstraction.
 
 ## Known blockers before declaring the goal complete
 

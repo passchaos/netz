@@ -1235,7 +1235,7 @@ test "QUIC endpoint dispatcher releases failed routed datagram once" {
     );
 }
 
-test "QUIC endpoint dispatcher consumes packets for closing connections" {
+test "QUIC endpoint dispatcher rate limits close responses" {
     const allocator = std.testing.allocator;
     var threaded = std.Io.Threaded.init(allocator, .{});
     defer threaded.deinit();
@@ -1288,12 +1288,218 @@ test "QUIC endpoint dispatcher consumes packets for closing connections" {
         one_rtt.TimerDeadlineKind.close,
         close_timer.timer.kind,
     );
+    var initial_close = try one_rtt.receive(
+        &peer_endpoint,
+        keys,
+        "closing-peer".len,
+        0,
+        1,
+    );
+    defer initial_close.deinit(allocator);
+    try std.testing.expect(initial_close.frames[0] == .application_close);
+    try std.testing.expectEqual(
+        @as(u64, 75),
+        initial_close.frames[0].application_close.error_code,
+    );
+
+    // A valid packet carrying this CID from a different tuple cannot induce
+    // reflected close traffic without authenticating migration first.
+    try peer.send(&.{.{ .ping = {} }});
+    var foreign_datagram = try endpoint.receiveBytes();
+    foreign_datagram.from = .{ .ip4 = .loopback(6553) };
+    try std.testing.expectEqual(
+        Event.consumed,
+        try dispatcher.dispatch(foreign_datagram),
+    );
+    try std.testing.expectEqual(
+        close_timer,
+        dispatcher.nextTimerDeadline() orelse
+            return error.TestUnexpectedResult,
+    );
 
     try peer.send(&.{.{ .ping = {} }});
     const datagram = try endpoint.receiveBytes();
     const event = try dispatcher.dispatch(datagram);
     try std.testing.expectEqual(Event.consumed, event);
     try std.testing.expect(connection.closing());
+    const response_timer = dispatcher.nextTimerDeadline() orelse
+        return error.TestUnexpectedResult;
+    try std.testing.expectEqual(
+        one_rtt.TimerDeadlineKind.close_response,
+        response_timer.timer.kind,
+    );
+    try std.testing.expectEqual(@as(ConnectionHandle, 2), response_timer.connection_id);
+    try std.testing.expect(
+        response_timer.timer.deadline_ns < close_timer.timer.deadline_ns,
+    );
+    try std.testing.expect(
+        (try dispatcher.serviceNextTimerAt(
+            response_timer.timer.deadline_ns - 1,
+        )) == null,
+    );
+    var failed_send = ObservedBatchSend{
+        .delegate = endpoint.io,
+        .fail_after_prefix = 0,
+    };
+    var failed_vtable = endpoint.io.vtable.*;
+    failed_vtable.netSend = ObservedBatchSend.netSend;
+    endpoint.io = .{
+        .userdata = &failed_send,
+        .vtable = &failed_vtable,
+    };
+    defer endpoint.io = failed_send.delegate;
+    const serviced = (try dispatcher.serviceNextTimerAt(
+        response_timer.timer.deadline_ns,
+    )) orelse return error.TestUnexpectedResult;
+    try std.testing.expectEqual(
+        one_rtt.TimerDeadlineKind.close_response,
+        serviced.timer.kind,
+    );
+    try std.testing.expectEqual(@as(usize, 1), failed_send.calls);
+    const retry_timer = dispatcher.nextTimerDeadline() orelse
+        return error.TestUnexpectedResult;
+    try std.testing.expectEqual(
+        one_rtt.TimerDeadlineKind.close_response,
+        retry_timer.timer.kind,
+    );
+    try std.testing.expect(
+        retry_timer.timer.deadline_ns > response_timer.timer.deadline_ns,
+    );
+
+    endpoint.io = failed_send.delegate;
+    const retried = (try dispatcher.serviceNextTimerAt(
+        retry_timer.timer.deadline_ns,
+    )) orelse return error.TestUnexpectedResult;
+    try std.testing.expectEqual(
+        one_rtt.TimerDeadlineKind.close_response,
+        retried.timer.kind,
+    );
+    var repeated_close = try one_rtt.receive(
+        &peer_endpoint,
+        keys,
+        "closing-peer".len,
+        1,
+        1,
+    );
+    defer repeated_close.deinit(allocator);
+    try std.testing.expect(repeated_close.frames[0] == .application_close);
+    try std.testing.expectEqual(
+        @as(u64, 75),
+        repeated_close.frames[0].application_close.error_code,
+    );
+    try std.testing.expectEqual(
+        close_timer,
+        dispatcher.nextTimerDeadline() orelse
+            return error.TestUnexpectedResult,
+    );
+
+    // The response threshold doubles after each retransmission. One packet no
+    // longer schedules work; the second arms another one-RTT debounce.
+    try peer.send(&.{.{ .ping = {} }});
+    const first_after_response = try endpoint.receiveBytes();
+    try std.testing.expectEqual(
+        Event.consumed,
+        try dispatcher.dispatch(first_after_response),
+    );
+    try std.testing.expectEqual(
+        close_timer,
+        dispatcher.nextTimerDeadline() orelse
+            return error.TestUnexpectedResult,
+    );
+    try peer.send(&.{.{ .ping = {} }});
+    const second_after_response = try endpoint.receiveBytes();
+    try std.testing.expectEqual(
+        Event.consumed,
+        try dispatcher.dispatch(second_after_response),
+    );
+    const second_response_timer = dispatcher.nextTimerDeadline() orelse
+        return error.TestUnexpectedResult;
+    try std.testing.expectEqual(
+        one_rtt.TimerDeadlineKind.close_response,
+        second_response_timer.timer.kind,
+    );
+}
+
+test "QUIC endpoint dispatcher keeps draining connections silent" {
+    const allocator = std.testing.allocator;
+    var threaded = std.Io.Threaded.init(allocator, .{});
+    defer threaded.deinit();
+    const io = threaded.io();
+    var endpoint = try runtime.Endpoint.bind(
+        allocator,
+        io,
+        .{ .ip4 = .loopback(0) },
+        .{ .max_datagram_size = 4096 },
+    );
+    defer endpoint.deinit();
+    var peer_endpoint = try runtime.Endpoint.bind(
+        allocator,
+        io,
+        .{ .ip4 = .loopback(0) },
+        .{ .max_datagram_size = 4096 },
+    );
+    defer peer_endpoint.deinit();
+    const keys = quic.protection.deriveAes128Keys(
+        [_]u8{0xec} ** quic.protection.secret_len,
+    );
+    var connection = try one_rtt.Connection.init(&endpoint, .{
+        .peer = peer_endpoint.address(),
+        .receive_keys = keys,
+        .send_keys = keys,
+        .local_connection_id = "draining-local",
+        .peer_connection_id = "draining-peer",
+        .local_endpoint = .server,
+        .enable_pacing = false,
+    });
+    defer connection.deinit();
+    var peer = try one_rtt.Connection.init(&peer_endpoint, .{
+        .peer = endpoint.address(),
+        .receive_keys = keys,
+        .send_keys = keys,
+        .local_connection_id = "draining-peer",
+        .peer_connection_id = "draining-local",
+        .enable_pacing = false,
+    });
+    defer peer.deinit();
+    var dispatcher = Dispatcher.init(allocator, &endpoint);
+    defer dispatcher.deinit();
+    try dispatcher.registerConnection(3, &connection);
+
+    try one_rtt.testing.applyReceivedFrames(
+        &connection,
+        0,
+        &.{.{ .application_close = .{
+            .error_code = 76,
+            .reason_phrase = "draining",
+        } }},
+        1_000_000,
+        .not_ect,
+    );
+    try dispatcher.refreshConnectionTimer(3);
+    const close_timer = dispatcher.nextTimerDeadline() orelse
+        return error.TestUnexpectedResult;
+    try std.testing.expectEqual(
+        one_rtt.TimerDeadlineKind.close,
+        close_timer.timer.kind,
+    );
+
+    var observed_send = ObservedBatchSend{ .delegate = endpoint.io };
+    var observed_vtable = endpoint.io.vtable.*;
+    observed_vtable.netSend = ObservedBatchSend.netSend;
+    endpoint.io = .{
+        .userdata = &observed_send,
+        .vtable = &observed_vtable,
+    };
+    defer endpoint.io = observed_send.delegate;
+
+    try peer.send(&.{.{ .ping = {} }});
+    const datagram = try endpoint.receiveBytes();
+    try std.testing.expectEqual(Event.consumed, try dispatcher.dispatch(datagram));
+    try std.testing.expect(connection.draining());
+    try std.testing.expectEqual(@as(usize, 0), observed_send.calls);
+    try std.testing.expect(
+        one_rtt.testing.closeResponseDeadline(&connection) == null,
+    );
     try std.testing.expectEqual(
         close_timer,
         dispatcher.nextTimerDeadline() orelse
