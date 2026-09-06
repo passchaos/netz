@@ -272,6 +272,9 @@ Dispatcher-fed Initial and injected per-handshake datagram-source entry points
 expose the same absolute and relative forms. Thus adopting a shared-endpoint
 architecture no longer requires giving up the caller deadline or restarting it
 between routed Initial processing, QUIC/TLS, and CONNECT admission.
+The endpoint handshake worker also sends the server HTTP/3 SETTINGS and QPACK
+stream prefixes before promotion, keeping critical-stream initialization out of
+the single-owner application callback that later accepts or rejects CONNECT.
 
 ## Important interoperability correction
 

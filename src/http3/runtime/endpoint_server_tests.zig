@@ -921,7 +921,14 @@ test "HTTP/3 endpoint server owns concurrent handshakes and requests" {
         );
         defer event.deinit(allocator);
         switch (event) {
-            .connected => connected += 1,
+            .connected => |handle| {
+                const promoted = endpoint_server.session(handle) orelse
+                    return error.TestUnexpectedResult;
+                try std.testing.expect(promoted.control.settings.sent);
+                try std.testing.expect(promoted.qpack_encoder_prefix_sent);
+                try std.testing.expect(promoted.qpack_decoder_prefix_sent);
+                connected += 1;
+            },
             .closed => return error.TestUnexpectedResult,
             .handshake_failed => |failure| return failure.err,
             .request, .unrouted => return error.TestUnexpectedResult,

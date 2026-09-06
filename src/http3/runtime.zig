@@ -4473,11 +4473,19 @@ pub const HandshakeServer = struct {
             options,
             admission.deadline(),
         );
-        errdefer established.deinit();
-        return HandshakeServerSession.initEstablished(
+        var session = HandshakeServerSession.initEstablished(
             established,
             self.session_options,
-        );
+        ) catch |err| {
+            established.deinit();
+            return err;
+        };
+        errdefer session.deinit();
+        // Complete critical-stream setup in the isolated handshake worker.
+        // Once promoted, the endpoint loop is the sole owner and application
+        // callbacks must not sleep while emitting their first response.
+        try session.ensureSettingsSent();
+        return session;
     }
 
     pub fn promoteAdmission(
