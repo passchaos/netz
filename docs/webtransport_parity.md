@@ -296,6 +296,9 @@ dispatcher timer, so packet routing never waits and the reset is not forgotten.
 Stale STREAMS_BLOCKED frames follow the same pattern: the current MAX_STREAMS
 limits are coalesced into one response attempt and retained behind a dedicated
 timer when transport backpressure prevents immediate delivery.
+PATH_CHALLENGE responses are also surfaced as immediate endpoint timer work;
+each turn submits one padded PATH_RESPONSE to the recorded source address, and
+keeps both the challenge and route intact across pacing or send failure.
 
 ## Important interoperability correction
 

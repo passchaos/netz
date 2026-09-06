@@ -640,6 +640,7 @@ pub const LossDetectionTimerDeadline = struct {
 };
 
 pub const TimerDeadlineKind = enum {
+    path_response,
     stop_sending_reset,
     streams_blocked_response,
     pacing,
@@ -802,6 +803,8 @@ pub const Connection = struct {
     peer_address_bytes_received: usize = 0,
     peer_address_bytes_sent: usize = 0,
     path_validation_retry_deadline_ns: ?u64 = null,
+    path_response_retry_deadline_ns: ?u64 = null,
+    path_response_retry_attempts: u8 = 0,
     /// Last path that completed validation. RFC 9000 section 9.3.2 requires
     /// reverting an apparent migration when validation of its address fails.
     last_validated_peer_path: ValidatedPeerPath = undefined,
@@ -2562,6 +2565,12 @@ pub const Connection = struct {
     /// typed helper matching `kind` when the deadline becomes due.
     pub fn nextTimerDeadline(self: Connection) ?TimerDeadline {
         var next: ?TimerDeadline = null;
+        if (self.path_response_retry_deadline_ns) |deadline| {
+            considerTimerDeadline(&next, .{
+                .kind = .path_response,
+                .deadline_ns = deadline,
+            });
+        }
         if (self.stop_sending_reset_retry_deadline_ns) |deadline| {
             considerTimerDeadline(&next, .{
                 .kind = .stop_sending_reset,
@@ -2665,6 +2674,12 @@ pub const Connection = struct {
         if (now_ns < deadline.deadline_ns) return null;
 
         switch (deadline.kind) {
+            .path_response => {
+                self.path_response_retry_deadline_ns = null;
+                self.sendPendingPathResponseAt(now_ns) catch |err| {
+                    self.schedulePathResponseRetry(err, now_ns);
+                };
+            },
             .stop_sending_reset => {
                 self.stop_sending_reset_retry_deadline_ns = null;
                 self.flushPendingStopSendingResetAt(now_ns) catch |err| {
@@ -6164,6 +6179,56 @@ pub const Connection = struct {
         ) catch std.math.maxInt(u64);
     }
 
+    fn updatePathResponseTimerAfterSend(
+        self: *Connection,
+        sent_time_ns: ?u64,
+    ) void {
+        if (self.path_validation.pendingResponseCount() == 0) {
+            self.path_response_retry_deadline_ns = null;
+            self.path_response_retry_attempts = 0;
+            return;
+        }
+        const now_ns = sent_time_ns orelse self.monotonicNowNs();
+        self.path_response_retry_attempts = 0;
+        self.path_response_retry_deadline_ns = std.math.add(
+            u64,
+            now_ns,
+            timer_blocked_receive_backoff_ns,
+        ) catch std.math.maxInt(u64);
+    }
+
+    fn schedulePathResponseRetry(
+        self: *Connection,
+        err: Error,
+        now_ns: u64,
+    ) void {
+        if (self.path_validation.pendingResponseCount() == 0 or
+            self.close_info != null or self.idle_timed_out)
+        {
+            self.path_response_retry_deadline_ns = null;
+            self.path_response_retry_attempts = 0;
+            return;
+        }
+        if (err == error.PacingLimited) {
+            if (self.pacing_blocked_until_ns) |deadline| {
+                if (deadline > now_ns) {
+                    self.path_response_retry_deadline_ns = deadline;
+                    return;
+                }
+            }
+        }
+        const index = @min(
+            @as(usize, self.path_response_retry_attempts),
+            stream_release_retry_backoff_ns.len - 1,
+        );
+        self.path_response_retry_attempts +|= 1;
+        self.path_response_retry_deadline_ns = std.math.add(
+            u64,
+            now_ns,
+            stream_release_retry_backoff_ns[index],
+        ) catch std.math.maxInt(u64);
+    }
+
     /// Number of path challenges queued or awaiting a response. This exposes
     /// whether a selected path is being validated without leaking the internal
     /// challenge payloads or queue representation.
@@ -6209,6 +6274,13 @@ pub const Connection = struct {
     }
 
     pub fn sendPendingPathResponse(self: *Connection) Error!void {
+        try self.sendPendingPathResponseAt(null);
+    }
+
+    fn sendPendingPathResponseAt(
+        self: *Connection,
+        sent_time_ns: ?u64,
+    ) Error!void {
         try self.validateNextPacketNumber();
         var frame_storage: [1]quic.Frame = undefined;
         if (self.path_validation.peekResponseFrames(&frame_storage) == 0) {
@@ -6217,9 +6289,10 @@ pub const Connection = struct {
         const frame = frame_storage[0];
         const frames = [_]quic.Frame{frame};
         const target = self.peekPathResponseTarget() orelse self.config.peer;
-        try self.sendPathValidationToPeer(target, &frames);
+        try self.sendPathValidationToPeerAt(target, &frames, sent_time_ns);
         self.path_validation.discardResponses(1);
         self.discardPathResponseTargets(1);
+        self.updatePathResponseTimerAfterSend(sent_time_ns);
     }
 
     pub fn sendPendingPathResponses(self: *Connection) Error!usize {
@@ -6242,6 +6315,7 @@ pub const Connection = struct {
         try self.send(send_frames);
         self.path_validation.discardResponses(count);
         self.discardPathResponseTargets(count);
+        self.updatePathResponseTimerAfterSend(null);
         return count;
     }
 
@@ -6257,12 +6331,25 @@ pub const Connection = struct {
         peer: net.IpAddress,
         frames: []const quic.Frame,
     ) Error!void {
+        return self.sendPathValidationToPeerAt(peer, frames, null);
+    }
+
+    fn sendPathValidationToPeerAt(
+        self: *Connection,
+        peer: net.IpAddress,
+        frames: []const quic.Frame,
+        sent_time_ns: ?u64,
+    ) Error!void {
         if (peer.eql(&self.config.peer)) {
             var padded: [9]quic.Frame = undefined;
-            return self.send(try self.padPathValidationFrames(
+            const send_frames = try self.padPathValidationFrames(
                 frames,
                 &padded,
-            ));
+            );
+            return if (sent_time_ns) |now_ns|
+                self.sendAutomaticallyAt(send_frames, now_ns)
+            else
+                self.send(send_frames);
         }
         if (peer.eql(&self.last_validated_peer_path.peer)) {
             const previous_peer = self.config.peer;
@@ -6288,20 +6375,28 @@ pub const Connection = struct {
                 self.peer_address_bytes_sent = previous_sent;
             }
             var padded: [9]quic.Frame = undefined;
-            return self.send(try self.padPathValidationFrames(
+            const send_frames = try self.padPathValidationFrames(
                 frames,
                 &padded,
-            ));
+            );
+            return if (sent_time_ns) |now_ns|
+                self.sendAutomaticallyAt(send_frames, now_ns)
+            else
+                self.send(send_frames);
         }
         if (self.config.local_endpoint != .server) {
             const previous_peer = self.config.peer;
             self.config.peer = peer;
             defer self.config.peer = previous_peer;
             var padded: [9]quic.Frame = undefined;
-            return self.send(try self.padPathValidationFrames(
+            const send_frames = try self.padPathValidationFrames(
                 frames,
                 &padded,
-            ));
+            );
+            return if (sent_time_ns) |now_ns|
+                self.sendAutomaticallyAt(send_frames, now_ns)
+            else
+                self.send(send_frames);
         }
         const index = self.findCandidatePathBudget(peer) orelse
             return error.AntiAmplificationLimited;
@@ -6326,7 +6421,11 @@ pub const Connection = struct {
             self.peer_address_bytes_sent = previous_sent;
         }
         var padded: [9]quic.Frame = undefined;
-        try self.send(try self.padPathValidationFrames(frames, &padded));
+        const send_frames = try self.padPathValidationFrames(frames, &padded);
+        if (sent_time_ns) |now_ns|
+            try self.sendAutomaticallyAt(send_frames, now_ns)
+        else
+            try self.send(send_frames);
     }
 
     fn padPathValidationFrames(
@@ -8860,6 +8959,13 @@ pub const Connection = struct {
                         self.path_response_targets.appendAssumeCapacity(
                             path_response_peer,
                         );
+                        const response_now = now_ns orelse
+                            self.monotonicNowNs();
+                        if (self.path_response_retry_deadline_ns == null or
+                            response_now < self.path_response_retry_deadline_ns.?)
+                        {
+                            self.path_response_retry_deadline_ns = response_now;
+                        }
                     }
                 },
                 .path_response => |path_response| {

@@ -3,6 +3,26 @@ const quic = @import("../../mod.zig");
 const one_rtt = @import("../../one_rtt.zig");
 const net = std.Io.net;
 
+const FixedClockIo = struct {
+    delegate: std.Io,
+    now_ns: i96,
+    sleep_calls: usize = 0,
+
+    fn now(userdata: ?*anyopaque, _: std.Io.Clock) std.Io.Timestamp {
+        const self: *FixedClockIo = @ptrCast(@alignCast(userdata));
+        return .fromNanoseconds(self.now_ns);
+    }
+
+    fn sleep(
+        userdata: ?*anyopaque,
+        _: std.Io.Timeout,
+    ) std.Io.Cancelable!void {
+        const self: *FixedClockIo = @ptrCast(@alignCast(userdata));
+        self.sleep_calls += 1;
+        return error.Canceled;
+    }
+};
+
 test "QUIC 1-RTT connection performs key update and clears ACK gate" {
     const allocator = std.testing.allocator;
 
@@ -3367,6 +3387,155 @@ test "QUIC 1-RTT connection batches PATH_CHALLENGE and PATH_RESPONSE frames" {
     defer response_packet.deinit(allocator);
     try std.testing.expectEqual(@as(usize, 3), response_packet.frames.len);
     try std.testing.expectEqual(@as(usize, 0), client.path_validation.outstandingChallengeCount());
+}
+
+test "QUIC dispatcher schedules PATH_RESPONSE without receive-side wait" {
+    const allocator = std.testing.allocator;
+    var threaded = std.Io.Threaded.init(allocator, .{});
+    defer threaded.deinit();
+    const io = threaded.io();
+
+    var server_endpoint = try quic.runtime.Endpoint.bind(
+        allocator,
+        io,
+        .{ .ip4 = .loopback(0) },
+        .{ .max_datagram_size = 4096 },
+    );
+    defer server_endpoint.deinit();
+    var client_endpoint = try quic.runtime.Endpoint.bind(
+        allocator,
+        io,
+        .{ .ip4 = .loopback(0) },
+        .{ .max_datagram_size = 4096 },
+    );
+    defer client_endpoint.deinit();
+    const server_cid = [_]u8{ 0x81, 0x82, 0x83, 0x84 };
+    const client_cid = [_]u8{ 0x85, 0x86, 0x87, 0x88 };
+    const keys = quic.protection.deriveAes128Keys(
+        [_]u8{0xd3} ** quic.protection.secret_len,
+    );
+    var server = try one_rtt.Connection.init(&server_endpoint, .{
+        .peer = client_endpoint.address(),
+        .receive_keys = keys,
+        .send_keys = keys,
+        .local_connection_id = &server_cid,
+        .peer_connection_id = &client_cid,
+        .local_endpoint = .server,
+        .max_datagram_size = 1200,
+        .pacing_max_burst_packets = 1,
+    });
+    defer server.deinit();
+    var client = try one_rtt.Connection.init(&client_endpoint, .{
+        .peer = server_endpoint.address(),
+        .receive_keys = keys,
+        .send_keys = keys,
+        .local_connection_id = &client_cid,
+        .peer_connection_id = &server_cid,
+        .enable_pacing = false,
+    });
+    defer client.deinit();
+    var dispatcher = quic.endpoint_dispatcher.Dispatcher.init(
+        allocator,
+        &server_endpoint,
+    );
+    defer dispatcher.deinit();
+    const handle: quic.endpoint_dispatcher.ConnectionHandle = 94;
+    try dispatcher.registerConnection(handle, &server);
+
+    var fixed_io = FixedClockIo{
+        .delegate = server_endpoint.io,
+        .now_ns = 1_000_000,
+    };
+    var fixed_vtable = server_endpoint.io.vtable.*;
+    fixed_vtable.now = FixedClockIo.now;
+    fixed_vtable.sleep = FixedClockIo.sleep;
+    server_endpoint.io = .{
+        .userdata = &fixed_io,
+        .vtable = &fixed_vtable,
+    };
+    defer server_endpoint.io = fixed_io.delegate;
+    try server.sendAt(
+        &.{.{ .padding = .{ .len = 1160 } }},
+        @intCast(fixed_io.now_ns),
+    );
+    var fill = try client.receivePacket();
+    defer fill.deinit(allocator);
+
+    const challenge = [_]u8{ 13, 21, 34, 55, 89, 1, 2, 3 };
+    try client.queuePathChallenge(challenge);
+    var challenge_frame: [1]quic.Frame = undefined;
+    try std.testing.expectEqual(
+        @as(usize, 1),
+        try client.path_validation.prepareChallengeFrames(&challenge_frame),
+    );
+    client.path_validation.commitChallengeFrames(
+        1,
+        @intCast(fixed_io.now_ns),
+        1_000_000,
+        0,
+    );
+    try one_rtt.testing.applyReceivedFrames(
+        &server,
+        0,
+        &.{.{ .path_challenge = .{ .data = challenge } }},
+        @intCast(fixed_io.now_ns),
+        .not_ect,
+    );
+    try dispatcher.refreshConnectionTimer(handle);
+    try std.testing.expectEqual(@as(usize, 0), fixed_io.sleep_calls);
+    try std.testing.expectEqual(
+        @as(usize, 1),
+        server.path_validation.pendingResponseCount(),
+    );
+    const timer = dispatcher.nextTimerDeadline() orelse
+        return error.TestUnexpectedResult;
+    try std.testing.expectEqual(handle, timer.connection_id);
+    try std.testing.expectEqual(
+        one_rtt.TimerDeadlineKind.path_response,
+        timer.timer.kind,
+    );
+
+    const first = (try dispatcher.serviceNextTimerAt(
+        timer.timer.deadline_ns,
+    )) orelse return error.TestUnexpectedResult;
+    try std.testing.expectEqual(
+        one_rtt.TimerDeadlineKind.path_response,
+        first.timer.kind,
+    );
+    try std.testing.expectEqual(
+        @as(usize, 1),
+        server.path_validation.pendingResponseCount(),
+    );
+    try std.testing.expectEqual(@as(usize, 0), fixed_io.sleep_calls);
+    const retry = dispatcher.nextTimerDeadline() orelse
+        return error.TestUnexpectedResult;
+    try std.testing.expectEqual(
+        one_rtt.TimerDeadlineKind.path_response,
+        retry.timer.kind,
+    );
+    fixed_io.now_ns = @intCast(retry.timer.deadline_ns);
+    _ = (try dispatcher.serviceNextTimerAt(retry.timer.deadline_ns)) orelse
+        return error.TestUnexpectedResult;
+    try std.testing.expectEqual(
+        @as(usize, 0),
+        server.path_validation.pendingResponseCount(),
+    );
+    try std.testing.expectEqual(@as(usize, 0), fixed_io.sleep_calls);
+    var response = try client.receivePacket();
+    defer response.deinit(allocator);
+    var found = false;
+    for (response.frames) |frame| switch (frame) {
+        .path_response => |path_response| {
+            try std.testing.expectEqualSlices(
+                u8,
+                &challenge,
+                &path_response.data,
+            );
+            found = true;
+        },
+        else => {},
+    };
+    try std.testing.expect(found);
 }
 
 test "QUIC queued PATH_RESPONSE retains exact source across migration" {
