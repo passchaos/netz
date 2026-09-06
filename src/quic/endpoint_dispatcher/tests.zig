@@ -1222,6 +1222,83 @@ test "QUIC endpoint dispatcher releases failed routed datagram once" {
         .from = connection.peerAddress(),
         .bytes = conflicting,
     }));
+    try std.testing.expect(connection.closing());
+    const connection_timer = connection.nextTimerDeadline() orelse
+        return error.TestUnexpectedResult;
+    const endpoint_timer = dispatcher.nextTimerDeadline() orelse
+        return error.TestUnexpectedResult;
+    try std.testing.expectEqual(@as(ConnectionHandle, 1), endpoint_timer.connection_id);
+    try std.testing.expectEqual(connection_timer, endpoint_timer.timer);
+    try std.testing.expectEqual(
+        one_rtt.TimerDeadlineKind.close,
+        endpoint_timer.timer.kind,
+    );
+}
+
+test "QUIC endpoint dispatcher consumes packets for closing connections" {
+    const allocator = std.testing.allocator;
+    var threaded = std.Io.Threaded.init(allocator, .{});
+    defer threaded.deinit();
+    const io = threaded.io();
+    var endpoint = try runtime.Endpoint.bind(
+        allocator,
+        io,
+        .{ .ip4 = .loopback(0) },
+        .{ .max_datagram_size = 4096 },
+    );
+    defer endpoint.deinit();
+    var peer_endpoint = try runtime.Endpoint.bind(
+        allocator,
+        io,
+        .{ .ip4 = .loopback(0) },
+        .{ .max_datagram_size = 4096 },
+    );
+    defer peer_endpoint.deinit();
+    const keys = quic.protection.deriveAes128Keys(
+        [_]u8{0xeb} ** quic.protection.secret_len,
+    );
+    var connection = try one_rtt.Connection.init(&endpoint, .{
+        .peer = peer_endpoint.address(),
+        .receive_keys = keys,
+        .send_keys = keys,
+        .local_connection_id = "closing-local",
+        .peer_connection_id = "closing-peer",
+        .local_endpoint = .server,
+        .enable_pacing = false,
+    });
+    defer connection.deinit();
+    var peer = try one_rtt.Connection.init(&peer_endpoint, .{
+        .peer = endpoint.address(),
+        .receive_keys = keys,
+        .send_keys = keys,
+        .local_connection_id = "closing-peer",
+        .peer_connection_id = "closing-local",
+        .enable_pacing = false,
+    });
+    defer peer.deinit();
+    var dispatcher = Dispatcher.init(allocator, &endpoint);
+    defer dispatcher.deinit();
+    try dispatcher.registerConnection(2, &connection);
+
+    try connection.closeApplication(75, "closing");
+    try dispatcher.refreshConnectionTimer(2);
+    const close_timer = dispatcher.nextTimerDeadline() orelse
+        return error.TestUnexpectedResult;
+    try std.testing.expectEqual(
+        one_rtt.TimerDeadlineKind.close,
+        close_timer.timer.kind,
+    );
+
+    try peer.send(&.{.{ .ping = {} }});
+    const datagram = try endpoint.receiveBytes();
+    const event = try dispatcher.dispatch(datagram);
+    try std.testing.expectEqual(Event.consumed, event);
+    try std.testing.expect(connection.closing());
+    try std.testing.expectEqual(
+        close_timer,
+        dispatcher.nextTimerDeadline() orelse
+            return error.TestUnexpectedResult,
+    );
 }
 
 test "QUIC endpoint dispatcher atomically replaces connection storage" {

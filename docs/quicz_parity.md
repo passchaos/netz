@@ -496,6 +496,12 @@ millisecond storage, so it cannot expire before RFC 9000's minimum; shared
 endpoint schedulers therefore retire ordinary and protocol-error closes without
 requiring another peer packet. Explicit `close*At` timestamps remain available
 for deterministic embedders and tests.
+The shared endpoint also consumes routed datagrams for connections already in
+closing or draining state instead of surfacing `ConnectionClosed` as a fatal
+multi-connection loop error, while retaining the connection's close-expiry
+timer. If the current datagram itself triggers a transport close, the original
+validation error remains visible and the newly installed close timer is synced
+before it returns.
 
 ## Known blockers before declaring the goal complete
 

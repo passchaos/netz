@@ -938,9 +938,29 @@ pub const Dispatcher = struct {
             .route = routed.route,
             .destination_connection_id = routed.destination_connection_id,
         };
-        var packet = try entry.connection.receiveRoutedDatagram(
+        var packet = entry.connection.receiveRoutedDatagramOrDropAfterClose(
             routed_datagram,
-        );
+        ) catch |err| {
+            // Frame/transport validation can install closing or draining state
+            // before returning the triggering error. Preserve that diagnostic
+            // while making its close deadline visible to the endpoint loop.
+            try self.timers.armFromConnection(
+                routed.route.connection_index,
+                entry.connection,
+            );
+            return err;
+        } orelse {
+            // Closing and draining connections retain their CID routes until
+            // the three-PTO expiry, but their packets must not escape as fatal
+            // ConnectionClosed errors from the shared receive owner.
+            routed_datagram.datagram.deinit(self.allocator);
+            owns_datagram = false;
+            try self.timers.armFromConnection(
+                routed.route.connection_index,
+                entry.connection,
+            );
+            return .consumed;
+        };
         errdefer packet.deinit(self.allocator);
         routed_datagram.datagram.deinit(self.allocator);
         owns_datagram = false;
