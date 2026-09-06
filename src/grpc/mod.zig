@@ -13,6 +13,7 @@ pub const call = @import("call.zig");
 pub const runtime = @import("runtime.zig");
 pub const health = @import("health.zig");
 pub const reflection = @import("reflection.zig");
+pub const service_config = @import("service_config.zig");
 
 pub const Error = stream.Error;
 pub const Status = wire.Status;
@@ -73,6 +74,7 @@ pub const UnaryRequest = call.UnaryRequest;
 pub const UnaryCallOptions = call.UnaryCallOptions;
 pub const RetryPolicy = call.RetryPolicy;
 pub const RetryThrottler = call.RetryThrottler;
+pub const ServiceConfig = service_config.ServiceConfig;
 pub const UnaryResponse = call.UnaryResponse;
 pub const UnaryResponseOptions = call.UnaryResponseOptions;
 pub const parseUnaryRequest = call.parseUnaryRequest;
@@ -93,4 +95,5 @@ test {
     _ = stream;
     _ = health;
     _ = reflection;
+    _ = service_config;
 }

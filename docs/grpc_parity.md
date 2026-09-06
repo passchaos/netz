@@ -53,6 +53,12 @@ existing HTTP/2 runtime:
   applies gRPC's milli-token algorithm, debiting configured retryable failures
   before eligibility and replenishing successful RPCs without exceeding its
   maximum,
+- owned standard service-config JSON parsing for global `retryThrottling` and
+  method `retryPolicy`, including protobuf Duration strings, canonical status
+  names, gRPC Core's five-attempt clamp, duplicate-selector rejection, and
+  exact-method then service then default policy selection. Unknown unrelated
+  service-config fields are ignored, and a more-specific config without a
+  retry policy deliberately disables a broader inherited retry,
 - sequential request/response message-stream helpers over HTTP/2
   `RequestWriter`, `ResponseWriter`, and borrowed DATA callbacks,
 - sequential client-stream deadlines captured once before request setup and
@@ -263,8 +269,7 @@ upstream gRPC Core's `ServerEarlyReturnTest`.
    empty-stream completion, cancellation, and deadline behavior against netz.
    A broader upstream matrix, including reverse custom metadata and TLS, remains
    future work.
-3. Add service-config parsing, generated service/client bindings, and broader
-   conformance/
+3. Add generated service/client bindings and broader conformance/
    interop runners. Reflection accepts standard descriptor sets directly and
    is covered by an independent official `grpc_cli` process-boundary gate.
    Health `Check` and `Watch` transport semantics are implemented, including

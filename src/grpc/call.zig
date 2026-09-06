@@ -187,7 +187,7 @@ pub const RetryPolicy = struct {
     /// maximum.
     throttler: ?*RetryThrottler = null,
 
-    pub fn validate(self: RetryPolicy) Error!void {
+    pub fn validate(self: RetryPolicy) error{InvalidRetryPolicy}!void {
         // gRPC Core clamps service-config retry attempts to five. Rejecting an
         // out-of-range direct API value is less surprising than silently
         // changing application policy.
@@ -226,7 +226,7 @@ pub const RetryThrottler = struct {
     pub fn init(
         max_tokens: u32,
         token_ratio: f64,
-    ) Error!RetryThrottler {
+    ) error{InvalidRetryPolicy}!RetryThrottler {
         if (max_tokens == 0 or !std.math.isFinite(token_ratio) or
             token_ratio <= 0)
         {

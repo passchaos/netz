@@ -483,6 +483,110 @@ test "gRPC h2c unary retry backoff cannot renew the RPC deadline" {
     try std.testing.expectEqual(@as(usize, 1), shared.attempts);
 }
 
+test "gRPC h2c unary retry follows standard service config" {
+    const allocator = std.testing.allocator;
+    var threaded = std.Io.Threaded.init(allocator, .{});
+    defer threaded.deinit();
+    const io = threaded.io();
+    var server = try grpc.runtime.Server.listen(
+        allocator,
+        io,
+        .{ .ip4 = .loopback(0) },
+        .{ .max_frame_payload = 4096, .max_body_bytes = 4096 },
+        1024,
+    );
+    defer server.deinit();
+
+    const Shared = struct {
+        server: *grpc.runtime.Server,
+        attempts: usize = 0,
+        err: ?anyerror = null,
+
+        fn run(self: *@This()) void {
+            var connection = self.server.accept() catch |err| {
+                self.err = err;
+                return;
+            };
+            defer connection.deinit();
+            for (0..3) |index| {
+                var request = connection.readUnary() catch |err| {
+                    self.err = err;
+                    return;
+                };
+                defer request.deinit();
+                self.attempts += 1;
+                if (index == 2 and !std.mem.eql(
+                    u8,
+                    grpc.call.headerValue(
+                        request.request.headers,
+                        "grpc-previous-rpc-attempts",
+                    ) orelse "",
+                    "2",
+                )) {
+                    self.err = error.InvalidMetadata;
+                    return;
+                }
+                connection.writeUnary(request.request.stream_id, if (index < 2) .{
+                    .status = .unavailable,
+                    .retry_pushback_ms = 1,
+                    .trailers_only = true,
+                } else .{ .message = "configured" }) catch |err| {
+                    self.err = err;
+                    return;
+                };
+            }
+        }
+    };
+    var shared = Shared{ .server = &server };
+    const thread = try std.Thread.spawn(.{}, Shared.run, .{&shared});
+    var joined = false;
+    defer if (!joined) thread.join();
+
+    var config = try grpc.ServiceConfig.parse(allocator,
+        \\{
+        \\  "retryThrottling": {"maxTokens": 10, "tokenRatio": 1},
+        \\  "methodConfig": [{
+        \\    "name": [{"service": "demo.Config", "method": "Unary"}],
+        \\    "retryPolicy": {
+        \\      "maxAttempts": 3,
+        \\      "initialBackoff": "0.001s",
+        \\      "maxBackoff": "0.010s",
+        \\      "backoffMultiplier": 2,
+        \\      "retryableStatusCodes": ["UNAVAILABLE"]
+        \\    }
+        \\  }]
+        \\}
+    );
+    defer config.deinit();
+    var client = try grpc.runtime.Client.connect(
+        allocator,
+        io,
+        server.address(),
+        .{ .max_frame_payload = 4096, .max_body_bytes = 4096 },
+    );
+    defer client.deinit();
+    var response = try client.unaryWithServiceConfig(.{
+        .path = "/demo.Config/Unary",
+        .authority = "localhost",
+        .message = "once",
+    }, &config);
+    defer response.deinit();
+    try std.testing.expectEqual(grpc.Status.ok, response.status);
+    try std.testing.expectEqualStrings(
+        "configured",
+        response.message.?.payload,
+    );
+
+    thread.join();
+    joined = true;
+    if (shared.err) |err| return err;
+    try std.testing.expectEqual(@as(usize, 3), shared.attempts);
+    try std.testing.expectEqual(
+        @as(u64, 9000),
+        config.retry_throttler.?.milliTokens(),
+    );
+}
+
 test "gRPC h2c health Check serves known and unknown services" {
     const allocator = std.testing.allocator;
     var threaded = std.Io.Threaded.init(allocator, .{});

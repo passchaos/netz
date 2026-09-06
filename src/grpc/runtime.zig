@@ -9,6 +9,7 @@ const http2 = @import("../http2/mod.zig");
 const call = @import("call.zig");
 const health = @import("health.zig");
 const reflection = @import("reflection.zig");
+const service_config = @import("service_config.zig");
 const streaming = @import("stream/runtime.zig");
 const duplex = @import("stream/duplex.zig");
 
@@ -90,6 +91,19 @@ pub const Client = struct {
             options,
             policy,
         );
+    }
+
+    /// Apply the standard service-config selector for this method. A matching
+    /// config without a retry policy, or no match, performs exactly one call.
+    pub fn unaryWithServiceConfig(
+        self: *Client,
+        options: call.UnaryCallOptions,
+        config: *service_config.ServiceConfig,
+    ) Error!call.UnaryResponse {
+        if (config.retryPolicy(options.path)) |policy| {
+            return self.unaryWithRetry(options, policy);
+        }
+        return self.unary(options);
     }
 
     pub fn healthCheck(
