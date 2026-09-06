@@ -145,6 +145,20 @@ pub const QpackDecodeState = struct {
         self.decoder_instructions.clearRetainingCapacity();
     }
 
+    pub fn consumeDecoderInstructions(
+        self: *QpackDecodeState,
+        count: usize,
+    ) void {
+        std.debug.assert(count <= self.decoder_instructions.items.len);
+        const remaining = self.decoder_instructions.items.len - count;
+        std.mem.copyForwards(
+            u8,
+            self.decoder_instructions.items[0..remaining],
+            self.decoder_instructions.items[count..],
+        );
+        self.decoder_instructions.items.len = remaining;
+    }
+
     pub fn acknowledgeSections(
         self: *QpackDecodeState,
         stream_id: u64,

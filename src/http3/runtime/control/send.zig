@@ -571,6 +571,75 @@ pub fn sendConnectionQpackFeedback(
     qpack.clearDecoderInstructions();
 }
 
+/// Submit pending decoder instructions once without waiting for pacing. The
+/// QPACK queue and stream offset remain unchanged when transport backpressure
+/// rejects the packet, so an endpoint owner can retry after its next turn.
+pub fn trySendConnectionQpackFeedback(
+    connection: *quic.one_rtt.Connection,
+    scratch: *CriticalStreamSendScratch,
+    qpack: *QpackDecodeState,
+    send_state: *quic.stream_state.SendState,
+    prefix_sent: *bool,
+    options: anytype,
+) Error!void {
+    const pending = qpack.pendingDecoderInstructions();
+    if (pending.len == 0) return;
+
+    scratch.reset();
+    try scratch.payload.ensureTotalCapacity(
+        connection.endpoint.allocator,
+        @intFromBool(!prefix_sent.*) + pending.len,
+    );
+    if (!prefix_sent.*) try http3.writeQpackDecoderStreamPrefix(
+        &scratch.payload,
+        connection.endpoint.allocator,
+    );
+    scratch.payload.appendSliceAssumeCapacity(pending);
+    const prefix_len = scratch.payload.items.len - pending.len;
+    const frame_limit = @max(@as(usize, 1), maxFramesPerPacket(options));
+    var low: usize = 1;
+    var high: usize = pending.len;
+    var fitting: usize = 0;
+    while (low <= high) {
+        const candidate = low + (high - low) / 2;
+        var staged = send_state.*;
+        scratch.frames.clearRetainingCapacity();
+        try staged.appendFrames(
+            &scratch.frames,
+            connection.endpoint.allocator,
+            scratch.payload.items[0 .. prefix_len + candidate],
+            maxStreamFrameData(options),
+            false,
+        );
+        if (scratch.frames.items.len <= frame_limit and
+            try connection.packetLenForFramesAtOffset(
+                0,
+                scratch.frames.items,
+            ) <= connection.currentSendDatagramSize())
+        {
+            fitting = candidate;
+            low = candidate + 1;
+        } else {
+            high = candidate - 1;
+        }
+    }
+    if (fitting == 0) return error.DatagramTooLarge;
+
+    var staged_send = send_state.*;
+    scratch.frames.clearRetainingCapacity();
+    try staged_send.appendFrames(
+        &scratch.frames,
+        connection.endpoint.allocator,
+        scratch.payload.items[0 .. prefix_len + fitting],
+        maxStreamFrameData(options),
+        false,
+    );
+    try connection.trySend(scratch.frames.items);
+    send_state.* = staged_send;
+    prefix_sent.* = true;
+    qpack.consumeDecoderInstructions(fitting);
+}
+
 pub fn cancelConnectionRequest(
     connection: *quic.one_rtt.Connection,
     critical_scratch: *CriticalStreamSendScratch,

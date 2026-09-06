@@ -8,6 +8,273 @@ const ObservedBatchSend =
 
 const net = std.Io.net;
 
+const EndpointFixedClockIo = struct {
+    delegate: std.Io,
+    now_ns: i96,
+    sleep_calls: usize = 0,
+
+    fn now(
+        userdata: ?*anyopaque,
+        _: std.Io.Clock,
+    ) std.Io.Timestamp {
+        const self: *EndpointFixedClockIo = @ptrCast(@alignCast(userdata));
+        return .fromNanoseconds(self.now_ns);
+    }
+
+    fn sleep(
+        userdata: ?*anyopaque,
+        _: std.Io.Timeout,
+    ) std.Io.Cancelable!void {
+        const self: *EndpointFixedClockIo = @ptrCast(@alignCast(userdata));
+        self.sleep_calls += 1;
+        return error.Canceled;
+    }
+};
+
+test "HTTP/3 endpoint request polling defers paced feedback" {
+    const allocator = std.testing.allocator;
+    var threaded = std.Io.Threaded.init(allocator, .{});
+    defer threaded.deinit();
+    const io = threaded.io();
+
+    var server_endpoint = try quic.runtime.Endpoint.bind(
+        allocator,
+        io,
+        .{ .ip4 = .loopback(0) },
+        .{ .max_datagram_size = 4096 },
+    );
+    defer server_endpoint.deinit();
+    var peer_endpoint = try quic.runtime.Endpoint.bind(
+        allocator,
+        io,
+        .{ .ip4 = .loopback(0) },
+        .{ .max_datagram_size = 4096 },
+    );
+    defer peer_endpoint.deinit();
+    const keys = quic.protection.deriveAes128Keys(
+        [_]u8{0xf2} ** quic.protection.secret_len,
+    );
+    const settings = http3.Settings{
+        .qpack_max_table_capacity = 512,
+        .qpack_blocked_streams = 2,
+    };
+    var server_transport = quic.practical_transport_parameters;
+    server_transport.initial_max_data = 32;
+    server_transport.initial_max_stream_data_bidi_remote = 32;
+    var session = try runtime.HandshakeServerSession.initPreconfigured(
+        &server_endpoint,
+        peer_endpoint.address(),
+        .{
+            .local_settings = settings,
+            .max_stream_frame_data = 1200,
+        },
+        .{
+            .receive_keys = keys,
+            .send_keys = keys,
+            .local_connection_id = "poll-feedback-server",
+            .peer_connection_id = "poll-feedback-client",
+            .local_transport_parameters = server_transport,
+            .one_rtt = .{
+                .max_datagram_size = 1200,
+                .pacing_max_burst_packets = 1,
+                .receive_window = 32,
+                .stream_receive_window = 32,
+            },
+        },
+    );
+    defer session.deinit();
+    session.control.settings.markSent(settings);
+    session.control.settings.markReceived(settings);
+    session.qpack_encoder_prefix_sent = true;
+    session.qpack_decoder_prefix_sent = true;
+
+    var request_bytes: std.ArrayList(u8) = .empty;
+    defer request_bytes.deinit(allocator);
+    try (http3.Request{
+        .method = "POST",
+        .path = "/paced-poll",
+        .authority = "localhost",
+    }).write(&request_bytes, allocator);
+    var peer = try quic.one_rtt.Connection.init(&peer_endpoint, .{
+        .peer = server_endpoint.address(),
+        .receive_keys = keys,
+        .send_keys = keys,
+        .local_connection_id = "poll-feedback-client",
+        .peer_connection_id = "poll-feedback-server",
+        .enable_pacing = false,
+    });
+    defer peer.deinit();
+    try peer.send(&.{.{ .stream = .{
+        .stream_id = 0,
+        .data = request_bytes.items,
+    } }});
+    var request_packet = try session.established.connection.receivePacket();
+    defer request_packet.deinit(allocator);
+    try session.processRequestPacket(&request_packet);
+    var head = (try session.pollRequestEvent()) orelse
+        return error.TestUnexpectedResult;
+    defer head.deinit(allocator);
+    try std.testing.expect(head == .message);
+    try std.testing.expect(head.message.value == .head);
+
+    for (0..1400) |_| {
+        try session.qpack_decode.recordStreamCancellation(0);
+    }
+    const feedback_len =
+        session.qpack_decode.pendingDecoderInstructions().len;
+    try std.testing.expect(feedback_len != 0);
+    const decoder_offset = session.qpack_decoder_send.next_offset;
+    const request_available = quic.one_rtt.testing
+        .receiveStreamAvailableLen(&session.established.connection, 0).?;
+    try std.testing.expect(request_available != 0);
+
+    var dispatcher = quic.endpoint_dispatcher.Dispatcher.init(
+        allocator,
+        &server_endpoint,
+    );
+    defer dispatcher.deinit();
+    const handle: quic.endpoint_dispatcher.ConnectionHandle = 79;
+    try dispatcher.registerConnection(
+        handle,
+        &session.established.connection,
+    );
+    var promoted = runtime.PromotedHandshakeSession{
+        .dispatcher = &dispatcher,
+        .allocator = allocator,
+        .handle = handle,
+        .session = &session,
+    };
+
+    var fixed_io = EndpointFixedClockIo{
+        .delegate = server_endpoint.io,
+        .now_ns = 1_000_000,
+    };
+    var fixed_vtable = server_endpoint.io.vtable.*;
+    fixed_vtable.now = EndpointFixedClockIo.now;
+    fixed_vtable.sleep = EndpointFixedClockIo.sleep;
+    server_endpoint.io = .{
+        .userdata = &fixed_io,
+        .vtable = &fixed_vtable,
+    };
+    defer server_endpoint.io = fixed_io.delegate;
+    quic.one_rtt.testing.exhaustPacingAt(
+        &session.established.connection,
+        @intCast(fixed_io.now_ns),
+    );
+
+    const packet_number = session.established.connection.next_packet_number;
+    try std.testing.expect(
+        (try runtime.EndpointServer.testing.pollSessionRequestEntry(
+            &promoted,
+        )) == null,
+    );
+    try std.testing.expectEqual(@as(usize, 0), fixed_io.sleep_calls);
+    try std.testing.expectEqual(
+        packet_number,
+        session.established.connection.next_packet_number,
+    );
+    try std.testing.expectEqual(
+        feedback_len,
+        session.qpack_decode.pendingDecoderInstructions().len,
+    );
+    try std.testing.expectEqual(
+        decoder_offset,
+        session.qpack_decoder_send.next_offset,
+    );
+    try std.testing.expectEqual(
+        request_available,
+        quic.one_rtt.testing.receiveStreamAvailableLen(
+            &session.established.connection,
+            0,
+        ).?,
+    );
+
+    const timer = dispatcher.nextTimerDeadline() orelse
+        return error.TestUnexpectedResult;
+    try std.testing.expectEqual(
+        quic.one_rtt.TimerDeadlineKind.pacing,
+        timer.timer.kind,
+    );
+    fixed_io.now_ns = @intCast(timer.timer.deadline_ns);
+    _ = (try dispatcher.serviceNextTimerAt(timer.timer.deadline_ns)) orelse
+        return error.TestUnexpectedResult;
+    try std.testing.expect(
+        (try runtime.EndpointServer.testing.pollSessionRequestEntry(
+            &promoted,
+        )) == null,
+    );
+    try std.testing.expectEqual(@as(usize, 0), fixed_io.sleep_calls);
+    try std.testing.expect(
+        session.qpack_decode.pendingDecoderInstructions().len != 0,
+    );
+    try std.testing.expect(
+        session.qpack_decode.pendingDecoderInstructions().len < feedback_len,
+    );
+    try std.testing.expect(
+        session.qpack_decoder_send.next_offset > decoder_offset,
+    );
+    try std.testing.expectEqual(
+        request_available,
+        quic.one_rtt.testing.receiveStreamAvailableLen(
+            &session.established.connection,
+            0,
+        ).?,
+    );
+
+    while (session.qpack_decode.pendingDecoderInstructions().len != 0) {
+        const feedback_timer = dispatcher.nextTimerDeadline() orelse
+            return error.TestUnexpectedResult;
+        try std.testing.expectEqual(
+            quic.one_rtt.TimerDeadlineKind.pacing,
+            feedback_timer.timer.kind,
+        );
+        fixed_io.now_ns = @intCast(feedback_timer.timer.deadline_ns);
+        _ = (try dispatcher.serviceNextTimerAt(
+            feedback_timer.timer.deadline_ns,
+        )) orelse return error.TestUnexpectedResult;
+        try std.testing.expect(
+            (try runtime.EndpointServer.testing.pollSessionRequestEntry(
+                &promoted,
+            )) == null,
+        );
+        try std.testing.expectEqual(@as(usize, 0), fixed_io.sleep_calls);
+        try std.testing.expectEqual(
+            request_available,
+            quic.one_rtt.testing.receiveStreamAvailableLen(
+                &session.established.connection,
+                0,
+            ).?,
+        );
+    }
+    try std.testing.expect(
+        session.qpack_decoder_send.next_offset > decoder_offset,
+    );
+
+    const credit_timer = dispatcher.nextTimerDeadline() orelse
+        return error.TestUnexpectedResult;
+    try std.testing.expectEqual(
+        quic.one_rtt.TimerDeadlineKind.pacing,
+        credit_timer.timer.kind,
+    );
+    fixed_io.now_ns = @intCast(credit_timer.timer.deadline_ns);
+    _ = (try dispatcher.serviceNextTimerAt(
+        credit_timer.timer.deadline_ns,
+    )) orelse return error.TestUnexpectedResult;
+    try std.testing.expect(
+        (try runtime.EndpointServer.testing.pollSessionRequestEntry(
+            &promoted,
+        )) == null,
+    );
+    try std.testing.expectEqual(@as(usize, 0), fixed_io.sleep_calls);
+    try std.testing.expectEqual(
+        @as(usize, 0),
+        quic.one_rtt.testing.receiveStreamAvailableLen(
+            &session.established.connection,
+            0,
+        ).?,
+    );
+}
+
 test "HTTP/3 endpoint server exposes bounded callback loop API" {
     try std.testing.expect(@hasDecl(runtime.EndpointServer, "receiveOnce"));
     try std.testing.expect(@hasDecl(

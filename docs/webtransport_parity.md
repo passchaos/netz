@@ -281,6 +281,9 @@ uses the same one-packet literal encoding with FIN. Pacing, congestion,
 flow-control, or MTU rejection leaves the request pending and safely retryable;
 oversized admission metadata returns `DatagramTooLarge` instead of partially
 publishing a response or introducing a dynamic encoder-stream dependency.
+Endpoint request polling likewise makes only nonblocking receive-credit and
+QPACK-feedback attempts; queued decoder instructions are drained in packet-
+sized prefixes and remain retryable across dispatcher pacing turns.
 
 ## Important interoperability correction
 

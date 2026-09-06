@@ -1473,7 +1473,7 @@ pub const HandshakeAdmission = struct {
         self: *HandshakeAdmission,
     ) Error!?PendingHandshakeSession {
         try self.ensureWithinDeadline();
-        while (try self.h3.pollRequestEvent()) |event_value| {
+        while (try self.h3.pollRequestEventOnce()) |event_value| {
             var event = event_value;
             const allocator =
                 self.h3.established.connection.endpoint.allocator;
@@ -2535,7 +2535,7 @@ pub const EndpointServer = struct {
             const h3 = self.h3.session(handle) orelse
                 return error.InvalidSessionState;
             try h3.processRequestPacket(packet);
-            while (try h3.pollRequestEvent()) |ignored_value| {
+            while (try h3.pollRequestEventOnce()) |ignored_value| {
                 var ignored = ignored_value;
                 ignored.deinit(self.allocator);
             }
@@ -2741,7 +2741,7 @@ const EndpointConnectHead = struct {
 fn pollEndpointConnectHead(
     h3: *http3.runtime.HandshakeServerSession,
 ) Error!?EndpointConnectHead {
-    while (try h3.pollRequestEvent()) |event_value| {
+    while (try h3.pollRequestEventOnce()) |event_value| {
         var event = event_value;
         defer event.deinit(h3.established.connection.endpoint.allocator);
         switch (event) {

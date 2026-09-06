@@ -176,6 +176,8 @@ const sendConnectionSettings = control_sender.sendConnectionSettings;
 const sendConnectionQpackEncoderInstructions =
     control_sender.sendConnectionQpackEncoderInstructions;
 const sendConnectionQpackFeedback = control_sender.sendConnectionQpackFeedback;
+const trySendConnectionQpackFeedback =
+    control_sender.trySendConnectionQpackFeedback;
 const cancelConnectionRequest = control_sender.cancelConnectionRequest;
 const sendProtectedSettings = control_sender.sendProtectedSettings;
 const sendProtectedQpackEncoderInstructions =
@@ -3832,7 +3834,7 @@ pub const EndpointServer = struct {
         _: quic.endpoint_dispatcher.ConnectionHandle,
         promoted: *PromotedHandshakeSession,
     ) HandshakeAdmissionError!?StreamingRequestEvent {
-        var event = promoted.session.pollRequestEvent() catch |err| {
+        var event = promoted.session.pollRequestEventOnce() catch |err| {
             // Protocol errors can queue RESET_STREAM, STOP_SENDING, QPACK
             // feedback, or CONNECTION_CLOSE before they are surfaced. Do not
             // strand that recovery work outside the endpoint timer heap.
@@ -5095,7 +5097,15 @@ pub const HandshakeServerSession = struct {
     pub fn pollRequestEvent(
         self: *HandshakeServerSession,
     ) Error!?StreamingRequestEvent {
-        return self.pollRequestEventMatching(null);
+        return self.pollRequestEventMatchingInternal(null, false);
+    }
+
+    /// Poll buffered request state without sleeping on receive-credit or QPACK
+    /// feedback. Backpressure leaves all pending work queued and returns null.
+    pub fn pollRequestEventOnce(
+        self: *HandshakeServerSession,
+    ) Error!?StreamingRequestEvent {
+        return self.pollRequestEventMatchingInternal(null, true);
     }
 
     /// Return an already-buffered event for one request stream without
@@ -5104,14 +5114,26 @@ pub const HandshakeServerSession = struct {
         self: *HandshakeServerSession,
         stream_id: u62,
     ) Error!?StreamingRequestEvent {
-        return self.pollRequestEventMatching(stream_id);
+        return self.pollRequestEventMatchingInternal(stream_id, false);
     }
 
-    fn pollRequestEventMatching(
+    fn pollRequestEventMatchingInternal(
         self: *HandshakeServerSession,
         target_stream_id: ?u62,
+        single_attempt: bool,
     ) Error!?StreamingRequestEvent {
-        try self.releaseStreamingRequestCapacity();
+        if (single_attempt) {
+            self.flushRequestPacketFeedbackOnce() catch |err| switch (err) {
+                error.PacingLimited,
+                error.CongestionLimited,
+                error.FlowControlBlocked,
+                => return null,
+                else => return err,
+            };
+            if (!try self.releaseStreamingRequestCapacityOnce()) return null;
+        } else {
+            try self.releaseStreamingRequestCapacity();
+        }
         if (if (target_stream_id) |stream_id|
             self.streaming_requests.takeReset(stream_id)
         else
@@ -5153,6 +5175,7 @@ pub const HandshakeServerSession = struct {
             return self.applyStreamingRequestEvent(
                 value.entry,
                 value.event,
+                single_attempt,
             ) catch |err| {
                 self.failReceivedRequest(
                     value.entry.reader.streamId(),
@@ -5225,7 +5248,13 @@ pub const HandshakeServerSession = struct {
             self,
             packetView(packet.*),
         );
-        try self.flushRequestPacketFeedback();
+        self.flushRequestPacketFeedbackOnce() catch |err| switch (err) {
+            error.PacingLimited,
+            error.CongestionLimited,
+            error.FlowControlBlocked,
+            => {},
+            else => return err,
+        };
     }
 
     pub fn readRequestData(
@@ -6894,6 +6923,7 @@ pub const HandshakeServerSession = struct {
         self: *HandshakeServerSession,
         entry: *StreamingRequestSet.Entry,
         event: StreamingEvent,
+        single_attempt: bool,
     ) Error!StreamingRequestEvent {
         const stream_id = entry.reader.streamId();
         const from = entry.from orelse unreachable;
@@ -6902,7 +6932,10 @@ pub const HandshakeServerSession = struct {
                 stream_id,
                 count,
             );
-            self.sendQpackFeedback() catch {};
+            if (single_attempt)
+                self.flushRequestPacketFeedbackOnce() catch {}
+            else
+                self.sendQpackFeedback() catch {};
         }
         if (event == .head) {
             serverRequestReceivedAssumeCapacity(
@@ -6943,12 +6976,45 @@ pub const HandshakeServerSession = struct {
         }
     }
 
+    fn releaseStreamingRequestCapacityOnce(
+        self: *HandshakeServerSession,
+    ) Error!bool {
+        var index: usize = 0;
+        while (self.streaming_requests.entryAt(index)) |entry| : (index += 1) {
+            releaseStreamingReaderCapacityOnce(
+                &self.established.connection,
+                &entry.reader,
+            ) catch |err| switch (err) {
+                error.PacingLimited,
+                error.CongestionLimited,
+                error.FlowControlBlocked,
+                => return false,
+                else => return err,
+            };
+        }
+        return true;
+    }
+
     fn connectionIo(self: *const HandshakeServerSession) std.Io {
         return self.established.connection.endpoint.io;
     }
 
     fn sendQpackFeedback(self: *HandshakeServerSession) Error!void {
         try sendConnectionQpackFeedback(
+            &self.established.connection,
+            &self.critical_stream_send_scratch,
+            &self.qpack_decode,
+            &self.qpack_decoder_send,
+            &self.qpack_decoder_prefix_sent,
+            self.options,
+        );
+    }
+
+    fn flushRequestPacketFeedbackOnce(
+        self: *HandshakeServerSession,
+    ) Error!void {
+        if (self.qpack_decode.pendingDecoderInstructions().len == 0) return;
+        try trySendConnectionQpackFeedback(
             &self.established.connection,
             &self.critical_stream_send_scratch,
             &self.qpack_decode,
@@ -14024,6 +14090,16 @@ fn releaseStreamingReaderCapacity(
         reader.streamId(),
         amount,
     );
+    reader.markCredited(amount);
+}
+
+fn releaseStreamingReaderCapacityOnce(
+    connection: *quic.one_rtt.Connection,
+    reader: *StreamingMessageReader,
+) Error!void {
+    const amount = reader.uncreditedConsumed();
+    if (amount == 0) return;
+    try connection.tryReleaseReceivedCapacity(reader.streamId(), amount);
     reader.markCredited(amount);
 }
 

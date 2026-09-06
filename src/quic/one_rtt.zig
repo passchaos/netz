@@ -9867,6 +9867,30 @@ pub const Connection = struct {
         stream_id: u64,
         amount: u64,
     ) Error!void {
+        return self.releaseReceivedCapacityAt(stream_id, amount, null);
+    }
+
+    /// Return application-consumed receive credit without sleeping for
+    /// pacing. A failed MAX_DATA/MAX_STREAM_DATA attempt leaves both flow
+    /// windows and retained stream bytes unchanged for an event-loop retry.
+    pub fn tryReleaseReceivedCapacity(
+        self: *Connection,
+        stream_id: u64,
+        amount: u64,
+    ) Error!void {
+        return self.releaseReceivedCapacityAt(
+            stream_id,
+            amount,
+            self.monotonicNowNs(),
+        );
+    }
+
+    fn releaseReceivedCapacityAt(
+        self: *Connection,
+        stream_id: u64,
+        amount: u64,
+        sent_time_ns: ?u64,
+    ) Error!void {
         if (amount == 0) return;
         const recv_stream = self.findRecvStreamEntry(stream_id) orelse
             return error.StreamStateError;
@@ -9896,7 +9920,12 @@ pub const Connection = struct {
             frames[count] = recv_stream.flow.maxStreamDataFrame(stream_id);
             count += 1;
         }
-        if (count != 0) try self.send(frames[0..count]);
+        if (count != 0) {
+            if (sent_time_ns) |now_ns|
+                try self.sendAutomaticallyAt(frames[0..count], now_ns)
+            else
+                try self.send(frames[0..count]);
+        }
         try recv_stream.recv_state.consume(consume_len);
     }
 
