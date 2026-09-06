@@ -178,6 +178,60 @@ pub fn sendConnectionBodyChunk(
     if (fin) _ = bodies.finish(stream_id);
 }
 
+/// Submit one complete HTTP/3 DATA contribution in one QUIC packet without
+/// sleeping. Both QUIC and body-stream state remain unchanged when pacing,
+/// congestion, flow control, or packet sizing prevents the attempt.
+pub fn trySendConnectionBodyChunk(
+    connection: *quic.one_rtt.Connection,
+    bodies: *OutboundBodySet,
+    stream_id: u62,
+    data: []const u8,
+    fin: bool,
+    options: anytype,
+) Error!void {
+    const entry = bodies.find(stream_id) orelse return error.UnexpectedStream;
+    var staged = entry.*;
+    try bodies.prepareChunkForEntry(&staged, data.len, fin);
+    bodies.frame_scratch.clearRetainingCapacity();
+    if (!try body_batch.appendDataStreamFrames(
+        &staged.send,
+        &bodies.frame_scratch,
+        connection.endpoint.allocator,
+        &bodies.data_prefix_scratch,
+        data,
+        fin,
+        options.max_stream_frame_data,
+        options.max_frames_per_packet,
+    )) {
+        bodies.payload_scratch.clearRetainingCapacity();
+        try writeDataFrame(
+            &bodies.payload_scratch,
+            connection.endpoint.allocator,
+            data,
+        );
+        try staged.send.appendFrames(
+            &bodies.frame_scratch,
+            connection.endpoint.allocator,
+            bodies.payload_scratch.items,
+            options.max_stream_frame_data,
+            fin,
+        );
+    }
+    if (bodies.frame_scratch.items.len == 0 or
+        bodies.frame_scratch.items.len >
+            @max(@as(usize, 1), options.max_frames_per_packet) or
+        try connection.packetLenForFramesAtOffset(
+            0,
+            bodies.frame_scratch.items,
+        ) > connection.currentSendDatagramSize())
+    {
+        return error.DatagramTooLarge;
+    }
+    try connection.trySend(bodies.frame_scratch.items);
+    entry.* = staged;
+    if (fin) _ = bodies.finish(stream_id);
+}
+
 pub fn sendConnectionBodyBatchPaced(
     connection: *quic.one_rtt.Connection,
     bodies: *OutboundBodySet,

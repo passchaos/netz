@@ -573,6 +573,12 @@ test "WebTransport endpoint control and datagram sends do not wait for pacing" {
     h3.control.settings.markSent(settings);
     h3.control.settings.markReceived(settings);
     try h3.connect_datagrams.register(0);
+    try h3.outbound_bodies.reserveOpen(0);
+    h3.outbound_bodies.appendOpenAssumeCapacity(
+        0,
+        quic.stream_state.SendState.init(0),
+        null,
+    );
     var streams = try handshake_stream.initRegistry(
         allocator,
         .init(0),
@@ -772,6 +778,31 @@ test "WebTransport endpoint control and datagram sends do not wait for pacing" {
     try std.testing.expectEqual(
         before_datagram.datagrams_sent + 2,
         accepted.stats().datagrams_sent,
+    );
+
+    const body_offset = h3.outbound_bodies.find(0).?.send.next_offset;
+    try std.testing.expectError(error.PacingLimited, accepted.drain());
+    try std.testing.expectEqual(@as(usize, 0), fixed_io.sleep_calls);
+    try std.testing.expect(!accepted.control.local_drain_sent);
+    try std.testing.expectEqual(
+        body_offset,
+        h3.outbound_bodies.find(0).?.send.next_offset,
+    );
+    const drain_timer = dispatcher.nextTimerDeadline() orelse
+        return error.TestUnexpectedResult;
+    try std.testing.expectEqual(
+        quic.one_rtt.TimerDeadlineKind.pacing,
+        drain_timer.timer.kind,
+    );
+    fixed_io.now_ns = @intCast(drain_timer.timer.deadline_ns);
+    _ = (try dispatcher.serviceNextTimerAt(
+        drain_timer.timer.deadline_ns,
+    )) orelse return error.TestUnexpectedResult;
+    try accepted.drain();
+    try std.testing.expectEqual(@as(usize, 0), fixed_io.sleep_calls);
+    try std.testing.expect(accepted.control.local_drain_sent);
+    try std.testing.expect(
+        h3.outbound_bodies.find(0).?.send.next_offset > body_offset,
     );
 }
 

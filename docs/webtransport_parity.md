@@ -306,6 +306,9 @@ independently. Shared-endpoint `writeStream`, `writeStreams`, `sendStream`, and
 `finishStream`, `resetStream`, and `stopStream` instead make one socket-free
 attempt and return flow-control, congestion, or pacing backpressure to the sole
 `EndpointServer.receive*` owner.
+The endpoint `drain` method applies the same single-packet rule to its Capsule
+and commits the HTTP/3 body offset and local draining state only after the
+packet reaches the socket.
 An initial `writeStream` may commit only the association prefix and return zero
 application bytes; retrying the unchanged payload after dispatcher progress is
 therefore unambiguous. Endpoint `sendStream` is atomic and single-packet, while

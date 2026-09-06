@@ -1924,15 +1924,17 @@ pub const EndpointAcceptedSession = struct {
 
     pub fn drain(self: *EndpointAcceptedSession) EndpointServerError!void {
         if (self.control.local_drain_sent) return;
+        try self.control.ensureOpen();
         var encoded: [16]u8 = undefined;
         const capsule = try session_control.writeDrainInto(&encoded);
-        try self.h3.sendResponseBodyPaced(
+        const result = self.h3.trySendResponseBody(
             self.session_id.value,
             capsule,
             false,
         );
-        try self.control.recordLocalDrain();
         try self.refreshTimer();
+        try result;
+        try self.control.recordLocalDrain();
     }
 
     pub fn close(

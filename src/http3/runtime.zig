@@ -188,6 +188,7 @@ const pacedBodyChunkLimit = body_sender.pacedBodyChunkLimit;
 const responseBodySendCapacity = body_sender.responseBodySendCapacity;
 const pacedProtectedBodyChunkLimit = body_sender.pacedProtectedBodyChunkLimit;
 const sendConnectionBodyChunk = body_sender.sendConnectionBodyChunk;
+const trySendConnectionBodyChunk = body_sender.trySendConnectionBodyChunk;
 const sendConnectionBodyBatchPaced = body_sender.sendConnectionBodyBatchPaced;
 const sendConnectionBodyBatchPacedProgress =
     body_sender.sendConnectionBodyBatchPacedProgress;
@@ -5904,6 +5905,34 @@ pub const HandshakeServerSession = struct {
         if (fin) finishServerRequest(&self.control, &self.request_lifecycle, stream_id);
     }
 
+    /// Submit one complete response DATA contribution in one QUIC packet,
+    /// without waiting for pacing or reading the connection socket.
+    pub fn trySendResponseBody(
+        self: *HandshakeServerSession,
+        stream_id: u62,
+        data: []const u8,
+        fin: bool,
+    ) Error!void {
+        if (try self.finishPeerResponseCancellationOnce(stream_id)) |cancel| {
+            return responseResetError(cancel.application_error_code);
+        }
+        try trySendConnectionBodyChunk(
+            &self.established.connection,
+            &self.outbound_bodies,
+            stream_id,
+            data,
+            fin,
+            self.options,
+        );
+        if (fin) {
+            finishServerRequest(
+                &self.control,
+                &self.request_lifecycle,
+                stream_id,
+            );
+        }
+    }
+
     /// Send response DATA while driving the receive side when QUIC
     /// backpressure says the peer must first ACK or extend flow-control
     /// credit.
@@ -6289,6 +6318,31 @@ pub const HandshakeServerSession = struct {
         self.qpack_encode.abandonStream(stream_id);
         _ = self.outbound_bodies.finish(stream_id);
         finishServerRequest(&self.control, &self.request_lifecycle, stream_id);
+        return .{
+            .stream_id = stream_id,
+            .application_error_code = stopped.application_error_code,
+        };
+    }
+
+    /// Cancellation cleanup for event-loop send attempts. Stream retirement
+    /// is registered for timer-driven retry so this path cannot wait for
+    /// pacing while reporting that the response direction was cancelled.
+    fn finishPeerResponseCancellationOnce(
+        self: *HandshakeServerSession,
+        stream_id: u62,
+    ) Error!?PeerResponseCancellation {
+        const stopped = self.established.connection.streamStopped(stream_id) orelse
+            return null;
+        _ = try self.established.connection.requestCompletedPeerStreamRelease(
+            stream_id,
+        );
+        self.qpack_encode.abandonStream(stream_id);
+        _ = self.outbound_bodies.finish(stream_id);
+        finishServerRequest(
+            &self.control,
+            &self.request_lifecycle,
+            stream_id,
+        );
         return .{
             .stream_id = stream_id,
             .application_error_code = stopped.application_error_code,
