@@ -2448,8 +2448,20 @@ test "public modules are reachable" {
         "trySendRequestBodyParts",
     ));
     try std.testing.expect(@hasDecl(
+        netz.http3.runtime.HandshakeClient,
+        "trySendRequestBodyBatch",
+    ));
+    try std.testing.expect(@hasDecl(
+        netz.http3.runtime,
+        "BodyBatchProgress",
+    ));
+    try std.testing.expect(@hasDecl(
         netz.http3.runtime.SharedHandshakeClientPool.Lease,
         "trySendRequestBodyParts",
+    ));
+    try std.testing.expect(@hasDecl(
+        netz.http3.runtime.SharedHandshakeClientPool.Lease,
+        "trySendRequestBodyBatch",
     ));
     try std.testing.expect(@hasDecl(netz.http3.runtime, "UriEndpoint"));
     try std.testing.expect(@hasDecl(netz.http3.runtime, "uriEndpoint"));

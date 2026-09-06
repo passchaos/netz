@@ -1401,6 +1401,105 @@ test "HTTP/3 request body parts remain transactional across pacing" {
     try std.testing.expectEqual(@as(usize, 0), fixed_io.sleep_calls);
 }
 
+test "HTTP/3 request body batch preserves every stream across pacing" {
+    const allocator = std.testing.allocator;
+    var threaded = std.Io.Threaded.init(allocator, .{});
+    defer threaded.deinit();
+    const io = threaded.io();
+
+    var peer_endpoint = try quic.runtime.Endpoint.bind(
+        allocator,
+        io,
+        .{ .ip4 = .loopback(0) },
+        .{ .max_datagram_size = 4096 },
+    );
+    defer peer_endpoint.deinit();
+    var endpoint = try quic.runtime.Endpoint.bind(
+        allocator,
+        io,
+        .{ .ip4 = .loopback(0) },
+        .{ .max_datagram_size = 4096, .enable_gso_send = false },
+    );
+    defer endpoint.deinit();
+    const client_keys = quic.protection.deriveAes128Keys(
+        [_]u8{0xb7} ** quic.protection.secret_len,
+    );
+    const server_keys = quic.protection.deriveAes128Keys(
+        [_]u8{0xb8} ** quic.protection.secret_len,
+    );
+    var client = try runtime.HandshakeClient.initEstablished(
+        &endpoint,
+        peer_endpoint.address(),
+        try quic.handshake.establishPreconfigured(
+            &endpoint,
+            peer_endpoint.address(),
+            .client,
+            .{
+                .receive_keys = server_keys,
+                .send_keys = client_keys,
+                .local_connection_id = "batch-client",
+                .peer_connection_id = "batch-server",
+                .one_rtt = .{
+                    .max_datagram_size = 1200,
+                    .pacing_max_burst_packets = 2,
+                },
+            },
+        ),
+        .{},
+    );
+    defer client.deinit();
+    const first = try client.startRequest(.{
+        .method = "POST",
+        .path = "/first",
+        .authority = "localhost",
+    }, 3);
+    const second = try client.startRequest(.{
+        .method = "POST",
+        .path = "/second",
+        .authority = "localhost",
+    }, 3);
+
+    var fixed_io = FixedClockIo{
+        .delegate = endpoint.io,
+        .now_ns = 8_000_000,
+    };
+    var fixed_vtable = endpoint.io.vtable.*;
+    fixed_vtable.now = FixedClockIo.now;
+    fixed_vtable.sleep = FixedClockIo.sleep;
+    fixed_vtable.netSend = FixedClockIo.netSend;
+    endpoint.io = .{ .userdata = &fixed_io, .vtable = &fixed_vtable };
+    defer endpoint.io = fixed_io.delegate;
+    const first_before = client.outbound_bodies.find(first).?.*;
+    const second_before = client.outbound_bodies.find(second).?.*;
+    const sends_before = fixed_io.send_calls;
+    quic.one_rtt.testing.exhaustPacingAt(
+        &client.established.connection,
+        @intCast(fixed_io.now_ns),
+    );
+    const chunks = [_]runtime.BodyChunk{
+        .{ .stream_id = first, .data = "one", .fin = true },
+        .{ .stream_id = second, .data = "two", .fin = true },
+    };
+    try std.testing.expectError(
+        error.PacingLimited,
+        client.trySendRequestBodyBatch(&chunks),
+    );
+    const first_after = client.outbound_bodies.find(first).?.*;
+    const second_after = client.outbound_bodies.find(second).?.*;
+    try std.testing.expectEqual(first_before.written, first_after.written);
+    try std.testing.expectEqual(
+        first_before.send.next_offset,
+        first_after.send.next_offset,
+    );
+    try std.testing.expectEqual(second_before.written, second_after.written);
+    try std.testing.expectEqual(
+        second_before.send.next_offset,
+        second_after.send.next_offset,
+    );
+    try std.testing.expectEqual(sends_before, fixed_io.send_calls);
+    try std.testing.expectEqual(@as(usize, 0), fixed_io.sleep_calls);
+}
+
 test "HTTP/3 flow-blocked request retry retains response semantics" {
     const allocator = std.testing.allocator;
     var threaded = std.Io.Threaded.init(allocator, .{});

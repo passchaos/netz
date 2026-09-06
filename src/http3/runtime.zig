@@ -2854,6 +2854,7 @@ pub const HandshakeSessionOptions = struct {
 
 pub const BodyChunk = body_batch.Chunk;
 pub const ResponseBody = body_batch.ResponseBody;
+pub const BodyBatchProgress = body_sender.ConnectionBodyBatchProgress;
 
 /// Narrow white-box surface for runtime tests kept in focused modules.
 pub const testing = struct {
@@ -6357,7 +6358,7 @@ pub const HandshakeServerSession = struct {
                 continue;
             }
 
-            const sent_count = sendConnectionBodyBatchPacedProgress(
+            const progress = sendConnectionBodyBatchPacedProgress(
                 &self.established.connection,
                 &self.outbound_bodies,
                 workspace.chunks(),
@@ -6376,9 +6377,10 @@ pub const HandshakeServerSession = struct {
                 },
                 else => return err,
             };
-            const commit = workspace.commitSentPrefix(sent_count);
+            const commit = workspace.commitSentPrefix(progress.sent_count);
             remaining_responses -= commit.completed_responses;
-            delay_budget.record(commit.body_bytes, sent_count);
+            delay_budget.record(commit.body_bytes, progress.sent_count);
+            if (progress.send_error) |err| return err;
             if (self.options.response_scheduler_batch_delay_ns != 0 and
                 delay_budget.due(
                     self.options.response_scheduler_batch_delay_bytes,
@@ -8582,6 +8584,29 @@ pub const HandshakeClient = struct {
             self.options,
             self,
             HandshakeClient.receiveBatchProgressForSend,
+            HandshakeClient.finishBatchRequestStream,
+        );
+    }
+
+    /// Submit at most one socket-visible prefix of independent request body
+    /// chunks without waiting for pacing or reading UDP. On a partial socket
+    /// send, `sent_count` identifies the committed prefix even when
+    /// `send_error` is non-null; retry only `chunks[sent_count..]`.
+    pub fn trySendRequestBodyBatch(
+        self: *HandshakeClient,
+        chunks: []const BodyChunk,
+    ) Error!BodyBatchProgress {
+        for (chunks) |chunk| {
+            if (!self.request_lifecycle.contains(chunk.stream_id)) {
+                return error.UnexpectedStream;
+            }
+        }
+        return sendConnectionBodyBatchPacedProgress(
+            &self.established.connection,
+            &self.outbound_bodies,
+            chunks,
+            self.options,
+            self,
             HandshakeClient.finishBatchRequestStream,
         );
     }

@@ -585,7 +585,9 @@ QPACK request sections so a retry never commits encoder dependencies separately
 from the request packet. The vectored body helper borrows multiple caller
 slices behind one DATA prefix and performs one socket submission; pacing or
 validation failure leaves the body length, STREAM offset, and FIN state intact
-for an identical retry.
+for an identical retry. Leases also expose nonblocking multi-stream body
+batches: the result reports the exact socket-visible committed prefix together
+with any partial send error, so callers retry only the untouched suffix.
 The authenticated client primitives supporting that
 integration are explicitly nonblocking: `pollResponseEventOnce`,
 `pollNextResponseEventOnce`, and `pollPushEventOnce` never receive or sleep,

@@ -837,6 +837,11 @@ regression verifies zero socket calls and unchanged body/STREAM/FIN state when
 pacing rejects the attempt, followed by exactly one socket call for the same
 slices after timer progress. This is syscall and retry-accounting evidence; no
 throughput claim is made without a stable comparative benchmark.
+The shared-pool batch upload wrapper sends one DATA contribution for each of
+several active request streams through the same `sendMany` submission. Its
+progress result preserves both a socket-visible prefix count and a simultaneous
+send error; fault injection verifies that only that prefix advances HTTP/3 body
+state and the untouched suffix remains retryable.
 HTTP/3 CONNECT DATAGRAM negotiation, send-side lifecycle checks, terminal
 observation, queue polling/draining, and authenticated packet-order routing now
 live beside the registry in `runtime/datagram/routing.zig`. The router preserves

@@ -338,6 +338,146 @@ test "HTTP/3 shared pool releases failed handshake capacity" {
     try std.testing.expectEqual(@as(usize, 0), pool.idleCount());
 }
 
+test "HTTP/3 shared pool batches two streaming uploads" {
+    const allocator = std.testing.allocator;
+    var threaded = std.Io.Threaded.init(allocator, .{
+        .async_limit = .unlimited,
+    });
+    defer threaded.deinit();
+    const io = threaded.io();
+
+    var certificate_der: [tls_testing.certificate_der_len]u8 = undefined;
+    try std.base64.standard.Decoder.decode(
+        &certificate_der,
+        tls_testing.certificate_base64,
+    );
+    const key_pair = try tls_testing.serverKeyPair();
+    const public_key = key_pair.public_key.toUncompressedSec1();
+    const limits: runtime.Limits = .{ .quic = .{
+        .max_datagram_size = 4096,
+        .max_frames_per_datagram = 8,
+    } };
+    var server = try runtime.HandshakeServer.bind(
+        allocator,
+        io,
+        .{ .ip4 = .loopback(0) },
+        limits,
+        .{ .handshake = .{
+            .local_connection_id = "shared-batch-server",
+            .identity = .{
+                .certificate_chain = &.{&certificate_der},
+                .signer = .{ .ecdsa_p256_sha256 = .{
+                    .key_pair = key_pair,
+                } },
+            },
+        } },
+    );
+    defer server.deinit();
+
+    const Worker = struct {
+        server: *runtime.HandshakeServer,
+        err: ?anyerror = null,
+
+        fn run(self: *@This()) void {
+            var session = self.server.acceptWithTimeout(
+                .fromSeconds(5),
+            ) catch |err| {
+                self.err = err;
+                return;
+            };
+            defer session.deinit();
+            var saw_first = false;
+            var saw_second = false;
+            for (0..2) |_| {
+                var request = session.receiveRequestWithTimeout(
+                    .fromSeconds(2),
+                ) catch |err| {
+                    self.err = err;
+                    return;
+                };
+                defer request.deinit(self.server.allocator);
+                if (std.mem.eql(u8, request.request.path, "/first")) {
+                    if (!std.mem.eql(u8, request.request.body, "one")) {
+                        self.err = error.TestUnexpectedResult;
+                        return;
+                    }
+                    saw_first = true;
+                } else if (std.mem.eql(
+                    u8,
+                    request.request.path,
+                    "/second",
+                )) {
+                    if (!std.mem.eql(u8, request.request.body, "two")) {
+                        self.err = error.TestUnexpectedResult;
+                        return;
+                    }
+                    saw_second = true;
+                } else {
+                    self.err = error.TestUnexpectedResult;
+                    return;
+                }
+            }
+            if (!saw_first or !saw_second) {
+                self.err = error.TestUnexpectedResult;
+            }
+        }
+    };
+    var worker = Worker{ .server = &server };
+    const thread = try std.Thread.spawn(.{}, Worker.run, .{&worker});
+    var joined = false;
+    defer if (!joined) thread.join();
+
+    var pool = try runtime.SharedHandshakeClientPool.init(allocator, io, .{
+        .local_address = .{ .ip4 = .unspecified(0) },
+        .max_connections = 1,
+        .limits = limits,
+        .client = .{ .handshake = .{
+            .original_destination_connection_id = &.{},
+            .local_connection_id = &.{},
+            .server_auth = .{
+                .pinned_ecdsa_p256_public_key = public_key,
+            },
+            .initial_one_rtt_config = .{
+                .max_datagram_size = 1200,
+                .enable_pacing = false,
+            },
+        }, .connect_timeout = .fromSeconds(3) },
+    });
+    defer pool.deinit();
+    const uri = try std.fmt.allocPrint(
+        allocator,
+        "https://localhost:{d}/batch",
+        .{server.address().ip4.port},
+    );
+    defer allocator.free(uri);
+    var lease = try pool.acquireUri(uri);
+    var lease_active = true;
+    defer if (lease_active) lease.discard();
+
+    const first = try lease.tryStartRequest(.{
+        .method = "POST",
+        .path = "/first",
+        .authority = "localhost",
+    }, 3);
+    const second = try lease.tryStartRequest(.{
+        .method = "POST",
+        .path = "/second",
+        .authority = "localhost",
+    }, 3);
+    const progress = try lease.trySendRequestBodyBatch(&.{
+        .{ .stream_id = first, .data = "one", .fin = true },
+        .{ .stream_id = second, .data = "two", .fin = true },
+    });
+    try std.testing.expectEqual(@as(usize, 2), progress.sent_count);
+    try std.testing.expect(progress.send_error == null);
+
+    thread.join();
+    joined = true;
+    if (worker.err) |err| return err;
+    lease.discard();
+    lease_active = false;
+}
+
 test "HTTP/3 shared pool enforces leased capacity" {
     const allocator = std.testing.allocator;
     var threaded = std.Io.Threaded.init(allocator, .{

@@ -13,6 +13,13 @@ const OutboundBodySet = outbound_body.Set;
 const ProtectedSendState = protected_send_module.State;
 const BodyChunk = body_batch.Chunk;
 
+pub const ConnectionBodyBatchProgress = struct {
+    /// Exact socket-visible prefix committed to HTTP/3 stream state.
+    sent_count: usize,
+    /// A batch socket may accept a prefix and report an error together.
+    send_error: ?net.Socket.SendError = null,
+};
+
 pub fn sendConnectionFrames(
     connection: *quic.one_rtt.Connection,
     frames: []const quic.Frame,
@@ -297,7 +304,7 @@ pub fn sendConnectionBodyBatchPaced(
 ) Error!void {
     var sent: usize = 0;
     while (sent < chunks.len) {
-        sent += sendConnectionBodyBatchPacedProgress(
+        const progress = sendConnectionBodyBatchPacedProgress(
             connection,
             bodies,
             chunks[sent..],
@@ -315,6 +322,8 @@ pub fn sendConnectionBodyBatchPaced(
             },
             else => return err,
         };
+        sent += progress.sent_count;
+        if (progress.send_error) |err| return err;
     }
 }
 
@@ -330,8 +339,8 @@ pub fn sendConnectionBodyBatchPacedProgress(
     options: anytype,
     context: anytype,
     comptime finish_stream: anytype,
-) Error!usize {
-    if (chunks.len == 0) return 0;
+) Error!ConnectionBodyBatchProgress {
+    if (chunks.len == 0) return .{ .sent_count = 0 };
     for (chunks, 0..) |chunk, i| {
         if (chunk.data.len > pacedBodyChunkLimit(options)) {
             return error.DatagramTooLarge;
@@ -433,12 +442,16 @@ pub fn sendConnectionBodyBatchPacedProgress(
             finish_stream(context, committed.stream_id);
         }
     }
-    if (result.send_error) |err| return err;
     if (result.sent_count != result.protected_count) {
+        if (result.send_error == null) return error.Unexpected;
+    }
+    if (result.sent_count == 0 and result.send_error == null) {
         return error.Unexpected;
     }
-    if (result.sent_count == 0) return error.Unexpected;
-    return result.sent_count;
+    return .{
+        .sent_count = result.sent_count,
+        .send_error = result.send_error,
+    };
 }
 
 pub fn sendProtectedBodyBatchPaced(

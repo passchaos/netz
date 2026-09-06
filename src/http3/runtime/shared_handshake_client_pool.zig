@@ -214,6 +214,15 @@ pub fn Pool(comptime Runtime: type) type {
                 );
             }
 
+            pub fn trySendRequestBodyBatch(
+                self: *Lease,
+                chunks: []const Runtime.BodyChunk,
+            ) !Runtime.BodyBatchProgress {
+                if (!self.active) return error.InvalidLease;
+                defer self.pool.refresh(self.handle) catch {};
+                return self.client().trySendRequestBodyBatch(chunks);
+            }
+
             pub fn release(self: *Lease) void {
                 std.debug.assert(self.active);
                 self.pool.release(self.handle);

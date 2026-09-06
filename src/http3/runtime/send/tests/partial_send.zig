@@ -4,6 +4,7 @@ const quic = @import("../../../../quic/mod.zig");
 const packetizer = @import("../packetizer.zig");
 const protected_send_module = @import("../protected.zig");
 const body_sender = @import("../body.zig");
+const body_batch = @import("../../body_batch.zig");
 const outbound_body = @import("../../stream/outbound_body.zig");
 const ObservedBatchSend =
     @import("../../../../quic/one_rtt/tests/observed_batch_send.zig")
@@ -383,6 +384,111 @@ test "HTTP/3 protected body batch commits only a visible prefix" {
         bodies.find(4).?.send.next_offset,
     );
     try std.testing.expectEqual(@as(u64, 2), next_packet_number);
+}
+
+test "HTTP/3 stateful body batch returns socket-visible error prefix" {
+    const allocator = std.testing.allocator;
+    var threaded = std.Io.Threaded.init(allocator, .{});
+    defer threaded.deinit();
+    const io = threaded.io();
+    var receiver = try quic.runtime.Endpoint.bind(
+        allocator,
+        io,
+        .{ .ip4 = .loopback(0) },
+        .{ .max_datagram_size = 4096 },
+    );
+    defer receiver.deinit();
+    var sender = try quic.runtime.Endpoint.bind(
+        allocator,
+        io,
+        .{ .ip4 = .loopback(0) },
+        .{ .max_datagram_size = 4096, .enable_gso_send = false },
+    );
+    defer sender.deinit();
+    const keys = quic.protection.deriveAes128Keys(
+        [_]u8{0x96} ** quic.protection.secret_len,
+    );
+    var connection = try quic.one_rtt.Connection.init(&sender, .{
+        .peer = receiver.address(),
+        .receive_keys = keys,
+        .send_keys = keys,
+        .local_connection_id = "batch-client",
+        .peer_connection_id = "batch-server",
+        .enable_pacing = false,
+        .tls_handshake_complete = true,
+    });
+    defer connection.deinit();
+    var bodies = OutboundBodySet.init(allocator, 2);
+    defer bodies.deinit();
+    inline for (.{ @as(u62, 0), @as(u62, 4) }) |stream_id| {
+        try bodies.reserveOpen(stream_id);
+        bodies.appendOpenAssumeCapacity(
+            stream_id,
+            quic.stream_state.SendState.init(stream_id),
+            3,
+        );
+    }
+
+    var partial = ObservedBatchSend{
+        .delegate = sender.io,
+        .fail_after_prefix = 1,
+    };
+    var vtable = sender.io.vtable.*;
+    vtable.netSend = ObservedBatchSend.netSend;
+    sender.io = .{ .userdata = &partial, .vtable = &vtable };
+    defer sender.io = partial.delegate;
+
+    const Context = struct {
+        finished: [2]u62 = undefined,
+        count: usize = 0,
+
+        fn finish(self: *@This(), stream_id: u62) void {
+            self.finished[self.count] = stream_id;
+            self.count += 1;
+        }
+    };
+    const options = .{
+        .paced_body_chunk_bytes = @as(usize, 64),
+        .max_stream_frame_data = @as(usize, 64),
+        .max_frames_per_packet = @as(usize, 4),
+    };
+    const chunks = [_]body_batch.Chunk{
+        .{ .stream_id = 0, .data = "one", .fin = true },
+        .{ .stream_id = 4, .data = "two", .fin = true },
+    };
+    var context: Context = .{};
+    const progress = try body_sender.sendConnectionBodyBatchPacedProgress(
+        &connection,
+        &bodies,
+        &chunks,
+        options,
+        &context,
+        Context.finish,
+    );
+    try std.testing.expectEqual(@as(usize, 1), progress.sent_count);
+    try std.testing.expectEqual(error.NetworkDown, progress.send_error.?);
+    try std.testing.expectEqual(@as(usize, 1), context.count);
+    try std.testing.expectEqual(@as(u62, 0), context.finished[0]);
+    try std.testing.expect(bodies.find(0) == null);
+    try std.testing.expectEqual(
+        @as(u64, 0),
+        bodies.find(4).?.send.next_offset,
+    );
+
+    sender.io = partial.delegate;
+    const retry = try body_sender.sendConnectionBodyBatchPacedProgress(
+        &connection,
+        &bodies,
+        chunks[progress.sent_count..],
+        options,
+        &context,
+        Context.finish,
+    );
+    try std.testing.expectEqual(@as(usize, 1), retry.sent_count);
+    try std.testing.expect(retry.send_error == null);
+    try std.testing.expectEqual(@as(usize, 2), context.count);
+    try std.testing.expectEqual(@as(u62, 4), context.finished[1]);
+    try std.testing.expect(bodies.isEmpty());
 }
 
 test "HTTP/3 protected send state reuses batch scratch" {
