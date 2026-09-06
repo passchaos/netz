@@ -2439,6 +2439,10 @@ test "public modules are reachable" {
         netz.http3.runtime.HandshakeClient,
         "isReusable",
     ));
+    try std.testing.expect(@hasDecl(
+        netz.http3.runtime.HandshakeClient,
+        "abandonExtendedConnectOnce",
+    ));
     try std.testing.expect(@hasDecl(netz.http3.runtime, "UriEndpoint"));
     try std.testing.expect(@hasDecl(netz.http3.runtime, "uriEndpoint"));
     try std.testing.expect(@hasDecl(netz.http3.runtime.ProtectedClient, "sendGoAway"));

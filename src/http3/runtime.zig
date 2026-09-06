@@ -8097,6 +8097,7 @@ pub const HandshakeClient = struct {
             !self.established.connection.draining() and
             self.request_lifecycle.isEmpty() and
             self.outbound_bodies.isEmpty() and
+            self.qpack_decode.pendingDecoderInstructions().len == 0 and
             self.response_streams.isEmpty() and
             self.streaming_responses.retainedCount() == 0 and
             self.push_streams.isIdle() and
@@ -11293,6 +11294,10 @@ pub const HandshakeClient = struct {
                 stream_id,
                 self.qpack_decode.table,
             ) catch false);
+        const qpack_prepared = !cancel_qpack or blk: {
+            self.qpack_decode.prepareStreamCancellation() catch break :blk false;
+            break :blk true;
+        };
         const cancelled = blk: {
             self.established.connection.tryCancelStream(
                 stream_id,
@@ -11300,10 +11305,16 @@ pub const HandshakeClient = struct {
             ) catch break :blk false;
             break :blk true;
         };
-        // Emitting the QPACK decoder-stream cancellation would require a
-        // second packet. Retire this connection instead of leaking queued
-        // feedback into a future lease.
-        if (!cancelled or cancel_qpack) {
+        // The decoder instruction is queued, not sent here: a second send
+        // would violate this method's one-packet bound. isReusable() keeps the
+        // connection out of an idle pool until a later dispatcher turn flushes
+        // it. Allocation or QUIC-send failure makes reuse permanently unsafe.
+        if (cancelled and cancel_qpack and qpack_prepared) {
+            self.qpack_decode.recordStreamCancellationAssumeCapacity(
+                stream_id,
+            );
+        }
+        if (!cancelled or !qpack_prepared) {
             self.reuse_safe = false;
         }
         _ = self.established.connection
