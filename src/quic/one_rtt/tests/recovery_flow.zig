@@ -2293,7 +2293,6 @@ test "QUIC 1-RTT connection releases completed peer stream credit once" {
 
     // A sent FIN is not terminal until acknowledged. The early release request
     // is remembered and completed automatically by ACK processing.
-    try std.testing.expect(!try server.releaseCompletedPeerStream(0));
     try client.send(&.{.{ .ack = .{
         .largest_acknowledged = later_ping.packet.packet_number,
         .ack_delay = 0,
@@ -2310,6 +2309,33 @@ test "QUIC 1-RTT connection releases completed peer stream credit once" {
     } }});
     var reply_ack = try server.receivePacket();
     defer reply_ack.deinit(allocator);
+    try std.testing.expect(server.peerStreamClosed(0));
+    try std.testing.expectEqual(@as(usize, 0), server.stats().active_receive_streams);
+    try std.testing.expectEqual(@as(usize, 0), server.stats().active_send_streams);
+    try std.testing.expectEqual(@as(usize, 1), server.stats().closed_peer_stream_ranges);
+    try std.testing.expect(server.recvStreamStats(0) == null);
+    try std.testing.expect(server.sendStreamStats(0) == null);
+    try std.testing.expectEqual(
+        one_rtt.PeerStreamLifecycle.closed,
+        server.peerStreamLifecycle(0),
+    );
+    try std.testing.expectEqual(
+        one_rtt.PeerStreamLifecycle.unknown,
+        server.peerStreamLifecycle(4),
+    );
+    try std.testing.expectEqual(@as(u64, 0), server.streamSendAvailable(0));
+    try std.testing.expectError(
+        error.StreamStateError,
+        server.send(&.{.{ .stream = .{
+            .stream_id = 0,
+            .data = "reopen",
+        } }}),
+    );
+    try std.testing.expectError(error.StreamStateError, server.resetStream(0, 9));
+    try std.testing.expectError(
+        error.StreamStateError,
+        server.sendStopSending(0, 9),
+    );
     const packets_after_release = server.stats().packets_sent;
     try std.testing.expect(!try server.releaseCompletedPeerStream(0));
     try std.testing.expectEqual(packets_after_release, server.stats().packets_sent);
@@ -2319,6 +2345,20 @@ test "QUIC 1-RTT connection releases completed peer stream credit once" {
     try std.testing.expectEqual(@as(u64, 2), credit.frames[0].max_streams_bidi.maximum_streams);
     try std.testing.expectEqual(@as(u64, 2), client.peer_max_streams_bidi);
 
+    // Retransmission after compaction is ignored and cannot recreate either
+    // transport-side stream entry.
+    try client.send(&.{.{ .stream = .{
+        .stream_id = 0,
+        .offset = 0,
+        .data = "first",
+        .fin = true,
+    } }});
+    var late = try server.receivePacket();
+    defer late.deinit(allocator);
+    try std.testing.expect(server.peerStreamClosed(0));
+    try std.testing.expectEqual(@as(usize, 0), server.stats().active_receive_streams);
+    try std.testing.expectEqual(@as(usize, 0), server.stats().active_send_streams);
+
     try client.send(&.{.{ .stream = .{
         .stream_id = 4,
         .data = "second",
@@ -2327,6 +2367,152 @@ test "QUIC 1-RTT connection releases completed peer stream credit once" {
     var second = try server.receivePacket();
     defer second.deinit(allocator);
     try std.testing.expectEqualStrings("second", second.frames[0].stream.data);
+}
+
+test "QUIC deferred peer stream credit retries from connection timer" {
+    const allocator = std.testing.allocator;
+
+    var threaded = std.Io.Threaded.init(allocator, .{});
+    defer threaded.deinit();
+    const io = threaded.io();
+
+    var server_endpoint = try quic.runtime.Endpoint.bind(
+        allocator,
+        io,
+        .{ .ip4 = .loopback(0) },
+        .{ .max_datagram_size = 4096 },
+    );
+    defer server_endpoint.deinit();
+    var client_endpoint = try quic.runtime.Endpoint.bind(
+        allocator,
+        io,
+        .{ .ip4 = .loopback(0) },
+        .{ .max_datagram_size = 4096 },
+    );
+    defer client_endpoint.deinit();
+
+    const client_cid = [_]u8{ 0x59, 0x5a, 0x5b, 0x5c };
+    const server_cid = [_]u8{ 0x5d, 0x5e, 0x5f, 0x60 };
+    const keys = quic.protection.deriveAes128Keys(
+        [_]u8{0xbc} ** quic.protection.secret_len,
+    );
+    var client = try one_rtt.Connection.init(&client_endpoint, .{
+        .peer = server_endpoint.address(),
+        .receive_keys = keys,
+        .send_keys = keys,
+        .local_connection_id = &client_cid,
+        .peer_connection_id = &server_cid,
+        .initial_send_max_streams_bidi = 1,
+        .enable_pacing = false,
+    });
+    defer client.deinit();
+    var server = try one_rtt.Connection.init(&server_endpoint, .{
+        .peer = client_endpoint.address(),
+        .receive_keys = keys,
+        .send_keys = keys,
+        .local_connection_id = &server_cid,
+        .peer_connection_id = &client_cid,
+        .initial_receive_max_streams_bidi = 1,
+        .local_endpoint = .server,
+        .enable_pacing = false,
+    });
+    defer server.deinit();
+
+    try client.send(&.{.{ .stream = .{
+        .stream_id = 0,
+        .data = "request",
+        .fin = true,
+    } }});
+    var request = try server.receivePacket();
+    defer request.deinit(allocator);
+    try server.releaseReceivedCapacity(0, "request".len);
+    try std.testing.expect(!try server.releaseCompletedPeerStream(0));
+
+    try server.send(&.{.{ .stream = .{
+        .stream_id = 0,
+        .data = "response",
+        .fin = true,
+    } }});
+    var response = try client.receivePacket();
+    defer response.deinit(allocator);
+
+    var failed_credit_send = ObservedBatchSend{
+        .delegate = server.endpoint.io,
+        .fail_after_prefix = 0,
+    };
+    var failed_credit_vtable = server.endpoint.io.vtable.*;
+    failed_credit_vtable.netSend = ObservedBatchSend.netSend;
+    server.endpoint.io = .{
+        .userdata = &failed_credit_send,
+        .vtable = &failed_credit_vtable,
+    };
+    defer server.endpoint.io = failed_credit_send.delegate;
+
+    // ACK processing is committed even when the automatic MAX_STREAMS send
+    // fails. The stream remains active and a timer is armed independently of
+    // future peer packets.
+    try one_rtt.testing.applyReceivedFrames(
+        &server,
+        server.expected_packet_number,
+        &.{.{ .ack = .{
+            .largest_acknowledged = response.packet.packet_number,
+            .ack_delay = 0,
+            .first_ack_range = 0,
+        } }},
+        null,
+        .not_ect,
+    );
+    try std.testing.expectEqual(@as(usize, 1), failed_credit_send.calls);
+    try std.testing.expectEqual(@as(u64, 1), server.next_packet_number);
+    try std.testing.expectEqual(@as(usize, 0), server.pendingRecoveryCount());
+    try std.testing.expect(!server.peerStreamClosed(0));
+    try std.testing.expectEqual(@as(u64, 1), server.recv_max_streams_bidi);
+    try std.testing.expectEqual(@as(usize, 1), server.stats().active_receive_streams);
+    try std.testing.expectEqual(@as(usize, 1), server.stats().active_send_streams);
+    const retry = server.nextTimerDeadline() orelse
+        return error.TestUnexpectedResult;
+    try std.testing.expectEqual(
+        one_rtt.TimerDeadlineKind.peer_stream_credit,
+        retry.kind,
+    );
+
+    const first_serviced = (try server.serviceNextTimerAt(retry.deadline_ns)) orelse
+        return error.TestUnexpectedResult;
+    try std.testing.expectEqual(
+        one_rtt.TimerDeadlineKind.peer_stream_credit,
+        first_serviced.kind,
+    );
+    try std.testing.expectEqual(@as(usize, 2), failed_credit_send.calls);
+    try std.testing.expectEqual(@as(u64, 1), server.next_packet_number);
+    try std.testing.expectEqual(@as(usize, 0), server.pendingRecoveryCount());
+    try std.testing.expect(!server.peerStreamClosed(0));
+    const second_retry = server.nextTimerDeadline() orelse
+        return error.TestUnexpectedResult;
+    try std.testing.expectEqual(
+        one_rtt.TimerDeadlineKind.peer_stream_credit,
+        second_retry.kind,
+    );
+    try std.testing.expect(second_retry.deadline_ns > retry.deadline_ns);
+
+    server.endpoint.io = failed_credit_send.delegate;
+    const serviced = (try server.serviceNextTimerAt(second_retry.deadline_ns)) orelse
+        return error.TestUnexpectedResult;
+    try std.testing.expectEqual(
+        one_rtt.TimerDeadlineKind.peer_stream_credit,
+        serviced.kind,
+    );
+    try std.testing.expect(server.peerStreamClosed(0));
+    try std.testing.expectEqual(@as(u64, 2), server.next_packet_number);
+    try std.testing.expectEqual(@as(usize, 1), server.pendingRecoveryCount());
+    try std.testing.expectEqual(@as(usize, 0), server.stats().active_receive_streams);
+    try std.testing.expectEqual(@as(usize, 0), server.stats().active_send_streams);
+
+    var credit = try client.receivePacket();
+    defer credit.deinit(allocator);
+    try std.testing.expectEqual(
+        @as(u64, 2),
+        credit.frames[0].max_streams_bidi.maximum_streams,
+    );
 }
 
 test "QUIC 1-RTT connection releases reset and unidirectional peer stream credit" {
@@ -2375,7 +2561,6 @@ test "QUIC 1-RTT connection releases reset and unidirectional peer stream credit
     try server.resetStream(0, 72);
     var local_reset = try client.receivePacket();
     defer local_reset.deinit(allocator);
-    try std.testing.expect(!try server.releaseCompletedPeerStream(0));
     try client.sendAck(0);
     var reset_ack = try server.receivePacket();
     defer reset_ack.deinit(allocator);
@@ -2393,9 +2578,474 @@ test "QUIC 1-RTT connection releases reset and unidirectional peer stream credit
     try server.releaseReceivedCapacity(2, "uni".len);
     // A peer-initiated unidirectional stream has no local send half.
     try std.testing.expect(try server.releaseCompletedPeerStream(2));
+    try std.testing.expect(server.peerStreamClosed(2));
+    try std.testing.expectEqual(@as(usize, 0), server.stats().active_receive_streams);
+    try std.testing.expectError(
+        error.StreamStateError,
+        one_rtt.testing.applyReceivedFrames(
+            &server,
+            server.expected_packet_number,
+            &.{.{ .max_stream_data = .{
+                .stream_id = 2,
+                .maximum_stream_data = 128,
+            } }},
+            null,
+            .not_ect,
+        ),
+    );
+    try std.testing.expectError(
+        error.StreamStateError,
+        one_rtt.testing.applyReceivedFrames(
+            &server,
+            server.expected_packet_number,
+            &.{.{ .stop_sending = .{
+                .stream_id = 2,
+                .application_error_code = 9,
+            } }},
+            null,
+            .not_ect,
+        ),
+    );
     var uni_credit = try client.receivePacket();
     defer uni_credit.deinit(allocator);
     try std.testing.expectEqual(@as(u64, 2), uni_credit.frames[0].max_streams_uni.maximum_streams);
+}
+
+test "QUIC 1-RTT connection compacts long peer stream churn into closed ranges" {
+    const allocator = std.testing.allocator;
+
+    var threaded = std.Io.Threaded.init(allocator, .{});
+    defer threaded.deinit();
+    const io = threaded.io();
+
+    var server_endpoint = try quic.runtime.Endpoint.bind(
+        allocator,
+        io,
+        .{ .ip4 = .loopback(0) },
+        .{ .max_datagram_size = 4096 },
+    );
+    defer server_endpoint.deinit();
+    var client_endpoint = try quic.runtime.Endpoint.bind(
+        allocator,
+        io,
+        .{ .ip4 = .loopback(0) },
+        .{ .max_datagram_size = 4096 },
+    );
+    defer client_endpoint.deinit();
+
+    const client_cid = [_]u8{ 0x81, 0x82, 0x83, 0x84 };
+    const server_cid = [_]u8{ 0x85, 0x86, 0x87, 0x88 };
+    const keys = quic.protection.deriveAes128Keys(
+        [_]u8{0xb6} ** quic.protection.secret_len,
+    );
+    var client = try one_rtt.Connection.init(&client_endpoint, .{
+        .peer = server_endpoint.address(),
+        .receive_keys = keys,
+        .send_keys = keys,
+        .local_connection_id = &client_cid,
+        .peer_connection_id = &server_cid,
+        .initial_send_max_streams_uni = 64,
+    });
+    defer client.deinit();
+    var server = try one_rtt.Connection.init(&server_endpoint, .{
+        .peer = client_endpoint.address(),
+        .receive_keys = keys,
+        .send_keys = keys,
+        .local_connection_id = &server_cid,
+        .peer_connection_id = &client_cid,
+        .initial_receive_max_streams_uni = 64,
+        .local_endpoint = .server,
+    });
+    defer server.deinit();
+
+    for (0..64) |sequence| {
+        const stream_id: u64 = 2 + @as(u64, @intCast(sequence)) * 4;
+        try client.send(&.{.{ .stream = .{
+            .stream_id = stream_id,
+            .data = "x",
+            .fin = true,
+        } }});
+        var packet = try server.receivePacket();
+        packet.deinit(allocator);
+        try server.releaseReceivedCapacity(stream_id, 1);
+        try std.testing.expect(try server.releaseCompletedPeerStream(stream_id));
+        var credit = try client.receivePacket();
+        credit.deinit(allocator);
+    }
+
+    const stats = server.stats();
+    try std.testing.expectEqual(@as(usize, 0), stats.active_receive_streams);
+    try std.testing.expectEqual(@as(usize, 0), stats.active_send_streams);
+    try std.testing.expectEqual(@as(usize, 1), stats.closed_peer_stream_ranges);
+    try std.testing.expect(server.peerStreamClosed(2));
+    try std.testing.expect(server.peerStreamClosed(2 + 63 * 4));
+}
+
+test "QUIC receive stream ID pagination remains stable after reclamation" {
+    const allocator = std.testing.allocator;
+    var threaded = std.Io.Threaded.init(allocator, .{});
+    defer threaded.deinit();
+    var endpoint = try quic.runtime.Endpoint.bind(
+        allocator,
+        threaded.io(),
+        .{ .ip4 = .loopback(0) },
+        .{ .max_datagram_size = 4096 },
+    );
+    defer endpoint.deinit();
+    const keys = quic.protection.deriveAes128Keys(
+        [_]u8{0xb8} ** quic.protection.secret_len,
+    );
+    var connection = try one_rtt.Connection.init(&endpoint, .{
+        .peer = endpoint.address(),
+        .receive_keys = keys,
+        .send_keys = keys,
+        .local_connection_id = "stable-page-server",
+        .peer_connection_id = "stable-page-client",
+        .initial_receive_max_streams_uni = 4,
+        .local_endpoint = .server,
+    });
+    defer connection.deinit();
+
+    for ([_]u62{ 2, 6, 10, 14 }) |stream_id| {
+        try one_rtt.testing.applyReceivedFrames(
+            &connection,
+            connection.expected_packet_number,
+            &.{.{ .stream = .{
+                .stream_id = stream_id,
+                .data = "x",
+                .fin = true,
+            } }},
+            null,
+            .not_ect,
+        );
+    }
+    var first_page: [2]u62 = undefined;
+    const first = connection.receivedStreamIdsAfterInto(null, &first_page);
+    try std.testing.expectEqualSlices(u62, &.{ 2, 6 }, first);
+
+    try connection.releaseReceivedCapacity(2, 1);
+    try std.testing.expect(try connection.releaseCompletedPeerStream(2));
+    var second_page: [2]u62 = undefined;
+    const second = connection.receivedStreamIdsAfterInto(
+        first[first.len - 1],
+        &second_page,
+    );
+    try std.testing.expectEqualSlices(u62, &.{ 10, 14 }, second);
+}
+
+test "QUIC stream poll cursor follows entry moved by reclamation" {
+    const allocator = std.testing.allocator;
+    var threaded = std.Io.Threaded.init(allocator, .{});
+    defer threaded.deinit();
+    var endpoint = try quic.runtime.Endpoint.bind(
+        allocator,
+        threaded.io(),
+        .{ .ip4 = .loopback(0) },
+        .{ .max_datagram_size = 4096 },
+    );
+    defer endpoint.deinit();
+    const keys = quic.protection.deriveAes128Keys(
+        [_]u8{0xba} ** quic.protection.secret_len,
+    );
+    var connection = try one_rtt.Connection.init(&endpoint, .{
+        .peer = endpoint.address(),
+        .receive_keys = keys,
+        .send_keys = keys,
+        .local_connection_id = "cursor-server",
+        .peer_connection_id = "cursor-client",
+        .initial_receive_max_streams_uni = 4,
+        .local_endpoint = .server,
+        .enable_pacing = false,
+    });
+    defer connection.deinit();
+
+    try one_rtt.testing.applyReceivedFrames(
+        &connection,
+        0,
+        &.{
+            .{ .stream = .{ .stream_id = 2, .data = "aaaa" } },
+            .{ .stream = .{ .stream_id = 6, .data = "b", .fin = true } },
+            .{ .stream = .{ .stream_id = 10, .data = "c", .fin = true } },
+            .{ .stream = .{ .stream_id = 14, .data = "d", .fin = true } },
+        },
+        null,
+        .not_ect,
+    );
+    var byte: [1]u8 = undefined;
+    try std.testing.expectEqual(
+        @as(u62, 2),
+        (try connection.pollStream(&byte)).?.data.stream_id,
+    );
+    try std.testing.expectEqual(
+        @as(u62, 6),
+        (try connection.pollStream(&byte)).?.data.stream_id,
+    );
+    try std.testing.expectEqual(
+        @as(u62, 10),
+        (try connection.pollStream(&byte)).?.data.stream_id,
+    );
+
+    try std.testing.expect(try connection.releaseCompletedPeerStream(6));
+    const next = (try connection.pollStream(&byte)) orelse
+        return error.TestUnexpectedResult;
+    try std.testing.expectEqual(@as(u62, 14), next.data.stream_id);
+}
+
+test "QUIC peer reset reclamation returns discarded connection flow credit" {
+    const allocator = std.testing.allocator;
+    var threaded = std.Io.Threaded.init(allocator, .{});
+    defer threaded.deinit();
+    const io = threaded.io();
+
+    var server_endpoint = try quic.runtime.Endpoint.bind(
+        allocator,
+        io,
+        .{ .ip4 = .loopback(0) },
+        .{ .max_datagram_size = 4096 },
+    );
+    defer server_endpoint.deinit();
+    var client_endpoint = try quic.runtime.Endpoint.bind(
+        allocator,
+        io,
+        .{ .ip4 = .loopback(0) },
+        .{ .max_datagram_size = 4096 },
+    );
+    defer client_endpoint.deinit();
+
+    const client_cid = [_]u8{ 0x91, 0x92, 0x93, 0x94 };
+    const server_cid = [_]u8{ 0x95, 0x96, 0x97, 0x98 };
+    const keys = quic.protection.deriveAes128Keys(
+        [_]u8{0xb7} ** quic.protection.secret_len,
+    );
+    var client = try one_rtt.Connection.init(&client_endpoint, .{
+        .peer = server_endpoint.address(),
+        .receive_keys = keys,
+        .send_keys = keys,
+        .local_connection_id = &client_cid,
+        .peer_connection_id = &server_cid,
+        .initial_send_max_data = 8,
+        .initial_send_max_streams_bidi = 1,
+    });
+    defer client.deinit();
+    var server = try one_rtt.Connection.init(&server_endpoint, .{
+        .peer = client_endpoint.address(),
+        .receive_keys = keys,
+        .send_keys = keys,
+        .local_connection_id = &server_cid,
+        .peer_connection_id = &client_cid,
+        .initial_receive_max_data = 8,
+        .receive_window = 8,
+        .initial_receive_max_streams_bidi = 1,
+        .local_endpoint = .server,
+    });
+    defer server.deinit();
+
+    try client.send(&.{.{ .stream = .{
+        .stream_id = 0,
+        .data = "12345678",
+    } }});
+    var data = try server.receivePacket();
+    defer data.deinit(allocator);
+    try client.resetStream(0, 71);
+    var reset = try server.receivePacket();
+    defer reset.deinit(allocator);
+    try std.testing.expect(!try server.releaseCompletedPeerStream(0));
+    try server.resetStream(0, 72);
+    var local_reset = try client.receivePacket();
+    defer local_reset.deinit(allocator);
+    try client.sendAck(0);
+    var ack = try server.receivePacket();
+    defer ack.deinit(allocator);
+
+    var credit = try client.receivePacket();
+    defer credit.deinit(allocator);
+    var saw_max_data = false;
+    var saw_max_streams = false;
+    for (credit.frames) |frame| switch (frame) {
+        .max_data => |value| {
+            saw_max_data = value.maximum_data == 16;
+        },
+        .max_streams_bidi => |value| {
+            saw_max_streams = value.maximum_streams == 2;
+        },
+        else => {},
+    };
+    try std.testing.expect(saw_max_data);
+    try std.testing.expect(saw_max_streams);
+    try std.testing.expect(server.peerStreamClosed(0));
+}
+
+test "QUIC closed peer stream keeps direction validation before ignore" {
+    const allocator = std.testing.allocator;
+    var threaded = std.Io.Threaded.init(allocator, .{});
+    defer threaded.deinit();
+    var endpoint = try quic.runtime.Endpoint.bind(
+        allocator,
+        threaded.io(),
+        .{ .ip4 = .loopback(0) },
+        .{ .max_datagram_size = 4096 },
+    );
+    defer endpoint.deinit();
+    const keys = quic.protection.deriveAes128Keys(
+        [_]u8{0xb9} ** quic.protection.secret_len,
+    );
+    var connection = try one_rtt.Connection.init(&endpoint, .{
+        .peer = endpoint.address(),
+        .receive_keys = keys,
+        .send_keys = keys,
+        .local_connection_id = "direction-server",
+        .peer_connection_id = "direction-client",
+        .initial_receive_max_streams_uni = 1,
+        .local_endpoint = .server,
+    });
+    defer connection.deinit();
+
+    try one_rtt.testing.applyReceivedFrames(
+        &connection,
+        0,
+        &.{.{ .stream = .{ .stream_id = 2, .data = "x", .fin = true } }},
+        null,
+        .not_ect,
+    );
+    try connection.releaseReceivedCapacity(2, 1);
+    try std.testing.expect(try connection.releaseCompletedPeerStream(2));
+    try std.testing.expect(connection.peerStreamClosed(2));
+
+    try one_rtt.testing.applyReceivedFrames(
+        &connection,
+        1,
+        &.{.{ .stream = .{ .stream_id = 2, .data = "late", .fin = true } }},
+        null,
+        .not_ect,
+    );
+    try std.testing.expect(connection.peerStreamClosed(2));
+    try std.testing.expectEqual(@as(usize, 0), connection.stats().active_receive_streams);
+
+    try std.testing.expectError(
+        error.StreamStateError,
+        one_rtt.testing.applyReceivedFrames(
+            &connection,
+            2,
+            &.{.{ .max_stream_data = .{
+                .stream_id = 2,
+                .maximum_stream_data = 128,
+            } }},
+            null,
+            .not_ect,
+        ),
+    );
+}
+
+test "QUIC acknowledged send half ignores late peer control until receive closes" {
+    const allocator = std.testing.allocator;
+    var threaded = std.Io.Threaded.init(allocator, .{});
+    defer threaded.deinit();
+    var endpoint = try quic.runtime.Endpoint.bind(
+        allocator,
+        threaded.io(),
+        .{ .ip4 = .loopback(0) },
+        .{ .max_datagram_size = 4096 },
+    );
+    defer endpoint.deinit();
+    const keys = quic.protection.deriveAes128Keys(
+        [_]u8{0xbb} ** quic.protection.secret_len,
+    );
+    var connection = try one_rtt.Connection.init(&endpoint, .{
+        .peer = endpoint.address(),
+        .receive_keys = keys,
+        .send_keys = keys,
+        .local_connection_id = "half-server",
+        .peer_connection_id = "half-client",
+        .local_endpoint = .server,
+        .initial_send_max_stream_data_bidi_local = 32,
+        .enable_pacing = false,
+    });
+    defer connection.deinit();
+
+    try one_rtt.testing.applyReceivedFrames(
+        &connection,
+        0,
+        &.{.{ .stream = .{ .stream_id = 0, .data = "open" } }},
+        null,
+        .not_ect,
+    );
+    try connection.send(&.{.{ .stream = .{
+        .stream_id = 0,
+        .data = "done",
+        .fin = true,
+    } }});
+    try std.testing.expect(connection.markPacketAcknowledged(0));
+    try std.testing.expectEqual(one_rtt.PeerStreamLifecycle.active, connection.peerStreamLifecycle(0));
+
+    try one_rtt.testing.applyReceivedFrames(
+        &connection,
+        1,
+        &.{.{ .stop_sending = .{
+            .stream_id = 0,
+            .application_error_code = 91,
+        } }},
+        null,
+        .not_ect,
+    );
+    try std.testing.expect(connection.streamStopped(0) == null);
+    try one_rtt.testing.applyReceivedFrames(
+        &connection,
+        2,
+        &.{.{ .max_stream_data = .{
+            .stream_id = 0,
+            .maximum_stream_data = 1_000_000,
+        } }},
+        null,
+        .not_ect,
+    );
+    try std.testing.expectEqual(
+        @as(u64, 28),
+        connection.streamSendAvailable(0),
+    );
+}
+
+test "QUIC reset stops recovery of superseded STREAM data" {
+    const allocator = std.testing.allocator;
+    var threaded = std.Io.Threaded.init(allocator, .{});
+    defer threaded.deinit();
+    var endpoint = try quic.runtime.Endpoint.bind(
+        allocator,
+        threaded.io(),
+        .{ .ip4 = .loopback(0) },
+        .{ .max_datagram_size = 4096 },
+    );
+    defer endpoint.deinit();
+    const keys = quic.protection.deriveAes128Keys(
+        [_]u8{0xbc} ** quic.protection.secret_len,
+    );
+    var connection = try one_rtt.Connection.init(&endpoint, .{
+        .peer = endpoint.address(),
+        .receive_keys = keys,
+        .send_keys = keys,
+        .local_connection_id = "reset-recovery-local",
+        .peer_connection_id = "reset-recovery-peer",
+        .enable_pacing = false,
+    });
+    defer connection.deinit();
+
+    try connection.send(&.{.{ .stream = .{
+        .stream_id = 0,
+        .data = "superseded",
+    } }});
+    try std.testing.expectEqual(@as(usize, 1), connection.pendingRecoveryCount());
+    try connection.resetStream(0, 93);
+    try std.testing.expectEqual(@as(usize, 1), connection.pendingRecoveryCount());
+    const reset_payload = one_rtt.testing.recoveryPayloadForPacket(
+        &connection,
+        1,
+    ) orelse return error.TestUnexpectedResult;
+    const reset = try quic.parseFrame(reset_payload);
+    try std.testing.expect(reset.frame == .reset_stream);
+    try std.testing.expectEqual(@as(u64, 0), reset.frame.reset_stream.stream_id);
+    try std.testing.expect(one_rtt.testing.recoveryPayloadForPacket(
+        &connection,
+        0,
+    ) == null);
 }
 
 test "QUIC 1-RTT connection batches completed peer stream credit" {

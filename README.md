@@ -333,7 +333,12 @@ starts with deterministic parsers, serializers, preallocated fixed-width wire-in
   the same per-limit duplicate suppression for stream-count exhaustion; peer
   stream credit is returned only after both directions are terminal, including
   acknowledgement of the local FIN/RESET, with early release requests flushed
-  automatically by the ACK receive path,
+  automatically by the ACK receive path. Released peer stream buffers and map
+  entries are reclaimed, sequential closed IDs collapse into a constant-space
+  watermark, sparse closures use merged ranges, stale recovery frames are
+  removed, failed automatic credit sends retain state behind an aggregate
+  connection-timer retry, and stable ID-based receive pagination survives swap
+  removal,
   protected 0-RTT long-header packet seal/open and preallocated frame datagram helpers with
   0-RTT packet-type restrictions, an indexed owning origin+ALPN session cache with
   cached transactional LRU eviction and stats, expired-hit eviction, independent TLS session copies, stable

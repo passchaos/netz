@@ -375,10 +375,10 @@ pub fn poll(
     max_stream_bytes: usize,
 ) Error!?OwnedHandshakeStream {
     var stream_ids: [256]u62 = undefined;
-    var start: usize = 0;
+    var after: ?u62 = null;
     while (true) {
-        const ids = connection.receivedStreamIdsFromInto(
-            start,
+        const ids = connection.receivedStreamIdsAfterInto(
+            after,
             &stream_ids,
         );
         for (ids) |stream_id| {
@@ -396,7 +396,7 @@ pub fn poll(
                 max_stream_bytes,
             )) |stream| return stream;
         }
-        start += ids.len;
+        if (ids.len != 0) after = ids[ids.len - 1];
         if (ids.len < stream_ids.len) return null;
     }
 }

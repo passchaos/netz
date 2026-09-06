@@ -123,15 +123,10 @@ pub fn poll(
 
     var stream_ids: [256]u62 = undefined;
     const previous = registry.incremental_poll_cursor;
-    var found_previous = previous == null;
-    var start: usize = 0;
+    var after = previous;
     while (true) {
-        const ids = connection.receivedStreamIdsFromInto(start, &stream_ids);
+        const ids = connection.receivedStreamIdsAfterInto(after, &stream_ids);
         for (ids) |stream_id| {
-            if (!found_previous) {
-                found_previous = stream_id == previous.?;
-                continue;
-            }
             if (try pollStreamId(
                 connection,
                 registry,
@@ -140,30 +135,19 @@ pub fn poll(
                 out,
             )) |event| return event;
         }
-        start += ids.len;
+        if (ids.len != 0) after = ids[ids.len - 1];
         if (ids.len < stream_ids.len) break;
     }
     if (previous == null) return null;
 
-    // A removed/stale cursor has no tail to wrap from. The first pass skipped
-    // everything while looking for it, so restart and inspect every stream.
-    const wrap_limit = if (found_previous) previous else null;
-    start = 0;
+    // Wrap to the lowest active ID. The cursor is an ID rather than a physical
+    // table slot, so reclaiming its stream between calls cannot skip a moved
+    // entry.
+    after = null;
     while (true) {
-        const ids = connection.receivedStreamIdsFromInto(start, &stream_ids);
+        const ids = connection.receivedStreamIdsAfterInto(after, &stream_ids);
         for (ids) |stream_id| {
-            if (wrap_limit) |stop_stream_id| {
-                if (stream_id == stop_stream_id) {
-                    const event = try pollStreamId(
-                        connection,
-                        registry,
-                        session_id,
-                        stream_id,
-                        out,
-                    );
-                    return event;
-                }
-            }
+            if (stream_id > previous.?) return null;
             if (try pollStreamId(
                 connection,
                 registry,
@@ -172,7 +156,7 @@ pub fn poll(
                 out,
             )) |event| return event;
         }
-        start += ids.len;
+        if (ids.len != 0) after = ids[ids.len - 1];
         if (ids.len < stream_ids.len) return null;
     }
 }

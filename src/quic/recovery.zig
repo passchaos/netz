@@ -323,6 +323,81 @@ pub const Queue = struct {
         return false;
     }
 
+    /// Stop retransmitting STREAM data after the application terminates that
+    /// send side with RESET_STREAM. Mixed payload groups are compacted in
+    /// place so unrelated reliable frames retain their packet group and ACK
+    /// identity without another allocation.
+    pub fn abandonStreamData(self: *Queue, stream_id: u64) usize {
+        return self.abandonStreamFrames(stream_id, .data);
+    }
+
+    /// Drop every stream-scoped frame that has become obsolete once both
+    /// directions are terminal and the active stream state is reclaimed.
+    pub fn abandonClosedStreamFrames(
+        self: *Queue,
+        stream_id: u64,
+    ) usize {
+        return self.abandonStreamFrames(stream_id, .closed);
+    }
+
+    const AbandonStreamFrames = enum { data, closed };
+
+    fn abandonStreamFrames(
+        self: *Queue,
+        stream_id: u64,
+        mode: AbandonStreamFrames,
+    ) usize {
+        var index: usize = 0;
+        var removed_frames: usize = 0;
+        while (index < self.pending.items.len) {
+            const entry = &self.pending.items[index];
+            const payload = entry.payload();
+            var read: usize = 0;
+            var write: usize = 0;
+            while (read < payload.len) {
+                const parsed = quic.parseFrame(payload[read..]) catch
+                    unreachable;
+                const remove = switch (parsed.frame) {
+                    .stream => |stream| stream.stream_id == stream_id,
+                    .reset_stream => |reset| mode == .closed and
+                        reset.stream_id == stream_id,
+                    .stop_sending => |stop| mode == .closed and
+                        stop.stream_id == stream_id,
+                    .max_stream_data => |maximum| mode == .closed and
+                        maximum.stream_id == stream_id,
+                    .stream_data_blocked => |blocked| mode == .closed and
+                        blocked.stream_id == stream_id,
+                    else => false,
+                };
+                if (remove) {
+                    removed_frames += 1;
+                } else {
+                    if (write != read) {
+                        @memmove(
+                            entry.payload_storage[write .. write + parsed.consumed],
+                            entry.payload_storage[read .. read + parsed.consumed],
+                        );
+                    }
+                    write += parsed.consumed;
+                }
+                read += parsed.consumed;
+            }
+            if (write == payload.len) {
+                index += 1;
+                continue;
+            }
+            if (write == 0) {
+                var removed = self.removeGroupOrdered(index);
+                self.recycleEntry(&removed);
+                continue;
+            }
+            self.payload_bytes -= payload.len - write;
+            entry.payload_len = write;
+            index += 1;
+        }
+        return removed_frames;
+    }
+
     pub fn ptoCandidate(self: *const Queue) ?Candidate {
         return self.ptoCandidateAt(0);
     }
@@ -744,6 +819,80 @@ test "QUIC recovery queue identifies pending stream terminal frames" {
     try std.testing.expect(queue.acknowledgePacketNumber(11));
     try std.testing.expect(!queue.hasPendingStreamData(4));
     try std.testing.expect(!queue.hasPendingResetStream(8));
+}
+
+test "QUIC recovery abandons one stream without losing sibling frames" {
+    const allocator = std.testing.allocator;
+    var queue = Queue.init(allocator);
+    defer queue.deinit();
+
+    var mixed: std.ArrayList(u8) = .empty;
+    defer mixed.deinit(allocator);
+    try (quic.Frame{ .stream = .{
+        .stream_id = 4,
+        .data = "old",
+    } }).write(&mixed, allocator);
+    try (quic.Frame{ .stream = .{
+        .stream_id = 8,
+        .data = "keep",
+        .fin = true,
+    } }).write(&mixed, allocator);
+    try (quic.Frame{ .ping = {} }).write(&mixed, allocator);
+    _ = try queue.trackSent(7, mixed.items);
+
+    try std.testing.expectEqual(@as(usize, 1), queue.abandonStreamData(4));
+    try std.testing.expect(!queue.hasPendingStreamData(4));
+    try std.testing.expect(queue.hasPendingStreamData(8));
+    const candidate = queue.packetNumberCandidate(7) orelse
+        return error.TestUnexpectedResult;
+    const first = try quic.parseFrame(candidate.payload);
+    try std.testing.expect(first.frame == .stream);
+    try std.testing.expectEqual(@as(u64, 8), first.frame.stream.stream_id);
+    const second = try quic.parseFrame(candidate.payload[first.consumed..]);
+    try std.testing.expect(second.frame == .ping);
+    try std.testing.expectEqual(
+        candidate.payload.len,
+        first.consumed + second.consumed,
+    );
+
+    try std.testing.expectEqual(@as(usize, 1), queue.abandonStreamData(8));
+    try std.testing.expect(!queue.hasPendingStreamData(8));
+    try std.testing.expectEqual(@as(usize, 1), queue.pendingCount());
+    const ping = try quic.parseFrame(queue.packetNumberCandidate(7).?.payload);
+    try std.testing.expect(ping.frame == .ping);
+}
+
+test "QUIC recovery drops stale closed-stream controls only" {
+    const allocator = std.testing.allocator;
+    var queue = Queue.init(allocator);
+    defer queue.deinit();
+
+    var payload: std.ArrayList(u8) = .empty;
+    defer payload.deinit(allocator);
+    try (quic.Frame{ .max_stream_data = .{
+        .stream_id = 4,
+        .maximum_stream_data = 90,
+    } }).write(&payload, allocator);
+    try (quic.Frame{ .stop_sending = .{
+        .stream_id = 4,
+        .application_error_code = 7,
+    } }).write(&payload, allocator);
+    try (quic.Frame{ .stream_data_blocked = .{
+        .stream_id = 8,
+        .maximum_stream_data = 30,
+    } }).write(&payload, allocator);
+    _ = try queue.trackSent(9, payload.items);
+
+    try std.testing.expectEqual(
+        @as(usize, 2),
+        queue.abandonClosedStreamFrames(4),
+    );
+    const kept = queue.packetNumberCandidate(9) orelse
+        return error.TestUnexpectedResult;
+    const parsed = try quic.parseFrame(kept.payload);
+    try std.testing.expect(parsed.frame == .stream_data_blocked);
+    try std.testing.expectEqual(@as(u64, 8), parsed.frame.stream_data_blocked.stream_id);
+    try std.testing.expectEqual(kept.payload.len, parsed.consumed);
 }
 
 test "QUIC recovery uninitialized tracking rejects empty payload transactionally" {

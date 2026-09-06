@@ -5011,9 +5011,21 @@ test "public modules are reachable" {
     try std.testing.expect(@hasDecl(netz.quic.one_rtt.Connection, "authenticationFailureCount"));
     try std.testing.expect(@hasDecl(netz.quic.one_rtt.Connection, "getSendStreamStats"));
     try std.testing.expect(@hasDecl(netz.quic.one_rtt.Connection, "getRecvStreamStats"));
+    try std.testing.expect(@hasDecl(netz.quic.one_rtt, "PeerStreamLifecycle"));
+    try std.testing.expect(@hasDecl(
+        netz.quic.one_rtt.Connection,
+        "peerStreamLifecycle",
+    ));
+    try std.testing.expect(@hasDecl(
+        netz.quic.one_rtt.Connection,
+        "receivedStreamIdsAfterInto",
+    ));
     try std.testing.expect(@hasField(netz.quic.one_rtt.ConnectionStats, "sent_packet_stats"));
     try std.testing.expect(@hasField(netz.quic.one_rtt.ConnectionStats, "received_packet_stats"));
     try std.testing.expect(@hasField(netz.quic.one_rtt.ConnectionStats, "recovery_queue_stats"));
+    try std.testing.expect(@hasField(netz.quic.one_rtt.ConnectionStats, "active_send_streams"));
+    try std.testing.expect(@hasField(netz.quic.one_rtt.ConnectionStats, "active_receive_streams"));
+    try std.testing.expect(@hasField(netz.quic.one_rtt.ConnectionStats, "closed_peer_stream_ranges"));
     try std.testing.expect(@hasDecl(netz.quic.one_rtt.Connection, "takeQlogError"));
     try std.testing.expectEqual(@as(usize, 16), netz.quic.protection.aes_128_key_len);
     try std.testing.expect(@hasDecl(netz.http3.Qpack, "DynamicTable"));
@@ -5190,6 +5202,16 @@ test "public modules are reachable" {
     try std.testing.expect(@hasField(netz.quic.one_rtt.ConnectionConfig, "initial_send_max_stream_data_bidi_local"));
     try std.testing.expect(@hasField(netz.quic.one_rtt.ConnectionConfig, "initial_send_max_streams_bidi"));
     try std.testing.expect(@hasField(netz.quic.one_rtt.ConnectionConfig, "initial_receive_max_streams_uni"));
+    try std.testing.expectEqual(
+        netz.quic.practical_transport_parameters.initial_max_streams_bidi,
+        (netz.quic.one_rtt.ConnectionConfig{
+            .peer = undefined,
+            .receive_keys = undefined,
+            .send_keys = undefined,
+            .local_connection_id = &.{},
+            .peer_connection_id = &.{},
+        }).initial_receive_max_streams_bidi,
+    );
     try std.testing.expect(@hasField(netz.quic.one_rtt.ConnectionConfig, "max_receive_window"));
     try std.testing.expect(@hasField(netz.quic.one_rtt.ConnectionConfig, "max_stream_receive_window"));
     try std.testing.expect(@hasField(

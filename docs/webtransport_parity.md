@@ -201,6 +201,12 @@ actual wait for a cumulative `MAX_STREAMS` update. Standalone sessions expose
 retaining cumulative WebTransport registry accounting. Bidirectional credit is
 emitted only after the local FIN/RESET and preceding reliable data are
 acknowledged; an early request is completed automatically by the QUIC ACK path.
+Released transport stream buffers are reclaimed behind compressed closed-ID
+ranges, while WebTransport's registry intentionally retains its separate
+per-session lifetime accounting. Stream discovery uses stable ID-based
+pagination so reclamation cannot skip a swap-moved active stream. A failed
+automatic credit update remains pending and retries through the aggregate QUIC
+connection timer without requiring another peer packet.
 The endpoint-accepted
 variant is deliberately nonblocking: it only inspects buffered state, sends a
 credit update when ready, and refreshes the dispatcher timer without reading

@@ -159,6 +159,83 @@ test "HTTP/3 request router handles duplicate reset idempotently" {
     try std.testing.expectEqual(code, queued.application_error_code);
 }
 
+test "HTTP/3 request router ignores late STREAM after QUIC reclamation" {
+    const allocator = std.testing.allocator;
+    var threaded = std.Io.Threaded.init(allocator, .{});
+    defer threaded.deinit();
+    var endpoint = try quic.runtime.Endpoint.bind(
+        allocator,
+        threaded.io(),
+        .{ .ip4 = .loopback(0) },
+        .{ .max_datagram_size = 4096 },
+    );
+    defer endpoint.deinit();
+    const keys = quic.protection.deriveAes128Keys(
+        [_]u8{0xc1} ** quic.protection.secret_len,
+    );
+    var connection = try quic.one_rtt.Connection.init(&endpoint, .{
+        .peer = endpoint.address(),
+        .receive_keys = keys,
+        .send_keys = keys,
+        .local_connection_id = "route-server",
+        .peer_connection_id = "route-client",
+        .initial_receive_max_streams_bidi = 1,
+        .local_endpoint = .server,
+        .enable_pacing = false,
+    });
+    defer connection.deinit();
+
+    try quic.one_rtt.testing.applyReceivedFrames(
+        &connection,
+        0,
+        &.{.{ .stream = .{ .stream_id = 0, .data = "x", .fin = true } }},
+        null,
+        .not_ect,
+    );
+    try connection.releaseReceivedCapacity(0, 1);
+    try connection.send(&.{.{ .stream = .{
+        .stream_id = 0,
+        .data = "response",
+        .fin = true,
+    } }});
+    try std.testing.expect(connection.markPacketAcknowledged(0));
+    try std.testing.expect(try connection.releaseCompletedPeerStream(0));
+    try std.testing.expect(connection.peerStreamClosed(0));
+
+    var control: http3.ControlState = .{};
+    defer control.deinit(allocator);
+    var qpack_decode = QpackDecodeState.init(allocator, 0, 1024);
+    defer qpack_decode.deinit();
+    var qpack_encode = QpackEncodeState.initAwaitingPeerSettings(allocator, 1024);
+    defer qpack_encode.deinit();
+    var buffered = RequestStreamSet.init(allocator, 1024, 1);
+    defer buffered.deinit();
+    var streaming = StreamingRequestSet.init(allocator, 1, 1024, .{}, .request);
+    defer streaming.deinit();
+    var lifecycle = ServerRequestLifecycle.init(allocator);
+    defer lifecycle.deinit();
+
+    try std.testing.expect((try request_routing.applyServerRequestPacketFrames(
+        .{ .ip4 = .loopback(443) },
+        &.{.{ .stream = .{ .stream_id = 0, .data = "late", .fin = true } }},
+        allocator,
+        &control,
+        &qpack_decode,
+        &qpack_encode,
+        0,
+        &buffered,
+        &streaming,
+        &lifecycle,
+        .{ .connection = &connection },
+        &.{},
+        null,
+        null,
+    )) == null);
+    try std.testing.expect(buffered.isEmpty());
+    try std.testing.expectEqual(@as(usize, 0), streaming.entryCount());
+    try std.testing.expectEqual(@as(usize, 0), lifecycle.count());
+}
+
 test "HTTP/3 request router enforces blocked budget across buffered and streaming sets" {
     const allocator = std.testing.allocator;
     const from: std.Io.net.IpAddress = .{ .ip4 = .loopback(443) };

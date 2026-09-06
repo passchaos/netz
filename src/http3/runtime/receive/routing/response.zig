@@ -86,6 +86,16 @@ pub fn routePacket(
             frame,
             .client,
         );
+        if (state.connection) |connection| {
+            const maybe_stream_id: ?u62 = switch (frame) {
+                .stream => |stream| @intCast(stream.stream_id),
+                .reset_stream => |reset| @intCast(reset.stream_id),
+                else => null,
+            };
+            if (maybe_stream_id) |stream_id| {
+                if (connection.peerStreamClosed(stream_id)) continue;
+            }
+        }
         if (frame == .reset_stream and
             (frame.reset_stream.stream_id & 0x03) == 0x03)
         {

@@ -4,6 +4,45 @@ const one_rtt = @import("../../one_rtt.zig");
 const net = std.Io.net;
 const ObservedBatchSend = @import("observed_batch_send.zig").ObservedBatchSend;
 
+test "QUIC 1-RTT validates configured stream-count limits" {
+    const defaults: one_rtt.ConnectionConfig = .{
+        .peer = undefined,
+        .receive_keys = undefined,
+        .send_keys = undefined,
+        .local_connection_id = &.{},
+        .peer_connection_id = &.{},
+    };
+    try std.testing.expectEqual(@as(u64, 100), defaults.initial_send_max_streams_bidi);
+    try std.testing.expectEqual(@as(u64, 100), defaults.initial_send_max_streams_uni);
+    try std.testing.expectEqual(@as(u64, 100), defaults.initial_receive_max_streams_bidi);
+    try std.testing.expectEqual(@as(u64, 100), defaults.initial_receive_max_streams_uni);
+
+    const allocator = std.testing.allocator;
+    var threaded = std.Io.Threaded.init(allocator, .{});
+    defer threaded.deinit();
+    var endpoint = try quic.runtime.Endpoint.bind(
+        allocator,
+        threaded.io(),
+        .{ .ip4 = .loopback(0) },
+        .{},
+    );
+    defer endpoint.deinit();
+    const keys = quic.protection.deriveAes128Keys(
+        [_]u8{0xe1} ** quic.protection.secret_len,
+    );
+    try std.testing.expectError(
+        error.InvalidTransportParameter,
+        one_rtt.Connection.init(&endpoint, .{
+            .peer = endpoint.address(),
+            .receive_keys = keys,
+            .send_keys = keys,
+            .local_connection_id = "limit-local",
+            .peer_connection_id = "limit-peer",
+            .initial_receive_max_streams_bidi = quic.max_stream_count + 1,
+        }),
+    );
+}
+
 test "QUIC 1-RTT stateless reset enters draining" {
     const allocator = std.testing.allocator;
 

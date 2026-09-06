@@ -1,6 +1,7 @@
 const std = @import("std");
 const quic = @import("mod.zig");
 const fixed_bit = @import("one_rtt/fixed_bit.zig");
+const closed_streams = @import("one_rtt/closed_streams.zig");
 const frame_traits = @import("one_rtt/frame_traits.zig");
 const datagram_queue = @import("one_rtt/datagram_queue.zig");
 const handshake_status = @import("one_rtt/handshake_status.zig");
@@ -196,10 +197,14 @@ pub const ConnectionConfig = struct {
     initial_receive_max_stream_data_bidi_local: ?u64 = null,
     initial_receive_max_stream_data_bidi_remote: ?u64 = null,
     initial_receive_max_stream_data_uni: ?u64 = null,
-    initial_send_max_streams_bidi: u64 = std.math.maxInt(u60),
-    initial_send_max_streams_uni: u64 = std.math.maxInt(u60),
-    initial_receive_max_streams_bidi: u64 = std.math.maxInt(u60),
-    initial_receive_max_streams_uni: u64 = std.math.maxInt(u60),
+    initial_send_max_streams_bidi: u64 =
+        quic.practical_transport_parameters.initial_max_streams_bidi,
+    initial_send_max_streams_uni: u64 =
+        quic.practical_transport_parameters.initial_max_streams_uni,
+    initial_receive_max_streams_bidi: u64 =
+        quic.practical_transport_parameters.initial_max_streams_bidi,
+    initial_receive_max_streams_uni: u64 =
+        quic.practical_transport_parameters.initial_max_streams_uni,
     stream_receive_window: u64 = 64 * 1024,
     max_stream_receive_window: ?u64 = null,
     max_datagram_size: usize = quic.congestion.default_max_datagram_size,
@@ -299,7 +304,6 @@ const StreamRecvFlowEntry = struct {
     /// The application has finished with this peer-initiated stream, but its
     /// local send-side terminal frame might still await acknowledgement.
     stream_count_release_requested: bool = false,
-    stream_count_credit_released: bool = false,
 
     fn deinit(self: *StreamRecvFlowEntry) void {
         self.recv_state.deinit();
@@ -408,6 +412,9 @@ pub const ConnectionStats = struct {
     congestion_available: usize,
     outgoing_streams_created: u64,
     incoming_streams_created: u64,
+    active_send_streams: usize,
+    active_receive_streams: usize,
+    closed_peer_stream_ranges: usize,
     datagrams_sent: u64,
     datagrams_received: u64,
     datagrams_dropped_incoming: u64,
@@ -492,6 +499,12 @@ pub const StreamRead = union(enum) {
         application_error_code: u64,
         final_size: u64,
     },
+};
+
+pub const PeerStreamLifecycle = enum {
+    unknown,
+    active,
+    closed,
 };
 
 fn sendStreamStatsFromEntry(entry: *const StreamFlowEntry) SendStreamStats {
@@ -615,6 +628,7 @@ pub const LossDetectionTimerDeadline = struct {
 
 pub const TimerDeadlineKind = enum {
     ack_delay,
+    peer_stream_credit,
     loss_time,
     pto,
     pmtu_raise,
@@ -671,6 +685,19 @@ fn appendPendingAck(
     return combined;
 }
 const timer_blocked_receive_backoff_ns: u64 = std.time.ns_per_ms;
+const peer_stream_credit_retry_backoff_ns = [_]u64{
+    1 * std.time.ns_per_ms,
+    2 * std.time.ns_per_ms,
+    4 * std.time.ns_per_ms,
+    8 * std.time.ns_per_ms,
+    16 * std.time.ns_per_ms,
+    32 * std.time.ns_per_ms,
+    64 * std.time.ns_per_ms,
+    128 * std.time.ns_per_ms,
+    256 * std.time.ns_per_ms,
+    512 * std.time.ns_per_ms,
+    1 * std.time.ns_per_s,
+};
 
 /// Established 1-RTT receive APIs no longer own Initial or Handshake keys.
 /// A long header therefore belongs to an obsolete/rejected packet-number
@@ -706,7 +733,11 @@ pub const Connection = struct {
     last_send_stream_index: ?usize = null,
     stream_recv_flows: std.ArrayList(StreamRecvFlowEntry) = .empty,
     stream_recv_index: std.AutoHashMapUnmanaged(u64, usize) = .empty,
+    closed_peer_bidi_streams: closed_streams.Set = .{},
+    closed_peer_uni_streams: closed_streams.Set = .{},
     pending_peer_stream_credit_releases: usize = 0,
+    peer_stream_credit_retry_deadline_ns: ?u64 = null,
+    peer_stream_credit_retry_attempts: u8 = 0,
     last_recv_stream_index: ?usize = null,
     stream_poll_cursor: usize = 0,
     close_info: ?CloseInfo = null,
@@ -811,6 +842,13 @@ pub const Connection = struct {
     pub fn init(endpoint: *quic.runtime.Endpoint, config: ConnectionConfig) Error!Connection {
         if (config.local_endpoint == .server and
             config.peer_stateless_reset_token != null)
+        {
+            return error.InvalidTransportParameter;
+        }
+        if (config.initial_send_max_streams_bidi > quic.max_stream_count or
+            config.initial_send_max_streams_uni > quic.max_stream_count or
+            config.initial_receive_max_streams_bidi > quic.max_stream_count or
+            config.initial_receive_max_streams_uni > quic.max_stream_count)
         {
             return error.InvalidTransportParameter;
         }
@@ -930,6 +968,8 @@ pub const Connection = struct {
         for (self.stream_recv_flows.items) |*entry| entry.deinit();
         self.stream_recv_flows.deinit(self.endpoint.allocator);
         self.stream_recv_index.deinit(self.endpoint.allocator);
+        self.closed_peer_bidi_streams.deinit(self.endpoint.allocator);
+        self.closed_peer_uni_streams.deinit(self.endpoint.allocator);
         self.path_response_targets.deinit(self.endpoint.allocator);
         self.datagram_recv_queue.deinit(self.endpoint.allocator);
         self.send_frame_buffer.deinit(self.endpoint.allocator);
@@ -2076,6 +2116,10 @@ pub const Connection = struct {
             .congestion_available = self.congestion.available(),
             .outgoing_streams_created = self.outgoing_streams_created_count,
             .incoming_streams_created = self.incoming_streams_created_count,
+            .active_send_streams = self.stream_send_flows.items.len,
+            .active_receive_streams = self.stream_recv_flows.items.len,
+            .closed_peer_stream_ranges = self.closed_peer_bidi_streams.rangeCount() +
+                self.closed_peer_uni_streams.rangeCount(),
             .datagrams_sent = self.datagrams_sent_count,
             .datagrams_received = self.datagrams_received_count,
             .datagrams_dropped_incoming = self.datagrams_dropped_incoming_count,
@@ -2301,7 +2345,9 @@ pub const Connection = struct {
         self: Connection,
         stream_id: u64,
     ) u64 {
-        return if (self.stream_send_index.count() == 0)
+        return if (self.isClosedPeerStream(stream_id))
+            0
+        else if (self.stream_send_index.count() == 0)
             self.initialSendStreamDataLimit(stream_id)
         else if (self.stream_send_index.get(stream_id)) |index|
             if (index < self.stream_send_flows.items.len and
@@ -2397,12 +2443,18 @@ pub const Connection = struct {
     /// Earliest connection timer for socket/event-loop integration.
     ///
     /// Mature QUIC loops arm one kernel timer for the next item of transport
-    /// work instead of polling loss detection, idle timeout, keep-alive,
-    /// path-validation, close, and key-discard timers independently.  This
-    /// selector is read-only: callers still dispatch the typed helper matching
-    /// `kind` when the deadline becomes due.
+    /// work instead of polling loss detection, deferred stream credit, idle
+    /// timeout, keep-alive, path-validation, close, and key-discard timers
+    /// independently. This selector is read-only: callers still dispatch the
+    /// typed helper matching `kind` when the deadline becomes due.
     pub fn nextTimerDeadline(self: Connection) ?TimerDeadline {
         var next: ?TimerDeadline = null;
+        if (self.peer_stream_credit_retry_deadline_ns) |deadline| {
+            considerTimerDeadline(&next, .{
+                .kind = .peer_stream_credit,
+                .deadline_ns = deadline,
+            });
+        }
         if (self.ack_delay_deadline_ns) |deadline| {
             considerTimerDeadline(&next, .{
                 .kind = .ack_delay,
@@ -2478,6 +2530,12 @@ pub const Connection = struct {
         switch (deadline.kind) {
             .ack_delay => {
                 try self.serviceAckDelayTimerAt(now_ns);
+            },
+            .peer_stream_credit => {
+                self.peer_stream_credit_retry_deadline_ns = null;
+                self.flushRequestedPeerStreamCreditsAt(now_ns) catch |err| {
+                    self.schedulePeerStreamCreditRetry(err, now_ns);
+                };
             },
             .loss_time, .pto => {
                 _ = try self.serviceLossDetectionTimer(now_ns);
@@ -4528,8 +4586,8 @@ pub const Connection = struct {
     /// method. A bidirectional stream also requires a locally sent FIN or
     /// RESET_STREAM to be acknowledged. Calling before that acknowledgement
     /// records a deferred release that the receive path completes when the ACK
-    /// arrives. State remains retained for duplicate/reordered frame validation;
-    /// only the cumulative MAX_STREAMS limit advances.
+    /// arrives. Closed stream IDs are retained as compressed ranges so late
+    /// frames can be ignored without retaining stream buffers and map entries.
     ///
     /// Returns true only when a new MAX_STREAMS frame was sent. Repeated calls
     /// are idempotent.
@@ -4578,8 +4636,27 @@ pub const Connection = struct {
             self.recv_max_streams_uni,
             uni_released,
         );
-        var frames: [2]quic.Frame = undefined;
+        var next_recv_flow = self.recv_flow;
+        for (stream_ids, 0..) |stream_id, index| {
+            if (containsStreamId(stream_ids[0..index], stream_id)) continue;
+            if (try self.peerStreamCreditState(stream_id) != .ready) continue;
+            const recv_stream = self.findRecvStreamEntry(stream_id).?;
+            _ = next_recv_flow.consume(
+                recv_stream.flow.highest_received -| recv_stream.flow.consumed,
+            );
+        }
+        try self.prepareClosedPeerStreamInsert(
+            std.math.cast(usize, bidi_released) orelse
+                return error.OutOfMemory,
+            std.math.cast(usize, uni_released) orelse
+                return error.OutOfMemory,
+        );
+        var frames: [3]quic.Frame = undefined;
         var frame_count: usize = 0;
+        if (next_recv_flow.limit != self.recv_flow.limit) {
+            frames[frame_count] = next_recv_flow.maxDataFrame();
+            frame_count += 1;
+        }
         if (next_bidi != self.recv_max_streams_bidi) {
             frames[frame_count] = .{ .max_streams_bidi = .{
                 .maximum_streams = next_bidi,
@@ -4593,6 +4670,7 @@ pub const Connection = struct {
             frame_count += 1;
         }
         if (frame_count != 0) try self.sendTrackedFrames(frames[0..frame_count]);
+        self.recv_flow = next_recv_flow;
 
         // No connection method may run concurrently with this mutation. The
         // second pass therefore selects exactly the preflighted streams while
@@ -4600,22 +4678,24 @@ pub const Connection = struct {
         for (stream_ids, 0..) |stream_id, index| {
             if (containsStreamId(stream_ids[0..index], stream_id)) continue;
             const state = try self.peerStreamCreditState(stream_id);
-            const recv_stream = self.findRecvStreamEntry(stream_id).?;
             switch (state) {
                 .ready => {
+                    const recv_stream = self.findRecvStreamEntry(stream_id).?;
                     if (recv_stream.stream_count_release_requested) {
                         self.pending_peer_stream_credit_releases -= 1;
                     }
-                    recv_stream.stream_count_release_requested = false;
-                    recv_stream.stream_count_credit_released = true;
+                    self.reclaimPeerStreamAssumeCapacity(stream_id);
                 },
-                .waiting_for_send_ack => {
+                .waiting_for_local_terminal,
+                .waiting_for_send_ack,
+                => {
+                    const recv_stream = self.findRecvStreamEntry(stream_id).?;
                     if (!recv_stream.stream_count_release_requested) {
                         recv_stream.stream_count_release_requested = true;
                         self.pending_peer_stream_credit_releases += 1;
                     }
                 },
-                .not_terminal, .released => {},
+                .receive_not_terminal, .released => {},
             }
         }
         self.recv_max_streams_bidi = next_bidi;
@@ -4627,7 +4707,8 @@ pub const Connection = struct {
     }
 
     const PeerStreamCreditState = enum {
-        not_terminal,
+        receive_not_terminal,
+        waiting_for_local_terminal,
         waiting_for_send_ack,
         ready,
         released,
@@ -4640,24 +4721,23 @@ pub const Connection = struct {
         if (streamInitiatedByLocal(self.config.local_endpoint, stream_id)) {
             return error.StreamStateError;
         }
+        if (self.isClosedPeerStream(stream_id)) return .released;
         const recv_stream = self.findRecvStreamEntry(stream_id) orelse
             return error.StreamStateError;
-        if (recv_stream.stream_count_credit_released) return .released;
         if (!recv_stream.recv_state.complete() and recv_stream.reset == null) {
-            return .not_terminal;
+            return .receive_not_terminal;
         }
         if (streamDirection(stream_id) == .bidirectional) {
             const send_stream = self.findSendStreamEntry(stream_id) orelse
-                return .not_terminal;
+                return .waiting_for_local_terminal;
             if (send_stream.final_size == null and
                 send_stream.reset_sent == null)
             {
-                return .not_terminal;
+                return .waiting_for_local_terminal;
             }
-            const pending = if (send_stream.reset_sent != null)
-                self.recovery.hasPendingResetStream(stream_id)
-            else
-                self.recovery.hasPendingStreamData(stream_id);
+            const pending = self.recovery.hasPendingStreamData(stream_id) or
+                (send_stream.reset_sent != null and
+                    self.recovery.hasPendingResetStream(stream_id));
             if (pending) {
                 return .waiting_for_send_ack;
             }
@@ -4665,9 +4745,127 @@ pub const Connection = struct {
         return .ready;
     }
 
-    fn flushRequestedPeerStreamCredits(self: *Connection) Error!void {
+    fn isClosedPeerStream(self: Connection, stream_id: u64) bool {
+        if (streamInitiatedByLocal(self.config.local_endpoint, stream_id)) {
+            return false;
+        }
+        const sequence = stream_id >> 2;
+        return switch (streamDirection(stream_id)) {
+            .bidirectional => self.closed_peer_bidi_streams.contains(sequence),
+            .unidirectional => self.closed_peer_uni_streams.contains(sequence),
+        };
+    }
+
+    /// Whether a peer-initiated stream has been fully released and compacted.
+    /// Late stream-control/data frames for such an ID are ignored by transport.
+    pub fn peerStreamClosed(self: Connection, stream_id: u64) bool {
+        return self.isClosedPeerStream(stream_id);
+    }
+
+    /// Classify stream identity without exposing active-table layout.
+    pub fn peerStreamLifecycle(
+        self: Connection,
+        stream_id: u64,
+    ) PeerStreamLifecycle {
+        if (self.isClosedPeerStream(stream_id)) return .closed;
+        if ((self.stream_send_index.count() != 0 and
+            self.stream_send_index.contains(stream_id)) or
+            (self.stream_recv_index.count() != 0 and
+                self.stream_recv_index.contains(stream_id)))
+        {
+            return .active;
+        }
+        return .unknown;
+    }
+
+    fn prepareClosedPeerStreamInsert(
+        self: *Connection,
+        bidi_count: usize,
+        uni_count: usize,
+    ) std.mem.Allocator.Error!void {
+        try self.closed_peer_bidi_streams.prepareInsert(
+            self.endpoint.allocator,
+            bidi_count,
+        );
+        try self.closed_peer_uni_streams.prepareInsert(
+            self.endpoint.allocator,
+            uni_count,
+        );
+    }
+
+    fn reclaimPeerStreamAssumeCapacity(
+        self: *Connection,
+        stream_id: u64,
+    ) void {
+        std.debug.assert(!streamInitiatedByLocal(
+            self.config.local_endpoint,
+            stream_id,
+        ));
+        const sequence = stream_id >> 2;
+        switch (streamDirection(stream_id)) {
+            .bidirectional => self.closed_peer_bidi_streams
+                .insertAssumeCapacity(sequence),
+            .unidirectional => self.closed_peer_uni_streams
+                .insertAssumeCapacity(sequence),
+        }
+        _ = self.recovery.abandonClosedStreamFrames(stream_id);
+        self.removeRecvStreamEntry(stream_id);
+        if (streamDirection(stream_id) == .bidirectional) {
+            self.removeSendStreamEntry(stream_id);
+        }
+    }
+
+    fn removeRecvStreamEntry(self: *Connection, stream_id: u64) void {
+        const index = self.stream_recv_index.get(stream_id) orelse return;
+        const last_index = self.stream_recv_flows.items.len - 1;
+        const next_poll_index = if (self.stream_recv_flows.items.len == 0)
+            0
+        else
+            self.stream_poll_cursor % self.stream_recv_flows.items.len;
+        var removed = self.stream_recv_flows.swapRemove(index);
+        _ = self.stream_recv_index.remove(stream_id);
+        if (index != last_index) {
+            const moved = self.stream_recv_flows.items[index];
+            self.stream_recv_index.getPtr(moved.stream_id).?.* = index;
+        }
+        self.last_recv_stream_index = null;
+        if (self.stream_recv_flows.items.len == 0) {
+            self.stream_poll_cursor = 0;
+        } else if (index != last_index and next_poll_index == last_index) {
+            // The stream that was next in round-robin order moved into the
+            // removed slot. Follow it so a perpetually readable lower-index
+            // stream cannot starve the moved entry.
+            self.stream_poll_cursor = index;
+        } else if (next_poll_index >= self.stream_recv_flows.items.len) {
+            self.stream_poll_cursor = 0;
+        } else {
+            self.stream_poll_cursor = next_poll_index;
+        }
+        removed.deinit();
+    }
+
+    fn removeSendStreamEntry(self: *Connection, stream_id: u64) void {
+        const index = self.stream_send_index.get(stream_id) orelse return;
+        const last_index = self.stream_send_flows.items.len - 1;
+        _ = self.stream_send_flows.swapRemove(index);
+        _ = self.stream_send_index.remove(stream_id);
+        if (index != last_index) {
+            const moved = self.stream_send_flows.items[index];
+            self.stream_send_index.getPtr(moved.stream_id).?.* = index;
+        }
+        self.last_send_stream_index = null;
+    }
+
+    fn flushRequestedPeerStreamCreditsAt(
+        self: *Connection,
+        now_ns: u64,
+    ) Error!void {
         if (self.pending_peer_stream_credit_releases == 0 or
-            self.close_info != null or self.idle_timed_out) return;
+            self.close_info != null or self.idle_timed_out)
+        {
+            self.clearPeerStreamCreditRetry();
+            return;
+        }
         var bidi_released: u64 = 0;
         var uni_released: u64 = 0;
         for (self.stream_recv_flows.items) |*recv_stream| {
@@ -4679,7 +4877,10 @@ pub const Connection = struct {
                 .unidirectional => uni_released += 1,
             }
         }
-        if (bidi_released == 0 and uni_released == 0) return;
+        if (bidi_released == 0 and uni_released == 0) {
+            self.clearPeerStreamCreditRetry();
+            return;
+        }
 
         const next_bidi = advanceStreamLimit(
             self.recv_max_streams_bidi,
@@ -4689,8 +4890,27 @@ pub const Connection = struct {
             self.recv_max_streams_uni,
             uni_released,
         );
-        var frames: [2]quic.Frame = undefined;
+        var next_recv_flow = self.recv_flow;
+        for (self.stream_recv_flows.items) |*recv_stream| {
+            if (!recv_stream.stream_count_release_requested) continue;
+            if (try self.peerStreamCreditState(recv_stream.stream_id) !=
+                .ready) continue;
+            _ = next_recv_flow.consume(
+                recv_stream.flow.highest_received -| recv_stream.flow.consumed,
+            );
+        }
+        try self.prepareClosedPeerStreamInsert(
+            std.math.cast(usize, bidi_released) orelse
+                return error.OutOfMemory,
+            std.math.cast(usize, uni_released) orelse
+                return error.OutOfMemory,
+        );
+        var frames: [3]quic.Frame = undefined;
         var frame_count: usize = 0;
+        if (next_recv_flow.limit != self.recv_flow.limit) {
+            frames[frame_count] = next_recv_flow.maxDataFrame();
+            frame_count += 1;
+        }
         if (next_bidi != self.recv_max_streams_bidi) {
             frames[frame_count] = .{ .max_streams_bidi = .{
                 .maximum_streams = next_bidi,
@@ -4703,18 +4923,70 @@ pub const Connection = struct {
             } };
             frame_count += 1;
         }
-        if (frame_count != 0) try self.sendTrackedFrames(frames[0..frame_count]);
+        if (frame_count != 0) try self.sendTrackedFramesEcnAt(
+            frames[0..frame_count],
+            .not_ect,
+            now_ns,
+        );
+        self.recv_flow = next_recv_flow;
 
-        for (self.stream_recv_flows.items) |*recv_stream| {
-            if (!recv_stream.stream_count_release_requested) continue;
+        var index: usize = 0;
+        while (index < self.stream_recv_flows.items.len) {
+            const recv_stream = &self.stream_recv_flows.items[index];
+            if (!recv_stream.stream_count_release_requested) {
+                index += 1;
+                continue;
+            }
             if (try self.peerStreamCreditState(recv_stream.stream_id) !=
-                .ready) continue;
-            recv_stream.stream_count_release_requested = false;
-            recv_stream.stream_count_credit_released = true;
+                .ready)
+            {
+                index += 1;
+                continue;
+            }
+            const stream_id = recv_stream.stream_id;
             self.pending_peer_stream_credit_releases -= 1;
+            self.reclaimPeerStreamAssumeCapacity(stream_id);
+            // swapRemove installed an unchecked entry at this index.
         }
         self.recv_max_streams_bidi = next_bidi;
         self.recv_max_streams_uni = next_uni;
+        self.clearPeerStreamCreditRetry();
+    }
+
+    fn clearPeerStreamCreditRetry(self: *Connection) void {
+        self.peer_stream_credit_retry_deadline_ns = null;
+        self.peer_stream_credit_retry_attempts = 0;
+    }
+
+    fn schedulePeerStreamCreditRetry(
+        self: *Connection,
+        err: Error,
+        now_ns: u64,
+    ) void {
+        if (self.pending_peer_stream_credit_releases == 0 or
+            self.close_info != null or self.idle_timed_out)
+        {
+            self.clearPeerStreamCreditRetry();
+            return;
+        }
+        if (err == error.PacingLimited) {
+            if (self.pacing_blocked_until_ns) |deadline| {
+                if (deadline > now_ns) {
+                    self.peer_stream_credit_retry_deadline_ns = deadline;
+                    return;
+                }
+            }
+        }
+        const index = @min(
+            @as(usize, self.peer_stream_credit_retry_attempts),
+            peer_stream_credit_retry_backoff_ns.len - 1,
+        );
+        self.peer_stream_credit_retry_attempts +|= 1;
+        self.peer_stream_credit_retry_deadline_ns = std.math.add(
+            u64,
+            now_ns,
+            peer_stream_credit_retry_backoff_ns[index],
+        ) catch std.math.maxInt(u64);
     }
 
     /// Copy known receive-stream IDs into caller storage without allocation.
@@ -4733,7 +5005,8 @@ pub const Connection = struct {
     /// Continue `receivedStreamIdsInto` from a physical stream-table offset.
     /// Returning fewer IDs than `out.len` means the current snapshot is fully
     /// scanned. The offset is deliberately opaque and only valid until another
-    /// receive operation can append a stream.
+    /// operation can append or reclaim a stream. New pagination code should use
+    /// `receivedStreamIdsAfterInto`, whose ID cursor survives table mutation.
     pub fn receivedStreamIdsFromInto(
         self: Connection,
         start: usize,
@@ -4750,6 +5023,36 @@ pub const Connection = struct {
             entry,
         | {
             stream_id.* = @intCast(entry.stream_id);
+        }
+        return out[0..count];
+    }
+
+    /// Copy the lowest active receive-stream IDs strictly greater than
+    /// `after`, in ascending order, without allocating. Unlike the legacy
+    /// physical-offset cursor above, this continuation remains valid when a
+    /// completed stream is removed with swap-remove between pages.
+    pub fn receivedStreamIdsAfterInto(
+        self: Connection,
+        after: ?u62,
+        out: []u62,
+    ) []u62 {
+        if (out.len == 0) return out[0..0];
+        var count: usize = 0;
+        for (self.stream_recv_flows.items) |entry| {
+            const stream_id: u62 = @intCast(entry.stream_id);
+            if (after) |previous| if (stream_id <= previous) continue;
+
+            var insert_at: usize = 0;
+            while (insert_at < count and out[insert_at] < stream_id) {
+                insert_at += 1;
+            }
+            if (insert_at == out.len) continue;
+            if (count < out.len) count += 1;
+            var move = count - 1;
+            while (move > insert_at) : (move -= 1) {
+                out[move] = out[move - 1];
+            }
+            out[insert_at] = stream_id;
         }
         return out[0..count];
     }
@@ -7748,6 +8051,11 @@ pub const Connection = struct {
                 },
                 .max_data => |max_data| self.send_flow.updateLimit(max_data.maximum_data),
                 .max_stream_data => |max_stream_data| {
+                    if (self.isClosedPeerStream(max_stream_data.stream_id) or
+                        self.sendStreamTerminal(max_stream_data.stream_id))
+                    {
+                        continue;
+                    }
                     const flow = try self.sendStreamFlow(max_stream_data.stream_id);
                     flow.updateLimit(max_stream_data.maximum_stream_data);
                 },
@@ -7793,8 +8101,15 @@ pub const Connection = struct {
                         current_path_validated = true;
                     }
                 },
-                .reset_stream => |reset| try self.receiveResetStream(reset),
-                .stop_sending => |stop| try self.receiveStopSending(stop),
+                .reset_stream => |reset| {
+                    if (self.isClosedPeerStream(reset.stream_id)) continue;
+                    try self.receiveResetStream(reset);
+                },
+                .stop_sending => |stop| {
+                    if (self.isClosedPeerStream(stop.stream_id) or
+                        self.sendStreamTerminal(stop.stream_id)) continue;
+                    try self.receiveStopSending(stop);
+                },
                 .new_token => |new_token| try self.receiveNewToken(new_token),
                 .handshake_done => try self.receiveHandshakeDone(),
                 .datagram => |datagram| try self.receiveDatagramFrame(
@@ -7819,6 +8134,7 @@ pub const Connection = struct {
                     .state = .draining,
                 }),
                 .stream => |stream| {
+                    if (self.isClosedPeerStream(stream.stream_id)) continue;
                     var recv_stream = try self.recvStreamFlow(stream.stream_id);
                     const reset_received = recv_stream.reset != null;
                     const data_len = std.math.cast(u64, stream.data.len) orelse return error.InvalidFrameLength;
@@ -7851,7 +8167,14 @@ pub const Connection = struct {
             self.path_validation.abandonAllChallenges();
         }
         triggering_frame_index.* = null;
-        try self.flushRequestedPeerStreamCredits();
+        const credit_now_ns = now_ns orelse self.monotonicNowNs();
+        self.flushRequestedPeerStreamCreditsAt(credit_now_ns) catch |err| {
+            // ACK and stream state above are already committed. Treat this
+            // internal credit packet like an event-loop send: preserve the
+            // pending release and arm an independent retry instead of making
+            // the authenticated packet appear rejected to the caller.
+            self.schedulePeerStreamCreditRetry(err, credit_now_ns);
+        };
     }
 
     fn validateReceivedFramePreconditions(
@@ -7870,6 +8193,10 @@ pub const Connection = struct {
             return validated;
         }
         if (frames.len == 1 and frames[0] == .stream) {
+            if (self.isClosedPeerStream(frames[0].stream.stream_id)) {
+                triggering_frame_index.* = null;
+                return null;
+            }
             triggering_frame_index.* = 0;
             try self.validateSingleStreamFramePrecondition(frames[0].stream);
             triggering_frame_index.* = null;
@@ -7932,8 +8259,8 @@ pub const Connection = struct {
                     // multi-frame packets.
                     try self.sent.validateAckCoversSentPackets(ack);
                 },
-                .stream => |stream| try self.validateStreamFramePrecondition(stream, &recv_streams, &recv_streams_allocated, &stream_frames, &recv_data_total),
-                .reset_stream => |reset| try self.validateResetStreamPrecondition(reset, &recv_streams, &recv_streams_allocated, &stream_frames, &recv_data_total),
+                .stream => |stream| if (!self.isClosedPeerStream(stream.stream_id)) try self.validateStreamFramePrecondition(stream, &recv_streams, &recv_streams_allocated, &stream_frames, &recv_data_total),
+                .reset_stream => |reset| if (!self.isClosedPeerStream(reset.stream_id)) try self.validateResetStreamPrecondition(reset, &recv_streams, &recv_streams_allocated, &stream_frames, &recv_data_total),
                 .stream_data_blocked => |blocked| try self.validateStreamReceiveFrameId(blocked.stream_id),
                 .max_stream_data => |max_stream_data| try self.validateStreamSendControlId(max_stream_data.stream_id),
                 .stop_sending => |stop| try self.validateStreamSendControlId(stop.stream_id),
@@ -8535,6 +8862,7 @@ pub const Connection = struct {
             .final_size = final_size,
         } }};
         try self.sendTrackedFrames(&frames);
+        _ = self.recovery.abandonStreamData(stream_id);
         entry.reset_sent = info;
     }
 
@@ -8987,8 +9315,18 @@ pub const Connection = struct {
         return &entry.flow;
     }
 
+    fn sendStreamTerminal(self: *Connection, stream_id: u64) bool {
+        const entry = self.findSendStreamEntry(stream_id) orelse return false;
+        if (self.recovery.hasPendingStreamData(stream_id)) return false;
+        if (entry.reset_sent != null) {
+            return !self.recovery.hasPendingResetStream(stream_id);
+        }
+        return entry.final_size != null;
+    }
+
     fn sendStreamEntry(self: *Connection, stream_id: u64) Error!*StreamFlowEntry {
         if (self.findSendStreamEntry(stream_id)) |entry| return entry;
+        if (self.isClosedPeerStream(stream_id)) return error.StreamStateError;
         if (streamInitiatedByLocal(self.config.local_endpoint, stream_id)) {
             try self.validateLocalStreamCount(stream_id);
             // Preserve the historical direct-STREAM API: using a local ID can
@@ -9049,6 +9387,9 @@ pub const Connection = struct {
                 }
             }
             return;
+        }
+        if (self.isClosedPeerStream(stream.stream_id)) {
+            return error.StreamStateError;
         }
         if (!streamHasSendSide(self.config.local_endpoint, stream.stream_id)) return error.StreamStateError;
         if (!streamInitiatedByLocal(self.config.local_endpoint, stream.stream_id)) return;
@@ -9144,6 +9485,7 @@ pub const Connection = struct {
 
     fn recvStreamFlow(self: *Connection, stream_id: u64) Error!*StreamRecvFlowEntry {
         if (self.findRecvStreamEntry(stream_id)) |entry| return entry;
+        if (self.isClosedPeerStream(stream_id)) return error.StreamStateError;
         try self.validateStreamReceiveFrameId(stream_id);
         try self.validatePeerStreamCount(stream_id);
         const initial_limit = self.initialReceiveStreamDataLimit(stream_id);
@@ -9200,6 +9542,7 @@ pub const Connection = struct {
 
     fn validateStreamReceiveFrameId(self: *Connection, stream_id: u64) Error!void {
         if (!streamHasReceiveSide(self.config.local_endpoint, stream_id)) return error.StreamStateError;
+        if (self.isClosedPeerStream(stream_id)) return;
         if (streamInitiatedByLocal(self.config.local_endpoint, stream_id)) {
             // STREAM/RESET/STREAM_DATA_BLOCKED on a locally initiated
             // bidirectional stream is valid only after the local endpoint has
@@ -9213,6 +9556,7 @@ pub const Connection = struct {
 
     fn validateStreamSendControlId(self: *Connection, stream_id: u64) Error!void {
         if (!streamHasSendSide(self.config.local_endpoint, stream_id)) return error.StreamStateError;
+        if (self.isClosedPeerStream(stream_id)) return;
         if (streamInitiatedByLocal(self.config.local_endpoint, stream_id)) {
             if (self.findSendStreamEntry(stream_id) == null) return error.StreamStateError;
             return;

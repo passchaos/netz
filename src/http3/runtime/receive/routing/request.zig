@@ -143,6 +143,14 @@ pub fn applyServerRequestPacketFrames(
     var first_reset: ?RequestStreamReset = null;
     for (frames) |frame| {
         try rejectCriticalStreamClosureFrame(control.*, frame, .server);
+        const maybe_stream_id: ?u62 = switch (frame) {
+            .stream => |stream| @intCast(stream.stream_id),
+            .reset_stream => |reset| @intCast(reset.stream_id),
+            else => null,
+        };
+        if (maybe_stream_id) |stream_id| {
+            if (request_id_validator.peerStreamClosed(stream_id)) continue;
+        }
         if (frame == .reset_stream and
             (try messageStreamDisposition(
                 frame.reset_stream.stream_id,
