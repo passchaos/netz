@@ -211,6 +211,10 @@ incremental WebTransport readers now register transport retirement when FIN or
 RESET_STREAM is delivered; local FIN/reset paths do the same, so associated
 streams are compacted after both applicable halves become terminal while the
 registry continues enforcing lifetime session limits.
+The shared-endpoint poll adapter refreshes its dispatcher timer after every
+application-state poll, including a null result, so a failed automatic
+MAX_STREAMS send cannot leave a retry deadline visible only inside the
+connection while the single UDP owner blocks indefinitely.
 The endpoint-accepted
 variant is deliberately nonblocking: it only inspects buffered state, sends a
 credit update when ready, and refreshes the dispatcher timer without reading

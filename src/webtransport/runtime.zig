@@ -2492,7 +2492,7 @@ pub const EndpointServer = struct {
     fn pollAcceptedSessions(
         self: *EndpointServer,
         stream_buffer: []u8,
-    ) Error!?EndpointServerEvent {
+    ) EndpointServerError!?EndpointServerEvent {
         return self.pollAcceptedSessionsWith(
             stream_buffer,
             {},
@@ -2505,7 +2505,7 @@ pub const EndpointServer = struct {
         stream_buffer: []u8,
         context: anytype,
         comptime poll: anytype,
-    ) Error!?EndpointServerEvent {
+    ) EndpointServerError!?EndpointServerEvent {
         return round_robin.poll(
             quic.endpoint_dispatcher.ConnectionHandle,
             @TypeOf(self.sessions),
@@ -2518,7 +2518,7 @@ pub const EndpointServer = struct {
                     poll_context: anytype,
                     handle: quic.endpoint_dispatcher.ConnectionHandle,
                     accepted_ptr: **EndpointAcceptedSession,
-                ) Error!?EndpointServerEvent {
+                ) EndpointServerError!?EndpointServerEvent {
                     const event = (try poll(
                         poll_context.context,
                         handle,
@@ -2539,8 +2539,14 @@ pub const EndpointServer = struct {
         _: quic.endpoint_dispatcher.ConnectionHandle,
         accepted: *EndpointAcceptedSession,
         stream_buffer: []u8,
-    ) Error!?EndpointSessionEvent {
-        return pollEndpointSession(accepted, stream_buffer);
+    ) EndpointServerError!?EndpointSessionEvent {
+        const event = try pollEndpointSession(accepted, stream_buffer);
+        // Polling can consume stream bytes, emit receive credit/MAX_STREAMS,
+        // or arm a retry after an automatic credit send fails. Mirror the
+        // resulting aggregate connection deadline before the endpoint blocks
+        // on its shared UDP socket again.
+        try accepted.refreshTimer();
+        return event;
     }
 
     pub const testing = struct {
@@ -2568,7 +2574,7 @@ pub const EndpointServer = struct {
         pub fn pollReadySessionHandle(
             server: *EndpointServer,
             ready: []const quic.endpoint_dispatcher.ConnectionHandle,
-        ) Error!?quic.endpoint_dispatcher.ConnectionHandle {
+        ) EndpointServerError!?quic.endpoint_dispatcher.ConnectionHandle {
             var probe = ReadyProbe{ .ready = ready };
             var scratch: [1]u8 = undefined;
             const event = (try server.pollAcceptedSessionsWith(
@@ -2577,6 +2583,21 @@ pub const EndpointServer = struct {
                 ReadyProbe.poll,
             )) orelse return null;
             return event.session_event.handle;
+        }
+
+        /// Exercise the production accepted-session poll adapter, including
+        /// its mandatory dispatcher timer refresh, without constructing the
+        /// outer endpoint admission maps in focused transport tests.
+        pub fn pollAcceptedSessionEntry(
+            accepted: *EndpointAcceptedSession,
+            stream_buffer: []u8,
+        ) EndpointServerError!?EndpointSessionEvent {
+            return pollEndpointSessionEntry(
+                {},
+                accepted.handle,
+                accepted,
+                stream_buffer,
+            );
         }
     };
 

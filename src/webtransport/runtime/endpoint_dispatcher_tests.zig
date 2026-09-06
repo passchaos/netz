@@ -5,6 +5,146 @@ const webtransport = @import("../mod.zig");
 const runtime = @import("../runtime.zig");
 const handshake_stream = @import("stream.zig");
 const session_control = @import("session_control.zig");
+const ObservedBatchSend =
+    @import("../../quic/one_rtt/tests/observed_batch_send.zig")
+        .ObservedBatchSend;
+
+test "WebTransport endpoint poll mirrors automatic stream-credit retry timer" {
+    const allocator = std.testing.allocator;
+    var threaded = std.Io.Threaded.init(allocator, .{});
+    defer threaded.deinit();
+    const io = threaded.io();
+
+    var server_endpoint = try quic.runtime.Endpoint.bind(
+        allocator,
+        io,
+        .{ .ip4 = .loopback(0) },
+        .{ .max_datagram_size = 4096 },
+    );
+    defer server_endpoint.deinit();
+    var peer_endpoint = try quic.runtime.Endpoint.bind(
+        allocator,
+        io,
+        .{ .ip4 = .loopback(0) },
+        .{ .max_datagram_size = 4096 },
+    );
+    defer peer_endpoint.deinit();
+    const keys = quic.protection.deriveAes128Keys(
+        [_]u8{0xe7} ** quic.protection.secret_len,
+    );
+    const settings = webtransport.defaultSettings(.{});
+    var h3 = try http3.runtime.HandshakeServerSession.initPreconfigured(
+        &server_endpoint,
+        peer_endpoint.address(),
+        .{ .local_settings = settings },
+        .{
+            .receive_keys = keys,
+            .send_keys = keys,
+            .local_connection_id = "wt-timer-server",
+            .peer_connection_id = "wt-timer-client",
+            .one_rtt = .{ .enable_pacing = false },
+        },
+    );
+    defer h3.deinit();
+    h3.control.settings.markSent(settings);
+    h3.control.settings.markReceived(settings);
+    var streams = try handshake_stream.initRegistry(
+        allocator,
+        .init(0),
+        .server,
+        settings,
+        settings,
+        8,
+        null,
+        null,
+    );
+    var streams_owned = true;
+    defer if (streams_owned) streams.deinit();
+    var dispatcher = quic.endpoint_dispatcher.Dispatcher.init(
+        allocator,
+        &server_endpoint,
+    );
+    defer dispatcher.deinit();
+    const handle: quic.endpoint_dispatcher.ConnectionHandle = 9;
+    try dispatcher.registerConnection(handle, &h3.established.connection);
+    try std.testing.expect(dispatcher.nextTimerDeadline() == null);
+
+    var accepted = runtime.EndpointAcceptedSession{
+        .handle = handle,
+        .dispatcher = &dispatcher,
+        .h3 = &h3,
+        .request = undefined,
+        .session_id = .init(0),
+        .streams = streams,
+        .control = try session_control.Control.init(.init(0)),
+    };
+    // Ownership moved to `accepted`; avoid the outer defer.
+    streams_owned = false;
+    defer accepted.streams.deinit();
+
+    var encoded: std.ArrayList(u8) = .empty;
+    defer encoded.deinit(allocator);
+    try webtransport.UnidirectionalStreamHeader.writeWebTransport(
+        &encoded,
+        allocator,
+        accepted.session_id,
+    );
+    try encoded.appendSlice(allocator, "terminal");
+    try quic.one_rtt.testing.applyReceivedFrames(
+        &h3.established.connection,
+        0,
+        &.{.{ .stream = .{
+            .stream_id = 2,
+            .data = encoded.items,
+            .fin = true,
+        } }},
+        null,
+        .not_ect,
+    );
+
+    var failed_send = ObservedBatchSend{
+        .delegate = server_endpoint.io,
+        .fail_after_prefix = 0,
+    };
+    var failed_vtable = server_endpoint.io.vtable.*;
+    failed_vtable.netSend = ObservedBatchSend.netSend;
+    server_endpoint.io = .{
+        .userdata = &failed_send,
+        .vtable = &failed_vtable,
+    };
+    defer server_endpoint.io = failed_send.delegate;
+
+    var buffer: [32]u8 = undefined;
+    const event = (try runtime.EndpointServer.testing
+        .pollAcceptedSessionEntry(&accepted, &buffer)) orelse
+        return error.TestUnexpectedResult;
+    try std.testing.expect(event == .stream);
+    try std.testing.expect(event.stream == .data);
+    try std.testing.expect(event.stream.data.fin);
+    try std.testing.expectEqualStrings(
+        "terminal",
+        buffer[0..event.stream.data.bytes],
+    );
+    try std.testing.expectEqual(@as(usize, 1), failed_send.calls);
+    try std.testing.expect(!h3.established.connection.peerStreamClosed(2));
+
+    const connection_timer = h3.established.connection.nextTimerDeadline() orelse
+        return error.TestUnexpectedResult;
+    const endpoint_timer = dispatcher.nextTimerDeadline() orelse
+        return error.TestUnexpectedResult;
+    try std.testing.expectEqual(handle, endpoint_timer.connection_id);
+    try std.testing.expectEqual(connection_timer, endpoint_timer.timer);
+    try std.testing.expectEqual(
+        quic.one_rtt.TimerDeadlineKind.peer_stream_credit,
+        endpoint_timer.timer.kind,
+    );
+
+    server_endpoint.io = failed_send.delegate;
+    _ = (try dispatcher.serviceNextTimerAt(
+        endpoint_timer.timer.deadline_ns,
+    )) orelse return error.TestUnexpectedResult;
+    try std.testing.expect(h3.established.connection.peerStreamClosed(2));
+}
 
 test "WebTransport client handshake and CONNECT share one socket owner" {
     const allocator = std.testing.allocator;
