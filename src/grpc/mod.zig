@@ -11,6 +11,7 @@ pub const compression = @import("compression.zig");
 pub const stream = @import("stream/mod.zig");
 pub const call = @import("call.zig");
 pub const runtime = @import("runtime.zig");
+pub const health = @import("health.zig");
 
 pub const Error = stream.Error;
 pub const Status = wire.Status;
@@ -86,4 +87,5 @@ test {
     _ = @import("runtime_tests.zig");
     _ = runtime;
     _ = stream;
+    _ = health;
 }

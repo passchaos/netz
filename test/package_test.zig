@@ -49,6 +49,9 @@ test "public modules are reachable" {
     try std.testing.expect(@hasDecl(netz.grpc, "statusFromHttp2Error"));
     try std.testing.expect(@hasField(netz.grpc.UnaryResponse, "reset"));
     try std.testing.expect(@hasDecl(netz.grpc, "runtime"));
+    try std.testing.expect(@hasDecl(netz.grpc, "health"));
+    try std.testing.expect(@hasDecl(netz.grpc.health, "Registry"));
+    try std.testing.expect(@hasDecl(netz.grpc.health, "WatchCursor"));
     try std.testing.expect(@hasDecl(netz.grpc.runtime, "Client"));
     try std.testing.expect(@hasDecl(netz.grpc.runtime, "Server"));
     try std.testing.expect(@hasDecl(netz.grpc.runtime.Server, "accept"));
