@@ -11,6 +11,7 @@ const metadata = @import("metadata.zig");
 const duplex = @import("stream/duplex.zig");
 const stream_codec = @import("stream/codec.zig");
 const wire = @import("wire.zig");
+const descriptor_set = @import("reflection/descriptor_set.zig");
 
 pub const v1_path =
     "/grpc.reflection.v1.ServerReflection/ServerReflectionInfo";
@@ -670,10 +671,7 @@ pub fn decodeResponse(
     return response;
 }
 
-pub const Extension = struct {
-    containing_type: []const u8,
-    number: i32,
-};
+pub const Extension = descriptor_set.Extension;
 
 pub const File = struct {
     name: []const u8,
@@ -685,6 +683,8 @@ pub const File = struct {
     message_types: []const []const u8 = &.{},
     /// All fully-qualified declarations usable by file_containing_symbol.
     symbols: []const []const u8 = &.{},
+    /// Fully-qualified service names also exposed by list_services.
+    services: []const []const u8 = &.{},
     extensions: []const Extension = &.{},
 };
 
@@ -756,6 +756,7 @@ pub const Registry = struct {
         for (file.dependencies) |name| try validateNonEmptyString(name);
         for (file.message_types) |name| try validateNonEmptyString(name);
         for (file.symbols) |symbol| try validateNonEmptyString(symbol);
+        for (file.services) |service| try validateNonEmptyString(service);
         for (file.extensions) |extension| {
             try validateNonEmptyString(extension.containing_type);
             try validateExtensionNumber(extension.number);
@@ -764,7 +765,9 @@ pub const Registry = struct {
         defer self.mutex.unlock(self.io);
         if (self.findFile(file.name) != null) return error.DuplicateDescriptor;
         for (file.symbols, 0..) |symbol, index| {
-            if (self.findFileContainingSymbol(symbol) != null) {
+            if (self.findFileContainingSymbol(symbol) != null or
+                self.hasMessageType(symbol))
+            {
                 return error.DuplicateSymbol;
             }
             for (file.symbols[0..index]) |prior| {
@@ -774,12 +777,31 @@ pub const Registry = struct {
             }
         }
         for (file.message_types, 0..) |message_type, index| {
-            if (self.hasMessageType(message_type)) {
+            if (self.hasMessageType(message_type) or
+                self.findFileContainingSymbol(message_type) != null)
+            {
                 return error.DuplicateSymbol;
             }
             for (file.message_types[0..index]) |prior| {
                 if (std.mem.eql(u8, prior, message_type)) {
                     return error.DuplicateSymbol;
+                }
+            }
+        }
+        for (file.services, 0..) |service, index| {
+            if (self.findFileContainingSymbol(service) != null or
+                self.hasMessageType(service))
+            {
+                return error.DuplicateSymbol;
+            }
+            for (self.services.items) |existing| {
+                if (std.mem.eql(u8, existing, service)) {
+                    return error.DuplicateService;
+                }
+            }
+            for (file.services[0..index]) |prior| {
+                if (std.mem.eql(u8, prior, service)) {
+                    return error.DuplicateService;
                 }
             }
         }
@@ -798,7 +820,108 @@ pub const Registry = struct {
         }
         var owned = try cloneFile(self.allocator, file);
         errdefer owned.deinit(self.allocator);
-        try self.files.append(self.allocator, owned);
+        const listed_services = try cloneStrings(
+            self.allocator,
+            file.services,
+        );
+        var listed_services_owned = true;
+        errdefer if (listed_services_owned) {
+            freeStrings(self.allocator, listed_services);
+        };
+        try self.files.ensureUnusedCapacity(self.allocator, 1);
+        try self.services.ensureUnusedCapacity(
+            self.allocator,
+            listed_services.len,
+        );
+        self.files.appendAssumeCapacity(owned);
+        owned = undefined;
+        self.services.appendSliceAssumeCapacity(listed_services);
+        self.allocator.free(listed_services);
+        listed_services_owned = false;
+    }
+
+    /// Transactionally import a standard serialized FileDescriptorSet.
+    /// Descriptor bytes are retained exactly as supplied so reflection clients
+    /// receive canonical FileDescriptorProto payloads from their generator.
+    pub fn addFileDescriptorSet(
+        self: *Registry,
+        bytes: []const u8,
+    ) Error!usize {
+        var parsed = try descriptor_set.parse(self.allocator, bytes);
+        defer parsed.deinit();
+
+        var staged = Registry.init(self.allocator, self.io);
+        defer staged.deinit();
+        for (parsed.files) |file| {
+            try staged.addFile(.{
+                .name = file.name,
+                .descriptor = file.descriptor,
+                .dependencies = file.dependencies,
+                .message_types = file.message_types,
+                .symbols = file.symbols,
+                .services = file.services,
+                .extensions = file.extensions,
+            });
+        }
+
+        self.mutex.lockUncancelable(self.io);
+        defer self.mutex.unlock(self.io);
+        for (staged.files.items) |file| {
+            if (self.findFile(file.name) != null) {
+                return error.DuplicateDescriptor;
+            }
+            for (file.symbols) |symbol| {
+                if (self.findFileContainingSymbol(symbol) != null or
+                    self.hasMessageType(symbol))
+                {
+                    return error.DuplicateSymbol;
+                }
+            }
+            for (file.message_types) |message_type| {
+                if (self.findFileContainingSymbol(message_type) != null or
+                    self.hasMessageType(message_type))
+                {
+                    return error.DuplicateSymbol;
+                }
+            }
+            for (file.extensions) |extension| {
+                if (self.findFileContainingExtension(
+                    extension.containing_type,
+                    extension.number,
+                ) != null) return error.DuplicateExtension;
+            }
+        }
+        for (staged.services.items) |service| {
+            for (self.services.items) |existing| {
+                if (std.mem.eql(u8, existing, service)) {
+                    return error.DuplicateService;
+                }
+            }
+        }
+        for (staged.files.items) |file| {
+            for (file.dependencies) |dependency| {
+                if (self.findFile(dependency) == null and
+                    staged.findFile(dependency) == null)
+                {
+                    return error.MissingDependency;
+                }
+            }
+        }
+
+        try self.files.ensureUnusedCapacity(
+            self.allocator,
+            staged.files.items.len,
+        );
+        try self.services.ensureUnusedCapacity(
+            self.allocator,
+            staged.services.items.len,
+        );
+        const count = staged.files.items.len;
+        self.files.appendSliceAssumeCapacity(staged.files.items);
+        staged.files.items.len = 0;
+        self.services.appendSliceAssumeCapacity(staged.services.items);
+        staged.services.items.len = 0;
+        return count;
     }
 
     /// Decode one reflection request and return its complete encoded response.
@@ -965,12 +1088,22 @@ pub const Registry = struct {
         self: *const Registry,
         symbol: []const u8,
     ) ?usize {
+        var selected: ?usize = null;
+        var selected_len: usize = 0;
         for (self.files.items, 0..) |file, index| {
             for (file.symbols) |candidate| {
-                if (std.mem.eql(u8, candidate, symbol)) return index;
+                if ((std.mem.eql(u8, candidate, symbol) or
+                    (symbol.len > candidate.len and
+                        symbol[candidate.len] == '.' and
+                        std.mem.startsWith(u8, symbol, candidate))) and
+                    candidate.len > selected_len)
+                {
+                    selected = index;
+                    selected_len = candidate.len;
+                }
             }
         }
-        return null;
+        return selected;
     }
 
     fn findFileContainingExtension(
@@ -1631,5 +1764,193 @@ test "gRPC reflection registry reports missing descriptor dependencies" {
     try std.testing.expectError(
         error.MissingDependency,
         registry.respondAlloc(allocator, request),
+    );
+}
+
+test "gRPC reflection imports a standard descriptor set transactionally" {
+    const allocator = std.testing.allocator;
+    var threaded = std.Io.Threaded.init(allocator, .{});
+    defer threaded.deinit();
+    var registry = Registry.init(allocator, threaded.io());
+    defer registry.deinit();
+
+    var common_message: std.ArrayList(u8) = .empty;
+    defer common_message.deinit(allocator);
+    try appendBytesField(&common_message, allocator, 1, "Common");
+    var common_file: std.ArrayList(u8) = .empty;
+    defer common_file.deinit(allocator);
+    try appendBytesField(&common_file, allocator, 1, "common.proto");
+    try appendBytesField(&common_file, allocator, 2, "demo");
+    try appendBytesField(&common_file, allocator, 4, common_message.items);
+
+    var method: std.ArrayList(u8) = .empty;
+    defer method.deinit(allocator);
+    try appendBytesField(&method, allocator, 1, "Unary");
+    var service: std.ArrayList(u8) = .empty;
+    defer service.deinit(allocator);
+    try appendBytesField(&service, allocator, 1, "Echo");
+    try appendBytesField(&service, allocator, 2, method.items);
+    var extension: std.ArrayList(u8) = .empty;
+    defer extension.deinit(allocator);
+    try appendBytesField(&extension, allocator, 1, "extra");
+    try appendBytesField(&extension, allocator, 2, ".demo.Common");
+    try appendInt32Field(&extension, allocator, 3, 100);
+    var app_file: std.ArrayList(u8) = .empty;
+    defer app_file.deinit(allocator);
+    try appendBytesField(&app_file, allocator, 1, "app.proto");
+    try appendBytesField(&app_file, allocator, 2, "demo");
+    try appendBytesField(&app_file, allocator, 3, "common.proto");
+    try appendBytesField(&app_file, allocator, 6, service.items);
+    try appendBytesField(&app_file, allocator, 7, extension.items);
+
+    var descriptor_bytes: std.ArrayList(u8) = .empty;
+    defer descriptor_bytes.deinit(allocator);
+    try appendBytesField(&descriptor_bytes, allocator, 1, app_file.items);
+    try appendBytesField(&descriptor_bytes, allocator, 1, common_file.items);
+    try std.testing.expectEqual(
+        @as(usize, 2),
+        try registry.addFileDescriptorSet(descriptor_bytes.items),
+    );
+
+    const symbol_request = try encodeRequestAlloc(allocator, .{
+        .query = .{ .file_containing_symbol = "demo.Echo.Unary.option" },
+    });
+    defer allocator.free(symbol_request);
+    const symbol_bytes = try registry.respondAlloc(allocator, symbol_request);
+    defer allocator.free(symbol_bytes);
+    var symbol_response = try decodeResponse(allocator, symbol_bytes);
+    defer symbol_response.deinit();
+    try std.testing.expectEqual(
+        @as(usize, 2),
+        symbol_response.result.file_descriptors.len,
+    );
+    try std.testing.expectEqualSlices(
+        u8,
+        app_file.items,
+        symbol_response.result.file_descriptors[0],
+    );
+    try std.testing.expectEqualSlices(
+        u8,
+        common_file.items,
+        symbol_response.result.file_descriptors[1],
+    );
+
+    const extension_request = try encodeRequestAlloc(allocator, .{
+        .query = .{ .file_containing_extension = .{
+            .containing_type = "demo.Common",
+            .extension_number = 100,
+        } },
+    });
+    defer allocator.free(extension_request);
+    const extension_bytes = try registry.respondAlloc(
+        allocator,
+        extension_request,
+    );
+    defer allocator.free(extension_bytes);
+    var extension_response = try decodeResponse(allocator, extension_bytes);
+    defer extension_response.deinit();
+    try std.testing.expectEqualSlices(
+        u8,
+        app_file.items,
+        extension_response.result.file_descriptors[0],
+    );
+
+    const list_request = try encodeRequestAlloc(allocator, .{
+        .query = .{ .list_services = "" },
+    });
+    defer allocator.free(list_request);
+    const list_bytes = try registry.respondAlloc(allocator, list_request);
+    defer allocator.free(list_bytes);
+    var list_response = try decodeResponse(allocator, list_bytes);
+    defer list_response.deinit();
+    try std.testing.expectEqual(@as(usize, 1), list_response.result.services.len);
+    try std.testing.expectEqualStrings(
+        "demo.Echo",
+        list_response.result.services[0],
+    );
+
+    var broken_file: std.ArrayList(u8) = .empty;
+    defer broken_file.deinit(allocator);
+    try appendBytesField(&broken_file, allocator, 1, "broken.proto");
+    try appendBytesField(&broken_file, allocator, 3, "missing.proto");
+    var valid_file: std.ArrayList(u8) = .empty;
+    defer valid_file.deinit(allocator);
+    try appendBytesField(&valid_file, allocator, 1, "valid.proto");
+    var broken_set: std.ArrayList(u8) = .empty;
+    defer broken_set.deinit(allocator);
+    try appendBytesField(&broken_set, allocator, 1, valid_file.items);
+    try appendBytesField(&broken_set, allocator, 1, broken_file.items);
+    try std.testing.expectError(
+        error.MissingDependency,
+        registry.addFileDescriptorSet(broken_set.items),
+    );
+    const broken_request = try encodeRequestAlloc(allocator, .{
+        .query = .{ .file_by_filename = "broken.proto" },
+    });
+    defer allocator.free(broken_request);
+    const broken_bytes = try registry.respondAlloc(allocator, broken_request);
+    defer allocator.free(broken_bytes);
+    var broken_response = try decodeResponse(allocator, broken_bytes);
+    defer broken_response.deinit();
+    try std.testing.expectEqual(
+        wire.Status.not_found,
+        broken_response.result.failure.code,
+    );
+    const valid_request = try encodeRequestAlloc(allocator, .{
+        .query = .{ .file_by_filename = "valid.proto" },
+    });
+    defer allocator.free(valid_request);
+    const valid_bytes = try registry.respondAlloc(allocator, valid_request);
+    defer allocator.free(valid_bytes);
+    var valid_response = try decodeResponse(allocator, valid_bytes);
+    defer valid_response.deinit();
+    try std.testing.expectEqual(
+        wire.Status.not_found,
+        valid_response.result.failure.code,
+    );
+}
+
+test "gRPC reflection descriptor import survives every allocation failure" {
+    try std.testing.checkAllAllocationFailures(
+        std.testing.allocator,
+        testDescriptorImportAllocationFailures,
+        .{},
+    );
+}
+
+fn testDescriptorImportAllocationFailures(
+    allocator: std.mem.Allocator,
+) !void {
+    var threaded = std.Io.Threaded.init(std.testing.allocator, .{});
+    defer threaded.deinit();
+    var registry = Registry.init(allocator, threaded.io());
+    defer registry.deinit();
+    // FileDescriptorSet { file { name: "x.proto" package: "demo"
+    // service { name: "Echo" } } }.
+    const bytes = [_]u8{
+        0x0a, 0x17,
+        0x0a, 0x07,
+        'x',  '.',
+        'p',  'r',
+        'o',  't',
+        'o',  0x12,
+        0x04, 'd',
+        'e',  'm',
+        'o',  0x32,
+        0x06, 0x0a,
+        0x04, 'E',
+        'c',  'h',
+        'o',
+    };
+    const result = registry.addFileDescriptorSet(&bytes) catch |err| {
+        try std.testing.expectEqual(@as(usize, 0), registry.files.items.len);
+        try std.testing.expectEqual(@as(usize, 0), registry.services.items.len);
+        return err;
+    };
+    try std.testing.expectEqual(@as(usize, 1), result);
+    try std.testing.expectEqual(@as(usize, 1), registry.files.items.len);
+    try std.testing.expectEqualStrings(
+        "demo.Echo",
+        registry.services.items[0],
     );
 }

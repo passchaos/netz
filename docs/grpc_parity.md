@@ -86,6 +86,11 @@ existing HTTP/2 runtime:
   thread-safe opaque-descriptor registry covering file, symbol, extension,
   extension-number, and service-list queries, including transitive dependency
   expansion and standard embedded `NOT_FOUND`/`UNIMPLEMENTED` responses,
+- transactional import of standard serialized `FileDescriptorSet` values from
+  protoc, pbz, or another generator. The schema-free importer retains each
+  original `FileDescriptorProto` byte string and automatically indexes file
+  dependencies, nested message/enum/field/oneof symbols, services/methods, and
+  extensions without making pbz a mandatory transport dependency,
 - bidirectional Server Reflection v1/v1alpha client sessions and server
   handlers over h2c and TLS. One stream accepts ordered repeated queries,
   owns each decoded response beyond the DATA callback, supports timeout retry
@@ -216,8 +221,9 @@ upstream gRPC Core's `ServerEarlyReturnTest`.
    A broader upstream matrix, including reverse custom metadata and TLS, remains
    future work.
 3. Add higher-level application cancellation and streaming deadline policy,
-   retry policy, generated reflection-registration adapters, and broader
-   conformance/interop runners. Health
+   retry policy, generated service/client bindings, and broader conformance/
+   interop runners. Reflection accepts standard descriptor sets directly, but
+   an independent grpc reflection client remains useful external evidence. Health
    `Check` and `Watch` transport semantics are implemented, including
    incremental Watch delivery and cancellation, but automatic client Watch
    reconnection/backoff remains application policy. Unary transport deadlines

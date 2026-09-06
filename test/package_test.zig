@@ -53,6 +53,10 @@ test "public modules are reachable" {
     try std.testing.expect(@hasDecl(netz.grpc, "reflection"));
     try std.testing.expect(@hasDecl(netz.grpc.reflection, "Registry"));
     try std.testing.expect(@hasDecl(
+        netz.grpc.reflection.Registry,
+        "addFileDescriptorSet",
+    ));
+    try std.testing.expect(@hasDecl(
         netz.grpc.reflection,
         "ClientSession",
     ));
