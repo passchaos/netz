@@ -8250,6 +8250,27 @@ pub const HandshakeClient = struct {
         );
     }
 
+    /// Submit one complete request DATA contribution without waiting for
+    /// pacing or reading the connection socket.
+    pub fn trySendRequestBody(
+        self: *HandshakeClient,
+        stream_id: u62,
+        data: []const u8,
+        fin: bool,
+    ) Error!void {
+        if (!self.request_lifecycle.contains(stream_id)) {
+            return error.UnexpectedStream;
+        }
+        try trySendConnectionBodyChunk(
+            &self.established.connection,
+            &self.outbound_bodies,
+            stream_id,
+            data,
+            fin,
+            self.options,
+        );
+    }
+
     /// Send request DATA and synchronously pump peer packets when QUIC
     /// congestion or flow-control state is not yet writable.
     ///
@@ -9178,6 +9199,23 @@ pub const HandshakeClient = struct {
         self: *HandshakeClient,
         stream_id: u62,
     ) Error!void {
+        return self.detachResponseStreamInternal(stream_id, false);
+    }
+
+    /// Detach an established response stream without waiting for receive
+    /// credit. Backpressure leaves the reader and association unchanged.
+    pub fn detachResponseStreamOnce(
+        self: *HandshakeClient,
+        stream_id: u62,
+    ) Error!void {
+        return self.detachResponseStreamInternal(stream_id, true);
+    }
+
+    fn detachResponseStreamInternal(
+        self: *HandshakeClient,
+        stream_id: u62,
+        single_attempt: bool,
+    ) Error!void {
         const entry = self.streaming_responses.find(stream_id) orelse
             return error.UnexpectedStream;
         if (!entry.reader.canDetachResponse()) {
@@ -9188,10 +9226,16 @@ pub const HandshakeClient = struct {
         errdefer if (!already_registered) {
             self.connect_datagrams.unregister(stream_id);
         };
-        try releaseStreamingReaderCapacity(
-            &self.established.connection,
-            &entry.reader,
-        );
+        if (single_attempt)
+            try releaseStreamingReaderCapacityOnce(
+                &self.established.connection,
+                &entry.reader,
+            )
+        else
+            try releaseStreamingReaderCapacity(
+                &self.established.connection,
+                &entry.reader,
+            );
         var removed = self.streaming_responses.takeEntry(stream_id) orelse
             return error.UnexpectedStream;
         removed.deinit();
@@ -9328,6 +9372,17 @@ pub const HandshakeClient = struct {
         try self.established.connection.sendDatagram(encoded);
     }
 
+    /// Submit one CONNECT DATAGRAM without sleeping or reading UDP.
+    pub fn trySendConnectDatagram(
+        self: *HandshakeClient,
+        stream_id: u62,
+        payload: []const u8,
+    ) Error!void {
+        try self.validateConnectDatagramSend(stream_id, payload);
+        const encoded = try self.connect_datagrams.encode(stream_id, payload);
+        try self.established.connection.trySendDatagram(encoded);
+    }
+
     pub fn sendConnectDatagramWithTimeout(
         self: *HandshakeClient,
         stream_id: u62,
@@ -9371,6 +9426,23 @@ pub const HandshakeClient = struct {
             };
             return;
         }
+    }
+
+    /// One deadline-checked attempt for a shared endpoint owner. This method
+    /// never reads UDP or sleeps while preserving retryability on backpressure.
+    pub fn trySendConnectDatagramWithDeadline(
+        self: *HandshakeClient,
+        stream_id: u62,
+        payload: []const u8,
+        deadline: std.Io.Clock.Timestamp,
+    ) ReceiveTimeoutError!void {
+        _ = try deadline_policy.usableAwake(self.connectionIo(), deadline);
+        try self.validateConnectDatagramSend(stream_id, payload);
+        const encoded = try self.connect_datagrams.encode(stream_id, payload);
+        try self.established.connection.trySendDatagramOnceWithDeadline(
+            encoded,
+            deadline,
+        );
     }
 
     fn validateConnectDatagramSend(
@@ -9844,7 +9916,11 @@ pub const HandshakeClient = struct {
         }
     }
 
-    fn flushResponsePacketFeedbackOnce(self: *HandshakeClient) Error!void {
+    /// Submit at most one packet-sized prefix of queued QPACK decoder
+    /// feedback without waiting for transport pacing.
+    pub fn flushResponsePacketFeedbackOnce(
+        self: *HandshakeClient,
+    ) Error!void {
         if (self.qpack_decode.pendingDecoderInstructions().len == 0) return;
         try trySendConnectionQpackFeedback(
             &self.established.connection,

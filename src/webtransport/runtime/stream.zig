@@ -569,6 +569,40 @@ pub fn poll(
     session_id: webtransport.SessionId,
     max_stream_bytes: usize,
 ) Error!?OwnedHandshakeStream {
+    return pollInternal(
+        connection,
+        registry,
+        session_id,
+        max_stream_bytes,
+        false,
+    );
+}
+
+/// Take one FIN-complete associated stream without waiting for receive-credit
+/// pacing. Transport bytes and the allocated payload remain uncommitted on
+/// backpressure so a dispatcher can retry the same stream later.
+pub fn pollOnce(
+    connection: *quic.one_rtt.Connection,
+    registry: *webtransport.StreamRegistry,
+    session_id: webtransport.SessionId,
+    max_stream_bytes: usize,
+) Error!?OwnedHandshakeStream {
+    return pollInternal(
+        connection,
+        registry,
+        session_id,
+        max_stream_bytes,
+        true,
+    );
+}
+
+fn pollInternal(
+    connection: *quic.one_rtt.Connection,
+    registry: *webtransport.StreamRegistry,
+    session_id: webtransport.SessionId,
+    max_stream_bytes: usize,
+    single_attempt: bool,
+) Error!?OwnedHandshakeStream {
     var stream_ids: [256]u62 = undefined;
     var after: ?u62 = null;
     while (true) {
@@ -589,6 +623,7 @@ pub fn poll(
                 session_id,
                 stream_id,
                 max_stream_bytes,
+                single_attempt,
             )) |stream| return stream;
         }
         if (ids.len != 0) after = ids[ids.len - 1];
@@ -602,6 +637,7 @@ fn takeHandshakeSessionStream(
     session_id: webtransport.SessionId,
     stream_id: u62,
     max_stream_bytes: usize,
+    single_attempt: bool,
 ) Error!?OwnedHandshakeStream {
     // Receive mode is selected per stream, not per session. A caller may use
     // the compatibility whole-stream API for one stream and incremental reads
@@ -612,13 +648,28 @@ fn takeHandshakeSessionStream(
     }
     const available = connection.availableReceivedStream(stream_id) orelse
         return null;
-    const stream = try association.identify(
-        connection,
-        registry,
-        session_id,
-        stream_id,
-        .whole,
-    ) orelse return null;
+    const stream = (if (single_attempt)
+        association.identifyOnce(
+            connection,
+            registry,
+            session_id,
+            stream_id,
+            .whole,
+        )
+    else
+        association.identify(
+            connection,
+            registry,
+            session_id,
+            stream_id,
+            .whole,
+        )) catch |err| switch (err) {
+        error.PacingLimited,
+        error.CongestionLimited,
+        error.FlowControlBlocked,
+        => return null,
+        else => return err,
+    } orelse return null;
     if (stream.receive_reset != null) return error.InvalidStreamState;
     const prefix_len = stream.receive_prefix_len;
 
@@ -636,13 +687,28 @@ fn takeHandshakeSessionStream(
         u8,
         available[prefix_len .. prefix_len + payload_len],
     );
-    errdefer connection.endpoint.allocator.free(payload);
-    try connection.releaseReceivedCapacity(
-        stream_id,
-        prefix_len + payload_len,
-    );
+    var payload_owned = true;
+    defer if (payload_owned) connection.endpoint.allocator.free(payload);
+    const release_result = if (single_attempt)
+        connection.tryReleaseReceivedCapacity(
+            stream_id,
+            prefix_len + payload_len,
+        )
+    else
+        connection.releaseReceivedCapacity(
+            stream_id,
+            prefix_len + payload_len,
+        );
+    release_result catch |err| switch (err) {
+        error.PacingLimited,
+        error.CongestionLimited,
+        error.FlowControlBlocked,
+        => return null,
+        else => return err,
+    };
     _ = try association.requestTransportRetirement(connection, stream);
     try registry.recordReceived(stream_id, payload_len, true);
+    payload_owned = false;
     return .{
         .allocator = connection.endpoint.allocator,
         .stream_id = stream_id,

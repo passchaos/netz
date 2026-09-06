@@ -4831,6 +4831,9 @@ pub const HandshakeClientSession = struct {
     response: http3.DecodedResponseHead,
     streams: webtransport.StreamRegistry,
     control: session_control.Control,
+    dispatcher: ?*quic.endpoint_dispatcher.Dispatcher = null,
+    dispatcher_handle: ?quic.endpoint_dispatcher.ConnectionHandle = null,
+    close_response_pending: bool = false,
 
     /// Open WebTransport on an existing authenticated HTTP/3 connection. The
     /// caller retains `h3` on failure and transfers it on success.
@@ -5491,6 +5494,11 @@ pub const HandshakeClientSession = struct {
     }
 
     pub fn deinit(self: *HandshakeClientSession) void {
+        if (self.dispatcher) |dispatcher| {
+            _ = dispatcher.unregisterConnection(
+                self.dispatcher_handle.?,
+            ) catch false;
+        }
         self.h3.closeConnectDatagramAssociation(
             self.session_id.value,
         ) catch {};
@@ -5534,10 +5542,12 @@ pub const HandshakeClientSession = struct {
         if (reason.len > max_connection_close_reason) {
             return error.InvalidSessionState;
         }
-        try self.h3.established.connection.closeApplication(
+        const result = self.h3.established.connection.closeApplication(
             error_code,
             reason,
         );
+        try self.refreshDispatcherTimer();
+        try result;
     }
 
     pub fn exportKeyingMaterial(
@@ -5576,7 +5586,9 @@ pub const HandshakeClientSession = struct {
     }
 
     pub fn initiateKeyUpdate(self: *HandshakeClientSession) Error!void {
-        try self.h3.initiateKeyUpdate();
+        const result = self.h3.initiateKeyUpdate();
+        try self.refreshDispatcherTimer();
+        try result;
     }
 
     pub fn localKeyUpdateCount(self: HandshakeClientSession) u64 {
@@ -5594,7 +5606,12 @@ pub const HandshakeClientSession = struct {
     pub fn sendDatagram(self: *HandshakeClientSession, payload: []const u8) Error!void {
         try self.control.ensureOpen();
         try webtransport.ensureDatagramsNegotiated(self.h3.options.local_settings, self.h3.control.settings.peer);
-        try self.h3.sendConnectDatagram(self.session_id.value, payload);
+        const result = if (self.dispatcher != null)
+            self.h3.trySendConnectDatagram(self.session_id.value, payload)
+        else
+            self.h3.sendConnectDatagram(self.session_id.value, payload);
+        try self.refreshDispatcherTimer();
+        try result;
     }
 
     /// Wait for QUIC congestion and pacing capacity while preserving HTTP/3
@@ -5621,14 +5638,24 @@ pub const HandshakeClientSession = struct {
             self.h3.options.local_settings,
             self.h3.control.settings.peer,
         );
-        try self.h3.sendConnectDatagramWithDeadline(
-            self.session_id.value,
-            payload,
-            deadline,
-        );
+        const result = if (self.dispatcher != null)
+            self.h3.trySendConnectDatagramWithDeadline(
+                self.session_id.value,
+                payload,
+                deadline,
+            )
+        else
+            self.h3.sendConnectDatagramWithDeadline(
+                self.session_id.value,
+                payload,
+                deadline,
+            );
+        try self.refreshDispatcherTimer();
+        try result;
     }
 
     pub fn receiveDatagram(self: *HandshakeClientSession) Error!OwnedHandshakeDatagram {
+        if (self.dispatcher != null) return error.InvalidDispatcherState;
         try webtransport.ensureDatagramsNegotiated(self.h3.options.local_settings, self.h3.control.settings.peer);
         return ownedHandshakeDatagram(
             try self.h3.receiveConnectDatagram(self.session_id.value),
@@ -5641,6 +5668,7 @@ pub const HandshakeClientSession = struct {
         timeout: std.Io.Duration,
     ) ReceiveTimeoutError!OwnedHandshakeDatagram {
         if (timeout.nanoseconds <= 0) return error.Timeout;
+        if (self.dispatcher != null) return error.InvalidDispatcherState;
         try webtransport.ensureDatagramsNegotiated(
             self.h3.options.local_settings,
             self.h3.control.settings.peer,
@@ -5658,6 +5686,7 @@ pub const HandshakeClientSession = struct {
         self: *HandshakeClientSession,
         deadline: std.Io.Clock.Timestamp,
     ) ReceiveTimeoutError!OwnedHandshakeDatagram {
+        if (self.dispatcher != null) return error.InvalidDispatcherState;
         try webtransport.ensureDatagramsNegotiated(
             self.h3.options.local_settings,
             self.h3.control.settings.peer,
@@ -5679,9 +5708,12 @@ pub const HandshakeClientSession = struct {
             self.h3.options.local_settings,
             self.h3.control.settings.peer,
         );
-        const datagram = try self.h3.pollConnectDatagram(
+        if (!try self.prepareDispatcherPoll()) return null;
+        const result = self.h3.pollConnectDatagram(
             self.session_id.value,
         );
+        try self.refreshDispatcherTimer();
+        const datagram = try result;
         return if (datagram) |owned|
             ownedHandshakeDatagram(owned, self.session_id)
         else
@@ -5689,6 +5721,7 @@ pub const HandshakeClientSession = struct {
     }
 
     pub fn receiveManyDatagrams(self: *HandshakeClientSession, count: usize) Error!OwnedHandshakeDatagramBatch {
+        if (self.dispatcher != null) return error.InvalidDispatcherState;
         try webtransport.ensureDatagramsNegotiated(self.h3.options.local_settings, self.h3.control.settings.peer);
         return receiveManyHandshakeDatagrams(
             &self.h3,
@@ -5706,6 +5739,7 @@ pub const HandshakeClientSession = struct {
         timeout: std.Io.Duration,
     ) ReceiveTimeoutError!OwnedHandshakeDatagramBatch {
         if (timeout.nanoseconds <= 0) return error.Timeout;
+        if (self.dispatcher != null) return error.InvalidDispatcherState;
         return self.receiveManyDatagramsWithDeadline(
             count,
             .fromNow(self.h3.established.connection.endpoint.io, .{
@@ -5720,6 +5754,7 @@ pub const HandshakeClientSession = struct {
         count: usize,
         deadline: std.Io.Clock.Timestamp,
     ) ReceiveTimeoutError!OwnedHandshakeDatagramBatch {
+        if (self.dispatcher != null) return error.InvalidDispatcherState;
         try webtransport.ensureDatagramsNegotiated(
             self.h3.options.local_settings,
             self.h3.control.settings.peer,
@@ -5764,6 +5799,7 @@ pub const HandshakeClientSession = struct {
     pub fn receivePeerConnectionClose(
         self: *HandshakeClientSession,
     ) Error!quic.one_rtt.PeerCloseInfo {
+        if (self.dispatcher != null) return error.InvalidDispatcherState;
         return receiveHandshakePeerConnectionClose(
             &self.h3.established.connection,
         );
@@ -5779,6 +5815,7 @@ pub const HandshakeClientSession = struct {
         self: *HandshakeClientSession,
         deadline: std.Io.Clock.Timestamp,
     ) ReceiveTimeoutError!quic.one_rtt.PeerCloseInfo {
+        if (self.dispatcher != null) return error.InvalidDispatcherState;
         return receiveHandshakePeerConnectionCloseUntil(
             &self.h3.established.connection,
             deadline,
@@ -5799,6 +5836,9 @@ pub const HandshakeClientSession = struct {
     pub fn openBidirectionalStream(
         self: *HandshakeClientSession,
     ) Error!u62 {
+        if (self.dispatcher != null) {
+            return self.openLocalStreamOnce(.bidirectional);
+        }
         return self.openLocalStream(.bidirectional, null);
     }
 
@@ -5817,12 +5857,22 @@ pub const HandshakeClientSession = struct {
         self: *HandshakeClientSession,
         deadline: std.Io.Clock.Timestamp,
     ) ReceiveTimeoutError!u62 {
+        if (self.dispatcher != null) {
+            _ = try deadline_policy.usableAwake(
+                self.h3.established.connection.endpoint.io,
+                deadline,
+            );
+            return self.openLocalStreamOnce(.bidirectional);
+        }
         return self.openLocalStream(.bidirectional, deadline);
     }
 
     pub fn openUnidirectionalStream(
         self: *HandshakeClientSession,
     ) Error!u62 {
+        if (self.dispatcher != null) {
+            return self.openLocalStreamOnce(.unidirectional);
+        }
         return self.openLocalStream(.unidirectional, null);
     }
 
@@ -5841,6 +5891,13 @@ pub const HandshakeClientSession = struct {
         self: *HandshakeClientSession,
         deadline: std.Io.Clock.Timestamp,
     ) ReceiveTimeoutError!u62 {
+        if (self.dispatcher != null) {
+            _ = try deadline_policy.usableAwake(
+                self.h3.established.connection.endpoint.io,
+                deadline,
+            );
+            return self.openLocalStreamOnce(.unidirectional);
+        }
         return self.openLocalStream(.unidirectional, deadline);
     }
 
@@ -5882,6 +5939,36 @@ pub const HandshakeClientSession = struct {
         )).stream_id;
     }
 
+    fn openLocalStreamOnce(
+        self: *HandshakeClientSession,
+        direction: webtransport.StreamDirection,
+    ) Error!u62 {
+        try self.control.ensureOpen();
+        try webtransport.ensureNegotiated(
+            self.h3.options.local_settings,
+            self.h3.control.settings.peer,
+        );
+        const stream_id = try self.streams.prepareLocal(direction);
+        const transport_id: u64 = switch (direction) {
+            .bidirectional => self.h3.established.connection
+                .tryOpenStream() catch |err| {
+                try self.refreshDispatcherTimer();
+                return err;
+            },
+            .unidirectional => self.h3.established.connection
+                .tryOpenUnidirectionalStream() catch |err| {
+                try self.refreshDispatcherTimer();
+                return err;
+            },
+        };
+        try self.refreshDispatcherTimer();
+        std.debug.assert(transport_id == stream_id);
+        return (try self.streams.commitPreparedLocal(
+            stream_id,
+            direction,
+        )).stream_id;
+    }
+
     pub fn sendStream(
         self: *HandshakeClientSession,
         stream_id: u62,
@@ -5889,14 +5976,27 @@ pub const HandshakeClientSession = struct {
         fin: bool,
     ) Error!void {
         try self.control.ensureOpen();
-        try sendHandshakeSessionStream(
-            &self.h3.established.connection,
-            &self.streams,
-            self.session_id,
-            stream_id,
-            payload,
-            fin,
-        );
+        if (self.dispatcher != null) {
+            const result = handshake_stream.sendOnce(
+                &self.h3.established.connection,
+                &self.streams,
+                self.session_id,
+                stream_id,
+                payload,
+                fin,
+            );
+            try self.refreshDispatcherTimer();
+            try result;
+        } else {
+            try sendHandshakeSessionStream(
+                &self.h3.established.connection,
+                &self.streams,
+                self.session_id,
+                stream_id,
+                payload,
+                fin,
+            );
+        }
     }
 
     pub fn writeStream(
@@ -5905,6 +6005,17 @@ pub const HandshakeClientSession = struct {
         payload: []const u8,
     ) Error!usize {
         try self.control.ensureOpen();
+        if (self.dispatcher != null) {
+            const result = handshake_stream.writeOnce(
+                &self.h3.established.connection,
+                &self.streams,
+                self.session_id,
+                stream_id,
+                payload,
+            );
+            try self.refreshDispatcherTimer();
+            return try result;
+        }
         return handshake_stream.write(
             &self.h3.established.connection,
             &self.streams,
@@ -5938,6 +6049,17 @@ pub const HandshakeClientSession = struct {
         counts: []usize,
     ) Error!StreamWriteResult {
         try self.control.ensureOpen();
+        if (self.dispatcher != null) {
+            const result = stream_batch.writeOnce(
+                &self.h3.established.connection,
+                &self.streams,
+                self.session_id,
+                writes,
+                counts,
+            );
+            try self.refreshDispatcherTimer();
+            return try result;
+        }
         return stream_batch.write(
             &self.h3.established.connection,
             &self.streams,
@@ -5953,6 +6075,17 @@ pub const HandshakeClientSession = struct {
     ) Error!void {
         // Completion means the FIN packet was submitted, not yet acknowledged.
         try self.control.ensureOpen();
+        if (self.dispatcher != null) {
+            const result = handshake_stream.finishOnce(
+                &self.h3.established.connection,
+                &self.streams,
+                self.session_id,
+                stream_id,
+            );
+            try self.refreshDispatcherTimer();
+            try result;
+            return;
+        }
         return handshake_stream.finish(
             &self.h3.established.connection,
             &self.streams,
@@ -5970,14 +6103,22 @@ pub const HandshakeClientSession = struct {
         const stream = self.streams.get(stream_id) orelse
             return error.UnknownStream;
         if (stream.locally_initiated) return error.InvalidStreamState;
-        return self.h3.established.connection.releaseCompletedPeerStream(
-            stream_id,
-        );
+        const result = if (self.dispatcher != null)
+            self.h3.established.connection.tryReleaseCompletedPeerStream(
+                stream_id,
+            )
+        else
+            self.h3.established.connection.releaseCompletedPeerStream(
+                stream_id,
+            );
+        try self.refreshDispatcherTimer();
+        return try result;
     }
 
     pub fn receiveStream(
         self: *HandshakeClientSession,
     ) Error!OwnedHandshakeStream {
+        if (self.dispatcher != null) return error.InvalidDispatcherState;
         return receiveHandshakeSessionStream(
             &self.h3.established.connection,
             &self.streams,
@@ -5991,6 +6132,7 @@ pub const HandshakeClientSession = struct {
         timeout: std.Io.Duration,
     ) ReceiveTimeoutError!OwnedHandshakeStream {
         if (timeout.nanoseconds <= 0) return error.Timeout;
+        if (self.dispatcher != null) return error.InvalidDispatcherState;
         return self.receiveStreamWithDeadline(.fromNow(
             self.h3.established.connection.endpoint.io,
             .{ .raw = timeout, .clock = .awake },
@@ -6001,6 +6143,7 @@ pub const HandshakeClientSession = struct {
         self: *HandshakeClientSession,
         deadline: std.Io.Clock.Timestamp,
     ) ReceiveTimeoutError!OwnedHandshakeStream {
+        if (self.dispatcher != null) return error.InvalidDispatcherState;
         return receiveHandshakeSessionStreamWithDeadline(
             &self.h3.established.connection,
             &self.streams,
@@ -6013,12 +6156,23 @@ pub const HandshakeClientSession = struct {
     pub fn pollCompleteStream(
         self: *HandshakeClientSession,
     ) Error!?OwnedHandshakeStream {
-        return handshake_stream.poll(
-            &self.h3.established.connection,
-            &self.streams,
-            self.session_id,
-            self.h3.options.max_stream_buffer,
-        );
+        if (!try self.prepareDispatcherPoll()) return null;
+        const result = if (self.dispatcher != null)
+            handshake_stream.pollOnce(
+                &self.h3.established.connection,
+                &self.streams,
+                self.session_id,
+                self.h3.options.max_stream_buffer,
+            )
+        else
+            handshake_stream.poll(
+                &self.h3.established.connection,
+                &self.streams,
+                self.session_id,
+                self.h3.options.max_stream_buffer,
+            );
+        try self.refreshDispatcherTimer();
+        return try result;
     }
 
     /// Apply one packet selected by the endpoint-wide QUIC dispatcher. HTTP/3
@@ -6029,10 +6183,25 @@ pub const HandshakeClientSession = struct {
         self: *HandshakeClientSession,
         packet: *const quic.one_rtt.ReceivedPacket,
     ) Error!void {
-        try self.h3.processDetachedResponsePacket(
+        const result = self.h3.processDetachedResponsePacket(
             self.session_id.value,
             packet,
         );
+        try self.refreshDispatcherTimer();
+        try result;
+        if (self.dispatcher != null and
+            (self.control.local_close_sent or self.control.terminal_reported))
+        {
+            const cleanup = self.advanceTerminalCleanupOnce();
+            try self.refreshDispatcherTimer();
+            _ = cleanup catch |err| switch (err) {
+                error.PacingLimited,
+                error.CongestionLimited,
+                error.FlowControlBlocked,
+                => return,
+                else => return err,
+            };
+        }
     }
 
     /// Poll already-buffered associated stream state without reading UDP.
@@ -6041,12 +6210,23 @@ pub const HandshakeClientSession = struct {
         out: []u8,
     ) Error!?StreamRead {
         if (out.len == 0) return error.BufferTooShort;
-        return incremental_stream.poll(
-            &self.h3.established.connection,
-            &self.streams,
-            self.session_id,
-            out,
-        );
+        if (!try self.prepareDispatcherPoll()) return null;
+        const result = if (self.dispatcher != null)
+            incremental_stream.pollOnce(
+                &self.h3.established.connection,
+                &self.streams,
+                self.session_id,
+                out,
+            )
+        else
+            incremental_stream.poll(
+                &self.h3.established.connection,
+                &self.streams,
+                self.session_id,
+                out,
+            );
+        try self.refreshDispatcherTimer();
+        return try result;
     }
 
     /// Read the next stream data/control event without waiting for FIN.
@@ -6054,6 +6234,7 @@ pub const HandshakeClientSession = struct {
         self: *HandshakeClientSession,
         out: []u8,
     ) Error!StreamRead {
+        if (self.dispatcher != null) return error.InvalidDispatcherState;
         return readHandshakeSessionStream(
             &self.h3.established.connection,
             &self.streams,
@@ -6068,6 +6249,7 @@ pub const HandshakeClientSession = struct {
         timeout: std.Io.Duration,
     ) ReceiveTimeoutError!StreamRead {
         if (timeout.nanoseconds <= 0) return error.Timeout;
+        if (self.dispatcher != null) return error.InvalidDispatcherState;
         return incremental_stream.readWithDeadline(
             &self.h3.established.connection,
             &self.streams,
@@ -6085,6 +6267,7 @@ pub const HandshakeClientSession = struct {
         out: []u8,
         deadline: std.Io.Clock.Timestamp,
     ) ReceiveTimeoutError!StreamRead {
+        if (self.dispatcher != null) return error.InvalidDispatcherState;
         return incremental_stream.readWithDeadline(
             &self.h3.established.connection,
             &self.streams,
@@ -6103,6 +6286,7 @@ pub const HandshakeClientSession = struct {
     pub fn serviceTransport(
         self: *HandshakeClientSession,
     ) Error!void {
+        if (self.dispatcher != null) return error.InvalidDispatcherState;
         try self.h3.established.connection.servicePacketServicingTimers();
     }
 
@@ -6111,12 +6295,22 @@ pub const HandshakeClientSession = struct {
         stream_id: u62,
         application_error_code: u32,
     ) Error!void {
-        return resetHandshakeSessionStream(
-            &self.h3.established.connection,
-            &self.streams,
-            stream_id,
-            application_error_code,
-        );
+        const result = if (self.dispatcher != null)
+            incremental_stream.resetOnce(
+                &self.h3.established.connection,
+                &self.streams,
+                stream_id,
+                application_error_code,
+            )
+        else
+            resetHandshakeSessionStream(
+                &self.h3.established.connection,
+                &self.streams,
+                stream_id,
+                application_error_code,
+            );
+        try self.refreshDispatcherTimer();
+        try result;
     }
 
     pub fn stopStream(
@@ -6124,23 +6318,42 @@ pub const HandshakeClientSession = struct {
         stream_id: u62,
         application_error_code: u32,
     ) Error!void {
-        return stopHandshakeSessionStream(
-            &self.h3.established.connection,
-            &self.streams,
-            stream_id,
-            application_error_code,
-        );
+        const result = if (self.dispatcher != null)
+            incremental_stream.stopOnce(
+                &self.h3.established.connection,
+                &self.streams,
+                stream_id,
+                application_error_code,
+            )
+        else
+            stopHandshakeSessionStream(
+                &self.h3.established.connection,
+                &self.streams,
+                stream_id,
+                application_error_code,
+            );
+        try self.refreshDispatcherTimer();
+        try result;
     }
 
     pub fn drain(self: *HandshakeClientSession) Error!void {
         if (self.control.local_drain_sent) return;
         var encoded: [16]u8 = undefined;
         const capsule = try session_control.writeDrainInto(&encoded);
-        try self.h3.sendRequestBodyPaced(
-            self.session_id.value,
-            capsule,
-            false,
-        );
+        const result = if (self.dispatcher != null)
+            self.h3.trySendRequestBody(
+                self.session_id.value,
+                capsule,
+                false,
+            )
+        else
+            self.h3.sendRequestBodyPaced(
+                self.session_id.value,
+                capsule,
+                false,
+            );
+        try self.refreshDispatcherTimer();
+        try result;
         try self.control.recordLocalDrain();
     }
 
@@ -6149,7 +6362,20 @@ pub const HandshakeClientSession = struct {
         code: u32,
         reason: []const u8,
     ) Error!void {
-        if (self.control.local_close_sent) return;
+        if (self.control.local_close_sent) {
+            if (self.dispatcher != null) {
+                const cleanup = self.advanceTerminalCleanupOnce();
+                try self.refreshDispatcherTimer();
+                _ = cleanup catch |err| switch (err) {
+                    error.PacingLimited,
+                    error.CongestionLimited,
+                    error.FlowControlBlocked,
+                    => return,
+                    else => return err,
+                };
+            }
+            return;
+        }
         var encoded: [4 + session_control.max_close_reason + 16]u8 =
             undefined;
         const capsule = try session_control.writeCloseInto(
@@ -6157,24 +6383,46 @@ pub const HandshakeClientSession = struct {
             code,
             reason,
         );
-        try self.h3.sendRequestBodyPaced(
-            self.session_id.value,
-            capsule,
-            true,
-        );
+        const result = if (self.dispatcher != null)
+            self.h3.trySendRequestBody(
+                self.session_id.value,
+                capsule,
+                true,
+            )
+        else
+            self.h3.sendRequestBodyPaced(
+                self.session_id.value,
+                capsule,
+                true,
+            );
+        try self.refreshDispatcherTimer();
+        try result;
         // A local FIN does not close the peer-to-client direction. Retain the
         // association so receiveSessionEvent can process the peer's terminal
         // capsule/FIN; finishPolledSessionEvent performs final retirement.
         try self.control.recordLocalClose(code);
-        try session_control.terminateStreams(
-            &self.h3.established.connection,
-            &self.streams,
-        );
+        if (self.dispatcher == null) {
+            try session_control.terminateStreams(
+                &self.h3.established.connection,
+                &self.streams,
+            );
+        } else {
+            const cleanup = self.advanceTerminalCleanupOnce();
+            try self.refreshDispatcherTimer();
+            _ = cleanup catch |err| switch (err) {
+                error.PacingLimited,
+                error.CongestionLimited,
+                error.FlowControlBlocked,
+                => return,
+                else => return err,
+            };
+        }
     }
 
     pub fn receiveSessionEvent(
         self: *HandshakeClientSession,
     ) Error!SessionEvent {
+        if (self.dispatcher != null) return error.InvalidDispatcherState;
         return while (true) {
             if (try self.pollSessionEvent()) |ready| break ready;
             try self.receiveControlProgress();
@@ -6187,20 +6435,27 @@ pub const HandshakeClientSession = struct {
     pub fn pollSessionEvent(
         self: *HandshakeClientSession,
     ) Error!?SessionEvent {
-        const event = self.control.poll(
-            &self.h3.established.connection,
-        ) catch |err| switch (err) {
-            error.InvalidCapsule => {
-                try self.h3.established.connection.resetStream(
-                    self.session_id.value,
-                    http3.ApplicationErrorCode.message_error,
-                );
-                return err;
-            },
-            else => return err,
-        };
-        if (event) |value| try self.finishPolledSessionEvent(value);
-        return event;
+        if (self.dispatcher == null) {
+            const event = self.control.poll(
+                &self.h3.established.connection,
+            ) catch |err| switch (err) {
+                error.InvalidCapsule => {
+                    try self.h3.established.connection.resetStream(
+                        self.session_id.value,
+                        http3.ApplicationErrorCode.message_error,
+                    );
+                    return err;
+                },
+                else => return err,
+            };
+            if (event) |value| try self.finishPolledSessionEvent(value);
+            return event;
+        }
+
+        if (!try self.prepareDispatcherPoll()) return null;
+        const result = self.pollSessionEventOnce();
+        try self.refreshDispatcherTimer();
+        return try result;
     }
 
     pub fn receiveSessionEventWithTimeout(
@@ -6208,6 +6463,7 @@ pub const HandshakeClientSession = struct {
         timeout: std.Io.Duration,
     ) ReceiveTimeoutError!SessionEvent {
         if (timeout.nanoseconds <= 0) return error.Timeout;
+        if (self.dispatcher != null) return error.InvalidDispatcherState;
         const deadline = std.Io.Clock.Timestamp.fromNow(
             self.h3.established.connection.endpoint.io,
             .{ .raw = timeout, .clock = .awake },
@@ -6222,6 +6478,7 @@ pub const HandshakeClientSession = struct {
         self: *HandshakeClientSession,
         deadline: std.Io.Clock.Timestamp,
     ) ReceiveTimeoutError!SessionEvent {
+        if (self.dispatcher != null) return error.InvalidDispatcherState;
         return while (true) {
             if (try self.pollSessionEvent()) |ready| break ready;
             try self.receiveControlProgressWithDeadline(deadline);
@@ -6248,6 +6505,102 @@ pub const HandshakeClientSession = struct {
                 &self.streams,
             );
         }
+    }
+
+    fn pollSessionEventOnce(
+        self: *HandshakeClientSession,
+    ) Error!?SessionEvent {
+        if (!self.control.terminal_reported) {
+            const event = self.control.pollOnce(
+                &self.h3.established.connection,
+            ) catch |err| switch (err) {
+                error.PacingLimited,
+                error.CongestionLimited,
+                error.FlowControlBlocked,
+                => return null,
+                error.InvalidCapsule => {
+                    self.h3.established.connection.tryResetStream(
+                        self.session_id.value,
+                        http3.ApplicationErrorCode.message_error,
+                    ) catch |reset_err| switch (reset_err) {
+                        error.PacingLimited,
+                        error.CongestionLimited,
+                        error.FlowControlBlocked,
+                        => return null,
+                        else => return reset_err,
+                    };
+                    return err;
+                },
+                else => return err,
+            };
+            if (event) |value| {
+                if (value == .closed and !self.control.local_close_sent) {
+                    self.close_response_pending = true;
+                }
+                return value;
+            }
+        }
+
+        _ = self.advanceTerminalCleanupOnce() catch |err| switch (err) {
+            error.PacingLimited,
+            error.CongestionLimited,
+            error.FlowControlBlocked,
+            => return null,
+            else => return err,
+        };
+        return null;
+    }
+
+    fn advanceTerminalCleanupOnce(
+        self: *HandshakeClientSession,
+    ) Error!session_control.TerminateProgress {
+        if (self.close_response_pending) {
+            self.h3.trySendRequestBody(
+                self.session_id.value,
+                &.{},
+                true,
+            ) catch |err| switch (err) {
+                error.RequestCancelled, error.RequestRejected => {},
+                else => return err,
+            };
+            self.close_response_pending = false;
+            self.control.local_close_sent = true;
+            return .submitted;
+        }
+        if (!self.control.local_close_sent and
+            !self.control.terminal_reported)
+        {
+            return .complete;
+        }
+        return session_control.terminateStreamsOnce(
+            &self.h3.established.connection,
+            &self.streams,
+        );
+    }
+
+    fn refreshDispatcherTimer(self: *HandshakeClientSession) Error!void {
+        const dispatcher = self.dispatcher orelse return;
+        dispatcher.refreshConnectionTimer(
+            self.dispatcher_handle orelse return error.InvalidDispatcherState,
+        ) catch return error.InvalidDispatcherState;
+    }
+
+    fn prepareDispatcherPoll(self: *HandshakeClientSession) Error!bool {
+        if (self.dispatcher == null) return true;
+        self.h3.flushResponsePacketFeedbackOnce() catch |err| switch (err) {
+            error.PacingLimited,
+            error.CongestionLimited,
+            error.FlowControlBlocked,
+            => {
+                try self.refreshDispatcherTimer();
+                return false;
+            },
+            else => {
+                try self.refreshDispatcherTimer();
+                return err;
+            },
+        };
+        return true;
     }
 
     fn receiveControlProgress(
@@ -6508,6 +6861,9 @@ pub const HandshakeConnectAttempt = struct {
     response_trailers: []http3.Qpack.HeaderField = &.{},
     stream_complete: bool = false,
     limits: Limits,
+    dispatcher_registered: bool = false,
+    dispatcher: ?*quic.endpoint_dispatcher.Dispatcher = null,
+    dispatcher_handle: ?quic.endpoint_dispatcher.ConnectionHandle = null,
 
     pub fn accepted(self: HandshakeConnectAttempt) bool {
         return self.response.status >= 200 and self.response.status < 300;
@@ -6540,6 +6896,11 @@ pub const HandshakeConnectAttempt = struct {
         allocator.free(self.response_body);
         http3.Qpack.freeDecodedFields(allocator, self.response_trailers);
         if (self.h3) |*h3| {
+            if (self.dispatcher_registered) {
+                _ = self.dispatcher.?.unregisterConnection(
+                    self.dispatcher_handle.?,
+                ) catch false;
+            }
             if (self.restore_to) |destination| {
                 if (!self.stream_complete) {
                     h3.abandonExtendedConnect(self.session_id.value);
@@ -6554,6 +6915,14 @@ pub const HandshakeConnectAttempt = struct {
 
     pub fn requireAccepted(
         self: *HandshakeConnectAttempt,
+    ) Error!HandshakeClientSession {
+        if (self.dispatcher_registered) return error.InvalidDispatcherState;
+        return self.requireAcceptedInternal(false);
+    }
+
+    fn requireAcceptedInternal(
+        self: *HandshakeConnectAttempt,
+        single_attempt: bool,
     ) Error!HandshakeClientSession {
         if (!self.accepted()) return error.SessionRejected;
         std.debug.assert(self.response_body.len == 0);
@@ -6576,7 +6945,10 @@ pub const HandshakeConnectAttempt = struct {
         );
         errdefer streams.deinit();
         const control = try session_control.Control.init(self.session_id);
-        try h3.detachResponseStream(self.session_id.value);
+        if (single_attempt)
+            try h3.detachResponseStreamOnce(self.session_id.value)
+        else
+            try h3.detachResponseStream(self.session_id.value);
         const session = HandshakeClientSession{
             .h3 = h3.*,
             .session_id = self.session_id,
@@ -6596,9 +6968,34 @@ pub const HandshakeConnectAttempt = struct {
         handle: quic.endpoint_dispatcher.ConnectionHandle,
         out: *HandshakeClientSession,
     ) Error!void {
-        out.* = try self.requireAccepted();
+        if (self.dispatcher_registered) {
+            const removed = self.dispatcher.?.unregisterConnection(
+                self.dispatcher_handle.?,
+            ) catch
+                return error.InvalidDispatcherState;
+            if (!removed) return error.InvalidDispatcherState;
+            self.dispatcher_registered = false;
+            self.dispatcher = null;
+            self.dispatcher_handle = null;
+        }
+        out.* = self.requireAcceptedInternal(true) catch |err| {
+            if (self.h3) |*h3| {
+                dispatcher.registerConnection(
+                    handle,
+                    &h3.established.connection,
+                ) catch return error.InvalidDispatcherState;
+                self.dispatcher_registered = true;
+                self.dispatcher = dispatcher;
+                self.dispatcher_handle = handle;
+                dispatcher.refreshConnectionTimer(handle) catch
+                    return error.InvalidDispatcherState;
+            }
+            return err;
+        };
         var out_owned = true;
         errdefer if (out_owned) out.deinit();
+        out.dispatcher = dispatcher;
+        out.dispatcher_handle = handle;
         dispatcher.registerConnection(
             handle,
             &out.h3.established.connection,

@@ -1807,6 +1807,243 @@ test "WebTransport endpoint stream credit operations do not wait for pacing" {
     try std.testing.expectEqual(@as(usize, 0), fixed_io.sleep_calls);
 }
 
+test "WebTransport dispatcher client defers terminal cleanup pacing" {
+    const allocator = std.testing.allocator;
+    var threaded = std.Io.Threaded.init(allocator, .{});
+    defer threaded.deinit();
+    const io = threaded.io();
+
+    var endpoint = try quic.runtime.Endpoint.bind(
+        allocator,
+        io,
+        .{ .ip4 = .loopback(0) },
+        .{ .max_datagram_size = 4096 },
+    );
+    defer endpoint.deinit();
+    var peer_endpoint = try quic.runtime.Endpoint.bind(
+        allocator,
+        io,
+        .{ .ip4 = .loopback(0) },
+        .{ .max_datagram_size = 4096 },
+    );
+    defer peer_endpoint.deinit();
+    const keys = quic.protection.deriveAes128Keys(
+        [_]u8{0xf2} ** quic.protection.secret_len,
+    );
+    const settings = webtransport.defaultSettings(.{});
+    var h3 = try http3.runtime.HandshakeClient.initEstablished(
+        &endpoint,
+        peer_endpoint.address(),
+        try quic.handshake.establishPreconfigured(
+            &endpoint,
+            peer_endpoint.address(),
+            .client,
+            .{
+                .receive_keys = keys,
+                .send_keys = keys,
+                .local_connection_id = "wt-close-client",
+                .peer_connection_id = "wt-close-server",
+                .one_rtt = .{
+                    .max_datagram_size = 1200,
+                    .pacing_max_burst_packets = 1,
+                },
+            },
+        ),
+        .{ .local_settings = settings },
+    );
+    var h3_owned = true;
+    defer if (h3_owned) h3.deinit();
+    h3.control.settings.markSent(settings);
+    h3.control.settings.markReceived(settings);
+    try h3.connect_datagrams.register(0);
+    try std.testing.expectEqual(
+        @as(u64, 0),
+        try h3.established.connection.openStream(),
+    );
+    try h3.request_lifecycle.open(0, "CONNECT", true);
+    try h3.outbound_bodies.reserveOpen(0);
+    h3.outbound_bodies.appendOpenAssumeCapacity(
+        0,
+        quic.stream_state.SendState.init(0),
+        null,
+    );
+    try h3.sendRequestBody(0, "x", false);
+    var streams = try handshake_stream.initRegistry(
+        allocator,
+        .init(0),
+        .client,
+        settings,
+        settings,
+        8,
+        4,
+        14,
+    );
+    var streams_owned = true;
+    defer if (streams_owned) streams.deinit();
+    _ = try streams.registerPeer(1, .bidirectional);
+    try quic.one_rtt.testing.applyReceivedFrames(
+        &h3.established.connection,
+        0,
+        &.{.{ .stream = .{ .stream_id = 1, .data = "x" } }},
+        4_000_000,
+        .not_ect,
+    );
+
+    var response = http3.DecodedResponseHead{
+        .status = 200,
+        .headers = &.{},
+        .content_length = null,
+        .body_allowed = true,
+        .consumed = 0,
+        .qpack_section_acknowledgments = 0,
+    };
+    var response_owned = true;
+    defer if (response_owned) response.deinit(allocator);
+    var dispatcher = quic.endpoint_dispatcher.Dispatcher.init(
+        allocator,
+        &endpoint,
+    );
+    defer dispatcher.deinit();
+    const handle: quic.endpoint_dispatcher.ConnectionHandle = 26;
+    try dispatcher.registerConnection(handle, &h3.established.connection);
+    var session = runtime.HandshakeClientSession{
+        .h3 = h3,
+        .session_id = .init(0),
+        .response = response,
+        .streams = streams,
+        .control = try session_control.Control.init(.init(0)),
+        .dispatcher = &dispatcher,
+        .dispatcher_handle = handle,
+    };
+    h3_owned = false;
+    streams_owned = false;
+    response_owned = false;
+    defer session.deinit();
+    defer _ = dispatcher.unregisterConnection(handle) catch false;
+    try dispatcher.replaceConnection(
+        handle,
+        &session.h3.established.connection,
+    );
+
+    var close_capsule: [4 + session_control.max_close_reason + 16]u8 =
+        undefined;
+    const capsule = try session_control.writeCloseInto(
+        &close_capsule,
+        91,
+        "client peer close",
+    );
+    var framed: [4 + session_control.max_close_reason + 32]u8 = undefined;
+    const framed_len = try writeDataFrame(&framed, capsule);
+    try quic.one_rtt.testing.applyReceivedFrames(
+        &session.h3.established.connection,
+        1,
+        &.{.{ .stream = .{
+            .stream_id = 0,
+            .data = framed[0..framed_len],
+            .fin = true,
+        } }},
+        4_000_000,
+        .not_ect,
+    );
+
+    var fixed_io = FixedClockIo{
+        .delegate = endpoint.io,
+        .now_ns = 4_000_000,
+    };
+    var fixed_vtable = endpoint.io.vtable.*;
+    fixed_vtable.now = FixedClockIo.now;
+    fixed_vtable.sleep = FixedClockIo.sleep;
+    fixed_vtable.netSend = FixedClockIo.netSend;
+    endpoint.io = .{
+        .userdata = &fixed_io,
+        .vtable = &fixed_vtable,
+    };
+    defer endpoint.io = fixed_io.delegate;
+    quic.one_rtt.testing.exhaustPacingAt(
+        &session.h3.established.connection,
+        @intCast(fixed_io.now_ns),
+    );
+    const drain_packet_number =
+        session.h3.established.connection.next_packet_number;
+    try std.testing.expectError(error.PacingLimited, session.drain());
+    try std.testing.expect(!session.control.local_drain_sent);
+    try std.testing.expectEqual(
+        drain_packet_number,
+        session.h3.established.connection.next_packet_number,
+    );
+    try std.testing.expectEqual(@as(usize, 0), fixed_io.sleep_calls);
+    var timer = dispatcher.nextTimerDeadline() orelse
+        return error.TestUnexpectedResult;
+    try std.testing.expectEqual(
+        quic.one_rtt.TimerDeadlineKind.pacing,
+        timer.timer.kind,
+    );
+    fixed_io.now_ns = @intCast(timer.timer.deadline_ns);
+    _ = (try dispatcher.serviceNextTimerAt(timer.timer.deadline_ns)) orelse
+        return error.TestUnexpectedResult;
+    try session.drain();
+    try std.testing.expect(session.control.local_drain_sent);
+    try std.testing.expectEqual(@as(usize, 0), fixed_io.sleep_calls);
+
+    const event = (try session.pollSessionEvent()) orelse
+        return error.TestUnexpectedResult;
+    try std.testing.expect(event == .closed);
+    try std.testing.expectEqual(@as(u32, 91), event.closed.code);
+    try std.testing.expectEqualStrings("client peer close", event.closed.reason);
+    try std.testing.expect(session.close_response_pending);
+    try std.testing.expect(!session.control.local_close_sent);
+    try std.testing.expectEqual(@as(usize, 0), fixed_io.sleep_calls);
+
+    const packet_number = session.h3.established.connection.next_packet_number;
+    try std.testing.expect((try session.pollSessionEvent()) == null);
+    try std.testing.expect(session.close_response_pending);
+    try std.testing.expectEqual(
+        packet_number,
+        session.h3.established.connection.next_packet_number,
+    );
+    try std.testing.expectEqual(@as(usize, 0), fixed_io.sleep_calls);
+
+    timer = dispatcher.nextTimerDeadline() orelse
+        return error.TestUnexpectedResult;
+    try std.testing.expectEqual(
+        quic.one_rtt.TimerDeadlineKind.pacing,
+        timer.timer.kind,
+    );
+    fixed_io.now_ns = @intCast(timer.timer.deadline_ns);
+    _ = (try dispatcher.serviceNextTimerAt(timer.timer.deadline_ns)) orelse
+        return error.TestUnexpectedResult;
+    try std.testing.expect((try session.pollSessionEvent()) == null);
+    try std.testing.expect(!session.close_response_pending);
+    try std.testing.expect(session.control.local_close_sent);
+    try std.testing.expect(session.h3.outbound_bodies.find(0) == null);
+    try std.testing.expectEqual(@as(usize, 0), fixed_io.sleep_calls);
+
+    // Each later poll terminates at most one associated direction. Both the
+    // RESET_STREAM and STOP_SENDING are paced and remain retryable.
+    inline for (.{ "reset", "stop" }) |stage| {
+        try std.testing.expect((try session.pollSessionEvent()) == null);
+        try std.testing.expectEqual(@as(usize, 0), fixed_io.sleep_calls);
+        timer = dispatcher.nextTimerDeadline() orelse
+            return error.TestUnexpectedResult;
+        try std.testing.expectEqual(
+            quic.one_rtt.TimerDeadlineKind.pacing,
+            timer.timer.kind,
+        );
+        fixed_io.now_ns = @intCast(timer.timer.deadline_ns);
+        _ = (try dispatcher.serviceNextTimerAt(timer.timer.deadline_ns)) orelse
+            return error.TestUnexpectedResult;
+        try std.testing.expect((try session.pollSessionEvent()) == null);
+        const state = session.streams.get(1) orelse
+            return error.TestUnexpectedResult;
+        if (std.mem.eql(u8, stage, "reset")) {
+            try std.testing.expect(state.send_reset != null);
+        } else {
+            try std.testing.expect(state.stop_sent != null);
+        }
+        try std.testing.expectEqual(@as(usize, 0), fixed_io.sleep_calls);
+    }
+}
+
 test "WebTransport client handshake and CONNECT share one socket owner" {
     const allocator = std.testing.allocator;
     var threaded = std.Io.Threaded.init(allocator, .{});
@@ -2022,7 +2259,8 @@ test "WebTransport client handshake and CONNECT share one socket owner" {
         1,
         &session,
     );
-    defer session.deinit();
+    var session_owned = true;
+    defer if (session_owned) session.deinit();
     var closed = false;
     while (!closed) {
         var event = try dispatcher.receive(&versions);
@@ -2050,7 +2288,9 @@ test "WebTransport client handshake and CONNECT share one socket owner" {
             .pending_handshake, .discarded_long_header, .new_initial, .unrouted => return error.TestUnexpectedResult,
         }
     }
-    try std.testing.expect(try dispatcher.unregisterConnection(1));
+    session.deinit();
+    session_owned = false;
+    try std.testing.expectEqual(@as(usize, 0), dispatcher.connectionCount());
     server_thread.join();
     server_joined = true;
     if (server_task.err) |err| return err;
@@ -2901,6 +3141,22 @@ test "WebTransport client CONNECT polling defers paced feedback and credit" {
         attempt.h3.?.qpack_decoder_send.next_offset > decoder_offset,
     );
     var session: runtime.HandshakeClientSession = undefined;
+    const peer_settings = attempt.h3.?.control.settings.peer;
+    attempt.h3.?.control.settings.peer.h3_datagram = false;
+    try std.testing.expectError(
+        error.DatagramsNotNegotiated,
+        attempt.requireAcceptedForDispatcher(
+            &dispatcher,
+            handle,
+            &session,
+        ),
+    );
+    try std.testing.expectEqual(@as(usize, 1), dispatcher.connectionCount());
+    try std.testing.expectError(
+        error.InvalidDispatcherState,
+        attempt.requireAccepted(),
+    );
+    attempt.h3.?.control.settings.peer = peer_settings;
     try attempt.requireAcceptedForDispatcher(
         &dispatcher,
         handle,
@@ -2911,9 +3167,262 @@ test "WebTransport client CONNECT polling defers paced feedback and credit" {
     try std.testing.expectEqual(@as(usize, 1), dispatcher.connectionCount());
     try std.testing.expectEqual(@as(usize, 0), fixed_io.sleep_calls);
     try std.testing.expectEqual(@as(u16, 200), session.response.status);
-    try std.testing.expect(try dispatcher.unregisterConnection(handle));
     session.deinit();
     session_owned = false;
+    try std.testing.expectEqual(@as(usize, 0), dispatcher.connectionCount());
+}
+
+test "WebTransport dispatcher client stream polls do not wait for credit" {
+    const allocator = std.testing.allocator;
+    var threaded = std.Io.Threaded.init(allocator, .{});
+    defer threaded.deinit();
+    const io = threaded.io();
+
+    var endpoint = try quic.runtime.Endpoint.bind(
+        allocator,
+        io,
+        .{ .ip4 = .loopback(0) },
+        .{ .max_datagram_size = 4096 },
+    );
+    defer endpoint.deinit();
+    var peer_endpoint = try quic.runtime.Endpoint.bind(
+        allocator,
+        io,
+        .{ .ip4 = .loopback(0) },
+        .{ .max_datagram_size = 4096 },
+    );
+    defer peer_endpoint.deinit();
+    const keys = quic.protection.deriveAes128Keys(
+        [_]u8{0xe7} ** quic.protection.secret_len,
+    );
+    const settings = webtransport.defaultSettings(.{});
+    var local_parameters = quic.practical_transport_parameters;
+    local_parameters.initial_max_data = 128;
+    local_parameters.initial_max_stream_data_uni = 64;
+    var h3 = try http3.runtime.HandshakeClient.initEstablished(
+        &endpoint,
+        peer_endpoint.address(),
+        try quic.handshake.establishPreconfigured(
+            &endpoint,
+            peer_endpoint.address(),
+            .client,
+            .{
+                .receive_keys = keys,
+                .send_keys = keys,
+                .local_connection_id = "wt-poll-client",
+                .peer_connection_id = "wt-poll-server",
+                .local_transport_parameters = local_parameters,
+                .one_rtt = .{
+                    .max_datagram_size = 1200,
+                    .pacing_max_burst_packets = 1,
+                    .receive_window = 64,
+                    .stream_receive_window = 64,
+                },
+            },
+        ),
+        .{ .local_settings = settings },
+    );
+    var h3_owned = true;
+    defer if (h3_owned) h3.deinit();
+    h3.control.settings.markSent(settings);
+    h3.control.settings.markReceived(settings);
+    try h3.connect_datagrams.register(0);
+    var streams = try handshake_stream.initRegistry(
+        allocator,
+        .init(0),
+        .client,
+        settings,
+        settings,
+        8,
+        4,
+        14,
+    );
+    var streams_owned = true;
+    defer if (streams_owned) streams.deinit();
+
+    var response = http3.DecodedResponseHead{
+        .status = 200,
+        .headers = &.{},
+        .content_length = null,
+        .consumed = 0,
+        .body_allowed = true,
+        .qpack_section_acknowledgments = 0,
+    };
+    var response_owned = true;
+    defer if (response_owned) response.deinit(allocator);
+    var dispatcher = quic.endpoint_dispatcher.Dispatcher.init(
+        allocator,
+        &endpoint,
+    );
+    defer dispatcher.deinit();
+    const handle: quic.endpoint_dispatcher.ConnectionHandle = 25;
+    try dispatcher.registerConnection(handle, &h3.established.connection);
+    var session = runtime.HandshakeClientSession{
+        .h3 = h3,
+        .session_id = .init(0),
+        .response = response,
+        .streams = streams,
+        .control = try session_control.Control.init(.init(0)),
+        .dispatcher = &dispatcher,
+        .dispatcher_handle = handle,
+    };
+    h3_owned = false;
+    streams_owned = false;
+    response_owned = false;
+    defer session.deinit();
+    defer _ = dispatcher.unregisterConnection(handle) catch false;
+    try dispatcher.replaceConnection(
+        handle,
+        &session.h3.established.connection,
+    );
+
+    var fixed_io = FixedClockIo{
+        .delegate = endpoint.io,
+        .now_ns = 3_000_000,
+    };
+    var fixed_vtable = endpoint.io.vtable.*;
+    fixed_vtable.now = FixedClockIo.now;
+    fixed_vtable.sleep = FixedClockIo.sleep;
+    fixed_vtable.netSend = FixedClockIo.netSend;
+    endpoint.io = .{
+        .userdata = &fixed_io,
+        .vtable = &fixed_vtable,
+    };
+    defer endpoint.io = fixed_io.delegate;
+
+    var incremental_bytes: std.ArrayList(u8) = .empty;
+    defer incremental_bytes.deinit(allocator);
+    try webtransport.UnidirectionalStreamHeader.writeWebTransport(
+        &incremental_bytes,
+        allocator,
+        session.session_id,
+    );
+    try incremental_bytes.appendSlice(allocator, &([_]u8{'i'} ** 40));
+    try quic.one_rtt.testing.applyReceivedFrames(
+        &session.h3.established.connection,
+        0,
+        &.{.{ .stream = .{
+            .stream_id = 3,
+            .data = incremental_bytes.items,
+        } }},
+        @intCast(fixed_io.now_ns),
+        .not_ect,
+    );
+    quic.one_rtt.testing.exhaustPacingAt(
+        &session.h3.established.connection,
+        @intCast(fixed_io.now_ns),
+    );
+    const packet_number = session.h3.established.connection.next_packet_number;
+    var buffer: [64]u8 = undefined;
+    try std.testing.expect((try session.pollStream(&buffer)) == null);
+    try std.testing.expectEqual(@as(usize, 0), fixed_io.sleep_calls);
+    try std.testing.expectEqual(
+        packet_number,
+        session.h3.established.connection.next_packet_number,
+    );
+    const deferred_incremental = session.streams.get(3) orelse
+        return error.TestUnexpectedResult;
+    try std.testing.expect(deferred_incremental.prefix_received);
+    try std.testing.expectEqual(
+        @as(u64, 0),
+        deferred_incremental.bytes_received,
+    );
+    try std.testing.expectEqual(
+        @as(usize, 40),
+        quic.one_rtt.testing.receiveStreamAvailableLen(
+            &session.h3.established.connection,
+            3,
+        ).?,
+    );
+
+    var timer = dispatcher.nextTimerDeadline() orelse
+        return error.TestUnexpectedResult;
+    try std.testing.expectEqual(
+        quic.one_rtt.TimerDeadlineKind.pacing,
+        timer.timer.kind,
+    );
+    fixed_io.now_ns = @intCast(timer.timer.deadline_ns);
+    _ = (try dispatcher.serviceNextTimerAt(timer.timer.deadline_ns)) orelse
+        return error.TestUnexpectedResult;
+    const incremental = (try session.pollStream(&buffer)) orelse
+        return error.TestUnexpectedResult;
+    try std.testing.expect(incremental == .data);
+    try std.testing.expectEqual(@as(u62, 3), incremental.data.stream_id);
+    try std.testing.expectEqualStrings(
+        &([_]u8{'i'} ** 40),
+        buffer[0..incremental.data.bytes],
+    );
+    try std.testing.expectEqual(@as(usize, 0), fixed_io.sleep_calls);
+
+    var whole_bytes: std.ArrayList(u8) = .empty;
+    defer whole_bytes.deinit(allocator);
+    try webtransport.UnidirectionalStreamHeader.writeWebTransport(
+        &whole_bytes,
+        allocator,
+        session.session_id,
+    );
+    try whole_bytes.appendSlice(allocator, &([_]u8{'w'} ** 40));
+    try quic.one_rtt.testing.applyReceivedFrames(
+        &session.h3.established.connection,
+        1,
+        &.{.{ .stream = .{
+            .stream_id = 7,
+            .data = whole_bytes.items,
+            .fin = true,
+        } }},
+        @intCast(fixed_io.now_ns),
+        .not_ect,
+    );
+    quic.one_rtt.testing.exhaustPacingAt(
+        &session.h3.established.connection,
+        @intCast(fixed_io.now_ns),
+    );
+    try std.testing.expect((try session.pollCompleteStream()) == null);
+    try std.testing.expectEqual(@as(usize, 0), fixed_io.sleep_calls);
+    const deferred_whole = session.streams.get(7) orelse
+        return error.TestUnexpectedResult;
+    try std.testing.expect(deferred_whole.prefix_received);
+    try std.testing.expectEqual(
+        @as(u64, 0),
+        deferred_whole.bytes_received,
+    );
+    try std.testing.expectEqual(
+        whole_bytes.items.len,
+        quic.one_rtt.testing.receiveStreamAvailableLen(
+            &session.h3.established.connection,
+            7,
+        ).?,
+    );
+
+    timer = dispatcher.nextTimerDeadline() orelse
+        return error.TestUnexpectedResult;
+    fixed_io.now_ns = @intCast(timer.timer.deadline_ns);
+    _ = (try dispatcher.serviceNextTimerAt(timer.timer.deadline_ns)) orelse
+        return error.TestUnexpectedResult;
+    var whole = (try session.pollCompleteStream()) orelse
+        return error.TestUnexpectedResult;
+    defer whole.deinit();
+    try std.testing.expectEqual(@as(u62, 7), whole.stream_id);
+    try std.testing.expectEqualStrings(&([_]u8{'w'} ** 40), whole.payload);
+    try std.testing.expectEqual(@as(usize, 0), fixed_io.sleep_calls);
+
+    try std.testing.expectError(
+        error.InvalidDispatcherState,
+        session.receiveDatagramWithTimeout(.fromMilliseconds(1)),
+    );
+    try std.testing.expectError(
+        error.InvalidDispatcherState,
+        session.receiveStreamWithTimeout(.fromMilliseconds(1)),
+    );
+    try std.testing.expectError(
+        error.InvalidDispatcherState,
+        session.readStreamWithTimeout(&buffer, .fromMilliseconds(1)),
+    );
+    try std.testing.expectError(
+        error.InvalidDispatcherState,
+        session.receiveSessionEventWithTimeout(.fromMilliseconds(1)),
+    );
+    try std.testing.expectEqual(@as(usize, 0), fixed_io.sleep_calls);
 }
 
 test "WebTransport client polls complete rejected CONNECT entity" {

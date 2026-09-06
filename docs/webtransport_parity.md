@@ -442,6 +442,14 @@ explicitly replaced because moving the owning state changes its connection
 address. The atomic `replaceConnection` operation preserves all CID routes and
 timer identity while swapping that pointer, avoiding an unregister/register
 gap.
+The promoted client session now retains its dispatcher binding. Its stream,
+DATAGRAM, Capsule, reset/stop, drain/close, and stream-open operations select
+single-attempt transport primitives and refresh the dispatcher timer after
+success, backpressure, or parse failure. Blocking receive/service helpers fail
+with `InvalidDispatcherState` on this object rather than competing for the
+shared UDP socket. Incremental and whole-stream reads preserve transport bytes
+until receive credit commits, while terminal cleanup advances at most one FIN,
+RESET_STREAM, or STOP_SENDING packet per endpoint turn.
 `beginConnectFrom` now composes the preceding phase as well: a sole endpoint
 owner can feed a CID-bound handshake inbox, receive a pending WebTransport
 CONNECT on the caller-owned endpoint, then register and drive it through the
