@@ -96,7 +96,8 @@ pub const Error = http2.Error || http1_runtime.Error || tls_stream.Error || erro
     InvalidAlpn,
     PostHandshakeTlsUnavailable,
     InvalidServeOptions,
-} || net.IpAddress.ListenError || net.IpAddress.ConnectError || net.HostName.ValidateError || net.HostName.ConnectError || net.Server.AcceptError || net.Stream.Reader.Error || net.Stream.Writer.Error || std.posix.SetSockOptError || std.Thread.SpawnError;
+    SocketOptionFailed,
+} || net.IpAddress.ListenError || net.IpAddress.ConnectError || net.HostName.ValidateError || net.HostName.ConnectError || net.Server.AcceptError || net.Stream.Reader.Error || net.Stream.Writer.Error || std.Thread.SpawnError;
 pub const ResponseTimeoutError = Error || std.Io.Timeout.Error;
 pub const RequestTimeoutError = Error || std.Io.Timeout.Error;
 

@@ -56,7 +56,8 @@ pub const Error = websocket.Error || http1_runtime.Error ||
     InvalidServeOptions,
     ExporterUnavailable,
     TlsKeyUpdateUnavailable,
-} || std.Io.RandomSecureError || net.HostName.ValidateError || net.HostName.ConnectError || net.Stream.Reader.Error || net.Stream.Writer.Error || std.posix.SetSockOptError;
+    SocketOptionFailed,
+} || std.Io.RandomSecureError || net.HostName.ValidateError || net.HostName.ConnectError || net.Stream.Reader.Error || net.Stream.Writer.Error;
 
 pub const Limits = common.Limits;
 pub const Role = common.Role;
