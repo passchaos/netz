@@ -8,7 +8,10 @@
 const std = @import("std");
 const http2 = @import("../http2/mod.zig");
 const call = @import("call.zig");
+const compression = @import("compression.zig");
 const metadata_mod = @import("metadata.zig");
+const duplex = @import("stream/duplex.zig");
+const stream_codec = @import("stream/codec.zig");
 const wire = @import("wire.zig");
 
 pub const check_path = "/grpc.health.v1.Health/Check";
@@ -58,6 +61,180 @@ pub const CheckResult = union(enum) {
 pub const CheckError = Error || call.Error || error{
     NotHealthCheckRequest,
 };
+
+pub const WatchOptions = struct {
+    service: []const u8 = "",
+    authority: ?[]const u8 = null,
+    scheme: ?[]const u8 = null,
+    metadata: []const http2.Hpack.HeaderField = &.{},
+    binary_metadata: []const metadata_mod.BinaryMetadata = &.{},
+    accepted_encodings: compression.AlgorithmSet = .supported,
+    max_message_size: usize = 16 * 1024 * 1024,
+};
+
+pub const WatchEvent = union(enum) {
+    status: Response,
+    terminal: duplex.Response,
+
+    pub fn deinit(self: *WatchEvent) void {
+        switch (self.*) {
+            .terminal => |*terminal| terminal.deinit(),
+            .status => {},
+        }
+        self.* = undefined;
+    }
+};
+
+pub const WatchError = Error || duplex.Error || error{
+    NotHealthWatchRequest,
+};
+
+/// One active server-streaming Health `Watch`. The value exclusively owns the
+/// underlying HTTP/2 connection reader until cancellation, terminal status,
+/// or deinitialization.
+pub const ClientWatch = struct {
+    allocator: std.mem.Allocator,
+    stream: duplex.ClientDuplex,
+    pending: std.ArrayList(Response) = .empty,
+    pending_head: usize = 0,
+    request_pending: bool = false,
+    terminal_seen: bool = false,
+
+    pub fn deinit(self: *ClientWatch) void {
+        self.pending.deinit(self.allocator);
+        self.stream.deinit();
+        self.* = undefined;
+    }
+
+    /// Send RST_STREAM(CANCEL). The owning HTTP/2 connection is reusable once
+    /// this succeeds and the watch is deinitialized.
+    pub fn cancel(self: *ClientWatch) WatchError!void {
+        if (self.terminal_seen) return error.ConnectionClosed;
+        try self.stream.reset(.cancel);
+        self.terminal_seen = true;
+    }
+
+    pub fn next(self: *ClientWatch) WatchError!WatchEvent {
+        return self.nextUntil(null);
+    }
+
+    pub fn nextWithTimeout(
+        self: *ClientWatch,
+        timeout: std.Io.Duration,
+    ) WatchError!WatchEvent {
+        if (timeout.nanoseconds <= 0) return error.Timeout;
+        return self.nextWithDeadline(.fromNow(
+            self.stream.transport.connection.io,
+            .{ .raw = timeout, .clock = .awake },
+        ));
+    }
+
+    pub fn nextWithDeadline(
+        self: *ClientWatch,
+        deadline: std.Io.Clock.Timestamp,
+    ) WatchError!WatchEvent {
+        return self.nextUntil(deadline);
+    }
+
+    fn nextUntil(
+        self: *ClientWatch,
+        deadline: ?std.Io.Clock.Timestamp,
+    ) WatchError!WatchEvent {
+        if (self.takePending()) |response| {
+            return .{ .status = response };
+        }
+        if (self.terminal_seen) return error.ConnectionClosed;
+        try self.resumeRequestIfNeeded();
+
+        while (true) {
+            var event = if (deadline) |absolute|
+                try self.stream.readResponseEventWithDeadline(
+                    absolute,
+                    self,
+                    collectResponse,
+                )
+            else
+                try self.stream.readResponseEvent(
+                    self,
+                    collectResponse,
+                );
+            switch (event) {
+                .terminal => |terminal| {
+                    event = undefined;
+                    self.terminal_seen = true;
+                    return .{ .terminal = terminal };
+                },
+                .informational, .initial_metadata => {
+                    event.deinit(self.allocator);
+                    try self.resumeRequestIfNeeded();
+                },
+                .messages => {
+                    event.deinit(self.allocator);
+                    if (self.takePending()) |response| {
+                        return .{ .status = response };
+                    }
+                    try self.resumeRequestIfNeeded();
+                },
+            }
+        }
+    }
+
+    fn collectResponse(
+        self: *ClientWatch,
+        message: stream_codec.DecodedMessage,
+    ) WatchError!void {
+        try self.pending.append(
+            self.allocator,
+            try decodeResponse(message.payload),
+        );
+    }
+
+    fn resumeRequestIfNeeded(self: *ClientWatch) WatchError!void {
+        if (!self.request_pending) return;
+        self.request_pending = switch (try self.stream.resumeMessage()) {
+            .complete => false,
+            .peer_event => true,
+        };
+    }
+
+    fn takePending(self: *ClientWatch) ?Response {
+        if (self.pending_head == self.pending.items.len) return null;
+        const result = self.pending.items[self.pending_head];
+        self.pending_head += 1;
+        if (self.pending_head == self.pending.items.len) {
+            self.pending.clearRetainingCapacity();
+            self.pending_head = 0;
+        }
+        return result;
+    }
+};
+
+pub fn startWatch(
+    connection: *http2.runtime.Connection,
+    allocator: std.mem.Allocator,
+    options: WatchOptions,
+) WatchError!ClientWatch {
+    const request = try encodeRequestAlloc(allocator, .{
+        .service = options.service,
+    });
+    defer allocator.free(request);
+    var stream = try duplex.startDuplex(connection, allocator, .{
+        .path = watch_path,
+        .authority = options.authority,
+        .scheme = options.scheme,
+        .accepted_encodings = options.accepted_encodings,
+        .metadata = options.metadata,
+        .binary_metadata = options.binary_metadata,
+        .max_message_size = options.max_message_size,
+    });
+    errdefer stream.deinit();
+    const write_result = try stream.writeFinalMessage(request);
+    return .{
+        .allocator = allocator,
+        .stream = stream,
+        .request_pending = write_result == .peer_event,
+    };
+}
 
 pub fn encodeRequestAlloc(
     allocator: std.mem.Allocator,
@@ -211,6 +388,138 @@ pub fn writeCheckResponse(
     });
 }
 
+/// Serve one accepted Health `Watch` until the client cancels it. The request
+/// must contain exactly one message and reach END_STREAM before the response
+/// starts. Registry updates and peer cancellation are awaited concurrently so
+/// an idle watch never hides a canceled HTTP/2 stream.
+pub fn serveWatch(
+    stream: *duplex.ServerDuplex,
+    registry: *Registry,
+) (WatchError || std.Io.ConcurrentError)!void {
+    if (!std.mem.eql(u8, stream.path, watch_path) or
+        !std.mem.eql(u8, stream.service, "grpc.health.v1.Health") or
+        !std.mem.eql(u8, stream.method, "Watch"))
+    {
+        return error.NotHealthWatchRequest;
+    }
+
+    const RequestCollector = struct {
+        service: [max_service_name_len]u8 = undefined,
+        service_len: usize = 0,
+        message_seen: bool = false,
+        invalid: bool = false,
+
+        fn consume(
+            self: *@This(),
+            message: stream_codec.DecodedMessage,
+        ) Error!void {
+            if (self.message_seen) {
+                self.invalid = true;
+                return;
+            }
+            self.message_seen = true;
+            const request = decodeRequest(message.payload) catch {
+                self.invalid = true;
+                return;
+            };
+            @memcpy(self.service[0..request.service.len], request.service);
+            self.service_len = request.service.len;
+        }
+    };
+    var collector: RequestCollector = .{};
+    while (true) {
+        var event = stream.readRequestEvent(
+            &collector,
+            RequestCollector.consume,
+        ) catch |err| return err;
+        defer event.deinit();
+        switch (event) {
+            .messages => {},
+            .finished => |terminal| {
+                if (terminal.message_count != 1 or
+                    !collector.message_seen or collector.invalid)
+                {
+                    try stream.finish(
+                        .internal,
+                        "could not parse request",
+                        &.{},
+                        &.{},
+                    );
+                    return;
+                }
+                break;
+            },
+            .reset => return,
+        }
+    }
+
+    var cursor = try registry.watch(collector.service[0..collector.service_len]);
+    defer cursor.deinit();
+    try stream.startResponse(.{
+        .request_accepted_encodings = stream.accepted_encodings,
+    });
+    if (!try writeWatchSnapshot(stream, try cursor.next())) return;
+
+    while (true) {
+        const UpdateResult = WatchCursor.WaitError!Snapshot;
+        const ResetResult = duplex.Error!http2.ResetStreamPayload;
+        const Wake = union(enum) {
+            update: UpdateResult,
+            reset: ResetResult,
+        };
+        var storage: [2]Wake = undefined;
+        var select: std.Io.Select(Wake) = .init(registry.io, &storage);
+        var select_done = false;
+        defer if (!select_done) select.cancelDiscard();
+        try select.concurrent(.update, WatchCursor.next, .{&cursor});
+        try select.concurrent(
+            .reset,
+            duplex.ServerDuplex.waitForPeerReset,
+            .{stream},
+        );
+        switch (try select.await()) {
+            .update => |result| {
+                const snapshot = try result;
+                while (select.cancel()) |remaining| switch (remaining) {
+                    .update => |other| _ = other catch |err| switch (err) {
+                        error.Canceled => {},
+                        else => return err,
+                    },
+                    .reset => |other| {
+                        _ = other catch |err| switch (err) {
+                            error.Canceled => continue,
+                            else => return err,
+                        };
+                        select_done = true;
+                        return;
+                    },
+                };
+                select_done = true;
+                if (!try writeWatchSnapshot(stream, snapshot)) return;
+            },
+            .reset => |result| {
+                _ = try result;
+                select.cancelDiscard();
+                select_done = true;
+                return;
+            },
+        }
+    }
+}
+
+fn writeWatchSnapshot(
+    stream: *duplex.ServerDuplex,
+    snapshot: Snapshot,
+) WatchError!bool {
+    const encoded = try encodeResponseAlloc(stream.allocator, .{
+        .status = snapshot.status,
+    });
+    defer stream.allocator.free(encoded);
+    if (try stream.writeMessage(encoded) == .complete) return true;
+    _ = try stream.waitForPeerReset();
+    return false;
+}
+
 pub const Snapshot = struct {
     status: ServingStatus,
     generation: u64,
@@ -329,7 +638,7 @@ pub const Registry = struct {
     }
 
     fn notifyLocked(self: *Registry) void {
-        self.generation +%= 1;
+        self.generation += 1;
         _ = self.wake_epoch.fetchAdd(1, .release);
         self.io.futexWake(
             u32,
@@ -701,4 +1010,47 @@ test "gRPC health watch wakes concurrently on service registration" {
     thread.join();
     if (shared.err) |err| return err;
     try std.testing.expectEqual(ServingStatus.serving, shared.status.?);
+}
+
+test "gRPC health registry wakes every cursor" {
+    const allocator = std.testing.allocator;
+    var threaded = std.Io.Threaded.init(allocator, .{
+        .async_limit = .unlimited,
+    });
+    defer threaded.deinit();
+    const io = threaded.io();
+    var registry = try Registry.init(allocator, io);
+    defer registry.deinit();
+
+    const Worker = struct {
+        cursor: WatchCursor,
+        status: ?ServingStatus = null,
+        err: ?anyerror = null,
+
+        fn run(self: *@This()) void {
+            const snapshot = self.cursor.nextWithTimeout(
+                .fromSeconds(2),
+            ) catch |err| {
+                self.err = err;
+                return;
+            };
+            self.status = snapshot.status;
+        }
+    };
+    var first = Worker{ .cursor = try registry.watch("echo") };
+    defer first.cursor.deinit();
+    var second = Worker{ .cursor = try registry.watch("echo") };
+    defer second.cursor.deinit();
+    _ = try first.cursor.next();
+    _ = try second.cursor.next();
+    const first_thread = try std.Thread.spawn(.{}, Worker.run, .{&first});
+    const second_thread = try std.Thread.spawn(.{}, Worker.run, .{&second});
+    try std.Io.sleep(io, .fromMilliseconds(1), .awake);
+    try std.testing.expect(try registry.setStatus("echo", .serving));
+    first_thread.join();
+    second_thread.join();
+    if (first.err) |err| return err;
+    if (second.err) |err| return err;
+    try std.testing.expectEqual(ServingStatus.serving, first.status.?);
+    try std.testing.expectEqual(ServingStatus.serving, second.status.?);
 }

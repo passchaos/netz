@@ -176,6 +176,234 @@ test "gRPC h2c health Check serves known and unknown services" {
     if (shared.err) |err| return err;
 }
 
+test "gRPC h2c health Watch streams changes and observes cancellation" {
+    const allocator = std.testing.allocator;
+    var threaded = std.Io.Threaded.init(allocator, .{
+        .async_limit = .unlimited,
+    });
+    defer threaded.deinit();
+    const io = threaded.io();
+    var registry = try grpc.health.Registry.init(allocator, io);
+    defer registry.deinit();
+    var server = try grpc.runtime.Server.listen(
+        allocator,
+        io,
+        .{ .ip4 = .loopback(0) },
+        .{ .max_frame_payload = 4096, .max_body_bytes = 4096 },
+        1024,
+    );
+    defer server.deinit();
+
+    const Shared = struct {
+        server: *grpc.runtime.Server,
+        registry: *grpc.health.Registry,
+        watch_done: std.Io.Event = .unset,
+        err: ?anyerror = null,
+
+        fn run(self: *@This()) void {
+            self.runFallible() catch |err| {
+                self.err = err;
+            };
+        }
+
+        fn runFallible(self: *@This()) !void {
+            var connection = try self.server.accept();
+            defer connection.deinit();
+            var watch = try connection.acceptDuplex();
+            var watch_live = true;
+            defer if (watch_live) watch.deinit();
+            try connection.serveHealthWatch(self.registry, &watch);
+            watch.deinit();
+            watch_live = false;
+            self.watch_done.set(self.registry.io);
+
+            var request = try connection.readUnary();
+            defer request.deinit();
+            try std.testing.expectEqualStrings(
+                "after",
+                request.request.message.payload,
+            );
+            try connection.writeUnary(request.request.stream_id, .{
+                .message = "reused",
+            });
+        }
+    };
+    var shared = Shared{ .server = &server, .registry = &registry };
+    const thread = try std.Thread.spawn(.{}, Shared.run, .{&shared});
+    var joined = false;
+    defer if (!joined) thread.join();
+
+    var client = try grpc.runtime.Client.connect(
+        allocator,
+        io,
+        server.address(),
+        .{ .max_frame_payload = 4096, .max_body_bytes = 4096 },
+    );
+    defer client.deinit();
+    var watch = try client.startHealthWatch(.{
+        .authority = "localhost",
+        .service = "demo.Echo",
+    });
+    var watch_live = true;
+    defer if (watch_live) watch.deinit();
+
+    var initial = try watch.nextWithTimeout(.fromSeconds(2));
+    defer initial.deinit();
+    try std.testing.expectEqual(
+        grpc.health.ServingStatus.service_unknown,
+        initial.status.status,
+    );
+    try std.testing.expectError(
+        error.Timeout,
+        watch.nextWithTimeout(.fromMilliseconds(1)),
+    );
+    // Queue a sibling unary request while Watch owns the connection reader.
+    // The server must keep streaming Watch updates while preserving this
+    // request, and the client must preserve its response for the later read.
+    var sibling = try client.startStreaming(.{
+        .path = "/demo.Echo/Unary",
+        .authority = "localhost",
+    });
+    defer sibling.deinit();
+    try sibling.writeMessage("after");
+    try sibling.finish();
+    try std.testing.expect(try registry.setStatus(
+        "demo.Echo",
+        .serving,
+    ));
+    var serving = try watch.nextWithTimeout(.fromSeconds(2));
+    defer serving.deinit();
+    try std.testing.expectEqual(
+        grpc.health.ServingStatus.serving,
+        serving.status.status,
+    );
+    try std.testing.expect(try registry.setStatus(
+        "demo.Echo",
+        .not_serving,
+    ));
+    var not_serving = try watch.nextWithTimeout(.fromSeconds(2));
+    defer not_serving.deinit();
+    try std.testing.expectEqual(
+        grpc.health.ServingStatus.not_serving,
+        not_serving.status.status,
+    );
+    try std.testing.expect(try registry.clearStatus("demo.Echo"));
+    var cleared = try watch.nextWithTimeout(.fromSeconds(2));
+    defer cleared.deinit();
+    try std.testing.expectEqual(
+        grpc.health.ServingStatus.service_unknown,
+        cleared.status.status,
+    );
+
+    try watch.cancel();
+    watch.deinit();
+    watch_live = false;
+    try shared.watch_done.waitTimeout(io, .{ .duration = .{
+        .raw = .fromSeconds(2),
+        .clock = .awake,
+    } });
+    const Collector = struct {
+        count: usize = 0,
+
+        fn consume(self: *@This(), message: grpc.StreamingMessage) !void {
+            if (self.count != 0) return error.UnexpectedMessage;
+            try std.testing.expectEqualStrings("reused", message.payload);
+            self.count += 1;
+        }
+    };
+    var collector: Collector = .{};
+    var response = try sibling.readResponse(&collector, Collector.consume);
+    defer response.deinit();
+    try std.testing.expectEqual(grpc.Status.ok, response.status);
+    try std.testing.expectEqual(@as(usize, 1), collector.count);
+
+    thread.join();
+    joined = true;
+    if (shared.err) |err| return err;
+}
+
+test "gRPC h2c health Watch rejects malformed protobuf" {
+    const allocator = std.testing.allocator;
+    var threaded = std.Io.Threaded.init(allocator, .{});
+    defer threaded.deinit();
+    const io = threaded.io();
+    var registry = try grpc.health.Registry.init(allocator, io);
+    defer registry.deinit();
+    var server = try grpc.runtime.Server.listen(
+        allocator,
+        io,
+        .{ .ip4 = .loopback(0) },
+        .{ .max_frame_payload = 4096, .max_body_bytes = 4096 },
+        1024,
+    );
+    defer server.deinit();
+
+    const Shared = struct {
+        server: *grpc.runtime.Server,
+        registry: *grpc.health.Registry,
+        err: ?anyerror = null,
+
+        fn run(self: *@This()) void {
+            var connection = self.server.accept() catch |err| {
+                self.err = err;
+                return;
+            };
+            defer connection.deinit();
+            var stream = connection.acceptDuplex() catch |err| {
+                self.err = err;
+                return;
+            };
+            defer stream.deinit();
+            connection.serveHealthWatch(
+                self.registry,
+                &stream,
+            ) catch |err| {
+                self.err = err;
+            };
+        }
+    };
+    const Consumer = struct {
+        fn consume(_: void, _: grpc.StreamingMessage) !void {
+            return error.UnexpectedMessage;
+        }
+    };
+    var shared = Shared{ .server = &server, .registry = &registry };
+    const thread = try std.Thread.spawn(.{}, Shared.run, .{&shared});
+    var joined = false;
+    defer if (!joined) thread.join();
+
+    var client = try grpc.runtime.Client.connect(
+        allocator,
+        io,
+        server.address(),
+        .{ .max_frame_payload = 4096, .max_body_bytes = 4096 },
+    );
+    defer client.deinit();
+    var stream = try client.startDuplex(.{
+        .path = grpc.health.watch_path,
+        .authority = "localhost",
+    });
+    defer stream.deinit();
+    try std.testing.expectEqual(
+        grpc.DuplexWriteResult.complete,
+        try stream.writeFinalMessage(&.{ 0x0a, 0x02, 'x' }),
+    );
+    var terminal = try stream.readResponseEvent({}, Consumer.consume);
+    defer terminal.deinit(allocator);
+    try std.testing.expectEqual(
+        grpc.Status.internal,
+        terminal.terminal.status,
+    );
+    try std.testing.expectEqualStrings(
+        "could not parse request",
+        terminal.terminal.status_message,
+    );
+
+    thread.join();
+    joined = true;
+    if (shared.err) |err| return err;
+}
+
 test "gRPC h2c runtime composes sequential message streams" {
     const allocator = std.testing.allocator;
     var threaded = std.Io.Threaded.init(allocator, .{});
@@ -430,7 +658,7 @@ test "gRPC TLS runtime serves health Check" {
     const public_key = key_pair.public_key.toUncompressedSec1();
     var registry = try grpc.health.Registry.init(allocator, io);
     defer registry.deinit();
-    try std.testing.expect(try registry.setStatus("", .not_serving));
+    try std.testing.expect(registry.enterGracefulShutdown());
     var server = try grpc.runtime.TlsServer.listen(
         allocator,
         io,
@@ -500,6 +728,108 @@ test "gRPC TLS runtime serves health Check" {
         grpc.health.ServingStatus.not_serving,
         result.response.status,
     );
+
+    thread.join();
+    joined = true;
+    if (shared.err) |err| return err;
+}
+
+test "gRPC TLS runtime streams health Watch updates" {
+    const allocator = std.testing.allocator;
+    var threaded = std.Io.Threaded.init(allocator, .{
+        .async_limit = .unlimited,
+    });
+    defer threaded.deinit();
+    const io = threaded.io();
+    var certificate_der: [tls_testing.certificate_der_len]u8 = undefined;
+    try std.base64.standard.Decoder.decode(
+        &certificate_der,
+        tls_testing.certificate_base64,
+    );
+    const key_pair = try tls_testing.serverKeyPair();
+    const public_key = key_pair.public_key.toUncompressedSec1();
+    var registry = try grpc.health.Registry.init(allocator, io);
+    defer registry.deinit();
+    var server = try grpc.runtime.TlsServer.listen(
+        allocator,
+        io,
+        .{ .ip4 = .loopback(0) },
+        .{ .transport = .{
+            .identity = .{
+                .certificate_chain = &.{&certificate_der},
+                .signer = .{ .ecdsa_p256_sha256 = .{
+                    .key_pair = key_pair,
+                } },
+            },
+            .limits = .{
+                .max_frame_payload = 4096,
+                .max_body_bytes = 4096,
+            },
+        } },
+    );
+    defer server.deinit();
+
+    const Shared = struct {
+        server: *grpc.runtime.TlsServer,
+        registry: *grpc.health.Registry,
+        err: ?anyerror = null,
+
+        fn run(self: *@This()) void {
+            var connection = self.server.accept() catch |err| {
+                self.err = err;
+                return;
+            };
+            defer connection.deinit();
+            var watch = connection.acceptDuplex() catch |err| {
+                self.err = err;
+                return;
+            };
+            defer watch.deinit();
+            connection.serveHealthWatch(
+                self.registry,
+                &watch,
+            ) catch |err| {
+                self.err = err;
+            };
+        }
+    };
+    var shared = Shared{ .server = &server, .registry = &registry };
+    const thread = try std.Thread.spawn(.{}, Shared.run, .{&shared});
+    var joined = false;
+    defer if (!joined) thread.join();
+
+    var client = try grpc.runtime.Client.connectTlsHost(
+        allocator,
+        io,
+        "localhost",
+        server.address().ip4.port,
+        .{
+            .limits = .{
+                .max_frame_payload = 4096,
+                .max_body_bytes = 4096,
+            },
+            .tls = .{ .server_verifier = .{
+                .pinned_ecdsa_p256_public_key = public_key,
+            } },
+        },
+    );
+    defer client.deinit();
+    var watch = try client.startHealthWatch(.{});
+    defer watch.deinit();
+    var initial = try watch.nextWithTimeout(.fromSeconds(2));
+    defer initial.deinit();
+    try std.testing.expectEqual(
+        grpc.health.ServingStatus.serving,
+        initial.status.status,
+    );
+    try std.testing.expect(try registry.setStatus("", .not_serving));
+    var changed = try watch.nextWithTimeout(.fromSeconds(2));
+    defer changed.deinit();
+    try std.testing.expectEqual(
+        grpc.health.ServingStatus.not_serving,
+        changed.status.status,
+    );
+    try watch.cancel();
 
     thread.join();
     joined = true;

@@ -86,6 +86,17 @@ pub const Client = struct {
         );
     }
 
+    pub fn startHealthWatch(
+        self: *Client,
+        options: health.WatchOptions,
+    ) health.WatchError!health.ClientWatch {
+        return health.startWatch(
+            &self.connection,
+            self.connection.allocator,
+            options,
+        );
+    }
+
     /// Start a sequential gRPC message stream on this persistent channel.
     ///
     /// The returned writer borrows the channel connection and must be
@@ -259,6 +270,17 @@ pub const ServerConnection = struct {
             registry,
             &request.request,
         );
+    }
+
+    pub fn serveHealthWatch(
+        self: *ServerConnection,
+        registry: *health.Registry,
+        stream: *duplex.ServerDuplex,
+    ) (health.WatchError || std.Io.ConcurrentError)!void {
+        if (stream.transport.connection != &self.connection) {
+            return error.InvalidStreamState;
+        }
+        return health.serveWatch(stream, registry);
     }
 
     /// Read one complete request message stream, delivering messages as their

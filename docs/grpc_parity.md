@@ -77,7 +77,11 @@ existing HTTP/2 runtime:
   `INVALID_ARGUMENT` for malformed requests,
 - a concurrent health registry with the standard default `SERVING` status,
   per-service updates/removal, graceful shutdown, and timeout/deadline-aware
-  Watch cursors that emit an immediate snapshot and subsequent status changes.
+  Watch cursors that emit an immediate snapshot and subsequent status changes,
+- `grpc.health.v1.Health/Watch` client/server transport adapters over h2c and
+  TLS, with incremental status delivery before END_STREAM, timeout/deadline
+  reads, explicit client `RST_STREAM(CANCEL)`, server cancellation observation,
+  and connection reuse after a canceled watch.
 
 Payloads intentionally remain opaque. This keeps gRPC transport reusable with
 generated or dynamic protobuf implementations; the user-owned
@@ -203,10 +207,9 @@ upstream gRPC Core's `ServerEarlyReturnTest`.
    future work.
 3. Add higher-level application cancellation and streaming deadline policy,
    retry policy, reflection, and broader conformance/interop runners. Health
-   `Check` and the concurrent state/cursor semantics needed by `Watch` are now
-   implemented. A transport-level `Watch` adapter still needs incremental
-   message delivery without waiting for END_STREAM, cancellation, and retry/
-   backoff policy; it is not claimed as complete. Unary transport deadlines
+   `Check` and `Watch` transport semantics are implemented, including
+   incremental Watch delivery and cancellation, but automatic client Watch
+   reconnection/backoff remains application policy. Unary transport deadlines
    are already enforced locally as described above.
 
 The current tests establish unary, sequential streaming, and single-owner

@@ -1002,21 +1002,51 @@ pub const ServerDuplex = struct {
     pub fn waitForPeerReset(
         self: *ServerDuplex,
     ) Error!http2.ResetStreamPayload {
-        return self.transport.waitForPeerReset();
+        return self.finishPeerResetWait(
+            self.transport.waitForPeerReset() catch |err| {
+                if (err != error.Canceled) self.fail(.internal_error);
+                return err;
+            },
+        );
     }
 
     pub fn waitForPeerResetWithTimeout(
         self: *ServerDuplex,
         timeout: std.Io.Duration,
     ) Error!http2.ResetStreamPayload {
-        return self.transport.waitForPeerResetWithTimeout(timeout);
+        const peer_reset = self.transport.waitForPeerResetWithTimeout(
+            timeout,
+        ) catch |err| {
+            if (err != error.Timeout and err != error.Canceled) {
+                self.fail(.internal_error);
+            }
+            return err;
+        };
+        return self.finishPeerResetWait(peer_reset);
     }
 
     pub fn waitForPeerResetWithDeadline(
         self: *ServerDuplex,
         deadline: std.Io.Clock.Timestamp,
     ) Error!http2.ResetStreamPayload {
-        return self.transport.waitForPeerResetWithDeadline(deadline);
+        const peer_reset = self.transport.waitForPeerResetWithDeadline(
+            deadline,
+        ) catch |err| {
+            if (err != error.Timeout and err != error.Canceled) {
+                self.fail(.internal_error);
+            }
+            return err;
+        };
+        return self.finishPeerResetWait(peer_reset);
+    }
+
+    fn finishPeerResetWait(
+        self: *ServerDuplex,
+        peer_reset: http2.ResetStreamPayload,
+    ) http2.ResetStreamPayload {
+        self.discardReceiveState();
+        self.receive_state = .terminal_delivered;
+        return peer_reset;
     }
 
     fn finishRequestDecoder(self: *ServerDuplex) Error!void {

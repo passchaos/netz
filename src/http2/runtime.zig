@@ -12503,7 +12503,13 @@ pub const Connection = struct {
             return error.InvalidStreamId;
         }
         written.* = 0;
-        if (self.pendingApplicationFrameCount() != 0) {
+        // For a client these are response frames for the active request and
+        // must be surfaced before another write. A server may instead have
+        // queued sibling request frames while a long-lived response owns the
+        // reader; those must not stall writes on the active stream.
+        if (self.role == .client and
+            self.pendingApplicationFrameCount() != 0)
+        {
             return error.ResponseAvailable;
         }
         if (data.len == 0) {
@@ -14795,9 +14801,6 @@ pub const ServerDuplexStream = struct {
             if (total > expected or (end_stream and total != expected)) {
                 return error.InvalidContentLength;
             }
-        }
-        if (self.connection.pendingApplicationFrameCount() != 0) {
-            return .{ .written = 0, .response_available = true };
         }
         var sent: usize = 0;
         self.connection.writeDataDuplexTracked(
