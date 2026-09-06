@@ -119,7 +119,7 @@ pub const Set = struct {
         state: State = .promised,
     };
 
-    const ReadyEvent = struct {
+    pub const ReadyEvent = struct {
         index: usize,
         event: PushEvent,
     };
@@ -539,6 +539,43 @@ pub const Set = struct {
             index = if (index + 1 == entry_count) 0 else index + 1;
         }
         return null;
+    }
+
+    /// Reconstruct a terminal event whose reader reached `done` before the
+    /// caller could return its final receive credit. This keeps once-poll
+    /// users from losing FIN when transport feedback is temporarily paced.
+    pub fn nextFinished(
+        self: *Set,
+        target_push_id: ?u64,
+    ) ?ReadyEvent {
+        if (target_push_id) |push_id| {
+            const index = self.push_index.get(push_id) orelse return null;
+            return self.finishedEntryEvent(index);
+        }
+        for (self.entries.items, 0..) |*entry, index| {
+            if (entry.reader == null or !entry.reader.?.finished()) continue;
+            if (self.finishedEntryEvent(index)) |ready| return ready;
+        }
+        return null;
+    }
+
+    fn finishedEntryEvent(self: *Set, index: usize) ?ReadyEvent {
+        if (index >= self.entries.items.len) return null;
+        const entry = &self.entries.items[index];
+        const reader = if (entry.reader) |*value| value else return null;
+        if (!reader.finished()) return null;
+        const push_id = entry.push_id orelse return null;
+        const promise = self.findPromise(push_id) orelse return null;
+        self.last_event_stream_id = reader.streamId();
+        return .{
+            .index = index,
+            .event = .{
+                .push_id = push_id,
+                .request_stream_id = promise.request_stream_id,
+                .stream_id = reader.streamId(),
+                .value = .finished,
+            },
+        };
     }
 
     fn nextEntryEvent(

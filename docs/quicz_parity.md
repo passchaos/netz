@@ -575,6 +575,13 @@ Each
 pooled connection currently owns its UDP endpoint. Sharing one endpoint across
 several pooled origins remains a separate dispatcher integration task rather
 than allowing competing socket readers.
+The authenticated client primitives needed by that integration are now
+explicitly nonblocking: `pollResponseEventOnce`,
+`pollNextResponseEventOnce`, and `pollPushEventOnce` never receive or sleep,
+and their matching response/push DATA helpers preserve unread bytes while
+receive credit, QPACK feedback, or STOP_SENDING is paced. Terminal response
+and push events remain reconstructible and are delivered exactly once after
+the endpoint owner advances the connection timer.
 
 The endpoint foundation now includes a concrete single-receive-owner
 `quic.endpoint_dispatcher.Dispatcher`. It owns established-connection CID

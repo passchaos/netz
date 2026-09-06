@@ -9942,6 +9942,25 @@ pub const HandshakeClient = struct {
         }
     }
 
+    fn releaseStreamingResponseCapacityOnce(
+        self: *HandshakeClient,
+    ) Error!bool {
+        var index: usize = 0;
+        while (self.streaming_responses.entryAt(index)) |entry| : (index += 1) {
+            releaseStreamingReaderCapacityOnce(
+                &self.established.connection,
+                &entry.reader,
+            ) catch |err| switch (err) {
+                error.PacingLimited,
+                error.CongestionLimited,
+                error.FlowControlBlocked,
+                => return false,
+                else => return err,
+            };
+        }
+        return true;
+    }
+
     /// Poll one promised response without aggregating its DATA payload.
     pub fn receivePushEvent(
         self: *HandshakeClient,
@@ -9959,7 +9978,17 @@ pub const HandshakeClient = struct {
         self: *HandshakeClient,
     ) Error!?StreamingPushEvent {
         if (self.push_aggregate.active()) return error.UnexpectedStream;
-        return self.pollPushEventMatching(null);
+        return self.pollPushEventMatching(null, false);
+    }
+
+    /// Return one buffered push event without waiting for pacing, congestion,
+    /// flow-control credit, or a socket receive. Pending transport feedback
+    /// remains queued and a terminal event remains reconstructible on retry.
+    pub fn pollPushEventOnce(
+        self: *HandshakeClient,
+    ) Error!?StreamingPushEvent {
+        if (self.push_aggregate.active()) return error.UnexpectedStream;
+        return self.pollPushEventMatching(null, true);
     }
 
     /// Wait for an event from any promised push within one relative budget.
@@ -9990,7 +10019,10 @@ pub const HandshakeClient = struct {
         deadline: ?std.Io.Clock.Timestamp,
     ) ReceiveTimeoutError!StreamingPushEvent {
         while (true) {
-            if (try self.pollPushEventMatching(target_push_id)) |event| {
+            if (try self.pollPushEventMatching(
+                target_push_id,
+                false,
+            )) |event| {
                 return event;
             }
             try receiveConnectionResponsePacketUntil(
@@ -10015,17 +10047,52 @@ pub const HandshakeClient = struct {
     fn pollPushEventMatching(
         self: *HandshakeClient,
         target_push_id: ?u64,
+        single_attempt: bool,
     ) Error!?StreamingPushEvent {
+        if (single_attempt) {
+            self.flushResponsePacketFeedbackOnce() catch |err| switch (err) {
+                error.PacingLimited,
+                error.CongestionLimited,
+                error.FlowControlBlocked,
+                => return null,
+                else => return err,
+            };
+        }
         var index: usize = 0;
         while (self.push_streams.entryAt(index)) |entry| : (index += 1) {
             if (PushStreamSet.entryReader(entry)) |reader| {
-                try releaseStreamingReaderCapacity(
-                    &self.established.connection,
-                    reader,
-                );
+                if (single_attempt) {
+                    releaseStreamingReaderCapacityOnce(
+                        &self.established.connection,
+                        reader,
+                    ) catch |err| switch (err) {
+                        error.PacingLimited,
+                        error.CongestionLimited,
+                        error.FlowControlBlocked,
+                        => return null,
+                        else => return err,
+                    };
+                } else {
+                    try releaseStreamingReaderCapacity(
+                        &self.established.connection,
+                        reader,
+                    );
+                }
             }
         }
-        try self.applyPendingPushCancellations();
+        if (single_attempt) {
+            if (!try self.applyPendingPushCancellationOnce()) return null;
+        } else {
+            try self.applyPendingPushCancellations();
+        }
+        if (single_attempt) {
+            if (self.push_streams.nextFinished(target_push_id)) |ready| {
+                _ = try self.established.connection
+                    .requestCompletedPeerStreamRelease(ready.event.stream_id);
+                self.push_streams.removeFinished(ready.index);
+                return ready.event;
+            }
+        }
         try self.qpack_decode.prepareSectionAcknowledgments(1);
         const ready = self.push_streams.next(
             self.qpack_decode.table,
@@ -10040,16 +10107,41 @@ pub const HandshakeClient = struct {
                         self.qpack_decode.table,
                     ) catch false;
                     if (cancel_qpack) {
-                        self.qpack_decode.recordStreamCancellation(
+                        if (single_attempt)
+                            try self.qpack_decode.prepareStreamCancellation()
+                        else
+                            self.qpack_decode.recordStreamCancellation(
+                                stream_id,
+                            ) catch {};
+                    }
+                    if (single_attempt) {
+                        self.established.connection.trySendStopSending(
                             stream_id,
+                            code,
+                        ) catch |send_err| switch (send_err) {
+                            error.PacingLimited,
+                            error.CongestionLimited,
+                            error.FlowControlBlocked,
+                            => return null,
+                            else => return send_err,
+                        };
+                        if (cancel_qpack) {
+                            self.qpack_decode
+                                .recordStreamCancellationAssumeCapacity(
+                                stream_id,
+                            );
+                        }
+                    } else {
+                        self.established.connection.sendStopSending(
+                            stream_id,
+                            code,
                         ) catch {};
                     }
-                    self.established.connection.sendStopSending(
-                        stream_id,
-                        code,
-                    ) catch {};
                     self.push_streams.failStream(stream_id);
-                    self.sendQpackFeedback() catch {};
+                    if (single_attempt)
+                        self.flushResponsePacketFeedbackOnce() catch {}
+                    else
+                        self.sendQpackFeedback() catch {};
                     return err;
                 }
             }
@@ -10071,20 +10163,57 @@ pub const HandshakeClient = struct {
                 event.stream_id,
                 count,
             );
-            self.flushResponsePacketFeedback() catch {};
+            if (single_attempt)
+                self.flushResponsePacketFeedbackOnce() catch {}
+            else
+                self.flushResponsePacketFeedback() catch {};
         }
         if (event.value == .finished) {
             if (self.push_streams.readerForStream(event.stream_id)) |reader| {
-                try releaseStreamingReaderCapacity(
-                    &self.established.connection,
-                    reader,
-                );
+                if (single_attempt) {
+                    releaseStreamingReaderCapacityOnce(
+                        &self.established.connection,
+                        reader,
+                    ) catch |err| switch (err) {
+                        error.PacingLimited,
+                        error.CongestionLimited,
+                        error.FlowControlBlocked,
+                        => return null,
+                        else => return err,
+                    };
+                } else {
+                    try releaseStreamingReaderCapacity(
+                        &self.established.connection,
+                        reader,
+                    );
+                }
             }
             _ = try self.established.connection
                 .requestCompletedPeerStreamRelease(event.stream_id);
             self.push_streams.removeFinished(ready.index);
         }
         return event;
+    }
+
+    fn applyPendingPushCancellationOnce(
+        self: *HandshakeClient,
+    ) Error!bool {
+        const stream_id = self.push_streams.firstCancelledStream() orelse
+            return true;
+        self.established.connection.trySendStopSending(
+            stream_id,
+            http3.ApplicationErrorCode.request_cancelled,
+        ) catch |err| switch (err) {
+            error.PacingLimited,
+            error.CongestionLimited,
+            error.FlowControlBlocked,
+            => return false,
+            else => return err,
+        };
+        std.debug.assert(
+            self.push_streams.takeCancelledStream().? == stream_id,
+        );
+        return true;
     }
 
     fn applyPendingPushCancellations(
@@ -10115,6 +10244,29 @@ pub const HandshakeClient = struct {
         return entry.reader.?.readData(out);
     }
 
+    /// Copy available push DATA without waiting for receive-credit pacing.
+    /// `null` leaves both the reader cursor and transport credit retryable.
+    pub fn readPushDataOnce(
+        self: *HandshakeClient,
+        push_id: u64,
+        out: []u8,
+    ) Error!?usize {
+        const entry = self.push_streams.findByPushId(push_id) orelse
+            return error.UnexpectedStream;
+        const reader = if (entry.reader) |*value| value else return error.UnexpectedStream;
+        releaseStreamingReaderCapacityOnce(
+            &self.established.connection,
+            reader,
+        ) catch |err| switch (err) {
+            error.PacingLimited,
+            error.CongestionLimited,
+            error.FlowControlBlocked,
+            => return null,
+            else => return err,
+        };
+        return try reader.readData(out);
+    }
+
     pub fn skipPushData(
         self: *HandshakeClient,
         push_id: u64,
@@ -10132,6 +10284,27 @@ pub const HandshakeClient = struct {
             reader,
         );
         return skipped;
+    }
+
+    /// Discard available push DATA without waiting for receive-credit pacing.
+    pub fn skipPushDataOnce(
+        self: *HandshakeClient,
+        push_id: u64,
+    ) Error!?usize {
+        const entry = self.push_streams.findByPushId(push_id) orelse
+            return error.UnexpectedStream;
+        const reader = if (entry.reader) |*value| value else return error.UnexpectedStream;
+        releaseStreamingReaderCapacityOnce(
+            &self.established.connection,
+            reader,
+        ) catch |err| switch (err) {
+            error.PacingLimited,
+            error.CongestionLimited,
+            error.FlowControlBlocked,
+            => return null,
+            else => return err,
+        };
+        return try reader.skipData();
     }
 
     pub fn receivePush(
@@ -10286,10 +10459,46 @@ pub const HandshakeClient = struct {
     pub fn pollNextResponseEvent(
         self: *HandshakeClient,
     ) Error!?StreamingResponseEvent {
+        return self.pollNextResponseEventInternal(false);
+    }
+
+    /// Return one buffered event from any response stream without waiting for
+    /// pacing, congestion, flow-control credit, or a socket receive.
+    pub fn pollNextResponseEventOnce(
+        self: *HandshakeClient,
+    ) Error!?StreamingResponseEvent {
+        return self.pollNextResponseEventInternal(true);
+    }
+
+    fn pollNextResponseEventInternal(
+        self: *HandshakeClient,
+        single_attempt: bool,
+    ) Error!?StreamingResponseEvent {
         if (self.request_lifecycle.isEmpty()) {
             return null;
         }
-        try self.releaseStreamingResponseCapacity();
+        if (single_attempt) {
+            self.flushResponsePacketFeedbackOnce() catch |err| switch (err) {
+                error.PacingLimited,
+                error.CongestionLimited,
+                error.FlowControlBlocked,
+                => return null,
+                else => return err,
+            };
+            if (!try self.releaseStreamingResponseCapacityOnce()) return null;
+            var index: usize = 0;
+            while (self.streaming_responses.entryAt(index)) |entry| : (index += 1) {
+                if (!entry.reader.finished()) continue;
+                const stream_id = entry.reader.streamId();
+                try self.finishStreamingResponse(stream_id);
+                return .{ .message = .{
+                    .stream_id = stream_id,
+                    .value = .finished,
+                } };
+            }
+        } else {
+            try self.releaseStreamingResponseCapacity();
+        }
         if (self.response_streams.firstReset()) |reset| {
             if (!self.request_lifecycle.contains(reset.stream_id)) {
                 return error.UnexpectedStream;
@@ -10297,7 +10506,10 @@ pub const HandshakeClient = struct {
             try self.request_lifecycle.prepareFinish();
             _ = self.response_streams.takeReset(reset.stream_id);
             try self.finishStreamingResponse(reset.stream_id);
-            self.flushResponsePacketFeedback() catch {};
+            if (single_attempt)
+                self.flushResponsePacketFeedbackOnce() catch {}
+            else
+                self.flushResponsePacketFeedback() catch {};
             return .{ .reset = .{
                 .stream_id = reset.stream_id,
                 .application_error_code = reset.application_error_code,
@@ -10310,12 +10522,20 @@ pub const HandshakeClient = struct {
             self.qpack_decode.table,
             self.options.local_settings.qpack_blocked_streams,
         ) catch |err| {
-            self.failReceivedResponse(
-                self.streaming_responses.lastErrorStreamId(),
-                null,
-                err,
-                false,
-            ) catch {};
+            if (single_attempt)
+                self.failReceivedResponseOnce(
+                    self.streaming_responses.lastErrorStreamId(),
+                    null,
+                    err,
+                    false,
+                ) catch {}
+            else
+                self.failReceivedResponse(
+                    self.streaming_responses.lastErrorStreamId(),
+                    null,
+                    err,
+                    false,
+                ) catch {};
             return err;
         } orelse return null;
         var ready = ready_value;
@@ -10337,24 +10557,46 @@ pub const HandshakeClient = struct {
             ready.entry.reader.applyDecodedResponseHead(
                 &ready.event.head.response,
             ) catch |err| {
+                if (single_attempt)
+                    self.failReceivedResponseOnce(
+                        stream_id,
+                        null,
+                        err,
+                        false,
+                    ) catch {}
+                else
+                    self.failReceivedResponse(
+                        stream_id,
+                        null,
+                        err,
+                        false,
+                    ) catch {};
+                return err;
+            };
+        }
+        const owned_event = ready.event;
+        const committed = self.applyStreamingResponseEvent(
+            stream_id,
+            owned_event,
+            single_attempt,
+        ) catch |err| {
+            if (single_attempt)
+                self.failReceivedResponseOnce(
+                    stream_id,
+                    null,
+                    err,
+                    false,
+                ) catch {}
+            else
                 self.failReceivedResponse(
                     stream_id,
                     null,
                     err,
                     false,
                 ) catch {};
-                return err;
-            };
-        }
-        const owned_event = ready.event;
-        _ = self.applyStreamingResponseEvent(
-            stream_id,
-            owned_event,
-            false,
-        ) catch |err| {
-            self.failReceivedResponse(stream_id, null, err, false) catch {};
             return err;
         };
+        if (!committed) return null;
         event_owned = false;
         return .{ .message = .{
             .stream_id = stream_id,
