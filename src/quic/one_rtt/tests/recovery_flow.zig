@@ -2862,6 +2862,73 @@ test "QUIC closed local unidirectional stream keeps direction validation" {
     );
 }
 
+test "QUIC local stream retirement batches closed-range capacity after ACK" {
+    const allocator = std.testing.allocator;
+    var threaded = std.Io.Threaded.init(allocator, .{});
+    defer threaded.deinit();
+    var endpoint = try quic.runtime.Endpoint.bind(
+        allocator,
+        threaded.io(),
+        .{ .ip4 = .loopback(0) },
+        .{ .max_datagram_size = 4096 },
+    );
+    defer endpoint.deinit();
+    const keys = quic.protection.deriveAes128Keys(
+        [_]u8{0xc1} ** quic.protection.secret_len,
+    );
+    var connection = try one_rtt.Connection.init(&endpoint, .{
+        .peer = endpoint.address(),
+        .receive_keys = keys,
+        .send_keys = keys,
+        .local_connection_id = "local-batch-client",
+        .peer_connection_id = "local-batch-server",
+        .initial_send_max_streams_bidi = 3,
+        .enable_pacing = false,
+    });
+    defer connection.deinit();
+
+    for ([_]u62{ 0, 4, 8 }) |stream_id| {
+        try connection.send(&.{.{ .stream = .{
+            .stream_id = stream_id,
+            .data = "request",
+            .fin = true,
+        } }});
+    }
+    try one_rtt.testing.applyReceivedFrames(
+        &connection,
+        0,
+        &.{
+            .{ .stream = .{ .stream_id = 8, .data = "c", .fin = true } },
+            .{ .stream = .{ .stream_id = 0, .data = "a", .fin = true } },
+            .{ .stream = .{ .stream_id = 4, .data = "b", .fin = true } },
+        },
+        null,
+        .not_ect,
+    );
+    for ([_]u62{ 8, 0, 4 }) |stream_id| {
+        try std.testing.expect(!try connection
+            .requestCompletedLocalStreamRelease(stream_id));
+    }
+
+    try one_rtt.testing.applyReceivedFrames(
+        &connection,
+        1,
+        &.{.{ .ack = .{
+            .largest_acknowledged = 2,
+            .ack_delay = 0,
+            .first_ack_range = 2,
+        } }},
+        null,
+        .not_ect,
+    );
+    for ([_]u62{ 0, 4, 8 }) |stream_id| {
+        try std.testing.expect(connection.localStreamClosed(stream_id));
+    }
+    try std.testing.expectEqual(@as(usize, 0), connection.stats().active_send_streams);
+    try std.testing.expectEqual(@as(usize, 0), connection.stats().active_receive_streams);
+    try std.testing.expectEqual(@as(usize, 1), connection.stats().closed_local_stream_ranges);
+}
+
 test "QUIC 1-RTT connection compacts long peer stream churn into closed ranges" {
     const allocator = std.testing.allocator;
 
