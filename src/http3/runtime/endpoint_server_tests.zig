@@ -2,6 +2,9 @@ const std = @import("std");
 const http3 = @import("../mod.zig");
 const runtime = @import("../runtime.zig");
 const quic = @import("../../quic/mod.zig");
+const ObservedBatchSend =
+    @import("../../quic/one_rtt/tests/observed_batch_send.zig")
+        .ObservedBatchSend;
 
 const net = std.Io.net;
 
@@ -266,6 +269,142 @@ test "HTTP/3 endpoint transport callback refreshes timers after adapter sends" {
     try std.testing.expectEqual(
         quic.one_rtt.TimerDeadlineKind.pto,
         timer.timer.kind,
+    );
+}
+
+test "HTTP/3 endpoint request poll mirrors automatic stream-credit retry timer" {
+    const allocator = std.testing.allocator;
+    var threaded = std.Io.Threaded.init(allocator, .{});
+    defer threaded.deinit();
+    const io = threaded.io();
+
+    var server_endpoint = try quic.runtime.Endpoint.bind(
+        allocator,
+        io,
+        .{ .ip4 = .loopback(0) },
+        .{ .max_datagram_size = 4096 },
+    );
+    defer server_endpoint.deinit();
+    const client_keys = quic.protection.deriveAes128Keys(
+        [_]u8{0xe3} ** quic.protection.secret_len,
+    );
+    const server_keys = quic.protection.deriveAes128Keys(
+        [_]u8{0xe4} ** quic.protection.secret_len,
+    );
+    const client_cid = "poll-timer-client";
+    const server_cid = "poll-timer-server";
+    var client = try runtime.HandshakeClient.initPreconfigured(
+        allocator,
+        io,
+        .{ .ip4 = .loopback(0) },
+        server_endpoint.address(),
+        .{ .quic = .{ .max_datagram_size = 4096 } },
+        .{},
+        .{
+            .receive_keys = server_keys,
+            .send_keys = client_keys,
+            .local_connection_id = client_cid,
+            .peer_connection_id = server_cid,
+            .one_rtt = .{ .enable_pacing = false },
+        },
+    );
+    defer client.deinit();
+    var session = try runtime.HandshakeServerSession.initPreconfigured(
+        &server_endpoint,
+        client.address(),
+        .{},
+        .{
+            .receive_keys = client_keys,
+            .send_keys = server_keys,
+            .local_connection_id = server_cid,
+            .peer_connection_id = client_cid,
+            .one_rtt = .{ .enable_pacing = false },
+        },
+    );
+    defer session.deinit();
+    var dispatcher = quic.endpoint_dispatcher.Dispatcher.init(
+        allocator,
+        &server_endpoint,
+    );
+    defer dispatcher.deinit();
+    const handle: quic.endpoint_dispatcher.ConnectionHandle = 80;
+    try dispatcher.registerConnection(handle, &session.established.connection);
+    var promoted = runtime.PromotedHandshakeSession{
+        .dispatcher = &dispatcher,
+        .allocator = allocator,
+        .handle = handle,
+        .session = &session,
+        .registered = false,
+    };
+
+    const stream_id = try client.sendRequest(.{
+        .method = "GET",
+        .path = "/poll-timer",
+        .authority = "localhost",
+    });
+    var head = try session.receiveRequestEvent();
+    defer head.deinit(allocator);
+    try std.testing.expect(head == .message);
+    try std.testing.expect(head.message.value == .head);
+    try std.testing.expectEqual(stream_id, head.message.stream_id);
+    try session.sendResponse(stream_id, .{ .status = 204 });
+
+    // The test is interested in the automatic MAX_STREAMS emitted by polling
+    // the terminal request event, not the already-submitted response. Retire
+    // all response recovery records as if the peer ACK arrived, then reset the
+    // endpoint's mirror to the resulting timer state.
+    for (0..64) |packet_number| {
+        _ = session.established.connection.markPacketAcknowledged(
+            packet_number,
+        );
+    }
+    try std.testing.expectEqual(
+        @as(usize, 0),
+        session.established.connection.pendingRecoveryCount(),
+    );
+    try dispatcher.refreshConnectionTimer(handle);
+    try std.testing.expect(dispatcher.nextTimerDeadline() == null);
+
+    var failed_send = ObservedBatchSend{
+        .delegate = server_endpoint.io,
+        .fail_after_prefix = 0,
+    };
+    var failed_vtable = server_endpoint.io.vtable.*;
+    failed_vtable.netSend = ObservedBatchSend.netSend;
+    server_endpoint.io = .{
+        .userdata = &failed_send,
+        .vtable = &failed_vtable,
+    };
+    defer server_endpoint.io = failed_send.delegate;
+
+    var finished = (try runtime.EndpointServer.testing
+        .pollSessionRequestEntry(&promoted)) orelse
+        return error.TestUnexpectedResult;
+    defer finished.deinit(allocator);
+    try std.testing.expect(finished == .message);
+    try std.testing.expect(finished.message.value == .finished);
+    try std.testing.expectEqual(@as(usize, 1), failed_send.calls);
+    try std.testing.expect(
+        !session.established.connection.peerStreamClosed(stream_id),
+    );
+
+    const connection_timer = session.established.connection
+        .nextTimerDeadline() orelse return error.TestUnexpectedResult;
+    const endpoint_timer = dispatcher.nextTimerDeadline() orelse
+        return error.TestUnexpectedResult;
+    try std.testing.expectEqual(handle, endpoint_timer.connection_id);
+    try std.testing.expectEqual(connection_timer, endpoint_timer.timer);
+    try std.testing.expectEqual(
+        quic.one_rtt.TimerDeadlineKind.peer_stream_credit,
+        endpoint_timer.timer.kind,
+    );
+
+    server_endpoint.io = failed_send.delegate;
+    _ = (try dispatcher.serviceNextTimerAt(
+        endpoint_timer.timer.deadline_ns,
+    )) orelse return error.TestUnexpectedResult;
+    try std.testing.expect(
+        session.established.connection.peerStreamClosed(stream_id),
     );
 }
 

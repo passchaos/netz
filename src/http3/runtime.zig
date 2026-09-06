@@ -3805,7 +3805,14 @@ pub const EndpointServer = struct {
         _: quic.endpoint_dispatcher.ConnectionHandle,
         promoted: *PromotedHandshakeSession,
     ) HandshakeAdmissionError!?StreamingRequestEvent {
-        return promoted.session.pollRequestEvent();
+        const event = try promoted.session.pollRequestEvent();
+        // Polling can return receive credit, emit QPACK feedback, retire a
+        // completed request stream, or arm a retry after an automatic credit
+        // send fails. The dispatcher last refreshed when it delivered the
+        // inbound packet, so mirror the resulting connection deadline before
+        // the endpoint waits on its shared UDP socket again.
+        try promoted.dispatcher.refreshConnectionTimer(promoted.handle);
+        return event;
     }
 
     pub const testing = struct {
@@ -3842,6 +3849,19 @@ pub const EndpointServer = struct {
                 ReadyProbe.poll,
             )) orelse return null;
             return event.request.connection_handle;
+        }
+
+        /// Exercise the production promoted-session poll adapter, including
+        /// its dispatcher timer refresh, without constructing the endpoint's
+        /// handshake-admission maps in focused transport tests.
+        pub fn pollSessionRequestEntry(
+            promoted: *PromotedHandshakeSession,
+        ) HandshakeAdmissionError!?StreamingRequestEvent {
+            return EndpointServer.pollSessionRequestEntry(
+                {},
+                promoted.handle,
+                promoted,
+            );
         }
 
         /// Expose completion adaptation without constructing a full QUIC/TLS
