@@ -521,6 +521,311 @@ test "gRPC h2c runtime composes sequential message streams" {
     try std.testing.expectEqual(grpc.Status.ok, response.status);
 }
 
+test "gRPC h2c reflection serves ordered v1 queries" {
+    const allocator = std.testing.allocator;
+    var threaded = std.Io.Threaded.init(allocator, .{});
+    defer threaded.deinit();
+    const io = threaded.io();
+    var registry = grpc.reflection.Registry.init(allocator, io);
+    defer registry.deinit();
+    try registry.addFile(.{
+        .name = "echo.proto",
+        .descriptor = "echo-descriptor",
+        .symbols = &.{"demo.Echo"},
+    });
+    try registry.addService("demo.Echo");
+    var server = try grpc.runtime.Server.listen(
+        allocator,
+        io,
+        .{ .ip4 = .loopback(0) },
+        .{ .max_frame_payload = 4096, .max_body_bytes = 4096 },
+        4096,
+    );
+    defer server.deinit();
+
+    const Shared = struct {
+        server: *grpc.runtime.Server,
+        registry: *grpc.reflection.Registry,
+        err: ?anyerror = null,
+
+        fn run(self: *@This()) void {
+            var connection = self.server.accept() catch |err| {
+                self.err = err;
+                return;
+            };
+            defer connection.deinit();
+            var stream = connection.acceptDuplex() catch |err| {
+                self.err = err;
+                return;
+            };
+            defer stream.deinit();
+            connection.serveReflection(self.registry, &stream) catch |err| {
+                self.err = err;
+            };
+        }
+    };
+    var shared = Shared{ .server = &server, .registry = &registry };
+    const thread = try std.Thread.spawn(.{}, Shared.run, .{&shared});
+    var joined = false;
+    defer if (!joined) thread.join();
+
+    var client = try grpc.runtime.Client.connect(
+        allocator,
+        io,
+        server.address(),
+        .{ .max_frame_payload = 4096, .max_body_bytes = 4096 },
+    );
+    defer client.deinit();
+    var reflection = try client.startReflection(.{
+        .authority = "localhost",
+    });
+    defer reflection.deinit();
+
+    try std.testing.expectEqual(
+        grpc.DuplexWriteResult.complete,
+        try reflection.writeRequest(.{
+            .host = "example.test",
+            .query = .{ .list_services = "" },
+        }),
+    );
+    var services = try reflection.nextWithTimeout(.fromSeconds(2));
+    defer services.deinit();
+    try std.testing.expectEqualStrings(
+        "example.test",
+        services.response.value.valid_host,
+    );
+    try std.testing.expectEqual(@as(usize, 1), services.response.value.result.services.len);
+    try std.testing.expectEqualStrings(
+        "demo.Echo",
+        services.response.value.result.services[0],
+    );
+
+    try std.testing.expectEqual(
+        grpc.DuplexWriteResult.complete,
+        try reflection.writeRequest(.{
+            .query = .{ .file_containing_symbol = "demo.Echo" },
+        }),
+    );
+    var descriptor = try reflection.nextWithTimeout(.fromSeconds(2));
+    defer descriptor.deinit();
+    try std.testing.expectEqual(
+        @as(usize, 1),
+        descriptor.response.value.result.file_descriptors.len,
+    );
+    try std.testing.expectEqualStrings(
+        "echo-descriptor",
+        descriptor.response.value.result.file_descriptors[0],
+    );
+
+    try std.testing.expectEqual(
+        grpc.DuplexWriteResult.complete,
+        try reflection.writeRequest(.{
+            .query = .{ .file_by_filename = "missing.proto" },
+        }),
+    );
+    var missing = try reflection.nextWithTimeout(.fromSeconds(2));
+    defer missing.deinit();
+    try std.testing.expectEqual(
+        grpc.Status.not_found,
+        missing.response.value.result.failure.code,
+    );
+    try std.testing.expectEqual(
+        grpc.DuplexWriteResult.complete,
+        try reflection.finishRequests(),
+    );
+    var terminal = try reflection.nextWithTimeout(.fromSeconds(2));
+    defer terminal.deinit();
+    try std.testing.expectEqual(grpc.Status.ok, terminal.terminal.status);
+
+    thread.join();
+    joined = true;
+    if (shared.err) |err| return err;
+}
+
+test "gRPC h2c reflection supports v1alpha and cancellation" {
+    const allocator = std.testing.allocator;
+    var threaded = std.Io.Threaded.init(allocator, .{});
+    defer threaded.deinit();
+    const io = threaded.io();
+    var registry = grpc.reflection.Registry.init(allocator, io);
+    defer registry.deinit();
+    var server = try grpc.runtime.Server.listen(
+        allocator,
+        io,
+        .{ .ip4 = .loopback(0) },
+        .{ .max_frame_payload = 4096, .max_body_bytes = 4096 },
+        4096,
+    );
+    defer server.deinit();
+
+    const Shared = struct {
+        server: *grpc.runtime.Server,
+        registry: *grpc.reflection.Registry,
+        reflection_done: std.Io.Event = .unset,
+        err: ?anyerror = null,
+
+        fn run(self: *@This()) void {
+            var connection = self.server.accept() catch |err| {
+                self.err = err;
+                return;
+            };
+            defer connection.deinit();
+            var stream = connection.acceptDuplex() catch |err| {
+                self.err = err;
+                return;
+            };
+            var stream_live = true;
+            defer if (stream_live) stream.deinit();
+            connection.serveReflection(self.registry, &stream) catch |err| {
+                self.err = err;
+                return;
+            };
+            stream.deinit();
+            stream_live = false;
+            self.reflection_done.set(self.registry.io);
+
+            var request = connection.readUnary() catch |err| {
+                self.err = err;
+                return;
+            };
+            defer request.deinit();
+            connection.writeUnary(request.request.stream_id, .{
+                .message = "reused",
+            }) catch |err| {
+                self.err = err;
+            };
+        }
+    };
+    var shared = Shared{ .server = &server, .registry = &registry };
+    const thread = try std.Thread.spawn(.{}, Shared.run, .{&shared});
+    var joined = false;
+    defer if (!joined) thread.join();
+
+    var client = try grpc.runtime.Client.connect(
+        allocator,
+        io,
+        server.address(),
+        .{ .max_frame_payload = 4096, .max_body_bytes = 4096 },
+    );
+    defer client.deinit();
+    var reflection = try client.startReflection(.{
+        .version = .v1alpha,
+        .authority = "localhost",
+    });
+    var reflection_live = true;
+    defer if (reflection_live) reflection.deinit();
+    try std.testing.expectError(
+        error.Timeout,
+        reflection.nextWithTimeout(.fromMilliseconds(1)),
+    );
+    try std.testing.expectEqual(
+        grpc.DuplexWriteResult.complete,
+        try reflection.writeRequest(.{ .query = .{ .list_services = "" } }),
+    );
+    var response = try reflection.nextWithTimeout(.fromSeconds(2));
+    defer response.deinit();
+    try std.testing.expectEqual(@as(usize, 0), response.response.value.result.services.len);
+    try reflection.cancel();
+    reflection.deinit();
+    reflection_live = false;
+    try shared.reflection_done.waitTimeout(io, .{ .duration = .{
+        .raw = .fromSeconds(2),
+        .clock = .awake,
+    } });
+    var reused = try client.unary(.{
+        .path = "/demo.Echo/Unary",
+        .authority = "localhost",
+        .message = "after",
+    });
+    defer reused.deinit();
+    try std.testing.expectEqualStrings("reused", reused.message.?.payload);
+
+    thread.join();
+    joined = true;
+    if (shared.err) |err| return err;
+}
+
+test "gRPC h2c reflection rejects malformed requests" {
+    const allocator = std.testing.allocator;
+    var threaded = std.Io.Threaded.init(allocator, .{});
+    defer threaded.deinit();
+    const io = threaded.io();
+    var registry = grpc.reflection.Registry.init(allocator, io);
+    defer registry.deinit();
+    var server = try grpc.runtime.Server.listen(
+        allocator,
+        io,
+        .{ .ip4 = .loopback(0) },
+        .{ .max_frame_payload = 4096, .max_body_bytes = 4096 },
+        4096,
+    );
+    defer server.deinit();
+
+    const Shared = struct {
+        server: *grpc.runtime.Server,
+        registry: *grpc.reflection.Registry,
+        err: ?anyerror = null,
+
+        fn run(self: *@This()) void {
+            var connection = self.server.accept() catch |err| {
+                self.err = err;
+                return;
+            };
+            defer connection.deinit();
+            var stream = connection.acceptDuplex() catch |err| {
+                self.err = err;
+                return;
+            };
+            defer stream.deinit();
+            connection.serveReflection(self.registry, &stream) catch |err| {
+                self.err = err;
+            };
+        }
+    };
+    const Consumer = struct {
+        fn consume(_: void, _: grpc.StreamingMessage) !void {
+            return error.UnexpectedMessage;
+        }
+    };
+    var shared = Shared{ .server = &server, .registry = &registry };
+    const thread = try std.Thread.spawn(.{}, Shared.run, .{&shared});
+    var joined = false;
+    defer if (!joined) thread.join();
+    var client = try grpc.runtime.Client.connect(
+        allocator,
+        io,
+        server.address(),
+        .{ .max_frame_payload = 4096, .max_body_bytes = 4096 },
+    );
+    defer client.deinit();
+    var stream = try client.startDuplex(.{
+        .path = grpc.reflection.v1_path,
+        .authority = "localhost",
+    });
+    defer stream.deinit();
+    try std.testing.expectEqual(
+        grpc.DuplexWriteResult.complete,
+        try stream.writeFinalMessage(&.{ 0x1a, 0x02, 'x' }),
+    );
+    var event = try stream.readResponseEvent({}, Consumer.consume);
+    defer event.deinit(allocator);
+    try std.testing.expect(event == .initial_metadata);
+    event.deinit(allocator);
+    event = try stream.readResponseEvent({}, Consumer.consume);
+    try std.testing.expectEqual(
+        grpc.Status.invalid_argument,
+        event.terminal.status,
+    );
+    try std.testing.expectEqualStrings(
+        "could not parse request",
+        event.terminal.status_message,
+    );
+
+    thread.join();
+    joined = true;
+    if (shared.err) |err| return err;
+}
+
 test "gRPC TLS runtime verifies ALPN and reuses one channel" {
     const allocator = std.testing.allocator;
     var threaded = std.Io.Threaded.init(allocator, .{});
@@ -830,6 +1135,106 @@ test "gRPC TLS runtime streams health Watch updates" {
         changed.status.status,
     );
     try watch.cancel();
+
+    thread.join();
+    joined = true;
+    if (shared.err) |err| return err;
+}
+
+test "gRPC TLS runtime serves reflection v1" {
+    const allocator = std.testing.allocator;
+    var threaded = std.Io.Threaded.init(allocator, .{});
+    defer threaded.deinit();
+    const io = threaded.io();
+    var certificate_der: [tls_testing.certificate_der_len]u8 = undefined;
+    try std.base64.standard.Decoder.decode(
+        &certificate_der,
+        tls_testing.certificate_base64,
+    );
+    const key_pair = try tls_testing.serverKeyPair();
+    const public_key = key_pair.public_key.toUncompressedSec1();
+    var registry = grpc.reflection.Registry.init(allocator, io);
+    defer registry.deinit();
+    try registry.addService("demo.Tls");
+    var server = try grpc.runtime.TlsServer.listen(
+        allocator,
+        io,
+        .{ .ip4 = .loopback(0) },
+        .{ .transport = .{
+            .identity = .{
+                .certificate_chain = &.{&certificate_der},
+                .signer = .{ .ecdsa_p256_sha256 = .{
+                    .key_pair = key_pair,
+                } },
+            },
+            .limits = .{
+                .max_frame_payload = 4096,
+                .max_body_bytes = 4096,
+            },
+        }, .max_message_size = 4096 },
+    );
+    defer server.deinit();
+
+    const Shared = struct {
+        server: *grpc.runtime.TlsServer,
+        registry: *grpc.reflection.Registry,
+        err: ?anyerror = null,
+
+        fn run(self: *@This()) void {
+            var connection = self.server.accept() catch |err| {
+                self.err = err;
+                return;
+            };
+            defer connection.deinit();
+            var stream = connection.acceptDuplex() catch |err| {
+                self.err = err;
+                return;
+            };
+            defer stream.deinit();
+            connection.serveReflection(self.registry, &stream) catch |err| {
+                self.err = err;
+            };
+        }
+    };
+    var shared = Shared{ .server = &server, .registry = &registry };
+    const thread = try std.Thread.spawn(.{}, Shared.run, .{&shared});
+    var joined = false;
+    defer if (!joined) thread.join();
+    var client = try grpc.runtime.Client.connectTlsHost(
+        allocator,
+        io,
+        "localhost",
+        server.address().ip4.port,
+        .{
+            .limits = .{
+                .max_frame_payload = 4096,
+                .max_body_bytes = 4096,
+            },
+            .tls = .{ .server_verifier = .{
+                .pinned_ecdsa_p256_public_key = public_key,
+            } },
+        },
+    );
+    defer client.deinit();
+    var reflection = try client.startReflection(.{});
+    defer reflection.deinit();
+    try std.testing.expectEqual(
+        grpc.DuplexWriteResult.complete,
+        try reflection.writeRequest(.{ .query = .{ .list_services = "" } }),
+    );
+    try std.testing.expectEqual(
+        grpc.DuplexWriteResult.complete,
+        try reflection.finishRequests(),
+    );
+    var response = try reflection.nextWithTimeout(.fromSeconds(2));
+    defer response.deinit();
+    try std.testing.expectEqualStrings(
+        "demo.Tls",
+        response.response.value.result.services[0],
+    );
+    var terminal = try reflection.nextWithTimeout(.fromSeconds(2));
+    defer terminal.deinit();
+    try std.testing.expectEqual(grpc.Status.ok, terminal.terminal.status);
 
     thread.join();
     joined = true;

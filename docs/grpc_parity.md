@@ -85,8 +85,13 @@ existing HTTP/2 runtime:
 - self-contained gRPC Server Reflection v1/v1alpha wire codecs and a
   thread-safe opaque-descriptor registry covering file, symbol, extension,
   extension-number, and service-list queries, including transitive dependency
-  expansion and standard embedded `NOT_FOUND`/`UNIMPLEMENTED` responses. The
-  bidirectional HTTP/2 service adapter remains the next integration step.
+  expansion and standard embedded `NOT_FOUND`/`UNIMPLEMENTED` responses,
+- bidirectional Server Reflection v1/v1alpha client sessions and server
+  handlers over h2c and TLS. One stream accepts ordered repeated queries,
+  owns each decoded response beyond the DATA callback, supports timeout retry
+  and explicit cancellation, and finishes with OK after request half-close.
+  Malformed requests terminate with `INVALID_ARGUMENT`; cancellation releases
+  the stream while preserving the HTTP/2 connection for later RPCs.
 
 Payloads intentionally remain opaque. This keeps gRPC transport reusable with
 generated or dynamic protobuf implementations; the user-owned
@@ -211,8 +216,8 @@ upstream gRPC Core's `ServerEarlyReturnTest`.
    A broader upstream matrix, including reverse custom metadata and TLS, remains
    future work.
 3. Add higher-level application cancellation and streaming deadline policy,
-   retry policy, reflection transport integration, and broader conformance/
-   interop runners. Health
+   retry policy, generated reflection-registration adapters, and broader
+   conformance/interop runners. Health
    `Check` and `Watch` transport semantics are implemented, including
    incremental Watch delivery and cancellation, but automatic client Watch
    reconnection/backoff remains application policy. Unary transport deadlines

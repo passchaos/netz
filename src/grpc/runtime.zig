@@ -8,6 +8,7 @@ const std = @import("std");
 const http2 = @import("../http2/mod.zig");
 const call = @import("call.zig");
 const health = @import("health.zig");
+const reflection = @import("reflection.zig");
 const streaming = @import("stream/runtime.zig");
 const duplex = @import("stream/duplex.zig");
 
@@ -91,6 +92,17 @@ pub const Client = struct {
         options: health.WatchOptions,
     ) health.WatchError!health.ClientWatch {
         return health.startWatch(
+            &self.connection,
+            self.connection.allocator,
+            options,
+        );
+    }
+
+    pub fn startReflection(
+        self: *Client,
+        options: reflection.ClientOptions,
+    ) reflection.StreamError!reflection.ClientSession {
+        return reflection.start(
             &self.connection,
             self.connection.allocator,
             options,
@@ -281,6 +293,17 @@ pub const ServerConnection = struct {
             return error.InvalidStreamState;
         }
         return health.serveWatch(stream, registry);
+    }
+
+    pub fn serveReflection(
+        self: *ServerConnection,
+        registry: *reflection.Registry,
+        stream: *duplex.ServerDuplex,
+    ) reflection.StreamError!void {
+        if (stream.transport.connection != &self.connection) {
+            return error.InvalidStreamState;
+        }
+        return reflection.serve(stream, registry);
     }
 
     /// Read one complete request message stream, delivering messages as their

@@ -5,12 +5,29 @@
 //! standard query shapes and transitive dependency expansion.
 
 const std = @import("std");
+const http2 = @import("../http2/mod.zig");
+const compression = @import("compression.zig");
+const metadata = @import("metadata.zig");
+const duplex = @import("stream/duplex.zig");
+const stream_codec = @import("stream/codec.zig");
 const wire = @import("wire.zig");
 
 pub const v1_path =
     "/grpc.reflection.v1.ServerReflection/ServerReflectionInfo";
 pub const v1alpha_path =
     "/grpc.reflection.v1alpha.ServerReflection/ServerReflectionInfo";
+
+pub const Version = enum {
+    v1,
+    v1alpha,
+
+    pub fn path(self: Version) []const u8 {
+        return switch (self) {
+            .v1 => v1_path,
+            .v1alpha => v1alpha_path,
+        };
+    }
+};
 
 pub const Error = std.mem.Allocator.Error || error{
     DuplicateDescriptor,
@@ -76,6 +93,365 @@ pub const Response = struct {
         self.* = undefined;
     }
 };
+
+pub const OwnedResponse = struct {
+    allocator: std.mem.Allocator,
+    encoded: []u8,
+    value: Response,
+
+    pub fn deinit(self: *OwnedResponse) void {
+        self.value.deinit();
+        self.allocator.free(self.encoded);
+        self.* = undefined;
+    }
+};
+
+pub const ClientOptions = struct {
+    version: Version = .v1,
+    authority: ?[]const u8 = null,
+    scheme: ?[]const u8 = null,
+    compression: compression.Algorithm = .identity,
+    compression_level: u4 = 6,
+    accepted_encodings: compression.AlgorithmSet = .supported,
+    timeout: ?wire.Timeout = null,
+    metadata: []const http2.Hpack.HeaderField = &.{},
+    binary_metadata: []const metadata.BinaryMetadata = &.{},
+    max_message_size: usize = 16 * 1024 * 1024,
+};
+
+pub const ClientEvent = union(enum) {
+    response: OwnedResponse,
+    terminal: duplex.Response,
+
+    pub fn deinit(self: *ClientEvent) void {
+        switch (self.*) {
+            .response => |*response| response.deinit(),
+            .terminal => |*terminal| terminal.deinit(),
+        }
+        self.* = undefined;
+    }
+};
+
+pub const StreamError = Error || duplex.Error || error{
+    NotReflectionRequest,
+};
+
+pub const ClientSession = struct {
+    const PendingRequest = enum { none, message, finish };
+
+    allocator: std.mem.Allocator,
+    stream: duplex.ClientDuplex,
+    pending_payloads: std.ArrayList([]u8) = .empty,
+    pending_head: usize = 0,
+    request_pending: PendingRequest = .none,
+    terminal_seen: bool = false,
+
+    pub fn deinit(self: *ClientSession) void {
+        for (self.pending_payloads.items[self.pending_head..]) |payload| {
+            self.allocator.free(payload);
+        }
+        self.pending_payloads.deinit(self.allocator);
+        self.stream.deinit();
+        self.* = undefined;
+    }
+
+    pub fn requestWritePending(self: ClientSession) bool {
+        return self.request_pending != .none;
+    }
+
+    pub fn writeRequest(
+        self: *ClientSession,
+        request: Request,
+    ) StreamError!duplex.WriteResult {
+        if (self.request_pending != .none) return error.InvalidStreamState;
+        const encoded = try encodeRequestAlloc(self.allocator, request);
+        defer self.allocator.free(encoded);
+        const result = try self.stream.writeMessage(encoded);
+        self.request_pending = if (result == .peer_event) .message else .none;
+        return result;
+    }
+
+    pub fn resumeRequest(
+        self: *ClientSession,
+    ) StreamError!duplex.WriteResult {
+        const result = switch (self.request_pending) {
+            .none => return error.InvalidStreamState,
+            .message => try self.stream.resumeMessage(),
+            .finish => try self.stream.finishRequest(),
+        };
+        self.request_pending = if (result == .peer_event)
+            self.request_pending
+        else
+            .none;
+        return result;
+    }
+
+    pub fn finishRequests(
+        self: *ClientSession,
+    ) StreamError!duplex.WriteResult {
+        if (self.request_pending != .none) return error.InvalidStreamState;
+        const result = try self.stream.finishRequest();
+        self.request_pending = if (result == .peer_event) .finish else .none;
+        return result;
+    }
+
+    pub fn cancel(self: *ClientSession) StreamError!void {
+        if (self.terminal_seen) return error.ConnectionClosed;
+        try self.stream.reset(.cancel);
+        self.terminal_seen = true;
+    }
+
+    pub fn next(self: *ClientSession) StreamError!ClientEvent {
+        return self.nextUntil(null);
+    }
+
+    pub fn nextWithTimeout(
+        self: *ClientSession,
+        timeout: std.Io.Duration,
+    ) StreamError!ClientEvent {
+        if (timeout.nanoseconds <= 0) return error.Timeout;
+        return self.nextWithDeadline(.fromNow(
+            self.stream.transport.connection.io,
+            .{ .raw = timeout, .clock = .awake },
+        ));
+    }
+
+    pub fn nextWithDeadline(
+        self: *ClientSession,
+        deadline: std.Io.Clock.Timestamp,
+    ) StreamError!ClientEvent {
+        return self.nextUntil(deadline);
+    }
+
+    fn nextUntil(
+        self: *ClientSession,
+        deadline: ?std.Io.Clock.Timestamp,
+    ) StreamError!ClientEvent {
+        if (try self.takePending()) |response| {
+            return .{ .response = response };
+        }
+        if (self.terminal_seen) return error.ConnectionClosed;
+        while (true) {
+            var event = if (deadline) |absolute|
+                try self.stream.readResponseEventWithDeadline(
+                    absolute,
+                    self,
+                    collectResponse,
+                )
+            else
+                try self.stream.readResponseEvent(
+                    self,
+                    collectResponse,
+                );
+            switch (event) {
+                .terminal => |terminal| {
+                    event = undefined;
+                    self.terminal_seen = true;
+                    return .{ .terminal = terminal };
+                },
+                .informational, .initial_metadata => {
+                    event.deinit(self.allocator);
+                    try self.resumeRequestAfterEvent();
+                },
+                .messages => {
+                    event.deinit(self.allocator);
+                    try self.resumeRequestAfterEvent();
+                    if (try self.takePending()) |response| {
+                        return .{ .response = response };
+                    }
+                },
+            }
+        }
+    }
+
+    fn collectResponse(
+        self: *ClientSession,
+        message: stream_codec.DecodedMessage,
+    ) StreamError!void {
+        const payload = try self.allocator.dupe(u8, message.payload);
+        errdefer self.allocator.free(payload);
+        try self.pending_payloads.append(self.allocator, payload);
+    }
+
+    fn resumeRequestAfterEvent(self: *ClientSession) StreamError!void {
+        if (self.request_pending == .none) return;
+        _ = try self.resumeRequest();
+    }
+
+    fn takePending(self: *ClientSession) StreamError!?OwnedResponse {
+        if (self.pending_head == self.pending_payloads.items.len) return null;
+        const encoded = self.pending_payloads.items[self.pending_head];
+        self.pending_head += 1;
+        if (self.pending_head == self.pending_payloads.items.len) {
+            self.pending_payloads.clearRetainingCapacity();
+            self.pending_head = 0;
+        }
+        errdefer self.allocator.free(encoded);
+        return .{
+            .allocator = self.allocator,
+            .encoded = encoded,
+            .value = try decodeResponse(self.allocator, encoded),
+        };
+    }
+};
+
+pub fn start(
+    connection: *http2.runtime.Connection,
+    allocator: std.mem.Allocator,
+    options: ClientOptions,
+) StreamError!ClientSession {
+    return .{
+        .allocator = allocator,
+        .stream = try duplex.startDuplex(connection, allocator, .{
+            .path = options.version.path(),
+            .authority = options.authority,
+            .scheme = options.scheme,
+            .compression = options.compression,
+            .compression_level = options.compression_level,
+            .accepted_encodings = options.accepted_encodings,
+            .timeout = options.timeout,
+            .metadata = options.metadata,
+            .binary_metadata = options.binary_metadata,
+            .max_message_size = options.max_message_size,
+        }),
+    };
+}
+
+/// Serve a standard v1 or v1alpha reflection bidirectional stream. Requests
+/// and responses remain ordered on one HTTP/2 stream; response flow-control
+/// waits may concurrently collect later request messages without a second
+/// connection reader.
+pub fn serve(
+    stream: *duplex.ServerDuplex,
+    registry: *Registry,
+) StreamError!void {
+    const version = versionForPath(stream.path) orelse
+        return error.NotReflectionRequest;
+    const expected_service = switch (version) {
+        .v1 => "grpc.reflection.v1.ServerReflection",
+        .v1alpha => "grpc.reflection.v1alpha.ServerReflection",
+    };
+    if (!std.mem.eql(u8, stream.service, expected_service) or
+        !std.mem.eql(u8, stream.method, "ServerReflectionInfo"))
+    {
+        return error.NotReflectionRequest;
+    }
+
+    const RequestQueue = struct {
+        allocator: std.mem.Allocator,
+        payloads: std.ArrayList([]u8) = .empty,
+        head: usize = 0,
+
+        fn deinit(self: *@This()) void {
+            for (self.payloads.items[self.head..]) |payload| {
+                self.allocator.free(payload);
+            }
+            self.payloads.deinit(self.allocator);
+        }
+
+        fn collect(
+            self: *@This(),
+            message: stream_codec.DecodedMessage,
+        ) std.mem.Allocator.Error!void {
+            const payload = try self.allocator.dupe(u8, message.payload);
+            errdefer self.allocator.free(payload);
+            try self.payloads.append(self.allocator, payload);
+        }
+
+        fn take(self: *@This()) ?[]u8 {
+            if (self.head == self.payloads.items.len) return null;
+            const payload = self.payloads.items[self.head];
+            self.head += 1;
+            if (self.head == self.payloads.items.len) {
+                self.payloads.clearRetainingCapacity();
+                self.head = 0;
+            }
+            return payload;
+        }
+    };
+
+    var requests = RequestQueue{ .allocator = stream.allocator };
+    defer requests.deinit();
+    var request_finished = false;
+    try stream.startResponse(.{
+        .request_accepted_encodings = stream.accepted_encodings,
+    });
+
+    while (true) {
+        if (requests.take()) |request_bytes| {
+            defer stream.allocator.free(request_bytes);
+            const response = registry.respondAlloc(
+                stream.allocator,
+                request_bytes,
+            ) catch |err| switch (err) {
+                error.OutOfMemory => return error.OutOfMemory,
+                error.MissingDependency => {
+                    try stream.finish(
+                        .internal,
+                        "reflection registry has a missing dependency",
+                        &.{},
+                        &.{},
+                    );
+                    return;
+                },
+                else => {
+                    try stream.finish(
+                        .invalid_argument,
+                        "could not parse request",
+                        &.{},
+                        &.{},
+                    );
+                    return;
+                },
+            };
+            defer stream.allocator.free(response);
+            var write_result = try stream.writeMessage(response);
+            while (write_result == .peer_event) {
+                if (request_finished) {
+                    _ = try stream.waitForPeerReset();
+                    return;
+                }
+                if (!try readServerRequestEvent(
+                    stream,
+                    &requests,
+                    RequestQueue.collect,
+                )) return;
+                request_finished = stream.requestFinished();
+                write_result = try stream.resumeMessage();
+            }
+            continue;
+        }
+        if (request_finished) {
+            try stream.finishOk();
+            return;
+        }
+        if (!try readServerRequestEvent(
+            stream,
+            &requests,
+            RequestQueue.collect,
+        )) return;
+        request_finished = stream.requestFinished();
+    }
+}
+
+fn readServerRequestEvent(
+    stream: *duplex.ServerDuplex,
+    context: anytype,
+    comptime consume: anytype,
+) StreamError!bool {
+    var event = try stream.readRequestEvent(context, consume);
+    defer event.deinit();
+    return switch (event) {
+        .messages, .finished => true,
+        .reset => false,
+    };
+}
+
+fn versionForPath(path: []const u8) ?Version {
+    if (std.mem.eql(u8, path, v1_path)) return .v1;
+    if (std.mem.eql(u8, path, v1alpha_path)) return .v1alpha;
+    return null;
+}
 
 pub fn encodeRequestAlloc(
     allocator: std.mem.Allocator,
