@@ -640,6 +640,7 @@ pub const LossDetectionTimerDeadline = struct {
 };
 
 pub const TimerDeadlineKind = enum {
+    stop_sending_reset,
     pacing,
     ack_delay,
     peer_stream_credit,
@@ -752,6 +753,12 @@ pub const Connection = struct {
     closed_peer_uni_streams: closed_streams.Set = .{},
     closed_local_bidi_streams: closed_streams.Set = .{},
     closed_local_uni_streams: closed_streams.Set = .{},
+    /// Streams whose received STOP_SENDING still require the mandated
+    /// RESET_STREAM response. The stream table is the queue; this count and
+    /// deadline only make that work visible to endpoint schedulers.
+    pending_stop_sending_resets: usize = 0,
+    stop_sending_reset_retry_deadline_ns: ?u64 = null,
+    stop_sending_reset_retry_attempts: u8 = 0,
     pending_peer_stream_credit_releases: usize = 0,
     pending_local_stream_releases: usize = 0,
     stream_release_retry_deadline_ns: ?u64 = null,
@@ -2550,6 +2557,12 @@ pub const Connection = struct {
     /// typed helper matching `kind` when the deadline becomes due.
     pub fn nextTimerDeadline(self: Connection) ?TimerDeadline {
         var next: ?TimerDeadline = null;
+        if (self.stop_sending_reset_retry_deadline_ns) |deadline| {
+            considerTimerDeadline(&next, .{
+                .kind = .stop_sending_reset,
+                .deadline_ns = deadline,
+            });
+        }
         if (self.pacing_blocked_until_ns) |deadline| {
             considerTimerDeadline(&next, .{
                 .kind = .pacing,
@@ -2641,6 +2654,12 @@ pub const Connection = struct {
         if (now_ns < deadline.deadline_ns) return null;
 
         switch (deadline.kind) {
+            .stop_sending_reset => {
+                self.stop_sending_reset_retry_deadline_ns = null;
+                self.flushPendingStopSendingResetAt(now_ns) catch |err| {
+                    self.scheduleStopSendingResetRetry(err, now_ns);
+                };
+            },
             // Pacing is application-owned pending work rather than a queued
             // transport frame. Clearing the hint emits one endpoint timer
             // event so the application can retry without spinning.
@@ -5386,7 +5405,14 @@ pub const Connection = struct {
     fn removeSendStreamEntry(self: *Connection, stream_id: u64) void {
         const index = self.stream_send_index.get(stream_id) orelse return;
         const last_index = self.stream_send_flows.items.len - 1;
-        _ = self.stream_send_flows.swapRemove(index);
+        const removed = self.stream_send_flows.swapRemove(index);
+        if (removed.stopped != null and removed.reset_sent == null) {
+            std.debug.assert(self.pending_stop_sending_resets != 0);
+            self.pending_stop_sending_resets -= 1;
+            if (self.pending_stop_sending_resets == 0) {
+                self.clearStopSendingResetRetry();
+            }
+        }
         _ = self.stream_send_index.remove(stream_id);
         if (index != last_index) {
             const moved = self.stream_send_flows.items[index];
@@ -5527,6 +5553,76 @@ pub const Connection = struct {
         );
         self.stream_release_retry_attempts +|= 1;
         self.stream_release_retry_deadline_ns = std.math.add(
+            u64,
+            now_ns,
+            stream_release_retry_backoff_ns[index],
+        ) catch std.math.maxInt(u64);
+    }
+
+    /// Advance at most one RESET_STREAM owed in response to STOP_SENDING.
+    /// The stream table itself owns the pending state, while the timer keeps
+    /// endpoint schedulers from depending on another inbound packet.
+    fn flushPendingStopSendingResetAt(
+        self: *Connection,
+        now_ns: u64,
+    ) Error!void {
+        if (self.pending_stop_sending_resets == 0) {
+            self.clearStopSendingResetRetry();
+            return;
+        }
+        for (self.stream_send_flows.items) |*entry| {
+            const stopped = entry.stopped orelse continue;
+            if (entry.reset_sent != null) continue;
+            try self.sendResetStreamAt(
+                entry.stream_id,
+                stopped.application_error_code,
+                entry.highest_sent_end,
+                now_ns,
+            );
+            break;
+        }
+        if (self.pending_stop_sending_resets == 0) {
+            self.clearStopSendingResetRetry();
+            return;
+        }
+        self.stop_sending_reset_retry_attempts = 0;
+        self.stop_sending_reset_retry_deadline_ns = std.math.add(
+            u64,
+            now_ns,
+            stream_release_retry_backoff_ns[0],
+        ) catch std.math.maxInt(u64);
+    }
+
+    fn clearStopSendingResetRetry(self: *Connection) void {
+        self.stop_sending_reset_retry_deadline_ns = null;
+        self.stop_sending_reset_retry_attempts = 0;
+    }
+
+    fn scheduleStopSendingResetRetry(
+        self: *Connection,
+        err: Error,
+        now_ns: u64,
+    ) void {
+        if (self.pending_stop_sending_resets == 0 or
+            self.close_info != null or self.idle_timed_out)
+        {
+            self.clearStopSendingResetRetry();
+            return;
+        }
+        if (err == error.PacingLimited) {
+            if (self.pacing_blocked_until_ns) |deadline| {
+                if (deadline > now_ns) {
+                    self.stop_sending_reset_retry_deadline_ns = deadline;
+                    return;
+                }
+            }
+        }
+        const index = @min(
+            @as(usize, self.stop_sending_reset_retry_attempts),
+            stream_release_retry_backoff_ns.len - 1,
+        );
+        self.stop_sending_reset_retry_attempts +|= 1;
+        self.stop_sending_reset_retry_deadline_ns = std.math.add(
             u64,
             now_ns,
             stream_release_retry_backoff_ns[index],
@@ -8733,6 +8829,9 @@ pub const Connection = struct {
         }
         triggering_frame_index.* = null;
         const credit_now_ns = now_ns orelse self.monotonicNowNs();
+        self.flushPendingStopSendingResetAt(credit_now_ns) catch |err| {
+            self.scheduleStopSendingResetRetry(err, credit_now_ns);
+        };
         self.flushRequestedStreamReleasesAt(credit_now_ns) catch |err| {
             // ACK and stream state above are already committed. Treat this
             // internal credit packet like an event-loop send: preserve the
@@ -9404,14 +9503,14 @@ pub const Connection = struct {
     fn receiveStopSending(self: *Connection, stop: quic.StopSendingFrame) Error!void {
         try self.validateNextPacketNumber();
         const entry = try self.sendStreamEntry(stop.stream_id);
+        if (entry.stopped != null) return;
         entry.stopped = .{ .application_error_code = stop.application_error_code };
         if (entry.reset_sent == null) {
-            // RFC 9000 requires a peer that receives STOP_SENDING to answer
-            // with RESET_STREAM unless the send side is already terminal.  The
-            // reset uses the current stream final size (highest sent offset)
-            // so the peer can account stream and connection flow control even
-            // when locally generated STREAM frames use explicit offsets.
-            try self.sendResetStream(stop.stream_id, stop.application_error_code, entry.highest_sent_end);
+            // RFC 9000 requires RESET_STREAM unless the send side is already
+            // terminal. Record the obligation first; packet application must
+            // not wait for pacing, and the aggregate timer retries it even if
+            // no later packet arrives.
+            self.pending_stop_sending_resets += 1;
         }
     }
 
@@ -9462,6 +9561,10 @@ pub const Connection = struct {
             try self.sendTrackedFrames(&frames);
         _ = self.recovery.abandonStreamData(stream_id);
         entry.reset_sent = info;
+        if (entry.stopped != null) {
+            std.debug.assert(self.pending_stop_sending_resets != 0);
+            self.pending_stop_sending_resets -= 1;
+        }
     }
 
     fn sendTrackedFramesAllowClosing(self: *Connection, frames: []const quic.Frame) Error!void {

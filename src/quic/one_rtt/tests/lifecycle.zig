@@ -4,6 +4,26 @@ const one_rtt = @import("../../one_rtt.zig");
 const net = std.Io.net;
 const ObservedBatchSend = @import("observed_batch_send.zig").ObservedBatchSend;
 
+const FixedClockIo = struct {
+    delegate: std.Io,
+    now_ns: i96,
+    sleep_calls: usize = 0,
+
+    fn now(userdata: ?*anyopaque, _: std.Io.Clock) std.Io.Timestamp {
+        const self: *FixedClockIo = @ptrCast(@alignCast(userdata));
+        return .fromNanoseconds(self.now_ns);
+    }
+
+    fn sleep(
+        userdata: ?*anyopaque,
+        _: std.Io.Timeout,
+    ) std.Io.Cancelable!void {
+        const self: *FixedClockIo = @ptrCast(@alignCast(userdata));
+        self.sleep_calls += 1;
+        return error.Canceled;
+    }
+};
+
 test "QUIC 1-RTT validates configured stream-count limits" {
     const defaults: one_rtt.ConnectionConfig = .{
         .peer = undefined,
@@ -1025,6 +1045,114 @@ test "QUIC 1-RTT connection answers STOP_SENDING with RESET_STREAM" {
 
     try std.testing.expectError(error.StreamStopped, client.send(&[_]quic.Frame{.{ .stream = .{ .stream_id = 0, .data = "more", .fin = false } }}));
     try std.testing.expectEqual(@as(u64, 7), client.send_flow.used);
+}
+
+test "QUIC STOP_SENDING defers paced automatic reset" {
+    const allocator = std.testing.allocator;
+    var threaded = std.Io.Threaded.init(allocator, .{});
+    defer threaded.deinit();
+    const io = threaded.io();
+
+    var local_endpoint = try quic.runtime.Endpoint.bind(
+        allocator,
+        io,
+        .{ .ip4 = .loopback(0) },
+        .{ .max_datagram_size = 4096 },
+    );
+    defer local_endpoint.deinit();
+    var peer_endpoint = try quic.runtime.Endpoint.bind(
+        allocator,
+        io,
+        .{ .ip4 = .loopback(0) },
+        .{ .max_datagram_size = 4096 },
+    );
+    defer peer_endpoint.deinit();
+    const keys = quic.protection.deriveAes128Keys(
+        [_]u8{0x4c} ** quic.protection.secret_len,
+    );
+    var connection = try one_rtt.Connection.init(&local_endpoint, .{
+        .peer = peer_endpoint.address(),
+        .receive_keys = keys,
+        .send_keys = keys,
+        .local_connection_id = "stop-local",
+        .peer_connection_id = "stop-peer",
+        .max_datagram_size = 1200,
+        .pacing_max_burst_packets = 1,
+    });
+    defer connection.deinit();
+    var dispatcher = quic.endpoint_dispatcher.Dispatcher.init(
+        allocator,
+        &local_endpoint,
+    );
+    defer dispatcher.deinit();
+    const handle: quic.endpoint_dispatcher.ConnectionHandle = 92;
+    try dispatcher.registerConnection(handle, &connection);
+
+    var fixed_io = FixedClockIo{
+        .delegate = local_endpoint.io,
+        .now_ns = 1_000_000,
+    };
+    var fixed_vtable = local_endpoint.io.vtable.*;
+    fixed_vtable.now = FixedClockIo.now;
+    fixed_vtable.sleep = FixedClockIo.sleep;
+    local_endpoint.io = .{
+        .userdata = &fixed_io,
+        .vtable = &fixed_vtable,
+    };
+    defer local_endpoint.io = fixed_io.delegate;
+
+    try connection.sendAt(
+        &.{
+            .{ .stream = .{ .stream_id = 0, .data = "payload" } },
+            .{ .padding = .{ .len = 1150 } },
+        },
+        @intCast(fixed_io.now_ns),
+    );
+    const packet_number = connection.next_packet_number;
+    try one_rtt.testing.applyReceivedFrames(
+        &connection,
+        0,
+        &.{.{ .stop_sending = .{
+            .stream_id = 0,
+            .application_error_code = 92,
+        } }},
+        @intCast(fixed_io.now_ns),
+        .not_ect,
+    );
+    try dispatcher.refreshConnectionTimer(handle);
+    try std.testing.expectEqual(@as(usize, 0), fixed_io.sleep_calls);
+    try std.testing.expectEqual(
+        packet_number,
+        connection.next_packet_number,
+    );
+    try std.testing.expectEqual(
+        @as(u64, 92),
+        connection.streamStopped(0).?.application_error_code,
+    );
+    try std.testing.expect(connection.sendStreamStats(0).?.reset == null);
+
+    const timer = dispatcher.nextTimerDeadline() orelse
+        return error.TestUnexpectedResult;
+    try std.testing.expectEqual(handle, timer.connection_id);
+    try std.testing.expectEqual(
+        one_rtt.TimerDeadlineKind.stop_sending_reset,
+        timer.timer.kind,
+    );
+    fixed_io.now_ns = @intCast(timer.timer.deadline_ns);
+    const serviced = (try dispatcher.serviceNextTimerAt(
+        timer.timer.deadline_ns,
+    )) orelse
+        return error.TestUnexpectedResult;
+    try std.testing.expectEqual(handle, serviced.connection_handle);
+    try std.testing.expectEqual(
+        one_rtt.TimerDeadlineKind.stop_sending_reset,
+        serviced.timer.kind,
+    );
+    try std.testing.expectEqual(@as(usize, 0), fixed_io.sleep_calls);
+    const reset = connection.sendStreamStats(0).?.reset orelse
+        return error.TestUnexpectedResult;
+    try std.testing.expectEqual(@as(u64, 92), reset.application_error_code);
+    try std.testing.expectEqual(@as(u64, 7), reset.final_size);
 }
 
 test "QUIC 1-RTT connection applies sparse ACK ranges from peer" {

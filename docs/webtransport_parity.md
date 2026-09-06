@@ -290,6 +290,9 @@ for the next endpoint turn instead of blocking or exposing partial cleanup.
 Accepted-session polling applies the same rule to CONNECT capsules and
 associated stream data: receive-credit backpressure rolls back parser/registry
 state and delays the application event until a later dispatcher turn.
+At the QUIC layer, a received STOP_SENDING records its mandatory RESET_STREAM
+response and attempts it once. Pacing or transient send failure arms a distinct
+dispatcher timer, so packet routing never waits and the reset is not forgotten.
 
 ## Important interoperability correction
 
