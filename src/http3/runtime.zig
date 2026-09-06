@@ -5163,12 +5163,20 @@ pub const HandshakeServerSession = struct {
             false,
         ) catch |err| {
             const stream_id = self.streaming_requests.lastErrorStreamId();
-            self.failReceivedRequest(
-                stream_id,
-                null,
-                err,
-                false,
-            ) catch {};
+            if (single_attempt)
+                self.failReceivedRequestOnce(
+                    stream_id,
+                    null,
+                    err,
+                    false,
+                ) catch {}
+            else
+                self.failReceivedRequest(
+                    stream_id,
+                    null,
+                    err,
+                    false,
+                ) catch {};
             return err;
         };
         if (ready) |value| {
@@ -5177,12 +5185,20 @@ pub const HandshakeServerSession = struct {
                 value.event,
                 single_attempt,
             ) catch |err| {
-                self.failReceivedRequest(
-                    value.entry.reader.streamId(),
-                    null,
-                    err,
-                    false,
-                ) catch {};
+                if (single_attempt)
+                    self.failReceivedRequestOnce(
+                        value.entry.reader.streamId(),
+                        null,
+                        err,
+                        false,
+                    ) catch {}
+                else
+                    self.failReceivedRequest(
+                        value.entry.reader.streamId(),
+                        null,
+                        err,
+                        false,
+                    ) catch {};
                 return err;
             };
         }
@@ -5224,6 +5240,42 @@ pub const HandshakeServerSession = struct {
                 err,
             );
             return;
+        }
+    }
+
+    fn failReceivedRequestOnce(
+        self: *HandshakeServerSession,
+        stream_id: ?u62,
+        assembled_bytes: ?[]const u8,
+        err: anyerror,
+        assembled: bool,
+    ) Error!void {
+        if (stream_id) |id| {
+            if (err == error.RequestIncomplete) {
+                try self.cancelRequestInternalOnce(
+                    id,
+                    http3.ApplicationErrorCode.request_incomplete,
+                    false,
+                );
+                return;
+            }
+            if (messageStreamErrorCode(err)) |code| {
+                const uses_dynamic = if (assembled)
+                    messageUsesDynamicQpack(
+                        assembled_bytes orelse &.{},
+                        self.qpack_decode.table,
+                    ) catch false
+                else
+                    false;
+                try self.cancelRequestInternalOnce(id, code, uses_dynamic);
+                return;
+            }
+        }
+        if (runtime_error.protocolClose(err) != null) {
+            try closeConnectionForHttp3Error(
+                &self.established.connection,
+                err,
+            );
         }
     }
 
@@ -6753,6 +6805,45 @@ pub const HandshakeServerSession = struct {
             application_error_code,
             cancel_qpack,
         );
+    }
+
+    fn cancelRequestInternalOnce(
+        self: *HandshakeServerSession,
+        stream_id: u62,
+        application_error_code: u64,
+        decoded_dynamic_section: bool,
+    ) Error!void {
+        var cancel_qpack = decoded_dynamic_section;
+        if (!cancel_qpack) {
+            cancel_qpack = try self.request_streams.requiresQpackCancellation(
+                stream_id,
+                self.qpack_decode.table,
+            );
+        }
+        if (!cancel_qpack) {
+            cancel_qpack =
+                try self.streaming_requests.hasUnacknowledgedDynamicSection(
+                    stream_id,
+                    self.qpack_decode.table,
+                );
+        }
+        if (cancel_qpack) {
+            try self.qpack_decode.prepareStreamCancellation();
+        }
+        try self.established.connection.tryCancelStream(
+            stream_id,
+            application_error_code,
+        );
+        if (cancel_qpack) {
+            self.qpack_decode.recordStreamCancellationAssumeCapacity(
+                stream_id,
+            );
+        }
+        self.request_streams.remove(stream_id);
+        self.streaming_requests.remove(stream_id);
+        self.qpack_encode.abandonStream(stream_id);
+        finishServerRequest(&self.control, &self.request_lifecycle, stream_id);
+        _ = self.outbound_bodies.finish(stream_id);
     }
 
     pub fn rejectRequest(

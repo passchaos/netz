@@ -4710,6 +4710,70 @@ pub const Connection = struct {
         );
     }
 
+    /// Atomically submit any still-needed RESET_STREAM and STOP_SENDING for
+    /// one bidirectional stream without waiting for pacing. State is committed
+    /// only after the combined packet reaches the socket, so an endpoint can
+    /// retry the same cancellation after transport progress.
+    pub fn tryCancelStream(
+        self: *Connection,
+        stream_id: u64,
+        application_error_code: u64,
+    ) Error!void {
+        try self.validateNextPacketNumber();
+        const send_stream = try self.sendStreamEntry(stream_id);
+        const recv_stream = try self.recvStreamFlow(stream_id);
+        const reset_info: StreamResetInfo = .{
+            .application_error_code = application_error_code,
+            .final_size = send_stream.highest_sent_end,
+        };
+        const needs_reset = send_stream.final_size == null and
+            send_stream.reset_sent == null;
+        if (send_stream.reset_sent) |existing| {
+            if (existing.application_error_code != application_error_code or
+                existing.final_size != reset_info.final_size)
+            {
+                return error.FinalSizeMismatch;
+            }
+        }
+        const needs_stop = if (recv_stream.stop_sending_sent) |existing|
+            existing.application_error_code != application_error_code
+        else
+            true;
+
+        var frames: [2]quic.Frame = undefined;
+        var count: usize = 0;
+        if (needs_reset) {
+            frames[count] = .{ .reset_stream = .{
+                .stream_id = stream_id,
+                .application_error_code = application_error_code,
+                .final_size = reset_info.final_size,
+            } };
+            count += 1;
+        }
+        if (needs_stop) {
+            frames[count] = .{ .stop_sending = .{
+                .stream_id = stream_id,
+                .application_error_code = application_error_code,
+            } };
+            count += 1;
+        }
+        if (count == 0) return;
+        try self.sendTrackedFramesEcnAt(
+            frames[0..count],
+            .not_ect,
+            self.monotonicNowNs(),
+        );
+        if (needs_reset) {
+            _ = self.recovery.abandonStreamData(stream_id);
+            send_stream.reset_sent = reset_info;
+        }
+        if (needs_stop) {
+            recv_stream.stop_sending_sent = .{
+                .application_error_code = application_error_code,
+            };
+        }
+    }
+
     fn sendStopSendingAt(
         self: *Connection,
         stream_id: u64,

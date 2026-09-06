@@ -196,11 +196,28 @@ pub const QpackDecodeState = struct {
         self: *QpackDecodeState,
         stream_id: u64,
     ) Error!void {
-        try http3.Qpack.writeDecoderInstruction(
+        try self.prepareStreamCancellation();
+        self.recordStreamCancellationAssumeCapacity(stream_id);
+    }
+
+    pub fn prepareStreamCancellation(
+        self: *QpackDecodeState,
+    ) std.mem.Allocator.Error!void {
+        try self.decoder_instructions.ensureUnusedCapacity(
+            self.allocator,
+            11,
+        );
+    }
+
+    pub fn recordStreamCancellationAssumeCapacity(
+        self: *QpackDecodeState,
+        stream_id: u64,
+    ) void {
+        http3.Qpack.writeDecoderInstruction(
             &self.decoder_instructions,
             self.allocator,
             .{ .stream_cancellation = stream_id },
-        );
+        ) catch unreachable;
     }
 
     fn recordInsertCount(self: *QpackDecodeState, inserted: u64) Error!void {

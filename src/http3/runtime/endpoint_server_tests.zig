@@ -275,6 +275,159 @@ test "HTTP/3 endpoint request polling defers paced feedback" {
     );
 }
 
+test "HTTP/3 endpoint malformed request cancellation is retryable" {
+    const allocator = std.testing.allocator;
+    var threaded = std.Io.Threaded.init(allocator, .{});
+    defer threaded.deinit();
+    const io = threaded.io();
+
+    var server_endpoint = try quic.runtime.Endpoint.bind(
+        allocator,
+        io,
+        .{ .ip4 = .loopback(0) },
+        .{ .max_datagram_size = 4096 },
+    );
+    defer server_endpoint.deinit();
+    var peer_endpoint = try quic.runtime.Endpoint.bind(
+        allocator,
+        io,
+        .{ .ip4 = .loopback(0) },
+        .{ .max_datagram_size = 4096 },
+    );
+    defer peer_endpoint.deinit();
+    const keys = quic.protection.deriveAes128Keys(
+        [_]u8{0xf3} ** quic.protection.secret_len,
+    );
+    var session = try runtime.HandshakeServerSession.initPreconfigured(
+        &server_endpoint,
+        peer_endpoint.address(),
+        .{},
+        .{
+            .receive_keys = keys,
+            .send_keys = keys,
+            .local_connection_id = "malformed-server",
+            .peer_connection_id = "malformed-client",
+            .one_rtt = .{
+                .max_datagram_size = 1200,
+                .pacing_max_burst_packets = 1,
+            },
+        },
+    );
+    defer session.deinit();
+    session.control.settings.markSent(.{});
+    session.control.settings.markReceived(.{});
+    session.qpack_encoder_prefix_sent = true;
+    session.qpack_decoder_prefix_sent = true;
+
+    var field_section: std.ArrayList(u8) = .empty;
+    defer field_section.deinit(allocator);
+    try http3.Qpack.encodeLiteralBlock(&field_section, allocator, &.{
+        .{ .name = ":method", .value = "GET" },
+        .{ .name = ":method", .value = "POST" },
+        .{ .name = ":path", .value = "/invalid" },
+        .{ .name = ":scheme", .value = "https" },
+    });
+    var request_bytes: std.ArrayList(u8) = .empty;
+    defer request_bytes.deinit(allocator);
+    try (http3.Frame{
+        .frame_type = http3.FrameType.headers,
+        .payload = field_section.items,
+        .consumed = 0,
+    }).write(&request_bytes, allocator);
+    var peer = try quic.one_rtt.Connection.init(&peer_endpoint, .{
+        .peer = server_endpoint.address(),
+        .receive_keys = keys,
+        .send_keys = keys,
+        .local_connection_id = "malformed-client",
+        .peer_connection_id = "malformed-server",
+        .enable_pacing = false,
+    });
+    defer peer.deinit();
+    try peer.send(&.{.{ .stream = .{
+        .stream_id = 0,
+        .data = request_bytes.items,
+    } }});
+    var packet = try session.established.connection.receivePacket();
+    defer packet.deinit(allocator);
+    try session.processRequestPacket(&packet);
+
+    var dispatcher = quic.endpoint_dispatcher.Dispatcher.init(
+        allocator,
+        &server_endpoint,
+    );
+    defer dispatcher.deinit();
+    const handle: quic.endpoint_dispatcher.ConnectionHandle = 80;
+    try dispatcher.registerConnection(
+        handle,
+        &session.established.connection,
+    );
+    var promoted = runtime.PromotedHandshakeSession{
+        .dispatcher = &dispatcher,
+        .allocator = allocator,
+        .handle = handle,
+        .session = &session,
+    };
+
+    var fixed_io = EndpointFixedClockIo{
+        .delegate = server_endpoint.io,
+        .now_ns = 1_000_000,
+    };
+    var fixed_vtable = server_endpoint.io.vtable.*;
+    fixed_vtable.now = EndpointFixedClockIo.now;
+    fixed_vtable.sleep = EndpointFixedClockIo.sleep;
+    server_endpoint.io = .{
+        .userdata = &fixed_io,
+        .vtable = &fixed_vtable,
+    };
+    defer server_endpoint.io = fixed_io.delegate;
+    quic.one_rtt.testing.exhaustPacingAt(
+        &session.established.connection,
+        @intCast(fixed_io.now_ns),
+    );
+
+    const packet_number = session.established.connection.next_packet_number;
+    try std.testing.expectError(
+        error.InvalidHeader,
+        runtime.EndpointServer.testing.pollSessionRequestEntry(&promoted),
+    );
+    try std.testing.expectEqual(@as(usize, 0), fixed_io.sleep_calls);
+    try std.testing.expectEqual(
+        packet_number,
+        session.established.connection.next_packet_number,
+    );
+    try std.testing.expect(session.streaming_requests.find(0) != null);
+    try std.testing.expect(
+        session.established.connection.sendStreamStats(0).?.reset == null,
+    );
+    try std.testing.expect(
+        session.established.connection.recvStreamStats(0).?
+            .stop_sending_sent == null,
+    );
+
+    const timer = dispatcher.nextTimerDeadline() orelse
+        return error.TestUnexpectedResult;
+    try std.testing.expectEqual(
+        quic.one_rtt.TimerDeadlineKind.pacing,
+        timer.timer.kind,
+    );
+    fixed_io.now_ns = @intCast(timer.timer.deadline_ns);
+    _ = (try dispatcher.serviceNextTimerAt(timer.timer.deadline_ns)) orelse
+        return error.TestUnexpectedResult;
+    try std.testing.expectError(
+        error.InvalidHeader,
+        runtime.EndpointServer.testing.pollSessionRequestEntry(&promoted),
+    );
+    try std.testing.expectEqual(@as(usize, 0), fixed_io.sleep_calls);
+    try std.testing.expect(session.streaming_requests.find(0) == null);
+    try std.testing.expect(
+        session.established.connection.sendStreamStats(0).?.reset != null,
+    );
+    try std.testing.expect(
+        session.established.connection.recvStreamStats(0).?
+            .stop_sending_sent != null,
+    );
+}
+
 test "HTTP/3 endpoint server exposes bounded callback loop API" {
     try std.testing.expect(@hasDecl(runtime.EndpointServer, "receiveOnce"));
     try std.testing.expect(@hasDecl(

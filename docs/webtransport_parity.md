@@ -284,6 +284,9 @@ publishing a response or introducing a dynamic encoder-stream dependency.
 Endpoint request polling likewise makes only nonblocking receive-credit and
 QPACK-feedback attempts; queued decoder instructions are drained in packet-
 sized prefixes and remain retryable across dispatcher pacing turns.
+Malformed request cleanup submits RESET_STREAM and STOP_SENDING atomically in
+one packet; if pacing rejects that packet, the parser state remains available
+for the next endpoint turn instead of blocking or exposing partial cleanup.
 
 ## Important interoperability correction
 
