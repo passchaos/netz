@@ -39,6 +39,7 @@ pub const ClientWriter = struct {
     encoder: codec.Encoder,
     accepted_encodings: compression.AlgorithmSet,
     max_message_size: usize,
+    deadline: ?std.Io.Clock.Timestamp = null,
 
     pub fn deinit(self: *ClientWriter) void {
         self.transport.deinit();
@@ -49,7 +50,18 @@ pub const ClientWriter = struct {
         self: *ClientWriter,
         payload: []const u8,
     ) Error!void {
-        try self.encoder.writeMessage(&self.transport, payload);
+        if (self.deadline) |deadline| {
+            self.encoder.writeMessageWithDeadline(
+                &self.transport,
+                payload,
+                deadline,
+            ) catch |err| {
+                if (err == error.Timeout) self.cancelAfterDeadline();
+                return err;
+            };
+        } else {
+            try self.encoder.writeMessage(&self.transport, payload);
+        }
     }
 
     /// Write one message, or consume a response that ended the upload early.
@@ -76,7 +88,20 @@ pub const ClientWriter = struct {
     }
 
     pub fn finish(self: *ClientWriter) Error!void {
-        try self.transport.finish();
+        if (self.deadline) |deadline| {
+            self.transport.finishWithDeadline(deadline) catch |err| {
+                if (err == error.Timeout) self.cancelAfterDeadline();
+                return err;
+            };
+        } else {
+            try self.transport.finish();
+        }
+    }
+
+    /// Cancel both halves with HTTP/2 CANCEL. This is idempotent once the
+    /// transport has reached a terminal state.
+    pub fn cancel(self: *ClientWriter) Error!void {
+        try self.transport.cancel(.cancel);
     }
 
     /// Finish the request side and consume all response messages.
@@ -105,11 +130,19 @@ pub const ClientWriter = struct {
             context,
         );
         defer bridge.deinit();
-        var response = self.transport.readResponseStreamingWithHead(
-            &bridge,
-            @TypeOf(bridge).begin,
-            @TypeOf(bridge).consumeData,
-        ) catch |err| {
+        var response = (if (self.deadline) |deadline|
+            self.transport.readResponseStreamingWithHeadAndDeadline(
+                deadline,
+                &bridge,
+                @TypeOf(bridge).begin,
+                @TypeOf(bridge).consumeData,
+            )
+        else
+            self.transport.readResponseStreamingWithHead(
+                &bridge,
+                @TypeOf(bridge).begin,
+                @TypeOf(bridge).consumeData,
+            )) catch |err| {
             self.transport.completed = true;
             switch (err) {
                 error.StreamReset => return try self.takeResetResponse(),
@@ -140,6 +173,10 @@ pub const ClientWriter = struct {
         };
     }
 
+    fn cancelAfterDeadline(self: *ClientWriter) void {
+        self.transport.cancel(.cancel) catch {};
+    }
+
     fn takeResetResponse(self: *ClientWriter) Error!Response {
         const reset = self.transport.connection.takeLastPeerReset() orelse
             return error.StreamReset;
@@ -156,6 +193,13 @@ pub fn startClient(
     allocator: std.mem.Allocator,
     options: RequestOptions,
 ) Error!ClientWriter {
+    const deadline: ?std.Io.Clock.Timestamp = if (options.timeout) |timeout|
+        std.Io.Clock.Timestamp.fromNow(connection.io, .{
+            .raw = timeout.duration(),
+            .clock = .awake,
+        })
+    else
+        null;
     _ = try call.parseRequestMetadata(
         "POST",
         options.path,
@@ -198,10 +242,13 @@ pub fn startClient(
         .value = "trailers",
     });
     var timeout_buffer: [9]u8 = undefined;
-    if (options.timeout) |timeout| {
+    if (deadline) |absolute| {
+        const remaining = absolute.durationFromNow(connection.io).raw;
+        if (remaining.nanoseconds <= 0) return error.Timeout;
         headers.appendAssumeCapacity(.{
             .name = "grpc-timeout",
-            .value = try timeout.formatInto(&timeout_buffer),
+            .value = try (try wire.Timeout.fromDuration(remaining))
+                .formatInto(&timeout_buffer),
         });
     }
     if (options.compression != .identity) {
@@ -223,13 +270,22 @@ pub fn startClient(
 
     return .{
         .allocator = allocator,
-        .transport = try connection.startRequest(.{
-            .method = "POST",
-            .path = options.path,
-            .scheme = options.scheme,
-            .authority = options.authority,
-            .headers = headers.items,
-        }),
+        .transport = if (deadline) |absolute|
+            try connection.startRequestWithDeadline(.{
+                .method = "POST",
+                .path = options.path,
+                .scheme = options.scheme,
+                .authority = options.authority,
+                .headers = headers.items,
+            }, absolute)
+        else
+            try connection.startRequest(.{
+                .method = "POST",
+                .path = options.path,
+                .scheme = options.scheme,
+                .authority = options.authority,
+                .headers = headers.items,
+            }),
         .encoder = .{
             .allocator = allocator,
             .algorithm = options.compression,
@@ -238,6 +294,7 @@ pub fn startClient(
         },
         .accepted_encodings = options.accepted_encodings,
         .max_message_size = options.max_message_size,
+        .deadline = deadline,
     };
 }
 

@@ -4081,6 +4081,39 @@ pub const Connection = struct {
         self: *Connection,
         options: StreamingRequestOptions,
     ) Error!RequestWriter {
+        return self.startRequestUntil(options, null);
+    }
+
+    /// Start an incremental request under a caller-owned awake-clock
+    /// deadline. The timestamp is checked again immediately before the
+    /// opening HEADERS are written, so local preparation cannot renew or
+    /// silently overrun the caller's budget.
+    pub fn startRequestWithDeadline(
+        self: *Connection,
+        options: StreamingRequestOptions,
+        deadline: std.Io.Clock.Timestamp,
+    ) ResponseTimeoutError!RequestWriter {
+        _ = try deadline_policy.usableAwake(self.io, deadline);
+        return self.startRequestUntil(options, deadline);
+    }
+
+    pub fn startRequestWithTimeout(
+        self: *Connection,
+        options: StreamingRequestOptions,
+        timeout: std.Io.Duration,
+    ) ResponseTimeoutError!RequestWriter {
+        if (timeout.nanoseconds <= 0) return error.Timeout;
+        return self.startRequestWithDeadline(options, .fromNow(self.io, .{
+            .raw = timeout,
+            .clock = .awake,
+        }));
+    }
+
+    fn startRequestUntil(
+        self: *Connection,
+        options: StreamingRequestOptions,
+        deadline: ?std.Io.Clock.Timestamp,
+    ) ResponseTimeoutError!RequestWriter {
         if (self.aggregate_timeout_unusable) return error.ConnectionClosed;
         if (self.role != .client) return error.UnexpectedFrame;
         self.last_peer_reset = null;
@@ -4166,6 +4199,9 @@ pub const Connection = struct {
             }
         }
         try validateHeaderBlock(fields.items, .request);
+        if (deadline) |absolute| {
+            _ = try deadline_policy.usableAwake(self.io, absolute);
+        }
 
         const stream_id = try self.reserveNextClientStreamId();
         var stream_owned = true;
@@ -12441,6 +12477,23 @@ pub const Connection = struct {
         end_stream: bool,
         written: *usize,
     ) Error!void {
+        return self.writeDataTrackedUntil(
+            stream_id,
+            data,
+            end_stream,
+            written,
+            null,
+        );
+    }
+
+    fn writeDataTrackedUntil(
+        self: *Connection,
+        stream_id: u31,
+        data: []const u8,
+        end_stream: bool,
+        written: *usize,
+        deadline: ?std.Io.Clock.Timestamp,
+    ) Error!void {
         if (!self.outboundStreamIsActive(stream_id)) return error.InvalidStreamId;
         if (self.role == .client and
             self.pendingApplicationFrameCount() != 0)
@@ -12448,6 +12501,9 @@ pub const Connection = struct {
             return error.ResponseAvailable;
         }
         written.* = 0;
+        if (deadline) |absolute| {
+            _ = try deadline_policy.usableAwake(self.io, absolute);
+        }
         const chunk_size = self.outboundFramePayloadLimit();
         if (data.len == 0) {
             try writeFrameTransport(
@@ -12470,7 +12526,7 @@ pub const Connection = struct {
                 stream_window.available(),
             );
             if (available_credit == 0) {
-                try self.waitForSendCapacity(stream_id);
+                try self.waitForSendCapacityUntil(stream_id, deadline);
                 continue;
             }
 
@@ -12714,8 +12770,16 @@ pub const Connection = struct {
     }
 
     fn waitForSendCapacity(self: *Connection, stream_id: u31) Error!void {
+        return self.waitForSendCapacityUntil(stream_id, null);
+    }
+
+    fn waitForSendCapacityUntil(
+        self: *Connection,
+        stream_id: u31,
+        deadline: ?std.Io.Clock.Timestamp,
+    ) Error!void {
         while (self.send_connection_window.available() == 0 or (try self.sendStreamWindow(stream_id)).available() == 0) {
-            var frame = try self.readOwnedFrame();
+            var frame = try self.readOwnedFrameWithDeadline(deadline);
             var frame_owned = true;
             defer if (frame_owned) frame.deinit(self.allocator);
             if (try self.handleConnectionFrame(frame.frame)) {
@@ -13503,14 +13567,32 @@ pub const RequestWriter = struct {
         self: *RequestWriter,
         data: []const u8,
     ) Error!void {
+        return self.writeUntil(data, null);
+    }
+
+    pub fn writeWithDeadline(
+        self: *RequestWriter,
+        data: []const u8,
+        deadline: std.Io.Clock.Timestamp,
+    ) ResponseTimeoutError!void {
+        _ = try deadline_policy.usableAwake(self.connection.io, deadline);
+        return self.writeUntil(data, deadline);
+    }
+
+    fn writeUntil(
+        self: *RequestWriter,
+        data: []const u8,
+        deadline: ?std.Io.Clock.Timestamp,
+    ) Error!void {
         try self.ensureWritable();
         try self.reserveLength(data.len, false);
         var sent: usize = 0;
-        self.connection.writeDataTracked(
+        self.connection.writeDataTrackedUntil(
             self.stream_id,
             data,
             false,
             &sent,
+            deadline,
         ) catch |err| switch (err) {
             error.ResponseAvailable => {
                 self.written += sent;
@@ -13538,14 +13620,32 @@ pub const RequestWriter = struct {
         self: *RequestWriter,
         data: []const u8,
     ) Error!void {
+        return self.finishDataUntil(data, null);
+    }
+
+    pub fn finishDataWithDeadline(
+        self: *RequestWriter,
+        data: []const u8,
+        deadline: std.Io.Clock.Timestamp,
+    ) ResponseTimeoutError!void {
+        _ = try deadline_policy.usableAwake(self.connection.io, deadline);
+        return self.finishDataUntil(data, deadline);
+    }
+
+    fn finishDataUntil(
+        self: *RequestWriter,
+        data: []const u8,
+        deadline: ?std.Io.Clock.Timestamp,
+    ) Error!void {
         try self.ensureWritable();
         try self.reserveLength(data.len, true);
         var sent: usize = 0;
-        self.connection.writeDataTracked(
+        self.connection.writeDataTrackedUntil(
             self.stream_id,
             data,
             true,
             &sent,
+            deadline,
         ) catch |err| switch (err) {
             error.ResponseAvailable => {
                 self.written += sent;
@@ -13568,6 +13668,13 @@ pub const RequestWriter = struct {
 
     pub fn finish(self: *RequestWriter) Error!void {
         return self.finishData(&.{});
+    }
+
+    pub fn finishWithDeadline(
+        self: *RequestWriter,
+        deadline: std.Io.Clock.Timestamp,
+    ) ResponseTimeoutError!void {
+        return self.finishDataWithDeadline(&.{}, deadline);
     }
 
     pub fn finishTrailers(
@@ -13928,6 +14035,18 @@ pub const RequestWriter = struct {
         error_code: http2.ErrorCode,
     ) Error!void {
         try self.ensureWritable();
+        try self.connection.sendResetStream(self.stream_id, error_code);
+        self.body_finished = true;
+        self.completed = true;
+    }
+
+    /// Cancel an unconsumed response even after the request body has been
+    /// half-closed. Repeated cancellation is a no-op.
+    pub fn cancel(
+        self: *RequestWriter,
+        error_code: http2.ErrorCode,
+    ) Error!void {
+        if (self.completed) return;
         try self.connection.sendResetStream(self.stream_id, error_code);
         self.body_finished = true;
         self.completed = true;

@@ -238,6 +238,42 @@ pub const Encoder = struct {
         if (encoded.bytes.len != 0) try writer.write(encoded.bytes);
     }
 
+    /// Write one message while preserving the caller's absolute transport
+    /// deadline across both the prefix and payload writes.
+    pub fn writeMessageWithDeadline(
+        self: Encoder,
+        writer: anytype,
+        payload: []const u8,
+        deadline: std.Io.Clock.Timestamp,
+    ) !void {
+        if (payload.len > self.max_message_size) {
+            return error.GrpcMessageTooLarge;
+        }
+        var encoded = try compression.compressAlloc(
+            self.allocator,
+            self.algorithm,
+            payload,
+            self.compression_level,
+        );
+        defer encoded.deinit(self.allocator);
+        var prefix: [5]u8 = undefined;
+        _ = try wire.writeMessageInto(
+            &prefix,
+            &.{},
+            encoded.compressed,
+        );
+        std.mem.writeInt(
+            u32,
+            prefix[1..5],
+            @intCast(encoded.bytes.len),
+            .big,
+        );
+        try writer.writeWithDeadline(&prefix, deadline);
+        if (encoded.bytes.len != 0) {
+            try writer.writeWithDeadline(encoded.bytes, deadline);
+        }
+    }
+
     /// Encode one message as a single temporary slice for tests, batching or
     /// transports that do not expose a stateful DATA writer.
     pub fn appendMessage(
