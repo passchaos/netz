@@ -1282,6 +1282,109 @@ test "QUIC blocked PATH_CHALLENGE timer remains armed until credit arrives" {
     );
 }
 
+test "QUIC PATH_CHALLENGE timer does not wait for pacing" {
+    const allocator = std.testing.allocator;
+    var threaded = std.Io.Threaded.init(allocator, .{});
+    defer threaded.deinit();
+    const io = threaded.io();
+
+    var endpoint = try quic.runtime.Endpoint.bind(
+        allocator,
+        io,
+        .{ .ip4 = .loopback(0) },
+        .{ .max_datagram_size = 4096 },
+    );
+    defer endpoint.deinit();
+    var peer_endpoint = try quic.runtime.Endpoint.bind(
+        allocator,
+        io,
+        .{ .ip4 = .loopback(0) },
+        .{ .max_datagram_size = 4096 },
+    );
+    defer peer_endpoint.deinit();
+    const keys = quic.protection.deriveAes128Keys(
+        [_]u8{0xd5} ** quic.protection.secret_len,
+    );
+    var connection = try one_rtt.Connection.init(&endpoint, .{
+        .peer = peer_endpoint.address(),
+        .receive_keys = keys,
+        .send_keys = keys,
+        .local_connection_id = "paced-client",
+        .peer_connection_id = "paced-server",
+        .max_datagram_size = 1200,
+        .pacing_max_burst_packets = 1,
+    });
+    defer connection.deinit();
+    var dispatcher = quic.endpoint_dispatcher.Dispatcher.init(
+        allocator,
+        &endpoint,
+    );
+    defer dispatcher.deinit();
+    const handle: quic.endpoint_dispatcher.ConnectionHandle = 95;
+    try dispatcher.registerConnection(handle, &connection);
+
+    var fixed_io = FixedClockIo{
+        .delegate = endpoint.io,
+        .now_ns = 1_000_000,
+    };
+    var fixed_vtable = endpoint.io.vtable.*;
+    fixed_vtable.now = FixedClockIo.now;
+    fixed_vtable.sleep = FixedClockIo.sleep;
+    endpoint.io = .{
+        .userdata = &fixed_io,
+        .vtable = &fixed_vtable,
+    };
+    defer endpoint.io = fixed_io.delegate;
+
+    try connection.sendAt(
+        &.{.{ .padding = .{ .len = 1160 } }},
+        @intCast(fixed_io.now_ns),
+    );
+    const challenge = [_]u8{ 21, 34, 55, 89, 1, 2, 3, 5 };
+    try connection.queuePathChallenge(challenge);
+    try std.testing.expectError(
+        error.PacingLimited,
+        connection.sendPendingPathChallengeAt(
+            @intCast(fixed_io.now_ns),
+            1_000_000,
+        ),
+    );
+    try dispatcher.refreshConnectionTimer(handle);
+    try std.testing.expectEqual(@as(usize, 0), fixed_io.sleep_calls);
+    try std.testing.expectEqual(
+        @as(usize, 1),
+        connection.path_validation.pendingChallengeCount(),
+    );
+    try std.testing.expectEqual(
+        @as(usize, 0),
+        connection.path_validation.outstandingChallengeCount(),
+    );
+    const timer = dispatcher.nextTimerDeadline() orelse
+        return error.TestUnexpectedResult;
+    try std.testing.expectEqual(handle, timer.connection_id);
+    try std.testing.expectEqual(
+        one_rtt.TimerDeadlineKind.path_validation,
+        timer.timer.kind,
+    );
+    fixed_io.now_ns = @intCast(timer.timer.deadline_ns);
+    const serviced = (try dispatcher.serviceNextTimerAt(
+        timer.timer.deadline_ns,
+    )) orelse return error.TestUnexpectedResult;
+    try std.testing.expectEqual(
+        one_rtt.TimerDeadlineKind.path_validation,
+        serviced.timer.kind,
+    );
+    try std.testing.expectEqual(@as(usize, 0), fixed_io.sleep_calls);
+    try std.testing.expectEqual(
+        @as(usize, 0),
+        connection.path_validation.pendingChallengeCount(),
+    );
+    try std.testing.expectEqual(
+        @as(usize, 1),
+        connection.path_validation.outstandingChallengeCount(),
+    );
+}
+
 test "QUIC congestion-blocked PATH_CHALLENGE retains retry deadline" {
     const allocator = std.testing.allocator;
     var threaded = std.Io.Threaded.init(allocator, .{});

@@ -299,6 +299,9 @@ timer when transport backpressure prevents immediate delivery.
 PATH_CHALLENGE responses are also surfaced as immediate endpoint timer work;
 each turn submits one padded PATH_RESPONSE to the recorded source address, and
 keeps both the challenge and route intact across pacing or send failure.
+Outbound PATH_CHALLENGE retries with an explicit transport timestamp now make
+one send attempt as well; pacing preserves the pending challenge and gives its
+path-validation timer priority over an equal generic pacing notification.
 
 ## Important interoperability correction
 

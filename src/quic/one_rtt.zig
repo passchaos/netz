@@ -2583,6 +2583,14 @@ pub const Connection = struct {
                 .deadline_ns = deadline,
             });
         }
+        // Internal path-validation work wins ties with the generic pacing
+        // notification so one dispatcher turn performs the queued send.
+        if (self.path_validation_retry_deadline_ns) |deadline| {
+            considerTimerDeadline(&next, .{
+                .kind = .path_validation,
+                .deadline_ns = deadline,
+            });
+        }
         if (self.pacing_blocked_until_ns) |deadline| {
             considerTimerDeadline(&next, .{
                 .kind = .pacing,
@@ -2617,12 +2625,6 @@ pub const Connection = struct {
             });
         }
         if (self.pathValidationDeadline()) |deadline| {
-            considerTimerDeadline(&next, .{
-                .kind = .path_validation,
-                .deadline_ns = deadline,
-            });
-        }
-        if (self.path_validation_retry_deadline_ns) |deadline| {
             considerTimerDeadline(&next, .{
                 .kind = .path_validation,
                 .deadline_ns = deadline,
@@ -2733,8 +2735,10 @@ pub const Connection = struct {
                         // A 1200-byte validation datagram may need more
                         // candidate-path credit. Keep the challenge pending
                         // and let the receive loop wait for another datagram.
-                        error.AntiAmplificationLimited => return deadline,
-                        error.CongestionLimited => {
+                        error.AntiAmplificationLimited,
+                        error.CongestionLimited,
+                        error.PacingLimited,
+                        => {
                             self.notePathValidationSendBlocked(err, now_ns);
                             return deadline;
                         },
@@ -6123,7 +6127,11 @@ pub const Connection = struct {
             &frames,
             &padded,
         );
-        self.send(send_frames) catch |err| {
+        const send_result = if (now_ns) |timestamp|
+            self.sendAutomaticallyAt(send_frames, timestamp)
+        else
+            self.send(send_frames);
+        send_result catch |err| {
             self.notePathValidationSendBlocked(err, now_ns);
             return err;
         };
@@ -6146,7 +6154,11 @@ pub const Connection = struct {
             frames[0..count],
             &padded,
         );
-        self.send(send_frames) catch |err| {
+        const send_result = if (now_ns) |timestamp|
+            self.sendAutomaticallyAt(send_frames, timestamp)
+        else
+            self.send(send_frames);
+        send_result catch |err| {
             self.notePathValidationSendBlocked(err, now_ns);
             return err;
         };
@@ -6170,8 +6182,17 @@ pub const Connection = struct {
         now_ns: ?u64,
     ) void {
         if (err != error.AntiAmplificationLimited and
-            err != error.CongestionLimited) return;
+            err != error.CongestionLimited and
+            err != error.PacingLimited) return;
         const now = now_ns orelse return;
+        if (err == error.PacingLimited) {
+            if (self.pacing_blocked_until_ns) |deadline| {
+                if (deadline > now) {
+                    self.path_validation_retry_deadline_ns = deadline;
+                    return;
+                }
+            }
+        }
         self.path_validation_retry_deadline_ns = std.math.add(
             u64,
             now,
