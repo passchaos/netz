@@ -92,6 +92,10 @@ test "WebTransport handshake streams read incrementally and exchange cancellatio
             try std.testing.expectEqual(shared.expected.len, received);
             try std.testing.expect(data_events > 1);
             try std.testing.expect(shared.expected.len > stream_window);
+            try std.testing.expect(!session.h3.established.connection
+                .peerStreamClosed(4));
+            try std.testing.expect(session.streams.get(4) != null);
+            try session.finishStream(4);
 
             const stop_stream = try session.openUnidirectionalStream();
             try session.sendStream(stop_stream, "stop me", false);
@@ -117,6 +121,9 @@ test "WebTransport handshake streams read incrementally and exchange cancellatio
                 error.InvalidStreamState,
                 session.sendStream(stop_stream, "late", false),
             );
+            while (!session.h3.established.connection.peerStreamClosed(4)) {
+                try session.h3.pollControlWithTimeout(.fromSeconds(2));
+            }
 
             const reset_stream = try session.openBidirectionalStream();
             try session.sendStream(reset_stream, "before reset", false);
@@ -168,10 +175,16 @@ test "WebTransport handshake streams read incrementally and exchange cancellatio
 
     var read_buffer: [2048]u8 = undefined;
     var saw_stop_payload = false;
+    var saw_streamed_fin = false;
     while (!saw_stop_payload) {
         const event = try client.readStream(&read_buffer);
         switch (event) {
             .data => |data| {
+                if (data.stream_id == streamed and data.fin) {
+                    try std.testing.expectEqual(@as(usize, 0), data.bytes);
+                    saw_streamed_fin = true;
+                    continue;
+                }
                 if (data.direction == .unidirectional and
                     !data.locally_initiated)
                 {
@@ -194,6 +207,11 @@ test "WebTransport handshake streams read incrementally and exchange cancellatio
         const event = try client.readStream(&read_buffer);
         switch (event) {
             .data => |data| {
+                if (data.stream_id == streamed and data.fin) {
+                    try std.testing.expectEqual(@as(usize, 0), data.bytes);
+                    saw_streamed_fin = true;
+                    continue;
+                }
                 if (data.direction == .bidirectional and
                     !data.locally_initiated)
                 {
@@ -231,6 +249,10 @@ test "WebTransport handshake streams read incrementally and exchange cancellatio
         }
     }
     try std.testing.expect(saw_stop_reset);
+    try std.testing.expect(saw_streamed_fin);
+    try std.testing.expect(client.h3.established.connection
+        .localStreamClosed(streamed));
+    try std.testing.expect(client.streams.get(streamed) != null);
     // RESET_STREAM can overtake its preceding STREAM packet. Both outcomes are
     // valid: when data arrives first it is delivered before reset; otherwise
     // the reset terminates the read direction without fabricating payload.

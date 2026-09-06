@@ -206,7 +206,11 @@ ranges, while WebTransport's registry intentionally retains its separate
 per-session lifetime accounting. Stream discovery uses stable ID-based
 pagination so reclamation cannot skip a swap-moved active stream. A failed
 automatic credit update remains pending and retries through the aggregate QUIC
-connection timer without requiring another peer packet.
+connection timer without requiring another peer packet. Whole-stream and
+incremental WebTransport readers now register transport retirement when FIN or
+RESET_STREAM is delivered; local FIN/reset paths do the same, so associated
+streams are compacted after both applicable halves become terminal while the
+registry continues enforcing lifetime session limits.
 The endpoint-accepted
 variant is deliberately nonblocking: it only inspects buffered state, sends a
 credit update when ready, and refreshes the dispatcher timer without reading

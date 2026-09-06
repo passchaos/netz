@@ -215,6 +215,7 @@ pub fn finish(
             },
             else => return err,
         };
+        try association.requestAfterSendTerminal(connection, stream);
         try registry.recordSent(stream_id, 0, true);
         return;
     }
@@ -446,6 +447,7 @@ fn takeHandshakeSessionStream(
         stream_id,
         prefix_len + payload_len,
     );
+    _ = try association.requestTransportRetirement(connection, stream);
     try registry.recordReceived(stream_id, payload_len, true);
     return .{
         .allocator = connection.endpoint.allocator,
@@ -470,4 +472,114 @@ fn writeUnidirectionalHeaderInto(
         session_id.value,
     );
     return storage[0 .. stream_type.len + session.len];
+}
+
+test "WebTransport whole-stream receive requests transport retirement" {
+    const allocator = std.testing.allocator;
+    var threaded = std.Io.Threaded.init(allocator, .{});
+    defer threaded.deinit();
+    var endpoint = try quic.runtime.Endpoint.bind(
+        allocator,
+        threaded.io(),
+        .{ .ip4 = .loopback(0) },
+        .{ .max_datagram_size = 4096 },
+    );
+    defer endpoint.deinit();
+    const keys = quic.protection.deriveAes128Keys(
+        [_]u8{0xd5} ** quic.protection.secret_len,
+    );
+    var connection = try quic.one_rtt.Connection.init(&endpoint, .{
+        .peer = endpoint.address(),
+        .receive_keys = keys,
+        .send_keys = keys,
+        .local_connection_id = "wt-retire-server",
+        .peer_connection_id = "wt-retire-client",
+        .local_endpoint = .server,
+        .enable_pacing = false,
+    });
+    defer connection.deinit();
+    const session_id: webtransport.SessionId = .init(0);
+    var registry = try webtransport.StreamRegistry.init(
+        allocator,
+        session_id,
+        .server,
+        .{ .max_peer_uni = 1 },
+    );
+    defer registry.deinit();
+
+    var encoded: std.ArrayList(u8) = .empty;
+    defer encoded.deinit(allocator);
+    try webtransport.UnidirectionalStreamHeader.writeWebTransport(
+        &encoded,
+        allocator,
+        session_id,
+    );
+    try encoded.appendSlice(allocator, "payload");
+    try quic.one_rtt.testing.applyReceivedFrames(
+        &connection,
+        0,
+        &.{.{ .stream = .{
+            .stream_id = 2,
+            .data = encoded.items,
+            .fin = true,
+        } }},
+        null,
+        .not_ect,
+    );
+
+    var stream = (try poll(
+        &connection,
+        &registry,
+        session_id,
+        64,
+    )) orelse return error.TestUnexpectedResult;
+    defer stream.deinit();
+    try std.testing.expectEqualStrings("payload", stream.payload);
+    try std.testing.expect(connection.peerStreamClosed(2));
+    try std.testing.expect(registry.get(2) != null);
+}
+
+test "WebTransport local unidirectional FIN requests transport retirement" {
+    const allocator = std.testing.allocator;
+    var threaded = std.Io.Threaded.init(allocator, .{});
+    defer threaded.deinit();
+    var endpoint = try quic.runtime.Endpoint.bind(
+        allocator,
+        threaded.io(),
+        .{ .ip4 = .loopback(0) },
+        .{ .max_datagram_size = 4096 },
+    );
+    defer endpoint.deinit();
+    const keys = quic.protection.deriveAes128Keys(
+        [_]u8{0xd6} ** quic.protection.secret_len,
+    );
+    var connection = try quic.one_rtt.Connection.init(&endpoint, .{
+        .peer = endpoint.address(),
+        .receive_keys = keys,
+        .send_keys = keys,
+        .local_connection_id = "wt-local-client",
+        .peer_connection_id = "wt-local-server",
+        .initial_send_max_streams_uni = 1,
+        .enable_pacing = false,
+    });
+    defer connection.deinit();
+    const session_id: webtransport.SessionId = .init(0);
+    var registry = try webtransport.StreamRegistry.init(
+        allocator,
+        session_id,
+        .client,
+        .{ .max_local_uni = 1, .first_local_uni = 2 },
+    );
+    defer registry.deinit();
+    const stream = try registry.openLocal(.unidirectional);
+    try std.testing.expectEqual(@as(u62, 2), stream.stream_id);
+
+    try finish(&connection, &registry, session_id, stream.stream_id);
+    try std.testing.expect(!connection.localStreamClosed(stream.stream_id));
+    try std.testing.expect(stream.local_fin);
+    try std.testing.expect(connection.markPacketAcknowledged(1));
+    try std.testing.expect(!connection.localStreamClosed(stream.stream_id));
+    try std.testing.expect(connection.markPacketAcknowledged(0));
+    try std.testing.expect(connection.localStreamClosed(stream.stream_id));
+    try std.testing.expect(registry.get(stream.stream_id) != null);
 }

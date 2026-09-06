@@ -90,6 +90,7 @@ pub fn reset(
     const http3_code =
         webtransport.applicationErrorCodeToHttp3(application_error_code);
     try connection.resetStream(stream_id, http3_code);
+    try association.requestAfterSendTerminal(connection, stream);
     stream.send_reset = .fromHttp3(http3_code);
 }
 
@@ -119,7 +120,7 @@ pub fn poll(
     session_id: webtransport.SessionId,
     out: []u8,
 ) Error!?Read {
-    if (pollKnownStopped(connection, registry)) |event| return event;
+    if (try pollKnownStopped(connection, registry)) |event| return event;
 
     var stream_ids: [256]u62 = undefined;
     const previous = registry.incremental_poll_cursor;
@@ -234,6 +235,7 @@ fn pollStream(
             // RESET_STREAM terminates the receive direction at packet
             // application time. It can overtake earlier STREAM packets, so
             // retained or later-arriving bytes are never exposed after reset.
+            _ = try association.requestTransportRetirement(connection, stream);
             stream.reset_reported = true;
             return resetEvent(stream, stream_id, reset_info.final_size);
         }
@@ -255,6 +257,9 @@ fn pollStream(
         const fin = after.reset == null and
             after.final_size != null and
             after.bytes_read == after.final_size.?;
+        if (fin) {
+            _ = try association.requestTransportRetirement(connection, stream);
+        }
         try registry.recordReceived(stream_id, count, fin);
         return dataEvent(stream, stream_id, count, fin);
     }
@@ -262,6 +267,7 @@ fn pollStream(
         recv_stats.bytes_read == recv_stats.final_size.? and
         !stream.peer_fin)
     {
+        _ = try association.requestTransportRetirement(connection, stream);
         try registry.recordReceived(stream_id, 0, true);
         return dataEvent(stream, stream_id, 0, true);
     }
@@ -271,7 +277,7 @@ fn pollStream(
 fn pollKnownStopped(
     connection: *quic.one_rtt.Connection,
     registry: *webtransport.StreamRegistry,
-) ?Read {
+) Error!?Read {
     for (registry.registered()) |*stream| {
         const stats = connection.sendStreamStats(stream.stream_id) orelse
             continue;
@@ -284,6 +290,7 @@ fn pollKnownStopped(
             stream.stopped = .fromHttp3(stopped.application_error_code);
         }
         if (stream.stopped_reported) continue;
+        try association.requestAfterSendTerminal(connection, stream);
         stream.stopped_reported = true;
         return stoppedEvent(stream, stream.stream_id);
     }

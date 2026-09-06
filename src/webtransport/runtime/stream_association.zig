@@ -7,6 +7,33 @@ const quic = @import("../../quic/mod.zig");
 
 pub const Error = webtransport.Error || quic.one_rtt.Error;
 
+/// Request transport-state reclamation while retaining WebTransport's
+/// session-lifetime registry entry and counters.
+pub fn requestTransportRetirement(
+    connection: *quic.one_rtt.Connection,
+    stream: *const webtransport.StreamState,
+) Error!bool {
+    return if (stream.locally_initiated)
+        connection.requestCompletedLocalStreamRelease(stream.stream_id)
+    else
+        connection.requestCompletedPeerStreamRelease(stream.stream_id);
+}
+
+/// A send terminal is sufficient immediately for a local unidirectional
+/// stream. Bidirectional streams wait until the application has also observed
+/// peer FIN/RESET, preventing transport reclamation from hiding that event.
+pub fn requestAfterSendTerminal(
+    connection: *quic.one_rtt.Connection,
+    stream: *const webtransport.StreamState,
+) Error!void {
+    if (stream.direction == .bidirectional and
+        !stream.peer_fin and stream.receive_reset == null)
+    {
+        return;
+    }
+    _ = try requestTransportRetirement(connection, stream);
+}
+
 /// Identify/register a WebTransport stream after its association prefix is
 /// contiguous. Locally-opened bidirectional reverse directions carry no
 /// second prefix and are recognized from the existing registry entry.

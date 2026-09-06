@@ -4681,7 +4681,6 @@ pub const Connection = struct {
         const send_stream = self.findSendStreamEntry(stream_id) orelse
             return error.StreamStateError;
         if (!send_stream.release_requested) {
-            try self.prepareClosedLocalStreamInsert(streamDirection(stream_id));
             send_stream.release_requested = true;
             self.pending_local_stream_releases += 1;
         }
@@ -4930,19 +4929,17 @@ pub const Connection = struct {
 
     fn prepareClosedLocalStreamInsert(
         self: *Connection,
-        direction: StreamDirection,
+        bidi_count: usize,
+        uni_count: usize,
     ) std.mem.Allocator.Error!void {
-        const reserve = self.pending_local_stream_releases + 1;
-        switch (direction) {
-            .bidirectional => try self.closed_local_bidi_streams.prepareInsert(
-                self.endpoint.allocator,
-                reserve,
-            ),
-            .unidirectional => try self.closed_local_uni_streams.prepareInsert(
-                self.endpoint.allocator,
-                reserve,
-            ),
-        }
+        try self.closed_local_bidi_streams.prepareInsert(
+            self.endpoint.allocator,
+            bidi_count,
+        );
+        try self.closed_local_uni_streams.prepareInsert(
+            self.endpoint.allocator,
+            uni_count,
+        );
     }
 
     fn localStreamReadyForReclaim(
@@ -4973,6 +4970,23 @@ pub const Connection = struct {
         now_ns: u64,
     ) Error!void {
         if (self.pending_local_stream_releases == 0) return;
+        var bidi_ready: usize = 0;
+        var uni_ready: usize = 0;
+        for (self.stream_send_flows.items) |*send_stream| {
+            const stream_id = send_stream.stream_id;
+            if (!streamInitiatedByLocal(self.config.local_endpoint, stream_id) or
+                !self.localStreamReadyForReclaim(stream_id))
+            {
+                continue;
+            }
+            switch (streamDirection(stream_id)) {
+                .bidirectional => bidi_ready += 1,
+                .unidirectional => uni_ready += 1,
+            }
+        }
+        if (bidi_ready == 0 and uni_ready == 0) return;
+        try self.prepareClosedLocalStreamInsert(bidi_ready, uni_ready);
+
         var next_recv_flow = self.recv_flow;
         for (self.stream_send_flows.items) |*send_stream| {
             const stream_id = send_stream.stream_id;
