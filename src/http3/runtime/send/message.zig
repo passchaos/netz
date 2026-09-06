@@ -95,6 +95,44 @@ pub fn sendConnectionMessage(
     message_sent = true;
 }
 
+/// Encode a complete request without dynamic QPACK references and submit it
+/// as one QUIC packet. Failure leaves the transport stream namespace and the
+/// caller's HTTP request bookkeeping retryable.
+pub fn trySendConnectionRequestLiteral(
+    connection: *quic.one_rtt.Connection,
+    scratch: *StreamMessageSendScratch,
+    stream_id: u62,
+    request: http3.Request,
+    options: anytype,
+    peer_settings: http3.Settings,
+) Error!void {
+    scratch.reset();
+    try request.writeWithSettings(
+        &scratch.encoded,
+        connection.endpoint.allocator,
+        peer_settings,
+    );
+    var send = quic.stream_state.SendState.init(stream_id);
+    try send.appendFrames(
+        &scratch.frames,
+        connection.endpoint.allocator,
+        scratch.encoded.items,
+        options.max_stream_frame_data,
+        true,
+    );
+    if (scratch.frames.items.len == 0 or
+        scratch.frames.items.len >
+            @max(@as(usize, 1), options.max_frames_per_packet) or
+        try connection.packetLenForFramesAtOffset(
+            0,
+            scratch.frames.items,
+        ) > connection.currentSendDatagramSize())
+    {
+        return error.DatagramTooLarge;
+    }
+    try connection.trySend(scratch.frames.items);
+}
+
 pub fn sendConnectionResponseSequence(
     connection: *quic.one_rtt.Connection,
     scratch: *StreamMessageSendScratch,

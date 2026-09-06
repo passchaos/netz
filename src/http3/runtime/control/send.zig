@@ -488,6 +488,116 @@ pub fn sendConnectionSettings(
     }
 }
 
+/// Submit the complete local critical-stream preface in one packet without
+/// waiting for pacing. All HTTP/3 send cursors remain unchanged when the
+/// packet cannot be submitted, so an endpoint loop can retry verbatim.
+pub fn trySendConnectionSettings(
+    connection: *quic.one_rtt.Connection,
+    scratch: *CriticalStreamSendScratch,
+    control: *http3.ControlState,
+    control_send: *quic.stream_state.SendState,
+    qpack_encoder_send: *quic.stream_state.SendState,
+    qpack_encoder_prefix_sent: *bool,
+    qpack_decoder_send: *quic.stream_state.SendState,
+    qpack_decoder_prefix_sent: *bool,
+    options: anytype,
+    stream_id: u62,
+) Error!void {
+    if (control.settings.sent) return;
+
+    const previous_settings = control.settings;
+    const previous_control_send = control_send.*;
+    const previous_encoder_send = qpack_encoder_send.*;
+    const previous_decoder_send = qpack_decoder_send.*;
+    errdefer control.settings = previous_settings;
+    errdefer control_send.* = previous_control_send;
+    errdefer qpack_encoder_send.* = previous_encoder_send;
+    errdefer qpack_decoder_send.* = previous_decoder_send;
+    scratch.reset();
+    try control.writeSettingsStream(
+        &scratch.payload,
+        connection.endpoint.allocator,
+        localSettings(options),
+    );
+    const control_end = scratch.payload.items.len;
+    const encoder_start = control_end;
+    const is_client = stream_id == client_control_stream_id;
+    if (!qpack_encoder_prefix_sent.*) {
+        try http3.writeQpackEncoderStreamPrefix(
+            &scratch.payload,
+            connection.endpoint.allocator,
+        );
+    }
+    const encoder_end = scratch.payload.items.len;
+    const decoder_start = encoder_end;
+    if (!qpack_decoder_prefix_sent.*) {
+        try http3.writeQpackDecoderStreamPrefix(
+            &scratch.payload,
+            connection.endpoint.allocator,
+        );
+    }
+
+    if (control_send.stream_id != stream_id) {
+        control_send.* = quic.stream_state.SendState.init(stream_id);
+    }
+    try control_send.appendFrames(
+        &scratch.frames,
+        connection.endpoint.allocator,
+        scratch.payload.items[0..control_end],
+        control_end,
+        false,
+    );
+    const encoder_stream_id = if (is_client)
+        client_qpack_encoder_stream_id
+    else
+        server_qpack_encoder_stream_id;
+    if (qpack_encoder_send.stream_id != encoder_stream_id) {
+        qpack_encoder_send.* = quic.stream_state.SendState.init(
+            encoder_stream_id,
+        );
+    }
+    if (encoder_end != encoder_start) {
+        try qpack_encoder_send.appendFrames(
+            &scratch.frames,
+            connection.endpoint.allocator,
+            scratch.payload.items[encoder_start..encoder_end],
+            encoder_end - encoder_start,
+            false,
+        );
+    }
+    const decoder_stream_id = if (is_client)
+        client_qpack_decoder_stream_id
+    else
+        server_qpack_decoder_stream_id;
+    if (qpack_decoder_send.stream_id != decoder_stream_id) {
+        qpack_decoder_send.* = quic.stream_state.SendState.init(
+            decoder_stream_id,
+        );
+    }
+    if (scratch.payload.items.len != decoder_start) {
+        try qpack_decoder_send.appendFrames(
+            &scratch.frames,
+            connection.endpoint.allocator,
+            scratch.payload.items[decoder_start..],
+            scratch.payload.items.len - decoder_start,
+            false,
+        );
+    }
+    if (scratch.frames.items.len > maxFramesPerPacket(options) or
+        try connection.packetLenForFramesAtOffset(
+            0,
+            scratch.frames.items,
+        ) > connection.currentSendDatagramSize())
+    {
+        return error.DatagramTooLarge;
+    }
+    try connection.trySend(scratch.frames.items);
+    if (encoder_end != encoder_start) qpack_encoder_prefix_sent.* = true;
+    if (scratch.payload.items.len != decoder_start) {
+        qpack_decoder_prefix_sent.* = true;
+    }
+}
+
 pub fn sendConnectionQpackEncoderInstructions(
     connection: *quic.one_rtt.Connection,
     scratch: *CriticalStreamSendScratch,

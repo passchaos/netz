@@ -571,12 +571,15 @@ also expose explicit per-call timeout counterparts. The
 one-shot `requestUriWithDeadline` path carries that same timestamp through DNS,
 all QUIC/TLS connection attempts, request transmission, and response assembly;
 its relative-timeout counterpart converts the budget once before any work.
-Each
-pooled connection currently owns its UDP endpoint. Sharing one endpoint across
-several pooled origins remains a separate dispatcher integration task rather
-than allowing competing socket readers.
-The authenticated client primitives needed by that integration are now
-explicitly nonblocking: `pollResponseEventOnce`,
+`SharedHandshakeClientPool` now owns one `std.Io` UDP endpoint and one QUIC
+dispatcher across all pooled origins. Its CID-routed handshake inboxes keep
+TLS workers off the socket, successful clients move into stable heap storage
+before atomic dispatcher promotion, and idle reuse/global LRU eviction retain
+the configured connection cap. Only the pool's `receive*` methods own UDP
+receive; leases send through single-attempt helpers, expose stable connection
+handles for response correlation, and reject client methods that would start a
+competing receive loop. The authenticated client primitives supporting that
+integration are explicitly nonblocking: `pollResponseEventOnce`,
 `pollNextResponseEventOnce`, and `pollPushEventOnce` never receive or sleep,
 and their matching response/push DATA helpers preserve unread bytes while
 receive credit, QPACK feedback, or STOP_SENDING is paced. Terminal response

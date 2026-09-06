@@ -173,6 +173,7 @@ const sendProtectedPriorityUpdate = control_sender.sendProtectedPriorityUpdate;
 const sendProtectedPriorityUpdateRaw =
     control_sender.sendProtectedPriorityUpdateRaw;
 const sendConnectionSettings = control_sender.sendConnectionSettings;
+const trySendConnectionSettings = control_sender.trySendConnectionSettings;
 const sendConnectionQpackEncoderInstructions =
     control_sender.sendConnectionQpackEncoderInstructions;
 const sendConnectionQpackFeedback = control_sender.sendConnectionQpackFeedback;
@@ -199,6 +200,8 @@ const sendProtectedBodyBatchProgress =
     body_sender.sendProtectedBodyBatchProgress;
 const sendProtectedBodyChunk = body_sender.sendProtectedBodyChunk;
 const sendConnectionMessage = message_sender.sendConnectionMessage;
+const trySendConnectionRequestLiteral =
+    message_sender.trySendConnectionRequestLiteral;
 const sendConnectionResponseSequence =
     message_sender.sendConnectionResponseSequence;
 const trySendConnectionResponseHeadLiteral =
@@ -332,7 +335,7 @@ pub const uriRequestTargetAlloc = client_uri.requestTargetAlloc;
 
 const connectDeadline = client_uri.connectDeadline;
 const cappedConnectDeadline = client_uri.cappedConnectDeadline;
-const resolveEndpointBefore = client_uri.resolveEndpointBefore;
+pub const resolveEndpointBefore = client_uri.resolveEndpointBefore;
 const resolveHostPortAddressesBefore =
     client_uri.resolveHostPortAddressesBefore;
 const handshakeRecoveryBefore = client_uri.handshakeRecoveryBefore;
@@ -7119,6 +7122,10 @@ pub const HandshakeServerSession = struct {
 pub const HandshakeClient = struct {
     endpoint: *quic.runtime.Endpoint,
     owns_endpoint: bool,
+    /// Set while an endpoint dispatcher is the sole UDP receive owner.
+    /// Socket-reading convenience methods fail closed in this mode; callers
+    /// inject routed packets and use the `*Once` polling surface instead.
+    dispatcher_bound: bool = false,
     peer: net.IpAddress,
     allocator: std.mem.Allocator,
     established: quic.handshake.EstablishedConnection,
@@ -7167,6 +7174,7 @@ pub const HandshakeClient = struct {
     pub fn openClientBidirectionalStream(
         self: *HandshakeClient,
     ) Error!u62 {
+        if (self.dispatcher_bound) return error.InvalidDispatcherState;
         const expected = self.next_stream_id;
         _ = std.math.add(u62, expected, 4) catch
             return error.StreamCreationError;
@@ -7181,10 +7189,32 @@ pub const HandshakeClient = struct {
         return stream_id;
     }
 
+    /// Reserve one bidirectional stream without waiting for STREAMS_BLOCKED
+    /// pacing. This is the dispatcher-safe counterpart to
+    /// `openClientBidirectionalStream`.
+    pub fn tryOpenClientBidirectionalStream(
+        self: *HandshakeClient,
+    ) Error!u62 {
+        const expected = self.next_stream_id;
+        const next_stream_id = std.math.add(u62, expected, 4) catch
+            return error.StreamCreationError;
+        if (self.established.connection.nextLocalBidirectionalStreamId() !=
+            expected)
+        {
+            return error.StreamCreationError;
+        }
+        const transport_id = try self.established.connection.tryOpenStream();
+        self.next_stream_id = next_stream_id;
+        self.request_lifecycle.markAllocated(expected);
+        std.debug.assert(expected == transport_id);
+        return expected;
+    }
+
     pub fn openClientBidirectionalStreamWithTimeout(
         self: *HandshakeClient,
         timeout: std.Io.Duration,
     ) ReceiveTimeoutError!u62 {
+        if (self.dispatcher_bound) return error.InvalidDispatcherState;
         if (timeout.nanoseconds <= 0) return error.Timeout;
         return self.openClientBidirectionalStreamWithDeadline(.fromNow(
             self.connectionIo(),
@@ -7196,6 +7226,7 @@ pub const HandshakeClient = struct {
         self: *HandshakeClient,
         deadline: std.Io.Clock.Timestamp,
     ) ReceiveTimeoutError!u62 {
+        if (self.dispatcher_bound) return error.InvalidDispatcherState;
         const expected = self.next_stream_id;
         _ = std.math.add(u62, expected, 4) catch
             return error.StreamCreationError;
@@ -7980,6 +8011,17 @@ pub const HandshakeClient = struct {
         return self.endpoint.address();
     }
 
+    pub fn bindDispatcher(self: *HandshakeClient) Error!void {
+        if (self.owns_endpoint or self.dispatcher_bound) {
+            return error.InvalidDispatcherState;
+        }
+        self.dispatcher_bound = true;
+    }
+
+    pub fn dispatcherBound(self: *const HandshakeClient) bool {
+        return self.dispatcher_bound;
+    }
+
     pub fn negotiatedAlpn(self: HandshakeClient) []const u8 {
         return self.established.alpn;
     }
@@ -8059,6 +8101,7 @@ pub const HandshakeClient = struct {
     }
 
     pub fn request(self: *HandshakeClient, request_options: http3.Request) Error!OwnedHandshakeResponse {
+        if (self.dispatcher_bound) return error.InvalidDispatcherState;
         const stream_id = try self.sendRequest(request_options);
         return self.receiveResponse(stream_id);
     }
@@ -8071,6 +8114,7 @@ pub const HandshakeClient = struct {
         request_options: http3.Request,
         deadline: std.Io.Clock.Timestamp,
     ) ReceiveTimeoutError!OwnedHandshakeResponse {
+        if (self.dispatcher_bound) return error.InvalidDispatcherState;
         _ = try deadline_policy.usableAwake(self.connectionIo(), deadline);
         const stream_id = try self.sendRequest(request_options);
         return self.receiveResponseWithDeadline(stream_id, deadline);
@@ -8097,6 +8141,7 @@ pub const HandshakeClient = struct {
         request_options: http3.Request,
         informational: ?http3.InformationalObserver,
     ) Error!OwnedHandshakeResponse {
+        if (self.dispatcher_bound) return error.InvalidDispatcherState;
         const stream_id = try self.sendRequest(request_options);
         return self.receiveResponseWithInformational(stream_id, informational);
     }
@@ -8124,6 +8169,7 @@ pub const HandshakeClient = struct {
         informational: ?http3.InformationalObserver,
         deadline: std.Io.Clock.Timestamp,
     ) ReceiveTimeoutError!OwnedHandshakeResponse {
+        if (self.dispatcher_bound) return error.InvalidDispatcherState;
         _ = try deadline_policy.usableAwake(self.connectionIo(), deadline);
         const stream_id = try self.sendRequest(request_options);
         return self.receiveResponseWithInformationalAndDeadline(
@@ -8137,6 +8183,7 @@ pub const HandshakeClient = struct {
         self: *HandshakeClient,
         request_options: http3.Request,
     ) Error!u62 {
+        if (self.dispatcher_bound) return error.InvalidDispatcherState;
         const stream_id = self.next_stream_id;
         if (!self.control.acceptsRequestStream(stream_id)) return error.GoAwayReceived;
         try self.request_lifecycle.open(
@@ -8175,11 +8222,66 @@ pub const HandshakeClient = struct {
         return stream_id;
     }
 
+    /// Submit one complete request without waiting for pacing or reading UDP.
+    /// This static-QPACK path is intended for dispatcher-owned connections;
+    /// the encoded request must fit in one transport packet.
+    pub fn trySendRequest(
+        self: *HandshakeClient,
+        request_options: http3.Request,
+    ) Error!u62 {
+        const stream_id = self.next_stream_id;
+        const next_stream_id = std.math.add(u62, stream_id, 4) catch
+            return error.StreamCreationError;
+        if (!self.control.acceptsRequestStream(stream_id)) {
+            return error.GoAwayReceived;
+        }
+        if (self.established.connection.nextLocalBidirectionalStreamId() !=
+            stream_id)
+        {
+            return error.StreamCreationError;
+        }
+        try self.request_lifecycle.open(
+            stream_id,
+            request_options.method,
+            requestHasProtocol(request_options.headers),
+        );
+        errdefer _ = self.request_lifecycle.finish(stream_id) catch false;
+        try self.ensureSettingsSentOnce();
+        try trySendConnectionRequestLiteral(
+            &self.established.connection,
+            &self.stream_send_scratch,
+            stream_id,
+            request_options,
+            self.options,
+            self.control.settings.peer,
+        );
+        self.next_stream_id = next_stream_id;
+        self.request_lifecycle.markAllocated(stream_id);
+        return stream_id;
+    }
+
+    /// Send the local SETTINGS/control preface without waiting for pacing.
+    pub fn ensureSettingsSentOnce(self: *HandshakeClient) Error!void {
+        try trySendConnectionSettings(
+            &self.established.connection,
+            &self.critical_stream_send_scratch,
+            &self.control,
+            &self.control_send,
+            &self.qpack_encoder_send,
+            &self.qpack_encoder_prefix_sent,
+            &self.qpack_decoder_send,
+            &self.qpack_decoder_prefix_sent,
+            self.options,
+            client_control_stream_id,
+        );
+    }
+
     pub fn startRequest(
         self: *HandshakeClient,
         request_options: http3.Request,
         body_length: ?usize,
     ) Error!u62 {
+        if (self.dispatcher_bound) return error.InvalidDispatcherState;
         const stream_id = self.next_stream_id;
         if (!self.control.acceptsRequestStream(stream_id)) {
             return error.GoAwayReceived;
@@ -8237,6 +8339,7 @@ pub const HandshakeClient = struct {
         data: []const u8,
         fin: bool,
     ) Error!void {
+        if (self.dispatcher_bound) return error.InvalidDispatcherState;
         if (!self.request_lifecycle.contains(stream_id)) {
             return error.UnexpectedStream;
         }
@@ -8286,6 +8389,7 @@ pub const HandshakeClient = struct {
         data: []const u8,
         fin: bool,
     ) Error!void {
+        if (self.dispatcher_bound) return error.InvalidDispatcherState;
         if (data.len == 0) {
             try self.sendRequestBodyPacedChunk(stream_id, data, fin);
             return;
@@ -8310,6 +8414,7 @@ pub const HandshakeClient = struct {
         parts: []const []const u8,
         fin: bool,
     ) Error!void {
+        if (self.dispatcher_bound) return error.InvalidDispatcherState;
         var non_empty: usize = 0;
         for (parts) |part| non_empty += @intFromBool(part.len != 0);
         if (non_empty == 0) {
@@ -8340,6 +8445,7 @@ pub const HandshakeClient = struct {
         self: *HandshakeClient,
         chunks: []const BodyChunk,
     ) Error!void {
+        if (self.dispatcher_bound) return error.InvalidDispatcherState;
         for (chunks) |chunk| {
             if (!self.request_lifecycle.contains(chunk.stream_id)) {
                 return error.UnexpectedStream;
@@ -8419,6 +8525,7 @@ pub const HandshakeClient = struct {
         stream_id: u62,
         trailers: []const http3.Qpack.HeaderField,
     ) Error!void {
+        if (self.dispatcher_bound) return error.InvalidDispatcherState;
         if (!self.request_lifecycle.contains(stream_id)) {
             return error.UnexpectedStream;
         }
@@ -8444,6 +8551,7 @@ pub const HandshakeClient = struct {
         stream_id: u62,
         trailers: []const http3.Qpack.HeaderField,
     ) Error!void {
+        if (self.dispatcher_bound) return error.InvalidDispatcherState;
         while (true) {
             self.finishRequestTrailers(stream_id, trailers) catch |err| switch (err) {
                 error.FlowControlBlocked, error.CongestionLimited => {
@@ -8468,6 +8576,7 @@ pub const HandshakeClient = struct {
         stream_id: u62,
         timeout: std.Io.Duration,
     ) ReceiveTimeoutError!OwnedHandshakeResponse {
+        if (self.dispatcher_bound) return error.InvalidDispatcherState;
         if (timeout.nanoseconds <= 0) return error.Timeout;
         return self.receiveResponseWithInformationalAndDeadline(
             stream_id,
@@ -8481,6 +8590,7 @@ pub const HandshakeClient = struct {
         stream_id: u62,
         deadline: std.Io.Clock.Timestamp,
     ) ReceiveTimeoutError!OwnedHandshakeResponse {
+        if (self.dispatcher_bound) return error.InvalidDispatcherState;
         return self.receiveResponseWithInformationalAndDeadline(
             stream_id,
             null,
@@ -8494,6 +8604,7 @@ pub const HandshakeClient = struct {
         stream_id: u62,
         informational: ?http3.InformationalObserver,
     ) Error!OwnedHandshakeResponse {
+        if (self.dispatcher_bound) return error.InvalidDispatcherState;
         return self.receiveResponseWithInformationalInternal(
             stream_id,
             informational,
@@ -8510,6 +8621,7 @@ pub const HandshakeClient = struct {
         informational: ?http3.InformationalObserver,
         timeout: std.Io.Duration,
     ) ReceiveTimeoutError!OwnedHandshakeResponse {
+        if (self.dispatcher_bound) return error.InvalidDispatcherState;
         if (timeout.nanoseconds <= 0) return error.Timeout;
         return self.receiveResponseWithInformationalAndDeadline(
             stream_id,
@@ -8527,6 +8639,7 @@ pub const HandshakeClient = struct {
         informational: ?http3.InformationalObserver,
         deadline: std.Io.Clock.Timestamp,
     ) ReceiveTimeoutError!OwnedHandshakeResponse {
+        if (self.dispatcher_bound) return error.InvalidDispatcherState;
         _ = try deadline_policy.usableAwake(self.connectionIo(), deadline);
         return self.receiveResponseWithInformationalInternal(
             stream_id,
@@ -8670,6 +8783,7 @@ pub const HandshakeClient = struct {
     pub fn receiveNextResponse(
         self: *HandshakeClient,
     ) Error!OwnedHandshakeResponseEvent {
+        if (self.dispatcher_bound) return error.InvalidDispatcherState;
         return self.receiveNextResponseWithInformational(null);
     }
 
@@ -8680,6 +8794,7 @@ pub const HandshakeClient = struct {
         self: *HandshakeClient,
         timeout: std.Io.Duration,
     ) ReceiveTimeoutError!OwnedHandshakeResponseEvent {
+        if (self.dispatcher_bound) return error.InvalidDispatcherState;
         if (timeout.nanoseconds <= 0) return error.Timeout;
         return self.receiveNextResponseWithInformationalAndDeadline(
             null,
@@ -8691,6 +8806,7 @@ pub const HandshakeClient = struct {
         self: *HandshakeClient,
         deadline: std.Io.Clock.Timestamp,
     ) ReceiveTimeoutError!OwnedHandshakeResponseEvent {
+        if (self.dispatcher_bound) return error.InvalidDispatcherState;
         return self.receiveNextResponseWithInformationalAndDeadline(
             null,
             deadline,
@@ -8703,6 +8819,7 @@ pub const HandshakeClient = struct {
         self: *HandshakeClient,
         informational: ?MultiplexedInformationalObserver,
     ) Error!OwnedHandshakeResponseEvent {
+        if (self.dispatcher_bound) return error.InvalidDispatcherState;
         return self.receiveNextResponseWithInformationalInternal(
             informational,
             null,
@@ -8717,6 +8834,7 @@ pub const HandshakeClient = struct {
         informational: ?MultiplexedInformationalObserver,
         timeout: std.Io.Duration,
     ) ReceiveTimeoutError!OwnedHandshakeResponseEvent {
+        if (self.dispatcher_bound) return error.InvalidDispatcherState;
         if (timeout.nanoseconds <= 0) return error.Timeout;
         return self.receiveNextResponseWithInformationalAndDeadline(
             informational,
@@ -8732,6 +8850,7 @@ pub const HandshakeClient = struct {
         informational: ?MultiplexedInformationalObserver,
         deadline: std.Io.Clock.Timestamp,
     ) ReceiveTimeoutError!OwnedHandshakeResponseEvent {
+        if (self.dispatcher_bound) return error.InvalidDispatcherState;
         // Callback ordering is preserved across all packets consumed before
         // the timeout, including unrelated response streams.
         _ = try deadline_policy.usableAwake(self.connectionIo(), deadline);
@@ -8836,6 +8955,7 @@ pub const HandshakeClient = struct {
     /// event loops to observe GOAWAY while an accepted response remains
     /// buffered and available to `receiveResponse`.
     pub fn receiveProgress(self: *HandshakeClient) Error!void {
+        if (self.dispatcher_bound) return error.InvalidDispatcherState;
         receiveConnectionResponsePacketUntil(
             &self.established.connection,
             &self.receive_packets,
@@ -8862,6 +8982,7 @@ pub const HandshakeClient = struct {
     /// Extended CONNECT adapters use this before depending on advertised
     /// protocol capabilities.
     pub fn receivePeerSettings(self: *HandshakeClient) Error!http3.Settings {
+        if (self.dispatcher_bound) return error.InvalidDispatcherState;
         return self.receivePeerSettingsInternal(null) catch |err| switch (err) {
             error.Timeout, error.ConcurrencyUnavailable => unreachable,
             else => |other| return @errorCast(other),
@@ -8872,6 +8993,7 @@ pub const HandshakeClient = struct {
         self: *HandshakeClient,
         timeout: std.Io.Duration,
     ) ReceiveTimeoutError!http3.Settings {
+        if (self.dispatcher_bound) return error.InvalidDispatcherState;
         if (timeout.nanoseconds <= 0) return error.Timeout;
         return self.receivePeerSettingsInternal(.fromNow(
             self.connectionIo(),
@@ -8883,6 +9005,7 @@ pub const HandshakeClient = struct {
         self: *HandshakeClient,
         deadline: std.Io.Clock.Timestamp,
     ) ReceiveTimeoutError!http3.Settings {
+        if (self.dispatcher_bound) return error.InvalidDispatcherState;
         _ = try deadline_policy.usableAwake(self.connectionIo(), deadline);
         return self.receivePeerSettingsInternal(deadline);
     }
@@ -8933,6 +9056,7 @@ pub const HandshakeClient = struct {
         self: *HandshakeClient,
         stream_id: u62,
     ) Error!?StreamingEvent {
+        if (self.dispatcher_bound) return error.InvalidDispatcherState;
         return self.receiveResponseEventInternal(stream_id, null) catch |err|
             switch (err) {
                 error.Timeout, error.ConcurrencyUnavailable => unreachable,
@@ -8947,6 +9071,7 @@ pub const HandshakeClient = struct {
         self: *HandshakeClient,
         stream_id: u62,
     ) Error!?StreamingEvent {
+        if (self.dispatcher_bound) return error.InvalidDispatcherState;
         return self.pollResponseEventInternal(stream_id, false);
     }
 
@@ -9080,6 +9205,7 @@ pub const HandshakeClient = struct {
         stream_id: u62,
         deadline: std.Io.Clock.Timestamp,
     ) ReceiveTimeoutError!?StreamingEvent {
+        if (self.dispatcher_bound) return error.InvalidDispatcherState;
         _ = try deadline_policy.usableAwake(self.connectionIo(), deadline);
         return self.receiveResponseEventInternal(stream_id, deadline);
     }
@@ -9089,6 +9215,7 @@ pub const HandshakeClient = struct {
         stream_id: u62,
         timeout: std.Io.Duration,
     ) ReceiveTimeoutError!?StreamingEvent {
+        if (self.dispatcher_bound) return error.InvalidDispatcherState;
         if (timeout.nanoseconds <= 0) return error.Timeout;
         return self.receiveResponseEventInternal(
             stream_id,
@@ -9134,6 +9261,7 @@ pub const HandshakeClient = struct {
         stream_id: u62,
         out: []u8,
     ) Error!usize {
+        if (self.dispatcher_bound) return error.InvalidDispatcherState;
         const entry = self.streaming_responses.find(stream_id) orelse
             return error.UnexpectedStream;
         try releaseStreamingReaderCapacity(
@@ -9179,6 +9307,7 @@ pub const HandshakeClient = struct {
         self: *HandshakeClient,
         stream_id: u62,
     ) Error!usize {
+        if (self.dispatcher_bound) return error.InvalidDispatcherState;
         const entry = self.streaming_responses.find(stream_id) orelse
             return error.UnexpectedStream;
         try releaseStreamingReaderCapacity(
@@ -9199,6 +9328,7 @@ pub const HandshakeClient = struct {
         self: *HandshakeClient,
         stream_id: u62,
     ) Error!void {
+        if (self.dispatcher_bound) return error.InvalidDispatcherState;
         return self.detachResponseStreamInternal(stream_id, false);
     }
 
@@ -9255,6 +9385,7 @@ pub const HandshakeClient = struct {
         self: *HandshakeClient,
         detached_stream_id: u62,
     ) Error!void {
+        if (self.dispatcher_bound) return error.InvalidDispatcherState;
         if (!self.connect_datagrams.contains(detached_stream_id)) {
             return error.UnexpectedStream;
         }
@@ -9272,6 +9403,7 @@ pub const HandshakeClient = struct {
         detached_stream_id: u62,
         timeout: std.Io.Duration,
     ) (Error || quic.runtime.ReceiveTimeoutError)!void {
+        if (self.dispatcher_bound) return error.InvalidDispatcherState;
         if (timeout.nanoseconds <= 0) return error.Timeout;
         return self.receiveDetachedResponseProgressWithDeadline(
             detached_stream_id,
@@ -9287,6 +9419,7 @@ pub const HandshakeClient = struct {
         detached_stream_id: u62,
         deadline: std.Io.Clock.Timestamp,
     ) (Error || quic.runtime.ReceiveTimeoutError)!void {
+        if (self.dispatcher_bound) return error.InvalidDispatcherState;
         _ = try deadline_policy.usableAwake(self.connectionIo(), deadline);
         if (!self.connect_datagrams.contains(detached_stream_id)) {
             return error.UnexpectedStream;
@@ -9367,6 +9500,7 @@ pub const HandshakeClient = struct {
         stream_id: u62,
         payload: []const u8,
     ) Error!void {
+        if (self.dispatcher_bound) return error.InvalidDispatcherState;
         try self.validateConnectDatagramSend(stream_id, payload);
         const encoded = try self.connect_datagrams.encode(stream_id, payload);
         try self.established.connection.sendDatagram(encoded);
@@ -9389,6 +9523,7 @@ pub const HandshakeClient = struct {
         payload: []const u8,
         timeout: std.Io.Duration,
     ) ReceiveTimeoutError!void {
+        if (self.dispatcher_bound) return error.InvalidDispatcherState;
         if (timeout.nanoseconds <= 0) return error.Timeout;
         return self.sendConnectDatagramWithDeadline(
             stream_id,
@@ -9406,6 +9541,7 @@ pub const HandshakeClient = struct {
         payload: []const u8,
         deadline: std.Io.Clock.Timestamp,
     ) ReceiveTimeoutError!void {
+        if (self.dispatcher_bound) return error.InvalidDispatcherState;
         _ = try deadline_policy.usableAwake(self.connectionIo(), deadline);
         try self.validateConnectDatagramSend(stream_id, payload);
         const encoded = try self.connect_datagrams.encode(stream_id, payload);
@@ -9518,6 +9654,7 @@ pub const HandshakeClient = struct {
         self: *HandshakeClient,
         stream_id: u62,
     ) Error!OwnedConnectDatagram {
+        if (self.dispatcher_bound) return error.InvalidDispatcherState;
         return receiveConnectDatagramFromSession(self, stream_id, null) catch |err|
             switch (err) {
                 error.Timeout, error.ConcurrencyUnavailable => unreachable,
@@ -9530,6 +9667,7 @@ pub const HandshakeClient = struct {
         stream_id: u62,
         timeout: std.Io.Duration,
     ) ReceiveTimeoutError!OwnedConnectDatagram {
+        if (self.dispatcher_bound) return error.InvalidDispatcherState;
         if (timeout.nanoseconds <= 0) return error.Timeout;
         return receiveConnectDatagramFromSession(self, stream_id, .fromNow(
             self.connectionIo(),
@@ -9542,6 +9680,7 @@ pub const HandshakeClient = struct {
         stream_id: u62,
         deadline: std.Io.Clock.Timestamp,
     ) ReceiveTimeoutError!OwnedConnectDatagram {
+        if (self.dispatcher_bound) return error.InvalidDispatcherState;
         _ = try deadline_policy.usableAwake(self.connectionIo(), deadline);
         return receiveConnectDatagramFromSession(self, stream_id, deadline);
     }
@@ -9573,6 +9712,7 @@ pub const HandshakeClient = struct {
         self: *HandshakeClient,
         detached_stream_id: u62,
     ) Error!?http3.DecodedResponseHead {
+        if (self.dispatcher_bound) return error.InvalidDispatcherState;
         return self.pollDetachedResponseHeadInternal(
             detached_stream_id,
             false,
@@ -9965,6 +10105,7 @@ pub const HandshakeClient = struct {
     pub fn receivePushEvent(
         self: *HandshakeClient,
     ) Error!StreamingPushEvent {
+        if (self.dispatcher_bound) return error.InvalidDispatcherState;
         if (self.push_aggregate.active()) return error.UnexpectedStream;
         return self.receivePushEventMatching(null, null) catch |err| switch (err) {
             error.Timeout, error.ConcurrencyUnavailable => unreachable,
@@ -9977,6 +10118,7 @@ pub const HandshakeClient = struct {
     pub fn pollPushEvent(
         self: *HandshakeClient,
     ) Error!?StreamingPushEvent {
+        if (self.dispatcher_bound) return error.InvalidDispatcherState;
         if (self.push_aggregate.active()) return error.UnexpectedStream;
         return self.pollPushEventMatching(null, false);
     }
@@ -9996,6 +10138,7 @@ pub const HandshakeClient = struct {
         self: *HandshakeClient,
         timeout: std.Io.Duration,
     ) ReceiveTimeoutError!StreamingPushEvent {
+        if (self.dispatcher_bound) return error.InvalidDispatcherState;
         if (timeout.nanoseconds <= 0) return error.Timeout;
         if (self.push_aggregate.active()) return error.UnexpectedStream;
         return self.receivePushEventMatching(
@@ -10008,6 +10151,7 @@ pub const HandshakeClient = struct {
         self: *HandshakeClient,
         deadline: std.Io.Clock.Timestamp,
     ) ReceiveTimeoutError!StreamingPushEvent {
+        if (self.dispatcher_bound) return error.InvalidDispatcherState;
         _ = try deadline_policy.usableAwake(self.connectionIo(), deadline);
         if (self.push_aggregate.active()) return error.UnexpectedStream;
         return self.receivePushEventMatching(null, deadline);
@@ -10235,6 +10379,7 @@ pub const HandshakeClient = struct {
         push_id: u64,
         out: []u8,
     ) Error!usize {
+        if (self.dispatcher_bound) return error.InvalidDispatcherState;
         const entry = self.push_streams.findByPushId(push_id) orelse
             return error.UnexpectedStream;
         try releaseStreamingReaderCapacity(
@@ -10271,6 +10416,7 @@ pub const HandshakeClient = struct {
         self: *HandshakeClient,
         push_id: u64,
     ) Error!usize {
+        if (self.dispatcher_bound) return error.InvalidDispatcherState;
         const entry = self.push_streams.findByPushId(push_id) orelse
             return error.UnexpectedStream;
         const reader = if (entry.reader) |*value| value else return error.UnexpectedStream;
@@ -10310,6 +10456,7 @@ pub const HandshakeClient = struct {
     pub fn receivePush(
         self: *HandshakeClient,
     ) Error!PushedResponse {
+        if (self.dispatcher_bound) return error.InvalidDispatcherState;
         return self.receivePushWithInformational(null);
     }
 
@@ -10319,6 +10466,7 @@ pub const HandshakeClient = struct {
         self: *HandshakeClient,
         timeout: std.Io.Duration,
     ) ReceiveTimeoutError!PushedResponse {
+        if (self.dispatcher_bound) return error.InvalidDispatcherState;
         if (timeout.nanoseconds <= 0) return error.Timeout;
         return self.receivePushWithInformationalAndDeadline(
             null,
@@ -10330,6 +10478,7 @@ pub const HandshakeClient = struct {
         self: *HandshakeClient,
         deadline: std.Io.Clock.Timestamp,
     ) ReceiveTimeoutError!PushedResponse {
+        if (self.dispatcher_bound) return error.InvalidDispatcherState;
         return self.receivePushWithInformationalAndDeadline(null, deadline);
     }
 
@@ -10338,6 +10487,7 @@ pub const HandshakeClient = struct {
         self: *HandshakeClient,
         informational: ?PushInformationalObserver,
     ) Error!PushedResponse {
+        if (self.dispatcher_bound) return error.InvalidDispatcherState;
         return self.receivePushWithInformationalAttempt(
             informational,
             null,
@@ -10352,6 +10502,7 @@ pub const HandshakeClient = struct {
         informational: ?PushInformationalObserver,
         timeout: std.Io.Duration,
     ) ReceiveTimeoutError!PushedResponse {
+        if (self.dispatcher_bound) return error.InvalidDispatcherState;
         if (timeout.nanoseconds <= 0) return error.Timeout;
         return self.receivePushWithInformationalAndDeadline(
             informational,
@@ -10367,6 +10518,7 @@ pub const HandshakeClient = struct {
         informational: ?PushInformationalObserver,
         deadline: std.Io.Clock.Timestamp,
     ) ReceiveTimeoutError!PushedResponse {
+        if (self.dispatcher_bound) return error.InvalidDispatcherState;
         _ = try deadline_policy.usableAwake(self.connectionIo(), deadline);
         return self.receivePushWithInformationalAttempt(
             informational,
@@ -10443,6 +10595,7 @@ pub const HandshakeClient = struct {
     pub fn receiveNextResponseEvent(
         self: *HandshakeClient,
     ) Error!StreamingResponseEvent {
+        if (self.dispatcher_bound) return error.InvalidDispatcherState;
         if (self.request_lifecycle.isEmpty()) {
             return error.UnexpectedStream;
         }
@@ -10459,6 +10612,7 @@ pub const HandshakeClient = struct {
     pub fn pollNextResponseEvent(
         self: *HandshakeClient,
     ) Error!?StreamingResponseEvent {
+        if (self.dispatcher_bound) return error.InvalidDispatcherState;
         return self.pollNextResponseEventInternal(false);
     }
 
@@ -10610,6 +10764,7 @@ pub const HandshakeClient = struct {
         self: *HandshakeClient,
         timeout: std.Io.Duration,
     ) ReceiveTimeoutError!StreamingResponseEvent {
+        if (self.dispatcher_bound) return error.InvalidDispatcherState;
         if (timeout.nanoseconds <= 0) return error.Timeout;
         if (self.request_lifecycle.isEmpty()) {
             return error.UnexpectedStream;
@@ -10623,6 +10778,7 @@ pub const HandshakeClient = struct {
         self: *HandshakeClient,
         deadline: std.Io.Clock.Timestamp,
     ) ReceiveTimeoutError!StreamingResponseEvent {
+        if (self.dispatcher_bound) return error.InvalidDispatcherState;
         _ = try deadline_policy.usableAwake(self.connectionIo(), deadline);
         if (self.request_lifecycle.isEmpty()) {
             return error.UnexpectedStream;
@@ -10657,6 +10813,7 @@ pub const HandshakeClient = struct {
     }
 
     pub fn sendGoAway(self: *HandshakeClient, stream_id: u64) Error!void {
+        if (self.dispatcher_bound) return error.InvalidDispatcherState;
         try validateClientGoAwayPushId(stream_id);
         try sendConnectionSettings(
             &self.established.connection,
@@ -10712,6 +10869,7 @@ pub const HandshakeClient = struct {
     /// Process one transport packet for SETTINGS/ORIGIN/GOAWAY progress
     /// without waiting for an application response event.
     pub fn pollControl(self: *HandshakeClient) Error!void {
+        if (self.dispatcher_bound) return error.InvalidDispatcherState;
         try self.receiveProgress();
     }
 
@@ -10719,6 +10877,7 @@ pub const HandshakeClient = struct {
         self: *HandshakeClient,
         timeout: std.Io.Duration,
     ) ReceiveTimeoutError!void {
+        if (self.dispatcher_bound) return error.InvalidDispatcherState;
         if (timeout.nanoseconds <= 0) return error.Timeout;
         return self.pollControlWithDeadline(.fromNow(
             self.connectionIo(),
@@ -10730,6 +10889,7 @@ pub const HandshakeClient = struct {
         self: *HandshakeClient,
         deadline: std.Io.Clock.Timestamp,
     ) ReceiveTimeoutError!void {
+        if (self.dispatcher_bound) return error.InvalidDispatcherState;
         _ = try deadline_policy.usableAwake(self.connectionIo(), deadline);
         try receiveConnectionResponsePacketUntil(
             &self.established.connection,
@@ -10756,6 +10916,7 @@ pub const HandshakeClient = struct {
         self: *HandshakeClient,
         timeout: std.Io.Duration,
     ) ReceiveTimeoutError!void {
+        if (self.dispatcher_bound) return error.InvalidDispatcherState;
         if (timeout.nanoseconds <= 0) return error.Timeout;
         return self.waitForRecoveryIdleWithDeadline(.fromNow(
             self.connectionIo(),
@@ -10767,6 +10928,7 @@ pub const HandshakeClient = struct {
         self: *HandshakeClient,
         deadline: std.Io.Clock.Timestamp,
     ) ReceiveTimeoutError!void {
+        if (self.dispatcher_bound) return error.InvalidDispatcherState;
         _ = try deadline_policy.usableAwake(self.connectionIo(), deadline);
         while (self.established.connection.pendingRecoveryCount() != 0) {
             try self.pollControlWithDeadline(deadline);
@@ -10778,6 +10940,7 @@ pub const HandshakeClient = struct {
         self: *HandshakeClient,
         push_id: u64,
     ) Error!void {
+        if (self.dispatcher_bound) return error.InvalidDispatcherState;
         try self.push_streams.reservePromisesThrough(push_id);
         const previous_max_push_id = self.control.local_max_push_id;
         try sendConnectionSettings(
@@ -10809,6 +10972,7 @@ pub const HandshakeClient = struct {
         self: *HandshakeClient,
         push_id: u64,
     ) Error!void {
+        if (self.dispatcher_bound) return error.InvalidDispatcherState;
         try sendConnectionSettings(
             &self.established.connection,
             &self.critical_stream_send_scratch,
@@ -10841,7 +11005,21 @@ pub const HandshakeClient = struct {
         stream_id: u62,
         application_error_code: u64,
     ) Error!void {
+        if (self.dispatcher_bound) return error.InvalidDispatcherState;
         return self.cancelRequestInternal(
+            stream_id,
+            application_error_code,
+            false,
+        );
+    }
+
+    /// Cancel one request without waiting for transport pacing.
+    pub fn tryCancelRequest(
+        self: *HandshakeClient,
+        stream_id: u62,
+        application_error_code: u64,
+    ) Error!void {
+        return self.cancelRequestInternalOnce(
             stream_id,
             application_error_code,
             false,
@@ -10978,6 +11156,7 @@ pub const HandshakeClient = struct {
         stream_id: u62,
         priority: http3.Priority,
     ) Error!void {
+        if (self.dispatcher_bound) return error.InvalidDispatcherState;
         // PRIORITY_UPDATE can precede the request itself, which is essential
         // for this synchronous request API: `next_stream_id` is the one request
         // stream that may be prioritized before request() opens it.
@@ -11008,6 +11187,7 @@ pub const HandshakeClient = struct {
         push_id: u64,
         priority: http3.Priority,
     ) Error!void {
+        if (self.dispatcher_bound) return error.InvalidDispatcherState;
         if (!self.push_streams.hasPromise(push_id)) {
             return error.UnexpectedStream;
         }
@@ -11223,6 +11403,12 @@ pub const HandshakeClientPoolDefaultConnector =
     handshake_client_pool.DefaultConnectorContext(@This());
 pub const HandshakeClientPoolStats = http3.origin_pool.Stats;
 pub const HandshakeClientPoolError = handshake_client_pool.Error;
+pub const SharedHandshakeClientPool =
+    @import("runtime/shared_handshake_client_pool.zig").Pool(@This());
+pub const SharedHandshakeClientPoolOptions =
+    @import("runtime/shared_handshake_client_pool.zig").Options(@This());
+pub const SharedHandshakeClientPoolError =
+    @import("runtime/shared_handshake_client_pool.zig").Error;
 
 pub const OwnedHandshakeRequest = struct {
     from: net.IpAddress,
@@ -20940,6 +21126,7 @@ test {
     _ = @import("runtime/client/tests/deadline.zig");
     _ = @import("runtime/client/tests/streaming.zig");
     _ = @import("runtime/handshake_client_pool_tests.zig");
+    _ = @import("runtime/shared_handshake_client_pool_tests.zig");
     _ = @import("runtime/development_streaming_tests.zig");
     _ = @import("runtime/development_server_tests.zig");
     _ = @import("runtime/development/server_peer/state_tests.zig");

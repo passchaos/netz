@@ -20,6 +20,7 @@ pub const Error = http3.Error || quic.runtime.Error ||
     InvalidUri,
     InvalidAlpn,
     DatagramsNotNegotiated,
+    InvalidDispatcherState,
 };
 
 /// Failures produced by a handshake worker after admission has transferred
