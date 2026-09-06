@@ -2675,6 +2675,247 @@ test "WebTransport client polls a dispatcher-injected packet" {
     }
 }
 
+test "WebTransport client CONNECT polling defers paced feedback and credit" {
+    const allocator = std.testing.allocator;
+    var threaded = std.Io.Threaded.init(allocator, .{});
+    defer threaded.deinit();
+    const io = threaded.io();
+
+    const client_cid = "wt-paced-client";
+    const server_cid = "wt-paced-server";
+    const client_keys = quic.protection.deriveAes128Keys(
+        [_]u8{0xe5} ** quic.protection.secret_len,
+    );
+    const server_keys = quic.protection.deriveAes128Keys(
+        [_]u8{0xe6} ** quic.protection.secret_len,
+    );
+    const settings = webtransport.defaultSettings(.{});
+    var client_transport = quic.practical_transport_parameters;
+    client_transport.initial_max_data = 512;
+    client_transport.initial_max_stream_data_bidi_local = 512;
+    client_transport.max_datagram_frame_size = 1200;
+
+    var server_endpoint = try quic.runtime.Endpoint.bind(
+        allocator,
+        io,
+        .{ .ip4 = .loopback(0) },
+        .{ .max_datagram_size = 4096 },
+    );
+    defer server_endpoint.deinit();
+    var client_endpoint = try quic.runtime.Endpoint.bind(
+        allocator,
+        io,
+        .{ .ip4 = .loopback(0) },
+        .{ .max_datagram_size = 4096 },
+    );
+    defer client_endpoint.deinit();
+    var pending = try runtime.HandshakeClientSession.beginEstablishedConnect(
+        &client_endpoint,
+        server_endpoint.address(),
+        try quic.handshake.establishPreconfigured(
+            &client_endpoint,
+            server_endpoint.address(),
+            .client,
+            .{
+                .receive_keys = server_keys,
+                .send_keys = client_keys,
+                .local_connection_id = client_cid,
+                .peer_connection_id = server_cid,
+                .local_transport_parameters = client_transport,
+                .peer_transport_parameters = quic.practical_transport_parameters,
+                .one_rtt = .{
+                    .max_datagram_size = 1200,
+                    .pacing_max_burst_packets = 1,
+                    .receive_window = 512,
+                    .stream_receive_window = 512,
+                },
+            },
+        ),
+        .{
+            .authority = "localhost",
+            .path = "/paced-client",
+            .origin = "https://localhost",
+            .limits = .{ .max_session_streams = 8 },
+            .h3 = .{ .local_settings = settings },
+        },
+    );
+    var pending_owned = true;
+    defer if (pending_owned) pending.deinit();
+
+    var server = try quic.one_rtt.Connection.init(&server_endpoint, .{
+        .peer = client_endpoint.address(),
+        .receive_keys = client_keys,
+        .send_keys = server_keys,
+        .local_connection_id = server_cid,
+        .peer_connection_id = client_cid,
+        .local_endpoint = .server,
+        .local_max_datagram_frame_size = 1200,
+        .peer_max_datagram_frame_size = 1200,
+        .enable_pacing = false,
+    });
+    defer server.deinit();
+
+    var padding: [320]u8 = undefined;
+    for (&padding, 0..) |*byte, index| {
+        byte.* = @intCast('!' + index % ('~' - '!' + 1));
+    }
+    var response_bytes: std.ArrayList(u8) = .empty;
+    defer response_bytes.deinit(allocator);
+    try (http3.Response{
+        .status = 200,
+        .headers = &.{
+            http3.capsule.protocol_header,
+            .{ .name = "x-padding", .value = &padding },
+        },
+        .extended_connect = true,
+    }).write(&response_bytes, allocator);
+    try std.testing.expect(response_bytes.items.len > 256);
+    try std.testing.expect(response_bytes.items.len <= 512);
+
+    var server_control = http3.ControlState{};
+    var settings_bytes: std.ArrayList(u8) = .empty;
+    defer settings_bytes.deinit(allocator);
+    try server_control.writeSettingsStream(
+        &settings_bytes,
+        allocator,
+        settings,
+    );
+    try server.send(&.{
+        .{ .stream = .{ .stream_id = 3, .data = settings_bytes.items } },
+        .{ .stream = .{
+            .stream_id = pending.sessionId().value,
+            .data = response_bytes.items,
+        } },
+    });
+    var response_packet = try pending.connection().receivePacket();
+    defer response_packet.deinit(allocator);
+
+    var dispatcher = quic.endpoint_dispatcher.Dispatcher.init(
+        allocator,
+        &client_endpoint,
+    );
+    defer dispatcher.deinit();
+    const handle: quic.endpoint_dispatcher.ConnectionHandle = 23;
+    try dispatcher.registerConnection(handle, pending.connection());
+
+    for (0..1400) |_| {
+        try pending.h3.?.qpack_decode.recordStreamCancellation(0);
+    }
+    const feedback_len =
+        pending.h3.?.qpack_decode.pendingDecoderInstructions().len;
+    const decoder_offset = pending.h3.?.qpack_decoder_send.next_offset;
+
+    var fixed_io = FixedClockIo{
+        .delegate = client_endpoint.io,
+        .now_ns = 1_000_000,
+    };
+    var fixed_vtable = client_endpoint.io.vtable.*;
+    fixed_vtable.now = FixedClockIo.now;
+    fixed_vtable.sleep = FixedClockIo.sleep;
+    fixed_vtable.netSend = FixedClockIo.netSend;
+    client_endpoint.io = .{
+        .userdata = &fixed_io,
+        .vtable = &fixed_vtable,
+    };
+    defer client_endpoint.io = fixed_io.delegate;
+    quic.one_rtt.testing.exhaustPacingAt(
+        pending.connection(),
+        @intCast(fixed_io.now_ns),
+    );
+
+    try pending.processPacket(&response_packet);
+    try std.testing.expectEqual(@as(usize, 0), fixed_io.sleep_calls);
+    try std.testing.expectEqual(
+        feedback_len,
+        pending.h3.?.qpack_decode.pendingDecoderInstructions().len,
+    );
+    try std.testing.expectEqual(
+        decoder_offset,
+        pending.h3.?.qpack_decoder_send.next_offset,
+    );
+    const response_available = quic.one_rtt.testing
+        .receiveStreamAvailableLen(
+        pending.connection(),
+        pending.sessionId().value,
+    ).?;
+    try std.testing.expectEqual(response_bytes.items.len, response_available);
+
+    const packet_number = pending.connection().next_packet_number;
+    try std.testing.expect((try pending.pollConnectForDispatcher(
+        &dispatcher,
+        handle,
+    )) == null);
+    try std.testing.expectEqual(@as(usize, 1), dispatcher.connectionCount());
+    try std.testing.expectEqual(@as(usize, 0), fixed_io.sleep_calls);
+    try std.testing.expectEqual(packet_number, pending.connection().next_packet_number);
+    try std.testing.expectEqual(
+        response_available,
+        quic.one_rtt.testing.receiveStreamAvailableLen(
+            pending.connection(),
+            pending.sessionId().value,
+        ).?,
+    );
+
+    var saw_feedback_progress = false;
+    var saw_credit_deferral = false;
+    var completed: ?runtime.HandshakeConnectAttempt = null;
+    for (0..8) |_| {
+        const timer = dispatcher.nextTimerDeadline() orelse
+            return error.TestUnexpectedResult;
+        try std.testing.expectEqual(
+            quic.one_rtt.TimerDeadlineKind.pacing,
+            timer.timer.kind,
+        );
+        fixed_io.now_ns = @intCast(timer.timer.deadline_ns);
+        _ = (try dispatcher.serviceNextTimerAt(timer.timer.deadline_ns)) orelse
+            return error.TestUnexpectedResult;
+        const before =
+            pending.h3.?.qpack_decode.pendingDecoderInstructions().len;
+        if (try pending.pollConnectForDispatcher(
+            &dispatcher,
+            handle,
+        )) |attempt| {
+            pending_owned = false;
+            completed = attempt;
+            break;
+        }
+        const after =
+            pending.h3.?.qpack_decode.pendingDecoderInstructions().len;
+        saw_feedback_progress = saw_feedback_progress or after < before;
+        saw_credit_deferral = saw_credit_deferral or after == 0;
+        try std.testing.expectEqual(@as(usize, 1), dispatcher.connectionCount());
+        try std.testing.expectEqual(
+            response_available,
+            quic.one_rtt.testing.receiveStreamAvailableLen(
+                pending.connection(),
+                pending.sessionId().value,
+            ).?,
+        );
+        try std.testing.expectEqual(@as(usize, 0), fixed_io.sleep_calls);
+    }
+    try std.testing.expect(saw_feedback_progress);
+    try std.testing.expect(saw_credit_deferral);
+
+    var attempt = completed orelse return error.TestUnexpectedResult;
+    try std.testing.expect(
+        attempt.h3.?.qpack_decoder_send.next_offset > decoder_offset,
+    );
+    var session: runtime.HandshakeClientSession = undefined;
+    try attempt.requireAcceptedForDispatcher(
+        &dispatcher,
+        handle,
+        &session,
+    );
+    var session_owned = true;
+    defer if (session_owned) session.deinit();
+    try std.testing.expectEqual(@as(usize, 1), dispatcher.connectionCount());
+    try std.testing.expectEqual(@as(usize, 0), fixed_io.sleep_calls);
+    try std.testing.expectEqual(@as(u16, 200), session.response.status);
+    try std.testing.expect(try dispatcher.unregisterConnection(handle));
+    session.deinit();
+    session_owned = false;
+}
+
 test "WebTransport client polls complete rejected CONNECT entity" {
     const allocator = std.testing.allocator;
     var threaded = std.Io.Threaded.init(allocator, .{});
@@ -2823,6 +3064,206 @@ test "WebTransport client polls complete rejected CONNECT entity" {
         error.SessionRejected,
         attempt.requireAccepted(),
     );
+}
+
+test "WebTransport client rejection body is not repeated by paced credit" {
+    const allocator = std.testing.allocator;
+    var threaded = std.Io.Threaded.init(allocator, .{});
+    defer threaded.deinit();
+    const io = threaded.io();
+
+    const client_cid = "wt-reject-client-p";
+    const server_cid = "wt-reject-server-p";
+    const client_keys = quic.protection.deriveAes128Keys(
+        [_]u8{0xd5} ** quic.protection.secret_len,
+    );
+    const server_keys = quic.protection.deriveAes128Keys(
+        [_]u8{0xd6} ** quic.protection.secret_len,
+    );
+    const settings = webtransport.defaultSettings(.{});
+    var client_transport = quic.practical_transport_parameters;
+    client_transport.initial_max_data = 1024;
+    client_transport.initial_max_stream_data_bidi_local = 1024;
+    client_transport.max_datagram_frame_size = 1200;
+
+    var server_endpoint = try quic.runtime.Endpoint.bind(
+        allocator,
+        io,
+        .{ .ip4 = .loopback(0) },
+        .{ .max_datagram_size = 4096 },
+    );
+    defer server_endpoint.deinit();
+    var client_endpoint = try quic.runtime.Endpoint.bind(
+        allocator,
+        io,
+        .{ .ip4 = .loopback(0) },
+        .{ .max_datagram_size = 4096 },
+    );
+    defer client_endpoint.deinit();
+    var pending = try runtime.HandshakeClientSession.beginEstablishedConnect(
+        &client_endpoint,
+        server_endpoint.address(),
+        try quic.handshake.establishPreconfigured(
+            &client_endpoint,
+            server_endpoint.address(),
+            .client,
+            .{
+                .receive_keys = server_keys,
+                .send_keys = client_keys,
+                .local_connection_id = client_cid,
+                .peer_connection_id = server_cid,
+                .local_transport_parameters = client_transport,
+                .peer_transport_parameters = quic.practical_transport_parameters,
+                .one_rtt = .{
+                    .max_datagram_size = 1200,
+                    .pacing_max_burst_packets = 1,
+                    .receive_window = 1024,
+                    .stream_receive_window = 1024,
+                },
+            },
+        ),
+        .{
+            .authority = "localhost",
+            .path = "/paced-rejection",
+            .origin = "https://localhost",
+            .limits = .{ .max_rejection_body_bytes = 1024 },
+            .h3 = .{ .local_settings = settings },
+        },
+    );
+    var pending_owned = true;
+    defer if (pending_owned) pending.deinit();
+
+    var server = try quic.one_rtt.Connection.init(&server_endpoint, .{
+        .peer = client_endpoint.address(),
+        .receive_keys = client_keys,
+        .send_keys = server_keys,
+        .local_connection_id = server_cid,
+        .peer_connection_id = client_cid,
+        .local_endpoint = .server,
+        .local_max_datagram_frame_size = 1200,
+        .peer_max_datagram_frame_size = 1200,
+        .enable_pacing = false,
+    });
+    defer server.deinit();
+
+    const body = [_]u8{'r'} ** 600;
+    var response_bytes: std.ArrayList(u8) = .empty;
+    defer response_bytes.deinit(allocator);
+    try (http3.Response{
+        .status = 429,
+        .body = &body,
+        .trailers = &.{.{ .name = "x-final", .value = "true" }},
+        .request_method = "CONNECT",
+        .extended_connect = true,
+    }).write(&response_bytes, allocator);
+    try std.testing.expect(response_bytes.items.len < 1024);
+    var server_control = http3.ControlState{};
+    var settings_bytes: std.ArrayList(u8) = .empty;
+    defer settings_bytes.deinit(allocator);
+    try server_control.writeSettingsStream(
+        &settings_bytes,
+        allocator,
+        settings,
+    );
+    try server.send(&.{
+        .{ .stream = .{ .stream_id = 3, .data = settings_bytes.items } },
+        .{ .stream = .{
+            .stream_id = pending.sessionId().value,
+            .data = response_bytes.items,
+            .fin = true,
+        } },
+    });
+    var response_packet = try pending.connection().receivePacket();
+    defer response_packet.deinit(allocator);
+
+    var dispatcher = quic.endpoint_dispatcher.Dispatcher.init(
+        allocator,
+        &client_endpoint,
+    );
+    defer dispatcher.deinit();
+    const handle: quic.endpoint_dispatcher.ConnectionHandle = 24;
+    try dispatcher.registerConnection(handle, pending.connection());
+
+    var fixed_io = FixedClockIo{
+        .delegate = client_endpoint.io,
+        .now_ns = 2_000_000,
+    };
+    var fixed_vtable = client_endpoint.io.vtable.*;
+    fixed_vtable.now = FixedClockIo.now;
+    fixed_vtable.sleep = FixedClockIo.sleep;
+    fixed_vtable.netSend = FixedClockIo.netSend;
+    client_endpoint.io = .{
+        .userdata = &fixed_io,
+        .vtable = &fixed_vtable,
+    };
+    defer client_endpoint.io = fixed_io.delegate;
+    quic.one_rtt.testing.exhaustPacingAt(
+        pending.connection(),
+        @intCast(fixed_io.now_ns),
+    );
+
+    try pending.processPacket(&response_packet);
+    try std.testing.expect((try pending.pollConnectForDispatcher(
+        &dispatcher,
+        handle,
+    )) == null);
+    try std.testing.expectEqual(@as(usize, 0), fixed_io.sleep_calls);
+    try std.testing.expectEqual(body.len, pending.rejection_body.items.len);
+    try std.testing.expectEqualStrings(&body, pending.rejection_body.items);
+    try std.testing.expectEqual(@as(usize, 1), dispatcher.connectionCount());
+    const packet_number = pending.connection().next_packet_number;
+
+    // The body was delivered before its receive-credit update hit pacing. A
+    // second poll at the same clock must neither wait nor append it again.
+    try std.testing.expect((try pending.pollConnectForDispatcher(
+        &dispatcher,
+        handle,
+    )) == null);
+    try std.testing.expectEqual(body.len, pending.rejection_body.items.len);
+    try std.testing.expectEqualStrings(&body, pending.rejection_body.items);
+    try std.testing.expectEqual(
+        packet_number,
+        pending.connection().next_packet_number,
+    );
+    try std.testing.expectEqual(@as(usize, 1), dispatcher.connectionCount());
+    try std.testing.expectEqual(@as(usize, 0), fixed_io.sleep_calls);
+
+    var completed: ?runtime.HandshakeConnectAttempt = null;
+    for (0..4) |_| {
+        const timer = dispatcher.nextTimerDeadline() orelse
+            return error.TestUnexpectedResult;
+        try std.testing.expectEqual(
+            quic.one_rtt.TimerDeadlineKind.pacing,
+            timer.timer.kind,
+        );
+        fixed_io.now_ns = @intCast(timer.timer.deadline_ns);
+        _ = (try dispatcher.serviceNextTimerAt(timer.timer.deadline_ns)) orelse
+            return error.TestUnexpectedResult;
+        if (try pending.pollConnectForDispatcher(
+            &dispatcher,
+            handle,
+        )) |attempt| {
+            pending_owned = false;
+            completed = attempt;
+            break;
+        }
+        try std.testing.expectEqual(body.len, pending.rejection_body.items.len);
+        try std.testing.expectEqualStrings(&body, pending.rejection_body.items);
+        try std.testing.expectEqual(@as(usize, 1), dispatcher.connectionCount());
+        try std.testing.expectEqual(@as(usize, 0), fixed_io.sleep_calls);
+    }
+    var attempt = completed orelse return error.TestUnexpectedResult;
+    pending_owned = false;
+    defer attempt.deinit();
+    try std.testing.expectEqual(@as(u16, 429), attempt.status());
+    try std.testing.expectEqualStrings(&body, attempt.body());
+    try std.testing.expectEqual(@as(usize, 1), attempt.trailers().len);
+    try std.testing.expectEqualStrings(
+        "true",
+        attempt.trailers()[0].value,
+    );
+    try std.testing.expectEqual(@as(usize, 0), dispatcher.connectionCount());
+    try std.testing.expectEqual(@as(usize, 0), fixed_io.sleep_calls);
 }
 
 test "WebTransport handshake admission polls routed CONNECT state" {

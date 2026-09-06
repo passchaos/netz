@@ -8899,7 +8899,7 @@ pub const HandshakeClient = struct {
         self: *HandshakeClient,
         packet: *const quic.one_rtt.ReceivedPacket,
     ) Error!void {
-        try self.processResponsePacketPreserving(null, packet);
+        try self.processResponsePacketPreserving(null, packet, true);
     }
 
     /// Advance one response stream without assembling its DATA payload.
@@ -8926,20 +8926,67 @@ pub const HandshakeClient = struct {
         self: *HandshakeClient,
         stream_id: u62,
     ) Error!?StreamingEvent {
+        return self.pollResponseEventInternal(stream_id, false);
+    }
+
+    /// Return one buffered response event without waiting for receive credit
+    /// or QPACK feedback pacing. A null result preserves all pending work for
+    /// a later dispatcher turn.
+    pub fn pollResponseEventOnce(
+        self: *HandshakeClient,
+        stream_id: u62,
+    ) Error!?StreamingEvent {
+        return self.pollResponseEventInternal(stream_id, true);
+    }
+
+    fn pollResponseEventInternal(
+        self: *HandshakeClient,
+        stream_id: u62,
+        single_attempt: bool,
+    ) Error!?StreamingEvent {
         if (!self.request_lifecycle.contains(stream_id)) {
             return error.UnexpectedStream;
         }
+        if (single_attempt) {
+            self.flushResponsePacketFeedbackOnce() catch |err| switch (err) {
+                error.PacingLimited,
+                error.CongestionLimited,
+                error.FlowControlBlocked,
+                => return null,
+                else => return err,
+            };
+        }
         if (self.streaming_responses.find(stream_id)) |active| {
-            try releaseStreamingReaderCapacity(
-                &self.established.connection,
-                &active.reader,
-            );
+            if (single_attempt) {
+                releaseStreamingReaderCapacityOnce(
+                    &self.established.connection,
+                    &active.reader,
+                ) catch |err| switch (err) {
+                    error.PacingLimited,
+                    error.CongestionLimited,
+                    error.FlowControlBlocked,
+                    => return null,
+                    else => return err,
+                };
+                if (active.reader.finished()) {
+                    try self.finishStreamingResponse(stream_id);
+                    return .finished;
+                }
+            } else {
+                try releaseStreamingReaderCapacity(
+                    &self.established.connection,
+                    &active.reader,
+                );
+            }
         }
         if (self.response_streams.resetFor(stream_id)) |code| {
             try self.request_lifecycle.prepareFinish();
             _ = self.response_streams.takeReset(stream_id);
             try self.finishStreamingResponse(stream_id);
-            self.flushResponsePacketFeedback() catch {};
+            if (single_attempt)
+                self.flushResponsePacketFeedbackOnce() catch {}
+            else
+                self.flushResponsePacketFeedback() catch {};
             return if (code == http3.ApplicationErrorCode.request_rejected)
                 error.RequestRejected
             else
@@ -8957,7 +9004,20 @@ pub const HandshakeClient = struct {
         );
         try self.qpack_decode.prepareSectionAcknowledgments(1);
         const event = (entry.reader.next(self.qpack_decode.table) catch |err| {
-            self.failReceivedResponse(stream_id, null, err, false) catch {};
+            if (single_attempt)
+                self.failReceivedResponseOnce(
+                    stream_id,
+                    null,
+                    err,
+                    false,
+                ) catch {}
+            else
+                self.failReceivedResponse(
+                    stream_id,
+                    null,
+                    err,
+                    false,
+                ) catch {};
             return err;
         }) orelse return null;
         const owned_event = event;
@@ -8968,10 +9028,28 @@ pub const HandshakeClient = struct {
                 self.established.connection.endpoint.allocator,
             );
         };
-        self.applyStreamingResponseEvent(stream_id, owned_event) catch |err| {
-            self.failReceivedResponse(stream_id, null, err, false) catch {};
+        const committed = self.applyStreamingResponseEvent(
+            stream_id,
+            owned_event,
+            single_attempt,
+        ) catch |err| {
+            if (single_attempt)
+                self.failReceivedResponseOnce(
+                    stream_id,
+                    null,
+                    err,
+                    false,
+                ) catch {}
+            else
+                self.failReceivedResponse(
+                    stream_id,
+                    null,
+                    err,
+                    false,
+                ) catch {};
             return err;
         };
+        if (!committed) return null;
         event_owned = false;
         return owned_event;
     }
@@ -9046,6 +9124,33 @@ pub const HandshakeClient = struct {
             &self.established.connection,
             &entry.reader,
         );
+        return read;
+    }
+
+    /// Copy available DATA without waiting for receive-credit pacing. `null`
+    /// means previously consumed bytes still need a retry; a successful read
+    /// is never rolled back or delivered twice when its new credit is paced.
+    pub fn readResponseDataOnce(
+        self: *HandshakeClient,
+        stream_id: u62,
+        out: []u8,
+    ) Error!?usize {
+        const entry = self.streaming_responses.find(stream_id) orelse
+            return error.UnexpectedStream;
+        releaseStreamingReaderCapacityOnce(
+            &self.established.connection,
+            &entry.reader,
+        ) catch |err| switch (err) {
+            error.PacingLimited,
+            error.CongestionLimited,
+            error.FlowControlBlocked,
+            => return null,
+            else => return err,
+        };
+        const read = try entry.reader.readData(out);
+        // Credit the newly consumed bytes on the next poll/read. Returning
+        // them first keeps a later socket error from making the caller retry
+        // an application-visible read whose parser cursor already advanced.
         return read;
     }
 
@@ -9396,8 +9501,41 @@ pub const HandshakeClient = struct {
         self: *HandshakeClient,
         detached_stream_id: u62,
     ) Error!?http3.DecodedResponseHead {
+        return self.pollDetachedResponseHeadInternal(
+            detached_stream_id,
+            false,
+        );
+    }
+
+    /// Decode a detached CONNECT response head without waiting for feedback
+    /// or receive-credit pacing. On backpressure the QUIC bytes and HTTP/3
+    /// parser state remain available for an identical retry.
+    pub fn pollDetachedResponseHeadOnce(
+        self: *HandshakeClient,
+        detached_stream_id: u62,
+    ) Error!?http3.DecodedResponseHead {
+        return self.pollDetachedResponseHeadInternal(
+            detached_stream_id,
+            true,
+        );
+    }
+
+    fn pollDetachedResponseHeadInternal(
+        self: *HandshakeClient,
+        detached_stream_id: u62,
+        single_attempt: bool,
+    ) Error!?http3.DecodedResponseHead {
         if (!self.request_lifecycle.contains(detached_stream_id)) {
             return error.UnexpectedStream;
+        }
+        if (single_attempt) {
+            self.flushResponsePacketFeedbackOnce() catch |err| switch (err) {
+                error.PacingLimited,
+                error.CongestionLimited,
+                error.FlowControlBlocked,
+                => return null,
+                else => return err,
+            };
         }
         const bytes = self.established.connection.availableReceivedStream(
             detached_stream_id,
@@ -9410,12 +9548,20 @@ pub const HandshakeClient = struct {
         if (bytes.len == 0) {
             if (!input_complete) return null;
             try self.request_lifecycle.prepareFinish();
-            self.failReceivedResponse(
-                detached_stream_id,
-                bytes,
-                error.MissingStatus,
-                true,
-            ) catch {};
+            if (single_attempt)
+                self.failReceivedResponseOnce(
+                    detached_stream_id,
+                    bytes,
+                    error.MissingStatus,
+                    true,
+                ) catch {}
+            else
+                self.failReceivedResponse(
+                    detached_stream_id,
+                    bytes,
+                    error.MissingStatus,
+                    true,
+                ) catch {};
             return error.MissingStatus;
         }
         try self.request_lifecycle.prepareFinish();
@@ -9436,36 +9582,61 @@ pub const HandshakeClient = struct {
             error.BufferTooShort => {
                 if (!input_complete) return null;
                 const final_error = responseHeadErrorAtFin(bytes);
-                self.failReceivedResponse(
-                    detached_stream_id,
-                    bytes,
-                    final_error,
-                    true,
-                ) catch {};
+                if (single_attempt)
+                    self.failReceivedResponseOnce(
+                        detached_stream_id,
+                        bytes,
+                        final_error,
+                        true,
+                    ) catch {}
+                else
+                    self.failReceivedResponse(
+                        detached_stream_id,
+                        bytes,
+                        final_error,
+                        true,
+                    ) catch {};
                 return final_error;
             },
             error.QpackBlocked => return null,
             else => {
-                self.failReceivedResponse(
-                    detached_stream_id,
-                    bytes,
-                    err,
-                    true,
-                ) catch {};
+                if (single_attempt)
+                    self.failReceivedResponseOnce(
+                        detached_stream_id,
+                        bytes,
+                        err,
+                        true,
+                    ) catch {}
+                else
+                    self.failReceivedResponse(
+                        detached_stream_id,
+                        bytes,
+                        err,
+                        true,
+                    ) catch {};
                 return err;
             },
         };
-        errdefer head.deinit(self.allocator);
+        var head_owned = true;
+        defer if (head_owned) head.deinit(self.allocator);
         http3.validateResponsePushPromises(
             self.control,
             bytes[0..head.consumed],
         ) catch |err| {
-            self.failReceivedResponse(
-                detached_stream_id,
-                bytes[0..head.consumed],
-                err,
-                true,
-            ) catch {};
+            if (single_attempt)
+                self.failReceivedResponseOnce(
+                    detached_stream_id,
+                    bytes[0..head.consumed],
+                    err,
+                    true,
+                ) catch {}
+            else
+                self.failReceivedResponse(
+                    detached_stream_id,
+                    bytes[0..head.consumed],
+                    err,
+                    true,
+                ) catch {};
             return err;
         };
         // Activate the response reader before consuming the encoded head from
@@ -9482,7 +9653,7 @@ pub const HandshakeClient = struct {
             )) orelse return error.UnexpectedStream
         else
             null;
-        errdefer if (rejection_receive) |*receive| receive.deinit();
+        defer if (rejection_receive) |*receive| receive.deinit();
         if (rejection_receive) |*receive| {
             try receive.consume(head.consumed);
         }
@@ -9491,24 +9662,48 @@ pub const HandshakeClient = struct {
             11 *| head.qpack_section_acknowledgments,
         );
         const promise_checkpoint = self.push_streams.promiseCount();
-        errdefer self.push_streams.rollbackPromises(promise_checkpoint);
+        var promises_committed = false;
+        defer if (!promises_committed) {
+            self.push_streams.rollbackPromises(promise_checkpoint);
+        };
         registerResponsePushPromises(
             &self.push_streams,
             detached_stream_id,
             bytes[0..head.consumed],
         ) catch |err| {
-            self.failReceivedResponse(
-                detached_stream_id,
-                bytes[0..head.consumed],
-                err,
-                true,
-            ) catch {};
+            if (single_attempt)
+                self.failReceivedResponseOnce(
+                    detached_stream_id,
+                    bytes[0..head.consumed],
+                    err,
+                    true,
+                ) catch {}
+            else
+                self.failReceivedResponse(
+                    detached_stream_id,
+                    bytes[0..head.consumed],
+                    err,
+                    true,
+                ) catch {};
             return err;
         };
-        try self.established.connection.releaseReceivedCapacity(
-            detached_stream_id,
-            head.consumed,
-        );
+        if (single_attempt) {
+            self.established.connection.tryReleaseReceivedCapacity(
+                detached_stream_id,
+                head.consumed,
+            ) catch |err| switch (err) {
+                error.PacingLimited,
+                error.CongestionLimited,
+                error.FlowControlBlocked,
+                => return null,
+                else => return err,
+            };
+        } else {
+            try self.established.connection.releaseReceivedCapacity(
+                detached_stream_id,
+                head.consumed,
+            );
+        }
         // Capacity was reserved before transport consumption. Canonical QPACK
         // Section Acknowledgments are at most 11 bytes apiece, so these writes
         // cannot allocate or fail once the request stream ID is known valid.
@@ -9533,11 +9728,16 @@ pub const HandshakeClient = struct {
         } else {
             entry.reader.adoptDecodedResponseHead(head, extended_connect);
         }
+        head_owned = false;
+        promises_committed = true;
         // The head is committed now. Feedback remains queued if its socket send
         // cannot make progress; later packet/control operations retry it. A
         // transient feedback failure must not turn a successfully consumed
         // final response into an unreturnable error.
-        self.flushResponsePacketFeedback() catch {};
+        if (single_attempt)
+            self.flushResponsePacketFeedbackOnce() catch {}
+        else
+            self.flushResponsePacketFeedback() catch {};
         return head;
     }
 
@@ -9555,6 +9755,7 @@ pub const HandshakeClient = struct {
         try self.processResponsePacketPreserving(
             detached_stream_id,
             packet,
+            true,
         );
     }
 
@@ -9574,7 +9775,7 @@ pub const HandshakeClient = struct {
         {
             return error.UnexpectedStream;
         }
-        try self.processResponsePacketPreserving(stream_id, packet);
+        try self.processResponsePacketPreserving(stream_id, packet, true);
     }
 
     /// Temporary compatibility hook for protocol adapters that detach only
@@ -9598,6 +9799,7 @@ pub const HandshakeClient = struct {
         self: *HandshakeClient,
         detached_stream_id: ?u62,
         packet: *const quic.one_rtt.ReceivedPacket,
+        single_attempt: bool,
     ) Error!void {
         if (self.receive_packets.ack_pending) {
             try self.established.connection.sendAck(0);
@@ -9623,13 +9825,35 @@ pub const HandshakeClient = struct {
             .detached_streams = &self.connect_datagrams,
         };
         try visitConnectionResponsePacket(&context, packetView(packet.*));
-        try self.flushResponsePacketFeedback();
+        if (single_attempt) {
+            self.flushResponsePacketFeedbackOnce() catch |err| switch (err) {
+                error.PacingLimited,
+                error.CongestionLimited,
+                error.FlowControlBlocked,
+                => {},
+                else => return err,
+            };
+        } else {
+            try self.flushResponsePacketFeedback();
+        }
     }
 
     fn flushResponsePacketFeedback(self: *HandshakeClient) Error!void {
         if (self.qpack_decode.pendingDecoderInstructions().len != 0) {
             try self.sendQpackFeedback();
         }
+    }
+
+    fn flushResponsePacketFeedbackOnce(self: *HandshakeClient) Error!void {
+        if (self.qpack_decode.pendingDecoderInstructions().len == 0) return;
+        try trySendConnectionQpackFeedback(
+            &self.established.connection,
+            &self.critical_stream_send_scratch,
+            &self.qpack_decode,
+            &self.qpack_decoder_send,
+            &self.qpack_decoder_prefix_sent,
+            self.options,
+        );
     }
 
     fn releaseStreamingResponseCapacity(self: *HandshakeClient) Error!void {
@@ -10047,7 +10271,11 @@ pub const HandshakeClient = struct {
             };
         }
         const owned_event = ready.event;
-        self.applyStreamingResponseEvent(stream_id, owned_event) catch |err| {
+        _ = self.applyStreamingResponseEvent(
+            stream_id,
+            owned_event,
+            false,
+        ) catch |err| {
             self.failReceivedResponse(stream_id, null, err, false) catch {};
             return err;
         };
@@ -10345,6 +10573,49 @@ pub const HandshakeClient = struct {
             .requestCompletedLocalStreamRelease(stream_id);
     }
 
+    fn cancelRequestInternalOnce(
+        self: *HandshakeClient,
+        stream_id: u62,
+        application_error_code: u64,
+        decoded_dynamic_section: bool,
+    ) Error!void {
+        var cancel_qpack = decoded_dynamic_section;
+        if (!cancel_qpack) {
+            cancel_qpack = try self.response_streams
+                .requiresQpackCancellation(
+                stream_id,
+                self.qpack_decode.table,
+            );
+        }
+        if (!cancel_qpack) {
+            cancel_qpack = try self.streaming_responses
+                .hasUnacknowledgedDynamicSection(
+                stream_id,
+                self.qpack_decode.table,
+            );
+        }
+        if (cancel_qpack) {
+            try self.qpack_decode.prepareStreamCancellation();
+        }
+        try self.established.connection.tryCancelStream(
+            stream_id,
+            application_error_code,
+        );
+        if (cancel_qpack) {
+            self.qpack_decode.recordStreamCancellationAssumeCapacity(
+                stream_id,
+            );
+        }
+        self.connect_datagrams.unregister(stream_id);
+        self.qpack_encode.abandonStream(stream_id);
+        self.response_streams.remove(stream_id);
+        self.streaming_responses.remove(stream_id);
+        _ = self.request_lifecycle.finish(stream_id) catch false;
+        _ = self.outbound_bodies.finish(stream_id);
+        _ = try self.established.connection
+            .requestCompletedLocalStreamRelease(stream_id);
+    }
+
     /// Best-effort cleanup for an Extended CONNECT adapter that is abandoned
     /// after receiving its response head. Unlike `cancelRequest`, local stream
     /// state is always released so an infallible adapter destructor can return
@@ -10497,7 +10768,8 @@ pub const HandshakeClient = struct {
         self: *HandshakeClient,
         stream_id: u62,
         event: StreamingEvent,
-    ) Error!void {
+        single_attempt: bool,
+    ) Error!bool {
         const section = try streamingResponseSectionAcknowledgments(event);
         if (event == .push_promise) {
             try http3.validatePushPromise(
@@ -10517,11 +10789,29 @@ pub const HandshakeClient = struct {
             // Encoder-stream insert count increments are also queued in the
             // decoder feedback buffer. Flush on every decoded field section,
             // even when that section itself used only static entries.
-            self.sendQpackFeedback() catch {};
+            if (single_attempt)
+                self.flushResponsePacketFeedbackOnce() catch {}
+            else
+                self.sendQpackFeedback() catch {};
         }
         if (event == .finished) {
+            if (single_attempt) {
+                const active = self.streaming_responses.find(stream_id) orelse
+                    return error.UnexpectedStream;
+                releaseStreamingReaderCapacityOnce(
+                    &self.established.connection,
+                    &active.reader,
+                ) catch |err| switch (err) {
+                    error.PacingLimited,
+                    error.CongestionLimited,
+                    error.FlowControlBlocked,
+                    => return false,
+                    else => return err,
+                };
+            }
             try self.finishStreamingResponse(stream_id);
         }
+        return true;
     }
 
     fn finishStreamingResponse(
@@ -10574,6 +10864,34 @@ pub const HandshakeClient = struct {
                 err,
             );
             return;
+        }
+    }
+
+    fn failReceivedResponseOnce(
+        self: *HandshakeClient,
+        stream_id: ?u62,
+        assembled_bytes: ?[]const u8,
+        err: anyerror,
+        assembled: bool,
+    ) Error!void {
+        if (stream_id) |id| {
+            if (messageStreamErrorCode(err)) |code| {
+                const uses_dynamic = if (assembled)
+                    messageUsesDynamicQpack(
+                        assembled_bytes orelse &.{},
+                        self.qpack_decode.table,
+                    ) catch false
+                else
+                    false;
+                try self.cancelRequestInternalOnce(id, code, uses_dynamic);
+                return;
+            }
+        }
+        if (runtime_error.protocolClose(err) != null) {
+            try closeConnectionForHttp3Error(
+                &self.established.connection,
+                err,
+            );
         }
     }
 };

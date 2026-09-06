@@ -483,6 +483,10 @@ pub const Reader = struct {
             self.response_connect_established;
     }
 
+    pub fn finished(self: Reader) bool {
+        return self.phase == .done;
+    }
+
     pub fn responseRequestMethod(self: Reader) ?[]const u8 {
         return self.response_request_method;
     }

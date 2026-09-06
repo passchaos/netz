@@ -6343,7 +6343,7 @@ pub const PendingHandshakeConnect = struct {
         // QUIC packet reordering. Do not consume it until SETTINGS is ready,
         // because `requireAccepted` must validate negotiated WebTransport and
         // DATAGRAM capabilities against that same connection state.
-        var response = (try self.pollConnectResponse()) orelse return null;
+        var response = (try self.pollConnectResponse(false)) orelse return null;
         errdefer response.deinit(self.h3.?.allocator);
         const h3 = self.h3.?;
         self.h3 = null;
@@ -6370,11 +6370,18 @@ pub const PendingHandshakeConnect = struct {
         dispatcher: *quic.endpoint_dispatcher.Dispatcher,
         handle: quic.endpoint_dispatcher.ConnectionHandle,
     ) Error!?HandshakeConnectAttempt {
-        var ready_response = (self.pollConnectResponse() catch |err| {
+        const maybe_response = self.pollConnectResponse(true) catch |err| {
             _ = dispatcher.unregisterConnection(handle) catch
                 return error.InvalidDispatcherState;
             return err;
-        }) orelse return null;
+        };
+        var ready_response = maybe_response orelse {
+            // A once-only feedback or credit attempt may have armed pacing.
+            // Publish that deadline before the shared endpoint waits again.
+            dispatcher.refreshConnectionTimer(handle) catch
+                return error.InvalidDispatcherState;
+            return null;
+        };
         errdefer ready_response.deinit(self.h3.?.allocator);
         // Moving a by-value attempt would briefly make the route point at a
         // return-value temporary. Unregister first; the accepted promotion
@@ -6400,14 +6407,21 @@ pub const PendingHandshakeConnect = struct {
 
     fn pollConnectResponse(
         self: *PendingHandshakeConnect,
+        single_attempt: bool,
     ) Error!?HandshakeConnectResponse {
         const h3 = &self.h3.?;
         if (self.rejection == null) {
             if (!h3.control.settings.received) return null;
-            var head = (try pollHandshakeConnectAttemptResponse(
-                h3,
-                self.session_id.value,
-            )) orelse return null;
+            var head = (if (single_attempt)
+                try pollHandshakeConnectAttemptResponseOnce(
+                    h3,
+                    self.session_id.value,
+                )
+            else
+                try pollHandshakeConnectAttemptResponse(
+                    h3,
+                    self.session_id.value,
+                )) orelse return null;
             if (head.status >= 200 and head.status < 300) {
                 return .{ .head = head };
             }
@@ -6430,7 +6444,11 @@ pub const PendingHandshakeConnect = struct {
             self.pending_datagram_registered = false;
         }
 
-        while (try h3.pollResponseEvent(self.session_id.value)) |event_value| {
+        while (if (single_attempt)
+            try h3.pollResponseEventOnce(self.session_id.value)
+        else
+            try h3.pollResponseEvent(self.session_id.value)) |event_value|
+        {
             var event = event_value;
             defer event.deinit(h3.allocator);
             switch (event) {
@@ -6438,10 +6456,16 @@ pub const PendingHandshakeConnect = struct {
                     const remaining = self.limits.max_rejection_body_bytes -|
                         self.rejection_body.items.len;
                     var scratch: [16 * 1024]u8 = undefined;
-                    const read = try h3.readResponseData(
-                        self.session_id.value,
-                        scratch[0..@min(scratch.len, remaining +| 1)],
-                    );
+                    const read = if (single_attempt)
+                        (try h3.readResponseDataOnce(
+                            self.session_id.value,
+                            scratch[0..@min(scratch.len, remaining +| 1)],
+                        )) orelse return null
+                    else
+                        try h3.readResponseData(
+                            self.session_id.value,
+                            scratch[0..@min(scratch.len, remaining +| 1)],
+                        );
                     if (read > remaining) return error.MessageTooLarge;
                     try self.rejection_body.appendSlice(
                         h3.allocator,
@@ -8445,6 +8469,19 @@ fn pollHandshakeConnectAttemptResponse(
     stream_id: u62,
 ) Error!?http3.DecodedResponseHead {
     var head = (try client.pollDetachedResponseHead(stream_id)) orelse
+        return null;
+    errdefer head.deinit(client.allocator);
+    if (head.status >= 200 and head.status < 300) {
+        try validateOptionalCapsuleProtocol(head.headers);
+    }
+    return head;
+}
+
+fn pollHandshakeConnectAttemptResponseOnce(
+    client: *http3.runtime.HandshakeClient,
+    stream_id: u62,
+) Error!?http3.DecodedResponseHead {
+    var head = (try client.pollDetachedResponseHeadOnce(stream_id)) orelse
         return null;
     errdefer head.deinit(client.allocator);
     if (head.status >= 200 and head.status < 300) {

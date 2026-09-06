@@ -284,6 +284,12 @@ publishing a response or introducing a dynamic encoder-stream dependency.
 Endpoint request polling likewise makes only nonblocking receive-credit and
 QPACK-feedback attempts; queued decoder instructions are drained in packet-
 sized prefixes and remain retryable across dispatcher pacing turns.
+Dispatcher-driven clients apply the same rule while a WebTransport CONNECT is
+pending: routed response packets never wait for QPACK decoder feedback, final
+heads remain in QUIC reassembly until receive credit can be committed, and a
+rejected response body is delivered once even when its credit update is paced.
+Every null poll republishes the connection timer without unregistering its CID
+route, so a later endpoint turn can finish feedback, promotion, or rejection.
 Malformed request cleanup submits RESET_STREAM and STOP_SENDING atomically in
 one packet; if pacing rejects that packet, the parser state remains available
 for the next endpoint turn instead of blocking or exposing partial cleanup.
