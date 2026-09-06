@@ -214,6 +214,9 @@ incremental WebTransport readers now register transport retirement when FIN or
 RESET_STREAM is delivered; local FIN/reset paths do the same, so associated
 streams are compacted after both applicable halves become terminal while the
 registry continues enforcing lifetime session limits.
+Shared-endpoint stream opens and explicit peer-stream release are single
+attempts: paced STREAMS_BLOCKED/MAX_STREAMS frames return backpressure and arm
+the dispatcher timer without consuming a stream ID or release state.
 The shared-endpoint poll adapter refreshes its dispatcher timer after every
 application-state poll, including null and error results, so a failed
 automatic MAX_STREAMS send or protocol-error control work cannot leave a

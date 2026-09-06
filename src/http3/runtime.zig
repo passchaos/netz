@@ -4666,6 +4666,26 @@ pub const HandshakeServerSession = struct {
         return stream_id;
     }
 
+    /// Reserve the next server unidirectional stream without waiting for a
+    /// paced STREAMS_BLOCKED notification.
+    pub fn tryOpenServerUnidirectionalStream(
+        self: *HandshakeServerSession,
+    ) Error!u62 {
+        const expected = self.next_push_stream_id;
+        _ = std.math.add(u62, expected, 4) catch
+            return error.StreamCreationError;
+        if (self.established.connection
+            .nextLocalUnidirectionalStreamId() != expected)
+        {
+            return error.StreamCreationError;
+        }
+        const transport_id = try self.established.connection
+            .tryOpenUnidirectionalStream();
+        const stream_id = try self.reserveServerUnidirectionalStreamId();
+        std.debug.assert(stream_id == expected and stream_id == transport_id);
+        return stream_id;
+    }
+
     pub fn openServerUnidirectionalStreamWithTimeout(
         self: *HandshakeServerSession,
         timeout: std.Io.Duration,

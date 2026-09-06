@@ -1700,6 +1700,8 @@ pub const EndpointAcceptedSession = struct {
         try result;
     }
 
+    /// Attempt to reserve one bidirectional stream without waiting for peer
+    /// credit or pacing; dispatcher progress makes a later retry possible.
     pub fn openBidirectionalStream(
         self: *EndpointAcceptedSession,
     ) EndpointServerError!u62 {
@@ -1709,7 +1711,11 @@ pub const EndpointAcceptedSession = struct {
             self.h3.control.settings.peer,
         );
         const stream_id = try self.streams.prepareLocal(.bidirectional);
-        const transport_id = try self.h3.established.connection.openStream();
+        const transport_id = self.h3.established.connection
+            .tryOpenStream() catch |err| {
+            try self.refreshTimer();
+            return err;
+        };
         std.debug.assert(transport_id == stream_id);
         const committed = (try self.streams.commitPreparedLocal(
             stream_id,
@@ -1719,6 +1725,8 @@ pub const EndpointAcceptedSession = struct {
         return committed;
     }
 
+    /// Attempt to reserve one unidirectional stream without waiting for peer
+    /// credit or pacing; dispatcher progress makes a later retry possible.
     pub fn openUnidirectionalStream(
         self: *EndpointAcceptedSession,
     ) EndpointServerError!u62 {
@@ -1728,7 +1736,10 @@ pub const EndpointAcceptedSession = struct {
             self.h3.control.settings.peer,
         );
         const stream_id = try self.streams.prepareLocal(.unidirectional);
-        const transport_id = try self.h3.openServerUnidirectionalStream();
+        const transport_id = self.h3.tryOpenServerUnidirectionalStream() catch |err| {
+            try self.refreshTimer();
+            return err;
+        };
         std.debug.assert(transport_id == stream_id);
         const registered = try self.streams.commitPreparedLocal(
             stream_id,
@@ -1885,10 +1896,10 @@ pub const EndpointAcceptedSession = struct {
         const stream = self.streams.get(stream_id) orelse
             return error.UnknownStream;
         if (stream.locally_initiated) return error.InvalidStreamState;
-        const released = try self.h3.established.connection
-            .releaseCompletedPeerStream(stream_id);
+        const result = self.h3.established.connection
+            .tryReleaseCompletedPeerStream(stream_id);
         try self.refreshTimer();
-        return released;
+        return try result;
     }
 
     /// Attempt RESET_STREAM once without waiting for pacing or reading the

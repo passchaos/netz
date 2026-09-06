@@ -2242,6 +2242,12 @@ pub const Connection = struct {
         return self.openLocalStream(.bidirectional);
     }
 
+    /// Attempt to reserve one bidirectional stream without sleeping while a
+    /// STREAMS_BLOCKED notification is paced.
+    pub fn tryOpenStream(self: *Connection) Error!u64 {
+        return self.tryOpenLocalStream(.bidirectional);
+    }
+
     /// Peek at the next local stream ID without reserving transport credit.
     /// Protocol adapters with a second shared namespace use this to reject a
     /// cursor mismatch before either irreversible reservation is consumed.
@@ -2280,6 +2286,12 @@ pub const Connection = struct {
 
     pub fn openUnidirectionalStream(self: *Connection) Error!u64 {
         return self.openLocalStream(.unidirectional);
+    }
+
+    /// Attempt to reserve one unidirectional stream without sleeping while a
+    /// STREAMS_BLOCKED notification is paced.
+    pub fn tryOpenUnidirectionalStream(self: *Connection) Error!u64 {
+        return self.tryOpenLocalStream(.unidirectional);
     }
 
     /// Wait for peer unidirectional-stream credit until `timeout` expires.
@@ -2366,6 +2378,20 @@ pub const Connection = struct {
         }
         if (self.localStreamLimitExceeded(direction)) {
             try self.sendStreamsBlocked(direction);
+            return error.StreamLimitExceeded;
+        }
+        return self.reserveLocalStream(direction);
+    }
+
+    fn tryOpenLocalStream(
+        self: *Connection,
+        direction: StreamDirection,
+    ) Error!u64 {
+        if (self.close_info != null or self.idle_timed_out) {
+            return error.ConnectionClosed;
+        }
+        if (self.localStreamLimitExceeded(direction)) {
+            try self.sendStreamsBlockedAt(direction, self.monotonicNowNs());
             return error.StreamLimitExceeded;
         }
         return self.reserveLocalStream(direction);
@@ -4775,7 +4801,24 @@ pub const Connection = struct {
         self: *Connection,
         stream_id: u64,
     ) Error!bool {
-        const result = try self.releaseCompletedPeerStreams(&.{stream_id});
+        const result = try self.releaseCompletedPeerStreamsAt(
+            &.{stream_id},
+            null,
+        );
+        return result.update_sent;
+    }
+
+    /// Attempt one terminal peer-stream release without sleeping for pacing.
+    /// All flow limits and stream state remain unchanged if its MAX_* packet
+    /// cannot be submitted.
+    pub fn tryReleaseCompletedPeerStream(
+        self: *Connection,
+        stream_id: u64,
+    ) Error!bool {
+        const result = try self.releaseCompletedPeerStreamsAt(
+            &.{stream_id},
+            self.monotonicNowNs(),
+        );
         return result.update_sent;
     }
 
@@ -4858,6 +4901,14 @@ pub const Connection = struct {
         self: *Connection,
         stream_ids: []const u64,
     ) Error!PeerStreamReleaseResult {
+        return self.releaseCompletedPeerStreamsAt(stream_ids, null);
+    }
+
+    fn releaseCompletedPeerStreamsAt(
+        self: *Connection,
+        stream_ids: []const u64,
+        sent_time_ns: ?u64,
+    ) Error!PeerStreamReleaseResult {
         var bidi_released: u64 = 0;
         var uni_released: u64 = 0;
         for (stream_ids, 0..) |stream_id, index| {
@@ -4917,7 +4968,16 @@ pub const Connection = struct {
             } };
             frame_count += 1;
         }
-        if (frame_count != 0) try self.sendTrackedFrames(frames[0..frame_count]);
+        if (frame_count != 0) {
+            if (sent_time_ns) |now_ns|
+                try self.sendTrackedFramesEcnAt(
+                    frames[0..frame_count],
+                    .not_ect,
+                    now_ns,
+                )
+            else
+                try self.sendTrackedFrames(frames[0..frame_count]);
+        }
         self.recv_flow = next_recv_flow;
 
         // No connection method may run concurrently with this mutation. The
@@ -9948,8 +10008,23 @@ pub const Connection = struct {
     }
 
     fn sendStreamsBlocked(self: *Connection, direction: StreamDirection) Error!void {
+        return self.sendStreamsBlockedAt(direction, null);
+    }
+
+    fn sendStreamsBlockedAt(
+        self: *Connection,
+        direction: StreamDirection,
+        sent_time_ns: ?u64,
+    ) Error!void {
         const frame = self.streamsBlockedFrame(direction) orelse return;
-        try self.sendTrackedFrames(&[_]quic.Frame{frame});
+        if (sent_time_ns) |now_ns|
+            try self.sendTrackedFramesEcnAt(
+                &[_]quic.Frame{frame},
+                .not_ect,
+                now_ns,
+            )
+        else
+            try self.sendTrackedFrames(&[_]quic.Frame{frame});
         self.markStreamsBlockedSent(direction);
     }
 
