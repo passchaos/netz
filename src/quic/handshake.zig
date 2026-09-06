@@ -1450,8 +1450,9 @@ fn connectAttempt(
             continue;
         };
 
-        break quic.initial_exchange.openInitialCryptoFlight(
+        break quic.initial_exchange.openInitialCryptoFlightFrom(
             endpoint,
+            source,
             server_datagram.from,
             server_datagram.bytes[0..server_initial_info.len],
             active_initial_secrets.server,
