@@ -1047,6 +1047,14 @@ pub const Connection = struct {
         try self.sendAutomaticallyWithLoop(frames);
     }
 
+    /// Attempt one send using the current awake-clock timestamp without
+    /// sleeping or reading the endpoint socket. Event-loop adapters use this
+    /// to preserve a single UDP receive owner and retry after their dispatcher
+    /// reports transport progress.
+    pub fn trySend(self: *Connection, frames: []const quic.Frame) Error!void {
+        try self.sendAutomaticallyAt(frames, self.monotonicNowNs());
+    }
+
     fn handleAutomaticEcnUnavailable(
         self: *Connection,
         requested_ecn: quic.packet_space.EcnCodepoint,
@@ -1409,7 +1417,7 @@ pub const Connection = struct {
                 @min(send_flow_available, total_stream_bytes))
             {
                 if (count == 0) {
-                    try self.sendDataBlocked();
+                    try self.sendDataBlockedAt(now_ns);
                     return error.FlowControlBlocked;
                 }
                 break;
@@ -1836,7 +1844,7 @@ pub const Connection = struct {
         if (stream_bytes > self.send_flow.available()) {
             self.send_frame_buffer.items.len = 0;
             packet_streams.clearRetainingCapacity();
-            try self.sendDataBlocked();
+            try self.sendDataBlockedAt(sent_time_ns);
             return error.FlowControlBlocked;
         }
         for (packet_streams.items) |credit| {
@@ -1847,7 +1855,10 @@ pub const Connection = struct {
             if (credit.bytes > available) {
                 self.send_frame_buffer.items.len = 0;
                 packet_streams.clearRetainingCapacity();
-                try self.sendStreamDataBlocked(credit.stream_id);
+                try self.sendStreamDataBlockedAt(
+                    credit.stream_id,
+                    sent_time_ns,
+                );
                 return error.FlowControlBlocked;
             }
         }
@@ -2800,17 +2811,38 @@ pub const Connection = struct {
     }
 
     fn sendDataBlocked(self: *Connection) Error!void {
+        return self.sendDataBlockedAt(null);
+    }
+
+    fn sendDataBlockedAt(
+        self: *Connection,
+        sent_time_ns: ?u64,
+    ) Error!void {
         if (!self.send_flow.shouldSendBlocked()) return;
         const frames = [_]quic.Frame{self.send_flow.dataBlockedFrame()};
-        try self.sendTrackedFrames(&frames);
+        if (sent_time_ns) |now_ns|
+            try self.sendTrackedFramesEcnAt(&frames, .not_ect, now_ns)
+        else
+            try self.sendTrackedFrames(&frames);
         self.send_flow.markBlockedSent();
     }
 
     fn sendStreamDataBlocked(self: *Connection, stream_id: u64) Error!void {
+        return self.sendStreamDataBlockedAt(stream_id, null);
+    }
+
+    fn sendStreamDataBlockedAt(
+        self: *Connection,
+        stream_id: u64,
+        sent_time_ns: ?u64,
+    ) Error!void {
         const entry = try self.sendStreamEntry(stream_id);
         if (!entry.flow.shouldSendBlocked()) return;
         const frames = [_]quic.Frame{entry.flow.streamDataBlockedFrame(stream_id)};
-        try self.sendTrackedFrames(&frames);
+        if (sent_time_ns) |now_ns|
+            try self.sendTrackedFramesEcnAt(&frames, .not_ect, now_ns)
+        else
+            try self.sendTrackedFrames(&frames);
         entry.flow.markBlockedSent();
     }
 

@@ -3484,6 +3484,64 @@ test "QUIC 1-RTT pacing gates in-flight packets transactionally" {
     try std.testing.expectEqual(@as(u64, 3), connection.next_packet_number);
 }
 
+test "QUIC 1-RTT trySend reports pacing without waiting" {
+    const allocator = std.testing.allocator;
+    var threaded = std.Io.Threaded.init(allocator, .{});
+    defer threaded.deinit();
+    const io = threaded.io();
+
+    var peer_endpoint = try quic.runtime.Endpoint.bind(
+        allocator,
+        io,
+        .{ .ip4 = .loopback(0) },
+        .{ .max_datagram_size = 4096 },
+    );
+    defer peer_endpoint.deinit();
+    var local_endpoint = try quic.runtime.Endpoint.bind(
+        allocator,
+        io,
+        .{ .ip4 = .loopback(0) },
+        .{ .max_datagram_size = 4096 },
+    );
+    defer local_endpoint.deinit();
+
+    const keys = quic.protection.deriveAes128Keys(
+        [_]u8{0x7c} ** quic.protection.secret_len,
+    );
+    var connection = try one_rtt.Connection.init(&local_endpoint, .{
+        .peer = peer_endpoint.address(),
+        .receive_keys = keys,
+        .send_keys = keys,
+        .local_connection_id = "try-local",
+        .peer_connection_id = "try-peer",
+        .max_datagram_size = 1200,
+        .pacing_max_burst_packets = 1,
+    });
+    defer connection.deinit();
+
+    const first = [_]quic.Frame{.{ .padding = .{ .len = 1160 } }};
+    const now_ns: u64 = @intCast(@max(
+        @as(i96, 0),
+        std.Io.Clock.awake.now(io).nanoseconds,
+    ));
+    try connection.sendAt(&first, now_ns);
+    const next_packet_number = connection.next_packet_number;
+    const sent_count = connection.sent.packets.items.len;
+    const in_flight = connection.bytesInFlight();
+    const blocked = [_]quic.Frame{.{ .stream = .{
+        .stream_id = 0,
+        .data = "payload",
+    } }};
+
+    try std.testing.expectError(error.PacingLimited, connection.trySend(&blocked));
+    try std.testing.expect(connection.pacing_blocked_until_ns != null);
+    try std.testing.expectEqual(next_packet_number, connection.next_packet_number);
+    try std.testing.expectEqual(sent_count, connection.sent.packets.items.len);
+    try std.testing.expectEqual(in_flight, connection.bytesInFlight());
+    try std.testing.expectEqual(@as(usize, 0), connection.pendingRecoveryCount());
+    try std.testing.expectEqual(@as(usize, 0), connection.stream_send_flows.items.len);
+}
+
 test "QUIC 1-RTT can disable pacing" {
     const allocator = std.testing.allocator;
     var threaded = std.Io.Threaded.init(allocator, .{});

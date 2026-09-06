@@ -1772,13 +1772,16 @@ pub const EndpointAcceptedSession = struct {
         try result;
     }
 
+    /// Attempt one packet-sized write without reading the shared UDP socket.
+    /// A zero result means only the association prefix was submitted and the
+    /// caller should drive `EndpointServer.receive*` before retrying `payload`.
     pub fn writeStream(
         self: *EndpointAcceptedSession,
         stream_id: u62,
         payload: []const u8,
     ) EndpointServerError!usize {
         try self.control.ensureOpen();
-        const written = try handshake_stream.write(
+        const result = handshake_stream.writeOnce(
             &self.h3.established.connection,
             &self.streams,
             self.session_id,
@@ -1786,9 +1789,13 @@ pub const EndpointAcceptedSession = struct {
             payload,
         );
         try self.refreshTimer();
-        return written;
+        return try result;
     }
 
+    /// Atomically submit one complete payload and optional FIN in one QUIC
+    /// packet. Backpressure or an oversized packet is returned without partial
+    /// application progress; use `writeStream` plus `finishStream` for larger
+    /// payloads. This method never reads the shared UDP socket.
     pub fn sendStream(
         self: *EndpointAcceptedSession,
         stream_id: u62,
@@ -1796,7 +1803,7 @@ pub const EndpointAcceptedSession = struct {
         fin: bool,
     ) EndpointServerError!void {
         try self.control.ensureOpen();
-        try sendHandshakeSessionStream(
+        const result = handshake_stream.sendOnce(
             &self.h3.established.connection,
             &self.streams,
             self.session_id,
@@ -1805,6 +1812,7 @@ pub const EndpointAcceptedSession = struct {
             fin,
         );
         try self.refreshTimer();
+        try result;
     }
 
     pub fn setStreamPriority(
@@ -1823,13 +1831,15 @@ pub const EndpointAcceptedSession = struct {
         return self.streams.priority(stream_id);
     }
 
+    /// Make one socket-free batch attempt across the supplied streams.
+    /// `counts` and `send_error` identify exactly the socket-visible prefix.
     pub fn writeStreams(
         self: *EndpointAcceptedSession,
         writes: []const StreamWrite,
         counts: []usize,
     ) EndpointServerError!StreamWriteResult {
         try self.control.ensureOpen();
-        const result = try stream_batch.write(
+        const result = stream_batch.writeOnce(
             &self.h3.established.connection,
             &self.streams,
             self.session_id,
@@ -1837,21 +1847,23 @@ pub const EndpointAcceptedSession = struct {
             counts,
         );
         try self.refreshTimer();
-        return result;
+        return try result;
     }
 
+    /// Attempt to submit FIN without reading or sleeping on the shared socket.
     pub fn finishStream(
         self: *EndpointAcceptedSession,
         stream_id: u62,
     ) EndpointServerError!void {
         try self.control.ensureOpen();
-        try handshake_stream.finish(
+        const result = handshake_stream.finishOnce(
             &self.h3.established.connection,
             &self.streams,
             self.session_id,
             stream_id,
         );
         try self.refreshTimer();
+        try result;
     }
 
     /// Nonblocking endpoint variant: inspect buffered terminal state, emit any

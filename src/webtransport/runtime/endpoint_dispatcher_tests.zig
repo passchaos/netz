@@ -348,6 +348,148 @@ test "WebTransport endpoint close failure still schedules expiry" {
     try std.testing.expect(h3.established.connection.closed());
 }
 
+test "WebTransport endpoint stream write leaves UDP receive to dispatcher" {
+    const allocator = std.testing.allocator;
+    var threaded = std.Io.Threaded.init(allocator, .{});
+    defer threaded.deinit();
+    const io = threaded.io();
+
+    var server_endpoint = try quic.runtime.Endpoint.bind(
+        allocator,
+        io,
+        .{ .ip4 = .loopback(0) },
+        .{ .max_datagram_size = 4096 },
+    );
+    defer server_endpoint.deinit();
+    var peer_endpoint = try quic.runtime.Endpoint.bind(
+        allocator,
+        io,
+        .{ .ip4 = .loopback(0) },
+        .{ .max_datagram_size = 4096 },
+    );
+    defer peer_endpoint.deinit();
+    const keys = quic.protection.deriveAes128Keys(
+        [_]u8{0xee} ** quic.protection.secret_len,
+    );
+    const settings = webtransport.defaultSettings(.{});
+    var peer_parameters = quic.practical_transport_parameters;
+    // Session ID zero has a three-byte bidirectional association prefix. Give
+    // the server exactly that much initial stream and connection credit.
+    peer_parameters.initial_max_data = 3;
+    peer_parameters.initial_max_stream_data_bidi_remote = 3;
+    var h3 = try http3.runtime.HandshakeServerSession.initPreconfigured(
+        &server_endpoint,
+        peer_endpoint.address(),
+        .{ .local_settings = settings },
+        .{
+            .receive_keys = keys,
+            .send_keys = keys,
+            .local_connection_id = "wt-write-server",
+            .peer_connection_id = "wt-write-client",
+            .peer_transport_parameters = peer_parameters,
+            .one_rtt = .{ .enable_pacing = false },
+        },
+    );
+    defer h3.deinit();
+    h3.control.settings.markSent(settings);
+    h3.control.settings.markReceived(settings);
+    var streams = try handshake_stream.initRegistry(
+        allocator,
+        .init(0),
+        .server,
+        settings,
+        settings,
+        8,
+        1,
+        null,
+    );
+    var streams_owned = true;
+    defer if (streams_owned) streams.deinit();
+    var dispatcher = quic.endpoint_dispatcher.Dispatcher.init(
+        allocator,
+        &server_endpoint,
+    );
+    defer dispatcher.deinit();
+    const handle: quic.endpoint_dispatcher.ConnectionHandle = 12;
+    try dispatcher.registerConnection(handle, &h3.established.connection);
+    var accepted = runtime.EndpointAcceptedSession{
+        .handle = handle,
+        .dispatcher = &dispatcher,
+        .h3 = &h3,
+        .request = undefined,
+        .session_id = .init(0),
+        .streams = streams,
+        .control = try session_control.Control.init(.init(0)),
+    };
+    streams_owned = false;
+    defer accepted.streams.deinit();
+    const stream_id = try accepted.openBidirectionalStream();
+    try std.testing.expectEqual(@as(u62, 1), stream_id);
+
+    // Queue credit before the write. A blocking per-connection writer would
+    // steal this datagram from the shared socket and succeed in the same call.
+    // The endpoint writer must return with zero application progress instead.
+    try quic.one_rtt.sendFrames(
+        &peer_endpoint,
+        server_endpoint.address(),
+        keys,
+        .{
+            .destination_connection_id = "wt-write-server",
+            .packet_number = 0,
+            .frames = &.{
+                .{ .max_data = .{ .maximum_data = 4 } },
+                .{ .max_stream_data = .{
+                    .stream_id = stream_id,
+                    .maximum_stream_data = 4,
+                } },
+            },
+        },
+    );
+    try std.testing.expectError(
+        error.FlowControlBlocked,
+        accepted.sendStream(stream_id, "x", true),
+    );
+    const stream = accepted.streams.get(stream_id) orelse
+        return error.TestUnexpectedResult;
+    try std.testing.expect(!stream.prefix_sent);
+    try std.testing.expect(!stream.local_fin);
+    try std.testing.expectEqual(@as(u64, 0), stream.send_offset);
+    try std.testing.expectEqual(@as(u64, 0), stream.bytes_sent);
+
+    var counts: [1]usize = undefined;
+    const batch_result = try accepted.writeStreams(
+        &.{.{ .stream_id = stream_id, .data = "x" }},
+        &counts,
+    );
+    try std.testing.expectEqual(@as(usize, 0), batch_result.progressed);
+    try std.testing.expect(batch_result.send_error == null);
+    try std.testing.expectEqual(@as(usize, 0), counts[0]);
+    try std.testing.expect(stream.prefix_sent);
+    try std.testing.expectEqual(@as(u64, 3), stream.send_offset);
+    try std.testing.expectEqual(@as(u64, 0), stream.bytes_sent);
+    const blocked_timer = dispatcher.nextTimerDeadline() orelse
+        return error.TestUnexpectedResult;
+    try std.testing.expectEqual(handle, blocked_timer.connection_id);
+    try std.testing.expectEqual(
+        quic.one_rtt.TimerDeadlineKind.pto,
+        blocked_timer.timer.kind,
+    );
+
+    var credit = try dispatcher.receive(
+        &.{quic.Version.version_1.wireValue()},
+    );
+    defer credit.deinit(allocator);
+    try std.testing.expect(credit == .packet);
+    try std.testing.expectEqual(handle, credit.packet.connection_handle);
+    try std.testing.expectEqual(
+        @as(usize, 1),
+        try accepted.writeStream(stream_id, "x"),
+    );
+    try std.testing.expectEqual(@as(u64, 1), stream.bytes_sent);
+    try accepted.finishStream(stream_id);
+    try std.testing.expect(stream.local_fin);
+}
+
 test "WebTransport client handshake and CONNECT share one socket owner" {
     const allocator = std.testing.allocator;
     var threaded = std.Io.Threaded.init(allocator, .{});

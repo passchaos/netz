@@ -79,6 +79,44 @@ pub fn write(
     writes: []const Write,
     counts: []usize,
 ) Error!Result {
+    while (true) {
+        const result = writeOnce(
+            connection,
+            registry,
+            session_id,
+            writes,
+            counts,
+        ) catch |err| switch (err) {
+            error.FlowControlBlocked, error.CongestionLimited => {
+                try stream_runtime.receiveSendProgress(connection);
+                continue;
+            },
+            error.PacingLimited => {
+                try connection.waitForPacingAvailability();
+                continue;
+            },
+            else => |other| return other,
+        };
+        if (result.progressed != 0 or
+            result.send_error != null or
+            !hasApplicationData(writes))
+        {
+            return result;
+        }
+        try stream_runtime.receiveSendProgress(connection);
+    }
+}
+
+/// Submit one fair packet batch without waiting for transport progress or
+/// reading the endpoint socket. Counts and `send_error` retain the same
+/// socket-visible-prefix contract as the blocking wrapper.
+pub fn writeOnce(
+    connection: *quic.one_rtt.Connection,
+    registry: *webtransport.StreamRegistry,
+    session_id: webtransport.SessionId,
+    writes: []const Write,
+    counts: []usize,
+) Error!Result {
     if (counts.len < writes.len) return error.BufferTooShort;
     @memset(counts[0..writes.len], 0);
     if (writes.len == 0) return .{ .progressed = 0 };
@@ -89,82 +127,78 @@ pub fn write(
     var input_indices: [quic.one_rtt.max_batch_packets]usize = undefined;
     var byte_counts: [quic.one_rtt.max_batch_packets]usize = undefined;
 
-    while (true) {
-        // A blocked retry may have processed STOP_SENDING/RESET_STREAM, and a
-        // prefix-aware pass may have completed every association prefix.
-        // Revalidate the current registry state before each staging attempt.
-        const validation = try validateBatch(registry, writes);
-        const packet_count = if (validation.all_prefixes_sent)
-            try stageSteadyBatch(
-                connection,
-                registry,
-                writes,
-                packet_limit,
-                &frames,
-                &packets,
-                &input_indices,
-                &byte_counts,
-            )
+    const validation = try validateBatch(registry, writes);
+    const packet_count = if (validation.all_prefixes_sent)
+        try stageSteadyBatch(
+            connection,
+            registry,
+            writes,
+            packet_limit,
+            &frames,
+            &packets,
+            &input_indices,
+            &byte_counts,
+        )
+    else
+        try stagePrefixAwareBatchOnce(
+            connection,
+            registry,
+            session_id,
+            writes,
+            packet_limit,
+            &frames,
+            &packets,
+            &input_indices,
+            &byte_counts,
+        );
+
+    if (packet_count == 0) {
+        if (!hasApplicationData(writes)) return .{ .progressed = 0 };
+        // Prefix-aware staging can make transport progress without committing
+        // application bytes. Report that retryable zero prefix explicitly; a
+        // shared endpoint will route MAX_* or ACK progress before calling us
+        // again. If every prefix was already present, ask QUIC to emit its
+        // normal BLOCKED signal and surface the precise backpressure error.
+        if (!validation.all_prefixes_sent) return .{ .progressed = 0 };
+        return if (connection.congestionAvailable() == 0)
+            error.CongestionLimited
         else
-            try stagePrefixAwareBatch(
-                connection,
-                registry,
-                session_id,
-                writes,
-                packet_limit,
-                &frames,
-                &packets,
-                &input_indices,
-                &byte_counts,
-            );
-
-        if (packet_count == 0) {
-            var has_data = false;
-            for (writes) |item| has_data = has_data or item.data.len != 0;
-            if (!has_data) return .{ .progressed = 0 };
-            try stream_runtime.receiveSendProgress(connection);
-            continue;
-        }
-
-        const sent = connection.sendManyProgress(packets[0..packet_count]) catch |err| switch (err) {
-            error.FlowControlBlocked, error.CongestionLimited => {
-                try stream_runtime.receiveSendProgress(connection);
-                continue;
-            },
-            error.PacingLimited => {
-                try connection.waitForPacingAvailability();
-                continue;
-            },
-            else => return err,
-        };
-        if (sent.sent_count > packet_count or
-            sent.sent_count > sent.protected_count)
-        {
-            return error.Unexpected;
-        }
-
-        for (0..sent.sent_count) |packet_index| {
-            const input_index = input_indices[packet_index];
-            const stream_id = writes[input_index].stream_id;
-            const count = byte_counts[packet_index];
-            const stream = registry.get(stream_id) orelse
-                return error.UnknownStream;
-            stream.send_offset = std.math.add(
-                u64,
-                stream.send_offset,
-                count,
-            ) catch return error.IntegerOverflow;
-            try registry.recordSent(stream_id, count, false);
-            counts[input_index] = count;
-        }
-        if (sent.sent_count == 0 and sent.send_error == null) {
-            return error.Unexpected;
-        }
-        return .{
-            .progressed = sent.sent_count,
-            .send_error = sent.send_error,
-        };
+            error.FlowControlBlocked;
     }
+
+    const sent = try connection.sendManyProgress(packets[0..packet_count]);
+    if (sent.sent_count > packet_count or
+        sent.sent_count > sent.protected_count)
+    {
+        return error.Unexpected;
+    }
+
+    for (0..sent.sent_count) |packet_index| {
+        const input_index = input_indices[packet_index];
+        const stream_id = writes[input_index].stream_id;
+        const count = byte_counts[packet_index];
+        const stream = registry.get(stream_id) orelse
+            return error.UnknownStream;
+        stream.send_offset = std.math.add(
+            u64,
+            stream.send_offset,
+            count,
+        ) catch return error.IntegerOverflow;
+        try registry.recordSent(stream_id, count, false);
+        counts[input_index] = count;
+    }
+    if (sent.sent_count == 0 and sent.send_error == null) {
+        return error.Unexpected;
+    }
+    return .{
+        .progressed = sent.sent_count,
+        .send_error = sent.send_error,
+    };
+}
+
+fn hasApplicationData(writes: []const Write) bool {
+    for (writes) |item| if (item.data.len != 0) return true;
+    return false;
 }
 
 const OrderedWrite = struct {
@@ -262,6 +296,57 @@ fn stagePrefixAwareBatch(
     input_indices: *[quic.one_rtt.max_batch_packets]usize,
     byte_counts: *[quic.one_rtt.max_batch_packets]usize,
 ) Error!usize {
+    return stagePrefixAwareBatchWith(
+        connection,
+        registry,
+        session_id,
+        writes,
+        packet_limit,
+        frames,
+        packets,
+        input_indices,
+        byte_counts,
+        stream_runtime.prepare,
+    );
+}
+
+fn stagePrefixAwareBatchOnce(
+    connection: *quic.one_rtt.Connection,
+    registry: *webtransport.StreamRegistry,
+    session_id: webtransport.SessionId,
+    writes: []const Write,
+    packet_limit: usize,
+    frames: *[quic.one_rtt.max_batch_packets][1]quic.Frame,
+    packets: *[quic.one_rtt.max_batch_packets][]const quic.Frame,
+    input_indices: *[quic.one_rtt.max_batch_packets]usize,
+    byte_counts: *[quic.one_rtt.max_batch_packets]usize,
+) Error!usize {
+    return stagePrefixAwareBatchWith(
+        connection,
+        registry,
+        session_id,
+        writes,
+        packet_limit,
+        frames,
+        packets,
+        input_indices,
+        byte_counts,
+        stream_runtime.prepareOnce,
+    );
+}
+
+fn stagePrefixAwareBatchWith(
+    connection: *quic.one_rtt.Connection,
+    registry: *webtransport.StreamRegistry,
+    session_id: webtransport.SessionId,
+    writes: []const Write,
+    packet_limit: usize,
+    frames: *[quic.one_rtt.max_batch_packets][1]quic.Frame,
+    packets: *[quic.one_rtt.max_batch_packets][]const quic.Frame,
+    input_indices: *[quic.one_rtt.max_batch_packets]usize,
+    byte_counts: *[quic.one_rtt.max_batch_packets]usize,
+    comptime prepare_stream: anytype,
+) Error!usize {
     var packet_count: usize = 0;
     const selection_epoch = registry.beginBatchEpoch();
     while (packet_count < packet_limit) {
@@ -277,7 +362,7 @@ fn stagePrefixAwareBatch(
             selection_epoch,
         ) orelse return error.UnknownStream;
         if (!mark.first) return error.Unexpected;
-        const stream = try stream_runtime.prepare(
+        const stream = try prepare_stream(
             connection,
             registry,
             session_id,
@@ -287,9 +372,6 @@ fn stagePrefixAwareBatch(
             item.data.len,
             sendableBytes(connection.streamSendCredit(item.stream_id)),
         );
-        // Marking happens before `prepare`: if the association prefix consumes
-        // the final credit, the next scan skips this stream and gives sendable
-        // peers a chance to progress.
         if (count == 0) continue;
 
         frames[packet_count][0] = .{ .stream = .{

@@ -172,7 +172,7 @@ pub fn write(
                 try connection.waitForPacingAvailability();
                 continue;
             },
-            else => return err,
+            else => |other| return other,
         };
         stream.send_offset = std.math.add(
             u64,
@@ -184,6 +184,71 @@ pub fn write(
     }
 }
 
+/// Submit at most one packet-sized application prefix without sleeping or
+/// reading the endpoint socket. Association-prefix progress is retained, but
+/// an error never commits application bytes, so retrying the same input is
+/// unambiguous for a shared-endpoint owner.
+pub fn writeOnce(
+    connection: *quic.one_rtt.Connection,
+    registry: *webtransport.StreamRegistry,
+    session_id: webtransport.SessionId,
+    stream_id: u62,
+    payload: []const u8,
+) Error!usize {
+    const stream = try writableStream(registry, stream_id);
+    if (payload.len == 0) return 0;
+    var prefix_storage: [16]u8 = undefined;
+    const prefix = try pendingPrefix(stream, session_id, &prefix_storage);
+    const credit = connection.streamSendCredit(stream_id);
+    const max_frame_data = @max(
+        @as(usize, 1),
+        credit.max_datagram_size -| 128,
+    );
+    const available = credit.available() -| prefix.len;
+    const count = @min(
+        payload.len,
+        @min(max_frame_data -| prefix.len, available),
+    );
+    if (count == 0 and prefix.len == 0) {
+        // Let QUIC emit DATA_BLOCKED/STREAM_DATA_BLOCKED when appropriate, or
+        // report congestion/pacing, without entering its receive loop.
+        const probe = [_]quic.Frame{.{ .stream = .{
+            .stream_id = stream_id,
+            .offset = stream.send_offset,
+            .data = payload[0..1],
+            .fin = false,
+        } }};
+        try connection.trySend(&probe);
+        return error.Unexpected;
+    }
+    try submitOnce(
+        connection,
+        stream,
+        stream_id,
+        prefix,
+        payload[0..count],
+        false,
+    );
+    return count;
+}
+
+/// Submit one complete payload and optional FIN as a single QUIC packet. This
+/// is the all-or-nothing counterpart used by endpoint-owned convenience APIs.
+pub fn sendOnce(
+    connection: *quic.one_rtt.Connection,
+    registry: *webtransport.StreamRegistry,
+    session_id: webtransport.SessionId,
+    stream_id: u62,
+    payload: []const u8,
+    fin: bool,
+) Error!void {
+    const stream = try writableStream(registry, stream_id);
+    if (payload.len == 0 and !fin) return;
+    var prefix_storage: [16]u8 = undefined;
+    const prefix = try pendingPrefix(stream, session_id, &prefix_storage);
+    try submitOnce(connection, stream, stream_id, prefix, payload, fin);
+}
+
 pub fn finish(
     connection: *quic.one_rtt.Connection,
     registry: *webtransport.StreamRegistry,
@@ -191,12 +256,7 @@ pub fn finish(
     stream_id: u62,
 ) Error!void {
     const stream = try writableStream(registry, stream_id);
-    try sendPrefixIfNeeded(
-        connection,
-        stream,
-        session_id,
-        stream_id,
-    );
+    try sendPrefixIfNeeded(connection, stream, session_id, stream_id);
     while (true) {
         const frames = [_]quic.Frame{.{ .stream = .{
             .stream_id = stream_id,
@@ -213,12 +273,22 @@ pub fn finish(
                 try connection.waitForPacingAvailability();
                 continue;
             },
-            else => return err,
+            else => |other| return other,
         };
         try association.requestAfterSendTerminal(connection, stream);
         try registry.recordSent(stream_id, 0, true);
         return;
     }
+}
+
+/// Submit an empty FIN without waiting for socket or transport progress.
+pub fn finishOnce(
+    connection: *quic.one_rtt.Connection,
+    registry: *webtransport.StreamRegistry,
+    session_id: webtransport.SessionId,
+    stream_id: u62,
+) Error!void {
+    try sendOnce(connection, registry, session_id, stream_id, &.{}, true);
 }
 
 /// Validate a local send direction and transmit its association prefix.
@@ -231,6 +301,19 @@ pub fn prepare(
 ) Error!*webtransport.StreamState {
     const stream = try writableStream(registry, stream_id);
     try sendPrefixIfNeeded(connection, stream, session_id, stream_id);
+    return stream;
+}
+
+/// Validate a stream and submit its association prefix once, without waiting
+/// for pacing, congestion, flow control, or peer packets.
+pub fn prepareOnce(
+    connection: *quic.one_rtt.Connection,
+    registry: *webtransport.StreamRegistry,
+    session_id: webtransport.SessionId,
+    stream_id: u62,
+) Error!*webtransport.StreamState {
+    const stream = try writableStream(registry, stream_id);
+    try sendPrefixIfNeededOnce(connection, stream, session_id, stream_id);
     return stream;
 }
 
@@ -274,13 +357,7 @@ fn sendPrefixIfNeeded(
         ),
     };
     while (true) {
-        const frames = [_]quic.Frame{.{ .stream = .{
-            .stream_id = stream_id,
-            .offset = stream.send_offset,
-            .data = prefix,
-            .fin = false,
-        } }};
-        connection.send(&frames) catch |err| switch (err) {
+        sendPrefix(connection, stream, stream_id, prefix) catch |err| switch (err) {
             error.FlowControlBlocked, error.CongestionLimited => {
                 try receiveSendProgress(connection);
                 continue;
@@ -291,14 +368,131 @@ fn sendPrefixIfNeeded(
             },
             else => return err,
         };
-        stream.send_offset = std.math.add(
-            u64,
-            stream.send_offset,
-            prefix.len,
-        ) catch return error.IntegerOverflow;
-        stream.prefix_sent = true;
         return;
     }
+}
+
+fn sendPrefixIfNeededOnce(
+    connection: *quic.one_rtt.Connection,
+    stream: *webtransport.StreamState,
+    session_id: webtransport.SessionId,
+    stream_id: u62,
+) Error!void {
+    if (stream.prefix_sent) return;
+    var prefix_storage: [16]u8 = undefined;
+    const prefix = try pendingPrefix(stream, session_id, &prefix_storage);
+    try sendPrefixOnce(connection, stream, stream_id, prefix);
+}
+
+fn pendingPrefix(
+    stream: *const webtransport.StreamState,
+    session_id: webtransport.SessionId,
+    storage: *[16]u8,
+) Error![]const u8 {
+    if (stream.prefix_sent) return storage[0..0];
+    return switch (stream.direction) {
+        .bidirectional => try webtransport
+            .BidirectionalStreamHeader.writeInto(storage, session_id),
+        .unidirectional => try writeUnidirectionalHeaderInto(
+            storage,
+            session_id,
+        ),
+    };
+}
+
+fn submitOnce(
+    connection: *quic.one_rtt.Connection,
+    stream: *webtransport.StreamState,
+    stream_id: u62,
+    prefix: []const u8,
+    payload: []const u8,
+    fin: bool,
+) Error!void {
+    const total = std.math.add(usize, prefix.len, payload.len) catch
+        return error.IntegerOverflow;
+    const next_offset = std.math.add(
+        u64,
+        stream.send_offset,
+        total,
+    ) catch return error.IntegerOverflow;
+    const next_bytes_sent = std.math.add(
+        u64,
+        stream.bytes_sent,
+        payload.len,
+    ) catch return error.IntegerOverflow;
+    var frames: [2]quic.Frame = undefined;
+    var frame_count: usize = 0;
+    if (prefix.len != 0) {
+        frames[frame_count] = .{ .stream = .{
+            .stream_id = stream_id,
+            .offset = stream.send_offset,
+            .data = prefix,
+            .fin = fin and payload.len == 0,
+        } };
+        frame_count += 1;
+    }
+    if (payload.len != 0 or (fin and prefix.len == 0)) {
+        frames[frame_count] = .{ .stream = .{
+            .stream_id = stream_id,
+            .offset = stream.send_offset + prefix.len,
+            .data = payload,
+            .fin = fin,
+        } };
+        frame_count += 1;
+    }
+    std.debug.assert(frame_count != 0);
+    try connection.trySend(frames[0..frame_count]);
+    stream.send_offset = next_offset;
+    stream.bytes_sent = next_bytes_sent;
+    stream.prefix_sent = true;
+    if (fin) {
+        stream.local_fin = true;
+        try association.requestAfterSendTerminal(connection, stream);
+    }
+}
+
+fn sendPrefix(
+    connection: *quic.one_rtt.Connection,
+    stream: *webtransport.StreamState,
+    stream_id: u62,
+    prefix: []const u8,
+) Error!void {
+    const next_offset = std.math.add(
+        u64,
+        stream.send_offset,
+        prefix.len,
+    ) catch return error.IntegerOverflow;
+    const frames = [_]quic.Frame{.{ .stream = .{
+        .stream_id = stream_id,
+        .offset = stream.send_offset,
+        .data = prefix,
+        .fin = false,
+    } }};
+    try connection.send(&frames);
+    stream.send_offset = next_offset;
+    stream.prefix_sent = true;
+}
+
+fn sendPrefixOnce(
+    connection: *quic.one_rtt.Connection,
+    stream: *webtransport.StreamState,
+    stream_id: u62,
+    prefix: []const u8,
+) Error!void {
+    const next_offset = std.math.add(
+        u64,
+        stream.send_offset,
+        prefix.len,
+    ) catch return error.IntegerOverflow;
+    const frames = [_]quic.Frame{.{ .stream = .{
+        .stream_id = stream_id,
+        .offset = stream.send_offset,
+        .data = prefix,
+        .fin = false,
+    } }};
+    try connection.trySend(&frames);
+    stream.send_offset = next_offset;
+    stream.prefix_sent = true;
 }
 
 pub fn receiveSendProgress(
@@ -582,4 +776,82 @@ test "WebTransport local unidirectional FIN requests transport retirement" {
     try std.testing.expect(connection.markPacketAcknowledged(0));
     try std.testing.expect(connection.localStreamClosed(stream.stream_id));
     try std.testing.expect(registry.get(stream.stream_id) != null);
+}
+
+test "WebTransport single-attempt send atomically includes prefix payload and FIN" {
+    const allocator = std.testing.allocator;
+    var threaded = std.Io.Threaded.init(allocator, .{});
+    defer threaded.deinit();
+    const io = threaded.io();
+    var sender_endpoint = try quic.runtime.Endpoint.bind(
+        allocator,
+        io,
+        .{ .ip4 = .loopback(0) },
+        .{ .max_datagram_size = 4096 },
+    );
+    defer sender_endpoint.deinit();
+    var receiver_endpoint = try quic.runtime.Endpoint.bind(
+        allocator,
+        io,
+        .{ .ip4 = .loopback(0) },
+        .{ .max_datagram_size = 4096 },
+    );
+    defer receiver_endpoint.deinit();
+    const keys = quic.protection.deriveAes128Keys(
+        [_]u8{0xd7} ** quic.protection.secret_len,
+    );
+    var connection = try quic.one_rtt.Connection.init(&sender_endpoint, .{
+        .peer = receiver_endpoint.address(),
+        .receive_keys = keys,
+        .send_keys = keys,
+        .local_connection_id = "wt-once-server",
+        .peer_connection_id = "wt-once-client",
+        .local_endpoint = .server,
+        .enable_pacing = false,
+    });
+    defer connection.deinit();
+    const session_id: webtransport.SessionId = .init(0);
+    var registry = try webtransport.StreamRegistry.init(
+        allocator,
+        session_id,
+        .server,
+        .{ .max_local_bidi = 1, .first_local_bidi = 1 },
+    );
+    defer registry.deinit();
+    const stream = try registry.openLocal(.bidirectional);
+
+    try sendOnce(
+        &connection,
+        &registry,
+        session_id,
+        stream.stream_id,
+        "atomic",
+        true,
+    );
+    try std.testing.expect(stream.prefix_sent);
+    try std.testing.expect(stream.local_fin);
+    try std.testing.expectEqual(@as(u64, 6), stream.bytes_sent);
+    try std.testing.expectEqual(@as(u64, 9), stream.send_offset);
+
+    var packet = try quic.one_rtt.receive(
+        &receiver_endpoint,
+        keys,
+        "wt-once-client".len,
+        0,
+        4,
+    );
+    defer packet.deinit(allocator);
+    try std.testing.expectEqual(@as(usize, 2), packet.frames.len);
+    try std.testing.expect(packet.frames[0] == .stream);
+    try std.testing.expectEqual(@as(u64, 0), packet.frames[0].stream.offset);
+    try std.testing.expectEqualSlices(
+        u8,
+        &.{ 0x40, 0x41, 0x00 },
+        packet.frames[0].stream.data,
+    );
+    try std.testing.expect(!packet.frames[0].stream.fin);
+    try std.testing.expect(packet.frames[1] == .stream);
+    try std.testing.expectEqual(@as(u64, 3), packet.frames[1].stream.offset);
+    try std.testing.expectEqualStrings("atomic", packet.frames[1].stream.data);
+    try std.testing.expect(packet.frames[1].stream.fin);
 }
