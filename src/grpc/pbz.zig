@@ -38,6 +38,16 @@ pub const ClientOptions = struct {
     service_config: ?*service_config.ServiceConfig = null,
 };
 
+pub const ServerOptions = struct {
+    package: []const u8 = "",
+    compression: compression.Algorithm = .identity,
+    compression_level: u4 = 6,
+    accepted_encodings: compression.AlgorithmSet = .supported,
+    max_message_size: usize = 16 * 1024 * 1024,
+    handler_error_status: wire.Status = .internal,
+    handler_error_message: ?[]const u8 = "generated handler failed",
+};
+
 /// Adapter accepted directly by a generated `Service.Client(Transport)`.
 ///
 /// A streaming response sink implements `append(allocator, message)`. The
@@ -428,6 +438,179 @@ pub fn ClientTransport(comptime Service: type) type {
     };
 }
 
+/// Dispatch one accepted RPC to a `protoc-gen-pbz` generated Handler.
+///
+/// Request iterators decode owned generated messages lazily. Response sinks
+/// encode generated messages immediately and keep the same `ServerDuplex` as
+/// the sole HTTP/2 frame reader while flow control exposes peer events.
+pub fn ServerTransport(comptime Service: type, comptime Handler: type) type {
+    validateServiceType(Service);
+    return struct {
+        connection: *runtime.ServerConnection,
+        handler: *Handler,
+        options: ServerOptions,
+
+        const Self = @This();
+
+        pub fn init(
+            connection: *runtime.ServerConnection,
+            handler: *Handler,
+            options: ServerOptions,
+        ) Error!Self {
+            try validateQualifiedName(options.package, true);
+            try validateIdentifier(Service.name);
+            if (options.handler_error_status == .ok) {
+                return error.InvalidTransportOptions;
+            }
+            return .{
+                .connection = connection,
+                .handler = handler,
+                .options = options,
+            };
+        }
+
+        pub fn serveOne(self: *Self) !wire.Status {
+            var rpc = try self.connection.acceptDuplex();
+            defer rpc.deinit();
+            if (!matchesService(
+                rpc.service,
+                self.options.package,
+                Service.name,
+            )) {
+                try rpc.finish(.unimplemented, "unknown service", &.{}, &.{});
+                return .unimplemented;
+            }
+            inline for (@typeInfo(Service).@"struct".decls) |decl| {
+                const Method = @field(Service, decl.name);
+                if (comptime !isMethodType(Method)) continue;
+                if (std.mem.eql(u8, rpc.method, Method.name)) {
+                    return self.serveMethod(Method, &rpc);
+                }
+            }
+            try rpc.finish(.unimplemented, "unknown method", &.{}, &.{});
+            return .unimplemented;
+        }
+
+        fn serveMethod(
+            self: *Self,
+            comptime Method: type,
+            rpc: *stream.ServerDuplex,
+        ) !wire.Status {
+            var requests = ServerRequestIterator(
+                Method.input_type_ref,
+            ).init(self.connection.connection.allocator, rpc);
+            defer requests.deinit();
+            var responses = ServerResponseSink(
+                Method.output_type_ref,
+                @TypeOf(&requests),
+            ).init(
+                self.connection.connection.allocator,
+                rpc,
+                &requests,
+                self.responseOptions(rpc),
+                !Method.server_streaming,
+            );
+
+            if (!Method.client_streaming and !Method.server_streaming) {
+                const request = (try requests.next()) orelse
+                    return error.InvalidMethodShape;
+                if (try requests.next() != null) {
+                    return error.InvalidMethodShape;
+                }
+                var response = @call(
+                    .auto,
+                    @field(Handler, Method.name),
+                    .{
+                        self.handler.*,
+                        self.connection.connection.allocator,
+                        request,
+                    },
+                ) catch |err| return self.finishHandlerError(rpc, err);
+                defer response.deinit(self.connection.connection.allocator);
+                try responses.append(
+                    self.connection.connection.allocator,
+                    response,
+                );
+            } else if (Method.client_streaming and
+                !Method.server_streaming)
+            {
+                var response = @call(
+                    .auto,
+                    @field(Handler, Method.name),
+                    .{
+                        self.handler.*,
+                        self.connection.connection.allocator,
+                        &requests,
+                    },
+                ) catch |err| return self.finishHandlerError(rpc, err);
+                defer response.deinit(self.connection.connection.allocator);
+                try responses.append(
+                    self.connection.connection.allocator,
+                    response,
+                );
+            } else if (!Method.client_streaming and
+                Method.server_streaming)
+            {
+                const request = (try requests.next()) orelse
+                    return error.InvalidMethodShape;
+                if (try requests.next() != null) {
+                    return error.InvalidMethodShape;
+                }
+                @call(
+                    .auto,
+                    @field(Handler, Method.name),
+                    .{
+                        self.handler.*,
+                        self.connection.connection.allocator,
+                        request,
+                        &responses,
+                    },
+                ) catch |err| return self.finishHandlerError(rpc, err);
+            } else {
+                @call(
+                    .auto,
+                    @field(Handler, Method.name),
+                    .{
+                        self.handler.*,
+                        self.connection.connection.allocator,
+                        &requests,
+                        &responses,
+                    },
+                ) catch |err| return self.finishHandlerError(rpc, err);
+            }
+            try responses.finish();
+            return .ok;
+        }
+
+        fn finishHandlerError(
+            self: Self,
+            rpc: *stream.ServerDuplex,
+            _: anyerror,
+        ) !wire.Status {
+            try rpc.finish(
+                self.options.handler_error_status,
+                self.options.handler_error_message,
+                &.{},
+                &.{},
+            );
+            return self.options.handler_error_status;
+        }
+
+        fn responseOptions(
+            self: Self,
+            rpc: *const stream.ServerDuplex,
+        ) stream.ResponseOptions {
+            return .{
+                .compression = self.options.compression,
+                .compression_level = self.options.compression_level,
+                .request_accepted_encodings = rpc.accepted_encodings,
+                .accepted_encodings = self.options.accepted_encodings,
+                .max_message_size = self.options.max_message_size,
+            };
+        }
+    };
+}
+
 const SingleResponse = struct {
     allocator: std.mem.Allocator,
     payload: ?[]u8 = null,
@@ -479,6 +662,140 @@ fn ResponseSink(comptime SinkPointer: type, comptime Message: type) type {
     };
 }
 
+fn ServerRequestIterator(comptime Message: type) type {
+    return struct {
+        allocator: std.mem.Allocator,
+        rpc: *stream.ServerDuplex,
+        messages: std.ArrayList(Message) = .empty,
+        next_index: usize = 0,
+        released_index: usize = 0,
+        finished: bool = false,
+
+        fn init(
+            allocator: std.mem.Allocator,
+            rpc: *stream.ServerDuplex,
+        ) @This() {
+            return .{ .allocator = allocator, .rpc = rpc };
+        }
+
+        fn deinit(self: *@This()) void {
+            for (self.messages.items[self.released_index..]) |*message| {
+                message.deinit(self.allocator);
+            }
+            self.messages.deinit(self.allocator);
+        }
+
+        pub fn next(self: *@This()) !?Message {
+            while (self.released_index < self.next_index) {
+                self.messages.items[self.released_index].deinit(
+                    self.allocator,
+                );
+                self.released_index += 1;
+            }
+            if (self.released_index == self.messages.items.len) {
+                self.messages.clearRetainingCapacity();
+                self.next_index = 0;
+                self.released_index = 0;
+            }
+            while (self.next_index == self.messages.items.len and
+                !self.finished)
+            {
+                try self.pump();
+            }
+            if (self.next_index == self.messages.items.len) return null;
+            defer self.next_index += 1;
+            return self.messages.items[self.next_index];
+        }
+
+        fn pump(self: *@This()) !void {
+            var event = try self.rpc.readRequestEvent(
+                self,
+                @This().consume,
+            );
+            defer event.deinit();
+            switch (event) {
+                .messages => {},
+                .finished => self.finished = true,
+                .reset => return error.RpcFailed,
+            }
+        }
+
+        fn consume(
+            self: *@This(),
+            message: stream.DecodedMessage,
+        ) !void {
+            try self.messages.append(
+                self.allocator,
+                try Message.decodeOwned(self.allocator, message.payload),
+            );
+        }
+    };
+}
+
+fn ServerResponseSink(comptime Message: type, comptime Requests: type) type {
+    return struct {
+        allocator: std.mem.Allocator,
+        rpc: *stream.ServerDuplex,
+        requests: Requests,
+        options: stream.ResponseOptions,
+        require_one: bool,
+        count: usize = 0,
+        started: bool = false,
+        finished: bool = false,
+
+        fn init(
+            allocator: std.mem.Allocator,
+            rpc: *stream.ServerDuplex,
+            requests: Requests,
+            options: stream.ResponseOptions,
+            require_one: bool,
+        ) @This() {
+            return .{
+                .allocator = allocator,
+                .rpc = rpc,
+                .requests = requests,
+                .options = options,
+                .require_one = require_one,
+            };
+        }
+
+        pub fn append(
+            self: *@This(),
+            allocator: std.mem.Allocator,
+            message: Message,
+        ) !void {
+            _ = allocator;
+            if (self.finished) {
+                return error.InvalidMethodShape;
+            }
+            if (self.require_one and self.count != 0) {
+                return error.InvalidMethodShape;
+            }
+            if (!self.started) {
+                try self.rpc.startResponse(self.options);
+                self.started = true;
+            }
+            const payload = try message.encode(self.allocator);
+            defer self.allocator.free(payload);
+            var result = try self.rpc.writeMessage(payload);
+            while (result == .peer_event) {
+                try self.requests.pump();
+                result = try self.rpc.resumeMessage();
+            }
+            self.count += 1;
+        }
+
+        fn finish(self: *@This()) !void {
+            if (self.finished) return error.InvalidMethodShape;
+            if (self.require_one and self.count != 1) {
+                return error.InvalidMethodShape;
+            }
+            try self.rpc.finishOk();
+            self.finished = true;
+        }
+    };
+}
+
 fn isMethodType(comptime candidate: anytype) bool {
     return @TypeOf(candidate) == type and
         @hasDecl(candidate, "name") and
@@ -492,6 +809,18 @@ fn validateServiceType(comptime Service: type) void {
     if (!@hasDecl(Service, "name")) {
         @compileError("pbz service metadata must declare name");
     }
+}
+
+fn matchesService(
+    actual: []const u8,
+    package: []const u8,
+    service: []const u8,
+) bool {
+    if (package.len == 0) return std.mem.eql(u8, actual, service);
+    return actual.len == package.len + 1 + service.len and
+        std.mem.startsWith(u8, actual, package) and
+        actual[package.len] == '.' and
+        std.mem.eql(u8, actual[package.len + 1 ..], service);
 }
 
 fn validateQualifiedName(name: []const u8, allow_empty: bool) Error!void {

@@ -35,6 +35,58 @@ const ResponseSink = struct {
     }
 };
 
+const PipeImpl = struct {
+    pub fn Get(
+        _: *@This(),
+        allocator: std.mem.Allocator,
+        request: Event,
+    ) !Event {
+        if (request.id < 0) return error.RejectedByApplication;
+        var response = try request.cloneOwned(allocator);
+        response.id += 100;
+        return response;
+    }
+
+    pub fn Upload(
+        _: *@This(),
+        _: std.mem.Allocator,
+        requests: anytype,
+    ) !Event {
+        var response = Event.init();
+        response.note = "upload";
+        while (try requests.next()) |request| response.id += request.id;
+        return response;
+    }
+
+    pub fn Watch(
+        _: *@This(),
+        allocator: std.mem.Allocator,
+        request: Event,
+        responses: anytype,
+    ) !void {
+        for (1..3) |delta| {
+            var response = Event.init();
+            response.id = request.id + @as(i32, @intCast(delta));
+            response.note = "watch";
+            try responses.append(allocator, response);
+        }
+    }
+
+    pub fn Chat(
+        _: *@This(),
+        allocator: std.mem.Allocator,
+        requests: anytype,
+        responses: anytype,
+    ) !void {
+        while (try requests.next()) |request| {
+            var response = Event.init();
+            response.id = request.id + 10;
+            response.note = "chat";
+            try responses.append(allocator, response);
+        }
+    }
+};
+
 const ServerState = struct {
     server: *netz.grpc.runtime.Server,
     err: ?anyerror = null,
@@ -48,142 +100,21 @@ const ServerState = struct {
     fn runFallible(self: *ServerState) !void {
         var connection = try self.server.accept();
         defer connection.deinit();
-        try serveUnary(&connection);
-        try serveClientStream(&connection);
-        try serveServerStream(&connection);
-        try serveBidi(&connection);
-    }
-
-    fn serveUnary(connection: *netz.grpc.runtime.ServerConnection) !void {
-        var request = try connection.readUnary();
-        defer request.deinit();
-        try std.testing.expectEqualStrings(
-            "/demo.binding.Pipe/Get",
-            request.request.path,
-        );
-        var decoded = try Event.decodeOwned(
-            connection.connection.allocator,
-            request.request.message.payload,
-        );
-        defer decoded.deinit(connection.connection.allocator);
-        decoded.id += 100;
-        const response = try decoded.encode(connection.connection.allocator);
-        defer connection.connection.allocator.free(response);
-        try connection.writeUnary(request.request.stream_id, .{
-            .message = response,
+        var implementation = PipeImpl{};
+        const Handler = Pipe.Handler(PipeImpl);
+        var handler = Handler.init(&implementation);
+        const Transport = netz.grpc.pbz.ServerTransport(Pipe, Handler);
+        var transport = try Transport.init(&connection, &handler, .{
+            .package = grpc_pb.proto_package,
+            .handler_error_status = .invalid_argument,
         });
-    }
-
-    fn serveClientStream(
-        connection: *netz.grpc.runtime.ServerConnection,
-    ) !void {
-        const Collector = struct {
-            allocator: std.mem.Allocator,
-            total: i32 = 0,
-
-            fn consume(self: *@This(), message: netz.grpc.StreamingMessage) !void {
-                var decoded = try Event.decodeOwned(
-                    self.allocator,
-                    message.payload,
-                );
-                defer decoded.deinit(self.allocator);
-                self.total += decoded.id;
-            }
-        };
-        var collector = Collector{
-            .allocator = connection.connection.allocator,
-        };
-        var request = try connection.readStreaming(&collector, Collector.consume);
-        defer request.deinit();
-        try std.testing.expectEqualStrings(
-            "/demo.binding.Pipe/Upload",
-            request.path,
-        );
-        var response_message = Event.init();
-        response_message.id = collector.total;
-        response_message.note = "upload";
-        const encoded = try response_message.encode(
-            connection.connection.allocator,
-        );
-        defer connection.connection.allocator.free(encoded);
-        var response = try connection.startStreamingResponse(
-            request.transport.stream_id,
-            .{ .request_accepted_encodings = request.accepted_encodings },
-        );
-        defer response.deinit();
-        try response.writeMessage(encoded);
-        try response.finishOk();
-    }
-
-    fn serveServerStream(
-        connection: *netz.grpc.runtime.ServerConnection,
-    ) !void {
-        var request = try connection.readUnary();
-        defer request.deinit();
-        try std.testing.expectEqualStrings(
-            "/demo.binding.Pipe/Watch",
-            request.request.path,
-        );
-        var decoded = try Event.decodeOwned(
-            connection.connection.allocator,
-            request.request.message.payload,
-        );
-        defer decoded.deinit(connection.connection.allocator);
-        var response = try connection.startStreamingResponse(
-            request.request.stream_id,
-            .{ .request_accepted_encodings = request.request.accepted_encodings },
-        );
-        defer response.deinit();
-        for (1..3) |delta| {
-            var item = Event.init();
-            item.id = decoded.id + @as(i32, @intCast(delta));
-            item.note = "watch";
-            const encoded = try item.encode(connection.connection.allocator);
-            defer connection.connection.allocator.free(encoded);
-            try response.writeMessage(encoded);
+        for (0..5) |index| {
+            const expected: netz.grpc.Status = if (index == 4)
+                .invalid_argument
+            else
+                .ok;
+            try std.testing.expectEqual(expected, try transport.serveOne());
         }
-        try response.finishOk();
-    }
-
-    fn serveBidi(connection: *netz.grpc.runtime.ServerConnection) !void {
-        const Collector = struct {
-            allocator: std.mem.Allocator,
-            ids: [4]i32 = undefined,
-            len: usize = 0,
-
-            fn consume(self: *@This(), message: netz.grpc.StreamingMessage) !void {
-                var decoded = try Event.decodeOwned(
-                    self.allocator,
-                    message.payload,
-                );
-                defer decoded.deinit(self.allocator);
-                self.ids[self.len] = decoded.id;
-                self.len += 1;
-            }
-        };
-        var collector = Collector{
-            .allocator = connection.connection.allocator,
-        };
-        var request = try connection.readStreaming(&collector, Collector.consume);
-        defer request.deinit();
-        try std.testing.expectEqualStrings(
-            "/demo.binding.Pipe/Chat",
-            request.path,
-        );
-        var response = try connection.startStreamingResponse(
-            request.transport.stream_id,
-            .{ .request_accepted_encodings = request.accepted_encodings },
-        );
-        defer response.deinit();
-        for (collector.ids[0..collector.len]) |id| {
-            var item = Event.init();
-            item.id = id + 10;
-            item.note = "chat";
-            const encoded = try item.encode(connection.connection.allocator);
-            defer connection.connection.allocator.free(encoded);
-            try response.writeMessage(encoded);
-        }
-        try response.finishOk();
     }
 };
 
@@ -259,11 +190,22 @@ pub fn main(init: std.process.Init) !void {
     try std.testing.expectEqual(@as(i32, 41), chat.items.items[0].id);
     try std.testing.expectEqual(@as(i32, 51), chat.items.items[1].id);
 
+    var rejected_request = Event.init();
+    rejected_request.id = -1;
+    try std.testing.expectError(
+        error.RpcFailed,
+        generated_client.Get(allocator, rejected_request),
+    );
+    try std.testing.expectEqual(
+        netz.grpc.Status.invalid_argument,
+        generated_client.transport.lastStatus().?,
+    );
+
     server_thread.join();
     if (server_state.err) |err| return err;
     _ = init;
     std.debug.print(
-        "pbz generated gRPC client interoperated: unary=true client_stream=true server_stream=true bidi=true\n",
+        "pbz generated gRPC client/handler interoperated: unary=true client_stream=true server_stream=true bidi=true error_status=true\n",
         .{},
     );
 }
