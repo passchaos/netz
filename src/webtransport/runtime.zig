@@ -1932,9 +1932,12 @@ pub const EndpointAcceptedSession = struct {
             capsule,
             false,
         );
-        try self.refreshTimer();
-        try result;
+        result catch |err| {
+            try self.refreshTimer();
+            return err;
+        };
         try self.control.recordLocalDrain();
+        try self.refreshTimer();
     }
 
     pub fn close(
