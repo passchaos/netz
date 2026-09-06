@@ -76,6 +76,7 @@ pub const UnaryCallOptions = call.UnaryCallOptions;
 pub const RetryPolicy = call.RetryPolicy;
 pub const RetryThrottler = call.RetryThrottler;
 pub const ServiceConfig = service_config.ServiceConfig;
+pub const MethodPolicy = service_config.MethodPolicy;
 pub const UnaryResponse = call.UnaryResponse;
 pub const UnaryResponseOptions = call.UnaryResponseOptions;
 pub const parseUnaryRequest = call.parseUnaryRequest;

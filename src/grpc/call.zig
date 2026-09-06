@@ -165,7 +165,27 @@ pub const UnaryCallOptions = struct {
     metadata: []const http2.Hpack.HeaderField = &.{},
     /// Raw application bytes encoded as unpadded Base64 `-bin` fields.
     binary_metadata: []const metadata_mod.BinaryMetadata = &.{},
+    /// Compatibility ceiling used for both directions unless a directional
+    /// limit below is stricter.
     max_message_size: usize = 16 * 1024 * 1024,
+    max_request_message_size: ?usize = null,
+    max_response_message_size: ?usize = null,
+
+    pub fn requestMessageLimit(self: UnaryCallOptions) usize {
+        return @min(
+            self.max_message_size,
+            self.max_request_message_size orelse
+                self.max_message_size,
+        );
+    }
+
+    pub fn responseMessageLimit(self: UnaryCallOptions) usize {
+        return @min(
+            self.max_message_size,
+            self.max_response_message_size orelse
+                self.max_message_size,
+        );
+    }
 };
 
 /// Explicit retry policy for replay-safe unary RPCs.
@@ -508,7 +528,7 @@ fn unaryCallAttempt(
     if ((deadline == null) != (timeout_header == null)) {
         return error.InvalidTimeout;
     }
-    if (options.message.len > options.max_message_size) {
+    if (options.message.len > options.requestMessageLimit()) {
         return error.GrpcMessageTooLarge;
     }
     var encoded = try compression_mod.compressAlloc(
@@ -620,7 +640,7 @@ fn unaryCallAttempt(
     return parseUnaryResponse(
         allocator,
         response,
-        options.max_message_size,
+        options.responseMessageLimit(),
         options.accepted_encodings,
     );
 }

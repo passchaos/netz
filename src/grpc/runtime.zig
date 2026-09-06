@@ -100,10 +100,35 @@ pub const Client = struct {
         options: call.UnaryCallOptions,
         config: *service_config.ServiceConfig,
     ) Error!call.UnaryResponse {
-        if (config.retryPolicy(options.path)) |policy| {
-            return self.unaryWithRetry(options, policy);
+        const policy = config.methodPolicy(options.path) orelse
+            return self.unary(options);
+        var resolved = options;
+        if (policy.timeout) |configured| {
+            if (configured.nanoseconds <= 0) return error.Timeout;
+            const duration = if (options.timeout) |explicit|
+                minDuration(explicit.duration(), configured)
+            else
+                configured;
+            resolved.timeout = try @import("wire.zig").Timeout.fromDuration(
+                duration,
+            );
         }
-        return self.unary(options);
+        if (policy.max_request_message_bytes) |configured| {
+            resolved.max_request_message_size = @min(
+                resolved.requestMessageLimit(),
+                @as(usize, configured),
+            );
+        }
+        if (policy.max_response_message_bytes) |configured| {
+            resolved.max_response_message_size = @min(
+                resolved.responseMessageLimit(),
+                @as(usize, configured),
+            );
+        }
+        if (policy.retry_policy) |retry| {
+            return self.unaryWithRetry(resolved, retry);
+        }
+        return self.unary(resolved);
     }
 
     pub fn healthCheck(
@@ -178,6 +203,10 @@ pub const Client = struct {
         return self.connection.peerCertificates();
     }
 };
+
+fn minDuration(a: std.Io.Duration, b: std.Io.Duration) std.Io.Duration {
+    return if (a.nanoseconds < b.nanoseconds) a else b;
+}
 
 pub const ServerOptions = struct {
     transport: http2.runtime.TlsListenOptions,

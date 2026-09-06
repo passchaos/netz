@@ -26,6 +26,10 @@ const JsonRetryPolicy = struct {
 
 const JsonMethodConfig = struct {
     name: []const JsonName = &.{},
+    timeout: ?[]const u8 = null,
+    waitForReady: ?bool = null,
+    maxRequestMessageBytes: ?std.json.Value = null,
+    maxResponseMessageBytes: ?std.json.Value = null,
     retryPolicy: ?JsonRetryPolicy = null,
 };
 
@@ -56,10 +60,24 @@ const OwnedRetryPolicy = struct {
     }
 };
 
+const OwnedMethodPolicy = struct {
+    timeout: ?std.Io.Duration = null,
+    max_request_message_bytes: ?u32 = null,
+    max_response_message_bytes: ?u32 = null,
+    retry_policy: ?OwnedRetryPolicy = null,
+};
+
+pub const MethodPolicy = struct {
+    timeout: ?std.Io.Duration,
+    max_request_message_bytes: ?u32,
+    max_response_message_bytes: ?u32,
+    retry_policy: ?call.RetryPolicy,
+};
+
 const MethodConfig = struct {
     service: ?[]const u8,
     method: ?[]const u8,
-    retry_policy: ?OwnedRetryPolicy,
+    policy: OwnedMethodPolicy,
 };
 
 pub const ServiceConfig = struct {
@@ -98,10 +116,25 @@ pub const ServiceConfig = struct {
         const methods = try owned.alloc(MethodConfig, method_count);
         var method_index: usize = 0;
         for (parsed.methodConfig) |config| {
-            const policy = if (config.retryPolicy) |retry|
-                try parseRetryPolicy(owned, retry)
-            else
-                null;
+            if (config.waitForReady != null) {
+                return error.InvalidServiceConfig;
+            }
+            const policy = OwnedMethodPolicy{
+                .timeout = if (config.timeout) |timeout|
+                    try parseDuration(timeout, true)
+                else
+                    null,
+                .max_request_message_bytes = try parseOptionalSize(
+                    config.maxRequestMessageBytes,
+                ),
+                .max_response_message_bytes = try parseOptionalSize(
+                    config.maxResponseMessageBytes,
+                ),
+                .retry_policy = if (config.retryPolicy) |retry|
+                    try parseRetryPolicy(owned, retry)
+                else
+                    null,
+            };
             for (config.name) |name| {
                 if (name.method != null and
                     (name.service == null or name.service.?.len == 0))
@@ -129,7 +162,7 @@ pub const ServiceConfig = struct {
                 const entry = MethodConfig{
                     .service = service,
                     .method = method,
-                    .retry_policy = policy,
+                    .policy = policy,
                 };
                 if (selectorExists(methods[0..method_index], entry)) {
                     return error.InvalidServiceConfig;
@@ -167,24 +200,23 @@ pub const ServiceConfig = struct {
         self: *ServiceConfig,
         path: []const u8,
     ) ?call.RetryPolicy {
+        const policy = self.methodPolicy(path) orelse return null;
+        return policy.retry_policy;
+    }
+
+    pub fn methodPolicy(
+        self: *ServiceConfig,
+        path: []const u8,
+    ) ?MethodPolicy {
         const name = splitPath(path) orelse return null;
         if (self.find(name.service, name.method)) |entry| {
-            return if (entry.retry_policy) |policy|
-                policy.view(throttlerPointer(self))
-            else
-                null;
+            return resolvedPolicy(self, entry.policy);
         }
         if (self.find(name.service, null)) |entry| {
-            return if (entry.retry_policy) |policy|
-                policy.view(throttlerPointer(self))
-            else
-                null;
+            return resolvedPolicy(self, entry.policy);
         }
         if (self.find(null, null)) |entry| {
-            return if (entry.retry_policy) |policy|
-                policy.view(throttlerPointer(self))
-            else
-                null;
+            return resolvedPolicy(self, entry.policy);
         }
         return null;
     }
@@ -202,8 +234,37 @@ pub const ServiceConfig = struct {
     }
 };
 
+fn resolvedPolicy(
+    config: *ServiceConfig,
+    owned: OwnedMethodPolicy,
+) MethodPolicy {
+    return .{
+        .timeout = owned.timeout,
+        .max_request_message_bytes = owned.max_request_message_bytes,
+        .max_response_message_bytes = owned.max_response_message_bytes,
+        .retry_policy = if (owned.retry_policy) |retry|
+            retry.view(throttlerPointer(config))
+        else
+            null,
+    };
+}
+
 fn throttlerPointer(config: *ServiceConfig) ?*call.RetryThrottler {
     return config.retry_throttler;
+}
+
+fn parseOptionalSize(value: ?std.json.Value) Error!?u32 {
+    const raw = value orelse return null;
+    return switch (raw) {
+        .integer => |number| std.math.cast(u32, number) orelse
+            error.InvalidServiceConfig,
+        .string, .number_string => |text| std.fmt.parseInt(
+            u32,
+            text,
+            10,
+        ) catch error.InvalidServiceConfig,
+        else => error.InvalidServiceConfig,
+    };
 }
 
 fn parseRetryPolicy(
@@ -227,10 +288,12 @@ fn parseRetryPolicy(
         .initial_backoff = try parseDuration(
             json.initialBackoff orelse
                 return error.InvalidServiceConfig,
+            false,
         ),
         .max_backoff = try parseDuration(
             json.maxBackoff orelse
                 return error.InvalidServiceConfig,
+            false,
         ),
         .backoff_multiplier = json.backoffMultiplier orelse
             return error.InvalidServiceConfig,
@@ -240,7 +303,10 @@ fn parseRetryPolicy(
     return policy;
 }
 
-fn parseDuration(raw: []const u8) Error!std.Io.Duration {
+fn parseDuration(
+    raw: []const u8,
+    allow_zero: bool,
+) Error!std.Io.Duration {
     if (raw.len < 2 or raw[raw.len - 1] != 's') {
         return error.InvalidServiceConfig;
     }
@@ -268,7 +334,7 @@ fn parseDuration(raw: []const u8) Error!std.Io.Duration {
             return error.InvalidServiceConfig,
         fractional_ns,
     ) catch return error.InvalidServiceConfig;
-    if (total == 0 or total > std.math.maxInt(i96)) {
+    if ((!allow_zero and total == 0) or total > std.math.maxInt(i96)) {
         return error.InvalidServiceConfig;
     }
     return .fromNanoseconds(@intCast(total));
@@ -330,7 +396,10 @@ test "gRPC service config selects exact service and default retry policies" {
         \\      "maxAttempts": 2, "initialBackoff": "1s",
         \\      "maxBackoff": "2s", "backoffMultiplier": 2,
         \\      "retryableStatusCodes": ["UNAVAILABLE"]}},
-        \\    {"name": [{"service": "demo.Echo"}], "retryPolicy": {
+        \\    {"name": [{"service": "demo.Echo"}],
+        \\      "timeout": "9s",
+        \\      "maxRequestMessageBytes": "1024",
+        \\      "maxResponseMessageBytes": 2048, "retryPolicy": {
         \\      "maxAttempts": 3, "initialBackoff": "0.125s",
         \\      "maxBackoff": "1.500000001s", "backoffMultiplier": 1.6,
         \\      "retryableStatusCodes": ["ABORTED"]}},
@@ -365,6 +434,13 @@ test "gRPC service config selects exact service and default retry policies" {
         service.max_backoff.nanoseconds,
     );
     try std.testing.expectEqual(wire.Status.aborted, service.retryable_status_codes[0]);
+    const service_policy = config.methodPolicy("/demo.Echo/Other").?;
+    try std.testing.expectEqual(
+        @as(i96, 9 * std.time.ns_per_s),
+        service_policy.timeout.?.nanoseconds,
+    );
+    try std.testing.expectEqual(@as(?u32, 1024), service_policy.max_request_message_bytes);
+    try std.testing.expectEqual(@as(?u32, 2048), service_policy.max_response_message_bytes);
 
     const default = config.retryPolicy("/other.Service/Method").?;
     try std.testing.expectEqual(@as(u8, 2), default.max_attempts);
@@ -391,6 +467,12 @@ test "gRPC service config rejects malformed retry settings" {
         ,
         \\{"methodConfig": [{"name": [{}]}, {"name": [{"service": ""}]}]}
         ,
+        \\{"methodConfig": [{"name": [{}], "waitForReady": true}]}
+        ,
+        \\{"methodConfig": [{"name": [{}], "maxRequestMessageBytes": -1}]}
+        ,
+        \\{"methodConfig": [{"name": [{}], "maxResponseMessageBytes": "4294967296"}]}
+        ,
     };
     for (invalid) |json| {
         try std.testing.expectError(
@@ -398,6 +480,17 @@ test "gRPC service config rejects malformed retry settings" {
             ServiceConfig.parse(std.testing.allocator, json),
         );
     }
+}
+
+test "gRPC service config accepts an immediate method timeout" {
+    var config = try ServiceConfig.parse(std.testing.allocator,
+        \\{"methodConfig": [{"name": [{}], "timeout": "0s"}]}
+    );
+    defer config.deinit();
+    try std.testing.expectEqual(
+        @as(i96, 0),
+        config.methodPolicy("/demo.Service/Call").?.timeout.?.nanoseconds,
+    );
 }
 
 test "gRPC service config owns parsed selectors" {

@@ -587,6 +587,177 @@ test "gRPC h2c unary retry follows standard service config" {
     );
 }
 
+test "gRPC service config enforces directional unary message limits" {
+    const allocator = std.testing.allocator;
+    var threaded = std.Io.Threaded.init(allocator, .{});
+    defer threaded.deinit();
+    const io = threaded.io();
+    var server = try grpc.runtime.Server.listen(
+        allocator,
+        io,
+        .{ .ip4 = .loopback(0) },
+        .{ .max_frame_payload = 4096, .max_body_bytes = 4096 },
+        1024,
+    );
+    defer server.deinit();
+
+    const Shared = struct {
+        server: *grpc.runtime.Server,
+        requests: usize = 0,
+        err: ?anyerror = null,
+
+        fn run(self: *@This()) void {
+            self.runFallible() catch |err| {
+                self.err = err;
+            };
+        }
+
+        fn runFallible(self: *@This()) !void {
+            var connection = try self.server.accept();
+            defer connection.deinit();
+            for (0..2) |index| {
+                var request = try connection.readUnary();
+                defer request.deinit();
+                self.requests += 1;
+                try std.testing.expectEqualStrings(
+                    if (index == 0)
+                        "/demo.Limits/Response"
+                    else
+                        "/demo.Limits/Ok",
+                    request.request.path,
+                );
+                try connection.writeUnary(request.request.stream_id, .{
+                    .message = if (index == 0) "four" else "ok",
+                });
+            }
+        }
+    };
+    var shared = Shared{ .server = &server };
+    const thread = try std.Thread.spawn(.{}, Shared.run, .{&shared});
+    var joined = false;
+    defer if (!joined) thread.join();
+    var config = try grpc.ServiceConfig.parse(allocator,
+        \\{"methodConfig": [
+        \\ {"name": [{"service": "demo.Limits", "method": "Request"}],
+        \\  "maxRequestMessageBytes": 3},
+        \\ {"name": [{"service": "demo.Limits", "method": "Response"}],
+        \\  "maxResponseMessageBytes": "3"}]}
+    );
+    defer config.deinit();
+    var client = try grpc.runtime.Client.connect(
+        allocator,
+        io,
+        server.address(),
+        .{ .max_frame_payload = 4096, .max_body_bytes = 4096 },
+    );
+    defer client.deinit();
+    try std.testing.expectError(
+        error.GrpcMessageTooLarge,
+        client.unaryWithServiceConfig(.{
+            .path = "/demo.Limits/Request",
+            .authority = "localhost",
+            .message = "four",
+        }, &config),
+    );
+    try std.testing.expectError(
+        error.GrpcMessageTooLarge,
+        client.unaryWithServiceConfig(.{
+            .path = "/demo.Limits/Response",
+            .authority = "localhost",
+            .message = "x",
+        }, &config),
+    );
+    var response = try client.unaryWithServiceConfig(.{
+        .path = "/demo.Limits/Ok",
+        .authority = "localhost",
+        .message = "x",
+    }, &config);
+    defer response.deinit();
+    try std.testing.expectEqualStrings("ok", response.message.?.payload);
+
+    thread.join();
+    joined = true;
+    if (shared.err) |err| return err;
+    try std.testing.expectEqual(@as(usize, 2), shared.requests);
+}
+
+test "gRPC service config method timeout bounds unary call" {
+    const allocator = std.testing.allocator;
+    var threaded = std.Io.Threaded.init(allocator, .{});
+    defer threaded.deinit();
+    const io = threaded.io();
+    var server = try grpc.runtime.Server.listen(
+        allocator,
+        io,
+        .{ .ip4 = .loopback(0) },
+        .{ .max_frame_payload = 4096, .max_body_bytes = 4096 },
+        1024,
+    );
+    defer server.deinit();
+
+    const Shared = struct {
+        server: *grpc.runtime.Server,
+        observed_timeout_ns: i96 = 0,
+        err: ?anyerror = null,
+
+        fn run(self: *@This()) void {
+            var connection = self.server.accept() catch |err| {
+                self.err = err;
+                return;
+            };
+            defer connection.deinit();
+            var request = connection.readUnary() catch |err| {
+                self.err = err;
+                return;
+            };
+            defer request.deinit();
+            self.observed_timeout_ns =
+                request.request.timeout.?.duration().nanoseconds;
+            std.Io.sleep(
+                self.server.transport.io,
+                .fromMilliseconds(100),
+                .awake,
+            ) catch |err| {
+                self.err = err;
+                return;
+            };
+            connection.writeUnary(request.request.stream_id, .{
+                .message = "late",
+            }) catch {};
+        }
+    };
+    var shared = Shared{ .server = &server };
+    const thread = try std.Thread.spawn(.{}, Shared.run, .{&shared});
+    var joined = false;
+    defer if (!joined) thread.join();
+    var config = try grpc.ServiceConfig.parse(allocator,
+        \\{"methodConfig": [{"name": [{"service": "demo.Timeout"}],
+        \\ "timeout": "0.050s"}]}
+    );
+    defer config.deinit();
+    var client = try grpc.runtime.Client.connect(
+        allocator,
+        io,
+        server.address(),
+        .{ .max_frame_payload = 4096, .max_body_bytes = 4096 },
+    );
+    defer client.deinit();
+    try std.testing.expectError(error.Timeout, client.unaryWithServiceConfig(.{
+        .path = "/demo.Timeout/Unary",
+        .authority = "localhost",
+        .message = "x",
+        .timeout = try grpc.Timeout.init(1, .second),
+    }, &config));
+
+    thread.join();
+    joined = true;
+    if (shared.err) |err| return err;
+    try std.testing.expect(shared.observed_timeout_ns > 0);
+    try std.testing.expect(
+        shared.observed_timeout_ns <= 50 * std.time.ns_per_ms,
+    );
+}
+
 test "gRPC h2c health Check serves known and unknown services" {
     const allocator = std.testing.allocator;
     var threaded = std.Io.Threaded.init(allocator, .{});
