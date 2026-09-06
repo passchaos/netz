@@ -8390,6 +8390,7 @@ pub const Connection = struct {
                     .reason_phrase = close.reason_phrase,
                     .peer_close_frame_received = true,
                     .state = .draining,
+                    .now_ms = nsToMs(now_ns),
                 }),
                 .application_close => |close| try self.setCloseInfo(.{
                     .application = true,
@@ -8397,6 +8398,7 @@ pub const Connection = struct {
                     .reason_phrase = close.reason_phrase,
                     .peer_close_frame_received = true,
                     .state = .draining,
+                    .now_ms = nsToMs(now_ns),
                 }),
                 .stream => |stream| {
                     if (self.isClosedStream(stream.stream_id)) continue;
@@ -9179,6 +9181,7 @@ pub const Connection = struct {
         if (self.close_info != null or self.idle_timed_out) {
             return error.ConnectionClosed;
         }
+        const timing = self.closeTiming(close.now_ms, close.pto_ms);
 
         // Own the diagnostic before attempting irreversible packet emission.
         // After this succeeds, every send outcome must publish the prepared
@@ -9193,8 +9196,8 @@ pub const Connection = struct {
                 close.reason_phrase,
             ),
             .state = .closing,
-            .started_ms = close.now_ms,
-            .expires_ms = closeExpiryMillis(close.now_ms, close.pto_ms),
+            .started_ms = timing.now_ms,
+            .expires_ms = closeExpiryMillis(timing.now_ms, timing.pto_ms),
         };
         var owns_reason = true;
         errdefer if (owns_reason) owned.deinit(self.endpoint.allocator);
@@ -9248,6 +9251,7 @@ pub const Connection = struct {
         now_ms: ?u64 = null,
         pto_ms: ?u64 = null,
     }) Error!void {
+        const timing = self.closeTiming(close.now_ms, close.pto_ms);
         if (self.close_info) |*existing| {
             // RFC 9000: receipt of CONNECTION_CLOSE moves the endpoint into
             // draining, where no further packets are sent.  A locally initiated
@@ -9269,10 +9273,13 @@ pub const Connection = struct {
                     self.peer_close_frame_received = true;
                 }
                 existing.state = .draining;
-                existing.started_ms = close.now_ms;
-                existing.expires_ms = closeExpiryMillis(close.now_ms, close.pto_ms);
+                existing.started_ms = timing.now_ms;
+                existing.expires_ms = closeExpiryMillis(
+                    timing.now_ms,
+                    timing.pto_ms,
+                );
                 self.observeConnectionClosed(
-                    close.now_ms,
+                    timing.now_ms,
                     close.application,
                     close.error_code,
                     close.reason_phrase,
@@ -9281,19 +9288,19 @@ pub const Connection = struct {
             }
             return;
         }
-        const expires_ms = closeExpiryMillis(close.now_ms, close.pto_ms);
+        const expires_ms = closeExpiryMillis(timing.now_ms, timing.pto_ms);
         self.close_info = .{
             .application = close.application,
             .error_code = close.error_code,
             .frame_type = close.frame_type,
             .reason_phrase = try self.endpoint.allocator.dupe(u8, close.reason_phrase),
             .state = close.state,
-            .started_ms = close.now_ms,
+            .started_ms = timing.now_ms,
             .expires_ms = expires_ms,
         };
         self.peer_close_frame_received = close.peer_close_frame_received;
         self.observeConnectionClosed(
-            close.now_ms,
+            timing.now_ms,
             close.application,
             close.error_code,
             close.reason_phrase,
@@ -9301,11 +9308,30 @@ pub const Connection = struct {
         );
     }
 
+    fn closeTiming(
+        self: Connection,
+        now_ms: ?u64,
+        pto_ms: ?u64,
+    ) struct { now_ms: u64, pto_ms: u64 } {
+        return .{
+            .now_ms = now_ms orelse
+                nanosToMillisCeil(self.monotonicNowNs()),
+            // Round upward before multiplying so the millisecond deadline can
+            // never expire before RFC 9000's three-PTO minimum.
+            .pto_ms = pto_ms orelse
+                nanosToMillisCeil(self.rtt_stats.pto(true)),
+        };
+    }
+
     fn enterStatelessResetDraining(self: *Connection, now_ms: ?u64, pto_ms: ?u64) Error!void {
+        const timing = self.closeTiming(now_ms, pto_ms);
         if (self.close_info) |*close_info| {
             close_info.state = .draining;
-            close_info.started_ms = now_ms;
-            close_info.expires_ms = closeExpiryMillis(now_ms, pto_ms);
+            close_info.started_ms = timing.now_ms;
+            close_info.expires_ms = closeExpiryMillis(
+                timing.now_ms,
+                timing.pto_ms,
+            );
             return;
         }
         try self.setCloseInfo(.{
@@ -9314,8 +9340,8 @@ pub const Connection = struct {
             .frame_type = 0,
             .reason_phrase = "stateless reset",
             .state = .draining,
-            .now_ms = now_ms,
-            .pto_ms = pto_ms,
+            .now_ms = timing.now_ms,
+            .pto_ms = timing.pto_ms,
         });
     }
 
@@ -10072,8 +10098,7 @@ fn closeExpiryMillis(now_ms: ?u64, pto_ms: ?u64) ?u64 {
 }
 
 fn nsToMs(now_ns: ?u64) ?u64 {
-    const ns = now_ns orelse return null;
-    return ns / 1_000_000;
+    return if (now_ns) |ns| nanosToMillisCeil(ns) else null;
 }
 
 fn discardPacketView(_: void, _: ReceivedPacketView) error{}!void {}

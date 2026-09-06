@@ -776,6 +776,131 @@ test "QUIC 1-RTT close lifecycle expires after three PTOs" {
     try std.testing.expect(connection.closed());
 }
 
+test "QUIC 1-RTT default local close arms three-PTO expiry" {
+    const allocator = std.testing.allocator;
+
+    var threaded = std.Io.Threaded.init(allocator, .{});
+    defer threaded.deinit();
+    const io = threaded.io();
+    var endpoint = try quic.runtime.Endpoint.bind(
+        allocator,
+        io,
+        .{ .ip4 = .loopback(0) },
+        .{ .max_datagram_size = 4096 },
+    );
+    defer endpoint.deinit();
+    const keys = quic.protection.deriveAes128Keys(
+        [_]u8{0xc2} ** quic.protection.secret_len,
+    );
+    var connection = try one_rtt.Connection.init(&endpoint, .{
+        .peer = endpoint.address(),
+        .receive_keys = keys,
+        .send_keys = keys,
+        .local_connection_id = "default-close-local",
+        .peer_connection_id = "default-close-peer",
+        .enable_pacing = false,
+    });
+    defer connection.deinit();
+
+    const before_ns = std.Io.Clock.awake.now(io).nanoseconds;
+    try connection.closeApplication(73, "default close");
+    const after_ns = std.Io.Clock.awake.now(io).nanoseconds;
+    const started_ms = connection.close_info.?.started_ms orelse
+        return error.TestUnexpectedResult;
+    const expiry_ms = connection.closeExpiryDeadlineMillis() orelse
+        return error.TestUnexpectedResult;
+    const pto_ms = std.math.divCeil(
+        u64,
+        connection.rtt_stats.pto(true),
+        std.time.ns_per_ms,
+    ) catch unreachable;
+    const before_ms: u64 = @intCast(@divFloor(
+        before_ns + std.time.ns_per_ms - 1,
+        std.time.ns_per_ms,
+    ));
+    const after_ms: u64 = @intCast(@divFloor(
+        after_ns + std.time.ns_per_ms - 1,
+        std.time.ns_per_ms,
+    ));
+
+    try std.testing.expect(started_ms >= before_ms);
+    try std.testing.expect(started_ms <= after_ms);
+    try std.testing.expectEqual(started_ms + 3 * pto_ms, expiry_ms);
+    const timer = connection.nextTimerDeadline() orelse
+        return error.TestUnexpectedResult;
+    try std.testing.expectEqual(one_rtt.TimerDeadlineKind.close, timer.kind);
+    try std.testing.expectEqual(expiry_ms * std.time.ns_per_ms, timer.deadline_ns);
+    try std.testing.expect(!connection.checkCloseExpired(expiry_ms - 1));
+    try std.testing.expect(connection.checkCloseExpired(expiry_ms));
+    try std.testing.expect(connection.closed());
+}
+
+test "QUIC 1-RTT default peer close arms three-PTO draining expiry" {
+    const allocator = std.testing.allocator;
+
+    var threaded = std.Io.Threaded.init(allocator, .{});
+    defer threaded.deinit();
+    const io = threaded.io();
+    var endpoint = try quic.runtime.Endpoint.bind(
+        allocator,
+        io,
+        .{ .ip4 = .loopback(0) },
+        .{ .max_datagram_size = 4096 },
+    );
+    defer endpoint.deinit();
+    const keys = quic.protection.deriveAes128Keys(
+        [_]u8{0xc3} ** quic.protection.secret_len,
+    );
+    var connection = try one_rtt.Connection.init(&endpoint, .{
+        .peer = endpoint.address(),
+        .receive_keys = keys,
+        .send_keys = keys,
+        .local_connection_id = "peer-close-local",
+        .peer_connection_id = "peer-close-peer",
+        .enable_pacing = false,
+    });
+    defer connection.deinit();
+
+    const before_ns = std.Io.Clock.awake.now(io).nanoseconds;
+    try one_rtt.testing.applyReceivedFrames(
+        &connection,
+        0,
+        &.{.{ .application_close = .{
+            .error_code = 74,
+            .reason_phrase = "peer close",
+        } }},
+        null,
+        .not_ect,
+    );
+    const after_ns = std.Io.Clock.awake.now(io).nanoseconds;
+    try std.testing.expect(connection.draining());
+    const started_ms = connection.close_info.?.started_ms orelse
+        return error.TestUnexpectedResult;
+    const expiry_ms = connection.closeExpiryDeadlineMillis() orelse
+        return error.TestUnexpectedResult;
+    const pto_ms = std.math.divCeil(
+        u64,
+        connection.rtt_stats.pto(true),
+        std.time.ns_per_ms,
+    ) catch unreachable;
+    const before_ms: u64 = @intCast(@divFloor(
+        before_ns + std.time.ns_per_ms - 1,
+        std.time.ns_per_ms,
+    ));
+    const after_ms: u64 = @intCast(@divFloor(
+        after_ns + std.time.ns_per_ms - 1,
+        std.time.ns_per_ms,
+    ));
+
+    try std.testing.expect(started_ms >= before_ms);
+    try std.testing.expect(started_ms <= after_ms);
+    try std.testing.expectEqual(started_ms + 3 * pto_ms, expiry_ms);
+    const timer = connection.nextTimerDeadline() orelse
+        return error.TestUnexpectedResult;
+    try std.testing.expectEqual(one_rtt.TimerDeadlineKind.close, timer.kind);
+    try std.testing.expectEqual(expiry_ms * std.time.ns_per_ms, timer.deadline_ns);
+}
+
 test "QUIC 1-RTT connection handles RESET_STREAM final size" {
     const allocator = std.testing.allocator;
 

@@ -482,7 +482,7 @@ test "HTTP/3 endpoint request poll refreshes timers before returning an error" {
     try std.testing.expectEqual(connection_timer, endpoint_timer.timer);
 }
 
-test "HTTP/3 endpoint packet error disarms stale transport timer" {
+test "HTTP/3 endpoint packet error replaces stale timer with close expiry" {
     const allocator = std.testing.allocator;
     var threaded = std.Io.Threaded.init(allocator, .{});
     defer threaded.deinit();
@@ -566,8 +566,8 @@ test "HTTP/3 endpoint packet error disarms stale transport timer" {
 
     // A FIN on the peer's control stream is H3_CLOSED_CRITICAL_STREAM. QUIC
     // accepts and routes the packet first; HTTP/3 then emits CONNECTION_CLOSE
-    // and returns the protocol error from the endpoint iteration. The default
-    // close has no explicit expiry, so the old PTO must be disarmed.
+    // and returns the protocol error from the endpoint iteration. Its default
+    // three-PTO close expiry must replace the stale pre-parser PTO.
     try client.established.connection.send(&.{.{ .stream = .{
         .stream_id = 2,
         .data = &.{@intFromEnum(http3.StreamType.control)},
@@ -581,10 +581,27 @@ test "HTTP/3 endpoint packet error disarms stale transport timer" {
         ),
     );
     try std.testing.expect(session.established.connection.closing());
-    try std.testing.expect(
-        session.established.connection.nextTimerDeadline() == null,
+    const connection_timer = session.established.connection
+        .nextTimerDeadline() orelse return error.TestUnexpectedResult;
+    const endpoint_timer = endpoint.dispatcher.nextTimerDeadline() orelse
+        return error.TestUnexpectedResult;
+    try std.testing.expectEqual(handle, endpoint_timer.connection_id);
+    try std.testing.expectEqual(connection_timer, endpoint_timer.timer);
+    try std.testing.expectEqual(
+        quic.one_rtt.TimerDeadlineKind.close,
+        endpoint_timer.timer.kind,
     );
-    try std.testing.expect(endpoint.dispatcher.nextTimerDeadline() == null);
+    try std.testing.expect(
+        endpoint_timer.timer.deadline_ns != before.timer.deadline_ns,
+    );
+    const serviced = (try endpoint.dispatcher.serviceNextTimerAt(
+        endpoint_timer.timer.deadline_ns,
+    )) orelse return error.TestUnexpectedResult;
+    try std.testing.expectEqual(
+        quic.one_rtt.TimerDeadlineKind.close,
+        serviced.timer.kind,
+    );
+    try std.testing.expect(session.established.connection.closed());
 }
 
 test "HTTP/3 endpoint server validates receive deadlines" {

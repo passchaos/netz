@@ -418,7 +418,7 @@ test "WebTransport endpoint server validates receive deadlines" {
     );
 }
 
-test "WebTransport endpoint packet error disarms stale transport timer" {
+test "WebTransport endpoint packet error replaces stale timer with close expiry" {
     const allocator = std.testing.allocator;
     var threaded = std.Io.Threaded.init(allocator, .{});
     defer threaded.deinit();
@@ -518,12 +518,27 @@ test "WebTransport endpoint packet error disarms stale transport timer" {
         ),
     );
     try std.testing.expect(session.established.connection.closing());
-    try std.testing.expect(
-        session.established.connection.nextTimerDeadline() == null,
+    const connection_timer = session.established.connection
+        .nextTimerDeadline() orelse return error.TestUnexpectedResult;
+    const endpoint_timer = endpoint.h3.dispatcher.nextTimerDeadline() orelse
+        return error.TestUnexpectedResult;
+    try std.testing.expectEqual(handle, endpoint_timer.connection_id);
+    try std.testing.expectEqual(connection_timer, endpoint_timer.timer);
+    try std.testing.expectEqual(
+        quic.one_rtt.TimerDeadlineKind.close,
+        endpoint_timer.timer.kind,
     );
     try std.testing.expect(
-        endpoint.h3.dispatcher.nextTimerDeadline() == null,
+        endpoint_timer.timer.deadline_ns != before.timer.deadline_ns,
     );
+    const serviced = (try endpoint.h3.dispatcher.serviceNextTimerAt(
+        endpoint_timer.timer.deadline_ns,
+    )) orelse return error.TestUnexpectedResult;
+    try std.testing.expectEqual(
+        quic.one_rtt.TimerDeadlineKind.close,
+        serviced.timer.kind,
+    );
+    try std.testing.expect(session.established.connection.closed());
 }
 
 test "WebTransport server deadline spans QUIC TLS and Extended CONNECT" {

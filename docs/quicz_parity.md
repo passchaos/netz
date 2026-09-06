@@ -489,6 +489,13 @@ quic-go migration and migration-under-loss process gates remain green. Failed
 validation history is retained as a saturating count rather than an
 ever-growing challenge list, eliminating long-connection growth and migration
 clone cost without reducing the public statistics surface.
+Local transport/application close and peer draining now derive a three-current-
+PTO expiry from the endpoint's awake clock when callers do not inject explicit
+test timing. The deadline rounds both the current time and PTO upward before
+millisecond storage, so it cannot expire before RFC 9000's minimum; shared
+endpoint schedulers therefore retire ordinary and protocol-error closes without
+requiring another peer packet. Explicit `close*At` timestamps remain available
+for deterministic embedders and tests.
 
 ## Known blockers before declaring the goal complete
 
