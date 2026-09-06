@@ -275,6 +275,12 @@ between routed Initial processing, QUIC/TLS, and CONNECT admission.
 The endpoint handshake worker also sends the server HTTP/3 SETTINGS and QPACK
 stream prefixes before promotion, keeping critical-stream initialization out of
 the single-owner application callback that later accepts or rejects CONNECT.
+Successful endpoint CONNECT admission then uses one packet containing a
+literal/static QPACK HEADERS section plus any receive-credit update. Rejection
+uses the same one-packet literal encoding with FIN. Pacing, congestion,
+flow-control, or MTU rejection leaves the request pending and safely retryable;
+oversized admission metadata returns `DatagramTooLarge` instead of partially
+publishing a response or introducing a dynamic encoder-stream dependency.
 
 ## Important interoperability correction
 

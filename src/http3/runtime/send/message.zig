@@ -145,6 +145,55 @@ pub fn sendConnectionResponseSequence(
     message_sent = true;
 }
 
+/// Encode a HEADERS-only response without dynamic-table references and submit
+/// it as exactly one QUIC packet. Event-loop adapters can safely retry pacing,
+/// congestion, flow-control, and size failures because neither QPACK nor
+/// stream-send state is committed before `Connection.trySend` succeeds.
+pub fn trySendConnectionResponseHeadLiteral(
+    connection: *quic.one_rtt.Connection,
+    scratch: *StreamMessageSendScratch,
+    stream_id: u62,
+    response: http3.Response,
+    peer_settings: http3.Settings,
+    fin: bool,
+    release_received: usize,
+) Error!u64 {
+    if (response.body.len != 0 or response.trailers.len != 0) {
+        return error.InvalidContentLength;
+    }
+    scratch.reset();
+    try response.writeWithSettings(
+        &scratch.encoded,
+        connection.endpoint.allocator,
+        peer_settings,
+    );
+    var send = quic.stream_state.SendState.init(stream_id);
+    try send.appendFrames(
+        &scratch.frames,
+        connection.endpoint.allocator,
+        scratch.encoded.items,
+        @max(@as(usize, 1), scratch.encoded.items.len),
+        fin,
+    );
+    std.debug.assert(scratch.frames.items.len == 1);
+    if (try connection.packetLenForFramesAtOffset(
+        0,
+        scratch.frames.items,
+    ) > connection.currentSendDatagramSize()) {
+        return error.DatagramTooLarge;
+    }
+    if (release_received == 0) {
+        try connection.trySend(scratch.frames.items);
+    } else {
+        try connection.trySendAndReleaseReceivedCapacity(
+            stream_id,
+            release_received,
+            scratch.frames.items[0],
+        );
+    }
+    return send.next_offset;
+}
+
 pub fn sendProtectedMessage(
     endpoint: *quic.runtime.Endpoint,
     to: net.IpAddress,

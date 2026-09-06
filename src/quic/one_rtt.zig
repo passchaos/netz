@@ -9900,6 +9900,58 @@ pub const Connection = struct {
         try recv_stream.recv_state.consume(consume_len);
     }
 
+    /// Submit one application packet while atomically returning consumed
+    /// receive credit. This is the event-loop counterpart used when an upper
+    /// protocol must not expose its packet before the receive cursor commits.
+    /// Pacing, congestion, flow-control, and size failures leave both sides
+    /// unchanged for retry.
+    pub fn trySendAndReleaseReceivedCapacity(
+        self: *Connection,
+        stream_id: u64,
+        amount: u64,
+        application_frame: quic.Frame,
+    ) Error!void {
+        return self.trySendAndReleaseReceivedCapacityAt(
+            stream_id,
+            amount,
+            application_frame,
+            self.monotonicNowNs(),
+        );
+    }
+
+    fn trySendAndReleaseReceivedCapacityAt(
+        self: *Connection,
+        stream_id: u64,
+        amount: u64,
+        application_frame: quic.Frame,
+        sent_time_ns: u64,
+    ) Error!void {
+        const recv_stream = self.findRecvStreamEntry(stream_id) orelse
+            return error.StreamStateError;
+        const consume_len = std.math.cast(usize, amount) orelse
+            return error.InvalidFrameLength;
+        if (consume_len > recv_stream.recv_state.available().len) {
+            return error.InvalidStreamRange;
+        }
+        var next_connection = self.recv_flow;
+        var next_stream = recv_stream.flow;
+        var frames: [3]quic.Frame = undefined;
+        frames[0] = application_frame;
+        var count: usize = 1;
+        if (next_connection.consume(amount) != null) {
+            frames[count] = next_connection.maxDataFrame();
+            count += 1;
+        }
+        if (next_stream.consume(amount) != null) {
+            frames[count] = next_stream.maxStreamDataFrame(stream_id);
+            count += 1;
+        }
+        try self.sendAutomaticallyAt(frames[0..count], sent_time_ns);
+        self.recv_flow = next_connection;
+        recv_stream.flow = next_stream;
+        recv_stream.recv_state.consume(consume_len) catch unreachable;
+    }
+
     fn sendStreamFlow(self: *Connection, stream_id: u64) Error!*quic.flow_control.SendFlow {
         const entry = try self.sendStreamEntry(stream_id);
         return &entry.flow;
@@ -11077,6 +11129,14 @@ pub const testing = struct {
             connection.congestion.bytes_in_flight;
     }
 
+    pub fn exhaustPacingAt(
+        connection: *Connection,
+        now_ns: u64,
+    ) void {
+        connection.pacer.budget = 0;
+        connection.pacer.last_sent_time_ns = now_ns;
+    }
+
     pub fn appendPendingAckForTest(
         allocator: std.mem.Allocator,
         stack: *[pending_ack_test_stack_capacity]quic.Frame,
@@ -11195,6 +11255,21 @@ pub const testing = struct {
 
     pub fn receiveDataTotal(connection: *const Connection) u64 {
         return connection.recv_data_total;
+    }
+
+    pub fn trySendAndReleaseReceivedCapacityAt(
+        connection: *Connection,
+        stream_id: u64,
+        amount: u64,
+        application_frame: quic.Frame,
+        sent_time_ns: u64,
+    ) Error!void {
+        return connection.trySendAndReleaseReceivedCapacityAt(
+            stream_id,
+            amount,
+            application_frame,
+            sent_time_ns,
+        );
     }
 
     pub fn validateDatagramFrame(

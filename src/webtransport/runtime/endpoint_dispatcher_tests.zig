@@ -49,6 +49,291 @@ const FixedClockIo = struct {
     }
 };
 
+test "WebTransport endpoint admission HEADERS do not wait for pacing" {
+    const allocator = std.testing.allocator;
+    var threaded = std.Io.Threaded.init(allocator, .{});
+    defer threaded.deinit();
+    const io = threaded.io();
+
+    var server = try runtime.HandshakeServer.bind(
+        allocator,
+        io,
+        .{ .ip4 = .loopback(0) },
+        .{ .http3 = .{ .quic = .{ .max_datagram_size = 4096 } } },
+        .{ .handshake = .{
+            .local_connection_id = "wt-admission-owner",
+        } },
+    );
+    defer server.deinit();
+    var peer_endpoint = try quic.runtime.Endpoint.bind(
+        allocator,
+        io,
+        .{ .ip4 = .loopback(0) },
+        .{ .max_datagram_size = 4096 },
+    );
+    defer peer_endpoint.deinit();
+    const keys = quic.protection.deriveAes128Keys(
+        [_]u8{0xf1} ** quic.protection.secret_len,
+    );
+    const settings = webtransport.defaultSettings(.{
+        .qpack_max_table_capacity = 512,
+        .qpack_blocked_streams = 2,
+    });
+    var h3 = try http3.runtime.HandshakeServerSession.initPreconfigured(
+        &server.h3.quic_server.endpoint,
+        peer_endpoint.address(),
+        .{
+            .local_settings = settings,
+            .auto_date_header = false,
+        },
+        .{
+            .receive_keys = keys,
+            .send_keys = keys,
+            .local_connection_id = "wt-admission-server",
+            .peer_connection_id = "wt-admission-client",
+            .one_rtt = .{
+                .max_datagram_size = 1200,
+                .pacing_max_burst_packets = 1,
+            },
+        },
+    );
+    defer h3.deinit();
+    h3.control.settings.markSent(settings);
+    h3.control.settings.markReceived(settings);
+    h3.qpack_encoder_prefix_sent = true;
+    h3.qpack_decoder_prefix_sent = true;
+    try h3.qpack_encode.configurePeerLimits(512, 2);
+    _ = try h3.qpack_encode.insertField(
+        "x-admission",
+        "literal",
+    );
+    h3.qpack_encode.clearEncoderInstructions();
+
+    var request_bytes: std.ArrayList(u8) = .empty;
+    defer request_bytes.deinit(allocator);
+    try (http3.Request{
+        .method = "CONNECT",
+        .scheme = "https",
+        .authority = "localhost",
+        .path = "/paced-admission",
+        .headers = &.{
+            .{ .name = ":protocol", .value = "webtransport" },
+            http3.capsule.protocol_header,
+        },
+    }).write(&request_bytes, allocator);
+    var peer = try quic.one_rtt.Connection.init(&peer_endpoint, .{
+        .peer = server.address(),
+        .receive_keys = keys,
+        .send_keys = keys,
+        .local_connection_id = "wt-admission-client",
+        .peer_connection_id = "wt-admission-server",
+        .enable_pacing = false,
+    });
+    defer peer.deinit();
+    try peer.send(&.{.{ .stream = .{
+        .stream_id = 0,
+        .data = request_bytes.items,
+    } }});
+    var request_packet = try h3.established.connection.receivePacket();
+    defer request_packet.deinit(allocator);
+    try h3.processRequestPacket(&request_packet);
+    var request_event = (try h3.pollRequestEvent()) orelse
+        return error.TestUnexpectedResult;
+    defer request_event.deinit(allocator);
+    var request_head = switch (request_event) {
+        .message => |*message| switch (message.value) {
+            .head => |head| switch (head) {
+                .request => |request| blk: {
+                    const value = request;
+                    message.value = .finished;
+                    break :blk value;
+                },
+                .response => return error.TestUnexpectedResult,
+            },
+            else => return error.TestUnexpectedResult,
+        },
+        .reset => return error.TestUnexpectedResult,
+    };
+    var request_head_owned = true;
+    defer if (request_head_owned) request_head.deinit(allocator);
+
+    var endpoint = try runtime.EndpointServer.init(&server, .{});
+    defer endpoint.deinit();
+    const handle: quic.endpoint_dispatcher.ConnectionHandle = 16;
+    try endpoint.h3.dispatcher.registerConnection(
+        handle,
+        &h3.established.connection,
+    );
+    const pending = try allocator.create(runtime.EndpointPendingSession);
+    pending.* = .{
+        .handle = handle,
+        .h3 = &h3,
+        .request = .{ .stream_id = 0, .request = request_head },
+        .session_id = .init(0),
+        .limits = endpoint.limits,
+    };
+    request_head_owned = false;
+    try endpoint.pending.put(allocator, handle, pending);
+
+    var fixed_io = FixedClockIo{
+        .delegate = server.h3.quic_server.endpoint.io,
+        .now_ns = 1_000_000,
+    };
+    var fixed_vtable = server.h3.quic_server.endpoint.io.vtable.*;
+    fixed_vtable.now = FixedClockIo.now;
+    fixed_vtable.sleep = FixedClockIo.sleep;
+    fixed_vtable.netSend = FixedClockIo.netSend;
+    server.h3.quic_server.endpoint.io = .{
+        .userdata = &fixed_io,
+        .vtable = &fixed_vtable,
+    };
+    defer server.h3.quic_server.endpoint.io = fixed_io.delegate;
+    quic.one_rtt.testing.exhaustPacingAt(
+        &h3.established.connection,
+        @intCast(fixed_io.now_ns),
+    );
+
+    const request_available =
+        quic.one_rtt.testing.receiveStreamAvailableLen(
+            &h3.established.connection,
+            0,
+        ).?;
+    var oversized_value: [2048]u8 = undefined;
+    @memset(&oversized_value, 'x');
+    try std.testing.expectError(
+        error.DatagramTooLarge,
+        endpoint.acceptWithHeaders(handle, &.{.{
+            .name = "x-oversized",
+            .value = &oversized_value,
+        }}),
+    );
+    try std.testing.expectEqual(@as(usize, 1), endpoint.pendingSessionCount());
+    try std.testing.expect(h3.outbound_bodies.find(0) == null);
+    try std.testing.expect(!h3.connect_datagrams.contains(0));
+
+    const packet_number = h3.established.connection.next_packet_number;
+    try std.testing.expectError(
+        error.PacingLimited,
+        endpoint.reject(handle, 403, &.{}),
+    );
+    try std.testing.expectEqual(@as(usize, 0), fixed_io.sleep_calls);
+    try std.testing.expectEqual(
+        packet_number,
+        h3.established.connection.next_packet_number,
+    );
+    try std.testing.expectEqual(@as(usize, 1), endpoint.pendingSessionCount());
+    try std.testing.expectEqual(@as(usize, 0), endpoint.rejectedSessionCount());
+
+    try std.testing.expectError(
+        error.PacingLimited,
+        endpoint.acceptWithHeaders(handle, &.{.{
+            .name = "x-admission",
+            .value = "literal",
+        }}),
+    );
+    try std.testing.expectEqual(@as(usize, 0), fixed_io.sleep_calls);
+    try std.testing.expectEqual(
+        packet_number,
+        h3.established.connection.next_packet_number,
+    );
+    try std.testing.expectEqual(
+        request_available,
+        quic.one_rtt.testing.receiveStreamAvailableLen(
+            &h3.established.connection,
+            0,
+        ).?,
+    );
+    try std.testing.expectEqual(@as(usize, 1), endpoint.pendingSessionCount());
+    try std.testing.expectEqual(@as(usize, 0), endpoint.sessionCount());
+    try std.testing.expect(h3.outbound_bodies.find(0) == null);
+    try std.testing.expect(!h3.connect_datagrams.contains(0));
+    try std.testing.expectEqual(
+        @as(usize, 0),
+        h3.qpack_encode.pendingEncoderInstructions().len,
+    );
+
+    const timer = endpoint.h3.dispatcher.nextTimerDeadline() orelse
+        return error.TestUnexpectedResult;
+    try std.testing.expectEqual(
+        quic.one_rtt.TimerDeadlineKind.pacing,
+        timer.timer.kind,
+    );
+    fixed_io.now_ns = @intCast(timer.timer.deadline_ns);
+    _ = (try endpoint.h3.dispatcher.serviceNextTimerAt(
+        timer.timer.deadline_ns,
+    )) orelse
+        return error.TestUnexpectedResult;
+    const accepted = try endpoint.acceptWithHeaders(handle, &.{.{
+        .name = "x-admission",
+        .value = "literal",
+    }});
+    try std.testing.expectEqual(@as(usize, 0), fixed_io.sleep_calls);
+    try std.testing.expectEqual(@as(usize, 0), endpoint.pendingSessionCount());
+    try std.testing.expectEqual(@as(usize, 1), endpoint.sessionCount());
+    try std.testing.expect(h3.outbound_bodies.find(0) != null);
+    try std.testing.expect(h3.connect_datagrams.contains(0));
+    try std.testing.expectEqual(
+        @as(usize, 0),
+        quic.one_rtt.testing.receiveStreamAvailableLen(
+            &h3.established.connection,
+            0,
+        ).?,
+    );
+    try std.testing.expectEqual(
+        @as(usize, 0),
+        h3.qpack_encode.pendingEncoderInstructions().len,
+    );
+    try std.testing.expectEqual(handle, accepted.handle);
+
+    var response_bytes: std.ArrayList(u8) = .empty;
+    defer response_bytes.deinit(allocator);
+    var response_fin = false;
+    for (0..3) |_| {
+        var response_packet = try peer.receivePacketTimeout(.{
+            .duration = .{
+                .clock = .awake,
+                .raw = .fromMilliseconds(100),
+            },
+        });
+        defer response_packet.deinit(allocator);
+        for (response_packet.frames) |frame| switch (frame) {
+            .stream => |stream| if (stream.stream_id == 0) {
+                try std.testing.expectEqual(
+                    @as(u64, response_bytes.items.len),
+                    stream.offset,
+                );
+                try response_bytes.appendSlice(allocator, stream.data);
+                response_fin = stream.fin;
+            },
+            else => {},
+        };
+        if (response_bytes.items.len != 0) break;
+    }
+    if (response_bytes.items.len == 0) return error.TestUnexpectedResult;
+    try std.testing.expectEqual(
+        @as(bool, false),
+        response_fin,
+    );
+    var empty_dynamic = http3.Qpack.DynamicTable.init(allocator, 0);
+    defer empty_dynamic.deinit();
+    var response_head = try http3.decodeResponseHeadWithDynamicTableAndOptions(
+        allocator,
+        response_bytes.items,
+        settings,
+        empty_dynamic,
+        .{
+            .request_method = "CONNECT",
+            .extended_connect = true,
+        },
+    );
+    defer response_head.deinit(allocator);
+    try std.testing.expectEqual(@as(u16, 200), response_head.status);
+    try std.testing.expectEqual(
+        @as(usize, 0),
+        response_head.qpack_section_acknowledgments,
+    );
+}
+
 test "WebTransport endpoint poll mirrors automatic stream-credit retry timer" {
     const allocator = std.testing.allocator;
     var threaded = std.Io.Threaded.init(allocator, .{});

@@ -1939,6 +1939,111 @@ test "QUIC 1-RTT connection handles stream-level flow control" {
         one_rtt.testing.sendStreamLimit(&combined_client, 0).?,
     );
 
+    // A shared-endpoint response can return the just-consumed request credit
+    // in the same packet. Pacing failure must preserve both the response
+    // stream and receive cursor so the whole admission can be retried.
+    var transactional_server_endpoint = try quic.runtime.Endpoint.bind(
+        allocator,
+        io,
+        .{ .ip4 = .loopback(0) },
+        .{ .max_datagram_size = 4096 },
+    );
+    defer transactional_server_endpoint.deinit();
+    var transactional_peer_endpoint = try quic.runtime.Endpoint.bind(
+        allocator,
+        io,
+        .{ .ip4 = .loopback(0) },
+        .{ .max_datagram_size = 4096 },
+    );
+    defer transactional_peer_endpoint.deinit();
+    var transactional = try one_rtt.Connection.init(
+        &transactional_server_endpoint,
+        .{
+            .peer = transactional_peer_endpoint.address(),
+            .receive_keys = server_keys,
+            .send_keys = client_keys,
+            .local_connection_id = "transactional-server",
+            .peer_connection_id = "transactional-peer",
+            .local_endpoint = .server,
+            .initial_receive_max_data = 8,
+            .receive_window = 8,
+            .initial_receive_max_stream_data = 8,
+            .stream_receive_window = 8,
+            .max_datagram_size = 1200,
+            .pacing_max_burst_packets = 1,
+        },
+    );
+    defer transactional.deinit();
+    try one_rtt.testing.applyReceivedFrames(
+        &transactional,
+        0,
+        &.{.{ .stream = .{
+            .stream_id = 0,
+            .data = "123456",
+        } }},
+        1_000_000,
+        .not_ect,
+    );
+    const pacing_now: u64 = @intCast(@max(
+        @as(i96, 0),
+        std.Io.Clock.awake.now(io).nanoseconds,
+    ));
+    try transactional.sendAt(
+        &.{.{ .padding = .{ .len = 1160 } }},
+        pacing_now,
+    );
+    const before_packet_number = transactional.next_packet_number;
+    const response_data = [_]u8{0xa5} ** 128;
+    const response = [_]quic.Frame{.{ .stream = .{
+        .stream_id = 0,
+        .data = &response_data,
+    } }};
+    try std.testing.expectError(
+        error.PacingLimited,
+        transactional.trySendAndReleaseReceivedCapacity(
+            0,
+            6,
+            response[0],
+        ),
+    );
+    try std.testing.expectEqual(
+        before_packet_number,
+        transactional.next_packet_number,
+    );
+    try std.testing.expectEqual(
+        @as(usize, 6),
+        one_rtt.testing.receiveStreamAvailableLen(&transactional, 0).?,
+    );
+    try std.testing.expectEqual(
+        @as(u64, 8),
+        one_rtt.testing.receiveStreamLimit(&transactional, 0).?,
+    );
+    const retry_at = transactional.nextTimerDeadline() orelse
+        return error.TestUnexpectedResult;
+    try std.testing.expectEqual(
+        one_rtt.TimerDeadlineKind.pacing,
+        retry_at.kind,
+    );
+    try one_rtt.testing.trySendAndReleaseReceivedCapacityAt(
+        &transactional,
+        0,
+        6,
+        response[0],
+        retry_at.deadline_ns,
+    );
+    try std.testing.expectEqual(
+        @as(usize, 0),
+        one_rtt.testing.receiveStreamAvailableLen(&transactional, 0).?,
+    );
+    try std.testing.expectEqual(
+        @as(u64, 14),
+        one_rtt.testing.receiveStreamLimit(&transactional, 0).?,
+    );
+    try std.testing.expectEqual(
+        @as(u64, response_data.len),
+        one_rtt.testing.sendStreamUsed(&transactional, 0).?,
+    );
+
     var violating_server_endpoint = try quic.runtime.Endpoint.bind(allocator, io, .{ .ip4 = .loopback(0) }, .{ .max_datagram_size = 4096 });
     defer violating_server_endpoint.deinit();
     var violating_client_endpoint = try quic.runtime.Endpoint.bind(allocator, io, .{ .ip4 = .loopback(0) }, .{ .max_datagram_size = 4096 });

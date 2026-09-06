@@ -199,6 +199,8 @@ const sendProtectedBodyChunk = body_sender.sendProtectedBodyChunk;
 const sendConnectionMessage = message_sender.sendConnectionMessage;
 const sendConnectionResponseSequence =
     message_sender.sendConnectionResponseSequence;
+const trySendConnectionResponseHeadLiteral =
+    message_sender.trySendConnectionResponseHeadLiteral;
 const sendProtectedMessage = message_sender.sendProtectedMessage;
 const sendProtectedResponseSequence =
     message_sender.sendProtectedResponseSequence;
@@ -5299,6 +5301,42 @@ pub const HandshakeServerSession = struct {
         removed.deinit();
     }
 
+    /// Atomically submit one successful Extended CONNECT response for a
+    /// shared endpoint and detach its request reader. All allocation and
+    /// receive-credit work completes before the single packet send; after the
+    /// packet is visible, the remaining local transition cannot fail.
+    pub fn tryAcceptConnectResponse(
+        self: *HandshakeServerSession,
+        stream_id: u62,
+        response: http3.Response,
+    ) Error!void {
+        const entry = self.streaming_requests.find(stream_id) orelse
+            return error.UnexpectedStream;
+        if (!entry.reader.canDetachRequest() or
+            self.outbound_bodies.find(stream_id) != null or
+            self.connect_datagrams.contains(stream_id))
+        {
+            return error.UnexpectedStream;
+        }
+        try self.connect_datagrams.register(stream_id);
+        errdefer self.connect_datagrams.unregister(stream_id);
+        const release_received = entry.reader.uncreditedConsumed();
+        try self.tryStartResponseLiteral(
+            stream_id,
+            response,
+            release_received,
+        );
+
+        const committed = self.streaming_requests.find(stream_id) orelse
+            unreachable;
+        std.debug.assert(committed.reader.canDetachRequest());
+        committed.reader.markCredited(release_received);
+        std.debug.assert(self.outbound_bodies.find(stream_id) != null);
+        var removed = self.streaming_requests.takeEntry(stream_id) orelse
+            unreachable;
+        removed.deinit();
+    }
+
     /// Reserve receive routing for a validated Extended CONNECT request before
     /// the server commits its successful response. The registration alone does
     /// not authorize datagram APIs; the stream remains attached until
@@ -5648,6 +5686,41 @@ pub const HandshakeServerSession = struct {
         try self.sendResponseWithInformational(stream_id, &.{}, response);
     }
 
+    /// Submit a complete HEADERS-only response in one QUIC packet without
+    /// waiting for pacing or creating a dynamic QPACK dependency.
+    pub fn trySendResponseLiteral(
+        self: *HandshakeServerSession,
+        stream_id: u62,
+        response: http3.Response,
+    ) Error!void {
+        try self.requireEndpointCriticalStreamsReady();
+        var response_headers_stack: [server_response.header_stack_capacity]http3.Qpack.HeaderField =
+            undefined;
+        var prepared = try server_response.prepare(
+            self.established.connection.endpoint.allocator,
+            response,
+            server_response.automaticDate(
+                self.options.auto_date_header,
+                self.established.connection.endpoint.io,
+                response,
+            ),
+            &response_headers_stack,
+        );
+        defer prepared.deinit(
+            self.established.connection.endpoint.allocator,
+        );
+        _ = try trySendConnectionResponseHeadLiteral(
+            &self.established.connection,
+            &self.stream_send_scratch,
+            stream_id,
+            prepared.value,
+            self.control.settings.peer,
+            true,
+            0,
+        );
+        finishServerRequest(&self.control, &self.request_lifecycle, stream_id);
+    }
+
     /// Blocking aggregate-response helper for convenience serving loops. It
     /// sends the response body in bounded chunks and pumps ACK and MAX_*
     /// packets whenever body or trailer transmission exhausts peer credit.
@@ -5910,6 +5983,61 @@ pub const HandshakeServerSession = struct {
             (!trailers_pending and streaming.expected_length == 0))
         {
             finishServerRequest(&self.control, &self.request_lifecycle, stream_id);
+        }
+    }
+
+    fn tryStartResponseLiteral(
+        self: *HandshakeServerSession,
+        stream_id: u62,
+        response: http3.Response,
+        release_received: usize,
+    ) Error!void {
+        try self.requireEndpointCriticalStreamsReady();
+        var response_headers_stack: [server_response.header_stack_capacity]http3.Qpack.HeaderField =
+            undefined;
+        var prepared = try server_response.prepare(
+            self.established.connection.endpoint.allocator,
+            response,
+            server_response.automaticDate(
+                self.options.auto_date_header,
+                self.established.connection.endpoint.io,
+                response,
+            ),
+            &response_headers_stack,
+        );
+        defer prepared.deinit(
+            self.established.connection.endpoint.allocator,
+        );
+        if (prepared.value.suppressesBody()) {
+            return error.InvalidContentLength;
+        }
+        try self.outbound_bodies.reserveOpen(stream_id);
+        const next_offset = try trySendConnectionResponseHeadLiteral(
+            &self.established.connection,
+            &self.stream_send_scratch,
+            stream_id,
+            prepared.value,
+            self.control.settings.peer,
+            false,
+            release_received,
+        );
+        var body_send = quic.stream_state.SendState.init(stream_id);
+        body_send.next_offset = next_offset;
+        self.outbound_bodies.appendOpenAssumeCapacity(
+            stream_id,
+            body_send,
+            null,
+        );
+    }
+
+    fn requireEndpointCriticalStreamsReady(
+        self: HandshakeServerSession,
+    ) Error!void {
+        if (!self.control.settings.sent or
+            !self.qpack_encoder_prefix_sent or
+            !self.qpack_decoder_prefix_sent)
+        {
+            return error.MissingSettings;
         }
     }
 

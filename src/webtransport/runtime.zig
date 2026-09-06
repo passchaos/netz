@@ -2207,18 +2207,14 @@ pub const EndpointServer = struct {
         const control = try session_control.Control.init(source.session_id);
         const accepted = try self.allocator.create(EndpointAcceptedSession);
         errdefer self.allocator.destroy(accepted);
-        try source.h3.prepareConnectDatagramAssociation(
-            source.session_id.value,
-        );
-        errdefer source.h3.cancelPreparedConnectDatagramAssociation(
-            source.session_id.value,
-        );
-        try source.h3.startResponse(
+        const response_result = source.h3.tryAcceptConnectResponse(
             source.session_id.value,
             connectResponseWithHeaders(prepared_headers.fields),
-            null,
         );
-        try source.h3.detachRequestStream(source.session_id.value);
+        response_result catch |err| {
+            try self.h3.dispatcher.refreshConnectionTimer(handle);
+            return err;
+        };
 
         const removed_entry = self.pending.fetchRemove(handle) orelse
             unreachable;
@@ -2256,15 +2252,26 @@ pub const EndpointServer = struct {
         const source = self.pending.get(handle) orelse
             return error.InvalidSessionState;
         try self.rejected.ensureUnusedCapacity(self.allocator, 1);
-        try source.h3.sendResponse(source.session_id.value, .{
+        const response_result = source.h3.trySendResponseLiteral(source.session_id.value, .{
             .status = status,
             .headers = response_headers,
+            .request_method = "CONNECT",
+            .extended_connect = true,
         });
+        response_result catch |err| {
+            try self.h3.dispatcher.refreshConnectionTimer(handle);
+            return err;
+        };
         const removed = self.pending.fetchRemove(handle).?.value;
         removed.request.deinit(self.allocator);
         self.allocator.destroy(removed);
         self.rejected.putAssumeCapacityNoClobber(handle, {});
-        try self.h3.dispatcher.refreshConnectionTimer(handle);
+        self.h3.dispatcher.refreshConnectionTimer(handle) catch |err| {
+            std.debug.panic(
+                "WebTransport endpoint lost registered timer after rejection: {s}",
+                .{@errorName(err)},
+            );
+        };
     }
 
     pub fn removeConnection(
