@@ -619,7 +619,7 @@ pub fn ServerTransport(comptime Service: type, comptime Handler: type) type {
 
             if (!Method.client_streaming and !Method.server_streaming) {
                 const request = requests.single() catch |err|
-                    return self.finishRequestError(rpc, err);
+                    return self.finishDispatchError(rpc, &requests, err);
                 var response = @call(
                     .auto,
                     @field(Handler, Method.name),
@@ -634,9 +634,13 @@ pub fn ServerTransport(comptime Service: type, comptime Handler: type) type {
                     err,
                 );
                 defer response.deinit(self.connection.connection.allocator);
-                try responses.append(
+                responses.append(
                     self.connection.connection.allocator,
                     response,
+                ) catch |err| return self.finishDispatchError(
+                    rpc,
+                    &requests,
+                    err,
                 );
             } else if (Method.client_streaming and
                 !Method.server_streaming)
@@ -655,15 +659,19 @@ pub fn ServerTransport(comptime Service: type, comptime Handler: type) type {
                     err,
                 );
                 defer response.deinit(self.connection.connection.allocator);
-                try responses.append(
+                responses.append(
                     self.connection.connection.allocator,
                     response,
+                ) catch |err| return self.finishDispatchError(
+                    rpc,
+                    &requests,
+                    err,
                 );
             } else if (!Method.client_streaming and
                 Method.server_streaming)
             {
                 const request = requests.single() catch |err|
-                    return self.finishRequestError(rpc, err);
+                    return self.finishDispatchError(rpc, &requests, err);
                 @call(
                     .auto,
                     @field(Handler, Method.name),
@@ -694,7 +702,11 @@ pub fn ServerTransport(comptime Service: type, comptime Handler: type) type {
                     err,
                 );
             }
-            try responses.finish();
+            responses.finish() catch |err| return self.finishDispatchError(
+                rpc,
+                &requests,
+                err,
+            );
             return .ok;
         }
 
@@ -718,6 +730,11 @@ pub fn ServerTransport(comptime Service: type, comptime Handler: type) type {
             requests: anytype,
             err: anyerror,
         ) !wire.Status {
+            if (requests.rpc_deadline_timed_out or
+                (err == error.Timeout and rpc.deadlineExpired()))
+            {
+                return self.finishDeadlineExceeded(rpc);
+            }
             if (requests.invalid_payload or err == error.InvalidRequestPayload) {
                 return self.finishRequestError(rpc, err);
             }
@@ -737,6 +754,20 @@ pub fn ServerTransport(comptime Service: type, comptime Handler: type) type {
                 &.{},
             );
             return .invalid_argument;
+        }
+
+        fn finishDeadlineExceeded(
+            self: Self,
+            rpc: *stream.ServerDuplex,
+        ) !wire.Status {
+            _ = self;
+            try rpc.finish(
+                .deadline_exceeded,
+                "deadline exceeded",
+                &.{},
+                &.{},
+            );
+            return .deadline_exceeded;
         }
 
         fn responseOptions(
@@ -814,6 +845,7 @@ fn ServerRequestIterator(comptime Message: type) type {
         released_index: usize = 0,
         finished: bool = false,
         invalid_payload: bool = false,
+        rpc_deadline_timed_out: bool = false,
 
         fn init(
             allocator: std.mem.Allocator,
@@ -864,10 +896,15 @@ fn ServerRequestIterator(comptime Message: type) type {
         }
 
         fn pump(self: *@This()) !void {
-            var event = try self.rpc.readRequestEvent(
+            var event = self.rpc.readRequestEvent(
                 self,
                 @This().consume,
-            );
+            ) catch |err| {
+                if (err == error.Timeout and self.rpc.deadline != null) {
+                    self.rpc_deadline_timed_out = true;
+                }
+                return err;
+            };
             defer event.deinit();
             switch (event) {
                 .messages => {},
@@ -934,6 +971,7 @@ fn ServerResponseSink(comptime Message: type, comptime Requests: type) type {
             if (self.finished) {
                 return error.InvalidMethodShape;
             }
+            try self.rpc.checkDeadline();
             if (self.require_one and self.count != 0) {
                 return error.InvalidMethodShape;
             }
@@ -956,6 +994,7 @@ fn ServerResponseSink(comptime Message: type, comptime Requests: type) type {
             if (self.require_one and self.count != 1) {
                 return error.InvalidMethodShape;
             }
+            try self.rpc.checkDeadline();
             try self.rpc.finishOk();
             self.finished = true;
         }

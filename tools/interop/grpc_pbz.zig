@@ -108,9 +108,11 @@ const ServerState = struct {
             .package = grpc_pb.proto_package,
             .handler_error_status = .invalid_argument,
         });
-        for (0..7) |index| {
+        for (0..8) |index| {
             const expected: netz.grpc.Status = if (index == 4 or index == 5)
                 .invalid_argument
+            else if (index == 6)
+                .deadline_exceeded
             else
                 .ok;
             try std.testing.expectEqual(expected, try transport.serveOne());
@@ -230,6 +232,43 @@ pub fn main(init: std.process.Init) !void {
         "could not parse request",
         malformed.status_message,
     );
+
+    var deadline_writer = try client.connection.startRequest(.{
+        .method = "POST",
+        .path = "/demo.binding.Pipe/Get",
+        .authority = "localhost",
+        .headers = &.{
+            .{ .name = "content-type", .value = "application/grpc+proto" },
+            .{ .name = "te", .value = "trailers" },
+            .{ .name = "grpc-timeout", .value = "50m" },
+        },
+    });
+    var deadline_stream = try deadline_writer.beginDuplex();
+    var deadline_stream_live = true;
+    defer if (deadline_stream_live) deadline_stream.deinit();
+    var deadline_event = try deadline_stream.readResponseEventWithTimeout(
+        .fromSeconds(2),
+    );
+    defer deadline_event.deinit(allocator);
+    try std.testing.expect(deadline_event == .head);
+    try std.testing.expectEqual(
+        @as(u16, 200),
+        deadline_event.head.status,
+    );
+    try std.testing.expectEqualStrings(
+        "4",
+        netz.http2.runtime.testing.findHeader(
+            deadline_event.head.headers,
+            "grpc-status",
+        ).?,
+    );
+    var deadline_finished = try deadline_stream.readResponseEventWithTimeout(
+        .fromSeconds(2),
+    );
+    defer deadline_finished.deinit(allocator);
+    try std.testing.expect(deadline_finished == .finished);
+    deadline_stream.deinit();
+    deadline_stream_live = false;
 
     unary_request.id = 8;
     var recovered = try generated_client.Get(allocator, unary_request);

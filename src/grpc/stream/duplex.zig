@@ -704,6 +704,7 @@ pub const ServerDuplex = struct {
     service: []const u8,
     method: []const u8,
     timeout: ?wire.Timeout,
+    deadline: ?std.Io.Clock.Timestamp = null,
     encoding: ?[]const u8,
     accepted_encodings: compression.AlgorithmSet,
     message_count: usize = 0,
@@ -728,12 +729,23 @@ pub const ServerDuplex = struct {
         return self.transport.responseFinished();
     }
 
+    pub fn checkDeadline(self: ServerDuplex) Error!void {
+        if (self.deadlineExpired()) return error.Timeout;
+    }
+
+    pub fn deadlineExpired(self: ServerDuplex) bool {
+        const deadline = self.deadline orelse return false;
+        return deadline.durationFromNow(
+            self.transport.connection.io,
+        ).raw.nanoseconds <= 0;
+    }
+
     pub fn readRequestEvent(
         self: *ServerDuplex,
         context: anytype,
         comptime consume: anytype,
     ) !ServerEvent {
-        return self.readRequestEventUntil(null, context, consume);
+        return self.readRequestEventUntil(self.deadline, context, consume);
     }
 
     pub fn readRequestEventWithTimeout(
@@ -743,11 +755,15 @@ pub const ServerDuplex = struct {
         comptime consume: anytype,
     ) !ServerEvent {
         if (timeout.nanoseconds <= 0) return error.Timeout;
-        return self.readRequestEventWithDeadline(
-            .fromNow(self.transport.connection.io, .{
+        const requested = std.Io.Clock.Timestamp.fromNow(
+            self.transport.connection.io,
+            .{
                 .raw = timeout,
                 .clock = .awake,
-            }),
+            },
+        );
+        return self.readRequestEventWithDeadline(
+            requested,
             context,
             consume,
         );
@@ -759,6 +775,8 @@ pub const ServerDuplex = struct {
         context: anytype,
         comptime consume: anytype,
     ) !ServerEvent {
+        if (deadline.clock != .awake) return error.Timeout;
+        const effective = earlierDeadline(self.deadline, deadline);
         if (self.pending_terminal) |terminal| {
             self.pending_terminal = null;
             self.receive_state = .terminal_delivered;
@@ -766,14 +784,14 @@ pub const ServerDuplex = struct {
         }
         if (self.receive_state != .active) return error.ConnectionClosed;
         const event = self.transport.readRequestEventWithDeadline(
-            deadline,
+            effective,
         ) catch |err| {
             if (err != error.Timeout) self.fail(.internal_error);
             return err;
         };
         return self.readRequestEventTransport(
             event,
-            deadline,
+            effective,
             context,
             consume,
         );
@@ -1166,6 +1184,13 @@ fn acceptDuplexTransport(
         transport.path,
         transport.headers,
     );
+    const deadline: ?std.Io.Clock.Timestamp = if (parsed.timeout) |timeout|
+        std.Io.Clock.Timestamp.fromNow(transport.connection.io, .{
+            .raw = timeout.duration(),
+            .clock = .awake,
+        })
+    else
+        null;
     return .{
         .allocator = allocator,
         .transport = transport,
@@ -1179,6 +1204,7 @@ fn acceptDuplexTransport(
         .service = parsed.service,
         .method = parsed.method,
         .timeout = parsed.timeout,
+        .deadline = deadline,
         .encoding = parsed.encoding,
         .accepted_encodings = parsed.accepted_encodings,
     };

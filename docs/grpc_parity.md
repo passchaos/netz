@@ -132,8 +132,12 @@ existing HTTP/2 runtime:
   text, optional HTTP status, and optional HTTP/2 reset reason across
   `RpcFailed`, with borrow-or-take APIs. Malformed protobuf and wrong unary
   request cardinality produce trailers-only `INVALID_ARGUMENT` while
-  preserving the channel; `pbz` remains a lazy integration dependency rather
-  than a requirement of the core transport.
+  preserving the channel. Server request-event reads use one absolute
+  awake-clock deadline derived from `grpc-timeout`; the generated adapter maps
+  expiry to trailers-only `DEADLINE_EXCEEDED` and rechecks before each response
+  message and final status. Synchronous handler computation is not preempted,
+  but an expired handler cannot subsequently commit OK. `pbz` remains a lazy
+  integration dependency rather than a requirement of the core transport.
 
 Payloads intentionally remain opaque. This keeps gRPC transport reusable with
 generated or dynamic protobuf implementations; the user-owned
