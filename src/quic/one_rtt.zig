@@ -25,6 +25,7 @@ pub const Error = quic.runtime.Error || quic.protection.Error || quic.packet_spa
     AckFrequencyDisabled,
     PacingLimited,
     AeadLimitReached,
+    KeyUpdateError,
     InvalidPostHandshakeCrypto,
     InvalidPtoJitter,
     PathValidationLimit,
@@ -3901,6 +3902,30 @@ pub const Connection = struct {
         }
         self.recordAuthenticationFailureAt(now_ns) catch |err| return err;
         return error.AuthenticationFailed;
+    }
+
+    fn handlePacketProtectionErrorAt(
+        self: *Connection,
+        protection_error: quic.protection.Error,
+        reset_candidate: ?[quic.stateless_reset.token_len]u8,
+        now_ns: ?u64,
+    ) Error {
+        if (protection_error == error.AuthenticationFailed) {
+            return self.handleAuthenticationFailureAt(
+                reset_candidate,
+                now_ns,
+            );
+        }
+        if (protection_error == error.InvalidReservedBits) {
+            self.closeTransportAt(
+                @intFromEnum(quic.TransportErrorCode.protocol_violation),
+                0,
+                "reserved bits",
+                nsToMs(now_ns),
+                null,
+            ) catch |err| return err;
+        }
+        return protection_error;
     }
 
     fn enterAeadLimitReached(
@@ -8187,13 +8212,11 @@ pub const Connection = struct {
             self.expected_packet_number,
             self.config.accept_zero_fixed_bit,
         ) catch |err| {
-            if (err == error.AuthenticationFailed) {
-                return self.handleAuthenticationFailureAt(
-                    reset_candidate,
-                    now_ns,
-                );
-            }
-            return err;
+            return self.handlePacketProtectionErrorAt(
+                err,
+                reset_candidate,
+                now_ns,
+            );
         };
         switch (current) {
             .opened => |packet| {
@@ -8258,13 +8281,11 @@ pub const Connection = struct {
                 self.expected_packet_number,
                 self.config.accept_zero_fixed_bit,
             ) catch |err| {
-                if (err == error.AuthenticationFailed) {
-                    return self.handleAuthenticationFailureAt(
-                        reset_candidate,
-                        now_ns,
-                    );
-                }
-                return err;
+                return self.handlePacketProtectionErrorAt(
+                    err,
+                    reset_candidate,
+                    now_ns,
+                );
             };
             switch (current) {
                 .opened => |packet| {
@@ -8417,20 +8438,12 @@ pub const Connection = struct {
         ecn: quic.packet_space.EcnCodepoint,
         now_ns: ?u64,
     ) Error!ReceivedPacket {
-        var packet = self.openReceivedBytesWithFrameClose(
+        var packet = try self.openReceivedBytesWithFrameClose(
             from,
             bytes,
             self.config.local_connection_id.len,
             now_ns,
-        ) catch |err| {
-            if (err == error.AuthenticationFailed) {
-                return self.handleAuthenticationFailureAt(
-                    quic.stateless_reset.tokenCandidate(bytes),
-                    now_ns,
-                );
-            }
-            return err;
-        };
+        );
         errdefer packet.deinit(self.endpoint.allocator);
         var peer_address_update = try self.preparePeerAddressUpdate(
             from,
@@ -8556,22 +8569,12 @@ pub const Connection = struct {
         if (self.shouldDiscardPeerAddressBeforeAuthentication(routed.datagram.from)) {
             return null;
         }
-        var packet = self.openReceivedBytesWithFrameClose(
+        var packet = try self.openReceivedBytesWithFrameClose(
             routed.datagram.from,
             routed.datagram.bytes,
             routed.destination_connection_id.len,
             now_ns,
-        ) catch |err| {
-            if (err == error.AuthenticationFailed) {
-                return self.handleAuthenticationFailureAt(
-                    quic.stateless_reset.tokenCandidate(
-                        routed.datagram.bytes,
-                    ),
-                    now_ns,
-                );
-            }
-            return err;
-        };
+        );
         errdefer packet.deinit(self.endpoint.allocator);
         var peer_address_update = try self.preparePeerAddressUpdate(
             routed.datagram.from,
@@ -8609,13 +8612,17 @@ pub const Connection = struct {
         destination_connection_id_len: usize,
         now_ns: ?u64,
     ) Error!ReceivedPacket {
-        var decoded = try quic.protection.openShortPacketWithKeyUpdateAndFixedBitPolicy(
+        var decoded = quic.protection.openShortPacketWithKeyUpdateAndFixedBitPolicy(
             self.endpoint.allocator,
             self.receive_key_phase.keyUpdateKeys(),
             bytes,
             destination_connection_id_len,
             self.expected_packet_number,
             self.config.accept_zero_fixed_bit,
+        ) catch |err| return self.handlePacketProtectionErrorAt(
+            err,
+            quic.stateless_reset.tokenCandidate(bytes),
+            now_ns,
         );
         errdefer decoded.deinit(self.endpoint.allocator);
 

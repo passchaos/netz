@@ -3,6 +3,49 @@ const quic = @import("../../mod.zig");
 const one_rtt = @import("../../one_rtt.zig");
 const net = std.Io.net;
 
+fn sealShortPacketWithReservedBits(
+    allocator: std.mem.Allocator,
+    keys: quic.protection.PacketProtectionKeys,
+    destination_connection_id: []const u8,
+    packet_number: u32,
+    payload: []const u8,
+) ![]u8 {
+    const packet_number_len = 4;
+    const packet_number_offset = 1 + destination_connection_id.len;
+    const payload_offset = packet_number_offset + packet_number_len;
+    const packet = try allocator.alloc(
+        u8,
+        payload_offset + payload.len + quic.protection.aead_tag_len,
+    );
+    errdefer allocator.free(packet);
+
+    packet[0] = 0x40 | 0x08 | (packet_number_len - 1);
+    @memcpy(packet[1..packet_number_offset], destination_connection_id);
+    std.mem.writeInt(
+        u32,
+        packet[packet_number_offset..payload_offset][0..4],
+        packet_number,
+        .big,
+    );
+    const ciphertext = packet[payload_offset .. payload_offset + payload.len];
+    const tag = packet[payload_offset + payload.len ..][0..quic.protection.aead_tag_len];
+    try quic.protection.protectPayload(
+        keys,
+        packet_number,
+        packet[0..payload_offset],
+        payload,
+        ciphertext,
+        tag,
+    );
+    try quic.protection.applyHeaderProtectionForKeys(
+        keys,
+        .short,
+        packet,
+        packet_number_offset,
+    );
+    return packet;
+}
+
 const FixedClockIo = struct {
     delegate: std.Io,
     now_ns: i96,
@@ -283,6 +326,59 @@ test "QUIC 1-RTT closes at the AEAD integrity limit" {
     try std.testing.expectError(error.ConnectionClosed, connection.send(&.{.{ .ping = {} }}));
 }
 
+test "QUIC 1-RTT closes on authenticated short-header reserved bits" {
+    const allocator = std.testing.allocator;
+
+    var threaded = std.Io.Threaded.init(allocator, .{});
+    defer threaded.deinit();
+    const io = threaded.io();
+
+    var server_endpoint = try quic.runtime.Endpoint.bind(allocator, io, .{ .ip4 = .loopback(0) }, .{ .max_datagram_size = 4096 });
+    defer server_endpoint.deinit();
+    var client_endpoint = try quic.runtime.Endpoint.bind(allocator, io, .{ .ip4 = .loopback(0) }, .{ .max_datagram_size = 4096 });
+    defer client_endpoint.deinit();
+
+    const server_cid = [_]u8{ 0x81, 0x82, 0x83, 0x84 };
+    const client_cid = [_]u8{ 0x85, 0x86, 0x87, 0x88 };
+    const keys = quic.protection.deriveAes128Keys(
+        [_]u8{0x89} ** quic.protection.secret_len,
+    );
+    var server = try one_rtt.Connection.init(&server_endpoint, .{
+        .peer = client_endpoint.address(),
+        .receive_keys = keys,
+        .send_keys = keys,
+        .local_connection_id = &server_cid,
+        .peer_connection_id = &client_cid,
+        .local_endpoint = .server,
+    });
+    defer server.deinit();
+
+    const reserved = try sealShortPacketWithReservedBits(
+        allocator,
+        keys,
+        &server_cid,
+        0,
+        &.{@intFromEnum(quic.FrameType.ping)},
+    );
+    defer allocator.free(reserved);
+    try std.testing.expectError(error.InvalidReservedBits, server.receiveRoutedDatagram(.{
+        .datagram = .{ .from = client_endpoint.address(), .bytes = reserved },
+        .route = .{ .connection_index = 0 },
+        .destination_connection_id = &server_cid,
+    }));
+    try std.testing.expectEqual(@as(u64, 0), server.authenticationFailureCount());
+    try std.testing.expect(server.closing());
+    try std.testing.expectEqual(
+        @as(u64, @intFromEnum(quic.TransportErrorCode.protocol_violation)),
+        server.close_info.?.error_code,
+    );
+    try std.testing.expectEqual(@as(u64, 0), server.close_info.?.frame_type);
+    try std.testing.expectEqualStrings(
+        "reserved bits",
+        server.close_info.?.reason_phrase,
+    );
+}
+
 test "QUIC 1-RTT connection accepts delayed previous-key packets until discard" {
     const allocator = std.testing.allocator;
 
@@ -364,11 +460,13 @@ test "QUIC 1-RTT connection accepts delayed previous-key packets until discard" 
     try std.testing.expectEqual(@as(?i64, 10), server.oneRttKeyDiscardDeadline());
     try std.testing.expect(server.discardExpiredOneRttKeys(10));
     try std.testing.expect(!server.peerOneRttRetainsKeyGeneration(0));
-    try std.testing.expectError(error.KeyUpdateError, server.receiveRoutedDatagram(.{
+    try std.testing.expectError(error.AuthenticationFailed, server.receiveRoutedDatagram(.{
         .datagram = .{ .from = client_endpoint.address(), .bytes = old_packet },
         .route = route,
         .destination_connection_id = &server_cid,
     }));
+    try std.testing.expectEqual(@as(u64, 1), server.authenticationFailureCount());
+    try std.testing.expect(!server.closing());
 }
 
 test "QUIC 1-RTT connection sends and validates PMTU probes" {

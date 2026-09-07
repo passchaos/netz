@@ -11,6 +11,49 @@ const ConnectionHandle = dispatcher_mod.ConnectionHandle;
 const Dispatcher = dispatcher_mod.Dispatcher;
 const Event = dispatcher_mod.Event;
 
+fn sealShortPacketWithReservedBits(
+    allocator: std.mem.Allocator,
+    keys: quic.protection.PacketProtectionKeys,
+    destination_connection_id: []const u8,
+    packet_number: u32,
+    payload: []const u8,
+) ![]u8 {
+    const packet_number_len = 4;
+    const packet_number_offset = 1 + destination_connection_id.len;
+    const payload_offset = packet_number_offset + packet_number_len;
+    const packet = try allocator.alloc(
+        u8,
+        payload_offset + payload.len + quic.protection.aead_tag_len,
+    );
+    errdefer allocator.free(packet);
+
+    packet[0] = 0x40 | 0x08 | (packet_number_len - 1);
+    @memcpy(packet[1..packet_number_offset], destination_connection_id);
+    std.mem.writeInt(
+        u32,
+        packet[packet_number_offset..payload_offset][0..4],
+        packet_number,
+        .big,
+    );
+    const ciphertext = packet[payload_offset .. payload_offset + payload.len];
+    const tag = packet[payload_offset + payload.len ..][0..quic.protection.aead_tag_len];
+    try quic.protection.protectPayload(
+        keys,
+        packet_number,
+        packet[0..payload_offset],
+        payload,
+        ciphertext,
+        tag,
+    );
+    try quic.protection.applyHeaderProtectionForKeys(
+        keys,
+        .short,
+        packet,
+        packet_number_offset,
+    );
+    return packet;
+}
+
 test "QUIC endpoint dispatcher owns CID routing across connections" {
     const allocator = std.testing.allocator;
     var threaded = std.Io.Threaded.init(allocator, .{});
@@ -1776,6 +1819,29 @@ test "QUIC endpoint dispatcher consumes authentication failure until AEAD limit"
 
     const payload = try one_rtt.encodeFrames(allocator, &.{.{ .ping = {} }});
     defer allocator.free(payload);
+
+    const truncated = try allocator.alloc(u8, 1 + "server-aead".len);
+    truncated[0] = 0x40;
+    @memcpy(truncated[1..], "server-aead");
+    try std.testing.expectEqual(Event.consumed, try dispatcher.dispatch(.{
+        .from = peer.address(),
+        .bytes = truncated,
+    }));
+
+    const missing_sample = try allocator.alloc(
+        u8,
+        1 + "server-aead".len + 1 + quic.protection.aead_tag_len,
+    );
+    @memset(missing_sample, 0);
+    missing_sample[0] = 0x40;
+    @memcpy(missing_sample[1..][0.."server-aead".len], "server-aead");
+    try std.testing.expectEqual(Event.consumed, try dispatcher.dispatch(.{
+        .from = peer.address(),
+        .bytes = missing_sample,
+    }));
+    try std.testing.expectEqual(@as(u64, 0), connection.authenticationFailureCount());
+    try std.testing.expect(!connection.closed());
+
     const corrupted = try quic.protection.sealShortPacket(allocator, keys, .{
         .destination_connection_id = "server-aead",
         .packet_number = 10,
@@ -1818,4 +1884,61 @@ test "QUIC endpoint dispatcher consumes authentication failure until AEAD limit"
     }));
     try std.testing.expectEqual(@as(u64, 2), connection.authenticationFailureCount());
     try std.testing.expect(connection.closing());
+}
+
+test "QUIC endpoint dispatcher propagates authenticated reserved bits" {
+    const allocator = std.testing.allocator;
+    var threaded = std.Io.Threaded.init(allocator, .{});
+    defer threaded.deinit();
+    const io = threaded.io();
+    var endpoint = try runtime.Endpoint.bind(
+        allocator,
+        io,
+        .{ .ip4 = .loopback(0) },
+        .{ .max_datagram_size = 4096 },
+    );
+    defer endpoint.deinit();
+    var peer = try runtime.Endpoint.bind(
+        allocator,
+        io,
+        .{ .ip4 = .loopback(0) },
+        .{ .max_datagram_size = 4096 },
+    );
+    defer peer.deinit();
+
+    const keys = quic.protection.deriveAes128Keys(
+        [_]u8{0xee} ** quic.protection.secret_len,
+    );
+    var connection = try one_rtt.Connection.init(&endpoint, .{
+        .peer = peer.address(),
+        .receive_keys = keys,
+        .send_keys = keys,
+        .local_connection_id = "server-reserved",
+        .peer_connection_id = "client-reserved",
+        .local_endpoint = .server,
+        .enable_pacing = false,
+    });
+    defer connection.deinit();
+    var dispatcher = Dispatcher.init(allocator, &endpoint);
+    defer dispatcher.deinit();
+    try dispatcher.registerConnection(12, &connection);
+
+    const reserved = try sealShortPacketWithReservedBits(
+        allocator,
+        keys,
+        "server-reserved",
+        0,
+        &.{@intFromEnum(quic.FrameType.ping)},
+    );
+    try std.testing.expectError(error.InvalidReservedBits, dispatcher.dispatch(.{
+        .from = peer.address(),
+        .bytes = reserved,
+    }));
+    try std.testing.expectEqual(@as(u64, 0), connection.authenticationFailureCount());
+    try std.testing.expect(connection.closing());
+    try std.testing.expectEqual(
+        @as(u64, @intFromEnum(quic.TransportErrorCode.protocol_violation)),
+        connection.close_info.?.error_code,
+    );
+    try std.testing.expectEqual(@as(u64, 0), connection.close_info.?.frame_type);
 }

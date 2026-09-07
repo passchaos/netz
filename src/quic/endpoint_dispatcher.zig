@@ -948,12 +948,14 @@ pub const Dispatcher = struct {
                 routed.route.connection_index,
                 entry.connection,
             );
-            if (err == error.AuthenticationFailed) {
+            if (isDiscardedShortPacketError(err)) {
                 // A short-header CID is visible before packet authentication.
-                // Invalid ciphertext addressed to an active CID is ordinary
-                // untrusted network input: retain the connection's AEAD
-                // integrity accounting but do not terminate the sole receive
-                // loop. AeadLimitReached remains observable above.
+                // Invalid ciphertext and pre-authentication format failures
+                // addressed to an active CID are ordinary untrusted network
+                // input and must not terminate the sole receive loop. Only an
+                // AuthenticationFailed value has touched the connection's
+                // AEAD integrity counter. AeadLimitReached and authenticated
+                // protocol violations remain observable above.
                 routed_datagram.datagram.deinit(self.allocator);
                 owns_datagram = false;
                 return .consumed;
@@ -986,6 +988,18 @@ pub const Dispatcher = struct {
         } };
     }
 };
+
+fn isDiscardedShortPacketError(err: anyerror) bool {
+    return switch (err) {
+        error.AuthenticationFailed,
+        error.InvalidInitialPacket,
+        error.InvalidHeaderProtectionSample,
+        error.InvalidPacketNumber,
+        error.InvalidPacketNumberLength,
+        => true,
+        else => false,
+    };
+}
 
 fn earliestReceiveTimeout(
     io: std.Io,

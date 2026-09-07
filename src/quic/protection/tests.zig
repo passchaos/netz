@@ -954,7 +954,38 @@ test "QUIC packet protection rejects reserved header bits after unprotect" {
 
         const malformed = try packet.toOwnedSlice(allocator);
         defer allocator.free(malformed);
-        try std.testing.expectError(error.InvalidInitialPacket, protection.openShortPacket(allocator, keys, malformed, dcid.len, 0));
+        try std.testing.expectError(error.InvalidReservedBits, protection.openShortPacket(allocator, keys, malformed, dcid.len, 0));
+
+        const unauthenticated = try protection.sealShortPacket(allocator, keys, .{
+            .destination_connection_id = &dcid,
+            .packet_number = 6,
+            .packet_number_len = packet_number_len,
+            .payload = payload,
+        });
+        defer allocator.free(unauthenticated);
+        try protection.removeHeaderProtectionForKeys(
+            keys,
+            .short,
+            unauthenticated,
+            pn_offset,
+        );
+        unauthenticated[0] |= 0x08;
+        try protection.applyHeaderProtectionForKeys(
+            keys,
+            .short,
+            unauthenticated,
+            pn_offset,
+        );
+        try std.testing.expectError(
+            error.AuthenticationFailed,
+            protection.openShortPacket(
+                allocator,
+                keys,
+                unauthenticated,
+                dcid.len,
+                0,
+            ),
+        );
     }
 }
 
@@ -1277,7 +1308,7 @@ test "QUIC short packet key update opens next and retained previous generations"
     receiver.schedulePreviousDiscard(1_000);
     try std.testing.expect(receiver.discardExpiredPrevious(1_000));
     try std.testing.expectError(
-        error.KeyUpdateError,
+        error.AuthenticationFailed,
         protection.openShortPacketWithKeyUpdate(allocator, receiver.keyUpdateKeys(), old_packet, dcid.len, 0),
     );
 }

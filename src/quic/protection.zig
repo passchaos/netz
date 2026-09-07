@@ -47,7 +47,7 @@ pub const Error = varint.Error || VersionError || error{
     InvalidPacketNumber,
     InvalidPacketNumberLength,
     InvalidPayloadLength,
-    KeyUpdateError,
+    InvalidReservedBits,
 } || std.crypto.errors.AuthenticationError || std.mem.Allocator.Error;
 
 pub const HeaderForm = enum {
@@ -286,7 +286,6 @@ pub const ShortPacketKeyUpdateKeys = struct {
     current_key_phase: bool,
     previous: ?PacketProtectionKeys = null,
     previous_key_phase: ?bool = null,
-    discarded_previous_key_phase: ?bool = null,
 };
 
 /// Directional 1-RTT key-phase state.
@@ -314,7 +313,6 @@ pub const KeyPhaseState = struct {
     previous: ?PacketProtectionKeys = null,
     previous_key_phase: ?bool = null,
     previous_discard_deadline_nanos: ?i64 = null,
-    discarded_previous_key_phase: ?bool = null,
 
     pub fn init(current: PacketProtectionKeys, current_key_phase: bool) KeyPhaseState {
         return initForVersion(
@@ -390,7 +388,6 @@ pub const KeyPhaseState = struct {
             .current_key_phase = self.current_key_phase,
             .previous = self.previous,
             .previous_key_phase = self.previous_key_phase,
-            .discarded_previous_key_phase = self.discarded_previous_key_phase,
         };
     }
 
@@ -416,7 +413,6 @@ pub const KeyPhaseState = struct {
     pub fn discardExpiredPrevious(self: *KeyPhaseState, now_nanos: i64) bool {
         const deadline = self.previous_discard_deadline_nanos orelse return false;
         if (now_nanos < deadline) return false;
-        self.discarded_previous_key_phase = self.previous_key_phase;
         self.previous = null;
         self.previous_key_phase = null;
         self.previous_discard_deadline_nanos = null;
@@ -750,7 +746,6 @@ fn previewShortHeaderForKeysWithFixedBitPolicy(
     {
         return error.InvalidInitialPacket;
     }
-    try validateShortHeaderReservedBits(first);
     const packet_number_len: u8 = (first & 0x03) + 1;
     if (pn_offset + packet_number_len > packet.len) {
         return error.InvalidPacketNumberLength;
@@ -1726,6 +1721,11 @@ fn openShortPacketInPlaceAfterPreview(
         tag,
         ciphertext,
     );
+    // Reserved bits are protected by both header protection and AEAD. RFC
+    // 9000 section 17.3.1 requires checking them only after both protections
+    // have been removed; checking before AEAD would let random ciphertext
+    // trigger a connection error.
+    try validateShortHeaderReservedBits(packet[0]);
     return .{
         .destination_connection_id = packet[1..pn_offset],
         .packet_number = packet_number,
@@ -1803,7 +1803,11 @@ pub fn openShortPacketWithKeyUpdateAndFixedBitPolicy(
         expected_packet_number,
         allow_zero_fixed_bit,
     ) catch |next_err| {
-        if (next_err == error.OutOfMemory) return next_err;
+        // Header protection is retained across key generations, so only an
+        // AEAD miss can justify trying the retained previous key. In
+        // particular, authenticated reserved-bit violations must remain
+        // connection errors rather than being hidden by a fallback failure.
+        if (next_err != error.AuthenticationFailed) return next_err;
         if (keys.previous) |previous| {
             if (keys.previous_key_phase) |previous_key_phase| {
                 if (key_phase == previous_key_phase) {
@@ -1821,9 +1825,10 @@ pub fn openShortPacketWithKeyUpdateAndFixedBitPolicy(
                 }
             }
         }
-        if (keys.discarded_previous_key_phase) |discarded_previous_key_phase| {
-            if (key_phase == discarded_previous_key_phase) return error.KeyUpdateError;
-        }
+        // A key-phase bit exposed by header protection is not authenticated.
+        // Once previous keys are discarded, an apparent old-phase packet is
+        // indistinguishable from forged ciphertext and must be discarded as
+        // an authentication failure instead of raising KEY_UPDATE_ERROR.
         return next_err;
     };
     return .{
@@ -1921,7 +1926,6 @@ pub fn peekShortPacketKeyPhaseWithFixedBitPolicy(
     {
         return error.InvalidInitialPacket;
     }
-    try validateShortHeaderReservedBits(first);
     return (first & 0x04) != 0;
 }
 
@@ -2033,10 +2037,9 @@ fn validateLongHeaderReservedBits(first_byte: u8) Error!void {
 }
 
 fn validateShortHeaderReservedBits(first_byte: u8) Error!void {
-    // RFC 9000 §17.3.1: short headers have reserved bits 0x18 once header
-    // protection is removed.  Treating them as a packet error here prevents
-    // malformed 1-RTT packets from reaching frame parsing or key-update state.
-    if ((first_byte & 0x18) != 0) return error.InvalidInitialPacket;
+    // RFC 9000 §17.3.1: short-header reserved bits are checked only after
+    // header protection is removed and the packet is authenticated.
+    if ((first_byte & 0x18) != 0) return error.InvalidReservedBits;
 }
 
 fn appendTruncatedPacketNumberAssumeCapacity(list: *std.ArrayList(u8), packet_number: u64, packet_number_len: u8) Error!void {

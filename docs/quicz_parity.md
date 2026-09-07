@@ -509,6 +509,16 @@ connection's AEAD integrity counter; reaching the negotiated cipher limit still
 surfaces `AeadLimitReached` and closes the connection. A forged packet therefore
 cannot stop the sole receive loop merely by knowing a visible CID, while the
 mandatory integrity-failure safety limit remains effective.
+Pre-authentication short-header format failures, including truncated header-
+protection samples and undersized packets, are also consumed without charging
+that integrity counter. Reserved bits are checked only after AEAD succeeds, as
+required by RFC 9000 section 17.3.1: an authenticated violation installs and
+surfaces a `PROTOCOL_VIOLATION` close, whereas random ciphertext cannot forge
+one. Likewise, once retained previous-generation keys are discarded, an
+apparent old Key Phase that cannot authenticate is treated as ordinary invalid
+ciphertext rather than an observable `KEY_UPDATE_ERROR` oracle. Focused codec,
+connection, and dispatcher regressions cover all three boundaries plus delivery
+of a valid packet after a discarded malformed packet.
 Closing connections now respond to current-path datagrams through a dedicated
 timer rather than parsing application frames or retransmitting immediately.
 The first response requires one packet, subsequent thresholds double to 2, 4,
