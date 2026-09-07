@@ -2158,6 +2158,225 @@ test "QUIC 1-RTT connection accounts only new overlapping stream bytes" {
     try std.testing.expectEqualStrings("stream data", server.close_info.?.reason_phrase);
 }
 
+test "QUIC 1-RTT connection charges sparse stream gaps to MAX_DATA" {
+    const allocator = std.testing.allocator;
+
+    var threaded = std.Io.Threaded.init(allocator, .{});
+    defer threaded.deinit();
+    const io = threaded.io();
+
+    var server_endpoint = try quic.runtime.Endpoint.bind(allocator, io, .{ .ip4 = .loopback(0) }, .{ .max_datagram_size = 4096 });
+    defer server_endpoint.deinit();
+    var client_endpoint = try quic.runtime.Endpoint.bind(allocator, io, .{ .ip4 = .loopback(0) }, .{ .max_datagram_size = 4096 });
+    defer client_endpoint.deinit();
+
+    const client_cid = [_]u8{ 0x21, 0x22, 0x23, 0x24 };
+    const server_cid = [_]u8{ 0x25, 0x26, 0x27, 0x28 };
+    const keys = quic.protection.deriveAes128Keys([_]u8{0x78} ** quic.protection.secret_len);
+
+    var server = try one_rtt.Connection.init(&server_endpoint, .{
+        .peer = client_endpoint.address(),
+        .receive_keys = keys,
+        .send_keys = keys,
+        .local_connection_id = &server_cid,
+        .peer_connection_id = &client_cid,
+        .local_endpoint = .server,
+        .initial_receive_max_data = 8,
+        .initial_receive_max_stream_data = 16,
+    });
+    defer server.deinit();
+
+    try one_rtt.sendFrames(&client_endpoint, server_endpoint.address(), keys, .{
+        .destination_connection_id = &server_cid,
+        .packet_number = 0,
+        .frames = &[_]quic.Frame{.{ .stream = .{
+            .stream_id = 0,
+            .offset = 7,
+            .data = "h",
+            .fin = false,
+        } }},
+    });
+    var sparse = try server.receivePacket();
+    defer sparse.deinit(allocator);
+    try std.testing.expectEqual(@as(u64, 8), server.recv_data_total);
+    try std.testing.expectEqual(@as(u64, 8), server.stream_recv_flows.items[0].highest_received_end);
+    try std.testing.expectEqual(@as(u64, 1), server.stream_recv_flows.items[0].recv_state.receivedByteCount());
+
+    // Filling the already charged gap must not consume connection credit a
+    // second time.
+    try one_rtt.sendFrames(&client_endpoint, server_endpoint.address(), keys, .{
+        .destination_connection_id = &server_cid,
+        .packet_number = 1,
+        .frames = &[_]quic.Frame{.{ .stream = .{
+            .stream_id = 0,
+            .offset = 0,
+            .data = "abcdefg",
+            .fin = false,
+        } }},
+    });
+    var gap_fill = try server.receivePacket();
+    defer gap_fill.deinit(allocator);
+    try std.testing.expectEqual(@as(u64, 8), server.recv_data_total);
+    try std.testing.expectEqual(@as(u64, 8), server.stream_recv_flows.items[0].recv_state.receivedByteCount());
+
+    // A new byte on another stream exceeds the exhausted MAX_DATA limit.
+    try one_rtt.sendFrames(&client_endpoint, server_endpoint.address(), keys, .{
+        .destination_connection_id = &server_cid,
+        .packet_number = 2,
+        .frames = &[_]quic.Frame{.{ .stream = .{
+            .stream_id = 4,
+            .data = "x",
+            .fin = false,
+        } }},
+    });
+    try std.testing.expectError(error.FlowControlViolation, server.receivePacket());
+    try std.testing.expectEqual(@as(u64, 8), server.recv_data_total);
+    try std.testing.expectEqual(@as(usize, 1), server.stream_recv_flows.items.len);
+    try std.testing.expect(server.closing());
+    try std.testing.expectEqual(
+        @intFromEnum(quic.TransportErrorCode.flow_control_error),
+        server.close_info.?.error_code,
+    );
+}
+
+test "QUIC 1-RTT sparse MAX_DATA preflight is packet transactional" {
+    const allocator = std.testing.allocator;
+
+    var threaded = std.Io.Threaded.init(allocator, .{});
+    defer threaded.deinit();
+    const io = threaded.io();
+
+    var server_endpoint = try quic.runtime.Endpoint.bind(allocator, io, .{ .ip4 = .loopback(0) }, .{ .max_datagram_size = 4096 });
+    defer server_endpoint.deinit();
+    var client_endpoint = try quic.runtime.Endpoint.bind(allocator, io, .{ .ip4 = .loopback(0) }, .{ .max_datagram_size = 4096 });
+    defer client_endpoint.deinit();
+
+    const client_cid = [_]u8{ 0x29, 0x2a, 0x2b, 0x2c };
+    const server_cid = [_]u8{ 0x2d, 0x2e, 0x2f, 0x30 };
+    const keys = quic.protection.deriveAes128Keys([_]u8{0x79} ** quic.protection.secret_len);
+
+    var server = try one_rtt.Connection.init(&server_endpoint, .{
+        .peer = client_endpoint.address(),
+        .receive_keys = keys,
+        .send_keys = keys,
+        .local_connection_id = &server_cid,
+        .peer_connection_id = &client_cid,
+        .local_endpoint = .server,
+        .initial_receive_max_data = 9,
+        .initial_receive_max_stream_data = 16,
+    });
+    defer server.deinit();
+
+    // Stream 0 advances to offset 5 and then final size 7; stream 4 advances
+    // to offset 3. Their aggregate offset is 10 even though only two payload
+    // bytes are present. The complete packet must be rejected before mutation.
+    try one_rtt.sendFrames(&client_endpoint, server_endpoint.address(), keys, .{
+        .destination_connection_id = &server_cid,
+        .packet_number = 0,
+        .frames = &[_]quic.Frame{
+            .{ .stream = .{
+                .stream_id = 0,
+                .offset = 4,
+                .data = "a",
+                .fin = false,
+            } },
+            .{ .reset_stream = .{
+                .stream_id = 0,
+                .application_error_code = 91,
+                .final_size = 7,
+            } },
+            .{ .stream = .{
+                .stream_id = 4,
+                .offset = 2,
+                .data = "b",
+                .fin = false,
+            } },
+        },
+    });
+    try std.testing.expectError(error.FlowControlViolation, server.receivePacket());
+    try std.testing.expectEqual(@as(u64, 0), server.recv_data_total);
+    try std.testing.expectEqual(@as(usize, 0), server.stream_recv_flows.items.len);
+    try std.testing.expect(server.closing());
+    try std.testing.expectEqual(
+        @intFromEnum(quic.TransportErrorCode.flow_control_error),
+        server.close_info.?.error_code,
+    );
+}
+
+test "QUIC 1-RTT RESET_STREAM charges only remaining highest offset" {
+    const allocator = std.testing.allocator;
+
+    var threaded = std.Io.Threaded.init(allocator, .{});
+    defer threaded.deinit();
+    const io = threaded.io();
+
+    var server_endpoint = try quic.runtime.Endpoint.bind(allocator, io, .{ .ip4 = .loopback(0) }, .{ .max_datagram_size = 4096 });
+    defer server_endpoint.deinit();
+    var client_endpoint = try quic.runtime.Endpoint.bind(allocator, io, .{ .ip4 = .loopback(0) }, .{ .max_datagram_size = 4096 });
+    defer client_endpoint.deinit();
+
+    const client_cid = [_]u8{ 0x31, 0x32, 0x33, 0x34 };
+    const server_cid = [_]u8{ 0x35, 0x36, 0x37, 0x38 };
+    const keys = quic.protection.deriveAes128Keys([_]u8{0x7a} ** quic.protection.secret_len);
+
+    var server = try one_rtt.Connection.init(&server_endpoint, .{
+        .peer = client_endpoint.address(),
+        .receive_keys = keys,
+        .send_keys = keys,
+        .local_connection_id = &server_cid,
+        .peer_connection_id = &client_cid,
+        .local_endpoint = .server,
+        .initial_receive_max_data = 8,
+        .initial_receive_max_stream_data = 16,
+    });
+    defer server.deinit();
+
+    try one_rtt.sendFrames(&client_endpoint, server_endpoint.address(), keys, .{
+        .destination_connection_id = &server_cid,
+        .packet_number = 0,
+        .frames = &[_]quic.Frame{.{ .stream = .{
+            .stream_id = 0,
+            .offset = 5,
+            .data = "f",
+            .fin = false,
+        } }},
+    });
+    var sparse = try server.receivePacket();
+    defer sparse.deinit(allocator);
+    try std.testing.expectEqual(@as(u64, 6), server.recv_data_total);
+
+    try one_rtt.sendFrames(&client_endpoint, server_endpoint.address(), keys, .{
+        .destination_connection_id = &server_cid,
+        .packet_number = 1,
+        .frames = &[_]quic.Frame{.{ .reset_stream = .{
+            .stream_id = 0,
+            .application_error_code = 92,
+            .final_size = 8,
+        } }},
+    });
+    var reset = try server.receivePacket();
+    defer reset.deinit(allocator);
+    try std.testing.expectEqual(@as(u64, 8), server.recv_data_total);
+    try std.testing.expectEqual(@as(u64, 8), server.stream_recv_flows.items[0].highest_received_end);
+    try std.testing.expectEqual(@as(u64, 8), server.streamResetReceived(0).?.final_size);
+
+    // Reordered data below the reset final size was already charged and must
+    // not consume more MAX_DATA.
+    try one_rtt.sendFrames(&client_endpoint, server_endpoint.address(), keys, .{
+        .destination_connection_id = &server_cid,
+        .packet_number = 2,
+        .frames = &[_]quic.Frame{.{ .stream = .{
+            .stream_id = 0,
+            .offset = 0,
+            .data = "abcde",
+            .fin = false,
+        } }},
+    });
+    var reordered = try server.receivePacket();
+    defer reordered.deinit(allocator);
+    try std.testing.expectEqual(@as(u64, 8), server.recv_data_total);
+}
+
 test "QUIC 1-RTT connection drops duplicate packet numbers before frame effects" {
     const allocator = std.testing.allocator;
 

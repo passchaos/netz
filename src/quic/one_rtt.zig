@@ -326,9 +326,6 @@ const RecvStreamPreflightEntry = struct {
     recv_state: quic.stream_state.RecvState.Preflight,
     highest_received_end: u64 = 0,
     final_size: ?u64 = null,
-    /// RESET_STREAM accounts its complete final size at most once, even when
-    /// a duplicate reset or a reordered STREAM shares the same packet.
-    reset_received: bool = false,
 
     fn deinit(self: *RecvStreamPreflightEntry) void {
         self.recv_state.deinit();
@@ -9146,19 +9143,23 @@ pub const Connection = struct {
                 .stream => |stream| {
                     if (self.isClosedStream(stream.stream_id)) continue;
                     var recv_stream = try self.recvStreamFlow(stream.stream_id);
-                    const reset_received = recv_stream.reset != null;
                     const data_len = std.math.cast(u64, stream.data.len) orelse return error.InvalidFrameLength;
                     const stream_end = std.math.add(u64, stream.offset, data_len) catch return error.InvalidFrameLength;
+                    const old_highest_received_end = recv_stream.highest_received_end;
                     try self.applyFinalSize(recv_stream, stream_end, stream.fin);
                     try recv_stream.flow.receive(stream_end);
-                    const newly_received = try recv_stream.recv_state.insertTracked(stream);
+                    _ = try recv_stream.recv_state.insertTracked(stream);
 
-                    // QUIC flow control is byte-range based, not highest-offset
-                    // based.  Retransmissions or partially overlapping frames
-                    // must not consume connection credit again, while conflicting
-                    // overlaps are rejected by RecvState before this counter moves.
-                    if (!reset_received and newly_received != 0) {
-                        const next_total = std.math.add(u64, self.recv_data_total, newly_received) catch return error.FlowControlViolation;
+                    // RFC 9000 connection flow control counts the sum of each
+                    // stream's largest received offset. A sparse frame therefore
+                    // consumes its gap, while retransmissions and lower-offset
+                    // gap fills consume no additional connection credit.
+                    const offset_increment = receiveOffsetIncrement(
+                        old_highest_received_end,
+                        stream_end,
+                    );
+                    if (offset_increment != 0) {
+                        const next_total = std.math.add(u64, self.recv_data_total, offset_increment) catch return error.FlowControlViolation;
                         try self.recv_flow.receive(next_total);
                         self.recv_data_total = next_total;
                     }
@@ -9354,7 +9355,6 @@ pub const Connection = struct {
             ),
             .highest_received_end = existing.highest_received_end,
             .final_size = existing.final_size,
-            .reset_received = existing.reset != null,
         } else blk: {
             try self.validatePeerStreamCount(stream.stream_id);
             const flow_limit = self.initialReceiveStreamDataLimit(
@@ -9537,14 +9537,14 @@ pub const Connection = struct {
 
         try preflightApplyFinalSize(recv_stream, stream_end, stream.fin);
         if (stream_end > recv_stream.flow_limit) return error.FlowControlViolation;
-        const newly_received = try recv_stream.recv_state.insertTracked(stream);
-        if (!recv_stream.reset_received) {
-            try self.preflightRecvCredit(
-                recv_stream,
-                newly_received,
-                recv_data_total,
-            );
-        }
+        _ = try recv_stream.recv_state.insertTracked(stream);
+        try self.preflightRecvCredit(
+            receiveOffsetIncrement(
+                recv_stream.highest_received_end,
+                stream_end,
+            ),
+            recv_data_total,
+        );
         recv_stream.highest_received_end = @max(recv_stream.highest_received_end, stream_end);
     }
 
@@ -9567,14 +9567,13 @@ pub const Connection = struct {
         if (reset.final_size > recv_stream.flow_limit) return error.FlowControlViolation;
         const received = recv_stream.recv_state.receivedByteCount();
         if (reset.final_size < received) return error.FinalSizeMismatch;
-        if (!recv_stream.reset_received) {
-            try self.preflightRecvCredit(
-                recv_stream,
-                reset.final_size - received,
-                recv_data_total,
-            );
-            recv_stream.reset_received = true;
-        }
+        try self.preflightRecvCredit(
+            receiveOffsetIncrement(
+                recv_stream.highest_received_end,
+                reset.final_size,
+            ),
+            recv_data_total,
+        );
         recv_stream.highest_received_end = @max(recv_stream.highest_received_end, reset.final_size);
     }
 
@@ -9602,7 +9601,6 @@ pub const Connection = struct {
                 .recv_state = recv_state,
                 .highest_received_end = existing.highest_received_end,
                 .final_size = existing.final_size,
-                .reset_received = existing.reset != null,
             });
             appended = true;
         } else {
@@ -9629,12 +9627,11 @@ pub const Connection = struct {
 
     fn preflightRecvCredit(
         self: Connection,
-        _: *RecvStreamPreflightEntry,
-        newly_received: u64,
+        offset_increment: u64,
         recv_data_total: *u64,
     ) Error!void {
-        if (newly_received == 0) return;
-        const next_total = std.math.add(u64, recv_data_total.*, newly_received) catch return error.FlowControlViolation;
+        if (offset_increment == 0) return;
+        const next_total = std.math.add(u64, recv_data_total.*, offset_increment) catch return error.FlowControlViolation;
         if (next_total > self.recv_flow.limit) return error.FlowControlViolation;
         recv_data_total.* = next_total;
     }
@@ -9821,17 +9818,18 @@ pub const Connection = struct {
     fn receiveResetStream(self: *Connection, reset: quic.ResetStreamFrame) Error!void {
         var recv_stream = try self.recvStreamFlow(reset.stream_id);
         const first_reset = recv_stream.reset == null;
+        const old_highest_received_end = recv_stream.highest_received_end;
         try self.applyFinalSize(recv_stream, reset.final_size, true);
         try recv_stream.flow.receive(reset.final_size);
 
         const received = recv_stream.recv_state.receivedByteCount();
         if (reset.final_size < received) return error.FinalSizeMismatch;
-        const new_stream_credit = if (first_reset)
-            reset.final_size - received
-        else
-            0;
-        if (new_stream_credit != 0) {
-            const next_total = std.math.add(u64, self.recv_data_total, new_stream_credit) catch return error.FlowControlViolation;
+        const offset_increment = receiveOffsetIncrement(
+            old_highest_received_end,
+            reset.final_size,
+        );
+        if (offset_increment != 0) {
+            const next_total = std.math.add(u64, self.recv_data_total, offset_increment) catch return error.FlowControlViolation;
             try self.recv_flow.receive(next_total);
             self.recv_data_total = next_total;
         }
@@ -9873,6 +9871,10 @@ pub const Connection = struct {
             return;
         }
         if (final) recv_stream.final_size = final_size;
+    }
+
+    fn receiveOffsetIncrement(old_highest_received_end: u64, end_offset: u64) u64 {
+        return end_offset -| old_highest_received_end;
     }
 
     fn sendResetStream(self: *Connection, stream_id: u64, application_error_code: u64, final_size: u64) Error!void {
