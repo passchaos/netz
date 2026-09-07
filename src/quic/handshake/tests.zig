@@ -2482,6 +2482,16 @@ test "QUIC automatic server Retry discards queued pre-Retry 0-RTT" {
         quic.zero_rtt.handshake.Status.rejected,
         shared.status,
     );
+    try std.testing.expect(established.connection.next_packet_number >= 1);
+    try std.testing.expectEqual(
+        @as(usize, 0),
+        established.connection.stats().sent_packet_stats.tracked_packets,
+    );
+    try std.testing.expectEqual(
+        @as(usize, 0),
+        established.connection.pendingRecoveryCount(),
+    );
+    try std.testing.expect(established.connection.sendStreamStats(0) == null);
 }
 
 test "QUIC integrated client ignores an invalid Retry before a valid Retry" {

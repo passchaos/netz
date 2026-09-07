@@ -7490,7 +7490,28 @@ pub const Connection = struct {
         packet_number: u64,
         frames: []const quic.Frame,
     ) Error!void {
-        if (packet_number != self.next_packet_number) {
+        return self.importSentEarlyDataCopies(packet_number, 1, frames);
+    }
+
+    /// Import every successfully transmitted copy of one 0-RTT flight. QUIC
+    /// shares a packet-number space between 0-RTT and 1-RTT, so all copies
+    /// remain ACK-valid and the first 1-RTT packet starts after the last one.
+    /// Stream offsets and flow-control bytes are committed only once.
+    pub fn importSentEarlyDataCopies(
+        self: *Connection,
+        first_packet_number: u64,
+        packet_count: u64,
+        frames: []const quic.Frame,
+    ) Error!void {
+        if (packet_count == 0) return error.InvalidPacketNumber;
+        const last_packet_number = std.math.add(
+            u64,
+            first_packet_number,
+            packet_count - 1,
+        ) catch return error.InvalidPacketNumber;
+        if (last_packet_number > quic.protection.max_packet_number or
+            first_packet_number != self.next_packet_number)
+        {
             return error.InvalidPacketNumber;
         }
         var payload: std.ArrayList(u8) = .empty;
@@ -7559,51 +7580,121 @@ pub const Connection = struct {
         const is_in_flight = analyzed.in_flight;
         if (recovery_payload.items.len != 0) {
             _ = try self.recovery.trackSent(
-                packet_number,
+                first_packet_number,
                 recovery_payload.items,
             );
         }
-        errdefer {
-            if (recovery_payload.items.len != 0) {
-                _ = self.recovery.forgetPacketNumber(packet_number);
+        var tracked_recovery_packets: u64 = @intFromBool(
+            recovery_payload.items.len != 0,
+        );
+        errdefer while (tracked_recovery_packets != 0) {
+            tracked_recovery_packets -= 1;
+            _ = self.recovery.forgetPacketNumber(
+                first_packet_number + tracked_recovery_packets,
+            );
+        };
+        if (recovery_payload.items.len != 0) {
+            const candidate = self.recovery.packetNumberCandidate(
+                first_packet_number,
+            ) orelse unreachable;
+            var copy_index: u64 = 1;
+            while (copy_index < packet_count) : (copy_index += 1) {
+                try self.recovery.recordRetransmission(
+                    candidate.group_index,
+                    first_packet_number + copy_index,
+                );
+                tracked_recovery_packets += 1;
             }
         }
-        const packet_number_len = quic.protection.packetNumberLenForPayload(
-            packet_number,
-            self.sent.largestAcknowledged(),
-            payload.items.len,
-        );
-        const packet_len = try quic.protection.shortPacketLen(.{
-            .destination_connection_id = self.config.peer_connection_id,
-            .packet_number = packet_number,
-            .packet_number_len = packet_number_len,
-            .fixed_bit = true,
-            .spin_bit = false,
-            .key_phase = self.send_key_phase.currentKeyPhase(),
-            .payload = payload.items,
-        });
-        try self.sent.sentInFlightAtWithDatagramSizeAndPathEpoch(
-            packet_number,
-            is_ack_eliciting,
-            is_in_flight,
-            payload.items.len,
-            packet_len,
-            .not_ect,
-            null,
-            self.pmtu_path_epoch,
-        );
-        errdefer _ = self.sent.forget(packet_number);
-        if (is_in_flight) {
-            try self.congestion.reserve(payload.items.len);
+        var tracked_sent_packets: u64 = 0;
+        errdefer while (tracked_sent_packets != 0) {
+            tracked_sent_packets -= 1;
+            _ = self.sent.forget(
+                first_packet_number + tracked_sent_packets,
+            );
+        };
+        // Exact 0-RTT transmission times are not retained by the synchronous
+        // handshake. Anchor every imported copy at handoff time: this is
+        // conservative for loss detection and, unlike a null timestamp, keeps
+        // unacknowledged sibling copies on a finite recovery timer after any
+        // one copy retires the shared payload group.
+        const imported_sent_time_ns = self.monotonicNowNs();
+        var packet_index: u64 = 0;
+        while (packet_index < packet_count) : (packet_index += 1) {
+            const packet_number = first_packet_number + packet_index;
+            const packet_number_len = quic.protection.packetNumberLenForPayload(
+                packet_number,
+                self.sent.largestAcknowledged(),
+                payload.items.len,
+            );
+            const packet_len = try quic.protection.shortPacketLen(.{
+                .destination_connection_id = self.config.peer_connection_id,
+                .packet_number = packet_number,
+                .packet_number_len = packet_number_len,
+                .fixed_bit = true,
+                .spin_bit = false,
+                .key_phase = self.send_key_phase.currentKeyPhase(),
+                .payload = payload.items,
+            });
+            try self.sent.sentInFlightAtWithDatagramSizeAndPathEpoch(
+                packet_number,
+                is_ack_eliciting,
+                is_in_flight,
+                payload.items.len,
+                packet_len,
+                .not_ect,
+                imported_sent_time_ns,
+                self.pmtu_path_epoch,
+            );
+            tracked_sent_packets += 1;
         }
-        errdefer {
-            if (is_in_flight) self.congestion.discard(payload.items.len);
+        if (is_in_flight) {
+            const packet_count_usize = std.math.cast(
+                usize,
+                packet_count,
+            ) orelse return error.InvalidPacketNumber;
+            const in_flight_bytes = std.math.mul(
+                usize,
+                payload.items.len,
+                packet_count_usize,
+            ) catch return error.CongestionLimited;
+            // These datagrams have already reached the socket during the
+            // handshake. Account the complete flight even when PTO copies
+            // exceed the newly initialized congestion window.
+            self.congestion.onPtoProbeSent(in_flight_bytes);
+            errdefer self.congestion.discard(in_flight_bytes);
         }
 
         self.noteSentStreams(frames);
-        self.next_packet_number = packet_number + 1;
+        self.next_packet_number = last_packet_number + 1;
         connection_reserved = false;
         reserved_streams.clearRetainingCapacity();
+        tracked_recovery_packets = 0;
+        tracked_sent_packets = 0;
+    }
+
+    /// Advance the shared application-data packet-number space past 0-RTT
+    /// copies that reached the socket but were rejected by the server. Their
+    /// stream and recovery state is deliberately not imported.
+    pub fn discardSentEarlyDataCopies(
+        self: *Connection,
+        first_packet_number: u64,
+        packet_count: u64,
+    ) Error!void {
+        if (packet_count == 0 or
+            first_packet_number != self.next_packet_number)
+        {
+            return error.InvalidPacketNumber;
+        }
+        const last_packet_number = std.math.add(
+            u64,
+            first_packet_number,
+            packet_count - 1,
+        ) catch return error.InvalidPacketNumber;
+        if (last_packet_number > quic.protection.max_packet_number) {
+            return error.InvalidPacketNumber;
+        }
+        self.next_packet_number = last_packet_number + 1;
     }
 
     /// Receive and process every 1-RTT packet represented by one kernel

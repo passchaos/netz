@@ -388,6 +388,134 @@ test "QUIC imported 0-RTT DATAGRAM retains only a PING probe" {
     );
 }
 
+test "QUIC imported 0-RTT copies preserve application packet numbers" {
+    const allocator = std.testing.allocator;
+    var threaded = std.Io.Threaded.init(allocator, .{});
+    defer threaded.deinit();
+    const io = threaded.io();
+    var endpoint = try quic.runtime.Endpoint.bind(
+        allocator,
+        io,
+        .{ .ip4 = .loopback(0) },
+        .{ .max_datagram_size = 4096 },
+    );
+    defer endpoint.deinit();
+    const keys = quic.protection.deriveAes128Keys(
+        [_]u8{0xcd} ** quic.protection.secret_len,
+    );
+    var connection = try one_rtt.Connection.init(&endpoint, .{
+        .peer = endpoint.address(),
+        .receive_keys = keys,
+        .send_keys = keys,
+        .local_connection_id = "early-local",
+        .peer_connection_id = "early-peer",
+        .enable_pacing = false,
+    });
+    defer connection.deinit();
+
+    try connection.importSentEarlyDataCopies(0, 3, &.{.{ .stream = .{
+        .stream_id = 0,
+        .data = "early",
+        .fin = false,
+    } }});
+    try std.testing.expectEqual(@as(u64, 3), connection.next_packet_number);
+    try std.testing.expectEqual(@as(u64, 5), connection.send_flow.used);
+    try std.testing.expectEqual(
+        @as(u64, 5),
+        connection.sendStreamStats(0).?.bytes_sent,
+    );
+    const stats = connection.stats();
+    try std.testing.expectEqual(
+        @as(usize, 3),
+        stats.sent_packet_stats.tracked_packets,
+    );
+    try std.testing.expectEqual(
+        @as(usize, 1),
+        stats.recovery_queue_stats.pending_groups,
+    );
+    try std.testing.expectEqual(
+        @as(usize, 3),
+        stats.recovery_queue_stats.packet_number_copies,
+    );
+    try std.testing.expectEqual(
+        @as(usize, 0),
+        stats.bytes_in_flight % 3,
+    );
+    const one_copy_bytes = stats.bytes_in_flight / 3;
+    for (0..3) |packet_number| {
+        try std.testing.expect(one_rtt.testing.recoveryPayloadForPacket(
+            &connection,
+            packet_number,
+        ) != null);
+    }
+    try one_rtt.testing.applyReceivedFrames(
+        &connection,
+        0,
+        &.{.{ .ack = .{
+            .largest_acknowledged = 2,
+            .ack_delay = 0,
+            .first_ack_range = 0,
+        } }},
+        @intCast(std.Io.Clock.awake.now(io).nanoseconds),
+        .not_ect,
+    );
+    try std.testing.expectEqual(
+        @as(usize, 0),
+        connection.pendingRecoveryCount(),
+    );
+    try std.testing.expectEqual(
+        one_copy_bytes * 2,
+        connection.stats().bytes_in_flight,
+    );
+    try std.testing.expect(connection.ptoDeadline() != null);
+
+    try connection.send(&.{.{ .ping = {} }});
+    try std.testing.expectEqual(@as(u64, 4), connection.next_packet_number);
+}
+
+test "QUIC rejected 0-RTT copies advance packet numbers without stream state" {
+    const allocator = std.testing.allocator;
+    var threaded = std.Io.Threaded.init(allocator, .{});
+    defer threaded.deinit();
+    const io = threaded.io();
+    var endpoint = try quic.runtime.Endpoint.bind(
+        allocator,
+        io,
+        .{ .ip4 = .loopback(0) },
+        .{ .max_datagram_size = 4096 },
+    );
+    defer endpoint.deinit();
+    const keys = quic.protection.deriveAes128Keys(
+        [_]u8{0xce} ** quic.protection.secret_len,
+    );
+    var connection = try one_rtt.Connection.init(&endpoint, .{
+        .peer = endpoint.address(),
+        .receive_keys = keys,
+        .send_keys = keys,
+        .local_connection_id = "early-local",
+        .peer_connection_id = "early-peer",
+        .enable_pacing = false,
+    });
+    defer connection.deinit();
+
+    try connection.discardSentEarlyDataCopies(0, 3);
+    try std.testing.expectEqual(@as(u64, 3), connection.next_packet_number);
+    try std.testing.expectEqual(@as(u64, 0), connection.send_flow.used);
+    try std.testing.expectEqual(@as(usize, 0), connection.pendingRecoveryCount());
+    try std.testing.expect(connection.sendStreamStats(0) == null);
+    try std.testing.expectError(
+        error.InvalidAckFrame,
+        connection.sent.validateAckCoversSentPackets(.{
+            .largest_acknowledged = 2,
+            .ack_delay = 0,
+            .first_ack_range = 0,
+        }),
+    );
+
+    try connection.send(&.{.{ .ping = {} }});
+    try std.testing.expectEqual(@as(u64, 4), connection.next_packet_number);
+}
+
 test "QUIC DATAGRAM recovery probes without retransmitting unreliable payload" {
     const allocator = std.testing.allocator;
     var threaded = std.Io.Threaded.init(allocator, .{});

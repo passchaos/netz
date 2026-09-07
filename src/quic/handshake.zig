@@ -1097,6 +1097,7 @@ const EarlyDataFlight = struct {
     initial_options: quic.initial_exchange.SendInitialFlightOptions,
     zero_rtt_keys: quic.protection.PacketProtectionKeys,
     zero_rtt_options: quic.zero_rtt.SendOptions,
+    transmitted_packet_count: u64 = 0,
 
     fn send(context: *anyopaque, retransmission: u8) anyerror!void {
         const self: *EarlyDataFlight = @ptrCast(@alignCast(context));
@@ -1124,6 +1125,11 @@ const EarlyDataFlight = struct {
             self.zero_rtt_keys,
             zero_rtt_options,
         );
+        self.transmitted_packet_count = std.math.add(
+            u64,
+            self.transmitted_packet_count,
+            1,
+        ) catch return error.InvalidPacketNumber;
     }
 };
 
@@ -1401,6 +1407,7 @@ fn connectAttempt(
     var active_initial_secrets = initial_secrets;
     var active_initial_packet_number = options.client_initial_packet_number;
     var send_early_data = options.early_data != null;
+    var sent_early_data_packet_count: u64 = 0;
     var server_datagram: quic.runtime.OwnedBytes = undefined;
 
     while (true) {
@@ -1468,6 +1475,8 @@ fn connectAttempt(
                     }
                     return err;
                 };
+            sent_early_data_packet_count =
+                send_context.transmitted_packet_count;
             if (early_data.lease.state == .active) {
                 early_data.cache.consumeEarlyData(
                     early_data.lease,
@@ -1992,10 +2001,16 @@ fn connectAttempt(
         );
     }
     if (options.early_data) |early_data| {
-        if (!retry_processed) {
-            try established.connection.importSentEarlyData(
+        if (early_data_status == .accepted) {
+            try established.connection.importSentEarlyDataCopies(
                 0,
+                sent_early_data_packet_count,
                 early_data.frames,
+            );
+        } else if (sent_early_data_packet_count != 0) {
+            try established.connection.discardSentEarlyDataCopies(
+                0,
+                sent_early_data_packet_count,
             );
         }
     }
