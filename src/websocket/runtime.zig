@@ -6547,6 +6547,14 @@ fn receiveMessageIntoConnection(
         {
             return error.PayloadTooLarge;
         }
+        // H1/H2 already validated these bytes while filling the transport
+        // buffer. This state owns the proof through fragmented completion.
+        if (connection.message_into.opcode == .text and
+            !connection.message_into.compressed)
+        {
+            connection.message_into.text_utf8 =
+                connection.incoming_text_utf8;
+        }
         if (!frame.header.fin) continue;
 
         const message_opcode = connection.message_into.opcode orelse
@@ -6561,7 +6569,7 @@ fn receiveMessageIntoConnection(
             )
         else
             out[0..connection.message_into.written];
-        if (message_opcode == .text and
+        if (connection.message_into.payloadNeedsFinalUtf8Validation() and
             !std.unicode.utf8ValidateSlice(payload))
         {
             return error.InvalidUtf8;

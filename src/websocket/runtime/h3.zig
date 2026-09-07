@@ -897,6 +897,10 @@ pub fn Connection(comptime role: common.Role) type {
                 if (next_written > self.limits.max_message_bytes) {
                     return error.PayloadTooLarge;
                 }
+                try self.message_into.validateFramePayload(
+                    frame.payload,
+                    frame.header.fin,
+                );
                 self.message_into.written = next_written;
                 if (!frame.header.fin) continue;
 
@@ -913,7 +917,7 @@ pub fn Connection(comptime role: common.Role) type {
                     )
                 else
                     out[0..self.message_into.written];
-                if (message_opcode == .text and
+                if (self.message_into.payloadNeedsFinalUtf8Validation() and
                     !std.unicode.utf8ValidateSlice(payload))
                 {
                     return error.InvalidUtf8;

@@ -168,6 +168,7 @@ pub const Message = struct {
 pub const MessageIntoReceiveState = struct {
     opcode: ?websocket.Opcode = null,
     compressed: bool = false,
+    text_utf8: websocket.Utf8Validator = .{},
     written: usize = 0,
     output_address: usize = 0,
     output_len: usize = 0,
@@ -204,6 +205,22 @@ pub const MessageIntoReceiveState = struct {
 
     pub fn reset(self: *MessageIntoReceiveState) void {
         self.* = .{};
+    }
+
+    pub fn validateFramePayload(
+        self: *MessageIntoReceiveState,
+        payload: []const u8,
+        fin: bool,
+    ) websocket.Error!void {
+        if (self.opcode != .text or self.compressed) return;
+        try self.text_utf8.feed(payload);
+        if (fin) try self.text_utf8.finish();
+    }
+
+    pub fn payloadNeedsFinalUtf8Validation(
+        self: MessageIntoReceiveState,
+    ) bool {
+        return self.opcode == .text and self.compressed;
     }
 };
 

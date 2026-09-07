@@ -1,6 +1,7 @@
 const std = @import("std");
 const websocket = @import("../../../mod.zig");
 const state = @import("../state.zig");
+const common = @import("../../common.zig");
 
 test "WebSocket message finalization owns failures and provenance" {
     const allocator = std.testing.allocator;
@@ -86,4 +87,27 @@ test "WebSocket send state permits only Close after peer Close" {
     try std.testing.expect(!state.canSendOpcode(.ping, false, true));
     try std.testing.expect(state.canSendOpcode(.close, false, true));
     try std.testing.expect(!state.canSendOpcode(.close, true, true));
+}
+
+test "WebSocket caller-buffer text validation spans fragments" {
+    var receive: common.MessageIntoReceiveState = .{};
+    var output: [32]u8 = undefined;
+    receive.begin(&output, .text, false);
+    try receive.validateFramePayload("ascii \xe2", false);
+    try receive.validateFramePayload("\x98", false);
+    try receive.validateFramePayload("\x83 tail", true);
+    try std.testing.expect(!receive.payloadNeedsFinalUtf8Validation());
+
+    receive.reset();
+    receive.begin(&output, .text, false);
+    try receive.validateFramePayload("ascii \xe2", false);
+    try std.testing.expectError(
+        error.InvalidUtf8,
+        receive.validateFramePayload("bad", true),
+    );
+
+    receive.reset();
+    receive.begin(&output, .text, true);
+    try receive.validateFramePayload("compressed wire bytes \xff", true);
+    try std.testing.expect(receive.payloadNeedsFinalUtf8Validation());
 }

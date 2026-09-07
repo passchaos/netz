@@ -253,6 +253,12 @@ scan, and finalization trusts only the assembler's internal proof for
 uncompressed text. Compressed text and externally constructed messages retain
 the final validation pass. Thus ordinary complete text is validated once while
 fragmented text still rejects a malformed sequence at the decisive byte.
+Caller-buffer H1/RFC 8441 receives retain their existing transport-read
+fail-fast validator but no longer rescan the complete uncompressed message;
+the shared resumable state carries the validation proof across continuation
+frames and timeout retries. RFC 9220 now advances that same validator after
+each completed WebSocket fragment instead of waiting for the complete message.
+Compressed caller-buffer text remains validated after inflation.
 
 Netz's actual unmasked TCP server path prepares only the validated stack header
 and uses one vectored network write for header + borrowed payload. Masked
