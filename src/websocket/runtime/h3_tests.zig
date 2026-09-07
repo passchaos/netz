@@ -1739,6 +1739,10 @@ test "WebSocket over HTTP3 extended CONNECT exchanges frames" {
     const compressed_parts = compressed_first ++ compressed_second;
     const concurrent_a = "concurrent-a-" ** 32;
     const concurrent_b = "concurrent-b-" ** 32;
+    const fallback_fragments = [_][]const u8{
+        "0", "1", "2", "3", "4", "5", "6", "7", "8",
+        "9", "a", "b", "c", "d", "e", "f", "g",
+    };
     const limits: http3.runtime.Limits = .{ .quic = .{
         .max_datagram_size = 4096,
         .max_frames_per_datagram = 8,
@@ -1844,6 +1848,15 @@ test "WebSocket over HTTP3 extended CONNECT exchanges frames" {
             );
             try std.testing.expectEqual(websocket.Opcode.binary, in_place.opcode);
             try std.testing.expectEqualStrings("mutable-h3", in_place.payload);
+            const fallback = try connection.receiveMessageIntoWithTimeout(
+                &receive_storage,
+                .fromSeconds(5),
+            );
+            try std.testing.expectEqual(websocket.Opcode.binary, fallback.opcode);
+            try std.testing.expectEqualStrings(
+                "0123456789abcdefg",
+                fallback.payload,
+            );
             try connection.sendText("in-place-received");
 
             for (0..2) |_| {
@@ -2068,6 +2081,7 @@ test "WebSocket over HTTP3 extended CONNECT exchanges frames" {
         &original_payload,
         &mutable_payload,
     ));
+    try client.sendFragmented(.binary, &fallback_fragments);
     client.permessage_deflate = true;
     var in_place_ack = try client.receiveMessageWithTimeout(.fromSeconds(5));
     defer in_place_ack.deinit(allocator);

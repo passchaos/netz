@@ -222,10 +222,13 @@ not presented as an end-to-end network throughput ratio.
 The dedicated RFC 9220 benchmark uses a real QUIC/TLS connection with a
 4096-byte datagram limit and 3500-byte paced DATA chunks. Three CPU-0 runs of
 the 4 KiB caller-buffer echo measured 54.730-56.287 us/roundtrip
-(138.79-142.74 logical MiB/s). The same payload split into 16 WebSocket frames
-measured 355.548-355.816 us/roundtrip (21.95-21.97 MiB/s), identifying
-per-fragment H3/QUIC send submission as the next dominant cost rather than the
-receive copy eliminated below.
+(138.79-142.74 logical MiB/s). Bounded messages of up to 16 fragments now
+encode all RFC 6455 frames into one 16 KiB stack buffer and submit one paced
+HTTP/3 DATA sequence; each client fragment still receives an independent random
+mask key. Three CPU-0 runs of the same payload split into 16 WebSocket frames
+fell from 355.548-355.816 us/roundtrip to 52.230-54.194 us/roundtrip
+(144.16-150.39 MiB/s), a roughly 6.6-6.8x latency reduction. Larger fragment
+counts or wire payloads retain the bounded streaming fallback.
 The RFC 9220 adapter also reserves the bounded receive-window tail before an
 HTTP/3 DATA read and lets the stream reader fill it directly. This removes the
 former 16 KiB stack staging buffer and its `scratch -> inbuf` copy while keeping

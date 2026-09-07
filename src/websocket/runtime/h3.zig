@@ -17,6 +17,8 @@ const deadline_policy = @import("../../internal/deadline.zig");
 const http3 = @import("../../http3/mod.zig");
 const rejection_drain_timeout: std.Io.Duration = .fromSeconds(5);
 const max_payload_read_chunk: usize = 16 * 1024;
+const fragmented_write_scratch_len: usize = 16 * 1024;
+const max_batched_fragments: usize = 16;
 
 const IncomingDataKind = enum {
     none,
@@ -481,6 +483,11 @@ pub fn Connection(comptime role: common.Role) type {
                     return;
                 }
             }
+            if (try self.writeFragmentBatch(
+                opcode,
+                fragments,
+                false,
+            )) return;
             for (fragments, 0..) |fragment, index| {
                 try self.writeFrame(
                     if (index == 0) opcode else .continuation,
@@ -1756,6 +1763,11 @@ pub fn Connection(comptime role: common.Role) type {
             payload: []const u8,
             frame_count: usize,
         ) Error!void {
+            if (try self.writeCompressedFragmentBatch(
+                opcode,
+                payload,
+                frame_count,
+            )) return;
             for (0..frame_count) |index| {
                 const range = compressedFragmentRange(
                     payload.len,
@@ -1770,6 +1782,77 @@ pub fn Connection(comptime role: common.Role) type {
                     index == 0,
                 );
             }
+        }
+
+        fn writeFragmentBatch(
+            self: *Self,
+            opcode: websocket.Opcode,
+            fragments: []const []const u8,
+            compressed: bool,
+        ) Error!bool {
+            if (fragments.len > max_batched_fragments) return false;
+            var wire_len: usize = 0;
+            for (fragments) |fragment| {
+                wire_len = std.math.add(
+                    usize,
+                    wire_len,
+                    websocket.max_frame_header_len,
+                ) catch return false;
+                wire_len = std.math.add(
+                    usize,
+                    wire_len,
+                    fragment.len,
+                ) catch return false;
+            }
+            if (wire_len > fragmented_write_scratch_len) return false;
+
+            var encoded: [fragmented_write_scratch_len]u8 align(64) =
+                undefined;
+            var offset: usize = 0;
+            for (fragments, 0..) |fragment, index| {
+                var mask_key: ?[4]u8 = null;
+                if (role == .client) {
+                    var key: [4]u8 = undefined;
+                    try std.Io.randomSecure(self.io(), &key);
+                    mask_key = key;
+                }
+                const frame = try websocket.writeFrameInto(
+                    encoded[offset..],
+                    if (index == 0) opcode else .continuation,
+                    fragment,
+                    .{
+                        .fin = index + 1 == fragments.len,
+                        .mask_key = mask_key,
+                        .rsv1 = compressed and index == 0,
+                    },
+                );
+                offset += frame.len;
+            }
+            try self.writeBytes(encoded[0..offset], false);
+            return true;
+        }
+
+        fn writeCompressedFragmentBatch(
+            self: *Self,
+            opcode: websocket.Opcode,
+            payload: []const u8,
+            frame_count: usize,
+        ) Error!bool {
+            if (frame_count > max_batched_fragments) return false;
+            var fragments: [max_batched_fragments][]const u8 = undefined;
+            for (fragments[0..frame_count], 0..) |*fragment, index| {
+                const range = compressedFragmentRange(
+                    payload.len,
+                    frame_count,
+                    index,
+                );
+                fragment.* = payload[range.start..range.end];
+            }
+            return self.writeFragmentBatch(
+                opcode,
+                fragments[0..frame_count],
+                true,
+            );
         }
 
         fn writeBytes(
