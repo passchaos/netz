@@ -13,6 +13,7 @@ Run:
 zig build run-webtransport-handshake-stream -Doptimize=ReleaseFast
 zig build bench-webtransport-datagram -Doptimize=ReleaseFast
 zig build bench-webtransport-stream -Doptimize=ReleaseFast
+zig build bench-webtransport-stream -Doptimize=ReleaseFast -- --send-all
 zig build interop-webtransport-stream-churn -Doptimize=ReleaseFast
 zig build interop-webtransport-wtransport -Doptimize=ReleaseFast
 zig build interop-webtransport-chrome -Doptimize=ReleaseFast
@@ -365,6 +366,13 @@ An initial `writeStream` may commit only the association prefix and return zero
 application bytes; retrying the unchanged payload after dispatcher progress is
 therefore unambiguous. Endpoint `sendStream` is atomic and single-packet, while
 larger sends use repeated `writeStream` calls followed by `finishStream`.
+The blocking handshake-session `sendStream` write-all helper instead submits up
+to 64 consecutive packets for the same stream per socket batch. It snapshots
+aggregate connection, stream, and congestion credit rather than the single-
+datagram `SendCredit.available()` value, and advances the registry only by the
+socket-visible prefix when a batch send is partial. `writeStream` remains a
+one-packet operation, so this optimization does not weaken caller-controlled
+cross-stream fairness.
 `writeStreams` stages one fair packet-sized slice per sendable
 stream through QUIC's stateful packet batch, orders candidates by signed stream
 priority with stable equal-priority ordering, and commits registry/caller offsets
@@ -390,21 +398,24 @@ progress, and then exchanges both reset and stop events. Thus a successful test
 cannot be explained by retaining a complete body behind the advertised window.
 
 The benchmark uses one 4 MiB real-handshake bidirectional transfer, a 64 KiB
-stream window, 16 KiB caller storage, partial writes and independent FIN:
+stream window, and 16 KiB caller storage. Three consecutive CPU-0
+`ReleaseFast` runs of the default fair `writeStreams` mode measured:
 
 ```text
-partial writes:    4036
-read events:       4037
+send API calls:                 1146
+caller-visible partial writes: 1146
+read events:                    1147
 checksum:          534773760
-median elapsed:    96.43 ms
-median throughput: 41 MiB/s
+median elapsed:    18.14 ms
+median throughput: 220 MiB/s
 ```
 
-These are the median elapsed time and corresponding integer throughput from
-three consecutive 2026-08-18 same-host `ReleaseFast` runs after switching the
-benchmark to one-packet partial writes. This deliberately prioritizes
-caller-controlled fairness over the write-all helper's throughput; it is an
-internal baseline and no equal-wire wtransport/quicz ratio is claimed.
+The explicit single-stream `--send-all` mode calls `sendStream` once and uses
+the same receive/window configuration. Its three runs measured 246, 247, and
+254 MiB/s, with a 16.13 ms median and the same 1147 read events. The median is
+about 12% faster than the fair partial-write mode while reducing caller-visible
+send API calls from 1146 to one. These 2026-09-07 same-host numbers are an
+internal API/path comparison; no equal-wire wtransport/quicz ratio is claimed.
 
 The benchmark now also accepts `--streams` and `--transfer-bytes`. A four-stream
 1 MiB-per-stream real-handshake run completed at 70 MiB/s aggregate with 3971

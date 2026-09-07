@@ -269,7 +269,8 @@ pub fn main(init: std.process.Init) !void {
         stream_id.* = try client.openBidirectionalStream();
     }
     const started_ns = nowNs(io);
-    var write_calls: usize = 0;
+    var send_calls: usize = 0;
+    var partial_writes: usize = 0;
     const offsets = try allocator.alloc(usize, config.streams);
     defer allocator.free(offsets);
     @memset(offsets, 0);
@@ -277,46 +278,54 @@ pub fn main(init: std.process.Init) !void {
         config.reset_after_bytes,
         payload.len,
     );
-    for (stream_ids, offsets, 0..) |stream_id, *offset, index| {
-        if (!streamShouldReset(config, index)) continue;
-        if (reset_prefix_bytes != 0) {
-            try client.sendStream(
-                stream_id,
-                payload[0..reset_prefix_bytes],
-                false,
-            );
+    if (config.send_all) {
+        try client.sendStream(stream_ids[0], payload, true);
+        send_calls = 1;
+        offsets[0] = payload.len;
+    } else {
+        for (stream_ids, offsets, 0..) |stream_id, *offset, index| {
+            if (!streamShouldReset(config, index)) continue;
+            if (reset_prefix_bytes != 0) {
+                try client.sendStream(
+                    stream_id,
+                    payload[0..reset_prefix_bytes],
+                    false,
+                );
+                send_calls += 1;
+            }
+            try client.resetStream(stream_id, cancellation_code);
+            offset.* = payload.len;
         }
-        try client.resetStream(stream_id, cancellation_code);
-        offset.* = payload.len;
-    }
-    const writes = try allocator.alloc(
-        netz.webtransport.runtime.StreamWrite,
-        config.streams,
-    );
-    defer allocator.free(writes);
-    const counts = try allocator.alloc(usize, config.streams);
-    defer allocator.free(counts);
-    var remaining = config.streams - resetStreamCount(config);
-    while (remaining != 0) {
-        for (writes, stream_ids, offsets) |*item, stream_id, offset| {
-            item.* = .{
-                .stream_id = stream_id,
-                .data = payload[offset..],
-            };
+        const writes = try allocator.alloc(
+            netz.webtransport.runtime.StreamWrite,
+            config.streams,
+        );
+        defer allocator.free(writes);
+        const counts = try allocator.alloc(usize, config.streams);
+        defer allocator.free(counts);
+        var remaining = config.streams - resetStreamCount(config);
+        while (remaining != 0) {
+            for (writes, stream_ids, offsets) |*item, stream_id, offset| {
+                item.* = .{
+                    .stream_id = stream_id,
+                    .data = payload[offset..],
+                };
+            }
+            const result = try client.writeStreams(writes, counts);
+            send_calls += 1;
+            if (result.send_error) |err| return err;
+            if (result.progressed == 0) return error.IncompleteTransfer;
+            partial_writes += result.progressed;
+            for (offsets, counts) |*offset, count| {
+                if (offset.* == payload.len) continue;
+                offset.* += count;
+                if (offset.* == payload.len) remaining -= 1;
+            }
         }
-        const result = try client.writeStreams(writes, counts);
-        if (result.send_error) |err| return err;
-        if (result.progressed == 0) return error.IncompleteTransfer;
-        write_calls += result.progressed;
-        for (offsets, counts) |*offset, count| {
-            if (offset.* == payload.len) continue;
-            offset.* += count;
-            if (offset.* == payload.len) remaining -= 1;
-        }
-    }
-    for (stream_ids, 0..) |stream_id, index| {
-        if (!streamShouldReset(config, index)) {
-            try client.finishStream(stream_id);
+        for (stream_ids, 0..) |stream_id, index| {
+            if (!streamShouldReset(config, index)) {
+                try client.finishStream(stream_id);
+            }
         }
     }
     const Progress = struct {
@@ -343,7 +352,8 @@ pub fn main(init: std.process.Init) !void {
         (@as(u64, total_bytes) *| std.time.ns_per_s) /
             (elapsed_ns *| 1024 * 1024);
     std.debug.print(
-        \\WebTransport incremental stream benchmark
+        \\WebTransport stream benchmark
+        \\  send mode: {s}
         \\  streams: {d}
         \\  bytes per stream: {d}
         \\  total transfer bytes: {d}
@@ -359,13 +369,15 @@ pub fn main(init: std.process.Init) !void {
         \\  reorder datagrams considered: {d}
         \\  datagrams held: {d}
         \\  caller buffer: {d}
-        \\  partial writes: {d}
+        \\  send API calls: {d}
+        \\  caller-visible partial writes: {d}
         \\  read events: {d}
         \\  checksum: {d}
         \\  elapsed ns: {d}
         \\  throughput MiB/s: {d}
         \\
     , .{
+        if (config.send_all) "send-all" else "write-streams",
         config.streams,
         payload.len,
         total_bytes,
@@ -381,7 +393,8 @@ pub fn main(init: std.process.Init) !void {
         reorder_state.considered.load(.monotonic),
         reorder_state.held.load(.monotonic),
         read_buffer_bytes,
-        write_calls,
+        send_calls,
+        partial_writes,
         shared.events,
         shared.checksum,
         elapsed_ns,
@@ -395,6 +408,7 @@ const Config = struct {
     stream_window: u64 = default_stream_window,
     one_rtt_datagram_size: usize = default_one_rtt_datagram_size,
     enable_pacing: bool = true,
+    send_all: bool = false,
     reset_every: usize = 0,
     reset_after_bytes: usize = 1024,
     loss_pct: u8 = 0,
@@ -434,6 +448,8 @@ fn parseArgs(
             );
         } else if (std.mem.eql(u8, arg, "--disable-pacing")) {
             config.enable_pacing = false;
+        } else if (std.mem.eql(u8, arg, "--send-all")) {
+            config.send_all = true;
         } else if (std.mem.startsWith(u8, arg, "--reset-every=")) {
             config.reset_every = try parsePositiveUsize(
                 arg["--reset-every=".len..],
@@ -466,6 +482,11 @@ fn parseArgs(
         } else return error.InvalidArgument;
     }
     if (config.streams > max_streams or config.loss_pct > 100) {
+        return error.InvalidArgument;
+    }
+    if (config.send_all and
+        (config.streams != 1 or config.reset_every != 0))
+    {
         return error.InvalidArgument;
     }
     return config;

@@ -96,6 +96,9 @@ test "WebTransport registry accepts peers without legacy stream settings" {
     try std.testing.expectEqual(@as(u62, 15), (try registry.openLocal(.unidirectional)).stream_id);
 }
 
+/// Send the complete payload with bounded consecutive same-stream packet
+/// batches, waiting for flow-control, congestion, or pacing progress between
+/// batches. `write` retains its one-packet fairness contract.
 pub fn send(
     connection: *quic.one_rtt.Connection,
     registry: *webtransport.StreamRegistry,
@@ -106,13 +109,94 @@ pub fn send(
 ) Error!void {
     var offset: usize = 0;
     while (offset < payload.len) {
-        offset += try write(
+        const stream = try writableStream(registry, stream_id);
+        try sendPrefixIfNeeded(
             connection,
-            registry,
+            stream,
             session_id,
             stream_id,
-            payload[offset..],
         );
+        const packet_payload = @max(
+            @as(usize, 1),
+            connection.currentSendDatagramSize() -| 128,
+        );
+        // `SendCredit.available()` is deliberately capped to one datagram for
+        // the single-packet writer. A multi-packet batch instead snapshots the
+        // aggregate flow/congestion limits and applies the datagram limit to
+        // each staged packet below.
+        const connection_available = std.math.cast(
+            usize,
+            connection.connectionSendAvailable(),
+        ) orelse std.math.maxInt(usize);
+        const stream_available = std.math.cast(
+            usize,
+            connection.streamSendAvailable(stream_id),
+        ) orelse std.math.maxInt(usize);
+        const available = @min(
+            payload.len - offset,
+            connection_available,
+            stream_available,
+            connection.congestionAvailable(),
+        );
+        if (available == 0) {
+            try receiveSendProgress(connection);
+            continue;
+        }
+        const packet_count = @min(
+            quic.one_rtt.max_batch_packets,
+            std.math.divCeil(usize, available, packet_payload) catch
+                return error.IntegerOverflow,
+        );
+        var frames: [quic.one_rtt.max_batch_packets][1]quic.Frame = undefined;
+        var packets: [quic.one_rtt.max_batch_packets][]const quic.Frame =
+            undefined;
+        var staged_bytes: usize = 0;
+        for (0..packet_count) |index| {
+            const count = @min(
+                packet_payload,
+                available - staged_bytes,
+            );
+            frames[index][0] = .{ .stream = .{
+                .stream_id = stream_id,
+                .offset = stream.send_offset + staged_bytes,
+                .data = payload[offset + staged_bytes ..][0..count],
+                .fin = false,
+            } };
+            packets[index] = &frames[index];
+            staged_bytes += count;
+        }
+        const result = connection.sendManyProgress(packets[0..packet_count]) catch |err| switch (err) {
+            error.FlowControlBlocked, error.CongestionLimited => {
+                try receiveSendProgress(connection);
+                continue;
+            },
+            error.PacingLimited => {
+                try connection.waitForPacingAvailability();
+                continue;
+            },
+            else => |other| return other,
+        };
+        if (result.sent_count > packet_count or
+            result.sent_count > result.protected_count)
+        {
+            return error.Unexpected;
+        }
+        var committed: usize = 0;
+        for (0..result.sent_count) |index| {
+            committed += frames[index][0].stream.data.len;
+        }
+        if (committed == 0) {
+            if (result.send_error) |err| return err;
+            return error.Unexpected;
+        }
+        stream.send_offset = std.math.add(
+            u64,
+            stream.send_offset,
+            committed,
+        ) catch return error.IntegerOverflow;
+        try registry.recordSent(stream_id, committed, false);
+        offset += committed;
+        if (result.send_error) |err| return err;
     }
     if (fin) try finish(
         connection,
@@ -842,6 +926,196 @@ test "WebTransport local unidirectional FIN requests transport retirement" {
     try std.testing.expect(connection.markPacketAcknowledged(0));
     try std.testing.expect(connection.localStreamClosed(stream.stream_id));
     try std.testing.expect(registry.get(stream.stream_id) != null);
+}
+
+test "WebTransport complete stream send batches consecutive packets" {
+    const allocator = std.testing.allocator;
+    var threaded = std.Io.Threaded.init(allocator, .{});
+    defer threaded.deinit();
+    const io = threaded.io();
+    var sender_endpoint = try quic.runtime.Endpoint.bind(
+        allocator,
+        io,
+        .{ .ip4 = .loopback(0) },
+        .{ .max_datagram_size = 4096, .enable_gso_send = false },
+    );
+    defer sender_endpoint.deinit();
+    var receiver_endpoint = try quic.runtime.Endpoint.bind(
+        allocator,
+        io,
+        .{ .ip4 = .loopback(0) },
+        .{ .max_datagram_size = 4096 },
+    );
+    defer receiver_endpoint.deinit();
+    const keys = quic.protection.deriveAes128Keys(
+        [_]u8{0xd8} ** quic.protection.secret_len,
+    );
+    var connection = try quic.one_rtt.Connection.init(&sender_endpoint, .{
+        .peer = receiver_endpoint.address(),
+        .receive_keys = keys,
+        .send_keys = keys,
+        .local_connection_id = "wt-batch-client",
+        .peer_connection_id = "wt-batch-server",
+        .max_datagram_size = 4096,
+        .enable_pacing = false,
+    });
+    defer connection.deinit();
+    const session_id: webtransport.SessionId = .init(0);
+    var registry = try webtransport.StreamRegistry.init(
+        allocator,
+        session_id,
+        .client,
+        .{ .max_local_bidi = 1 },
+    );
+    defer registry.deinit();
+    const stream = try registry.openLocal(.bidirectional);
+
+    const ObservedBatchSend =
+        @import("../../quic/one_rtt/tests/observed_batch_send.zig")
+            .ObservedBatchSend;
+    var observed = ObservedBatchSend{ .delegate = sender_endpoint.io };
+    var observed_vtable = sender_endpoint.io.vtable.*;
+    observed_vtable.netSend = ObservedBatchSend.netSend;
+    sender_endpoint.io = .{
+        .userdata = &observed,
+        .vtable = &observed_vtable,
+    };
+    defer sender_endpoint.io = observed.delegate;
+
+    const payload = [_]u8{0xa5} ** 10_000;
+    try send(
+        &connection,
+        &registry,
+        session_id,
+        stream.stream_id,
+        &payload,
+        false,
+    );
+
+    // One association-prefix send is followed by one three-datagram
+    // application batch: 3968 + 3968 + 2064 bytes.
+    try std.testing.expectEqual(@as(usize, 2), observed.calls);
+    try std.testing.expectEqual(@as(usize, 3), observed.last_message_count);
+    try std.testing.expect(stream.prefix_sent);
+    try std.testing.expectEqual(@as(u64, payload.len), stream.bytes_sent);
+    try std.testing.expectEqual(@as(u64, payload.len + 3), stream.send_offset);
+    try std.testing.expectEqual(@as(u64, 4), connection.stats().packets_sent);
+}
+
+test "WebTransport complete stream batch commits only socket prefix" {
+    const allocator = std.testing.allocator;
+    var threaded = std.Io.Threaded.init(allocator, .{});
+    defer threaded.deinit();
+    const io = threaded.io();
+    var sender_endpoint = try quic.runtime.Endpoint.bind(
+        allocator,
+        io,
+        .{ .ip4 = .loopback(0) },
+        .{ .max_datagram_size = 4096, .enable_gso_send = false },
+    );
+    defer sender_endpoint.deinit();
+    var receiver_endpoint = try quic.runtime.Endpoint.bind(
+        allocator,
+        io,
+        .{ .ip4 = .loopback(0) },
+        .{ .max_datagram_size = 4096 },
+    );
+    defer receiver_endpoint.deinit();
+    const keys = quic.protection.deriveAes128Keys(
+        [_]u8{0xd9} ** quic.protection.secret_len,
+    );
+    var connection = try quic.one_rtt.Connection.init(&sender_endpoint, .{
+        .peer = receiver_endpoint.address(),
+        .receive_keys = keys,
+        .send_keys = keys,
+        .local_connection_id = "wt-prefix-client",
+        .peer_connection_id = "wt-prefix-server",
+        .max_datagram_size = 4096,
+        .enable_pacing = false,
+    });
+    defer connection.deinit();
+    const session_id: webtransport.SessionId = .init(0);
+    var registry = try webtransport.StreamRegistry.init(
+        allocator,
+        session_id,
+        .client,
+        .{ .max_local_bidi = 1 },
+    );
+    defer registry.deinit();
+    const stream = try registry.openLocal(.bidirectional);
+    _ = try prepare(
+        &connection,
+        &registry,
+        session_id,
+        stream.stream_id,
+    );
+    try std.testing.expectEqual(@as(u64, 3), stream.send_offset);
+
+    const ObservedBatchSend =
+        @import("../../quic/one_rtt/tests/observed_batch_send.zig")
+            .ObservedBatchSend;
+    var observed = ObservedBatchSend{
+        .delegate = sender_endpoint.io,
+        .fail_after_prefix = 0,
+    };
+    var observed_vtable = sender_endpoint.io.vtable.*;
+    observed_vtable.netSend = ObservedBatchSend.netSend;
+    sender_endpoint.io = .{
+        .userdata = &observed,
+        .vtable = &observed_vtable,
+    };
+    defer sender_endpoint.io = observed.delegate;
+
+    const payload = [_]u8{0x5a} ** 10_000;
+    try std.testing.expectError(
+        error.NetworkDown,
+        send(
+            &connection,
+            &registry,
+            session_id,
+            stream.stream_id,
+            &payload,
+            false,
+        ),
+    );
+    try std.testing.expectEqual(@as(u64, 0), stream.bytes_sent);
+    try std.testing.expectEqual(@as(u64, 3), stream.send_offset);
+
+    observed.fail_after_prefix = 1;
+    try std.testing.expectError(
+        error.NetworkDown,
+        send(
+            &connection,
+            &registry,
+            session_id,
+            stream.stream_id,
+            &payload,
+            false,
+        ),
+    );
+    const first_packet_bytes: usize = 4096 - 128;
+    try std.testing.expectEqual(@as(usize, 2), observed.calls);
+    try std.testing.expectEqual(@as(usize, 3), observed.last_message_count);
+    try std.testing.expectEqual(
+        @as(u64, first_packet_bytes),
+        stream.bytes_sent,
+    );
+    try std.testing.expectEqual(
+        @as(u64, first_packet_bytes + 3),
+        stream.send_offset,
+    );
+
+    sender_endpoint.io = observed.delegate;
+    try send(
+        &connection,
+        &registry,
+        session_id,
+        stream.stream_id,
+        payload[first_packet_bytes..],
+        false,
+    );
+    try std.testing.expectEqual(@as(u64, payload.len), stream.bytes_sent);
+    try std.testing.expectEqual(@as(u64, payload.len + 3), stream.send_offset);
 }
 
 test "WebTransport single-attempt send atomically includes prefix payload and FIN" {
