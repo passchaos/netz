@@ -307,6 +307,17 @@ as its streaming counterpart. On `http2_parallel_x10_empty`, this removed one
 bytes. The single before/after timings were 28.607 and 28.363 us/batch, so this
 records the deterministic allocation/copy reduction without claiming a latency
 improvement.
+The client request and server response batch writers now alternate between two
+connection-owned HPACK encoders. Before staging a batch, the inactive encoder
+copies live compression state while retaining its entry, index, string and
+encoded-block capacities; commit is a pointer-free swap. On the same warmed
+parallel x10 run this removed the remaining ten batch-level clone allocations
+per batch, reducing measured calls from 60,000 to 40,000 and cumulative
+requested bytes from 16,200,000 to 12,560,000. The exact-size list now contains
+only the 20,000 request and 20,000 response owned HPACK blocks. The single
+telemetry sample was 27.415 us/batch; five subsequent fixed-binary CPU-0 runs
+measured 26.258-26.431 us/batch. This is recorded as an internal regression
+range rather than a new cross-stack ratio.
 
 `strace` confirmed equal steady-state wire sizes: empty exchanges use 19-byte
 requests and 11-byte responses; POST exchanges use 43-byte requests and

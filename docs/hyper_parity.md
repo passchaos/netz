@@ -1025,6 +1025,15 @@ parallel x10 empty workload removed 20,000 exact 11-byte allocations across
 2,000 measured batches (80,000 to 60,000 total calls). A focused batch test
 warms the connection, reads three responses through the aggregate state
 machine, and permits only their three combined HPACK ownership blocks.
+Transactional batch encoders now use a second connection-owned HPACK encoder
+as reusable staging storage. Copying live state reuses dynamic-entry blocks,
+both lookup-index tables and encoded scratch; a successful write swaps live and
+staging encoders, while a validation/encoding failure leaves live state intact.
+The warmed parallel x10 empty workload consequently fell from 60,000 to 40,000
+allocations over 2,000 batches. Its exact-size telemetry contains only one
+request and one response HPACK ownership block per exchange; encoder staging is
+allocation-free. HPACK fail-first reuse and runtime rollback tests protect both
+the allocation and transactional guarantees.
 The bidirectional Hyper process gate now exercises that boundary directly over
 h2c and TLS. A netz client waits through an idle interval, receives Hyper/h2's
 PING ACK, and completes another request on the same connection. In the reverse

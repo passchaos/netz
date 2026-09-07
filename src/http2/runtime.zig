@@ -3051,6 +3051,10 @@ pub const Connection = struct {
     response_semantics_index: std.AutoHashMapUnmanaged(u31, usize) = .empty,
     hpack_decoder: http2.Hpack.Decoder = .{},
     hpack_encoder: http2.Hpack.Encoder = .{},
+    /// Transactional batch encoding copies live HPACK state here. Successful
+    /// batches swap the encoders, so both sides retain their dynamic-table and
+    /// scratch capacity for the next batch.
+    hpack_encoder_staging: http2.Hpack.Encoder = .{},
     /// Reassembles only fragmented HEADERS/PUSH_PROMISE blocks. A single-frame
     /// block is decoded directly from frame-reader storage, avoiding this copy
     /// on the common path while retaining capacity for later continuations.
@@ -3208,6 +3212,7 @@ pub const Connection = struct {
         self.locally_reset_stream_index.deinit(self.allocator);
         self.hpack_decoder.deinit(self.allocator);
         self.hpack_encoder.deinit(self.allocator);
+        self.hpack_encoder_staging.deinit(self.allocator);
         self.header_block_scratch.deinit(self.allocator);
         self.write_batch.deinit(self.allocator);
         self.batch_data_headers.deinit(self.allocator);
@@ -4278,11 +4283,7 @@ pub const Connection = struct {
         };
         const batch = &self.write_batch;
         batch.clearRetainingCapacity();
-        var staged_encoder = try self.hpack_encoder.clone(self.allocator);
-        var staged_encoder_owned = true;
-        defer if (staged_encoder_owned) {
-            staged_encoder.deinit(self.allocator);
-        };
+        const staged_encoder = try self.prepareStagedHpackEncoder();
         var started: usize = 0;
         var requests_written = false;
         errdefer {
@@ -4300,7 +4301,7 @@ pub const Connection = struct {
             const pending = try self.appendBodylessRequestToBatch(
                 request_options,
                 batch,
-                &staged_encoder,
+                staged_encoder,
             );
             state.* = .{
                 .stream_id = pending.stream_id,
@@ -4310,9 +4311,7 @@ pub const Connection = struct {
             started += 1;
         }
         try self.transportForIo().writeAll(batch.items);
-        self.hpack_encoder.deinit(self.allocator);
-        self.hpack_encoder = staged_encoder;
-        staged_encoder_owned = false;
+        self.commitStagedHpackEncoder();
         requests_written = true;
 
         try self.readResponseBatch(states, informational);
@@ -4394,11 +4393,7 @@ pub const Connection = struct {
 
         const batch = &self.write_batch;
         batch.clearRetainingCapacity();
-        var staged_encoder = try self.hpack_encoder.clone(self.allocator);
-        var staged_encoder_owned = true;
-        defer if (staged_encoder_owned) {
-            staged_encoder.deinit(self.allocator);
-        };
+        const staged_encoder = try self.prepareStagedHpackEncoder();
         var started: usize = 0;
         var requests_written = false;
         errdefer {
@@ -4416,7 +4411,7 @@ pub const Connection = struct {
             const pending = try self.appendBodylessRequestToBatch(
                 request_options,
                 batch,
-                &staged_encoder,
+                staged_encoder,
             );
             state.* = .{
                 .stream_id = pending.stream_id,
@@ -4429,14 +4424,10 @@ pub const Connection = struct {
             // Some HEADERS may already be visible. As with body-bearing
             // batches, retain advanced HPACK state and consumed stream IDs so
             // accidental reuse cannot pretend the transaction never started.
-            self.hpack_encoder.deinit(self.allocator);
-            self.hpack_encoder = staged_encoder;
-            staged_encoder_owned = false;
+            self.commitStagedHpackEncoder();
             return err;
         };
-        self.hpack_encoder.deinit(self.allocator);
-        self.hpack_encoder = staged_encoder;
-        staged_encoder_owned = false;
+        self.commitStagedHpackEncoder();
         requests_written = true;
 
         try self.readResponseBatchStreaming(
@@ -4548,12 +4539,9 @@ pub const Connection = struct {
         const batch = &self.write_batch;
         batch.clearRetainingCapacity();
         const original_next_stream_id = self.next_client_stream_id;
-        var staged_encoder = try self.hpack_encoder.clone(self.allocator);
-        var staged_encoder_owned = true;
-        defer if (staged_encoder_owned) {
-            staged_encoder.deinit(self.allocator);
-        };
+        const staged_encoder = try self.prepareStagedHpackEncoder();
         var started: usize = 0;
+        var request_heads_committed = false;
         var responses_pending = false;
         errdefer {
             if (responses_pending) {
@@ -4564,7 +4552,7 @@ pub const Connection = struct {
             // Before staged HPACK state is committed no HEADERS were written,
             // so local stream IDs roll back with the transaction. Once the
             // write succeeds, IDs remain consumed on later I/O failures.
-            if (staged_encoder_owned) {
+            if (!request_heads_committed) {
                 self.next_client_stream_id = original_next_stream_id;
             }
             for (states[0..started]) |*state| {
@@ -4576,7 +4564,7 @@ pub const Connection = struct {
             const pending = try self.appendRequestHeadToBatch(
                 request_options,
                 batch,
-                &staged_encoder,
+                staged_encoder,
             );
             state.* = .{
                 .stream_id = pending.stream_id,
@@ -4620,14 +4608,12 @@ pub const Connection = struct {
             // A transport failure may expose only a prefix of the staged HPACK
             // sequence. It cannot be retried or rolled back; commit encoder
             // state and stream IDs so any accidental reuse fails closed.
-            self.hpack_encoder.deinit(self.allocator);
-            self.hpack_encoder = staged_encoder;
-            staged_encoder_owned = false;
+            self.commitStagedHpackEncoder();
+            request_heads_committed = true;
             return err;
         };
-        self.hpack_encoder.deinit(self.allocator);
-        self.hpack_encoder = staged_encoder;
-        staged_encoder_owned = false;
+        self.commitStagedHpackEncoder();
+        request_heads_committed = true;
         var body_write_succeeded = false;
         errdefer if (!body_write_succeeded) {
             // A partial DATA submission has consumed an unknown wire prefix.
@@ -5050,6 +5036,24 @@ pub const Connection = struct {
             .request_method = request_options.method,
             .extended_connect = extended_connect,
         };
+    }
+
+    fn prepareStagedHpackEncoder(
+        self: *Connection,
+    ) Error!*http2.Hpack.Encoder {
+        try self.hpack_encoder_staging.copyFromRetainingCapacity(
+            self.allocator,
+            &self.hpack_encoder,
+        );
+        return &self.hpack_encoder_staging;
+    }
+
+    fn commitStagedHpackEncoder(self: *Connection) void {
+        std.mem.swap(
+            http2.Hpack.Encoder,
+            &self.hpack_encoder,
+            &self.hpack_encoder_staging,
+        );
     }
 
     const BatchResponseState = struct {
@@ -8566,11 +8570,7 @@ pub const Connection = struct {
 
         const batch = &self.write_batch;
         batch.clearRetainingCapacity();
-        var staged_encoder = try self.hpack_encoder.clone(self.allocator);
-        var staged_encoder_owned = true;
-        defer if (staged_encoder_owned) {
-            staged_encoder.deinit(self.allocator);
-        };
+        const staged_encoder = try self.prepareStagedHpackEncoder();
         const automatic_date = if (needs_automatic_date)
             http_date.valueNow(self.io)
         else
@@ -8659,9 +8659,7 @@ pub const Connection = struct {
         }
 
         try self.transportForIo().writeAll(batch.items);
-        self.hpack_encoder.deinit(self.allocator);
-        self.hpack_encoder = staged_encoder;
-        staged_encoder_owned = false;
+        self.commitStagedHpackEncoder();
         for (stream_ids) |stream_id| self.releasePeerStream(stream_id);
     }
 
@@ -8755,11 +8753,7 @@ pub const Connection = struct {
 
         const batch = &self.write_batch;
         batch.clearRetainingCapacity();
-        var staged_encoder = try self.hpack_encoder.clone(self.allocator);
-        var staged_encoder_owned = true;
-        defer if (staged_encoder_owned) {
-            staged_encoder.deinit(self.allocator);
-        };
+        const staged_encoder = try self.prepareStagedHpackEncoder();
         const automatic_date = if (needs_automatic_date)
             http_date.valueNow(self.io)
         else
@@ -8769,7 +8763,7 @@ pub const Connection = struct {
                 stream_id,
                 options,
                 batch,
-                &staged_encoder,
+                staged_encoder,
                 automatic_date,
             );
         }
@@ -8778,14 +8772,10 @@ pub const Connection = struct {
             // A transport failure may expose only a prefix of the staged HPACK
             // sequence. It cannot be retried or rolled back; commit encoder
             // state so accidental connection reuse fails closed.
-            self.hpack_encoder.deinit(self.allocator);
-            self.hpack_encoder = staged_encoder;
-            staged_encoder_owned = false;
+            self.commitStagedHpackEncoder();
             return err;
         };
-        self.hpack_encoder.deinit(self.allocator);
-        self.hpack_encoder = staged_encoder;
-        staged_encoder_owned = false;
+        self.commitStagedHpackEncoder();
         try self.writeResponseBodyBatchData(
             views,
             offsets,
@@ -25157,19 +25147,43 @@ test "HTTP/2 aggregate response batch borrows wire frames after warmup" {
                 try connection.writeResponse(warmup.stream_id, .{});
             }
 
-            var requests: [parallel]OwnedRequest = undefined;
-            var initialized: usize = 0;
-            defer for (requests[0..initialized]) |*request| {
-                request.deinit(server_ptr.allocator);
-            };
-            var stream_ids: [parallel]u31 = undefined;
-            for (&requests, &stream_ids) |*request, *stream_id| {
-                request.* = try connection.readRequest();
-                initialized += 1;
-                stream_id.* = request.stream_id;
-            }
             const responses = [_]ResponseOptions{.{}} ** parallel;
-            try connection.writeResponseBatch(&stream_ids, &responses);
+            for (0..2) |batch_index| {
+                var requests: [parallel]OwnedRequest = undefined;
+                var initialized: usize = 0;
+                defer for (requests[0..initialized]) |*request| {
+                    request.deinit(server_ptr.allocator);
+                };
+                var stream_ids: [parallel]u31 = undefined;
+                for (&requests, &stream_ids) |*request, *stream_id| {
+                    request.* = try connection.readRequest();
+                    initialized += 1;
+                    stream_id.* = request.stream_id;
+                }
+                if (batch_index == 0) {
+                    try connection.writeResponseBatch(
+                        &stream_ids,
+                        &responses,
+                    );
+                    continue;
+                }
+
+                var tracking = std.testing.FailingAllocator.init(
+                    allocator,
+                    .{},
+                );
+                const saved_allocator = connection.allocator;
+                connection.allocator = tracking.allocator();
+                defer connection.allocator = saved_allocator;
+                try connection.writeResponseBatch(
+                    &stream_ids,
+                    &responses,
+                );
+                try std.testing.expectEqual(
+                    @as(usize, 0),
+                    tracking.allocations,
+                );
+            }
         }
     };
 
@@ -25190,33 +25204,36 @@ test "HTTP/2 aggregate response batch borrows wire frames after warmup" {
         defer warmup.deinit(allocator);
     }
 
-    var states: [parallel]Connection.BatchResponseState = undefined;
-    var initialized: usize = 0;
-    defer for (states[0..initialized]) |*state| {
-        client.releaseLocalStream(state.stream_id);
-        state.deinit(allocator);
-    };
-    for (&states) |*state| {
-        const pending = try client.sendCompleteRequest(.{
-            .path = "/batch-borrow",
-            .authority = "localhost",
-        });
-        state.* = .{
-            .stream_id = pending.stream_id,
-            .request_method = pending.request_method,
-            .extended_connect = pending.extended_connect,
-        };
-        initialized += 1;
+    const requests = [_]RequestOptions{.{
+        .path = "/batch-borrow",
+        .authority = "localhost",
+    }} ** parallel;
+    {
+        var responses: [parallel]OwnedResponse = undefined;
+        try client.requestBatchInto(&requests, &responses);
+        defer for (&responses) |*response| response.deinit(allocator);
     }
-
-    var tracking = std.testing.FailingAllocator.init(allocator, .{});
-    const saved_allocator = client.allocator;
-    client.allocator = tracking.allocator();
-    defer client.allocator = saved_allocator;
-    try client.readResponseBatch(&states, null);
-    // Each response owns one combined HPACK block. The complete response
-    // frames stay borrowed from the connection's reusable reader buffer.
-    try std.testing.expectEqual(@as(usize, parallel), tracking.allocations);
+    {
+        var responses: [parallel]OwnedResponse = undefined;
+        var tracking = std.testing.FailingAllocator.init(allocator, .{});
+        const saved_allocator = client.allocator;
+        client.allocator = tracking.allocator();
+        defer client.allocator = saved_allocator;
+        try client.requestBatchInto(&requests, &responses);
+        defer for (&responses) |*response| {
+            response.deinit(client.allocator);
+        };
+        // Request/response staging and wire-frame reads reuse connection
+        // storage. Only one combined HPACK block per response is allocated.
+        try std.testing.expectEqual(
+            @as(usize, parallel),
+            tracking.allocations,
+        );
+        for (responses) |response| {
+            try std.testing.expectEqual(@as(u16, 200), response.status);
+            try std.testing.expectEqualStrings("", response.body);
+        }
+    }
 
     thread.join();
     if (shared.err) |err| return err;
@@ -25691,6 +25708,7 @@ test "HTTP/2 request batch rolls back staged HPACK state" {
         connection.write_batch.deinit(allocator);
         connection.hpack_decoder.deinit(allocator);
         connection.hpack_encoder.deinit(allocator);
+        connection.hpack_encoder_staging.deinit(allocator);
     }
 
     const requests = [_]RequestOptions{
@@ -25746,6 +25764,7 @@ test "HTTP/2 request body batch rolls back staged HPACK state" {
         connection.batch_data_parts.deinit(allocator);
         connection.hpack_decoder.deinit(allocator);
         connection.hpack_encoder.deinit(allocator);
+        connection.hpack_encoder_staging.deinit(allocator);
     }
 
     const requests = [_]RequestOptions{
@@ -25808,6 +25827,7 @@ test "HTTP/2 response batch validates transactionally" {
         connection.write_batch.deinit(allocator);
         connection.hpack_decoder.deinit(allocator);
         connection.hpack_encoder.deinit(allocator);
+        connection.hpack_encoder_staging.deinit(allocator);
     }
     try connection.addActivePeerStream(1);
     try connection.addActivePeerStream(3);

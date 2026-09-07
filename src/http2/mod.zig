@@ -1066,6 +1066,91 @@ pub const Hpack = struct {
             return copy;
         }
 
+        fn copyFromRetainingCapacity(
+            self: *DynamicTable,
+            allocator: std.mem.Allocator,
+            source: *const DynamicTable,
+        ) !void {
+            std.debug.assert(self != source);
+            std.debug.assert(
+                self.maintain_lookup_indexes ==
+                    source.maintain_lookup_indexes,
+            );
+            const source_entries =
+                source.entries.items[source.head..];
+            try self.entries.ensureTotalCapacity(
+                allocator,
+                source_entries.len,
+            );
+            if (self.maintain_lookup_indexes) {
+                const index_count = std.math.cast(
+                    u32,
+                    source_entries.len,
+                ) orelse return error.OutOfMemory;
+                try self.latest_name.ensureTotalCapacity(
+                    allocator,
+                    index_count,
+                );
+                try self.latest_exact.ensureTotalCapacity(
+                    allocator,
+                    index_count,
+                );
+            }
+
+            if (self.head != 0) {
+                const retained = self.entries.items[self.head..];
+                @memmove(
+                    self.entries.items[0..retained.len],
+                    retained,
+                );
+                self.entries.items.len = retained.len;
+                self.head = 0;
+            }
+            self.latest_name.clearRetainingCapacity();
+            self.latest_exact.clearRetainingCapacity();
+
+            var copied: usize = 0;
+            while (copied < source_entries.len) : (copied += 1) {
+                const source_entry = source_entries[copied];
+                const string_len = std.math.add(
+                    usize,
+                    source_entry.name.len,
+                    source_entry.value.len,
+                ) catch return error.OutOfMemory;
+                var storage = if (copied < self.entries.items.len)
+                    self.entries.items[copied].block_storage.?
+                else
+                    try allocator.alloc(u8, string_len);
+                if (storage.len < string_len) {
+                    const replacement = try allocator.alloc(u8, string_len);
+                    allocator.free(storage);
+                    storage = replacement;
+                }
+                const name = storage[0..source_entry.name.len];
+                @memcpy(name, source_entry.name);
+                const value = storage[name.len..][0..source_entry.value.len];
+                @memcpy(value, source_entry.value);
+                const target = HeaderField{
+                    .name = name,
+                    .value = value,
+                    .never_index = source_entry.never_index,
+                    .block_storage = storage,
+                };
+                if (copied < self.entries.items.len) {
+                    self.entries.items[copied] = target;
+                } else {
+                    self.entries.appendAssumeCapacity(target);
+                }
+            }
+            for (self.entries.items[copied..]) |entry| {
+                allocator.free(entry.block_storage.?);
+            }
+            self.entries.items.len = copied;
+            self.size_limit = source.size_limit;
+            self.used = source.used;
+            if (self.maintain_lookup_indexes) self.rebuildIndexes();
+        }
+
         pub fn setLimit(self: *DynamicTable, allocator: std.mem.Allocator, new_limit: usize) void {
             self.size_limit = new_limit;
             self.evictToLimit(allocator);
@@ -1369,6 +1454,24 @@ pub const Hpack = struct {
                 .pending_size_update = self.pending_size_update,
                 .last_emitted_dynamic_table_size = self.last_emitted_dynamic_table_size,
             };
+        }
+
+        /// Replace this encoder's compression state while retaining all
+        /// reusable staging storage. The source remains unchanged.
+        pub fn copyFromRetainingCapacity(
+            self: *Encoder,
+            allocator: std.mem.Allocator,
+            source: *const Encoder,
+        ) !void {
+            std.debug.assert(self != source);
+            try self.dynamic_table.copyFromRetainingCapacity(
+                allocator,
+                &source.dynamic_table,
+            );
+            self.pending_size_update = source.pending_size_update;
+            self.last_emitted_dynamic_table_size =
+                source.last_emitted_dynamic_table_size;
+            self.encoded_scratch.clearRetainingCapacity();
         }
 
         pub fn setMaxDynamicTableSize(self: *Encoder, allocator: std.mem.Allocator, max_size: usize) void {
@@ -3461,6 +3564,35 @@ test "HTTP/2 HPACK encoder clone isolates transactional state" {
         &.{.{ .name = "x-staged", .value = "two" }},
     );
     try std.testing.expect((original_new[0] & 0x80) == 0);
+}
+
+test "HTTP/2 HPACK encoder staging reuses cloned state capacity" {
+    const allocator = std.testing.allocator;
+    const fields = [_]Hpack.HeaderField{
+        .{ .name = "x-first", .value = "one" },
+        .{ .name = "x-second", .value = "two" },
+    };
+    var live = Hpack.Encoder{};
+    defer live.deinit(allocator);
+    _ = try live.encodeBlockRetained(allocator, &fields);
+
+    var staging = Hpack.Encoder{};
+    defer staging.deinit(allocator);
+    try staging.copyFromRetainingCapacity(allocator, &live);
+    _ = try staging.encodeBlockRetained(allocator, &fields);
+    std.mem.swap(Hpack.Encoder, &live, &staging);
+
+    var no_alloc = std.testing.FailingAllocator.init(
+        allocator,
+        .{ .fail_index = 0 },
+    );
+    try staging.copyFromRetainingCapacity(no_alloc.allocator(), &live);
+    const block = try staging.encodeBlockRetained(
+        no_alloc.allocator(),
+        &fields,
+    );
+    try std.testing.expect(!no_alloc.has_induced_failure);
+    try std.testing.expectEqualSlices(u8, &.{ 0xbf, 0xbe }, block);
 }
 
 test "HTTP/2 HPACK decoder writes into caller storage" {
