@@ -99,11 +99,55 @@ pub const Error = quic.runtime.Error ||
         HandshakeReceiveFailed,
     };
 
+pub const AntiAmplificationBudget = struct {
+    validated: bool = false,
+    bytes_received: usize = 0,
+    bytes_sent: usize = 0,
+
+    pub fn recordReceived(self: *AntiAmplificationBudget, bytes: usize) void {
+        if (self.validated) return;
+        self.bytes_received = std.math.add(
+            usize,
+            self.bytes_received,
+            bytes,
+        ) catch std.math.maxInt(usize);
+    }
+
+    pub fn validate(self: *AntiAmplificationBudget) void {
+        self.validated = true;
+    }
+
+    pub fn remaining(self: AntiAmplificationBudget) ?usize {
+        if (self.validated) return null;
+        const limit = std.math.mul(
+            usize,
+            self.bytes_received,
+            quic.one_rtt.anti_amplification_multiplier,
+        ) catch std.math.maxInt(usize);
+        return limit -| self.bytes_sent;
+    }
+
+    pub fn reserve(self: *AntiAmplificationBudget, bytes: usize) !void {
+        const available = self.remaining() orelse return;
+        if (bytes > available) return error.AntiAmplificationLimited;
+        self.bytes_sent = std.math.add(
+            usize,
+            self.bytes_sent,
+            bytes,
+        ) catch std.math.maxInt(usize);
+    }
+};
+
 pub const SendFn = *const fn (
     context: *anyopaque,
     retransmission: u8,
 ) anyerror!void;
 pub const AcceptFn = *const fn (datagram: []const u8) bool;
+pub const ObserveDatagramFn = *const fn (
+    context: *anyopaque,
+    from: net.IpAddress,
+    bytes: usize,
+) void;
 pub const AcceptContextFn = *const fn (
     context: *anyopaque,
     datagram: []const u8,
@@ -160,6 +204,30 @@ pub fn sendAndReceiveMatchingFrom(
     send_fn: SendFn,
     accept_fn: AcceptFn,
 ) Error!quic.runtime.OwnedBytes {
+    return sendAndReceiveMatchingFromObserved(
+        endpoint,
+        source,
+        config,
+        context,
+        send_fn,
+        accept_fn,
+        null,
+    );
+}
+
+/// Source-driven retransmission with an observer that sees every complete UDP
+/// datagram before response classification. Server handshakes use this to
+/// account all same-path bytes, including packets that are later discarded,
+/// toward RFC 9000's anti-amplification allowance.
+pub fn sendAndReceiveMatchingFromObserved(
+    endpoint: *quic.runtime.Endpoint,
+    source: quic.runtime.DatagramSource,
+    config: Config,
+    context: *anyopaque,
+    send_fn: SendFn,
+    accept_fn: AcceptFn,
+    observe_fn: ?ObserveDatagramFn,
+) Error!quic.runtime.OwnedBytes {
     try config.validate();
     var retransmission: u8 = 0;
     var transmitted: u8 = 0;
@@ -170,9 +238,14 @@ pub fn sendAndReceiveMatchingFrom(
         else
             false;
         if (!drop) {
-            send_fn(context, transmitted) catch
-                return error.HandshakeSendFailed;
-            transmitted +|= 1;
+            const sent = blk: {
+                send_fn(context, transmitted) catch |err| switch (err) {
+                    error.AntiAmplificationLimited => break :blk false,
+                    else => return error.HandshakeSendFailed,
+                };
+                break :blk true;
+            };
+            if (sent) transmitted +|= 1;
         }
         const deadline = attemptDeadline(
             config,
@@ -198,6 +271,9 @@ pub fn sendAndReceiveMatchingFrom(
                     error.ConcurrencyUnavailable => return error.HandshakeReceiveFailed,
                     else => |other| return @errorCast(other),
                 };
+            if (observe_fn) |observe| {
+                observe(context, datagram.from, datagram.bytes.len);
+            }
             if (accept_fn(datagram.bytes)) return datagram;
             datagram.deinit(endpoint.allocator);
             if (hardDeadlineExpired(endpoint.io, hard_deadline)) {
@@ -448,6 +524,7 @@ pub const InitialHandshakeFlight = struct {
     initial_options: quic.initial_exchange.SendInitialFlightOptions,
     handshake_keys: quic.protection.PacketProtectionKeys,
     handshake_options: quic.initial_exchange.SendInitialOptions,
+    anti_amplification: AntiAmplificationBudget = .{ .validated = true },
     /// First Handshake packet number not consumed by a successful flight
     /// transmission. A fatal receive error can use it for CONNECTION_CLOSE
     /// without reusing an AEAD nonce from an earlier retransmission.
@@ -467,6 +544,15 @@ pub const InitialHandshakeFlight = struct {
             1,
             retransmission,
         );
+        const flight_bytes = try quic.initial_exchange
+            .initialThenHandshakeCryptoWireLen(
+            initial_options,
+            handshake_options,
+        );
+        // This reservation is intentionally not rolled back on a send error:
+        // the socket API cannot prove that no prefix reached the network, and
+        // conservative over-accounting is required before address validation.
+        try self.anti_amplification.reserve(flight_bytes);
         _ = try quic.initial_exchange.sendInitialThenHandshakeCrypto(
             self.endpoint,
             self.peer,
@@ -480,6 +566,16 @@ pub const InitialHandshakeFlight = struct {
             handshake_options.packet_number,
             1,
         ) catch null;
+    }
+
+    pub fn observeReceived(
+        context: *anyopaque,
+        from: net.IpAddress,
+        bytes: usize,
+    ) void {
+        const self: *InitialHandshakeFlight = @ptrCast(@alignCast(context));
+        if (!from.eql(&self.peer)) return;
+        self.anti_amplification.recordReceived(bytes);
     }
 };
 

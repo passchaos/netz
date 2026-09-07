@@ -874,6 +874,7 @@ fn sendHandshakeProtocolViolation(
     source_connection_id: []const u8,
     packet_number: u64,
     reason_phrase: []const u8,
+    anti_amplification: ?*retransmit.AntiAmplificationBudget,
 ) Error!void {
     var payload: std.ArrayList(u8) = .empty;
     defer payload.deinit(endpoint.allocator);
@@ -908,6 +909,7 @@ fn sendHandshakeProtocolViolation(
         ),
     };
     defer endpoint.allocator.free(packet);
+    if (anti_amplification) |budget| try budget.reserve(packet.len);
     try endpoint.sendBytes(peer, packet);
 }
 
@@ -955,6 +957,7 @@ test "QUIC handshake protocol violations use the available encryption level" {
             scid,
             case.packet_number,
             "reserved bits",
+            null,
         );
         var datagram = try receiver.receiveBytes();
         defer datagram.deinit(allocator);
@@ -1720,6 +1723,7 @@ fn connectAttempt(
                 options.local_connection_id,
                 options.client_handshake_packet_number,
                 "reserved bits",
+                null,
             ) catch {};
         }
         return err;
@@ -2211,7 +2215,7 @@ pub const testing = struct {
         original_destination_connection_id: []const u8,
         options: ServerOptions,
     ) Error!void {
-        return validateAddressTokenForInitial(
+        _ = try validateAddressTokenForInitial(
             allocator,
             token,
             original_destination_connection_id,
@@ -2375,12 +2379,16 @@ fn acceptInternal(
         client_initial.packet.destination_connection_id,
         effective_options,
     );
-    try validateAddressTokenForInitial(
+    const address_validated = try validateAddressTokenForInitial(
         endpoint.allocator,
         client_initial.packet.token,
         original_destination_connection_id,
         effective_options,
     );
+    var anti_amplification = retransmit.AntiAmplificationBudget{
+        .validated = address_validated,
+    };
+    anti_amplification.recordReceived(client_initial.bytes_received);
 
     var parsed_client = try quic.tls_client_hello.parseClientHello(
         client_initial.crypto_data,
@@ -2573,6 +2581,7 @@ fn acceptInternal(
                     options.local_connection_id,
                     options.server_initial_packet_number,
                     "reserved bits",
+                    &anti_amplification,
                 ) catch {};
             }
             return err;
@@ -2591,6 +2600,7 @@ fn acceptInternal(
                 client_initial.packet.source_connection_id,
                 options.local_transport_parameters.grease_quic_bit,
                 options.handshake_recovery.deadline,
+                &anti_amplification,
             ) catch |err| {
                 if (err == error.InvalidReservedBits) {
                     sendHandshakeProtocolViolation(
@@ -2603,6 +2613,7 @@ fn acceptInternal(
                         options.local_connection_id,
                         options.server_initial_packet_number,
                         "reserved bits",
+                        &anti_amplification,
                     ) catch {};
                 }
                 return err;
@@ -2622,8 +2633,10 @@ fn acceptInternal(
         try discardClientEarlyData(
             endpoint,
             source,
+            client_initial.from,
             client_initial.coalesced_tail,
             options.handshake_recovery.deadline,
+            &anti_amplification,
         );
     } else if (client_initial.coalesced_tail.len != 0) {
         // RFC 9000 requires the first client datagram to be at least 1200
@@ -2794,14 +2807,17 @@ fn acceptInternal(
             .crypto_data = server_flight.items,
             .max_crypto_frame_data_len = options.max_crypto_frame_data_len,
         },
+        .anti_amplification = anti_amplification,
     };
-    var client_handshake_datagram = try retransmit.sendAndReceiveMatchingFrom(
+    var client_handshake_datagram = try retransmit
+        .sendAndReceiveMatchingFromObserved(
         endpoint,
         source,
         options.handshake_recovery,
         &send_context,
         retransmit.InitialHandshakeFlight.send,
         containsHandshakePacket,
+        retransmit.InitialHandshakeFlight.observeReceived,
     );
     defer client_handshake_datagram.deinit(endpoint.allocator);
     var client_handshake = receiveClientHandshakeCryptoFromDatagram(
@@ -2817,6 +2833,7 @@ fn acceptInternal(
         local_transport_parameters.grease_quic_bit,
         options.client_auth != null,
         options.handshake_recovery,
+        &send_context.anti_amplification,
     ) catch |err| {
         if (err == error.InvalidReservedBits) {
             if (send_context.next_handshake_packet_number) |packet_number| {
@@ -2830,6 +2847,7 @@ fn acceptInternal(
                     options.local_connection_id,
                     packet_number,
                     "reserved bits",
+                    &send_context.anti_amplification,
                 ) catch {};
             }
         }
@@ -2979,6 +2997,7 @@ fn openClientHandshakeCryptoFromDatagram(
     max_crypto_buffer: usize,
     allow_zero_fixed_bit: bool,
     require_client_certificate: bool,
+    anti_amplification: ?*retransmit.AntiAmplificationBudget,
 ) Error!quic.initial_exchange.ReceivedHandshakeCrypto {
     var reassembler = quic.crypto_stream.Reassembler.init(
         endpoint.allocator,
@@ -3021,12 +3040,17 @@ fn openClientHandshakeCryptoFromDatagram(
             .handshake,
         ) catch |err| switch (err) {
             error.MissingCryptoFrame => {
+                // An authenticated ACK/PADDING-only Handshake packet still
+                // proves return routability even though it carries no TLS
+                // bytes for this reassembler.
+                if (anti_amplification) |budget| budget.validate();
                 opened.deinit(endpoint.allocator);
                 opened_owned = false;
                 continue;
             },
             else => |other| return other,
         };
+        if (anti_amplification) |budget| budget.validate();
         if (first_packet == null) {
             first_packet = opened;
             opened_owned = false;
@@ -3084,6 +3108,7 @@ fn receiveClientHandshakeCryptoFromDatagram(
     allow_zero_fixed_bit: bool,
     require_client_certificate: bool,
     recovery: retransmit.Config,
+    anti_amplification: *retransmit.AntiAmplificationBudget,
 ) Error!quic.initial_exchange.ReceivedHandshakeCrypto {
     var next_from = first_from;
     var next_bytes = first_datagram;
@@ -3106,6 +3131,7 @@ fn receiveClientHandshakeCryptoFromDatagram(
                 max_crypto_buffer,
                 allow_zero_fixed_bit,
                 require_client_certificate,
+                anti_amplification,
             ) catch |err| switch (err) {
                 error.MissingCryptoFrame => null,
                 else => |other| return other,
@@ -3122,6 +3148,9 @@ fn receiveClientHandshakeCryptoFromDatagram(
                 error.ConcurrencyUnavailable => return error.HandshakeReceiveFailed,
                 else => |other| return @errorCast(other),
             };
+        if (owned_datagram.?.from.eql(&expected_from)) {
+            anti_amplification.recordReceived(owned_datagram.?.bytes.len);
+        }
         next_from = owned_datagram.?.from;
         next_bytes = owned_datagram.?.bytes;
         next_ecn = owned_datagram.?.ecn;
@@ -3247,6 +3276,7 @@ test "QUIC server finds Client Finished behind coalesced Initial" {
         1024,
         false,
         false,
+        null,
     );
     defer opened.deinit(allocator);
     try std.testing.expectEqualSlices(
@@ -3307,6 +3337,9 @@ test "QUIC server waits past unauthenticated client Handshake datagram" {
     defer allocator.free(corrupted);
     corrupted[corrupted.len - 1] ^= 0x80;
     try sender.sendBytes(receiver.address(), valid);
+    var anti_amplification = retransmit.AntiAmplificationBudget{
+        .validated = true,
+    };
 
     var opened = try receiveClientHandshakeCryptoFromDatagram(
         &receiver,
@@ -3321,6 +3354,7 @@ test "QUIC server waits past unauthenticated client Handshake datagram" {
         false,
         false,
         .{ .initial_pto_ms = 10, .max_pto_ms = 10 },
+        &anti_amplification,
     );
     defer opened.deinit(allocator);
     try std.testing.expectEqualSlices(u8, &finished, opened.crypto_data);
@@ -3337,10 +3371,10 @@ fn validateAddressTokenForInitial(
     token: []const u8,
     original_destination_connection_id: []const u8,
     options: ServerOptions,
-) Error!void {
+) Error!bool {
     if (token.len == 0) {
         if (options.retry_source_connection_id.len != 0) return error.InvalidPacket;
-        return;
+        return false;
     }
     if (options.retry_source_connection_id.len != 0) {
         if (options.retry_original_destination_connection_id.len == 0 or
@@ -3357,7 +3391,7 @@ fn validateAddressTokenForInitial(
             token,
         ) catch return error.InvalidPacket;
         try rememberValidatedAddressToken(token, options);
-        return;
+        return true;
     }
     if (options.address_validation_secrets.len == 0 or
         options.address_validation_peer.len == 0)
@@ -3368,7 +3402,7 @@ fn validateAddressTokenForInitial(
         if (options.address_validation_replay_filter != null) {
             return error.InvalidPacket;
         }
-        return;
+        return false;
     }
     _ = quic.address_validation_token.validateAnySecret(
         options.address_validation_secrets,
@@ -3379,6 +3413,7 @@ fn validateAddressTokenForInitial(
         token,
     ) catch return error.InvalidPacket;
     try rememberValidatedAddressToken(token, options);
+    return true;
 }
 
 fn rememberValidatedAddressToken(
@@ -3399,6 +3434,7 @@ const ReceivedClientInitial = struct {
     crypto_data: []u8,
     initial_secrets: quic.protection.InitialSecrets,
     coalesced_tail: []u8,
+    bytes_received: usize,
 
     fn deinit(self: *ReceivedClientInitial, allocator: std.mem.Allocator) void {
         self.packet.deinit(allocator);
@@ -3535,6 +3571,11 @@ fn openClientInitialDatagram(
         .crypto_data = flight.crypto_data,
         .initial_secrets = initial_secrets,
         .coalesced_tail = coalesced_tail,
+        .bytes_received = std.math.add(
+            usize,
+            flight.bytes_received,
+            datagram.bytes.len - initial_info.len,
+        ) catch std.math.maxInt(usize),
     };
 }
 
@@ -3606,6 +3647,11 @@ fn receiveRetriedClientInitial(
             .crypto_data = flight.crypto_data,
             .initial_secrets = initial_secrets,
             .coalesced_tail = coalesced_tail,
+            .bytes_received = std.math.add(
+                usize,
+                flight.bytes_received,
+                datagram.bytes.len - info.len,
+            ) catch std.math.maxInt(usize),
         };
     }
 }
@@ -4074,10 +4120,12 @@ fn receiveStandaloneClientEarlyData(
     expected_source_connection_id: []const u8,
     allow_zero_fixed_bit: bool,
     caller_deadline: ?std.Io.Clock.Timestamp,
+    anti_amplification: *retransmit.AntiAmplificationBudget,
 ) Error!?quic.zero_rtt.Packet {
     var datagram = try receiveFromSourceBefore(source, caller_deadline);
     defer datagram.deinit(endpoint.allocator);
     if (!datagram.from.eql(&expected_from)) return null;
+    anti_amplification.recordReceived(datagram.bytes.len);
     return openClientEarlyData(
         endpoint,
         datagram.from,
@@ -4094,14 +4142,19 @@ fn receiveStandaloneClientEarlyData(
 fn discardClientEarlyData(
     endpoint: *quic.runtime.Endpoint,
     source: quic.runtime.DatagramSource,
+    expected_from: net.IpAddress,
     coalesced_tail: []const u8,
     caller_deadline: ?std.Io.Clock.Timestamp,
+    anti_amplification: *retransmit.AntiAmplificationBudget,
 ) Error!void {
     if (coalesced_tail.len != 0) {
         return validateRejectedEarlyData(coalesced_tail);
     }
     var datagram = try receiveFromSourceBefore(source, caller_deadline);
     defer datagram.deinit(endpoint.allocator);
+    if (datagram.from.eql(&expected_from)) {
+        anti_amplification.recordReceived(datagram.bytes.len);
+    }
     try validateRejectedEarlyData(datagram.bytes);
 }
 

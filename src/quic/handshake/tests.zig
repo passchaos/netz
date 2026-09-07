@@ -198,6 +198,118 @@ test "QUIC Initial deadline validation consumes owned datagram" {
     );
 }
 
+test "QUIC server handshake respects pre-validation amplification limit" {
+    const allocator = std.testing.allocator;
+    var threaded = std.Io.Threaded.init(allocator, .{});
+    defer threaded.deinit();
+    const io = threaded.io();
+
+    const Counter = struct {
+        bytes: usize = 0,
+        datagrams: usize = 0,
+
+        fn drop(context: *anyopaque, bytes: []const u8) bool {
+            const self: *@This() = @ptrCast(@alignCast(context));
+            self.bytes += bytes.len;
+            self.datagrams += 1;
+            return true;
+        }
+    };
+    var counter = Counter{};
+    var server = try quic.runtime.Endpoint.bind(
+        allocator,
+        io,
+        .{ .ip4 = .loopback(0) },
+        .{
+            .max_datagram_size = quic.initial_exchange.min_initial_udp_datagram_size,
+            .send_interceptor = .{
+                .context = &counter,
+                .should_drop = Counter.drop,
+            },
+        },
+    );
+    defer server.deinit();
+    var client = try quic.runtime.Endpoint.bind(
+        allocator,
+        io,
+        .{ .ip4 = .loopback(0) },
+        .{ .max_datagram_size = quic.initial_exchange.min_initial_udp_datagram_size },
+    );
+    defer client.deinit();
+
+    const dcid = "amplify0";
+    const client_cid = "client";
+    const client_secret_key = [_]u8{0x92} ** 32;
+    const client_public = try quic.tls_client_hello.x25519PublicKey(
+        clampSecret(client_secret_key),
+    );
+    var params = quic.practical_transport_parameters;
+    params.initial_source_connection_id = client_cid;
+    var encoded_tp: std.ArrayList(u8) = .empty;
+    defer encoded_tp.deinit(allocator);
+    try quic.encodeTransportParametersForSource(
+        &encoded_tp,
+        allocator,
+        params,
+        .client,
+    );
+    var client_hello: std.ArrayList(u8) = .empty;
+    defer client_hello.deinit(allocator);
+    try quic.tls_client_hello.writeClientHello(
+        &client_hello,
+        allocator,
+        .{
+            .random = [_]u8{0x91} ** 32,
+            .x25519_public_key = client_public,
+            .alpn_protocols = &.{"h3"},
+            .transport_parameters = encoded_tp.items,
+        },
+    );
+    try quic.initial_exchange.sendInitialCrypto(
+        &client,
+        server.address(),
+        quic.protection.deriveInitialSecrets(dcid).client,
+        .{
+            .destination_connection_id = dcid,
+            .source_connection_id = client_cid,
+            .packet_number = 0,
+            .crypto_data = client_hello.items,
+            .min_datagram_size = quic.initial_exchange.min_initial_udp_datagram_size,
+        },
+    );
+    const initial = try server.receiveBytes();
+    const received_bytes = initial.bytes.len;
+    try std.testing.expectEqual(
+        quic.initial_exchange.min_initial_udp_datagram_size,
+        received_bytes,
+    );
+
+    try std.testing.expectError(
+        error.HandshakeTimeout,
+        handshake.acceptFromInitialWithTimeout(
+            &server,
+            initial,
+            .{
+                .local_connection_id = "server",
+                .random = [_]u8{0x93} ** 32,
+                .x25519_secret_key = [_]u8{0x94} ** 32,
+                .key_exchange_groups = &.{.x25519},
+                .handshake_recovery = .{
+                    .initial_pto_ms = 5,
+                    .max_pto_ms = 5,
+                    .max_retries = 3,
+                },
+            },
+            .fromMilliseconds(40),
+        ),
+    );
+    // One complete flight is an Initial plus a Handshake datagram. The second
+    // PTO flight fits, while a third would cross 3x and must be suppressed.
+    try std.testing.expect(counter.datagrams >= 4);
+    try std.testing.expect(counter.bytes <=
+        received_bytes * quic.one_rtt.anti_amplification_multiplier);
+}
+
 test "QUIC server deadline retains stricter recovery bound" {
     const allocator = std.testing.allocator;
     var threaded = std.Io.Threaded.init(allocator, .{});

@@ -93,6 +93,59 @@ test "Initial CRYPTO flight stays within MTU and reassembles" {
     );
 }
 
+test "Initial CRYPTO flight wire length matches emitted datagrams" {
+    const allocator = std.testing.allocator;
+    var threaded = std.Io.Threaded.init(allocator, .{});
+    defer threaded.deinit();
+
+    const Counter = struct {
+        bytes: usize = 0,
+        datagrams: usize = 0,
+
+        fn drop(context: *anyopaque, bytes: []const u8) bool {
+            const self: *@This() = @ptrCast(@alignCast(context));
+            self.bytes += bytes.len;
+            self.datagrams += 1;
+            return true;
+        }
+    };
+    var counter = Counter{};
+    var endpoint = try quic.runtime.Endpoint.bind(
+        allocator,
+        threaded.io(),
+        .{ .ip4 = .loopback(0) },
+        .{
+            .max_datagram_size = target.min_initial_udp_datagram_size,
+            .send_interceptor = .{
+                .context = &counter,
+                .should_drop = Counter.drop,
+            },
+        },
+    );
+    defer endpoint.deinit();
+
+    const options = target.SendOptions{
+        .initial = .{
+            .destination_connection_id = "wire-len",
+            .source_connection_id = "peer",
+            .packet_number = 61,
+            .crypto_data = &([_]u8{0x5a} ** 2604),
+            .min_datagram_size = target.min_initial_udp_datagram_size,
+        },
+        .max_datagram_size = target.min_initial_udp_datagram_size,
+    };
+    const expected = try target.wireLen(options);
+    const sent = try target.send(
+        &endpoint,
+        .{ .ip4 = .loopback(4433) },
+        quic.protection.deriveInitialSecrets("wire-len").client,
+        options,
+    );
+
+    try std.testing.expectEqual(expected, counter.bytes);
+    try std.testing.expectEqual(sent.packet_count, counter.datagrams);
+}
+
 test "Initial CRYPTO flight rejects impossible budgets before send" {
     var threaded = std.Io.Threaded.init(std.testing.allocator, .{});
     defer threaded.deinit();

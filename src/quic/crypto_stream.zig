@@ -102,7 +102,7 @@ pub fn writeCryptoFrames(
     }
 }
 
-fn cryptoFramesWireLen(offset: u64, bytes_len: usize, max_frame_data_len: usize) Error!usize {
+pub fn cryptoFramesWireLen(offset: u64, bytes_len: usize, max_frame_data_len: usize) Error!usize {
     if (max_frame_data_len == 0) return error.InvalidCryptoRange;
     var len: usize = 0;
     var written: usize = 0;

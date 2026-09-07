@@ -77,6 +77,9 @@ pub const Received = struct {
     first_packet: quic.protection.OpenedInitialPacket,
     crypto_data: []u8,
     packet_count: usize,
+    /// Full UDP payload bytes consumed from this path while assembling the
+    /// Initial CRYPTO flight, including datagrams later discarded.
+    bytes_received: usize,
     next_expected_packet_number: u64,
 
     pub fn deinit(self: *Received, allocator: std.mem.Allocator) void {
@@ -153,6 +156,70 @@ pub fn send(
     };
 }
 
+/// Return the exact total wire bytes emitted by `send` without allocating or
+/// protecting packets. Handshake anti-amplification uses this to reserve a
+/// complete flight before any datagram becomes visible on the socket.
+pub fn wireLen(options: SendOptions) Error!usize {
+    if (options.initial.crypto_data.len == 0 or
+        options.max_datagram_size == 0 or
+        options.max_datagrams == 0 or
+        options.initial.max_crypto_frame_data_len == 0 or
+        options.initial.min_datagram_size > options.max_datagram_size)
+    {
+        return error.InvalidCryptoRange;
+    }
+
+    var total: usize = 0;
+    var sent: usize = 0;
+    var packet_number = options.initial.packet_number;
+    var packet_count: usize = 0;
+    while (sent < options.initial.crypto_data.len) {
+        if (packet_count == options.max_datagrams) {
+            return error.CryptoBufferTooLarge;
+        }
+        if (packet_number > quic.protection.max_packet_number) {
+            return error.InvalidPacketNumber;
+        }
+        const chunk_len = try largestChunk(options, sent);
+        if (chunk_len == 0) return error.DatagramTooLarge;
+        var packet_options = options.initial;
+        packet_options.packet_number = packet_number;
+        packet_options.crypto_offset = std.math.add(
+            u64,
+            options.initial.crypto_offset,
+            sent,
+        ) catch return error.InvalidCryptoRange;
+        var payload_len = try cryptoFrameWireLen(
+            packet_options.crypto_offset,
+            chunk_len,
+        );
+        var packet_len = try protectedInitialPacketWireLen(
+            packet_options,
+            payload_len,
+        );
+        while (packet_len < packet_options.min_datagram_size) {
+            payload_len = std.math.add(
+                usize,
+                payload_len,
+                packet_options.min_datagram_size - packet_len,
+            ) catch return error.InvalidFrameLength;
+            packet_len = try protectedInitialPacketWireLen(
+                packet_options,
+                payload_len,
+            );
+        }
+        if (packet_len > options.max_datagram_size) {
+            return error.DatagramTooLarge;
+        }
+        total = std.math.add(usize, total, packet_len) catch
+            return error.InvalidFrameLength;
+        sent += chunk_len;
+        packet_count += 1;
+        if (sent < options.initial.crypto_data.len) packet_number += 1;
+    }
+    return total;
+}
+
 pub fn largestChunk(
     options: SendOptions,
     sent: usize,
@@ -200,6 +267,13 @@ fn initialPacketWireLen(
     data_len: usize,
 ) Error!usize {
     const frame_len = try cryptoFrameWireLen(frame_offset, data_len);
+    return protectedInitialPacketWireLen(options, frame_len);
+}
+
+fn protectedInitialPacketWireLen(
+    options: SendInitialOptions,
+    frame_len: usize,
+) Error!usize {
     return quic.protection.protectedLongPacketCapacity(
         options.destination_connection_id.len,
         options.source_connection_id.len,
@@ -293,6 +367,7 @@ pub fn openFrom(
     var next_expected = options.expected_packet_number;
     var packet_count: usize = 0;
     var datagram_count: usize = 0;
+    var bytes_received: usize = 0;
     var target_len = options.expected_crypto_len;
     var use_first_datagram = true;
 
@@ -318,6 +393,17 @@ pub fn openFrom(
         };
         datagram_count += 1;
 
+        if (peer) |expected_peer| {
+            if (!datagram_from.eql(&expected_peer)) {
+                continue;
+            }
+        }
+        bytes_received = std.math.add(
+            usize,
+            bytes_received,
+            datagram_bytes.len,
+        ) catch std.math.maxInt(usize);
+
         // The caller-provided first packet can be the Initial prefix of a
         // coalesced datagram already validated at the UDP boundary.
         if (!is_first_datagram and
@@ -333,12 +419,6 @@ pub fn openFrom(
             }
             return error.InvalidInitialPacket;
         }
-        if (peer) |expected_peer| {
-            if (!datagram_from.eql(&expected_peer)) {
-                continue;
-            }
-        }
-
         const info = quic.protection.peekProtectedLongPacketInfoWithFixedBitPolicy(
             datagram_bytes,
             options.allow_zero_fixed_bit,
@@ -461,6 +541,7 @@ pub fn openFrom(
                         endpoint.allocator,
                     ),
                     .packet_count = packet_count,
+                    .bytes_received = bytes_received,
                     .next_expected_packet_number = next_expected,
                 };
             }
