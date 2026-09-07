@@ -783,9 +783,9 @@ test "QUIC 1-RTT batch send preflights storage and all packets" {
     const keys = quic.protection.deriveAes128Keys([_]u8{0xb2} ** quic.protection.secret_len);
     const valid = [_]quic.Frame{.{ .ping = {} }};
     const invalid = [_]quic.Frame{.{ .ack_frequency = .{
-        .sequence_number = 0,
-        .ack_eliciting_threshold = 0,
-        .request_max_ack_delay = 0,
+        .sequence_number = std.math.maxInt(u64),
+        .ack_eliciting_threshold = 1,
+        .request_max_ack_delay = 1,
         .reordering_threshold = 0,
     } }};
     const packets = [_][]const quic.Frame{ &valid, &invalid };
@@ -799,7 +799,7 @@ test "QUIC 1-RTT batch send preflights storage and all packets" {
     @memset(&payload_storage, 0xa5);
     @memset(&packet_storage, 0x5a);
     try std.testing.expectError(
-        error.InvalidFrame,
+        error.InvalidFrameLength,
         one_rtt.sendFramesBatchInto(&sender, receiver.address(), keys, options, &payload_storage, &packet_storage),
     );
     try std.testing.expect(allEqualForTest(u8, &payload_storage, 0xa5));

@@ -9,6 +9,21 @@ const pto_jitter = @import("one_rtt/pto_jitter.zig");
 
 const net = std.Io.net;
 
+/// ACK_FREQUENCY expresses Requested Max Ack Delay in microseconds, while the
+/// QUIC max_ack_delay limit is 2^14 milliseconds (exclusive).
+const max_requested_ack_delay_us: u64 = (@as(u64, 1) << 14) * 1000;
+
+fn validateRequestedMaxAckDelay(
+    requested_us: u64,
+    advertised_min_us: ?u64,
+) error{InvalidFrame}!void {
+    if (requested_us >= max_requested_ack_delay_us or
+        (advertised_min_us != null and requested_us < advertised_min_us.?))
+    {
+        return error.InvalidFrame;
+    }
+}
+
 pub const Error = quic.runtime.Error || quic.protection.Error || quic.packet_space.Error || quic.flow_control.Error || quic.recovery.Error || quic.congestion.Error || quic.path_validation.Error || quic.connection_id.Error || quic.stream_state.Error || quic.Error || error{
     MissingFrame,
     ConnectionClosed,
@@ -263,7 +278,11 @@ pub const ConnectionConfig = struct {
     peer_max_datagram_frame_size: ?usize = null,
     max_datagram_queue_items: usize = 16,
     enable_ack_frequency: bool = false,
+    /// `min_ack_delay` advertised locally; gates peer ACK_FREQUENCY and
+    /// validates its Requested Max Ack Delay (microseconds).
     local_min_ack_delay: ?u64 = null,
+    /// Peer's advertised `min_ack_delay`; gates local ACK_FREQUENCY and
+    /// validates the delay requested by the caller (microseconds).
     peer_min_ack_delay: ?u64 = null,
     local_stateless_reset_key: ?[quic.stateless_reset.static_key_len]u8 = null,
     /// Authenticated server transport-parameter token for the peer's Initial
@@ -2904,7 +2923,13 @@ pub const Connection = struct {
     }
 
     pub fn sendAckFrequency(self: *Connection, ack_eliciting_threshold: u64, request_max_ack_delay: u64, reordering_threshold: u64) Error!u64 {
-        if (!self.config.enable_ack_frequency) return error.AckFrequencyDisabled;
+        if (!self.ackFrequencySendEnabled()) {
+            return error.AckFrequencyDisabled;
+        }
+        try validateRequestedMaxAckDelay(
+            request_max_ack_delay,
+            self.config.peer_min_ack_delay,
+        );
         try self.validateNextPacketNumber();
         const sequence_number = self.ack_frequency_send_next_sequence;
         const frames = [_]quic.Frame{.{ .ack_frequency = .{
@@ -2924,7 +2949,9 @@ pub const Connection = struct {
     }
 
     pub fn sendImmediateAck(self: *Connection) Error!void {
-        if (!self.config.enable_ack_frequency) return error.AckFrequencyDisabled;
+        if (!self.ackFrequencySendEnabled()) {
+            return error.AckFrequencyDisabled;
+        }
         try self.send(&[_]quic.Frame{.{ .immediate_ack = {} }});
     }
 
@@ -2952,9 +2979,9 @@ pub const Connection = struct {
         max_ack_delay: u64,
         reordering_threshold: u64,
     ) void {
-        self.ack_eliciting_threshold = @max(@as(u64, 1), ack_eliciting_threshold);
+        self.ack_eliciting_threshold = ack_eliciting_threshold;
         self.requested_max_ack_delay = max_ack_delay;
-        self.ack_reordering_threshold = @max(@as(u64, 1), reordering_threshold);
+        self.ack_reordering_threshold = reordering_threshold;
     }
 
     pub fn immediateAckRequested(self: Connection) bool {
@@ -3349,8 +3376,17 @@ pub const Connection = struct {
                 const frame_size = datagramFrameWireSize(datagram) orelse return error.InvalidFrameLength;
                 if (frame_size > frame_limit) return error.DatagramTooLarge;
             },
-            .ack_frequency, .immediate_ack => {
-                if (!self.config.enable_ack_frequency) return error.AckFrequencyDisabled;
+            .ack_frequency => |ack_frequency| {
+                if (!self.ackFrequencySendEnabled()) {
+                    return error.AckFrequencyDisabled;
+                }
+                try validateRequestedMaxAckDelay(
+                    ack_frequency.request_max_ack_delay,
+                    self.config.peer_min_ack_delay,
+                );
+            },
+            .immediate_ack => if (!self.ackFrequencySendEnabled()) {
+                return error.AckFrequencyDisabled;
             },
             else => {},
         }
@@ -4682,7 +4718,11 @@ pub const Connection = struct {
             if (largest_packet_number) |largest| {
                 if (packet.packet.packet_number < largest) {
                     const gap = largest - packet.packet.packet_number;
-                    if (gap >= self.ack_reordering_threshold) reordered = true;
+                    if (self.ack_reordering_threshold != 0 and
+                        gap >= self.ack_reordering_threshold)
+                    {
+                        reordered = true;
+                    }
                 } else {
                     largest_packet_number = packet.packet.packet_number;
                 }
@@ -4711,6 +4751,7 @@ pub const Connection = struct {
         if (!frame_traits.ackEliciting(frames)) return false;
         const reordered = if (self.received.largestReceived()) |largest|
             packet_number < largest and
+                self.ack_reordering_threshold != 0 and
                 largest - packet_number >= self.ack_reordering_threshold
         else
             false;
@@ -9412,7 +9453,8 @@ pub const Connection = struct {
                     if (self.config.local_endpoint == .server) return error.InvalidFrame;
                 },
                 .datagram => |datagram| try self.validateDatagramFrame(datagram),
-                .ack_frequency, .immediate_ack => if (!self.config.enable_ack_frequency) return error.AckFrequencyDisabled,
+                .ack_frequency => |ack_frequency| try self.validateAckFrequencyForReceive(ack_frequency),
+                .immediate_ack => if (!self.ackFrequencyReceiveEnabled()) return error.AckFrequencyDisabled,
                 else => {},
             }
         }
@@ -9496,6 +9538,7 @@ pub const Connection = struct {
             error.InvalidFrame => blk: {
                 if (self.config.local_endpoint == .server and frame == .new_token) break :blk semanticClose(.protocol_violation, @intFromEnum(quic.FrameType.new_token), "new token");
                 if (self.config.local_endpoint == .server and frame == .handshake_done) break :blk semanticClose(.protocol_violation, @intFromEnum(quic.FrameType.handshake_done), "handshake done");
+                if (frame == .ack_frequency) break :blk ackFrequencyFrameClose(frame);
                 if (frame == .datagram) {
                     const frame_type = if (frame.datagram.length_present)
                         quic.FrameType.datagram_len
@@ -9894,12 +9937,43 @@ pub const Connection = struct {
     }
 
     fn receiveAckFrequency(self: *Connection, ack_frequency: quic.AckFrequencyFrame) Error!void {
-        if (!self.config.enable_ack_frequency) return error.AckFrequencyDisabled;
+        try self.validateAckFrequencyForReceive(ack_frequency);
         if (ack_frequency.sequence_number < self.ack_frequency_recv_next_sequence) return;
         self.ack_frequency_recv_next_sequence = ack_frequency.sequence_number +| 1;
-        self.ack_eliciting_threshold = @max(@as(u64, 1), ack_frequency.ack_eliciting_threshold);
+        self.ack_eliciting_threshold = ack_frequency.ack_eliciting_threshold;
         self.requested_max_ack_delay = ack_frequency.request_max_ack_delay;
-        self.ack_reordering_threshold = @max(@as(u64, 1), ack_frequency.reordering_threshold);
+        self.ack_reordering_threshold = ack_frequency.reordering_threshold;
+    }
+
+    fn validateAckFrequencyForReceive(
+        self: Connection,
+        ack_frequency: quic.AckFrequencyFrame,
+    ) Error!void {
+        if (!self.ackFrequencyReceiveEnabled()) {
+            return error.AckFrequencyDisabled;
+        }
+        // Obsolete frames are ignored in their entirety, including fields
+        // that would be invalid in a newer request.
+        if (ack_frequency.sequence_number <
+            self.ack_frequency_recv_next_sequence) return;
+        try validateRequestedMaxAckDelay(
+            ack_frequency.request_max_ack_delay,
+            self.config.local_min_ack_delay,
+        );
+    }
+
+    fn ackFrequencySendEnabled(self: Connection) bool {
+        if (!self.config.enable_ack_frequency) return false;
+        if (self.config.local_min_ack_delay == null and
+            self.config.peer_min_ack_delay == null) return true;
+        return self.config.peer_min_ack_delay != null;
+    }
+
+    fn ackFrequencyReceiveEnabled(self: Connection) bool {
+        if (!self.config.enable_ack_frequency) return false;
+        if (self.config.local_min_ack_delay == null and
+            self.config.peer_min_ack_delay == null) return true;
+        return self.config.local_min_ack_delay != null;
     }
 
     fn receiveImmediateAck(self: *Connection) void {
@@ -11702,6 +11776,12 @@ pub const testing = struct {
 
     pub fn expectedPacketNumber(connection: *const Connection) u64 {
         return connection.expected_packet_number;
+    }
+
+    pub fn ackFrequencyReceiveNextSequence(
+        connection: *const Connection,
+    ) u64 {
+        return connection.ack_frequency_recv_next_sequence;
     }
 
     pub fn ecnBaselinePending(connection: *const Connection) bool {

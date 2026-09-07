@@ -2054,7 +2054,6 @@ fn validateAckFrequencyFrame(ack_frequency: AckFrequencyFrame) Error!void {
     try validateQuicVarint(ack_frequency.ack_eliciting_threshold);
     try validateQuicVarint(ack_frequency.request_max_ack_delay);
     try validateQuicVarint(ack_frequency.reordering_threshold);
-    if (ack_frequency.ack_eliciting_threshold == 0) return error.InvalidFrame;
 }
 
 pub fn appendPadding(list: *std.ArrayList(u8), allocator: std.mem.Allocator, len: usize) Error!void {
@@ -3302,12 +3301,22 @@ test "QUIC ACK_FREQUENCY and IMMEDIATE_ACK frames" {
     try std.testing.expect(frameAllowedInPacketType(.{ .immediate_ack = {} }, .one_rtt));
     try std.testing.expect(!frameAllowedInPacketType(.{ .immediate_ack = {} }, .zero_rtt));
 
-    try std.testing.expectError(error.InvalidFrame, (Frame{ .ack_frequency = .{
+    encoded.clearRetainingCapacity();
+    try (Frame{ .ack_frequency = .{
         .sequence_number = 10,
         .ack_eliciting_threshold = 0,
         .request_max_ack_delay = 0,
         .reordering_threshold = 0,
-    } }).write(&encoded, allocator));
+    } }).write(&encoded, allocator);
+    const immediate_frequency = try parseFrame(encoded.items);
+    try std.testing.expectEqual(
+        @as(u64, 0),
+        immediate_frequency.frame.ack_frequency.ack_eliciting_threshold,
+    );
+    try std.testing.expectEqual(
+        @as(u64, 0),
+        immediate_frequency.frame.ack_frequency.reordering_threshold,
+    );
 
     encoded.clearRetainingCapacity();
     try varint.encode(&encoded, allocator, @intFromEnum(FrameType.ack_frequency));
@@ -3315,7 +3324,11 @@ test "QUIC ACK_FREQUENCY and IMMEDIATE_ACK frames" {
     try varint.encode(&encoded, allocator, 0);
     try varint.encode(&encoded, allocator, 0);
     try varint.encode(&encoded, allocator, 0);
-    try std.testing.expectError(error.InvalidFrame, parseFrame(encoded.items));
+    const parsed_zero = try parseFrame(encoded.items);
+    try std.testing.expectEqual(
+        @as(u64, 0),
+        parsed_zero.frame.ack_frequency.ack_eliciting_threshold,
+    );
 }
 
 test "QUIC frame packet context rules follow RFC 9000" {

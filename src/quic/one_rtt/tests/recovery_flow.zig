@@ -4165,6 +4165,8 @@ test "QUIC 1-RTT ACK_FREQUENCY and IMMEDIATE_ACK state" {
         .local_connection_id = &client_cid,
         .peer_connection_id = &server_cid,
         .enable_ack_frequency = true,
+        .local_min_ack_delay = 1_000,
+        .peer_min_ack_delay = 2_000,
     });
     defer client.deinit();
     var server = try one_rtt.Connection.init(&server_endpoint, .{
@@ -4175,6 +4177,8 @@ test "QUIC 1-RTT ACK_FREQUENCY and IMMEDIATE_ACK state" {
         .peer_connection_id = &client_cid,
         .local_endpoint = .server,
         .enable_ack_frequency = true,
+        .local_min_ack_delay = 2_000,
+        .peer_min_ack_delay = 1_000,
     });
     defer server.deinit();
 
@@ -4186,8 +4190,28 @@ test "QUIC 1-RTT ACK_FREQUENCY and IMMEDIATE_ACK state" {
     try std.testing.expectEqual(@as(u64, 12_000), server.requestedMaxAckDelay());
     try std.testing.expectEqual(@as(u64, 5), server.ackReorderingThreshold());
 
-    try std.testing.expectError(error.InvalidFrame, client.sendAckFrequency(0, 12_000, 5));
-    try std.testing.expectEqual(@as(u64, 1), client.ack_frequency_send_next_sequence);
+    const immediate_sequence = try client.sendAckFrequency(0, 12_000, 0);
+    try std.testing.expectEqual(@as(u64, 1), immediate_sequence);
+    var immediate_frequency = try server.receivePacket();
+    defer immediate_frequency.deinit(allocator);
+    try std.testing.expectEqual(@as(u64, 0), server.ackFrequencyThreshold());
+    try std.testing.expectEqual(@as(u64, 0), server.ackReorderingThreshold());
+    try std.testing.expectEqual(
+        @as(u64, 2),
+        client.ack_frequency_send_next_sequence,
+    );
+    try std.testing.expectError(
+        error.InvalidFrame,
+        client.sendAckFrequency(4, 1_999, 5),
+    );
+    try std.testing.expectError(
+        error.InvalidFrame,
+        client.sendAckFrequency(4, 16_384_000, 5),
+    );
+    try std.testing.expectEqual(
+        @as(u64, 2),
+        client.ack_frequency_send_next_sequence,
+    );
 
     const reverse_sequence = try server.sendAckFrequency(6, 34_000, 7);
     try std.testing.expectEqual(@as(u64, 0), reverse_sequence);
@@ -4204,7 +4228,7 @@ test "QUIC 1-RTT ACK_FREQUENCY and IMMEDIATE_ACK state" {
 
     try one_rtt.sendFrames(&client_endpoint, server_endpoint.address(), keys, .{
         .destination_connection_id = &server_cid,
-        .packet_number = 2,
+        .packet_number = 3,
         .frames = &[_]quic.Frame{.{ .ack_frequency = .{
             .sequence_number = 0,
             .ack_eliciting_threshold = 99,
@@ -4214,7 +4238,7 @@ test "QUIC 1-RTT ACK_FREQUENCY and IMMEDIATE_ACK state" {
     });
     var stale = try server.receivePacket();
     defer stale.deinit(allocator);
-    try std.testing.expectEqual(@as(u64, 4), server.ackFrequencyThreshold());
+    try std.testing.expectEqual(@as(u64, 0), server.ackFrequencyThreshold());
 
     var disabled = try one_rtt.Connection.init(&server_endpoint, .{
         .peer = client_endpoint.address(),
@@ -4263,6 +4287,103 @@ test "QUIC 1-RTT ACK_FREQUENCY and IMMEDIATE_ACK state" {
     try std.testing.expectEqual(@intFromEnum(quic.TransportErrorCode.protocol_violation), disabled2.close_info.?.error_code);
     try std.testing.expectEqual(@as(u64, @intFromEnum(quic.FrameType.ack_frequency)), disabled2.close_info.?.frame_type);
     try std.testing.expectEqualStrings("ack frequency", disabled2.close_info.?.reason_phrase);
+}
+
+test "QUIC 1-RTT rejects invalid requested ACK delays transactionally" {
+    const allocator = std.testing.allocator;
+    var threaded = std.Io.Threaded.init(allocator, .{});
+    defer threaded.deinit();
+    const io = threaded.io();
+
+    var sender = try quic.runtime.Endpoint.bind(
+        allocator,
+        io,
+        .{ .ip4 = .loopback(0) },
+        .{ .max_datagram_size = 4096 },
+    );
+    defer sender.deinit();
+    const keys = quic.protection.deriveAes128Keys(
+        [_]u8{0xa7} ** quic.protection.secret_len,
+    );
+
+    for ([_]u64{ 999, 16_384_000 }, 0..) |invalid_delay, index| {
+        var receiver = try quic.runtime.Endpoint.bind(
+            allocator,
+            io,
+            .{ .ip4 = .loopback(0) },
+            .{ .max_datagram_size = 4096 },
+        );
+        defer receiver.deinit();
+        var cid = [_]u8{ 0xa8, 0xa9, 0xaa, 0 };
+        cid[3] = @intCast(index);
+        var connection = try one_rtt.Connection.init(&receiver, .{
+            .peer = sender.address(),
+            .receive_keys = keys,
+            .send_keys = keys,
+            .local_connection_id = &cid,
+            .peer_connection_id = "peer",
+            .local_endpoint = .server,
+            .enable_ack_frequency = true,
+            .local_min_ack_delay = 1_000,
+        });
+        defer connection.deinit();
+
+        try one_rtt.sendFrames(
+            &sender,
+            receiver.address(),
+            keys,
+            .{
+                .destination_connection_id = &cid,
+                .packet_number = 0,
+                .frames = &.{
+                    .{ .ping = {} },
+                    .{ .ack_frequency = .{
+                        .sequence_number = 7,
+                        .ack_eliciting_threshold = 9,
+                        .request_max_ack_delay = invalid_delay,
+                        .reordering_threshold = 11,
+                    } },
+                },
+            },
+        );
+        try std.testing.expectError(
+            error.InvalidFrame,
+            connection.receivePacket(),
+        );
+        try std.testing.expect(connection.closing());
+        try std.testing.expectEqual(
+            @as(u64, @intFromEnum(quic.TransportErrorCode.protocol_violation)),
+            connection.close_info.?.error_code,
+        );
+        try std.testing.expectEqual(
+            @as(u64, @intFromEnum(quic.FrameType.ack_frequency)),
+            connection.close_info.?.frame_type,
+        );
+        try std.testing.expectEqualStrings(
+            "ack frequency",
+            connection.close_info.?.reason_phrase,
+        );
+        try std.testing.expectEqual(
+            @as(u64, 0),
+            one_rtt.testing.ackFrequencyReceiveNextSequence(&connection),
+        );
+        try std.testing.expectEqual(
+            @as(u64, 1),
+            connection.ackFrequencyThreshold(),
+        );
+        try std.testing.expectEqual(
+            @as(u64, 0),
+            connection.requestedMaxAckDelay(),
+        );
+        try std.testing.expectEqual(
+            @as(u64, quic.packet_space.default_packet_threshold),
+            connection.ackReorderingThreshold(),
+        );
+        try std.testing.expectEqual(
+            @as(u64, 0),
+            one_rtt.testing.expectedPacketNumber(&connection),
+        );
+    }
 }
 
 test "QUIC 1-RTT ACK_FREQUENCY gates automatic ACK emission" {

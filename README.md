@@ -326,7 +326,10 @@ starts with deterministic parsers, serializers, preallocated fixed-width wire-in
   and connection-seeded unpredictable 1-RTT QUIC Bit emission,
   draft ACK_FREQUENCY and IMMEDIATE_ACK frame codecs with `min_ack_delay`
   transport-parameter negotiation and opt-in 1-RTT state updates for requested
-  ACK threshold/max-delay/reordering behavior, plus automatic ACK coalescing
+  ACK threshold/max-delay/reordering behavior, directional capability checks,
+  transactional rejection of requests below the advertised minimum or at least
+  2^14 milliseconds, and zero-valued immediate-ACK/disabled-reordering modes,
+  plus automatic ACK coalescing
   that respects the negotiated threshold, max-delay timer, and IMMEDIATE_ACK
   override,
   flow-control state with zero-byte reserve/consume, saturated-consume skips, and duplicate receive-offset no-ops for MAX_DATA/MAX_STREAM_DATA/BLOCKED frames wired into
