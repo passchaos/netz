@@ -1341,7 +1341,16 @@ test "WebSocket HTTP3 caller server session restores after rejection" {
     if (shared.err) |err| return err;
 }
 
-test "WebSocket HTTP3 caller-buffer rejects invalid UTF-8 before frame completion" {
+const H3Utf8ReceiveMode = enum {
+    caller_buffer,
+    owned_message,
+    frame,
+    fragmented_frames,
+};
+
+fn expectH3InvalidUtf8RejectedBeforeFrameCompletion(
+    receive_mode: H3Utf8ReceiveMode,
+) !void {
     const allocator = std.testing.allocator;
     var threaded = std.Io.Threaded.init(allocator, .{});
     defer threaded.deinit();
@@ -1377,6 +1386,7 @@ test "WebSocket HTTP3 caller-buffer rejects invalid UTF-8 before frame completio
 
     const Shared = struct {
         server: *h3.Server,
+        receive_mode: H3Utf8ReceiveMode,
         err: ?anyerror = null,
 
         fn run(self: *@This()) void {
@@ -1390,18 +1400,54 @@ test "WebSocket HTTP3 caller-buffer rejects invalid UTF-8 before frame completio
                 .limits = websocket_limits,
             });
             defer connection.deinit();
-            var storage: [websocket_limits.max_message_bytes]u8 = undefined;
-            try std.testing.expectError(
-                error.InvalidUtf8,
-                connection.receiveMessageIntoWithTimeout(
-                    &storage,
-                    .fromSeconds(5),
+            switch (self.receive_mode) {
+                .caller_buffer => {
+                    var storage: [websocket_limits.max_message_bytes]u8 =
+                        undefined;
+                    try std.testing.expectError(
+                        error.InvalidUtf8,
+                        connection.receiveMessageIntoWithTimeout(
+                            &storage,
+                            .fromSeconds(5),
+                        ),
+                    );
+                },
+                .owned_message => try std.testing.expectError(
+                    error.InvalidUtf8,
+                    connection.receiveMessageWithTimeout(.fromSeconds(5)),
                 ),
-            );
+                .frame => try std.testing.expectError(
+                    error.InvalidUtf8,
+                    connection.receiveFrameWithTimeout(.fromSeconds(5)),
+                ),
+                .fragmented_frames => {
+                    var first = try connection.receiveFrameWithTimeout(
+                        .fromSeconds(5),
+                    );
+                    defer first.deinit(allocator);
+                    try std.testing.expectEqual(
+                        websocket.Opcode.text,
+                        first.header.opcode,
+                    );
+                    try std.testing.expect(!first.header.fin);
+                    try std.testing.expectEqualSlices(
+                        u8,
+                        &.{0xf4},
+                        first.payload,
+                    );
+                    try std.testing.expectError(
+                        error.InvalidUtf8,
+                        connection.receiveFrameWithTimeout(.fromSeconds(5)),
+                    );
+                },
+            }
         }
     };
 
-    var shared = Shared{ .server = &server };
+    var shared = Shared{
+        .server = &server,
+        .receive_mode = receive_mode,
+    };
     const thread = try std.Thread.spawn(.{}, Shared.run, .{&shared});
     var joined = false;
     defer if (!joined) thread.join();
@@ -1434,23 +1480,58 @@ test "WebSocket HTTP3 caller-buffer rejects invalid UTF-8 before frame completio
     // the two bytes that prove F4 90 cannot encode a Unicode scalar. With
     // five-byte QUIC STREAM chunks, the receiver must reject this prefix
     // rather than wait forever for the other 1022 payload bytes.
-    var header_storage: [websocket.max_frame_header_len]u8 = undefined;
     const mask_key = [4]u8{ 0x11, 0x22, 0x33, 0x44 };
-    const header = try websocket.writeFrameHeaderForLengthInto(
-        &header_storage,
-        .text,
-        websocket_limits.max_frame_bytes,
-        .{ .mask_key = mask_key },
-    );
-    var wire_prefix: [websocket.max_frame_header_len + 2]u8 = undefined;
-    @memcpy(wire_prefix[0..header.len], header);
-    wire_prefix[header.len] = 0xf4 ^ mask_key[0];
-    wire_prefix[header.len + 1] = 0x90 ^ mask_key[1];
-    try client.h3.sendRequestBodyPaced(
-        client.stream_id,
-        wire_prefix[0 .. header.len + 2],
-        false,
-    );
+    if (receive_mode == .fragmented_frames) {
+        var first_header_storage: [websocket.max_frame_header_len]u8 =
+            undefined;
+        const first_header = try websocket.writeFrameHeaderForLengthInto(
+            &first_header_storage,
+            .text,
+            1,
+            .{ .fin = false, .mask_key = mask_key },
+        );
+        var second_header_storage: [websocket.max_frame_header_len]u8 =
+            undefined;
+        const second_header = try websocket.writeFrameHeaderForLengthInto(
+            &second_header_storage,
+            .continuation,
+            websocket_limits.max_frame_bytes,
+            .{ .mask_key = mask_key },
+        );
+        var wire_prefix: [2 * websocket.max_frame_header_len + 2]u8 =
+            undefined;
+        var wire_len: usize = 0;
+        @memcpy(wire_prefix[wire_len..][0..first_header.len], first_header);
+        wire_len += first_header.len;
+        wire_prefix[wire_len] = 0xf4 ^ mask_key[0];
+        wire_len += 1;
+        @memcpy(wire_prefix[wire_len..][0..second_header.len], second_header);
+        wire_len += second_header.len;
+        wire_prefix[wire_len] = 0x90 ^ mask_key[0];
+        wire_len += 1;
+        try client.h3.sendRequestBodyPaced(
+            client.stream_id,
+            wire_prefix[0..wire_len],
+            false,
+        );
+    } else {
+        var header_storage: [websocket.max_frame_header_len]u8 = undefined;
+        const header = try websocket.writeFrameHeaderForLengthInto(
+            &header_storage,
+            .text,
+            websocket_limits.max_frame_bytes,
+            .{ .mask_key = mask_key },
+        );
+        var wire_prefix: [websocket.max_frame_header_len + 2]u8 = undefined;
+        @memcpy(wire_prefix[0..header.len], header);
+        wire_prefix[header.len] = 0xf4 ^ mask_key[0];
+        wire_prefix[header.len + 1] = 0x90 ^ mask_key[1];
+        try client.h3.sendRequestBodyPaced(
+            client.stream_id,
+            wire_prefix[0 .. header.len + 2],
+            false,
+        );
+    }
 
     var close = (try client.receiveCloseFrameWithTimeout(
         .fromSeconds(5),
@@ -1464,6 +1545,22 @@ test "WebSocket HTTP3 caller-buffer rejects invalid UTF-8 before frame completio
     thread.join();
     joined = true;
     if (shared.err) |err| return err;
+}
+
+test "WebSocket HTTP3 caller-buffer rejects invalid UTF-8 before frame completion" {
+    try expectH3InvalidUtf8RejectedBeforeFrameCompletion(.caller_buffer);
+}
+
+test "WebSocket HTTP3 owned message rejects invalid UTF-8 before frame completion" {
+    try expectH3InvalidUtf8RejectedBeforeFrameCompletion(.owned_message);
+}
+
+test "WebSocket HTTP3 frame rejects invalid UTF-8 before frame completion" {
+    try expectH3InvalidUtf8RejectedBeforeFrameCompletion(.frame);
+}
+
+test "WebSocket HTTP3 frame validation spans fragmented receive calls" {
+    try expectH3InvalidUtf8RejectedBeforeFrameCompletion(.fragmented_frames);
 }
 
 test "WebSocket over HTTP3 extended CONNECT exchanges frames" {

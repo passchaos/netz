@@ -760,7 +760,10 @@ pub fn Connection(comptime role: common.Role) type {
                     .ping, .pong => continue,
                     .close => return error.ConnectionClosed,
                     else => {
-                        const assembled = (try self.message_assembler.?.feed(frame)) orelse
+                        const assembled = (try self.message_assembler.?.feedUtf8Validated(
+                            frame,
+                            self.incoming_text_utf8,
+                        )) orelse
                             continue;
                         self.message_assembler.?.deinit();
                         self.message_assembler = null;
@@ -1179,7 +1182,11 @@ pub fn Connection(comptime role: common.Role) type {
                 header.header_len,
                 payload_len,
             ) catch return error.PayloadTooLarge;
-            try self.ensureBuffered(total_len, deadline);
+            try self.ensureIncomingFrameBuffered(
+                header,
+                total_len,
+                deadline,
+            );
             available = message_buffer.unread(
                 &self.inbuf,
                 self.inbuf_consumed,

@@ -3993,12 +3993,12 @@ pub const Connection = struct {
             .client => .{
                 .expect_mask = .unmasked,
                 .allow_rsv1 = self.permessage_deflate,
-                .validate_utf8 = self.message_assembler == null,
+                .validate_utf8 = false,
             },
             .server => .{
                 .expect_mask = .masked,
                 .allow_rsv1 = self.permessage_deflate,
-                .validate_utf8 = self.message_assembler == null,
+                .validate_utf8 = false,
             },
         };
         var frame = try websocket.parseFrameWithHeader(
@@ -4121,7 +4121,10 @@ pub const Connection = struct {
                 .ping, .pong => continue,
                 .close => return error.ConnectionClosed,
                 else => {
-                    const maybe_message = self.message_assembler.?.feed(frame) catch |err| {
+                    const maybe_message = self.message_assembler.?.feedUtf8Validated(
+                        frame,
+                        self.incoming_text_utf8,
+                    ) catch |err| {
                         self.message_assembler.?.deinit();
                         self.message_assembler = null;
                         return @errorCast(err);
@@ -5146,12 +5149,12 @@ pub const H2Connection = struct {
             .client => .{
                 .expect_mask = .unmasked,
                 .allow_rsv1 = self.permessage_deflate,
-                .validate_utf8 = self.message_assembler == null,
+                .validate_utf8 = false,
             },
             .server => .{
                 .expect_mask = .masked,
                 .allow_rsv1 = self.permessage_deflate,
-                .validate_utf8 = self.message_assembler == null,
+                .validate_utf8 = false,
             },
         };
         var frame = try websocket.parseFrameWithHeader(
@@ -5272,7 +5275,10 @@ pub const H2Connection = struct {
                 .ping, .pong => continue,
                 .close => return error.ConnectionClosed,
                 else => {
-                    const maybe_message = self.message_assembler.?.feed(frame) catch |err| {
+                    const maybe_message = self.message_assembler.?.feedUtf8Validated(
+                        frame,
+                        self.incoming_text_utf8,
+                    ) catch |err| {
                         self.message_assembler.?.deinit();
                         self.message_assembler = null;
                         return @errorCast(err);

@@ -1115,6 +1115,26 @@ pub const MessageAssembler = struct {
     }
 
     pub fn feed(self: *MessageAssembler, frame: Frame) !?Message {
+        return self.feedInternal(frame, null);
+    }
+
+    /// Assemble a frame whose uncompressed text bytes were already checked by
+    /// a transport-level incremental validator. The supplied state is copied
+    /// into the assembler so continuation boundaries and final completeness
+    /// retain the same proof without rescanning the frame payload.
+    pub fn feedUtf8Validated(
+        self: *MessageAssembler,
+        frame: Frame,
+        text_utf8: Utf8Validator,
+    ) !?Message {
+        return self.feedInternal(frame, text_utf8);
+    }
+
+    fn feedInternal(
+        self: *MessageAssembler,
+        frame: Frame,
+        validated_text_utf8: ?Utf8Validator,
+    ) !?Message {
         if (frame.header.opcode.isControl()) return null;
         if (frame.header.opcode != .continuation) {
             if (self.opcode != null) return error.InvalidFrame;
@@ -1134,7 +1154,11 @@ pub const MessageAssembler = struct {
         if (new_len > self.max_message_bytes) return error.PayloadTooLarge;
         try self.buffer.appendSlice(self.allocator, frame.payload);
         if (self.opcode == .text and !self.compressed) {
-            try self.text_utf8.feed(frame.payload);
+            if (validated_text_utf8) |validator| {
+                self.text_utf8 = validator;
+            } else {
+                try self.text_utf8.feed(frame.payload);
+            }
             if (frame.header.fin) try self.text_utf8.finish();
         }
         if (!frame.header.fin) return null;

@@ -252,12 +252,13 @@ same-process masked short-frame loop measured 4.30 ns/frame with header reuse
 versus 7.85 ns/frame for the former duplicate parse, a 1.83x reduction in that
 fixed parser component. Length-boundary and masked/unmasked equivalence tests
 cover both allocating and caller-buffer predecoded APIs.
-Aggregate H1 and RFC 8441 receives now also assign UTF-8 ownership to the
-incremental `MessageAssembler`: message-mode frame parsing skips its whole-frame
-scan, and finalization trusts only the assembler's internal proof for
-uncompressed text. Compressed text and externally constructed messages retain
-the final validation pass. Thus ordinary complete text is validated once while
-fragmented text still rejects a malformed sequence at the decisive byte.
+Aggregate H1, RFC 8441, and RFC 9220 receives now transfer the transport's
+incremental UTF-8 state into `MessageAssembler`: both frame parsing and message
+assembly skip their otherwise-repeated payload scans, and finalization trusts
+only the assembler's internal proof for uncompressed text. Compressed text and
+externally constructed messages retain the final validation pass. Thus ordinary
+complete text is validated once while fragmented text still rejects a malformed
+sequence at the decisive byte.
 Caller-buffer H1/RFC 8441 receives retain their existing transport-read
 fail-fast validator but no longer rescan the complete uncompressed message;
 the shared resumable state carries the validation proof across continuation
@@ -265,8 +266,10 @@ frames and timeout retries. RFC 9220 now validates each newly arrived HTTP/3
 DATA slice inside the current WebSocket frame and carries that proof across
 continuations and timeout retries. A real QUIC regression limits STREAM payloads
 to five bytes, advertises a 1 KiB masked text frame, then withholds all but the
-two-byte invalid prefix; the server returns `InvalidUtf8` and Close 1007 without
-waiting for the unfinished frame.
+two-byte invalid prefix; caller-buffer, owning-message, and frame receives all
+return `InvalidUtf8` and Close 1007 without waiting for the unfinished frame. A
+second case carries an incomplete code point from one frame into a separately
+received continuation and rejects its decisive byte before that frame finishes.
 Compressed caller-buffer text remains validated after inflation.
 
 Netz's actual unmasked TCP server path prepares only the validated stack header
