@@ -251,6 +251,11 @@ pub const ConnectionConfig = struct {
     enable_reset_partial_delivery: bool = false,
     enable_pmtud: bool = false,
     pmtud_max_probe_size: usize = quic.pmtu.max_ipv4_udp_payload_size,
+    /// Whether this endpoint advertised disable_active_migration. Servers use
+    /// this local policy to silently discard packets from a new client IP.
+    local_disable_active_migration: bool = false,
+    /// Whether the peer advertised disable_active_migration. This constrains
+    /// local path selection; it is not receive-side authorization policy.
     peer_disable_active_migration: bool = false,
     peer_preferred_address: ?quic.PreferredAddress = null,
     local_max_datagram_frame_size: ?usize = null,
@@ -1047,12 +1052,10 @@ pub const Connection = struct {
             .connection_index = connection_index,
             .sequence_number = sequence_number,
             .peer_address = self.config.peer,
-            // A server can reject prohibited client migration before
-            // decryption. A client must instead let the connection compare
-            // the complete source tuple against its current and retained
-            // server paths so unknown server addresses are silently dropped.
+            // Retain path metadata for observers and compatibility. The CID
+            // router never enforces it before packet authentication.
             .active_migration_disabled = self.config.local_endpoint == .server and
-                self.config.peer_disable_active_migration,
+                self.config.local_disable_active_migration,
             .accept_zero_fixed_bit = self.config.accept_zero_fixed_bit,
         };
     }
@@ -3580,16 +3583,24 @@ pub const Connection = struct {
         );
     }
 
-    /// RFC 9000 section 9 permits migration only for a client's address. A
-    /// client therefore accepts packets from its selected server tuple and,
-    /// while validating a replacement such as preferred_address, the retained
-    /// previously validated tuple. Every other server source is discarded
-    /// before authentication, packet-number reconstruction, or frame parsing.
-    fn shouldDiscardUnknownServerAddress(
+    /// Apply role-specific source-address policy before authentication. Clients
+    /// accept only their selected server tuple plus the retained validated tuple
+    /// during preferred-address migration. Servers that advertised
+    /// disable_active_migration discard a new client IP while still allowing a
+    /// source-port NAT rebinding. These drops precede packet-number
+    /// reconstruction, reset-token comparison, and frame parsing.
+    fn shouldDiscardPeerAddressBeforeAuthentication(
         self: *const Connection,
         from: net.IpAddress,
     ) bool {
-        if (self.config.local_endpoint == .server) return false;
+        if (self.config.local_endpoint == .server) {
+            // RFC 9000 section 9 allows an endpoint that advertised
+            // disable_active_migration to drop traffic from a new peer IP.
+            // A source-port change can be NAT rebinding and remains eligible
+            // for authentication and the normal rebinding path below.
+            return self.config.local_disable_active_migration and
+                !peerAddressSameIp(self.config.peer, from);
+        }
         if (self.config.peer.eql(&from)) return false;
         return !self.peer_preferred_address_migration_active or
             !self.last_validated_peer_path.peer.eql(&from);
@@ -6064,6 +6075,10 @@ pub const Connection = struct {
         return self.config.peer_disable_active_migration;
     }
 
+    pub fn localActiveMigrationDisabled(self: Connection) bool {
+        return self.config.local_disable_active_migration;
+    }
+
     pub fn peerPreferredAddress(self: Connection) ?quic.PreferredAddress {
         return self.config.peer_preferred_address;
     }
@@ -7147,7 +7162,7 @@ pub const Connection = struct {
     ) Error!?ReceivedPacket {
         var pending = self.takePendingReceivedDatagram() orelse return null;
         defer pending.deinit(self.endpoint.allocator);
-        return try self.processReceivedBytesOrDropUnknownServerAddressAt(
+        return try self.processReceivedBytesOrDropPeerAddressAt(
             pending.from,
             pending.bytes,
             pending.ecn,
@@ -7232,7 +7247,7 @@ pub const Connection = struct {
             // the short-header decoder incorrectly turns ordinary handshake
             // loss recovery into an application receive failure.
             if (isDiscardedLongHeaderPacket(datagram.bytes)) continue;
-            var packet = (try self.processReceivedBytesOrDropUnknownServerAddressAt(
+            var packet = (try self.processReceivedBytesOrDropPeerAddressAt(
                 datagram.from,
                 datagram.bytes,
                 datagram.ecn,
@@ -7385,7 +7400,7 @@ pub const Connection = struct {
             var datagram = try self.endpoint.receiveBytes();
             defer datagram.deinit(self.endpoint.allocator);
             if (isDiscardedLongHeaderPacket(datagram.bytes)) continue;
-            return (try self.processReceivedBytesOrDropUnknownServerAddressAt(
+            return (try self.processReceivedBytesOrDropPeerAddressAt(
                 datagram.from,
                 datagram.bytes,
                 datagram.ecn,
@@ -7416,7 +7431,7 @@ pub const Connection = struct {
             var datagram = try self.endpoint.receiveBytesTimeout(deadline);
             defer datagram.deinit(self.endpoint.allocator);
             if (isDiscardedLongHeaderPacket(datagram.bytes)) continue;
-            return (try self.processReceivedBytesOrDropUnknownServerAddressAt(
+            return (try self.processReceivedBytesOrDropPeerAddressAt(
                 datagram.from,
                 datagram.bytes,
                 datagram.ecn,
@@ -7594,7 +7609,7 @@ pub const Connection = struct {
         datagrams: *quic.runtime.OwnedBytesBatch,
         now_ns: ?u64,
     ) Error!?ReceivedPacketBatch {
-        if (self.shouldDiscardUnknownServerAddress(datagrams.from)) {
+        if (self.shouldDiscardPeerAddressBeforeAuthentication(datagrams.from)) {
             return null;
         }
         const packets = try self.endpoint.allocator.alloc(ReceivedPacket, datagrams.segment_count);
@@ -7840,7 +7855,7 @@ pub const Connection = struct {
         if (self.takePendingReceivedDatagram()) |pending_value| {
             var pending = pending_value;
             defer pending.deinit(self.endpoint.allocator);
-            if (!self.shouldDiscardUnknownServerAddress(pending.from)) {
+            if (!self.shouldDiscardPeerAddressBeforeAuthentication(pending.from)) {
                 return self.processReceivedBytesVisitingAt(
                     pending.from,
                     pending.bytes,
@@ -7856,7 +7871,7 @@ pub const Connection = struct {
                 self.receive_packet_buffer.allocatedSlice(),
             );
             if (isDiscardedLongHeaderPacket(datagram.bytes)) continue;
-            if (self.shouldDiscardUnknownServerAddress(datagram.from)) continue;
+            if (self.shouldDiscardPeerAddressBeforeAuthentication(datagram.from)) continue;
             return self.processReceivedBytesVisitingAt(
                 datagram.from,
                 datagram.bytes,
@@ -7935,7 +7950,7 @@ pub const Connection = struct {
         if (self.takePendingReceivedDatagram()) |pending_value| {
             var pending = pending_value;
             defer pending.deinit(self.endpoint.allocator);
-            if (!self.shouldDiscardUnknownServerAddress(pending.from)) {
+            if (!self.shouldDiscardPeerAddressBeforeAuthentication(pending.from)) {
                 return self.processReceivedBytesVisitingAt(
                     pending.from,
                     pending.bytes,
@@ -8048,7 +8063,7 @@ pub const Connection = struct {
                     if (isDiscardedLongHeaderPacket(datagram.bytes)) {
                         continue;
                     }
-                    if (self.shouldDiscardUnknownServerAddress(datagram.from)) {
+                    if (self.shouldDiscardPeerAddressBeforeAuthentication(datagram.from)) {
                         continue;
                     }
                     return datagram;
@@ -8083,7 +8098,7 @@ pub const Connection = struct {
                                 if (isDiscardedLongHeaderPacket(datagram.bytes)) {
                                     continue;
                                 }
-                                if (self.shouldDiscardUnknownServerAddress(datagram.from)) {
+                                if (self.shouldDiscardPeerAddressBeforeAuthentication(datagram.from)) {
                                     continue;
                                 }
                                 return datagram;
@@ -8099,7 +8114,7 @@ pub const Connection = struct {
                             storage,
                         );
                         if (isDiscardedLongHeaderPacket(fallback.bytes) or
-                            self.shouldDiscardUnknownServerAddress(
+                            self.shouldDiscardPeerAddressBeforeAuthentication(
                                 fallback.from,
                             ))
                         {
@@ -8110,7 +8125,7 @@ pub const Connection = struct {
                     else => |other| return @errorCast(other),
                 };
             if (isDiscardedLongHeaderPacket(datagram.bytes)) continue;
-            if (self.shouldDiscardUnknownServerAddress(datagram.from)) continue;
+            if (self.shouldDiscardPeerAddressBeforeAuthentication(datagram.from)) continue;
             return datagram;
         }
     }
@@ -8214,7 +8229,7 @@ pub const Connection = struct {
         if (self.takePendingReceivedDatagram()) |pending_value| {
             var pending = pending_value;
             defer pending.deinit(self.endpoint.allocator);
-            var packet = (try self.processReceivedBytesOrDropUnknownServerAddressAt(
+            var packet = (try self.processReceivedBytesOrDropPeerAddressAt(
                 pending.from,
                 pending.bytes,
                 pending.ecn,
@@ -8225,7 +8240,7 @@ pub const Connection = struct {
         }
         var datagrams = try self.endpoint.receiveBytesBatch();
         defer datagrams.deinit(self.endpoint.allocator);
-        if (self.shouldDiscardUnknownServerAddress(datagrams.from)) return 0;
+        if (self.shouldDiscardPeerAddressBeforeAuthentication(datagrams.from)) return 0;
 
         var completed: usize = 0;
         for (0..datagrams.segment_count) |index| {
@@ -8446,14 +8461,14 @@ pub const Connection = struct {
         return packet;
     }
 
-    fn processReceivedBytesOrDropUnknownServerAddressAt(
+    fn processReceivedBytesOrDropPeerAddressAt(
         self: *Connection,
         from: net.IpAddress,
         bytes: []const u8,
         ecn: quic.packet_space.EcnCodepoint,
         now_ns: ?u64,
     ) Error!?ReceivedPacket {
-        if (self.shouldDiscardUnknownServerAddress(from)) return null;
+        if (self.shouldDiscardPeerAddressBeforeAuthentication(from)) return null;
         return try self.processReceivedBytesAt(from, bytes, ecn, now_ns);
     }
 
@@ -8480,7 +8495,7 @@ pub const Connection = struct {
     }
 
     /// Process one datagram already routed by Destination Connection ID.
-    /// Clients return null when the source is not a known server tuple.
+    /// Returns null when role-specific peer-address policy discards it.
     pub fn receiveRoutedDatagram(self: *Connection, routed: quic.runtime.RoutedBytes) Error!?ReceivedPacket {
         return self.receiveRoutedDatagramAt(routed, self.monotonicNowNs());
     }
@@ -8511,13 +8526,13 @@ pub const Connection = struct {
         packet: ReceivedPacket,
         stateless_reset: u64,
         dropped_after_close,
-        dropped_unknown_server_address,
+        dropped_peer_address,
     };
 
     pub fn receiveRoutedDatagramOrStatelessReset(self: *Connection, routed: quic.runtime.RoutedBytes, now_ms: ?u64, pto_ms: ?u64) Error!RoutedReceiveResult {
         if (self.close_info != null or self.idle_timed_out) return .dropped_after_close;
-        if (self.shouldDiscardUnknownServerAddress(routed.datagram.from)) {
-            return .dropped_unknown_server_address;
+        if (self.shouldDiscardPeerAddressBeforeAuthentication(routed.datagram.from)) {
+            return .dropped_peer_address;
         }
         if (self.processStatelessResetDatagram(routed.datagram.bytes, now_ms, pto_ms)) |sequence_number| {
             return .{ .stateless_reset = sequence_number };
@@ -8538,7 +8553,7 @@ pub const Connection = struct {
 
     pub fn receiveRoutedDatagramWithEcnAt(self: *Connection, routed: quic.runtime.RoutedBytes, now_ns: ?u64, ecn: quic.packet_space.EcnCodepoint) Error!?ReceivedPacket {
         if (self.close_info != null or self.idle_timed_out) return error.ConnectionClosed;
-        if (self.shouldDiscardUnknownServerAddress(routed.datagram.from)) {
+        if (self.shouldDiscardPeerAddressBeforeAuthentication(routed.datagram.from)) {
             return null;
         }
         var packet = self.openReceivedBytesWithFrameClose(
@@ -8652,10 +8667,6 @@ pub const Connection = struct {
                     0,
             },
         };
-        if (self.config.peer_disable_active_migration) {
-            return error.ActiveMigrationDisabled;
-        }
-
         const previous = self.config.peer;
         if (peerAddressSameIp(previous, from)) {
             return .{ .nat_rebinding = from };
@@ -10244,7 +10255,7 @@ pub const Connection = struct {
             .initial_max_data = self.config.initial_receive_max_data,
             .initial_max_streams_bidi = self.config.initial_receive_max_streams_bidi,
             .initial_max_streams_uni = self.config.initial_receive_max_streams_uni,
-            .disable_active_migration = null,
+            .disable_active_migration = self.config.local_disable_active_migration,
         });
         observer.parametersSet(event_time, .{
             .owner = .remote,
@@ -11716,14 +11727,14 @@ pub const testing = struct {
         );
     }
 
-    pub fn processReceivedBytesOrDropUnknownServerAddressAt(
+    pub fn processReceivedBytesOrDropPeerAddressAt(
         connection: *Connection,
         from: net.IpAddress,
         bytes: []const u8,
         ecn: quic.packet_space.EcnCodepoint,
         now_ns: u64,
     ) Error!?ReceivedPacket {
-        return connection.processReceivedBytesOrDropUnknownServerAddressAt(
+        return connection.processReceivedBytesOrDropPeerAddressAt(
             from,
             bytes,
             ecn,

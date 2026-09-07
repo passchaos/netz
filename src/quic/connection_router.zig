@@ -14,7 +14,11 @@ pub const Error = error{
 pub const Route = struct {
     connection_index: usize,
     sequence_number: u64 = 0,
+    /// Retained for source compatibility. Established-path policy belongs to
+    /// the connection because it can only be enforced safely after routing.
     peer_address: ?net.IpAddress = null,
+    /// Informational only; `routeDatagramFrom` deliberately does not reject
+    /// packets based on unauthenticated source addresses.
     active_migration_disabled: bool = false,
     /// RFC 9287 is negotiated per connection. The router needs this bit before
     /// decryption so a greased short-header packet can reach the connection
@@ -132,6 +136,7 @@ pub const Router = struct {
     }
 
     pub fn routeDatagramFrom(self: Router, from: ?net.IpAddress, packet: []const u8) Error!?RoutedDatagram {
+        _ = from;
         if (packet.len == 0) return error.InvalidPacket;
         const long_header = (packet[0] & 0x80) != 0;
         const fixed_bit = (packet[0] & 0x40) != 0;
@@ -143,7 +148,6 @@ pub const Router = struct {
             if (!fixed_bit and !candidate.route.accept_zero_fixed_bit) {
                 return null;
             }
-            try validateRoutePath(candidate.route, from);
         }
         return routed;
     }
@@ -208,31 +212,6 @@ pub const Router = struct {
         self.longest_connection_id_len = 0;
     }
 };
-
-fn validateRoutePath(route: Route, from: ?net.IpAddress) Error!void {
-    if (!route.active_migration_disabled) return;
-    const expected = route.peer_address orelse return;
-    const actual = from orelse return;
-    // RFC 9000 disables active migration, not NAT rebinding. Route before
-    // decryption by IP identity only; the connection pipeline authenticates
-    // the packet before committing a same-IP source-port change.
-    if (!sameIp(expected, actual)) return error.ActiveMigrationDisabled;
-}
-
-fn sameIp(a: net.IpAddress, b: net.IpAddress) bool {
-    return switch (a) {
-        .ip4 => |a4| switch (b) {
-            .ip4 => |b4| std.mem.eql(u8, &a4.bytes, &b4.bytes),
-            .ip6 => false,
-        },
-        .ip6 => |a6| switch (b) {
-            .ip4 => false,
-            .ip6 => |b6| std.mem.eql(u8, &a6.bytes, &b6.bytes) and
-                a6.flow == b6.flow and
-                a6.interface.index == b6.interface.index,
-        },
-    };
-}
 
 test "QUIC connection router maps and retires connection IDs" {
     const allocator = std.testing.allocator;
@@ -351,7 +330,7 @@ test "QUIC connection router probes short-header CID lengths without revalidatio
     try std.testing.expectEqualStrings("a", fallback.destination_connection_id);
 }
 
-test "QUIC connection router rejects changed paths when migration disabled" {
+test "QUIC connection router leaves peer-address policy to authenticated connection" {
     const allocator = std.testing.allocator;
     var router = Router.init(allocator);
     defer router.deinit();
@@ -360,11 +339,7 @@ test "QUIC connection router rejects changed paths when migration disabled" {
     const rebound = net.IpAddress{ .ip4 = .loopback(2222) };
     var path_b = net.IpAddress{ .ip4 = .loopback(3333) };
     path_b.ip4.bytes = .{ 127, 0, 0, 2 };
-    try router.register("abc", .{
-        .connection_index = 1,
-        .peer_address = path_a,
-        .active_migration_disabled = true,
-    });
+    try router.register("abc", .{ .connection_index = 1 });
 
     const short = [_]u8{ 0x40, 'a', 'b', 'c', 0x00 };
     const routed = (try router.routeDatagramFrom(path_a, &short)).?;
@@ -372,13 +347,9 @@ test "QUIC connection router rejects changed paths when migration disabled" {
     try std.testing.expect(
         (try router.routeDatagramFrom(rebound, &short)) != null,
     );
-    try std.testing.expectError(error.ActiveMigrationDisabled, router.routeDatagramFrom(path_b, &short));
+    try std.testing.expect((try router.routeDatagramFrom(path_b, &short)) != null);
 
-    try router.register("def", .{
-        .connection_index = 2,
-        .peer_address = path_a,
-        .active_migration_disabled = false,
-    });
+    try router.register("def", .{ .connection_index = 2 });
     const migrated = [_]u8{ 0x40, 'd', 'e', 'f', 0x00 };
     try std.testing.expect((try router.routeDatagramFrom(path_b, &migrated)) != null);
 }

@@ -819,6 +819,24 @@ test "QUIC endpoint dispatcher routes and promotes a pending handshake" {
     const keys = quic.protection.deriveAes128Keys(
         [_]u8{0xef} ** quic.protection.secret_len,
     );
+    const spoofed = try quic.protection.sealHandshakePacket(
+        allocator,
+        keys,
+        .{
+            .destination_connection_id = "pending-server",
+            .source_connection_id = "peer",
+            .packet_number = 0,
+            .payload = &.{@intFromEnum(quic.FrameType.ping)},
+        },
+    );
+    var spoofed_peer = peer;
+    spoofed_peer.ip4.bytes = .{ 127, 0, 0, 2 };
+    try std.testing.expectEqual(Event.consumed, try dispatcher.dispatch(.{
+        .from = spoofed_peer,
+        .bytes = spoofed,
+    }));
+    try std.testing.expectEqual(@as(usize, 2), inbox.remainingCapacity());
+
     for ([_][]const u8{ "admitted", "pending-server" }) |cid| {
         const datagram = try quic.protection.sealHandshakePacket(
             allocator,
@@ -1638,6 +1656,79 @@ test "QUIC endpoint dispatcher consumes unknown server tuple for client" {
     var event = try dispatcher.dispatch(.{
         .from = server.address(),
         .bytes = accepted,
+    });
+    defer event.deinit(allocator);
+    try std.testing.expect(event == .packet);
+    try std.testing.expectEqual(@as(u64, 0), event.packet.packet.packet.packet_number);
+    try std.testing.expectEqual(@as(u64, 1), connection.stats().packets_received);
+}
+
+test "QUIC endpoint dispatcher consumes disabled client migration before AEAD" {
+    const allocator = std.testing.allocator;
+    var threaded = std.Io.Threaded.init(allocator, .{});
+    defer threaded.deinit();
+    const io = threaded.io();
+    var endpoint = try runtime.Endpoint.bind(
+        allocator,
+        io,
+        .{ .ip4 = .loopback(0) },
+        .{ .max_datagram_size = 4096 },
+    );
+    defer endpoint.deinit();
+    var client = try runtime.Endpoint.bind(
+        allocator,
+        io,
+        .{ .ip4 = .loopback(0) },
+        .{ .max_datagram_size = 4096 },
+    );
+    defer client.deinit();
+
+    const keys = quic.protection.deriveAes128Keys(
+        [_]u8{0xec} ** quic.protection.secret_len,
+    );
+    var connection = try one_rtt.Connection.init(&endpoint, .{
+        .peer = client.address(),
+        .receive_keys = keys,
+        .send_keys = keys,
+        .local_connection_id = "server-disabled",
+        .peer_connection_id = "client-disabled",
+        .local_endpoint = .server,
+        .local_disable_active_migration = true,
+        .enable_pacing = false,
+    });
+    defer connection.deinit();
+    var dispatcher = Dispatcher.init(allocator, &endpoint);
+    defer dispatcher.deinit();
+    try dispatcher.registerConnection(10, &connection);
+
+    var spoofed = try allocator.alloc(
+        u8,
+        1 + "server-disabled".len + 32,
+    );
+    @memset(spoofed, 0xa5);
+    spoofed[0] = 0x40;
+    @memcpy(spoofed[1..][0.."server-disabled".len], "server-disabled");
+    var different_ip = client.address();
+    different_ip.ip4.bytes = .{ 127, 0, 0, 2 };
+    try std.testing.expectEqual(Event.consumed, try dispatcher.dispatch(.{
+        .from = different_ip,
+        .bytes = spoofed,
+    }));
+    try std.testing.expectEqual(@as(u64, 0), connection.authenticationFailureCount());
+    try std.testing.expectEqual(@as(u64, 0), connection.stats().packets_received);
+    try std.testing.expect(!connection.closed());
+
+    const payload = try one_rtt.encodeFrames(allocator, &.{.{ .ping = {} }});
+    defer allocator.free(payload);
+    const valid = try quic.protection.sealShortPacket(allocator, keys, .{
+        .destination_connection_id = "server-disabled",
+        .packet_number = 0,
+        .packet_number_len = 4,
+        .payload = payload,
+    });
+    var event = try dispatcher.dispatch(.{
+        .from = client.address(),
+        .bytes = valid,
     });
     defer event.deinit(allocator);
     try std.testing.expect(event == .packet);

@@ -2706,6 +2706,8 @@ test "QUIC integrated handshake applies negotiated transport parameters over QUI
             try std.testing.expectEqual(@as(u64, 7), established.connection.config.local_ack_delay_exponent);
             try std.testing.expectEqual(@as(u64, 5), established.connection.config.peer_ack_delay_exponent);
             try std.testing.expectEqual(@as(u64, 35), established.connection.config.peer_max_ack_delay_ms);
+            try std.testing.expect(established.connection.localActiveMigrationDisabled());
+            try std.testing.expect(!established.connection.peerActiveMigrationDisabled());
             try std.testing.expectEqual(@as(?usize, 888), established.connection.config.local_max_datagram_frame_size);
             try std.testing.expectEqual(@as(?usize, 777), established.connection.config.peer_max_datagram_frame_size);
             try std.testing.expect(established.connection.config.accept_zero_fixed_bit);
@@ -2747,6 +2749,8 @@ test "QUIC integrated handshake applies negotiated transport parameters over QUI
     try std.testing.expectEqual(@as(u64, 5), established.connection.config.local_ack_delay_exponent);
     try std.testing.expectEqual(@as(u64, 7), established.connection.config.peer_ack_delay_exponent);
     try std.testing.expectEqual(@as(u64, 45), established.connection.config.peer_max_ack_delay_ms);
+    try std.testing.expect(!established.connection.localActiveMigrationDisabled());
+    try std.testing.expect(established.connection.peerActiveMigrationDisabled());
     try std.testing.expectEqual(@as(?usize, 777), established.connection.config.local_max_datagram_frame_size);
     try std.testing.expectEqual(@as(?usize, 888), established.connection.config.peer_max_datagram_frame_size);
     try std.testing.expect(established.connection.config.accept_zero_fixed_bit);

@@ -1735,6 +1735,7 @@ test "QUIC 1-RTT receive commits NAT rebinding after non-probing packet" {
         .local_connection_id = &server_cid,
         .peer_connection_id = &client_cid,
         .local_endpoint = .server,
+        .local_disable_active_migration = true,
         .enable_pmtud = true,
         .pmtud_max_probe_size = 1300,
         .max_datagram_size = 1400,
@@ -1820,6 +1821,9 @@ test "QUIC 1-RTT receive starts validation for new peer IP" {
         .local_connection_id = &server_cid,
         .peer_connection_id = &client_cid,
         .local_endpoint = .server,
+        // The peer's transport parameter constrains this endpoint's own path
+        // selection; it must not disable authenticated peer migration.
+        .peer_disable_active_migration = true,
         .enable_pmtud = true,
         .pmtud_max_probe_size = 1300,
     });
@@ -1851,7 +1855,7 @@ test "QUIC 1-RTT receive starts validation for new peer IP" {
     try std.testing.expectEqual(server.pacer.maxBurstSize(), server.pacer.budget);
 }
 
-test "QUIC 1-RTT receive rejects active migration before mutation when disabled" {
+test "QUIC 1-RTT owning receive skips a new client IP when migration is disabled" {
     const allocator = std.testing.allocator;
 
     var threaded = std.Io.Threaded.init(allocator, .{});
@@ -1876,22 +1880,65 @@ test "QUIC 1-RTT receive rejects active migration before mutation when disabled"
         .local_connection_id = &server_cid,
         .peer_connection_id = &client_cid,
         .local_endpoint = .server,
-        .peer_disable_active_migration = true,
+        .local_disable_active_migration = true,
     });
     defer server.deinit();
 
-    try one_rtt.sendFrames(&rebound_client_endpoint, server_endpoint.address(), keys, .{
-        .destination_connection_id = &server_cid,
-        .packet_number = 0,
-        .frames = &.{.{ .stream = .{ .stream_id = 0, .data = "blocked" } }},
-    });
-    try std.testing.expectError(error.ActiveMigrationDisabled, server.receivePacket());
+    const blocked_payload = try one_rtt.encodeFrames(
+        allocator,
+        &.{.{ .stream = .{ .stream_id = 0, .data = "blocked" } }},
+    );
+    defer allocator.free(blocked_payload);
+    const blocked_packet = try quic.protection.sealShortPacket(
+        allocator,
+        keys,
+        .{
+            .destination_connection_id = &server_cid,
+            .packet_number = 0,
+            .packet_number_len = 4,
+            .payload = blocked_payload,
+        },
+    );
+    defer allocator.free(blocked_packet);
+    var different_ip = rebound_client_endpoint.address();
+    different_ip.ip4.bytes = .{ 127, 0, 0, 2 };
+    try server.preloadReceivedDatagram(
+        different_ip,
+        blocked_packet,
+        .ce,
+    );
+    try one_rtt.sendFrames(
+        &original_client_endpoint,
+        server_endpoint.address(),
+        keys,
+        .{
+            .destination_connection_id = &server_cid,
+            .packet_number = 1,
+            .frames = &.{.{ .stream = .{
+                .stream_id = 0,
+                .data = "accepted",
+            } }},
+        },
+    );
+    const initial_stats = server.stats();
+    const initial_epoch = one_rtt.testing.currentPathEpoch(&server);
+    var accepted = try server.receivePacket();
+    defer accepted.deinit(allocator);
+    try std.testing.expectEqual(@as(u64, 1), accepted.packet.packet_number);
+    try std.testing.expectEqualStrings("accepted", accepted.frames[0].stream.data);
     try std.testing.expectEqual(
         original_client_endpoint.address(),
         server.peerAddress(),
     );
-    try std.testing.expectEqual(@as(usize, 0), server.stream_recv_flows.items.len);
-    try std.testing.expectEqual(@as(usize, 0), server.received.ranges.items.len);
+    try std.testing.expect(server.peerAddressValidated());
+    try std.testing.expectEqual(initial_stats.packets_received + 1, server.stats().packets_received);
+    try std.testing.expectEqual(
+        initial_epoch,
+        one_rtt.testing.currentPathEpoch(&server),
+    );
+    try std.testing.expectEqual(@as(u64, 0), server.authenticationFailureCount());
+    try std.testing.expectEqual(@as(usize, 1), server.stream_recv_flows.items.len);
+    try std.testing.expectEqual(@as(usize, 1), server.received.ranges.items.len);
 }
 
 test "QUIC client drops unknown server tuples before decrypting" {
@@ -1985,7 +2032,7 @@ test "QUIC client drops unknown server tuples before decrypting" {
     var different_ip = unknown_endpoint.address();
     different_ip.ip4.bytes = .{ 127, 0, 0, 2 };
     try std.testing.expect((try one_rtt.testing
-        .processReceivedBytesOrDropUnknownServerAddressAt(
+        .processReceivedBytesOrDropPeerAddressAt(
         &client,
         different_ip,
         updated_packet,
@@ -2006,7 +2053,7 @@ test "QUIC client drops unknown server tuples before decrypting" {
         20,
         30,
     );
-    try std.testing.expect(reset_result == .dropped_unknown_server_address);
+    try std.testing.expect(reset_result == .dropped_peer_address);
 
     try std.testing.expectEqual(server_endpoint.address(), client.peerAddress());
     try std.testing.expect(client.peerAddressValidated());
