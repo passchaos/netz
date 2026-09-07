@@ -38,6 +38,34 @@ test "WebSocket message finalization owns failures and provenance" {
             .compressed = false,
         }, 1024),
     );
+
+    var assembler = websocket.MessageAssembler.init(allocator);
+    defer assembler.deinit();
+    const frame_payload = try allocator.dupe(u8, "plain text");
+    const assembled = (try assembler.feed(.{
+        .header = .{
+            .fin = true,
+            .opcode = .text,
+            .masked = false,
+            .payload_len = frame_payload.len,
+            .mask_key = null,
+            .header_len = 2,
+        },
+        .payload = frame_payload,
+        .consumed = frame_payload.len + 2,
+    })).?;
+    allocator.free(frame_payload);
+    try std.testing.expect(assembled.utf8_validated);
+    var validated_message = try state.finishIncomingMessage(
+        allocator,
+        assembled,
+        1024,
+    );
+    defer validated_message.deinit(allocator);
+    try std.testing.expectEqualStrings(
+        "plain text",
+        validated_message.payload,
+    );
 }
 
 test "WebSocket compressed fragment ranges are complete and balanced" {

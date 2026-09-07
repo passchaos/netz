@@ -30,7 +30,7 @@ pub fn finishIncomingMessage(
         allocator.free(message.payload);
     }
     errdefer allocator.free(payload);
-    if (message.opcode == .text and
+    if (message.opcode == .text and !message.utf8_validated and
         !std.unicode.utf8ValidateSlice(payload))
     {
         return error.InvalidUtf8;

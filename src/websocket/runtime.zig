@@ -3990,8 +3990,16 @@ pub const Connection = struct {
         );
 
         const parse_options: websocket.ParseFrameOptions = switch (self.role) {
-            .client => .{ .expect_mask = .unmasked, .allow_rsv1 = self.permessage_deflate },
-            .server => .{ .expect_mask = .masked, .allow_rsv1 = self.permessage_deflate },
+            .client => .{
+                .expect_mask = .unmasked,
+                .allow_rsv1 = self.permessage_deflate,
+                .validate_utf8 = self.message_assembler == null,
+            },
+            .server => .{
+                .expect_mask = .masked,
+                .allow_rsv1 = self.permessage_deflate,
+                .validate_utf8 = self.message_assembler == null,
+            },
         };
         var frame = try websocket.parseFrameWithHeader(
             self.allocator,
@@ -5135,8 +5143,16 @@ pub const H2Connection = struct {
         );
 
         const parse_options: websocket.ParseFrameOptions = switch (self.role) {
-            .client => .{ .expect_mask = .unmasked, .allow_rsv1 = self.permessage_deflate },
-            .server => .{ .expect_mask = .masked, .allow_rsv1 = self.permessage_deflate },
+            .client => .{
+                .expect_mask = .unmasked,
+                .allow_rsv1 = self.permessage_deflate,
+                .validate_utf8 = self.message_assembler == null,
+            },
+            .server => .{
+                .expect_mask = .masked,
+                .allow_rsv1 = self.permessage_deflate,
+                .validate_utf8 = self.message_assembler == null,
+            },
         };
         var frame = try websocket.parseFrameWithHeader(
             self.allocator,

@@ -1008,6 +1008,11 @@ pub const MessageAssembler = struct {
         opcode: Opcode,
         payload: []u8,
         compressed: bool = false,
+        /// The assembler incrementally validated this uncompressed text.
+        /// This is internal protocol evidence, not a caller assertion; runtime
+        /// finalization skips its otherwise redundant full-message scan only
+        /// for values produced by `feed`.
+        utf8_validated: bool = false,
     };
 
     pub fn init(allocator: std.mem.Allocator) MessageAssembler {
@@ -1055,7 +1060,12 @@ pub const MessageAssembler = struct {
         self.compressed = false;
         self.text_utf8.reset();
         self.buffer = .empty;
-        return .{ .opcode = opcode, .payload = payload, .compressed = compressed };
+        return .{
+            .opcode = opcode,
+            .payload = payload,
+            .compressed = compressed,
+            .utf8_validated = opcode == .text and !compressed,
+        };
     }
 };
 

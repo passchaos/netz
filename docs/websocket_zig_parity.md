@@ -247,6 +247,12 @@ same-process masked short-frame loop measured 4.30 ns/frame with header reuse
 versus 7.85 ns/frame for the former duplicate parse, a 1.83x reduction in that
 fixed parser component. Length-boundary and masked/unmasked equivalence tests
 cover both allocating and caller-buffer predecoded APIs.
+Aggregate H1 and RFC 8441 receives now also assign UTF-8 ownership to the
+incremental `MessageAssembler`: message-mode frame parsing skips its whole-frame
+scan, and finalization trusts only the assembler's internal proof for
+uncompressed text. Compressed text and externally constructed messages retain
+the final validation pass. Thus ordinary complete text is validated once while
+fragmented text still rejects a malformed sequence at the decisive byte.
 
 Netz's actual unmasked TCP server path prepares only the validated stack header
 and uses one vectored network write for header + borrowed payload. Masked
