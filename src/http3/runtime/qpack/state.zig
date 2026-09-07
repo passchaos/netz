@@ -182,6 +182,11 @@ pub const QpackDecodeState = struct {
         control: *http3.ControlState,
         stream: quic.StreamFrame,
     ) Error!void {
+        if (self.encoder_stream) |receive| {
+            if (receive.stream_id != stream.stream_id) {
+                return error.StreamCreationError;
+            }
+        }
         if (stream.fin) return error.ClosedCriticalStream;
         if (self.encoder_stream == null) {
             self.encoder_stream = quic.stream_state.RecvState.init(
@@ -656,6 +661,11 @@ pub const QpackEncodeState = struct {
         control: *http3.ControlState,
         stream: quic.StreamFrame,
     ) Error!void {
+        if (self.decoder_stream) |receive| {
+            if (receive.stream_id != stream.stream_id) {
+                return error.StreamCreationError;
+            }
+        }
         if (stream.fin) return error.ClosedCriticalStream;
         if (self.decoder_stream == null) {
             self.decoder_stream = quic.stream_state.RecvState.init(

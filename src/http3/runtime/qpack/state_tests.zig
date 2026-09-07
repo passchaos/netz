@@ -164,6 +164,40 @@ test "HTTP/3 QPACK decoder state rejects capacity overflow and critical stream F
     ));
 }
 
+test "HTTP/3 QPACK state rejects duplicate peer critical streams" {
+    const allocator = std.testing.allocator;
+
+    var decoder = QpackDecodeState.init(allocator, 0, 4096);
+    defer decoder.deinit();
+    var decoder_control = http3.ControlState{};
+    try decoder.applyEncoderStreamFrame(&decoder_control, .{
+        .stream_id = client_qpack_encoder_stream_id,
+        .data = &.{@intFromEnum(http3.StreamType.qpack_encoder)},
+    });
+    try std.testing.expectError(
+        error.StreamCreationError,
+        decoder.applyEncoderStreamFrame(&decoder_control, .{
+            .stream_id = client_qpack_encoder_stream_id + 4,
+            .data = &.{@intFromEnum(http3.StreamType.qpack_encoder)},
+        }),
+    );
+
+    var encoder = QpackEncodeState.initAwaitingPeerSettings(allocator, 4096);
+    defer encoder.deinit();
+    var encoder_control = http3.ControlState{};
+    try encoder.applyDecoderStreamFrame(&encoder_control, .{
+        .stream_id = client_qpack_decoder_stream_id,
+        .data = &.{@intFromEnum(http3.StreamType.qpack_decoder)},
+    });
+    try std.testing.expectError(
+        error.StreamCreationError,
+        encoder.applyDecoderStreamFrame(&encoder_control, .{
+            .stream_id = client_qpack_decoder_stream_id + 4,
+            .data = &.{@intFromEnum(http3.StreamType.qpack_decoder)},
+        }),
+    );
+}
+
 test "HTTP/3 QPACK encoder state waits for insert acknowledgment before dynamic reference" {
     const allocator = std.testing.allocator;
     var encoder = QpackEncodeState.init(allocator, 256, 4096);

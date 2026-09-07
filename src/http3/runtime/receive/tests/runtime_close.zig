@@ -8,6 +8,18 @@ fn expectProtectedClientProtocolClose(
     expected_error: anyerror,
     expected_code: u64,
 ) !void {
+    return expectProtectedClientProtocolCloseFrames(
+        &.{frame},
+        expected_error,
+        expected_code,
+    );
+}
+
+fn expectProtectedClientProtocolCloseFrames(
+    frames: []const quic.Frame,
+    expected_error: anyerror,
+    expected_code: u64,
+) !void {
     const allocator = std.testing.allocator;
     var threaded = std.Io.Threaded.init(allocator, .{});
     defer threaded.deinit();
@@ -49,7 +61,7 @@ fn expectProtectedClientProtocolClose(
         .{
             .destination_connection_id = &client_cid,
             .packet_number = 0,
-            .frames = &.{frame},
+            .frames = frames,
         },
     );
     try std.testing.expectError(expected_error, client.pollControl());
@@ -104,5 +116,22 @@ test "HTTP/3 protected client closes on invalid QPACK encoder instruction" {
         },
         error.QpackEncoderStreamError,
         http3.ApplicationErrorCode.qpack_encoder_stream_error,
+    );
+}
+
+test "HTTP/3 protected client closes on duplicate QPACK encoder streams" {
+    try expectProtectedClientProtocolCloseFrames(
+        &.{
+            .{ .stream = .{
+                .stream_id = 7,
+                .data = &.{@intFromEnum(http3.StreamType.qpack_encoder)},
+            } },
+            .{ .stream = .{
+                .stream_id = 15,
+                .data = &.{@intFromEnum(http3.StreamType.qpack_encoder)},
+            } },
+        },
+        error.StreamCreationError,
+        http3.ApplicationErrorCode.stream_creation_error,
     );
 }

@@ -466,6 +466,11 @@ allocated control, QPACK, and push streams reach the correct state machine
 without relying on fixed stream-ID guesses. Client and server routing tests
 cover both a reserved type on the conventional QPACK ID and a real QPACK
 encoder stream allocated at a later ID.
+Once either QPACK critical stream is registered, a different stream declaring
+the same type is rejected before generic reassembly with
+`H3_STREAM_CREATION_ERROR`, as required by RFC 9204. Direct encoder/decoder
+state tests cover both types, and a protected-client wire test verifies the
+application close code instead of leaking the internal `WrongStream` error.
 
 The 1-RTT anti-amplification budget is server-only and accounts complete
 protected UDP datagram lengths rather than plaintext payload lengths. Batch and
