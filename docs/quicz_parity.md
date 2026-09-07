@@ -503,6 +503,12 @@ multi-connection loop error, while retaining the connection's close-expiry
 timer. If the current datagram itself triggers a transport close, the original
 validation error remains visible and the newly installed close timer is synced
 before it returns.
+Ordinary short-header authentication failures addressed to a registered CID
+are likewise consumed by the shared endpoint after incrementing the
+connection's AEAD integrity counter; reaching the negotiated cipher limit still
+surfaces `AeadLimitReached` and closes the connection. A forged packet therefore
+cannot stop the sole receive loop merely by knowing a visible CID, while the
+mandatory integrity-failure safety limit remains effective.
 Closing connections now respond to current-path datagrams through a dedicated
 timer rather than parsing application frames or retransmitting immediately.
 The first response requires one packet, subsequent thresholds double to 2, 4,

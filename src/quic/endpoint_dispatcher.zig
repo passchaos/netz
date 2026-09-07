@@ -948,6 +948,16 @@ pub const Dispatcher = struct {
                 routed.route.connection_index,
                 entry.connection,
             );
+            if (err == error.AuthenticationFailed) {
+                // A short-header CID is visible before packet authentication.
+                // Invalid ciphertext addressed to an active CID is ordinary
+                // untrusted network input: retain the connection's AEAD
+                // integrity accounting but do not terminate the sole receive
+                // loop. AeadLimitReached remains observable above.
+                routed_datagram.datagram.deinit(self.allocator);
+                owns_datagram = false;
+                return .consumed;
+            }
             return err;
         } orelse {
             // Closing and draining connections retain their CID routes until

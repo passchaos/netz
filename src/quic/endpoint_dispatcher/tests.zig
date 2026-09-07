@@ -1735,3 +1735,87 @@ test "QUIC endpoint dispatcher consumes disabled client migration before AEAD" {
     try std.testing.expectEqual(@as(u64, 0), event.packet.packet.packet.packet_number);
     try std.testing.expectEqual(@as(u64, 1), connection.stats().packets_received);
 }
+
+test "QUIC endpoint dispatcher consumes authentication failure until AEAD limit" {
+    const allocator = std.testing.allocator;
+    var threaded = std.Io.Threaded.init(allocator, .{});
+    defer threaded.deinit();
+    const io = threaded.io();
+    var endpoint = try runtime.Endpoint.bind(
+        allocator,
+        io,
+        .{ .ip4 = .loopback(0) },
+        .{ .max_datagram_size = 4096 },
+    );
+    defer endpoint.deinit();
+    var peer = try runtime.Endpoint.bind(
+        allocator,
+        io,
+        .{ .ip4 = .loopback(0) },
+        .{ .max_datagram_size = 4096 },
+    );
+    defer peer.deinit();
+
+    const keys = quic.protection.deriveAes128Keys(
+        [_]u8{0xed} ** quic.protection.secret_len,
+    );
+    var connection = try one_rtt.Connection.init(&endpoint, .{
+        .peer = peer.address(),
+        .receive_keys = keys,
+        .send_keys = keys,
+        .local_connection_id = "server-aead",
+        .peer_connection_id = "client-aead",
+        .local_endpoint = .server,
+        .aead_integrity_limit = 2,
+        .enable_pacing = false,
+    });
+    defer connection.deinit();
+    var dispatcher = Dispatcher.init(allocator, &endpoint);
+    defer dispatcher.deinit();
+    try dispatcher.registerConnection(11, &connection);
+
+    const payload = try one_rtt.encodeFrames(allocator, &.{.{ .ping = {} }});
+    defer allocator.free(payload);
+    const corrupted = try quic.protection.sealShortPacket(allocator, keys, .{
+        .destination_connection_id = "server-aead",
+        .packet_number = 10,
+        .packet_number_len = 4,
+        .payload = payload,
+    });
+    corrupted[corrupted.len - 1] ^= 0x80;
+    try std.testing.expectEqual(Event.consumed, try dispatcher.dispatch(.{
+        .from = peer.address(),
+        .bytes = corrupted,
+    }));
+    try std.testing.expectEqual(@as(u64, 1), connection.authenticationFailureCount());
+    try std.testing.expect(!connection.closed());
+
+    const valid = try quic.protection.sealShortPacket(allocator, keys, .{
+        .destination_connection_id = "server-aead",
+        .packet_number = 0,
+        .packet_number_len = 4,
+        .payload = payload,
+    });
+    var event = try dispatcher.dispatch(.{
+        .from = peer.address(),
+        .bytes = valid,
+    });
+    defer event.deinit(allocator);
+    try std.testing.expect(event == .packet);
+    try std.testing.expectEqual(@as(u64, 0), event.packet.packet.packet.packet_number);
+    try std.testing.expectEqual(@as(u64, 1), connection.stats().packets_received);
+
+    const limit = try quic.protection.sealShortPacket(allocator, keys, .{
+        .destination_connection_id = "server-aead",
+        .packet_number = 11,
+        .packet_number_len = 4,
+        .payload = payload,
+    });
+    limit[limit.len - 1] ^= 0x80;
+    try std.testing.expectError(error.AeadLimitReached, dispatcher.dispatch(.{
+        .from = peer.address(),
+        .bytes = limit,
+    }));
+    try std.testing.expectEqual(@as(u64, 2), connection.authenticationFailureCount());
+    try std.testing.expect(connection.closing());
+}
