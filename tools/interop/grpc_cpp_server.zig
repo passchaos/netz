@@ -6,6 +6,10 @@ const messages = @import("grpc_cpp_messages.zig");
 
 const duplex_service_path = "/grpc.testing.TestService/FullDuplexCall";
 const unary_service_path = "/grpc.testing.TestService/UnaryCall";
+const client_streaming_service_path =
+    "/grpc.testing.TestService/StreamingInputCall";
+const server_streaming_service_path =
+    "/grpc.testing.TestService/StreamingOutputCall";
 const message_limit = messages.max_payload_size + 64;
 const echo_initial_key = "x-grpc-test-echo-initial";
 const echo_initial_value = "test_initial_metadata_value";
@@ -13,6 +17,7 @@ const echo_trailing_key = "x-grpc-test-echo-trailing-bin";
 const echo_trailing_value = "\x0a\x0b\x0a\x0b\x0a\x0b";
 const canonical_request_sizes = [_]usize{ 27_182, 8, 1_828, 45_904 };
 const canonical_response_sizes = [_]usize{ 31_415, 9, 2_653, 58_979 };
+const canonical_response_sizes_u32 = [_]u32{ 31_415, 9, 2_653, 58_979 };
 
 const Scenario = enum {
     ping_pong,
@@ -20,6 +25,8 @@ const Scenario = enum {
     cancel_after_first_response,
     timeout_on_sleeping_server,
     custom_metadata,
+    client_streaming,
+    server_streaming,
 
     fn parse(raw: []const u8) !Scenario {
         return std.meta.stringToEnum(Scenario, raw) orelse error.InvalidArgument;
@@ -115,26 +122,113 @@ pub fn main(init: std.process.Init) !void {
     {
         return error.InvalidAlpn;
     }
-    if (scenario == .custom_metadata) {
-        try serveCustomMetadata(allocator, &connection);
-        std.debug.print(
-            "netz grpc server completed: scenario={s} transport={s}\n",
-            .{ @tagName(scenario), if (tls_enabled) "tls" else "h2c" },
-        );
-        return;
+    switch (scenario) {
+        .custom_metadata => try serveCustomMetadata(allocator, &connection),
+        .client_streaming => try serveClientStreaming(allocator, &connection),
+        .server_streaming => try serveServerStreaming(allocator, &connection),
+        else => {
+            var stream = try connection.acceptDuplex();
+            defer stream.deinit();
+            if (!std.mem.eql(u8, stream.path, duplex_service_path)) {
+                try stream.finish(.unimplemented, null, &.{}, &.{});
+                return error.UnexpectedMethod;
+            }
+            try serveScenario(allocator, io, &stream, scenario);
+        },
     }
-    var stream = try connection.acceptDuplex();
-    defer stream.deinit();
-    if (!std.mem.eql(u8, stream.path, duplex_service_path)) {
-        try stream.finish(.unimplemented, null, &.{}, &.{});
-        return error.UnexpectedMethod;
-    }
-
-    try serveScenario(allocator, io, &stream, scenario);
     std.debug.print(
         "netz grpc server completed: scenario={s} transport={s}\n",
         .{ @tagName(scenario), if (tls_enabled) "tls" else "h2c" },
     );
+}
+
+const InputStreamAccumulator = struct {
+    count: usize = 0,
+    total: usize = 0,
+
+    fn consume(self: *@This(), message: netz.grpc.StreamingMessage) !void {
+        if (self.count == canonical_request_sizes.len or
+            try messages.decodeStreamingInputCallRequest(message.payload) !=
+                canonical_request_sizes[self.count])
+        {
+            return error.UnexpectedRequest;
+        }
+        self.total = std.math.add(
+            usize,
+            self.total,
+            canonical_request_sizes[self.count],
+        ) catch return error.MessageTooLarge;
+        self.count += 1;
+    }
+};
+
+fn serveClientStreaming(
+    allocator: std.mem.Allocator,
+    connection: *netz.grpc.runtime.ServerConnection,
+) !void {
+    var accumulator = InputStreamAccumulator{};
+    var request = try connection.readStreaming(
+        &accumulator,
+        InputStreamAccumulator.consume,
+    );
+    defer request.deinit();
+    if (!std.mem.eql(u8, request.path, client_streaming_service_path) or
+        accumulator.count != canonical_request_sizes.len or
+        request.message_count != canonical_request_sizes.len)
+    {
+        return error.UnexpectedRequest;
+    }
+    const response = try messages.encodeStreamingInputCallResponseAlloc(
+        allocator,
+        accumulator.total,
+    );
+    defer allocator.free(response);
+    var writer = try connection.startStreamingResponse(
+        request.transport.stream_id,
+        .{
+            .request_accepted_encodings = request.accepted_encodings,
+            .max_message_size = message_limit,
+        },
+    );
+    defer writer.deinit();
+    try writer.writeMessage(response);
+    try writer.finishOk();
+}
+
+fn serveServerStreaming(
+    allocator: std.mem.Allocator,
+    connection: *netz.grpc.runtime.ServerConnection,
+) !void {
+    var request = try connection.readUnary();
+    defer request.deinit();
+    if (!std.mem.eql(u8, request.request.path, server_streaming_service_path)) {
+        return error.UnexpectedMethod;
+    }
+    var sizes_storage: [16]u32 = undefined;
+    const sizes = try messages.decodeStreamingOutputCallResponseSizes(
+        request.request.message.payload,
+        &sizes_storage,
+    );
+    if (!std.mem.eql(u32, sizes, &canonical_response_sizes_u32)) {
+        return error.UnexpectedRequest;
+    }
+    var writer = try connection.startStreamingResponse(
+        request.request.stream_id,
+        .{
+            .request_accepted_encodings = request.request.accepted_encodings,
+            .max_message_size = message_limit,
+        },
+    );
+    defer writer.deinit();
+    for (sizes) |size| {
+        const response = try messages.encodeStreamingOutputCallResponseAlloc(
+            allocator,
+            size,
+        );
+        defer allocator.free(response);
+        try writer.writeMessage(response);
+    }
+    try writer.finishOk();
 }
 
 fn serveCustomMetadata(
@@ -276,7 +370,7 @@ fn serveScenario(
         .empty_stream => try serveEmpty(stream, &queue, deadline),
         .cancel_after_first_response => try serveCancellation(io, stream, &queue, deadline),
         .timeout_on_sleeping_server => try serveSleepingDeadline(io, stream, &queue),
-        .custom_metadata => unreachable,
+        .custom_metadata, .client_streaming, .server_streaming => unreachable,
     }
 }
 

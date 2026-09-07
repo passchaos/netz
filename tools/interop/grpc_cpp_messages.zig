@@ -106,6 +106,96 @@ pub fn encodeSimpleResponseAlloc(
     return encodeStreamingOutputCallResponseAlloc(allocator, body_size);
 }
 
+/// Decode one canonical `StreamingInputCallRequest` and return the zero-filled
+/// payload body size.
+pub fn decodeStreamingInputCallRequest(input: []const u8) Error!usize {
+    if (input.len > max_payload_size + 16) return error.MessageTooLarge;
+    var reader = Reader{ .input = input };
+    var payload_seen = false;
+    var body_size: usize = 0;
+    while (!reader.finished()) {
+        const tag = try reader.readTag();
+        switch (tag.field_number) {
+            1 => {
+                if (tag.wire_type != .length_delimited) {
+                    return error.UnsupportedWireType;
+                }
+                if (payload_seen) return error.DuplicateField;
+                payload_seen = true;
+                body_size = try decodeZeroPayload(
+                    try reader.readBytes(max_payload_size + 16),
+                );
+            },
+            else => return error.UnsupportedField,
+        }
+    }
+    if (!payload_seen) return error.MissingPayload;
+    return body_size;
+}
+
+pub fn encodeStreamingInputCallResponseAlloc(
+    allocator: std.mem.Allocator,
+    aggregated_payload_size: usize,
+) Error![]u8 {
+    if (aggregated_payload_size > std.math.maxInt(i32)) {
+        return error.MessageTooLarge;
+    }
+    const encoded = try allocator.alloc(
+        u8,
+        1 + varintLen(aggregated_payload_size),
+    );
+    var cursor: usize = 0;
+    encoded[cursor] = fieldKey(1, .varint);
+    cursor += 1;
+    writeVarint(encoded, &cursor, aggregated_payload_size);
+    std.debug.assert(cursor == encoded.len);
+    return encoded;
+}
+
+/// Decode the repeated response sizes from the canonical server-streaming
+/// request into caller-owned bounded storage.
+pub fn decodeStreamingOutputCallResponseSizes(
+    input: []const u8,
+    out: []u32,
+) Error![]const u32 {
+    if (input.len > max_payload_size + 64) return error.MessageTooLarge;
+    var reader = Reader{ .input = input };
+    var response_type_seen = false;
+    var count: usize = 0;
+    while (!reader.finished()) {
+        const tag = try reader.readTag();
+        switch (tag.field_number) {
+            1 => {
+                if (tag.wire_type != .varint) {
+                    return error.UnsupportedWireType;
+                }
+                if (response_type_seen) return error.DuplicateField;
+                response_type_seen = true;
+                if (try reader.readVarint() != 0) {
+                    return error.InvalidPayloadType;
+                }
+            },
+            2 => {
+                if (tag.wire_type != .length_delimited) {
+                    return error.UnsupportedWireType;
+                }
+                if (count == out.len) return error.MessageTooLarge;
+                const parameters = try decodeResponseParameters(
+                    try reader.readBytes(32),
+                );
+                if (parameters.interval_us != 0) {
+                    return error.InvalidArgument;
+                }
+                out[count] = parameters.size;
+                count += 1;
+            },
+            else => return error.UnsupportedField,
+        }
+    }
+    if (count == 0) return error.MissingPayload;
+    return out[0..count];
+}
+
 /// Decode the exact `StreamingOutputCallRequest` subset emitted by the
 /// canonical FullDuplexCall interoperability cases.
 ///
@@ -539,6 +629,35 @@ test "decodes canonical unary custom metadata request" {
         error.UnsupportedField,
         decodeSimpleRequest(&.{ 0x20, 0x01, 0x10, 0x05, 0x1a, 0x00 }),
     );
+}
+
+test "decodes client and server streaming fixture messages" {
+    try std.testing.expectEqual(
+        @as(usize, 3),
+        try decodeStreamingInputCallRequest(
+            &.{ 0x0a, 0x05, 0x12, 0x03, 0, 0, 0 },
+        ),
+    );
+    const aggregate = try encodeStreamingInputCallResponseAlloc(
+        std.testing.allocator,
+        74_922,
+    );
+    defer std.testing.allocator.free(aggregate);
+    try std.testing.expectEqualSlices(
+        u8,
+        &.{ 0x08, 0xaa, 0xc9, 0x04 },
+        aggregate,
+    );
+
+    var sizes_storage: [4]u32 = undefined;
+    const sizes = try decodeStreamingOutputCallResponseSizes(
+        &.{
+            0x12, 0x03, 0x08, 0xb7, 0xf5, 0x01,
+            0x12, 0x02, 0x08, 0x09,
+        },
+        &sizes_storage,
+    );
+    try std.testing.expectEqualSlices(u32, &.{ 31_415, 9 }, sizes);
 }
 
 test "encodes sleeping request without response parameters" {
