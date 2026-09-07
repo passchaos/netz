@@ -261,8 +261,12 @@ fragmented text still rejects a malformed sequence at the decisive byte.
 Caller-buffer H1/RFC 8441 receives retain their existing transport-read
 fail-fast validator but no longer rescan the complete uncompressed message;
 the shared resumable state carries the validation proof across continuation
-frames and timeout retries. RFC 9220 now advances that same validator after
-each completed WebSocket fragment instead of waiting for the complete message.
+frames and timeout retries. RFC 9220 now validates each newly arrived HTTP/3
+DATA slice inside the current WebSocket frame and carries that proof across
+continuations and timeout retries. A real QUIC regression limits STREAM payloads
+to five bytes, advertises a 1 KiB masked text frame, then withholds all but the
+two-byte invalid prefix; the server returns `InvalidUtf8` and Close 1007 without
+waiting for the unfinished frame.
 Compressed caller-buffer text remains validated after inflation.
 
 Netz's actual unmasked TCP server path prepares only the validated stack header

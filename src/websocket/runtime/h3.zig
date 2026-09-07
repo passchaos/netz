@@ -17,6 +17,13 @@ const deadline_policy = @import("../../internal/deadline.zig");
 const http3 = @import("../../http3/mod.zig");
 const rejection_drain_timeout: std.Io.Duration = .fromSeconds(5);
 
+const IncomingDataKind = enum {
+    none,
+    binary,
+    text,
+    compressed_text,
+};
+
 pub const PingEvent = common.PingEvent;
 pub const CloseHandshakeEvent = common.CloseHandshakeEvent;
 pub const Message = common.Message;
@@ -193,6 +200,11 @@ pub fn Connection(comptime role: common.Role) type {
         send_mutex: std.Io.Mutex = .init,
         message_assembler: ?websocket.MessageAssembler = null,
         message_into: common.MessageIntoReceiveState = .{},
+        /// Caller-buffer receives validate uncompressed text while HTTP/3
+        /// DATA chunks arrive, before the complete WebSocket frame exists.
+        incoming_data_kind: IncomingDataKind = .none,
+        incoming_text_utf8: websocket.Utf8Validator = .{},
+        incoming_frame_validated: usize = 0,
         permessage_deflate: bool = false,
         compression_threshold: usize = 32,
         compression_send_max_window_bits: u8 = 15,
@@ -897,10 +909,14 @@ pub fn Connection(comptime role: common.Role) type {
                 if (next_written > self.limits.max_message_bytes) {
                     return error.PayloadTooLarge;
                 }
-                try self.message_into.validateFramePayload(
-                    frame.payload,
-                    frame.header.fin,
-                );
+                // The HTTP/3 DATA reader already validated uncompressed text
+                // incrementally. Carry that proof across WebSocket fragments
+                // instead of rescanning the completed frame payload here.
+                if (self.message_into.opcode == .text and
+                    !self.message_into.compressed)
+                {
+                    self.message_into.text_utf8 = self.incoming_text_utf8;
+                }
                 self.message_into.written = next_written;
                 if (!frame.header.fin) continue;
 
@@ -977,7 +993,11 @@ pub fn Connection(comptime role: common.Role) type {
                 header.header_len,
                 payload_len,
             ) catch return error.PayloadTooLarge;
-            try self.ensureBuffered(total_len, deadline);
+            try self.ensureIncomingFrameBuffered(
+                header,
+                total_len,
+                deadline,
+            );
             available = message_buffer.unread(
                 &self.inbuf,
                 self.inbuf_consumed,
@@ -1517,6 +1537,127 @@ pub fn Connection(comptime role: common.Role) type {
                     scratch[0..count],
                 );
             }
+        }
+
+        /// Read the current frame body while validating uncompressed text as
+        /// HTTP/3 DATA becomes available. This avoids waiting for an attacker
+        /// to finish a large advertised frame after its prefix is already
+        /// known to violate RFC 3629.
+        fn ensureIncomingFrameBuffered(
+            self: *Self,
+            header: websocket.FrameHeader,
+            total_len: usize,
+            deadline: ?std.Io.Clock.Timestamp,
+        ) Error!void {
+            const options: websocket.ParseFrameOptions = switch (role) {
+                .client => .{
+                    .expect_mask = .unmasked,
+                    .allow_rsv1 = self.permessage_deflate,
+                    .validate_utf8 = false,
+                },
+                .server => .{
+                    .expect_mask = .masked,
+                    .allow_rsv1 = self.permessage_deflate,
+                    .validate_utf8 = false,
+                },
+            };
+            // Protocol/header errors are fully knowable before any payload
+            // validation and retain precedence over malformed UTF-8.
+            try websocket.validateFrameHeader(header, options);
+            const message_kind: IncomingDataKind = switch (header.opcode) {
+                .text => blk: {
+                    if (self.incoming_data_kind != .none) {
+                        return error.InvalidFrame;
+                    }
+                    // A timeout can leave a validated prefix of this same
+                    // frame buffered. Preserve its validator when resuming.
+                    if (self.incoming_frame_validated == 0) {
+                        self.incoming_text_utf8.reset();
+                    }
+                    break :blk if (header.rsv1)
+                        .compressed_text
+                    else
+                        .text;
+                },
+                .binary => blk: {
+                    if (self.incoming_data_kind != .none) {
+                        return error.InvalidFrame;
+                    }
+                    break :blk .binary;
+                },
+                .continuation => blk: {
+                    if (self.incoming_data_kind == .none) {
+                        return error.InvalidFrame;
+                    }
+                    break :blk self.incoming_data_kind;
+                },
+                else => .none,
+            };
+            const validate_text = message_kind == .text;
+            var validated = @max(
+                header.header_len,
+                self.incoming_frame_validated,
+            );
+            errdefer self.incoming_frame_validated = validated;
+            while (message_buffer.unreadLen(
+                &self.inbuf,
+                self.inbuf_consumed,
+            ) < total_len) {
+                if (validate_text) {
+                    try self.validateBufferedTextRange(
+                        header,
+                        &validated,
+                        total_len,
+                    );
+                }
+                const buffered = message_buffer.unreadLen(
+                    &self.inbuf,
+                    self.inbuf_consumed,
+                );
+                try self.ensureBuffered(
+                    @min(total_len, buffered + 1),
+                    deadline,
+                );
+            }
+            if (validate_text) {
+                try self.validateBufferedTextRange(
+                    header,
+                    &validated,
+                    total_len,
+                );
+                if (header.fin) try self.incoming_text_utf8.finish();
+            }
+
+            if (!header.opcode.isControl()) {
+                self.incoming_data_kind =
+                    if (header.fin) .none else message_kind;
+            }
+            self.incoming_frame_validated = 0;
+        }
+
+        fn validateBufferedTextRange(
+            self: *Self,
+            header: websocket.FrameHeader,
+            validated: *usize,
+            total_len: usize,
+        ) Error!void {
+            const available = message_buffer.unread(
+                &self.inbuf,
+                self.inbuf_consumed,
+            );
+            const available_end = @min(available.len, total_len);
+            if (available_end <= validated.*) return;
+            const bytes = available[validated.*..available_end];
+            if (header.mask_key) |mask| {
+                try self.incoming_text_utf8.feedMasked(
+                    bytes,
+                    mask,
+                    validated.* - header.header_len,
+                );
+            } else {
+                try self.incoming_text_utf8.feed(bytes);
+            }
+            validated.* = available_end;
         }
 
         fn readPayloadChunk(

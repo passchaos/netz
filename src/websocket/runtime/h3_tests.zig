@@ -1341,6 +1341,131 @@ test "WebSocket HTTP3 caller server session restores after rejection" {
     if (shared.err) |err| return err;
 }
 
+test "WebSocket HTTP3 caller-buffer rejects invalid UTF-8 before frame completion" {
+    const allocator = std.testing.allocator;
+    var threaded = std.Io.Threaded.init(allocator, .{});
+    defer threaded.deinit();
+    const io = threaded.io();
+
+    const original_dcid =
+        [_]u8{ 0x91, 0x92, 0x93, 0x94, 0x95, 0x96, 0x97, 0x98 };
+    const client_cid = [_]u8{ 0xa1, 0xa2, 0xa3, 0xa4 };
+    const server_cid = [_]u8{ 0xb1, 0xb2, 0xb3, 0xb4 };
+    const transport_limits: http3.runtime.Limits = .{ .quic = .{
+        .max_datagram_size = 4096,
+        .max_frames_per_datagram = 8,
+    } };
+    const websocket_limits: @import("common.zig").Limits = .{
+        .max_frame_bytes = 1024,
+        .max_message_bytes = 1024,
+    };
+    var server = try h3.Server.bind(
+        allocator,
+        io,
+        .{ .ip4 = .loopback(0) },
+        transport_limits,
+        .{
+            .handshake = .{
+                .local_connection_id = &server_cid,
+                .random = [_]u8{0xb5} ** 32,
+                .x25519_secret_key = [_]u8{0xb6} ** 32,
+            },
+            .session = .{ .max_stream_frame_data = 5 },
+        },
+    );
+    defer server.deinit();
+
+    const Shared = struct {
+        server: *h3.Server,
+        err: ?anyerror = null,
+
+        fn run(self: *@This()) void {
+            self.runFallible() catch |err| {
+                self.err = err;
+            };
+        }
+
+        fn runFallible(self: *@This()) !void {
+            var connection = try self.server.accept(.{
+                .limits = websocket_limits,
+            });
+            defer connection.deinit();
+            var storage: [websocket_limits.max_message_bytes]u8 = undefined;
+            try std.testing.expectError(
+                error.InvalidUtf8,
+                connection.receiveMessageIntoWithTimeout(
+                    &storage,
+                    .fromSeconds(5),
+                ),
+            );
+        }
+    };
+
+    var shared = Shared{ .server = &server };
+    const thread = try std.Thread.spawn(.{}, Shared.run, .{&shared});
+    var joined = false;
+    defer if (!joined) thread.join();
+
+    var client = try h3.Client.connect(
+        allocator,
+        io,
+        .{ .ip4 = .loopback(0) },
+        server.address(),
+        transport_limits,
+        .{
+            .handshake = .{
+                .original_destination_connection_id = &original_dcid,
+                .local_connection_id = &client_cid,
+                .server_name = "localhost",
+                .random = [_]u8{0xb7} ** 32,
+                .x25519_secret_key = [_]u8{0xb8} ** 32,
+            },
+            .session = .{ .max_stream_frame_data = 5 },
+        },
+        .{
+            .authority = "localhost",
+            .path = "/utf8-fail-fast",
+            .limits = websocket_limits,
+        },
+    );
+    defer client.deinit();
+
+    // Advertise a 1024-byte masked text frame, then send only the header and
+    // the two bytes that prove F4 90 cannot encode a Unicode scalar. With
+    // five-byte QUIC STREAM chunks, the receiver must reject this prefix
+    // rather than wait forever for the other 1022 payload bytes.
+    var header_storage: [websocket.max_frame_header_len]u8 = undefined;
+    const mask_key = [4]u8{ 0x11, 0x22, 0x33, 0x44 };
+    const header = try websocket.writeFrameHeaderForLengthInto(
+        &header_storage,
+        .text,
+        websocket_limits.max_frame_bytes,
+        .{ .mask_key = mask_key },
+    );
+    var wire_prefix: [websocket.max_frame_header_len + 2]u8 = undefined;
+    @memcpy(wire_prefix[0..header.len], header);
+    wire_prefix[header.len] = 0xf4 ^ mask_key[0];
+    wire_prefix[header.len + 1] = 0x90 ^ mask_key[1];
+    try client.h3.sendRequestBodyPaced(
+        client.stream_id,
+        wire_prefix[0 .. header.len + 2],
+        false,
+    );
+
+    var close = (try client.receiveCloseFrameWithTimeout(
+        .fromSeconds(5),
+    )).?;
+    defer close.deinit(allocator);
+    try std.testing.expectEqual(
+        websocket.CloseCode.invalid_payload_data,
+        close.code,
+    );
+
+    thread.join();
+    joined = true;
+    if (shared.err) |err| return err;
+}
+
 test "WebSocket over HTTP3 extended CONNECT exchanges frames" {
     const allocator = std.testing.allocator;
     var threaded = std.Io.Threaded.init(allocator, .{});
@@ -1915,6 +2040,7 @@ test "WebSocket over HTTP3 rejects peer without extended CONNECT" {
 
 test "HTTP3 peer SETTINGS wait rejects an expired budget" {
     var client: http3.runtime.HandshakeClient = undefined;
+    client.dispatcher_bound = false;
     try std.testing.expectError(
         error.Timeout,
         client.receivePeerSettingsWithTimeout(.zero),
