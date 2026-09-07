@@ -72,7 +72,9 @@ identity because the browser's `serverCertificateHashes` exception requires a
 certificate validity period of at most two weeks. The server receives the
 origin page's dynamically allocated `http://localhost:<port>` serialization as
 an exact allowlist and verifies the browser-generated Origin before accepting
-CONNECT. The gate verifies CONNECT,
+CONNECT. Before that allowed run, a second netz listener deliberately trusts a
+different Origin, returns 403, and the same browser page must observe
+`transport.ready` rejection. The allowed run then verifies CONNECT,
 DATAGRAM, bidirectional and unidirectional streams, RESET_STREAM code 71,
 STOP_SENDING code 72, sibling reuse, and clean session close. Chrome coalesces
 its Handshake Finished and first 1-RTT control-stream packet in one UDP

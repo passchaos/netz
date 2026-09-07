@@ -121,6 +121,11 @@ pub fn main(init: std.process.Init) !void {
         &.{};
     const origin_only = args.len == 6 and
         std.mem.eql(u8, args[5], "origin-only");
+    const reject_origin = args.len == 6 and
+        std.mem.eql(u8, args[5], "reject-origin");
+    if (args.len == 6 and !origin_only and !reject_origin) {
+        return error.InvalidArgument;
+    }
     var server = try netz.webtransport.runtime.HandshakeServer.bind(
         allocator,
         io,
@@ -165,11 +170,25 @@ pub fn main(init: std.process.Init) !void {
         return error.UnexpectedPath;
     }
     if (allowed_origins.len != 0) {
-        if (!std.mem.eql(
-            u8,
-            pending.origin() orelse return error.UnexpectedHeader,
-            allowed_origins[0],
-        )) return error.UnexpectedHeader;
+        const origin = pending.origin() orelse return error.UnexpectedHeader;
+        if (reject_origin) {
+            if (std.mem.eql(u8, origin, allowed_origins[0])) {
+                return error.UnexpectedHeader;
+            }
+            try std.testing.expectError(error.InvalidOrigin, pending.accept());
+            var rejected = try pending.forbidden();
+            pending_owned = false;
+            defer rejected.deinit();
+            std.debug.print(
+                "netz WebTransport Origin policy passed: rejected=403\n",
+                .{},
+            );
+            try std.Io.sleep(io, .fromMilliseconds(100), .awake);
+            return;
+        }
+        if (!std.mem.eql(u8, origin, allowed_origins[0])) {
+            return error.UnexpectedHeader;
+        }
     } else {
         if (!std.mem.eql(
             u8,

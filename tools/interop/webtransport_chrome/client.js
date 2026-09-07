@@ -9,7 +9,7 @@ if (!Number.isInteger(port) || port < 1 || port > 65535 ||
   throw new Error('usage: client.js PORT CERTIFICATE_SHA256_HEX');
 }
 
-async function runBrowserProbe({port, certificateHash, originOnly}) {
+async function runBrowserProbe({port, certificateHash, originOnly, rejectOnly}) {
   const timeoutMs = 10_000;
   const textEncoder = new TextEncoder();
   const textDecoder = new TextDecoder();
@@ -54,6 +54,19 @@ async function runBrowserProbe({port, certificateHash, originOnly}) {
   const transport = new WebTransport(`https://127.0.0.1:${port}/interop`, {
     serverCertificateHashes: [{algorithm: 'sha-256', value: hash.buffer}],
   });
+  if (rejectOnly) {
+    let rejected = false;
+    try {
+      await withTimeout(transport.ready, 'rejected WebTransport ready');
+    } catch (_) {
+      rejected = true;
+    }
+    if (!rejected) {
+      transport.close();
+      throw new Error('disallowed Origin unexpectedly accepted');
+    }
+    return 'Chrome WebTransport Origin policy passed: rejected=true';
+  }
   await withTimeout(transport.ready, 'WebTransport ready');
   if (originOnly) {
     transport.close({closeCode: 0, reason: 'origin verified'});
@@ -158,6 +171,7 @@ async function runBrowserProbe({port, certificateHash, originOnly}) {
       port,
       certificateHash,
       originOnly: process.env.WEBTRANSPORT_ORIGIN_ONLY === '1',
+      rejectOnly: process.env.WEBTRANSPORT_REJECT_ONLY === '1',
     }));
   } finally {
     await browser.close();
