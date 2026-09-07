@@ -232,6 +232,13 @@ The reference measurement calls `proto.writeFrameHeader`, copies the immutable
 payload into scratch, then calls its SIMD `proto.mask`. Copying is required for
 an equivalent contract: the reference client API accepts `[]u8` and masks it
 in place, while netz accepts `[]const u8` and preserves caller memory.
+The same benchmark now includes incremental UTF-8 validation of one 4 KiB
+ASCII telemetry message. A vector high-bit scan skips complete ASCII blocks
+only while no multibyte sequence is pending, then falls back to the original
+byte state machine at the first non-ASCII byte. One CPU-0 run measured 46.88
+ns/message versus 1843.09 ns/message for the directly invoked scalar state
+machine, a 39.32x same-process speedup. Split multibyte sequences and invalid
+bytes after long ASCII prefixes retain direct regression coverage.
 
 Netz's actual unmasked TCP server path prepares only the validated stack header
 and uses one vectored network write for header + borrowed payload. Masked

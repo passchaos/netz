@@ -4,6 +4,7 @@ const netz = @import("netz");
 const iterations: usize = 200_000;
 const payload_len: usize = 4096;
 const compression_iterations: usize = 20_000;
+const utf8_iterations: usize = 500_000;
 const compression_fragments: usize = 16;
 const mask_key = [4]u8{ 0x12, 0x34, 0x56, 0x78 };
 
@@ -124,6 +125,31 @@ pub fn main() !void {
     }
     const fragmented_ns = nowNs(io) -| fragmented_started;
 
+    var ascii_text: [payload_len]u8 = undefined;
+    for (&ascii_text, 0..) |*byte, index| {
+        byte.* = "sensor=42;status=nominal;"[
+            index % "sensor=42;status=nominal;".len
+        ];
+    }
+    const utf8_scalar_started = nowNs(io);
+    var utf8_scalar_checksum: u64 = 0;
+    for (0..utf8_iterations) |_| {
+        var validator: netz.websocket.Utf8Validator = .{};
+        for (&ascii_text) |byte| try validator.feedByte(byte);
+        try validator.finish();
+        utf8_scalar_checksum +%= validator.remaining + ascii_text[0];
+    }
+    const utf8_scalar_ns = nowNs(io) -| utf8_scalar_started;
+    const utf8_started = nowNs(io);
+    var utf8_checksum: u64 = 0;
+    for (0..utf8_iterations) |_| {
+        var validator: netz.websocket.Utf8Validator = .{};
+        try validator.feed(&ascii_text);
+        try validator.finish();
+        utf8_checksum +%= validator.remaining + ascii_text[0];
+    }
+    const utf8_ns = nowNs(io) -| utf8_started;
+
     const caller_speedup_x100 = ratioTimes100(
         allocating_ns,
         caller_buffer_ns,
@@ -142,6 +168,9 @@ pub fn main() !void {
         \\  header-only speedup: {d}.{d:0>2}x
         \\  permessage-deflate: {d} ns/message, {d} -> {d} wire bytes
         \\  fragmented deflate ({d} slices): {d} ns/message, {d} -> {d} wire bytes, no plaintext join
+        \\  incremental UTF-8 scalar reference: {d:.2} ns/message
+        \\  incremental UTF-8 ASCII validation: {d:.2} ns/message
+        \\  incremental UTF-8 ASCII speedup: {d:.2}x
         \\  checksum: {d}
         \\
     , .{
@@ -162,11 +191,19 @@ pub fn main() !void {
         fragmented_ns / compression_iterations,
         compressible.len,
         fragmented_bytes,
+        @as(f64, @floatFromInt(utf8_scalar_ns)) /
+            @as(f64, @floatFromInt(utf8_iterations)),
+        @as(f64, @floatFromInt(utf8_ns)) /
+            @as(f64, @floatFromInt(utf8_iterations)),
+        @as(f64, @floatFromInt(utf8_scalar_ns)) /
+            @as(f64, @floatFromInt(@max(utf8_ns, 1))),
         allocating_checksum +%
             caller_buffer_checksum +%
             header_checksum +%
             compression_checksum +%
-            fragmented_checksum,
+            fragmented_checksum +%
+            utf8_scalar_checksum +%
+            utf8_checksum,
     });
 }
 

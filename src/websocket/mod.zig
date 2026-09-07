@@ -322,7 +322,20 @@ pub const Utf8Validator = struct {
     }
 
     pub fn feed(self: *Utf8Validator, bytes: []const u8) Error!void {
-        for (bytes) |byte| try self.feedByte(byte);
+        var remaining_bytes = bytes;
+        if (self.remaining == 0 and comptime backend_supports_vectors) {
+            const vector_size = std.simd.suggestVectorLength(u8) orelse
+                @sizeOf(usize);
+            const high_bits: @Vector(vector_size, u8) =
+                @splat(0x80);
+            while (remaining_bytes.len >= vector_size) {
+                const block: @Vector(vector_size, u8) =
+                    remaining_bytes[0..vector_size].*;
+                if (@reduce(.Or, block & high_bits) != 0) break;
+                remaining_bytes = remaining_bytes[vector_size..];
+            }
+        }
+        for (remaining_bytes) |byte| try self.feedByte(byte);
     }
 
     pub fn feedByte(self: *Utf8Validator, byte: u8) Error!void {
@@ -388,6 +401,23 @@ test "WebSocket incremental UTF-8 validator rejects decisive bytes" {
     validator.reset();
     try validator.feedByte(0xf0);
     try std.testing.expectError(error.InvalidUtf8, validator.finish());
+}
+
+test "WebSocket incremental UTF-8 validator skips ASCII blocks safely" {
+    var validator: Utf8Validator = .{};
+    const ascii = "abcdefghijklmnopqrstuvwxyz0123456789" ** 8;
+    try validator.feed(ascii);
+    try validator.finish();
+
+    validator.reset();
+    try validator.feed(ascii ++ "\xe2");
+    try validator.feed("\x82");
+    try validator.feed("\xac" ++ ascii);
+    try validator.finish();
+
+    validator.reset();
+    const invalid = ascii ++ "\xff" ++ ascii;
+    try std.testing.expectError(error.InvalidUtf8, validator.feed(invalid));
 }
 
 fn validatePayload(header: FrameHeader, payload: []const u8, options: ParseFrameOptions) Error!void {
