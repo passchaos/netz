@@ -416,10 +416,10 @@ pub fn readRequest(
         // protocol failure. Match gRPC Core's message assembler behavior by
         // terminating this stream rather than leaving it available for a
         // response after surfacing the framing error.
-        connection.sendResetStream(
+        connection.abandonPeerRequest(
             request.stream_id,
             .internal_error,
-        ) catch {};
+        );
         return err;
     };
     const parsed = bridge.metadata orelse return error.InvalidGrpcRequest;

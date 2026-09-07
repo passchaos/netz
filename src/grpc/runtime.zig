@@ -388,11 +388,17 @@ pub const ServerConnection = struct {
     pub fn readUnary(self: *ServerConnection) Error!OwnedUnaryRequest {
         var transport = try self.connection.readRequest();
         errdefer transport.deinit(self.connection.allocator);
-        const request = try call.parseUnaryRequest(
+        const request = call.parseUnaryRequest(
             self.connection.allocator,
             &transport,
             self.max_message_size,
-        );
+        ) catch |err| {
+            self.connection.abandonPeerRequest(
+                transport.stream_id,
+                .internal_error,
+            );
+            return err;
+        };
         return .{ .transport = transport, .request = request };
     }
 

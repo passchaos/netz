@@ -38,7 +38,10 @@ existing HTTP/2 runtime:
   requested response encoding,
 - unary HTTP/2 client/server helpers with initial metadata, trailing metadata,
   trailers-only errors, configurable message-size limits, and explicit
-  ownership for decoded request and response messages,
+  ownership for decoded request and response messages. Malformed unary
+  metadata or envelopes receive `RST_STREAM(INTERNAL_ERROR)` and retire local
+  HTTP/2 concurrency, response-semantics, and flow-window state even if the
+  best-effort reset write fails,
 - unary client deadlines captured once from `grpc-timeout` at API entry and
   enforced locally with the awake clock across request setup and the complete
   HTTP/2 exchange; expiration returns `error.Timeout` and emits
@@ -289,7 +292,10 @@ real HTTP 503 response without `grpc-status`. Stream tests sweep every byte spli
 across three coalesced messages, split a prefix across separate HTTP/2 writes,
 force large gzip/deflate messages across small DATA frames in both directions,
 verify independent compressed members, and require RST_STREAM(INTERNAL_ERROR)
-for an incomplete request message. The duplex test sends client message one,
+for incomplete unary and streaming request messages. The unary regression
+runs with one concurrent-stream slot and completes a valid RPC on the same
+connection after the malformed stream; a failing-write state test verifies
+that local credit and windows are still retired. The duplex test sends client message one,
 observes the server's reply while the request half remains open, then sends
 client message two and completes both halves. A second duplex test covers an
 early trailers-only PERMISSION_DENIED response and proves subsequent writes are

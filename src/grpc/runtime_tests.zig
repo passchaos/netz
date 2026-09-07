@@ -86,6 +86,105 @@ test "gRPC h2c runtime reuses one channel" {
     try std.testing.expectEqual(@as(usize, 1), shared.accepts);
 }
 
+test "gRPC malformed unary resets stream and releases concurrency" {
+    const allocator = std.testing.allocator;
+    var threaded = std.Io.Threaded.init(allocator, .{});
+    defer threaded.deinit();
+    const io = threaded.io();
+    const limits: http2.runtime.Limits = .{
+        .max_frame_payload = 4096,
+        .max_body_bytes = 4096,
+        .max_concurrent_streams = 1,
+    };
+    var server = try grpc.runtime.Server.listen(
+        allocator,
+        io,
+        .{ .ip4 = .loopback(0) },
+        limits,
+        1024,
+    );
+    defer server.deinit();
+
+    const Shared = struct {
+        server: *grpc.runtime.Server,
+        err: ?anyerror = null,
+
+        fn run(self: *@This()) void {
+            var connection = self.server.accept() catch |err| {
+                self.err = err;
+                return;
+            };
+            defer connection.deinit();
+            if (connection.readUnary()) |request| {
+                var unexpected = request;
+                unexpected.deinit();
+                self.err = error.TestUnexpectedResult;
+                return;
+            } else |err| {
+                if (err != error.BufferTooShort) {
+                    self.err = err;
+                    return;
+                }
+            }
+
+            var request = connection.readUnary() catch |err| {
+                self.err = err;
+                return;
+            };
+            defer request.deinit();
+            connection.writeUnary(request.request.stream_id, .{
+                .message = "reused",
+            }) catch |err| {
+                self.err = err;
+            };
+        }
+    };
+    var shared = Shared{ .server = &server };
+    const thread = try std.Thread.spawn(.{}, Shared.run, .{&shared});
+    var joined = false;
+    defer if (!joined) thread.join();
+
+    var client = try grpc.runtime.Client.connect(
+        allocator,
+        io,
+        server.address(),
+        limits,
+    );
+    defer client.deinit();
+    var malformed = try client.connection.startRequest(.{
+        .path = "/demo.Echo/Unary",
+        .authority = "localhost",
+        .headers = &.{
+            .{ .name = "content-type", .value = "application/grpc" },
+            .{ .name = "te", .value = "trailers" },
+        },
+        .body_length = 1,
+    });
+    defer malformed.deinit();
+    try malformed.finishData(&.{0});
+    var reset = try client.connection.readResetStreamWithTimeout(
+        .fromSeconds(2),
+    );
+    defer reset.deinit(allocator);
+    try std.testing.expectEqual(@as(u31, 1), reset.reset.stream_id);
+    try std.testing.expectEqual(
+        http2.ErrorCode.internal_error,
+        reset.reset.error_code,
+    );
+
+    var response = try client.unary(.{
+        .path = "/demo.Echo/Unary",
+        .authority = "localhost",
+        .message = "next",
+    });
+    defer response.deinit();
+    try std.testing.expectEqualStrings("reused", response.message.?.payload);
+
+    thread.join();
+    joined = true;
+    if (shared.err) |err| return err;
+}
+
 test "gRPC h2c unary retry reuses one deadline and reports attempts" {
     const allocator = std.testing.allocator;
     var threaded = std.Io.Threaded.init(allocator, .{});

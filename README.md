@@ -265,7 +265,9 @@ starts with deterministic parsers, serializers, preallocated fixed-width wire-in
   reassembly, several messages per DATA callback, zero-copy complete
   uncompressed messages, exact allocation for split messages, independent
   per-message compression, trailers-only errors, decoded-message ownership,
-  truncated-message stream reset, typed early `grpc-status` handoff when a
+  truncated-message stream reset with unconditional local stream-credit and
+  flow-window retirement even when the best-effort reset write fails, typed
+  early `grpc-status` handoff when a
   flow-control-blocked upload receives server trailers, and `grpc-status`
   enforcement, plus `grpc.pbz.ClientTransport` and `ServerTransport` for
   plugging generated pbz service clients and handlers directly into all four

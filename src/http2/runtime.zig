@@ -9845,6 +9845,25 @@ pub const Connection = struct {
         self.forgetStreamWindows(stream_id);
     }
 
+    /// Terminate an admitted peer request that an upper protocol adapter can
+    /// no longer process. The reset is best effort, but local stream credit,
+    /// response semantics, and flow-control windows are always released so a
+    /// malformed request cannot consume concurrency for the connection's
+    /// remaining lifetime.
+    pub fn abandonPeerRequest(
+        self: *Connection,
+        stream_id: u31,
+        error_code: http2.ErrorCode,
+    ) void {
+        if (self.active_peer_index.count() != 0 and
+            self.active_peer_index.contains(stream_id))
+        {
+            self.writeResetStreamFrame(stream_id, error_code) catch {};
+        }
+        self.releasePeerStream(stream_id);
+        self.forgetStreamWindows(stream_id);
+    }
+
     pub fn readResetStream(self: *Connection) Error!OwnedResetStream {
         return self.readResetStreamUntil(null);
     }
@@ -10686,11 +10705,7 @@ pub const Connection = struct {
         // tests and upgrade paths can surface already-materialized requests
         // without an active stream, where emitting RST_STREAM would itself be
         // invalid and may not have a usable transport.
-        if (self.outboundStreamIsActive(stream_id)) {
-            self.writeResetStreamFrame(stream_id, .cancel) catch {};
-        }
-        self.releasePeerStream(stream_id);
-        self.forgetStreamWindows(stream_id);
+        self.abandonPeerRequest(stream_id, .cancel);
     }
 
     fn failTimedOutRequest(self: *Connection, stream_id: u31) void {
@@ -27024,6 +27039,64 @@ test "HTTP/2 failed protocol error reset write is terminal and uncounted" {
     );
     try std.testing.expectEqual(@as(usize, 0), connection.local_error_reset_streams);
     try std.testing.expect(connection.aggregate_timeout_unusable);
+}
+
+test "HTTP/2 abandoning peer request releases state after reset write failure" {
+    const allocator = std.testing.allocator;
+    const FailingWriter = struct {
+        fn write(
+            _: ?*anyopaque,
+            _: net.Socket.Handle,
+            _: []const u8,
+            _: []const []const u8,
+            _: usize,
+        ) net.Stream.Writer.Error!usize {
+            return error.NetworkDown;
+        }
+    };
+
+    var threaded = std.Io.Threaded.init(allocator, .{});
+    defer threaded.deinit();
+    var vtable = threaded.io().vtable.*;
+    vtable.netWrite = FailingWriter.write;
+    var connection = Connection{
+        .io = .{ .userdata = null, .vtable = &vtable },
+        .allocator = allocator,
+        .stream = undefined,
+        .role = .server,
+        .limits = .{
+            .max_concurrent_streams = 1,
+            .max_reset_stream_history = 0,
+        },
+    };
+    defer {
+        connection.send_stream_windows.deinit(allocator);
+        connection.send_stream_window_index.deinit(allocator);
+        connection.recv_stream_windows.deinit(allocator);
+        connection.recv_stream_window_index.deinit(allocator);
+        connection.active_peer_streams.deinit(allocator);
+        connection.active_peer_index.deinit(allocator);
+        connection.priority_state.deinit(allocator);
+        connection.response_semantics.deinit(allocator);
+        connection.response_semantics_index.deinit(allocator);
+    }
+
+    try connection.reservePeerStream(1);
+    try connection.rememberResponseSemantics(1, "POST", null, .{});
+    _ = try connection.sendStreamWindow(1);
+    _ = try connection.recvStreamWindow(1);
+    try std.testing.expect(connection.outboundStreamIsActive(1));
+    try std.testing.expect(connection.hasRecvStreamWindow(1));
+
+    connection.abandonPeerRequest(1, .internal_error);
+    try std.testing.expect(!connection.outboundStreamIsActive(1));
+    try std.testing.expect(!connection.hasRecvStreamWindow(1));
+    try std.testing.expect(!connection.response_semantics_index.contains(1));
+    try std.testing.expect(connection.priority_state.get(1) == null);
+
+    // The failed best-effort RST must not strand the sole concurrency slot.
+    try connection.reservePeerStream(3);
+    try std.testing.expect(connection.outboundStreamIsActive(3));
 }
 
 test "HTTP/2 reset history allocation failure precedes wire write" {
