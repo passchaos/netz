@@ -264,6 +264,43 @@ pub fn main() !void {
     }
     const reused_parse_ns = nowNs(io) -| reused_parse_started;
 
+    var aggregate_wire_storage: [
+        payload_len + netz.websocket.max_frame_header_len
+    ]u8 = undefined;
+    const aggregate_wire = try netz.websocket.writeFrameInto(
+        &aggregate_wire_storage,
+        .binary,
+        &payload,
+        .{},
+    );
+    const aggregate_header = try netz.websocket.FrameHeader.parse(
+        aggregate_wire,
+    );
+    const owned_parse_started = nowNs(io);
+    var owned_parse_checksum: u64 = 0;
+    for (0..iterations) |_| {
+        var frame = try netz.websocket.parseFrameWithHeader(
+            allocator,
+            aggregate_wire,
+            aggregate_header,
+            .{ .expect_mask = .unmasked },
+        );
+        owned_parse_checksum +%= checksum(frame.payload);
+        frame.deinit(allocator);
+    }
+    const owned_parse_ns = nowNs(io) -| owned_parse_started;
+    const in_place_parse_started = nowNs(io);
+    var in_place_parse_checksum: u64 = 0;
+    for (0..iterations) |_| {
+        const frame = try netz.websocket.parseFrameInPlaceWithHeader(
+            aggregate_wire,
+            aggregate_header,
+            .{ .expect_mask = .unmasked },
+        );
+        in_place_parse_checksum +%= checksum(frame.payload);
+    }
+    const in_place_parse_ns = nowNs(io) -| in_place_parse_started;
+
     const caller_speedup_x100 = ratioTimes100(
         allocating_ns,
         caller_buffer_ns,
@@ -361,7 +398,22 @@ pub fn main() !void {
             masked_copy_two_pass_checksum +%
             masked_copy_fused_checksum +%
             parse_checksum +%
-            reused_parse_checksum,
+            reused_parse_checksum +%
+            owned_parse_checksum +%
+            in_place_parse_checksum,
+    });
+    std.debug.print(
+        \\  owned aggregate-frame parse: {d:.2} ns/frame
+        \\  in-place aggregate-frame parse: {d:.2} ns/frame
+        \\  in-place aggregate-frame speedup: {d:.2}x
+        \\
+    , .{
+        @as(f64, @floatFromInt(owned_parse_ns)) /
+            @as(f64, @floatFromInt(iterations)),
+        @as(f64, @floatFromInt(in_place_parse_ns)) /
+            @as(f64, @floatFromInt(iterations)),
+        @as(f64, @floatFromInt(owned_parse_ns)) /
+            @as(f64, @floatFromInt(@max(in_place_parse_ns, 1))),
     });
 }
 

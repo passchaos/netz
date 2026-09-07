@@ -1407,6 +1407,43 @@ test "WebSocket receiveMessageInto buffered fast path does not allocate" {
     try std.testing.expect(!failing.has_induced_failure);
 }
 
+test "WebSocket owning message avoids an intermediate frame allocation" {
+    const backing = std.testing.allocator;
+    var failing = std.testing.FailingAllocator.init(backing, .{});
+    const allocator = failing.allocator();
+    const payload = "single-allocation-owned-message";
+    var encoded: std.ArrayList(u8) = .empty;
+    defer encoded.deinit(backing);
+    try websocket.writeFrame(&encoded, backing, .binary, payload, .{});
+
+    var connection = Connection{
+        .io = undefined,
+        .allocator = allocator,
+        .stream = undefined,
+        .role = .client,
+        .limits = .{
+            .max_frame_bytes = payload.len,
+            .max_message_bytes = payload.len,
+        },
+    };
+    defer connection.inbuf.deinit(allocator);
+    try connection.inbuf.appendSlice(allocator, encoded.items);
+    connection.message_assembler = websocket.MessageAssembler.initLimited(
+        allocator,
+        payload.len,
+    );
+    try connection.message_assembler.?.buffer.ensureTotalCapacityPrecise(
+        allocator,
+        payload.len,
+    );
+    failing.fail_index = failing.alloc_index;
+
+    var message = try connection.receiveMessage();
+    defer message.deinit(allocator);
+    try std.testing.expectEqualStrings(payload, message.payload);
+    try std.testing.expect(!failing.has_induced_failure);
+}
+
 test "WebSocket HTTP2 caller-buffer receive reuses compression scratch" {
     const allocator = std.testing.allocator;
     const payload = "h2 caller-buffer compressed message " ** 8;

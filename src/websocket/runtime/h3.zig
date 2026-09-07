@@ -769,17 +769,48 @@ pub fn Connection(comptime role: common.Role) type {
                 );
             }
             while (true) {
-                var frame = try self.receiveFrameInternal(deadline);
-                defer frame.deinit(self.allocator);
+                const frame = try self.receiveMessageFrameBorrowed(deadline);
                 switch (frame.header.opcode) {
-                    .ping, .pong => continue,
-                    .close => return error.ConnectionClosed,
+                    .ping => {
+                        if (!self.closeSent()) {
+                            self.sendPong(frame.payload) catch |err| {
+                                self.discardBuffered(frame.consumed);
+                                return @errorCast(err);
+                            };
+                        }
+                        self.discardBuffered(frame.consumed);
+                        continue;
+                    },
+                    .pong => {
+                        self.discardBuffered(frame.consumed);
+                        continue;
+                    },
+                    .close => {
+                        self.close_received.store(true, .release);
+                        if (!self.closeSent()) {
+                            self.echoCloseFrame(frame.payload) catch |err| {
+                                self.discardBuffered(frame.consumed);
+                                return @errorCast(err);
+                            };
+                        }
+                        self.discardBuffered(frame.consumed);
+                        return error.ConnectionClosed;
+                    },
                     else => {
-                        const assembled = (try self.message_assembler.?.feedUtf8Validated(
+                        const maybe_assembled = self.message_assembler.?.feedUtf8Validated(
                             frame,
                             self.incoming_text_utf8,
-                        )) orelse
+                        ) catch |err| {
+                            self.discardBuffered(frame.consumed);
+                            self.message_assembler.?.deinit();
+                            self.message_assembler = null;
+                            return @errorCast(err);
+                        };
+                        const assembled = maybe_assembled orelse {
+                            self.discardBuffered(frame.consumed);
                             continue;
+                        };
+                        self.discardBuffered(frame.consumed);
                         self.message_assembler.?.deinit();
                         self.message_assembler = null;
                         if (assembled.compressed) {
@@ -809,6 +840,69 @@ pub fn Connection(comptime role: common.Role) type {
                     },
                 }
             }
+        }
+
+        fn receiveMessageFrameBorrowed(
+            self: *Self,
+            deadline: ?std.Io.Clock.Timestamp,
+        ) Error!websocket.BorrowedFrame {
+            if (self.closeSent() and self.closeReceived()) {
+                return error.ConnectionClosed;
+            }
+            try self.ensureBuffered(2, deadline);
+            var available = message_buffer.unread(
+                &self.inbuf,
+                self.inbuf_consumed,
+            );
+            const second = available[1];
+            var header_len: usize = 2;
+            const length_code = second & 0x7f;
+            if (length_code == 126) {
+                header_len += 2;
+            } else if (length_code == 127) {
+                header_len += 8;
+            }
+            if ((second & 0x80) != 0) header_len += 4;
+            try self.ensureBuffered(header_len, deadline);
+            available = message_buffer.unread(
+                &self.inbuf,
+                self.inbuf_consumed,
+            );
+            const header = try websocket.FrameHeader.parse(available);
+            const payload_len = std.math.cast(
+                usize,
+                header.payload_len,
+            ) orelse return error.PayloadTooLarge;
+            if (payload_len > self.limits.max_frame_bytes) {
+                return error.MessageTooLarge;
+            }
+            const total_len = std.math.add(
+                usize,
+                header.header_len,
+                payload_len,
+            ) catch return error.PayloadTooLarge;
+            try self.ensureIncomingFrameBuffered(header, total_len, deadline);
+            available = message_buffer.unread(
+                &self.inbuf,
+                self.inbuf_consumed,
+            );
+            const options: websocket.ParseFrameOptions = switch (role) {
+                .client => .{
+                    .expect_mask = .unmasked,
+                    .allow_rsv1 = self.permessage_deflate,
+                    .validate_utf8 = false,
+                },
+                .server => .{
+                    .expect_mask = .masked,
+                    .allow_rsv1 = self.permessage_deflate,
+                    .validate_utf8 = false,
+                },
+            };
+            return websocket.parseFrameInPlaceWithHeader(
+                available[0..total_len],
+                header,
+                options,
+            );
         }
 
         fn resetMessageIntoAfterError(self: *Self, err: anyerror) void {

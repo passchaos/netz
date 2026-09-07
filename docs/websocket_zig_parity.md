@@ -292,6 +292,15 @@ only the assembler's internal proof for uncompressed text. Compressed text and
 externally constructed messages retain the final validation pass. Thus ordinary
 complete text is validated once while fragmented text still rejects a malformed
 sequence at the decisive byte.
+Their owning-message loops also decode complete frames in place in the
+connection buffer and copy payload bytes only once into `MessageAssembler`. The
+public frame API keeps its independent owned payload, while aggregate receives
+avoid allocating and freeing an intermediate payload for every fragment. A
+failing-allocator regression preallocates only the final assembler storage and
+proves a complete buffered message needs no per-frame allocation. A CPU-0
+same-process 4 KiB binary parse measured 1.96 ns/frame in place versus 63.51
+ns/frame through the former owned allocation/copy path, a 32.43x reduction in
+that isolated parser component.
 Caller-buffer H1/RFC 8441 receives retain their existing transport-read
 fail-fast validator but no longer rescan the complete uncompressed message;
 the shared resumable state carries the validation proof across continuation

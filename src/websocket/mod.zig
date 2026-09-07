@@ -307,6 +307,34 @@ pub fn parseFrameIntoWithHeader(
     };
 }
 
+/// Decode one complete frame in caller-owned mutable wire storage. The
+/// returned payload aliases `bytes`, so it remains valid only while that
+/// storage is unchanged. Stream runtimes use this to feed message assembly
+/// without allocating an intermediate payload for every fragment.
+pub fn parseFrameInPlaceWithHeader(
+    bytes: []u8,
+    header: FrameHeader,
+    options: ParseFrameOptions,
+) Error!BorrowedFrame {
+    try validateFrameHeader(header, options);
+    const payload_len = std.math.cast(usize, header.payload_len) orelse
+        return error.PayloadTooLarge;
+    const consumed = std.math.add(
+        usize,
+        header.header_len,
+        payload_len,
+    ) catch return error.PayloadTooLarge;
+    if (bytes.len < consumed) return error.BufferTooShort;
+    const payload = bytes[header.header_len..consumed];
+    if (header.mask_key) |mask| applyMask(payload, mask, 0);
+    try validatePayload(header, payload, options);
+    return .{
+        .header = header,
+        .payload = payload,
+        .consumed = consumed,
+    };
+}
+
 pub fn validateFrameHeader(header: FrameHeader, options: ParseFrameOptions) Error!void {
     if (header.opcode.isControl() and (header.rsv1 or header.rsv2 or header.rsv3)) return error.UnexpectedRsv;
     if (header.opcode == .continuation and (header.rsv1 or header.rsv2 or header.rsv3)) return error.UnexpectedRsv;
@@ -1216,7 +1244,7 @@ pub const MessageAssembler = struct {
     /// retain the same proof without rescanning the frame payload.
     pub fn feedUtf8Validated(
         self: *MessageAssembler,
-        frame: Frame,
+        frame: anytype,
         text_utf8: Utf8Validator,
     ) !?Message {
         return self.feedInternal(frame, text_utf8);
@@ -1224,7 +1252,7 @@ pub const MessageAssembler = struct {
 
     fn feedInternal(
         self: *MessageAssembler,
-        frame: Frame,
+        frame: anytype,
         validated_text_utf8: ?Utf8Validator,
     ) !?Message {
         if (frame.header.opcode.isControl()) return null;
@@ -1757,6 +1785,22 @@ test "WebSocket frame decodes masked payload into caller storage" {
     try std.testing.expectEqual(frame.header.masked, predecoded.header.masked);
     try std.testing.expectEqualStrings(frame.payload, predecoded.payload);
     try std.testing.expectEqual(frame.consumed, predecoded.consumed);
+
+    const in_place = try allocator.dupe(u8, encoded.items);
+    defer allocator.free(in_place);
+    const decoded_in_place = try parseFrameInPlaceWithHeader(
+        in_place,
+        header,
+        .{ .expect_mask = .masked },
+    );
+    try std.testing.expectEqualStrings(
+        frame.payload,
+        decoded_in_place.payload,
+    );
+    try std.testing.expectEqual(
+        frame.consumed,
+        decoded_in_place.consumed,
+    );
 
     try std.testing.expectError(
         error.MaskedServerFrame,

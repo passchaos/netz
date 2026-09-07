@@ -4128,20 +4128,40 @@ pub const Connection = struct {
         }
 
         while (true) {
-            var frame = try self.receiveFrameAutoInternal(deadline);
-            defer frame.deinit(self.allocator);
+            const frame = try receiveMessageFrameBorrowed(self, deadline);
             switch (frame.header.opcode) {
-                .ping, .pong => continue,
-                .close => return error.ConnectionClosed,
+                .ping => {
+                    self.replyPong(frame.payload) catch |err| {
+                        self.discardBuffered(frame.consumed);
+                        return @errorCast(err);
+                    };
+                    self.discardBuffered(frame.consumed);
+                    continue;
+                },
+                .pong => {
+                    self.discardBuffered(frame.consumed);
+                    continue;
+                },
+                .close => {
+                    self.close_received.store(true, .release);
+                    self.echoCloseFrame(frame.payload) catch |err| {
+                        self.discardBuffered(frame.consumed);
+                        return @errorCast(err);
+                    };
+                    self.discardBuffered(frame.consumed);
+                    return error.ConnectionClosed;
+                },
                 else => {
                     const maybe_message = self.message_assembler.?.feedUtf8Validated(
                         frame,
                         self.incoming_text_utf8,
                     ) catch |err| {
+                        self.discardBuffered(frame.consumed);
                         self.message_assembler.?.deinit();
                         self.message_assembler = null;
                         return @errorCast(err);
                     };
+                    self.discardBuffered(frame.consumed);
                     if (maybe_message) |message| {
                         self.message_assembler.?.deinit();
                         self.message_assembler = null;
@@ -5330,20 +5350,40 @@ pub const H2Connection = struct {
         }
 
         while (true) {
-            var frame = try self.receiveFrameAutoInternal(deadline);
-            defer frame.deinit(self.allocator);
+            const frame = try receiveMessageFrameBorrowed(self, deadline);
             switch (frame.header.opcode) {
-                .ping, .pong => continue,
-                .close => return error.ConnectionClosed,
+                .ping => {
+                    self.replyPong(frame.payload) catch |err| {
+                        self.discardBuffered(frame.consumed);
+                        return @errorCast(err);
+                    };
+                    self.discardBuffered(frame.consumed);
+                    continue;
+                },
+                .pong => {
+                    self.discardBuffered(frame.consumed);
+                    continue;
+                },
+                .close => {
+                    self.close_received.store(true, .release);
+                    self.echoCloseFrame(frame.payload) catch |err| {
+                        self.discardBuffered(frame.consumed);
+                        return @errorCast(err);
+                    };
+                    self.discardBuffered(frame.consumed);
+                    return error.ConnectionClosed;
+                },
                 else => {
                     const maybe_message = self.message_assembler.?.feedUtf8Validated(
                         frame,
                         self.incoming_text_utf8,
                     ) catch |err| {
+                        self.discardBuffered(frame.consumed);
                         self.message_assembler.?.deinit();
                         self.message_assembler = null;
                         return @errorCast(err);
                     };
+                    self.discardBuffered(frame.consumed);
                     if (maybe_message) |message| {
                         self.message_assembler.?.deinit();
                         self.message_assembler = null;
@@ -6620,6 +6660,69 @@ pub const H2AcceptOptions = struct {
 };
 
 const canSendOpcode = message_state.canSendOpcode;
+
+fn receiveMessageFrameBorrowed(
+    connection: anytype,
+    deadline: ?std.Io.Clock.Timestamp,
+) Error!websocket.BorrowedFrame {
+    if (connection.closeSent() and connection.closeReceived()) {
+        return error.ConnectionClosed;
+    }
+    try connection.ensureBufferedWithDeadline(2, deadline);
+    var available = message_buffer.unread(
+        &connection.inbuf,
+        connection.inbuf_consumed,
+    );
+    const second = available[1];
+    var header_len: usize = 2;
+    const length_code = second & 0x7f;
+    if (length_code == 126) {
+        header_len += 2;
+    } else if (length_code == 127) {
+        header_len += 8;
+    }
+    if ((second & 0x80) != 0) header_len += 4;
+    try connection.ensureBufferedWithDeadline(header_len, deadline);
+    available = message_buffer.unread(
+        &connection.inbuf,
+        connection.inbuf_consumed,
+    );
+    const header = try websocket.FrameHeader.parse(available);
+    const payload_len = std.math.cast(
+        usize,
+        header.payload_len,
+    ) orelse return error.PayloadTooLarge;
+    if (payload_len > connection.limits.max_frame_bytes) {
+        return error.MessageTooLarge;
+    }
+    const total_len = std.math.add(
+        usize,
+        header.header_len,
+        payload_len,
+    ) catch return error.PayloadTooLarge;
+    try ensureIncomingFrameBuffered(connection, header, total_len, deadline);
+    available = message_buffer.unread(
+        &connection.inbuf,
+        connection.inbuf_consumed,
+    );
+    const options: websocket.ParseFrameOptions = switch (connection.role) {
+        .client => .{
+            .expect_mask = .unmasked,
+            .allow_rsv1 = connection.permessage_deflate,
+            .validate_utf8 = false,
+        },
+        .server => .{
+            .expect_mask = .masked,
+            .allow_rsv1 = connection.permessage_deflate,
+            .validate_utf8 = false,
+        },
+    };
+    return websocket.parseFrameInPlaceWithHeader(
+        available[0..total_len],
+        header,
+        options,
+    );
+}
 
 fn receiveMessageIntoDirectConnection(
     connection: anytype,
