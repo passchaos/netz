@@ -225,6 +225,12 @@ the existing 16 KiB read-ahead ceiling; QUIC's receive storage still performs
 the one copy required by the current public H3 reader contract. This follows
 tquic's separate DATA streaming state and Hyper's direct-fill receive-buffer
 pattern without introducing a wrapping ring into the contiguous frame parser.
+Caller-buffer RFC 9220 messages go one step further after their frame header is
+known: data-frame payload is read from the HTTP/3 stream directly into caller
+storage, or into reusable compressed scratch, and masked in place. A resumable
+frame cursor pins the output identity and payload offset across deadlines;
+interleaved control frames remain in connection-owned storage because their
+temporary stack output cannot survive a timeout.
 
 The 2026-08-17 same-host sample ranges for 200,000 masked 4 KiB binary frames:
 

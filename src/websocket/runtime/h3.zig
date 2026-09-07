@@ -25,6 +25,18 @@ const IncomingDataKind = enum {
     compressed_text,
 };
 
+const MessageFrameReceiveState = struct {
+    header: ?websocket.FrameHeader = null,
+    payload_start: usize = 0,
+    payload_end: usize = 0,
+    payload_written: usize = 0,
+    message_kind: IncomingDataKind = .none,
+
+    fn reset(self: *MessageFrameReceiveState) void {
+        self.* = .{};
+    }
+};
+
 pub const PingEvent = common.PingEvent;
 pub const CloseHandshakeEvent = common.CloseHandshakeEvent;
 pub const Message = common.Message;
@@ -201,11 +213,13 @@ pub fn Connection(comptime role: common.Role) type {
         send_mutex: std.Io.Mutex = .init,
         message_assembler: ?websocket.MessageAssembler = null,
         message_into: common.MessageIntoReceiveState = .{},
-        /// Caller-buffer receives validate uncompressed text while HTTP/3
-        /// DATA chunks arrive, before the complete WebSocket frame exists.
+        /// Owning/frame receives validate uncompressed text while HTTP/3 DATA
+        /// chunks arrive, before the complete WebSocket frame exists. The
+        /// caller-buffer path keeps equivalent state directly in `message_into`.
         incoming_data_kind: IncomingDataKind = .none,
         incoming_text_utf8: websocket.Utf8Validator = .{},
         incoming_frame_validated: usize = 0,
+        message_frame_receive: MessageFrameReceiveState = .{},
         permessage_deflate: bool = false,
         compression_threshold: usize = 32,
         compression_send_max_window_bits: u8 = 15,
@@ -803,7 +817,10 @@ pub fn Connection(comptime role: common.Role) type {
             // failures terminate this caller-buffer operation; retaining its
             // borrowed pointer would make a later receive spuriously require
             // memory that the caller no longer promised to keep alive.
-            if (err != error.Timeout) self.message_into.reset();
+            if (err != error.Timeout) {
+                self.message_into.reset();
+                self.message_frame_receive.reset();
+            }
         }
 
         /// Receive one complete RFC 9220 message into caller-owned storage.
@@ -855,13 +872,8 @@ pub fn Connection(comptime role: common.Role) type {
 
             var control_storage: [125]u8 = undefined;
             while (true) {
-                const frame_out = if (self.message_into.compressed)
-                    self.compression_receive
-                        .payload.items[self.message_into.written..]
-                else
-                    out[self.message_into.written..];
-                const frame = try self.receiveFrameIntoInternal(
-                    frame_out,
+                const frame = try self.receiveMessageFrameIntoInternal(
+                    out,
                     &control_storage,
                     deadline,
                 );
@@ -869,59 +881,14 @@ pub fn Connection(comptime role: common.Role) type {
                     .ping, .pong => continue,
                     .close => return error.ConnectionClosed,
                     .text, .binary => {
-                        if (self.message_into.active()) {
-                            return error.InvalidFrame;
-                        }
-                        self.message_into.begin(
-                            out,
-                            frame.header.opcode,
-                            frame.header.rsv1,
-                        );
-                        if (self.message_into.compressed and
-                            !self.permessage_deflate)
-                        {
-                            return error.UnexpectedRsv;
-                        }
-                        if (self.message_into.compressed) {
-                            try self.ensureCompressionReceiveScratch();
-                            // The first frame was decoded before RSV1 selected
-                            // compressed scratch. Copy it once; continuation
-                            // frames decode directly into retained storage.
-                            if (frame.payload.len != 0) {
-                                @memcpy(
-                                    self.compression_receive
-                                        .payload.items[0..frame.payload.len],
-                                    frame.payload,
-                                );
-                            }
-                        }
+                        std.debug.assert(self.message_into.active());
                     },
                     .continuation => {
-                        if (!self.message_into.active()) {
-                            return error.InvalidFrame;
-                        }
-                        if (frame.header.rsv1) return error.UnexpectedRsv;
+                        std.debug.assert(self.message_into.active());
                     },
                     else => return error.InvalidFrame,
                 }
 
-                const next_written = std.math.add(
-                    usize,
-                    self.message_into.written,
-                    frame.payload.len,
-                ) catch return error.PayloadTooLarge;
-                if (next_written > self.limits.max_message_bytes) {
-                    return error.PayloadTooLarge;
-                }
-                // The HTTP/3 DATA reader already validated uncompressed text
-                // incrementally. Carry that proof across WebSocket fragments
-                // instead of rescanning the completed frame payload here.
-                if (self.message_into.opcode == .text and
-                    !self.message_into.compressed)
-                {
-                    self.message_into.text_utf8 = self.incoming_text_utf8;
-                }
-                self.message_into.written = next_written;
                 if (!frame.header.fin) continue;
 
                 const message_opcode = self.message_into.opcode orelse
@@ -1036,6 +1003,212 @@ pub fn Connection(comptime role: common.Role) type {
                 else => {},
             }
             return frame;
+        }
+
+        /// Decode application DATA directly into the caller's message buffer
+        /// (or reusable compressed scratch). Only control frames retain the
+        /// complete-frame staging path because their destination is stack
+        /// storage that cannot survive a timeout.
+        fn receiveMessageFrameIntoInternal(
+            self: *Self,
+            out: []u8,
+            control_out: *[125]u8,
+            deadline: ?std.Io.Clock.Timestamp,
+        ) Error!websocket.BorrowedFrame {
+            if (self.message_frame_receive.header == null) {
+                if (self.closeSent() and self.closeReceived()) {
+                    return error.ConnectionClosed;
+                }
+                try self.ensureBuffered(2, deadline);
+                var available = message_buffer.unread(
+                    &self.inbuf,
+                    self.inbuf_consumed,
+                );
+                const second = available[1];
+                var header_len: usize = 2;
+                const length_code = second & 0x7f;
+                if (length_code == 126) {
+                    header_len += 2;
+                } else if (length_code == 127) {
+                    header_len += 8;
+                }
+                if ((second & 0x80) != 0) header_len += 4;
+                try self.ensureBuffered(header_len, deadline);
+                available = message_buffer.unread(
+                    &self.inbuf,
+                    self.inbuf_consumed,
+                );
+                const header = try websocket.FrameHeader.parse(available);
+                const options: websocket.ParseFrameOptions = switch (role) {
+                    .client => .{
+                        .expect_mask = .unmasked,
+                        .allow_rsv1 = self.permessage_deflate,
+                        .validate_utf8 = false,
+                    },
+                    .server => .{
+                        .expect_mask = .masked,
+                        .allow_rsv1 = self.permessage_deflate,
+                        .validate_utf8 = false,
+                    },
+                };
+                try websocket.validateFrameHeader(header, options);
+                const payload_len = std.math.cast(
+                    usize,
+                    header.payload_len,
+                ) orelse return error.PayloadTooLarge;
+                if (payload_len > self.limits.max_frame_bytes) {
+                    return error.MessageTooLarge;
+                }
+                if (header.opcode.isControl()) {
+                    return self.receiveFrameIntoInternal(
+                        out,
+                        control_out,
+                        deadline,
+                    );
+                }
+
+                const message_kind: IncomingDataKind = switch (header.opcode) {
+                    .text => blk: {
+                        if (self.message_into.active()) {
+                            return error.InvalidFrame;
+                        }
+                        self.message_into.begin(
+                            out,
+                            .text,
+                            header.rsv1,
+                        );
+                        if (header.rsv1) {
+                            try self.ensureCompressionReceiveScratch();
+                        } else {
+                            self.message_into.text_utf8.reset();
+                        }
+                        break :blk if (header.rsv1)
+                            .compressed_text
+                        else
+                            .text;
+                    },
+                    .binary => blk: {
+                        if (self.message_into.active()) {
+                            return error.InvalidFrame;
+                        }
+                        self.message_into.begin(
+                            out,
+                            .binary,
+                            header.rsv1,
+                        );
+                        if (header.rsv1) {
+                            try self.ensureCompressionReceiveScratch();
+                        }
+                        break :blk .binary;
+                    },
+                    .continuation => blk: {
+                        if (!self.message_into.active()) {
+                            return error.InvalidFrame;
+                        }
+                        break :blk self.incoming_data_kind;
+                    },
+                    else => return error.InvalidFrame,
+                };
+                const next_written = std.math.add(
+                    usize,
+                    self.message_into.written,
+                    payload_len,
+                ) catch return error.PayloadTooLarge;
+                if (next_written > self.limits.max_message_bytes) {
+                    return error.PayloadTooLarge;
+                }
+                self.discardBuffered(header.header_len);
+                self.message_frame_receive = .{
+                    .header = header,
+                    .payload_start = self.message_into.written,
+                    .payload_end = next_written,
+                    .message_kind = message_kind,
+                };
+            }
+
+            const state = &self.message_frame_receive;
+            const header = state.header.?;
+            const payload_len: usize = @intCast(header.payload_len);
+            const destination = if (self.message_into.compressed)
+                self.compression_receive.payload.items[state.payload_start..state.payload_end]
+            else
+                out[state.payload_start..state.payload_end];
+            while (state.payload_written < payload_len) {
+                const buffered = message_buffer.unread(
+                    &self.inbuf,
+                    self.inbuf_consumed,
+                );
+                const count = @min(
+                    buffered.len,
+                    payload_len - state.payload_written,
+                );
+                if (count != 0) {
+                    try self.decodeMessagePayloadChunk(
+                        destination[state.payload_written..][0..count],
+                        buffered[0..count],
+                        header,
+                        state.payload_written,
+                        state.message_kind,
+                    );
+                    self.discardBuffered(count);
+                    state.payload_written += count;
+                    continue;
+                }
+                if (self.receive_finished) return error.ConnectionClosed;
+                const read = try self.readPayloadChunkInto(
+                    destination[state.payload_written..],
+                    deadline,
+                );
+                if (read == 0) continue;
+                if (header.mask_key) |mask| {
+                    websocket.applyMask(
+                        destination[state.payload_written..][0..read],
+                        mask,
+                        state.payload_written,
+                    );
+                }
+                if (state.message_kind == .text) {
+                    try self.message_into.text_utf8.feed(
+                        destination[state.payload_written..][0..read],
+                    );
+                }
+                state.payload_written += read;
+            }
+            if (state.message_kind == .text and header.fin) {
+                try self.message_into.text_utf8.finish();
+            }
+            self.message_into.written = state.payload_end;
+            self.incoming_data_kind =
+                if (header.fin) .none else state.message_kind;
+            state.reset();
+            return .{
+                .header = header,
+                .payload = destination,
+                .consumed = header.header_len + payload_len,
+            };
+        }
+
+        fn decodeMessagePayloadChunk(
+            self: *Self,
+            destination: []u8,
+            encoded: []const u8,
+            header: websocket.FrameHeader,
+            payload_offset: usize,
+            message_kind: IncomingDataKind,
+        ) Error!void {
+            if (header.mask_key) |mask| {
+                try websocket.applyMaskCopy(
+                    destination,
+                    encoded,
+                    mask,
+                    payload_offset,
+                );
+            } else {
+                @memcpy(destination, encoded);
+            }
+            if (message_kind == .text) {
+                try self.message_into.text_utf8.feed(destination);
+            }
         }
 
         fn ensureCompressionReceiveScratch(self: *Self) Error!void {
@@ -1737,6 +1910,71 @@ pub fn Connection(comptime role: common.Role) type {
                                     message_buffer.commitAppend(
                                         &self.inbuf,
                                         count,
+                                    );
+                                    if (count != 0) break count;
+                                },
+                                .finished => {
+                                    self.receive_finished = true;
+                                    break 0;
+                                },
+                                else => return error.InvalidHandshake,
+                            }
+                        },
+                    }
+                },
+            };
+        }
+
+        fn readPayloadChunkInto(
+            self: *Self,
+            out: []u8,
+            deadline: ?std.Io.Clock.Timestamp,
+        ) Error!usize {
+            std.debug.assert(out.len != 0);
+            return switch (role) {
+                .client => while (true) {
+                    var event = (if (deadline) |absolute|
+                        try self.h3.receiveResponseEventWithDeadline(
+                            self.stream_id,
+                            absolute,
+                        )
+                    else
+                        try self.h3.receiveResponseEvent(self.stream_id)) orelse
+                        continue;
+                    defer event.deinit(self.allocator);
+                    switch (event) {
+                        .data_available => {
+                            const count = try self.h3.readResponseData(
+                                self.stream_id,
+                                out,
+                            );
+                            if (count != 0) break count;
+                        },
+                        .finished => {
+                            self.receive_finished = true;
+                            break 0;
+                        },
+                        else => return error.InvalidHandshake,
+                    }
+                },
+                .server => while (true) {
+                    var event = if (deadline) |absolute|
+                        try self.h3.receiveRequestEventForWithDeadline(
+                            self.stream_id,
+                            absolute,
+                        )
+                    else
+                        try self.h3.receiveRequestEventFor(self.stream_id);
+                    defer event.deinit(self.allocator);
+                    switch (event) {
+                        .reset => return error.ConnectionClosed,
+                        .message => |message| {
+                            std.debug.assert(message.stream_id == self.stream_id);
+                            switch (message.value) {
+                                .data_available => {
+                                    const count = try self.h3.readRequestData(
+                                        self.stream_id,
+                                        out,
                                     );
                                     if (count != 0) break count;
                                 },

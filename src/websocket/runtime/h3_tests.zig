@@ -1563,6 +1563,167 @@ test "WebSocket HTTP3 frame validation spans fragmented receive calls" {
     try expectH3InvalidUtf8RejectedBeforeFrameCompletion(.fragmented_frames);
 }
 
+test "WebSocket HTTP3 caller-buffer resumes a partially streamed frame" {
+    const allocator = std.testing.allocator;
+    var threaded = std.Io.Threaded.init(allocator, .{});
+    defer threaded.deinit();
+    const io = threaded.io();
+
+    const original_dcid =
+        [_]u8{ 0xc1, 0xc2, 0xc3, 0xc4, 0xc5, 0xc6, 0xc7, 0xc8 };
+    const client_cid = [_]u8{ 0xd1, 0xd2, 0xd3, 0xd4 };
+    const server_cid = [_]u8{ 0xe1, 0xe2, 0xe3, 0xe4 };
+    const payload = "0123456789abcdef" ** 64;
+    const prefix_len = 37;
+    const transport_limits: http3.runtime.Limits = .{ .quic = .{
+        .max_datagram_size = 4096,
+        .max_frames_per_datagram = 8,
+    } };
+    const websocket_limits: @import("common.zig").Limits = .{
+        .max_frame_bytes = payload.len,
+        .max_message_bytes = payload.len,
+    };
+    var server = try h3.Server.bind(
+        allocator,
+        io,
+        .{ .ip4 = .loopback(0) },
+        transport_limits,
+        .{
+            .handshake = .{
+                .local_connection_id = &server_cid,
+                .random = [_]u8{0xe5} ** 32,
+                .x25519_secret_key = [_]u8{0xe6} ** 32,
+            },
+            .session = .{ .max_stream_frame_data = 256 },
+        },
+    );
+    defer server.deinit();
+
+    const Shared = struct {
+        server: *h3.Server,
+        io: std.Io,
+        prefix_sent: std.Io.Event = .unset,
+        resume_send: std.Io.Event = .unset,
+        receive_done: std.Io.Event = .unset,
+        err: ?anyerror = null,
+
+        fn run(self: *@This()) void {
+            self.runFallible() catch |err| {
+                self.err = err;
+                self.prefix_sent.set(self.io);
+            };
+        }
+
+        fn runFallible(self: *@This()) !void {
+            var connection = try self.server.accept(.{
+                .limits = websocket_limits,
+            });
+            defer connection.deinit();
+            var header_storage: [websocket.max_frame_header_len]u8 = undefined;
+            const header = try websocket.writeFrameHeaderForLengthInto(
+                &header_storage,
+                .text,
+                payload.len,
+                .{},
+            );
+            var prefix: [websocket.max_frame_header_len + prefix_len]u8 =
+                undefined;
+            @memcpy(prefix[0..header.len], header);
+            @memcpy(
+                prefix[header.len..][0..prefix_len],
+                payload[0..prefix_len],
+            );
+            try connection.h3.sendResponseBodyPaced(
+                connection.stream_id,
+                prefix[0 .. header.len + prefix_len],
+                false,
+            );
+            self.prefix_sent.set(self.io);
+            try self.resume_send.wait(self.io);
+            try connection.h3.sendResponseBodyPaced(
+                connection.stream_id,
+                payload[prefix_len..],
+                false,
+            );
+            try self.receive_done.wait(self.io);
+        }
+    };
+
+    var shared = Shared{ .server = &server, .io = io };
+    const thread = try std.Thread.spawn(.{}, Shared.run, .{&shared});
+    var joined = false;
+    defer if (!joined) {
+        shared.resume_send.set(io);
+        shared.receive_done.set(io);
+        thread.join();
+    };
+
+    var client = try h3.Client.connect(
+        allocator,
+        io,
+        .{ .ip4 = .loopback(0) },
+        server.address(),
+        transport_limits,
+        .{
+            .handshake = .{
+                .original_destination_connection_id = &original_dcid,
+                .local_connection_id = &client_cid,
+                .server_name = "localhost",
+                .random = [_]u8{0xe7} ** 32,
+                .x25519_secret_key = [_]u8{0xe8} ** 32,
+            },
+            .session = .{ .max_stream_frame_data = 256 },
+        },
+        .{
+            .authority = "localhost",
+            .path = "/stream-into-resume",
+            .limits = websocket_limits,
+        },
+    );
+    defer client.deinit();
+
+    try shared.prefix_sent.wait(io);
+    var storage: [payload.len]u8 = undefined;
+    try std.testing.expectError(
+        error.Timeout,
+        client.receiveMessageIntoWithTimeout(
+            &storage,
+            .fromMilliseconds(50),
+        ),
+    );
+    try std.testing.expect(client.message_into.active());
+    try std.testing.expectEqual(
+        @as(usize, prefix_len),
+        client.message_frame_receive.payload_written,
+    );
+    var other_storage: [payload.len]u8 = undefined;
+    try std.testing.expectError(
+        error.BufferTooShort,
+        client.message_into.validateOutput(&other_storage),
+    );
+    try std.testing.expect(client.inbuf.capacity < payload.len);
+
+    shared.resume_send.set(io);
+    const message = client.receiveMessageIntoWithTimeout(
+        &storage,
+        .fromSeconds(5),
+    ) catch |err| {
+        shared.receive_done.set(io);
+        thread.join();
+        joined = true;
+        if (shared.err) |send_err| return send_err;
+        return err;
+    };
+    try std.testing.expectEqual(websocket.Opcode.text, message.opcode);
+    try std.testing.expectEqualStrings(payload, message.payload);
+    try std.testing.expect(client.inbuf.capacity < payload.len);
+
+    shared.receive_done.set(io);
+    thread.join();
+    joined = true;
+    if (shared.err) |err| return err;
+}
+
 test "WebSocket over HTTP3 extended CONNECT exchanges frames" {
     const allocator = std.testing.allocator;
     var threaded = std.Io.Threaded.init(allocator, .{});
