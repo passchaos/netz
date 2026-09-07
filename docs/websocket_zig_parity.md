@@ -301,6 +301,10 @@ proves a complete buffered message needs no per-frame allocation. A CPU-0
 same-process 4 KiB binary parse measured 1.96 ns/frame in place versus 63.51
 ns/frame through the former owned allocation/copy path, a 32.43x reduction in
 that isolated parser component.
+`MessageAssembler` now also gives a complete, unfragmented message one exact
+payload allocation. It bypasses geometric `ArrayList` growth followed by a
+final shrink/remap; fragmented messages retain amortized growth. An allocator
+regression verifies one allocation and no resize/remap for this common case.
 Caller-buffer H1/RFC 8441 receives retain their existing transport-read
 fail-fast validator but no longer rescan the complete uncompressed message;
 the shared resumable state carries the validation proof across continuation

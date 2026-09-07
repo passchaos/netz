@@ -1267,6 +1267,33 @@ pub const MessageAssembler = struct {
         } else if (frame.header.rsv1) {
             return error.UnexpectedRsv;
         }
+        if (frame.header.fin and self.buffer.items.len == 0 and
+            self.buffer.capacity < frame.payload.len)
+        {
+            if (frame.payload.len > self.max_message_bytes) {
+                return error.PayloadTooLarge;
+            }
+            if (self.opcode == .text and !self.compressed) {
+                if (validated_text_utf8) |validator| {
+                    self.text_utf8 = validator;
+                } else {
+                    try self.text_utf8.feed(frame.payload);
+                }
+                try self.text_utf8.finish();
+            }
+            const payload = try self.allocator.dupe(u8, frame.payload);
+            const opcode = self.opcode.?;
+            const compressed = self.compressed;
+            self.opcode = null;
+            self.compressed = false;
+            self.text_utf8.reset();
+            return .{
+                .opcode = opcode,
+                .payload = payload,
+                .compressed = compressed,
+                .utf8_validated = opcode == .text and !compressed,
+            };
+        }
         // A fragmented message can be split into many individually-valid
         // frames.  Bound the aggregate payload, not only the current frame, so
         // peers cannot bypass runtime limits with many small fragments.
@@ -2377,6 +2404,36 @@ test "WebSocket message assembler enforces aggregate payload limit" {
         .consumed = 2 + second_payload.len,
     };
     try std.testing.expectError(error.PayloadTooLarge, assembler.feed(second));
+}
+
+test "WebSocket message assembler owns a complete frame with one exact allocation" {
+    const payload = "single-frame-owned-payload";
+    var tracking = std.testing.FailingAllocator.init(
+        std.testing.allocator,
+        .{},
+    );
+    const allocator = tracking.allocator();
+    var assembler = MessageAssembler.initLimited(allocator, payload.len);
+    defer assembler.deinit();
+    const frame = Frame{
+        .header = .{
+            .fin = true,
+            .opcode = .binary,
+            .masked = false,
+            .payload_len = payload.len,
+            .mask_key = null,
+            .header_len = 2,
+        },
+        .payload = @constCast(payload),
+        .consumed = 2 + payload.len,
+    };
+
+    const message = (try assembler.feed(frame)).?;
+    defer allocator.free(message.payload);
+    try std.testing.expectEqualStrings(payload, message.payload);
+    try std.testing.expectEqual(@as(usize, 1), tracking.allocations);
+    try std.testing.expectEqual(@as(usize, 0), tracking.resize_index);
+    try std.testing.expectEqual(payload.len, tracking.allocated_bytes);
 }
 
 test "WebSocket message assembler validates completed text fragments" {
