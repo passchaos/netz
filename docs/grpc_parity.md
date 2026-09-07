@@ -212,7 +212,7 @@ matches upstream's checked-in `.bazelversion`. The harness is reproducible even
 when a host lacks that exact Bazel release, but such a host cannot establish an
 external pass until the pinned tool or a prebuilt server is supplied.
 
-On 2026-09-07 both bidirectional TLS gates passed against upstream commit
+On 2025-09-07 both bidirectional TLS gates passed against upstream commit
 `03d65cc67c450ccbb58a8a45627c4da83a886ccd` using Bazel 8.7.0 and GCC on
 Linux x86_64. The pinned Bazel output root was placed on tmpfs because this
 host's disk-backed extraction stalled in journal waits; that is a host build
