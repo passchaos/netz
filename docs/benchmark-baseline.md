@@ -292,6 +292,14 @@ step removes allocator calls rather than payload ownership. Five post-coalesce
 fixed-binary CPU-0 samples measured 9.642-9.931 us/op; the earlier
 four-allocation sample remains above to separate the two optimizations, and no
 throughput gain is claimed from their overlapping latency ranges.
+For the consecutive 10-byte POST shape, exact-size telemetry then identified
+the remaining transient 143-byte block as `ArrayList` geometric growth despite
+an already validated `Content-Length: 10`; `toOwnedSlice` subsequently allocated
+and copied a 10-byte result. Exact reservation plus direct ownership transfer
+removed that over-allocation and copy. A warmed run fell from four to three
+allocations per request and from 2,010,096 to 1,724,096 cumulative requested
+bytes over 2,000 requests; its remaining per-request allocations are exactly
+the request HPACK block, 10-byte body and response HPACK block.
 
 `strace` confirmed equal steady-state wire sizes: empty exchanges use 19-byte
 requests and 11-byte responses; POST exchanges use 43-byte requests and

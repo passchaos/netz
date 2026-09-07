@@ -6361,7 +6361,7 @@ pub const Connection = struct {
                         // The Content-Length has already passed strict header
                         // validation. Reserve the final aggregate once rather
                         // than repeatedly growing while DATA frames arrive.
-                        try body.ensureTotalCapacity(
+                        try body.ensureTotalCapacityPrecise(
                             self.allocator,
                             body_len,
                         );
@@ -6484,6 +6484,10 @@ pub const Connection = struct {
                         protocol,
                         request_priority,
                     );
+                    const owned_body = if (expected_request_len != null)
+                        body.toOwnedSliceAssert()
+                    else
+                        try body.toOwnedSlice(self.allocator);
                     return .{
                         .stream_id = stream_id,
                         .headers = headers,
@@ -6492,7 +6496,7 @@ pub const Connection = struct {
                         .scheme = lookup.scheme orelse "",
                         .authority = lookup.requestAuthority(),
                         .protocol = protocol,
-                        .body = try body.toOwnedSlice(self.allocator),
+                        .body = owned_body,
                         .trailers = trailers,
                         .priority = request_priority,
                     };
@@ -16942,6 +16946,42 @@ test "HTTP/2 aggregate empty exchange borrows wire frames after warmup" {
                 break :blk request.stream_id;
             };
             try connection.writeResponse(second_stream_id, .{});
+
+            {
+                var warmup = try connection.readRequest();
+                defer warmup.deinit(server_ptr.allocator);
+                try std.testing.expectEqualStrings(
+                    "small-body",
+                    warmup.body,
+                );
+                try connection.writeResponse(warmup.stream_id, .{});
+            }
+
+            const post_stream_id = blk: {
+                var tracking = std.testing.FailingAllocator.init(
+                    allocator,
+                    .{},
+                );
+                const saved_allocator = connection.allocator;
+                connection.allocator = tracking.allocator();
+                defer connection.allocator = saved_allocator;
+
+                var request = try connection.readRequest();
+                defer request.deinit(connection.allocator);
+                try std.testing.expectEqualStrings("POST", request.method);
+                try std.testing.expectEqualStrings(
+                    "small-body",
+                    request.body,
+                );
+                // Known Content-Length reserves the exact body once. Together
+                // with the combined HPACK block, no other allocation remains.
+                try std.testing.expectEqual(
+                    @as(usize, 2),
+                    tracking.allocations,
+                );
+                break :blk request.stream_id;
+            };
+            try connection.writeResponse(post_stream_id, .{});
         }
     };
 
@@ -16984,6 +17024,27 @@ test "HTTP/2 aggregate empty exchange borrows wire frames after warmup" {
         try std.testing.expectEqualStrings("", response.body);
         // As on the request side, aggregate ownership is one HPACK block.
         try std.testing.expectEqual(@as(usize, 1), tracking.allocations);
+    }
+
+    {
+        var response = try client.request(.{
+            .method = "POST",
+            .path = "/measured",
+            .authority = "localhost",
+            .body = "small-body",
+        });
+        defer response.deinit(allocator);
+        try std.testing.expectEqual(@as(u16, 200), response.status);
+    }
+    {
+        var response = try client.request(.{
+            .method = "POST",
+            .path = "/measured",
+            .authority = "localhost",
+            .body = "small-body",
+        });
+        defer response.deinit(allocator);
+        try std.testing.expectEqual(@as(u16, 200), response.status);
     }
 
     thread.join();

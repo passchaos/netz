@@ -1012,6 +1012,13 @@ pointer-layout assertions exercise the combined ownership contract; an
 integration regression swaps in allocation-tracking allocators around the
 second aggregate request and response read and requires exactly one HPACK
 allocation on each side.
+Known-length aggregate request bodies now reserve their validated
+`Content-Length` exactly and transfer that buffer directly into `OwnedRequest`.
+Previously a 10-byte POST grew to a 143-byte `ArrayList` allocation and then
+allocated/copied the exact 10-byte result. Warmed h2c telemetry now reports
+three allocations per exchange rather than four, and the integration
+allocation regression first warms DATA flow-control storage before requiring
+only the combined request-header block and exact body allocation on the server.
 The bidirectional Hyper process gate now exercises that boundary directly over
 h2c and TLS. A netz client waits through an idle interval, receives Hyper/h2's
 PING ACK, and completes another request on the same connection. In the reverse
