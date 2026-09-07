@@ -1942,6 +1942,16 @@ test "WebSocket predecoded header parsers match ordinary parsers" {
                 .{},
             );
             try std.testing.expectEqualSlices(u8, payload, borrowed.payload);
+
+            const mutable_encoded = try allocator.dupe(u8, encoded.items);
+            defer allocator.free(mutable_encoded);
+            const in_place = try parseFrameInPlaceWithHeader(
+                mutable_encoded,
+                header,
+                .{},
+            );
+            try std.testing.expectEqual(ordinary.consumed, in_place.consumed);
+            try std.testing.expectEqualSlices(u8, payload, in_place.payload);
         }
     }
 }
