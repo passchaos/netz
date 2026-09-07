@@ -3039,7 +3039,7 @@ test "QUIC committed receive credit retries from connection timer" {
         server.nextTimerDeadline().?.kind != .receive_credit);
 }
 
-test "QUIC committed receive credit retries streams fairly" {
+test "QUIC committed receive credit batches streams fairly" {
     const allocator = std.testing.allocator;
     var threaded = std.Io.Threaded.init(allocator, .{});
     defer threaded.deinit();
@@ -3137,10 +3137,20 @@ test "QUIC committed receive credit retries streams fairly" {
     try server.commitReceivedThrough(0, 12);
     var first_credit = try client.receivePacket();
     defer first_credit.deinit(allocator);
-    try std.testing.expectEqual(@as(u64, 0), first_credit.frames[0].max_stream_data.stream_id);
+    try std.testing.expectEqual(@as(usize, 2), first_credit.frames.len);
+    try std.testing.expectEqual(
+        @as(u64, 0),
+        first_credit.frames[0].max_stream_data.stream_id,
+    );
+    try std.testing.expectEqual(
+        @as(u64, 4),
+        first_credit.frames[1].max_stream_data.stream_id,
+    );
+    try std.testing.expect(server.nextTimerDeadline() == null or
+        server.nextTimerDeadline().?.kind != .receive_credit);
 
-    // Re-pend the lower-index stream before the retry fires. The persistent
-    // cursor must nevertheless select stream 4 instead of stream 0 again.
+    // Re-pending the lower-index stream after the batch starts a new fair
+    // cycle; the higher ID was already unblocked by the first packet.
     try one_rtt.testing.applyReceivedFrames(
         &server,
         3,
@@ -3155,7 +3165,11 @@ test "QUIC committed receive credit retries streams fairly" {
     try server.commitReceivedThrough(0, 18);
     var second_credit = try client.receivePacket();
     defer second_credit.deinit(allocator);
-    try std.testing.expectEqual(@as(u64, 4), second_credit.frames[0].max_stream_data.stream_id);
+    try std.testing.expectEqual(@as(usize, 1), second_credit.frames.len);
+    try std.testing.expectEqual(
+        @as(u64, 0),
+        second_credit.frames[0].max_stream_data.stream_id,
+    );
 }
 
 test "QUIC 1-RTT connection releases reset and unidirectional peer stream credit" {

@@ -482,7 +482,10 @@ Both stream- and connection-level receive windows therefore keep advancing on
 connection-long critical streams; if a MAX_STREAM_DATA/MAX_DATA write is paced,
 congested, or fails at the socket, the latest absolute credit remains queued on
 an independent connection timer instead of replaying already committed HTTP/3
-parser state. Client/server QPACK, control-stream, fragmented push-prefix,
+parser state. Pending per-stream updates are selected in stable round-robin
+order and coalesced into one packet up to a fixed frame cap and the active MTU,
+reducing timer turns and control packets without starving a higher stream ID.
+Client/server QPACK, control-stream, fragmented push-prefix,
 terminal-extension, reordered WebTransport-prefix, and injected send-failure
 tests cover these ownership boundaries.
 

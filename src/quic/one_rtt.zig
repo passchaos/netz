@@ -695,6 +695,9 @@ const max_short_packet_overhead: usize = 1 + 20 + 4 + quic.protection.aead_tag_l
 // the stack while retaining an exact fallback for lower-level callers.
 const handshake_done_frame_stack_capacity: usize = 16;
 const pending_ack_frame_stack_capacity: usize = 16;
+// Match the default receive parser bound so a peer can consume one update for
+// every frame in the coalesced credit packet without special configuration.
+const receive_credit_frame_stack_capacity: usize = 16;
 
 fn appendPendingHandshakeDone(
     allocator: std.mem.Allocator,
@@ -5958,36 +5961,84 @@ pub const Connection = struct {
             return;
         }
 
-        var frames: [2]quic.Frame = undefined;
+        var frames: [receive_credit_frame_stack_capacity]quic.Frame = undefined;
         var count: usize = 0;
+        const includes_handshake_done =
+            self.handshake_status.needsHandshakeDone();
+        var payload_len: usize = @intFromBool(includes_handshake_done);
         const includes_max_data = self.pending_max_data;
         if (includes_max_data) {
             frames[count] = self.recv_flow.maxDataFrame();
+            payload_len = std.math.add(
+                usize,
+                payload_len,
+                try frames[count].wireLen(),
+            ) catch return error.InvalidFrameLength;
             count += 1;
         }
-        var stream_id: ?u64 = null;
+        var selected_stream_ids: [receive_credit_frame_stack_capacity]u64 = undefined;
+        var selected_stream_count: usize = 0;
+        var scan_after = self.last_receive_credit_stream_id;
         if (self.stream_recv_flows.items.len != 0 and
             self.pending_receive_stream_credits != 0)
         {
-            var next_id: ?u64 = null;
-            var wrapped_id: ?u64 = null;
-            for (self.stream_recv_flows.items) |*entry| {
-                if (!entry.pending_max_stream_data) continue;
-                if (wrapped_id == null or entry.stream_id < wrapped_id.?) {
-                    wrapped_id = entry.stream_id;
+            const max_frame_count = frames.len -
+                @intFromBool(includes_handshake_done);
+            while (count < max_frame_count and
+                selected_stream_count < self.pending_receive_stream_credits)
+            {
+                var next_id: ?u64 = null;
+                var wrapped_id: ?u64 = null;
+                for (self.stream_recv_flows.items) |*entry| {
+                    if (!entry.pending_max_stream_data or
+                        containsStreamId(
+                            selected_stream_ids[0..selected_stream_count],
+                            entry.stream_id,
+                        )) continue;
+                    if (wrapped_id == null or entry.stream_id < wrapped_id.?) {
+                        wrapped_id = entry.stream_id;
+                    }
+                    if (scan_after) |last| {
+                        if (entry.stream_id <= last) continue;
+                    }
+                    if (next_id == null or entry.stream_id < next_id.?) {
+                        next_id = entry.stream_id;
+                    }
                 }
-                if (self.last_receive_credit_stream_id) |last| {
-                    if (entry.stream_id <= last) continue;
+                const id = next_id orelse wrapped_id orelse break;
+                const entry = self.findRecvStreamEntry(id) orelse unreachable;
+                const candidate = entry.flow.maxStreamDataFrame(id);
+                const next_payload_len = std.math.add(
+                    usize,
+                    payload_len,
+                    try candidate.wireLen(),
+                ) catch return error.InvalidFrameLength;
+                const packet_number_len =
+                    quic.protection.packetNumberLenForPayload(
+                        self.next_packet_number,
+                        self.sent.largestAcknowledged(),
+                        next_payload_len,
+                    );
+                const packet_len = try quic.protection
+                    .shortPacketLenForPayloadLen(
+                    self.config.peer_connection_id.len,
+                    self.next_packet_number,
+                    packet_number_len,
+                    next_payload_len,
+                );
+                if (packet_len > self.currentSendDatagramSize()) {
+                    if (selected_stream_count == 0 and !includes_max_data) {
+                        return error.DatagramTooLarge;
+                    }
+                    break;
                 }
-                if (next_id == null or entry.stream_id < next_id.?) {
-                    next_id = entry.stream_id;
-                }
+                frames[count] = candidate;
+                count += 1;
+                payload_len = next_payload_len;
+                selected_stream_ids[selected_stream_count] = id;
+                selected_stream_count += 1;
+                scan_after = id;
             }
-            stream_id = next_id orelse wrapped_id;
-            const entry = self.findRecvStreamEntry(stream_id.?) orelse
-                unreachable;
-            frames[count] = entry.flow.maxStreamDataFrame(entry.stream_id);
-            count += 1;
         }
         std.debug.assert(count != 0);
         try self.sendTrackedFramesEcnAt(
@@ -5996,7 +6047,7 @@ pub const Connection = struct {
             now_ns,
         );
         if (includes_max_data) self.pending_max_data = false;
-        if (stream_id) |id| {
+        for (selected_stream_ids[0..selected_stream_count]) |id| {
             const entry = self.findRecvStreamEntry(id) orelse unreachable;
             std.debug.assert(entry.pending_max_stream_data);
             entry.pending_max_stream_data = false;
