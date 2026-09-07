@@ -339,22 +339,22 @@ test "QUIC 1-RTT connection accepts delayed previous-key packets until discard" 
     defer allocator.free(updated_packet);
 
     const route = quic.connection_router.Route{ .connection_index = 0 };
-    var updated = try server.receiveRoutedDatagram(.{
+    var updated = (try server.receiveRoutedDatagram(.{
         .datagram = .{ .from = client_endpoint.address(), .bytes = updated_packet },
         .route = route,
         .destination_connection_id = &server_cid,
-    });
+    })).?;
     defer updated.deinit(allocator);
     try std.testing.expect(updated.peer_initiated_key_update);
     try std.testing.expect(server.peerOneRttKeyPhase());
     try std.testing.expectEqual(@as(u64, 1), server.peerOneRttKeyUpdateCount());
     try std.testing.expect(server.peerOneRttRetainsKeyGeneration(0));
 
-    var delayed_old = try server.receiveRoutedDatagram(.{
+    var delayed_old = (try server.receiveRoutedDatagram(.{
         .datagram = .{ .from = client_endpoint.address(), .bytes = old_packet },
         .route = route,
         .destination_connection_id = &server_cid,
-    });
+    })).?;
     defer delayed_old.deinit(allocator);
     try std.testing.expect(!delayed_old.peer_initiated_key_update);
     try std.testing.expect(!delayed_old.packet.key_phase);
@@ -1559,13 +1559,13 @@ test "QUIC 1-RTT routed datagrams dispatch to separate connections" {
         defer routed.deinit(allocator);
         switch (routed.route.connection_index) {
             0 => {
-                var packet = try server_a.receiveRoutedDatagram(routed);
+                var packet = (try server_a.receiveRoutedDatagram(routed)).?;
                 defer packet.deinit(allocator);
                 try std.testing.expectEqualStrings("for-a", packet.frames[0].stream.data);
                 saw_a = true;
             },
             1 => {
-                var packet = try server_b.receiveRoutedDatagram(routed);
+                var packet = (try server_b.receiveRoutedDatagram(routed)).?;
                 defer packet.deinit(allocator);
                 try std.testing.expectEqualStrings("for-b", packet.frames[0].stream.data);
                 saw_b = true;
@@ -1892,6 +1892,333 @@ test "QUIC 1-RTT receive rejects active migration before mutation when disabled"
     );
     try std.testing.expectEqual(@as(usize, 0), server.stream_recv_flows.items.len);
     try std.testing.expectEqual(@as(usize, 0), server.received.ranges.items.len);
+}
+
+test "QUIC client drops unknown server tuples before decrypting" {
+    const allocator = std.testing.allocator;
+    var threaded = std.Io.Threaded.init(allocator, .{});
+    defer threaded.deinit();
+    const io = threaded.io();
+
+    var client_endpoint = try quic.runtime.Endpoint.bind(
+        allocator,
+        io,
+        .{ .ip4 = .loopback(0) },
+        .{ .max_datagram_size = 4096 },
+    );
+    defer client_endpoint.deinit();
+    var server_endpoint = try quic.runtime.Endpoint.bind(
+        allocator,
+        io,
+        .{ .ip4 = .loopback(0) },
+        .{ .max_datagram_size = 4096 },
+    );
+    defer server_endpoint.deinit();
+    var unknown_endpoint = try quic.runtime.Endpoint.bind(
+        allocator,
+        io,
+        .{ .ip4 = .loopback(0) },
+        .{ .max_datagram_size = 4096 },
+    );
+    defer unknown_endpoint.deinit();
+
+    const client_cid = [_]u8{ 0x31, 0x32, 0x33, 0x34 };
+    const server_cid = [_]u8{ 0x41, 0x42, 0x43, 0x44 };
+    const keys = quic.protection.deriveAes128Keys(
+        [_]u8{0x51} ** quic.protection.secret_len,
+    );
+    const next_keys = quic.protection.nextAes128PacketProtectionKeys(keys);
+    const reset_token = [_]u8{0x91} ** quic.stateless_reset.token_len;
+    var client = try one_rtt.Connection.init(&client_endpoint, .{
+        .peer = server_endpoint.address(),
+        .receive_keys = keys,
+        .send_keys = keys,
+        .local_connection_id = &client_cid,
+        .peer_connection_id = &server_cid,
+        .peer_stateless_reset_token = reset_token,
+    });
+    defer client.deinit();
+
+    const payload = try one_rtt.encodeFrames(
+        allocator,
+        &.{.{ .stream = .{ .stream_id = 1, .data = "spoofed" } }},
+    );
+    defer allocator.free(payload);
+    const current_packet = try quic.protection.sealShortPacket(
+        allocator,
+        keys,
+        .{
+            .destination_connection_id = &client_cid,
+            .packet_number = 99,
+            .packet_number_len = 4,
+            .payload = payload,
+        },
+    );
+    defer allocator.free(current_packet);
+    const updated_packet = try quic.protection.sealShortPacket(
+        allocator,
+        next_keys,
+        .{
+            .destination_connection_id = &client_cid,
+            .packet_number = 100,
+            .packet_number_len = 4,
+            .key_phase = true,
+            .payload = payload,
+        },
+    );
+    defer allocator.free(updated_packet);
+
+    const initial_stats = client.stats();
+    const initial_epoch = one_rtt.testing.currentPathEpoch(&client);
+    const initial_expected_packet_number =
+        one_rtt.testing.expectedPacketNumber(&client);
+    const route = quic.connection_router.Route{ .connection_index = 0 };
+    try std.testing.expect((try client.receiveRoutedDatagramOrDropAfterClose(.{
+        .datagram = .{
+            .from = unknown_endpoint.address(),
+            .bytes = current_packet,
+        },
+        .route = route,
+        .destination_connection_id = &client_cid,
+    })) == null);
+
+    var different_ip = unknown_endpoint.address();
+    different_ip.ip4.bytes = .{ 127, 0, 0, 2 };
+    try std.testing.expect((try one_rtt.testing
+        .processReceivedBytesOrDropUnknownServerAddressAt(
+        &client,
+        different_ip,
+        updated_packet,
+        .ce,
+        10,
+    )) == null);
+    var reset_bytes = [_]u8{0x40} ** 32;
+    @memcpy(
+        reset_bytes[reset_bytes.len - quic.stateless_reset.token_len ..],
+        &reset_token,
+    );
+    const reset_result = try client.receiveRoutedDatagramOrStatelessReset(
+        .{
+            .datagram = .{ .from = different_ip, .bytes = &reset_bytes },
+            .route = route,
+            .destination_connection_id = &client_cid,
+        },
+        20,
+        30,
+    );
+    try std.testing.expect(reset_result == .dropped_unknown_server_address);
+
+    try std.testing.expectEqual(server_endpoint.address(), client.peerAddress());
+    try std.testing.expect(client.peerAddressValidated());
+    try std.testing.expectEqual(initial_epoch, one_rtt.testing.currentPathEpoch(&client));
+    try std.testing.expectEqual(
+        initial_expected_packet_number,
+        one_rtt.testing.expectedPacketNumber(&client),
+    );
+    try std.testing.expectEqual(initial_stats, client.stats());
+    try std.testing.expectEqual(@as(u64, 0), client.authenticationFailureCount());
+    try std.testing.expect(!client.draining());
+    try std.testing.expect(!client.peerOneRttKeyPhase());
+    try std.testing.expectEqual(@as(u64, 0), client.peerOneRttKeyUpdateCount());
+    try std.testing.expectEqual(@as(usize, 0), client.received.ranges.items.len);
+    try std.testing.expectEqual(@as(usize, 0), client.stream_recv_flows.items.len);
+    try std.testing.expectEqual(@as(usize, 0), client.pendingPathValidationCount());
+    try std.testing.expectEqual(
+        @as(usize, 0),
+        one_rtt.testing.candidatePathBudgetCount(&client),
+    );
+
+    var accepted = (try client.receiveRoutedDatagram(.{
+        .datagram = .{
+            .from = server_endpoint.address(),
+            .bytes = current_packet,
+        },
+        .route = route,
+        .destination_connection_id = &client_cid,
+    })) orelse return error.TestUnexpectedResult;
+    defer accepted.deinit(allocator);
+    try std.testing.expectEqual(@as(u64, 99), accepted.packet.packet_number);
+    try std.testing.expectEqualStrings("spoofed", accepted.frames[0].stream.data);
+}
+
+test "QUIC client owning batch and visitor skip unknown server tuple" {
+    const allocator = std.testing.allocator;
+    var threaded = std.Io.Threaded.init(allocator, .{});
+    defer threaded.deinit();
+    const io = threaded.io();
+
+    var client_endpoint = try quic.runtime.Endpoint.bind(
+        allocator,
+        io,
+        .{ .ip4 = .loopback(0) },
+        .{ .max_datagram_size = 4096 },
+    );
+    defer client_endpoint.deinit();
+    var server_endpoint = try quic.runtime.Endpoint.bind(
+        allocator,
+        io,
+        .{ .ip4 = .loopback(0) },
+        .{ .max_datagram_size = 4096 },
+    );
+    defer server_endpoint.deinit();
+    var unknown_endpoint = try quic.runtime.Endpoint.bind(
+        allocator,
+        io,
+        .{ .ip4 = .loopback(0) },
+        .{ .max_datagram_size = 4096 },
+    );
+    defer unknown_endpoint.deinit();
+
+    const client_cid = [_]u8{ 0x61, 0x62, 0x63, 0x64 };
+    const server_cid = [_]u8{ 0x71, 0x72, 0x73, 0x74 };
+    const keys = quic.protection.deriveAes128Keys(
+        [_]u8{0x81} ** quic.protection.secret_len,
+    );
+    var client = try one_rtt.Connection.init(&client_endpoint, .{
+        .peer = server_endpoint.address(),
+        .receive_keys = keys,
+        .send_keys = keys,
+        .local_connection_id = &client_cid,
+        .peer_connection_id = &server_cid,
+    });
+    defer client.deinit();
+
+    const unknown_payload = try one_rtt.encodeFrames(
+        allocator,
+        &.{.{ .ping = {} }},
+    );
+    defer allocator.free(unknown_payload);
+    const owning_unknown_packet = try quic.protection.sealShortPacket(
+        allocator,
+        keys,
+        .{
+            .destination_connection_id = &client_cid,
+            .packet_number = 10,
+            .packet_number_len = 4,
+            .payload = unknown_payload,
+        },
+    );
+    defer allocator.free(owning_unknown_packet);
+    try client.preloadReceivedDatagram(
+        unknown_endpoint.address(),
+        owning_unknown_packet,
+        .not_ect,
+    );
+    try one_rtt.sendFrames(
+        &server_endpoint,
+        client_endpoint.address(),
+        keys,
+        .{
+            .destination_connection_id = &client_cid,
+            .packet_number = 0,
+            .frames = &.{.{ .ping = {} }},
+        },
+    );
+    var owning = try client.receivePacketAt(10);
+    defer owning.deinit(allocator);
+    try std.testing.expectEqual(@as(u64, 0), owning.packet.packet_number);
+    try std.testing.expectEqual(@as(u64, 1), client.stats().packets_received);
+
+    const batch_unknown_packet = try quic.protection.sealShortPacket(
+        allocator,
+        keys,
+        .{
+            .destination_connection_id = &client_cid,
+            .packet_number = 20,
+            .packet_number_len = 4,
+            .payload = unknown_payload,
+        },
+    );
+    defer allocator.free(batch_unknown_packet);
+    try client.preloadReceivedDatagram(
+        unknown_endpoint.address(),
+        batch_unknown_packet,
+        .not_ect,
+    );
+    try one_rtt.sendFrames(
+        &server_endpoint,
+        client_endpoint.address(),
+        keys,
+        .{
+            .destination_connection_id = &client_cid,
+            .packet_number = 1,
+            .frames = &.{.{ .ping = {} }},
+        },
+    );
+    var batch = try client.receivePacketBatchAt(20);
+    defer batch.deinit();
+    try std.testing.expectEqual(@as(usize, 1), batch.packets.len);
+    try std.testing.expectEqual(
+        @as(u64, 1),
+        batch.packets[0].packet.packet_number,
+    );
+    try std.testing.expectEqual(@as(u64, 2), client.stats().packets_received);
+
+    try one_rtt.sendFrames(
+        &unknown_endpoint,
+        client_endpoint.address(),
+        keys,
+        .{
+            .destination_connection_id = &client_cid,
+            .packet_number = 21,
+            .frames = &.{.{ .ping = {} }},
+        },
+    );
+    try std.testing.expectEqual(
+        @as(usize, 0),
+        try client.servicePacketBatchAt(20),
+    );
+    try std.testing.expectEqual(@as(u64, 2), client.stats().packets_received);
+
+    const unknown_packet = try quic.protection.sealShortPacket(
+        allocator,
+        keys,
+        .{
+            .destination_connection_id = &client_cid,
+            .packet_number = 22,
+            .packet_number_len = 4,
+            .payload = unknown_payload,
+        },
+    );
+    defer allocator.free(unknown_packet);
+    try client.preloadReceivedDatagram(
+        unknown_endpoint.address(),
+        unknown_packet,
+        .not_ect,
+    );
+    try one_rtt.sendFrames(
+        &server_endpoint,
+        client_endpoint.address(),
+        keys,
+        .{
+            .destination_connection_id = &client_cid,
+            .packet_number = 2,
+            .frames = &.{.{ .stream = .{
+                .stream_id = 1,
+                .data = "accepted",
+            } }},
+        },
+    );
+
+    const Observed = struct {
+        calls: usize = 0,
+        from: ?std.Io.net.IpAddress = null,
+
+        fn visit(observed: *@This(), packet: one_rtt.ReceivedPacketView) !void {
+            observed.calls += 1;
+            observed.from = packet.from;
+            try std.testing.expectEqual(@as(u64, 2), packet.packet_number);
+            try std.testing.expectEqualStrings(
+                "accepted",
+                packet.frames[0].stream.data,
+            );
+        }
+    };
+    var observed: Observed = .{};
+    try client.visitPacketAt(30, &observed, Observed.visit);
+    try std.testing.expectEqual(@as(usize, 1), observed.calls);
+    try std.testing.expectEqual(server_endpoint.address(), observed.from.?);
+    try std.testing.expectEqual(@as(u64, 3), client.stats().packets_received);
 }
 
 test "QUIC 1-RTT migration resets path state and validates on PATH_RESPONSE" {
@@ -2528,6 +2855,77 @@ test "QUIC 1-RTT preferred address migration selects address and CID" {
         &decoded.frames[0].path_challenge.data,
     );
 
+    const route = quic.connection_router.Route{ .connection_index = 0 };
+    const ping_payload = try one_rtt.encodeFrames(
+        allocator,
+        &.{.{ .ping = {} }},
+    );
+    defer allocator.free(ping_payload);
+    const old_path_packet = try quic.protection.sealShortPacket(
+        allocator,
+        keys,
+        .{
+            .destination_connection_id = &local_cid,
+            .packet_number = 0,
+            .packet_number_len = 4,
+            .payload = ping_payload,
+        },
+    );
+    defer allocator.free(old_path_packet);
+    var old_path_received = (try connection.receiveRoutedDatagram(.{
+        .datagram = .{
+            .from = original_endpoint.address(),
+            .bytes = old_path_packet,
+        },
+        .route = route,
+        .destination_connection_id = &local_cid,
+    })) orelse return error.TestUnexpectedResult;
+    defer old_path_received.deinit(allocator);
+
+    const preferred_path_packet = try quic.protection.sealShortPacket(
+        allocator,
+        keys,
+        .{
+            .destination_connection_id = &local_cid,
+            .packet_number = 1,
+            .packet_number_len = 4,
+            .payload = ping_payload,
+        },
+    );
+    defer allocator.free(preferred_path_packet);
+    var preferred_path_received = (try connection.receiveRoutedDatagram(.{
+        .datagram = .{
+            .from = preferred_endpoint.address(),
+            .bytes = preferred_path_packet,
+        },
+        .route = route,
+        .destination_connection_id = &local_cid,
+    })) orelse return error.TestUnexpectedResult;
+    defer preferred_path_received.deinit(allocator);
+
+    var third_tuple = preferred_endpoint.address();
+    third_tuple.ip4.port +%= 1;
+    const third_path_packet = try quic.protection.sealShortPacket(
+        allocator,
+        keys,
+        .{
+            .destination_connection_id = &local_cid,
+            .packet_number = 2,
+            .packet_number_len = 4,
+            .payload = ping_payload,
+        },
+    );
+    defer allocator.free(third_path_packet);
+    try std.testing.expect((try connection.receiveRoutedDatagram(.{
+        .datagram = .{ .from = third_tuple, .bytes = third_path_packet },
+        .route = route,
+        .destination_connection_id = &local_cid,
+    })) == null);
+    try std.testing.expectEqual(preferred_endpoint.address(), connection.peerAddress());
+    try std.testing.expect(!connection.peerAddressValidated());
+    try std.testing.expectEqual(@as(u64, 2), connection.stats().packets_received);
+    try std.testing.expectEqual(@as(usize, 1), connection.pendingPathValidationCount());
+
     var invalid_family = try one_rtt.Connection.init(&original_endpoint, .{
         .peer = original_endpoint.address(),
         .receive_keys = keys,
@@ -2809,7 +3207,7 @@ test "QUIC 1-RTT PATH_RESPONSE returns to probing source address" {
     try std.testing.expectEqualSlices(u8, &challenge, &response.frames[0].path_response.data);
 }
 
-test "QUIC client pads PATH_RESPONSE to a probing source" {
+test "QUIC client drops PATH_CHALLENGE from unknown server tuple" {
     const allocator = std.testing.allocator;
     var threaded = std.Io.Threaded.init(allocator, .{});
     defer threaded.deinit();
@@ -2863,15 +3261,24 @@ test "QUIC client pads PATH_RESPONSE to a probing source" {
             .frames = &.{.{ .path_challenge = .{ .data = challenge } }},
         },
     );
-    var received = try client.receivePacket();
-    received.deinit(allocator);
-    try client.sendPendingPathResponse();
-    var response = try probing_endpoint.receiveBytes();
-    defer response.deinit(allocator);
-    try std.testing.expectEqual(
-        quic.pmtu.min_udp_payload_size,
-        response.bytes.len,
+    try one_rtt.sendFrames(
+        &original_server_endpoint,
+        client_endpoint.address(),
+        keys,
+        .{
+            .destination_connection_id = &client_cid,
+            .packet_number = 1,
+            .frames = &.{.{ .ping = {} }},
+        },
     );
+    var received = try client.receivePacket();
+    defer received.deinit(allocator);
+    try std.testing.expectEqual(@as(u64, 1), received.packet.packet_number);
+    try std.testing.expectEqual(
+        @as(usize, 0),
+        client.path_validation.pendingResponseCount(),
+    );
+    try std.testing.expectEqual(@as(u64, 1), client.stats().packets_received);
 }
 
 test "QUIC candidate PATH_RESPONSE waits for its own amplification credit" {
@@ -3834,7 +4241,7 @@ test "QUIC 1-RTT connection handles NEW and RETIRE connection IDs" {
     try router.register("server-new-cid", .{ .connection_index = 0, .sequence_number = 1 });
     var routed = try server_endpoint.receiveRoutedBytes(router);
     defer routed.deinit(allocator);
-    var retire_packet = try server.receiveRoutedDatagram(routed);
+    var retire_packet = (try server.receiveRoutedDatagram(routed)).?;
     defer retire_packet.deinit(allocator);
     try std.testing.expectEqual(@as(usize, 1), server.local_connection_ids.count());
 }
@@ -3897,7 +4304,7 @@ test "QUIC 1-RTT replacement CID can retire prior IDs at peer active limit" {
     try router.register("server-rotated-cid", .{ .connection_index = 0, .sequence_number = 2 });
     var routed = try server_endpoint.receiveRoutedBytes(router);
     defer routed.deinit(allocator);
-    var retire = try server.receiveRoutedDatagram(routed);
+    var retire = (try server.receiveRoutedDatagram(routed)).?;
     defer retire.deinit(allocator);
     try std.testing.expectEqual(@as(usize, 2), server.local_connection_ids.count());
 }
@@ -4221,7 +4628,7 @@ test "QUIC 1-RTT queues RETIRE_CONNECTION_ID for retired peer IDs" {
     try router.register("server-cid-two", .{ .connection_index = 0, .sequence_number = 2 });
     var routed = try server_endpoint.receiveRoutedBytes(router);
     defer routed.deinit(allocator);
-    var retire_packet = try server.receiveRoutedDatagram(routed);
+    var retire_packet = (try server.receiveRoutedDatagram(routed)).?;
     defer retire_packet.deinit(allocator);
     try std.testing.expectEqual(@as(usize, 0), server.local_connection_ids.count());
 }

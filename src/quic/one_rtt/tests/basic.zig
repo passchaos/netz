@@ -3728,7 +3728,11 @@ test "QUIC 1-RTT connection sends ACK_ECN for received ECN-marked packets" {
             .route = .{ .connection_index = 0 },
             .destination_connection_id = &server_cid,
         };
-        var packet = try server.receiveRoutedDatagramWithEcnAt(routed, null, mark);
+        var packet = (try server.receiveRoutedDatagramWithEcnAt(
+            routed,
+            null,
+            mark,
+        )).?;
         defer packet.deinit(allocator);
     }
     try std.testing.expectEqual(@as(u64, 1), server.received.latestEcnCounts().?.ect0_count);

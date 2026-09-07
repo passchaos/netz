@@ -1568,3 +1568,79 @@ test "QUIC endpoint dispatcher atomically replaces connection storage" {
     try std.testing.expectEqual(@as(usize, 1), event.packet.connection_handle);
     try std.testing.expect(event.packet.packet.frames[0] == .ping);
 }
+
+test "QUIC endpoint dispatcher consumes unknown server tuple for client" {
+    const allocator = std.testing.allocator;
+    var threaded = std.Io.Threaded.init(allocator, .{});
+    defer threaded.deinit();
+    const io = threaded.io();
+    var endpoint = try runtime.Endpoint.bind(
+        allocator,
+        io,
+        .{ .ip4 = .loopback(0) },
+        .{ .max_datagram_size = 4096 },
+    );
+    defer endpoint.deinit();
+    var server = try runtime.Endpoint.bind(
+        allocator,
+        io,
+        .{ .ip4 = .loopback(0) },
+        .{ .max_datagram_size = 4096 },
+    );
+    defer server.deinit();
+    var unknown = try runtime.Endpoint.bind(
+        allocator,
+        io,
+        .{ .ip4 = .loopback(0) },
+        .{ .max_datagram_size = 4096 },
+    );
+    defer unknown.deinit();
+
+    const keys = quic.protection.deriveAes128Keys(
+        [_]u8{0xeb} ** quic.protection.secret_len,
+    );
+    var connection = try one_rtt.Connection.init(&endpoint, .{
+        .peer = server.address(),
+        .receive_keys = keys,
+        .send_keys = keys,
+        .local_connection_id = "client-route",
+        .peer_connection_id = "server-route",
+        .peer_disable_active_migration = true,
+        .enable_pacing = false,
+    });
+    defer connection.deinit();
+    var dispatcher = Dispatcher.init(allocator, &endpoint);
+    defer dispatcher.deinit();
+    try dispatcher.registerConnection(9, &connection);
+
+    const payload = try one_rtt.encodeFrames(allocator, &.{.{ .ping = {} }});
+    defer allocator.free(payload);
+    const spoofed = try quic.protection.sealShortPacket(allocator, keys, .{
+        .destination_connection_id = "client-route",
+        .packet_number = 10,
+        .packet_number_len = 4,
+        .payload = payload,
+    });
+    var unknown_server_address = unknown.address();
+    unknown_server_address.ip4.bytes = .{ 127, 0, 0, 2 };
+    try std.testing.expectEqual(Event.consumed, try dispatcher.dispatch(.{
+        .from = unknown_server_address,
+        .bytes = spoofed,
+    }));
+    try std.testing.expectEqual(@as(u64, 0), connection.stats().packets_received);
+
+    const accepted = try quic.protection.sealShortPacket(allocator, keys, .{
+        .destination_connection_id = "client-route",
+        .packet_number = 0,
+        .packet_number_len = 4,
+        .payload = payload,
+    });
+    var event = try dispatcher.dispatch(.{
+        .from = server.address(),
+        .bytes = accepted,
+    });
+    defer event.deinit(allocator);
+    try std.testing.expect(event == .packet);
+    try std.testing.expectEqual(@as(u64, 0), event.packet.packet.packet.packet_number);
+    try std.testing.expectEqual(@as(u64, 1), connection.stats().packets_received);
+}
