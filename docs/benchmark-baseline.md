@@ -300,6 +300,13 @@ removed that over-allocation and copy. A warmed run fell from four to three
 allocations per request and from 2,010,096 to 1,724,096 cumulative requested
 bytes over 2,000 requests; its remaining per-request allocations are exactly
 the request HPACK block, 10-byte body and response HPACK block.
+The aggregate parallel response reader now uses the same borrowed-frame cursor
+as its streaming counterpart. On `http2_parallel_x10_empty`, this removed one
+11-byte owned frame per response: a warmed 2,000-batch run fell from 80,000 to
+60,000 allocation calls and from 16,420,000 to 16,200,000 cumulative requested
+bytes. The single before/after timings were 28.607 and 28.363 us/batch, so this
+records the deterministic allocation/copy reduction without claiming a latency
+improvement.
 
 `strace` confirmed equal steady-state wire sizes: empty exchanges use 19-byte
 requests and 11-byte responses; POST exchanges use 43-byte requests and

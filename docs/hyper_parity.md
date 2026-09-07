@@ -1019,6 +1019,12 @@ allocated/copied the exact 10-byte result. Warmed h2c telemetry now reports
 three allocations per exchange rather than four, and the integration
 allocation regression first warms DATA flow-control storage before requiring
 only the combined request-header block and exact body allocation on the server.
+Aggregate response batches now likewise consume ordinary frames through the
+reusable borrowed reader rather than duplicating every response frame. The
+parallel x10 empty workload removed 20,000 exact 11-byte allocations across
+2,000 measured batches (80,000 to 60,000 total calls). A focused batch test
+warms the connection, reads three responses through the aggregate state
+machine, and permits only their three combined HPACK ownership blocks.
 The bidirectional Hyper process gate now exercises that boundary directly over
 h2c and TLS. A netz client waits through an idle interval, receives Hyper/h2's
 PING ACK, and completes another request on the same connection. In the reverse

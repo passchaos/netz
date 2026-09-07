@@ -5105,11 +5105,10 @@ pub const Connection = struct {
         var remaining = states.len;
         while (remaining != 0) {
             current_stream_id = null;
-            var frame = try self.readOwnedFrame();
-            defer frame.deinit(self.allocator);
-            if (try self.handleConnectionFrame(frame.frame)) continue;
-            if (frame.frame.header.frame_type == .goaway) {
-                const goaway = try http2.GoAwayPayload.parse(frame.frame);
+            const frame = try self.readFrameScratch();
+            if (try self.handleConnectionFrame(frame)) continue;
+            if (frame.header.frame_type == .goaway) {
+                const goaway = try http2.GoAwayPayload.parse(frame);
                 try self.recordPeerGoAway(goaway);
                 for (states) |state| {
                     if (!state.done and state.stream_id > goaway.last_stream_id) {
@@ -5121,30 +5120,30 @@ pub const Connection = struct {
 
             const state_index = findBatchResponseStateIndex(
                 states,
-                frame.frame.header.stream_id,
+                frame.header.stream_id,
             ) orelse return error.UnexpectedFrame;
             const state = &states[state_index];
             current_stream_id = state.stream_id;
             if (state.done) return error.UnexpectedFrame;
-            switch (frame.frame.header.frame_type) {
+            switch (frame.header.frame_type) {
                 .push_promise => {
                     if (!self.limits.enable_push) {
                         _ = try self.validatePushPromiseForClientStream(
-                            frame.frame,
+                            frame,
                         );
                         return error.InvalidFrame;
                     }
-                    try self.receivePushPromise(frame.frame);
+                    try self.receivePushPromise(frame);
                 },
                 .headers => {
                     if (state.headers != null) {
                         if (state.forbids_body) {
                             return error.InvalidContentLength;
                         }
-                        if ((frame.frame.header.flags & flag_end_stream) == 0) {
+                        if ((frame.header.flags & flag_end_stream) == 0) {
                             return error.UnexpectedFrame;
                         }
-                        state.trailers = try self.readHeaderBlock(frame.frame);
+                        state.trailers = try self.readHeaderBlock(frame);
                         try validateHeaderBlock(
                             state.trailers,
                             .response_trailers,
@@ -5158,7 +5157,7 @@ pub const Connection = struct {
                         continue;
                     }
 
-                    const headers = try self.readHeaderBlock(frame.frame);
+                    const headers = try self.readHeaderBlock(frame);
                     var headers_owned_by_state = false;
                     errdefer if (!headers_owned_by_state) {
                         freeHeaders(self.allocator, headers);
@@ -5173,7 +5172,7 @@ pub const Connection = struct {
                         10,
                     ) catch return error.InvalidStatus;
                     if (informationalResponseToSkip(status)) {
-                        if ((frame.frame.header.flags & flag_end_stream) != 0 or
+                        if ((frame.header.flags & flag_end_stream) != 0 or
                             lookup.content_length != null)
                         {
                             return error.InvalidContentLength;
@@ -5224,7 +5223,7 @@ pub const Connection = struct {
                             return error.InvalidContentLength;
                         }
                     }
-                    if ((frame.frame.header.flags & flag_end_stream) != 0) {
+                    if ((frame.header.flags & flag_end_stream) != 0) {
                         try validateExpectedContentLength(
                             lookup.content_length,
                             0,
@@ -5237,11 +5236,11 @@ pub const Connection = struct {
                     if (state.headers == null) return error.UnexpectedFrame;
                     const data = try self.receiveDataPayload(
                         state.stream_id,
-                        frame.frame,
+                        frame,
                     );
                     if (state.forbids_body and data.data.len != 0) {
                         self.releaseConnectionCapacity(
-                            frame.frame.payload.len,
+                            frame.payload.len,
                         ) catch {};
                         return error.InvalidContentLength;
                     }
@@ -5252,16 +5251,16 @@ pub const Connection = struct {
                     ) catch return error.MessageTooLarge;
                     if (body_len > self.limits.max_body_bytes) {
                         self.releaseConnectionCapacity(
-                            frame.frame.payload.len,
+                            frame.payload.len,
                         ) catch {};
                         return error.MessageTooLarge;
                     }
                     try state.body.appendSlice(self.allocator, data.data);
                     try self.maybeReleaseReceivedCapacity(
                         state.stream_id,
-                        (frame.frame.header.flags & flag_end_stream) != 0,
+                        (frame.header.flags & flag_end_stream) != 0,
                     );
-                    if ((frame.frame.header.flags & flag_end_stream) != 0) {
+                    if ((frame.header.flags & flag_end_stream) != 0) {
                         try validateExpectedContentLength(
                             state.content_length,
                             state.body.items.len,
@@ -5272,7 +5271,7 @@ pub const Connection = struct {
                 },
                 .rst_stream => {
                     const reset = try http2.ResetStreamPayload.parse(
-                        frame.frame,
+                        frame,
                     );
                     try self.recordResetStream(reset);
                     state.done = true;
@@ -25117,6 +25116,107 @@ test "HTTP/2 response batch reorders out-of-order responses" {
         try std.testing.expectEqualStrings("GMT", date[26..]);
     }
     try std.testing.expectEqual(@as(usize, 0), client.active_local_streams.items.len);
+
+    thread.join();
+    if (shared.err) |err| return err;
+}
+
+test "HTTP/2 aggregate response batch borrows wire frames after warmup" {
+    const allocator = std.testing.allocator;
+    const parallel = 3;
+
+    var threaded = std.Io.Threaded.init(allocator, .{});
+    defer threaded.deinit();
+    const io = threaded.io();
+
+    var server = try Server.listen(
+        allocator,
+        io,
+        .{ .ip4 = .loopback(0) },
+        .{ .max_frame_payload = 4096, .max_body_bytes = 4096 },
+    );
+    defer server.deinit();
+
+    const Shared = struct {
+        server: *Server,
+        err: ?anyerror = null,
+
+        fn run(shared: *@This()) void {
+            runFallible(shared.server) catch |err| {
+                shared.err = err;
+            };
+        }
+
+        fn runFallible(server_ptr: *Server) !void {
+            var connection = try server_ptr.accept();
+            defer connection.close();
+
+            {
+                var warmup = try connection.readRequest();
+                defer warmup.deinit(server_ptr.allocator);
+                try connection.writeResponse(warmup.stream_id, .{});
+            }
+
+            var requests: [parallel]OwnedRequest = undefined;
+            var initialized: usize = 0;
+            defer for (requests[0..initialized]) |*request| {
+                request.deinit(server_ptr.allocator);
+            };
+            var stream_ids: [parallel]u31 = undefined;
+            for (&requests, &stream_ids) |*request, *stream_id| {
+                request.* = try connection.readRequest();
+                initialized += 1;
+                stream_id.* = request.stream_id;
+            }
+            const responses = [_]ResponseOptions{.{}} ** parallel;
+            try connection.writeResponseBatch(&stream_ids, &responses);
+        }
+    };
+
+    var shared = Shared{ .server = &server };
+    const thread = try std.Thread.spawn(.{}, Shared.run, .{&shared});
+
+    var client = try Client.connect(allocator, io, server.address(), .{
+        .max_frame_payload = 4096,
+        .max_body_bytes = 4096,
+    });
+    defer client.close();
+
+    {
+        var warmup = try client.request(.{
+            .path = "/batch-borrow",
+            .authority = "localhost",
+        });
+        defer warmup.deinit(allocator);
+    }
+
+    var states: [parallel]Connection.BatchResponseState = undefined;
+    var initialized: usize = 0;
+    defer for (states[0..initialized]) |*state| {
+        client.releaseLocalStream(state.stream_id);
+        state.deinit(allocator);
+    };
+    for (&states) |*state| {
+        const pending = try client.sendCompleteRequest(.{
+            .path = "/batch-borrow",
+            .authority = "localhost",
+        });
+        state.* = .{
+            .stream_id = pending.stream_id,
+            .request_method = pending.request_method,
+            .extended_connect = pending.extended_connect,
+        };
+        initialized += 1;
+    }
+
+    var tracking = std.testing.FailingAllocator.init(allocator, .{});
+    const saved_allocator = client.allocator;
+    client.allocator = tracking.allocator();
+    defer client.allocator = saved_allocator;
+    try client.readResponseBatch(&states, null);
+    // Each response owns one combined HPACK block. The complete response
+    // frames stay borrowed from the connection's reusable reader buffer.
+    try std.testing.expectEqual(@as(usize, parallel), tracking.allocations);
 
     thread.join();
     if (shared.err) |err| return err;
