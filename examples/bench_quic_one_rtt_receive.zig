@@ -6,7 +6,7 @@ const payload_size: usize = 1152;
 const default_iterations: usize = 1_000;
 const default_warmup_iterations: usize = 100;
 
-const Mode = enum { all, gro, plain, service, visitor };
+const Mode = enum { all, gro, gro_service, plain, service, visitor };
 const FrameShape = enum { padding, stream };
 
 const Options = struct {
@@ -78,6 +78,19 @@ pub fn main(init: std.process.Init) !void {
             error.GroUnavailable => 0,
             else => |other| return other,
         };
+        _ = measureMode(
+            allocator,
+            io,
+            keys,
+            client_cid,
+            server_cid,
+            .gro_service,
+            options.frame,
+            options.warmup_iterations,
+        ) catch |err| switch (err) {
+            error.GroUnavailable => 0,
+            else => |other| return other,
+        };
         inline for (.{ Mode.plain, Mode.service, Mode.visitor }) |mode| {
             _ = try measureMode(
                 allocator,
@@ -117,6 +130,20 @@ pub fn main(init: std.process.Init) !void {
         options.frame,
         options.iterations,
     );
+    const gro_service_ns = measure(
+        allocator,
+        io,
+        keys,
+        client_cid,
+        server_cid,
+        true,
+        true,
+        options.frame,
+        options.iterations,
+    ) catch |err| switch (err) {
+        error.GroUnavailable => null,
+        else => |e| return e,
+    };
     const service_ns = try measure(
         allocator,
         io,
@@ -138,16 +165,21 @@ pub fn main(init: std.process.Init) !void {
         options.iterations,
     );
     const total_packets = options.iterations * batch_size;
-    if (gro_ns) |gro| {
+    if (gro_ns != null and gro_service_ns != null) {
+        const gro = gro_ns.?;
+        const gro_service = gro_service_ns.?;
         const ratio_x100 = ratioTimes100(plain_ns, gro);
+        const service_ratio_x100 = ratioTimes100(gro, gro_service);
         std.debug.print(
             \\QUIC 1-RTT receive benchmark
             \\  frame: {s}, iterations: {d}, packets/batch: {d}, payload bytes/packet: {d}
             \\  GRO batch:    {d} ns/batch, {d} ns/packet
+            \\  GRO state service: {d} ns/batch, {d} ns/packet
             \\  plain packet: {d} ns/batch, {d} ns/packet
             \\  in-place service: {d} ns/batch, {d} ns/packet
             \\  borrowed visitor: {d} ns/batch, {d} ns/packet
             \\  GRO relative packet throughput: {d}.{d:0>2}x
+            \\  state-only vs owning GRO throughput: {d}.{d:0>2}x
             \\  total packets/path: {d}
             \\
         , .{
@@ -157,6 +189,8 @@ pub fn main(init: std.process.Init) !void {
             payload_size,
             gro / options.iterations,
             gro / total_packets,
+            gro_service / options.iterations,
+            gro_service / total_packets,
             plain_ns / options.iterations,
             plain_ns / total_packets,
             service_ns / options.iterations,
@@ -165,6 +199,8 @@ pub fn main(init: std.process.Init) !void {
             visitor_ns / total_packets,
             ratio_x100 / 100,
             ratio_x100 % 100,
+            service_ratio_x100 / 100,
+            service_ratio_x100 % 100,
             total_packets,
         });
     } else {
@@ -172,6 +208,7 @@ pub fn main(init: std.process.Init) !void {
             \\QUIC 1-RTT receive benchmark
             \\  frame: {s}, iterations: {d}, packets/batch: {d}, payload bytes/packet: {d}
             \\  GRO batch:    unavailable on this endpoint
+            \\  GRO state service: unavailable on this endpoint
             \\  plain packet: {d} ns/batch, {d} ns/packet
             \\  in-place service: {d} ns/batch, {d} ns/packet
             \\  borrowed visitor: {d} ns/batch, {d} ns/packet
@@ -295,6 +332,17 @@ fn measureMode(
             frame_shape,
             iteration_count,
         ),
+        .gro_service => measure(
+            allocator,
+            io,
+            keys,
+            client_cid,
+            server_cid,
+            true,
+            true,
+            frame_shape,
+            iteration_count,
+        ),
         .plain => measure(
             allocator,
             io,
@@ -409,7 +457,14 @@ fn measure(
         try client_endpoint.sendManyBytes(server_endpoint.address(), &datagrams);
 
         const started = nowNs(io);
-        if (enable_gro) {
+        if (enable_gro and service_in_place) {
+            if (try server.servicePacketBatchAt(started) != batch_size) {
+                return error.UnexpectedPacketCount;
+            }
+            if (frame_shape == .stream) {
+                observed_stream_bytes += try drainStream(&server);
+            }
+        } else if (enable_gro) {
             var received = try server.receivePacketBatchAt(started);
             defer received.deinit();
             var consumed: usize = 0;

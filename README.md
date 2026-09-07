@@ -466,7 +466,9 @@ starts with deterministic parsers, serializers, preallocated fixed-width wire-in
   Linux `UDP_SEGMENT` offload for
   contiguous equal-sized packet batches with one-shot capability fallback and
   opt-in Linux `UDP_GRO` receive coalescing with shared zero-copy segment
-  ownership, preallocated 1-RTT frame payload encoding, in-place current-key 1-RTT decryption, reusable frame scratch,
+  ownership or caller-buffer batch views, preallocated 1-RTT frame payload
+  encoding, in-place current-key 1-RTT decryption, reusable receive/frame
+  scratch,
   strict wire-order low-peak batch servicing, and bounded power-of-two
   recovery-payload reuse with allocation-free ACK-time recycling, four direct
   per-class slots, payload-intrusive overflow free lists, and a global

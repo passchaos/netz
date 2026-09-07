@@ -78,6 +78,9 @@ pub const SendManyBytesResult = struct {
     send_error: ?net.Socket.SendError = null,
 };
 
+/// Caller storage required to preserve the largest possible UDP_GRO receive.
+pub const max_gro_receive_bytes: usize = std.math.maxInt(u16);
+
 const HeldSend = struct {
     to: net.IpAddress,
     bytes: []u8,
@@ -880,6 +883,65 @@ pub const Endpoint = struct {
         return self.receiveKernelBytesBatchWithEcn();
     }
 
+    /// Receive one kernel datagram or UDP_GRO batch directly into caller
+    /// storage. The returned segment slices remain valid until `buffer` is
+    /// reused. GRO endpoints require `max_gro_receive_bytes` bytes so a kernel
+    /// batch can never be consumed through a truncated buffer.
+    pub fn receiveBytesBatchInto(
+        self: *Endpoint,
+        buffer: []u8,
+    ) Error!ReceivedBytesBatchView {
+        try self.validateBatchReceiveBuffer(buffer);
+        if (try self.copyPendingReceivedIntoBatch(buffer)) |pending| {
+            return pending;
+        }
+        self.socket_receive_mutex.lockUncancelable(self.io);
+        defer self.socket_receive_mutex.unlock(self.io);
+        if (try self.copyPendingReceivedIntoBatch(buffer)) |pending| {
+            return pending;
+        }
+        return self.receiveKernelBytesBatchInto(buffer);
+    }
+
+    pub fn receiveBytesBatchIntoTimeout(
+        self: *Endpoint,
+        buffer: []u8,
+        timeout: std.Io.Timeout,
+    ) ReceiveTimeoutError!ReceivedBytesBatchView {
+        try self.validateBatchReceiveBuffer(buffer);
+        if (try self.copyPendingReceivedIntoBatch(buffer)) |pending| {
+            return pending;
+        }
+        self.socket_receive_mutex.lockUncancelable(self.io);
+        defer self.socket_receive_mutex.unlock(self.io);
+        if (try self.copyPendingReceivedIntoBatch(buffer)) |pending| {
+            return pending;
+        }
+        return self.receiveKernelBytesBatchIntoTimeout(buffer, timeout);
+    }
+
+    pub fn receiveBytesBatchIntoWithTimeout(
+        self: *Endpoint,
+        buffer: []u8,
+        timeout: std.Io.Duration,
+    ) ReceiveTimeoutError!ReceivedBytesBatchView {
+        if (timeout.nanoseconds <= 0) return error.Timeout;
+        return self.receiveBytesBatchIntoWithDeadline(buffer, .fromNow(
+            self.io,
+            .{ .clock = .awake, .raw = timeout },
+        ));
+    }
+
+    pub fn receiveBytesBatchIntoWithDeadline(
+        self: *Endpoint,
+        buffer: []u8,
+        deadline: std.Io.Clock.Timestamp,
+    ) ReceiveTimeoutError!ReceivedBytesBatchView {
+        return self.receiveBytesBatchIntoTimeout(buffer, .{
+            .deadline = try deadline_policy.usableAwake(self.io, deadline),
+        });
+    }
+
     /// Receive one UDP datagram and preserve the kernel-reported ECN codepoint.
     /// If ancillary ECN reception was unavailable when the socket was bound,
     /// callers get `.not_ect`, matching the conservative QUIC fallback.
@@ -949,6 +1011,50 @@ pub const Endpoint = struct {
         if (maybe_err) |err| return err;
         std.debug.assert(count == 1);
         return self.finishKernelBytesBatch(buffer, incoming);
+    }
+
+    fn receiveKernelBytesBatchInto(
+        self: *Endpoint,
+        buffer: []u8,
+    ) Error!ReceivedBytesBatchView {
+        var control_buffer: [receive_control_buffer_len]u8 align(@alignOf(EcnCmsgHdr)) = undefined;
+        @memset(&control_buffer, 0);
+        var incoming: net.IncomingMessage = .init;
+        incoming.control = &control_buffer;
+        const maybe_err, const count = (try self.io.operate(.{
+            .net_receive = .{
+                .socket_handle = self.socket.handle,
+                .message_buffer = (&incoming)[0..1],
+                .data_buffer = buffer,
+                .flags = .{},
+            },
+        })).net_receive;
+        if (maybe_err) |err| return err;
+        std.debug.assert(count == 1);
+        return self.finishKernelBytesBatchView(incoming);
+    }
+
+    fn receiveKernelBytesBatchIntoTimeout(
+        self: *Endpoint,
+        buffer: []u8,
+        timeout: std.Io.Timeout,
+    ) ReceiveTimeoutError!ReceivedBytesBatchView {
+        var control_buffer: [receive_control_buffer_len]u8 align(@alignOf(EcnCmsgHdr)) = undefined;
+        @memset(&control_buffer, 0);
+        var incoming: net.IncomingMessage = .init;
+        incoming.control = &control_buffer;
+        const maybe_err, const count = (try self.io.operateTimeout(
+            .{ .net_receive = .{
+                .socket_handle = self.socket.handle,
+                .message_buffer = (&incoming)[0..1],
+                .data_buffer = buffer,
+                .flags = .{},
+            } },
+            timeout,
+        )).net_receive;
+        if (maybe_err) |err| return err;
+        std.debug.assert(count == 1);
+        return self.finishKernelBytesBatchView(incoming);
     }
 
     fn receiveKernelBytesInto(
@@ -1048,21 +1154,37 @@ pub const Endpoint = struct {
         buffer: []u8,
         incoming: net.IncomingMessage,
     ) Error!OwnedBytesBatch {
-        if (incoming.data.len == 0) return error.EmptyDatagram;
-        if (incoming.flags.trunc or incoming.flags.ctrunc) return error.DatagramTooLarge;
+        const view = try self.finishKernelBytesBatchView(incoming);
+        // Most allocator implementations can shrink this allocation in place.
+        // Returning receive storage directly avoids an alloc-copy-free cycle.
+        const storage = try self.allocator.realloc(buffer, view.storage.len);
+        return .{
+            .from = view.from,
+            .storage = storage,
+            .segment_size = view.segment_size,
+            .segment_count = view.segment_count,
+            .ecn = view.ecn,
+        };
+    }
 
+    fn finishKernelBytesBatchView(
+        self: *Endpoint,
+        incoming: net.IncomingMessage,
+    ) Error!ReceivedBytesBatchView {
+        if (incoming.data.len == 0) return error.EmptyDatagram;
+        if (incoming.flags.trunc or incoming.flags.ctrunc) {
+            return error.DatagramTooLarge;
+        }
         const control = receiveControlFromBytes(incoming.control);
         const ecn = if (self.receive_ecn_enabled) control.ecn else .not_ect;
         const segment_size = control.gro_segment_size orelse {
-            if (incoming.data.len > self.limits.max_datagram_size) return error.DatagramTooLarge;
-            // Most allocator implementations can shrink this allocation in
-            // place. Returning the receive storage directly removes the
-            // previous alloc-copy-free cycle even when GRO is not involved.
-            const bytes = try self.allocator.realloc(buffer, incoming.data.len);
+            if (incoming.data.len > self.limits.max_datagram_size) {
+                return error.DatagramTooLarge;
+            }
             return .{
                 .from = incoming.from,
-                .storage = bytes,
-                .segment_size = bytes.len,
+                .storage = incoming.data,
+                .segment_size = incoming.data.len,
                 .segment_count = 1,
                 .ecn = ecn,
             };
@@ -1074,18 +1196,58 @@ pub const Endpoint = struct {
         {
             return error.InvalidGroSegment;
         }
-
-        const segment_count = std.math.divCeil(usize, incoming.data.len, segment_size) catch
+        const segment_count = std.math.divCeil(
+            usize,
+            incoming.data.len,
+            segment_size,
+        ) catch return error.InvalidGroSegment;
+        if (segment_count < 2 or segment_count > udp_gro_max_segments) {
             return error.InvalidGroSegment;
-        if (segment_count < 2 or segment_count > udp_gro_max_segments) return error.InvalidGroSegment;
-        const storage = try self.allocator.realloc(buffer, incoming.data.len);
+        }
         return .{
             .from = incoming.from,
-            .storage = storage,
+            .storage = incoming.data,
             .segment_size = segment_size,
             .segment_count = segment_count,
             .ecn = ecn,
         };
+    }
+
+    fn validateBatchReceiveBuffer(
+        self: Endpoint,
+        buffer: []u8,
+    ) Error!void {
+        if (buffer.len == 0) return error.BufferTooShort;
+        const required = if (self.gro_receive_enabled)
+            max_gro_receive_bytes
+        else
+            self.limits.max_datagram_size;
+        if (buffer.len < required) return error.BufferTooShort;
+    }
+
+    fn copyPendingReceivedIntoBatch(
+        self: *Endpoint,
+        buffer: []u8,
+    ) Error!?ReceivedBytesBatchView {
+        self.pending_receive_mutex.lockUncancelable(self.io);
+        defer self.pending_receive_mutex.unlock(self.io);
+        if (self.pending_receive_index >= self.pending_received.items.len) {
+            return null;
+        }
+        var pending = self.pending_received.items[self.pending_receive_index];
+        if (pending.bytes.len > buffer.len) return error.BufferTooShort;
+        @memcpy(buffer[0..pending.bytes.len], pending.bytes);
+        const result: ReceivedBytesBatchView = .{
+            .from = pending.from,
+            .storage = buffer[0..pending.bytes.len],
+            .segment_size = pending.bytes.len,
+            .segment_count = 1,
+            .ecn = pending.ecn,
+        };
+        self.pending_receive_index += 1;
+        self.compactPendingReceivedIfSparse();
+        pending.deinit(self.allocator);
+        return result;
     }
 
     fn receiveKernelBytesTimeout(
@@ -1767,6 +1929,33 @@ pub const OwnedBytesBatch = struct {
     }
 };
 
+pub const ReceivedBytesBatchView = struct {
+    from: net.IpAddress,
+    storage: []u8,
+    segment_size: usize,
+    segment_count: usize,
+    ecn: quic.packet_space.EcnCodepoint = .not_ect,
+
+    pub fn datagramAt(self: ReceivedBytesBatchView, index: usize) ?[]const u8 {
+        if (index >= self.segment_count) return null;
+        return self.datagramAtUnchecked(index);
+    }
+
+    pub fn datagramAtMutable(
+        self: *ReceivedBytesBatchView,
+        index: usize,
+    ) ?[]u8 {
+        if (index >= self.segment_count) return null;
+        return self.datagramAtUnchecked(index);
+    }
+
+    fn datagramAtUnchecked(self: ReceivedBytesBatchView, index: usize) []u8 {
+        const start = index * self.segment_size;
+        const end = @min(start + self.segment_size, self.storage.len);
+        return self.storage[start..end];
+    }
+};
+
 pub const OwnedBytes = struct {
     from: net.IpAddress,
     bytes: []u8,
@@ -1991,6 +2180,7 @@ test "QUIC raw endpoint deadline receives validate and deliver" {
         .raw = .zero,
     };
     var buffer: [16]u8 = undefined;
+    var batch_buffer: [max_gro_receive_bytes]u8 = undefined;
 
     try std.testing.expectError(
         error.Timeout,
@@ -2003,6 +2193,13 @@ test "QUIC raw endpoint deadline receives validate and deliver" {
     try std.testing.expectError(
         error.Timeout,
         receiver.receiveBytesBatchWithDeadline(invalid),
+    );
+    try std.testing.expectError(
+        error.Timeout,
+        receiver.receiveBytesBatchIntoWithDeadline(
+            &batch_buffer,
+            invalid,
+        ),
     );
     try std.testing.expectError(
         error.Timeout,
@@ -2019,6 +2216,13 @@ test "QUIC raw endpoint deadline receives validate and deliver" {
     try std.testing.expectError(
         error.Timeout,
         receiver.receiveBytesBatchWithTimeout(.zero),
+    );
+    try std.testing.expectError(
+        error.Timeout,
+        receiver.receiveBytesBatchIntoWithTimeout(
+            &batch_buffer,
+            .zero,
+        ),
     );
     try std.testing.expectError(
         error.Timeout,
@@ -2063,6 +2267,30 @@ test "QUIC raw endpoint deadline receives validate and deliver" {
     try std.testing.expectEqualStrings(
         "batch",
         batch.datagramAt(0).?,
+    );
+
+    try sender.sendBytes(receiver.address(), "batch-into");
+    try std.testing.expectError(
+        error.Timeout,
+        receiver.receiveBytesBatchIntoWithDeadline(
+            &batch_buffer,
+            .fromNow(io, .{
+                .clock = .awake,
+                .raw = .zero,
+            }),
+        ),
+    );
+    const batch_view = try receiver.receiveBytesBatchIntoWithDeadline(
+        &batch_buffer,
+        .fromNow(io, .{
+            .clock = .awake,
+            .raw = .fromSeconds(1),
+        }),
+    );
+    try std.testing.expectEqual(@as(usize, 1), batch_view.segment_count);
+    try std.testing.expectEqualStrings(
+        "batch-into",
+        batch_view.datagramAt(0).?,
     );
 }
 
@@ -2755,6 +2983,167 @@ test "QUIC UDP endpoint receives into caller storage" {
     try std.testing.expect(received.from.eql(&sender.address()));
 }
 
+test "QUIC UDP endpoint receives plain batch into caller storage" {
+    const allocator = std.testing.allocator;
+    var threaded = std.Io.Threaded.init(allocator, .{});
+    defer threaded.deinit();
+    const io = threaded.io();
+    var receiver = try Endpoint.bind(
+        allocator,
+        io,
+        .{ .ip4 = .loopback(0) },
+        .{ .max_datagram_size = 128 },
+    );
+    defer receiver.deinit();
+    var sender = try Endpoint.bind(
+        allocator,
+        io,
+        .{ .ip4 = .loopback(0) },
+        .{ .max_datagram_size = 128 },
+    );
+    defer sender.deinit();
+
+    try sender.sendBytes(receiver.address(), "plain-batch");
+    var too_short: [127]u8 = undefined;
+    try std.testing.expectError(
+        error.BufferTooShort,
+        receiver.receiveBytesBatchInto(&too_short),
+    );
+    var storage: [128]u8 = undefined;
+    const received = try receiver.receiveBytesBatchInto(&storage);
+    try std.testing.expectEqual(@as(usize, 1), received.segment_count);
+    try std.testing.expectEqual(@as(usize, 11), received.segment_size);
+    try std.testing.expectEqualStrings(
+        "plain-batch",
+        received.datagramAt(0).?,
+    );
+    try std.testing.expectEqual(
+        @intFromPtr(&storage),
+        @intFromPtr(received.storage.ptr),
+    );
+    try std.testing.expect(received.from.eql(&sender.address()));
+}
+
+test "QUIC UDP endpoint receives GRO batch into caller storage" {
+    if (!udpGroSupported()) return error.SkipZigTest;
+
+    const allocator = std.testing.allocator;
+    var threaded = std.Io.Threaded.init(allocator, .{});
+    defer threaded.deinit();
+    const io = threaded.io();
+    var receiver = try Endpoint.bind(
+        allocator,
+        io,
+        .{ .ip4 = .loopback(0) },
+        .{ .max_datagram_size = 128, .enable_gro_receive = true },
+    );
+    defer receiver.deinit();
+    var sender = try Endpoint.bind(
+        allocator,
+        io,
+        .{ .ip4 = .loopback(0) },
+        .{ .max_datagram_size = 128 },
+    );
+    defer sender.deinit();
+    if (!receiver.groReceiveEnabled() or !sender.gsoSendEnabled()) {
+        return error.SkipZigTest;
+    }
+
+    const wire = "aaaabbbbcc";
+    const datagrams = [_][]const u8{
+        wire[0..4],
+        wire[4..8],
+        wire[8..10],
+    };
+    try sender.sendManyBytes(receiver.address(), &datagrams);
+    if (!sender.gsoSendEnabled()) return error.SkipZigTest;
+
+    var too_short: [128]u8 = undefined;
+    try std.testing.expectError(
+        error.BufferTooShort,
+        receiver.receiveBytesBatchInto(&too_short),
+    );
+    var storage: [max_gro_receive_bytes]u8 = undefined;
+    const received = try receiver.receiveBytesBatchInto(&storage);
+    try std.testing.expectEqual(@as(usize, 3), received.segment_count);
+    try std.testing.expectEqual(@as(usize, 4), received.segment_size);
+    try std.testing.expectEqual(
+        @intFromPtr(&storage),
+        @intFromPtr(received.storage.ptr),
+    );
+    for (datagrams, 0..) |expected, index| {
+        try std.testing.expectEqualStrings(
+            expected,
+            received.datagramAt(index).?,
+        );
+    }
+}
+
+test "QUIC caller batch leaves pending GRO suffix queued on short buffer" {
+    if (!udpGroSupported()) return error.SkipZigTest;
+
+    const allocator = std.testing.allocator;
+    var threaded = std.Io.Threaded.init(allocator, .{});
+    defer threaded.deinit();
+    const io = threaded.io();
+    var receiver = try Endpoint.bind(
+        allocator,
+        io,
+        .{ .ip4 = .loopback(0) },
+        .{ .max_datagram_size = 128, .enable_gro_receive = true },
+    );
+    defer receiver.deinit();
+    var sender = try Endpoint.bind(
+        allocator,
+        io,
+        .{ .ip4 = .loopback(0) },
+        .{ .max_datagram_size = 128 },
+    );
+    defer sender.deinit();
+    if (!receiver.groReceiveEnabled() or !sender.gsoSendEnabled()) {
+        return error.SkipZigTest;
+    }
+
+    const wire = "aaaabbbbcc";
+    const datagrams = [_][]const u8{
+        wire[0..4],
+        wire[4..8],
+        wire[8..10],
+    };
+    try sender.sendManyBytes(receiver.address(), &datagrams);
+    if (!sender.gsoSendEnabled()) return error.SkipZigTest;
+    var first = try receiver.receiveBytes();
+    defer first.deinit(allocator);
+    try std.testing.expectEqualStrings("aaaa", first.bytes);
+    try std.testing.expectEqual(@as(usize, 2), receiver.pendingReceivedCount());
+
+    var storage: [max_gro_receive_bytes]u8 = undefined;
+    try std.testing.expectError(
+        error.Timeout,
+        receiver.receiveBytesBatchIntoWithTimeout(
+            &storage,
+            .zero,
+        ),
+    );
+    try std.testing.expectEqual(@as(usize, 2), receiver.pendingReceivedCount());
+    var too_short: [128]u8 = undefined;
+    try std.testing.expectError(
+        error.BufferTooShort,
+        receiver.receiveBytesBatchInto(&too_short),
+    );
+    try std.testing.expectEqual(@as(usize, 2), receiver.pendingReceivedCount());
+
+    const second = try receiver.receiveBytesBatchIntoTimeout(&storage, .{
+        .duration = .{ .clock = .awake, .raw = .zero },
+    });
+    try std.testing.expectEqual(@as(usize, 1), second.segment_count);
+    try std.testing.expectEqualStrings("bbbb", second.datagramAt(0).?);
+    try std.testing.expectEqual(@as(usize, 1), receiver.pendingReceivedCount());
+    const third = try receiver.receiveBytesBatchInto(&storage);
+    try std.testing.expectEqualStrings("cc", third.datagramAt(0).?);
+    try std.testing.expectEqual(@as(usize, 0), receiver.pendingReceivedCount());
+}
+
 test "QUIC UDP GSO planner requires a contiguous equal-sized prefix" {
     if (!udpGsoSupported()) return error.SkipZigTest;
 
@@ -2830,6 +3219,141 @@ test "QUIC UDP receive control decodes ECN and GRO segment size" {
     const decoded = receiveControlFromBytes(&control);
     try std.testing.expectEqual(quic.packet_space.EcnCodepoint.ect0, decoded.ecn);
     try std.testing.expectEqual(@as(?usize, 1200), decoded.gro_segment_size);
+}
+
+test "QUIC caller batch validates GRO metadata without ownership" {
+    if (!udpGroSupported()) return error.SkipZigTest;
+
+    const allocator = std.testing.allocator;
+    var threaded = std.Io.Threaded.init(allocator, .{});
+    defer threaded.deinit();
+    var endpoint = try Endpoint.bind(
+        allocator,
+        threaded.io(),
+        .{ .ip4 = .loopback(0) },
+        .{ .max_datagram_size = 1200, .enable_gro_receive = true },
+    );
+    defer endpoint.deinit();
+    if (!endpoint.groReceiveEnabled()) return error.SkipZigTest;
+
+    var control: [receive_control_buffer_len]u8 align(@alignOf(EcnCmsgHdr)) =
+        .{0} ** receive_control_buffer_len;
+    const header: *EcnCmsgHdr = @ptrCast(@alignCast(control[0..].ptr));
+    header.* = .{
+        .len = @sizeOf(EcnCmsgHdr) + @sizeOf(i32),
+        .level = udp_gso_level,
+        .type = @intCast(udp_gro_segment),
+    };
+    const segment_size: i32 = 1200;
+    @memcpy(
+        control[@sizeOf(EcnCmsgHdr)..][0..@sizeOf(i32)],
+        std.mem.asBytes(&segment_size),
+    );
+    var payload: [2401]u8 = undefined;
+    const valid = try endpoint.finishKernelBytesBatchView(.{
+        .from = endpoint.address(),
+        .data = &payload,
+        .control = &control,
+        .flags = .{
+            .eor = false,
+            .trunc = false,
+            .ctrunc = false,
+            .oob = false,
+            .errqueue = false,
+        },
+    });
+    try std.testing.expectEqual(@as(usize, 1200), valid.segment_size);
+    try std.testing.expectEqual(@as(usize, 3), valid.segment_count);
+    try std.testing.expectEqual(@as(usize, 1), valid.datagramAt(2).?.len);
+
+    endpoint.gro_receive_enabled = false;
+    try std.testing.expectError(
+        error.InvalidGroSegment,
+        endpoint.finishKernelBytesBatchView(.{
+            .from = endpoint.address(),
+            .data = &payload,
+            .control = &control,
+            .flags = .{
+                .eor = false,
+                .trunc = false,
+                .ctrunc = false,
+                .oob = false,
+                .errqueue = false,
+            },
+        }),
+    );
+    endpoint.gro_receive_enabled = true;
+    try std.testing.expectError(
+        error.InvalidGroSegment,
+        endpoint.finishKernelBytesBatchView(.{
+            .from = endpoint.address(),
+            .data = payload[0..1200],
+            .control = &control,
+            .flags = .{
+                .eor = false,
+                .trunc = false,
+                .ctrunc = false,
+                .oob = false,
+                .errqueue = false,
+            },
+        }),
+    );
+
+    const oversized_segment: i32 = 1201;
+    @memcpy(
+        control[@sizeOf(EcnCmsgHdr)..][0..@sizeOf(i32)],
+        std.mem.asBytes(&oversized_segment),
+    );
+    try std.testing.expectError(
+        error.InvalidGroSegment,
+        endpoint.finishKernelBytesBatchView(.{
+            .from = endpoint.address(),
+            .data = &payload,
+            .control = &control,
+            .flags = emptyIncomingFlags(),
+        }),
+    );
+
+    const tiny_segment: i32 = 32;
+    @memcpy(
+        control[@sizeOf(EcnCmsgHdr)..][0..@sizeOf(i32)],
+        std.mem.asBytes(&tiny_segment),
+    );
+    try std.testing.expectError(
+        error.InvalidGroSegment,
+        endpoint.finishKernelBytesBatchView(.{
+            .from = endpoint.address(),
+            .data = &payload,
+            .control = &control,
+            .flags = emptyIncomingFlags(),
+        }),
+    );
+
+    @memcpy(
+        control[@sizeOf(EcnCmsgHdr)..][0..@sizeOf(i32)],
+        std.mem.asBytes(&segment_size),
+    );
+    var truncated_flags = emptyIncomingFlags();
+    truncated_flags.trunc = true;
+    try std.testing.expectError(
+        error.DatagramTooLarge,
+        endpoint.finishKernelBytesBatchView(.{
+            .from = endpoint.address(),
+            .data = &payload,
+            .control = &control,
+            .flags = truncated_flags,
+        }),
+    );
+}
+
+fn emptyIncomingFlags() net.IncomingMessage.Flags {
+    return .{
+        .eor = false,
+        .trunc = false,
+        .ctrunc = false,
+        .oob = false,
+        .errqueue = false,
+    };
 }
 
 test "QUIC UDP endpoint segments a contiguous GSO super-packet" {

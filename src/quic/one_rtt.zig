@@ -176,6 +176,32 @@ pub const ReceivedPacketBatch = struct {
     }
 };
 
+const ReceivedDatagramBatch = union(enum) {
+    owned: quic.runtime.OwnedBytesBatch,
+    borrowed: quic.runtime.ReceivedBytesBatchView,
+
+    fn deinit(self: *ReceivedDatagramBatch, allocator: std.mem.Allocator) void {
+        switch (self.*) {
+            .owned => |*batch| batch.deinit(allocator),
+            .borrowed => {},
+        }
+        self.* = undefined;
+    }
+
+    fn view(self: *ReceivedDatagramBatch) quic.runtime.ReceivedBytesBatchView {
+        return switch (self.*) {
+            .owned => |*batch| .{
+                .from = batch.from,
+                .storage = batch.storage,
+                .segment_size = batch.segment_size,
+                .segment_count = batch.segment_count,
+                .ecn = batch.ecn,
+            },
+            .borrowed => |batch| batch,
+        };
+    }
+};
+
 const zero_rtt = quic.zero_rtt;
 pub const ZeroRttSendOptions = zero_rtt.SendOptions;
 pub const ReceivedZeroRttPacket = zero_rtt.Packet;
@@ -898,9 +924,9 @@ pub const Connection = struct {
     /// recovery's required stable payload ownership.
     send_batch_stream_scratch: std.ArrayList(ReservedStreamCredit) = .empty,
     send_batch_packet_stream_scratch: std.ArrayList(ReservedStreamCredit) = .empty,
-    /// Reused socket receive storage for the synchronous non-GRO visitor and
-    /// state-service paths. Owning diagnostic receives and GRO batches keep
-    /// their independent lifetime-bearing storage.
+    /// Reused socket receive storage for synchronous visitor and state-only
+    /// service paths. GRO grows this lazily to the largest kernel coalesced
+    /// payload; owning diagnostic receives keep independent lifetime storage.
     receive_packet_buffer: std.ArrayList(u8) = .empty,
     receive_ack_range_buffer: std.ArrayList(quic.AckRange) = .empty,
     /// Borrowed frame views used by state-only service and synchronous packet
@@ -7954,8 +7980,15 @@ pub const Connection = struct {
         while (true) {
             var datagrams = try self.endpoint.receiveBytesBatch();
             defer datagrams.deinit(self.endpoint.allocator);
+            var view: quic.runtime.ReceivedBytesBatchView = .{
+                .from = datagrams.from,
+                .storage = datagrams.storage,
+                .segment_size = datagrams.segment_size,
+                .segment_count = datagrams.segment_count,
+                .ecn = datagrams.ecn,
+            };
             if (try self.processReceivedDatagramBatchAt(
-                &datagrams,
+                &view,
                 now_ns,
             )) |batch| return batch;
         }
@@ -7963,7 +7996,7 @@ pub const Connection = struct {
 
     fn processReceivedDatagramBatchAt(
         self: *Connection,
-        datagrams: *quic.runtime.OwnedBytesBatch,
+        datagrams: *quic.runtime.ReceivedBytesBatchView,
         now_ns: ?u64,
     ) Error!?ReceivedPacketBatch {
         if (self.shouldDiscardPeerAddressBeforeAuthentication(datagrams.from)) {
@@ -8047,12 +8080,14 @@ pub const Connection = struct {
             return error.Timeout;
         }
         while (true) {
-            var datagrams = try self.receiveBytesBatchServicingTimersUntil(
+            var datagrams = try self.receiveDatagramBatchServicingTimersUntil(
                 caller_deadline,
+                null,
             );
             defer datagrams.deinit(self.endpoint.allocator);
+            var view = datagrams.view();
             var batch = (try self.processReceivedDatagramBatchAt(
-                &datagrams,
+                &view,
                 self.monotonicNowNs(),
             )) orelse continue;
             errdefer batch.deinit();
@@ -8061,17 +8096,18 @@ pub const Connection = struct {
         }
     }
 
-    fn receiveBytesBatchServicingTimersUntil(
+    fn receiveDatagramBatchServicingTimersUntil(
         self: *Connection,
         caller_deadline: ?std.Io.Clock.Timestamp,
-    ) (Error || quic.runtime.ReceiveTimeoutError)!quic.runtime.OwnedBytesBatch {
+        storage: ?[]u8,
+    ) (Error || quic.runtime.ReceiveTimeoutError)!ReceivedDatagramBatch {
         while (true) {
             if (self.close_info != null or self.idle_timed_out) {
                 return error.ConnectionClosed;
             }
             const timer = self.nextTimerDeadline();
             if (timer == null and caller_deadline == null) {
-                return self.endpoint.receiveBytesBatch();
+                return self.receiveDatagramBatch(storage);
             }
             const now_ns = self.monotonicNowNs();
             if (callerDeadlineExpired(caller_deadline, now_ns)) {
@@ -8081,15 +8117,17 @@ pub const Connection = struct {
                 if (try self.serviceNextTimerForBlockingReceive(now_ns)) {
                     continue;
                 }
-                if (try self.receiveBytesBatchAfterBlockedTimer(
+                if (try self.receiveDatagramBatchAfterBlockedTimer(
                     now_ns,
                     caller_deadline,
+                    storage,
                 )) |batch| {
                     return batch;
                 }
                 continue;
             };
-            return self.endpoint.receiveBytesBatchTimeout(
+            return self.receiveDatagramBatchTimeout(
+                storage,
                 earliestConnectionReceiveTimeout(timer, caller_deadline),
             ) catch |err| switch (err) {
                 error.Timeout => {
@@ -8101,9 +8139,10 @@ pub const Connection = struct {
                     if (!try self.serviceNextTimerForBlockingReceive(
                         timeout_ns,
                     )) {
-                        if (try self.receiveBytesBatchAfterBlockedTimer(
+                        if (try self.receiveDatagramBatchAfterBlockedTimer(
                             timeout_ns,
                             caller_deadline,
+                            storage,
                         )) |batch| {
                             return batch;
                         }
@@ -8114,18 +8153,19 @@ pub const Connection = struct {
                     if (caller_deadline != null) {
                         return error.ConcurrencyUnavailable;
                     }
-                    return self.endpoint.receiveBytesBatch();
+                    return self.receiveDatagramBatch(storage);
                 },
                 else => |other| return @errorCast(other),
             };
         }
     }
 
-    fn receiveBytesBatchAfterBlockedTimer(
+    fn receiveDatagramBatchAfterBlockedTimer(
         self: *Connection,
         now_ns: u64,
         caller_deadline: ?std.Io.Clock.Timestamp,
-    ) (Error || quic.runtime.ReceiveTimeoutError)!?quic.runtime.OwnedBytesBatch {
+        storage: ?[]u8,
+    ) (Error || quic.runtime.ReceiveTimeoutError)!?ReceivedDatagramBatch {
         const deadline_ns = std.math.add(
             u64,
             now_ns,
@@ -8135,7 +8175,8 @@ pub const Connection = struct {
             .{ .kind = .loss_time, .deadline_ns = deadline_ns },
             caller_deadline,
         );
-        const datagrams = self.endpoint.receiveBytesBatchTimeout(
+        const datagrams = self.receiveDatagramBatchTimeout(
+            storage,
             timeout,
         ) catch |err| switch (err) {
             error.Timeout => {
@@ -8149,11 +8190,35 @@ pub const Connection = struct {
                 if (caller_deadline != null) {
                     return error.ConcurrencyUnavailable;
                 }
-                return try self.endpoint.receiveBytesBatch();
+                return try self.receiveDatagramBatch(storage);
             },
             else => |other| return @errorCast(other),
         };
         return datagrams;
+    }
+
+    fn receiveDatagramBatch(
+        self: *Connection,
+        storage: ?[]u8,
+    ) Error!ReceivedDatagramBatch {
+        return if (storage) |out|
+            .{ .borrowed = try self.endpoint.receiveBytesBatchInto(out) }
+        else
+            .{ .owned = try self.endpoint.receiveBytesBatch() };
+    }
+
+    fn receiveDatagramBatchTimeout(
+        self: *Connection,
+        storage: ?[]u8,
+        timeout: std.Io.Timeout,
+    ) (Error || quic.runtime.ReceiveTimeoutError)!ReceivedDatagramBatch {
+        return if (storage) |out|
+            .{ .borrowed = try self.endpoint.receiveBytesBatchIntoTimeout(
+                out,
+                timeout,
+            ) }
+        else
+            .{ .owned = try self.endpoint.receiveBytesBatchTimeout(timeout) };
     }
 
     /// Process a kernel/GRO batch and release each decoded packet immediately.
@@ -8224,17 +8289,20 @@ pub const Connection = struct {
         if (callerDeadlineExpired(caller_deadline, first_now_ns)) {
             return error.Timeout;
         }
+        const receive_storage = try self.stateOnlyBatchReceiveStorage();
         while (true) {
-            var datagrams = try self.receiveBytesBatchServicingTimersUntil(
+            var datagrams = try self.receiveDatagramBatchServicingTimersUntil(
                 caller_deadline,
+                receive_storage,
             );
             defer datagrams.deinit(self.endpoint.allocator);
+            var view = datagrams.view();
             var ack: BatchAckObservation = .{
                 .largest_packet_number = self.received.largestReceived(),
                 .reordering_threshold = self.ack_reordering_threshold,
             };
             const completed = try self.processReceivedDatagramBatchVisitingAt(
-                &datagrams,
+                &view,
                 self.monotonicNowNs(),
                 &ack,
                 BatchAckObservation.observe,
@@ -8677,8 +8745,9 @@ pub const Connection = struct {
             packet.deinit(self.endpoint.allocator);
             return 1;
         }
-        var datagrams = try self.endpoint.receiveBytesBatch();
-        defer datagrams.deinit(self.endpoint.allocator);
+        var datagrams = try self.endpoint.receiveBytesBatchInto(
+            try self.stateOnlyBatchReceiveStorage(),
+        );
         return self.processReceivedDatagramBatchVisitingAt(
             &datagrams,
             now_ns,
@@ -8687,9 +8756,21 @@ pub const Connection = struct {
         );
     }
 
+    fn stateOnlyBatchReceiveStorage(self: *Connection) Error![]u8 {
+        const required = if (self.endpoint.groReceiveEnabled())
+            quic.runtime.max_gro_receive_bytes
+        else
+            self.endpoint.limits.max_datagram_size;
+        try self.receive_packet_buffer.ensureTotalCapacity(
+            self.endpoint.allocator,
+            required,
+        );
+        return self.receive_packet_buffer.allocatedSlice();
+    }
+
     fn processReceivedDatagramBatchVisitingAt(
         self: *Connection,
-        datagrams: *quic.runtime.OwnedBytesBatch,
+        datagrams: *quic.runtime.ReceivedBytesBatchView,
         now_ns: ?u64,
         context: anytype,
         comptime visitor: anytype,

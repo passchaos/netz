@@ -506,6 +506,16 @@ The final all-mode STREAM run measured GRO 1138, allocating plain 1387,
 in-place service 1161, and borrowed visitor 1166 ns/packet over 270,000 packets
 per path.
 
+The receive benchmark now also exposes `--mode=gro_service`, which applies all
+segments from one kernel UDP_GRO receive synchronously through connection-owned
+storage instead of allocating an owning datagram and `ReceivedPacket` array.
+Three order-varied CPU-0 runs over 162,000 STREAM packets per path measured the
+owning GRO mode at 1142, 1155, and 1157 ns/packet and state-only GRO at 687,
+688, and 696 ns/packet. The median fell from 1155 to 688 ns/packet, a 40.4%
+latency reduction or about 1.68x packet throughput. A failing-allocator test
+proves the second state-only batch needs no allocation after the receive/frame
+scratch has been warmed.
+
 ```text
 QUIC 1-RTT receive benchmark
   iterations: 1000, packets/batch: 54, payload bytes/packet: 1152
@@ -532,8 +542,10 @@ owning path at 1.92-2.83 us/packet. Handshake HTTP/3 uses the visitor on its
 ordinary non-GRO packet pump. HTTP/3 retains a lazy owning GRO suffix because
 it deliberately routes only one coalesced packet per application turn; pure
 connection-state consumers can instead use the timer-aware state-only batch
-pump to decrypt and apply every segment in receive storage with one cumulative
-ACK decision.
+pump to decrypt and apply every segment in lazily grown, connection-owned
+receive storage with one cumulative ACK decision. The raw endpoint exposes the
+same borrowed batch shape for caller-provided 65,535-byte GRO storage, while
+its owning batch API and HTTP/3 cursor retain their existing lifetimes.
 
 ### QUIC recovery ACK range application
 

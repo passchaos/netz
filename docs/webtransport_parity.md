@@ -429,6 +429,12 @@ non-GRO samples this is about 67% higher median throughput. A four-stream 4 MiB
 aggregate smoke completed at 217 MiB/s, and focused tests cover cumulative ACK,
 FIN, timeout/resume, and preserving the cross-stream rotation cursor when two
 streams arrive in the same GRO batch.
+The follow-up caller-buffer GRO path removes the remaining per-batch receive
+allocation by growing connection-owned storage once and reusing it. Three
+fixed-binary CPU-0 runs of the same 4 MiB shape measured 503, 510, and 514
+MiB/s (7.83 ms median), another 26% over the preceding 405 MiB/s median. The
+underlying 54-packet QUIC STREAM microbenchmark measured a 688 ns/packet
+state-only median versus 1155 ns/packet for the owning GRO batch.
 
 The benchmark now also accepts `--streams` and `--transfer-bytes`. A four-stream
 1 MiB-per-stream real-handshake run completed at 70 MiB/s aggregate with 3971
