@@ -393,6 +393,33 @@ pub const Utf8Validator = struct {
         }
     }
 
+    /// Validate a masked wire slice without materializing an unmasked copy.
+    /// ASCII blocks are XORed and tested as vectors; a non-ASCII block falls
+    /// back to the incremental byte state machine and resumes the fast path
+    /// after the code point completes.
+    pub fn feedMasked(
+        self: *Utf8Validator,
+        bytes: []const u8,
+        mask_key: [4]u8,
+        mask_offset: usize,
+    ) Error!void {
+        var offset: usize = 0;
+        while (offset < bytes.len) {
+            if (self.remaining == 0) {
+                offset += maskedAsciiPrefixLen(
+                    bytes[offset..],
+                    mask_key,
+                    mask_offset + offset,
+                );
+                if (offset == bytes.len) return;
+            }
+            try self.feedByte(
+                bytes[offset] ^ mask_key[(mask_offset + offset) & 3],
+            );
+            offset += 1;
+        }
+    }
+
     pub fn finish(self: Utf8Validator) Error!void {
         if (self.remaining != 0) return error.InvalidUtf8;
     }
@@ -412,6 +439,34 @@ inline fn asciiPrefixLen(bytes: []const u8) usize {
         }
     }
     while (offset < bytes.len and bytes[offset] < 0x80) : (offset += 1) {}
+    return offset;
+}
+
+inline fn maskedAsciiPrefixLen(
+    bytes: []const u8,
+    mask_key: [4]u8,
+    mask_offset: usize,
+) usize {
+    const rotated = rotatedMask(mask_key, mask_offset);
+    var offset: usize = 0;
+    if (comptime backend_supports_vectors) {
+        const vector_size = std.simd.suggestVectorLength(u8) orelse
+            @sizeOf(usize);
+        const high_bits: @Vector(vector_size, u8) = @splat(0x80);
+        const mask_vector = std.simd.repeat(
+            vector_size,
+            @as(@Vector(4, u8), rotated),
+        );
+        while (bytes.len - offset >= vector_size) {
+            const block: @Vector(vector_size, u8) =
+                bytes[offset..][0..vector_size].* ^ mask_vector;
+            if (@reduce(.Or, block & high_bits) != 0) break;
+            offset += vector_size;
+        }
+    }
+    while (offset < bytes.len and
+        (bytes[offset] ^ rotated[offset & 3]) < 0x80) : (offset += 1)
+    {}
     return offset;
 }
 
@@ -470,6 +525,37 @@ test "WebSocket incremental UTF-8 validator skips ASCII blocks safely" {
             validator.feed(&storage),
         );
     }
+}
+
+test "WebSocket incremental UTF-8 validator handles masked offsets" {
+    const key = [4]u8{ 0x12, 0x34, 0x56, 0x78 };
+    var storage = [_]u8{'a'} ** 96;
+    @memcpy(storage[31..34], "\xe2\x98\x83");
+    const plain = storage;
+    for (0..4) |mask_offset| {
+        storage = plain;
+        applyMask(&storage, key, mask_offset);
+        var validator: Utf8Validator = .{};
+        try validator.feedMasked(&storage, key, mask_offset);
+        try validator.finish();
+
+        storage = plain;
+        storage[63] = 0xff;
+        applyMask(&storage, key, mask_offset);
+        validator.reset();
+        try std.testing.expectError(
+            error.InvalidUtf8,
+            validator.feedMasked(&storage, key, mask_offset),
+        );
+    }
+
+    var split = [_]u8{ 0xe2, 0x98, 0x83 };
+    applyMask(&split, key, 3);
+    var validator: Utf8Validator = .{};
+    try validator.feedMasked(split[0..1], key, 3);
+    try validator.feedMasked(split[1..2], key, 4);
+    try validator.feedMasked(split[2..3], key, 5);
+    try validator.finish();
 }
 
 fn validatePayload(header: FrameHeader, payload: []const u8, options: ParseFrameOptions) Error!void {

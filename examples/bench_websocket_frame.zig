@@ -176,6 +176,32 @@ pub fn main() !void {
     }
     const sparse_ns = nowNs(io) -| sparse_started;
 
+    var masked_text = ascii_text;
+    const masked_offset: usize = 3;
+    netz.websocket.applyMask(&masked_text, mask_key, masked_offset);
+    const masked_utf8_scalar_started = nowNs(io);
+    var masked_utf8_scalar_checksum: u64 = 0;
+    for (0..utf8_iterations) |_| {
+        var validator: netz.websocket.Utf8Validator = .{};
+        for (&masked_text, 0..) |byte, index| {
+            try validator.feedByte(
+                byte ^ mask_key[(masked_offset + index) & 3],
+            );
+        }
+        try validator.finish();
+        masked_utf8_scalar_checksum +%= validator.remaining + masked_text[0];
+    }
+    const masked_utf8_scalar_ns = nowNs(io) -| masked_utf8_scalar_started;
+    const masked_utf8_started = nowNs(io);
+    var masked_utf8_checksum: u64 = 0;
+    for (0..utf8_iterations) |_| {
+        var validator: netz.websocket.Utf8Validator = .{};
+        try validator.feedMasked(&masked_text, mask_key, masked_offset);
+        try validator.finish();
+        masked_utf8_checksum +%= validator.remaining + masked_text[0];
+    }
+    const masked_utf8_ns = nowNs(io) -| masked_utf8_started;
+
     var parse_storage: [32]u8 = undefined;
     const parse_frame = try netz.websocket.writeFrameInto(
         &parse_storage,
@@ -230,6 +256,9 @@ pub fn main() !void {
         \\  incremental UTF-8 sparse scalar: {d:.2} ns/message
         \\  incremental UTF-8 sparse validation: {d:.2} ns/message
         \\  incremental UTF-8 sparse speedup: {d:.2}x
+        \\  masked UTF-8 scalar validation: {d:.2} ns/message
+        \\  masked UTF-8 vector validation: {d:.2} ns/message
+        \\  masked UTF-8 speedup: {d:.2}x
         \\  duplicate frame-header parse: {d:.2} ns/frame
         \\  reused frame-header parse: {d:.2} ns/frame
         \\  frame-header reuse speedup: {d:.2}x
@@ -265,6 +294,12 @@ pub fn main() !void {
             @as(f64, @floatFromInt(utf8_iterations)),
         @as(f64, @floatFromInt(sparse_scalar_ns)) /
             @as(f64, @floatFromInt(@max(sparse_ns, 1))),
+        @as(f64, @floatFromInt(masked_utf8_scalar_ns)) /
+            @as(f64, @floatFromInt(utf8_iterations)),
+        @as(f64, @floatFromInt(masked_utf8_ns)) /
+            @as(f64, @floatFromInt(utf8_iterations)),
+        @as(f64, @floatFromInt(masked_utf8_scalar_ns)) /
+            @as(f64, @floatFromInt(@max(masked_utf8_ns, 1))),
         @as(f64, @floatFromInt(parse_ns)) /
             @as(f64, @floatFromInt(parse_iterations)),
         @as(f64, @floatFromInt(reused_parse_ns)) /
@@ -280,6 +315,8 @@ pub fn main() !void {
             utf8_checksum +%
             sparse_scalar_checksum +%
             sparse_checksum +%
+            masked_utf8_scalar_checksum +%
+            masked_utf8_checksum +%
             parse_checksum +%
             reused_parse_checksum,
     });

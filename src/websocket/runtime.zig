@@ -6787,11 +6787,11 @@ fn validateBufferedTextRange(
     if (available_end <= validated.*) return;
     const bytes = available[validated.*..available_end];
     if (header.mask_key) |mask| {
-        for (bytes, 0..) |byte, index| {
-            try connection.incoming_text_utf8.feedByte(
-                byte ^ mask[(validated.* - header.header_len + index) & 3],
-            );
-        }
+        try connection.incoming_text_utf8.feedMasked(
+            bytes,
+            mask,
+            validated.* - header.header_len,
+        );
     } else {
         try connection.incoming_text_utf8.feed(bytes);
     }

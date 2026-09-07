@@ -240,6 +240,11 @@ run measured 40.32 ns/message versus 2007.79 ns for the directly invoked
 scalar ASCII path (49.80x), and 301.08 versus 2184.19 ns for sparse Unicode
 (7.25x). Split multibyte sequences plus valid and invalid high bytes at every
 offset across several vector boundaries retain direct regression coverage.
+Masked client text uses the same no-copy validator: it XORs and checks ASCII
+blocks as vectors, preserves all four mask phases across partial transport
+reads, and falls back to the incremental code-point state machine only when
+needed. One CPU-0 same-process run measured 58.37 ns per 4 KiB message versus
+2097.76 ns for the former scalar XOR/feed loop, a 35.94x speedup.
 HTTP/1, RFC 8441, and RFC 9220 receive paths also reuse the `FrameHeader` they
 already parsed to size their transport read instead of decoding the same
 variable-length header again in the complete-frame codec. The frame benchmark's
