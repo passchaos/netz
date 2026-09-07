@@ -1068,7 +1068,6 @@ pub fn openInitialPacketWithFixedBitPolicy(
         bytes[0],
         allow_zero_fixed_bit,
     );
-    try validateLongHeaderReservedBits(bytes[0]);
     const pn_len = @as(usize, (bytes[0] & 0x03) + 1);
     if (protected_len < pn_len + aead_tag_len) return error.InvalidInitialPacket;
     const payload_offset = pn_offset + pn_len;
@@ -1080,6 +1079,7 @@ pub fn openInitialPacketWithFixedBitPolicy(
     const payload = try allocator.alloc(u8, ciphertext.len);
     errdefer allocator.free(payload);
     try openPayload(keys, packet_number, bytes[0..payload_offset], ciphertext, tag, payload);
+    try validateLongHeaderReservedBits(bytes[0]);
 
     const dcid_owned = try allocator.dupe(u8, dcid);
     errdefer allocator.free(dcid_owned);
@@ -1205,7 +1205,6 @@ pub fn openHandshakePacketWithFixedBitPolicy(
         bytes[0],
         allow_zero_fixed_bit,
     );
-    try validateLongHeaderReservedBits(bytes[0]);
     const pn_len = @as(usize, (bytes[0] & 0x03) + 1);
     if (protected_len < pn_len + aead_tag_len) return error.InvalidInitialPacket;
     const payload_offset = pn_offset + pn_len;
@@ -1217,6 +1216,7 @@ pub fn openHandshakePacketWithFixedBitPolicy(
     const payload = try allocator.alloc(u8, ciphertext.len);
     errdefer allocator.free(payload);
     try openPayload(keys, packet_number, bytes[0..payload_offset], ciphertext, tag, payload);
+    try validateLongHeaderReservedBits(bytes[0]);
 
     const dcid_owned = try allocator.dupe(u8, dcid);
     errdefer allocator.free(dcid_owned);
@@ -1339,7 +1339,6 @@ pub fn openZeroRttPacketWithFixedBitPolicy(
         bytes[0],
         allow_zero_fixed_bit,
     );
-    try validateLongHeaderReservedBits(bytes[0]);
     const pn_len = @as(usize, (bytes[0] & 0x03) + 1);
     if (protected_len < pn_len + aead_tag_len) return error.InvalidInitialPacket;
     const payload_offset = pn_offset + pn_len;
@@ -1351,6 +1350,7 @@ pub fn openZeroRttPacketWithFixedBitPolicy(
     const payload = try allocator.alloc(u8, ciphertext.len);
     errdefer allocator.free(payload);
     try openPayload(keys, packet_number, bytes[0..payload_offset], ciphertext, tag, payload);
+    try validateLongHeaderReservedBits(bytes[0]);
 
     const dcid_owned = try allocator.dupe(u8, dcid);
     errdefer allocator.free(dcid_owned);
@@ -2029,11 +2029,11 @@ fn validateLongHeaderProtectionSampleBounds(protected_len: usize) Error!void {
 }
 
 fn validateLongHeaderReservedBits(first_byte: u8) Error!void {
-    // RFC 9000 §17.2: long headers have two reserved bits (0x0c) that are
-    // covered by header protection.  Mature stacks such as s2n-quic and
-    // quic-zig fail these packets after removing header protection and before
-    // accepting payload bytes.
-    if ((first_byte & 0x0c) != 0) return error.InvalidInitialPacket;
+    // RFC 9000 §17.2 requires checking long-header reserved bits only after
+    // both header and packet protection have been removed. Returning the same
+    // explicit protocol error as short headers keeps this distinction visible
+    // to connection state without creating a decryption oracle.
+    if ((first_byte & 0x0c) != 0) return error.InvalidReservedBits;
 }
 
 fn validateShortHeaderReservedBits(first_byte: u8) Error!void {

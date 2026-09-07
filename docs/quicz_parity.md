@@ -519,6 +519,11 @@ apparent old Key Phase that cannot authenticate is treated as ordinary invalid
 ciphertext rather than an observable `KEY_UPDATE_ERROR` oracle. Focused codec,
 connection, and dispatcher regressions cover all three boundaries plus delivery
 of a valid packet after a discarded malformed packet.
+Initial, Handshake, and 0-RTT packet protection applies the same deferred-error
+rule from RFC 9000 section 17.2 and RFC 9001 section 9.5: long-header reserved
+bits are reported only after AEAD succeeds. Tests cover every protected long
+packet type with both an authenticated non-zero value and a forged header whose
+unchanged tag must instead produce `AuthenticationFailed`.
 Closing connections now respond to current-path datagrams through a dedicated
 timer rather than parsing application frames or retransmitting immediately.
 The first response requires one packet, subsequent thresholds double to 2, 4,

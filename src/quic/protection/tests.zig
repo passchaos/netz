@@ -43,6 +43,74 @@ fn appendTruncatedPacketNumberForTest(
     try list.appendSlice(allocator, full[8 - packet_number_len ..]);
 }
 
+fn sealLongPacketWithReservedBitsForTest(
+    allocator: std.mem.Allocator,
+    keys: protection.PacketProtectionKeys,
+    packet_type: protection.ProtectedLongPacketType,
+    destination_connection_id: []const u8,
+    source_connection_id: []const u8,
+    packet_number: u64,
+    packet_number_len: u8,
+    payload: []const u8,
+) ![]u8 {
+    var packet: std.ArrayList(u8) = .empty;
+    errdefer packet.deinit(allocator);
+    try packet.append(
+        allocator,
+        longHeaderFirstByteForTest(
+            version_1_wire_for_test,
+            packet_type,
+            packet_number_len,
+        ) | 0x04,
+    );
+    try wire.appendInt(
+        &packet,
+        allocator,
+        u32,
+        version_1_wire_for_test,
+        .big,
+    );
+    try packet.append(allocator, @intCast(destination_connection_id.len));
+    try packet.appendSlice(allocator, destination_connection_id);
+    try packet.append(allocator, @intCast(source_connection_id.len));
+    try packet.appendSlice(allocator, source_connection_id);
+    if (packet_type == .initial) try varint.encode(&packet, allocator, 0);
+    try varint.encode(
+        &packet,
+        allocator,
+        packet_number_len + payload.len + protection.aead_tag_len,
+    );
+    const packet_number_offset = packet.items.len;
+    try appendTruncatedPacketNumberForTest(
+        &packet,
+        allocator,
+        packet_number,
+        packet_number_len,
+    );
+    const payload_offset = packet.items.len;
+    try packet.resize(
+        allocator,
+        payload_offset + payload.len + protection.aead_tag_len,
+    );
+    const ciphertext = packet.items[payload_offset .. payload_offset + payload.len];
+    const tag = packet.items[payload_offset + payload.len ..][0..protection.aead_tag_len];
+    try protection.protectPayload(
+        keys,
+        packet_number,
+        packet.items[0..payload_offset],
+        payload,
+        ciphertext,
+        tag,
+    );
+    try protection.applyHeaderProtectionForKeys(
+        keys,
+        .long,
+        packet.items,
+        packet_number_offset,
+    );
+    return packet.toOwnedSlice(allocator);
+}
+
 fn trafficSecretForSuiteForTest(suite: protection.CipherSuite) vail.tls.secret.Secret {
     return switch (suite.hash()) {
         .sha256 => .fromSha256([_]u8{0x51} ** 32),
@@ -890,41 +958,87 @@ test "QUIC short packet zero fixed bit requires RFC 9287 policy" {
 test "QUIC packet protection rejects reserved header bits after unprotect" {
     const allocator = std.testing.allocator;
 
-    {
-        const dcid = [_]u8{ 0xa1, 0xa2, 0xa3, 0xa4 };
-        const scid = [_]u8{ 0xb1, 0xb2, 0xb3, 0xb4 };
-        const keys = protection.deriveInitialSecrets(&dcid).client;
-        const payload = "initial reserved bits";
-        const packet_number: u64 = 4;
-        const packet_number_len: u8 = 4;
-
-        var packet: std.ArrayList(u8) = .empty;
-        errdefer packet.deinit(allocator);
-        try packet.append(allocator, longHeaderFirstByteForTest(version_1_wire_for_test, .initial, packet_number_len) | 0x04);
-        try wire.appendInt(&packet, allocator, u32, version_1_wire_for_test, .big);
-        try packet.append(allocator, @intCast(dcid.len));
-        try packet.appendSlice(allocator, &dcid);
-        try packet.append(allocator, @intCast(scid.len));
-        try packet.appendSlice(allocator, &scid);
-        try varint.encode(&packet, allocator, 0);
-        try varint.encode(&packet, allocator, packet_number_len + payload.len + protection.aead_tag_len);
-        const pn_offset = packet.items.len;
-        try appendTruncatedPacketNumberForTest(&packet, allocator, packet_number, packet_number_len);
-        const payload_offset = packet.items.len;
-        try packet.resize(allocator, payload_offset + payload.len + protection.aead_tag_len);
-        const ciphertext = packet.items[payload_offset .. payload_offset + payload.len];
-        const tag = packet.items[payload_offset + payload.len ..][0..protection.aead_tag_len];
-        try protection.protectPayload(keys, packet_number, packet.items[0..payload_offset], payload, ciphertext, tag);
-        try protection.applyHeaderProtectionForKeys(
-            keys,
-            .long,
-            packet.items,
-            pn_offset,
+    const long_dcid = [_]u8{ 0xa1, 0xa2, 0xa3, 0xa4 };
+    const long_scid = [_]u8{ 0xb1, 0xb2, 0xb3, 0xb4 };
+    const long_keys = protection.deriveInitialSecrets(&long_dcid).client;
+    for ([_]protection.ProtectedLongPacketType{
+        .initial,
+        .handshake,
+        .zero_rtt,
+    }) |packet_type| {
+        const malformed = try sealLongPacketWithReservedBitsForTest(
+            allocator,
+            long_keys,
+            packet_type,
+            &long_dcid,
+            &long_scid,
+            4,
+            4,
+            "long reserved bits",
         );
-
-        const malformed = try packet.toOwnedSlice(allocator);
         defer allocator.free(malformed);
-        try std.testing.expectError(error.InvalidInitialPacket, protection.openInitialPacket(allocator, keys, malformed, 0));
+        switch (packet_type) {
+            .initial => try std.testing.expectError(
+                error.InvalidReservedBits,
+                protection.openInitialPacket(
+                    allocator,
+                    long_keys,
+                    malformed,
+                    0,
+                ),
+            ),
+            .handshake => try std.testing.expectError(
+                error.InvalidReservedBits,
+                protection.openHandshakePacket(
+                    allocator,
+                    long_keys,
+                    malformed,
+                    0,
+                ),
+            ),
+            .zero_rtt => try std.testing.expectError(
+                error.InvalidReservedBits,
+                protection.openZeroRttPacket(
+                    allocator,
+                    long_keys,
+                    malformed,
+                    0,
+                ),
+            ),
+            .retry => unreachable,
+        }
+
+        malformed[malformed.len - 1] ^= 0x80;
+        switch (packet_type) {
+            .initial => try std.testing.expectError(
+                error.AuthenticationFailed,
+                protection.openInitialPacket(
+                    allocator,
+                    long_keys,
+                    malformed,
+                    0,
+                ),
+            ),
+            .handshake => try std.testing.expectError(
+                error.AuthenticationFailed,
+                protection.openHandshakePacket(
+                    allocator,
+                    long_keys,
+                    malformed,
+                    0,
+                ),
+            ),
+            .zero_rtt => try std.testing.expectError(
+                error.AuthenticationFailed,
+                protection.openZeroRttPacket(
+                    allocator,
+                    long_keys,
+                    malformed,
+                    0,
+                ),
+            ),
+            .retry => unreachable,
+        }
     }
 
     {
