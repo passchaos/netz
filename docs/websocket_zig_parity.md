@@ -208,6 +208,7 @@ Run:
 ```sh
 zig build bench-websocket-frame -Doptimize=ReleaseFast
 taskset -c 0 zig build bench-websocket-receive-buffer -Doptimize=ReleaseFast
+taskset -c 0 zig build bench-websocket-h3-echo -Doptimize=ReleaseFast
 ```
 
 The receive-buffer benchmark exercises 8,192 coalesced eight-byte frames over
@@ -218,6 +219,13 @@ bytes from 5,368,053,760 to 1,305,600: HTTP/1, RFC 8441, and RFC 9220 receive
 paths are now amortized linear rather than quadratic when a transport read
 contains many small frames. The benchmark is intentionally adversarial and is
 not presented as an end-to-end network throughput ratio.
+The dedicated RFC 9220 benchmark uses a real QUIC/TLS connection with a
+4096-byte datagram limit and 3500-byte paced DATA chunks. Three CPU-0 runs of
+the 4 KiB caller-buffer echo measured 54.730-56.287 us/roundtrip
+(138.79-142.74 logical MiB/s). The same payload split into 16 WebSocket frames
+measured 355.548-355.816 us/roundtrip (21.95-21.97 MiB/s), identifying
+per-fragment H3/QUIC send submission as the next dominant cost rather than the
+receive copy eliminated below.
 The RFC 9220 adapter also reserves the bounded receive-window tail before an
 HTTP/3 DATA read and lets the stream reader fill it directly. This removes the
 former 16 KiB stack staging buffer and its `scratch -> inbuf` copy while keeping

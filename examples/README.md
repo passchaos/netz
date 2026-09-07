@@ -31,6 +31,7 @@ taskset -c 0 zig build bench-quic-one-rtt-receive -Doptimize=ReleaseFast -- \
   --mode=visitor --frame=stream --warmup=200 --iterations=5000
 zig build bench-websocket-frame -Doptimize=ReleaseFast
 zig build bench-websocket-receive-buffer -Doptimize=ReleaseFast
+zig build bench-websocket-h3-echo -Doptimize=ReleaseFast
 zig build run-webtransport-handshake-stream -Doptimize=ReleaseFast
 ```
 
