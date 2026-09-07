@@ -3752,6 +3752,14 @@ test "QUIC 1-RTT trySend reports pacing without waiting" {
         .data = "payload",
     } }};
 
+    // Keep the non-blocking assertion independent of how long this test was
+    // descheduled after the first socket write. The fixed-time send above
+    // intentionally seeded a synthetic pacing epoch; anchor it to the real
+    // clock used by `trySend` immediately before checking the fast failure.
+    one_rtt.testing.exhaustPacingAt(&connection, @intCast(@max(
+        @as(i96, 0),
+        std.Io.Clock.awake.now(io).nanoseconds,
+    )));
     try std.testing.expectError(error.PacingLimited, connection.trySend(&blocked));
     try std.testing.expect(connection.pacing_blocked_until_ns != null);
     try std.testing.expectEqual(next_packet_number, connection.next_packet_number);

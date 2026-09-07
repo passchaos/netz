@@ -236,8 +236,16 @@ split. Its socket or TLS read is bounded to the current frame remainder, so a
 1 KiB masked text payload can cross a timeout in caller storage without growing
 the WebSocket receive buffer to the frame size; a real TCP regression verifies
 the partial offset, same-buffer retry rule, mask phase, and completed payload.
-RFC 8441 retains its owned HTTP/2 DATA-frame staging because the tunnel API can
-return bytes beyond the current WebSocket frame.
+RFC 8441 now retains each owned HTTP/2 DATA frame with a cursor and copies its
+WebSocket bytes directly into the final caller/compression destination. This
+preserves sibling-frame routing, padding validation, flow-control accounting,
+and DATA read-ahead while removing the `H2 DATA -> inbuf -> out` staging copy.
+A bidirectional h2c regression splits both unmasked server and masked client
+payloads across DATA frames, exercises timeout recovery, and keeps `inbuf`
+smaller than the 1 KiB WebSocket message. A second multiplexing regression
+inserts a sibling response between two DATA portions and verifies that
+`ResponseAvailable` preserves the partial WebSocket cursor until the sibling is
+consumed and the same caller buffer resumes.
 
 The 2026-08-17 same-host sample ranges for 200,000 masked 4 KiB binary frames:
 

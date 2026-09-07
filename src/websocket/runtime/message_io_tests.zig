@@ -2,6 +2,7 @@ const std = @import("std");
 const websocket = @import("../mod.zig");
 const runtime = @import("../runtime.zig");
 const compression_scratch = @import("compression_scratch.zig");
+const http2_runtime = @import("../../http2/mod.zig").runtime;
 
 const Server = runtime.Server;
 const Client = runtime.Client;
@@ -1508,6 +1509,307 @@ test "WebSocket HTTP2 caller-buffer receive needs no message scratch" {
     try std.testing.expectEqual(websocket.Opcode.text, message.opcode);
     try std.testing.expectEqualStrings("direct caller buffer", message.payload);
     try std.testing.expect(!failing.has_induced_failure);
+}
+
+test "WebSocket HTTP2 caller-buffer streams DATA into output" {
+    const allocator = std.testing.allocator;
+    var threaded = std.Io.Threaded.init(allocator, .{});
+    defer threaded.deinit();
+    const io = threaded.io();
+
+    const payload = "h2-direct-frame-" ** 64;
+    const prefix_len = 37;
+    var server = try http2_runtime.Server.listen(
+        allocator,
+        io,
+        .{ .ip4 = .loopback(0) },
+        .{
+            .max_frame_payload = 4096,
+            .max_body_bytes = 4096,
+            .enable_connect_protocol = true,
+        },
+    );
+    defer server.deinit();
+
+    const Shared = struct {
+        server: *http2_runtime.Server,
+        io: std.Io,
+        prefix_sent: std.Io.Event = .unset,
+        resume_send: std.Io.Event = .unset,
+        receive_done: std.Io.Event = .unset,
+        err: ?anyerror = null,
+
+        fn run(self: *@This()) void {
+            self.runFallible() catch |err| {
+                self.err = err;
+                self.prefix_sent.set(self.io);
+            };
+        }
+
+        fn runFallible(self: *@This()) !void {
+            var h2 = try self.server.accept();
+            defer h2.close();
+            var connection = try runtime.H2Server.accept(
+                self.server.allocator,
+                &h2,
+                .{ .limits = .{
+                    .max_head_bytes = 4096,
+                    .max_frame_bytes = payload.len,
+                    .max_message_bytes = payload.len,
+                } },
+            );
+            defer connection.close();
+
+            var header_storage: [websocket.max_frame_header_len]u8 = undefined;
+            const header = try websocket.writeFrameHeaderForLengthInto(
+                &header_storage,
+                .text,
+                payload.len,
+                .{},
+            );
+            var prefix: [websocket.max_frame_header_len + prefix_len]u8 =
+                undefined;
+            @memcpy(prefix[0..header.len], header);
+            @memcpy(
+                prefix[header.len..][0..prefix_len],
+                payload[0..prefix_len],
+            );
+            try connection.tunnel.write(
+                prefix[0 .. header.len + prefix_len],
+                false,
+            );
+            self.prefix_sent.set(self.io);
+            try self.resume_send.wait(self.io);
+            try connection.tunnel.write(payload[prefix_len..], false);
+            try self.receive_done.wait(self.io);
+
+            var storage: [payload.len]u8 = undefined;
+            const message = try connection.receiveMessageIntoWithTimeout(
+                &storage,
+                .fromSeconds(5),
+            );
+            try std.testing.expectEqual(websocket.Opcode.text, message.opcode);
+            try std.testing.expectEqualStrings(payload, message.payload);
+            try std.testing.expect(connection.inbuf.capacity < payload.len);
+        }
+    };
+
+    var shared = Shared{ .server = &server, .io = io };
+    const thread = try std.Thread.spawn(.{}, Shared.run, .{&shared});
+    var joined = false;
+    defer if (!joined) {
+        shared.resume_send.set(io);
+        shared.receive_done.set(io);
+        thread.join();
+    };
+
+    var h2_client = try http2_runtime.Client.connect(
+        allocator,
+        io,
+        server.address(),
+        .{ .max_frame_payload = 4096, .max_body_bytes = 4096 },
+    );
+    defer h2_client.close();
+    var client = try runtime.H2Client.open(allocator, &h2_client, .{
+        .authority = "localhost",
+        .path = "/message-frame-direct",
+        .limits = .{
+            .max_head_bytes = 4096,
+            .max_frame_bytes = payload.len,
+            .max_message_bytes = payload.len,
+        },
+    });
+    defer client.close();
+
+    try shared.prefix_sent.wait(io);
+    var storage: [payload.len]u8 = undefined;
+    try std.testing.expectError(
+        error.Timeout,
+        client.receiveMessageIntoWithTimeout(
+            &storage,
+            .fromMilliseconds(20),
+        ),
+    );
+    try std.testing.expect(client.message_into.active());
+    try std.testing.expectEqual(
+        @as(usize, prefix_len),
+        client.message_frame_receive.payload_written,
+    );
+    try std.testing.expect(client.pending_tunnel_data == null);
+    var other_storage: [payload.len]u8 = undefined;
+    try std.testing.expectError(
+        error.BufferTooShort,
+        client.message_into.validateOutput(&other_storage),
+    );
+    try std.testing.expect(client.inbuf.capacity < payload.len);
+
+    shared.resume_send.set(io);
+    const message = client.receiveMessageIntoWithTimeout(
+        &storage,
+        .fromSeconds(5),
+    ) catch |err| {
+        shared.receive_done.set(io);
+        thread.join();
+        joined = true;
+        if (shared.err) |send_err| return send_err;
+        return err;
+    };
+    try std.testing.expectEqual(websocket.Opcode.text, message.opcode);
+    try std.testing.expectEqualStrings(payload, message.payload);
+    try std.testing.expect(client.inbuf.capacity < payload.len);
+
+    var encoded: std.ArrayList(u8) = .empty;
+    defer encoded.deinit(allocator);
+    try websocket.writeFrame(
+        &encoded,
+        allocator,
+        .text,
+        payload,
+        .{ .mask_key = .{ 0x11, 0x22, 0x33, 0x44 } },
+    );
+    const header = try websocket.FrameHeader.parse(encoded.items);
+    try client.tunnel.write(
+        encoded.items[0 .. header.header_len + prefix_len],
+        false,
+    );
+    try client.tunnel.write(
+        encoded.items[header.header_len + prefix_len ..],
+        false,
+    );
+    shared.receive_done.set(io);
+    thread.join();
+    joined = true;
+    if (shared.err) |err| return err;
+}
+
+test "WebSocket HTTP2 caller-buffer resumes after sibling response" {
+    const allocator = std.testing.allocator;
+    var threaded = std.Io.Threaded.init(allocator, .{});
+    defer threaded.deinit();
+    const io = threaded.io();
+
+    const payload = "websocket-after-sibling-" ** 32;
+    const prefix_len = 29;
+    var server = try http2_runtime.Server.listen(
+        allocator,
+        io,
+        .{ .ip4 = .loopback(0) },
+        .{
+            .max_frame_payload = 4096,
+            .max_body_bytes = 4096,
+            .enable_connect_protocol = true,
+        },
+    );
+    defer server.deinit();
+
+    const Shared = struct {
+        server: *http2_runtime.Server,
+        io: std.Io,
+        receive_done: std.Io.Event = .unset,
+        err: ?anyerror = null,
+
+        fn run(self: *@This()) void {
+            self.runFallible() catch |err| {
+                self.err = err;
+            };
+        }
+
+        fn runFallible(self: *@This()) !void {
+            var h2 = try self.server.accept();
+            defer h2.close();
+            var connection = try runtime.H2Server.accept(
+                self.server.allocator,
+                &h2,
+                .{ .limits = .{
+                    .max_head_bytes = 4096,
+                    .max_frame_bytes = payload.len,
+                    .max_message_bytes = payload.len,
+                } },
+            );
+            defer connection.close();
+
+            var header_storage: [websocket.max_frame_header_len]u8 = undefined;
+            const header = try websocket.writeFrameHeaderForLengthInto(
+                &header_storage,
+                .text,
+                payload.len,
+                .{},
+            );
+            try connection.tunnel.writeParts(
+                header,
+                payload[0..prefix_len],
+                false,
+            );
+
+            var sibling = try h2.readRequest();
+            defer sibling.deinit(self.server.allocator);
+            try std.testing.expectEqualStrings("/sibling", sibling.path);
+            try h2.writeResponse(sibling.stream_id, .{
+                .body = "ready",
+                .request_method = sibling.method,
+            });
+            try connection.tunnel.write(payload[prefix_len..], false);
+            try self.receive_done.wait(self.io);
+        }
+    };
+
+    var shared = Shared{ .server = &server, .io = io };
+    const thread = try std.Thread.spawn(.{}, Shared.run, .{&shared});
+    var joined = false;
+    defer if (!joined) {
+        shared.receive_done.set(io);
+        thread.join();
+    };
+
+    var h2_client = try http2_runtime.Client.connect(
+        allocator,
+        io,
+        server.address(),
+        .{ .max_frame_payload = 4096, .max_body_bytes = 4096 },
+    );
+    defer h2_client.close();
+    var client = try runtime.H2Client.open(allocator, &h2_client, .{
+        .authority = "localhost",
+        .path = "/websocket",
+        .limits = .{
+            .max_head_bytes = 4096,
+            .max_frame_bytes = payload.len,
+            .max_message_bytes = payload.len,
+        },
+    });
+    defer client.close();
+    var sibling = try h2_client.startRequest(.{
+        .path = "/sibling",
+        .authority = "localhost",
+        .body_length = 0,
+    });
+    defer sibling.deinit();
+    try sibling.finish();
+
+    var storage: [payload.len]u8 = undefined;
+    try std.testing.expectError(
+        error.ResponseAvailable,
+        client.receiveMessageIntoWithTimeout(&storage, .fromSeconds(5)),
+    );
+    try std.testing.expect(client.message_into.active());
+    try std.testing.expectEqual(
+        @as(usize, prefix_len),
+        client.message_frame_receive.payload_written,
+    );
+    var sibling_response = try sibling.readResponse();
+    defer sibling_response.deinit(allocator);
+    try std.testing.expectEqualStrings("ready", sibling_response.body);
+
+    const message = try client.receiveMessageIntoWithTimeout(
+        &storage,
+        .fromSeconds(5),
+    );
+    try std.testing.expectEqualStrings(payload, message.payload);
+
+    shared.receive_done.set(io);
+    thread.join();
+    joined = true;
+    if (shared.err) |err| return err;
 }
 
 fn writeAllToStream(

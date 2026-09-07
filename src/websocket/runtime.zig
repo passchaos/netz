@@ -4168,7 +4168,7 @@ pub const Connection = struct {
         self: *Connection,
         out: []u8,
     ) Error!Message {
-        return receiveMessageIntoTcpConnection(self, out, null);
+        return receiveMessageIntoDirectConnection(self, out, null);
     }
 
     pub fn receiveMessageIntoWithTimeout(
@@ -4177,7 +4177,7 @@ pub const Connection = struct {
         timeout: std.Io.Duration,
     ) Error!Message {
         if (timeout.nanoseconds <= 0) return error.Timeout;
-        return receiveMessageIntoTcpConnection(
+        return receiveMessageIntoDirectConnection(
             self,
             out,
             .fromNow(self.io, .{ .raw = timeout, .clock = .awake }),
@@ -4193,7 +4193,7 @@ pub const Connection = struct {
         deadline: std.Io.Clock.Timestamp,
     ) Error!Message {
         _ = try deadline_policy.usableAwake(self.io, deadline);
-        return receiveMessageIntoTcpConnection(self, out, deadline);
+        return receiveMessageIntoDirectConnection(self, out, deadline);
     }
 
     fn ensureCompressionReceiveScratch(self: *Connection) Error!void {
@@ -4454,6 +4454,17 @@ pub const Connection = struct {
         }
     }
 
+    fn readMessagePayloadChunk(
+        self: *Connection,
+        out: []u8,
+        deadline: ?std.Io.Clock.Timestamp,
+    ) Error!usize {
+        if (deadline) |absolute| {
+            return self.transport().readWithDeadline(out, absolute);
+        }
+        return self.transport().read(out);
+    }
+
     fn ensureBufferedWithDeadline(
         self: *Connection,
         len: usize,
@@ -4543,6 +4554,10 @@ pub const H2Connection = struct {
     incoming_frame_validated: usize = 0,
     message_assembler: ?websocket.MessageAssembler = null,
     message_into: MessageIntoReceiveState = .{},
+    message_frame_receive: MessageFrameReceiveState = .{},
+    pending_tunnel_data: ?http2_runtime.OwnedTunnelData = null,
+    pending_tunnel_data_offset: usize = 0,
+    receive_finished: bool = false,
     selected_protocol: ?[]u8 = null,
     permessage_deflate: bool = false,
     compression_threshold: usize = default_compression_threshold,
@@ -4576,6 +4591,9 @@ pub const H2Connection = struct {
     }
 
     pub fn close(self: *H2Connection) void {
+        if (self.pending_tunnel_data) |*data| {
+            data.deinit(self.allocator);
+        }
         if (self.tunnel_owned) {
             self.tunnel.connection.abandonExtendedConnect(
                 self.tunnel.stream_id,
@@ -5349,7 +5367,7 @@ pub const H2Connection = struct {
         self: *H2Connection,
         out: []u8,
     ) Error!Message {
-        return receiveMessageIntoConnection(self, out, null);
+        return receiveMessageIntoDirectConnection(self, out, null);
     }
 
     pub fn receiveMessageIntoWithTimeout(
@@ -5358,7 +5376,7 @@ pub const H2Connection = struct {
         timeout: std.Io.Duration,
     ) Error!Message {
         if (timeout.nanoseconds <= 0) return error.Timeout;
-        return receiveMessageIntoConnection(
+        return receiveMessageIntoDirectConnection(
             self,
             out,
             .fromNow(
@@ -5379,7 +5397,7 @@ pub const H2Connection = struct {
             self.tunnel.connection.io,
             deadline,
         );
-        return receiveMessageIntoConnection(self, out, deadline);
+        return receiveMessageIntoDirectConnection(self, out, deadline);
     }
 
     fn ensureCompressionReceiveScratch(self: *H2Connection) Error!void {
@@ -5756,26 +5774,120 @@ pub const H2Connection = struct {
             &self.inbuf,
             self.inbuf_consumed,
         ) < len) {
-            var data = if (deadline) |absolute|
-                try self.tunnel.readWithDeadline(absolute)
-            else
-                try self.tunnel.read();
-            defer data.deinit(self.allocator);
-            if (data.data.len != 0) {
+            if (self.receive_finished) return error.ConnectionClosed;
+            const count = try self.appendTunnelDataChunk(deadline);
+            if (count == 0) return error.ConnectionClosed;
+        }
+    }
+
+    fn ensureBufferedExactWithDeadline(
+        self: *H2Connection,
+        len: usize,
+        deadline: ?std.Io.Clock.Timestamp,
+    ) Error!void {
+        while (message_buffer.unreadLen(
+            &self.inbuf,
+            self.inbuf_consumed,
+        ) < len) {
+            if (self.receive_finished) return error.ConnectionClosed;
+            const missing = len - message_buffer.unreadLen(
+                &self.inbuf,
+                self.inbuf_consumed,
+            );
+            const destination = try message_buffer.reserveAppendAfterConsumed(
+                &self.inbuf,
+                &self.inbuf_consumed,
+                self.allocator,
+                missing,
+            );
+            const count = try self.readMessagePayloadChunk(
+                destination,
+                deadline,
+            );
+            if (count == 0) return error.ConnectionClosed;
+            message_buffer.commitAppend(&self.inbuf, count);
+        }
+    }
+
+    fn appendTunnelDataChunk(
+        self: *H2Connection,
+        deadline: ?std.Io.Clock.Timestamp,
+    ) Error!usize {
+        while (true) {
+            if (self.pending_tunnel_data) |*pending| {
+                const remaining =
+                    pending.data[self.pending_tunnel_data_offset..];
                 try message_buffer.appendAfterConsumed(
                     &self.inbuf,
                     &self.inbuf_consumed,
                     self.allocator,
-                    data.data,
+                    remaining,
                 );
+                const count = remaining.len;
+                const end_stream = pending.end_stream;
+                pending.deinit(self.allocator);
+                self.pending_tunnel_data = null;
+                self.pending_tunnel_data_offset = 0;
+                if (end_stream) self.receive_finished = true;
+                return count;
             }
-            if (data.end_stream) {
-                if (message_buffer.unreadLen(
-                    &self.inbuf,
-                    self.inbuf_consumed,
-                ) < len) return error.ConnectionClosed;
-                break;
+            if (self.receive_finished) return 0;
+            const data = if (deadline) |absolute|
+                try self.tunnel.readWithDeadline(absolute)
+            else
+                try self.tunnel.read();
+            if (data.data.len == 0) {
+                const end_stream = data.end_stream;
+                var empty = data;
+                empty.deinit(self.allocator);
+                if (end_stream) {
+                    self.receive_finished = true;
+                    return 0;
+                }
+                continue;
             }
+            self.pending_tunnel_data = data;
+        }
+    }
+
+    fn readMessagePayloadChunk(
+        self: *H2Connection,
+        out: []u8,
+        deadline: ?std.Io.Clock.Timestamp,
+    ) Error!usize {
+        std.debug.assert(out.len != 0);
+        while (true) {
+            if (self.pending_tunnel_data) |*pending| {
+                const remaining =
+                    pending.data[self.pending_tunnel_data_offset..];
+                const count = @min(out.len, remaining.len);
+                @memcpy(out[0..count], remaining[0..count]);
+                self.pending_tunnel_data_offset += count;
+                if (self.pending_tunnel_data_offset == pending.data.len) {
+                    const end_stream = pending.end_stream;
+                    pending.deinit(self.allocator);
+                    self.pending_tunnel_data = null;
+                    self.pending_tunnel_data_offset = 0;
+                    if (end_stream) self.receive_finished = true;
+                }
+                return count;
+            }
+            if (self.receive_finished) return 0;
+            const data = if (deadline) |absolute|
+                try self.tunnel.readWithDeadline(absolute)
+            else
+                try self.tunnel.read();
+            if (data.data.len == 0) {
+                const end_stream = data.end_stream;
+                var empty = data;
+                empty.deinit(self.allocator);
+                if (end_stream) {
+                    self.receive_finished = true;
+                    return 0;
+                }
+                continue;
+            }
+            self.pending_tunnel_data = data;
         }
     }
 
@@ -6509,8 +6621,8 @@ pub const H2AcceptOptions = struct {
 
 const canSendOpcode = message_state.canSendOpcode;
 
-fn receiveMessageIntoTcpConnection(
-    connection: *Connection,
+fn receiveMessageIntoDirectConnection(
+    connection: anytype,
     out: []u8,
     deadline: ?std.Io.Clock.Timestamp,
 ) Error!Message {
@@ -6520,14 +6632,16 @@ fn receiveMessageIntoTcpConnection(
         return error.BufferTooShort;
     }
     try connection.message_into.validateOutput(out);
-    errdefer |err| if (err != error.Timeout) {
+    errdefer |err| if (err != error.Timeout and
+        err != error.ResponseAvailable)
+    {
         connection.message_into.reset();
         connection.message_frame_receive.reset();
     };
 
     var control_storage: [125]u8 = undefined;
     while (true) {
-        const frame = try receiveMessageFrameIntoTcpConnection(
+        const frame = try receiveMessageFrameIntoDirectConnection(
             connection,
             out,
             &control_storage,
@@ -6576,8 +6690,8 @@ fn receiveMessageIntoTcpConnection(
     }
 }
 
-fn receiveMessageFrameIntoTcpConnection(
-    connection: *Connection,
+fn receiveMessageFrameIntoDirectConnection(
+    connection: anytype,
     out: []u8,
     control_out: *[125]u8,
     deadline: ?std.Io.Clock.Timestamp,
@@ -6712,15 +6826,10 @@ fn receiveMessageFrameIntoTcpConnection(
             state.payload_written += count;
             continue;
         }
-        const read = if (deadline) |absolute|
-            try connection.transport().readWithDeadline(
-                destination[state.payload_written..],
-                absolute,
-            )
-        else
-            try connection.transport().read(
-                destination[state.payload_written..],
-            );
+        const read = try connection.readMessagePayloadChunk(
+            destination[state.payload_written..],
+            deadline,
+        );
         if (read == 0) return error.ConnectionClosed;
         if (header.mask_key) |mask| {
             websocket.applyMask(
@@ -6769,129 +6878,6 @@ fn decodeMessagePayloadChunk(
         @memcpy(destination, encoded);
     }
     if (validate_text) try validator.feed(destination);
-}
-
-/// Assemble a message directly into caller storage for either stream-backed
-/// WebSocket transport. Both connection types expose the same buffering and
-/// frame-writing contract; keeping the state machine here prevents the HTTP/2
-/// adapter from regressing to per-frame ownership and a second whole-message
-/// buffer.
-fn receiveMessageIntoConnection(
-    connection: anytype,
-    out: []u8,
-    deadline: ?std.Io.Clock.Timestamp,
-) Error!Message {
-    errdefer |err| closeAfterReceiveError(connection, err);
-    if (connection.message_assembler != null) return error.InvalidFrame;
-    if (out.len < connection.limits.max_message_bytes) {
-        return error.BufferTooShort;
-    }
-    try connection.message_into.validateOutput(out);
-
-    var control_storage: [125]u8 = undefined;
-    while (true) {
-        const frame_out = if (connection.message_into.compressed)
-            connection.compression_receive.payload.items[connection.message_into.written..]
-        else
-            out[connection.message_into.written..];
-        const frame = try receiveFrameIntoConnection(
-            connection,
-            frame_out,
-            &control_storage,
-            deadline,
-        );
-        switch (frame.header.opcode) {
-            .ping => {
-                try connection.replyPong(frame.payload);
-                continue;
-            },
-            .pong => continue,
-            .close => {
-                try connection.echoCloseFrame(frame.payload);
-                return error.ConnectionClosed;
-            },
-            .text, .binary => {
-                if (connection.message_into.active()) {
-                    return error.InvalidFrame;
-                }
-                connection.message_into.begin(
-                    out,
-                    frame.header.opcode,
-                    frame.header.rsv1,
-                );
-                if (connection.message_into.compressed and
-                    !connection.permessage_deflate)
-                {
-                    return error.UnexpectedRsv;
-                }
-                if (connection.message_into.compressed) {
-                    try connection.ensureCompressionReceiveScratch();
-                }
-                // The first frame is decoded before its RSV1 bit selects
-                // compressed scratch, so copy it exactly once. Continuations
-                // then decode directly into retained compressed storage.
-                if (connection.message_into.compressed and
-                    frame.payload.len != 0)
-                {
-                    @memcpy(
-                        connection.compression_receive
-                            .payload.items[0..frame.payload.len],
-                        frame.payload,
-                    );
-                }
-            },
-            .continuation => {
-                if (!connection.message_into.active()) {
-                    return error.InvalidFrame;
-                }
-                if (frame.header.rsv1) return error.UnexpectedRsv;
-            },
-            else => return error.InvalidFrame,
-        }
-        connection.message_into.written = std.math.add(
-            usize,
-            connection.message_into.written,
-            frame.payload.len,
-        ) catch return error.PayloadTooLarge;
-        if (connection.message_into.written >
-            connection.limits.max_message_bytes)
-        {
-            return error.PayloadTooLarge;
-        }
-        // H1/H2 already validated these bytes while filling the transport
-        // buffer. This state owns the proof through fragmented completion.
-        if (connection.message_into.opcode == .text and
-            !connection.message_into.compressed)
-        {
-            connection.message_into.text_utf8 =
-                connection.incoming_text_utf8;
-        }
-        if (!frame.header.fin) continue;
-
-        const message_opcode = connection.message_into.opcode orelse
-            return error.InvalidFrame;
-        const was_compressed = connection.message_into.compressed;
-        const payload = if (was_compressed)
-            try websocket.decompressMessageInto(
-                out[0..connection.limits.max_message_bytes],
-                connection.compression_receive.payload.items[0..connection.message_into.written],
-                connection.compression_receive.payload.allocatedSlice(),
-                connection.compression_receive.flate_window.?,
-            )
-        else
-            out[0..connection.message_into.written];
-        if (connection.message_into.payloadNeedsFinalUtf8Validation() and
-            !std.unicode.utf8ValidateSlice(payload))
-        {
-            return error.InvalidUtf8;
-        }
-        connection.message_into.reset();
-        return .{
-            .opcode = message_opcode,
-            .payload = payload,
-            .was_compressed = was_compressed,
-        };
-    }
 }
 
 fn receiveFrameIntoConnection(
