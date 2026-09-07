@@ -1591,6 +1591,10 @@ pub const EndpointAcceptedSession = struct {
     session_id: webtransport.SessionId,
     streams: webtransport.StreamRegistry,
     control: session_control.Control,
+    /// This runtime advertises one WebTransport session per HTTP/3
+    /// connection. If rejection is temporarily paced or flow-controlled, keep
+    /// the extra request ID here and retry without consuming another head.
+    request_rejection_pending: ?u62 = null,
     /// A peer CLOSE was already reported to the application; the endpoint
     /// still owes the CONNECT response FIN and retries it from later turns.
     close_response_pending: bool = false,
@@ -2553,6 +2557,7 @@ pub const EndpointServer = struct {
                 session_value.session_id.value,
                 packet,
             );
+            _ = try rejectAdditionalEndpointRequestsOnce(session_value);
             return self.pollAcceptedSessions(stream_buffer);
         }
         if (self.pending.get(handle)) |pending_value| {
@@ -2712,12 +2717,25 @@ pub const EndpointServer = struct {
                 stream_buffer,
             );
         }
+
+        pub fn processAcceptedPacket(
+            accepted: *EndpointAcceptedSession,
+            packet: *const quic.one_rtt.ReceivedPacket,
+        ) EndpointServerError!void {
+            try accepted.h3.processDetachedRequestPacket(
+                accepted.session_id.value,
+                packet,
+            );
+            _ = try rejectAdditionalEndpointRequestsOnce(accepted);
+            try accepted.refreshTimer();
+        }
     };
 
     fn pollEndpointSession(
         target: *EndpointAcceptedSession,
         stream_buffer: []u8,
     ) Error!?EndpointSessionEvent {
+        _ = try rejectAdditionalEndpointRequestsOnce(target);
         // Accepted sessions remain in the endpoint map until the application
         // removes their connection. Once the peer terminal event has been
         // delivered, do not poll stream/DATAGRAM APIs whose association is no
@@ -2767,6 +2785,90 @@ pub const EndpointServer = struct {
         return null;
     }
 };
+
+fn rejectAdditionalEndpointRequestsOnce(
+    target: *EndpointAcceptedSession,
+) Error!bool {
+    return rejectAdditionalHandshakeRequestsOnce(
+        target.h3,
+        &target.streams,
+        target.session_id,
+        &target.request_rejection_pending,
+    );
+}
+
+fn rejectAdditionalHandshakeRequestsOnce(
+    h3: *http3.runtime.HandshakeServerSession,
+    streams: *webtransport.StreamRegistry,
+    session_id: webtransport.SessionId,
+    request_rejection_pending: *?u62,
+) Error!bool {
+    if (request_rejection_pending.*) |stream_id| {
+        h3.tryCancelRequest(
+            stream_id,
+            http3.ApplicationErrorCode.request_rejected,
+        ) catch |err| switch (err) {
+            error.PacingLimited,
+            error.CongestionLimited,
+            error.FlowControlBlocked,
+            => return false,
+            else => return err,
+        };
+        request_rejection_pending.* = null;
+    }
+
+    var after: ?u62 = null;
+    var stream_ids: [16]u62 = undefined;
+    while (true) {
+        const ids = h3.established.connection
+            .receivedStreamIdsAfterInto(after, &stream_ids);
+        for (ids) |stream_id| {
+            if (stream_id == session_id.value or
+                (stream_id & 0x03) != 0 or
+                streams.get(stream_id) != null)
+            {
+                continue;
+            }
+            const available = h3.established.connection
+                .availableReceivedStream(stream_id) orelse continue;
+            const prefix = quic.varint.decodeSlice(available) catch |err|
+                switch (err) {
+                    error.BufferTooShort => continue,
+                    else => return err,
+                };
+            if (prefix.value == http3.FrameType.webtransport_stream) {
+                continue;
+            }
+            const event_value = (try h3.pollRequestEventForOnce(
+                stream_id,
+            )) orelse continue;
+            var event = event_value;
+            defer event.deinit(
+                h3.established.connection.endpoint.allocator,
+            );
+            const request_stream_id = switch (event) {
+                .reset => continue,
+                .message => |message| message.stream_id,
+            };
+            request_rejection_pending.* = request_stream_id;
+            h3.tryCancelRequest(
+                request_stream_id,
+                http3.ApplicationErrorCode.request_rejected,
+            ) catch |err| switch (err) {
+                error.PacingLimited,
+                error.CongestionLimited,
+                error.FlowControlBlocked,
+                => {
+                    return false;
+                },
+                else => return err,
+            };
+            request_rejection_pending.* = null;
+        }
+        if (ids.len == 0 or ids.len < stream_ids.len) return true;
+        after = ids[ids.len - 1];
+    }
+}
 
 const EndpointConnectHead = struct {
     request: OwnedHandshakeConnectRequest,
@@ -3500,6 +3602,7 @@ pub const AcceptedHandshakeSession = struct {
     session_id: webtransport.SessionId,
     streams: webtransport.StreamRegistry,
     control: session_control.Control,
+    request_rejection_pending: ?u62 = null,
 
     pub fn deinit(self: *AcceptedHandshakeSession) void {
         const allocator = self.h3.established.connection.endpoint.allocator;
@@ -4076,6 +4179,12 @@ pub const AcceptedHandshakeSession = struct {
             self.session_id.value,
             packet,
         );
+        _ = try rejectAdditionalHandshakeRequestsOnce(
+            &self.h3,
+            &self.streams,
+            self.session_id,
+            &self.request_rejection_pending,
+        );
     }
 
     /// Poll already-buffered associated stream state without reading UDP.
@@ -4260,6 +4369,12 @@ pub const AcceptedHandshakeSession = struct {
         try self.h3.receiveDetachedRequestProgress(
             self.session_id.value,
         );
+        _ = try rejectAdditionalHandshakeRequestsOnce(
+            &self.h3,
+            &self.streams,
+            self.session_id,
+            &self.request_rejection_pending,
+        );
     }
 
     fn receiveControlProgressWithDeadline(
@@ -4269,6 +4384,12 @@ pub const AcceptedHandshakeSession = struct {
         try self.h3.receiveDetachedRequestProgressWithDeadline(
             self.session_id.value,
             deadline,
+        );
+        _ = try rejectAdditionalHandshakeRequestsOnce(
+            &self.h3,
+            &self.streams,
+            self.session_id,
+            &self.request_rejection_pending,
         );
     }
 };

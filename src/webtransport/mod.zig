@@ -283,7 +283,10 @@ pub fn defaultSettings(settings: http3.Settings) http3.Settings {
     out.enable_connect_protocol = true;
     out.h3_datagram = true;
     out.enable_webtransport = true;
-    if (out.webtransport_max_sessions == 0) out.webtransport_max_sessions = 1;
+    // The stateful WebTransport adapters currently own one session per HTTP/3
+    // connection. Advertise exactly that capacity so a peer never relies on a
+    // larger setting that the runtime cannot route independently.
+    out.webtransport_max_sessions = 1;
     if (out.webtransport_initial_max_data == 0) out.webtransport_initial_max_data = default_initial_max_data;
     if (out.webtransport_initial_max_streams_uni == 0) out.webtransport_initial_max_streams_uni = default_initial_max_streams_uni;
     if (out.webtransport_initial_max_streams_bidi == 0) out.webtransport_initial_max_streams_bidi = default_initial_max_streams_bidi;
@@ -575,6 +578,13 @@ test "WebTransport session state tracks lifecycle and datagram counters" {
 
 test "WebTransport settings negotiation and datagram budget" {
     const local = defaultSettings(.{});
+    const clamped = defaultSettings(.{
+        .webtransport_max_sessions = 4,
+    });
+    try std.testing.expectEqual(
+        @as(u64, 1),
+        clamped.webtransport_max_sessions,
+    );
     const peer = http3.Settings{
         .enable_connect_protocol = true,
         .h3_datagram = true,

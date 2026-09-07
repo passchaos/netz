@@ -334,6 +334,233 @@ test "WebTransport endpoint admission HEADERS do not wait for pacing" {
     );
 }
 
+test "WebTransport accepted session rejects a second CONNECT and stays usable" {
+    const allocator = std.testing.allocator;
+    var threaded = std.Io.Threaded.init(allocator, .{});
+    defer threaded.deinit();
+    const io = threaded.io();
+
+    var server_endpoint = try quic.runtime.Endpoint.bind(
+        allocator,
+        io,
+        .{ .ip4 = .loopback(0) },
+        .{ .max_datagram_size = 4096 },
+    );
+    defer server_endpoint.deinit();
+    var peer_endpoint = try quic.runtime.Endpoint.bind(
+        allocator,
+        io,
+        .{ .ip4 = .loopback(0) },
+        .{ .max_datagram_size = 4096 },
+    );
+    defer peer_endpoint.deinit();
+
+    const keys = quic.protection.deriveAes128Keys(
+        [_]u8{0xf2} ** quic.protection.secret_len,
+    );
+    const settings = webtransport.defaultSettings(.{
+        .webtransport_max_sessions = 4,
+    });
+    try std.testing.expectEqual(
+        @as(u64, 1),
+        settings.webtransport_max_sessions,
+    );
+    var h3 = try http3.runtime.HandshakeServerSession.initPreconfigured(
+        &server_endpoint,
+        peer_endpoint.address(),
+        .{ .local_settings = settings },
+        .{
+            .receive_keys = keys,
+            .send_keys = keys,
+            .local_connection_id = "wt-capacity-server",
+            .peer_connection_id = "wt-capacity-client",
+            .one_rtt = .{ .pacing_max_burst_packets = 1 },
+        },
+    );
+    defer h3.deinit();
+    h3.control.settings.markSent(settings);
+    h3.control.settings.markReceived(settings);
+    try h3.connect_datagrams.register(0);
+
+    var streams = try handshake_stream.initRegistry(
+        allocator,
+        .init(0),
+        .server,
+        settings,
+        settings,
+        8,
+        null,
+        null,
+    );
+    var streams_owned = true;
+    defer if (streams_owned) streams.deinit();
+    var dispatcher = quic.endpoint_dispatcher.Dispatcher.init(
+        allocator,
+        &server_endpoint,
+    );
+    defer dispatcher.deinit();
+    const handle: quic.endpoint_dispatcher.ConnectionHandle = 17;
+    try dispatcher.registerConnection(handle, &h3.established.connection);
+    var accepted = runtime.EndpointAcceptedSession{
+        .handle = handle,
+        .dispatcher = &dispatcher,
+        .h3 = &h3,
+        .request = undefined,
+        .session_id = .init(0),
+        .streams = streams,
+        .control = try session_control.Control.init(.init(0)),
+    };
+    streams_owned = false;
+    defer accepted.streams.deinit();
+
+    var peer = try quic.one_rtt.Connection.init(&peer_endpoint, .{
+        .peer = server_endpoint.address(),
+        .receive_keys = keys,
+        .send_keys = keys,
+        .local_connection_id = "wt-capacity-client",
+        .peer_connection_id = "wt-capacity-server",
+        .enable_pacing = false,
+    });
+    defer peer.deinit();
+
+    var fixed_io = FixedClockIo{
+        .delegate = server_endpoint.io,
+        .now_ns = 1_000_000,
+    };
+    var fixed_vtable = server_endpoint.io.vtable.*;
+    fixed_vtable.now = FixedClockIo.now;
+    fixed_vtable.sleep = FixedClockIo.sleep;
+    fixed_vtable.netSend = FixedClockIo.netSend;
+    server_endpoint.io = .{
+        .userdata = &fixed_io,
+        .vtable = &fixed_vtable,
+    };
+    defer server_endpoint.io = fixed_io.delegate;
+    quic.one_rtt.testing.exhaustPacingAt(
+        &h3.established.connection,
+        @intCast(fixed_io.now_ns),
+    );
+
+    var second_connect: std.ArrayList(u8) = .empty;
+    defer second_connect.deinit(allocator);
+    try (http3.Request{
+        .method = "CONNECT",
+        .scheme = "https",
+        .authority = "localhost",
+        .path = "/second",
+        .headers = &.{
+            .{ .name = ":protocol", .value = "webtransport" },
+            http3.capsule.protocol_header,
+        },
+    }).write(&second_connect, allocator);
+    var associated: std.ArrayList(u8) = .empty;
+    defer associated.deinit(allocator);
+    try webtransport.BidirectionalStreamHeader.write(
+        &associated,
+        allocator,
+        .init(0),
+    );
+    try associated.appendSlice(allocator, "alive");
+
+    // The extra CONNECT and first-session traffic deliberately share one
+    // encrypted packet. Only stream 4 is rejected; stream 8 remains routed to
+    // the accepted session.
+    try peer.send(&.{
+        .{ .stream = .{
+            .stream_id = 4,
+            .data = second_connect.items,
+        } },
+        .{ .stream = .{
+            .stream_id = 8,
+            .data = associated.items,
+            .fin = true,
+        } },
+    });
+    var incoming = try h3.established.connection.receivePacket();
+    defer incoming.deinit(allocator);
+    try runtime.EndpointServer.testing.processAcceptedPacket(
+        &accepted,
+        &incoming,
+    );
+    try std.testing.expectEqual(
+        @as(?u62, 4),
+        accepted.request_rejection_pending,
+    );
+    try std.testing.expect(
+        h3.established.connection.sendStreamStats(4).?.reset == null,
+    );
+    try std.testing.expect(
+        h3.established.connection.recvStreamStats(4).?.stop_sending_sent == null,
+    );
+    try std.testing.expect(!h3.established.connection.closing());
+
+    const retry = dispatcher.nextTimerDeadline() orelse
+        return error.TestUnexpectedResult;
+    try std.testing.expectEqual(handle, retry.connection_id);
+    try std.testing.expectEqual(
+        quic.one_rtt.TimerDeadlineKind.pacing,
+        retry.timer.kind,
+    );
+    var payload: [16]u8 = undefined;
+    const accepted_event = (try runtime.EndpointServer.testing
+        .pollAcceptedSessionEntry(&accepted, &payload)) orelse
+        return error.TestUnexpectedResult;
+    try std.testing.expectEqual(
+        @as(?u62, 4),
+        accepted.request_rejection_pending,
+    );
+    try std.testing.expect(accepted_event == .stream);
+    const stream_event = accepted_event.stream;
+    try std.testing.expect(stream_event == .data);
+    try std.testing.expectEqual(@as(u62, 8), stream_event.data.stream_id);
+    try std.testing.expect(stream_event.data.fin);
+    try std.testing.expectEqualStrings(
+        "alive",
+        payload[0..stream_event.data.bytes],
+    );
+    fixed_io.now_ns = @intCast(retry.timer.deadline_ns);
+    try std.testing.expect(
+        (try runtime.EndpointServer.testing.pollAcceptedSessionEntry(
+            &accepted,
+            &payload,
+        )) == null,
+    );
+    try std.testing.expect(accepted.request_rejection_pending == null);
+
+    var saw_reset = false;
+    var saw_stop = false;
+    for (0..3) |_| {
+        var response = try peer.receivePacketTimeout(.{
+            .duration = .{
+                .clock = .awake,
+                .raw = .fromMilliseconds(100),
+            },
+        });
+        defer response.deinit(allocator);
+        for (response.frames) |frame| switch (frame) {
+            .reset_stream => |reset| if (reset.stream_id == 4) {
+                try std.testing.expectEqual(
+                    @as(u64, http3.ApplicationErrorCode.request_rejected),
+                    reset.application_error_code,
+                );
+                saw_reset = true;
+            },
+            .stop_sending => |stop| if (stop.stream_id == 4) {
+                try std.testing.expectEqual(
+                    @as(u64, http3.ApplicationErrorCode.request_rejected),
+                    stop.application_error_code,
+                );
+                saw_stop = true;
+            },
+            else => {},
+        };
+        if (saw_reset and saw_stop) break;
+    }
+    try std.testing.expect(saw_reset);
+    try std.testing.expect(saw_stop);
+    try std.testing.expect(!peer.closing());
+}
+
 test "WebTransport endpoint poll mirrors automatic stream-credit retry timer" {
     const allocator = std.testing.allocator;
     var threaded = std.Io.Threaded.init(allocator, .{});

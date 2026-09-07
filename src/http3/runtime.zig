@@ -5136,6 +5136,17 @@ pub const HandshakeServerSession = struct {
         return self.pollRequestEventMatchingInternal(stream_id, false);
     }
 
+    /// Poll one buffered event for a specific request stream without waiting
+    /// for transport pacing. Shared endpoint adapters use this only after
+    /// classifying the stream prefix, so extension-owned bidirectional streams
+    /// remain outside the HTTP/3 message parser.
+    pub fn pollRequestEventForOnce(
+        self: *HandshakeServerSession,
+        stream_id: u62,
+    ) Error!?StreamingRequestEvent {
+        return self.pollRequestEventMatchingInternal(stream_id, true);
+    }
+
     fn pollRequestEventMatchingInternal(
         self: *HandshakeServerSession,
         target_stream_id: ?u62,
@@ -6781,6 +6792,21 @@ pub const HandshakeServerSession = struct {
         application_error_code: u64,
     ) Error!void {
         return self.cancelRequestInternal(
+            stream_id,
+            application_error_code,
+            false,
+        );
+    }
+
+    /// Cancel one request without waiting for transport pacing. Endpoint-wide
+    /// protocol adapters retry this after dispatcher progress so they retain a
+    /// single UDP receive owner and never sleep inside packet routing.
+    pub fn tryCancelRequest(
+        self: *HandshakeServerSession,
+        stream_id: u62,
+        application_error_code: u64,
+    ) Error!void {
+        return self.cancelRequestInternalOnce(
             stream_id,
             application_error_code,
             false,
