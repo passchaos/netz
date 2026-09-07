@@ -240,6 +240,13 @@ run measured 40.32 ns/message versus 2007.79 ns for the directly invoked
 scalar ASCII path (49.80x), and 301.08 versus 2184.19 ns for sparse Unicode
 (7.25x). Split multibyte sequences plus valid and invalid high bytes at every
 offset across several vector boundaries retain direct regression coverage.
+HTTP/1, RFC 8441, and RFC 9220 receive paths also reuse the `FrameHeader` they
+already parsed to size their transport read instead of decoding the same
+variable-length header again in the complete-frame codec. The frame benchmark's
+same-process masked short-frame loop measured 4.30 ns/frame with header reuse
+versus 7.85 ns/frame for the former duplicate parse, a 1.83x reduction in that
+fixed parser component. Length-boundary and masked/unmasked equivalence tests
+cover both allocating and caller-buffer predecoded APIs.
 
 Netz's actual unmasked TCP server path prepares only the validated stack header
 and uses one vectored network write for header + borrowed payload. Masked

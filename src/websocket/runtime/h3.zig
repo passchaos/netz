@@ -990,9 +990,10 @@ pub fn Connection(comptime role: common.Role) type {
                     .validate_utf8 = false,
                 },
             };
-            const frame = try websocket.parseFrameInto(
+            const frame = try websocket.parseFrameIntoWithHeader(
                 payload_out,
                 available[0..total_len],
+                header,
                 options,
             );
             self.discardBuffered(frame.consumed);
@@ -1171,9 +1172,10 @@ pub fn Connection(comptime role: common.Role) type {
                     .validate_utf8 = false,
                 },
             };
-            const frame = try websocket.parseFrameOptions(
+            const frame = try websocket.parseFrameWithHeader(
                 self.allocator,
                 available[0..total_len],
+                header,
                 options,
             );
             self.discardBuffered(frame.consumed);

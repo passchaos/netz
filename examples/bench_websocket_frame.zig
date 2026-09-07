@@ -6,6 +6,7 @@ const payload_len: usize = 4096;
 const compression_iterations: usize = 20_000;
 const utf8_iterations: usize = 500_000;
 const compression_fragments: usize = 16;
+const parse_iterations: usize = 2_000_000;
 const mask_key = [4]u8{ 0x12, 0x34, 0x56, 0x78 };
 
 pub fn main() !void {
@@ -175,6 +176,36 @@ pub fn main() !void {
     }
     const sparse_ns = nowNs(io) -| sparse_started;
 
+    var parse_storage: [32]u8 = undefined;
+    const parse_frame = try netz.websocket.writeFrameInto(
+        &parse_storage,
+        .binary,
+        "payload",
+        .{ .mask_key = mask_key },
+    );
+    const parse_started = nowNs(io);
+    var parse_checksum: u64 = 0;
+    for (0..parse_iterations) |iteration| {
+        parse_frame[parse_frame.len - 1] = @truncate(iteration);
+        std.mem.doNotOptimizeAway(parse_frame.ptr);
+        const first = try netz.websocket.FrameHeader.parse(parse_frame);
+        const second = try netz.websocket.FrameHeader.parse(parse_frame);
+        std.mem.doNotOptimizeAway(first);
+        std.mem.doNotOptimizeAway(second);
+        parse_checksum +%= first.header_len + second.payload_len;
+    }
+    const parse_ns = nowNs(io) -| parse_started;
+    const reused_parse_started = nowNs(io);
+    var reused_parse_checksum: u64 = 0;
+    for (0..parse_iterations) |iteration| {
+        parse_frame[parse_frame.len - 1] = @truncate(iteration);
+        std.mem.doNotOptimizeAway(parse_frame.ptr);
+        const header = try netz.websocket.FrameHeader.parse(parse_frame);
+        std.mem.doNotOptimizeAway(header);
+        reused_parse_checksum +%= header.header_len + header.payload_len;
+    }
+    const reused_parse_ns = nowNs(io) -| reused_parse_started;
+
     const caller_speedup_x100 = ratioTimes100(
         allocating_ns,
         caller_buffer_ns,
@@ -199,6 +230,9 @@ pub fn main() !void {
         \\  incremental UTF-8 sparse scalar: {d:.2} ns/message
         \\  incremental UTF-8 sparse validation: {d:.2} ns/message
         \\  incremental UTF-8 sparse speedup: {d:.2}x
+        \\  duplicate frame-header parse: {d:.2} ns/frame
+        \\  reused frame-header parse: {d:.2} ns/frame
+        \\  frame-header reuse speedup: {d:.2}x
         \\  checksum: {d}
         \\
     , .{
@@ -231,6 +265,12 @@ pub fn main() !void {
             @as(f64, @floatFromInt(utf8_iterations)),
         @as(f64, @floatFromInt(sparse_scalar_ns)) /
             @as(f64, @floatFromInt(@max(sparse_ns, 1))),
+        @as(f64, @floatFromInt(parse_ns)) /
+            @as(f64, @floatFromInt(parse_iterations)),
+        @as(f64, @floatFromInt(reused_parse_ns)) /
+            @as(f64, @floatFromInt(parse_iterations)),
+        @as(f64, @floatFromInt(parse_ns)) /
+            @as(f64, @floatFromInt(@max(reused_parse_ns, 1))),
         allocating_checksum +%
             caller_buffer_checksum +%
             header_checksum +%
@@ -239,7 +279,9 @@ pub fn main() !void {
             utf8_scalar_checksum +%
             utf8_checksum +%
             sparse_scalar_checksum +%
-            sparse_checksum,
+            sparse_checksum +%
+            parse_checksum +%
+            reused_parse_checksum,
     });
 }
 

@@ -3993,9 +3993,10 @@ pub const Connection = struct {
             .client => .{ .expect_mask = .unmasked, .allow_rsv1 = self.permessage_deflate },
             .server => .{ .expect_mask = .masked, .allow_rsv1 = self.permessage_deflate },
         };
-        var frame = try websocket.parseFrameOptions(
+        var frame = try websocket.parseFrameWithHeader(
             self.allocator,
             available[0..total_len],
+            header,
             parse_options,
         );
         errdefer frame.deinit(self.allocator);
@@ -5137,9 +5138,10 @@ pub const H2Connection = struct {
             .client => .{ .expect_mask = .unmasked, .allow_rsv1 = self.permessage_deflate },
             .server => .{ .expect_mask = .masked, .allow_rsv1 = self.permessage_deflate },
         };
-        var frame = try websocket.parseFrameOptions(
+        var frame = try websocket.parseFrameWithHeader(
             self.allocator,
             available[0..total_len],
+            header,
             parse_options,
         );
         errdefer frame.deinit(self.allocator);
@@ -6620,9 +6622,10 @@ fn receiveFrameIntoConnection(
             .validate_utf8 = false,
         },
     };
-    const frame = try websocket.parseFrameInto(
+    const frame = try websocket.parseFrameIntoWithHeader(
         payload_out,
         available[0..total_len],
+        header,
         parse_options,
     );
     connection.discardBuffered(frame.consumed);

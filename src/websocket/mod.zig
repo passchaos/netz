@@ -239,6 +239,18 @@ pub fn parseFrame(allocator: std.mem.Allocator, bytes: []const u8) Error!Frame {
 
 pub fn parseFrameOptions(allocator: std.mem.Allocator, bytes: []const u8, options: ParseFrameOptions) Error!Frame {
     const header = try FrameHeader.parse(bytes);
+    return parseFrameWithHeader(allocator, bytes, header, options);
+}
+
+/// Decode a complete frame after the caller has already parsed its header.
+/// Streaming runtimes use this after buffering exactly `header_len +
+/// payload_len`, avoiding a second variable-length header parse.
+pub fn parseFrameWithHeader(
+    allocator: std.mem.Allocator,
+    bytes: []const u8,
+    header: FrameHeader,
+    options: ParseFrameOptions,
+) Error!Frame {
     try validateFrameHeader(header, options);
     const payload_len = std.math.cast(usize, header.payload_len) orelse return error.PayloadTooLarge;
     if (bytes.len < header.header_len + payload_len) return error.BufferTooShort;
@@ -260,6 +272,16 @@ pub fn parseFrameInto(
     options: ParseFrameOptions,
 ) Error!BorrowedFrame {
     const header = try FrameHeader.parse(bytes);
+    return parseFrameIntoWithHeader(out, bytes, header, options);
+}
+
+/// Caller-buffer counterpart to `parseFrameWithHeader`.
+pub fn parseFrameIntoWithHeader(
+    out: []u8,
+    bytes: []const u8,
+    header: FrameHeader,
+    options: ParseFrameOptions,
+) Error!BorrowedFrame {
     try validateFrameHeader(header, options);
     const payload_len = std.math.cast(usize, header.payload_len) orelse
         return error.PayloadTooLarge;
@@ -1502,6 +1524,37 @@ test "WebSocket frame decodes masked payload into caller storage" {
             .{ .expect_mask = .masked },
         ),
     );
+
+    var predecoded_storage: [32]u8 = undefined;
+    const header = try FrameHeader.parse(encoded.items);
+    const predecoded = try parseFrameIntoWithHeader(
+        &predecoded_storage,
+        encoded.items,
+        header,
+        .{ .expect_mask = .masked },
+    );
+    try std.testing.expectEqual(
+        frame.header.header_len,
+        predecoded.header.header_len,
+    );
+    try std.testing.expectEqual(
+        frame.header.payload_len,
+        predecoded.header.payload_len,
+    );
+    try std.testing.expectEqual(frame.header.opcode, predecoded.header.opcode);
+    try std.testing.expectEqual(frame.header.masked, predecoded.header.masked);
+    try std.testing.expectEqualStrings(frame.payload, predecoded.payload);
+    try std.testing.expectEqual(frame.consumed, predecoded.consumed);
+
+    try std.testing.expectError(
+        error.MaskedServerFrame,
+        parseFrameIntoWithHeader(
+            &predecoded_storage,
+            encoded.items,
+            header,
+            .{ .expect_mask = .unmasked },
+        ),
+    );
 }
 
 test "WebSocket caller-buffer frame encoding matches allocating writer" {
@@ -1554,6 +1607,58 @@ test "WebSocket caller-buffer frame encoding matches allocating writer" {
                 header.payload_len,
             );
             try std.testing.expectEqual(mask_key != null, header.masked);
+        }
+    }
+}
+
+test "WebSocket predecoded header parsers match ordinary parsers" {
+    const allocator = std.testing.allocator;
+    const payload_lengths = [_]usize{ 0, 1, 125, 126, 257 };
+    for (payload_lengths) |payload_len| {
+        const payload = try allocator.alloc(u8, payload_len);
+        defer allocator.free(payload);
+        for (payload, 0..) |*byte, index| byte.* = @truncate(index * 29);
+        for ([_]?[4]u8{ null, .{ 9, 8, 7, 6 } }) |mask_key| {
+            var encoded: std.ArrayList(u8) = .empty;
+            defer encoded.deinit(allocator);
+            try writeFrame(
+                &encoded,
+                allocator,
+                .binary,
+                payload,
+                .{ .mask_key = mask_key },
+            );
+            const header = try FrameHeader.parse(encoded.items);
+
+            var ordinary = try parseFrameOptions(
+                allocator,
+                encoded.items,
+                .{},
+            );
+            defer ordinary.deinit(allocator);
+            var predecoded = try parseFrameWithHeader(
+                allocator,
+                encoded.items,
+                header,
+                .{},
+            );
+            defer predecoded.deinit(allocator);
+            try std.testing.expectEqual(ordinary.consumed, predecoded.consumed);
+            try std.testing.expectEqualSlices(
+                u8,
+                ordinary.payload,
+                predecoded.payload,
+            );
+
+            const output = try allocator.alloc(u8, payload_len);
+            defer allocator.free(output);
+            const borrowed = try parseFrameIntoWithHeader(
+                output,
+                encoded.items,
+                header,
+                .{},
+            );
+            try std.testing.expectEqualSlices(u8, payload, borrowed.payload);
         }
     }
 }
