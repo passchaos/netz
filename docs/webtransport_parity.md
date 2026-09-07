@@ -14,6 +14,7 @@ zig build run-webtransport-handshake-stream -Doptimize=ReleaseFast
 zig build bench-webtransport-datagram -Doptimize=ReleaseFast
 zig build bench-webtransport-stream -Doptimize=ReleaseFast
 zig build bench-webtransport-stream -Doptimize=ReleaseFast -- --send-all
+zig build bench-webtransport-stream -Doptimize=ReleaseFast -- --send-all --enable-gro-receive
 zig build interop-webtransport-stream-churn -Doptimize=ReleaseFast
 zig build interop-webtransport-wtransport -Doptimize=ReleaseFast
 zig build interop-webtransport-chrome -Doptimize=ReleaseFast
@@ -416,6 +417,18 @@ the same receive/window configuration. Its three runs measured 246, 247, and
 about 12% faster than the fair partial-write mode while reducing caller-visible
 send API calls from 1146 to one. These 2026-09-07 same-host numbers are an
 internal API/path comparison; no equal-wire wtransport/quicz ratio is claimed.
+
+`--enable-gro-receive` now exercises WebTransport's timer-aware state-only QUIC
+batch pump. One kernel/GRO receive is decrypted and applied in place, its ACK
+decision is accumulated across the packet batch, and `readStream` then returns
+one fair associated-stream event from the resulting connection state. It does
+not wait for future datagrams merely to fill the caller buffer. Three CPU-0
+single-stream runs measured 400, 405, and 408 MiB/s (9.86 ms median), with 362
+read events instead of 1147; against the same binary's 237, 243, and 246 MiB/s
+non-GRO samples this is about 67% higher median throughput. A four-stream 4 MiB
+aggregate smoke completed at 217 MiB/s, and focused tests cover cumulative ACK,
+FIN, timeout/resume, and preserving the cross-stream rotation cursor when two
+streams arrive in the same GRO batch.
 
 The benchmark now also accepts `--streams` and `--transfer-bytes`. A four-stream
 1 MiB-per-stream real-handshake run completed at 70 MiB/s aggregate with 3971

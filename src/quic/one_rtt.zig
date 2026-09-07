@@ -8047,9 +8047,31 @@ pub const Connection = struct {
             return error.Timeout;
         }
         while (true) {
+            var datagrams = try self.receiveBytesBatchServicingTimersUntil(
+                caller_deadline,
+            );
+            defer datagrams.deinit(self.endpoint.allocator);
+            var batch = (try self.processReceivedDatagramBatchAt(
+                &datagrams,
+                self.monotonicNowNs(),
+            )) orelse continue;
+            errdefer batch.deinit();
+            _ = try self.retransmitPacketThresholdLosses(max_batch_packets);
+            return batch;
+        }
+    }
+
+    fn receiveBytesBatchServicingTimersUntil(
+        self: *Connection,
+        caller_deadline: ?std.Io.Clock.Timestamp,
+    ) (Error || quic.runtime.ReceiveTimeoutError)!quic.runtime.OwnedBytesBatch {
+        while (true) {
+            if (self.close_info != null or self.idle_timed_out) {
+                return error.ConnectionClosed;
+            }
             const timer = self.nextTimerDeadline();
             if (timer == null and caller_deadline == null) {
-                return self.receivePacketBatchServicingAckDrivenRecovery();
+                return self.endpoint.receiveBytesBatch();
             }
             const now_ns = self.monotonicNowNs();
             if (callerDeadlineExpired(caller_deadline, now_ns)) {
@@ -8059,7 +8081,7 @@ pub const Connection = struct {
                 if (try self.serviceNextTimerForBlockingReceive(now_ns)) {
                     continue;
                 }
-                if (try self.receivePacketBatchAfterBlockedTimer(
+                if (try self.receiveBytesBatchAfterBlockedTimer(
                     now_ns,
                     caller_deadline,
                 )) |batch| {
@@ -8067,7 +8089,7 @@ pub const Connection = struct {
                 }
                 continue;
             };
-            var datagrams = self.endpoint.receiveBytesBatchTimeout(
+            return self.endpoint.receiveBytesBatchTimeout(
                 earliestConnectionReceiveTimeout(timer, caller_deadline),
             ) catch |err| switch (err) {
                 error.Timeout => {
@@ -8079,7 +8101,7 @@ pub const Connection = struct {
                     if (!try self.serviceNextTimerForBlockingReceive(
                         timeout_ns,
                     )) {
-                        if (try self.receivePacketBatchAfterBlockedTimer(
+                        if (try self.receiveBytesBatchAfterBlockedTimer(
                             timeout_ns,
                             caller_deadline,
                         )) |batch| {
@@ -8092,35 +8114,18 @@ pub const Connection = struct {
                     if (caller_deadline != null) {
                         return error.ConcurrencyUnavailable;
                     }
-                    return self.receivePacketBatchServicingAckDrivenRecovery();
+                    return self.endpoint.receiveBytesBatch();
                 },
                 else => |other| return @errorCast(other),
             };
-            defer datagrams.deinit(self.endpoint.allocator);
-            var batch = (try self.processReceivedDatagramBatchAt(
-                &datagrams,
-                self.monotonicNowNs(),
-            )) orelse continue;
-            errdefer batch.deinit();
-            _ = try self.retransmitPacketThresholdLosses(max_batch_packets);
-            return batch;
         }
     }
 
-    fn receivePacketBatchServicingAckDrivenRecovery(
-        self: *Connection,
-    ) Error!ReceivedPacketBatch {
-        var batch = try self.receivePacketBatch();
-        errdefer batch.deinit();
-        _ = try self.retransmitPacketThresholdLosses(max_batch_packets);
-        return batch;
-    }
-
-    fn receivePacketBatchAfterBlockedTimer(
+    fn receiveBytesBatchAfterBlockedTimer(
         self: *Connection,
         now_ns: u64,
         caller_deadline: ?std.Io.Clock.Timestamp,
-    ) (Error || quic.runtime.ReceiveTimeoutError)!?ReceivedPacketBatch {
+    ) (Error || quic.runtime.ReceiveTimeoutError)!?quic.runtime.OwnedBytesBatch {
         const deadline_ns = std.math.add(
             u64,
             now_ns,
@@ -8130,7 +8135,7 @@ pub const Connection = struct {
             .{ .kind = .loss_time, .deadline_ns = deadline_ns },
             caller_deadline,
         );
-        var datagrams = self.endpoint.receiveBytesBatchTimeout(
+        const datagrams = self.endpoint.receiveBytesBatchTimeout(
             timeout,
         ) catch |err| switch (err) {
             error.Timeout => {
@@ -8144,18 +8149,11 @@ pub const Connection = struct {
                 if (caller_deadline != null) {
                     return error.ConcurrencyUnavailable;
                 }
-                return try self.receivePacketBatchServicingAckDrivenRecovery();
+                return try self.endpoint.receiveBytesBatch();
             },
             else => |other| return @errorCast(other),
         };
-        defer datagrams.deinit(self.endpoint.allocator);
-        var batch = (try self.processReceivedDatagramBatchAt(
-            &datagrams,
-            self.monotonicNowNs(),
-        )) orelse return null;
-        errdefer batch.deinit();
-        _ = try self.retransmitPacketThresholdLosses(max_batch_packets);
-        return batch;
+        return datagrams;
     }
 
     /// Process a kernel/GRO batch and release each decoded packet immediately.
@@ -8165,6 +8163,92 @@ pub const Connection = struct {
     /// application while bounding live decrypt/frame allocations to one packet.
     pub fn servicePacketBatch(self: *Connection) Error!usize {
         return self.servicePacketBatchAt(self.monotonicNowNs());
+    }
+
+    /// Receive and apply one kernel/GRO batch while continuing to service QUIC
+    /// timers. The common key phase is decrypted and parsed in receive storage,
+    /// and one cumulative ACK decision covers the complete batch.
+    pub fn servicePacketBatchServicingTimers(
+        self: *Connection,
+    ) Error!usize {
+        return self.servicePacketBatchServicingTimersUntil(null) catch |err|
+            switch (err) {
+                error.Timeout, error.ConcurrencyUnavailable => unreachable,
+                else => |other| return @errorCast(other),
+            };
+    }
+
+    pub fn servicePacketBatchServicingTimersTimeout(
+        self: *Connection,
+        timeout: std.Io.Timeout,
+    ) (Error || quic.runtime.ReceiveTimeoutError)!usize {
+        return self.servicePacketBatchServicingTimersUntil(
+            callerDeadlineFromTimeout(self.endpoint.io, timeout),
+        );
+    }
+
+    pub fn servicePacketBatchServicingTimersDeadline(
+        self: *Connection,
+        deadline: std.Io.Clock.Timestamp,
+    ) (Error || quic.runtime.ReceiveTimeoutError)!usize {
+        return self.servicePacketBatchServicingTimersUntil(
+            callerDeadlineFromTimeout(
+                self.endpoint.io,
+                .{ .deadline = deadline },
+            ),
+        );
+    }
+
+    fn servicePacketBatchServicingTimersUntil(
+        self: *Connection,
+        caller_deadline: ?std.Io.Clock.Timestamp,
+    ) (Error || quic.runtime.ReceiveTimeoutError)!usize {
+        const first_now_ns = self.monotonicNowNs();
+        if (self.takePendingReceivedDatagram()) |pending_value| {
+            var pending = pending_value;
+            defer pending.deinit(self.endpoint.allocator);
+            var packet = (try self.processReceivedBytesOrDropPeerAddressAt(
+                pending.from,
+                pending.bytes,
+                pending.ecn,
+                first_now_ns,
+            )) orelse return 0;
+            defer packet.deinit(self.endpoint.allocator);
+            _ = try self.retransmitPacketThresholdLosses(max_batch_packets);
+            _ = self.sendAckForPacketIfNeeded(
+                packet.packet.packet_number,
+                packet.frames,
+            ) catch {};
+            return 1;
+        }
+        if (callerDeadlineExpired(caller_deadline, first_now_ns)) {
+            return error.Timeout;
+        }
+        while (true) {
+            var datagrams = try self.receiveBytesBatchServicingTimersUntil(
+                caller_deadline,
+            );
+            defer datagrams.deinit(self.endpoint.allocator);
+            var ack: BatchAckObservation = .{
+                .largest_packet_number = self.received.largestReceived(),
+                .reordering_threshold = self.ack_reordering_threshold,
+            };
+            const completed = try self.processReceivedDatagramBatchVisitingAt(
+                &datagrams,
+                self.monotonicNowNs(),
+                &ack,
+                BatchAckObservation.observe,
+            );
+            if (completed == 0) continue;
+            _ = try self.retransmitPacketThresholdLosses(max_batch_packets);
+            if (ack.ack_eliciting_count != 0) {
+                _ = self.sendAckForObservedPacketMetadata(
+                    ack.ack_eliciting_count,
+                    ack.reordered,
+                ) catch {};
+            }
+            return completed;
+        }
     }
 
     /// Receive one ordinary UDP datagram and apply it without returning owned
@@ -8595,7 +8679,24 @@ pub const Connection = struct {
         }
         var datagrams = try self.endpoint.receiveBytesBatch();
         defer datagrams.deinit(self.endpoint.allocator);
-        if (self.shouldDiscardPeerAddressBeforeAuthentication(datagrams.from)) return 0;
+        return self.processReceivedDatagramBatchVisitingAt(
+            &datagrams,
+            now_ns,
+            {},
+            discardPacketView,
+        );
+    }
+
+    fn processReceivedDatagramBatchVisitingAt(
+        self: *Connection,
+        datagrams: *quic.runtime.OwnedBytesBatch,
+        now_ns: ?u64,
+        context: anytype,
+        comptime visitor: anytype,
+    ) (Error || callbackErrorSet(visitor))!usize {
+        if (self.shouldDiscardPeerAddressBeforeAuthentication(datagrams.from)) {
+            return 0;
+        }
 
         var completed: usize = 0;
         for (0..datagrams.segment_count) |index| {
@@ -8621,12 +8722,14 @@ pub const Connection = struct {
             };
             switch (current) {
                 .opened => |packet| {
-                    try self.processOpenedBytesInPlaceAt(
+                    try self.processOpenedBytesInPlaceVisitingAt(
                         datagrams.from,
                         bytes,
                         datagrams.ecn,
                         now_ns,
                         packet,
+                        context,
+                        visitor,
                     );
                     completed += 1;
                     continue;
@@ -8638,13 +8741,21 @@ pub const Connection = struct {
             // fallback on the owning path because a failed in-place AEAD trial
             // intentionally destroys its output and cannot safely retry
             // current/next/previous generations against the same ciphertext.
-            var packet = try self.processReceivedBytesAt(
-                datagrams.from,
-                bytes,
-                datagrams.ecn,
-                now_ns,
-            );
-            packet.deinit(self.endpoint.allocator);
+            {
+                var packet = try self.processReceivedBytesAt(
+                    datagrams.from,
+                    bytes,
+                    datagrams.ecn,
+                    now_ns,
+                );
+                defer packet.deinit(self.endpoint.allocator);
+                try visitor(context, .{
+                    .from = packet.from,
+                    .packet_number = packet.packet.packet_number,
+                    .frames = packet.frames,
+                    .peer_initiated_key_update = packet.peer_initiated_key_update,
+                });
+            }
             completed += 1;
         }
         return completed;
@@ -11432,6 +11543,33 @@ fn acknowledgePacketView(
         packet.frames,
     ) catch {};
 }
+
+const BatchAckObservation = struct {
+    largest_packet_number: ?u64,
+    reordering_threshold: u64,
+    ack_eliciting_count: u64 = 0,
+    reordered: bool = false,
+
+    fn observe(
+        self: *BatchAckObservation,
+        packet: ReceivedPacketView,
+    ) error{}!void {
+        if (!frame_traits.ackEliciting(packet.frames)) return;
+        self.ack_eliciting_count +|= 1;
+        if (self.largest_packet_number) |largest| {
+            if (packet.packet_number < largest and
+                self.reordering_threshold != 0 and
+                largest - packet.packet_number >= self.reordering_threshold)
+            {
+                self.reordered = true;
+            } else if (packet.packet_number > largest) {
+                self.largest_packet_number = packet.packet_number;
+            }
+        } else {
+            self.largest_packet_number = packet.packet_number;
+        }
+    }
+};
 
 fn nanosToMillisFloor(ns: u64) u64 {
     return ns / 1_000_000;

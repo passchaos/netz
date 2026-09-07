@@ -529,8 +529,11 @@ plaintext and frame-array lifetimes. The same-shape benchmark's borrowed
 visitor was 1.49-2.38 us/packet in three ReleaseFast runs, within measurement
 noise of state-only service at 1.53-2.36 us/packet and faster than the matching
 owning path at 1.92-2.83 us/packet. Handshake HTTP/3 uses the visitor on its
-ordinary non-GRO packet pump; GRO retains its lazy owning suffix because the
-application deliberately routes only one coalesced packet per call.
+ordinary non-GRO packet pump. HTTP/3 retains a lazy owning GRO suffix because
+it deliberately routes only one coalesced packet per application turn; pure
+connection-state consumers can instead use the timer-aware state-only batch
+pump to decrypt and apply every segment in receive storage with one cumulative
+ACK decision.
 
 ### QUIC recovery ACK range application
 

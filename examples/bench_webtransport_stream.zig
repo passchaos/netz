@@ -77,6 +77,7 @@ pub fn main(init: std.process.Init) !void {
             .quic = .{
                 .max_datagram_size = config.one_rtt_datagram_size,
                 .max_frames_per_datagram = 8,
+                .enable_gro_receive = config.enable_gro_receive,
             },
         },
     };
@@ -369,6 +370,7 @@ pub fn main(init: std.process.Init) !void {
         \\  reorder datagrams considered: {d}
         \\  datagrams held: {d}
         \\  caller buffer: {d}
+        \\  GRO receive enabled: {}
         \\  send API calls: {d}
         \\  caller-visible partial writes: {d}
         \\  read events: {d}
@@ -393,6 +395,7 @@ pub fn main(init: std.process.Init) !void {
         reorder_state.considered.load(.monotonic),
         reorder_state.held.load(.monotonic),
         read_buffer_bytes,
+        config.enable_gro_receive,
         send_calls,
         partial_writes,
         shared.events,
@@ -408,6 +411,7 @@ const Config = struct {
     stream_window: u64 = default_stream_window,
     one_rtt_datagram_size: usize = default_one_rtt_datagram_size,
     enable_pacing: bool = true,
+    enable_gro_receive: bool = false,
     send_all: bool = false,
     reset_every: usize = 0,
     reset_after_bytes: usize = 1024,
@@ -448,6 +452,8 @@ fn parseArgs(
             );
         } else if (std.mem.eql(u8, arg, "--disable-pacing")) {
             config.enable_pacing = false;
+        } else if (std.mem.eql(u8, arg, "--enable-gro-receive")) {
+            config.enable_gro_receive = true;
         } else if (std.mem.eql(u8, arg, "--send-all")) {
             config.send_all = true;
         } else if (std.mem.startsWith(u8, arg, "--reset-every=")) {

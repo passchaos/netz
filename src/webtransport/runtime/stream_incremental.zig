@@ -36,7 +36,9 @@ pub const Read = union(enum) {
 ///
 /// Each returned data prefix is immediately released to QUIC flow control, so
 /// a long-lived stream can exceed its receive window without whole-body
-/// retention. The supplied buffer must be non-empty.
+/// retention. With UDP_GRO enabled, one kernel batch is applied before polling
+/// again, but the call still returns one fairly selected stream event and does
+/// not wait for future datagrams to fill `out`. The buffer must be non-empty.
 pub fn read(
     connection: *quic.one_rtt.Connection,
     registry: *webtransport.StreamRegistry,
@@ -51,7 +53,7 @@ pub fn read(
 
         // `poll` reads assembled QUIC stream state, so packet plaintext and
         // frame arrays do not need ownership beyond transport processing.
-        try connection.servicePacketServicingTimers();
+        try serviceReceive(connection);
     }
 }
 
@@ -69,8 +71,27 @@ pub fn readWithDeadline(
         if (try poll(connection, registry, session_id, out)) |event| {
             return event;
         }
-        try connection.servicePacketServicingTimersDeadline(deadline);
+        try serviceReceiveWithDeadline(connection, deadline);
     }
+}
+
+fn serviceReceive(connection: *quic.one_rtt.Connection) Error!void {
+    if (!connection.endpoint.groReceiveEnabled()) {
+        return connection.servicePacketServicingTimers();
+    }
+    _ = try connection.servicePacketBatchServicingTimers();
+}
+
+fn serviceReceiveWithDeadline(
+    connection: *quic.one_rtt.Connection,
+    deadline: std.Io.Clock.Timestamp,
+) (Error || quic.runtime.ReceiveTimeoutError)!void {
+    if (!connection.endpoint.groReceiveEnabled()) {
+        return connection.servicePacketServicingTimersDeadline(deadline);
+    }
+    _ = try connection.servicePacketBatchServicingTimersDeadline(
+        deadline,
+    );
 }
 
 /// Abort the local send direction with a mapped WebTransport error code.
@@ -440,6 +461,250 @@ fn stoppedEvent(
         .locally_initiated = stream.locally_initiated,
         .error_info = stream.stopped.?,
     } };
+}
+
+test "WebTransport incremental read consumes one UDP GRO stream batch" {
+    if (!quic.runtime.udpGroSupported()) return error.SkipZigTest;
+
+    const allocator = std.testing.allocator;
+    var threaded = std.Io.Threaded.init(allocator, .{});
+    defer threaded.deinit();
+    const io = threaded.io();
+    var receiver = try quic.runtime.Endpoint.bind(
+        allocator,
+        io,
+        .{ .ip4 = .loopback(0) },
+        .{ .max_datagram_size = 1400, .enable_gro_receive = true },
+    );
+    defer receiver.deinit();
+    var sender = try quic.runtime.Endpoint.bind(
+        allocator,
+        io,
+        .{ .ip4 = .loopback(0) },
+        .{ .max_datagram_size = 1400 },
+    );
+    defer sender.deinit();
+    if (!receiver.groReceiveEnabled() or !sender.gsoSendEnabled()) {
+        return error.SkipZigTest;
+    }
+
+    const client_cid = [_]u8{ 0x61, 0x62, 0x63, 0x64 };
+    const server_cid = [_]u8{ 0x65, 0x66, 0x67, 0x68 };
+    const keys = quic.protection.deriveAes128Keys(
+        [_]u8{0x69} ** quic.protection.secret_len,
+    );
+    var connection = try quic.one_rtt.Connection.init(&receiver, .{
+        .peer = sender.address(),
+        .receive_keys = keys,
+        .send_keys = keys,
+        .local_connection_id = &server_cid,
+        .peer_connection_id = &client_cid,
+        .local_endpoint = .server,
+        .max_datagram_size = 1400,
+        .enable_pacing = false,
+    });
+    defer connection.deinit();
+    const session_id: webtransport.SessionId = .init(0);
+    var registry = try webtransport.StreamRegistry.init(
+        allocator,
+        session_id,
+        .server,
+        .{ .max_peer_bidi = 1 },
+    );
+    defer registry.deinit();
+
+    const first_data = [_]u8{ 0x40, 0x41, 0x00 } ++
+        [_]u8{0xa5} ** 999;
+    const second_data = [_]u8{0x5a} ** 1000;
+    const first = [_]quic.Frame{.{ .stream = .{
+        .stream_id = 4,
+        .offset = 0,
+        .data = &first_data,
+    } }};
+    const second = [_]quic.Frame{.{ .stream = .{
+        .stream_id = 4,
+        .offset = first_data.len,
+        .data = &second_data,
+        .fin = true,
+    } }};
+    var out: [2048]u8 = undefined;
+    try std.testing.expectError(
+        error.Timeout,
+        readWithDeadline(
+            &connection,
+            &registry,
+            session_id,
+            &out,
+            .fromNow(io, .{
+                .clock = .awake,
+                .raw = .fromNanoseconds(0),
+            }),
+        ),
+    );
+    try quic.one_rtt.sendFramesBatch(
+        &sender,
+        receiver.address(),
+        keys,
+        .{
+            .destination_connection_id = &server_cid,
+            .first_packet_number = 0,
+            .packet_number_len = 4,
+            .packets = &.{ &first, &second },
+        },
+    );
+
+    const event = try readWithDeadline(
+        &connection,
+        &registry,
+        session_id,
+        &out,
+        .fromNow(io, .{
+            .clock = .awake,
+            .raw = .fromSeconds(1),
+        }),
+    );
+    try std.testing.expect(event == .data);
+    try std.testing.expectEqual(@as(u62, 4), event.data.stream_id);
+    try std.testing.expectEqual(@as(usize, 1999), event.data.bytes);
+    try std.testing.expect(event.data.fin);
+    try std.testing.expectEqualSlices(
+        u8,
+        &([_]u8{0xa5} ** 999),
+        out[0..999],
+    );
+    try std.testing.expectEqualSlices(
+        u8,
+        &second_data,
+        out[999..1999],
+    );
+    try std.testing.expectEqual(
+        @as(u64, 2),
+        connection.stats().packets_received,
+    );
+}
+
+test "WebTransport UDP GRO batch preserves incremental stream rotation" {
+    if (!quic.runtime.udpGroSupported()) return error.SkipZigTest;
+
+    const allocator = std.testing.allocator;
+    var threaded = std.Io.Threaded.init(allocator, .{});
+    defer threaded.deinit();
+    const io = threaded.io();
+    var receiver = try quic.runtime.Endpoint.bind(
+        allocator,
+        io,
+        .{ .ip4 = .loopback(0) },
+        .{ .max_datagram_size = 1400, .enable_gro_receive = true },
+    );
+    defer receiver.deinit();
+    var sender = try quic.runtime.Endpoint.bind(
+        allocator,
+        io,
+        .{ .ip4 = .loopback(0) },
+        .{ .max_datagram_size = 1400 },
+    );
+    defer sender.deinit();
+    if (!receiver.groReceiveEnabled() or !sender.gsoSendEnabled()) {
+        return error.SkipZigTest;
+    }
+
+    const client_cid = [_]u8{ 0x71, 0x72, 0x73, 0x74 };
+    const server_cid = [_]u8{ 0x75, 0x76, 0x77, 0x78 };
+    const keys = quic.protection.deriveAes128Keys(
+        [_]u8{0x79} ** quic.protection.secret_len,
+    );
+    var connection = try quic.one_rtt.Connection.init(&receiver, .{
+        .peer = sender.address(),
+        .receive_keys = keys,
+        .send_keys = keys,
+        .local_connection_id = &server_cid,
+        .peer_connection_id = &client_cid,
+        .local_endpoint = .server,
+        .max_datagram_size = 1400,
+        .enable_pacing = false,
+    });
+    defer connection.deinit();
+    const session_id: webtransport.SessionId = .init(0);
+    var registry = try webtransport.StreamRegistry.init(
+        allocator,
+        session_id,
+        .server,
+        .{ .max_peer_bidi = 2 },
+    );
+    defer registry.deinit();
+
+    const first_data = [_]u8{ 0x40, 0x41, 0x00 } ++
+        [_]u8{0xa1} ** 997;
+    const second_data = [_]u8{ 0x40, 0x41, 0x00 } ++
+        [_]u8{0xb2} ** 997;
+    const first = [_]quic.Frame{.{ .stream = .{
+        .stream_id = 4,
+        .data = &first_data,
+        .fin = true,
+    } }};
+    const second = [_]quic.Frame{.{ .stream = .{
+        .stream_id = 8,
+        .data = &second_data,
+        .fin = true,
+    } }};
+    try quic.one_rtt.sendFramesBatch(
+        &sender,
+        receiver.address(),
+        keys,
+        .{
+            .destination_connection_id = &server_cid,
+            .first_packet_number = 0,
+            .packet_number_len = 4,
+            .packets = &.{ &first, &second },
+        },
+    );
+
+    var out: [1024]u8 = undefined;
+    const first_event = try readWithDeadline(
+        &connection,
+        &registry,
+        session_id,
+        &out,
+        .fromNow(io, .{
+            .clock = .awake,
+            .raw = .fromSeconds(1),
+        }),
+    );
+    try std.testing.expect(first_event == .data);
+    try std.testing.expectEqual(@as(u62, 4), first_event.data.stream_id);
+    try std.testing.expectEqual(@as(usize, 997), first_event.data.bytes);
+    try std.testing.expect(first_event.data.fin);
+    try std.testing.expectEqualSlices(
+        u8,
+        &([_]u8{0xa1} ** 997),
+        out[0..997],
+    );
+
+    // Stream 8 was applied by the same kernel receive. The cursor still
+    // returns one stream event per call and advances past stream 4.
+    const second_event = try readWithDeadline(
+        &connection,
+        &registry,
+        session_id,
+        &out,
+        .fromNow(io, .{
+            .clock = .awake,
+            .raw = .fromSeconds(1),
+        }),
+    );
+    try std.testing.expect(second_event == .data);
+    try std.testing.expectEqual(@as(u62, 8), second_event.data.stream_id);
+    try std.testing.expectEqual(@as(usize, 997), second_event.data.bytes);
+    try std.testing.expect(second_event.data.fin);
+    try std.testing.expectEqualSlices(
+        u8,
+        &([_]u8{0xb2} ** 997),
+        out[0..997],
+    );
+    try std.testing.expectEqual(
+        @as(u64, 2),
+        connection.stats().packets_received,
+    );
 }
 
 test "WebTransport incremental polling rotates across busy streams" {
