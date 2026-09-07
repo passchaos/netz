@@ -40,6 +40,72 @@ pub const RequestOptions = struct {
     request_body_size: usize,
 };
 
+pub const SimpleRequestOptions = struct {
+    response_size: u32,
+    request_body_size: usize,
+};
+
+/// Decode the exact `SimpleRequest` subset emitted by the canonical unary
+/// custom-metadata case.
+pub fn decodeSimpleRequest(input: []const u8) Error!SimpleRequestOptions {
+    if (input.len > max_payload_size + 64) return error.MessageTooLarge;
+
+    var reader = Reader{ .input = input };
+    var response_type_seen = false;
+    var response_size_seen = false;
+    var payload_seen = false;
+    var result = SimpleRequestOptions{
+        .response_size = 0,
+        .request_body_size = 0,
+    };
+    while (!reader.finished()) {
+        const tag = try reader.readTag();
+        switch (tag.field_number) {
+            1 => {
+                if (tag.wire_type != .varint) {
+                    return error.UnsupportedWireType;
+                }
+                if (response_type_seen) return error.DuplicateField;
+                response_type_seen = true;
+                if (try reader.readVarint() != 0) {
+                    return error.InvalidPayloadType;
+                }
+            },
+            2 => {
+                if (tag.wire_type != .varint) {
+                    return error.UnsupportedWireType;
+                }
+                if (response_size_seen) return error.DuplicateField;
+                response_size_seen = true;
+                const size = try reader.readVarint();
+                if (size > max_payload_size) return error.MessageTooLarge;
+                result.response_size = @intCast(size);
+            },
+            3 => {
+                if (tag.wire_type != .length_delimited) {
+                    return error.UnsupportedWireType;
+                }
+                if (payload_seen) return error.DuplicateField;
+                payload_seen = true;
+                const payload = try reader.readBytes(max_payload_size + 16);
+                result.request_body_size = try decodeZeroPayload(payload);
+            },
+            else => return error.UnsupportedField,
+        }
+    }
+    if (!response_size_seen or !payload_seen) return error.MissingPayload;
+    return result;
+}
+
+/// `SimpleResponse` and `StreamingOutputCallResponse` share the exact Payload
+/// field used by this fixture.
+pub fn encodeSimpleResponseAlloc(
+    allocator: std.mem.Allocator,
+    body_size: usize,
+) Error![]u8 {
+    return encodeStreamingOutputCallResponseAlloc(allocator, body_size);
+}
+
 /// Decode the exact `StreamingOutputCallRequest` subset emitted by the
 /// canonical FullDuplexCall interoperability cases.
 ///
@@ -456,6 +522,22 @@ test "encodes canonical streaming request subset" {
         u8,
         &.{ 0x12, 0x05, 0x08, 0x05, 0x10, 0xac, 0x02, 0x1a, 0x00 },
         delayed,
+    );
+}
+
+test "decodes canonical unary custom metadata request" {
+    const request = try decodeSimpleRequest(
+        &.{ 0x10, 0x05, 0x1a, 0x05, 0x12, 0x03, 0, 0, 0 },
+    );
+    try std.testing.expectEqual(@as(u32, 5), request.response_size);
+    try std.testing.expectEqual(@as(usize, 3), request.request_body_size);
+    try std.testing.expectError(
+        error.MissingPayload,
+        decodeSimpleRequest(&.{ 0x10, 0x05 }),
+    );
+    try std.testing.expectError(
+        error.UnsupportedField,
+        decodeSimpleRequest(&.{ 0x20, 0x01, 0x10, 0x05, 0x1a, 0x00 }),
     );
 }
 

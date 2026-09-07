@@ -230,12 +230,15 @@ process-boundary client reported all four scenarios below as successful. Large
 responses crossed multiple HTTP/2 DATA frames, additionally exercising decoder
 progress events that contain a message fragment but no completed gRPC message.
 The reverse gate builds upstream's `interop_client` and verifies `ping_pong`,
-`empty_stream`, `cancel_after_first_response`, and
-`timeout_on_sleeping_server` over both transports. Each case requires both the
-C++ client's successful exit and a netz marker proving the expected terminal
-condition. For the upstream test's hard-coded 1 ms TLS deadline, the harness
-also records the legitimate race where the client reaches local
-`DEADLINE_EXCEEDED` before the TLS accept finishes and no server RPC exists.
+`empty_stream`, `cancel_after_first_response`, `timeout_on_sleeping_server`,
+and `custom_metadata` over both transports. The metadata case runs a 271828-
+byte unary request and a bidirectional request on one channel, requiring the
+expected 314159-byte responses plus exact ASCII initial-metadata and raw
+binary trailing-metadata echoes. Each case requires both the C++ client's
+successful exit and a netz marker proving the expected terminal condition. For
+the upstream test's hard-coded 1 ms TLS deadline, the harness also records the
+legitimate race where the client reaches local `DEADLINE_EXCEEDED` before the
+TLS accept finishes and no server RPC exists.
 
 The reflection gate passed on 2026-09-07 against the same pinned upstream
 revision, Bazel 8.7.0, and GCC. It generates a standard descriptor set with the
@@ -307,9 +310,10 @@ upstream gRPC Core's `ServerEarlyReturnTest`.
    and response streams. A focused grpc-cpp gate is now available for external
    server checks of full duplex, metadata, cancellation/channel reuse, and
    deadline propagation over h2c and certificate-verified TLS. The reverse gate
-   covers upstream-client ping-pong, empty-stream completion, cancellation, and
-   deadline behavior against netz over both transports. A broader upstream
-   matrix, including reverse custom metadata, remains future work.
+   covers upstream-client ping-pong, empty-stream completion, cancellation,
+   deadline behavior, and unary/bidirectional custom-metadata echo against netz
+   over both transports. Broader upstream unary/streaming cases remain future
+   work.
 3. Add broader conformance/interop runners. Reflection accepts standard
    descriptor sets directly and
    is covered by an independent official `grpc_cli` process-boundary gate.

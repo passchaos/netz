@@ -723,6 +723,14 @@ pub const ServerDuplex = struct {
         return self.transport.stream_id;
     }
 
+    /// Borrow the validated request metadata for this RPC. The slice remains
+    /// valid until the duplex stream is deinitialized.
+    pub fn requestHeaders(
+        self: ServerDuplex,
+    ) []const http2.Hpack.HeaderField {
+        return self.transport.headers;
+    }
+
     pub fn requestFinished(self: ServerDuplex) bool {
         return self.transport.requestFinished();
     }

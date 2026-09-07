@@ -4,8 +4,13 @@ const std = @import("std");
 const netz = @import("netz");
 const messages = @import("grpc_cpp_messages.zig");
 
-const service_path = "/grpc.testing.TestService/FullDuplexCall";
+const duplex_service_path = "/grpc.testing.TestService/FullDuplexCall";
+const unary_service_path = "/grpc.testing.TestService/UnaryCall";
 const message_limit = messages.max_payload_size + 64;
+const echo_initial_key = "x-grpc-test-echo-initial";
+const echo_initial_value = "test_initial_metadata_value";
+const echo_trailing_key = "x-grpc-test-echo-trailing-bin";
+const echo_trailing_value = "\x0a\x0b\x0a\x0b\x0a\x0b";
 const canonical_request_sizes = [_]usize{ 27_182, 8, 1_828, 45_904 };
 const canonical_response_sizes = [_]usize{ 31_415, 9, 2_653, 58_979 };
 
@@ -14,6 +19,7 @@ const Scenario = enum {
     empty_stream,
     cancel_after_first_response,
     timeout_on_sleeping_server,
+    custom_metadata,
 
     fn parse(raw: []const u8) !Scenario {
         return std.meta.stringToEnum(Scenario, raw) orelse error.InvalidArgument;
@@ -109,9 +115,17 @@ pub fn main(init: std.process.Init) !void {
     {
         return error.InvalidAlpn;
     }
+    if (scenario == .custom_metadata) {
+        try serveCustomMetadata(allocator, &connection);
+        std.debug.print(
+            "netz grpc server completed: scenario={s} transport={s}\n",
+            .{ @tagName(scenario), if (tls_enabled) "tls" else "h2c" },
+        );
+        return;
+    }
     var stream = try connection.acceptDuplex();
     defer stream.deinit();
-    if (!std.mem.eql(u8, stream.path, service_path)) {
+    if (!std.mem.eql(u8, stream.path, duplex_service_path)) {
         try stream.finish(.unimplemented, null, &.{}, &.{});
         return error.UnexpectedMethod;
     }
@@ -121,6 +135,107 @@ pub fn main(init: std.process.Init) !void {
         "netz grpc server completed: scenario={s} transport={s}\n",
         .{ @tagName(scenario), if (tls_enabled) "tls" else "h2c" },
     );
+}
+
+fn serveCustomMetadata(
+    allocator: std.mem.Allocator,
+    connection: *netz.grpc.runtime.ServerConnection,
+) !void {
+    {
+        var unary = try connection.readUnary();
+        defer unary.deinit();
+        if (!std.mem.eql(u8, unary.request.path, unary_service_path)) {
+            return error.UnexpectedMethod;
+        }
+        try expectEchoMetadata(unary.request.headers);
+        const request = try messages.decodeSimpleRequest(
+            unary.request.message.payload,
+        );
+        try expectRequestSizes(request.request_body_size, request.response_size);
+        const response = try messages.encodeSimpleResponseAlloc(
+            allocator,
+            request.response_size,
+        );
+        defer allocator.free(response);
+        try connection.writeUnary(unary.request.stream_id, .{
+            .message = response,
+            .request_accepted_encodings = unary.request.accepted_encodings,
+            .initial_metadata = &.{.{
+                .name = echo_initial_key,
+                .value = echo_initial_value,
+            }},
+            .trailing_binary_metadata = &.{.{
+                .name = echo_trailing_key,
+                .value = echo_trailing_value,
+            }},
+        });
+    }
+
+    var stream = try connection.acceptDuplex();
+    defer stream.deinit();
+    if (!std.mem.eql(u8, stream.path, duplex_service_path)) {
+        return error.UnexpectedMethod;
+    }
+    try expectEchoMetadata(stream.requestHeaders());
+
+    var queue = RequestQueue{ .allocator = allocator };
+    defer queue.deinit();
+    try stream.startResponse(.{
+        .request_accepted_encodings = stream.accepted_encodings,
+        .initial_metadata = &.{.{
+            .name = echo_initial_key,
+            .value = echo_initial_value,
+        }},
+        .max_message_size = message_limit,
+    });
+    const streaming_request = try nextRequest(&stream, &queue, null);
+    try expectRequest(streaming_request, 271_828, 314_159);
+    try expectFinished(&stream, &queue, null);
+    try writeResponse(&stream, &queue, null, 314_159);
+    try stream.finish(
+        .ok,
+        null,
+        &.{},
+        &.{.{
+            .name = echo_trailing_key,
+            .value = echo_trailing_value,
+        }},
+    );
+}
+
+fn expectEchoMetadata(
+    headers: []const netz.http2.Hpack.HeaderField,
+) !void {
+    if (!std.mem.eql(
+        u8,
+        netz.grpc.call.headerValue(headers, echo_initial_key) orelse
+            return error.MissingMetadata,
+        echo_initial_value,
+    )) return error.UnexpectedMetadata;
+
+    const decoded_len = try netz.grpc.binaryMetadataFieldsDecodedUpperBound(
+        headers,
+        echo_trailing_key,
+    );
+    var scratch: [64]u8 = undefined;
+    if (decoded_len > scratch.len) return error.UnexpectedMetadata;
+    var values = try netz.grpc.BinaryMetadataIterator.init(
+        headers,
+        echo_trailing_key,
+        scratch[0..decoded_len],
+    );
+    const value = (try values.next()) orelse return error.MissingMetadata;
+    if (!std.mem.eql(u8, value.value, echo_trailing_value) or
+        try values.next() != null)
+    {
+        return error.UnexpectedMetadata;
+    }
+}
+
+fn expectRequestSizes(request_size: usize, response_size: u32) !void {
+    if (request_size != 271_828 or response_size != 314_159) {
+        return error.UnexpectedRequest;
+    }
 }
 
 const RequestQueue = struct {
@@ -161,6 +276,7 @@ fn serveScenario(
         .empty_stream => try serveEmpty(stream, &queue, deadline),
         .cancel_after_first_response => try serveCancellation(io, stream, &queue, deadline),
         .timeout_on_sleeping_server => try serveSleepingDeadline(io, stream, &queue),
+        .custom_metadata => unreachable,
     }
 }
 

@@ -186,10 +186,11 @@ for transport in h2c tls; do
     ping_pong \
     empty_stream \
     cancel_after_first_response \
-    timeout_on_sleeping_server
+    timeout_on_sleeping_server \
+    custom_metadata
   do
     run_case "$scenario" "$transport"
   done
 done
 
-echo 'grpc-cpp client interoperated with netz: transport=h2c+tls ping_pong=true empty_stream=true cancel=CANCEL deadline=DEADLINE_EXCEEDED certificate=verified alpn=h2'
+echo 'grpc-cpp client interoperated with netz: transport=h2c+tls ping_pong=true empty_stream=true cancel=CANCEL deadline=DEADLINE_EXCEEDED metadata=unary+bidi certificate=verified alpn=h2'
