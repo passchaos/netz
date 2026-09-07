@@ -1,5 +1,7 @@
 const std = @import("std");
 const netz = @import("netz");
+const CountingAllocator = @import("support/counting_allocator.zig")
+    .CountingAllocator;
 
 const warmup_iterations: usize = 1_000;
 const iterations: usize = 2_000;
@@ -17,8 +19,22 @@ const limits: netz.http2.runtime.Limits = .{
     .initial_connection_window_size = h2_window,
 };
 
+const ScenarioId = enum {
+    http2_consecutive_x1_empty,
+    http2_consecutive_x1_req_10b,
+    http2_consecutive_x1_req_100kb,
+    http2_parallel_x10_empty,
+    http2_parallel_x10_req_10kb_100_chunks_max_window,
+    http2_parallel_x10_res_1mb,
+};
+
+const Options = struct {
+    scenario: ?ScenarioId = null,
+    stats: bool = false,
+};
+
 const Scenario = struct {
-    name: []const u8,
+    id: ScenarioId,
     request: netz.http2.runtime.RequestOptions,
     response_body: []const u8 = "",
     parallel: usize = 1,
@@ -26,8 +42,13 @@ const Scenario = struct {
     measured: usize = iterations,
 };
 
-pub fn main() !void {
-    const allocator = std.heap.smp_allocator;
+pub fn main(init: std.process.Init) !void {
+    const options = try parseOptions(init, std.heap.smp_allocator);
+    var counting = CountingAllocator.init(std.heap.smp_allocator);
+    const allocator = if (options.stats)
+        counting.allocator()
+    else
+        std.heap.smp_allocator;
 
     var threaded = std.Io.Threaded.init(allocator, .{});
     defer threaded.deinit();
@@ -44,6 +65,7 @@ pub fn main() !void {
     const Shared = struct {
         server: *netz.http2.runtime.Server,
         err: ?anyerror = null,
+        scenario: ?ScenarioId,
 
         fn run(shared: *@This()) void {
             runFallible(shared) catch |err| {
@@ -53,6 +75,7 @@ pub fn main() !void {
 
         fn runFallible(shared: *@This()) !void {
             const ScenarioServer = struct {
+                id: ScenarioId,
                 request_body: []const u8,
                 response_body: []const u8 = "",
                 parallel: usize,
@@ -61,22 +84,25 @@ pub fn main() !void {
                 streaming: bool = false,
             };
             const scenarios = [_]ScenarioServer{
-                .{ .request_body = "", .parallel = 1 },
-                .{ .request_body = request_body, .parallel = 1 },
+                .{ .id = .http2_consecutive_x1_empty, .request_body = "", .parallel = 1 },
+                .{ .id = .http2_consecutive_x1_req_10b, .request_body = request_body, .parallel = 1 },
                 .{
+                    .id = .http2_consecutive_x1_req_100kb,
                     .request_body = request_body_100kb,
                     .parallel = 1,
                     .warmups = 100,
                     .streaming = true,
                 },
-                .{ .request_body = "", .parallel = 10 },
+                .{ .id = .http2_parallel_x10_empty, .request_body = "", .parallel = 10 },
                 .{
+                    .id = .http2_parallel_x10_req_10kb_100_chunks_max_window,
                     .request_body = parallel_body,
                     .parallel = 10,
                     .warmups = 5,
                     .measured = 20,
                 },
                 .{
+                    .id = .http2_parallel_x10_res_1mb,
                     .request_body = "",
                     .response_body = response_body_1mb,
                     .parallel = 10,
@@ -85,6 +111,8 @@ pub fn main() !void {
                 },
             };
             for (scenarios) |scenario| {
+                if (shared.scenario != null and
+                    scenario.id != shared.scenario.?) continue;
                 var connection = try shared.server.accept();
                 defer connection.close();
                 const scenario_iterations =
@@ -211,7 +239,10 @@ pub fn main() !void {
         }
     };
 
-    var shared = Shared{ .server = &server };
+    var shared = Shared{
+        .server = &server,
+        .scenario = options.scenario,
+    };
     const thread = try std.Thread.spawn(.{}, Shared.run, .{&shared});
 
     const authority = try std.fmt.allocPrint(
@@ -222,7 +253,7 @@ pub fn main() !void {
     defer allocator.free(authority);
     const scenarios = [_]Scenario{
         .{
-            .name = "http2_consecutive_x1_empty",
+            .id = .http2_consecutive_x1_empty,
             .request = .{
                 .path = "/hello",
                 .scheme = "http",
@@ -230,7 +261,7 @@ pub fn main() !void {
             },
         },
         .{
-            .name = "http2_consecutive_x1_req_10b",
+            .id = .http2_consecutive_x1_req_10b,
             .request = .{
                 .method = "POST",
                 .path = "/hello",
@@ -240,7 +271,7 @@ pub fn main() !void {
             },
         },
         .{
-            .name = "http2_consecutive_x1_req_100kb",
+            .id = .http2_consecutive_x1_req_100kb,
             .request = .{
                 .method = "POST",
                 .path = "/hello",
@@ -251,7 +282,7 @@ pub fn main() !void {
             .warmups = 100,
         },
         .{
-            .name = "http2_parallel_x10_empty",
+            .id = .http2_parallel_x10_empty,
             .request = .{
                 .path = "/hello",
                 .scheme = "http",
@@ -260,7 +291,7 @@ pub fn main() !void {
             .parallel = 10,
         },
         .{
-            .name = "http2_parallel_x10_req_10kb_100_chunks_max_window",
+            .id = .http2_parallel_x10_req_10kb_100_chunks_max_window,
             .request = .{
                 .method = "POST",
                 .path = "/hello",
@@ -273,7 +304,7 @@ pub fn main() !void {
             .measured = 20,
         },
         .{
-            .name = "http2_parallel_x10_res_1mb",
+            .id = .http2_parallel_x10_res_1mb,
             .request = .{
                 .path = "/hello",
                 .scheme = "http",
@@ -286,6 +317,8 @@ pub fn main() !void {
         },
     };
     for (scenarios) |scenario| {
+        if (options.scenario != null and
+            scenario.id != options.scenario.?) continue;
         var client = try netz.http2.runtime.Client.connect(
             allocator,
             io,
@@ -305,6 +338,7 @@ pub fn main() !void {
             );
         }
 
+        const allocations_before = counting.snapshot();
         const start = nowNs(io);
         var status_total: usize = 0;
         for (0..scenario.measured) |_| {
@@ -317,6 +351,7 @@ pub fn main() !void {
             status_total += 200 * scenario.parallel;
         }
         const elapsed = nowNs(io) -| start;
+        const allocations_after = counting.snapshot();
         const requests_per_second = if (elapsed == 0)
             0
         else
@@ -334,7 +369,7 @@ pub fn main() !void {
             \\  requests/s: {d}
             \\
         , .{
-            scenario.name,
+            @tagName(scenario.id),
             scenario.parallel,
             scenario.warmups,
             scenario.measured,
@@ -343,10 +378,85 @@ pub fn main() !void {
             elapsed / (scenario.measured * scenario.parallel),
             requests_per_second * scenario.parallel,
         });
+        if (options.stats) {
+            printAllocationDelta(allocations_before, allocations_after);
+        }
     }
 
     thread.join();
     if (shared.err) |err| return err;
+}
+
+fn parseOptions(
+    init: std.process.Init,
+    allocator: std.mem.Allocator,
+) !Options {
+    var args = try std.process.Args.Iterator.initAllocator(
+        init.minimal.args,
+        allocator,
+    );
+    defer args.deinit();
+    _ = args.next();
+    var options: Options = .{};
+    while (args.next()) |arg| {
+        if (std.mem.eql(u8, arg, "--stats")) {
+            options.stats = true;
+        } else if (std.mem.startsWith(u8, arg, "--scenario=")) {
+            options.scenario = std.meta.stringToEnum(
+                ScenarioId,
+                arg["--scenario=".len..],
+            ) orelse return error.InvalidArgument;
+        } else return error.InvalidArgument;
+    }
+    return options;
+}
+
+fn printAllocationDelta(
+    before: @import("support/counting_allocator.zig").Snapshot,
+    after: @import("support/counting_allocator.zig").Snapshot,
+) void {
+    std.debug.print(
+        \\  measured allocator calls: {d}
+        \\  measured frees: {d}
+        \\  measured resize/remap: {d}/{d}
+        \\  measured allocated bytes: {d}
+        \\  live bytes after measurement: {d}
+        \\  peak live bytes: {d}
+        \\  measured allocation buckets:
+    ++ "\n", .{
+        after.alloc_count - before.alloc_count,
+        after.free_count - before.free_count,
+        after.resize_count - before.resize_count,
+        after.remap_count - before.remap_count,
+        after.total_allocated - before.total_allocated,
+        after.current_bytes,
+        after.peak_bytes,
+    });
+    for (@import("support/counting_allocator.zig").bucket_labels, 0..) |label, index| {
+        std.debug.print(
+            "    {s}: count={d}, bytes={d}\n",
+            .{
+                label,
+                after.alloc_buckets[index] - before.alloc_buckets[index],
+                after.alloc_bucket_bytes[index] -
+                    before.alloc_bucket_bytes[index],
+            },
+        );
+    }
+    std.debug.print("  measured exact allocation sizes:\n", .{});
+    for (after.exact_sizes[0..after.exact_size_len]) |entry| {
+        var before_count: usize = 0;
+        for (before.exact_sizes[0..before.exact_size_len]) |old_entry| {
+            if (old_entry.size != entry.size) continue;
+            before_count = old_entry.count;
+            break;
+        }
+        if (entry.count <= before_count) continue;
+        std.debug.print(
+            "    {d} bytes: {d}\n",
+            .{ entry.size, entry.count - before_count },
+        );
+    }
 }
 
 fn validateResponse(response: netz.http2.runtime.OwnedResponse) !void {

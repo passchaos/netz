@@ -992,6 +992,19 @@ empty requests, 10.051-10.498 us for 10-byte requests, 22.744-22.921 us for
 for the ten-stream request-body batch, and 1.685-1.703 ms for the ten-stream
 1-MiB response batch. These are current regression ranges; the dated matched
 Hyper comparison above remains the cross-stack evidence.
+Aggregate request and response reads now also keep the complete common-case
+wire frame borrowed through immediate HPACK decode/body copy, matching the
+existing streaming response path. A queued application frame remains owned
+until the iteration finishes, and fragmented HEADERS copy the first fragment
+into connection-owned continuation scratch before advancing the frame reader.
+Warmup-scoped h2c allocator telemetry attributes the removed copies exactly:
+the empty exchange fell from six to four allocations per request, eliminating
+one 19-byte request frame and one 11-byte response frame while retaining the
+two owned HPACK allocations at each endpoint. An integration regression swaps
+in allocation-tracking allocators around the second aggregate request and response read
+and requires exactly those two HPACK allocations on each side. Existing
+CONTINUATION and interleaved-request tests cover borrowed lifetime and the
+pending-frame owning fallback.
 The bidirectional Hyper process gate now exercises that boundary directly over
 h2c and TLS. A netz client waits through an idle interval, receives Hyper/h2's
 PING ACK, and completes another request on the same connection. In the reverse

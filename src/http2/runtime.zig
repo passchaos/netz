@@ -6307,19 +6307,25 @@ pub const Connection = struct {
             }
         };
         while (true) {
-            var frame = try self.readOwnedFrameWithDeadline(deadline);
-            defer frame.deinit(self.allocator);
-            if (try self.handleConnectionFrame(frame.frame)) continue;
-            switch (frame.frame.header.frame_type) {
+            var pending_owned: ?OwnedFrame = null;
+            defer if (pending_owned) |*owned| {
+                owned.deinit(self.allocator);
+            };
+            const frame = if (self.pendingApplicationFrameCount() != 0) blk: {
+                pending_owned = try self.readOwnedFrameWithDeadline(deadline);
+                break :blk pending_owned.?.frame;
+            } else (try self.readBufferedFrameWithDeadline(deadline)).frame;
+            if (try self.handleConnectionFrame(frame)) continue;
+            switch (frame.header.frame_type) {
                 .headers => {
-                    const stream_id = frame.frame.header.stream_id;
+                    const stream_id = frame.header.stream_id;
                     const admission = try self.claimPeerRequestStream(
                         stream_id,
                     );
                     if (admission != .admitted) {
                         try self.refusePeerRequestStreamUntil(
                             stream_id,
-                            frame.frame,
+                            frame,
                             deadline,
                             admission == .refused_reset_sent,
                         );
@@ -6328,7 +6334,7 @@ pub const Connection = struct {
                     errdefer self.releasePeerStream(stream_id);
                     active_stream_id = stream_id;
                     const headers = try self.readHeaderBlockUntil(
-                        frame.frame,
+                        frame,
                         deadline,
                     );
                     errdefer freeHeaders(self.allocator, headers);
@@ -6361,7 +6367,7 @@ pub const Connection = struct {
                         );
                     }
 
-                    if ((!is_connect or is_extended_connect) and (frame.frame.header.flags & flag_end_stream) == 0) {
+                    if ((!is_connect or is_extended_connect) and (frame.header.flags & flag_end_stream) == 0) {
                         while (true) {
                             var incoming = try self.readRequestBodyFrameUntil(
                                 stream_id,
@@ -6493,7 +6499,7 @@ pub const Connection = struct {
                 },
                 .rst_stream => {
                     const reset = try http2.ResetStreamPayload.parse(
-                        frame.frame,
+                        frame,
                     );
                     if (self.streamIsIdle(reset.stream_id)) {
                         return error.InvalidFrame;
@@ -10828,43 +10834,49 @@ pub const Connection = struct {
         var trailers_only = false;
 
         while (true) {
-            var frame = try self.readOwnedFrameWithDeadline(deadline);
-            defer frame.deinit(self.allocator);
-            if (try self.handleConnectionFrame(frame.frame)) continue;
-            if (frame.frame.header.frame_type == .goaway) {
-                const goaway = try http2.GoAwayPayload.parse(frame.frame);
+            var pending_owned: ?OwnedFrame = null;
+            defer if (pending_owned) |*owned| {
+                owned.deinit(self.allocator);
+            };
+            const frame = if (self.pendingApplicationFrameCount() != 0) blk: {
+                pending_owned = try self.readOwnedFrameWithDeadline(deadline);
+                break :blk pending_owned.?.frame;
+            } else (try self.readBufferedFrameWithDeadline(deadline)).frame;
+            if (try self.handleConnectionFrame(frame)) continue;
+            if (frame.header.frame_type == .goaway) {
+                const goaway = try http2.GoAwayPayload.parse(frame);
                 try self.handleGoAwayForStream(stream_id, goaway);
                 continue;
             }
-            if (frame.frame.header.stream_id != stream_id) return error.UnexpectedFrame;
-            switch (frame.frame.header.frame_type) {
+            if (frame.header.stream_id != stream_id) return error.UnexpectedFrame;
+            switch (frame.header.frame_type) {
                 .push_promise => {
                     if (!self.limits.enable_push) {
                         _ = try self.validatePushPromiseForClientStream(
-                            frame.frame,
+                            frame,
                         );
                         return error.InvalidFrame;
                     }
                     try self.receivePushPromiseUntil(
-                        frame.frame,
+                        frame,
                         deadline,
                     );
                     continue;
                 },
                 .headers => {
                     if (headers) |h| {
-                        if ((frame.frame.header.flags & flag_end_stream) == 0) return error.UnexpectedFrame;
+                        if ((frame.header.flags & flag_end_stream) == 0) return error.UnexpectedFrame;
                         _ = h;
                         try validateExpectedContentLength(response_content_length, body.items.len);
                         trailers = try self.readHeaderBlockUntil(
-                            frame.frame,
+                            frame,
                             deadline,
                         );
                         try validateHeaderBlock(trailers, .response_trailers);
                         break;
                     } else {
                         headers = try self.readHeaderBlockUntil(
-                            frame.frame,
+                            frame,
                             deadline,
                         );
                         try validateHeaderBlock(headers.?, .response);
@@ -10874,7 +10886,7 @@ pub const Connection = struct {
                         response_status = status;
                         response_content_length = lookup.content_length;
                         if (informationalResponseToSkip(status)) {
-                            if ((frame.frame.header.flags & flag_end_stream) != 0) return error.UnexpectedFrame;
+                            if ((frame.header.flags & flag_end_stream) != 0) return error.UnexpectedFrame;
                             if (lookup.content_length != null) return error.InvalidContentLength;
                             try notifyInformationalResponse(
                                 informational,
@@ -10892,7 +10904,7 @@ pub const Connection = struct {
                             const traditional_connect = methodIsConnect(request_method) and !extended_connect;
                             if (traditional_connect and (lookup.content_length orelse 0) != 0) return error.InvalidContentLength;
                             if ((statusIsInformational(status) or status == 204) and lookup.content_length != null) return error.InvalidContentLength;
-                            if (!traditional_connect and (frame.frame.header.flags & flag_end_stream) == 0) {
+                            if (!traditional_connect and (frame.header.flags & flag_end_stream) == 0) {
                                 try self.consumeForbiddenResponseBodyUntil(
                                     stream_id,
                                     deadline,
@@ -10900,7 +10912,7 @@ pub const Connection = struct {
                             }
                             break;
                         }
-                        if ((frame.frame.header.flags & flag_end_stream) != 0) {
+                        if ((frame.header.flags & flag_end_stream) != 0) {
                             try validateExpectedContentLength(lookup.content_length, 0);
                             trailers_only = true;
                             break;
@@ -10909,29 +10921,29 @@ pub const Connection = struct {
                 },
                 .data => {
                     if (headers == null) return error.UnexpectedFrame;
-                    const data = try self.receiveDataPayload(stream_id, frame.frame);
+                    const data = try self.receiveDataPayload(stream_id, frame);
                     if (body.items.len + data.data.len > self.limits.max_body_bytes) {
                         // The DATA payload already consumed connection credit.
                         // A stream-local size rejection must restore that shared
                         // credit before terminating this response.
                         self.releaseConnectionCapacity(
-                            frame.frame.payload.len,
+                            frame.payload.len,
                         ) catch {};
                         return error.MessageTooLarge;
                     }
                     try body.appendSlice(self.allocator, data.data);
                     try self.maybeReleaseReceivedCapacity(
                         stream_id,
-                        (frame.frame.header.flags & flag_end_stream) != 0,
+                        (frame.header.flags & flag_end_stream) != 0,
                     );
-                    if ((frame.frame.header.flags & flag_end_stream) != 0) {
+                    if ((frame.header.flags & flag_end_stream) != 0) {
                         if (headers != null) try validateExpectedContentLength(response_content_length, body.items.len);
                         break;
                     }
                 },
                 .rst_stream => {
                     const reset = try http2.ResetStreamPayload.parse(
-                        frame.frame,
+                        frame,
                     );
                     try self.recordResetStream(reset);
                     return error.StreamReset;
@@ -16869,6 +16881,113 @@ test "HTTP/2 h2c runtime client and server exchange over TCP" {
     defer goaway.deinit(allocator);
     try std.testing.expectEqual(http2.ErrorCode.no_error, goaway.goaway.error_code);
     try std.testing.expectEqualStrings("done", goaway.goaway.debug_data);
+}
+
+test "HTTP/2 aggregate empty exchange borrows wire frames after warmup" {
+    const allocator = std.testing.allocator;
+
+    var threaded = std.Io.Threaded.init(allocator, .{});
+    defer threaded.deinit();
+    const io = threaded.io();
+
+    var server = try Server.listen(
+        allocator,
+        io,
+        .{ .ip4 = .loopback(0) },
+        .{ .max_frame_payload = 4096, .max_body_bytes = 4096 },
+    );
+    defer server.deinit();
+
+    const Shared = struct {
+        server: *Server,
+        err: ?anyerror = null,
+
+        fn run(shared: *@This()) void {
+            runFallible(shared.server) catch |err| {
+                shared.err = err;
+            };
+        }
+
+        fn runFallible(server_ptr: *Server) !void {
+            var connection = try server_ptr.accept();
+            defer connection.close();
+
+            {
+                var warmup = try connection.readRequest();
+                defer warmup.deinit(server_ptr.allocator);
+                try std.testing.expectEqualStrings("/measured", warmup.path);
+                try connection.writeResponse(warmup.stream_id, .{});
+            }
+
+            const second_stream_id = blk: {
+                var tracking = std.testing.FailingAllocator.init(
+                    allocator,
+                    .{},
+                );
+                const saved_allocator = connection.allocator;
+                connection.allocator = tracking.allocator();
+                defer connection.allocator = saved_allocator;
+
+                var request = try connection.readRequest();
+                defer request.deinit(connection.allocator);
+                try std.testing.expectEqualStrings("/measured", request.path);
+                try std.testing.expectEqualStrings("", request.body);
+                // The owned HPACK field array and shared string block are the
+                // only allocations. The complete HEADERS wire frame remains
+                // borrowed from the reusable frame-reader buffer.
+                try std.testing.expectEqual(
+                    @as(usize, 2),
+                    tracking.allocations,
+                );
+                break :blk request.stream_id;
+            };
+            try connection.writeResponse(second_stream_id, .{});
+        }
+    };
+
+    var shared = Shared{ .server = &server };
+    const thread = try std.Thread.spawn(.{}, Shared.run, .{&shared});
+
+    var client = try Client.connect(allocator, io, server.address(), .{
+        .max_frame_payload = 4096,
+        .max_body_bytes = 4096,
+    });
+    defer client.close();
+
+    {
+        var warmup = try client.request(.{
+            .path = "/measured",
+            .authority = "localhost",
+        });
+        defer warmup.deinit(allocator);
+        try std.testing.expectEqual(@as(u16, 200), warmup.status);
+    }
+
+    const pending = try client.sendCompleteRequest(.{
+        .path = "/measured",
+        .authority = "localhost",
+    });
+    {
+        var tracking = std.testing.FailingAllocator.init(allocator, .{});
+        const saved_allocator = client.allocator;
+        client.allocator = tracking.allocator();
+        defer client.allocator = saved_allocator;
+
+        var response = try client.readResponse(
+            pending.stream_id,
+            pending.request_method,
+            pending.extended_connect,
+            null,
+        );
+        defer response.deinit(client.allocator);
+        try std.testing.expectEqual(@as(u16, 200), response.status);
+        try std.testing.expectEqualStrings("", response.body);
+        // As on the request side, aggregate ownership belongs only to HPACK.
+        try std.testing.expectEqual(@as(usize, 2), tracking.allocations);
+    }
+
+    thread.join();
+    if (shared.err) |err| return err;
 }
 
 test "HTTP/2 serveConnection handles sequential requests" {

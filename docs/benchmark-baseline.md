@@ -263,6 +263,25 @@ three final fixed-binary runs measured 9.923-10.035 us, 10.449-10.565 us,
 23.243-23.372 us, 27.951-28.156 us/batch, 167.797-168.067 us/request, and
 173.706-174.753 us/request.
 
+The h2c harness now accepts `--scenario=<name>` and `--stats`, with allocator
+snapshots taken after warmup and exact allocation sizes reported alongside the
+size buckets. On the consecutive empty GET shape, the initial telemetry found
+exactly six allocations per exchange: the two owned HPACK outputs at each
+endpoint plus 19-byte request and 11-byte response frame copies. Aggregate
+request and response readers now borrow ordinary wire frames from the reusable
+64-KiB frame-reader buffer, while frames dequeued from the pending application
+queue retain their owning fallback. A post-change run removed both frame sizes
+and measured exactly four allocations per exchange (8,000 over 2,000 measured
+requests), down 33.3% from 12,000; cumulative requested bytes fell from
+1,316,000 to 1,256,000. Five fixed-binary CPU-0 samples measured
+9.606-9.880 us/op. This is allocation/copy evidence and a local regression
+range, not a new cross-stack speed ratio. Reproduce the isolated shape with:
+
+```sh
+taskset -c 0 zig build bench-http2-h2c -Doptimize=ReleaseFast -- \
+  --scenario=http2_consecutive_x1_empty --stats
+```
+
 `strace` confirmed equal steady-state wire sizes: empty exchanges use 19-byte
 requests and 11-byte responses; POST exchanges use 43-byte requests and
 11-byte responses. The large POST gap is specifically Hyper's two-write
