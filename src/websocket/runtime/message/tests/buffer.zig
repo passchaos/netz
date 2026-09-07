@@ -80,6 +80,38 @@ test "WebSocket receive window compacts before append reuses capacity" {
     );
 }
 
+test "WebSocket receive window supports direct transport fill" {
+    const allocator = std.testing.allocator;
+    var storage: std.ArrayList(u8) = .empty;
+    defer storage.deinit(allocator);
+    try storage.ensureTotalCapacityPrecise(allocator, 8);
+    try storage.appendSlice(allocator, "old-data");
+    var consumed: usize = 4;
+
+    const tail = try buffer.reserveAppendAfterConsumed(
+        &storage,
+        &consumed,
+        allocator,
+        5,
+    );
+    try std.testing.expectEqual(@as(usize, 0), consumed);
+    try std.testing.expectEqualStrings("data", storage.items);
+    @memcpy(tail[0..3], "new");
+    buffer.commitAppend(&storage, 3);
+    try std.testing.expectEqualStrings("datanew", storage.items);
+
+    const unused = try buffer.reserveAppendAfterConsumed(
+        &storage,
+        &consumed,
+        allocator,
+        2,
+    );
+    unused[0] = 0xaa;
+    unused[1] = 0xbb;
+    buffer.commitAppend(&storage, 0);
+    try std.testing.expectEqualStrings("datanew", storage.items);
+}
+
 test "WebSocket message buffer capacity rounding rejects overflow" {
     try std.testing.expectEqual(
         @as(usize, 0),

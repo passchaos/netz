@@ -218,6 +218,13 @@ bytes from 5,368,053,760 to 1,305,600: HTTP/1, RFC 8441, and RFC 9220 receive
 paths are now amortized linear rather than quadratic when a transport read
 contains many small frames. The benchmark is intentionally adversarial and is
 not presented as an end-to-end network throughput ratio.
+The RFC 9220 adapter also reserves the bounded receive-window tail before an
+HTTP/3 DATA read and lets the stream reader fill it directly. This removes the
+former 16 KiB stack staging buffer and its `scratch -> inbuf` copy while keeping
+the existing 16 KiB read-ahead ceiling; QUIC's receive storage still performs
+the one copy required by the current public H3 reader contract. This follows
+tquic's separate DATA streaming state and Hyper's direct-fill receive-buffer
+pattern without introducing a wrapping ring into the contiguous frame parser.
 
 The 2026-08-17 same-host sample ranges for 200,000 masked 4 KiB binary frames:
 

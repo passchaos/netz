@@ -5357,6 +5357,16 @@ pub const HandshakeServerSession = struct {
         return read;
     }
 
+    /// Return DATA bytes currently readable without receiving another packet.
+    pub fn availableRequestData(
+        self: *HandshakeServerSession,
+        stream_id: u62,
+    ) Error!usize {
+        const entry = self.streaming_requests.find(stream_id) orelse
+            return error.UnexpectedStream;
+        return entry.reader.availableDataBytes();
+    }
+
     pub fn skipRequestData(
         self: *HandshakeServerSession,
         stream_id: u62,
@@ -9475,6 +9485,17 @@ pub const HandshakeClient = struct {
             &entry.reader,
         );
         return read;
+    }
+
+    /// Return DATA bytes currently readable without receiving another packet.
+    pub fn availableResponseData(
+        self: *HandshakeClient,
+        stream_id: u62,
+    ) Error!usize {
+        if (self.dispatcher_bound) return error.InvalidDispatcherState;
+        const entry = self.streaming_responses.find(stream_id) orelse
+            return error.UnexpectedStream;
+        return entry.reader.availableDataBytes();
     }
 
     /// Copy available DATA without waiting for receive-credit pacing. `null`

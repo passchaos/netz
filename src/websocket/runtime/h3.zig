@@ -16,6 +16,7 @@ const message_buffer = @import("message/buffer.zig");
 const deadline_policy = @import("../../internal/deadline.zig");
 const http3 = @import("../../http3/mod.zig");
 const rejection_drain_timeout: std.Io.Duration = .fromSeconds(5);
+const max_payload_read_chunk: usize = 16 * 1024;
 
 const IncomingDataKind = enum {
     none,
@@ -1534,15 +1535,8 @@ pub fn Connection(comptime role: common.Role) type {
                 self.inbuf_consumed,
             ) < required) {
                 if (self.receive_finished) return error.ConnectionClosed;
-                var scratch: [16 * 1024]u8 = undefined;
-                const count = try self.readPayloadChunk(&scratch, deadline);
+                const count = try self.appendPayloadChunk(deadline);
                 if (count == 0) continue;
-                try message_buffer.appendAfterConsumed(
-                    &self.inbuf,
-                    &self.inbuf_consumed,
-                    self.allocator,
-                    scratch[0..count],
-                );
             }
         }
 
@@ -1667,9 +1661,8 @@ pub fn Connection(comptime role: common.Role) type {
             validated.* = available_end;
         }
 
-        fn readPayloadChunk(
+        fn appendPayloadChunk(
             self: *Self,
-            out: []u8,
             deadline: ?std.Io.Clock.Timestamp,
         ) Error!usize {
             return switch (role) {
@@ -1685,10 +1678,21 @@ pub fn Connection(comptime role: common.Role) type {
                     defer event.deinit(self.allocator);
                     switch (event) {
                         .data_available => {
+                            const available = try self.h3
+                                .availableResponseData(self.stream_id);
+                            if (available == 0) continue;
+                            const out = try message_buffer
+                                .reserveAppendAfterConsumed(
+                                &self.inbuf,
+                                &self.inbuf_consumed,
+                                self.allocator,
+                                @min(available, max_payload_read_chunk),
+                            );
                             const count = try self.h3.readResponseData(
                                 self.stream_id,
                                 out,
                             );
+                            message_buffer.commitAppend(&self.inbuf, count);
                             if (count != 0) break count;
                         },
                         .finished => {
@@ -1713,9 +1717,26 @@ pub fn Connection(comptime role: common.Role) type {
                             std.debug.assert(message.stream_id == self.stream_id);
                             switch (message.value) {
                                 .data_available => {
+                                    const available = try self.h3
+                                        .availableRequestData(self.stream_id);
+                                    if (available == 0) continue;
+                                    const out = try message_buffer
+                                        .reserveAppendAfterConsumed(
+                                        &self.inbuf,
+                                        &self.inbuf_consumed,
+                                        self.allocator,
+                                        @min(
+                                            available,
+                                            max_payload_read_chunk,
+                                        ),
+                                    );
                                     const count = try self.h3.readRequestData(
                                         self.stream_id,
                                         out,
+                                    );
+                                    message_buffer.commitAppend(
+                                        &self.inbuf,
+                                        count,
                                     );
                                     if (count != 0) break count;
                                 },

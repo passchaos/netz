@@ -382,23 +382,30 @@ pub const Reader = struct {
     }
 
     pub fn readData(self: *Reader, out: []u8) Error!usize {
-        const header = self.current_frame orelse return error.UnexpectedFrame;
-        if (header.frame_type != http3.FrameType.data or self.phase != .body) {
-            return error.UnexpectedFrame;
-        }
-        const remaining = header.payload_length - self.current_payload_read;
-        const count = @min(remaining, @min(out.len, self.receive.available().len));
+        const count = @min(out.len, try self.availableDataBytes());
         if (count == 0) return 0;
         @memcpy(out[0..count], self.receive.available()[0..count]);
         try self.receive.consume(count);
         self.current_payload_read += count;
         self.body_read += count;
-        if (self.current_payload_read == header.payload_length) {
+        if (self.current_payload_read == self.current_frame.?.payload_length) {
             self.current_frame = null;
             self.current_header_consumed = false;
             self.current_payload_read = 0;
         }
         return count;
+    }
+
+    /// Number of current DATA payload bytes readable without pumping another
+    /// QUIC packet. This lets adapters reserve their final destination before
+    /// calling `readData`, avoiding an intermediate staging buffer.
+    pub fn availableDataBytes(self: Reader) Error!usize {
+        const header = self.current_frame orelse return error.UnexpectedFrame;
+        if (header.frame_type != http3.FrameType.data or self.phase != .body) {
+            return error.UnexpectedFrame;
+        }
+        const remaining = header.payload_length - self.current_payload_read;
+        return @min(remaining, self.receive.available().len);
     }
 
     pub fn skipData(self: *Reader) Error!usize {

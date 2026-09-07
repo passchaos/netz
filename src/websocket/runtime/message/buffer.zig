@@ -45,12 +45,47 @@ pub fn appendAfterConsumed(
     allocator: std.mem.Allocator,
     bytes: []const u8,
 ) std.mem.Allocator.Error!void {
-    std.debug.assert(consumed.* <= buffer.items.len);
     if (bytes.len == 0) return;
-    if (consumed.* != 0 and bytes.len > buffer.capacity - buffer.items.len) {
+    const destination = try reserveAppendAfterConsumed(
+        buffer,
+        consumed,
+        allocator,
+        bytes.len,
+    );
+    @memcpy(destination, bytes);
+    commitAppend(buffer, bytes.len);
+}
+
+/// Reserve a bounded tail slice that a transport can fill directly. This is
+/// the zero-intermediate-copy counterpart to `appendAfterConsumed`; callers
+/// must publish only initialized bytes with `commitAppend`.
+pub fn reserveAppendAfterConsumed(
+    buffer: *std.ArrayList(u8),
+    consumed: *usize,
+    allocator: std.mem.Allocator,
+    additional: usize,
+) std.mem.Allocator.Error![]u8 {
+    std.debug.assert(consumed.* <= buffer.items.len);
+    if (consumed.* != 0 and
+        additional > buffer.capacity - buffer.items.len)
+    {
         compact(buffer, consumed);
     }
-    try appendPrecise(buffer, allocator, bytes);
+    const required = std.math.add(
+        usize,
+        buffer.items.len,
+        additional,
+    ) catch return error.OutOfMemory;
+    if (required > buffer.capacity) {
+        const rounded = try roundedCapacity(required);
+        try buffer.ensureTotalCapacityPrecise(allocator, rounded);
+    }
+    return buffer.unusedCapacitySlice()[0..additional];
+}
+
+pub fn commitAppend(buffer: *std.ArrayList(u8), initialized: usize) void {
+    std.debug.assert(initialized <= buffer.capacity - buffer.items.len);
+    buffer.items.len += initialized;
 }
 
 /// Consume one parsed frame and return the number of bytes physically moved.

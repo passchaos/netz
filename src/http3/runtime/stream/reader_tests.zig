@@ -93,7 +93,12 @@ test "HTTP/3 incremental reader streams DATA through bounded window" {
             const event = (try reader.next(table)) orelse break;
             try std.testing.expect(event == .data_available);
             while (reader.hasPendingFrame()) {
+                const available = try reader.availableDataBytes();
                 const read = try reader.readData(&read_buf);
+                try std.testing.expectEqual(
+                    @min(available, read_buf.len),
+                    read,
+                );
                 if (read == 0) break;
                 for (read_buf[0..read]) |byte| body_checksum +%= byte;
                 body_read += read;
