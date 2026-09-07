@@ -474,6 +474,7 @@ pub fn terminateStreams(
             );
         }
     }
+    try terminateBufferedStreams(connection, registry);
 }
 
 pub const TerminateProgress = enum { complete, submitted };
@@ -520,5 +521,145 @@ pub fn terminateStreamsOnce(
             return .submitted;
         }
     }
-    return .complete;
+    return terminateBufferedStreamsOnce(connection, registry);
+}
+
+/// Terminate peer streams whose complete association prefix reached QUIC before
+/// the session became terminal but which no WebTransport read had observed.
+/// Prefix and payload bytes remain unconsumed, and registry capacity is not
+/// required merely to apply terminal transport state.
+fn terminateBufferedStreams(
+    connection: *quic.one_rtt.Connection,
+    registry: *webtransport.StreamRegistry,
+) Error!void {
+    while (try terminateBufferedStreamsInternal(
+        connection,
+        registry,
+        false,
+    ) == .submitted) {}
+}
+
+fn terminateBufferedStreamsOnce(
+    connection: *quic.one_rtt.Connection,
+    registry: *webtransport.StreamRegistry,
+) Error!TerminateProgress {
+    return terminateBufferedStreamsInternal(connection, registry, true);
+}
+
+fn terminateBufferedStreamsInternal(
+    connection: *quic.one_rtt.Connection,
+    registry: *webtransport.StreamRegistry,
+    single_attempt: bool,
+) Error!TerminateProgress {
+    var stream_ids: [256]u62 = undefined;
+    var after: ?u62 = null;
+    while (true) {
+        const ids = connection.receivedStreamIdsAfterInto(
+            after,
+            &stream_ids,
+        );
+        for (ids) |stream_id| {
+            if (stream_id == registry.session_id.value or
+                registry.get(stream_id) != null)
+            {
+                continue;
+            }
+            const direction = bufferedPeerWebTransportDirection(
+                connection,
+                registry,
+                stream_id,
+            ) orelse continue;
+            if (direction == .bidirectional and
+                bufferedSendNeedsReset(connection, stream_id))
+            {
+                if (single_attempt) {
+                    try connection.tryResetStream(
+                        stream_id,
+                        webtransport.ApplicationErrorCode.session_gone,
+                    );
+                } else {
+                    try connection.resetStream(
+                        stream_id,
+                        webtransport.ApplicationErrorCode.session_gone,
+                    );
+                }
+                return .submitted;
+            }
+            if (bufferedReceiveNeedsStop(connection, stream_id)) {
+                if (single_attempt) {
+                    try connection.trySendStopSending(
+                        stream_id,
+                        webtransport.ApplicationErrorCode.session_gone,
+                    );
+                } else {
+                    try connection.sendStopSending(
+                        stream_id,
+                        webtransport.ApplicationErrorCode.session_gone,
+                    );
+                }
+                return .submitted;
+            }
+        }
+        if (ids.len != 0) after = ids[ids.len - 1];
+        if (ids.len < stream_ids.len) return .complete;
+    }
+}
+
+fn bufferedPeerWebTransportDirection(
+    connection: *quic.one_rtt.Connection,
+    registry: *webtransport.StreamRegistry,
+    stream_id: u62,
+) ?webtransport.StreamDirection {
+    const id = quic.StreamId.init(stream_id);
+    const peer_initiated = switch (registry.role) {
+        .client => id.initiator() == .server,
+        .server => id.initiator() == .client,
+    };
+    if (!peer_initiated) return null;
+    const available = connection.availableReceivedStream(stream_id) orelse
+        return null;
+    return switch (id.direction()) {
+        .bidirectional => blk: {
+            const header = webtransport.BidirectionalStreamHeader.parse(
+                available,
+            ) catch return null;
+            if (header.session_id.value != registry.session_id.value) {
+                return null;
+            }
+            break :blk .bidirectional;
+        },
+        .unidirectional => blk: {
+            const header = webtransport.UnidirectionalStreamHeader.parse(
+                available,
+            ) catch return null;
+            if (header.stream_type !=
+                http3.StreamType.webtransport_unidirectional or
+                header.session_id == null or
+                header.session_id.?.value != registry.session_id.value)
+            {
+                return null;
+            }
+            break :blk .unidirectional;
+        },
+    };
+}
+
+fn bufferedSendNeedsReset(
+    connection: *quic.one_rtt.Connection,
+    stream_id: u62,
+) bool {
+    const stats = connection.sendStreamStats(stream_id) orelse return true;
+    return stats.final_size == null and
+        stats.reset == null and
+        stats.stopped == null;
+}
+
+fn bufferedReceiveNeedsStop(
+    connection: *quic.one_rtt.Connection,
+    stream_id: u62,
+) bool {
+    const stats = connection.recvStreamStats(stream_id) orelse return false;
+    return stats.final_size == null and
+        stats.reset == null and
+        stats.stop_sending_sent == null;
 }

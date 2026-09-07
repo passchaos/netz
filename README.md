@@ -726,7 +726,11 @@ scheduling, with independent FIN and blocking write-all compatibility. Their
 Extended CONNECT streams remain open for bounded incremental Capsule Protocol
 control, including advisory drain, detailed/clean close, split DATA/capsule
 parsing, UTF-8 reason validation and WT_SESSION_GONE cleanup of associated
-streams. Handshake-backed sessions separately expose authenticated peer QUIC
+streams. Terminal cleanup also discovers peer streams whose complete
+association prefix was already buffered by QUIC before the WebTransport
+registry observed it; same-session streams receive WT_SESSION_GONE without
+consuming their payload, while incomplete, ordinary HTTP/3, and other-session
+prefixes remain untouched. Handshake-backed sessions separately expose authenticated peer QUIC
 application/transport close details, including code, reason, and transport
 frame type, without conflating connection shutdown with a Session close
 capsule. The lightweight preconfigured-key protected runtime shares the same

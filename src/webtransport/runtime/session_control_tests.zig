@@ -428,6 +428,140 @@ test "WebTransport session control encodes bounds and rejects malformed close" {
     _ = quic;
 }
 
+test "WebTransport terminal sweep discovers buffered associated streams" {
+    const allocator = std.testing.allocator;
+    var threaded = std.Io.Threaded.init(allocator, .{});
+    defer threaded.deinit();
+    var endpoint = try quic.runtime.Endpoint.bind(
+        allocator,
+        threaded.io(),
+        .{ .ip4 = .loopback(0) },
+        .{ .max_datagram_size = 4096 },
+    );
+    defer endpoint.deinit();
+    const keys = quic.protection.deriveAes128Keys(
+        [_]u8{0xc7} ** quic.protection.secret_len,
+    );
+    var connection = try quic.one_rtt.Connection.init(&endpoint, .{
+        .peer = endpoint.address(),
+        .receive_keys = keys,
+        .send_keys = keys,
+        .local_connection_id = "wt-sweep-server",
+        .peer_connection_id = "wt-sweep-client",
+        .local_endpoint = .server,
+        .enable_pacing = false,
+    });
+    defer connection.deinit();
+    const session_id: webtransport.SessionId = .init(0);
+    var registry = try webtransport.StreamRegistry.init(
+        allocator,
+        session_id,
+        .server,
+        .{ .max_peer_bidi = 0, .max_peer_uni = 0 },
+    );
+    defer registry.deinit();
+
+    var bidi_storage: [16]u8 = undefined;
+    const bidi = try webtransport.BidirectionalStreamHeader.writeInto(
+        &bidi_storage,
+        session_id,
+    );
+    var uni: std.ArrayList(u8) = .empty;
+    defer uni.deinit(allocator);
+    try webtransport.UnidirectionalStreamHeader.writeWebTransport(
+        &uni,
+        allocator,
+        session_id,
+    );
+    var other_session: std.ArrayList(u8) = .empty;
+    defer other_session.deinit(allocator);
+    try webtransport.UnidirectionalStreamHeader.writeWebTransport(
+        &other_session,
+        allocator,
+        .init(4),
+    );
+    try quic.one_rtt.testing.applyReceivedFrames(
+        &connection,
+        0,
+        &.{
+            .{ .stream = .{ .stream_id = 4, .data = bidi } },
+            .{ .stream = .{ .stream_id = 2, .data = uni.items } },
+            .{ .stream = .{ .stream_id = 6, .data = other_session.items } },
+            .{ .stream = .{ .stream_id = 8, .data = &.{0x41} } },
+            .{ .stream = .{ .stream_id = 10, .data = &.{0x00} } },
+        },
+        null,
+        .not_ect,
+    );
+    try std.testing.expect(registry.get(4) == null);
+    try std.testing.expect(registry.get(2) == null);
+
+    try std.testing.expectEqual(
+        @import("session_control.zig").TerminateProgress.submitted,
+        try @import("session_control.zig").terminateStreamsOnce(
+            &connection,
+            &registry,
+        ),
+    );
+    try std.testing.expect(registry.get(4) == null);
+    try std.testing.expect(registry.get(2) == null);
+    try std.testing.expect(registry.get(6) == null);
+    try std.testing.expect(registry.get(8) == null);
+    try std.testing.expect(registry.get(10) == null);
+
+    while (try @import("session_control.zig").terminateStreamsOnce(
+        &connection,
+        &registry,
+    ) == .submitted) {}
+
+    try std.testing.expectEqual(
+        webtransport.ApplicationErrorCode.session_gone,
+        connection.sendStreamStats(4).?.reset.?.application_error_code,
+    );
+    try std.testing.expectEqual(
+        webtransport.ApplicationErrorCode.session_gone,
+        connection.recvStreamStats(4).?.stop_sending_sent.?
+            .application_error_code,
+    );
+    try std.testing.expectEqual(
+        webtransport.ApplicationErrorCode.session_gone,
+        connection.recvStreamStats(2).?.stop_sending_sent.?
+            .application_error_code,
+    );
+    try std.testing.expect(connection.recvStreamStats(6).?.stop_sending_sent == null);
+    try std.testing.expect(connection.recvStreamStats(8).?.stop_sending_sent == null);
+    try std.testing.expect(connection.recvStreamStats(10).?.stop_sending_sent == null);
+    try std.testing.expectEqual(bidi.len, connection.availableReceivedStream(4).?.len);
+    try std.testing.expectEqual(uni.items.len, connection.availableReceivedStream(2).?.len);
+
+    // The blocking cleanup path uses the same discovery without relying on
+    // registry capacity or consuming the association prefix.
+    try quic.one_rtt.testing.applyReceivedFrames(
+        &connection,
+        1,
+        &.{.{ .stream = .{ .stream_id = 12, .data = bidi } }},
+        null,
+        .not_ect,
+    );
+    try @import("session_control.zig").terminateStreams(
+        &connection,
+        &registry,
+    );
+    try std.testing.expectEqual(
+        webtransport.ApplicationErrorCode.session_gone,
+        connection.sendStreamStats(12).?.reset.?.application_error_code,
+    );
+    try std.testing.expectEqual(
+        webtransport.ApplicationErrorCode.session_gone,
+        connection.recvStreamStats(12).?.stop_sending_sent.?
+            .application_error_code,
+    );
+    try std.testing.expectEqual(
+        bidi.len,
+        connection.availableReceivedStream(12).?.len,
+    );
+}
+
 test "WebTransport session control parses split framed capsules and skips unknown" {
     const control_module = @import("session_control.zig");
 
