@@ -1005,10 +1005,10 @@ pub const Hpack = struct {
         name_storage: ?[]u8 = null,
         value_storage: ?[]u8 = null,
         /// Allocation shared by name/value. Runtime-owned header lists use it
-        /// only on element zero for one whole-block allocation; dynamic-table
-        /// entries and decoded dynamic indexed fields use one block per field.
-        /// In every form this keeps the public slices unchanged while avoiding
-        /// separate name and value allocations.
+        /// only on element zero; the allocation may also contain the field
+        /// array itself. Dynamic-table entries and decoded dynamic indexed
+        /// fields use one string block per field. In every form this keeps the
+        /// public slices unchanged while avoiding separate name/value storage.
         block_storage: ?[]u8 = null,
     };
 
@@ -1295,8 +1295,9 @@ pub const Hpack = struct {
             );
         }
 
-        /// Decode into one owned field array plus one contiguous string block.
-        /// This is the application-ownership path used by the HTTP/2 runtime;
+        /// Decode into one allocation containing the field array followed by
+        /// one contiguous string block. This is the application-ownership path
+        /// used by the HTTP/2 runtime;
         /// unlike `decodeBlockIntoWithLimit`, it never creates per-field output
         /// allocations that a caller must immediately clone.
         pub fn decodeBlockOwnedWithLimit(
@@ -2056,16 +2057,36 @@ pub const Hpack = struct {
             field_limit_exceeded.* = true;
             return error.BufferTooShort;
         }
-        const fields = try allocator.alloc(HeaderField, plans.items.len);
-        errdefer allocator.free(fields);
-        if (fields.len == 0) return fields;
-        const owned_strings = try allocator.dupe(u8, strings.items);
+        if (plans.items.len == 0) {
+            return allocator.alloc(HeaderField, 0);
+        }
+        const field_bytes = std.math.mul(
+            usize,
+            plans.items.len,
+            @sizeOf(HeaderField),
+        ) catch return error.OutOfMemory;
+        const allocation_len = std.math.add(
+            usize,
+            field_bytes,
+            strings.items.len,
+        ) catch return error.OutOfMemory;
+        const allocation = try allocator.alignedAlloc(
+            u8,
+            .of(HeaderField),
+            allocation_len,
+        );
+        const fields: []HeaderField = @as(
+            [*]HeaderField,
+            @ptrCast(allocation.ptr),
+        )[0..plans.items.len];
+        const owned_strings = allocation[field_bytes..];
+        @memcpy(owned_strings, strings.items);
         for (plans.items, fields, 0..) |plan, *field, index| {
             field.* = .{
                 .name = owned_strings[plan.name_offset..][0..plan.name_len],
                 .value = owned_strings[plan.value_offset..][0..plan.value_len],
                 .never_index = plan.never_index,
-                .block_storage = if (index == 0) owned_strings else null,
+                .block_storage = if (index == 0) allocation else null,
             };
         }
         return fields;
@@ -2102,14 +2123,20 @@ pub const Hpack = struct {
         });
     }
 
-    /// Release fields returned by `decodeBlockOwnedWithLimit`. The field slice
-    /// and its shared string block are the only two caller-owned allocations.
+    /// Release fields returned by `decodeBlockOwnedWithLimit`, as well as the
+    /// legacy two-allocation layout used by callers that clone header lists.
     pub fn freeOwnedFields(
         allocator: std.mem.Allocator,
         fields: []HeaderField,
     ) void {
         if (fields.len != 0) {
             if (fields[0].block_storage) |strings| {
+                if (@intFromPtr(fields.ptr) == @intFromPtr(strings.ptr)) {
+                    const allocation: []align(@alignOf(HeaderField)) u8 =
+                        @alignCast(strings);
+                    allocator.free(allocation);
+                    return;
+                }
                 allocator.free(strings);
             }
         }
@@ -3561,6 +3588,10 @@ fn checkHpackOwnedDecode(allocator: std.mem.Allocator) !void {
     try std.testing.expectEqual(fields.len, first.len);
     try std.testing.expect(first[0].block_storage != null);
     try std.testing.expect(first[1].block_storage == null);
+    try std.testing.expectEqual(
+        @intFromPtr(first.ptr),
+        @intFromPtr(first[0].block_storage.?.ptr),
+    );
     try std.testing.expectEqualStrings("x-compressible-name", first[1].name);
     try std.testing.expectEqualStrings("compressible-value", first[1].value);
     try std.testing.expect(first[2].never_index);
@@ -3578,7 +3609,7 @@ fn checkHpackOwnedDecode(allocator: std.mem.Allocator) !void {
     try std.testing.expectEqualStrings("compressible-value", second[1].value);
 }
 
-test "HTTP/2 HPACK owned decode uses one string block and is allocation-failure safe" {
+test "HTTP/2 HPACK owned decode uses one allocation and is failure safe" {
     try std.testing.checkAllAllocationFailures(
         std.testing.allocator,
         checkHpackOwnedDecode,

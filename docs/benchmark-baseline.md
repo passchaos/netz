@@ -282,6 +282,17 @@ taskset -c 0 zig build bench-http2-h2c -Doptimize=ReleaseFast -- \
   --scenario=http2_consecutive_x1_empty --stats
 ```
 
+The remaining descriptor-array and string-block allocations at each endpoint
+are now coalesced into one aligned allocation without changing the public
+`HeaderField` slices. The same warmed empty exchange therefore fell again from
+four to two allocations per request (4,000 over 2,000 measured requests), with
+one 409-byte request-header block and one 219-byte response-header block.
+Cumulative requested bytes remained exactly 1,256,000, confirming that this
+step removes allocator calls rather than payload ownership. Five post-coalesce
+fixed-binary CPU-0 samples measured 9.642-9.931 us/op; the earlier
+four-allocation sample remains above to separate the two optimizations, and no
+throughput gain is claimed from their overlapping latency ranges.
+
 `strace` confirmed equal steady-state wire sizes: empty exchanges use 19-byte
 requests and 11-byte responses; POST exchanges use 43-byte requests and
 11-byte responses. The large POST gap is specifically Hyper's two-write

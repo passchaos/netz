@@ -970,14 +970,13 @@ copying it. A warmed retained-scratch regression uses a failing allocator to
 prove compressed never-indexed fields need no transient allocation. Three
 pinned ReleaseFast HPACK runs measured 261-265 ns for stateful encode-only,
 down from 316-319 ns immediately before this change.
-The runtime owning decode path now materializes names and values directly into
-one stack-staged byte sequence, then performs exactly two output allocations:
-the field descriptors and their shared contiguous string block. It no longer
-allocates per Huffman/dynamic field and then clones every field into that final
-block. Offset-based plans keep slices valid while scratch grows, and bounded
-decode still consumes incremental-indexing fields after an output limit so the
-connection table stays synchronized. Three pinned runs measured the new owned
-path at 1,246-1,253 ns for this seven-field benchmark.
+The runtime owning decode path first replaced per-field Huffman/dynamic output
+allocations with a stack-staged byte sequence, a descriptor array and one
+shared contiguous string block. Offset-based plans keep slices valid while
+scratch grows, and bounded decode still consumes incremental-indexing fields
+after an output limit so the connection table stays synchronized. Three pinned
+runs measured that two-output-allocation stage at 1,246-1,253 ns for this
+seven-field benchmark; the later single-allocation layout is described below.
 HTTP/2 receive paths now decode the overwhelmingly common END_HEADERS block
 directly from the buffered frame instead of first copying it into a temporary
 ArrayList. Fragmented HEADERS and PUSH_PROMISE sequences retain one assembly
@@ -1000,11 +999,19 @@ into connection-owned continuation scratch before advancing the frame reader.
 Warmup-scoped h2c allocator telemetry attributes the removed copies exactly:
 the empty exchange fell from six to four allocations per request, eliminating
 one 19-byte request frame and one 11-byte response frame while retaining the
-two owned HPACK allocations at each endpoint. An integration regression swaps
-in allocation-tracking allocators around the second aggregate request and response read
-and requires exactly those two HPACK allocations on each side. Existing
-CONTINUATION and interleaved-request tests cover borrowed lifetime and the
-pending-frame owning fallback.
+two owned HPACK allocations at each endpoint at that intermediate stage.
+Existing CONTINUATION and interleaved-request tests cover borrowed lifetime and
+the pending-frame owning fallback.
+HPACK owned decode then coalesces each descriptor array and its contiguous
+name/value bytes into one aligned allocation. `freeOwnedFields` detects that
+layout while retaining compatibility with existing callers that provide a
+separate `block_storage`. The same warmed empty exchange therefore fell again
+from four allocations to two per request, one owned header block at each
+endpoint, with unchanged cumulative bytes. Allocation-failure coverage and
+pointer-layout assertions exercise the combined ownership contract; an
+integration regression swaps in allocation-tracking allocators around the
+second aggregate request and response read and requires exactly one HPACK
+allocation on each side.
 The bidirectional Hyper process gate now exercises that boundary directly over
 h2c and TLS. A netz client waits through an idle interval, receives Hyper/h2's
 PING ACK, and completes another request on the same connection. In the reverse

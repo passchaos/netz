@@ -276,9 +276,8 @@ fn freeHeaders(
     headers: []http2.Hpack.HeaderField,
 ) void {
     if (headers.len != 0) {
-        if (headers[0].block_storage) |storage| {
-            allocator.free(storage);
-            allocator.free(headers);
+        if (headers[0].block_storage != null) {
+            http2.Hpack.freeOwnedFields(allocator, headers);
             return;
         }
     }

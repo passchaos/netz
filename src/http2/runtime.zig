@@ -16932,11 +16932,11 @@ test "HTTP/2 aggregate empty exchange borrows wire frames after warmup" {
                 defer request.deinit(connection.allocator);
                 try std.testing.expectEqualStrings("/measured", request.path);
                 try std.testing.expectEqualStrings("", request.body);
-                // The owned HPACK field array and shared string block are the
-                // only allocations. The complete HEADERS wire frame remains
-                // borrowed from the reusable frame-reader buffer.
+                // The owned HPACK fields and strings share one allocation. The
+                // complete HEADERS wire frame remains borrowed from the
+                // reusable frame-reader buffer.
                 try std.testing.expectEqual(
-                    @as(usize, 2),
+                    @as(usize, 1),
                     tracking.allocations,
                 );
                 break :blk request.stream_id;
@@ -16982,8 +16982,8 @@ test "HTTP/2 aggregate empty exchange borrows wire frames after warmup" {
         defer response.deinit(client.allocator);
         try std.testing.expectEqual(@as(u16, 200), response.status);
         try std.testing.expectEqualStrings("", response.body);
-        // As on the request side, aggregate ownership belongs only to HPACK.
-        try std.testing.expectEqual(@as(usize, 2), tracking.allocations);
+        // As on the request side, aggregate ownership is one HPACK block.
+        try std.testing.expectEqual(@as(usize, 1), tracking.allocations);
     }
 
     thread.join();
@@ -28067,7 +28067,7 @@ test "HTTP/2 runtime enforces header list size limits" {
     try std.testing.expectError(error.MessageTooLarge, connection.writeHeaders(1, &oversized, true));
 }
 
-test "HTTP/2 runtime decodes owned headers into one string allocation" {
+test "HTTP/2 runtime decodes owned headers into one allocation" {
     const allocator = std.testing.allocator;
     const fields = [_]http2.Hpack.HeaderField{
         .{ .name = ":status", .value = "200" },
@@ -28089,6 +28089,10 @@ test "HTTP/2 runtime decodes owned headers into one string allocation" {
 
     try std.testing.expect(cloned[0].block_storage != null);
     try std.testing.expect(cloned[1].block_storage == null);
+    try std.testing.expectEqual(
+        @intFromPtr(cloned.ptr),
+        @intFromPtr(cloned[0].block_storage.?.ptr),
+    );
     try std.testing.expectEqualStrings("x-second", cloned[2].name);
     const storage = cloned[0].block_storage.?;
     for (cloned) |field| {
@@ -28111,9 +28115,9 @@ test "HTTP/2 runtime decodes owned headers into one string allocation" {
         &tracked_decoder,
     );
     defer freeHeaders(tracking.allocator(), tracked_headers);
-    // The plan list stays on the stack; only the final field array and shared
-    // string block are allocated for a static/literal application result.
-    try std.testing.expectEqual(before + 2, tracking.allocations);
+    // The plan list stays on the stack; the final fields and strings share one
+    // aligned allocation for a static/literal application result.
+    try std.testing.expectEqual(before + 1, tracking.allocations);
 }
 
 test "HTTP/2 runtime advertises configured initial SETTINGS" {
