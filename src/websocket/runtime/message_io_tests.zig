@@ -496,6 +496,118 @@ test "WebSocket frame timeout preserves partial wire bytes" {
     if (shared.err) |err| return err;
 }
 
+test "WebSocket caller-buffer streams a partial frame directly" {
+    const allocator = std.testing.allocator;
+    var threaded = std.Io.Threaded.init(allocator, .{});
+    defer threaded.deinit();
+    const io = threaded.io();
+
+    const payload = "0123456789abcdef" ** 64;
+    const prefix_len = 37;
+    var server = try Server.listen(
+        allocator,
+        io,
+        .{ .ip4 = .loopback(0) },
+        .{
+            .max_head_bytes = 4096,
+            .max_frame_bytes = payload.len,
+            .max_message_bytes = payload.len,
+        },
+    );
+    defer server.deinit();
+
+    const Shared = struct {
+        server: *Server,
+        prefix_received: std.Io.Event = .unset,
+        timed_out: std.Io.Event = .unset,
+        err: ?anyerror = null,
+
+        fn run(self: *@This()) void {
+            self.runFallible() catch |err| {
+                self.err = err;
+                self.prefix_received.set(self.server.http.io);
+                self.timed_out.set(self.server.http.io);
+            };
+        }
+
+        fn runFallible(self: *@This()) !void {
+            var connection = try self.server.accept(.{});
+            defer connection.close();
+            var storage: [payload.len]u8 = undefined;
+            self.prefix_received.set(self.server.http.io);
+            try std.testing.expectError(
+                error.Timeout,
+                connection.receiveMessageIntoWithTimeout(
+                    &storage,
+                    .fromMilliseconds(20),
+                ),
+            );
+            try std.testing.expect(connection.message_into.active());
+            try std.testing.expectEqual(
+                @as(usize, prefix_len),
+                connection.message_frame_receive.payload_written,
+            );
+            var other_storage: [payload.len]u8 = undefined;
+            try std.testing.expectError(
+                error.BufferTooShort,
+                connection.message_into.validateOutput(&other_storage),
+            );
+            try std.testing.expect(connection.inbuf.capacity < payload.len);
+            self.timed_out.set(self.server.http.io);
+            const message = try connection.receiveMessageIntoWithTimeout(
+                &storage,
+                .fromSeconds(1),
+            );
+            try std.testing.expectEqual(websocket.Opcode.text, message.opcode);
+            try std.testing.expectEqualStrings(payload, message.payload);
+            try std.testing.expect(connection.inbuf.capacity < payload.len);
+        }
+    };
+
+    var shared = Shared{ .server = &server };
+    const thread = try std.Thread.spawn(.{}, Shared.run, .{&shared});
+    var joined = false;
+    defer if (!joined) thread.join();
+
+    var client = try Client.connect(allocator, io, server.address(), .{
+        .host = "127.0.0.1",
+        .target = "/message-frame-direct",
+        .limits = .{
+            .max_head_bytes = 4096,
+            .max_frame_bytes = payload.len,
+            .max_message_bytes = payload.len,
+        },
+    });
+    defer client.close();
+
+    var encoded: std.ArrayList(u8) = .empty;
+    defer encoded.deinit(allocator);
+    try websocket.writeFrame(
+        &encoded,
+        allocator,
+        .text,
+        payload,
+        .{ .mask_key = .{ 0x11, 0x22, 0x33, 0x44 } },
+    );
+    const header = try websocket.FrameHeader.parse(encoded.items);
+    try writeAllToStream(
+        io,
+        client.stream,
+        encoded.items[0 .. header.header_len + prefix_len],
+    );
+    try shared.prefix_received.wait(io);
+    try shared.timed_out.wait(io);
+    try writeAllToStream(
+        io,
+        client.stream,
+        encoded.items[header.header_len + prefix_len ..],
+    );
+
+    thread.join();
+    joined = true;
+    if (shared.err) |err| return err;
+}
+
 test "WebSocket receiveMessageInto preserves full message space across ping" {
     const allocator = std.testing.allocator;
     var threaded = std.Io.Threaded.init(allocator, .{});

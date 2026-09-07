@@ -69,6 +69,18 @@ const IncomingDataKind = enum {
     compressed_text,
 };
 
+const MessageFrameReceiveState = struct {
+    header: ?websocket.FrameHeader = null,
+    payload_start: usize = 0,
+    payload_end: usize = 0,
+    payload_written: usize = 0,
+    message_kind: IncomingDataKind = .none,
+
+    fn reset(self: *MessageFrameReceiveState) void {
+        self.* = .{};
+    }
+};
+
 pub const ClientIdentity = tls_client_identity.ClientIdentity;
 pub const ClientCertificateVerifier =
     tls_client_identity.CertificateVerifier;
@@ -3308,6 +3320,7 @@ pub const Connection = struct {
     incoming_frame_validated: usize = 0,
     message_assembler: ?websocket.MessageAssembler = null,
     message_into: MessageIntoReceiveState = .{},
+    message_frame_receive: MessageFrameReceiveState = .{},
     selected_protocol: ?[]u8 = null,
     permessage_deflate: bool = false,
     compression_threshold: usize = default_compression_threshold,
@@ -4155,7 +4168,7 @@ pub const Connection = struct {
         self: *Connection,
         out: []u8,
     ) Error!Message {
-        return receiveMessageIntoConnection(self, out, null);
+        return receiveMessageIntoTcpConnection(self, out, null);
     }
 
     pub fn receiveMessageIntoWithTimeout(
@@ -4164,7 +4177,7 @@ pub const Connection = struct {
         timeout: std.Io.Duration,
     ) Error!Message {
         if (timeout.nanoseconds <= 0) return error.Timeout;
-        return receiveMessageIntoConnection(
+        return receiveMessageIntoTcpConnection(
             self,
             out,
             .fromNow(self.io, .{ .raw = timeout, .clock = .awake }),
@@ -4180,7 +4193,7 @@ pub const Connection = struct {
         deadline: std.Io.Clock.Timestamp,
     ) Error!Message {
         _ = try deadline_policy.usableAwake(self.io, deadline);
-        return receiveMessageIntoConnection(self, out, deadline);
+        return receiveMessageIntoTcpConnection(self, out, deadline);
     }
 
     fn ensureCompressionReceiveScratch(self: *Connection) Error!void {
@@ -4409,6 +4422,36 @@ pub const Connection = struct {
 
     fn ensureBuffered(self: *Connection, len: usize) Error!void {
         return self.ensureBufferedWithDeadline(len, null);
+    }
+
+    /// Fill exactly the requested prefix without reading payload bytes that a
+    /// caller-buffer receive can place directly in its final destination.
+    fn ensureBufferedExactWithDeadline(
+        self: *Connection,
+        len: usize,
+        deadline: ?std.Io.Clock.Timestamp,
+    ) Error!void {
+        while (message_buffer.unreadLen(
+            &self.inbuf,
+            self.inbuf_consumed,
+        ) < len) {
+            const missing = len - message_buffer.unreadLen(
+                &self.inbuf,
+                self.inbuf_consumed,
+            );
+            const destination = try message_buffer.reserveAppendAfterConsumed(
+                &self.inbuf,
+                &self.inbuf_consumed,
+                self.allocator,
+                missing,
+            );
+            const count = if (deadline) |absolute|
+                try self.transport().readWithDeadline(destination, absolute)
+            else
+                try self.transport().read(destination);
+            if (count == 0) return error.ConnectionClosed;
+            message_buffer.commitAppend(&self.inbuf, count);
+        }
     }
 
     fn ensureBufferedWithDeadline(
@@ -6465,6 +6508,268 @@ pub const H2AcceptOptions = struct {
 };
 
 const canSendOpcode = message_state.canSendOpcode;
+
+fn receiveMessageIntoTcpConnection(
+    connection: *Connection,
+    out: []u8,
+    deadline: ?std.Io.Clock.Timestamp,
+) Error!Message {
+    errdefer |err| closeAfterReceiveError(connection, err);
+    if (connection.message_assembler != null) return error.InvalidFrame;
+    if (out.len < connection.limits.max_message_bytes) {
+        return error.BufferTooShort;
+    }
+    try connection.message_into.validateOutput(out);
+    errdefer |err| if (err != error.Timeout) {
+        connection.message_into.reset();
+        connection.message_frame_receive.reset();
+    };
+
+    var control_storage: [125]u8 = undefined;
+    while (true) {
+        const frame = try receiveMessageFrameIntoTcpConnection(
+            connection,
+            out,
+            &control_storage,
+            deadline,
+        );
+        switch (frame.header.opcode) {
+            .ping => {
+                try connection.replyPong(frame.payload);
+                continue;
+            },
+            .pong => continue,
+            .close => {
+                try connection.echoCloseFrame(frame.payload);
+                return error.ConnectionClosed;
+            },
+            .text, .binary, .continuation => {
+                std.debug.assert(connection.message_into.active());
+            },
+            else => return error.InvalidFrame,
+        }
+        if (!frame.header.fin) continue;
+
+        const message_opcode = connection.message_into.opcode orelse
+            return error.InvalidFrame;
+        const was_compressed = connection.message_into.compressed;
+        const payload = if (was_compressed)
+            try websocket.decompressMessageInto(
+                out[0..connection.limits.max_message_bytes],
+                connection.compression_receive.payload.items[0..connection.message_into.written],
+                connection.compression_receive.payload.allocatedSlice(),
+                connection.compression_receive.flate_window.?,
+            )
+        else
+            out[0..connection.message_into.written];
+        if (connection.message_into.payloadNeedsFinalUtf8Validation() and
+            !std.unicode.utf8ValidateSlice(payload))
+        {
+            return error.InvalidUtf8;
+        }
+        connection.message_into.reset();
+        return .{
+            .opcode = message_opcode,
+            .payload = payload,
+            .was_compressed = was_compressed,
+        };
+    }
+}
+
+fn receiveMessageFrameIntoTcpConnection(
+    connection: *Connection,
+    out: []u8,
+    control_out: *[125]u8,
+    deadline: ?std.Io.Clock.Timestamp,
+) Error!websocket.BorrowedFrame {
+    if (connection.message_frame_receive.header == null) {
+        if (connection.closeSent() and connection.closeReceived()) {
+            return error.ConnectionClosed;
+        }
+        try connection.ensureBufferedExactWithDeadline(2, deadline);
+        var available = message_buffer.unread(
+            &connection.inbuf,
+            connection.inbuf_consumed,
+        );
+        const second = available[1];
+        var header_len: usize = 2;
+        const length_code = second & 0x7f;
+        if (length_code == 126) {
+            header_len += 2;
+        } else if (length_code == 127) {
+            header_len += 8;
+        }
+        if ((second & 0x80) != 0) header_len += 4;
+        try connection.ensureBufferedExactWithDeadline(header_len, deadline);
+        available = message_buffer.unread(
+            &connection.inbuf,
+            connection.inbuf_consumed,
+        );
+        const header = try websocket.FrameHeader.parse(available);
+        const options: websocket.ParseFrameOptions = switch (connection.role) {
+            .client => .{
+                .expect_mask = .unmasked,
+                .allow_rsv1 = connection.permessage_deflate,
+                .validate_utf8 = false,
+            },
+            .server => .{
+                .expect_mask = .masked,
+                .allow_rsv1 = connection.permessage_deflate,
+                .validate_utf8 = false,
+            },
+        };
+        try websocket.validateFrameHeader(header, options);
+        const payload_len = std.math.cast(
+            usize,
+            header.payload_len,
+        ) orelse return error.PayloadTooLarge;
+        if (payload_len > connection.limits.max_frame_bytes) {
+            return error.MessageTooLarge;
+        }
+        if (header.opcode.isControl()) {
+            return receiveFrameIntoConnection(
+                connection,
+                out,
+                control_out,
+                deadline,
+            );
+        }
+
+        const message_kind: IncomingDataKind = switch (header.opcode) {
+            .text => blk: {
+                if (connection.message_into.active()) {
+                    return error.InvalidFrame;
+                }
+                connection.message_into.begin(out, .text, header.rsv1);
+                if (header.rsv1) {
+                    try connection.ensureCompressionReceiveScratch();
+                } else {
+                    connection.message_into.text_utf8.reset();
+                }
+                break :blk if (header.rsv1) .compressed_text else .text;
+            },
+            .binary => blk: {
+                if (connection.message_into.active()) {
+                    return error.InvalidFrame;
+                }
+                connection.message_into.begin(out, .binary, header.rsv1);
+                if (header.rsv1) {
+                    try connection.ensureCompressionReceiveScratch();
+                }
+                break :blk .binary;
+            },
+            .continuation => blk: {
+                if (!connection.message_into.active()) {
+                    return error.InvalidFrame;
+                }
+                break :blk connection.incoming_data_kind;
+            },
+            else => return error.InvalidFrame,
+        };
+        const next_written = std.math.add(
+            usize,
+            connection.message_into.written,
+            payload_len,
+        ) catch return error.PayloadTooLarge;
+        if (next_written > connection.limits.max_message_bytes) {
+            return error.PayloadTooLarge;
+        }
+        connection.discardBuffered(header.header_len);
+        connection.message_frame_receive = .{
+            .header = header,
+            .payload_start = connection.message_into.written,
+            .payload_end = next_written,
+            .message_kind = message_kind,
+        };
+    }
+
+    const state = &connection.message_frame_receive;
+    const header = state.header.?;
+    const payload_len: usize = @intCast(header.payload_len);
+    const destination = if (connection.message_into.compressed)
+        connection.compression_receive.payload.items[state.payload_start..state.payload_end]
+    else
+        out[state.payload_start..state.payload_end];
+    while (state.payload_written < payload_len) {
+        const buffered = message_buffer.unread(
+            &connection.inbuf,
+            connection.inbuf_consumed,
+        );
+        const count = @min(
+            buffered.len,
+            payload_len - state.payload_written,
+        );
+        if (count != 0) {
+            try decodeMessagePayloadChunk(
+                &connection.message_into.text_utf8,
+                destination[state.payload_written..][0..count],
+                buffered[0..count],
+                header,
+                state.payload_written,
+                state.message_kind == .text,
+            );
+            connection.discardBuffered(count);
+            state.payload_written += count;
+            continue;
+        }
+        const read = if (deadline) |absolute|
+            try connection.transport().readWithDeadline(
+                destination[state.payload_written..],
+                absolute,
+            )
+        else
+            try connection.transport().read(
+                destination[state.payload_written..],
+            );
+        if (read == 0) return error.ConnectionClosed;
+        if (header.mask_key) |mask| {
+            websocket.applyMask(
+                destination[state.payload_written..][0..read],
+                mask,
+                state.payload_written,
+            );
+        }
+        if (state.message_kind == .text) {
+            try connection.message_into.text_utf8.feed(
+                destination[state.payload_written..][0..read],
+            );
+        }
+        state.payload_written += read;
+    }
+    if (state.message_kind == .text and header.fin) {
+        try connection.message_into.text_utf8.finish();
+    }
+    connection.message_into.written = state.payload_end;
+    connection.incoming_data_kind =
+        if (header.fin) .none else state.message_kind;
+    state.reset();
+    return .{
+        .header = header,
+        .payload = destination,
+        .consumed = header.header_len + payload_len,
+    };
+}
+
+fn decodeMessagePayloadChunk(
+    validator: *websocket.Utf8Validator,
+    destination: []u8,
+    encoded: []const u8,
+    header: websocket.FrameHeader,
+    payload_offset: usize,
+    validate_text: bool,
+) Error!void {
+    if (header.mask_key) |mask| {
+        try websocket.applyMaskCopy(
+            destination,
+            encoded,
+            mask,
+            payload_offset,
+        );
+    } else {
+        @memcpy(destination, encoded);
+    }
+    if (validate_text) try validator.feed(destination);
+}
 
 /// Assemble a message directly into caller storage for either stream-backed
 /// WebSocket transport. Both connection types expose the same buffering and

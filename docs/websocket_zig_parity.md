@@ -231,6 +231,13 @@ storage, or into reusable compressed scratch, and masked in place. A resumable
 frame cursor pins the output identity and payload offset across deadlines;
 interleaved control frames remain in connection-owned storage because their
 temporary stack output cannot survive a timeout.
+The HTTP/1 caller-buffer path now uses the same header-staging/data-direct
+split. Its socket or TLS read is bounded to the current frame remainder, so a
+1 KiB masked text payload can cross a timeout in caller storage without growing
+the WebSocket receive buffer to the frame size; a real TCP regression verifies
+the partial offset, same-buffer retry rule, mask phase, and completed payload.
+RFC 8441 retains its owned HTTP/2 DATA-frame staging because the tunnel API can
+return bytes beyond the current WebSocket frame.
 
 The 2026-08-17 same-host sample ranges for 200,000 masked 4 KiB binary frames:
 
