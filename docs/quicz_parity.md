@@ -426,6 +426,14 @@ Detached Extended CONNECT head polling also consults the QUIC final size: a
 complete stream without final response HEADERS fails with stream-local
 `H3_MESSAGE_ERROR`, while an actually truncated HTTP/3 frame remains a
 connection-level `H3_FRAME_ERROR` instead of polling forever.
+HTTP/2 CONNECT tunnels now model local and remote half-close independently.
+DATA `END_STREAM`, explicit `closeWrite`, and multi-slice `TunnelWriter` sends
+close only the local direction; peer `END_STREAM` closes only the receive
+direction; and the parent connection releases stream concurrency and flow
+windows exactly once after both halves finish. RST still terminates both sides
+immediately. A real h2c regression holds `SETTINGS_MAX_CONCURRENT_STREAMS` at
+one, proves a half-closed tunnel continues consuming that slot, then reuses the
+same parent connection after the opposite half closes.
 
 ## Feature parity table
 

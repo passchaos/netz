@@ -15509,13 +15509,17 @@ pub const OwnedTunnelData = struct {
 pub const Tunnel = struct {
     connection: *Connection,
     stream_id: u31,
+    /// RFC 9113 counts open and either half-closed state against the
+    /// concurrent-stream limit. Atomics preserve Tunnel's documented split
+    /// reader/writer use while allowing exactly one side to release state.
+    send_finished: std.atomic.Value(bool) = .init(false),
+    receive_finished: std.atomic.Value(bool) = .init(false),
+    released: std.atomic.Value(bool) = .init(false),
 
     pub fn write(self: *Tunnel, data: []const u8, end_stream: bool) Error!void {
+        try self.ensureWritable();
         try self.connection.writeData(self.stream_id, data, end_stream);
-        if (end_stream) {
-            self.connection.releaseLocalStream(self.stream_id);
-            self.connection.releasePeerStream(self.stream_id);
-        }
+        if (end_stream) self.finishSend();
     }
 
     /// Write two borrowed slices as one ordered tunnel byte sequence. DATA
@@ -15527,16 +15531,14 @@ pub const Tunnel = struct {
         second: []const u8,
         end_stream: bool,
     ) Error!void {
+        try self.ensureWritable();
         try self.connection.writeDataParts(
             self.stream_id,
             first,
             second,
             end_stream,
         );
-        if (end_stream) {
-            self.connection.releaseLocalStream(self.stream_id);
-            self.connection.releasePeerStream(self.stream_id);
-        }
+        if (end_stream) self.finishSend();
     }
 
     /// Write borrowed slices as one ordered tunnel byte sequence. The HTTP/2
@@ -15547,15 +15549,13 @@ pub const Tunnel = struct {
         slices: []const []const u8,
         end_stream: bool,
     ) Error!void {
+        try self.ensureWritable();
         try self.connection.writeDataSlices(
             self.stream_id,
             slices,
             end_stream,
         );
-        if (end_stream) {
-            self.connection.releaseLocalStream(self.stream_id);
-            self.connection.releasePeerStream(self.stream_id);
-        }
+        if (end_stream) self.finishSend();
     }
 
     /// Begin one logical multi-call tunnel write. The initial preflight is
@@ -15564,19 +15564,19 @@ pub const Tunnel = struct {
     /// `ResponseAvailable`. The returned writer borrows this tunnel and must
     /// not overlap another reader or writer on the HTTP/2 connection.
     pub fn beginWriteSequence(self: *Tunnel) Error!TunnelWriter {
+        try self.ensureWritable();
         try self.connection.prepareDataWrite(self.stream_id);
-        return .{
-            .connection = self.connection,
-            .stream_id = self.stream_id,
-        };
+        return .{ .tunnel = self };
     }
 
     pub fn closeWrite(self: *Tunnel) Error!void {
-        try self.connection.writeData(self.stream_id, &.{}, true);
+        return self.write(&.{}, true);
     }
 
     pub fn reset(self: *Tunnel, error_code: http2.ErrorCode) Error!void {
+        if (self.released.load(.acquire)) return error.ConnectionClosed;
         try self.connection.sendResetStream(self.stream_id, error_code);
+        self.finishReset();
     }
 
     pub fn read(self: *Tunnel) Error!OwnedTunnelData {
@@ -15606,6 +15606,9 @@ pub const Tunnel = struct {
         self: *Tunnel,
         deadline: ?std.Io.Clock.Timestamp,
     ) Error!OwnedTunnelData {
+        if (self.receive_finished.load(.acquire)) {
+            return error.ConnectionClosed;
+        }
         while (true) {
             var frame = try self.connection
                 .readOwnedFrameWithDeadline(deadline);
@@ -15632,6 +15635,7 @@ pub const Tunnel = struct {
                         self.stream_id,
                         end_stream,
                     );
+                    if (end_stream) self.finishReceive();
                     return .{
                         .frame = frame,
                         .data = payload.data,
@@ -15639,8 +15643,14 @@ pub const Tunnel = struct {
                     };
                 },
                 .rst_stream => {
-                    self.connection.releaseLocalStream(self.stream_id);
-                    self.connection.releasePeerStream(self.stream_id);
+                    const peer_reset = try http2.ResetStreamPayload.parse(
+                        frame.frame,
+                    );
+                    self.connection.recordResetStream(peer_reset) catch |err| {
+                        self.finishReset();
+                        return err;
+                    };
+                    self.finishReset();
                     return error.StreamReset;
                 },
                 .headers => return error.UnexpectedFrame,
@@ -15651,12 +15661,42 @@ pub const Tunnel = struct {
             }
         }
     }
+
+    fn ensureWritable(self: *Tunnel) Error!void {
+        if (self.send_finished.load(.acquire)) return error.ConnectionClosed;
+        if (!self.connection.outboundStreamIsActive(self.stream_id)) {
+            return error.StreamReset;
+        }
+    }
+
+    fn finishSend(self: *Tunnel) void {
+        self.send_finished.store(true, .release);
+        self.maybeRelease();
+    }
+
+    fn finishReceive(self: *Tunnel) void {
+        self.receive_finished.store(true, .release);
+        self.maybeRelease();
+    }
+
+    fn finishReset(self: *Tunnel) void {
+        self.send_finished.store(true, .release);
+        self.receive_finished.store(true, .release);
+        _ = self.released.swap(true, .acq_rel);
+    }
+
+    fn maybeRelease(self: *Tunnel) void {
+        if (!self.send_finished.load(.acquire) or
+            !self.receive_finished.load(.acquire) or
+            self.released.swap(true, .acq_rel)) return;
+        self.connection.releaseLocalStream(self.stream_id);
+        self.connection.releasePeerStream(self.stream_id);
+        self.connection.forgetStreamWindows(self.stream_id);
+    }
 };
 
 pub const TunnelWriter = struct {
-    connection: *Connection,
-    stream_id: u31,
-    ended: bool = false,
+    tunnel: *Tunnel,
 
     pub fn write(
         self: *TunnelWriter,
@@ -15680,20 +15720,20 @@ pub const TunnelWriter = struct {
         slices: []const []const u8,
         end_stream: bool,
     ) Error!void {
-        if (self.ended) return error.ConnectionClosed;
-        if (!self.connection.outboundStreamIsActive(self.stream_id)) {
+        if (self.tunnel.send_finished.load(.acquire)) {
+            return error.ConnectionClosed;
+        }
+        if (!self.tunnel.connection.outboundStreamIsActive(
+            self.tunnel.stream_id,
+        )) {
             return error.StreamReset;
         }
-        try self.connection.writeDataSlicesPrepared(
-            self.stream_id,
+        try self.tunnel.connection.writeDataSlicesPrepared(
+            self.tunnel.stream_id,
             slices,
             end_stream,
         );
-        if (end_stream) {
-            self.connection.releaseLocalStream(self.stream_id);
-            self.connection.releasePeerStream(self.stream_id);
-            self.ended = true;
-        }
+        if (end_stream) self.tunnel.finishSend();
     }
 };
 
@@ -23694,6 +23734,168 @@ test "HTTP/2 runtime accepts multipart traditional CONNECT DATA tunnel" {
     try std.testing.expect(inbound.end_stream);
 
     thread.join();
+    if (shared.err) |err| return err;
+}
+
+test "HTTP/2 tunnel releases concurrency only after both halves close" {
+    const allocator = std.testing.allocator;
+    var threaded = std.Io.Threaded.init(allocator, .{});
+    defer threaded.deinit();
+    const io = threaded.io();
+
+    var server = try Server.listen(
+        allocator,
+        io,
+        .{ .ip4 = .loopback(0) },
+        .{
+            .max_frame_payload = 4096,
+            .max_body_bytes = 4096,
+            .max_concurrent_streams = 1,
+        },
+    );
+    defer server.deinit();
+
+    const Shared = struct {
+        server: *Server,
+        err: ?anyerror = null,
+
+        fn run(shared: *@This()) void {
+            runFallible(shared.server) catch |err| {
+                shared.err = err;
+            };
+        }
+
+        fn runFallible(server_ptr: *Server) !void {
+            var connection = try server_ptr.accept();
+            defer connection.close();
+
+            var first_request = try connection.readRequest();
+            defer first_request.deinit(server_ptr.allocator);
+            var first = try connection.acceptConnectTunnel(
+                first_request,
+                &.{},
+            );
+            try first.write("server half close", true);
+            try std.testing.expectEqual(
+                @as(usize, 1),
+                connection.active_peer_streams.items.len,
+            );
+            try std.testing.expectError(
+                error.FlowControlViolation,
+                connection.reservePeerStream(3),
+            );
+            try std.testing.expectError(
+                error.ConnectionClosed,
+                first.write("after end", false),
+            );
+            var first_end = try first.read();
+            defer first_end.deinit(server_ptr.allocator);
+            try std.testing.expect(first_end.end_stream);
+            try std.testing.expectEqual(
+                @as(usize, 0),
+                connection.active_peer_streams.items.len,
+            );
+            try std.testing.expect(
+                connection.send_stream_window_index.get(first.stream_id) == null,
+            );
+            try std.testing.expect(
+                connection.recv_stream_window_index.get(first.stream_id) == null,
+            );
+
+            var second_request = try connection.readRequest();
+            defer second_request.deinit(server_ptr.allocator);
+            var second = try connection.acceptConnectTunnel(
+                second_request,
+                &.{},
+            );
+            var writer = try second.beginWriteSequence();
+            try writer.write("server writer close", true);
+            try std.testing.expectError(
+                error.ConnectionClosed,
+                writer.write("after end", false),
+            );
+            var second_end = try second.read();
+            defer second_end.deinit(server_ptr.allocator);
+            try std.testing.expect(second_end.end_stream);
+            try std.testing.expectEqual(
+                @as(usize, 0),
+                connection.active_peer_streams.items.len,
+            );
+        }
+    };
+    var shared = Shared{ .server = &server };
+    const thread = try std.Thread.spawn(.{}, Shared.run, .{&shared});
+    var joined = false;
+    defer if (!joined) thread.join();
+
+    var client = try Client.connect(allocator, io, server.address(), .{
+        .max_frame_payload = 4096,
+        .max_body_bytes = 4096,
+    });
+    defer client.close();
+    try std.testing.expectEqual(@as(?u32, 1), client.peer_max_concurrent_streams);
+
+    var first_response = try client.openConnectTunnel(.{
+        .method = "CONNECT",
+        .authority = "example.com:443",
+    });
+    defer first_response.deinit(allocator);
+    var first = first_response.tunnel;
+    var first_data = try first.read();
+    defer first_data.deinit(allocator);
+    try std.testing.expectEqualStrings("server half close", first_data.data);
+    try std.testing.expect(first_data.end_stream);
+    try std.testing.expectEqual(
+        @as(usize, 1),
+        client.active_local_streams.items.len,
+    );
+    try std.testing.expectError(
+        error.FlowControlBlocked,
+        client.openConnectTunnel(.{
+            .method = "CONNECT",
+            .authority = "example.com:443",
+        }),
+    );
+    try first.closeWrite();
+    try std.testing.expectError(error.ConnectionClosed, first.closeWrite());
+    try std.testing.expectEqual(
+        @as(usize, 0),
+        client.active_local_streams.items.len,
+    );
+    try std.testing.expect(
+        client.send_stream_window_index.get(first.stream_id) == null,
+    );
+    try std.testing.expect(
+        client.recv_stream_window_index.get(first.stream_id) == null,
+    );
+
+    var second_response = try client.openConnectTunnel(.{
+        .method = "CONNECT",
+        .authority = "example.com:443",
+    });
+    defer second_response.deinit(allocator);
+    var second = second_response.tunnel;
+    var writer = try second.beginWriteSequence();
+    try writer.write("client writer close", true);
+    try std.testing.expectError(
+        error.ConnectionClosed,
+        writer.write("after end", false),
+    );
+    var second_data = try second.read();
+    defer second_data.deinit(allocator);
+    try std.testing.expectEqualStrings(
+        "server writer close",
+        second_data.data,
+    );
+    try std.testing.expect(second_data.end_stream);
+    try std.testing.expectEqual(
+        @as(usize, 0),
+        client.active_local_streams.items.len,
+    );
+    try std.testing.expect(client.isReusable());
+
+    thread.join();
+    joined = true;
     if (shared.err) |err| return err;
 }
 
