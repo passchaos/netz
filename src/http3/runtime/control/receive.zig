@@ -120,6 +120,20 @@ pub const ServerRequestIdValidator = union(enum) {
             .static_limit => true,
         };
     }
+
+    pub fn commitReceivedThrough(
+        self: @This(),
+        stream_id: u64,
+        end_offset: u64,
+    ) Error!void {
+        switch (self) {
+            .connection => |connection| try connection.commitReceivedThrough(
+                stream_id,
+                end_offset,
+            ),
+            .static_limit => {},
+        }
+    }
 };
 
 const ServerControlFrameValidator = struct {

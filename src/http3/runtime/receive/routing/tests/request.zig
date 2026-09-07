@@ -3,6 +3,7 @@ const http3 = @import("../../../../mod.zig");
 const quic = @import("../../../../../quic/mod.zig");
 const request_routing = @import("../request.zig");
 const qpack_state = @import("../../../qpack/state.zig");
+const connect_datagram = @import("../../../datagram.zig");
 const buffered_request = @import("../../../stream/buffered/request.zig");
 const stream_lifecycle = @import("../../../stream/lifecycle.zig");
 const streaming_set = @import("../../../stream/set.zig");
@@ -281,6 +282,421 @@ test "HTTP/3 request router classifies reordered peer uni streams by prefix" {
         control.peer_qpack_encoder_stream_id,
     );
     try std.testing.expectEqual(@as(u64, 1), qpack_decode.table.insert_count);
+}
+
+test "HTTP/3 request router returns QPACK receive credit to QUIC" {
+    const allocator = std.testing.allocator;
+    var threaded = std.Io.Threaded.init(allocator, .{});
+    defer threaded.deinit();
+    var endpoint = try quic.runtime.Endpoint.bind(
+        allocator,
+        threaded.io(),
+        .{ .ip4 = .loopback(0) },
+        .{ .max_datagram_size = 4096 },
+    );
+    defer endpoint.deinit();
+    const keys = quic.protection.deriveAes128Keys(
+        [_]u8{0xc5} ** quic.protection.secret_len,
+    );
+    var connection = try quic.one_rtt.Connection.init(&endpoint, .{
+        .peer = endpoint.address(),
+        .receive_keys = keys,
+        .send_keys = keys,
+        .local_connection_id = "credit-server",
+        .peer_connection_id = "credit-client",
+        .local_endpoint = .server,
+        .initial_receive_max_data = 16,
+        .receive_window = 16,
+        .max_receive_window = 16,
+        .initial_receive_max_stream_data_uni = 16,
+        .stream_receive_window = 16,
+        .max_stream_receive_window = 16,
+        .initial_receive_max_streams_uni = 2,
+        .enable_pacing = false,
+    });
+    defer connection.deinit();
+
+    var control: http3.ControlState = .{};
+    defer control.deinit(allocator);
+    var qpack_decode = QpackDecodeState.init(allocator, 256, 1024);
+    defer qpack_decode.deinit();
+    try qpack_decode.table.setCapacity(256);
+    var qpack_encode = QpackEncodeState.initAwaitingPeerSettings(
+        allocator,
+        1024,
+    );
+    defer qpack_encode.deinit();
+    var buffered = RequestStreamSet.init(allocator, 1024, 1);
+    defer buffered.deinit();
+    var streaming = StreamingRequestSet.init(
+        allocator,
+        1,
+        1024,
+        .{},
+        .request,
+    );
+    defer streaming.deinit();
+    var lifecycle = ServerRequestLifecycle.init(allocator);
+    defer lifecycle.deinit();
+
+    var encoder: std.ArrayList(u8) = .empty;
+    defer encoder.deinit(allocator);
+    try http3.writeQpackEncoderStreamPrefix(&encoder, allocator);
+    try http3.Qpack.writeEncoderInstruction(
+        &encoder,
+        allocator,
+        .{ .insert_literal = .{ .name = "x", .value = "123456789" } },
+    );
+    const stream_frame = quic.Frame{ .stream = .{
+        .stream_id = 6,
+        .data = encoder.items,
+    } };
+    try quic.one_rtt.testing.applyReceivedFrames(
+        &connection,
+        0,
+        &.{stream_frame},
+        null,
+        .not_ect,
+    );
+    try std.testing.expect((try request_routing
+        .applyServerRequestPacketFrames(
+        endpoint.address(),
+        &.{stream_frame},
+        allocator,
+        &control,
+        &qpack_decode,
+        &qpack_encode,
+        0,
+        &buffered,
+        &streaming,
+        &lifecycle,
+        .{ .connection = &connection },
+        &.{},
+        null,
+        null,
+    )) == null);
+
+    const stats = connection.recvStreamStats(6) orelse
+        return error.TestUnexpectedResult;
+    try std.testing.expectEqual(@as(u64, encoder.items.len), stats.bytes_read);
+    try std.testing.expectEqual(
+        @as(u64, 16 + encoder.items.len),
+        stats.receive_limit,
+    );
+}
+
+test "HTTP/3 request router retires drained unknown uni stream" {
+    const allocator = std.testing.allocator;
+    var threaded = std.Io.Threaded.init(allocator, .{});
+    defer threaded.deinit();
+    var endpoint = try quic.runtime.Endpoint.bind(
+        allocator,
+        threaded.io(),
+        .{ .ip4 = .loopback(0) },
+        .{ .max_datagram_size = 4096 },
+    );
+    defer endpoint.deinit();
+    const keys = quic.protection.deriveAes128Keys(
+        [_]u8{0xc7} ** quic.protection.secret_len,
+    );
+    var connection = try quic.one_rtt.Connection.init(&endpoint, .{
+        .peer = endpoint.address(),
+        .receive_keys = keys,
+        .send_keys = keys,
+        .local_connection_id = "unknown-server",
+        .peer_connection_id = "unknown-client",
+        .local_endpoint = .server,
+        .initial_receive_max_streams_uni = 1,
+        .enable_pacing = false,
+    });
+    defer connection.deinit();
+
+    var control: http3.ControlState = .{};
+    defer control.deinit(allocator);
+    var qpack_decode = QpackDecodeState.init(allocator, 0, 1024);
+    defer qpack_decode.deinit();
+    var qpack_encode = QpackEncodeState.initAwaitingPeerSettings(
+        allocator,
+        1024,
+    );
+    defer qpack_encode.deinit();
+    var buffered = RequestStreamSet.init(allocator, 1024, 1);
+    defer buffered.deinit();
+    var streaming = StreamingRequestSet.init(
+        allocator,
+        1,
+        1024,
+        .{},
+        .request,
+    );
+    defer streaming.deinit();
+    var lifecycle = ServerRequestLifecycle.init(allocator);
+    defer lifecycle.deinit();
+
+    const unknown = quic.Frame{ .stream = .{
+        .stream_id = 2,
+        .data = &.{ 0x21, 0xaa },
+        .fin = true,
+    } };
+    try quic.one_rtt.testing.applyReceivedFrames(
+        &connection,
+        0,
+        &.{unknown},
+        null,
+        .not_ect,
+    );
+    try std.testing.expect((try request_routing
+        .applyServerRequestPacketFrames(
+        endpoint.address(),
+        &.{unknown},
+        allocator,
+        &control,
+        &qpack_decode,
+        &qpack_encode,
+        0,
+        &buffered,
+        &streaming,
+        &lifecycle,
+        .{ .connection = &connection },
+        &.{},
+        null,
+        null,
+    )) == null);
+    try std.testing.expect(connection.peerStreamClosed(2));
+
+    const reset = quic.Frame{ .reset_stream = .{
+        .stream_id = 6,
+        .application_error_code = 0,
+        .final_size = 0,
+    } };
+    try quic.one_rtt.testing.applyReceivedFrames(
+        &connection,
+        1,
+        &.{reset},
+        null,
+        .not_ect,
+    );
+    try std.testing.expect((try request_routing
+        .applyServerRequestPacketFrames(
+        endpoint.address(),
+        &.{reset},
+        allocator,
+        &control,
+        &qpack_decode,
+        &qpack_encode,
+        0,
+        &buffered,
+        &streaming,
+        &lifecycle,
+        .{ .connection = &connection },
+        &.{},
+        null,
+        null,
+    )) == null);
+    try std.testing.expect(connection.peerStreamClosed(6));
+
+    try quic.one_rtt.testing.applyReceivedFrames(
+        &connection,
+        2,
+        &.{.{ .stream = .{
+            .stream_id = 10,
+            .data = &.{0x21},
+            .fin = true,
+        } }},
+        null,
+        .not_ect,
+    );
+}
+
+test "HTTP/3 request router preserves reordered WebTransport uni prefix" {
+    const allocator = std.testing.allocator;
+    var threaded = std.Io.Threaded.init(allocator, .{});
+    defer threaded.deinit();
+    var endpoint = try quic.runtime.Endpoint.bind(
+        allocator,
+        threaded.io(),
+        .{ .ip4 = .loopback(0) },
+        .{ .max_datagram_size = 4096 },
+    );
+    defer endpoint.deinit();
+    const keys = quic.protection.deriveAes128Keys(
+        [_]u8{0xc9} ** quic.protection.secret_len,
+    );
+    var connection = try quic.one_rtt.Connection.init(&endpoint, .{
+        .peer = endpoint.address(),
+        .receive_keys = keys,
+        .send_keys = keys,
+        .local_connection_id = "wt-server",
+        .peer_connection_id = "wt-client",
+        .local_endpoint = .server,
+        .initial_receive_max_streams_uni = 1,
+        .enable_pacing = false,
+    });
+    defer connection.deinit();
+
+    var control: http3.ControlState = .{};
+    defer control.deinit(allocator);
+    var qpack_decode = QpackDecodeState.init(allocator, 0, 1024);
+    defer qpack_decode.deinit();
+    var qpack_encode = QpackEncodeState.initAwaitingPeerSettings(
+        allocator,
+        1024,
+    );
+    defer qpack_encode.deinit();
+    var buffered = RequestStreamSet.init(allocator, 1024, 1);
+    defer buffered.deinit();
+    var streaming = StreamingRequestSet.init(
+        allocator,
+        1,
+        1024,
+        .{},
+        .request,
+    );
+    defer streaming.deinit();
+    var lifecycle = ServerRequestLifecycle.init(allocator);
+    defer lifecycle.deinit();
+    var detached = connect_datagram.Registry.init(allocator, .{
+        .max_associations = 1,
+        .max_queued_per_association = 1,
+        .max_queued_bytes_per_association = 64,
+    });
+    defer detached.deinit();
+    try detached.register(0);
+
+    const bytes = [_]u8{ 0x40, 0x54, 0x00, 'w', 't' };
+    const suffix = quic.Frame{ .stream = .{
+        .stream_id = 2,
+        .offset = 1,
+        .data = bytes[1..],
+    } };
+    const first = quic.Frame{ .stream = .{
+        .stream_id = 2,
+        .data = bytes[0..1],
+    } };
+    for ([_]quic.Frame{ suffix, first }, 0..) |frame, packet_number| {
+        try quic.one_rtt.testing.applyReceivedFrames(
+            &connection,
+            packet_number,
+            &.{frame},
+            null,
+            .not_ect,
+        );
+        try std.testing.expect((try request_routing
+            .applyServerRequestPacketFrames(
+            endpoint.address(),
+            &.{frame},
+            allocator,
+            &control,
+            &qpack_decode,
+            &qpack_encode,
+            0,
+            &buffered,
+            &streaming,
+            &lifecycle,
+            .{ .connection = &connection },
+            &.{},
+            null,
+            &detached,
+        )) == null);
+    }
+    const stats = connection.recvStreamStats(2) orelse
+        return error.TestUnexpectedResult;
+    try std.testing.expectEqual(@as(u64, 0), stats.bytes_read);
+    try std.testing.expectEqual(bytes.len, stats.available_bytes);
+}
+
+test "HTTP/3 request router preserves reset WebTransport uni stream" {
+    const allocator = std.testing.allocator;
+    var threaded = std.Io.Threaded.init(allocator, .{});
+    defer threaded.deinit();
+    var endpoint = try quic.runtime.Endpoint.bind(
+        allocator,
+        threaded.io(),
+        .{ .ip4 = .loopback(0) },
+        .{ .max_datagram_size = 4096 },
+    );
+    defer endpoint.deinit();
+    const keys = quic.protection.deriveAes128Keys(
+        [_]u8{0xcb} ** quic.protection.secret_len,
+    );
+    var connection = try quic.one_rtt.Connection.init(&endpoint, .{
+        .peer = endpoint.address(),
+        .receive_keys = keys,
+        .send_keys = keys,
+        .local_connection_id = "wt-reset-server",
+        .peer_connection_id = "wt-reset-client",
+        .local_endpoint = .server,
+        .initial_receive_max_streams_uni = 1,
+        .enable_pacing = false,
+    });
+    defer connection.deinit();
+
+    var control: http3.ControlState = .{};
+    defer control.deinit(allocator);
+    var qpack_decode = QpackDecodeState.init(allocator, 0, 1024);
+    defer qpack_decode.deinit();
+    var qpack_encode = QpackEncodeState.initAwaitingPeerSettings(
+        allocator,
+        1024,
+    );
+    defer qpack_encode.deinit();
+    var buffered = RequestStreamSet.init(allocator, 1024, 1);
+    defer buffered.deinit();
+    var streaming = StreamingRequestSet.init(
+        allocator,
+        1,
+        1024,
+        .{},
+        .request,
+    );
+    defer streaming.deinit();
+    var lifecycle = ServerRequestLifecycle.init(allocator);
+    defer lifecycle.deinit();
+    var detached = connect_datagram.Registry.init(allocator, .{
+        .max_associations = 1,
+        .max_queued_per_association = 1,
+        .max_queued_bytes_per_association = 64,
+    });
+    defer detached.deinit();
+    try detached.register(0);
+
+    const prefix = quic.Frame{ .stream = .{
+        .stream_id = 2,
+        .data = &.{ 0x40, 0x54, 0x00 },
+    } };
+    const reset = quic.Frame{ .reset_stream = .{
+        .stream_id = 2,
+        .application_error_code = 7,
+        .final_size = 3,
+    } };
+    for ([_]quic.Frame{ prefix, reset }, 0..) |frame, packet_number| {
+        try quic.one_rtt.testing.applyReceivedFrames(
+            &connection,
+            packet_number,
+            &.{frame},
+            null,
+            .not_ect,
+        );
+        try std.testing.expect((try request_routing
+            .applyServerRequestPacketFrames(
+            endpoint.address(),
+            &.{frame},
+            allocator,
+            &control,
+            &qpack_decode,
+            &qpack_encode,
+            0,
+            &buffered,
+            &streaming,
+            &lifecycle,
+            .{ .connection = &connection },
+            &.{},
+            null,
+            &detached,
+        )) == null);
+    }
+    try std.testing.expect(!connection.peerStreamClosed(2));
+    try std.testing.expectEqual(@as(u64, 3), connection.recvStreamStats(2).?.available_bytes);
 }
 
 test "HTTP/3 request router ignores late STREAM after QUIC reclamation" {

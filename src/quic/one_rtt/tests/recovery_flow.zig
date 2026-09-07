@@ -2931,6 +2931,233 @@ test "QUIC deferred peer stream credit retries from connection timer" {
     );
 }
 
+test "QUIC committed receive credit retries from connection timer" {
+    const allocator = std.testing.allocator;
+    var threaded = std.Io.Threaded.init(allocator, .{});
+    defer threaded.deinit();
+    const io = threaded.io();
+
+    var server_endpoint = try quic.runtime.Endpoint.bind(
+        allocator,
+        io,
+        .{ .ip4 = .loopback(0) },
+        .{ .max_datagram_size = 4096 },
+    );
+    defer server_endpoint.deinit();
+    var client_endpoint = try quic.runtime.Endpoint.bind(
+        allocator,
+        io,
+        .{ .ip4 = .loopback(0) },
+        .{ .max_datagram_size = 4096 },
+    );
+    defer client_endpoint.deinit();
+
+    const client_cid = [_]u8{ 0x69, 0x6a, 0x6b, 0x6c };
+    const server_cid = [_]u8{ 0x6d, 0x6e, 0x6f, 0x70 };
+    const keys = quic.protection.deriveAes128Keys(
+        [_]u8{0xbd} ** quic.protection.secret_len,
+    );
+    var client = try one_rtt.Connection.init(&client_endpoint, .{
+        .peer = server_endpoint.address(),
+        .receive_keys = keys,
+        .send_keys = keys,
+        .local_connection_id = &client_cid,
+        .peer_connection_id = &server_cid,
+        .initial_send_max_data = 8,
+        .initial_send_max_stream_data = 8,
+        .enable_pacing = false,
+    });
+    defer client.deinit();
+    var server = try one_rtt.Connection.init(&server_endpoint, .{
+        .peer = client_endpoint.address(),
+        .receive_keys = keys,
+        .send_keys = keys,
+        .local_connection_id = &server_cid,
+        .peer_connection_id = &client_cid,
+        .initial_receive_max_data = 8,
+        .receive_window = 8,
+        .max_receive_window = 8,
+        .initial_receive_max_stream_data = 8,
+        .stream_receive_window = 8,
+        .max_stream_receive_window = 8,
+        .local_endpoint = .server,
+        .enable_pacing = false,
+    });
+    defer server.deinit();
+
+    try client.send(&.{.{ .stream = .{
+        .stream_id = 0,
+        .data = "123456",
+    } }});
+    var data = try server.receivePacket();
+    defer data.deinit(allocator);
+
+    var failed_credit_send = ObservedBatchSend{
+        .delegate = server.endpoint.io,
+        .fail_after_prefix = 0,
+    };
+    var failed_credit_vtable = server.endpoint.io.vtable.*;
+    failed_credit_vtable.netSend = ObservedBatchSend.netSend;
+    server.endpoint.io = .{
+        .userdata = &failed_credit_send,
+        .vtable = &failed_credit_vtable,
+    };
+    defer server.endpoint.io = failed_credit_send.delegate;
+
+    // Parser ownership is committed even though the first credit packet
+    // cannot reach the socket. The latest absolute limits remain queued.
+    try server.commitReceivedThrough(0, 6);
+    try std.testing.expectEqual(
+        @as(usize, 0),
+        one_rtt.testing.receiveStreamAvailableLen(&server, 0).?,
+    );
+    try std.testing.expectEqual(
+        @as(u64, 14),
+        one_rtt.testing.receiveStreamLimit(&server, 0).?,
+    );
+    const retry = server.nextTimerDeadline() orelse
+        return error.TestUnexpectedResult;
+    try std.testing.expectEqual(
+        one_rtt.TimerDeadlineKind.receive_credit,
+        retry.kind,
+    );
+
+    server.endpoint.io = failed_credit_send.delegate;
+    _ = try server.serviceNextTimerAt(retry.deadline_ns);
+    var credit = try client.receivePacket();
+    defer credit.deinit(allocator);
+    try std.testing.expectEqual(@as(usize, 2), credit.frames.len);
+    try std.testing.expectEqual(
+        @as(u64, 14),
+        credit.frames[0].max_data.maximum_data,
+    );
+    try std.testing.expectEqual(
+        @as(u64, 14),
+        credit.frames[1].max_stream_data.maximum_stream_data,
+    );
+    try std.testing.expect(server.nextTimerDeadline() == null or
+        server.nextTimerDeadline().?.kind != .receive_credit);
+}
+
+test "QUIC committed receive credit retries streams fairly" {
+    const allocator = std.testing.allocator;
+    var threaded = std.Io.Threaded.init(allocator, .{});
+    defer threaded.deinit();
+    const io = threaded.io();
+
+    var server_endpoint = try quic.runtime.Endpoint.bind(
+        allocator,
+        io,
+        .{ .ip4 = .loopback(0) },
+        .{ .max_datagram_size = 4096 },
+    );
+    defer server_endpoint.deinit();
+    var client_endpoint = try quic.runtime.Endpoint.bind(
+        allocator,
+        io,
+        .{ .ip4 = .loopback(0) },
+        .{ .max_datagram_size = 4096 },
+    );
+    defer client_endpoint.deinit();
+
+    const client_cid = [_]u8{ 0x71, 0x72, 0x73, 0x74 };
+    const server_cid = [_]u8{ 0x75, 0x76, 0x77, 0x78 };
+    const keys = quic.protection.deriveAes128Keys(
+        [_]u8{0xbe} ** quic.protection.secret_len,
+    );
+    var client = try one_rtt.Connection.init(&client_endpoint, .{
+        .peer = server_endpoint.address(),
+        .receive_keys = keys,
+        .send_keys = keys,
+        .local_connection_id = &client_cid,
+        .peer_connection_id = &server_cid,
+        .initial_send_max_data = 64,
+        .initial_send_max_stream_data = 64,
+        .enable_pacing = false,
+    });
+    defer client.deinit();
+    var server = try one_rtt.Connection.init(&server_endpoint, .{
+        .peer = client_endpoint.address(),
+        .receive_keys = keys,
+        .send_keys = keys,
+        .local_connection_id = &server_cid,
+        .peer_connection_id = &client_cid,
+        .initial_receive_max_data = 64,
+        .receive_window = 64,
+        .max_receive_window = 64,
+        .initial_receive_max_stream_data = 8,
+        .stream_receive_window = 8,
+        .max_stream_receive_window = 8,
+        .initial_receive_max_streams_bidi = 2,
+        .local_endpoint = .server,
+        .enable_pacing = false,
+    });
+    defer server.deinit();
+
+    try client.send(&.{.{ .stream = .{
+        .stream_id = 0,
+        .data = "aaaaaa",
+    } }});
+    var first_data = try server.receivePacket();
+    defer first_data.deinit(allocator);
+    try client.send(&.{.{ .stream = .{
+        .stream_id = 4,
+        .data = "bbbbbb",
+    } }});
+    var second_data = try server.receivePacket();
+    defer second_data.deinit(allocator);
+
+    var failed_credit_send = ObservedBatchSend{
+        .delegate = server.endpoint.io,
+        .fail_after_prefix = 0,
+    };
+    var failed_credit_vtable = server.endpoint.io.vtable.*;
+    failed_credit_vtable.netSend = ObservedBatchSend.netSend;
+    server.endpoint.io = .{
+        .userdata = &failed_credit_send,
+        .vtable = &failed_credit_vtable,
+    };
+    defer server.endpoint.io = failed_credit_send.delegate;
+
+    try server.commitReceivedThrough(0, 6);
+    try server.commitReceivedThrough(4, 6);
+    server.endpoint.io = failed_credit_send.delegate;
+
+    try one_rtt.testing.applyReceivedFrames(
+        &server,
+        2,
+        &.{.{ .stream = .{
+            .stream_id = 0,
+            .offset = 6,
+            .data = "cccccc",
+        } }},
+        null,
+        .not_ect,
+    );
+    try server.commitReceivedThrough(0, 12);
+    var first_credit = try client.receivePacket();
+    defer first_credit.deinit(allocator);
+    try std.testing.expectEqual(@as(u64, 0), first_credit.frames[0].max_stream_data.stream_id);
+
+    // Re-pend the lower-index stream before the retry fires. The persistent
+    // cursor must nevertheless select stream 4 instead of stream 0 again.
+    try one_rtt.testing.applyReceivedFrames(
+        &server,
+        3,
+        &.{.{ .stream = .{
+            .stream_id = 0,
+            .offset = 12,
+            .data = "dddddd",
+        } }},
+        null,
+        .not_ect,
+    );
+    try server.commitReceivedThrough(0, 18);
+    var second_credit = try client.receivePacket();
+    defer second_credit.deinit(allocator);
+    try std.testing.expectEqual(@as(u64, 4), second_credit.frames[0].max_stream_data.stream_id);
+}
+
 test "QUIC 1-RTT connection releases reset and unidirectional peer stream credit" {
     const allocator = std.testing.allocator;
 

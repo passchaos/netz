@@ -155,6 +155,16 @@ pub const QpackDecodeState = struct {
         self.removePeerUniStream(stream_id);
     }
 
+    pub fn classifiedPeerUniStreamType(
+        self: *const QpackDecodeState,
+        stream_id: u64,
+    ) ?PeerUniStreamType {
+        for (self.peer_uni_streams.items) |entry| {
+            if (entry.receive.stream_id == stream_id) return entry.stream_type;
+        }
+        return null;
+    }
+
     fn findPeerUniStream(
         self: *QpackDecodeState,
         stream_id: u64,

@@ -97,32 +97,44 @@ pub fn routePacket(
         if (frame == .reset_stream and
             (frame.reset_stream.stream_id & 0x02) != 0)
         {
+            const preserve_for_detached = hasDetachedAssociation(state.*) and
+                shouldPreserveDetachedUniReset(
+                    state.connection,
+                    state.qpack_decode,
+                    frame.reset_stream.stream_id,
+                );
             state.qpack_decode.discardPeerUniStream(
                 frame.reset_stream.stream_id,
             );
-        }
-        if (frame == .reset_stream and
-            (frame.reset_stream.stream_id & 0x03) == 0x03)
-        {
-            if (state.push_streams) |pushes| {
-                const stream_id: u62 = @intCast(
-                    frame.reset_stream.stream_id,
-                );
-                const tracked_push = pushes.containsStream(stream_id);
-                if (try pushes.hasUnacknowledgedDynamicSection(
-                    stream_id,
-                    state.qpack_decode.table,
-                )) {
-                    try state.qpack_decode.recordStreamCancellation(stream_id);
-                    flush_qpack_feedback = true;
-                }
-                if (tracked_push) {
-                    if (state.connection) |connection| {
-                        _ = try connection
-                            .requestCompletedPeerStreamRelease(stream_id);
+            var tracked_push = false;
+            if ((frame.reset_stream.stream_id & 0x03) == 0x03) {
+                if (state.push_streams) |pushes| {
+                    const stream_id: u62 = @intCast(
+                        frame.reset_stream.stream_id,
+                    );
+                    tracked_push = pushes.containsStream(stream_id);
+                    if (try pushes.hasUnacknowledgedDynamicSection(
+                        stream_id,
+                        state.qpack_decode.table,
+                    )) {
+                        try state.qpack_decode.recordStreamCancellation(stream_id);
+                        flush_qpack_feedback = true;
                     }
+                    if (tracked_push) {
+                        if (state.connection) |connection| {
+                            _ = try connection
+                                .requestCompletedPeerStreamRelease(stream_id);
+                        }
+                    }
+                    pushes.removeByStreamId(stream_id);
                 }
-                pushes.removeByStreamId(stream_id);
+            }
+            if (!tracked_push and !preserve_for_detached) {
+                if (state.connection) |connection| {
+                    _ = try connection.requestCompletedPeerStreamRelease(
+                        frame.reset_stream.stream_id,
+                    );
+                }
             }
             continue;
         }
@@ -175,8 +187,7 @@ pub fn routePacket(
                 continue;
             }
         }
-        if (state.detached_stream_id != null and
-            state.connection != null and
+        if (hasDetachedAssociation(state.*) and state.connection != null and
             shouldPreserveDetachedStream(
                 state.connection.?,
                 frame.stream,
@@ -195,6 +206,8 @@ pub fn routePacket(
             const classified = try state.qpack_decode.classifyPeerUniFrame(
                 frame.stream,
             ) orelse continue;
+            var transport_consumed_end: ?u64 = null;
+            var mark_push_prefix_credited = false;
             switch (classified.stream_type) {
                 .control => {
                     if (!try applyControlStreamFrameForRole(
@@ -240,14 +253,59 @@ pub fn routePacket(
                 },
                 .push => {
                     if (state.push_streams) |pushes| {
+                        const had_reader = pushes.readerForStream(
+                            @intCast(classified.frame.stream_id),
+                        ) != null;
                         if (!try pushes.insert(
                             from,
                             classified.frame,
                             state.control.*,
                         )) return error.UnexpectedStream;
+                        if (!had_reader) {
+                            if (pushes.readerForStream(
+                                @intCast(classified.frame.stream_id),
+                            )) |reader| {
+                                transport_consumed_end = reader.readOffset();
+                                mark_push_prefix_credited = true;
+                            }
+                        }
                     }
                 },
                 .unknown => {},
+            }
+            if (classified.stream_type != .push or
+                state.push_streams == null)
+            {
+                transport_consumed_end = std.math.add(
+                    u64,
+                    classified.frame.offset,
+                    std.math.cast(
+                        u64,
+                        classified.frame.data.len,
+                    ) orelse return error.InvalidStreamRange,
+                ) catch return error.InvalidStreamRange;
+            }
+            if (transport_consumed_end) |consumed_end| {
+                if (state.connection) |connection| {
+                    try connection.commitReceivedThrough(
+                        classified.frame.stream_id,
+                        consumed_end,
+                    );
+                    if (mark_push_prefix_credited) {
+                        const pushes = state.push_streams orelse unreachable;
+                        const reader = pushes.readerForStream(
+                            @intCast(classified.frame.stream_id),
+                        ) orelse unreachable;
+                        reader.markCredited(reader.uncreditedConsumed());
+                    }
+                    if (classified.stream_type == .unknown and
+                        classified.frame.fin)
+                    {
+                        _ = try connection.requestCompletedPeerStreamRelease(
+                            classified.frame.stream_id,
+                        );
+                    }
+                }
             }
             state.qpack_decode.commitPeerUniFrame(classified.frame);
             continue;
@@ -307,6 +365,31 @@ pub fn recordClientResponseReset(
     return cancel_qpack;
 }
 
+fn hasDetachedAssociation(state: State) bool {
+    return state.detached_stream_id != null or
+        if (state.detached_streams) |detached|
+            detached.associationCount() != 0
+        else
+            false;
+}
+
+fn shouldPreserveDetachedUniReset(
+    maybe_connection: ?*quic.one_rtt.Connection,
+    qpack_decode: *QpackDecodeState,
+    stream_id: u64,
+) bool {
+    if (qpack_decode.classifiedPeerUniStreamType(stream_id) != null)
+        return false;
+    const connection = maybe_connection orelse return true;
+    const stats = connection.recvStreamStats(stream_id) orelse return false;
+    if (stats.bytes_read != 0) return true;
+    const available = connection.retainedReceivedStream(stream_id) orelse
+        return false;
+    const prefix = quic.varint.decodeSlice(available) catch return false;
+    return @as(http3.StreamType, @enumFromInt(prefix.value)) ==
+        .webtransport_unidirectional;
+}
+
 fn shouldPreserveDetachedStream(
     connection: *quic.one_rtt.Connection,
     stream: quic.StreamFrame,
@@ -317,10 +400,6 @@ fn shouldPreserveDetachedStream(
         const lifecycle = request_lifecycle orelse return false;
         return !lifecycle.contains(stream_id) and
             !lifecycle.isFinished(stream_id);
-    }
-    if (stream.offset == 0) {
-        return control_receive.peekUniStreamType(stream) ==
-            .webtransport_unidirectional;
     }
     const available = connection.availableReceivedStream(
         stream.stream_id,

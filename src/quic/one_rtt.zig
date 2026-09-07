@@ -332,6 +332,9 @@ const StreamRecvFlowEntry = struct {
     /// The application has finished with this peer-initiated stream, but its
     /// local send-side terminal frame might still await acknowledgement.
     stream_count_release_requested: bool = false,
+    /// Application consumption advanced this stream's receive window, but
+    /// the latest MAX_STREAM_DATA value has not reached the socket yet.
+    pending_max_stream_data: bool = false,
 
     fn deinit(self: *StreamRecvFlowEntry) void {
         self.recv_state.deinit();
@@ -668,6 +671,7 @@ pub const TimerDeadlineKind = enum {
     pacing,
     ack_delay,
     peer_stream_credit,
+    receive_credit,
     loss_time,
     pto,
     pmtu_raise,
@@ -791,6 +795,11 @@ pub const Connection = struct {
     pending_local_stream_releases: usize = 0,
     stream_release_retry_deadline_ns: ?u64 = null,
     stream_release_retry_attempts: u8 = 0,
+    pending_max_data: bool = false,
+    pending_receive_stream_credits: usize = 0,
+    last_receive_credit_stream_id: ?u64 = null,
+    receive_credit_retry_deadline_ns: ?u64 = null,
+    receive_credit_retry_attempts: u8 = 0,
     last_recv_stream_index: ?usize = null,
     stream_poll_cursor: usize = 0,
     close_info: ?CloseInfo = null,
@@ -2639,6 +2648,12 @@ pub const Connection = struct {
                 .deadline_ns = deadline,
             });
         }
+        if (self.receive_credit_retry_deadline_ns) |deadline| {
+            considerTimerDeadline(&next, .{
+                .kind = .receive_credit,
+                .deadline_ns = deadline,
+            });
+        }
         if (self.ack_delay_deadline_ns) |deadline| {
             considerTimerDeadline(&next, .{
                 .kind = .ack_delay,
@@ -2741,6 +2756,12 @@ pub const Connection = struct {
                 self.stream_release_retry_deadline_ns = null;
                 self.flushRequestedStreamReleasesAt(now_ns) catch |err| {
                     self.scheduleStreamReleaseRetry(err, now_ns);
+                };
+            },
+            .receive_credit => {
+                self.receive_credit_retry_deadline_ns = null;
+                self.flushPendingReceiveCreditAt(now_ns) catch |err| {
+                    self.scheduleReceiveCreditRetry(err, now_ns);
                 };
             },
             .loss_time, .pto => {
@@ -4988,6 +5009,18 @@ pub const Connection = struct {
         );
     }
 
+    /// Borrow contiguous transport bytes even after RESET_STREAM. Protocol
+    /// dispatchers use this narrow view only to identify ownership from a
+    /// stream prefix; application data APIs continue to honor reset delivery
+    /// policy through `availableReceivedStream`.
+    pub fn retainedReceivedStream(
+        self: *Connection,
+        stream_id: u64,
+    ) ?[]const u8 {
+        const entry = self.findRecvStreamEntry(stream_id) orelse return null;
+        return entry.recv_state.available();
+    }
+
     /// Snapshot one receive stream for a protocol parser that is taking over
     /// after consuming a prefix directly from the QUIC buffer. The connection
     /// retains its own copy for flow control and retransmission validation.
@@ -5534,6 +5567,10 @@ pub const Connection = struct {
         else
             self.stream_poll_cursor % self.stream_recv_flows.items.len;
         var removed = self.stream_recv_flows.swapRemove(index);
+        if (removed.pending_max_stream_data) {
+            std.debug.assert(self.pending_receive_stream_credits != 0);
+            self.pending_receive_stream_credits -= 1;
+        }
         _ = self.stream_recv_index.remove(stream_id);
         if (index != last_index) {
             const moved = self.stream_recv_flows.items[index];
@@ -5553,6 +5590,9 @@ pub const Connection = struct {
             self.stream_poll_cursor = next_poll_index;
         }
         removed.deinit();
+        if (!self.hasPendingReceiveCredit()) {
+            self.clearReceiveCreditRetry();
+        }
     }
 
     fn removeSendStreamEntry(self: *Connection, stream_id: u64) void {
@@ -5862,6 +5902,118 @@ pub const Connection = struct {
             now_ns,
             stream_release_retry_backoff_ns[index],
         ) catch std.math.maxInt(u64);
+    }
+
+    fn hasPendingReceiveCredit(self: Connection) bool {
+        return self.pending_max_data or
+            self.pending_receive_stream_credits != 0;
+    }
+
+    fn clearReceiveCreditRetry(self: *Connection) void {
+        self.receive_credit_retry_deadline_ns = null;
+        self.receive_credit_retry_attempts = 0;
+    }
+
+    fn scheduleReceiveCreditRetry(
+        self: *Connection,
+        err: Error,
+        now_ns: u64,
+    ) void {
+        if (!self.hasPendingReceiveCredit() or
+            self.close_info != null or self.idle_timed_out)
+        {
+            self.clearReceiveCreditRetry();
+            return;
+        }
+        if (err == error.PacingLimited) {
+            if (self.pacing_blocked_until_ns) |deadline| {
+                if (deadline > now_ns) {
+                    self.receive_credit_retry_deadline_ns = deadline;
+                    return;
+                }
+            }
+        }
+        const index = @min(
+            @as(usize, self.receive_credit_retry_attempts),
+            stream_release_retry_backoff_ns.len - 1,
+        );
+        self.receive_credit_retry_attempts +|= 1;
+        self.receive_credit_retry_deadline_ns = std.math.add(
+            u64,
+            now_ns,
+            stream_release_retry_backoff_ns[index],
+        ) catch std.math.maxInt(u64);
+    }
+
+    fn flushPendingReceiveCreditAt(
+        self: *Connection,
+        now_ns: u64,
+    ) Error!void {
+        if (!self.hasPendingReceiveCredit()) {
+            self.clearReceiveCreditRetry();
+            return;
+        }
+        if (self.close_info != null or self.idle_timed_out) {
+            self.clearReceiveCreditRetry();
+            return;
+        }
+
+        var frames: [2]quic.Frame = undefined;
+        var count: usize = 0;
+        const includes_max_data = self.pending_max_data;
+        if (includes_max_data) {
+            frames[count] = self.recv_flow.maxDataFrame();
+            count += 1;
+        }
+        var stream_id: ?u64 = null;
+        if (self.stream_recv_flows.items.len != 0 and
+            self.pending_receive_stream_credits != 0)
+        {
+            var next_id: ?u64 = null;
+            var wrapped_id: ?u64 = null;
+            for (self.stream_recv_flows.items) |*entry| {
+                if (!entry.pending_max_stream_data) continue;
+                if (wrapped_id == null or entry.stream_id < wrapped_id.?) {
+                    wrapped_id = entry.stream_id;
+                }
+                if (self.last_receive_credit_stream_id) |last| {
+                    if (entry.stream_id <= last) continue;
+                }
+                if (next_id == null or entry.stream_id < next_id.?) {
+                    next_id = entry.stream_id;
+                }
+            }
+            stream_id = next_id orelse wrapped_id;
+            const entry = self.findRecvStreamEntry(stream_id.?) orelse
+                unreachable;
+            frames[count] = entry.flow.maxStreamDataFrame(entry.stream_id);
+            count += 1;
+        }
+        std.debug.assert(count != 0);
+        try self.sendTrackedFramesEcnAt(
+            frames[0..count],
+            .not_ect,
+            now_ns,
+        );
+        if (includes_max_data) self.pending_max_data = false;
+        if (stream_id) |id| {
+            const entry = self.findRecvStreamEntry(id) orelse unreachable;
+            std.debug.assert(entry.pending_max_stream_data);
+            entry.pending_max_stream_data = false;
+            std.debug.assert(self.pending_receive_stream_credits != 0);
+            self.pending_receive_stream_credits -= 1;
+            self.last_receive_credit_stream_id = id;
+        }
+        if (self.hasPendingReceiveCredit()) {
+            self.receive_credit_retry_attempts = 0;
+            self.receive_credit_retry_deadline_ns = std.math.add(
+                u64,
+                now_ns,
+                stream_release_retry_backoff_ns[0],
+            ) catch std.math.maxInt(u64);
+        } else {
+            self.clearReceiveCreditRetry();
+        }
     }
 
     /// Copy known receive-stream IDs into caller storage without allocation.
@@ -9324,6 +9476,9 @@ pub const Connection = struct {
             // the authenticated packet appear rejected to the caller.
             self.scheduleStreamReleaseRetry(err, credit_now_ns);
         };
+        self.flushPendingReceiveCreditAt(credit_now_ns) catch |err| {
+            self.scheduleReceiveCreditRetry(err, credit_now_ns);
+        };
     }
 
     fn validateReceivedFramePreconditions(
@@ -10568,6 +10723,48 @@ pub const Connection = struct {
             amount,
             self.monotonicNowNs(),
         );
+    }
+
+    /// Commit ownership of received bytes through one absolute stream offset.
+    /// Protocol adapters that copy bytes into their own bounded reassembly use
+    /// this after parsing succeeds. The receive cursor and both flow windows
+    /// advance immediately; MAX_DATA/MAX_STREAM_DATA are sent nonblockingly or
+    /// retained for the connection timer to retry.
+    pub fn commitReceivedThrough(
+        self: *Connection,
+        stream_id: u64,
+        end_offset: u64,
+    ) Error!void {
+        const recv_stream = self.findRecvStreamEntry(stream_id) orelse
+            return error.StreamStateError;
+        const read_offset = std.math.cast(
+            u64,
+            recv_stream.recv_state.read_offset,
+        ) orelse return error.InvalidStreamRange;
+        if (end_offset < read_offset) return error.InvalidStreamRange;
+        const amount = end_offset - read_offset;
+        if (amount == 0) return;
+        const consume_len = std.math.cast(usize, amount) orelse
+            return error.InvalidFrameLength;
+        if (consume_len > recv_stream.recv_state.available().len) {
+            return error.InvalidStreamRange;
+        }
+
+        if (self.recv_flow.consume(amount) != null) {
+            self.pending_max_data = true;
+        }
+        if (recv_stream.flow.consume(amount) != null and
+            !recv_stream.pending_max_stream_data)
+        {
+            recv_stream.pending_max_stream_data = true;
+            self.pending_receive_stream_credits += 1;
+        }
+        recv_stream.recv_state.consume(consume_len) catch unreachable;
+
+        const now_ns = self.monotonicNowNs();
+        self.flushPendingReceiveCreditAt(now_ns) catch |err| {
+            self.scheduleReceiveCreditRetry(err, now_ns);
+        };
     }
 
     fn releaseReceivedCapacityAt(

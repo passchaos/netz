@@ -471,6 +471,20 @@ the same type is rejected before generic reassembly with
 `H3_STREAM_CREATION_ERROR`, as required by RFC 9204. Direct encoder/decoder
 state tests cover both types, and a protected-client wire test verifies the
 application close code instead of leaking the internal `WrongStream` error.
+Stateful HTTP/3 routing also commits every consumed control, QPACK, and
+ignored-extension byte through the underlying QUIC receive cursor. Push streams
+commit only their parsed type/Push-ID prefix and preserve message DATA
+backpressure, including when that prefix is split across packets, without later
+double-crediting it as application consumption. Terminal unknown streams also
+return their unidirectional MAX_STREAMS slot, while active WebTransport sessions
+preserve 0x54 streams even when the two-byte type is reordered across packets.
+Both stream- and connection-level receive windows therefore keep advancing on
+connection-long critical streams; if a MAX_STREAM_DATA/MAX_DATA write is paced,
+congested, or fails at the socket, the latest absolute credit remains queued on
+an independent connection timer instead of replaying already committed HTTP/3
+parser state. Client/server QPACK, control-stream, fragmented push-prefix,
+terminal-extension, reordered WebTransport-prefix, and injected send-failure
+tests cover these ownership boundaries.
 
 The 1-RTT anti-amplification budget is server-only and accounts complete
 protected UDP datagram lengths rather than plaintext payload lengths. Batch and

@@ -90,7 +90,7 @@ fn identifyInternal(
             .unidirectional;
     var stream = registry.get(stream_id);
     if (stream == null) {
-        const available = connection.availableReceivedStream(stream_id) orelse
+        const available = connection.retainedReceivedStream(stream_id) orelse
             return null;
         const prefix_len = switch (direction) {
             .bidirectional => blk: {

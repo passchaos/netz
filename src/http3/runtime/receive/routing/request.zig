@@ -153,9 +153,22 @@ pub fn applyServerRequestPacketFrames(
         if (frame == .reset_stream and
             (frame.reset_stream.stream_id & 0x02) != 0)
         {
+            const preserve_for_detached =
+                hasDetachedAssociation(detached_stream_id, detached_streams) and
+                shouldPreserveDetachedUniReset(
+                    request_id_validator,
+                    qpack_decode,
+                    frame.reset_stream.stream_id,
+                );
             qpack_decode.discardPeerUniStream(
                 frame.reset_stream.stream_id,
             );
+            if (!preserve_for_detached) {
+                _ = try request_id_validator.requestCompletedPeerStreamRelease(
+                    @intCast(frame.reset_stream.stream_id),
+                );
+            }
+            continue;
         }
         if (frame == .reset_stream and
             (try messageStreamDisposition(
@@ -249,6 +262,15 @@ pub fn applyServerRequestPacketFrames(
             qpack_decode.discardPeerUniStream(frame.stream.stream_id);
             continue;
         }
+        if (hasDetachedAssociation(detached_stream_id, detached_streams) and
+            shouldPreserveDetachedUniStream(
+                request_id_validator,
+                frame.stream,
+            ))
+        {
+            qpack_decode.discardPeerUniStream(frame.stream.stream_id);
+            continue;
+        }
         if ((frame.stream.stream_id & 0x02) != 0) {
             const classified = try qpack_decode.classifyPeerUniFrame(
                 frame.stream,
@@ -283,6 +305,23 @@ pub fn applyServerRequestPacketFrames(
                 ),
                 .push => return error.StreamCreationError,
                 .unknown => {},
+            }
+            const consumed_end = std.math.add(
+                u64,
+                classified.frame.offset,
+                std.math.cast(
+                    u64,
+                    classified.frame.data.len,
+                ) orelse return error.InvalidStreamRange,
+            ) catch return error.InvalidStreamRange;
+            try request_id_validator.commitReceivedThrough(
+                classified.frame.stream_id,
+                consumed_end,
+            );
+            if (classified.stream_type == .unknown and classified.frame.fin) {
+                _ = try request_id_validator.requestCompletedPeerStreamRelease(
+                    @intCast(classified.frame.stream_id),
+                );
             }
             qpack_decode.commitPeerUniFrame(classified.frame);
             continue;
@@ -319,6 +358,54 @@ pub fn applyServerRequestPacketFrames(
         streaming_requests,
     );
     return first_reset;
+}
+
+fn hasDetachedAssociation(
+    detached_stream_id: ?u62,
+    detached_streams: ?*connect_datagram.Registry,
+) bool {
+    return detached_stream_id != null or
+        if (detached_streams) |detached|
+            detached.associationCount() != 0
+        else
+            false;
+}
+
+fn shouldPreserveDetachedUniReset(
+    request_id_validator: ServerRequestIdValidator,
+    qpack_decode: *QpackDecodeState,
+    stream_id: u64,
+) bool {
+    if (qpack_decode.classifiedPeerUniStreamType(stream_id) != null)
+        return false;
+    const connection = switch (request_id_validator) {
+        .connection => |value| value,
+        .static_limit => return true,
+    };
+    const stats = connection.recvStreamStats(stream_id) orelse return false;
+    if (stats.bytes_read != 0) return true;
+    const available = connection.retainedReceivedStream(stream_id) orelse
+        return false;
+    const prefix = quic.varint.decodeSlice(available) catch return false;
+    return @as(http3.StreamType, @enumFromInt(prefix.value)) ==
+        .webtransport_unidirectional;
+}
+
+fn shouldPreserveDetachedUniStream(
+    request_id_validator: ServerRequestIdValidator,
+    stream: quic.StreamFrame,
+) bool {
+    if ((stream.stream_id & 0x02) == 0) return false;
+    const connection = switch (request_id_validator) {
+        .connection => |value| value,
+        .static_limit => return false,
+    };
+    const available = connection.availableReceivedStream(
+        stream.stream_id,
+    ) orelse return false;
+    const prefix = quic.varint.decodeSlice(available) catch return false;
+    return @as(http3.StreamType, @enumFromInt(prefix.value)) ==
+        .webtransport_unidirectional;
 }
 
 pub fn validateBlockedStreamBudget(
