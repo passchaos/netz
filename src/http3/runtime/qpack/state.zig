@@ -5,7 +5,45 @@ const runtime_error = @import("../error.zig");
 
 const Error = runtime_error.Error;
 
-/// Connection-scoped receive side of QPACK.
+pub const PeerUniStreamType = enum {
+    control,
+    qpack_encoder,
+    qpack_decoder,
+    push,
+    unknown,
+};
+
+pub const ClassifiedPeerUniFrame = struct {
+    frame: quic.StreamFrame,
+    stream_type: PeerUniStreamType,
+};
+
+const PeerUniStream = struct {
+    receive: quic.stream_state.RecvState,
+    stream_type: ?PeerUniStreamType = null,
+    fin_delivered: bool = false,
+
+    fn deinit(self: *PeerUniStream) void {
+        self.receive.deinit();
+        self.* = undefined;
+    }
+};
+
+const max_pending_peer_uni_streams: usize = 256;
+
+fn peerUniStreamType(value: u64) PeerUniStreamType {
+    return switch (@as(http3.StreamType, @enumFromInt(value))) {
+        .control => .control,
+        .qpack_encoder => .qpack_encoder,
+        .qpack_decoder => .qpack_decoder,
+        .push => .push,
+        else => .unknown,
+    };
+}
+
+/// Connection-scoped receive side of QPACK. It also owns bounded temporary
+/// reassembly for peer unidirectional streams until their offset-zero type can
+/// be classified without relying on stream-number allocation order.
 ///
 /// Encoder-stream bytes are QUIC stream data, so instructions can be split,
 /// duplicated, or delivered out of order. This state reassembles that stream,
@@ -19,6 +57,7 @@ pub const QpackDecodeState = struct {
     decoder_instructions: std.ArrayList(u8) = .empty,
     acknowledged_insert_count: u64 = 0,
     max_stream_buffer: usize,
+    peer_uni_streams: std.ArrayList(PeerUniStream) = .empty,
 
     pub fn init(
         allocator: std.mem.Allocator,
@@ -34,9 +73,108 @@ pub const QpackDecodeState = struct {
 
     pub fn deinit(self: *QpackDecodeState) void {
         if (self.encoder_stream) |*stream| stream.deinit();
+        for (self.peer_uni_streams.items) |*stream| stream.deinit();
+        self.peer_uni_streams.deinit(self.allocator);
         self.table.deinit();
         self.decoder_instructions.deinit(self.allocator);
         self.* = undefined;
+    }
+
+    /// Reassemble a peer unidirectional stream until its offset-zero type is
+    /// available. Returned bytes are contiguous and remain borrowed until the
+    /// matching `commitPeerUniFrame` call.
+    pub fn classifyPeerUniFrame(
+        self: *QpackDecodeState,
+        frame: quic.StreamFrame,
+    ) Error!?ClassifiedPeerUniFrame {
+        if ((frame.stream_id & 0x02) == 0) return null;
+        const entry = self.findPeerUniStream(frame.stream_id) orelse blk: {
+            if (self.peer_uni_streams.items.len >=
+                max_pending_peer_uni_streams)
+            {
+                return error.ExcessiveLoad;
+            }
+            try self.peer_uni_streams.append(self.allocator, .{
+                .receive = .init(
+                    self.allocator,
+                    frame.stream_id,
+                    self.max_stream_buffer,
+                ),
+            });
+            break :blk &self.peer_uni_streams.items[
+                self.peer_uni_streams.items.len - 1
+            ];
+        };
+        try entry.receive.insert(frame);
+        if (entry.stream_type == null) {
+            const available = entry.receive.available();
+            const prefix = quic.varint.decodeSlice(available) catch |err|
+                switch (err) {
+                    error.BufferTooShort => {
+                        if (entry.receive.final_size != null) {
+                            return error.InvalidStreamType;
+                        }
+                        return null;
+                    },
+                    else => return err,
+                };
+            entry.stream_type = peerUniStreamType(prefix.value);
+        }
+        const available = entry.receive.available();
+        const at_final = entry.receive.final_size != null and
+            entry.receive.contiguous_end == entry.receive.final_size.?;
+        if (available.len == 0 and (!at_final or entry.fin_delivered)) {
+            return null;
+        }
+        return .{
+            .frame = .{
+                .stream_id = frame.stream_id,
+                .offset = entry.receive.read_offset,
+                .data = available,
+                .fin = at_final and !entry.fin_delivered,
+            },
+            .stream_type = entry.stream_type.?,
+        };
+    }
+
+    pub fn commitPeerUniFrame(
+        self: *QpackDecodeState,
+        frame: quic.StreamFrame,
+    ) void {
+        const entry = self.findPeerUniStream(frame.stream_id) orelse
+            unreachable;
+        entry.receive.consume(frame.data.len) catch unreachable;
+        if (frame.fin) entry.fin_delivered = true;
+        if (entry.fin_delivered) self.removePeerUniStream(frame.stream_id);
+    }
+
+    pub fn discardPeerUniStream(
+        self: *QpackDecodeState,
+        stream_id: u64,
+    ) void {
+        self.removePeerUniStream(stream_id);
+    }
+
+    fn findPeerUniStream(
+        self: *QpackDecodeState,
+        stream_id: u64,
+    ) ?*PeerUniStream {
+        for (self.peer_uni_streams.items) |*entry| {
+            if (entry.receive.stream_id == stream_id) return entry;
+        }
+        return null;
+    }
+
+    fn removePeerUniStream(
+        self: *QpackDecodeState,
+        stream_id: u64,
+    ) void {
+        for (self.peer_uni_streams.items, 0..) |*entry, index| {
+            if (entry.receive.stream_id != stream_id) continue;
+            entry.deinit();
+            _ = self.peer_uni_streams.swapRemove(index);
+            return;
+        }
     }
 
     pub fn applyEncoderStreamFrame(

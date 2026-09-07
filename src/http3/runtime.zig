@@ -145,7 +145,6 @@ const validateNewServerPush = control_receive.validateNewServerPush;
 const rejectByLocalGoAway = control_receive.rejectByLocalGoAway;
 const configureQpackEncoderFromPeerSettings =
     control_receive.configureQpackEncoderFromPeerSettings;
-const isPeerQpackStreamFrame = control_receive.isPeerQpackStreamFrame;
 const applyControlStreamFrameForRole =
     control_receive.applyControlStreamFrameForRole;
 const applyControlStreamFrameForRoleWithPushes =

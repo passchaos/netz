@@ -202,48 +202,6 @@ pub fn configureQpackEncoderFromPeerSettings(
     );
 }
 
-pub fn isPeerQpackStreamFrame(
-    control: http3.ControlState,
-    receive: ?quic.stream_state.RecvState,
-    stream: quic.StreamFrame,
-    role: ControlStreamRole,
-    stream_type: http3.StreamType,
-) bool {
-    if ((stream.stream_id & 0x02) == 0) return false;
-    if (receive) |state| {
-        return state.stream_id == stream.stream_id;
-    }
-
-    const registered = switch (stream_type) {
-        .qpack_encoder => control.peer_qpack_encoder_stream_id,
-        .qpack_decoder => control.peer_qpack_decoder_stream_id,
-        else => return false,
-    };
-    if (registered) |stream_id| {
-        return stream_id == stream.stream_id;
-    }
-
-    // The fixed IDs are the first legal unidirectional streams allocated by
-    // this compact runtime and let reordered nonzero-offset frames be routed
-    // before their prefix arrives. At offset zero, always trust the explicit
-    // stream type instead so peers can allocate critical streams in another
-    // order without a fixed-ID false positive.
-    const expected_stream_id: u62 = switch (role) {
-        .client => switch (stream_type) {
-            .qpack_encoder => server_qpack_encoder_stream_id,
-            .qpack_decoder => server_qpack_decoder_stream_id,
-            else => unreachable,
-        },
-        .server => switch (stream_type) {
-            .qpack_encoder => client_qpack_encoder_stream_id,
-            .qpack_decoder => client_qpack_decoder_stream_id,
-            else => unreachable,
-        },
-    };
-    if (stream.offset == 0) return peekUniStreamType(stream) == stream_type;
-    return stream.stream_id == expected_stream_id;
-}
-
 pub fn applyControlStreamFrameForRole(control: *http3.ControlState, allocator: std.mem.Allocator, stream: quic.StreamFrame, role: ControlStreamRole) Error!bool {
     return applyControlStreamFrameForRoleWithPushes(
         control,

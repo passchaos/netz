@@ -139,6 +139,91 @@ test "HTTP/3 response router requests QPACK insert-count feedback" {
     try std.testing.expect(qpack_decode.pendingDecoderInstructions().len != 0);
 }
 
+test "HTTP/3 response router classifies reordered peer uni streams by prefix" {
+    const allocator = std.testing.allocator;
+    const from: net.IpAddress = .{ .ip4 = .loopback(443) };
+    var control: http3.ControlState = .{};
+    defer control.deinit(allocator);
+    var qpack_decode = QpackDecodeState.init(allocator, 256, 1024);
+    defer qpack_decode.deinit();
+    try qpack_decode.table.setCapacity(256);
+    var qpack_encode = QpackEncodeState.initAwaitingPeerSettings(
+        allocator,
+        1024,
+    );
+    defer qpack_encode.deinit();
+    var responses = ResponseStreamSet.init(allocator, 1024, 2);
+    defer responses.deinit();
+    var state: response_routing.State = .{
+        .allocator = allocator,
+        .control = &control,
+        .qpack_decode = &qpack_decode,
+        .qpack_encode = &qpack_encode,
+        .max_blocked_streams = 0,
+        .response_streams = &responses,
+        .streaming_responses = null,
+        .push_streams = null,
+        .request_lifecycle = null,
+    };
+
+    // Stream 7 is often the server QPACK encoder stream, but stream IDs do
+    // not define HTTP/3 stream types. A reserved type arriving after an
+    // out-of-order suffix must remain an ignored extension stream.
+    try std.testing.expect(!try response_routing.routePacket(
+        &state,
+        from,
+        &.{.{ .stream = .{
+            .stream_id = 7,
+            .offset = 1,
+            .data = &.{0xaa},
+        } }},
+    ));
+    try std.testing.expect(!try response_routing.routePacket(
+        &state,
+        from,
+        &.{.{ .stream = .{
+            .stream_id = 7,
+            .offset = 0,
+            .data = &.{0x21},
+        } }},
+    ));
+    try std.testing.expect(control.peer_qpack_encoder_stream_id == null);
+    try std.testing.expect(qpack_decode.encoder_stream == null);
+
+    var encoder: std.ArrayList(u8) = .empty;
+    defer encoder.deinit(allocator);
+    try http3.writeQpackEncoderStreamPrefix(&encoder, allocator);
+    try http3.Qpack.writeEncoderInstruction(
+        &encoder,
+        allocator,
+        .{ .insert_literal = .{ .name = "x-reordered", .value = "yes" } },
+    );
+    try std.testing.expect(encoder.items.len > 1);
+    try std.testing.expect(!try response_routing.routePacket(
+        &state,
+        from,
+        &.{.{ .stream = .{
+            .stream_id = 15,
+            .offset = 1,
+            .data = encoder.items[1..],
+        } }},
+    ));
+    try std.testing.expect(try response_routing.routePacket(
+        &state,
+        from,
+        &.{.{ .stream = .{
+            .stream_id = 15,
+            .offset = 0,
+            .data = encoder.items[0..1],
+        } }},
+    ));
+    try std.testing.expectEqual(
+        @as(?u64, 15),
+        control.peer_qpack_encoder_stream_id,
+    );
+    try std.testing.expectEqual(@as(u64, 1), qpack_decode.table.insert_count);
+}
+
 test "HTTP/3 push reset requests QUIC stream retirement" {
     const allocator = std.testing.allocator;
     var threaded = std.Io.Threaded.init(allocator, .{});

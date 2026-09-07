@@ -22,12 +22,10 @@ const PushStreamSet = push_state.Set;
 const rejectCriticalStreamClosureFrame =
     control_receive.rejectCriticalStreamClosureFrame;
 const messageStreamDisposition = control_receive.messageStreamDisposition;
-const isPeerQpackStreamFrame = control_receive.isPeerQpackStreamFrame;
 const applyControlStreamFrameForRole =
     control_receive.applyControlStreamFrameForRole;
 const configureQpackEncoderFromPeerSettings =
     control_receive.configureQpackEncoderFromPeerSettings;
-const peekUniStreamType = control_receive.peekUniStreamType;
 
 /// Mutable response-side state shared by handshake-backed and
 /// preconfigured-key clients. `connection` is needed only when preserving a
@@ -97,6 +95,13 @@ pub fn routePacket(
             }
         }
         if (frame == .reset_stream and
+            (frame.reset_stream.stream_id & 0x02) != 0)
+        {
+            state.qpack_decode.discardPeerUniStream(
+                frame.reset_stream.stream_id,
+            );
+        }
+        if (frame == .reset_stream and
             (frame.reset_stream.stream_id & 0x03) == 0x03)
         {
             if (state.push_streams) |pushes| {
@@ -154,13 +159,21 @@ pub fn routePacket(
         if (state.detached_stream_id != null and
             frame.stream.stream_id == state.detached_stream_id.?)
         {
+            state.qpack_decode.discardPeerUniStream(
+                frame.stream.stream_id,
+            );
             continue;
         }
         if (state.detached_streams) |detached| {
             if (detached.contains(
                 std.math.cast(u62, frame.stream.stream_id) orelse
                     return error.UnexpectedStream,
-            )) continue;
+            )) {
+                state.qpack_decode.discardPeerUniStream(
+                    frame.stream.stream_id,
+                );
+                continue;
+            }
         }
         if (state.detached_stream_id != null and
             state.connection != null and
@@ -171,64 +184,73 @@ pub fn routePacket(
             ))
         {
             // QUIC has already retained these bytes. Classify WebTransport
-            // before the fixed-ID QPACK fallback so extension streams may use
+            // before HTTP/3 stream-type routing so extension streams may use
             // any legal peer-initiated unidirectional stream number.
+            state.qpack_decode.discardPeerUniStream(
+                frame.stream.stream_id,
+            );
             continue;
         }
-        if (isPeerQpackStreamFrame(
-            state.control.*,
-            state.qpack_encode.decoder_stream,
-            frame.stream,
-            .client,
-            .qpack_decoder,
-        )) {
-            if (state.push_streams) |pushes| {
-                pushes.removeByStreamId(@intCast(frame.stream.stream_id));
-            }
-            try state.qpack_encode.applyDecoderStreamFrame(
-                state.control,
+        if ((frame.stream.stream_id & 0x02) != 0) {
+            const classified = try state.qpack_decode.classifyPeerUniFrame(
                 frame.stream,
-            );
-            continue;
-        }
-        if (isPeerQpackStreamFrame(
-            state.control.*,
-            state.qpack_decode.encoder_stream,
-            frame.stream,
-            .client,
-            .qpack_encoder,
-        )) {
-            if (state.push_streams) |pushes| {
-                pushes.removeByStreamId(@intCast(frame.stream.stream_id));
+            ) orelse continue;
+            switch (classified.stream_type) {
+                .control => {
+                    if (!try applyControlStreamFrameForRole(
+                        state.control,
+                        state.allocator,
+                        classified.frame,
+                        .client,
+                    )) return error.UnexpectedStream;
+                    if (state.push_streams) |pushes| {
+                        pushes.removeByStreamId(
+                            @intCast(classified.frame.stream_id),
+                        );
+                        if (state.control.peer_cancelled_push_id) |push_id| {
+                            try pushes.observePeerCancellation(push_id);
+                        }
+                    }
+                    try configureQpackEncoderFromPeerSettings(
+                        state.control.*,
+                        state.qpack_encode,
+                    );
+                },
+                .qpack_decoder => {
+                    if (state.push_streams) |pushes| {
+                        pushes.removeByStreamId(
+                            @intCast(classified.frame.stream_id),
+                        );
+                    }
+                    try state.qpack_encode.applyDecoderStreamFrame(
+                        state.control,
+                        classified.frame,
+                    );
+                },
+                .qpack_encoder => {
+                    if (state.push_streams) |pushes| {
+                        pushes.removeByStreamId(
+                            @intCast(classified.frame.stream_id),
+                        );
+                    }
+                    try state.qpack_decode.applyEncoderStreamFrame(
+                        state.control,
+                        classified.frame,
+                    );
+                },
+                .push => {
+                    if (state.push_streams) |pushes| {
+                        if (!try pushes.insert(
+                            from,
+                            classified.frame,
+                            state.control.*,
+                        )) return error.UnexpectedStream;
+                    }
+                },
+                .unknown => {},
             }
-            try state.qpack_decode.applyEncoderStreamFrame(
-                state.control,
-                frame.stream,
-            );
+            state.qpack_decode.commitPeerUniFrame(classified.frame);
             continue;
-        }
-        if (try applyControlStreamFrameForRole(
-            state.control,
-            state.allocator,
-            frame.stream,
-            .client,
-        )) {
-            if (state.push_streams) |pushes| {
-                pushes.removeByStreamId(@intCast(frame.stream.stream_id));
-                if (state.control.peer_cancelled_push_id) |push_id| {
-                    try pushes.observePeerCancellation(push_id);
-                }
-            }
-            try configureQpackEncoderFromPeerSettings(
-                state.control.*,
-                state.qpack_encode,
-            );
-            continue;
-        }
-        if (state.push_streams) |pushes| {
-            if (try pushes.insert(from, frame.stream, state.control.*)) {
-                continue;
-            }
         }
         if ((try messageStreamDisposition(
             frame.stream.stream_id,
@@ -297,7 +319,8 @@ fn shouldPreserveDetachedStream(
             !lifecycle.isFinished(stream_id);
     }
     if (stream.offset == 0) {
-        return peekUniStreamType(stream) == .webtransport_unidirectional;
+        return control_receive.peekUniStreamType(stream) ==
+            .webtransport_unidirectional;
     }
     const available = connection.availableReceivedStream(
         stream.stream_id,

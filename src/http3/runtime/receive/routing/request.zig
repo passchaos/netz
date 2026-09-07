@@ -20,7 +20,6 @@ const ServerRequestIdValidator = control_receive.ServerRequestIdValidator;
 const rejectCriticalStreamClosureFrame =
     control_receive.rejectCriticalStreamClosureFrame;
 const messageStreamDisposition = control_receive.messageStreamDisposition;
-const isPeerQpackStreamFrame = control_receive.isPeerQpackStreamFrame;
 const applyControlStreamFrameForRoleWithPushes =
     control_receive.applyControlStreamFrameForRoleWithPushes;
 const configureQpackEncoderFromPeerSettings =
@@ -152,6 +151,13 @@ pub fn applyServerRequestPacketFrames(
             if (request_id_validator.peerStreamClosed(stream_id)) continue;
         }
         if (frame == .reset_stream and
+            (frame.reset_stream.stream_id & 0x02) != 0)
+        {
+            qpack_decode.discardPeerUniStream(
+                frame.reset_stream.stream_id,
+            );
+        }
+        if (frame == .reset_stream and
             (try messageStreamDisposition(
                 frame.reset_stream.stream_id,
             )) == .request_response)
@@ -240,42 +246,45 @@ pub fn applyServerRequestPacketFrames(
         {
             // QUIC has already assembled this frame in the connection receive
             // state. Its protocol adapter consumes it directly.
+            qpack_decode.discardPeerUniStream(frame.stream.stream_id);
             continue;
         }
-        if (isPeerQpackStreamFrame(
-            control.*,
-            qpack_encode.decoder_stream,
-            frame.stream,
-            .server,
-            .qpack_decoder,
-        )) {
-            try qpack_encode.applyDecoderStreamFrame(control, frame.stream);
-            continue;
-        }
-        if (isPeerQpackStreamFrame(
-            control.*,
-            qpack_decode.encoder_stream,
-            frame.stream,
-            .server,
-            .qpack_encoder,
-        )) {
-            try qpack_decode.applyEncoderStreamFrame(control, frame.stream);
-            continue;
-        }
-        if (try applyControlStreamFrameForRoleWithPushes(
-            control,
-            allocator,
-            frame.stream,
-            .server,
-            peer_promised_push_ids,
-            request_id_validator,
-            request_lifecycle,
-        )) {
-            reconcileServerRequestPriorities(control, request_lifecycle);
-            try configureQpackEncoderFromPeerSettings(
-                control.*,
-                qpack_encode,
-            );
+        if ((frame.stream.stream_id & 0x02) != 0) {
+            const classified = try qpack_decode.classifyPeerUniFrame(
+                frame.stream,
+            ) orelse continue;
+            switch (classified.stream_type) {
+                .control => {
+                    if (!try applyControlStreamFrameForRoleWithPushes(
+                        control,
+                        allocator,
+                        classified.frame,
+                        .server,
+                        peer_promised_push_ids,
+                        request_id_validator,
+                        request_lifecycle,
+                    )) return error.UnexpectedStream;
+                    reconcileServerRequestPriorities(
+                        control,
+                        request_lifecycle,
+                    );
+                    try configureQpackEncoderFromPeerSettings(
+                        control.*,
+                        qpack_encode,
+                    );
+                },
+                .qpack_decoder => try qpack_encode.applyDecoderStreamFrame(
+                    control,
+                    classified.frame,
+                ),
+                .qpack_encoder => try qpack_decode.applyEncoderStreamFrame(
+                    control,
+                    classified.frame,
+                ),
+                .push => return error.StreamCreationError,
+                .unknown => {},
+            }
+            qpack_decode.commitPeerUniFrame(classified.frame);
             continue;
         }
         if ((try messageStreamDisposition(

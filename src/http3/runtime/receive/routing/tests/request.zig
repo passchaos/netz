@@ -90,7 +90,7 @@ test "HTTP/3 request router handles duplicate reset idempotently" {
 
     var control: http3.ControlState = .{};
     defer control.deinit(allocator);
-    var qpack_decode = QpackDecodeState.init(allocator, 0, 1024);
+    var qpack_decode = QpackDecodeState.init(allocator, 256, 1024);
     defer qpack_decode.deinit();
     var qpack_encode = QpackEncodeState.initAwaitingPeerSettings(
         allocator,
@@ -157,6 +157,130 @@ test "HTTP/3 request router handles duplicate reset idempotently" {
         return error.TestUnexpectedResult;
     try std.testing.expectEqual(@as(u62, 0), queued.stream_id);
     try std.testing.expectEqual(code, queued.application_error_code);
+}
+
+test "HTTP/3 request router classifies reordered peer uni streams by prefix" {
+    const allocator = std.testing.allocator;
+    const from: std.Io.net.IpAddress = .{ .ip4 = .loopback(443) };
+    var control: http3.ControlState = .{};
+    defer control.deinit(allocator);
+    var qpack_decode = QpackDecodeState.init(allocator, 256, 1024);
+    defer qpack_decode.deinit();
+    var qpack_encode = QpackEncodeState.initAwaitingPeerSettings(
+        allocator,
+        1024,
+    );
+    defer qpack_encode.deinit();
+    var buffered = RequestStreamSet.init(allocator, 1024, 2);
+    defer buffered.deinit();
+    var streaming = StreamingRequestSet.init(
+        allocator,
+        2,
+        1024,
+        .{},
+        .request,
+    );
+    defer streaming.deinit();
+    var lifecycle = ServerRequestLifecycle.init(allocator);
+    defer lifecycle.deinit();
+
+    try std.testing.expect((try request_routing.applyServerRequestPacketFrames(
+        from,
+        &.{.{ .stream = .{
+            .stream_id = 6,
+            .offset = 1,
+            .data = &.{0xbb},
+        } }},
+        allocator,
+        &control,
+        &qpack_decode,
+        &qpack_encode,
+        0,
+        &buffered,
+        &streaming,
+        &lifecycle,
+        .{ .static_limit = 2 },
+        &.{},
+        null,
+        null,
+    )) == null);
+    try std.testing.expect((try request_routing.applyServerRequestPacketFrames(
+        from,
+        &.{.{ .stream = .{
+            .stream_id = 6,
+            .offset = 0,
+            .data = &.{0x21},
+        } }},
+        allocator,
+        &control,
+        &qpack_decode,
+        &qpack_encode,
+        0,
+        &buffered,
+        &streaming,
+        &lifecycle,
+        .{ .static_limit = 2 },
+        &.{},
+        null,
+        null,
+    )) == null);
+    try std.testing.expect(control.peer_qpack_encoder_stream_id == null);
+    try std.testing.expect(qpack_decode.encoder_stream == null);
+
+    try qpack_decode.table.setCapacity(256);
+    var encoder: std.ArrayList(u8) = .empty;
+    defer encoder.deinit(allocator);
+    try http3.writeQpackEncoderStreamPrefix(&encoder, allocator);
+    try http3.Qpack.writeEncoderInstruction(
+        &encoder,
+        allocator,
+        .{ .insert_literal = .{ .name = "x-request", .value = "yes" } },
+    );
+    try std.testing.expect((try request_routing.applyServerRequestPacketFrames(
+        from,
+        &.{.{ .stream = .{
+            .stream_id = 14,
+            .offset = 1,
+            .data = encoder.items[1..],
+        } }},
+        allocator,
+        &control,
+        &qpack_decode,
+        &qpack_encode,
+        0,
+        &buffered,
+        &streaming,
+        &lifecycle,
+        .{ .static_limit = 2 },
+        &.{},
+        null,
+        null,
+    )) == null);
+    try std.testing.expect((try request_routing.applyServerRequestPacketFrames(
+        from,
+        &.{.{ .stream = .{
+            .stream_id = 14,
+            .offset = 0,
+            .data = encoder.items[0..1],
+        } }},
+        allocator,
+        &control,
+        &qpack_decode,
+        &qpack_encode,
+        0,
+        &buffered,
+        &streaming,
+        &lifecycle,
+        .{ .static_limit = 2 },
+        &.{},
+        null,
+        null,
+    )) == null);
+    try std.testing.expectEqual(
+        @as(?u64, 14),
+        control.peer_qpack_encoder_stream_id,
+    );
+    try std.testing.expectEqual(@as(u64, 1), qpack_decode.table.insert_count);
 }
 
 test "HTTP/3 request router ignores late STREAM after QUIC reclamation" {
