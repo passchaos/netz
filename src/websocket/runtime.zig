@@ -6832,13 +6832,18 @@ fn receiveMessageFrameIntoDirectConnection(
         );
         if (read == 0) return error.ConnectionClosed;
         if (header.mask_key) |mask| {
-            websocket.applyMask(
-                destination[state.payload_written..][0..read],
-                mask,
-                state.payload_written,
-            );
-        }
-        if (state.message_kind == .text) {
+            const decoded = destination[state.payload_written..][0..read];
+            if (state.message_kind == .text) {
+                try connection.message_into.text_utf8.feedMaskedCopy(
+                    decoded,
+                    decoded,
+                    mask,
+                    state.payload_written,
+                );
+            } else {
+                websocket.applyMask(decoded, mask, state.payload_written);
+            }
+        } else if (state.message_kind == .text) {
             try connection.message_into.text_utf8.feed(
                 destination[state.payload_written..][0..read],
             );
@@ -6868,6 +6873,14 @@ fn decodeMessagePayloadChunk(
     validate_text: bool,
 ) Error!void {
     if (header.mask_key) |mask| {
+        if (validate_text) {
+            return validator.feedMaskedCopy(
+                destination,
+                encoded,
+                mask,
+                payload_offset,
+            );
+        }
         try websocket.applyMaskCopy(
             destination,
             encoded,

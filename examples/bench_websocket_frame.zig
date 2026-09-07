@@ -202,6 +202,38 @@ pub fn main() !void {
     }
     const masked_utf8_ns = nowNs(io) -| masked_utf8_started;
 
+    var masked_copy_output: [payload_len]u8 = undefined;
+    const masked_copy_two_pass_started = nowNs(io);
+    var masked_copy_two_pass_checksum: u64 = 0;
+    for (0..utf8_iterations) |_| {
+        var validator: netz.websocket.Utf8Validator = .{};
+        try netz.websocket.applyMaskCopy(
+            &masked_copy_output,
+            &masked_text,
+            mask_key,
+            masked_offset,
+        );
+        try validator.feed(&masked_copy_output);
+        try validator.finish();
+        masked_copy_two_pass_checksum +%= checksum(&masked_copy_output);
+    }
+    const masked_copy_two_pass_ns =
+        nowNs(io) -| masked_copy_two_pass_started;
+    const masked_copy_fused_started = nowNs(io);
+    var masked_copy_fused_checksum: u64 = 0;
+    for (0..utf8_iterations) |_| {
+        var validator: netz.websocket.Utf8Validator = .{};
+        try validator.feedMaskedCopy(
+            &masked_copy_output,
+            &masked_text,
+            mask_key,
+            masked_offset,
+        );
+        try validator.finish();
+        masked_copy_fused_checksum +%= checksum(&masked_copy_output);
+    }
+    const masked_copy_fused_ns = nowNs(io) -| masked_copy_fused_started;
+
     var parse_storage: [32]u8 = undefined;
     const parse_frame = try netz.websocket.writeFrameInto(
         &parse_storage,
@@ -259,6 +291,9 @@ pub fn main() !void {
         \\  masked UTF-8 scalar validation: {d:.2} ns/message
         \\  masked UTF-8 vector validation: {d:.2} ns/message
         \\  masked UTF-8 speedup: {d:.2}x
+        \\  masked copy + UTF-8 two-pass: {d:.2} ns/message
+        \\  masked copy + UTF-8 fused: {d:.2} ns/message
+        \\  masked copy + UTF-8 fused speedup: {d:.2}x
         \\  duplicate frame-header parse: {d:.2} ns/frame
         \\  reused frame-header parse: {d:.2} ns/frame
         \\  frame-header reuse speedup: {d:.2}x
@@ -300,6 +335,12 @@ pub fn main() !void {
             @as(f64, @floatFromInt(utf8_iterations)),
         @as(f64, @floatFromInt(masked_utf8_scalar_ns)) /
             @as(f64, @floatFromInt(@max(masked_utf8_ns, 1))),
+        @as(f64, @floatFromInt(masked_copy_two_pass_ns)) /
+            @as(f64, @floatFromInt(utf8_iterations)),
+        @as(f64, @floatFromInt(masked_copy_fused_ns)) /
+            @as(f64, @floatFromInt(utf8_iterations)),
+        @as(f64, @floatFromInt(masked_copy_two_pass_ns)) /
+            @as(f64, @floatFromInt(@max(masked_copy_fused_ns, 1))),
         @as(f64, @floatFromInt(parse_ns)) /
             @as(f64, @floatFromInt(parse_iterations)),
         @as(f64, @floatFromInt(reused_parse_ns)) /
@@ -317,6 +358,8 @@ pub fn main() !void {
             sparse_checksum +%
             masked_utf8_scalar_checksum +%
             masked_utf8_checksum +%
+            masked_copy_two_pass_checksum +%
+            masked_copy_fused_checksum +%
             parse_checksum +%
             reused_parse_checksum,
     });

@@ -1161,13 +1161,23 @@ pub fn Connection(comptime role: common.Role) type {
                 );
                 if (read == 0) continue;
                 if (header.mask_key) |mask| {
-                    websocket.applyMask(
-                        destination[state.payload_written..][0..read],
-                        mask,
-                        state.payload_written,
-                    );
-                }
-                if (state.message_kind == .text) {
+                    const decoded =
+                        destination[state.payload_written..][0..read];
+                    if (state.message_kind == .text) {
+                        try self.message_into.text_utf8.feedMaskedCopy(
+                            decoded,
+                            decoded,
+                            mask,
+                            state.payload_written,
+                        );
+                    } else {
+                        websocket.applyMask(
+                            decoded,
+                            mask,
+                            state.payload_written,
+                        );
+                    }
+                } else if (state.message_kind == .text) {
                     try self.message_into.text_utf8.feed(
                         destination[state.payload_written..][0..read],
                     );
@@ -1197,6 +1207,14 @@ pub fn Connection(comptime role: common.Role) type {
             message_kind: IncomingDataKind,
         ) Error!void {
             if (header.mask_key) |mask| {
+                if (message_kind == .text) {
+                    return self.message_into.text_utf8.feedMaskedCopy(
+                        destination,
+                        encoded,
+                        mask,
+                        payload_offset,
+                    );
+                }
                 try websocket.applyMaskCopy(
                     destination,
                     encoded,

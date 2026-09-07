@@ -420,6 +420,50 @@ pub const Utf8Validator = struct {
         }
     }
 
+    /// Copy, unmask, and validate one wire slice in a single pass. `output`
+    /// may alias `bytes` exactly, allowing transport reads to land in their
+    /// final destination before in-place decoding.
+    pub fn feedMaskedCopy(
+        self: *Utf8Validator,
+        output: []u8,
+        bytes: []const u8,
+        mask_key: [4]u8,
+        mask_offset: usize,
+    ) Error!void {
+        if (output.len < bytes.len) return error.BufferTooShort;
+        const destination = output[0..bytes.len];
+        const rotated = rotatedMask(mask_key, mask_offset);
+        var offset: usize = 0;
+        var saw_non_ascii = self.remaining != 0;
+        if (comptime backend_supports_vectors) {
+            const vector_size =
+                std.simd.suggestVectorLength(u8) orelse @sizeOf(usize);
+            if (comptime vector_size % mask_key.len == 0) {
+                const high_bits: @Vector(vector_size, u8) = @splat(0x80);
+                const mask_vector = std.simd.repeat(
+                    vector_size,
+                    @as(@Vector(4, u8), rotated),
+                );
+                var seen_high_bits: @Vector(vector_size, u8) = @splat(0);
+                while (bytes.len - offset >= vector_size) {
+                    const decoded: @Vector(vector_size, u8) =
+                        bytes[offset..][0..vector_size].* ^ mask_vector;
+                    destination[offset..][0..vector_size].* = decoded;
+                    seen_high_bits |= decoded & high_bits;
+                    offset += vector_size;
+                }
+                saw_non_ascii = saw_non_ascii or
+                    @reduce(.Or, seen_high_bits) != 0;
+            }
+        }
+        while (offset < bytes.len) : (offset += 1) {
+            const decoded = bytes[offset] ^ rotated[offset & 3];
+            destination[offset] = decoded;
+            saw_non_ascii = saw_non_ascii or decoded >= 0x80;
+        }
+        if (saw_non_ascii) try self.feed(destination);
+    }
+
     pub fn finish(self: Utf8Validator) Error!void {
         if (self.remaining != 0) return error.InvalidUtf8;
     }
@@ -556,6 +600,54 @@ test "WebSocket incremental UTF-8 validator handles masked offsets" {
     try validator.feedMasked(split[1..2], key, 4);
     try validator.feedMasked(split[2..3], key, 5);
     try validator.finish();
+}
+
+test "WebSocket masked UTF-8 copy validates in one pass" {
+    const key = [4]u8{ 0x12, 0x34, 0x56, 0x78 };
+    const plain = ("vector-ascii-" ** 8) ++ "snowman: \xe2\x98\x83";
+    for (0..4) |mask_offset| {
+        var encoded = plain.*;
+        applyMask(&encoded, key, mask_offset);
+        var output: [plain.len]u8 = undefined;
+        var validator: Utf8Validator = .{};
+        try validator.feedMaskedCopy(
+            &output,
+            &encoded,
+            key,
+            mask_offset,
+        );
+        try validator.finish();
+        try std.testing.expectEqualStrings(plain, &output);
+
+        validator.reset();
+        try validator.feedMaskedCopy(
+            &encoded,
+            &encoded,
+            key,
+            mask_offset,
+        );
+        try validator.finish();
+        try std.testing.expectEqualStrings(plain, &encoded);
+    }
+
+    var invalid = [_]u8{ 0xf4, 0x90 };
+    applyMask(&invalid, key, 3);
+    var output: [invalid.len]u8 = undefined;
+    var validator: Utf8Validator = .{};
+    try std.testing.expectError(
+        error.InvalidUtf8,
+        validator.feedMaskedCopy(&output, &invalid, key, 3),
+    );
+
+    var split = [_]u8{ 0xe2, 0x98, 0x83 };
+    applyMask(&split, key, 3);
+    var decoded: [split.len]u8 = undefined;
+    validator.reset();
+    try validator.feedMaskedCopy(decoded[0..1], split[0..1], key, 3);
+    try validator.feedMaskedCopy(decoded[1..2], split[1..2], key, 4);
+    try validator.feedMaskedCopy(decoded[2..3], split[2..3], key, 5);
+    try validator.finish();
+    try std.testing.expectEqualStrings("\xe2\x98\x83", &decoded);
 }
 
 fn validatePayload(header: FrameHeader, payload: []const u8, options: ParseFrameOptions) Error!void {

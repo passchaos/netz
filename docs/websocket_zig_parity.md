@@ -273,6 +273,11 @@ blocks as vectors, preserves all four mask phases across partial transport
 reads, and falls back to the incremental code-point state machine only when
 needed. One CPU-0 same-process run measured 58.37 ns per 4 KiB message versus
 2097.76 ns for the former scalar XOR/feed loop, a 35.94x speedup.
+Caller-buffer receives now fuse copy, unmasking, and the common ASCII UTF-8
+check into one vector pass. The non-ASCII fallback reuses the incremental DFA
+and remains resumable across transport chunks. A same-process 4 KiB run measured
+44.81 ns/message for the fused path versus 72.29 ns for vector mask-copy followed
+by a separate vector UTF-8 scan, a 1.61x speedup.
 HTTP/1, RFC 8441, and RFC 9220 receive paths also reuse the `FrameHeader` they
 already parsed to size their transport read instead of decoding the same
 variable-length header again in the complete-frame codec. The frame benchmark's
