@@ -916,7 +916,11 @@ liveness round trip and `KeepAlive.run(connection)` for repeatable scheduled
 keep-alive cycles. Passive PING, GOAWAY, RST_STREAM, WINDOW_UPDATE, and RFC
 9218 PRIORITY_UPDATE readers now provide both timeout and absolute-deadline
 variants, and HTTP/2 tunnels
-provide `readWithTimeout` alongside `readWithDeadline`. The keep-alive driver
+provide `readWithTimeout` alongside `readWithDeadline`. A tunnel read holds the
+connection's single frame-reader lease only for that call; if it encounters a
+sibling response, it preserves the complete frame or fragmented HPACK block in
+wire order and returns `ResponseAvailable` so the owning response reader can
+consume it without loss. The keep-alive driver
 waits until a full interval of peer receive inactivity, supports Hyper-shaped
 active-stream versus `while_idle` policy, and
 then requires the matching ACK within a separate timeout. Both use awake-clock

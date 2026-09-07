@@ -15609,23 +15609,49 @@ pub const Tunnel = struct {
         if (self.receive_finished.load(.acquire)) {
             return error.ConnectionClosed;
         }
+        if (self.connection.duplex_reader_active) {
+            return error.UnexpectedFrame;
+        }
+        self.connection.duplex_reader_active = true;
+        defer self.connection.duplex_reader_active = false;
+
+        // A previous tunnel read yielded after preserving another stream's
+        // frame. Let that stream's ordinary reader make progress before this
+        // tunnel consumes more bytes from the shared connection.
+        if (self.connection.pendingApplicationFrameCount() != 0 and
+            self.connection.pending_duplex_sibling_header == null)
+        {
+            return error.ResponseAvailable;
+        }
         while (true) {
             var frame = try self.connection
-                .readOwnedFrameWithDeadline(deadline);
-            errdefer frame.deinit(self.connection.allocator);
+                .readOwnedFrameForDuplexWithDeadline(deadline);
+            var frame_owned = true;
+            defer if (frame_owned) {
+                frame.deinit(self.connection.allocator);
+            };
             if (try self.connection.handleConnectionFrame(frame.frame)) {
                 frame.deinit(self.connection.allocator);
+                frame_owned = false;
                 continue;
             }
             if (frame.frame.header.frame_type == .goaway) {
                 const goaway = try http2.GoAwayPayload.parse(frame.frame);
                 try self.connection.handleGoAwayForStream(self.stream_id, goaway);
                 frame.deinit(self.connection.allocator);
+                frame_owned = false;
                 continue;
             }
             if (frame.frame.header.stream_id != self.stream_id) {
-                frame.deinit(self.connection.allocator);
-                return error.UnexpectedFrame;
+                try self.connection.queueDuplexSiblingFrameUntil(frame);
+                frame_owned = false;
+                // Keep consuming an uninterrupted HEADERS/CONTINUATION block
+                // so HPACK advances in wire order before handing the sibling
+                // stream back to an ordinary request/response reader.
+                if (self.connection.pending_duplex_sibling_header != null) {
+                    continue;
+                }
+                return error.ResponseAvailable;
             }
             switch (frame.frame.header.frame_type) {
                 .data => {
@@ -15636,6 +15662,7 @@ pub const Tunnel = struct {
                         end_stream,
                     );
                     if (end_stream) self.finishReceive();
+                    frame_owned = false;
                     return .{
                         .frame = frame,
                         .data = payload.data,
@@ -15656,6 +15683,7 @@ pub const Tunnel = struct {
                 .headers => return error.UnexpectedFrame,
                 else => {
                     frame.deinit(self.connection.allocator);
+                    frame_owned = false;
                     continue;
                 },
             }
@@ -23734,6 +23762,104 @@ test "HTTP/2 runtime accepts multipart traditional CONNECT DATA tunnel" {
     try std.testing.expect(inbound.end_stream);
 
     thread.join();
+    if (shared.err) |err| return err;
+}
+
+test "HTTP/2 tunnel preserves a sibling response for its owner" {
+    const allocator = std.testing.allocator;
+    var threaded = std.Io.Threaded.init(allocator, .{});
+    defer threaded.deinit();
+    const io = threaded.io();
+
+    var server = try Server.listen(
+        allocator,
+        io,
+        .{ .ip4 = .loopback(0) },
+        .{ .max_frame_payload = 4096, .max_body_bytes = 4096 },
+    );
+    defer server.deinit();
+
+    const Shared = struct {
+        server: *Server,
+        err: ?anyerror = null,
+
+        fn run(self: *@This()) void {
+            self.runFallible() catch |err| {
+                self.err = err;
+            };
+        }
+
+        fn runFallible(self: *@This()) !void {
+            var connection = try self.server.accept();
+            defer connection.close();
+
+            var connect_request = try connection.readRequest();
+            defer connect_request.deinit(self.server.allocator);
+            var tunnel = try connection.acceptConnectTunnel(
+                connect_request,
+                &.{},
+            );
+
+            var sibling_request = try connection.readRequest();
+            defer sibling_request.deinit(self.server.allocator);
+            try std.testing.expectEqualStrings(
+                "/sibling",
+                sibling_request.path,
+            );
+            try connection.writeResponse(sibling_request.stream_id, .{
+                .body = "sibling response",
+                .request_method = sibling_request.method,
+            });
+            try tunnel.write("tunnel response", true);
+        }
+    };
+    var shared = Shared{ .server = &server };
+    const thread = try std.Thread.spawn(.{}, Shared.run, .{&shared});
+    var joined = false;
+    defer if (!joined) thread.join();
+
+    var client = try Client.connect(allocator, io, server.address(), .{
+        .max_frame_payload = 4096,
+        .max_body_bytes = 4096,
+    });
+    defer client.close();
+    var connect_response = try client.openConnectTunnel(.{
+        .method = "CONNECT",
+        .authority = "example.com:443",
+    });
+    defer connect_response.deinit(allocator);
+    var sibling = try client.startRequest(.{
+        .path = "/sibling",
+        .authority = "localhost",
+        .body_length = 0,
+    });
+    defer sibling.deinit();
+    try sibling.finish();
+
+    try std.testing.expectError(
+        error.ResponseAvailable,
+        connect_response.tunnel.readWithDeadline(.fromNow(
+            io,
+            .{ .raw = .fromSeconds(1), .clock = .awake },
+        )),
+    );
+    var sibling_response = try sibling.readResponse();
+    defer sibling_response.deinit(allocator);
+    try std.testing.expectEqualStrings(
+        "sibling response",
+        sibling_response.body,
+    );
+
+    var tunnel_data = try connect_response.tunnel.readWithDeadline(.fromNow(
+        io,
+        .{ .raw = .fromSeconds(1), .clock = .awake },
+    ));
+    defer tunnel_data.deinit(allocator);
+    try std.testing.expectEqualStrings("tunnel response", tunnel_data.data);
+    try std.testing.expect(tunnel_data.end_stream);
+
+    thread.join();
+    joined = true;
     if (shared.err) |err| return err;
 }
 
