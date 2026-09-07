@@ -150,6 +150,31 @@ pub fn main() !void {
     }
     const utf8_ns = nowNs(io) -| utf8_started;
 
+    var sparse_unicode = ascii_text;
+    const snowman = "\xe2\x98\x83";
+    var unicode_offset: usize = 253;
+    while (unicode_offset + snowman.len <= sparse_unicode.len) : (unicode_offset += 256) {
+        @memcpy(sparse_unicode[unicode_offset..][0..snowman.len], snowman);
+    }
+    const sparse_scalar_started = nowNs(io);
+    var sparse_scalar_checksum: u64 = 0;
+    for (0..utf8_iterations) |_| {
+        var validator: netz.websocket.Utf8Validator = .{};
+        for (&sparse_unicode) |byte| try validator.feedByte(byte);
+        try validator.finish();
+        sparse_scalar_checksum +%= validator.remaining + sparse_unicode[0];
+    }
+    const sparse_scalar_ns = nowNs(io) -| sparse_scalar_started;
+    const sparse_started = nowNs(io);
+    var sparse_checksum: u64 = 0;
+    for (0..utf8_iterations) |_| {
+        var validator: netz.websocket.Utf8Validator = .{};
+        try validator.feed(&sparse_unicode);
+        try validator.finish();
+        sparse_checksum +%= validator.remaining + sparse_unicode[0];
+    }
+    const sparse_ns = nowNs(io) -| sparse_started;
+
     const caller_speedup_x100 = ratioTimes100(
         allocating_ns,
         caller_buffer_ns,
@@ -171,6 +196,9 @@ pub fn main() !void {
         \\  incremental UTF-8 scalar reference: {d:.2} ns/message
         \\  incremental UTF-8 ASCII validation: {d:.2} ns/message
         \\  incremental UTF-8 ASCII speedup: {d:.2}x
+        \\  incremental UTF-8 sparse scalar: {d:.2} ns/message
+        \\  incremental UTF-8 sparse validation: {d:.2} ns/message
+        \\  incremental UTF-8 sparse speedup: {d:.2}x
         \\  checksum: {d}
         \\
     , .{
@@ -197,13 +225,21 @@ pub fn main() !void {
             @as(f64, @floatFromInt(utf8_iterations)),
         @as(f64, @floatFromInt(utf8_scalar_ns)) /
             @as(f64, @floatFromInt(@max(utf8_ns, 1))),
+        @as(f64, @floatFromInt(sparse_scalar_ns)) /
+            @as(f64, @floatFromInt(utf8_iterations)),
+        @as(f64, @floatFromInt(sparse_ns)) /
+            @as(f64, @floatFromInt(utf8_iterations)),
+        @as(f64, @floatFromInt(sparse_scalar_ns)) /
+            @as(f64, @floatFromInt(@max(sparse_ns, 1))),
         allocating_checksum +%
             caller_buffer_checksum +%
             header_checksum +%
             compression_checksum +%
             fragmented_checksum +%
             utf8_scalar_checksum +%
-            utf8_checksum,
+            utf8_checksum +%
+            sparse_scalar_checksum +%
+            sparse_checksum,
     });
 }
 
