@@ -2350,6 +2350,11 @@ fn informationalHeaderFieldCapacity(
 }
 
 pub const Request = struct {
+    pub const Context = enum {
+        direct,
+        proxy,
+    };
+
     method: []const u8,
     path: []const u8,
     scheme: []const u8 = "https",
@@ -2357,6 +2362,106 @@ pub const Request = struct {
     headers: []const Qpack.HeaderField = &.{},
     body: []const u8 = &.{},
     trailers: []const Qpack.HeaderField = &.{},
+
+    /// Validate request metadata and body semantics before encoding. HTTP/3
+    /// uses the same pseudo-header request target for direct and proxy hops;
+    /// the context is explicit so callers can share policy without importing
+    /// HTTP/1 request-target rules.
+    pub fn validateForContext(
+        self: Request,
+        context: Context,
+    ) Error!void {
+        switch (context) {
+            .direct, .proxy => {},
+        }
+        try validateHttpToken(self.method);
+
+        var saw_regular = false;
+        var seen_protocol = false;
+        var host_value: ?[]const u8 = null;
+        var declared_content_length: ?usize = null;
+        for (self.headers) |header| {
+            try validateHeaderName(header.name);
+            try validateHeaderValue(header.value);
+            if (std.mem.startsWith(u8, header.name, ":")) {
+                if (saw_regular or
+                    !std.mem.eql(u8, header.name, ":protocol") or
+                    seen_protocol)
+                {
+                    return error.InvalidHeader;
+                }
+                seen_protocol = true;
+                try validateHttpToken(header.value);
+                continue;
+            }
+            saw_regular = true;
+            if (std.mem.eql(u8, header.name, "host")) {
+                if (host_value != null) return error.InvalidHeader;
+                host_value = header.value;
+            }
+            if (std.mem.eql(u8, header.name, "priority")) {
+                _ = priority_field.Priority.parseStrict(header.value) catch
+                    return error.InvalidHeader;
+            }
+            if (connectionSpecificHeaderName(header.name)) {
+                return error.InvalidHeader;
+            }
+            if (std.ascii.eqlIgnoreCase(header.name, "te") and
+                !std.ascii.eqlIgnoreCase(
+                    std.mem.trim(u8, header.value, " \t"),
+                    "trailers",
+                ))
+            {
+                return error.InvalidHeader;
+            }
+            if (std.ascii.eqlIgnoreCase(header.name, "content-length")) {
+                try parseContentLengthHeaderValue(
+                    header.value,
+                    &declared_content_length,
+                );
+            }
+        }
+        try validateHeaderBlock(self.trailers, .trailers);
+
+        const is_connect = std.mem.eql(u8, self.method, "CONNECT");
+        if (is_connect and !seen_protocol) {
+            const authority = self.authority orelse return error.InvalidHeader;
+            try validateConnectAuthority(authority);
+        } else {
+            if (seen_protocol and !is_connect) return error.InvalidHeader;
+            try validateUriScheme(self.scheme);
+            try validateUriPath(self.method, self.path);
+            if (self.authority) |authority| {
+                try validateRequestAuthority(authority);
+            }
+            if (host_value) |host| try validateRequestAuthority(host);
+            if (self.authority) |authority| {
+                if (host_value) |host| {
+                    if (!std.ascii.eqlIgnoreCase(authority, host)) {
+                        return error.InvalidHeader;
+                    }
+                }
+            }
+            if ((std.mem.eql(u8, self.scheme, "http") or
+                std.mem.eql(u8, self.scheme, "https")) and
+                ((self.authority == null or self.authority.?.len == 0) and
+                    host_value == null))
+            {
+                return error.InvalidHeader;
+            }
+        }
+        try validateRequestBodyForMethodValue(
+            self.method,
+            seen_protocol,
+            declared_content_length,
+            self.body,
+            self.trailers,
+        );
+        try validateContentLengthValue(
+            declared_content_length,
+            self.body.len,
+        );
+    }
 
     pub fn headerFields(self: Request, out: []Qpack.HeaderField) Error![]Qpack.HeaderField {
         var count: usize = 0;
@@ -6342,6 +6447,33 @@ test "HTTP/3 request encode decode" {
     var get = try decodeRequest(allocator, encoded.items);
     defer get.deinit(allocator);
     try std.testing.expect(findHeader(get.headers, "content-length") == null);
+}
+
+test "HTTP/3 request context accepts OPTIONS asterisk only" {
+    const options_asterisk = Request{
+        .method = "OPTIONS",
+        .path = "*",
+        .authority = "example.com",
+    };
+    try options_asterisk.validateForContext(.direct);
+    try options_asterisk.validateForContext(.proxy);
+
+    try std.testing.expectError(
+        error.InvalidHeader,
+        (Request{
+            .method = "GET",
+            .path = "*",
+            .authority = "example.com",
+        }).validateForContext(.direct),
+    );
+    try std.testing.expectError(
+        error.InvalidHeader,
+        (Request{
+            .method = "options",
+            .path = "*",
+            .authority = "example.com",
+        }).validateForContext(.proxy),
+    );
 }
 
 test "HTTP/3 dynamic QPACK request decode preserves message semantics and acknowledgment count" {
