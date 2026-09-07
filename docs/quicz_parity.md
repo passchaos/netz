@@ -582,7 +582,12 @@ competing receive loop. Leases provide one-attempt complete requests and
 streaming uploads (`tryStartRequest`, `trySendRequestBody`, and
 `trySendRequestBodyParts`, and `tryFinishRequestTrailers`), with literal/static
 QPACK request sections so a retry never commits encoder dependencies separately
-from the request packet. The vectored body helper borrows multiple caller
+from the request packet. Their underlying QUIC one-shot sends also keep
+automatically generated `STREAMS_BLOCKED`, `DATA_BLOCKED`, and
+`STREAM_DATA_BLOCKED` notifications on the caller-supplied timestamped path:
+pacing returns immediately without sleeping, and a failed HTTP/3 request start
+does not advance its stream ID, request lifecycle, QPACK dependencies, or body
+state. The vectored body helper borrows multiple caller
 slices behind one DATA prefix and performs one socket submission; pacing or
 validation failure leaves the body length, STREAM offset, and FIN state intact
 for an identical retry. Leases also expose nonblocking multi-stream body

@@ -2875,6 +2875,12 @@ pub const testing = struct {
     pub fn clientRequestCount(client: *const HandshakeClient) usize {
         return client.request_lifecycle.count();
     }
+
+    pub fn clientPendingQpackSectionCount(
+        client: *const HandshakeClient,
+    ) usize {
+        return client.qpack_encode.pending_sections.items.len;
+    }
 };
 
 pub const HandshakeServerOptions = struct {

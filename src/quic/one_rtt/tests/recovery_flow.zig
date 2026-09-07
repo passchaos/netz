@@ -2276,6 +2276,189 @@ test "QUIC bounded stream open does not outwait pacing deadline" {
     );
 }
 
+test "QUIC one-shot STREAM sends never wait for blocked notifications" {
+    const FixedClockIo = struct {
+        delegate: std.Io,
+        now_ns: i96,
+        sleep_calls: usize = 0,
+
+        fn now(
+            userdata: ?*anyopaque,
+            _: std.Io.Clock,
+        ) std.Io.Timestamp {
+            const self: *@This() = @ptrCast(@alignCast(userdata));
+            return .fromNanoseconds(self.now_ns);
+        }
+
+        fn sleep(
+            userdata: ?*anyopaque,
+            _: std.Io.Timeout,
+        ) std.Io.Cancelable!void {
+            const self: *@This() = @ptrCast(@alignCast(userdata));
+            self.sleep_calls += 1;
+            return error.Canceled;
+        }
+    };
+    const allocator = std.testing.allocator;
+    var threaded = std.Io.Threaded.init(allocator, .{});
+    defer threaded.deinit();
+    const io = threaded.io();
+
+    var endpoint = try quic.runtime.Endpoint.bind(
+        allocator,
+        io,
+        .{ .ip4 = .loopback(0) },
+        .{ .max_datagram_size = 4096 },
+    );
+    defer endpoint.deinit();
+    var peer_endpoint = try quic.runtime.Endpoint.bind(
+        allocator,
+        io,
+        .{ .ip4 = .loopback(0) },
+        .{ .max_datagram_size = 4096 },
+    );
+    defer peer_endpoint.deinit();
+    const keys = quic.protection.deriveAes128Keys(
+        [_]u8{0xaa} ** quic.protection.secret_len,
+    );
+    var connection = try one_rtt.Connection.init(&endpoint, .{
+        .peer = peer_endpoint.address(),
+        .receive_keys = keys,
+        .send_keys = keys,
+        .local_connection_id = "try-limit-local",
+        .peer_connection_id = "try-limit-peer",
+        .initial_send_max_streams_bidi = 0,
+        .max_datagram_size = 1200,
+        .pacing_max_burst_packets = 1,
+    });
+    defer connection.deinit();
+
+    var fixed_io = FixedClockIo{
+        .delegate = endpoint.io,
+        .now_ns = 1_000_000,
+    };
+    var fixed_vtable = endpoint.io.vtable.*;
+    fixed_vtable.now = FixedClockIo.now;
+    fixed_vtable.sleep = FixedClockIo.sleep;
+    endpoint.io = .{ .userdata = &fixed_io, .vtable = &fixed_vtable };
+    defer endpoint.io = fixed_io.delegate;
+
+    one_rtt.testing.exhaustPacingAt(&connection, 1_000_000);
+    const before = connection.stats();
+    const frames = [_]quic.Frame{.{ .stream = .{
+        .stream_id = 0,
+        .data = "blocked",
+    } }};
+    try std.testing.expectError(error.PacingLimited, connection.trySend(&frames));
+    const packets = [_][]const quic.Frame{&frames};
+    try std.testing.expectError(
+        error.PacingLimited,
+        connection.sendManyProgressAt(&packets, 1_000_000),
+    );
+    try std.testing.expectEqual(@as(usize, 0), fixed_io.sleep_calls);
+    try std.testing.expectEqual(before.packets_sent, connection.stats().packets_sent);
+    try std.testing.expectEqual(
+        @as(u64, 0),
+        connection.nextLocalBidirectionalStreamId(),
+    );
+    try std.testing.expect(connection.sendStreamStats(0) == null);
+    try std.testing.expectEqual(@as(usize, 0), connection.pendingRecoveryCount());
+}
+
+test "QUIC batch stream-data blocked notification uses caller timestamp" {
+    const FixedClockIo = struct {
+        delegate: std.Io,
+        now_ns: i96,
+        sleep_calls: usize = 0,
+
+        fn now(
+            userdata: ?*anyopaque,
+            _: std.Io.Clock,
+        ) std.Io.Timestamp {
+            const self: *@This() = @ptrCast(@alignCast(userdata));
+            return .fromNanoseconds(self.now_ns);
+        }
+
+        fn sleep(
+            userdata: ?*anyopaque,
+            _: std.Io.Timeout,
+        ) std.Io.Cancelable!void {
+            const self: *@This() = @ptrCast(@alignCast(userdata));
+            self.sleep_calls += 1;
+            return error.Canceled;
+        }
+    };
+    const allocator = std.testing.allocator;
+    var threaded = std.Io.Threaded.init(allocator, .{});
+    defer threaded.deinit();
+    const io = threaded.io();
+
+    var peer_endpoint = try quic.runtime.Endpoint.bind(
+        allocator,
+        io,
+        .{ .ip4 = .loopback(0) },
+        .{ .max_datagram_size = 4096 },
+    );
+    defer peer_endpoint.deinit();
+    var endpoint = try quic.runtime.Endpoint.bind(
+        allocator,
+        io,
+        .{ .ip4 = .loopback(0) },
+        .{ .max_datagram_size = 4096 },
+    );
+    defer endpoint.deinit();
+    const keys = quic.protection.deriveAes128Keys(
+        [_]u8{0xab} ** quic.protection.secret_len,
+    );
+    var connection = try one_rtt.Connection.init(&endpoint, .{
+        .peer = peer_endpoint.address(),
+        .receive_keys = keys,
+        .send_keys = keys,
+        .local_connection_id = "batch-block-local",
+        .peer_connection_id = "batch-block-peer",
+        .initial_send_max_streams_bidi = 1,
+        .initial_send_max_stream_data_bidi_remote = 0,
+        .max_datagram_size = 1200,
+        .pacing_max_burst_packets = 1,
+    });
+    defer connection.deinit();
+
+    var fixed_io = FixedClockIo{
+        .delegate = endpoint.io,
+        .now_ns = 2_000_000,
+    };
+    var fixed_vtable = endpoint.io.vtable.*;
+    fixed_vtable.now = FixedClockIo.now;
+    fixed_vtable.sleep = FixedClockIo.sleep;
+    endpoint.io = .{ .userdata = &fixed_io, .vtable = &fixed_vtable };
+    defer endpoint.io = fixed_io.delegate;
+
+    one_rtt.testing.exhaustPacingAt(&connection, 2_000_000);
+    const before = connection.stats();
+    const frames = [_]quic.Frame{.{ .stream = .{
+        .stream_id = 0,
+        .data = "blocked",
+    } }};
+    const packets = [_][]const quic.Frame{&frames};
+    try std.testing.expectError(
+        error.FlowControlBlocked,
+        connection.sendManyProgressAt(
+            &packets,
+            2_000_000 + std.time.ns_per_s,
+        ),
+    );
+    try std.testing.expectEqual(@as(usize, 0), fixed_io.sleep_calls);
+    try std.testing.expectEqual(
+        before.packets_sent + 1,
+        connection.stats().packets_sent,
+    );
+    const stream = connection.sendStreamStats(0) orelse
+        return error.TestUnexpectedResult;
+    try std.testing.expectEqual(@as(u64, 0), stream.bytes_sent);
+    try std.testing.expectEqual(@as(u64, 0), connection.send_flow.used);
+    try std.testing.expectEqual(@as(usize, 1), connection.pendingRecoveryCount());
+}
+
 test "QUIC bounded stream open failures preserve the next ID" {
     const allocator = std.testing.allocator;
     var threaded = std.Io.Threaded.init(allocator, .{});

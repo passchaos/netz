@@ -1211,6 +1211,144 @@ test "HTTP/3 request once send preserves its stream across pacing" {
     );
 }
 
+test "HTTP/3 tryStartRequest stream limit is transactional and nonblocking" {
+    const allocator = std.testing.allocator;
+    var threaded = std.Io.Threaded.init(allocator, .{});
+    defer threaded.deinit();
+    const io = threaded.io();
+
+    var peer_endpoint = try quic.runtime.Endpoint.bind(
+        allocator,
+        io,
+        .{ .ip4 = .loopback(0) },
+        .{ .max_datagram_size = 4096 },
+    );
+    defer peer_endpoint.deinit();
+    var endpoint = try quic.runtime.Endpoint.bind(
+        allocator,
+        io,
+        .{ .ip4 = .loopback(0) },
+        .{ .max_datagram_size = 4096 },
+    );
+    defer endpoint.deinit();
+    const client_keys = quic.protection.deriveAes128Keys(
+        [_]u8{0xb7} ** quic.protection.secret_len,
+    );
+    const server_keys = quic.protection.deriveAes128Keys(
+        [_]u8{0xb8} ** quic.protection.secret_len,
+    );
+    var peer_transport = quic.practical_transport_parameters;
+    peer_transport.initial_max_streams_bidi = 0;
+    var client = try runtime.HandshakeClient.initEstablished(
+        &endpoint,
+        peer_endpoint.address(),
+        try quic.handshake.establishPreconfigured(
+            &endpoint,
+            peer_endpoint.address(),
+            .client,
+            .{
+                .receive_keys = server_keys,
+                .send_keys = client_keys,
+                .local_connection_id = "stream-limit-client",
+                .peer_connection_id = "stream-limit-server",
+                .peer_transport_parameters = peer_transport,
+                .one_rtt = .{
+                    .max_datagram_size = 1200,
+                    .pacing_max_burst_packets = 1,
+                },
+            },
+        ),
+        .{},
+    );
+    defer client.deinit();
+
+    try client.ensureSettingsSentOnce();
+    var fixed_io = FixedClockIo{
+        .delegate = endpoint.io,
+        .now_ns = 5_000_000,
+    };
+    var fixed_vtable = endpoint.io.vtable.*;
+    fixed_vtable.now = FixedClockIo.now;
+    fixed_vtable.sleep = FixedClockIo.sleep;
+    fixed_vtable.netSend = FixedClockIo.netSend;
+    endpoint.io = .{ .userdata = &fixed_io, .vtable = &fixed_vtable };
+    defer endpoint.io = fixed_io.delegate;
+
+    quic.one_rtt.testing.exhaustPacingAt(
+        &client.established.connection,
+        @intCast(fixed_io.now_ns),
+    );
+    const packet_number = client.established.connection.next_packet_number;
+    try std.testing.expectError(error.PacingLimited, client.tryStartRequest(.{
+        .method = "POST",
+        .path = "/stream-limit",
+        .authority = "localhost",
+    }, 1));
+    try std.testing.expectEqual(@as(usize, 0), fixed_io.sleep_calls);
+    try std.testing.expectEqual(@as(u62, 0), client.next_stream_id);
+    try std.testing.expectEqual(
+        @as(u64, 0),
+        client.established.connection.nextLocalBidirectionalStreamId(),
+    );
+    try std.testing.expectEqual(
+        packet_number,
+        client.established.connection.next_packet_number,
+    );
+    try std.testing.expectEqual(
+        @as(usize, 0),
+        runtime.testing.clientRequestCount(&client),
+    );
+    try std.testing.expectEqual(
+        @as(usize, 0),
+        runtime.testing.clientPendingQpackSectionCount(&client),
+    );
+    try std.testing.expect(client.outbound_bodies.find(0) == null);
+
+    try quic.one_rtt.testing.applyReceivedFrames(
+        &client.established.connection,
+        0,
+        &.{.{ .max_streams_bidi = .{ .maximum_streams = 1 } }},
+        @intCast(fixed_io.now_ns),
+        .not_ect,
+    );
+    const request_options: http3.Request = .{
+        .method = "POST",
+        .path = "/stream-limit",
+        .authority = "localhost",
+    };
+    while (true) {
+        const stream_id = client.tryStartRequest(
+            request_options,
+            1,
+        ) catch |err| switch (err) {
+            error.PacingLimited => {
+                const timer = client.established.connection
+                    .nextTimerDeadline() orelse
+                    return error.TestUnexpectedResult;
+                try std.testing.expectEqual(
+                    quic.one_rtt.TimerDeadlineKind.pacing,
+                    timer.kind,
+                );
+                fixed_io.now_ns = @intCast(timer.deadline_ns);
+                _ = (try client.established.connection.serviceNextTimerAt(
+                    timer.deadline_ns,
+                )) orelse return error.TestUnexpectedResult;
+                continue;
+            },
+            else => return err,
+        };
+        try std.testing.expectEqual(@as(u62, 0), stream_id);
+        break;
+    }
+    try std.testing.expectEqual(@as(usize, 0), fixed_io.sleep_calls);
+    try std.testing.expectEqual(@as(u62, 4), client.next_stream_id);
+    try std.testing.expectEqual(
+        @as(usize, 1),
+        runtime.testing.clientRequestCount(&client),
+    );
+    try std.testing.expect(client.outbound_bodies.find(0) != null);
+}
+
 test "HTTP/3 dispatcher-bound abandon never waits for pacing" {
     const allocator = std.testing.allocator;
     var threaded = std.Io.Threaded.init(allocator, .{});

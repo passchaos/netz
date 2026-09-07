@@ -1223,6 +1223,7 @@ pub const Connection = struct {
         if (self.close_info != null or self.idle_timed_out) {
             return error.ConnectionClosed;
         }
+        const now_ns = sent_time_ns orelse self.monotonicNowNs();
         // Route the first application packet through the single-packet path
         // while HANDSHAKE_DONE is unsent. It appends the control frame after
         // the caller's frames, preserving application order, and later calls
@@ -1231,7 +1232,7 @@ pub const Connection = struct {
             try self.sendWithEcnAtImpl(
                 packets[0],
                 self.autoEcnForFrames(packets[0]),
-                sent_time_ns,
+                now_ns,
                 true,
             );
             return .{ .sent_count = 1, .protected_count = 1 };
@@ -1301,7 +1302,10 @@ pub const Connection = struct {
                 );
                 try traits.merge(current_traits);
                 if (frame == .stream) {
-                    try self.validateStreamFrameForSend(frame.stream);
+                    try self.validateStreamFrameForSendAt(
+                        frame.stream,
+                        now_ns,
+                    );
                 }
                 const frame_len = try frame.wireLen();
                 payload_len = std.math.add(
@@ -1348,7 +1352,6 @@ pub const Connection = struct {
         const packet_streams = &self.send_batch_packet_stream_scratch;
         defer packet_streams.clearRetainingCapacity();
         var simulated_pacer = self.pacer;
-        const now_ns = sent_time_ns orelse self.monotonicNowNs();
         const smoothed_rtt = self.rtt_stats.smoothedOrInitial();
         var next_pacing_deadline: ?u64 = null;
         var count: usize = 0;
@@ -1457,7 +1460,7 @@ pub const Connection = struct {
             }
             if (blocked_stream_id) |stream_id| {
                 if (count == 0) {
-                    try self.sendStreamDataBlocked(stream_id);
+                    try self.sendStreamDataBlockedAt(stream_id, now_ns);
                     return error.FlowControlBlocked;
                 }
                 break;
@@ -1841,6 +1844,7 @@ pub const Connection = struct {
         const stream_bytes = try self.collectOutboundStreamCredits(
             frames,
             packet_streams,
+            sent_time_ns,
         );
         const prepared = try self.prepareFramesForSend(
             frames,
@@ -1933,6 +1937,7 @@ pub const Connection = struct {
         self: *Connection,
         frames: []const quic.Frame,
         credits: *std.ArrayList(ReservedStreamCredit),
+        sent_time_ns: ?u64,
     ) Error!u64 {
         std.debug.assert(credits.items.len == 0);
         errdefer credits.clearRetainingCapacity();
@@ -1940,7 +1945,10 @@ pub const Connection = struct {
         var stream_bytes: u64 = 0;
         for (frames) |frame| {
             if (frame != .stream) continue;
-            try self.validateStreamFrameForSend(frame.stream);
+            try self.validateStreamFrameForSendAt(
+                frame.stream,
+                sent_time_ns,
+            );
             const bytes = std.math.cast(
                 u64,
                 frame.stream.data.len,
@@ -7428,7 +7436,7 @@ pub const Connection = struct {
             try quic.validateFrameForPacketType(frame, .zero_rtt);
             try frame.write(&payload, self.endpoint.allocator);
             if (frame != .stream) continue;
-            try self.validateStreamFrameForSend(frame.stream);
+            try self.validateStreamFrameForSendAt(frame.stream, null);
             stream_bytes = std.math.add(
                 u64,
                 stream_bytes,
@@ -10441,7 +10449,11 @@ pub const Connection = struct {
         return &self.stream_send_flows.items[self.stream_send_flows.items.len - 1];
     }
 
-    fn validateStreamFrameForSend(self: *Connection, stream: quic.StreamFrame) Error!void {
+    fn validateStreamFrameForSendAt(
+        self: *Connection,
+        stream: quic.StreamFrame,
+        sent_time_ns: ?u64,
+    ) Error!void {
         if (self.findSendStreamEntry(stream.stream_id)) |entry| {
             if (entry.stopped != null or entry.reset_sent != null) return error.StreamStopped;
             const data_len = std.math.cast(u64, stream.data.len) orelse
@@ -10478,7 +10490,10 @@ pub const Connection = struct {
             .unidirectional => self.peer_max_streams_uni,
         };
         if (count <= limit) return;
-        try self.sendStreamsBlocked(direction);
+        if (sent_time_ns) |now_ns|
+            try self.sendStreamsBlockedAt(direction, now_ns)
+        else
+            try self.sendStreamsBlocked(direction);
         return error.StreamLimitExceeded;
     }
 
