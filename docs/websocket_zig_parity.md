@@ -634,6 +634,13 @@ RFC 8441 setup now has matching `openWithDeadline`/`openWithTimeout` and
 HTTP/2 Extended CONNECT deadline primitives, so interleaved control frames and
 fragmented HPACK cannot renew the handshake budget; client timeout cancels the
 uncompleted stream and prevents reuse of ambiguous aggregate decoder state.
+Dropping an established RFC 8441 adapter before completing its WebSocket Close
+handshake now abandons only that Extended CONNECT stream with
+`RST_STREAM(CANCEL)` and releases its parent HTTP/2 stream/window state. A real
+h2c regression holds `MAX_CONCURRENT_STREAMS` at one, observes the first
+stream's exact reset, then completes a second WebSocket on the same reusable
+connection; an ordinarily completed Close remains an idempotent no-op at
+adapter destruction.
 
 ## Remaining evidence before a broad completion claim
 

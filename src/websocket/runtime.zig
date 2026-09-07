@@ -4474,6 +4474,7 @@ pub const Connection = struct {
 pub const H2Connection = struct {
     allocator: std.mem.Allocator,
     tunnel: http2_runtime.Tunnel,
+    tunnel_owned: bool = false,
     role: Role,
     limits: Limits = .{},
     inbuf: std.ArrayList(u8) = .empty,
@@ -4506,6 +4507,7 @@ pub const H2Connection = struct {
         return .{
             .allocator = allocator,
             .tunnel = tunnel,
+            .tunnel_owned = true,
             .role = role,
             .limits = limits,
             .selected_protocol = selected_protocol,
@@ -4519,6 +4521,11 @@ pub const H2Connection = struct {
     }
 
     pub fn close(self: *H2Connection) void {
+        if (self.tunnel_owned) {
+            self.tunnel.connection.abandonExtendedConnect(
+                self.tunnel.stream_id,
+            );
+        }
         if (self.selected_protocol) |protocol| self.allocator.free(protocol);
         if (self.message_assembler) |*assembler| assembler.deinit();
         self.inbuf.deinit(self.allocator);
@@ -8263,6 +8270,123 @@ test "WebSocket over HTTP/2 extended CONNECT exchanges messages" {
 
     thread.join();
     if (shared.err) |err| return err;
+}
+
+test "WebSocket HTTP2 close abandons unfinished stream and permits reuse" {
+    const allocator = std.testing.allocator;
+    var threaded = std.Io.Threaded.init(allocator, .{
+        .async_limit = .unlimited,
+    });
+    defer threaded.deinit();
+    const io = threaded.io();
+
+    var server = try http2_runtime.Server.listen(
+        allocator,
+        io,
+        .{ .ip4 = .loopback(0) },
+        .{
+            .max_frame_payload = 4096,
+            .max_body_bytes = 4096,
+            .max_concurrent_streams = 1,
+            .enable_connect_protocol = true,
+        },
+    );
+    defer server.deinit();
+
+    const Shared = struct {
+        server: *http2_runtime.Server,
+        err: ?anyerror = null,
+
+        fn run(self: *@This()) void {
+            self.runFallible() catch |err| {
+                self.err = err;
+            };
+        }
+
+        fn runFallible(self: *@This()) !void {
+            var h2 = try self.server.accept();
+            defer h2.close();
+
+            var first = try H2Server.accept(
+                self.server.allocator,
+                &h2,
+                .{},
+            );
+            const first_stream_id = first.tunnel.stream_id;
+            first.close();
+            var reset = try h2.readResetStreamWithTimeout(
+                .fromSeconds(1),
+            );
+            defer reset.deinit(self.server.allocator);
+            try std.testing.expectEqual(first_stream_id, reset.reset.stream_id);
+            try std.testing.expectEqual(
+                http2.ErrorCode.cancel,
+                reset.reset.error_code,
+            );
+
+            var second = try H2Server.accept(
+                self.server.allocator,
+                &h2,
+                .{},
+            );
+            defer second.close();
+            var message = try second.receiveMessageWithTimeout(
+                .fromSeconds(1),
+            );
+            defer message.deinit(self.server.allocator);
+            try std.testing.expectEqualStrings("second", message.payload);
+            try std.testing.expectError(
+                error.ConnectionClosed,
+                second.receiveMessageWithTimeout(.fromSeconds(1)),
+            );
+        }
+    };
+
+    var shared = Shared{ .server = &server };
+    const thread = try std.Thread.spawn(.{}, Shared.run, .{&shared});
+    var joined = false;
+    defer if (!joined) thread.join();
+
+    var h2_client = try http2_runtime.Client.connect(
+        allocator,
+        io,
+        server.address(),
+        .{
+            .max_frame_payload = 4096,
+            .max_body_bytes = 4096,
+            .enable_connect_protocol = true,
+        },
+    );
+    defer h2_client.close();
+
+    var first = try H2Client.open(allocator, &h2_client, .{
+        .authority = "localhost",
+        .path = "/abandoned",
+    });
+    first.close();
+
+    var second = try H2Client.open(allocator, &h2_client, .{
+        .authority = "localhost",
+        .path = "/reused",
+    });
+    var second_live = true;
+    defer if (second_live) second.close();
+    try second.sendText("second");
+    try second.sendClose(.normal_closure, "done");
+    var close = try second.receiveFrameWithTimeout(.fromSeconds(1));
+    defer close.deinit(allocator);
+    try std.testing.expectEqual(websocket.Opcode.close, close.header.opcode);
+    try std.testing.expectEqualStrings(
+        "done",
+        (try websocket.parseClosePayload(close.payload)).?.reason,
+    );
+    second.close();
+    second_live = false;
+
+    thread.join();
+    joined = true;
+    if (shared.err) |err| return err;
+    try std.testing.expect(h2_client.isReusable());
 }
 
 test "WebSocket HTTP2 handshake timeout bounds CONNECT response" {
