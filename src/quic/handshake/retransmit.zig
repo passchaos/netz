@@ -448,6 +448,10 @@ pub const InitialHandshakeFlight = struct {
     initial_options: quic.initial_exchange.SendInitialFlightOptions,
     handshake_keys: quic.protection.PacketProtectionKeys,
     handshake_options: quic.initial_exchange.SendInitialOptions,
+    /// First Handshake packet number not consumed by a successful flight
+    /// transmission. A fatal receive error can use it for CONNECTION_CLOSE
+    /// without reusing an AEAD nonce from an earlier retransmission.
+    next_handshake_packet_number: ?u64 = null,
 
     pub fn send(context: *anyopaque, retransmission: u8) anyerror!void {
         const self: *InitialHandshakeFlight = @ptrCast(@alignCast(context));
@@ -471,6 +475,11 @@ pub const InitialHandshakeFlight = struct {
             self.handshake_keys,
             handshake_options,
         );
+        self.next_handshake_packet_number = std.math.add(
+            u64,
+            handshake_options.packet_number,
+            1,
+        ) catch null;
     }
 };
 

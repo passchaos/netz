@@ -859,6 +859,146 @@ fn isDiscardableLongHeaderParseError(err: anyerror) bool {
     };
 }
 
+const HandshakeClosePacketType = enum {
+    initial,
+    handshake,
+};
+
+fn sendHandshakeProtocolViolation(
+    endpoint: *quic.runtime.Endpoint,
+    peer: net.IpAddress,
+    packet_type: HandshakeClosePacketType,
+    keys: quic.protection.PacketProtectionKeys,
+    version: u32,
+    destination_connection_id: []const u8,
+    source_connection_id: []const u8,
+    packet_number: u64,
+    reason_phrase: []const u8,
+) Error!void {
+    var payload: std.ArrayList(u8) = .empty;
+    defer payload.deinit(endpoint.allocator);
+    try (quic.Frame{ .connection_close = .{
+        .error_code = @intFromEnum(quic.TransportErrorCode.protocol_violation),
+        .frame_type = 0,
+        .reason_phrase = reason_phrase,
+    } }).write(&payload, endpoint.allocator);
+
+    const packet = switch (packet_type) {
+        .initial => try quic.protection.sealInitialPacket(
+            endpoint.allocator,
+            keys,
+            .{
+                .version = version,
+                .destination_connection_id = destination_connection_id,
+                .source_connection_id = source_connection_id,
+                .packet_number = packet_number,
+                .payload = payload.items,
+            },
+        ),
+        .handshake => try quic.protection.sealHandshakePacket(
+            endpoint.allocator,
+            keys,
+            .{
+                .version = version,
+                .destination_connection_id = destination_connection_id,
+                .source_connection_id = source_connection_id,
+                .packet_number = packet_number,
+                .payload = payload.items,
+            },
+        ),
+    };
+    defer endpoint.allocator.free(packet);
+    try endpoint.sendBytes(peer, packet);
+}
+
+test "QUIC handshake protocol violations use the available encryption level" {
+    const allocator = std.testing.allocator;
+    var threaded = std.Io.Threaded.init(allocator, .{});
+    defer threaded.deinit();
+    const io = threaded.io();
+    var sender = try quic.runtime.Endpoint.bind(
+        allocator,
+        io,
+        .{ .ip4 = .loopback(0) },
+        .{ .max_datagram_size = 4096 },
+    );
+    defer sender.deinit();
+    var receiver = try quic.runtime.Endpoint.bind(
+        allocator,
+        io,
+        .{ .ip4 = .loopback(0) },
+        .{ .max_datagram_size = 4096 },
+    );
+    defer receiver.deinit();
+
+    const dcid = "close-dst";
+    const scid = "close-src";
+    const initial_keys = quic.protection.deriveInitialSecrets(dcid).server;
+    const handshake_keys = quic.protection.deriveAes128Keys(
+        [_]u8{0xf1} ** quic.protection.secret_len,
+    );
+    for ([_]struct {
+        packet_type: HandshakeClosePacketType,
+        keys: quic.protection.PacketProtectionKeys,
+        packet_number: u64,
+    }{
+        .{ .packet_type = .initial, .keys = initial_keys, .packet_number = 7 },
+        .{ .packet_type = .handshake, .keys = handshake_keys, .packet_number = 8 },
+    }) |case| {
+        try sendHandshakeProtocolViolation(
+            &sender,
+            receiver.address(),
+            case.packet_type,
+            case.keys,
+            quic.Version.version_1.wireValue(),
+            dcid,
+            scid,
+            case.packet_number,
+            "reserved bits",
+        );
+        var datagram = try receiver.receiveBytes();
+        defer datagram.deinit(allocator);
+        const payload = switch (case.packet_type) {
+            .initial => blk: {
+                var opened = try quic.protection.openInitialPacket(
+                    allocator,
+                    case.keys,
+                    datagram.bytes,
+                    case.packet_number,
+                );
+                defer opened.deinit(allocator);
+                break :blk try allocator.dupe(u8, opened.payload);
+            },
+            .handshake => blk: {
+                var opened = try quic.protection.openHandshakePacket(
+                    allocator,
+                    case.keys,
+                    datagram.bytes,
+                    case.packet_number,
+                );
+                defer opened.deinit(allocator);
+                break :blk try allocator.dupe(u8, opened.payload);
+            },
+        };
+        defer allocator.free(payload);
+        const parsed = try quic.parseFrame(payload);
+        try std.testing.expectEqual(payload.len, parsed.consumed);
+        try std.testing.expect(parsed.frame == .connection_close);
+        try std.testing.expectEqual(
+            @as(u64, @intFromEnum(quic.TransportErrorCode.protocol_violation)),
+            parsed.frame.connection_close.error_code,
+        );
+        try std.testing.expectEqual(
+            @as(u64, 0),
+            parsed.frame.connection_close.frame_type,
+        );
+        try std.testing.expectEqualStrings(
+            "reserved bits",
+            parsed.frame.connection_close.reason_phrase,
+        );
+    }
+}
+
 fn passiveHandshakeTimeout(
     io: std.Io,
     recovery: retransmit.Config,
@@ -1547,7 +1687,7 @@ fn connectAttempt(
         );
     }
 
-    var server_handshake = try receiveServerHandshakeCrypto(
+    var server_handshake = receiveServerHandshakeCrypto(
         endpoint,
         source,
         server_initial.from,
@@ -1559,7 +1699,22 @@ fn connectAttempt(
         local_transport_parameters.grease_quic_bit,
         !parsed_server.selected_psk and options.server_auth != null,
         options.handshake_recovery,
-    );
+    ) catch |err| {
+        if (err == error.InvalidReservedBits) {
+            sendHandshakeProtocolViolation(
+                endpoint,
+                server_initial.from,
+                .handshake,
+                handshake.client_quic,
+                options.version.wireValue(),
+                server_initial.packet.source_connection_id,
+                options.local_connection_id,
+                options.client_handshake_packet_number,
+                "reserved bits",
+            ) catch {};
+        }
+        return err;
+    };
     defer server_handshake.deinit(endpoint.allocator);
     const server_flight = try splitServerFlight(
         server_handshake.crypto_data,
@@ -2381,7 +2536,7 @@ fn acceptInternal(
         early_data.deinit(endpoint.allocator);
     };
     if (early_data_accepted) {
-        pending_early_data = try openClientEarlyData(
+        pending_early_data = openClientEarlyData(
             endpoint,
             client_initial.from,
             client_initial.coalesced_tail,
@@ -2391,11 +2546,26 @@ fn acceptInternal(
             client_initial.packet.destination_connection_id,
             client_initial.packet.source_connection_id,
             options.local_transport_parameters.grease_quic_bit,
-        );
+        ) catch |err| {
+            if (err == error.InvalidReservedBits) {
+                sendHandshakeProtocolViolation(
+                    endpoint,
+                    client_initial.from,
+                    .initial,
+                    client_initial.initial_secrets.server,
+                    options.version.wireValue(),
+                    client_initial.packet.source_connection_id,
+                    options.local_connection_id,
+                    options.server_initial_packet_number,
+                    "reserved bits",
+                ) catch {};
+            }
+            return err;
+        };
         if (pending_early_data == null and
             client_initial.coalesced_tail.len == 0)
         {
-            pending_early_data = try receiveStandaloneClientEarlyData(
+            pending_early_data = receiveStandaloneClientEarlyData(
                 endpoint,
                 source,
                 client_initial.from,
@@ -2406,7 +2576,22 @@ fn acceptInternal(
                 client_initial.packet.source_connection_id,
                 options.local_transport_parameters.grease_quic_bit,
                 options.handshake_recovery.deadline,
-            );
+            ) catch |err| {
+                if (err == error.InvalidReservedBits) {
+                    sendHandshakeProtocolViolation(
+                        endpoint,
+                        client_initial.from,
+                        .initial,
+                        client_initial.initial_secrets.server,
+                        options.version.wireValue(),
+                        client_initial.packet.source_connection_id,
+                        options.local_connection_id,
+                        options.server_initial_packet_number,
+                        "reserved bits",
+                    ) catch {};
+                }
+                return err;
+            };
         }
     } else if (client_offered_early_data and
         effective_options.retry_source_connection_id.len != 0)
@@ -2604,7 +2789,7 @@ fn acceptInternal(
         containsHandshakePacket,
     );
     defer client_handshake_datagram.deinit(endpoint.allocator);
-    var client_handshake = try receiveClientHandshakeCryptoFromDatagram(
+    var client_handshake = receiveClientHandshakeCryptoFromDatagram(
         endpoint,
         source,
         client_initial.from,
@@ -2617,7 +2802,24 @@ fn acceptInternal(
         local_transport_parameters.grease_quic_bit,
         options.client_auth != null,
         options.handshake_recovery,
-    );
+    ) catch |err| {
+        if (err == error.InvalidReservedBits) {
+            if (send_context.next_handshake_packet_number) |packet_number| {
+                sendHandshakeProtocolViolation(
+                    endpoint,
+                    client_initial.from,
+                    .handshake,
+                    handshake.server_quic,
+                    options.version.wireValue(),
+                    client_initial.packet.source_connection_id,
+                    options.local_connection_id,
+                    packet_number,
+                    "reserved bits",
+                ) catch {};
+            }
+        }
+        return err;
+    };
     defer client_handshake.deinit(endpoint.allocator);
     const client_flight = try splitClientFlight(
         client_handshake.crypto_data,

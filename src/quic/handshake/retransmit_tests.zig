@@ -72,6 +72,55 @@ test "handshake PTO retries with fresh packet numbers" {
     try std.testing.expectEqualStrings("response", opened.crypto_data);
 }
 
+test "server handshake flight records an unused close packet number" {
+    const allocator = std.testing.allocator;
+    var threaded = std.Io.Threaded.init(allocator, .{});
+    defer threaded.deinit();
+    const io = threaded.io();
+    var sender = try quic.runtime.Endpoint.bind(
+        allocator,
+        io,
+        .{ .ip4 = .loopback(0) },
+        .{ .max_datagram_size = 4096 },
+    );
+    defer sender.deinit();
+    var receiver = try quic.runtime.Endpoint.bind(
+        allocator,
+        io,
+        .{ .ip4 = .loopback(0) },
+        .{ .max_datagram_size = 4096 },
+    );
+    defer receiver.deinit();
+
+    const initial_keys = quic.protection.deriveInitialSecrets("close-pn").server;
+    const handshake_keys = quic.protection.deriveAes128Keys(
+        [_]u8{0xf2} ** quic.protection.secret_len,
+    );
+    var context = target.InitialHandshakeFlight{
+        .endpoint = &sender,
+        .peer = receiver.address(),
+        .initial_keys = initial_keys,
+        .initial_options = .{
+            .initial = .{
+                .destination_connection_id = "close-pn",
+                .source_connection_id = "server",
+                .packet_number = 10,
+                .crypto_data = "initial",
+            },
+            .max_datagram_size = 1200,
+        },
+        .handshake_keys = handshake_keys,
+        .handshake_options = .{
+            .destination_connection_id = "close-pn",
+            .source_connection_id = "server",
+            .packet_number = 20,
+            .crypto_data = "handshake",
+        },
+    };
+    try target.InitialHandshakeFlight.send(&context, 2);
+    try std.testing.expectEqual(@as(?u64, 23), context.next_handshake_packet_number);
+}
+
 test "handshake PTO exhausts a bounded retry budget" {
     var threaded = std.Io.Threaded.init(std.testing.allocator, .{});
     defer threaded.deinit();
