@@ -98,8 +98,11 @@ grep -q 'WebTransport interop server listening' "$work/server.log" || {
   exit 1
 }
 
-ORIGIN_PORT="$origin_port" timeout 30s node "$client_dir/client.js" \
-  "$port" "$certificate_hash" >"$work/client.log" 2>&1
+if ! ORIGIN_PORT="$origin_port" timeout 30s node "$client_dir/client.js" \
+  "$port" "$certificate_hash" >"$work/client.log" 2>&1; then
+  sleep 0.2
+  exit 1
+fi
 wait "$server_pid"
 server_pid=
 cat "$work/client.log"
