@@ -73,7 +73,14 @@ certificate_hash=$(openssl dgst -sha256 -binary "$work/cert.der" | xxd -p -c64)
 python3 -m http.server "$origin_port" --bind 127.0.0.1 \
   --directory "$work" >"$work/origin.log" 2>&1 &
 origin_pid=$!
-"$netz_server" "$port" "$work/cert.der" "$work/private-scalar.bin" \
+server_args=(
+  "$netz_server" "$port" "$work/cert.der" "$work/private-scalar.bin"
+  "http://localhost:$origin_port"
+)
+if [[ ${WEBTRANSPORT_ORIGIN_ONLY:-0} == 1 ]]; then
+  server_args+=(origin-only)
+fi
+"${server_args[@]}" \
   >"$work/server.log" 2>&1 &
 server_pid=$!
 for _ in $(seq 1 200); do
@@ -98,8 +105,18 @@ server_pid=
 cat "$work/client.log"
 cat "$work/server.log"
 grep -Fq \
-  'Chrome WebTransport interop passed: CONNECT DATAGRAM max_datagram_size=' \
+  "$(if [[ ${WEBTRANSPORT_ORIGIN_ONLY:-0} == 1 ]]; then
+      printf '%s' 'Chrome WebTransport Origin policy passed: exact-origin=true'
+    else
+      printf '%s' 'Chrome WebTransport interop passed: CONNECT DATAGRAM max_datagram_size='
+    fi)" \
   "$work/client.log"
+if [[ ${WEBTRANSPORT_ORIGIN_ONLY:-0} == 1 ]]; then
+  grep -Fq \
+    'netz WebTransport Origin policy passed: exact-origin=true' \
+    "$work/server.log"
+  exit 0
+fi
 grep -Fq \
   'bidi uni reset=71 stop=72 concurrent_sibling=true reuse=true drain-before-close=true close=77/netz-done' \
   "$work/client.log"

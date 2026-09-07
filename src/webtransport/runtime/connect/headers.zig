@@ -5,6 +5,20 @@ pub const stack_capacity: usize = 16;
 
 pub const Context = enum { request, response };
 
+/// Admission policy for the RFC 6454 Origin carried by WebTransport CONNECT.
+///
+/// Browser clients always send Origin. Non-browser clients are allowed to
+/// omit it under the default policy, but any value they do send is checked.
+pub const OriginPolicy = union(enum) {
+    /// Accept an absent Origin or one matching `:scheme` and `:authority`.
+    same_origin_or_absent,
+    /// Require one valid Origin whose serialization exactly matches this
+    /// borrowed allowlist. The entries must outlive the server using it.
+    exact: []const []const u8,
+    /// Explicitly accept an absent or any single syntactically valid Origin.
+    allow_any,
+};
+
 pub const Prepared = struct {
     fields: []const http3.Qpack.HeaderField,
     allocated: ?[]http3.Qpack.HeaderField = null,
@@ -98,6 +112,54 @@ pub fn validateRequest(request: anytype) error{InvalidConnect}!void {
         return error.InvalidConnect;
     }
     try validateOptionalCapsule(request.headers);
+}
+
+pub fn validateOrigin(
+    request: anytype,
+    policy: OriginPolicy,
+) error{InvalidOrigin}!void {
+    var origin: ?[]const u8 = null;
+    for (request.headers) |header| {
+        if (!std.ascii.eqlIgnoreCase(header.name, "origin")) continue;
+        if (origin != null or header.value.len == 0) {
+            return error.InvalidOrigin;
+        }
+        origin = header.value;
+    }
+
+    const value = origin orelse return switch (policy) {
+        .exact => error.InvalidOrigin,
+        .same_origin_or_absent, .allow_any => {},
+    };
+    const supplied_origin: ?http3.Origin = if (std.mem.eql(u8, value, "null"))
+        null
+    else
+        http3.originFromSerialized(value) catch return error.InvalidOrigin;
+    switch (policy) {
+        .allow_any => return,
+        .exact => |allowed_origins| {
+            for (allowed_origins) |allowed| {
+                // RFC 6454 serializations are policy values. Keep this exact
+                // so operators do not accidentally broaden an allowlist.
+                if (std.mem.eql(u8, value, allowed)) return;
+            }
+            return error.InvalidOrigin;
+        },
+        .same_origin_or_absent => {
+            const authority = request.authority orelse
+                return error.InvalidOrigin;
+            const request_origin = http3.requestOrigin(
+                request.scheme,
+                authority,
+            ) catch return error.InvalidOrigin;
+            if (!http3.sameOrigin(
+                request_origin,
+                supplied_origin orelse return error.InvalidOrigin,
+            )) {
+                return error.InvalidOrigin;
+            }
+        },
+    }
 }
 
 pub fn response(fields: []const http3.Qpack.HeaderField) http3.Response {
@@ -304,4 +366,93 @@ test "WebTransport additional CONNECT fields reject reserved overrides" {
         .value = "value",
     }} ** 80;
     try validate(&many, .request);
+}
+
+test "WebTransport Origin policy defaults to same-origin or absent" {
+    const Request = struct {
+        scheme: []const u8 = "https",
+        authority: ?[]const u8 = "Example.COM",
+        headers: []const http3.Qpack.HeaderField,
+    };
+    try validateOrigin(Request{ .headers = &.{} }, .same_origin_or_absent);
+    try validateOrigin(Request{ .headers = &.{.{
+        .name = "origin",
+        .value = "https://example.com:443",
+    }} }, .same_origin_or_absent);
+    try validateOrigin(.{
+        .scheme = "https",
+        .authority = @as(?[]const u8, "[2001:db8::1]:8443"),
+        .headers = @as([]const http3.Qpack.HeaderField, &.{.{
+            .name = "origin",
+            .value = "https://[2001:db8::1]:8443",
+        }}),
+    }, .same_origin_or_absent);
+    try std.testing.expectError(error.InvalidOrigin, validateOrigin(
+        Request{ .headers = &.{.{
+            .name = "origin",
+            .value = "https://cross-origin.example",
+        }} },
+        .same_origin_or_absent,
+    ));
+    try std.testing.expectError(error.InvalidOrigin, validateOrigin(
+        Request{ .headers = &.{.{ .name = "origin", .value = "null" }} },
+        .same_origin_or_absent,
+    ));
+    try std.testing.expectError(error.InvalidOrigin, validateOrigin(
+        Request{ .headers = &.{.{ .name = "origin", .value = "" }} },
+        .same_origin_or_absent,
+    ));
+    try std.testing.expectError(error.InvalidOrigin, validateOrigin(
+        Request{ .headers = &.{.{
+            .name = "origin",
+            .value = "https://example.com/path",
+        }} },
+        .same_origin_or_absent,
+    ));
+    try std.testing.expectError(error.InvalidOrigin, validateOrigin(
+        Request{ .headers = &.{.{
+            .name = "origin",
+            .value = "https://example.com:8443",
+        }} },
+        .same_origin_or_absent,
+    ));
+}
+
+test "WebTransport Origin policy handles exact allowlists and ambiguity" {
+    const Request = struct {
+        scheme: []const u8 = "https",
+        authority: ?[]const u8 = "service.example",
+        headers: []const http3.Qpack.HeaderField,
+    };
+    const allowed = [_][]const u8{ "https://app.example", "null" };
+    try validateOrigin(Request{ .headers = &.{.{
+        .name = "origin",
+        .value = "https://app.example",
+    }} }, .{ .exact = &allowed });
+    try validateOrigin(Request{ .headers = &.{.{
+        .name = "origin",
+        .value = "null",
+    }} }, .{ .exact = &allowed });
+    try std.testing.expectError(
+        error.InvalidOrigin,
+        validateOrigin(Request{ .headers = &.{} }, .{ .exact = &allowed }),
+    );
+    try std.testing.expectError(error.InvalidOrigin, validateOrigin(
+        Request{ .headers = &.{
+            .{ .name = "origin", .value = "https://app.example" },
+            .{ .name = "Origin", .value = "https://app.example" },
+        } },
+        .allow_any,
+    ));
+    try validateOrigin(Request{ .headers = &.{.{
+        .name = "origin",
+        .value = "https://untrusted.example",
+    }} }, .allow_any);
+    try std.testing.expectError(error.InvalidOrigin, validateOrigin(
+        Request{ .headers = &.{.{
+            .name = "origin",
+            .value = "https://untrusted.example/path",
+        }} },
+        .allow_any,
+    ));
 }

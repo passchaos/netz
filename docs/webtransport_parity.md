@@ -16,6 +16,7 @@ zig build bench-webtransport-stream -Doptimize=ReleaseFast
 zig build interop-webtransport-stream-churn -Doptimize=ReleaseFast
 zig build interop-webtransport-wtransport -Doptimize=ReleaseFast
 zig build interop-webtransport-chrome -Doptimize=ReleaseFast
+WEBTRANSPORT_ORIGIN_ONLY=1 zig build interop-webtransport-chrome -Doptimize=ReleaseFast
 ```
 
 The external interoperability gate builds the audited `~/Work/wtransport`
@@ -65,7 +66,10 @@ shared authenticated QUIC connection rather than per-session guesses.
 The Chrome gate drives the browser's real `WebTransport` API through
 Puppeteer, not a native QUIC substitute. It generates a fresh P-256 localhost
 identity because the browser's `serverCertificateHashes` exception requires a
-certificate validity period of at most two weeks. The gate verifies CONNECT,
+certificate validity period of at most two weeks. The server receives the
+origin page's dynamically allocated `http://localhost:<port>` serialization as
+an exact allowlist and verifies the browser-generated Origin before accepting
+CONNECT. The gate verifies CONNECT,
 DATAGRAM, bidirectional and unidirectional streams, RESET_STREAM code 71,
 STOP_SENDING code 72, sibling reuse, and clean session close. Chrome coalesces
 its Handshake Finished and first 1-RTT control-stream packet in one UDP
@@ -106,7 +110,7 @@ WebTransport DATAGRAM round trip and transport statistics.
 
 | Area | netz | `~/Work/quicz` | `~/Work/wtransport` |
 | --- | --- | --- | --- |
-| CONNECT / SETTINGS | Handshake, protected and dev runtimes; every server exposes a two-phase request object with authority/path/origin/header inspection, custom success headers, and typed 403/404/429 or generic 3xx-5xx rejection. Every client can send validated custom CONNECT headers, retain accepted response metadata, and opt into an attempt API that preserves non-2xx status, headers, bounded DATA, and trailers. Every pending server type can emit the complete rejection entity. CONNECT metadata uses a 16-field stack-first view with exact allocation fallback instead of fixed 57/62 additional-field ceilings; SETTINGS_MAX_FIELD_SECTION_SIZE remains the byte limit. Handshake and protected CONNECT streams remain open for Capsule Protocol traffic | Codec/session helpers | Production async endpoint/session with request inspection and accept/reject methods |
+| CONNECT / SETTINGS | Handshake, protected and dev runtimes; every server exposes a two-phase request object with authority/path/origin/header inspection, custom success headers, and typed 403/404/429 or generic 3xx-5xx rejection. Every client can send validated custom CONNECT headers, retain accepted response metadata, and opt into an attempt API that preserves non-2xx status, headers, bounded DATA, and trailers. Every pending server type can emit the complete rejection entity. CONNECT metadata uses a 16-field stack-first view with exact allocation fallback instead of fixed 57/62 additional-field ceilings; SETTINGS_MAX_FIELD_SECTION_SIZE remains the byte limit. Server acceptance enforces one RFC 6454 Origin across every runtime: the secure default permits native clients to omit Origin but requires any explicit value to match the CONNECT scheme/authority with canonical host/default-port handling; exact cross-origin allowlists and an explicit allow-any policy are available. Duplicate, empty, malformed, opaque `null`, and unapproved cross-origin values cannot reach a 2xx response. Handshake and protected CONNECT streams remain open for Capsule Protocol traffic | Codec/session helpers | Production async endpoint/session with request inspection, Origin policy, and accept/reject methods |
 | DATAGRAM | Dev, protected, real-handshake, batch receive, payload budget/stats | Codec/session counters | Production send/receive |
 | Bidirectional streams | Real-handshake open/send, reverse direction, whole-FIN compatibility receive plus caller-buffer incremental reads, reset/stop, lifecycle/limits and per-send-stream priority; the cleartext development runtime also supports both initiators, reverse-direction data, fragmented modern `0x41` association, coordinated IDs, per-session limits, and timeout/deadline-bounded whole-FIN receive; standalone handshake sessions expose timeout/deadline-bounded opens backed by QUIC stream credit; bounded batch writes select higher-priority streams first with stable equal-priority order; a concurrent sibling survives cancellation loss in external interop | Session registry and old-draft prefix codec | Production async bidi streams with read/reset/stop and Quinn-backed send priority; interoperates with netz while another stream is being cancelled |
 | Unidirectional streams | Real-handshake both directions, incremental reads, mapped reset/stop, lifecycle/limits and send priority; the cleartext development runtime supports both initiators, fragmented `0x54` association, coordinated IDs, per-session limits, and timeout/deadline-bounded whole-FIN receive; standalone handshake sessions expose timeout/deadline-bounded opens backed by QUIC stream credit; external interop drops netz's first STOP_SENDING and requires exact-code peer observation after recovery | Session registry and header codec | Production async uni streams with read/reset/stop and send priority; exact mapped codes are verified against netz |

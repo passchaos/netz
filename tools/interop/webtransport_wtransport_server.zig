@@ -67,7 +67,9 @@ pub fn main(init: std.process.Init) !void {
     // Browser certificate hashes impose a <=14-day validity window, so the
     // Chrome gate supplies a freshly generated DER leaf and raw P-256 scalar.
     // Native wtransport interop keeps using the stable built-in test identity.
-    if (args.len != 2 and args.len != 4) return error.InvalidArgument;
+    if (args.len != 2 and args.len != 4 and args.len != 5 and args.len != 6) {
+        return error.InvalidArgument;
+    }
     const port = try std.fmt.parseInt(u16, args[1], 10);
     if (port == 0) return error.InvalidArgument;
 
@@ -89,7 +91,7 @@ pub fn main(init: std.process.Init) !void {
     defer if (owned_certificate_der) |bytes| allocator.free(bytes);
     var owned_private_scalar: ?[]u8 = null;
     defer if (owned_private_scalar) |bytes| allocator.free(bytes);
-    const certificate_der: []const u8 = if (args.len == 4) blk: {
+    const certificate_der: []const u8 = if (args.len >= 4) blk: {
         owned_certificate_der = try std.Io.Dir.cwd().readFileAlloc(
             io,
             args[2],
@@ -98,7 +100,7 @@ pub fn main(init: std.process.Init) !void {
         );
         break :blk owned_certificate_der.?;
     } else &built_in_certificate_der;
-    const key_pair = if (args.len == 4) blk: {
+    const key_pair = if (args.len >= 4) blk: {
         owned_private_scalar = try std.Io.Dir.cwd().readFileAlloc(
             io,
             args[3],
@@ -113,6 +115,12 @@ pub fn main(init: std.process.Init) !void {
     } else try netz.tls.testing.serverKeyPair();
     const server_cid = [_]u8{ 0x77, 0x74, 0x69, 0x6f, 0x70, 0x00, 0x00, 0x01 };
 
+    const allowed_origins: []const []const u8 = if (args.len >= 5)
+        args[4..5]
+    else
+        &.{};
+    const origin_only = args.len == 6 and
+        std.mem.eql(u8, args[5], "origin-only");
     var server = try netz.webtransport.runtime.HandshakeServer.bind(
         allocator,
         io,
@@ -122,6 +130,10 @@ pub fn main(init: std.process.Init) !void {
                 .max_datagram_size = 4096,
                 .max_frames_per_datagram = 16,
             } },
+            .origin_policy = if (allowed_origins.len == 0)
+                .same_origin_or_absent
+            else
+                .{ .exact = allowed_origins },
         },
         .{
             .handshake = .{
@@ -152,21 +164,29 @@ pub fn main(init: std.process.Init) !void {
     if (!std.mem.eql(u8, pending.path(), "/interop")) {
         return error.UnexpectedPath;
     }
-    if (!std.mem.eql(
-        u8,
-        pending.userAgent() orelse return error.UnexpectedHeader,
-        "netz-wtransport-gate",
-    )) return error.UnexpectedHeader;
-    const authorization = blk: {
-        for (pending.headers()) |header| {
-            if (std.ascii.eqlIgnoreCase(header.name, "authorization")) {
-                break :blk header.value;
+    if (allowed_origins.len != 0) {
+        if (!std.mem.eql(
+            u8,
+            pending.origin() orelse return error.UnexpectedHeader,
+            allowed_origins[0],
+        )) return error.UnexpectedHeader;
+    } else {
+        if (!std.mem.eql(
+            u8,
+            pending.userAgent() orelse return error.UnexpectedHeader,
+            "netz-wtransport-gate",
+        )) return error.UnexpectedHeader;
+        const authorization = blk: {
+            for (pending.headers()) |header| {
+                if (std.ascii.eqlIgnoreCase(header.name, "authorization")) {
+                    break :blk header.value;
+                }
             }
+            return error.UnexpectedHeader;
+        };
+        if (!std.mem.eql(u8, authorization, "Bearer wtransport-interop")) {
+            return error.UnexpectedHeader;
         }
-        return error.UnexpectedHeader;
-    };
-    if (!std.mem.eql(u8, authorization, "Bearer wtransport-interop")) {
-        return error.UnexpectedHeader;
     }
     var session = try pending.acceptWithHeaders(&.{.{
         .name = "x-netz-admission",
@@ -190,6 +210,14 @@ pub fn main(init: std.process.Init) !void {
         "netz WebTransport interop accepted CONNECT with admission metadata\n",
         .{},
     );
+    if (origin_only) {
+        std.debug.print(
+            "netz WebTransport Origin policy passed: exact-origin=true\n",
+            .{},
+        );
+        try std.Io.sleep(io, .fromMilliseconds(100), .awake);
+        return;
+    }
 
     var datagram = try session.receiveDatagram();
     defer datagram.deinit(allocator);

@@ -193,11 +193,13 @@ pub fn originFromSerialized(serialized: []const u8) Error!Origin {
         .raw, .percent_encoded => |value| value,
     };
     if (host.len == 0) return error.InvalidOrigin;
+    const normalized_host = normalizeAltSvcHost(host) catch
+        return error.InvalidOrigin;
     const default_port = defaultPortForScheme(uri.scheme) orelse
         return error.InvalidOrigin;
     return .{
         .scheme = uri.scheme,
-        .host = host,
+        .host = normalized_host,
         .port = uri.port orelse default_port,
     };
 }
@@ -5129,6 +5131,10 @@ test "HTTP/3 normalizes request origins for reuse policy" {
     const http_default = try requestOrigin("http", "example.com");
     try std.testing.expectEqual(@as(u16, 80), http_default.port);
     try std.testing.expect(!sameOrigin(https_default, http_default));
+    try std.testing.expect(sameOrigin(
+        try requestOrigin("https", "[2001:db8::1]:8443"),
+        try originFromSerialized("https://[2001:db8::1]:8443"),
+    ));
 
     try std.testing.expectError(error.InvalidHeader, requestOrigin("ftp", "example.com"));
     try std.testing.expectError(error.InvalidHeader, requestOrigin("https", "user@example.com"));

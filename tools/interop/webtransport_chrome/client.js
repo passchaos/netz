@@ -9,7 +9,7 @@ if (!Number.isInteger(port) || port < 1 || port > 65535 ||
   throw new Error('usage: client.js PORT CERTIFICATE_SHA256_HEX');
 }
 
-async function runBrowserProbe({port, certificateHash}) {
+async function runBrowserProbe({port, certificateHash, originOnly}) {
   const timeoutMs = 10_000;
   const textEncoder = new TextEncoder();
   const textDecoder = new TextDecoder();
@@ -55,6 +55,10 @@ async function runBrowserProbe({port, certificateHash}) {
     serverCertificateHashes: [{algorithm: 'sha-256', value: hash.buffer}],
   });
   await withTimeout(transport.ready, 'WebTransport ready');
+  if (originOnly) {
+    transport.close({closeCode: 0, reason: 'origin verified'});
+    return 'Chrome WebTransport Origin policy passed: exact-origin=true';
+  }
   const maxDatagramSize = transport.datagrams.maxDatagramSize;
   if (!Number.isInteger(maxDatagramSize) || maxDatagramSize <= 0) {
     throw new Error(`invalid maxDatagramSize: ${maxDatagramSize}`);
@@ -150,7 +154,11 @@ async function runBrowserProbe({port, certificateHash}) {
     await page.goto('http://localhost:' + process.env.ORIGIN_PORT + '/', {
       waitUntil: 'load',
     });
-    console.log(await page.evaluate(runBrowserProbe, {port, certificateHash}));
+    console.log(await page.evaluate(runBrowserProbe, {
+      port,
+      certificateHash,
+      originOnly: process.env.WEBTRANSPORT_ORIGIN_ONLY === '1',
+    }));
   } finally {
     await browser.close();
   }

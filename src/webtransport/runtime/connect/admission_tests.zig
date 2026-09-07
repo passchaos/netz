@@ -66,7 +66,12 @@ test "WebTransport server admission exposes request and response metadata" {
         allocator,
         io,
         .{ .ip4 = .loopback(0) },
-        .{ .http3 = .{ .quic = .{ .max_datagram_size = 1200 } } },
+        .{
+            .http3 = .{ .quic = .{ .max_datagram_size = 1200 } },
+            .origin_policy = .{
+                .exact = &.{"https://example.test"},
+            },
+        },
         .{ .handshake = .{
             .local_connection_id = &server_cid,
             .random = [_]u8{0xa3} ** 32,
@@ -329,6 +334,134 @@ test "WebTransport server admission sends explicit rejection response" {
         error.SessionRejected,
         attempt.requireAccepted(),
     );
+
+    thread.join();
+    joined = true;
+    if (shared.err) |err| return err;
+}
+
+test "WebTransport handshake enforces Origin before acceptance" {
+    const allocator = std.testing.allocator;
+    var threaded = std.Io.Threaded.init(allocator, .{});
+    defer threaded.deinit();
+    const io = threaded.io();
+    const original_dcid =
+        [_]u8{ 0x57, 0x54, 0xe0, 0x01, 0x57, 0x54, 0xe0, 0x02 };
+    const client_cid = [_]u8{ 0x57, 0x54, 0xe0, 0x03 };
+    const server_cid = [_]u8{ 0x57, 0x54, 0xe0, 0x04 };
+
+    var server = try runtime.HandshakeServer.bind(
+        allocator,
+        io,
+        .{ .ip4 = .loopback(0) },
+        .{ .http3 = .{ .quic = .{ .max_datagram_size = 4096 } } },
+        .{ .handshake = .{
+            .local_connection_id = &server_cid,
+            .random = [_]u8{0xe3} ** 32,
+            .x25519_secret_key = [_]u8{0xe4} ** 32,
+        } },
+    );
+    defer server.deinit();
+
+    const Shared = struct {
+        server: *runtime.HandshakeServer,
+        err: ?anyerror = null,
+
+        fn run(self: *@This()) void {
+            self.runFallible() catch |err| {
+                self.err = err;
+            };
+        }
+
+        fn runFallible(self: *@This()) !void {
+            var h3 = try self.server.h3.accept();
+            var h3_owned = true;
+            defer if (h3_owned) h3.deinit();
+            var denied = try runtime.HandshakeServer
+                .receiveSessionRequestFromSessionWithTimeout(
+                &h3,
+                self.server.limits,
+                operation_timeout,
+            );
+            var denied_owned = true;
+            defer if (denied_owned) denied.deinit();
+            try std.testing.expectEqualStrings(
+                "https://cross-origin.example",
+                denied.origin().?,
+            );
+            try std.testing.expectError(error.InvalidOrigin, denied.accept());
+            var rejected = try denied.forbidden();
+            denied_owned = false;
+            rejected.deinit();
+
+            var allowed = try runtime.HandshakeServer
+                .receiveSessionRequestFromSessionWithTimeout(
+                &h3,
+                self.server.limits,
+                operation_timeout,
+            );
+            var allowed_owned = true;
+            defer if (allowed_owned) allowed.deinit();
+            var accepted = try allowed.accept();
+            allowed_owned = false;
+            h3_owned = false;
+            defer accepted.deinit();
+        }
+    };
+    var shared = Shared{ .server = &server };
+    const thread = try std.Thread.spawn(.{}, Shared.run, .{&shared});
+    var joined = false;
+    defer if (!joined) thread.join();
+
+    var h3_client = try http3.runtime.HandshakeClient.connect(
+        allocator,
+        io,
+        .{ .ip4 = .loopback(0) },
+        server.address(),
+        server.limits.http3,
+        .{
+            .handshake = .{
+                .original_destination_connection_id = &original_dcid,
+                .local_connection_id = &client_cid,
+                .server_name = "localhost",
+                .random = [_]u8{0xe1} ** 32,
+                .x25519_secret_key = [_]u8{0xe2} ** 32,
+            },
+            .session = .{
+                .local_settings = webtransport.defaultSettings(.{}),
+            },
+        },
+    );
+    var h3_client_owned = true;
+    defer if (h3_client_owned) h3_client.deinit();
+    var denied_attempt = try runtime.HandshakeClientSession
+        .connectSessionAttemptWithTimeout(
+        &h3_client,
+        .{
+            .authority = "localhost",
+            .path = "/denied-origin",
+            .origin = "https://cross-origin.example",
+        },
+        operation_timeout,
+    );
+    var denied_attempt_owned = true;
+    defer if (denied_attempt_owned) denied_attempt.deinit();
+    try std.testing.expect(!denied_attempt.accepted());
+    try std.testing.expectEqual(@as(u16, 403), denied_attempt.status());
+    denied_attempt.deinit();
+    denied_attempt_owned = false;
+
+    var accepted = try runtime.HandshakeClientSession.connectSessionWithTimeout(
+        &h3_client,
+        .{
+            .authority = "LOCALHOST:443",
+            .path = "/same-origin",
+            .origin = "https://localhost",
+        },
+        operation_timeout,
+    );
+    h3_client_owned = false;
+    defer accepted.deinit();
 
     thread.join();
     joined = true;

@@ -39,10 +39,14 @@ pub const ReceiveTimeoutError = Error || quic.runtime.ReceiveTimeoutError;
 pub const EndpointServerError = Error ||
     http3.runtime.HandshakeAdmissionError;
 pub const HandshakeFailure = http3.runtime.HandshakeFailure;
+pub const OriginPolicy = connect_headers.OriginPolicy;
 
 pub const Limits = struct {
     http3: http3.runtime.Limits = .{},
     max_session_streams: usize = 128,
+    /// Browser-origin admission. By default, absent Origin is accepted for
+    /// native clients and an explicit Origin must match the CONNECT target.
+    origin_policy: OriginPolicy = .same_origin_or_absent,
     /// Maximum response-body bytes retained from a rejected Extended CONNECT
     /// across the development, protected, and authenticated runtimes.
     /// Successful sessions are unaffected.
@@ -54,11 +58,13 @@ pub const max_connection_close_reason: usize = 1024;
 pub const Server = struct {
     h3: http3.runtime.Server,
     max_session_streams: usize,
+    origin_policy: OriginPolicy,
 
     pub fn bind(allocator: std.mem.Allocator, io: std.Io, bind_address: net.IpAddress, limits: Limits) Error!Server {
         return .{
             .h3 = try .bind(allocator, io, bind_address, limits.http3),
             .max_session_streams = limits.max_session_streams,
+            .origin_policy = limits.origin_policy,
         };
     }
 
@@ -317,6 +323,7 @@ pub const Server = struct {
 
 pub const ProtectedServer = struct {
     h3: http3.runtime.ProtectedServer,
+    origin_policy: OriginPolicy,
 
     pub fn bind(
         allocator: std.mem.Allocator,
@@ -325,7 +332,16 @@ pub const ProtectedServer = struct {
         limits: Limits,
         config: http3.runtime.ProtectedConfig,
     ) Error!ProtectedServer {
-        return .{ .h3 = try .bind(allocator, io, bind_address, limits.http3, webTransportProtectedConfig(config)) };
+        return .{
+            .h3 = try .bind(
+                allocator,
+                io,
+                bind_address,
+                limits.http3,
+                webTransportProtectedConfig(config),
+            ),
+            .origin_policy = limits.origin_policy,
+        };
     }
 
     pub fn deinit(self: *ProtectedServer) void {
@@ -638,6 +654,10 @@ pub const PendingSession = struct {
         self: *PendingSession,
         additional_headers: []const http3.Qpack.HeaderField,
     ) Error!AcceptedSession {
+        try validateConnectOrigin(
+            self.request.request,
+            self.server.origin_policy,
+        );
         const allocator = self.server.h3.quic_server.endpoint.allocator;
         var header_stack: [connect_headers.stack_capacity]http3.Qpack.HeaderField =
             undefined;
@@ -816,6 +836,10 @@ pub const PendingProtectedSession = struct {
         self: *PendingProtectedSession,
         additional_headers: []const http3.Qpack.HeaderField,
     ) Error!AcceptedProtectedSession {
+        try validateConnectOrigin(
+            self.request.request,
+            self.server.origin_policy,
+        );
         const allocator = self.server.h3.quic_server.endpoint.allocator;
         var header_stack: [connect_headers.stack_capacity]http3.Qpack.HeaderField =
             undefined;
@@ -2182,6 +2206,10 @@ pub const EndpointServer = struct {
     ) EndpointServerError!*EndpointAcceptedSession {
         const source = self.pending.get(handle) orelse
             return error.InvalidSessionState;
+        try validateConnectOrigin(
+            source.request.request,
+            source.limits.origin_policy,
+        );
         // Reserve every allocation before emitting status 200. Once the peer
         // observes acceptance this state transition must be infallible.
         try self.sessions.ensureUnusedCapacity(self.allocator, 1);
@@ -3301,6 +3329,10 @@ pub const PendingHandshakeSession = struct {
         self: *PendingHandshakeSession,
         additional_headers: []const http3.Qpack.HeaderField,
     ) Error!AcceptedHandshakeSession {
+        try validateConnectOrigin(
+            self.request.request,
+            self.limits.origin_policy,
+        );
         const allocator = self.h3.established.connection.endpoint.allocator;
         var header_stack: [connect_headers.stack_capacity]http3.Qpack.HeaderField =
             undefined;
@@ -8553,6 +8585,7 @@ fn receiveStatefulSessionRequestBefore(
     errdefer request.head.deinit(
         session.established.connection.endpoint.allocator,
     );
+    try validateConnectRequest(request.head);
     try webtransport.ensureDatagramsNegotiated(
         session.options.local_settings,
         session.control.settings.peer,
@@ -8952,6 +8985,7 @@ fn receiveProtectedConnectAttemptResponseBefore(
 }
 
 const validateConnectRequest = connect_headers.validateRequest;
+const validateConnectOrigin = connect_headers.validateOrigin;
 const connectResponseWithHeaders = connect_headers.response;
 const validateConnectResponse = connect_headers.validateResponse;
 const AdditionalHeaderContext = connect_headers.Context;
@@ -9366,7 +9400,12 @@ test "WebTransport development runtime exposes pending admission metadata" {
         allocator,
         io,
         .{ .ip4 = .loopback(0) },
-        .{ .http3 = .{ .quic = .{ .max_datagram_size = 4096 } } },
+        .{
+            .http3 = .{ .quic = .{ .max_datagram_size = 4096 } },
+            .origin_policy = .{
+                .exact = &.{"https://example.test"},
+            },
+        },
     );
     defer server.deinit();
 
