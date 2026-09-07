@@ -524,6 +524,13 @@ rule from RFC 9000 section 17.2 and RFC 9001 section 9.5: long-header reserved
 bits are reported only after AEAD succeeds. Tests cover every protected long
 packet type with both an authenticated non-zero value and a forged header whose
 unchanged tag must instead produce `AuthenticationFailed`.
+Handshake-owned receive loops now discard pre-authentication long-header parse
+and AEAD failures while preserving one absolute timeout and the peer tuple.
+This covers the first/retried server Initial, multi-packet Initial CRYPTO, both
+Handshake directions, and accepted 0-RTT; low-level one-packet open APIs retain
+their diagnostic errors. Authenticated CRYPTO/frame failures and
+`InvalidReservedBits` remain visible, and invalid Initials use RFC 9000 section
+10.2.3's explicit discard allowance before any CRYPTO state is committed.
 Closing connections now respond to current-path datagrams through a dedicated
 timer rather than parsing application frames or retransmitting immediately.
 The first response requires one packet, subsequent thresholds double to 2, 4,

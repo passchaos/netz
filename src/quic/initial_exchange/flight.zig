@@ -15,7 +15,10 @@ pub const Error = quic.runtime.Error ||
     quic.crypto_stream.Error ||
     quic.Error ||
     error{MissingCryptoFrame};
-pub const ReceiveError = Error || error{HandshakeTimeout};
+pub const ReceiveError = Error || error{
+    HandshakeTimeout,
+    DiscardedInitialPacket,
+};
 
 pub const min_initial_udp_datagram_size: usize = 1200;
 
@@ -58,6 +61,10 @@ pub const ReceiveOptions = struct {
     min_datagram_size: usize = 0,
     max_datagrams: usize = 64,
     allow_zero_fixed_bit: bool = false,
+    /// Convert an unauthenticated or invalid first candidate into a stable
+    /// discard signal. Handshake receive owners use this to continue without
+    /// accidentally swallowing errors from authenticated CRYPTO frames.
+    discard_invalid_first: bool = false,
     /// Optional absolute bound shared with the enclosing handshake. This is
     /// needed when one TLS CRYPTO message spans several Initial datagrams: the
     /// caller's budget must cover the continuation packets as well as the
@@ -285,16 +292,20 @@ pub fn openFrom(
     var peer: ?net.IpAddress = null;
     var next_expected = options.expected_packet_number;
     var packet_count: usize = 0;
+    var datagram_count: usize = 0;
     var target_len = options.expected_crypto_len;
+    var use_first_datagram = true;
 
-    while (packet_count < options.max_datagrams) {
+    while (datagram_count < options.max_datagrams) {
         var received: ?quic.runtime.OwnedBytes = null;
         defer if (received) |*datagram| {
             datagram.deinit(endpoint.allocator);
         };
-        const datagram_from, const datagram_bytes = if (packet_count == 0)
-            .{ first_from, first_bytes }
-        else blk: {
+        const is_first_datagram = use_first_datagram;
+        const datagram_from, const datagram_bytes = if (use_first_datagram) blk: {
+            use_first_datagram = false;
+            break :blk .{ first_from, first_bytes };
+        } else blk: {
             received = source.receiveTimeout(if (options.deadline) |deadline|
                 .{ .deadline = deadline }
             else
@@ -305,36 +316,81 @@ pub fn openFrom(
             };
             break :blk .{ received.?.from, received.?.bytes };
         };
+        datagram_count += 1;
 
         // The caller-provided first packet can be the Initial prefix of a
         // coalesced datagram already validated at the UDP boundary.
-        if (packet_count != 0 and
+        if (!is_first_datagram and
             datagram_bytes.len < options.min_datagram_size)
         {
+            continue;
+        }
+        if (is_first_datagram and
+            datagram_bytes.len < options.min_datagram_size)
+        {
+            if (options.discard_invalid_first) {
+                return error.DiscardedInitialPacket;
+            }
             return error.InvalidInitialPacket;
         }
         if (peer) |expected_peer| {
             if (!datagram_from.eql(&expected_peer)) {
-                return error.InvalidInitialPacket;
+                continue;
             }
-        } else {
-            peer = datagram_from;
         }
 
-        const info = try quic.protection.peekProtectedLongPacketInfoWithFixedBitPolicy(
+        const info = quic.protection.peekProtectedLongPacketInfoWithFixedBitPolicy(
             datagram_bytes,
             options.allow_zero_fixed_bit,
-        );
+        ) catch |err| {
+            if (isDiscardableLongHeaderParseError(err)) {
+                if (is_first_datagram) {
+                    if (options.discard_invalid_first) {
+                        return error.DiscardedInitialPacket;
+                    }
+                    return err;
+                }
+                continue;
+            }
+            return err;
+        };
         if (info.packet_type != .initial or info.len != datagram_bytes.len) {
-            return error.InvalidInitialPacket;
+            if (is_first_datagram) {
+                if (options.discard_invalid_first) {
+                    return error.DiscardedInitialPacket;
+                }
+                return error.InvalidInitialPacket;
+            }
+            continue;
         }
-        var packet = try quic.protection.openInitialPacketWithFixedBitPolicy(
+        var packet = quic.protection.openInitialPacketWithFixedBitPolicy(
             endpoint.allocator,
             keys,
             datagram_bytes,
             next_expected,
             options.allow_zero_fixed_bit,
-        );
+        ) catch |err| {
+            if (quic.protection.isUnauthenticatedOpenError(err)) {
+                if (is_first_datagram) {
+                    if (options.discard_invalid_first) {
+                        return error.DiscardedInitialPacket;
+                    }
+                    return err;
+                }
+                continue;
+            }
+            // RFC 9000 section 10.2.3 permits silently discarding an invalid
+            // Initial because its public keys do not provide strong peer
+            // authentication. Keep the pure one-shot API diagnostic unless a
+            // handshake receive owner explicitly selects discard mode.
+            if (err == error.InvalidReservedBits and
+                options.discard_invalid_first)
+            {
+                if (is_first_datagram) return error.DiscardedInitialPacket;
+                continue;
+            }
+            return err;
+        };
         var packet_owned = true;
         errdefer if (packet_owned) packet.deinit(endpoint.allocator);
         if (first_packet) |first| {
@@ -350,22 +406,35 @@ pub fn openFrom(
                     first.source_connection_id,
                 ))
             {
-                return error.InvalidInitialPacket;
+                packet.deinit(endpoint.allocator);
+                packet_owned = false;
+                continue;
             }
         }
+        if (peer == null) peer = datagram_from;
         const after_packet = std.math.add(
             u64,
             packet.packet_number,
             1,
         ) catch return error.InvalidPacketNumber;
         next_expected = @max(next_expected, after_packet);
-        try insertCryptoPayload(
+        packet_count += 1;
+        insertCryptoPayload(
             endpoint.allocator,
             &reassembler,
             packet.payload,
             .initial,
-        );
-        packet_count += 1;
+        ) catch |err| switch (err) {
+            error.MissingCryptoFrame => {
+                if (is_first_datagram and first_packet == null) {
+                    if (!options.discard_invalid_first) return err;
+                }
+                packet.deinit(endpoint.allocator);
+                packet_owned = false;
+                continue;
+            },
+            else => |other| return other,
+        };
         if (first_packet == null) {
             first_packet = packet;
             packet_owned = false;
@@ -398,6 +467,22 @@ pub fn openFrom(
         }
     }
     return error.MissingCryptoFrame;
+}
+
+fn isDiscardableLongHeaderParseError(err: anyerror) bool {
+    return switch (err) {
+        error.BufferTooShort,
+        error.IntegerOverflow,
+        error.InvalidConnectionIdLength,
+        error.InvalidEncoding,
+        error.InvalidFrame,
+        error.InvalidFrameLength,
+        error.InvalidVersionNegotiation,
+        error.MalformedVarInt,
+        error.VarIntTooLarge,
+        => true,
+        else => false,
+    };
 }
 
 fn tlsHandshakeMessageLen(

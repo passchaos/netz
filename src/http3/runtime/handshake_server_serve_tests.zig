@@ -1054,7 +1054,11 @@ test "HTTP/3 handshake supervisor bounds and reports failed workers" {
     var supervisor = try runtime.HandshakeSupervisor.init(
         &server,
         &dispatcher,
-        .{ .max_pending_handshakes = 1, .inbox_capacity = 1 },
+        .{
+            .max_pending_handshakes = 1,
+            .inbox_capacity = 1,
+            .handshake_timeout_ms = 10,
+        },
     );
     defer supervisor.deinit();
 
@@ -1098,33 +1102,34 @@ test "HTTP/3 handshake supervisor bounds and reports failed workers" {
         supervisor.admit(&second),
     );
     try std.testing.expect(second == .new_initial);
+    try std.testing.expectEqual(
+        @as(usize, 1),
+        supervisor.expireAt(std.math.maxInt(u64)),
+    );
 
     var completion: runtime.HandshakeCompletion = undefined;
     while (true) {
-        var ready = try supervisor.receive(
-            &.{quic.Version.version_1.wireValue()},
-            .{ .clock = .awake, .raw = .fromMilliseconds(1) },
-        );
-        defer ready.deinit(allocator);
-        switch (ready) {
-            .completed => {
-                completion = ready.takeCompletion().?;
-                break;
-            },
-            .consumed => unreachable,
-            .endpoint => return error.TestUnexpectedResult,
+        if (supervisor.pollCompleted()) |ready| {
+            completion = ready;
+            break;
         }
+        std.Io.sleep(io, .fromMilliseconds(1), .awake) catch |err| switch (err) {
+            error.Canceled => return err,
+        };
     }
+    var completion_owned = true;
+    defer if (completion_owned) completion.deinit();
     try std.testing.expect(completion.result == .failure);
-    try std.testing.expectEqual(
-        error.InvalidEncoding,
-        completion.result.failure,
+    try std.testing.expect(
+        completion.result.failure == error.SocketUnconnected or
+            completion.result.failure == error.HandshakeTimeout,
     );
     try std.testing.expectEqual(@as(usize, 0), supervisor.pendingCount());
     // The worker never mutates dispatcher maps. Cleanup occurs when the sole
     // owner consumes or discards its completion.
     try std.testing.expectEqual(@as(usize, 1), dispatcher.pendingHandshakeCount());
     supervisor.discardCompletion(&completion);
+    completion_owned = false;
     try std.testing.expectEqual(@as(usize, 0), dispatcher.pendingHandshakeCount());
 }
 
@@ -1191,7 +1196,8 @@ test "HTTP/3 handshake supervisor expires a silent pending worker" {
     try std.testing.expect(completion.result == .failure);
     try std.testing.expect(
         completion.result.failure == error.SocketUnconnected or
-            completion.result.failure == error.InvalidInitialPacket,
+            completion.result.failure == error.InvalidInitialPacket or
+            completion.result.failure == error.HandshakeTimeout,
     );
 }
 

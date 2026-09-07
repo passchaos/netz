@@ -164,13 +164,26 @@ pub fn openBytesWithFixedBitPolicy(
     max_frames: usize,
     allow_zero_fixed_bit: bool,
 ) Error!Packet {
-    var packet = try quic.protection.openZeroRttPacketWithFixedBitPolicy(
+    const packet = try quic.protection.openZeroRttPacketWithFixedBitPolicy(
         endpoint.allocator,
         keys,
         bytes,
         expected_packet_number,
         allow_zero_fixed_bit,
     );
+    return fromOpenedPacket(endpoint, from, packet, max_frames);
+}
+
+/// Parse authenticated 0-RTT payload bytes without re-opening packet
+/// protection. Handshake receive owners use this to keep pre-authentication
+/// packet discard policy separate from authenticated frame validation.
+pub fn fromOpenedPacket(
+    endpoint: *quic.runtime.Endpoint,
+    from: net.IpAddress,
+    opened_packet: quic.protection.OpenedZeroRttPacket,
+    max_frames: usize,
+) Error!Packet {
+    var packet = opened_packet;
     errdefer packet.deinit(endpoint.allocator);
     const frames = try parseFrames(
         endpoint.allocator,

@@ -293,6 +293,206 @@ test "Initial CRYPTO flight reassembles reordered packets" {
     try std.testing.expectEqualSlices(u8, &message, &shared.received);
 }
 
+test "Initial CRYPTO flight discards unauthenticated continuation" {
+    const allocator = std.testing.allocator;
+    var threaded = std.Io.Threaded.init(allocator, .{});
+    defer threaded.deinit();
+    const io = threaded.io();
+    var receiver = try quic.runtime.Endpoint.bind(
+        allocator,
+        io,
+        .{ .ip4 = .loopback(0) },
+        .{ .max_datagram_size = 4096 },
+    );
+    defer receiver.deinit();
+    var sender = try quic.runtime.Endpoint.bind(
+        allocator,
+        io,
+        .{ .ip4 = .loopback(0) },
+        .{ .max_datagram_size = 4096 },
+    );
+    defer sender.deinit();
+
+    const dcid = "noise001";
+    const scid = "peer";
+    const keys = quic.protection.deriveInitialSecrets(dcid).client;
+    const message = [_]u8{ 1, 0, 0, 8 } ++ "complete".*;
+    const split = 6;
+    const first = try target.sealPacket(allocator, keys, .{
+        .destination_connection_id = dcid,
+        .source_connection_id = scid,
+        .packet_number = 10,
+        .crypto_offset = 0,
+        .crypto_data = message[0..split],
+        .min_datagram_size = 1200,
+    });
+    defer allocator.free(first);
+    const bad = try target.sealPacket(allocator, keys, .{
+        .destination_connection_id = dcid,
+        .source_connection_id = scid,
+        .packet_number = 11,
+        .crypto_offset = split,
+        .crypto_data = message[split..],
+        .min_datagram_size = 1200,
+    });
+    defer allocator.free(bad);
+    bad[bad.len - 1] ^= 0x80;
+    const second = try target.sealPacket(allocator, keys, .{
+        .destination_connection_id = dcid,
+        .source_connection_id = scid,
+        .packet_number = 12,
+        .crypto_offset = split,
+        .crypto_data = message[split..],
+        .min_datagram_size = 1200,
+    });
+    defer allocator.free(second);
+
+    const Shared = struct {
+        endpoint: *quic.runtime.Endpoint,
+        keys: quic.protection.PacketProtectionKeys,
+        from: std.Io.net.IpAddress,
+        first: []const u8,
+        expected: []const u8,
+        err: ?anyerror = null,
+
+        fn run(shared: *@This()) void {
+            var received = target.open(
+                shared.endpoint,
+                shared.from,
+                shared.first,
+                shared.keys,
+                .{
+                    .expected_packet_number = 10,
+                    .expected_crypto_len = shared.expected.len,
+                    .max_crypto_buffer = shared.expected.len,
+                    .min_datagram_size = 1200,
+                },
+            ) catch |err| {
+                shared.err = err;
+                return;
+            };
+            defer received.deinit(shared.endpoint.allocator);
+            if (!std.mem.eql(u8, shared.expected, received.crypto_data) or
+                received.packet_count != 2 or
+                received.next_expected_packet_number != 13)
+            {
+                shared.err = error.TestUnexpectedResult;
+            }
+        }
+    };
+    var shared = Shared{
+        .endpoint = &receiver,
+        .keys = keys,
+        .from = sender.address(),
+        .first = first,
+        .expected = &message,
+    };
+    const thread = try std.Thread.spawn(.{}, Shared.run, .{&shared});
+    try sender.sendBytes(receiver.address(), bad);
+    try sender.sendBytes(receiver.address(), second);
+    thread.join();
+    if (shared.err) |err| return err;
+}
+
+test "Initial CRYPTO handshake discard mode preserves authenticated errors" {
+    const allocator = std.testing.allocator;
+    var threaded = std.Io.Threaded.init(allocator, .{});
+    defer threaded.deinit();
+    var endpoint = try quic.runtime.Endpoint.bind(
+        allocator,
+        threaded.io(),
+        .{ .ip4 = .loopback(0) },
+        .{ .max_datagram_size = 4096 },
+    );
+    defer endpoint.deinit();
+
+    const dcid = "autherr1";
+    const keys = quic.protection.deriveInitialSecrets(dcid).client;
+    var payload: std.ArrayList(u8) = .empty;
+    defer payload.deinit(allocator);
+    try (quic.Frame{ .stream = .{
+        .stream_id = 0,
+        .data = "forbidden",
+    } }).write(&payload, allocator);
+    const packet = try quic.protection.sealInitialPacket(allocator, keys, .{
+        .destination_connection_id = dcid,
+        .source_connection_id = "peer",
+        .packet_number = 0,
+        .payload = payload.items,
+    });
+    defer allocator.free(packet);
+
+    try std.testing.expectError(
+        error.InvalidFrame,
+        target.open(
+            &endpoint,
+            endpoint.address(),
+            packet,
+            keys,
+            .{
+                .expected_packet_number = 0,
+                .max_crypto_buffer = 64,
+                .discard_invalid_first = true,
+            },
+        ),
+    );
+}
+
+test "Initial CRYPTO one-shot opener preserves authentication errors" {
+    const allocator = std.testing.allocator;
+    var threaded = std.Io.Threaded.init(allocator, .{});
+    defer threaded.deinit();
+    var endpoint = try quic.runtime.Endpoint.bind(
+        allocator,
+        threaded.io(),
+        .{ .ip4 = .loopback(0) },
+        .{ .max_datagram_size = 4096 },
+    );
+    defer endpoint.deinit();
+
+    const dcid = "oneshot1";
+    const keys = quic.protection.deriveInitialSecrets(dcid).client;
+    const packet = try target.sealPacket(allocator, keys, .{
+        .destination_connection_id = dcid,
+        .source_connection_id = "peer",
+        .packet_number = 0,
+        .crypto_data = &.{ 1, 0, 0, 0 },
+        .min_datagram_size = 1200,
+    });
+    defer allocator.free(packet);
+    packet[packet.len - 1] ^= 0x80;
+
+    try std.testing.expectError(
+        error.AuthenticationFailed,
+        target.open(
+            &endpoint,
+            endpoint.address(),
+            packet,
+            keys,
+            .{
+                .expected_packet_number = 0,
+                .max_crypto_buffer = 64,
+                .min_datagram_size = 1200,
+            },
+        ),
+    );
+    try std.testing.expectError(
+        error.DiscardedInitialPacket,
+        target.open(
+            &endpoint,
+            endpoint.address(),
+            packet,
+            keys,
+            .{
+                .expected_packet_number = 0,
+                .max_crypto_buffer = 64,
+                .min_datagram_size = 1200,
+                .discard_invalid_first = true,
+            },
+        ),
+    );
+}
+
 test "Initial CRYPTO payload extraction skips ACK without allocation" {
     const allocator = std.testing.allocator;
     var payload: std.ArrayList(u8) = .empty;

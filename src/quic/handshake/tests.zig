@@ -839,7 +839,7 @@ test "QUIC client handshake receives through one socket owner" {
     try std.testing.expectEqualStrings("h3", server_established.alpn);
 }
 
-test "QUIC server handshake releases an invalid injected Initial" {
+test "QUIC server handshake consumes an invalid injected Initial" {
     const allocator = std.testing.allocator;
     var threaded = std.Io.Threaded.init(allocator, .{});
     defer threaded.deinit();
@@ -857,14 +857,15 @@ test "QUIC server handshake releases an invalid injected Initial" {
     );
     @memset(bytes, 0);
     try std.testing.expectError(
-        error.InvalidEncoding,
-        handshake.acceptFromInitial(
+        error.HandshakeTimeout,
+        handshake.acceptFromInitialWithTimeout(
             &endpoint,
             .{
                 .from = .{ .ip4 = .loopback(4444) },
                 .bytes = bytes,
             },
             .{ .local_connection_id = "server" },
+            .fromMilliseconds(10),
         ),
     );
 }
@@ -2602,11 +2603,18 @@ test "QUIC integrated server rejects invalid first client Initial datagrams" {
         .packet_number = 0,
         .crypto_data = "too small",
     });
-    try std.testing.expectError(error.InvalidInitialPacket, handshake.accept(&short_server, .{
-        .local_connection_id = "srv1",
-        .random = [_]u8{0x52} ** 32,
-        .x25519_secret_key = [_]u8{0x53} ** 32,
-    }));
+    try std.testing.expectError(
+        error.HandshakeTimeout,
+        handshake.acceptWithTimeout(
+            &short_server,
+            .{
+                .local_connection_id = "srv1",
+                .random = [_]u8{0x52} ** 32,
+                .x25519_secret_key = [_]u8{0x53} ** 32,
+            },
+            .fromMilliseconds(10),
+        ),
+    );
 
     var dcid_server = try quic.runtime.Endpoint.bind(allocator, io, .{ .ip4 = .loopback(0) }, .{ .max_datagram_size = 4096 });
     defer dcid_server.deinit();
@@ -2622,11 +2630,184 @@ test "QUIC integrated server rejects invalid first client Initial datagrams" {
         .crypto_data = "bad dcid",
         .min_datagram_size = quic.initial_exchange.min_initial_udp_datagram_size,
     });
-    try std.testing.expectError(error.InvalidInitialPacket, handshake.accept(&dcid_server, .{
-        .local_connection_id = "srv2",
-        .random = [_]u8{0x54} ** 32,
-        .x25519_secret_key = [_]u8{0x55} ** 32,
-    }));
+    try std.testing.expectError(
+        error.HandshakeTimeout,
+        handshake.acceptWithTimeout(
+            &dcid_server,
+            .{
+                .local_connection_id = "srv2",
+                .random = [_]u8{0x54} ** 32,
+                .x25519_secret_key = [_]u8{0x55} ** 32,
+            },
+            .fromMilliseconds(10),
+        ),
+    );
+}
+
+test "QUIC integrated server ignores unauthenticated Initial before client" {
+    const allocator = std.testing.allocator;
+    var threaded = std.Io.Threaded.init(allocator, .{});
+    defer threaded.deinit();
+    const io = threaded.io();
+
+    const CorruptFirstInitial = struct {
+        count: usize = 0,
+
+        fn corrupt(context: *anyopaque, bytes: []u8) bool {
+            const self: *@This() = @ptrCast(@alignCast(context));
+            if (self.count != 0 or bytes.len == 0 or
+                (bytes[0] & 0x80) == 0) return false;
+            self.count += 1;
+            bytes[bytes.len - 1] ^= 0x80;
+            return true;
+        }
+    };
+    var corrupt_first = CorruptFirstInitial{};
+    var server_endpoint = try quic.runtime.Endpoint.bind(
+        allocator,
+        io,
+        .{ .ip4 = .loopback(0) },
+        .{ .max_datagram_size = 4096 },
+    );
+    defer server_endpoint.deinit();
+    var client_endpoint = try quic.runtime.Endpoint.bind(
+        allocator,
+        io,
+        .{ .ip4 = .loopback(0) },
+        .{
+            .max_datagram_size = 4096,
+            .send_interceptor = .{
+                .context = &corrupt_first,
+                .corrupt = CorruptFirstInitial.corrupt,
+            },
+        },
+    );
+    defer client_endpoint.deinit();
+
+    const original_dcid = "noisecli";
+    const Shared = struct {
+        endpoint: *quic.runtime.Endpoint,
+        err: ?anyerror = null,
+
+        fn run(shared: *@This()) void {
+            var established = handshake.acceptWithTimeout(
+                shared.endpoint,
+                .{
+                    .local_connection_id = "server",
+                    .random = [_]u8{0xc1} ** 32,
+                    .x25519_secret_key = [_]u8{0xc2} ** 32,
+                },
+                .fromSeconds(2),
+            ) catch |err| {
+                shared.err = err;
+                return;
+            };
+            established.deinit();
+        }
+    };
+    var shared = Shared{ .endpoint = &server_endpoint };
+    const thread = try std.Thread.spawn(.{}, Shared.run, .{&shared});
+
+    var established = try handshake.connect(
+        &client_endpoint,
+        server_endpoint.address(),
+        .{
+            .original_destination_connection_id = original_dcid,
+            .local_connection_id = "client",
+            .random = [_]u8{0xc3} ** 32,
+            .x25519_secret_key = [_]u8{0xc4} ** 32,
+        },
+    );
+    established.deinit();
+    thread.join();
+    if (shared.err) |err| return err;
+    try std.testing.expectEqual(@as(usize, 1), corrupt_first.count);
+}
+
+test "QUIC integrated client ignores unauthenticated server Initial" {
+    const allocator = std.testing.allocator;
+    var threaded = std.Io.Threaded.init(allocator, .{});
+    defer threaded.deinit();
+    const io = threaded.io();
+
+    const CorruptFirstInitial = struct {
+        count: usize = 0,
+
+        fn corrupt(context: *anyopaque, bytes: []u8) bool {
+            const self: *@This() = @ptrCast(@alignCast(context));
+            if (self.count != 0 or bytes.len == 0 or
+                (bytes[0] & 0x80) == 0) return false;
+            self.count += 1;
+            bytes[bytes.len - 1] ^= 0x80;
+            return true;
+        }
+    };
+    var corrupt_first = CorruptFirstInitial{};
+    var server_endpoint = try quic.runtime.Endpoint.bind(
+        allocator,
+        io,
+        .{ .ip4 = .loopback(0) },
+        .{
+            .max_datagram_size = 4096,
+            .send_interceptor = .{
+                .context = &corrupt_first,
+                .corrupt = CorruptFirstInitial.corrupt,
+            },
+        },
+    );
+    defer server_endpoint.deinit();
+    var client_endpoint = try quic.runtime.Endpoint.bind(
+        allocator,
+        io,
+        .{ .ip4 = .loopback(0) },
+        .{ .max_datagram_size = 4096 },
+    );
+    defer client_endpoint.deinit();
+
+    const recovery = @import("../handshake/retransmit.zig").Config{
+        .initial_pto_ms = 10,
+        .max_pto_ms = 20,
+        .max_retries = 3,
+    };
+    const Shared = struct {
+        endpoint: *quic.runtime.Endpoint,
+        recovery: @import("../handshake/retransmit.zig").Config,
+        err: ?anyerror = null,
+
+        fn run(shared: *@This()) void {
+            var established = handshake.accept(shared.endpoint, .{
+                .local_connection_id = "server",
+                .random = [_]u8{0xd1} ** 32,
+                .x25519_secret_key = [_]u8{0xd2} ** 32,
+                .handshake_recovery = shared.recovery,
+            }) catch |err| {
+                shared.err = err;
+                return;
+            };
+            established.deinit();
+        }
+    };
+    var shared = Shared{
+        .endpoint = &server_endpoint,
+        .recovery = recovery,
+    };
+    const thread = try std.Thread.spawn(.{}, Shared.run, .{&shared});
+
+    var established = try handshake.connect(
+        &client_endpoint,
+        server_endpoint.address(),
+        .{
+            .original_destination_connection_id = "noisesrv",
+            .local_connection_id = "client",
+            .random = [_]u8{0xd3} ** 32,
+            .x25519_secret_key = [_]u8{0xd4} ** 32,
+            .handshake_recovery = recovery,
+        },
+    );
+    established.deinit();
+    thread.join();
+    if (shared.err) |err| return err;
+    try std.testing.expectEqual(@as(usize, 1), corrupt_first.count);
 }
 
 test "QUIC integrated handshake applies negotiated transport parameters over QUIC v2" {

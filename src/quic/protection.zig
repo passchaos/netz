@@ -50,6 +50,28 @@ pub const Error = varint.Error || VersionError || error{
     InvalidReservedBits,
 } || std.crypto.errors.AuthenticationError || std.mem.Allocator.Error;
 
+/// Classify errors produced before a protected packet has authenticated.
+/// Network receive owners may discard these and continue, but must never use
+/// this predicate for errors from authenticated frame or TLS processing.
+pub fn isUnauthenticatedOpenError(err: anyerror) bool {
+    return switch (err) {
+        error.AuthenticationFailed,
+        error.BufferTooShort,
+        error.IntegerOverflow,
+        error.InvalidEncoding,
+        error.InvalidHeaderProtectionSample,
+        error.InvalidInitialPacket,
+        error.InvalidPacketNumber,
+        error.InvalidPacketNumberLength,
+        error.InvalidPayloadLength,
+        error.MalformedVarInt,
+        error.UnsupportedVersion,
+        error.VarIntTooLarge,
+        => true,
+        else => false,
+    };
+}
+
 pub const HeaderForm = enum {
     long,
     short,

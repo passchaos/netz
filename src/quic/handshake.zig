@@ -14,6 +14,7 @@ pub const ServerNistHybridKeyMaterial =
 pub const ServerRetryPolicy = retry.Policy;
 
 pub const Error = quic.runtime.Error || quic.protection.Error || quic.crypto_stream.Error || quic.tls_client_hello.Error || quic.tls.auth.Error || quic.tls.client_auth.Error || quic.one_rtt.Error || quic.zero_rtt.handshake.Error || quic.zero_rtt.replay_filter.Error || quic.resumption.tls_psk.Error || quic.resumption.ticket.handshake.Error || quic.Error || std.Io.RandomSecureError || std.Io.Writer.Error || error{
+    DiscardedInitialPacket,
     InvalidHandshakeFlight,
     MissingCryptoFrame,
     MissingAlpn,
@@ -842,6 +843,22 @@ fn timeoutExpired(io: std.Io, timeout: std.Io.Timeout) bool {
     }
 }
 
+fn isDiscardableLongHeaderParseError(err: anyerror) bool {
+    return switch (err) {
+        error.BufferTooShort,
+        error.IntegerOverflow,
+        error.InvalidConnectionIdLength,
+        error.InvalidEncoding,
+        error.InvalidFrame,
+        error.InvalidFrameLength,
+        error.InvalidVersionNegotiation,
+        error.MalformedVarInt,
+        error.VarIntTooLarge,
+        => true,
+        else => false,
+    };
+}
+
 fn passiveHandshakeTimeout(
     io: std.Io,
     recovery: retransmit.Config,
@@ -910,7 +927,6 @@ test "QUIC client filters non-target datagrams while waiting for server Initial"
         },
     );
     defer allocator.free(handshake);
-
     try std.testing.expect(try peekExpectedServerInitial(
         handshake,
         .version_1,
@@ -1461,15 +1477,10 @@ fn connectAttempt(
                 .expected_packet_number = 0,
                 .max_crypto_buffer = options.max_crypto_buffer,
                 .allow_zero_fixed_bit = local_transport_parameters.grease_quic_bit,
+                .discard_invalid_first = true,
             },
         ) catch |err| switch (err) {
-            error.MissingCryptoFrame,
-            error.InvalidInitialPacket,
-            error.InvalidPayloadLength,
-            error.InvalidHeaderProtectionSample,
-            error.BufferTooShort,
-            error.AuthenticationFailed,
-            => {
+            error.DiscardedInitialPacket => {
                 try replaceServerDatagramFromUntil(
                     endpoint,
                     source,
@@ -2084,7 +2095,7 @@ fn acceptInternal(
     );
 
     var client_initial = if (owned_first) |datagram| blk: {
-        const opened = try openClientInitialDatagram(
+        const opened = openClientInitialDatagram(
             endpoint,
             source,
             datagram,
@@ -2094,13 +2105,32 @@ fn acceptInternal(
             options.version,
             accept_zero_fixed_bit,
             options.handshake_recovery.deadline,
-        );
+        ) catch |err| switch (err) {
+            error.DiscardedInitialPacket => {
+                var discarded = datagram;
+                discarded.deinit(endpoint.allocator);
+                owned_first = null;
+                break :blk try receiveClientInitial(
+                    endpoint,
+                    source,
+                    0,
+                    options.max_crypto_buffer,
+                    options.retry_source_connection_id,
+                    options.version,
+                    options.available_versions,
+                    accept_zero_fixed_bit,
+                    options.handshake_recovery.deadline,
+                );
+            },
+            else => |other| return other,
+        };
         owned_first = null;
         var consumed = datagram;
         consumed.deinit(endpoint.allocator);
         break :blk opened;
     } else try receiveClientInitial(
         endpoint,
+        source,
         0,
         options.max_crypto_buffer,
         options.retry_source_connection_id,
@@ -2362,7 +2392,9 @@ fn acceptInternal(
             client_initial.packet.source_connection_id,
             options.local_transport_parameters.grease_quic_bit,
         );
-        if (pending_early_data == null) {
+        if (pending_early_data == null and
+            client_initial.coalesced_tail.len == 0)
+        {
             pending_early_data = try receiveStandaloneClientEarlyData(
                 endpoint,
                 source,
@@ -2572,8 +2604,10 @@ fn acceptInternal(
         containsHandshakePacket,
     );
     defer client_handshake_datagram.deinit(endpoint.allocator);
-    var client_handshake = try openClientHandshakeCryptoFromDatagram(
+    var client_handshake = try receiveClientHandshakeCryptoFromDatagram(
         endpoint,
+        source,
+        client_initial.from,
         client_handshake_datagram.from,
         client_handshake_datagram.bytes,
         client_handshake_datagram.ecn,
@@ -2582,6 +2616,7 @@ fn acceptInternal(
         options.max_crypto_buffer,
         local_transport_parameters.grease_quic_bit,
         options.client_auth != null,
+        options.handshake_recovery,
     );
     defer client_handshake.deinit(endpoint.allocator);
     const client_flight = try splitClientFlight(
@@ -2739,18 +2774,26 @@ fn openClientHandshakeCryptoFromDatagram(
     };
     var tail = datagram;
     var next_expected = expected_packet_number;
-    while (try nextHandshakePacketFromCoalescedTail(
-        &tail,
-        allow_zero_fixed_bit,
-    )) |packet| {
-        var opened = try quic.protection
-            .openHandshakePacketWithFixedBitPolicy(
+    while (true) {
+        const packet = (nextHandshakePacketFromCoalescedTail(
+            &tail,
+            allow_zero_fixed_bit,
+        ) catch |err| {
+            if (isDiscardableLongHeaderParseError(err)) {
+                return error.MissingCryptoFrame;
+            }
+            return err;
+        }) orelse break;
+        var opened = quic.protection.openHandshakePacketWithFixedBitPolicy(
             endpoint.allocator,
             keys,
             packet,
             next_expected,
             allow_zero_fixed_bit,
-        );
+        ) catch |err| {
+            if (quic.protection.isUnauthenticatedOpenError(err)) continue;
+            return err;
+        };
         var opened_owned = true;
         errdefer if (opened_owned) opened.deinit(endpoint.allocator);
         next_expected = opened.packet_number + 1;
@@ -2809,6 +2852,63 @@ fn openClientHandshakeCryptoFromDatagram(
         }
     }
     return error.MissingCryptoFrame;
+}
+
+fn receiveClientHandshakeCryptoFromDatagram(
+    endpoint: *quic.runtime.Endpoint,
+    source: quic.runtime.DatagramSource,
+    expected_from: net.IpAddress,
+    first_from: net.IpAddress,
+    first_datagram: []const u8,
+    first_ecn: quic.packet_space.EcnCodepoint,
+    keys: quic.protection.PacketProtectionKeys,
+    expected_packet_number: u64,
+    max_crypto_buffer: usize,
+    allow_zero_fixed_bit: bool,
+    require_client_certificate: bool,
+    recovery: retransmit.Config,
+) Error!quic.initial_exchange.ReceivedHandshakeCrypto {
+    var next_from = first_from;
+    var next_bytes = first_datagram;
+    var next_ecn = first_ecn;
+    var owned_datagram: ?quic.runtime.OwnedBytes = null;
+    defer if (owned_datagram) |*datagram| {
+        datagram.deinit(endpoint.allocator);
+    };
+    const deadline = passiveHandshakeTimeout(endpoint.io, recovery);
+
+    while (true) {
+        if (next_from.eql(&expected_from)) {
+            const opened = openClientHandshakeCryptoFromDatagram(
+                endpoint,
+                next_from,
+                next_bytes,
+                next_ecn,
+                keys,
+                expected_packet_number,
+                max_crypto_buffer,
+                allow_zero_fixed_bit,
+                require_client_certificate,
+            ) catch |err| switch (err) {
+                error.MissingCryptoFrame => null,
+                else => |other| return other,
+            };
+            if (opened) |result| return result;
+        }
+        if (owned_datagram) |*datagram| {
+            datagram.deinit(endpoint.allocator);
+            owned_datagram = null;
+        }
+        owned_datagram = source.receiveTimeout(deadline) catch |receive_err|
+            switch (receive_err) {
+                error.Timeout => return error.HandshakeTimeout,
+                error.ConcurrencyUnavailable => return error.HandshakeReceiveFailed,
+                else => |other| return @errorCast(other),
+            };
+        next_from = owned_datagram.?.from;
+        next_bytes = owned_datagram.?.bytes;
+        next_ecn = owned_datagram.?.ecn;
+    }
 }
 
 fn coalescedOneRttTail(
@@ -2889,6 +2989,9 @@ test "QUIC server finds Client Finished behind coalesced Initial" {
         },
     );
     defer allocator.free(handshake);
+    const unauthenticated_handshake = try allocator.dupe(u8, handshake);
+    defer allocator.free(unauthenticated_handshake);
+    unauthenticated_handshake[unauthenticated_handshake.len - 1] ^= 0x80;
     const application_keys = quic.protection.deriveAes128Keys(
         [_]u8{0x6b} ** quic.protection.secret_len,
     );
@@ -2913,7 +3016,7 @@ test "QUIC server finds Client Finished behind coalesced Initial" {
     const coalesced = try std.mem.concat(
         allocator,
         u8,
-        &.{ initial, handshake, application },
+        &.{ initial, unauthenticated_handshake, handshake, application },
     );
     defer allocator.free(coalesced);
     try std.testing.expect(containsHandshakePacket(coalesced));
@@ -2939,6 +3042,72 @@ test "QUIC server finds Client Finished behind coalesced Initial" {
         application,
         opened.coalesced_one_rtt.?,
     );
+}
+
+test "QUIC server waits past unauthenticated client Handshake datagram" {
+    const allocator = std.testing.allocator;
+    var threaded = std.Io.Threaded.init(allocator, .{});
+    defer threaded.deinit();
+    const io = threaded.io();
+    var receiver = try quic.runtime.Endpoint.bind(
+        allocator,
+        io,
+        .{ .ip4 = .loopback(0) },
+        .{ .max_datagram_size = 4096 },
+    );
+    defer receiver.deinit();
+    var sender = try quic.runtime.Endpoint.bind(
+        allocator,
+        io,
+        .{ .ip4 = .loopback(0) },
+        .{ .max_datagram_size = 4096 },
+    );
+    defer sender.deinit();
+
+    const keys = quic.protection.deriveAes128Keys(
+        [_]u8{0x6c} ** quic.protection.secret_len,
+    );
+    const dcid = "server02";
+    const scid = "client02";
+    const finished = [_]u8{ 0x14, 0, 0, 32 } ++ ([_]u8{0xa6} ** 32);
+    var payload: std.ArrayList(u8) = .empty;
+    defer payload.deinit(allocator);
+    try quic.crypto_stream.writeCryptoFrames(
+        &payload,
+        allocator,
+        0,
+        &finished,
+        finished.len,
+    );
+    const valid = try quic.protection.sealHandshakePacket(allocator, keys, .{
+        .destination_connection_id = dcid,
+        .source_connection_id = scid,
+        .packet_number = 1,
+        .payload = payload.items,
+    });
+    defer allocator.free(valid);
+    const corrupted = try allocator.dupe(u8, valid);
+    defer allocator.free(corrupted);
+    corrupted[corrupted.len - 1] ^= 0x80;
+    try sender.sendBytes(receiver.address(), valid);
+
+    var opened = try receiveClientHandshakeCryptoFromDatagram(
+        &receiver,
+        quic.runtime.DatagramSource.fromEndpoint(&receiver),
+        sender.address(),
+        sender.address(),
+        corrupted,
+        .not_ect,
+        keys,
+        0,
+        1024,
+        false,
+        false,
+        .{ .initial_pto_ms = 10, .max_pto_ms = 10 },
+    );
+    defer opened.deinit(allocator);
+    try std.testing.expectEqualSlices(u8, &finished, opened.crypto_data);
+    try std.testing.expectEqual(@as(u64, 1), opened.packet.packet_number);
 }
 
 fn serverOriginalDestinationConnectionId(received_destination_connection_id: []const u8, options: ServerOptions) []const u8 {
@@ -3024,6 +3193,7 @@ const ReceivedClientInitial = struct {
 
 fn receiveClientInitial(
     endpoint: *quic.runtime.Endpoint,
+    source: quic.runtime.DatagramSource,
     expected_packet_number: u64,
     max_crypto_buffer: usize,
     retry_destination_connection_id: []const u8,
@@ -3044,31 +3214,29 @@ fn receiveClientInitial(
     // A caller-owned deadline, however, starts at the public accept entry and
     // must include this wait rather than taking effect only after peer traffic
     // has created retransmission state.
-    var datagram = if (caller_deadline) |deadline|
-        endpoint.receiveBytesHandlingVersionNegotiationWithDeadline(
+    while (true) {
+        var datagram = try receiveFromSourceBefore(source, caller_deadline);
+        defer datagram.deinit(endpoint.allocator);
+        if (try endpoint.sendVersionNegotiationIfUnsupported(
+            datagram.from,
+            datagram.bytes,
             supported_wire_versions,
-            deadline,
+        )) continue;
+        return openClientInitialDatagram(
+            endpoint,
+            source,
+            datagram,
+            expected_packet_number,
+            max_crypto_buffer,
+            retry_destination_connection_id,
+            version,
+            allow_zero_fixed_bit,
+            caller_deadline,
         ) catch |err| switch (err) {
-            error.Timeout => return error.HandshakeTimeout,
-            error.ConcurrencyUnavailable => return error.HandshakeReceiveFailed,
-            else => |other| return @errorCast(other),
-        }
-    else
-        try endpoint.receiveBytesHandlingVersionNegotiation(
-            supported_wire_versions,
-        );
-    defer datagram.deinit(endpoint.allocator);
-    return openClientInitialDatagram(
-        endpoint,
-        .fromEndpoint(endpoint),
-        datagram,
-        expected_packet_number,
-        max_crypto_buffer,
-        retry_destination_connection_id,
-        version,
-        allow_zero_fixed_bit,
-        caller_deadline,
-    );
+            error.DiscardedInitialPacket => continue,
+            else => |other| return other,
+        };
+    }
 }
 
 fn openClientInitialDatagram(
@@ -3082,31 +3250,47 @@ fn openClientInitialDatagram(
     allow_zero_fixed_bit: bool,
     caller_deadline: ?std.Io.Clock.Timestamp,
 ) Error!ReceivedClientInitial {
-    if (datagram.bytes.len < quic.initial_exchange.min_initial_udp_datagram_size) return error.InvalidInitialPacket;
+    if (datagram.bytes.len < quic.initial_exchange.min_initial_udp_datagram_size) {
+        return error.DiscardedInitialPacket;
+    }
 
-    const header = try quic.LongHeader.parseWithFixedBitPolicy(
+    const header = quic.LongHeader.parseWithFixedBitPolicy(
         datagram.bytes,
         allow_zero_fixed_bit,
-    );
-    if (header.packet_type != .initial) return error.InvalidInitialPacket;
+    ) catch |err| {
+        if (isDiscardableLongHeaderParseError(err)) {
+            return error.DiscardedInitialPacket;
+        }
+        return err;
+    };
+    if (header.packet_type != .initial) return error.DiscardedInitialPacket;
     if (retry_destination_connection_id.len == 0) {
         // RFC 9000 Section 7.2 requires a first client Initial to use a random
         // Destination Connection ID of at least 8 bytes.  A Retry follow-up is
         // different: its DCID is the server-chosen Retry SCID, which can be
         // shorter, so the accept path below validates exact equality instead.
-        if (header.destination_connection_id.len < 8) return error.InvalidInitialPacket;
+        if (header.destination_connection_id.len < 8) {
+            return error.DiscardedInitialPacket;
+        }
     } else if (!std.mem.eql(u8, header.destination_connection_id, retry_destination_connection_id)) {
-        return error.InvalidInitialPacket;
+        return error.DiscardedInitialPacket;
     }
 
-    if (header.version != version.wireValue()) return error.InvalidInitialPacket;
+    if (header.version != version.wireValue()) return error.DiscardedInitialPacket;
     const initial_secrets = try quic.protection.deriveInitialSecretsForVersion(version.wireValue(), header.destination_connection_id);
     const initial_info =
-        try quic.protection.peekProtectedLongPacketInfoWithFixedBitPolicy(
+        quic.protection.peekProtectedLongPacketInfoWithFixedBitPolicy(
             datagram.bytes,
             allow_zero_fixed_bit,
-        );
-    if (initial_info.packet_type != .initial) return error.InvalidInitialPacket;
+        ) catch |err| {
+            if (isDiscardableLongHeaderParseError(err)) {
+                return error.DiscardedInitialPacket;
+            }
+            return err;
+        };
+    if (initial_info.packet_type != .initial) {
+        return error.DiscardedInitialPacket;
+    }
     var flight = try quic.initial_exchange.openInitialCryptoFlightFrom(
         endpoint,
         source,
@@ -3119,6 +3303,7 @@ fn openClientInitialDatagram(
             .min_datagram_size = quic.initial_exchange.min_initial_udp_datagram_size,
             .allow_zero_fixed_bit = allow_zero_fixed_bit,
             .deadline = caller_deadline,
+            .discard_invalid_first = true,
         },
     );
     errdefer flight.deinit(endpoint.allocator);
@@ -3175,7 +3360,7 @@ fn receiveRetriedClientInitial(
                 version.wireValue(),
                 retry_destination_connection_id,
             );
-        var flight = try quic.initial_exchange.openInitialCryptoFlightFrom(
+        var flight = quic.initial_exchange.openInitialCryptoFlightFrom(
             endpoint,
             source,
             datagram.from,
@@ -3186,8 +3371,12 @@ fn receiveRetriedClientInitial(
                 .max_crypto_buffer = max_crypto_buffer,
                 .min_datagram_size = quic.initial_exchange.min_initial_udp_datagram_size,
                 .allow_zero_fixed_bit = allow_zero_fixed_bit,
+                .discard_invalid_first = true,
             },
-        );
+        ) catch |err| switch (err) {
+            error.DiscardedInitialPacket => continue,
+            else => |other| return other,
+        };
         errdefer flight.deinit(endpoint.allocator);
         const coalesced_tail = try endpoint.allocator.dupe(
             u8,
@@ -3230,25 +3419,34 @@ fn receiveServerHandshakeCrypto(
     defer if (pending_tail_storage) |storage| endpoint.allocator.free(storage);
 
     while (true) {
-        var owned_datagram: ?quic.runtime.OwnedBytes = null;
-        defer if (owned_datagram) |*datagram| datagram.deinit(endpoint.allocator);
-        const bytes = if (try nextHandshakePacketFromCoalescedTail(
+        const pending_packet = nextHandshakePacketFromCoalescedTail(
             &pending_tail,
             allow_zero_fixed_bit,
-        )) |packet| packet else blk: {
+        ) catch |err| blk: {
+            if (!isDiscardableLongHeaderParseError(err)) return err;
+            pending_tail = &.{};
+            break :blk null;
+        };
+        var owned_datagram: ?quic.runtime.OwnedBytes = null;
+        defer if (owned_datagram) |*datagram| datagram.deinit(endpoint.allocator);
+        const bytes = if (pending_packet) |packet| packet else blk: {
             owned_datagram = source.receiveTimeout(passive_deadline) catch |err|
                 switch (err) {
                     error.Timeout => return error.HandshakeTimeout,
                     error.ConcurrencyUnavailable => return error.HandshakeReceiveFailed,
                     else => |other| return @errorCast(other),
                 };
+            if (!owned_datagram.?.from.eql(&from)) continue;
             response_from = owned_datagram.?.from;
             response_ecn = owned_datagram.?.ecn;
             var datagram_tail: []const u8 = owned_datagram.?.bytes;
             const packet = (nextHandshakePacketFromCoalescedTail(
                 &datagram_tail,
                 allow_zero_fixed_bit,
-            ) catch continue) orelse continue;
+            ) catch |err| {
+                if (isDiscardableLongHeaderParseError(err)) continue;
+                return err;
+            }) orelse continue;
             if (datagram_tail.len != 0) {
                 if (pending_tail_storage) |storage| {
                     endpoint.allocator.free(storage);
@@ -3263,13 +3461,16 @@ fn receiveServerHandshakeCrypto(
             break :blk packet;
         };
 
-        var packet = try quic.protection.openHandshakePacketWithFixedBitPolicy(
+        var packet = quic.protection.openHandshakePacketWithFixedBitPolicy(
             endpoint.allocator,
             handshake_keys,
             bytes,
             next_expected,
             allow_zero_fixed_bit,
-        );
+        ) catch |err| {
+            if (quic.protection.isUnauthenticatedOpenError(err)) continue;
+            return err;
+        };
         errdefer packet.deinit(endpoint.allocator);
         next_expected = packet.packet_number + 1;
         quic.initial_exchange.insertCryptoPayload(
@@ -3465,6 +3666,10 @@ test "QUIC handshake receive skips many CRYPTO-less Handshake packets" {
         },
     );
     defer allocator.free(crypto_packet);
+    const unauthenticated_packet = try allocator.dupe(u8, crypto_packet);
+    defer allocator.free(unauthenticated_packet);
+    unauthenticated_packet[unauthenticated_packet.len - 1] ^= 0x80;
+    try coalesced.appendSlice(allocator, unauthenticated_packet);
     try coalesced.appendSlice(allocator, crypto_packet);
     const application_keys = quic.protection.deriveAes128Keys(
         [_]u8{0x54} ** quic.protection.secret_len,
@@ -3520,21 +3725,31 @@ fn openClientEarlyData(
 ) Error!?quic.zero_rtt.Packet {
     if (coalesced_tail.len == 0) return null;
     const info =
-        try quic.protection.peekProtectedLongPacketInfoWithFixedBitPolicy(
+        quic.protection.peekProtectedLongPacketInfoWithFixedBitPolicy(
             coalesced_tail,
             allow_zero_fixed_bit,
-        );
+        ) catch |err| {
+            if (isDiscardableLongHeaderParseError(err)) return null;
+            return err;
+        };
     if (info.packet_type != .zero_rtt or info.len != coalesced_tail.len) {
-        return error.InvalidHandshakeFlight;
+        return null;
     }
-    var packet = try quic.zero_rtt.openBytesWithFixedBitPolicy(
+    const opened = quic.protection.openZeroRttPacketWithFixedBitPolicy(
+        endpoint.allocator,
+        keys,
+        coalesced_tail,
+        expected_packet_number,
+        allow_zero_fixed_bit,
+    ) catch |err| {
+        if (quic.protection.isUnauthenticatedOpenError(err)) return null;
+        return err;
+    };
+    var packet = try quic.zero_rtt.fromOpenedPacket(
         endpoint,
         from,
-        coalesced_tail,
-        keys,
-        expected_packet_number,
+        opened,
         max_frames,
-        allow_zero_fixed_bit,
     );
     errdefer packet.deinit(endpoint.allocator);
     if (!std.mem.eql(
@@ -3553,6 +3768,84 @@ fn openClientEarlyData(
     return packet;
 }
 
+test "QUIC handshake discards unauthenticated 0-RTT before frame parsing" {
+    const allocator = std.testing.allocator;
+    var threaded = std.Io.Threaded.init(allocator, .{});
+    defer threaded.deinit();
+    var endpoint = try quic.runtime.Endpoint.bind(
+        allocator,
+        threaded.io(),
+        .{ .ip4 = .loopback(0) },
+        .{ .max_datagram_size = 4096 },
+    );
+    defer endpoint.deinit();
+
+    const dcid = "earlydst";
+    const scid = "earlysrc";
+    const keys = quic.protection.deriveAes128Keys(
+        [_]u8{0xe8} ** quic.protection.secret_len,
+    );
+    const payload = try quic.zero_rtt.encodeFrames(
+        allocator,
+        &.{.{ .stream = .{ .stream_id = 0, .data = "early" } }},
+    );
+    defer allocator.free(payload);
+    const corrupted = try quic.protection.sealZeroRttPacket(
+        allocator,
+        keys,
+        .{
+            .destination_connection_id = dcid,
+            .source_connection_id = scid,
+            .packet_number = 0,
+            .payload = payload,
+        },
+    );
+    defer allocator.free(corrupted);
+    corrupted[corrupted.len - 1] ^= 0x80;
+    try std.testing.expect((try openClientEarlyData(
+        &endpoint,
+        endpoint.address(),
+        corrupted,
+        keys,
+        0,
+        8,
+        dcid,
+        scid,
+        false,
+    )) == null);
+
+    const forbidden_payload = try quic.zero_rtt.encodeFrames(
+        allocator,
+        &.{.{ .crypto = .{ .offset = 0, .data = "forbidden" } }},
+    );
+    defer allocator.free(forbidden_payload);
+    const authenticated = try quic.protection.sealZeroRttPacket(
+        allocator,
+        keys,
+        .{
+            .destination_connection_id = dcid,
+            .source_connection_id = scid,
+            .packet_number = 1,
+            .payload = forbidden_payload,
+        },
+    );
+    defer allocator.free(authenticated);
+    try std.testing.expectError(
+        error.InvalidFrame,
+        openClientEarlyData(
+            &endpoint,
+            endpoint.address(),
+            authenticated,
+            keys,
+            0,
+            8,
+            dcid,
+            scid,
+            false,
+        ),
+    );
+}
+
 fn receiveStandaloneClientEarlyData(
     endpoint: *quic.runtime.Endpoint,
     source: quic.runtime.DatagramSource,
@@ -3564,13 +3857,11 @@ fn receiveStandaloneClientEarlyData(
     expected_source_connection_id: []const u8,
     allow_zero_fixed_bit: bool,
     caller_deadline: ?std.Io.Clock.Timestamp,
-) Error!quic.zero_rtt.Packet {
+) Error!?quic.zero_rtt.Packet {
     var datagram = try receiveFromSourceBefore(source, caller_deadline);
     defer datagram.deinit(endpoint.allocator);
-    if (!datagram.from.eql(&expected_from)) {
-        return error.InvalidHandshakeFlight;
-    }
-    return (try openClientEarlyData(
+    if (!datagram.from.eql(&expected_from)) return null;
+    return openClientEarlyData(
         endpoint,
         datagram.from,
         datagram.bytes,
@@ -3580,7 +3871,7 @@ fn receiveStandaloneClientEarlyData(
         expected_destination_connection_id,
         expected_source_connection_id,
         allow_zero_fixed_bit,
-    )) orelse return error.InvalidHandshakeFlight;
+    );
 }
 
 fn discardClientEarlyData(

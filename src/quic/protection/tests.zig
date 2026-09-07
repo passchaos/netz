@@ -1103,6 +1103,21 @@ test "QUIC packet protection rejects reserved header bits after unprotect" {
     }
 }
 
+test "QUIC unauthenticated open error classifier excludes protocol errors" {
+    try std.testing.expect(
+        protection.isUnauthenticatedOpenError(error.AuthenticationFailed),
+    );
+    try std.testing.expect(
+        protection.isUnauthenticatedOpenError(error.InvalidHeaderProtectionSample),
+    );
+    try std.testing.expect(
+        !protection.isUnauthenticatedOpenError(error.InvalidReservedBits),
+    );
+    try std.testing.expect(
+        !protection.isUnauthenticatedOpenError(error.OutOfMemory),
+    );
+}
+
 test "QUIC protected long packets reject a missing fixed bit before AEAD" {
     const allocator = std.testing.allocator;
     const dcid = [_]u8{ 0xc1, 0xc2, 0xc3, 0xc4 };
