@@ -895,6 +895,7 @@ zig build bench-quic-handshake-stream -Doptimize=ReleaseFast -- --iterations=3 -
 taskset -c 0 zig build bench-quic-handshake-stream -Doptimize=ReleaseFast -- --mode=handshake --iterations=200 --skip-server-verification
 zig build bench-quic-handshake-stream -Doptimize=ReleaseFast -- --mode=lifecycle-churn --iterations=4096 --streams=16 --loss-pct=5
 zig build bench-quic-handshake-stream -Doptimize=ReleaseFast -- --mode=lifecycle-churn --iterations=4096 --streams=16 --reorder-every=5
+zig build bench-quic-quic-go -Doptimize=ReleaseFast -- --warmup=2 --iterations=5 --bytes-per-stream=4194304 --chunk-bytes=16384 --stream-window=1048576
 zig build bench-quic-one-rtt-send -Doptimize=ReleaseFast
 zig build bench-quic-one-rtt-receive -Doptimize=ReleaseFast
 taskset -c 0 zig build bench-quic-one-rtt-receive -Doptimize=ReleaseFast -- --mode=visitor --frame=stream --warmup=200 --iterations=5000
@@ -986,6 +987,13 @@ The aggregate `bench` step runs the current protocol microbenchmarks:
   retained-memory reduction versus the previous absolute-offset buffer model.
 
 External cross-process comparisons remain separate from the aggregate step.
+`bench-quic-quic-go` runs certificate-verified raw QUIC STREAM upload with one
+or four streams, both sender roles, separate client/server CPUs, and a fresh
+connection per sample. Untimed control and stream preludes precede the timed
+payload, while DONE/DONE_ACK require exact byte, FIN, and checksum validation.
+Results remain `same-application-shape` because quic-go GRO, ACK/pacing, and
+packetization are not externally equalized.
+
 `bench-http3-quic-go` runs certificate-verified HTTP/3 upload/download in both
 client/server role pairings, with a fresh connection and untimed ready request
 per sample, matching payloads, flow windows, 1280-byte steady-state MTU, and

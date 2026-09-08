@@ -699,6 +699,39 @@ pub fn build(b: *std.Build) void {
         "Run verified QUIC lifecycle, migration, flow-control, and loss interop with local quic-go fixtures",
     );
     quic_quic_go_step.dependOn(&quic_quic_go.step);
+    const quic_quic_go_bench_client = b.addExecutable(.{
+        .name = "netz-quic-quic-go-bench-client",
+        .root_module = b.createModule(.{
+            .root_source_file = b.path(
+                "tools/interop/quic_quic_go_bench_client.zig",
+            ),
+            .target = target,
+            .optimize = optimize,
+            .imports = &.{.{ .name = "netz", .module = netz_mod }},
+        }),
+    });
+    const quic_quic_go_bench_server = b.addExecutable(.{
+        .name = "netz-quic-quic-go-bench-server",
+        .root_module = b.createModule(.{
+            .root_source_file = b.path(
+                "tools/interop/quic_quic_go_bench_server.zig",
+            ),
+            .target = target,
+            .optimize = optimize,
+            .imports = &.{.{ .name = "netz", .module = netz_mod }},
+        }),
+    });
+    const quic_quic_go_bench = b.addSystemCommand(
+        &.{"tools/interop/quic_quic_go_bench.sh"},
+    );
+    quic_quic_go_bench.addArtifactArg(quic_quic_go_bench_client);
+    quic_quic_go_bench.addArtifactArg(quic_quic_go_bench_server);
+    if (b.args) |args| quic_quic_go_bench.addArgs(args);
+    const quic_quic_go_bench_step = b.step(
+        "bench-quic-quic-go",
+        "Compare verified raw QUIC STREAM transfer against quic-go",
+    );
+    quic_quic_go_bench_step.dependOn(&quic_quic_go_bench.step);
 
     const quic_s2n = b.addSystemCommand(
         &.{"tools/interop/quic_s2n.sh"},

@@ -1885,6 +1885,45 @@ matching pinned netz probe was similarly scheduling-bound. The prior 1.36x and
 1.29x ratios are therefore withdrawn. Future raw QUIC claims require an
 equivalent endpoint CPU layout, not merely a shared host and transfer size.
 
+The new `bench-quic-quic-go` process harness supplies that equivalent two-CPU
+layout against quic-go v0.59.0. It runs both client/server sender roles with a
+fresh certificate-verified QUIC v1 connection per sample. An untimed fixed
+control stream exchanges CONFIG/READY before 1 or 4 unidirectional data streams
+transfer deterministic payloads; t1 occurs only after the receiver verifies
+every byte and FIN and returns DONE with the exact aggregate checksum. The
+sender returns DONE_ACK before the receiver closes the connection. Both
+processes disable GSO, netz disables GRO, both use fixed 1 MiB stream and 8 MiB
+connection windows, and the measured 1-RTT MTU is 1280 bytes.
+
+```sh
+zig build bench-quic-quic-go -Doptimize=ReleaseFast -- \
+  --warmup=2 --iterations=5 --bytes-per-stream=4194304 \
+  --chunk-bytes=16384 --stream-window=1048576 --timeout-ms=30000
+```
+
+CPU-0/client and CPU-1/server samples on 2026-09-08 measured:
+
+| Streams | Sender | Role pair | Throughput |
+|---:|---|---|---:|
+| 1 | netz | netz client + quic-go server | 227.48-228.77 MiB/s |
+| 1 | netz | quic-go client + netz server | 172.74-185.68 MiB/s |
+| 1 | quic-go | quic-go client + netz server | 43.78-72.31 MiB/s |
+| 1 | quic-go | netz client + quic-go server | 59.01-126.12 MiB/s |
+| 4 | netz | netz client + quic-go server | 210.53-216.66 MiB/s |
+| 4 | netz | quic-go client + netz server | 145.62-147.99 MiB/s |
+| 4 | quic-go | quic-go client + netz server | 116.83-121.03 MiB/s |
+| 4 | quic-go | netz client + quic-go server | 115.01-122.68 MiB/s |
+
+Each 1-stream sample verified 4,194,304 bytes and checksum 534,773,760; each
+4-stream sample verified 16,777,216 bytes and checksum 2,139,095,040. The wide
+single-stream quic-go ranges and netz's role sensitivity are retained instead
+of compressed into a ratio. This is `same-application-shape`, not equal-wire:
+quic-go has no public GRO disable, advertises a different maximum UDP payload,
+uses per-stream goroutines while netz round-robins one event loop, and retains
+implementation-specific ACK/pacing/packetization. Capture-level UDP byte and
+datagram counts are still required before a general raw STREAM superiority
+claim.
+
 This comparison intentionally disables GSO/GRO. The host clamps
 `net.core.rmem_max` to 212,992 bytes, so a same-process multi-packet burst can
 overflow the effective UDP receive queue and create artificial loss. The

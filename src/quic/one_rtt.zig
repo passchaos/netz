@@ -7555,7 +7555,7 @@ pub const Connection = struct {
         deadline: std.Io.Clock.Timestamp,
     ) (Error || quic.runtime.ReceiveTimeoutError)!ReceivedPacket {
         return self.receivePacketServicingTimersUntil(
-            try callerDeadlineFromTimeout(
+            callerDeadlineFromTimeout(
                 self.endpoint.io,
                 .{ .deadline = deadline },
             ),

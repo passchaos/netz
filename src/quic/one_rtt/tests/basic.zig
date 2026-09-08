@@ -1877,6 +1877,20 @@ test "QUIC 1-RTT pollStream reports data FIN and reset once" {
     try std.testing.expect(bounded_final == .data);
     try std.testing.expect(bounded_final.data.fin);
     try std.testing.expectEqualStrings("ded", out[0..bounded_final.data.bytes]);
+
+    try client.send(&.{.{ .stream = .{
+        .stream_id = 24,
+        .data = "deadline-packet",
+        .fin = true,
+    } }});
+    var deadline_packet = try server.receivePacketServicingTimersDeadline(
+        .fromNow(io, .{ .raw = .fromSeconds(1), .clock = .awake }),
+    );
+    defer deadline_packet.deinit(allocator);
+    try std.testing.expectEqualStrings(
+        "deadline-packet",
+        server.availableReceivedStream(24).?,
+    );
 }
 
 test "QUIC 1-RTT optionally drains buffered stream data before reset" {
