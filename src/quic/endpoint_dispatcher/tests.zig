@@ -191,6 +191,139 @@ test "QUIC endpoint dispatcher owns CID routing across connections" {
     try std.testing.expect(!(try dispatcher.unregisterConnection(10)));
 }
 
+test "QUIC endpoint dispatcher polls stream credit without owning receive" {
+    const allocator = std.testing.allocator;
+    var threaded = std.Io.Threaded.init(allocator, .{});
+    defer threaded.deinit();
+    const io = threaded.io();
+
+    var endpoint = try runtime.Endpoint.bind(
+        allocator,
+        io,
+        .{ .ip4 = .loopback(0) },
+        .{ .max_datagram_size = 4096 },
+    );
+    defer endpoint.deinit();
+    var peer_endpoint = try runtime.Endpoint.bind(
+        allocator,
+        io,
+        .{ .ip4 = .loopback(0) },
+        .{ .max_datagram_size = 4096 },
+    );
+    defer peer_endpoint.deinit();
+    const keys = quic.protection.deriveAes128Keys(
+        [_]u8{0xd7} ** quic.protection.secret_len,
+    );
+    var connection = try one_rtt.Connection.init(&endpoint, .{
+        .peer = peer_endpoint.address(),
+        .receive_keys = keys,
+        .send_keys = keys,
+        .local_connection_id = "poll-server",
+        .peer_connection_id = "poll-client",
+        .initial_send_max_streams_bidi = 1,
+        .initial_send_max_streams_uni = 1,
+        .enable_pacing = false,
+    });
+    defer connection.deinit();
+    var dispatcher = Dispatcher.init(allocator, &endpoint);
+    defer dispatcher.deinit();
+    try dispatcher.registerConnection(77, &connection);
+
+    try std.testing.expectError(
+        error.UnknownConnectionHandle,
+        dispatcher.pollOpenStream(78),
+    );
+    try std.testing.expectEqual(@as(?u64, 0), try dispatcher.pollOpenStream(77));
+    try std.testing.expectEqual(
+        @as(?u64, 2),
+        try dispatcher.pollOpenUnidirectionalStream(77),
+    );
+
+    const grant_frames = [_]quic.Frame{
+        .{ .max_streams_bidi = .{ .maximum_streams = 2 } },
+        .{ .max_streams_uni = .{ .maximum_streams = 2 } },
+    };
+    try one_rtt.sendFrames(
+        &peer_endpoint,
+        endpoint.address(),
+        keys,
+        .{
+            .destination_connection_id = "poll-server",
+            .packet_number = 0,
+            .frames = &grant_frames,
+        },
+    );
+
+    const before = connection.stats();
+    try std.testing.expectEqual(
+        @as(?u64, null),
+        try dispatcher.pollOpenStream(77),
+    );
+    try std.testing.expectEqual(
+        @as(?u64, null),
+        try dispatcher.pollOpenUniStream(77),
+    );
+    try std.testing.expectEqual(before.packets_sent, connection.stats().packets_sent);
+    try std.testing.expectEqual(
+        before.packets_received,
+        connection.stats().packets_received,
+    );
+    try std.testing.expectEqual(
+        @as(u64, 4),
+        connection.nextLocalBidirectionalStreamId(),
+    );
+    try std.testing.expectEqual(
+        @as(u64, 6),
+        connection.nextLocalUnidirectionalStreamId(),
+    );
+
+    const versions = [_]u32{quic.Version.version_1.wireValue()};
+    var event = try dispatcher.receive(&versions);
+    defer event.deinit(allocator);
+    try std.testing.expect(event == .packet);
+    try std.testing.expectEqual(@as(ConnectionHandle, 77), event.packet.connection_handle);
+    try std.testing.expectEqual(@as(?u64, 4), try dispatcher.pollOpenStream(77));
+    try std.testing.expectEqual(
+        @as(?u64, 6),
+        try dispatcher.pollOpenUnidirectionalStream(77),
+    );
+
+    const connection_timer = connection.nextTimerDeadline();
+    const endpoint_timer = dispatcher.nextTimerDeadline();
+    if (connection_timer) |timer| {
+        const scheduled = endpoint_timer orelse
+            return error.TestUnexpectedResult;
+        try std.testing.expectEqual(
+            @as(ConnectionHandle, 77),
+            scheduled.connection_id,
+        );
+        try std.testing.expectEqual(timer, scheduled.timer);
+    } else {
+        try std.testing.expect(endpoint_timer == null);
+    }
+
+    // A caller may close a registered connection between endpoint turns. The
+    // failed poll still mirrors its newly armed close timer.
+    try connection.closeApplication(0, "done");
+    try std.testing.expectError(
+        error.ConnectionClosed,
+        dispatcher.pollOpenStream(77),
+    );
+    const close_timer = connection.nextTimerDeadline() orelse
+        return error.TestUnexpectedResult;
+    const endpoint_close_timer = dispatcher.nextTimerDeadline() orelse
+        return error.TestUnexpectedResult;
+    try std.testing.expectEqual(
+        @as(ConnectionHandle, 77),
+        endpoint_close_timer.connection_id,
+    );
+    try std.testing.expectEqual(close_timer, endpoint_close_timer.timer);
+    try std.testing.expectEqual(
+        one_rtt.TimerDeadlineKind.close,
+        endpoint_close_timer.timer.kind,
+    );
+}
+
 test "QUIC endpoint dispatcher synchronizes local CID rotation" {
     const allocator = std.testing.allocator;
     var threaded = std.Io.Threaded.init(allocator, .{});

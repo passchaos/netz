@@ -2269,6 +2269,133 @@ test "QUIC 1-RTT connection enforces stream count limits and MAX_STREAMS" {
     try std.testing.expectEqual(@as(u64, 2), blocked_again.frames[0].streams_blocked_bidi.maximum_streams);
 }
 
+test "QUIC socket-free stream open polling preserves blocked cursors" {
+    const allocator = std.testing.allocator;
+    var threaded = std.Io.Threaded.init(allocator, .{});
+    defer threaded.deinit();
+    const io = threaded.io();
+
+    var endpoint = try quic.runtime.Endpoint.bind(
+        allocator,
+        io,
+        .{ .ip4 = .loopback(0) },
+        .{ .max_datagram_size = 4096 },
+    );
+    defer endpoint.deinit();
+    var peer_endpoint = try quic.runtime.Endpoint.bind(
+        allocator,
+        io,
+        .{ .ip4 = .loopback(0) },
+        .{ .max_datagram_size = 4096 },
+    );
+    defer peer_endpoint.deinit();
+    const keys = quic.protection.deriveAes128Keys(
+        [_]u8{0xa6} ** quic.protection.secret_len,
+    );
+    var connection = try one_rtt.Connection.init(&endpoint, .{
+        .peer = peer_endpoint.address(),
+        .receive_keys = keys,
+        .send_keys = keys,
+        .local_connection_id = "poll-local",
+        .peer_connection_id = "poll-peer",
+        .initial_send_max_streams_bidi = 1,
+        .initial_send_max_streams_uni = 1,
+        .enable_pacing = false,
+    });
+    defer connection.deinit();
+
+    try std.testing.expectEqual(
+        @as(?u64, 0),
+        try connection.pollOpenStream(),
+    );
+    try std.testing.expectEqual(
+        @as(?u64, 2),
+        try connection.pollOpenUnidirectionalStream(),
+    );
+    const before = connection.stats();
+    try std.testing.expectEqual(
+        @as(?u64, null),
+        try connection.pollOpenStream(),
+    );
+    try std.testing.expectEqual(
+        @as(?u64, null),
+        try connection.pollOpenUniStream(),
+    );
+    try std.testing.expectEqual(before.packets_sent, connection.stats().packets_sent);
+    try std.testing.expectEqual(
+        @as(u64, 4),
+        connection.nextLocalBidirectionalStreamId(),
+    );
+    try std.testing.expectEqual(
+        @as(u64, 6),
+        connection.nextLocalUnidirectionalStreamId(),
+    );
+
+    connection.peer_max_streams_bidi = 2;
+    connection.peer_max_streams_uni = 2;
+    try std.testing.expectEqual(
+        @as(?u64, 4),
+        try connection.pollOpenStream(),
+    );
+    try std.testing.expectEqual(
+        @as(?u64, 6),
+        try connection.pollOpenUnidirectionalStream(),
+    );
+}
+
+test "QUIC socket-free stream open polling rejects closed and idle connections" {
+    const allocator = std.testing.allocator;
+    var threaded = std.Io.Threaded.init(allocator, .{});
+    defer threaded.deinit();
+    const io = threaded.io();
+
+    var endpoint = try quic.runtime.Endpoint.bind(
+        allocator,
+        io,
+        .{ .ip4 = .loopback(0) },
+        .{ .max_datagram_size = 4096 },
+    );
+    defer endpoint.deinit();
+    var peer_endpoint = try quic.runtime.Endpoint.bind(
+        allocator,
+        io,
+        .{ .ip4 = .loopback(0) },
+        .{ .max_datagram_size = 4096 },
+    );
+    defer peer_endpoint.deinit();
+    const keys = quic.protection.deriveAes128Keys(
+        [_]u8{0xa5} ** quic.protection.secret_len,
+    );
+    var closed = try one_rtt.Connection.init(&endpoint, .{
+        .peer = peer_endpoint.address(),
+        .receive_keys = keys,
+        .send_keys = keys,
+        .local_connection_id = "closed-local",
+        .peer_connection_id = "closed-peer",
+        .enable_pacing = false,
+    });
+    defer closed.deinit();
+    try closed.closeApplication(0, "done");
+    try std.testing.expectError(error.ConnectionClosed, closed.pollOpenStream());
+
+    var idle = try one_rtt.Connection.init(&endpoint, .{
+        .peer = peer_endpoint.address(),
+        .receive_keys = keys,
+        .send_keys = keys,
+        .local_connection_id = "idle-local",
+        .peer_connection_id = "idle-peer",
+        .local_max_idle_timeout_ms = 1,
+        .enable_pacing = false,
+    });
+    defer idle.deinit();
+    idle.markActivity(0);
+    try std.testing.expect(idle.checkIdleTimeout(std.math.maxInt(u64)));
+    try std.testing.expectError(
+        error.ConnectionClosed,
+        idle.pollOpenUnidirectionalStream(),
+    );
+}
+
 test "QUIC bounded stream open waits for cumulative MAX_STREAMS credit" {
     const allocator = std.testing.allocator;
     var threaded = std.Io.Threaded.init(allocator, .{});

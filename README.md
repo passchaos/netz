@@ -340,6 +340,10 @@ starts with deterministic parsers, serializers, preallocated fixed-width wire-in
   packet storms and opt-in adaptive receive-window growth,
   stream-count flow control with MAX_STREAMS and STREAMS_BLOCKED handling plus
   the same per-limit duplicate suppression for stream-count exhaustion; peer
+  credit polling for shared-endpoint loops reserves bidirectional or
+  unidirectional IDs only when credit is already present, without reading the
+  UDP socket, waiting, emitting STREAMS_BLOCKED, or advancing a blocked cursor;
+  handle-based dispatcher variants keep the aggregate timer index synchronized;
   stream credit is returned only after both directions are terminal, including
   acknowledgement of the local FIN/RESET, with early release requests flushed
   automatically by the ACK receive path. Released peer stream buffers and map

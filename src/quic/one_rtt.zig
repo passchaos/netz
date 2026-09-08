@@ -2343,14 +2343,26 @@ pub const Connection = struct {
         return self.tryOpenLocalStream(.bidirectional);
     }
 
+    /// Reserve one bidirectional stream when peer credit is already present.
+    ///
+    /// Unlike `openStreamWithDeadline`, this never reads the endpoint socket
+    /// or waits. Unlike `tryOpenStream`, it also emits no STREAMS_BLOCKED
+    /// packet. Shared-endpoint dispatchers can therefore poll after routing a
+    /// packet or servicing a timer without creating a second socket owner.
+    /// `null` leaves the stream-ID cursor unchanged and means the caller must
+    /// wait for externally driven MAX_STREAMS progress.
+    pub fn pollOpenStream(self: *Connection) Error!?u64 {
+        return self.pollOpenLocalStream(.bidirectional);
+    }
+
     /// Peek at the next local stream ID without reserving transport credit.
     /// Protocol adapters with a second shared namespace use this to reject a
     /// cursor mismatch before either irreversible reservation is consumed.
-    pub fn nextLocalBidirectionalStreamId(self: Connection) u64 {
+    pub fn nextLocalBidirectionalStreamId(self: *const Connection) u64 {
         return self.next_local_bidi_stream_id;
     }
 
-    pub fn nextLocalUnidirectionalStreamId(self: Connection) u64 {
+    pub fn nextLocalUnidirectionalStreamId(self: *const Connection) u64 {
         return self.next_local_uni_stream_id;
     }
 
@@ -2387,6 +2399,15 @@ pub const Connection = struct {
     /// STREAMS_BLOCKED notification is paced.
     pub fn tryOpenUnidirectionalStream(self: *Connection) Error!u64 {
         return self.tryOpenLocalStream(.unidirectional);
+    }
+
+    /// Socket-free unidirectional counterpart to `pollOpenStream`.
+    pub fn pollOpenUnidirectionalStream(self: *Connection) Error!?u64 {
+        return self.pollOpenLocalStream(.unidirectional);
+    }
+
+    pub fn pollOpenUniStream(self: *Connection) Error!?u64 {
+        return self.pollOpenUnidirectionalStream();
     }
 
     /// Wait for peer unidirectional-stream credit until `timeout` expires.
@@ -2492,8 +2513,19 @@ pub const Connection = struct {
         return self.reserveLocalStream(direction);
     }
 
+    fn pollOpenLocalStream(
+        self: *Connection,
+        direction: StreamDirection,
+    ) Error!?u64 {
+        if (self.close_info != null or self.idle_timed_out) {
+            return error.ConnectionClosed;
+        }
+        if (self.localStreamLimitExceeded(direction)) return null;
+        return try self.reserveLocalStream(direction);
+    }
+
     fn localStreamLimitExceeded(
-        self: Connection,
+        self: *const Connection,
         direction: StreamDirection,
     ) bool {
         const stream_id, const limit = switch (direction) {

@@ -630,6 +630,40 @@ pub const Dispatcher = struct {
         return self.timers.earliestDeadline();
     }
 
+    /// Reserve one bidirectional stream when the registered connection has
+    /// peer credit. This operation never reads the shared UDP socket, waits,
+    /// or emits STREAMS_BLOCKED; `null` asks the endpoint loop to drive more
+    /// packet/timer progress before polling again.
+    pub fn pollOpenStream(
+        self: *Dispatcher,
+        handle: ConnectionHandle,
+    ) Error!?u64 {
+        const entry = self.connections.getPtr(handle) orelse
+            return error.UnknownConnectionHandle;
+        const result = entry.connection.pollOpenStream();
+        try self.timers.armFromConnection(handle, entry.connection);
+        return result;
+    }
+
+    /// Socket-free unidirectional counterpart to `pollOpenStream`.
+    pub fn pollOpenUnidirectionalStream(
+        self: *Dispatcher,
+        handle: ConnectionHandle,
+    ) Error!?u64 {
+        const entry = self.connections.getPtr(handle) orelse
+            return error.UnknownConnectionHandle;
+        const result = entry.connection.pollOpenUnidirectionalStream();
+        try self.timers.armFromConnection(handle, entry.connection);
+        return result;
+    }
+
+    pub fn pollOpenUniStream(
+        self: *Dispatcher,
+        handle: ConnectionHandle,
+    ) Error!?u64 {
+        return self.pollOpenUnidirectionalStream(handle);
+    }
+
     /// Return one event from state already buffered while the handshake was
     /// promoted. A client's Finished datagram can carry its first 1-RTT
     /// packet, so an event loop must drain this before blocking on UDP again.
