@@ -2273,6 +2273,15 @@ remaining 15.1-16.0% cost against the one-frame control represents actual
 frame header/mask handling. All samples verified checksum 51,000.
 The RFC 9220 HTTP/3 benchmark also accepts `--warmup=N` and `--iterations=N`
 (defaults 20 and 200), allowing longer profiling runs without source edits.
+Its QUIC timer selector and the directly invoked read-only deadline helpers now
+take `*const Connection` instead of copying the roughly 7.5-KiB connection
+state on every receive-loop poll. Six fixed-binary CPU-0 A/B pairs over 5,000
+complete-message echoes measured 48.14-48.53 us/roundtrip versus
+54.45-54.81 us (11.3-11.9% lower latency). Four fragmented pairs measured
+49.48-49.61 us versus 54.33-54.81 us (8.7-9.7% lower). The corresponding perf
+sample removed `nextTimerDeadline` as a visible symbol and reduced aggregate
+`memcpy` samples from 9.52% to 1.58%; a compile-time receiver assertion guards
+against reintroducing the by-value copy.
 
 ## MQTT 5 windowed QoS 1 broker fanout
 

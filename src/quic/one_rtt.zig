@@ -2574,7 +2574,7 @@ pub const Connection = struct {
         return self.recvStreamStats(stream_id);
     }
 
-    pub fn keepAliveEnabled(self: Connection) bool {
+    pub fn keepAliveEnabled(self: *const Connection) bool {
         return self.config.keep_alive_period_ms != 0;
     }
 
@@ -2583,7 +2583,7 @@ pub const Connection = struct {
     /// The configured period is first capped to half the negotiated idle
     /// timeout when one exists, then raised to at least 1.5x PTO so a keep-alive
     /// PING does not race normal loss recovery on high-latency paths.
-    pub fn keepAliveIntervalMillis(self: Connection) ?u64 {
+    pub fn keepAliveIntervalMillis(self: *const Connection) ?u64 {
         if (!self.keepAliveEnabled()) return null;
         var interval = self.config.keep_alive_period_ms;
         if (self.effectiveIdleTimeoutMillis()) |idle_timeout| {
@@ -2598,7 +2598,7 @@ pub const Connection = struct {
         return @max(interval, nanosToMillisCeil(floor_ns));
     }
 
-    pub fn keepAliveDeadlineMillis(self: Connection) ?u64 {
+    pub fn keepAliveDeadlineMillis(self: *const Connection) ?u64 {
         if (self.close_info != null or self.idle_timed_out) return null;
         if (!self.handshakeConfirmed() or self.keep_alive_ping_sent) return null;
         const interval = self.keepAliveIntervalMillis() orelse return null;
@@ -2637,7 +2637,7 @@ pub const Connection = struct {
     /// timeout, keep-alive, path-validation, close, and key-discard timers
     /// independently. This selector is read-only: callers still dispatch the
     /// typed helper matching `kind` when the deadline becomes due.
-    pub fn nextTimerDeadline(self: Connection) ?TimerDeadline {
+    pub fn nextTimerDeadline(self: *const Connection) ?TimerDeadline {
         var next: ?TimerDeadline = null;
         if (self.path_response_retry_deadline_ns) |deadline| {
             considerTimerDeadline(&next, .{
@@ -3558,7 +3558,7 @@ pub const Connection = struct {
         }
     }
 
-    pub fn pmtuProbeDeadline(self: Connection) ?u64 {
+    pub fn pmtuProbeDeadline(self: *const Connection) ?u64 {
         return self.pmtud.probeDeadlineNs();
     }
 
@@ -4246,7 +4246,7 @@ pub const Connection = struct {
         return retransmitted;
     }
 
-    pub fn timeThresholdLossDeadline(self: Connection, loss_delay_ns: u64) ?u64 {
+    pub fn timeThresholdLossDeadline(self: *const Connection, loss_delay_ns: u64) ?u64 {
         // Ordinary QUIC loss requires a later ACK. A DPLPMTUD probe has no
         // retransmittable application data, but a lone probe still needs a
         // time-threshold deadline so its search state can be retried.
@@ -4294,7 +4294,7 @@ pub const Connection = struct {
 
     /// Effective PTO recovery period for the currently armed epoch. Repeated
     /// scheduler reads cannot move an already published deadline.
-    pub fn jitteredPtoPeriod(self: Connection) u64 {
+    pub fn jitteredPtoPeriod(self: *const Connection) u64 {
         return self.pto_jitter_state.period(
             self.rtt_stats.pto(true),
             self.pto_count,
@@ -4303,7 +4303,7 @@ pub const Connection = struct {
         );
     }
 
-    pub fn ptoDeadline(self: Connection) ?u64 {
+    pub fn ptoDeadline(self: *const Connection) ?u64 {
         if (self.close_info != null or self.idle_timed_out) return null;
         const sent_time = if (self.recovery.pendingCount() != 0)
             self.sent.latestAckElicitingInFlightSentTimeForPathEpoch(
@@ -4329,7 +4329,7 @@ pub const Connection = struct {
             std.math.maxInt(u64);
     }
 
-    pub fn lossDetectionTimerDeadline(self: Connection) ?LossDetectionTimerDeadline {
+    pub fn lossDetectionTimerDeadline(self: *const Connection) ?LossDetectionTimerDeadline {
         if (self.close_info != null or self.idle_timed_out) return null;
         const has_recoverable_data = self.recovery.pendingCount() != 0;
         const has_ack_eliciting_in_flight = self.sent
@@ -6513,7 +6513,7 @@ pub const Connection = struct {
         return count;
     }
 
-    pub fn pathValidationDeadline(self: Connection) ?u64 {
+    pub fn pathValidationDeadline(self: *const Connection) ?u64 {
         return self.path_validation.earliestChallengeDeadline();
     }
 
@@ -6949,11 +6949,11 @@ pub const Connection = struct {
         return self.close_info != null and self.close_info.?.state == .draining;
     }
 
-    pub fn closeExpiryDeadlineMillis(self: Connection) ?u64 {
+    pub fn closeExpiryDeadlineMillis(self: *const Connection) ?u64 {
         return if (self.close_info) |close_info| close_info.expires_ms else null;
     }
 
-    fn closeResponseDeadline(self: Connection) ?u64 {
+    fn closeResponseDeadline(self: *const Connection) ?u64 {
         const close_info = self.close_info orelse return null;
         if (close_info.state != .closing) return null;
         return close_info.response_deadline_ns;
@@ -7039,7 +7039,7 @@ pub const Connection = struct {
     /// three times the current base PTO. Established application-data PTO
     /// includes the peer's max_ack_delay but excludes exponential backoff,
     /// matching tquic and s2n-quic's negotiated idle-timer calculation.
-    pub fn effectiveIdleTimeoutMillis(self: Connection) ?u64 {
+    pub fn effectiveIdleTimeoutMillis(self: *const Connection) ?u64 {
         const local = self.config.local_max_idle_timeout_ms;
         const peer = self.config.peer_max_idle_timeout_ms;
         if (local == 0 and peer == 0) return null;
@@ -7081,7 +7081,7 @@ pub const Connection = struct {
         self.sent_ack_eliciting_since_peer_activity = true;
     }
 
-    pub fn idleTimeoutDeadlineMillis(self: Connection) ?u64 {
+    pub fn idleTimeoutDeadlineMillis(self: *const Connection) ?u64 {
         const timeout = self.effectiveIdleTimeoutMillis() orelse return null;
         const last_activity = self.last_activity_ms orelse return null;
         return std.math.add(u64, last_activity, timeout) catch std.math.maxInt(u64);
@@ -7298,7 +7298,7 @@ pub const Connection = struct {
         return self.stored_new_tokens.items[self.stored_new_tokens.items.len - 1];
     }
 
-    pub fn handshakeConfirmed(self: Connection) bool {
+    pub fn handshakeConfirmed(self: *const Connection) bool {
         return self.handshake_status.isConfirmed();
     }
 
@@ -7374,7 +7374,7 @@ pub const Connection = struct {
         self.receive_key_phase.schedulePreviousDiscard(deadline_nanos);
     }
 
-    pub fn oneRttKeyDiscardDeadline(self: Connection) ?i64 {
+    pub fn oneRttKeyDiscardDeadline(self: *const Connection) ?i64 {
         var deadline: ?i64 = self.send_key_phase.previousDiscardDeadline();
         if (self.receive_key_phase.previousDiscardDeadline()) |peer_deadline| {
             if (deadline == null or peer_deadline < deadline.?) deadline = peer_deadline;
@@ -10866,7 +10866,7 @@ pub const Connection = struct {
         );
     }
 
-    fn monotonicNowNs(self: Connection) u64 {
+    fn monotonicNowNs(self: *const Connection) u64 {
         // `awake` is monotonic and excludes suspend time where the platform can
         // distinguish it. Saturating at the u64 range keeps the existing
         // timestamp API stable even though std.Io uses signed i96 timestamps.
@@ -12523,6 +12523,11 @@ pub const testing = struct {
         return candidate.payload;
     }
 };
+
+comptime {
+    const timer_fn = @typeInfo(@TypeOf(Connection.nextTimerDeadline)).@"fn";
+    std.debug.assert(timer_fn.params[0].type.? == *const Connection);
+}
 
 test {
     _ = @import("one_rtt/tests/mod.zig");
