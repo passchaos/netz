@@ -467,6 +467,16 @@ and stable machine-readable results. It is deliberately reported as
 same-application-shape rather than equal-wire: the two peers currently expose
 different effective WebTransport DATAGRAM payload limits, and packet capture
 plus UDP datagram accounting is still needed to prove equivalent packetization.
+Its opt-in process-memory matrix covers stream upload and DATAGRAM ping-pong in
+both role directions. Three default-shape runs measured stream RSS at 10,240
+KiB for the netz client versus 11,264-11,312 KiB for the wtransport client,
+and 4,352 KiB for the netz server versus 6,144-6,400 KiB for the wtransport
+server. DATAGRAM RSS was 3,840 KiB for both netz roles, 6,144-6,400 KiB for
+the wtransport client, and 5,888-6,144 KiB for its server. Netz explicit
+allocation records ended at zero live bytes; Rust system-requested counters
+remain separately scoped diagnostics. A strict verifier independently derives
+the expected bytes/checksum and requires distinct result, server-completion,
+and memory records.
 
 The RFC 9220 quic-go peer likewise exposes
 `bench-websocket-h3-quic-go`. It runs a certificate-verified persistent binary

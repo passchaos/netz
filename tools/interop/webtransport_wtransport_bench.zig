@@ -353,7 +353,8 @@ pub fn printConfig(
     datagram_limit: usize,
 ) !void {
     std.debug.print(
-        "implementation={s} mode={s} direction={s} role_pair={s} " ++
+        "implementation={s} protocol=webtransport transport=h3 mode={s} " ++
+            "direction={s} role_pair={s} connection_scope=persistent " ++
             "benchmark_scope=same-application-shape warmup={d} " ++
             "iterations={d} streams={d} bytes_per_stream={d} " ++
             "payload_bytes={d} chunk_bytes={d} " ++
@@ -598,15 +599,28 @@ fn runStreamClient(
                     @as(f64, @floatFromInt(elapsed)) /
                     (1024.0 * 1024.0);
             std.debug.print(
-                "implementation=netz mode={s} direction={s} " ++
+                "record=result implementation=netz protocol=webtransport " ++
+                    "transport=h3 mode={s} direction={s} " ++
                     "role_pair=netz-client+wtransport-server " ++
-                    "benchmark_scope=same-application-shape sample={d} " ++
+                    "endpoint_role=client connection_scope=persistent " ++
+                    "benchmark_scope=same-application-shape warmup={d} " ++
+                    "iterations={d} streams={d} bytes_per_stream={d} " ++
+                    "payload_bytes={d} chunk_bytes={d} stream_window={d} " ++
+                    "timeout_ms={d} sample={d} " ++
                     "elapsed_ns={d} logical_MiB_s={d:.3} " ++
                     "sent_bytes={d} received_bytes={d} " ++
                     "streams_finished={d} checksum={d} complete=true\n",
                 .{
                     config.mode.name(),
                     config.mode.direction(),
+                    config.warmup,
+                    config.iterations,
+                    config.streams,
+                    config.bytes_per_stream,
+                    config.payload_bytes,
+                    config.chunk_bytes,
+                    config.stream_window,
+                    config.timeout_ms,
                     round - config.warmup + 1,
                     elapsed,
                     mib_s,
@@ -842,15 +856,29 @@ fn runPingClient(
     var sum: u128 = 0;
     for (samples) |sample| sum += sample;
     std.debug.print(
-        "implementation=netz mode={s} direction={s} " ++
+        "record=result implementation=netz protocol=webtransport " ++
+            "transport=h3 mode={s} direction={s} " ++
             "role_pair=netz-client+wtransport-server " ++
-            "benchmark_scope=same-application-shape " ++
+            "endpoint_role=client connection_scope=persistent " ++
+            "benchmark_scope=same-application-shape warmup={d} " ++
+            "iterations={d} streams={d} bytes_per_stream={d} " ++
+            "payload_bytes={d} chunk_bytes={d} stream_window={d} " ++
+            "timeout_ms={d} " ++
             "p50_ns={d} p90_ns={d} p99_ns={d} p999_ns={d} " ++
-            "mean_ns={d} min_ns={d} max_ns={d} checksum={d} " ++
+            "mean_ns={d} min_ns={d} max_ns={d} sent_bytes={d} " ++
+            "received_bytes={d} checksum={d} " ++
             "complete=true\n",
         .{
             config.mode.name(),
             config.mode.direction(),
+            config.warmup,
+            config.iterations,
+            config.streams,
+            config.bytes_per_stream,
+            config.payload_bytes,
+            config.chunk_bytes,
+            config.stream_window,
+            config.timeout_ms,
             percentile(samples, 50, 100),
             percentile(samples, 90, 100),
             percentile(samples, 99, 100),
@@ -858,7 +886,111 @@ fn runPingClient(
             sum / samples.len,
             samples[0],
             samples[samples.len - 1],
+            @as(u64, config.rounds()) * config.payload_bytes,
+            @as(u64, config.rounds()) * config.payload_bytes,
             checksum,
+        },
+    );
+}
+
+fn streamChecksum(config: Config) u64 {
+    var checksum: u64 = 0;
+    for (0..config.streams) |stream_index| {
+        for (0..config.bytes_per_stream) |offset| {
+            checksum +%= streamByte(@intCast(offset), stream_index);
+        }
+    }
+    return checksum;
+}
+
+fn pingChecksum(config: Config) u64 {
+    var storage: [max_datagram_size]u8 = undefined;
+    const payload = storage[0..config.payload_bytes];
+    var checksum: u64 = 0;
+    for (0..config.rounds()) |sequence| {
+        fillPing(payload, sequence);
+        addChecksum(&checksum, payload);
+    }
+    return checksum;
+}
+
+pub fn printServerComplete(
+    role_pair: []const u8,
+    config: Config,
+) void {
+    const bytes, const checksum = switch (config.mode) {
+        .stream => .{
+            @as(u64, config.iterations) * config.streams * config.bytes_per_stream,
+            @as(u64, config.iterations) *% streamChecksum(config),
+        },
+        .datagram_pingpong => .{
+            @as(u64, config.rounds()) * config.payload_bytes,
+            pingChecksum(config),
+        },
+    };
+    std.debug.print(
+        "record=server-complete implementation=netz protocol=webtransport " ++
+            "transport=h3 mode={s} direction={s} role_pair={s} " ++
+            "endpoint_role=server connection_scope=persistent warmup={d} " ++
+            "iterations={d} streams={d} bytes_per_stream={d} " ++
+            "payload_bytes={d} chunk_bytes={d} stream_window={d} " ++
+            "timeout_ms={d} sent_bytes={d} " ++
+            "received_bytes={d} checksum={d} server_complete=true\n",
+        .{
+            config.mode.name(),
+            config.mode.direction(),
+            role_pair,
+            config.warmup,
+            config.iterations,
+            config.streams,
+            config.bytes_per_stream,
+            config.payload_bytes,
+            config.chunk_bytes,
+            config.stream_window,
+            config.timeout_ms,
+            bytes,
+            bytes,
+            checksum,
+        },
+    );
+}
+
+pub fn printNetzMemory(
+    role_pair: []const u8,
+    endpoint_role: []const u8,
+    config: Config,
+    snapshot: anytype,
+) void {
+    std.debug.print(
+        "record=memory implementation=netz protocol=webtransport transport=h3 " ++
+            "mode={s} direction={s} role_pair={s} endpoint_role={s} " ++
+            "connection_scope=persistent warmup={d} iterations={d} " ++
+            "streams={d} bytes_per_stream={d} payload_bytes={d} " ++
+            "chunk_bytes={d} stream_window={d} timeout_ms={d} " ++
+            "memory_scope=benchmark-run-after-argument-parse " ++
+            "allocator_scope=netz-explicit alloc_count={d} free_count={d} " ++
+            "resize_count={d} remap_count={d} total_allocated_bytes={d} " ++
+            "live_bytes={d} peak_live_bytes={d} complete=true\n",
+        .{
+            config.mode.name(),
+            config.mode.direction(),
+            role_pair,
+            endpoint_role,
+            config.warmup,
+            config.iterations,
+            config.streams,
+            config.bytes_per_stream,
+            config.payload_bytes,
+            config.chunk_bytes,
+            config.stream_window,
+            config.timeout_ms,
+            snapshot.alloc_count,
+            snapshot.free_count,
+            snapshot.resize_count,
+            snapshot.remap_count,
+            snapshot.total_allocated,
+            snapshot.current_bytes,
+            snapshot.peak_bytes,
         },
     );
 }

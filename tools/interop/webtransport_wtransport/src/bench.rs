@@ -52,7 +52,7 @@ impl Mode {
 }
 
 #[derive(Clone, Debug, Eq, PartialEq)]
-struct Config {
+pub(crate) struct Config {
     mode: Mode,
     warmup: u32,
     iterations: u32,
@@ -343,7 +343,7 @@ fn transport_config(config: &Config) -> Result<QuicTransportConfig> {
     Ok(transport)
 }
 
-pub async fn run_client(args: &[String]) -> Result<()> {
+pub async fn run_client(args: &[String]) -> Result<Config> {
     let (port, options) = parse_port(args)?;
     ensure!(port != 0, "benchmark server port must be non-zero");
     let config = Config::parse(options)?;
@@ -402,10 +402,10 @@ pub async fn run_client(args: &[String]) -> Result<()> {
         close_ack.round == config.rounds(),
         "CLOSE_ACK round mismatch"
     );
-    Ok(())
+    Ok(config)
 }
 
-pub async fn run_server(args: &[String]) -> Result<()> {
+pub async fn run_server(args: &[String]) -> Result<Config> {
     let (port, options) = parse_port(args)?;
     let config = Config::parse(options)?;
     let identity = Identity::self_signed(["localhost", "127.0.0.1"])?;
@@ -447,7 +447,8 @@ pub async fn run_server(args: &[String]) -> Result<()> {
     )
     .await?;
     tokio::time::sleep(Duration::from_millis(100)).await;
-    Ok(())
+    print_server_complete("wtransport", "netz-client+wtransport-server", &config);
+    Ok(config)
 }
 
 fn parse_port(args: &[String]) -> Result<(u16, &[String])> {
@@ -475,7 +476,7 @@ fn validate_datagram_limit(connection: &Connection, config: &Config) -> Result<(
 
 fn print_config(implementation: &str, role_pair: &str, config: &Config, connection: &Connection) {
     println!(
-        "implementation={implementation} mode={} direction={} role_pair={role_pair} benchmark_scope=same-application-shape warmup={} iterations={} streams={} bytes_per_stream={} payload_bytes={} chunk_bytes={} stream_window_requested={} stream_window_effective={} connection_window={} max_datagram_size={} quic_version=1 cipher=negotiated-unexposed cert_verify=false gso=false gro=implementation-default pacing=true",
+        "implementation={implementation} protocol=webtransport transport=h3 mode={} direction={} role_pair={role_pair} connection_scope=persistent benchmark_scope=same-application-shape warmup={} iterations={} streams={} bytes_per_stream={} payload_bytes={} chunk_bytes={} stream_window_requested={} stream_window_effective={} connection_window={} max_datagram_size={} quic_version=1 cipher=negotiated-unexposed cert_verify=false gso=false gro=implementation-default pacing=true",
         config.mode.name(),
         config.mode.direction(),
         config.warmup,
@@ -629,9 +630,17 @@ async fn run_stream_client(
                 logical_bytes as f64 * 1_000_000_000.0 / elapsed as f64 / (1024.0 * 1024.0)
             };
             println!(
-                "implementation={implementation} mode={} direction={} role_pair={role_pair} benchmark_scope=same-application-shape sample={sample} elapsed_ns={elapsed} logical_MiB_s={mib_s:.3} sent_bytes={logical_bytes} received_bytes={} streams_finished={} checksum={} complete=true",
+                "record=result implementation={implementation} protocol=webtransport transport=h3 mode={} direction={} role_pair={role_pair} endpoint_role=client connection_scope=persistent benchmark_scope=same-application-shape warmup={} iterations={} streams={} bytes_per_stream={} payload_bytes={} chunk_bytes={} stream_window={} timeout_ms={} sample={sample} elapsed_ns={elapsed} logical_MiB_s={mib_s:.3} sent_bytes={logical_bytes} received_bytes={} streams_finished={} checksum={} complete=true",
                 config.mode.name(),
                 config.mode.direction(),
+                config.warmup,
+                config.iterations,
+                config.streams,
+                config.bytes_per_stream,
+                config.payload_bytes,
+                config.chunk_bytes,
+                config.stream_window,
+                config.timeout_ms,
                 done.received_bytes,
                 config.streams,
                 done.checksum,
@@ -806,15 +815,25 @@ async fn run_ping_client(
     let sum: u128 = samples.iter().map(|value| u128::from(*value)).sum();
     let mean = (sum / samples.len() as u128) as u64;
     println!(
-        "implementation={implementation} mode={} direction={} role_pair={role_pair} benchmark_scope=same-application-shape p50_ns={} p90_ns={} p99_ns={} p999_ns={} mean_ns={mean} min_ns={} max_ns={} checksum={checksum} complete=true",
+        "record=result implementation={implementation} protocol=webtransport transport=h3 mode={} direction={} role_pair={role_pair} endpoint_role=client connection_scope=persistent benchmark_scope=same-application-shape warmup={} iterations={} streams={} bytes_per_stream={} payload_bytes={} chunk_bytes={} stream_window={} timeout_ms={} p50_ns={} p90_ns={} p99_ns={} p999_ns={} mean_ns={mean} min_ns={} max_ns={} sent_bytes={} received_bytes={} checksum={checksum} complete=true",
         config.mode.name(),
         config.mode.direction(),
+        config.warmup,
+        config.iterations,
+        config.streams,
+        config.bytes_per_stream,
+        config.payload_bytes,
+        config.chunk_bytes,
+        config.stream_window,
+        config.timeout_ms,
         percentile(&samples, 50, 100),
         percentile(&samples, 90, 100),
         percentile(&samples, 99, 100),
         percentile(&samples, 999, 1000),
         samples[0],
         samples[samples.len() - 1],
+        u64::from(total) * u64::from(config.payload_bytes),
+        u64::from(total) * u64::from(config.payload_bytes),
     );
     Ok(())
 }
@@ -857,6 +876,86 @@ async fn run_ping_server(connection: &Connection, config: &Config) -> Result<()>
 fn percentile(sorted: &[u64], numerator: usize, denominator: usize) -> u64 {
     let rank = (sorted.len() * numerator).div_ceil(denominator);
     sorted[rank.saturating_sub(1).min(sorted.len() - 1)]
+}
+
+fn stream_checksum(config: &Config) -> u64 {
+    let mut checksum = 0u64;
+    for stream_index in 0..usize::from(config.streams) {
+        for offset in 0..config.bytes_per_stream as usize {
+            checksum = checksum.wrapping_add(u64::from(stream_byte(offset, stream_index)));
+        }
+    }
+    checksum
+}
+
+fn ping_checksum(config: &Config) -> u64 {
+    let mut storage = [0u8; MAX_DATAGRAM_SIZE as usize];
+    let payload = &mut storage[..config.payload_bytes as usize];
+    let mut checksum = 0u64;
+    for sequence in 0..config.rounds() {
+        fill_ping(payload, u64::from(sequence));
+        add_checksum(&mut checksum, payload);
+    }
+    checksum
+}
+
+fn print_server_complete(implementation: &str, role_pair: &str, config: &Config) {
+    let (bytes, checksum) = match config.mode {
+        Mode::Stream => (
+            u64::from(config.iterations) * u64::from(config.streams) * config.bytes_per_stream,
+            u64::from(config.iterations).wrapping_mul(stream_checksum(config)),
+        ),
+        Mode::DatagramPingPong => (
+            u64::from(config.rounds()) * u64::from(config.payload_bytes),
+            ping_checksum(config),
+        ),
+    };
+    println!(
+        "record=server-complete implementation={implementation} protocol=webtransport transport=h3 mode={} direction={} role_pair={role_pair} endpoint_role=server connection_scope=persistent warmup={} iterations={} streams={} bytes_per_stream={} payload_bytes={} chunk_bytes={} stream_window={} timeout_ms={} sent_bytes={bytes} received_bytes={bytes} checksum={checksum} server_complete=true",
+        config.mode.name(),
+        config.mode.direction(),
+        config.warmup,
+        config.iterations,
+        config.streams,
+        config.bytes_per_stream,
+        config.payload_bytes,
+        config.chunk_bytes,
+        config.stream_window,
+        config.timeout_ms,
+    );
+}
+
+#[cfg(feature = "allocation-stats")]
+pub(crate) fn print_memory(
+    role: &str,
+    config: &Config,
+    stats: crate::counting_allocator::Snapshot,
+) {
+    let (role_pair, endpoint_role) = if role == "bench-client" {
+        ("wtransport-client+netz-server", "client")
+    } else {
+        ("netz-client+wtransport-server", "server")
+    };
+    println!(
+        "record=memory implementation=wtransport protocol=webtransport transport=h3 mode={} direction={} role_pair={role_pair} endpoint_role={endpoint_role} connection_scope=persistent warmup={} iterations={} streams={} bytes_per_stream={} payload_bytes={} chunk_bytes={} stream_window={} timeout_ms={} memory_scope=process-start-through-runtime-teardown allocator_scope=rust-system-requested alloc_count={} free_count={} realloc_count={} total_allocated_bytes={} total_freed_bytes={} live_bytes_end={} peak_live_bytes={} complete=true",
+        config.mode.name(),
+        config.mode.direction(),
+        config.warmup,
+        config.iterations,
+        config.streams,
+        config.bytes_per_stream,
+        config.payload_bytes,
+        config.chunk_bytes,
+        config.stream_window,
+        config.timeout_ms,
+        stats.alloc_count,
+        stats.free_count,
+        stats.realloc_count,
+        stats.total_allocated,
+        stats.total_freed,
+        stats.current_bytes,
+        stats.peak_bytes,
+    );
 }
 
 #[cfg(test)]

@@ -6,6 +6,12 @@ use wtransport::error::{StreamReadError, StreamWriteError};
 use wtransport::{ClientConfig, Endpoint, Identity, ServerConfig, VarInt};
 
 mod bench;
+#[cfg(feature = "allocation-stats")]
+mod counting_allocator;
+#[cfg(feature = "allocation-stats")]
+#[global_allocator]
+static COUNTING_ALLOCATOR: counting_allocator::CountingAllocator =
+    counting_allocator::CountingAllocator::new();
 
 const CLIENT_DATAGRAM: &[u8] = b"wtransport datagram";
 const SERVER_DATAGRAM: &[u8] = b"netz datagram";
@@ -28,16 +34,53 @@ fn mapped_stream_error(application_code: u32) -> VarInt {
         .expect("mapped WebTransport error fits a QUIC varint")
 }
 
-#[tokio::main]
-async fn main() -> Result<()> {
-    let all_args: Vec<String> = std::env::args().collect();
-    if all_args.get(1).map(String::as_str) == Some("bench-client") {
-        return bench::run_client(&all_args[2..]).await;
+fn main() -> Result<()> {
+    let mut all_args: Vec<String> = std::env::args().collect();
+    if matches!(
+        all_args.get(1).map(String::as_str),
+        Some("bench-client" | "bench-server")
+    ) {
+        ensure!(all_args.len() >= 3, "benchmark mode requires PORT");
+        let role = all_args[1].clone();
+        let mut stats = false;
+        let mut filtered = all_args.drain(..3).collect::<Vec<_>>();
+        for arg in all_args {
+            if arg == "--stats" && !stats {
+                stats = true;
+            } else {
+                filtered.push(arg);
+            }
+        }
+        if stats && !cfg!(feature = "allocation-stats") {
+            bail!("--stats requires the allocation-stats Cargo feature");
+        }
+        let runtime = tokio::runtime::Builder::new_multi_thread()
+            .enable_all()
+            .build()
+            .context("Tokio runtime")?;
+        let config = match role.as_str() {
+            "bench-client" => runtime.block_on(bench::run_client(&filtered[2..]))?,
+            "bench-server" => runtime.block_on(bench::run_server(&filtered[2..]))?,
+            _ => unreachable!(),
+        };
+        drop(runtime);
+        #[cfg(not(feature = "allocation-stats"))]
+        let _ = &config;
+        if stats {
+            #[cfg(feature = "allocation-stats")]
+            bench::print_memory(&role, &config, COUNTING_ALLOCATOR.snapshot());
+        }
+        return Ok(());
     }
-    if all_args.get(1).map(String::as_str) == Some("bench-server") {
-        return bench::run_server(&all_args[2..]).await;
-    }
-    let mut args = std::env::args().skip(1);
+    let runtime = tokio::runtime::Builder::new_multi_thread()
+        .enable_all()
+        .build()
+        .context("Tokio runtime")?;
+    runtime.block_on(run_interop(&all_args))
+}
+
+async fn run_interop(all_args: &[String]) -> Result<()> {
+    let mut args = all_args.iter().skip(1).cloned();
     let mode = args
         .next()
         .context("usage: netz-webtransport-wtransport client PORT | server")?;

@@ -1021,7 +1021,11 @@ strict verifiers require distinct client-result and server-completion records
 and independently recompute every measured payload checksum; allocation
 counters are not compared across languages.
 `bench-webtransport-wtransport` provides the
-analogous stream upload and DATAGRAM ping-pong comparison described above.
+analogous stream upload and DATAGRAM ping-pong comparison described above. It
+also accepts `--stats` for four-process peak RSS and separately scoped netz
+explicit-allocation / Rust system-requested-allocation telemetry. Its strict
+verifier checks every stream sample or the aggregate DATAGRAM result plus an
+independent server-completion record.
 
 The build script pins the package to Zig `0.16.0`.
 

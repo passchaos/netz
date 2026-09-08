@@ -2943,6 +2943,39 @@ netz-client at 32.125/36.024/38.434/45.025 us, with checksum 15,084,056 in
 both directions. These are same-application-shape cross-process samples, not
 equal-wire ratios or whole-library superiority claims.
 
+Both modes also accept `--stats`. Only this opt-in path enables the netz
+counting allocator, builds the Rust peer with its system-allocation wrapper,
+and wraps all four processes with GNU time. The strict verifier requires the
+exact number of stream sample records (or one DATAGRAM percentile record), one
+separate server-completion record, and two memory records per role pair. It
+independently reconstructs stream and DATAGRAM checksums, so memory output
+cannot substitute for application completion. Three default-shape runs
+recorded the following whole-process peak RSS:
+
+| Mode | Implementation | Endpoint role | Process peak RSS (KiB) |
+|---|---|---|---:|
+| 1 x 4 MiB stream upload | netz | client/sender | 10,240 |
+| 1 x 4 MiB stream upload | wtransport | client/sender | 11,264-11,312 |
+| 1 x 4 MiB stream upload | netz | server/receiver | 4,352 |
+| 1 x 4 MiB stream upload | wtransport | server/receiver | 6,144-6,400 |
+| 32-byte DATAGRAM ping-pong | netz | client | 3,840 |
+| 32-byte DATAGRAM ping-pong | wtransport | client | 6,144-6,400 |
+| 32-byte DATAGRAM ping-pong | netz | server | 3,840 |
+| 32-byte DATAGRAM ping-pong | wtransport | server | 5,888-6,144 |
+
+For the stream shape, netz client/server peak explicit live bytes were
+6,513,930-6,523,146 and 570,900-681,143; the wtransport client/server peak
+requested live bytes were 8,409,858-8,427,002 and 3,252,500-3,260,325. For
+DATAGRAM ping-pong, the corresponding netz peaks were 95,067-95,092 and
+55,651-55,721, while wtransport reported 3,166,100-3,166,101 and
+3,154,071-3,154,140. All four netz runs in every repetition ended at zero
+explicit live bytes after complete WebTransport/HTTP/3/QUIC/runtime teardown.
+Rust retains about 2.2 KiB of process-global requested allocations after the
+Tokio runtime is dropped; this is not treated as a leak. Whole-process maximum
+RSS is the cross-language metric, and the differently scoped allocator
+counters are not used as a cross-language ratio. These memory observations
+retain the same `same-application-shape` boundary as the timing results.
+
 ## Reference context from `~/Work`
 
 The closest available reference document is
@@ -2987,8 +3020,6 @@ benchmark pass and does not replace the isolated ranges above.
   host that permits pcap. The current complete-connection userspace UDP
   counters prove the existing shapes differ and therefore remain
   `same-application-shape`.
-- Extend allocation/peak-memory telemetry from the raw QUIC, HTTP/3, and
-  WebSocket-over-H2/H3 process matrices to WebTransport.
 - Add loss/reordering benchmark cases or interop-runner style scenarios for
   handshake loss, transfer loss, and corruption.
 - Keep public HTTP/3 smoke (`https://robotics.bytedance.com/ --verify --head`)

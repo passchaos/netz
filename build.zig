@@ -829,7 +829,13 @@ pub fn build(b: *std.Build) void {
             ),
             .target = target,
             .optimize = optimize,
-            .imports = &.{.{ .name = "netz", .module = netz_mod }},
+            .imports = &.{
+                .{ .name = "netz", .module = netz_mod },
+                .{
+                    .name = "benchmark_counting_allocator",
+                    .module = benchmark_counting_allocator_mod,
+                },
+            },
         }),
     });
     const webtransport_wtransport_client = b.addExecutable(.{
@@ -840,7 +846,13 @@ pub fn build(b: *std.Build) void {
             ),
             .target = target,
             .optimize = optimize,
-            .imports = &.{.{ .name = "netz", .module = netz_mod }},
+            .imports = &.{
+                .{ .name = "netz", .module = netz_mod },
+                .{
+                    .name = "benchmark_counting_allocator",
+                    .module = benchmark_counting_allocator_mod,
+                },
+            },
         }),
     });
     const webtransport_wtransport = b.addSystemCommand(&.{

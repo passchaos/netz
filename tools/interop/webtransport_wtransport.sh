@@ -21,7 +21,8 @@ on_exit() {
     while IFS= read -r log; do
       echo "===== $log =====" >&2
       cat "$log" >&2
-    done < <(find "$work" -type f -name '*.log' -size +0c | sort)
+    done < <(find "$work" -type f \
+      \( -name '*.log' -o -name '*.rss' \) -size +0c | sort)
   fi
   cleanup
   exit "$status"
@@ -30,8 +31,6 @@ trap on_exit EXIT
 
 if [[ ${3:-} == --bench ]]; then
   shift 3
-  cargo build --quiet --release --locked --manifest-path "$client_manifest"
-  rust_bench="$repo_root/tools/interop/webtransport_wtransport/target/release/netz-webtransport-wtransport"
   mapfile -t bench_cpus < <(python3 - <<'PY'
 import os
 for cpu in sorted(os.sched_getaffinity(0))[:2]:
@@ -46,13 +45,44 @@ PY
   server_cpu=${bench_cpus[1]}
   requested_modes=(stream datagram-pingpong)
   common_args=()
+  stats=false
+  warmup_override=
+  iterations_override=
+  streams=1
+  bytes_per_stream=4194304
+  payload_bytes=32
+  chunk_bytes=16384
+  stream_window=1048576
+  timeout_ms=30000
   for arg in "$@"; do
     if [[ $arg == --mode=* ]]; then
       requested_modes=("${arg#--mode=}")
     else
       common_args+=("$arg")
+      case "$arg" in
+        --stats) stats=true ;;
+        --warmup=*) warmup_override=${arg#--warmup=} ;;
+        --iterations=*) iterations_override=${arg#--iterations=} ;;
+        --streams=*) streams=${arg#--streams=} ;;
+        --bytes-per-stream=*) bytes_per_stream=${arg#--bytes-per-stream=} ;;
+        --payload-bytes=*) payload_bytes=${arg#--payload-bytes=} ;;
+        --chunk-bytes=*) chunk_bytes=${arg#--chunk-bytes=} ;;
+        --stream-window=*) stream_window=${arg#--stream-window=} ;;
+        --timeout-ms=*) timeout_ms=${arg#--timeout-ms=} ;;
+      esac
     fi
   done
+  time_bin=${TIME_BIN:-/usr/bin/time}
+  if [[ $stats == true && ! -x $time_bin ]]; then
+    echo "GNU time not found at $time_bin" >&2
+    exit 127
+  fi
+  cargo_args=(build --quiet --release --locked --manifest-path "$client_manifest")
+  if [[ $stats == true ]]; then
+    cargo_args+=(--features allocation-stats)
+  fi
+  cargo "${cargo_args[@]}"
+  rust_bench="$repo_root/tools/interop/webtransport_wtransport/target/release/netz-webtransport-wtransport"
 
   wait_for_port() {
     local pid=$1
@@ -81,40 +111,101 @@ PY
     local pair_dir="$work/$benchmark_mode"
     mkdir -p "$pair_dir"
     local mode_args=("--mode=$benchmark_mode" "${common_args[@]}")
+    local result_mode=$benchmark_mode
+    local warmup=${warmup_override:-20}
+    local iterations=${iterations_override:-5}
+    if [[ $benchmark_mode == datagram-pingpong ]]; then
+      warmup=${warmup_override:-200}
+      iterations=${iterations_override:-5000}
+    else
+      result_mode=stream-upload
+    fi
 
-    timeout 180s taskset -c "$server_cpu" "$netz_server" \
-      bench-server 0 "${mode_args[@]}" \
-      >"$pair_dir/netz-server.log" 2>&1 &
+    check_result() {
+      local check_args=(python3 \
+        "$repo_root/tools/interop/webtransport_benchmark_check.py" \
+        --role-pair="$1" --mode="$result_mode" --warmup="$warmup" \
+        --iterations="$iterations" --streams="$streams" \
+        --bytes-per-stream="$bytes_per_stream" \
+        --payload-bytes="$payload_bytes" --chunk-bytes="$chunk_bytes" \
+        --stream-window="$stream_window" --timeout-ms="$timeout_ms" \
+        --client-log="$2" --server-log="$3")
+      if [[ -n ${4:-} ]]; then
+        check_args+=(--client-rss="$4" --server-rss="$5")
+      fi
+      "${check_args[@]}"
+    }
+
+    if [[ $stats == true ]]; then
+      timeout 180s "$time_bin" -f '%M' -o "$pair_dir/netz-server.rss" \
+        taskset -c "$server_cpu" "$netz_server" \
+        bench-server 0 "${mode_args[@]}" \
+        >"$pair_dir/netz-server.log" 2>&1 &
+    else
+      timeout 180s taskset -c "$server_cpu" "$netz_server" \
+        bench-server 0 "${mode_args[@]}" \
+        >"$pair_dir/netz-server.log" 2>&1 &
+    fi
     server_pid=$!
     local netz_port
     netz_port=$(wait_for_port "$server_pid" \
       "$pair_dir/netz-server.log" NETZ_BENCH_PORT)
-    timeout 180s taskset -c "$client_cpu" "$rust_bench" \
-      bench-client "$netz_port" "${mode_args[@]}" \
-      >"$pair_dir/wtransport-client.log" 2>&1
+    if [[ $stats == true ]]; then
+      timeout 180s "$time_bin" -f '%M' -o "$pair_dir/wtransport-client.rss" \
+        taskset -c "$client_cpu" "$rust_bench" \
+        bench-client "$netz_port" "${mode_args[@]}" \
+        >"$pair_dir/wtransport-client.log" 2>&1
+    else
+      timeout 180s taskset -c "$client_cpu" "$rust_bench" \
+        bench-client "$netz_port" "${mode_args[@]}" \
+        >"$pair_dir/wtransport-client.log" 2>&1
+    fi
     wait "$server_pid"
     server_pid=
-    grep -Fq 'role_pair=wtransport-client+netz-server' \
-      "$pair_dir/wtransport-client.log"
-    grep -Fq 'complete=true' "$pair_dir/wtransport-client.log"
+    if [[ $stats == true ]]; then
+      check_result wtransport-client+netz-server \
+        "$pair_dir/wtransport-client.log" "$pair_dir/netz-server.log" \
+        "$pair_dir/wtransport-client.rss" "$pair_dir/netz-server.rss"
+    else
+      check_result wtransport-client+netz-server \
+        "$pair_dir/wtransport-client.log" "$pair_dir/netz-server.log"
+    fi
     cat "$pair_dir/netz-server.log"
     cat "$pair_dir/wtransport-client.log"
 
     rust_log="$pair_dir/wtransport-server.log"
-    timeout 180s taskset -c "$server_cpu" "$rust_bench" \
-      bench-server 0 "${mode_args[@]}" >"$rust_log" 2>&1 &
+    if [[ $stats == true ]]; then
+      timeout 180s "$time_bin" -f '%M' -o "$pair_dir/wtransport-server.rss" \
+        taskset -c "$server_cpu" "$rust_bench" \
+        bench-server 0 "${mode_args[@]}" >"$rust_log" 2>&1 &
+    else
+      timeout 180s taskset -c "$server_cpu" "$rust_bench" \
+        bench-server 0 "${mode_args[@]}" >"$rust_log" 2>&1 &
+    fi
     server_pid=$!
     local rust_port
     rust_port=$(wait_for_port "$server_pid" "$rust_log" \
       WTRANSPORT_BENCH_PORT)
-    timeout 180s taskset -c "$client_cpu" "$netz_client" \
-      bench-client "$rust_port" "${mode_args[@]}" \
-      >"$pair_dir/netz-client.log" 2>&1
+    if [[ $stats == true ]]; then
+      timeout 180s "$time_bin" -f '%M' -o "$pair_dir/netz-client.rss" \
+        taskset -c "$client_cpu" "$netz_client" \
+        bench-client "$rust_port" "${mode_args[@]}" \
+        >"$pair_dir/netz-client.log" 2>&1
+    else
+      timeout 180s taskset -c "$client_cpu" "$netz_client" \
+        bench-client "$rust_port" "${mode_args[@]}" \
+        >"$pair_dir/netz-client.log" 2>&1
+    fi
     wait "$server_pid"
     server_pid=
-    grep -Fq 'role_pair=netz-client+wtransport-server' \
-      "$pair_dir/netz-client.log"
-    grep -Fq 'complete=true' "$pair_dir/netz-client.log"
+    if [[ $stats == true ]]; then
+      check_result netz-client+wtransport-server \
+        "$pair_dir/netz-client.log" "$pair_dir/wtransport-server.log" \
+        "$pair_dir/netz-client.rss" "$pair_dir/wtransport-server.rss"
+    else
+      check_result netz-client+wtransport-server \
+        "$pair_dir/netz-client.log" "$pair_dir/wtransport-server.log"
+    fi
     cat "$rust_log"
     cat "$pair_dir/netz-client.log"
   }
