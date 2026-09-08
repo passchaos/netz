@@ -205,6 +205,7 @@ const OrderedWrite = struct {
     input_index: usize,
     priority: i32,
     byte_count: usize,
+    send_offset: u64,
 };
 
 fn insertOrderedWrite(
@@ -266,15 +267,14 @@ fn stageSteadyBatch(
             .input_index = input_index,
             .priority = stream.priority,
             .byte_count = count,
+            .send_offset = stream.send_offset,
         });
     }
     for (selected[0..selected_count], 0..) |item, packet_index| {
         const input = writes[item.input_index];
-        const stream = registry.get(input.stream_id) orelse
-            return error.UnknownStream;
         frames[packet_index][0] = .{ .stream = .{
             .stream_id = input.stream_id,
-            .offset = stream.send_offset,
+            .offset = item.send_offset,
             .data = input.data[0..item.byte_count],
             .fin = false,
         } };
@@ -455,6 +455,49 @@ fn nextWriteIndex(
 /// Narrow white-box helpers for the colocated stream batch tests.
 pub const testing = struct {
     pub const Ordered = OrderedWrite;
+    pub const StageSummary = struct {
+        packet_count: usize,
+        checksum: u64,
+    };
+
+    /// Stage the production steady-state path and consume its descriptors.
+    /// This deliberately performs no socket I/O and commits no stream state,
+    /// so a benchmark can isolate selection and frame construction cost.
+    pub fn stageSteady(
+        connection: *quic.one_rtt.Connection,
+        registry: *webtransport.StreamRegistry,
+        writes: []const Write,
+    ) Error!StageSummary {
+        var frames: [quic.one_rtt.max_batch_packets][1]quic.Frame = undefined;
+        var packets: [quic.one_rtt.max_batch_packets][]const quic.Frame =
+            undefined;
+        var input_indices: [quic.one_rtt.max_batch_packets]usize = undefined;
+        var byte_counts: [quic.one_rtt.max_batch_packets]usize = undefined;
+        const packet_count = try stageSteadyBatch(
+            connection,
+            registry,
+            writes,
+            @min(writes.len, quic.one_rtt.max_batch_packets),
+            &frames,
+            &packets,
+            &input_indices,
+            &byte_counts,
+        );
+        var checksum: u64 = 0;
+        for (0..packet_count) |packet_index| {
+            const frame = frames[packet_index][0].stream;
+            checksum +%= frame.stream_id;
+            checksum +%= frame.offset;
+            checksum +%= frame.data.len;
+            checksum +%= input_indices[packet_index];
+            checksum +%= byte_counts[packet_index];
+            std.mem.doNotOptimizeAway(packets[packet_index].ptr);
+        }
+        return .{
+            .packet_count = packet_count,
+            .checksum = checksum,
+        };
+    }
 
     pub fn nextWrite(
         registry: *webtransport.StreamRegistry,

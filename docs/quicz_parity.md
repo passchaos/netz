@@ -497,6 +497,12 @@ fixed-binary 64-stream pairs reduced the public enumeration call from a
 1,084.55 ns median to 97.64 ns (91.0%, 11.1x), with identical checksums. The
 end-to-end 64-stream transfer remains UDP-queue-bimodal, so this is recorded as
 a CPU-path improvement rather than a throughput ratio.
+Steady 64-stream write-batch staging now carries each selected stream's offset
+from its initial registry lookup into frame construction instead of repeating
+the hash lookup. Ten alternating fixed-binary CPU-0 pairs reduced median pure
+staging cost from 1,217.593 to 1,019.589 ns (16.3%, 1.19x), with identical
+descriptor checksums. This socket-free measurement is likewise scoped only to
+the staging CPU path, not end-to-end throughput or a cross-library result.
 
 Peer unidirectional streams are classified only after their offset-zero type
 varint becomes contiguous. A bounded connection-scoped reassembler retains

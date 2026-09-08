@@ -9126,6 +9126,10 @@ pub const OwnedHandshakeStream = handshake_stream.OwnedHandshakeStream;
 pub const StreamRead = incremental_stream.Read;
 pub const StreamWrite = stream_batch.Write;
 pub const StreamWriteResult = stream_batch.Result;
+/// Narrow white-box hooks for deterministic CPU regression benchmarks.
+pub const testing = struct {
+    pub const stream_batch = @import("runtime/stream/batch.zig").testing;
+};
 pub const SessionEvent = session_control.Event;
 const initHandshakeStreamRegistry = handshake_stream.initRegistry;
 const sendHandshakeSessionStream = handshake_stream.send;

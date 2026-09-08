@@ -68,11 +68,11 @@ test "WebTransport steady batch keeps highest priorities with stable ties" {
     var selected: [3]batch.testing.Ordered = undefined;
     var count: usize = 0;
     for ([_]batch.testing.Ordered{
-        .{ .input_index = 0, .priority = 1, .byte_count = 10 },
-        .{ .input_index = 1, .priority = 3, .byte_count = 11 },
-        .{ .input_index = 2, .priority = 3, .byte_count = 12 },
-        .{ .input_index = 3, .priority = 2, .byte_count = 13 },
-        .{ .input_index = 4, .priority = 4, .byte_count = 14 },
+        .{ .input_index = 0, .priority = 1, .byte_count = 10, .send_offset = 20 },
+        .{ .input_index = 1, .priority = 3, .byte_count = 11, .send_offset = 21 },
+        .{ .input_index = 2, .priority = 3, .byte_count = 12, .send_offset = 22 },
+        .{ .input_index = 3, .priority = 2, .byte_count = 13, .send_offset = 23 },
+        .{ .input_index = 4, .priority = 4, .byte_count = 14, .send_offset = 24 },
     }) |candidate| {
         batch.testing.insertOrdered(
             &selected,
@@ -92,6 +92,59 @@ test "WebTransport steady batch keeps highest priorities with stable ties" {
         },
     );
     try std.testing.expectEqual(@as(usize, 14), selected[0].byte_count);
+    try std.testing.expectEqual(@as(u64, 24), selected[0].send_offset);
+}
+
+test "WebTransport steady batch stages offset without committing it" {
+    const allocator = std.testing.allocator;
+    var threaded = std.Io.Threaded.init(allocator, .{});
+    defer threaded.deinit();
+    var endpoint = try quic.runtime.Endpoint.bind(
+        allocator,
+        threaded.io(),
+        .{ .ip4 = .loopback(0) },
+        .{ .max_datagram_size = 1400 },
+    );
+    defer endpoint.deinit();
+    const keys = quic.protection.deriveAes128Keys(
+        [_]u8{0x57} ** quic.protection.secret_len,
+    );
+    var connection = try quic.one_rtt.Connection.init(&endpoint, .{
+        .peer = endpoint.address(),
+        .receive_keys = keys,
+        .send_keys = keys,
+        .local_connection_id = "wt-stage-client",
+        .peer_connection_id = "wt-stage-server",
+        .initial_send_max_streams_bidi = 1,
+        .enable_pacing = false,
+    });
+    defer connection.deinit();
+    var registry = try webtransport.StreamRegistry.init(
+        allocator,
+        .init(0),
+        .client,
+        .{ .max_local_bidi = 1 },
+    );
+    defer registry.deinit();
+    const stream = try registry.openLocal(.bidirectional);
+    stream.prefix_sent = true;
+    stream.send_offset = 123;
+    const writes = [_]batch.Write{
+        .{ .stream_id = stream.stream_id, .data = "payload" },
+    };
+
+    const staged = try batch.testing.stageSteady(
+        &connection,
+        &registry,
+        &writes,
+    );
+    try std.testing.expectEqual(@as(usize, 1), staged.packet_count);
+    try std.testing.expectEqual(
+        @as(u64, stream.stream_id + 123 + 2 * "payload".len),
+        staged.checksum,
+    );
+    try std.testing.expectEqual(@as(u64, 123), stream.send_offset);
+    try std.testing.expectEqual(@as(u64, 0), stream.bytes_sent);
 }
 
 test "WebTransport batch validates duplicate beyond packet window" {

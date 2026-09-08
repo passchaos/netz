@@ -1093,6 +1093,12 @@ pub fn build(b: *std.Build) void {
             .description = "Benchmark incremental WebTransport stream transfer",
         },
         .{
+            .exe_name = "netz-bench-webtransport-stream-batch",
+            .path = "examples/bench_webtransport_stream_batch.zig",
+            .run_step = "bench-webtransport-stream-batch",
+            .description = "Benchmark WebTransport steady stream-batch staging",
+        },
+        .{
             .exe_name = "netz-webtransport-handshake-stream",
             .path = "examples/webtransport_handshake_stream.zig",
             .run_step = "run-webtransport-handshake-stream",
@@ -1171,7 +1177,13 @@ pub fn build(b: *std.Build) void {
         if (b.args) |args| run.addArgs(args);
         const run_step = b.step(spec.run_step, spec.description);
         run_step.dependOn(&run.step);
-        if (std.mem.startsWith(u8, spec.run_step, "bench-")) {
+        if (std.mem.startsWith(u8, spec.run_step, "bench-") and
+            !std.mem.eql(
+                u8,
+                spec.run_step,
+                "bench-webtransport-stream-batch",
+            ))
+        {
             bench_step.dependOn(&run.step);
         }
     }

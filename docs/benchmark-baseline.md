@@ -2682,6 +2682,38 @@ client datagrams, held 121-123, verified the same 2,097,152 bytes/checksum
 the end of a batch is now explicitly flushed, preventing the emulator from
 turning an intended reorder into accidental loss.
 
+### WebTransport steady stream-batch staging
+
+`bench-webtransport-stream-batch` isolates the production steady-state batch
+selection and STREAM-frame staging path from UDP queues, packet protection, and
+commit bookkeeping. It registers 64 streams with varied priorities and nonzero
+offsets, stages one 1-KiB slice per stream, validates the complete descriptor
+checksum, and deliberately performs no socket I/O or registry mutation:
+
+```sh
+taskset -c 0 zig build bench-webtransport-stream-batch \
+  -Doptimize=ReleaseFast -- --warmup=20000 --iterations=300000
+```
+
+Steady staging previously looked up every selected stream in the registry a
+second time solely to recover `send_offset`. `OrderedWrite` now carries that
+offset from the first lookup; staging contains no I/O, commit, or registry
+mutation between the snapshot and frame construction. A direct test uses a
+nonzero offset and verifies that staging neither advances it nor records sent
+bytes.
+
+Ten alternating fixed-binary CPU-0 pairs measured 1,213.699-1,245.951
+ns/staging before and 1,010.843-1,135.826 ns/staging after. Median cost fell
+from 1,217.593 to 1,019.589 ns (16.3%, 1.19x), with checksum 52,761,600,000 in
+every 300,000-iteration run. Baseline SHA-256 was
+`cf3c9d71c20908aab6c33e4f7b9ce457a9a7ffb08e204344c2def43ed271c1a0`;
+candidate SHA-256 was
+`60ac76743f1574180f8a4653302a2c101be1cc445fe129cbf042e58534aead2c`.
+This is an internal staging CPU result, not an end-to-end throughput or
+cross-library claim; the existing UDP-backed 64-stream benchmark remains the
+appropriate system-level guard and remains susceptible to this host's receive
+queue bimodality.
+
 ## WebTransport versus wtransport, same application shape
 
 The external wtransport gate now has a separate benchmark mode that leaves its

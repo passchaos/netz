@@ -787,6 +787,8 @@ zig build run-http2-h2c
 zig build run-http3-handshake
 zig build run-webtransport-handshake-stream
 zig build bench-webtransport-stream -Doptimize=ReleaseFast
+# Isolate 64-stream steady batch selection/frame staging without UDP I/O.
+zig build bench-webtransport-stream-batch -Doptimize=ReleaseFast
 # Bidirectional wtransport interop for CONNECT admission metadata, DATAGRAM,
 # bidi/uni streams, mapped RESET_STREAM/STOP_SENDING codes, post-cancellation
 # reuse, Session drain, and connection-level close.
