@@ -867,7 +867,7 @@ zig build bench-http1-parse -Doptimize=ReleaseFast
 taskset -c 0 zig build bench-http1-pipeline -Doptimize=ReleaseFast
 zig build bench-http2-hpack -Doptimize=ReleaseFast
 taskset -c 0 zig build bench-http2-h2c -Doptimize=ReleaseFast
-zig build bench-http3-dev -Doptimize=ReleaseFast
+zig build bench-http3-dev -Doptimize=ReleaseFast -- --iterations=1000
 zig build bench-http3-handshake-transfer -Doptimize=ReleaseFast -- --iterations=1 --body-bytes=16777216 --mode=upload --streams=1
 zig build bench-http3-handshake-transfer -Doptimize=ReleaseFast -- --iterations=1 --body-bytes=16777216 --mode=download --streams=1
 zig build bench-http3-handshake-transfer -Doptimize=ReleaseFast -- --iterations=1 --body-bytes=16777216 --mode=upload --streams=4
