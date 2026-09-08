@@ -527,6 +527,12 @@ improvement over the hash version and 4.35-4.49x over the original linear
 deduplication baseline; the 32-field block remained at 804-826 ns/block.
 Use `--scenario=encode|large|churn|decode` and `--iterations=N` to isolate one
 phase for profiling; omitting both options retains the combined default run.
+In the isolated 512-reference scenario, combining the already-computed name and
+value digests directly for the exact-match index removed a redundant 16-byte
+Wyhash pass. Three interleaved CPU-0 comparisons measured 9.83-9.99 us/block
+versus 10.98-11.19 us/block at the preceding bitmap commit (1.10-1.14x faster).
+The index still stores both digests and verifies the original strings after a
+hit; a forced combined-hash collision test covers key separation.
 
 ### QUIC 1-RTT send
 

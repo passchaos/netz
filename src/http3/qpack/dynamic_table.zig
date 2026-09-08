@@ -15,6 +15,26 @@ const DynamicExactKey = struct {
     value_hash: u64,
 };
 
+const DynamicExactContext = struct {
+    pub fn hash(_: @This(), key: DynamicExactKey) u64 {
+        // Both components are already independent Wyhash results. Mixing them
+        // directly avoids hashing the 16-byte pair again on every lookup.
+        return key.name_hash ^ std.math.rotl(u64, key.value_hash, 32);
+    }
+
+    pub fn eql(_: @This(), lhs: DynamicExactKey, rhs: DynamicExactKey) bool {
+        return lhs.name_hash == rhs.name_hash and
+            lhs.value_hash == rhs.value_hash;
+    }
+};
+
+const DynamicExactIndex = std.HashMapUnmanaged(
+    DynamicExactKey,
+    u64,
+    DynamicExactContext,
+    std.hash_map.default_max_load_percentage,
+);
+
 pub const DynamicEntry = struct {
     absolute_index: u64,
     name: []u8,
@@ -51,7 +71,7 @@ pub const DynamicTable = struct {
     /// is always verified against the entry bytes, so collisions preserve
     /// correctness and only fall back to the reverse scan.
     latest_name: std.AutoHashMapUnmanaged(u64, u64) = .empty,
-    latest_exact: std.AutoHashMapUnmanaged(DynamicExactKey, u64) = .empty,
+    latest_exact: DynamicExactIndex = .empty,
     head: usize = 0,
     current_size: usize = 0,
     capacity: usize = 0,
@@ -411,4 +431,22 @@ pub const DynamicTable = struct {
 fn dynamicEntrySize(name: []const u8, value: []const u8) error{IntegerOverflow}!usize {
     const strings = std.math.add(usize, name.len, value.len) catch return error.IntegerOverflow;
     return std.math.add(usize, strings, dynamic_entry_overhead) catch error.IntegerOverflow;
+}
+
+test "QPACK dynamic exact index keeps combined-hash collisions distinct" {
+    const first = DynamicExactKey{ .name_hash = 1, .value_hash = 0 };
+    const second = DynamicExactKey{
+        .name_hash = 0,
+        .value_hash = @as(u64, 1) << 32,
+    };
+    const context = DynamicExactContext{};
+    try std.testing.expectEqual(context.hash(first), context.hash(second));
+    try std.testing.expect(!context.eql(first, second));
+
+    var index: DynamicExactIndex = .empty;
+    defer index.deinit(std.testing.allocator);
+    try index.put(std.testing.allocator, first, 11);
+    try index.put(std.testing.allocator, second, 22);
+    try std.testing.expectEqual(@as(?u64, 11), index.get(first));
+    try std.testing.expectEqual(@as(?u64, 22), index.get(second));
 }

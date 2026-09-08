@@ -917,6 +917,7 @@ The aggregate `bench` step runs the current protocol microbenchmarks:
   table-relative bitmap that preserves first-reference ordering and
   scenario/iteration selection for isolated profiling,
 - HTTP/3 QPACK dynamic-table churn with single-allocation name/value ownership,
+  prehashed exact-match index keys, and byte-verified collision fallback,
 - WebSocket masked frame encoding with allocating, caller-buffer, and
   header-only streaming paths, plus retained no-context-takeover
   permessage-deflate throughput and wire-size reporting; stream transports
