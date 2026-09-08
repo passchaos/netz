@@ -4,6 +4,8 @@
 const std = @import("std");
 const netz = @import("netz");
 const benchmark = @import("websocket_hyper_h2_bench.zig");
+const CountingAllocator = @import("benchmark_counting_allocator")
+    .CountingAllocator;
 
 pub fn main(init: std.process.Init) !void {
     const args = try init.minimal.args.toSlice(init.arena.allocator());
@@ -161,8 +163,37 @@ fn runBenchmark(_: std.process.Init, args: []const []const u8) !void {
     if (args.len == 0) return error.InvalidArgument;
     const port = try std.fmt.parseInt(u16, args[0], 10);
     if (port == 0) return error.InvalidArgument;
-    const config = try benchmark.Config.parse(args[1..]);
-    const allocator = std.heap.c_allocator;
+    var stats = false;
+    var config_args: std.ArrayList([]const u8) = .empty;
+    defer config_args.deinit(std.heap.c_allocator);
+    for (args[1..]) |arg| {
+        if (std.mem.eql(u8, arg, "--stats") and !stats) {
+            stats = true;
+        } else {
+            try config_args.append(std.heap.c_allocator, arg);
+        }
+    }
+    const config = try benchmark.Config.parse(config_args.items);
+    var counting = CountingAllocator.init(std.heap.c_allocator);
+    const allocator = if (stats) counting.allocator() else std.heap.c_allocator;
+    try runBenchmarkWithAllocator(allocator, port, config);
+    if (stats) {
+        const snapshot = counting.snapshot();
+        if (snapshot.current_bytes != 0) return error.MemoryLeak;
+        benchmark.printNetzMemory(
+            "netz-client+hyper-server",
+            "client",
+            config,
+            snapshot,
+        );
+    }
+}
+
+fn runBenchmarkWithAllocator(
+    allocator: std.mem.Allocator,
+    port: u16,
+    config: benchmark.Config,
+) !void {
     var threaded = std.Io.Threaded.init(allocator, .{ .async_limit = .unlimited });
     defer threaded.deinit();
     const io = threaded.io();

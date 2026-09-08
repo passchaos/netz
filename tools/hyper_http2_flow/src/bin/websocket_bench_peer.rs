@@ -1,6 +1,7 @@
 use std::convert::Infallible;
 use std::env;
 use std::io::{self, Write};
+use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 
 use bytes::Bytes;
@@ -16,6 +17,15 @@ use tokio::time::timeout;
 #[path = "../tokiort.rs"]
 mod tokiort;
 use tokiort::{TokioExecutor, TokioIo, TokioTimer};
+
+#[cfg(feature = "allocation-stats")]
+#[allow(dead_code)]
+#[path = "../counting_allocator.rs"]
+mod counting_allocator;
+#[cfg(feature = "allocation-stats")]
+#[global_allocator]
+static COUNTING_ALLOCATOR: counting_allocator::CountingAllocator =
+    counting_allocator::CountingAllocator::new();
 
 const PATH: &str = "/rfc8441-benchmark";
 const ORIGIN: &str = "http://example.test";
@@ -66,7 +76,19 @@ fn main() {
     let role = args.next().expect("server or client role");
     let port: u16 = args.next().expect("port").parse().expect("valid port");
     assert_ne!(port, 0);
-    let config = Config::parse(args);
+    let mut stats = false;
+    let mut config_args = Vec::new();
+    for arg in args {
+        if arg == "--stats" && !stats {
+            stats = true;
+        } else {
+            config_args.push(arg);
+        }
+    }
+    if stats && !cfg!(feature = "allocation-stats") {
+        panic!("--stats requires the allocation-stats Cargo feature");
+    }
+    let config = Config::parse(config_args.into_iter());
     let runtime = tokio::runtime::Builder::new_current_thread()
         .enable_all()
         .build()
@@ -75,6 +97,11 @@ fn main() {
         "server" => runtime.block_on(run_server(port, config)),
         "client" => runtime.block_on(run_client(port, config)),
         _ => panic!("invalid role"),
+    }
+    drop(runtime);
+    if stats {
+        #[cfg(feature = "allocation-stats")]
+        print_memory(&role, config, COUNTING_ALLOCATOR.snapshot());
     }
 }
 
@@ -92,18 +119,25 @@ async fn run_server(port: u16, config: Config) {
         .adaptive_window(false)
         .max_frame_size(16 * 1024);
     let service_config = config;
+    let echo_task = Arc::new(Mutex::new(None));
+    let service_echo_task = Arc::clone(&echo_task);
     builder
         .serve_connection(
             TokioIo::new(stream),
-            service_fn(move |request| handle_server(request, service_config)),
+            service_fn(move |request| {
+                handle_server(request, service_config, Arc::clone(&service_echo_task))
+            }),
         )
         .await
         .expect("serve benchmark connection");
+    let task = echo_task.lock().unwrap().take().expect("missing echo task");
+    task.await.expect("echo task");
 }
 
 async fn handle_server(
     mut request: Request<hyper::body::Incoming>,
     config: Config,
+    echo_task: Arc<Mutex<Option<tokio::task::JoinHandle<()>>>>,
 ) -> Result<Response<Empty<Bytes>>, Infallible> {
     assert_eq!(request.method(), Method::CONNECT);
     assert_eq!(request.version(), Version::HTTP_2);
@@ -121,7 +155,7 @@ async fn handle_server(
     );
     validate_config_headers(request.headers(), config);
     let on_upgrade = hyper::upgrade::on(&mut request);
-    tokio::spawn(async move {
+    let task = tokio::spawn(async move {
         let upgraded = timeout(config.timeout, on_upgrade)
             .await
             .expect("upgrade timeout")
@@ -129,6 +163,7 @@ async fn handle_server(
         let mut stream = TokioIo::new(upgraded);
         run_echo_server(&mut stream, config, true).await;
     });
+    assert!(echo_task.lock().unwrap().replace(task).is_none());
     let mut response = Response::new(Empty::new());
     *response.status_mut() = StatusCode::OK;
     response
@@ -197,7 +232,7 @@ async fn run_client(port: u16, config: Config) {
         .await
         .expect("driver timeout")
         .expect("driver join")
-        .ok();
+        .expect("HTTP/2 client connection");
 }
 
 async fn run_echo_server(
@@ -251,7 +286,7 @@ async fn run_echo_server(
     .await
     .expect("close write timeout");
     stream.shutdown().await.expect("shutdown");
-    println!("protocol=websocket-h2 role_pair=netz-client+hyper-server server_complete=true received_bytes={} checksum={}", u64::from(config.iterations) * config.payload_bytes as u64, checksum);
+    println!("record=server-complete implementation=hyper protocol=websocket-h2 transport=h2c mode=binary-echo role_pair=netz-client+hyper-server endpoint_role=server connection_scope=persistent warmup={} iterations={} payload_bytes={} sent_bytes={} received_bytes={} checksum={} server_complete=true", config.warmup, config.iterations, config.payload_bytes, u64::from(config.iterations) * config.payload_bytes as u64, u64::from(config.iterations) * config.payload_bytes as u64, checksum);
 }
 
 async fn run_echo_client(
@@ -475,5 +510,15 @@ fn print_config(role: &str, c: Config) {
 }
 fn print_result(role: &str, c: Config, e: Duration, checksum: u64) {
     let r = c.iterations as f64 / e.as_secs_f64();
-    println!("protocol=websocket-h2 transport=h2c mode=binary-echo role_pair={role} connection_scope=persistent benchmark_scope=same-application-shape elapsed_ns={} ns_per_roundtrip={:.3} roundtrips_per_s={:.3} logical_MiB_s={:.3} sent_bytes={} received_bytes={} checksum={} complete=true",e.as_nanos(),e.as_nanos() as f64/c.iterations as f64,r,r*c.payload_bytes as f64*2.0/(1024.0*1024.0),u64::from(c.iterations)*c.payload_bytes as u64,u64::from(c.iterations)*c.payload_bytes as u64,checksum);
+    println!("record=result implementation=hyper protocol=websocket-h2 transport=h2c mode=binary-echo role_pair={role} endpoint_role=client connection_scope=persistent benchmark_scope=same-application-shape warmup={} iterations={} payload_bytes={} elapsed_ns={} ns_per_roundtrip={:.3} roundtrips_per_s={:.3} logical_MiB_s={:.3} sent_bytes={} received_bytes={} checksum={} complete=true",c.warmup,c.iterations,c.payload_bytes,e.as_nanos(),e.as_nanos() as f64/c.iterations as f64,r,r*c.payload_bytes as f64*2.0/(1024.0*1024.0),u64::from(c.iterations)*c.payload_bytes as u64,u64::from(c.iterations)*c.payload_bytes as u64,checksum);
+}
+
+#[cfg(feature = "allocation-stats")]
+fn print_memory(role: &str, c: Config, stats: counting_allocator::Snapshot) {
+    let role_pair = if role == "client" {
+        "hyper-client+netz-server"
+    } else {
+        "netz-client+hyper-server"
+    };
+    println!("record=memory implementation=hyper protocol=websocket-h2 transport=h2c mode=binary-echo role_pair={role_pair} endpoint_role={role} connection_scope=persistent warmup={} iterations={} payload_bytes={} memory_scope=process-start-through-runtime-teardown allocator_scope=rust-system-requested alloc_count={} free_count={} realloc_count={} total_allocated_bytes={} total_freed_bytes={} live_bytes_end={} peak_live_bytes={} complete=true", c.warmup, c.iterations, c.payload_bytes, stats.alloc_count, stats.free_count, stats.realloc_count, stats.total_allocated, stats.total_freed, stats.current_bytes, stats.peak_bytes);
 }

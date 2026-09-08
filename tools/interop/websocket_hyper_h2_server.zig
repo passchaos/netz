@@ -1,6 +1,8 @@
 const std = @import("std");
 const netz = @import("netz");
 const benchmark = @import("websocket_hyper_h2_bench.zig");
+const CountingAllocator = @import("benchmark_counting_allocator")
+    .CountingAllocator;
 
 pub fn main(init: std.process.Init) !void {
     const args = try init.minimal.args.toSlice(init.arena.allocator());
@@ -8,8 +10,37 @@ pub fn main(init: std.process.Init) !void {
         return error.InvalidArgument;
     }
     const port = try std.fmt.parseInt(u16, args[2], 10);
-    const expected_config = try benchmark.Config.parse(args[3..]);
-    const allocator = std.heap.c_allocator;
+    var stats = false;
+    var config_args: std.ArrayList([]const u8) = .empty;
+    defer config_args.deinit(std.heap.c_allocator);
+    for (args[3..]) |arg| {
+        if (std.mem.eql(u8, arg, "--stats") and !stats) {
+            stats = true;
+        } else {
+            try config_args.append(std.heap.c_allocator, arg);
+        }
+    }
+    const expected_config = try benchmark.Config.parse(config_args.items);
+    var counting = CountingAllocator.init(std.heap.c_allocator);
+    const allocator = if (stats) counting.allocator() else std.heap.c_allocator;
+    try runBenchmarkWithAllocator(allocator, port, expected_config);
+    if (stats) {
+        const snapshot = counting.snapshot();
+        if (snapshot.current_bytes != 0) return error.MemoryLeak;
+        benchmark.printNetzMemory(
+            "hyper-client+netz-server",
+            "server",
+            expected_config,
+            snapshot,
+        );
+    }
+}
+
+fn runBenchmarkWithAllocator(
+    allocator: std.mem.Allocator,
+    port: u16,
+    expected_config: benchmark.Config,
+) !void {
     var threaded = std.Io.Threaded.init(allocator, .{ .async_limit = .unlimited });
     defer threaded.deinit();
     const io = threaded.io();
@@ -34,7 +65,8 @@ pub fn main(init: std.process.Init) !void {
         },
         expected_config.timeout(),
     );
-    errdefer pending.deinit();
+    var pending_owned = true;
+    defer if (pending_owned) pending.deinit();
     const config = try benchmark.Config.fromUpgrade(pending);
     if (!std.meta.eql(config, expected_config) or
         !std.mem.eql(u8, pending.target(), benchmark.path) or
@@ -44,6 +76,7 @@ pub fn main(init: std.process.Init) !void {
         return error.InvalidBenchmarkConfig;
     }
     var ws = try pending.accept();
+    pending_owned = false;
     defer ws.close();
     try ws.sendBinary(benchmark.ready);
     benchmark.printConfig("hyper-client+netz-server", config);
@@ -70,7 +103,18 @@ pub fn main(init: std.process.Init) !void {
         return error.UnexpectedClose;
     }
     std.debug.print(
-        "protocol=websocket-h2 role_pair=hyper-client+netz-server server_complete=true received_bytes={d} checksum={d}\n",
-        .{ @as(u64, config.iterations) * config.payload_bytes, checksum },
+        "record=server-complete implementation=netz protocol=websocket-h2 " ++
+            "transport=h2c mode=binary-echo role_pair=hyper-client+netz-server " ++
+            "endpoint_role=server connection_scope=persistent warmup={d} " ++
+            "iterations={d} payload_bytes={d} sent_bytes={d} " ++
+            "received_bytes={d} checksum={d} server_complete=true\n",
+        .{
+            config.warmup,
+            config.iterations,
+            config.payload_bytes,
+            @as(u64, config.iterations) * config.payload_bytes,
+            @as(u64, config.iterations) * config.payload_bytes,
+            checksum,
+        },
     );
 }

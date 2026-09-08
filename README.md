@@ -1015,7 +1015,9 @@ netz explicit-allocator and Go runtime-heap telemetry.
 `bench-websocket-h3-quic-go` use the same two-CPU, dual-role layout for
 persistent RFC 8441/RFC 9220 binary echo, with handshake and warmup outside the
 measured interval and byte-exact validation at both peers. They are also
-labeled `same-application-shape`. `bench-webtransport-wtransport` provides the
+labeled `same-application-shape`. The H2/Hyper runner accepts `--stats` for
+whole-process RSS plus separately scoped netz and Rust allocation telemetry.
+`bench-webtransport-wtransport` provides the
 analogous stream upload and DATAGRAM ping-pong comparison described above.
 
 The build script pins the package to Zig `0.16.0`.

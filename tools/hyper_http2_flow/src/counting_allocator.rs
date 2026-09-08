@@ -24,13 +24,13 @@ pub struct CountingAllocator {
 }
 
 pub struct Snapshot {
-    current_bytes: usize,
-    peak_bytes: usize,
-    total_allocated: usize,
-    total_freed: usize,
-    alloc_count: usize,
-    free_count: usize,
-    realloc_count: usize,
+    pub current_bytes: usize,
+    pub peak_bytes: usize,
+    pub total_allocated: usize,
+    pub total_freed: usize,
+    pub alloc_count: usize,
+    pub free_count: usize,
+    pub realloc_count: usize,
     bucket_counts: [usize; 7],
     bucket_bytes: [usize; 7],
 }

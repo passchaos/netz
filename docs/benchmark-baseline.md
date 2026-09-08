@@ -2510,6 +2510,31 @@ equal-wire: the two implementations retain distinct HTTP/2 scheduling, HPACK,
 frame packing, masking, syscall, and executor behavior. No cross-library speed
 ratio is inferred.
 
+The same command accepts `--stats`. In this mode the runner builds only the
+Hyper benchmark binary with its `allocation-stats` feature, wraps all four
+client/server processes with GNU time, and requires one structured result, one
+server-completion record, and two memory records for each role pair. The
+functional verifier independently recomputes the checksum across all measured
+rounds, so a memory record cannot satisfy a missing echo result. Three runs of
+the default 20-warmup/1,000-measured/4-KiB workload recorded:
+
+| Implementation | Endpoint role | Process peak RSS (KiB) | Allocations | Requested bytes | Peak requested live bytes | End live bytes |
+|---|---|---:|---:|---:|---:|---:|
+| netz | client | 2,304 | 2,097 | 4,279,502 | 81,719 | 0 |
+| netz | server | 2,048 | 2,091 | 4,279,498 | 77,109 | 0 |
+| Hyper | client | 3,328 | 7,250 | 12,743,488 | 89,883 | 1,618 |
+| Hyper | server | 3,328 | 7,237 | 12,723,177 | 83,756 | 1,671 |
+
+The three runs reproduced these values exactly on this host. Whole-process
+maximum RSS is the cross-language metric. Netz's explicit allocator and Rust's
+global `System`-allocator requested-byte counters have different scopes and are
+not treated as a cross-language allocation ratio. The netz counter starts after
+argument parsing and proves zero live bytes after full H2/WebSocket/runtime
+teardown. Hyper counts from process start; the benchmark now waits for the
+server upgrade/echo task, propagates the client connection-driver result, and
+drops the Tokio runtime before taking its final snapshot. Default runs do not
+enable the Rust allocation feature, the netz wrapper, or GNU time.
+
 The RFC 9220 HTTP/3 benchmark also accepts `--warmup=N` and `--iterations=N`
 (defaults 20 and 200), allowing longer profiling runs without source edits.
 Its QUIC timer selector and the directly invoked read-only deadline helpers now
@@ -2939,8 +2964,8 @@ benchmark pass and does not replace the isolated ranges above.
   host that permits pcap. The current complete-connection userspace UDP
   counters prove the existing shapes differ and therefore remain
   `same-application-shape`.
-- Extend allocation/peak-memory telemetry from the raw QUIC and HTTP/3 process
-  matrices to the remaining WebSocket and WebTransport cross-process harnesses.
+- Extend allocation/peak-memory telemetry from the raw QUIC, HTTP/3, and
+  WebSocket-over-H2 process matrices to WebSocket-over-H3 and WebTransport.
 - Add loss/reordering benchmark cases or interop-runner style scenarios for
   handshake loss, transfer loss, and corruption.
 - Keep public HTTP/3 smoke (`https://robotics.bytedance.com/ --verify --head`)

@@ -489,6 +489,14 @@ peers before a normal Close. Five 1,000-round runs measured
 same-application-shape results, not equal-wire or isolated single-library
 costs, because HTTP/2 scheduling, HPACK, frame packing, masking, syscalls, and
 executor behavior remain implementation-specific.
+An opt-in memory run over the same 20-warmup/1,000-measured/4-KiB workload
+recorded whole-process peak RSS of 2,304/2,048 KiB for the netz client/server
+and 3,328/3,328 KiB for the Hyper server/client role pairings. Netz's explicit
+allocator ended at zero live bytes; Rust requested-allocation counters remain a
+separately scoped diagnostic rather than a cross-language ratio. The strict
+runner now requires unique client-result and server-completion records with the
+exact independently recomputed checksum, and Hyper waits for both the upgrade
+echo task and connection driver before its memory snapshot.
 
 WebTransport's incremental and whole-stream readers now benefit from a QUIC
 receive-stream ID enumeration fast path: increasing physical IDs append

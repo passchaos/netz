@@ -22,16 +22,38 @@ on_exit() {
     while IFS= read -r log_file; do
       echo "===== $log_file =====" >&2
       cat "$log_file" >&2
-    done < <(find "$work" -type f -name '*.log' -size +0c | sort)
+    done < <(find "$work" -type f \
+      \( -name '*.log' -o -name '*.rss' \) -size +0c | sort)
   fi
   cleanup
   exit "$status"
 }
 trap on_exit EXIT
 
-cargo build --quiet --release --offline --locked \
+stats=false
+warmup=20
+iterations=1000
+payload_bytes=4096
+for arg in "$@"; do
+  case "$arg" in
+    --stats) stats=true ;;
+    --warmup=*) warmup=${arg#--warmup=} ;;
+    --iterations=*) iterations=${arg#--iterations=} ;;
+    --payload-bytes=*) payload_bytes=${arg#--payload-bytes=} ;;
+  esac
+done
+time_bin=${TIME_BIN:-/usr/bin/time}
+if [[ $stats == true && ! -x $time_bin ]]; then
+  echo "GNU time not found at $time_bin" >&2
+  exit 127
+fi
+cargo_args=(build --quiet --release --offline --locked \
   --manifest-path "$manifest" \
-  --bin netz-hyper-http2-websocket-bench
+  --bin netz-hyper-http2-websocket-bench)
+if [[ $stats == true ]]; then
+  cargo_args+=(--features allocation-stats)
+fi
+cargo "${cargo_args[@]}"
 
 free_tcp_port() {
   python3 - <<'PY'
@@ -64,32 +86,75 @@ client_cpu=${bench_cpus[0]}
 server_cpu=${bench_cpus[1]}
 echo "benchmark_cpu_layout=client:$client_cpu,server:$server_cpu"
 
+check_result() {
+  local check_args=(python3 \
+    "$repo_root/tools/interop/websocket_h2_benchmark_check.py" \
+    --role-pair="$1" --warmup="$warmup" --iterations="$iterations" \
+    --payload-bytes="$payload_bytes" --client-log="$2" --server-log="$3")
+  if [[ -n ${4:-} ]]; then
+    check_args+=(--client-rss="$4" --server-rss="$5")
+  fi
+  "${check_args[@]}"
+}
+
 port=$(free_tcp_port)
-timeout 180s taskset -c "$server_cpu" "$peer" server "$port" "$@" \
-  >"$work/hyper-server.log" 2>&1 &
+if [[ $stats == true ]]; then
+  timeout 180s "$time_bin" -f '%M' -o "$work/hyper-server.rss" \
+    taskset -c "$server_cpu" "$peer" server "$port" "$@" \
+    >"$work/hyper-server.log" 2>&1 &
+else
+  timeout 180s taskset -c "$server_cpu" "$peer" server "$port" "$@" \
+    >"$work/hyper-server.log" 2>&1 &
+fi
 server_pid=$!
 wait_for_line "$server_pid" "$work/hyper-server.log" HYPER_WEBSOCKET_H2_BENCH_PORT
-timeout 180s taskset -c "$client_cpu" "$netz_client" \
-  bench-client "$port" "$@" >"$work/netz-client.log" 2>&1
+if [[ $stats == true ]]; then
+  timeout 180s "$time_bin" -f '%M' -o "$work/netz-client.rss" \
+    taskset -c "$client_cpu" "$netz_client" bench-client "$port" "$@" \
+    >"$work/netz-client.log" 2>&1
+else
+  timeout 180s taskset -c "$client_cpu" "$netz_client" \
+    bench-client "$port" "$@" >"$work/netz-client.log" 2>&1
+fi
 wait "$server_pid"
 server_pid=
-grep -Fq 'role_pair=netz-client+hyper-server' "$work/netz-client.log"
-grep -Fq 'complete=true' "$work/netz-client.log"
-grep -Fq 'server_complete=true' "$work/hyper-server.log"
+if [[ $stats == true ]]; then
+  check_result netz-client+hyper-server "$work/netz-client.log" \
+    "$work/hyper-server.log" "$work/netz-client.rss" "$work/hyper-server.rss"
+else
+  check_result netz-client+hyper-server "$work/netz-client.log" \
+    "$work/hyper-server.log"
+fi
 cat "$work/hyper-server.log"
 cat "$work/netz-client.log"
 
 port=$(free_tcp_port)
-timeout 180s taskset -c "$server_cpu" "$netz_server" \
-  bench-server "$port" "$@" >"$work/netz-server.log" 2>&1 &
+if [[ $stats == true ]]; then
+  timeout 180s "$time_bin" -f '%M' -o "$work/netz-server.rss" \
+    taskset -c "$server_cpu" "$netz_server" bench-server "$port" "$@" \
+    >"$work/netz-server.log" 2>&1 &
+else
+  timeout 180s taskset -c "$server_cpu" "$netz_server" \
+    bench-server "$port" "$@" >"$work/netz-server.log" 2>&1 &
+fi
 server_pid=$!
 wait_for_line "$server_pid" "$work/netz-server.log" NETZ_WEBSOCKET_H2_BENCH_PORT
-timeout 180s taskset -c "$client_cpu" "$peer" client "$port" "$@" \
-  >"$work/hyper-client.log" 2>&1
+if [[ $stats == true ]]; then
+  timeout 180s "$time_bin" -f '%M' -o "$work/hyper-client.rss" \
+    taskset -c "$client_cpu" "$peer" client "$port" "$@" \
+    >"$work/hyper-client.log" 2>&1
+else
+  timeout 180s taskset -c "$client_cpu" "$peer" client "$port" "$@" \
+    >"$work/hyper-client.log" 2>&1
+fi
 wait "$server_pid"
 server_pid=
-grep -Fq 'role_pair=hyper-client+netz-server' "$work/hyper-client.log"
-grep -Fq 'complete=true' "$work/hyper-client.log"
-grep -Fq 'server_complete=true' "$work/netz-server.log"
+if [[ $stats == true ]]; then
+  check_result hyper-client+netz-server "$work/hyper-client.log" \
+    "$work/netz-server.log" "$work/hyper-client.rss" "$work/netz-server.rss"
+else
+  check_result hyper-client+netz-server "$work/hyper-client.log" \
+    "$work/netz-server.log"
+fi
 cat "$work/netz-server.log"
 cat "$work/hyper-client.log"

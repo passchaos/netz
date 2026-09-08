@@ -638,7 +638,13 @@ pub fn build(b: *std.Build) void {
             ),
             .target = target,
             .optimize = optimize,
-            .imports = &.{.{ .name = "netz", .module = netz_mod }},
+            .imports = &.{
+                .{ .name = "netz", .module = netz_mod },
+                .{
+                    .name = "benchmark_counting_allocator",
+                    .module = benchmark_counting_allocator_mod,
+                },
+            },
         }),
     });
     const websocket_hyper_h2 = b.addSystemCommand(
@@ -658,7 +664,13 @@ pub fn build(b: *std.Build) void {
             ),
             .target = target,
             .optimize = optimize,
-            .imports = &.{.{ .name = "netz", .module = netz_mod }},
+            .imports = &.{
+                .{ .name = "netz", .module = netz_mod },
+                .{
+                    .name = "benchmark_counting_allocator",
+                    .module = benchmark_counting_allocator_mod,
+                },
+            },
         }),
     });
     const websocket_hyper_h2_bench = b.addSystemCommand(
