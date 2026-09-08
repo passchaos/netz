@@ -2458,6 +2458,17 @@ exposes stream-window/datagram/pacing controls. Four 4-MiB streams with 1-MiB
 stream windows and 8-KiB datagrams completed at 188-195 MiB/s aggregate across
 three ReleaseFast runs. This replaces the earlier 26 MiB/s result whose fixed
 128-KiB connection window unintentionally serialized four streams.
+Read-only QUIC stream queries now borrow `Connection` instead of copying its
+roughly 7.5-KiB state for every credit, stats, and active-ID pagination probe.
+Five fixed-binary CPU-0 A/B pairs with the default 64-KiB stream window and a
+4-MiB single stream measured 270-272 MiB/s versus 236-240 MiB/s (1.13-1.15x
+throughput). Four equivalent runs with four 4-MiB streams measured 276-278
+MiB/s versus 211-213 MiB/s (1.30-1.32x). The 64-MiB single-stream profile
+reduced aggregate `memcpy` samples from 10.93% to 3.42%; the former copies
+under incremental polling and stream-credit queries disappeared. Compile-time
+receiver assertions guard the four hot query APIs. These are internal A/B
+results and do not replace the differently configured 8-KiB/1-MiB-window
+baseline above.
 
 The benchmark also accepts `--loss-pct=N`. Handshake and CONNECT setup remain
 reliable; a fixed-seed endpoint interceptor starts immediately before the

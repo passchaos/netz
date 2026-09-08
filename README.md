@@ -934,6 +934,8 @@ The aggregate `bench` step runs the current protocol microbenchmarks:
   negotiated permessage-deflate mode with logical-throughput reporting,
 - QUIC receive-loop timer selection through read-only connection references,
   avoiding full connection-state copies in HTTP/3, WebSocket, and WebTransport,
+- QUIC stream credit/stats/pagination queries through read-only connection
+  references, avoiding equivalent copies in WebTransport stream scheduling,
 - MQTT subscription-router combined ordinary/shared count+emit trie matching
   versus a linear filter scan, retained connection PUBLISH encoding scratch,
   and linear-time overlapping-subscription broker flush plans,

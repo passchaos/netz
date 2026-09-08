@@ -2310,7 +2310,10 @@ pub const Connection = struct {
         return self.stats();
     }
 
-    pub fn sendStreamStats(self: Connection, stream_id: u64) ?SendStreamStats {
+    pub fn sendStreamStats(
+        self: *const Connection,
+        stream_id: u64,
+    ) ?SendStreamStats {
         if (self.stream_send_index.count() == 0) return null;
         const index = self.stream_send_index.get(stream_id) orelse return null;
         if (index >= self.stream_send_flows.items.len) return null;
@@ -2319,7 +2322,10 @@ pub const Connection = struct {
         return sendStreamStatsFromEntry(entry);
     }
 
-    pub fn getSendStreamStats(self: Connection, stream_id: u64) ?SendStreamStats {
+    pub fn getSendStreamStats(
+        self: *const Connection,
+        stream_id: u64,
+    ) ?SendStreamStats {
         return self.sendStreamStats(stream_id);
     }
 
@@ -2532,7 +2538,7 @@ pub const Connection = struct {
     /// congestion, and path-MTU snapshot instead of rebuilding a full
     /// `SendCredit` value for every stream.
     pub fn streamSendAvailable(
-        self: Connection,
+        self: *const Connection,
         stream_id: u64,
     ) u64 {
         return if (self.isClosedStream(stream_id))
@@ -2561,7 +2567,10 @@ pub const Connection = struct {
         };
     }
 
-    pub fn recvStreamStats(self: Connection, stream_id: u64) ?RecvStreamStats {
+    pub fn recvStreamStats(
+        self: *const Connection,
+        stream_id: u64,
+    ) ?RecvStreamStats {
         if (self.stream_recv_index.count() == 0) return null;
         const index = self.stream_recv_index.get(stream_id) orelse return null;
         if (index >= self.stream_recv_flows.items.len) return null;
@@ -2570,7 +2579,10 @@ pub const Connection = struct {
         return recvStreamStatsFromEntry(entry);
     }
 
-    pub fn getRecvStreamStats(self: Connection, stream_id: u64) ?RecvStreamStats {
+    pub fn getRecvStreamStats(
+        self: *const Connection,
+        stream_id: u64,
+    ) ?RecvStreamStats {
         return self.recvStreamStats(stream_id);
     }
 
@@ -5355,7 +5367,7 @@ pub const Connection = struct {
         return .ready;
     }
 
-    fn isClosedPeerStream(self: Connection, stream_id: u64) bool {
+    fn isClosedPeerStream(self: *const Connection, stream_id: u64) bool {
         if (streamInitiatedByLocal(self.config.local_endpoint, stream_id)) {
             return false;
         }
@@ -5366,7 +5378,7 @@ pub const Connection = struct {
         };
     }
 
-    fn isClosedLocalStream(self: Connection, stream_id: u64) bool {
+    fn isClosedLocalStream(self: *const Connection, stream_id: u64) bool {
         if (!streamInitiatedByLocal(self.config.local_endpoint, stream_id)) {
             return false;
         }
@@ -5377,7 +5389,7 @@ pub const Connection = struct {
         };
     }
 
-    fn isClosedStream(self: Connection, stream_id: u64) bool {
+    fn isClosedStream(self: *const Connection, stream_id: u64) bool {
         return if (streamInitiatedByLocal(self.config.local_endpoint, stream_id))
             self.isClosedLocalStream(stream_id)
         else
@@ -6100,7 +6112,7 @@ pub const Connection = struct {
     /// lifecycle state. Protocol adapters use this to discover streams whose
     /// first packet was consumed while pumping ACK/flow-control progress.
     pub fn receivedStreamIdsInto(
-        self: Connection,
+        self: *const Connection,
         out: []u62,
     ) []u62 {
         return self.receivedStreamIdsFromInto(0, out);
@@ -6112,7 +6124,7 @@ pub const Connection = struct {
     /// operation can append or reclaim a stream. New pagination code should use
     /// `receivedStreamIdsAfterInto`, whose ID cursor survives table mutation.
     pub fn receivedStreamIdsFromInto(
-        self: Connection,
+        self: *const Connection,
         start: usize,
         out: []u62,
     ) []u62 {
@@ -6136,7 +6148,7 @@ pub const Connection = struct {
     /// physical-offset cursor above, this continuation remains valid when a
     /// completed stream is removed with swap-remove between pages.
     pub fn receivedStreamIdsAfterInto(
-        self: Connection,
+        self: *const Connection,
         after: ?u62,
         out: []u62,
     ) []u62 {
@@ -11421,7 +11433,10 @@ pub const Connection = struct {
             self.isPeerInitiatedStreamIdWithinLimit(stream_id);
     }
 
-    fn initialSendStreamDataLimit(self: Connection, stream_id: u64) u64 {
+    fn initialSendStreamDataLimit(
+        self: *const Connection,
+        stream_id: u64,
+    ) u64 {
         if (streamDirection(stream_id) == .unidirectional) {
             if (!streamInitiatedByLocal(self.config.local_endpoint, stream_id)) return 0;
             return self.config.initial_send_max_stream_data_uni orelse self.config.initial_send_max_stream_data;
@@ -12527,6 +12542,15 @@ pub const testing = struct {
 comptime {
     const timer_fn = @typeInfo(@TypeOf(Connection.nextTimerDeadline)).@"fn";
     std.debug.assert(timer_fn.params[0].type.? == *const Connection);
+    for (.{
+        Connection.sendStreamStats,
+        Connection.streamSendAvailable,
+        Connection.recvStreamStats,
+        Connection.receivedStreamIdsAfterInto,
+    }) |query| {
+        const query_fn = @typeInfo(@TypeOf(query)).@"fn";
+        std.debug.assert(query_fn.params[0].type.? == *const Connection);
+    }
 }
 
 test {
