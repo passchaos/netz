@@ -1574,7 +1574,7 @@ test "WebSocket HTTP3 caller-buffer resumes a partially streamed frame" {
     const client_cid = [_]u8{ 0xd1, 0xd2, 0xd3, 0xd4 };
     const server_cid = [_]u8{ 0xe1, 0xe2, 0xe3, 0xe4 };
     const payload = "0123456789abcdef" ** 64;
-    const prefix_len = 37;
+    const prefix_len = 512;
     const transport_limits: http3.runtime.Limits = .{ .quic = .{
         .max_datagram_size = 4096,
         .max_frames_per_datagram = 8,
@@ -1594,7 +1594,7 @@ test "WebSocket HTTP3 caller-buffer resumes a partially streamed frame" {
                 .random = [_]u8{0xe5} ** 32,
                 .x25519_secret_key = [_]u8{0xe6} ** 32,
             },
-            .session = .{ .max_stream_frame_data = 256 },
+            .session = .{ .max_stream_frame_data = 2048 },
         },
     );
     defer server.deinit();
@@ -1701,7 +1701,9 @@ test "WebSocket HTTP3 caller-buffer resumes a partially streamed frame" {
         error.BufferTooShort,
         client.message_into.validateOutput(&other_storage),
     );
-    try std.testing.expect(client.inbuf.capacity < payload.len);
+    try std.testing.expect(
+        client.inbuf.capacity <= @import("message/buffer.zig").slab_size,
+    );
 
     shared.resume_send.set(io);
     const message = client.receiveMessageIntoWithTimeout(
@@ -1716,7 +1718,9 @@ test "WebSocket HTTP3 caller-buffer resumes a partially streamed frame" {
     };
     try std.testing.expectEqual(websocket.Opcode.text, message.opcode);
     try std.testing.expectEqualStrings(payload, message.payload);
-    try std.testing.expect(client.inbuf.capacity < payload.len);
+    try std.testing.expect(
+        client.inbuf.capacity <= @import("message/buffer.zig").slab_size,
+    );
 
     shared.receive_done.set(io);
     thread.join();

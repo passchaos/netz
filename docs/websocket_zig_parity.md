@@ -209,6 +209,8 @@ Run:
 zig build bench-websocket-frame -Doptimize=ReleaseFast
 taskset -c 0 zig build bench-websocket-receive-buffer -Doptimize=ReleaseFast
 taskset -c 0 zig build bench-websocket-h3-echo -Doptimize=ReleaseFast
+taskset -c 0 zig build bench-websocket-h3-echo -Doptimize=ReleaseFast -- \
+  --stats
 ```
 
 The receive-buffer benchmark exercises 8,192 coalesced eight-byte frames over
@@ -242,6 +244,15 @@ storage, or into reusable compressed scratch, and masked in place. A resumable
 frame cursor pins the output identity and payload offset across deadlines;
 interleaved control frames remain in connection-owned storage because their
 temporary stack output cannot survive a timeout.
+The caller-buffer header path now requests only the missing 2-14 header bytes
+instead of reading ahead most of the first H3 DATA chunk into `inbuf`. A timeout
+regression sends a header plus a 512-byte payload prefix in one H3 write and
+verifies the final-buffer progress survives while `inbuf` remains within its
+256-byte header slab. On a 64-KiB echo A/B, five CPU-0 runs measured a
+121.213-us median with exact header reads versus 124.133 us with read-ahead, a
+2.4% reduction; the ordinary 4-KiB shape remained within timing noise. The H3
+benchmark now exposes `--stats`; a warmed 200-roundtrip run reported only nine
+one-time growth allocations and no per-message allocation.
 The HTTP/1 caller-buffer path now uses the same header-staging/data-direct
 split. Its socket or TLS read is bounded to the current frame remainder, so a
 1 KiB masked text payload can cross a timeout in caller storage without growing

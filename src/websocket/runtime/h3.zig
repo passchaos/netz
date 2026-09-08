@@ -1120,7 +1120,7 @@ pub fn Connection(comptime role: common.Role) type {
                 if (self.closeSent() and self.closeReceived()) {
                     return error.ConnectionClosed;
                 }
-                try self.ensureBuffered(2, deadline);
+                try self.ensureBufferedExact(2, deadline);
                 var available = message_buffer.unread(
                     &self.inbuf,
                     self.inbuf_consumed,
@@ -1134,7 +1134,7 @@ pub fn Connection(comptime role: common.Role) type {
                     header_len += 8;
                 }
                 if ((second & 0x80) != 0) header_len += 4;
-                try self.ensureBuffered(header_len, deadline);
+                try self.ensureBufferedExact(header_len, deadline);
                 available = message_buffer.unread(
                     &self.inbuf,
                     self.inbuf_consumed,
@@ -1904,6 +1904,40 @@ pub fn Connection(comptime role: common.Role) type {
             ) < required) {
                 if (self.receive_finished) return error.ConnectionClosed;
                 const count = try self.appendPayloadChunk(deadline);
+                if (count == 0) continue;
+            }
+        }
+
+        /// Buffer only the missing WebSocket header bytes. Caller-buffer data
+        /// frames send their payload directly to the final destination, so
+        /// reading ahead here would stage most of the first H3 DATA chunk in
+        /// `inbuf` only to copy it out immediately afterward.
+        fn ensureBufferedExact(
+            self: *Self,
+            required: usize,
+            deadline: ?std.Io.Clock.Timestamp,
+        ) Error!void {
+            while (true) {
+                const buffered = message_buffer.unreadLen(
+                    &self.inbuf,
+                    self.inbuf_consumed,
+                );
+                if (buffered >= required) return;
+                if (self.receive_finished) return error.ConnectionClosed;
+                const destination = try message_buffer.reserveAppendAfterConsumed(
+                    &self.inbuf,
+                    &self.inbuf_consumed,
+                    self.allocator,
+                    required - buffered,
+                );
+                const count = self.readPayloadChunkInto(
+                    destination,
+                    deadline,
+                ) catch |err| {
+                    message_buffer.commitAppend(&self.inbuf, 0);
+                    return err;
+                };
+                message_buffer.commitAppend(&self.inbuf, count);
                 if (count == 0) continue;
             }
         }

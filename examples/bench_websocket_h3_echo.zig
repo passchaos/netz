@@ -1,14 +1,25 @@
 const std = @import("std");
 const netz = @import("netz");
+const counting_allocator = @import("support/counting_allocator.zig");
+const CountingAllocator = counting_allocator.CountingAllocator;
 
 const payload_bytes: usize = 4096;
 const warmup_iterations: usize = 20;
 const iterations: usize = 200;
 const fragmented_slices: usize = 16;
 
+const Options = struct {
+    fragmented: bool = false,
+    stats: bool = false,
+};
+
 pub fn main(init: std.process.Init) !void {
-    const fragmented = try parseFragmented(init);
-    const allocator = std.heap.smp_allocator;
+    const options = try parseOptions(init);
+    var counting = CountingAllocator.init(std.heap.smp_allocator);
+    const allocator = if (options.stats)
+        counting.allocator()
+    else
+        std.heap.smp_allocator;
     var threaded = std.Io.Threaded.init(allocator, .{});
     defer threaded.deinit();
     const io = threaded.io();
@@ -107,14 +118,21 @@ pub fn main(init: std.process.Init) !void {
     var response: [payload_bytes]u8 align(64) = undefined;
     for (&payload, 0..) |*byte, index| byte.* = @truncate(index);
     for (0..warmup_iterations) |_| {
-        _ = try exchange(&ws, &payload, &response, fragmented);
+        _ = try exchange(&ws, &payload, &response, options.fragmented);
     }
+    const allocations_before = counting.snapshot();
     const started = nowNs(io);
     var checksum: u64 = 0;
     for (0..iterations) |_| {
-        checksum +%= try exchange(&ws, &payload, &response, fragmented);
+        checksum +%= try exchange(
+            &ws,
+            &payload,
+            &response,
+            options.fragmented,
+        );
     }
     const elapsed = nowNs(io) -| started;
+    const allocations_after = counting.snapshot();
 
     server_thread.join();
     if (shared.err) |err| return err;
@@ -139,7 +157,7 @@ pub fn main(init: std.process.Init) !void {
         warmup_iterations,
         iterations,
         payload_bytes,
-        if (fragmented) fragmented_slices else 1,
+        if (options.fragmented) fragmented_slices else 1,
         h3_limits.quic.max_datagram_size,
         session_options.paced_body_chunk_bytes,
         elapsed / iterations,
@@ -149,6 +167,9 @@ pub fn main(init: std.process.Init) !void {
         )) / (1024.0 * 1024.0),
         checksum,
     });
+    if (options.stats) {
+        printAllocationDelta(allocations_before, allocations_after);
+    }
 }
 
 fn exchange(
@@ -178,22 +199,69 @@ fn exchange(
         @as(u64, response.payload[payload_bytes - 1]);
 }
 
-fn parseFragmented(init: std.process.Init) !bool {
+fn parseOptions(init: std.process.Init) !Options {
     var args = try std.process.Args.Iterator.initAllocator(
         init.minimal.args,
         std.heap.smp_allocator,
     );
     defer args.deinit();
     _ = args.next();
-    var fragmented = false;
+    var options: Options = .{};
     while (args.next()) |arg| {
         if (std.mem.eql(u8, arg, "--fragmented")) {
-            fragmented = true;
+            options.fragmented = true;
+        } else if (std.mem.eql(u8, arg, "--stats")) {
+            options.stats = true;
         } else {
             return error.InvalidArgument;
         }
     }
-    return fragmented;
+    return options;
+}
+
+fn printAllocationDelta(
+    before: counting_allocator.Snapshot,
+    after: counting_allocator.Snapshot,
+) void {
+    std.debug.print(
+        "  measured allocator calls: {d}\n" ++
+            "  measured frees: {d}\n" ++
+            "  measured resize/remap: {d}/{d}\n" ++
+            "  measured allocated bytes: {d}\n" ++
+            "  measured allocation buckets:\n",
+        .{
+            after.alloc_count - before.alloc_count,
+            after.free_count - before.free_count,
+            after.resize_count - before.resize_count,
+            after.remap_count - before.remap_count,
+            after.total_allocated - before.total_allocated,
+        },
+    );
+    for (counting_allocator.bucket_labels, 0..) |label, index| {
+        std.debug.print(
+            "    {s}: count={d}, bytes={d}\n",
+            .{
+                label,
+                after.alloc_buckets[index] - before.alloc_buckets[index],
+                after.alloc_bucket_bytes[index] -
+                    before.alloc_bucket_bytes[index],
+            },
+        );
+    }
+    std.debug.print("  measured exact allocation sizes:\n", .{});
+    for (after.exact_sizes[0..after.exact_size_len]) |entry| {
+        var before_count: usize = 0;
+        for (before.exact_sizes[0..before.exact_size_len]) |old_entry| {
+            if (old_entry.size != entry.size) continue;
+            before_count = old_entry.count;
+            break;
+        }
+        if (entry.count <= before_count) continue;
+        std.debug.print(
+            "    {d} bytes: {d}\n",
+            .{ entry.size, entry.count - before_count },
+        );
+    }
 }
 
 fn nowNs(io: std.Io) u64 {
