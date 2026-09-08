@@ -1040,6 +1040,12 @@ allocations over 2,000 batches. Its exact-size telemetry contains only one
 request and one response HPACK ownership block per exchange; encoder staging is
 allocation-free. HPACK fail-first reuse and runtime rollback tests protect both
 the allocation and transactional guarantees.
+The single-stream streaming request path now borrows its initial HEADERS frame
+as well as subsequent DATA. The 100-KiB POST telemetry dropped from 6,020 to
+4,020 allocations over 2,000 requests by removing one exact 26-byte frame copy
+per request; the two remaining steady-state allocations are the request and
+response HPACK ownership blocks. The integration allocation test exercises the
+same header-plus-streamed-DATA path after warmup.
 The bidirectional Hyper process gate now exercises that boundary directly over
 h2c and TLS. A netz client waits through an idle interval, receives Hyper/h2's
 PING ACK, and completes another request on the same connection. In the reverse

@@ -327,6 +327,12 @@ only the 20,000 request and 20,000 response owned HPACK blocks. The single
 telemetry sample was 27.415 us/batch; five subsequent fixed-binary CPU-0 runs
 measured 26.258-26.431 us/batch. This is recorded as an internal regression
 range rather than a new cross-stack ratio.
+The single-stream streaming-request reader now borrows its initial wire frame
+under the same pending-owned fallback. The 100-KiB POST scenario removed one
+26-byte HEADERS allocation per request, reducing the warmed 2,000-request run
+from 6,020 to 4,020 allocation calls and from 1,902,112 to 1,850,112 cumulative
+requested bytes. Its 23.533-us sample stays within the established range, so
+only the allocation/copy reduction is claimed.
 
 `strace` confirmed equal steady-state wire sizes: empty exchanges use 19-byte
 requests and 11-byte responses; POST exchanges use 43-byte requests and

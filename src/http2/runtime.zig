@@ -6848,23 +6848,32 @@ pub const Connection = struct {
             }
         };
         while (true) {
-            var first = self.readOwnedFrameWithDeadline(deadline) catch |err| {
+            var pending_owned: ?OwnedFrame = null;
+            defer if (pending_owned) |*owned| {
+                owned.deinit(self.allocator);
+            };
+            const first = (if (self.pendingApplicationFrameCount() != 0) blk: {
+                pending_owned = self.readOwnedFrameWithDeadline(deadline) catch |err| {
+                    read_timed_out = deadline != null and err == error.Timeout;
+                    return err;
+                };
+                break :blk pending_owned.?.frame;
+            } else (self.readBufferedFrameWithDeadline(deadline) catch |err| {
                 read_timed_out = deadline != null and err == error.Timeout;
                 return err;
-            };
-            defer first.deinit(self.allocator);
-            if (try self.handleConnectionFrame(first.frame)) continue;
-            if (first.frame.header.frame_type == .goaway) continue;
-            if (first.frame.header.frame_type != .headers) {
+            }).frame);
+            if (try self.handleConnectionFrame(first)) continue;
+            if (first.header.frame_type == .goaway) continue;
+            if (first.header.frame_type != .headers) {
                 return error.UnexpectedFrame;
             }
 
-            const stream_id = first.frame.header.stream_id;
+            const stream_id = first.header.stream_id;
             const admission = try self.claimPeerRequestStream(stream_id);
             if (admission != .admitted) {
                 try self.refusePeerRequestStreamUntil(
                     stream_id,
-                    first.frame,
+                    first,
                     deadline,
                     admission == .refused_reset_sent,
                 );
@@ -6874,7 +6883,7 @@ pub const Connection = struct {
             active_stream_id = stream_id;
 
             const headers = self.readHeaderBlockUntil(
-                first.frame,
+                first,
                 deadline,
             ) catch |err| {
                 read_timed_out = deadline != null and err == error.Timeout;
@@ -6925,7 +6934,7 @@ pub const Connection = struct {
             };
             var body_bytes: usize = 0;
             if ((!is_connect or is_extended_connect) and
-                (first.frame.header.flags & flag_end_stream) == 0)
+                (first.header.flags & flag_end_stream) == 0)
             {
                 while (true) {
                     const frame = (self.readBufferedFrameWithDeadline(
@@ -17010,6 +17019,38 @@ test "HTTP/2 aggregate empty exchange borrows wire frames after warmup" {
                     .body = "small-body",
                 });
             }
+
+            {
+                var body_bytes: usize = 0;
+                var tracking = std.testing.FailingAllocator.init(
+                    allocator,
+                    .{},
+                );
+                const saved_allocator = connection.allocator;
+                connection.allocator = tracking.allocator();
+                defer connection.allocator = saved_allocator;
+
+                var request = try connection.readRequestStreaming(
+                    &body_bytes,
+                    struct {
+                        fn consume(
+                            count: *usize,
+                            data: []const u8,
+                        ) !void {
+                            count.* += data.len;
+                        }
+                    }.consume,
+                );
+                defer request.deinit(connection.allocator);
+                try std.testing.expectEqual(@as(usize, 10), body_bytes);
+                // Streaming DATA is borrowed and the HEADERS wire frame now
+                // remains borrowed too, leaving only the owned HPACK block.
+                try std.testing.expectEqual(
+                    @as(usize, 1),
+                    tracking.allocations,
+                );
+                try connection.writeResponse(request.stream_id, .{});
+            }
         }
     };
 
@@ -17104,6 +17145,17 @@ test "HTTP/2 aggregate empty exchange borrows wire frames after warmup" {
         // The combined HPACK block and exact body buffer are the only owned
         // allocations for a warmed known-length aggregate response.
         try std.testing.expectEqual(@as(usize, 2), tracking.allocations);
+    }
+
+    {
+        var response = try client.request(.{
+            .method = "POST",
+            .path = "/measured",
+            .authority = "localhost",
+            .body = "small-body",
+        });
+        defer response.deinit(allocator);
+        try std.testing.expectEqual(@as(u16, 200), response.status);
     }
 
     thread.join();
