@@ -409,8 +409,7 @@ pub fn encodeDynamicBlockWithReferenceLimit(
         table.entryCount() != 0 and
         table.entries.items[table.head].absolute_index < reference_limit;
     const stack_match_capacity = 64;
-    var stack_matches: [stack_match_capacity]?DynamicTable.Match =
-        undefined;
+    var stack_matches: [stack_match_capacity]?DynamicTable.Match = undefined;
     const dynamic_matches: []?DynamicTable.Match = if (!dynamic_references_possible)
         &.{}
     else if (fields.len <= stack_matches.len)
@@ -449,6 +448,17 @@ pub fn encodeDynamicBlockWithReferenceLimit(
     // also keeps literal-only sections at the canonical zero/zero prefix even
     // after a long-lived connection has accumulated many unreferenced inserts.
     const base = required_insert_count;
+    if (fields.len > stack_match_capacity and dynamic_references_possible) {
+        return encodeLargeDynamicFields(
+            list,
+            allocator,
+            fields,
+            dynamic_matches,
+            encoded_insert_count,
+            base,
+            references,
+        );
+    }
     try encodePrefix(
         list,
         allocator,
@@ -547,6 +557,124 @@ pub fn encodeDynamicBlockWithReferenceLimit(
     }
 }
 
+fn encodeLargeDynamicFields(
+    list: *std.ArrayList(u8),
+    allocator: std.mem.Allocator,
+    fields: []const HeaderField,
+    dynamic_matches: []const ?DynamicTable.Match,
+    encoded_insert_count: u64,
+    base: u64,
+    references: *std.ArrayList(u64),
+) !void {
+    var seen: std.AutoHashMapUnmanaged(u64, void) = .empty;
+    defer seen.deinit(allocator);
+    const max_references = std.math.add(
+        usize,
+        references.items.len,
+        fields.len,
+    ) catch return error.OutOfMemory;
+    try seen.ensureTotalCapacity(
+        allocator,
+        std.math.cast(u32, max_references) orelse return error.OutOfMemory,
+    );
+    for (references.items) |absolute_index| {
+        seen.putAssumeCapacity(absolute_index, {});
+    }
+    try encodePrefix(list, allocator, encoded_insert_count, 0);
+
+    for (fields, dynamic_matches) |field, dynamic_match| {
+        if (!field.never_indexed) {
+            if (dynamic_match) |match| {
+                if (match.full_match) {
+                    const absolute_index = match.absolute_index;
+                    try appendReferenceUniqueHashed(
+                        references,
+                        allocator,
+                        absolute_index,
+                        &seen,
+                    );
+                    if (absolute_index < base) {
+                        try encodePrefixedInteger(
+                            list,
+                            allocator,
+                            6,
+                            0x80,
+                            base - absolute_index - 1,
+                        );
+                    } else {
+                        try encodePrefixedInteger(
+                            list,
+                            allocator,
+                            4,
+                            0x10,
+                            absolute_index - base,
+                        );
+                    }
+                    continue;
+                }
+            }
+        }
+
+        if (static_table_module.findMatch(field.name, field.value)) |match| {
+            if (match.full_match and !field.never_indexed) {
+                try encodePrefixedInteger(list, allocator, 6, 0xc0, match.index);
+            } else {
+                try encodePrefixedInteger(
+                    list,
+                    allocator,
+                    4,
+                    0x50 | if (field.never_indexed) @as(u8, 0x20) else 0,
+                    match.index,
+                );
+                try encodeString(list, allocator, field.value);
+            }
+            continue;
+        }
+
+        if (dynamic_match) |match| {
+            const absolute_index = match.absolute_index;
+            try appendReferenceUniqueHashed(
+                references,
+                allocator,
+                absolute_index,
+                &seen,
+            );
+            if (absolute_index < base) {
+                try encodePrefixedInteger(
+                    list,
+                    allocator,
+                    4,
+                    0x40 | if (field.never_indexed) @as(u8, 0x20) else 0,
+                    base - absolute_index - 1,
+                );
+            } else {
+                try encodePrefixedInteger(
+                    list,
+                    allocator,
+                    3,
+                    if (field.never_indexed) 0x08 else 0x00,
+                    absolute_index - base,
+                );
+            }
+            try encodeString(list, allocator, field.value);
+            continue;
+        }
+
+        try list.ensureUnusedCapacity(
+            allocator,
+            prefixed_integer.encodedLen(3, field.name.len) + field.name.len,
+        );
+        encodePrefixedIntegerAssumeCapacity(
+            list,
+            3,
+            0x20 | if (field.never_indexed) @as(u8, 0x10) else 0,
+            field.name.len,
+        );
+        list.appendSliceAssumeCapacity(field.name);
+        try encodeString(list, allocator, field.value);
+    }
+}
+
 fn usesDynamicMatch(
     field: HeaderField,
     match: DynamicTable.Match,
@@ -567,15 +695,29 @@ fn appendReferenceUnique(
     // Dynamic encoders often reference the same table entry for adjacent fields
     // (for example repeated trailers or benchmark blocks). Check the tail first
     // so that common duplicate case avoids scanning the whole reference set.
-    if (references.items.len != 0 and
-        references.items[references.items.len - 1] == absolute_index)
-    {
-        return;
-    }
-    for (references.items) |existing| {
-        if (existing == absolute_index) return;
+    if (references.items.len != 0) {
+        if (references.items[references.items.len - 1] == absolute_index) {
+            return;
+        }
+        for (references.items[0 .. references.items.len - 1]) |existing| {
+            if (existing == absolute_index) return;
+        }
     }
     try references.append(allocator, absolute_index);
+}
+
+fn appendReferenceUniqueHashed(
+    references: *std.ArrayList(u64),
+    allocator: std.mem.Allocator,
+    absolute_index: u64,
+    seen: *std.AutoHashMapUnmanaged(u64, void),
+) !void {
+    const slot = seen.getOrPutAssumeCapacity(absolute_index);
+    if (slot.found_existing) return;
+    references.append(allocator, absolute_index) catch |err| {
+        _ = seen.remove(absolute_index);
+        return err;
+    };
 }
 
 pub fn decodeDynamicBlock(

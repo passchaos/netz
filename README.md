@@ -913,6 +913,8 @@ The aggregate `bench` step runs the current protocol microbenchmarks:
 - HTTP/3 Capsule Protocol parsing/iteration and caller-buffer encoding for
   CONNECT-stream extension payloads,
 - HTTP/3 QPACK field-section encoding against a populated dynamic table,
+- HTTP/3 QPACK 512-entry reference-set encoding with large-only hashed
+  deduplication and first-reference ordering,
 - HTTP/3 QPACK dynamic-table churn with single-allocation name/value ownership,
 - WebSocket masked frame encoding with allocating, caller-buffer, and
   header-only streaming paths, plus retained no-context-takeover
@@ -1089,7 +1091,10 @@ if (session.maxDatagramPayloadSize()) |limit| {
   feedback. These HTTP/3 runtimes persist their encoder/decoder streams and
   automatically use peer-capacity-bounded, reference-safe dynamic compression
   for repeated request and response fields after either preconfigured 1-RTT or
-  a full QUIC handshake. The lightweight preconfigured 1-RTT runtime also
+  a full QUIC handshake. Large field sections deduplicate dynamic references
+  with temporary hash membership while preserving first-use order; ordinary
+  sections retain their allocation-free stack and linear fast path. The
+  lightweight preconfigured 1-RTT runtime also
   reuses protected packet scratch. Stateful preconfigured-key and
   handshake-backed runtimes batch
   multi-packet STREAM sends through UDP GSO or sendmmsg while preserving

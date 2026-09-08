@@ -784,6 +784,53 @@ test "HTTP/3 QPACK encoder state is transactional under allocation failure" {
     );
 }
 
+test "HTTP/3 QPACK large reference scratch OOM rolls back encoder state" {
+    const allocator = std.testing.allocator;
+    const field_count = 65;
+    var encoder = QpackEncodeState.initAwaitingPeerSettings(allocator, 4096);
+    defer encoder.deinit();
+    try encoder.configurePeerCapacity(8 * 1024);
+
+    var names: [field_count][24]u8 = undefined;
+    var values: [field_count][24]u8 = undefined;
+    var fields: [field_count]http3.Qpack.HeaderField = undefined;
+    for (&fields, 0..) |*field, index| {
+        const name = try std.fmt.bufPrint(
+            &names[index],
+            "x-state-ref-{d:0>2}",
+            .{index},
+        );
+        const value = try std.fmt.bufPrint(
+            &values[index],
+            "value-{d:0>2}",
+            .{index},
+        );
+        _ = try encoder.insertField(name, value);
+        field.* = .{ .name = name, .value = value };
+    }
+    encoder.known_received_count = encoder.table.insert_count;
+
+    var block: std.ArrayList(u8) = .empty;
+    defer block.deinit(allocator);
+    try block.appendSlice(allocator, &.{ 0xaa, 0xbb });
+    var failing = std.testing.FailingAllocator.init(allocator, .{
+        // Let the dynamic-match array allocate, then fail the large-only
+        // reference membership set before the prefix can be written.
+        .fail_index = 1,
+    });
+    encoder.allocator = failing.allocator();
+    const result = encoder.encodeFieldSection(&block, 12, &fields);
+    encoder.allocator = allocator;
+
+    try std.testing.expectError(error.OutOfMemory, result);
+    try std.testing.expect(failing.has_induced_failure);
+    try std.testing.expectEqualSlices(u8, &.{ 0xaa, 0xbb }, block.items);
+    try std.testing.expectEqual(@as(usize, 0), encoder.pending_sections.items.len);
+    try std.testing.expectEqual(@as(usize, 0), encoder.pending_section_index.count());
+    try std.testing.expectEqual(@as(usize, 0), encoder.reference_counts.count());
+    try std.testing.expectEqual(@as(usize, 0), encoder.blocked_section_counts.count());
+}
+
 fn checkQpackSpeculativeEncodeAllocationFailure(
     allocator: std.mem.Allocator,
 ) !void {

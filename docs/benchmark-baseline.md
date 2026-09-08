@@ -512,8 +512,13 @@ Three CPU-14 baseline runs took 50.50-65.60 us/block (98-128 ns/field). A
 sort/compact prototype reduced that large shape to 18.70-18.79 us but enlarged
 the shared encoder enough to regress the ordinary block from 917 ns to about
 1,247 ns, so the implementation was rejected and fully rolled back. The
-large-section number remains a checked-in optimization gate rather than hiding
-the trade-off.
+accepted large-only hash-membership path now preserves first-reference order
+without rescanning the growing reference list. Five CPU-0 samples measured
+14.10-14.59 us/block (27-28 ns/field), down from the immediately preceding
+49.10-49.45 us/block CPU-0 baseline, or 3.37-3.51x faster. The same runs kept
+the ordinary 32-field block at 821-827 ns/block after isolating hash-backed
+emission from its linear stack path. These are internal before/after results,
+not an equal-wire cross-library comparison.
 
 ### QUIC 1-RTT send
 
