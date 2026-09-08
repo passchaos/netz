@@ -134,6 +134,11 @@ benchmark response:
   The isolated borrowed parser improved from a 264-ns median to 238 ns; existing
   malformed-authority, IPv6-literal and port-range tests retain the strict
   request-smuggling boundary.
+- forcing the compact header-line parser inline reduced the isolated borrowed
+  median from 238 to 231 ns and also improved both owned benchmark modes. Two
+  seemingly plausible alternatives were rejected by direct A/B: a scalar
+  CRLF/header state machine lost the standard library's vectorized delimiter
+  scan, while vectorized colon search reintroduced a second name pass.
 
 Connection persistence and Upgrade decisions scan every repeated `Connection`
 field as one comma-separated token list while ordinary `header()` lookup still

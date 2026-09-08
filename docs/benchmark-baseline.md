@@ -128,6 +128,14 @@ the pre-pass 334 to 238 ns (28.7%). Five default-shape runs measured
 240-242 ns borrowed, 795-797 ns owned and 818-822 ns owned plus explicit Host
 validation. Existing Host regressions cover URI/userinfo/list delimiters,
 queries/fragments, unbracketed IPv6, mixed brackets and port overflow.
+Finally, explicitly inlining the now compact `parseHeaderLine` hot helper
+removed its call boundary in both borrowed and owned loops. Five CPU-0
+5-million-parse samples measured 231-234 ns/op (231 ns median), another 2.9%
+below 238 ns. Five default-shape runs measured 236-241 ns borrowed,
+766-769 ns owned and 791-796 ns owned plus Host validation. Two attempted
+alternatives were rejected by A/B evidence: scalar CRLF/header fusion regressed
+to 259-261 ns/op, and vectorized colon search followed by token validation
+regressed to 253-257 ns/op.
 HTTP/1 aggregate message-boundary logic now lives under
 `runtime/message/framing.zig`: head limits, Content-Length and
 Transfer-Encoding classification, decoded chunk limits, trailer limits,

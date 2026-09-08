@@ -972,7 +972,7 @@ fn parseRequestLine(
     };
 }
 
-fn parseHeaderLine(
+inline fn parseHeaderLine(
     line: []const u8,
     allow_spaces_before_colon: bool,
 ) Error!Header {
