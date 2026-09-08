@@ -468,6 +468,17 @@ same-application-shape rather than equal-wire: the two peers currently expose
 different effective WebTransport DATAGRAM payload limits, and packet capture
 plus UDP datagram accounting is still needed to prove equivalent packetization.
 
+The RFC 9220 quic-go peer likewise exposes
+`bench-websocket-h3-quic-go`. It runs a certificate-verified persistent binary
+echo in both implementation-role pairings on separate CPUs, excludes handshake
+and warmup from timing, varies and validates all 4 KiB payloads at both peers,
+and requires a normal Close. Five 1,000-round samples measured
+101.80-103.39 us/roundtrip for netz-client + quic-go-server and
+102.25-103.34 us/roundtrip for quic-go-client + netz-server. The overlapping
+ranges are reported by role pair, not attributed to one library. This remains
+same-application-shape because GSO/GRO, ACK policy, packetization, and syscall
+counts have not been proven equal.
+
 Peer unidirectional streams are classified only after their offset-zero type
 varint becomes contiguous. A bounded connection-scoped reassembler retains
 out-of-order suffixes, so reserved/unknown streams are ignored and arbitrarily

@@ -538,6 +538,24 @@ pub fn build(b: *std.Build) void {
         "Run bidirectional RFC 9220 interoperability with quic-go",
     );
     websocket_h3_quic_go_step.dependOn(&websocket_h3_quic_go.step);
+    const websocket_h3_quic_go_bench = b.addSystemCommand(
+        &.{"tools/interop/websocket_h3_quic_go.sh"},
+    );
+    websocket_h3_quic_go_bench.addArtifactArg(
+        websocket_h3_quic_go_client,
+    );
+    websocket_h3_quic_go_bench.addArtifactArg(
+        websocket_h3_quic_go_server,
+    );
+    websocket_h3_quic_go_bench.addArg("--bench");
+    if (b.args) |args| websocket_h3_quic_go_bench.addArgs(args);
+    const websocket_h3_quic_go_bench_step = b.step(
+        "bench-websocket-h3-quic-go",
+        "Compare persistent RFC 9220 echo against quic-go",
+    );
+    websocket_h3_quic_go_bench_step.dependOn(
+        &websocket_h3_quic_go_bench.step,
+    );
 
     const http3_tquic_client = b.addExecutable(.{
         .name = "netz-http3-tquic-client",

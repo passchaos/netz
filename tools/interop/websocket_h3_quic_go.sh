@@ -35,7 +35,18 @@ cleanup() {
   fi
   rm -rf "$work"
 }
-trap cleanup EXIT
+on_exit() {
+  local status=$?
+  if [[ $status -ne 0 ]]; then
+    while IFS= read -r log_file; do
+      echo "===== $log_file =====" >&2
+      cat "$log_file" >&2
+    done < <(find "$work" -type f -name '*.log' -size +0c | sort)
+  fi
+  cleanup
+  exit "$status"
+}
+trap on_exit EXIT
 
 # Build inside the external module so its pinned quic-go version supplies the
 # HTTP/3 implementation, without modifying that checkout.
@@ -51,6 +62,83 @@ with socket.socket(socket.AF_INET, socket.SOCK_DGRAM) as sock:
     print(sock.getsockname()[1])
 PY
 }
+
+if [[ ${3:-} == --bench ]]; then
+  shift 3
+  mapfile -t bench_cpus < <(python3 - <<'PY'
+import os
+for cpu in sorted(os.sched_getaffinity(0))[:2]:
+    print(cpu)
+PY
+  )
+  if [[ ${#bench_cpus[@]} -lt 2 ]]; then
+    echo 'WebSocket-over-H3 comparison requires two available CPUs' >&2
+    exit 1
+  fi
+  client_cpu=${bench_cpus[0]}
+  server_cpu=${bench_cpus[1]}
+  go_args=()
+  for arg in "$@"; do go_args+=("-${arg#--}"); done
+
+  wait_for_line() {
+    local pid=$1 log=$2 prefix=$3
+    local value=
+    for _ in $(seq 1 600); do
+      value=$(sed -n "s/^${prefix}=//p" "$log" | head -1)
+      if [[ -n $value ]]; then printf '%s\n' "$value"; return 0; fi
+      if ! kill -0 "$pid" 2>/dev/null; then cat "$log" >&2; return 1; fi
+      sleep 0.05
+    done
+    echo "timed out waiting for $prefix" >&2
+    return 1
+  }
+
+  echo "benchmark_cpu_layout=client:$client_cpu,server:$server_cpu"
+  cat >"$work/netz-ca.pem" <<'EOF'
+-----BEGIN CERTIFICATE-----
+MIIBMDCB1qADAgECAgISNDAKBggqhkjOPQQDAjAUMRIwEAYDVQQDDAlsb2NhbGhvc3QwHhcNMjYwMTAxMDAwMDAwWhcNMzYwMTAxMDAwMDAwWjAUMRIwEAYDVQQDDAlsb2NhbGhvc3QwWTATBgcqhkjOPQIBBggqhkjOPQMBBwNCAARawLjuCeZXZ7tsfTRAu+FcuRLUr+ELbhoX/6Hs0fLlSZe0NNZYPUqZa65oYGMMs9Ud19Qc/RZMzn4vZv5+EakUoxgwFjAUBgNVHREEDTALgglsb2NhbGhvc3QwCgYIKoZIzj0EAwIDSQAwRgIhAJFAj+UlV/FOGaVRnB/9l7wXgSet0zn4CdgFIckqC1hEAiEApPR1fJT2M9PVNn3fwdZBboKEoWrUYLVy6sMvbrhNjKU=
+-----END CERTIFICATE-----
+EOF
+  port=$(free_udp_port)
+  timeout 180s taskset -c "$server_cpu" "$work/quic-go-rfc9220-peer" \
+    -mode bench-server -addr "127.0.0.1:$port" \
+    -ca-out "$work/quic-go-bench-ca.pem" "${go_args[@]}" \
+    >"$work/quic-go-bench-server.log" 2>&1 &
+  server_pid=$!
+  wait_for_line "$server_pid" "$work/quic-go-bench-server.log" \
+    QUIC_GO_WEBSOCKET_H3_BENCH_ADDR >/dev/null
+  sleep 0.05
+  timeout 180s taskset -c "$client_cpu" "$client" \
+    bench-client "$port" "$work/quic-go-bench-ca.pem" "$@" \
+    >"$work/netz-bench-client.log" 2>&1
+  wait "$server_pid"
+  server_pid=
+  grep -Fq 'role_pair=netz-client+quic-go-server' \
+    "$work/netz-bench-client.log"
+  grep -Fq 'complete=true' "$work/netz-bench-client.log"
+  grep -Fq 'server_complete=true' "$work/quic-go-bench-server.log"
+  cat "$work/quic-go-bench-server.log"
+  cat "$work/netz-bench-client.log"
+
+  port=$(free_udp_port)
+  timeout 180s taskset -c "$server_cpu" "$server" \
+    bench-server "$port" "$@" >"$work/netz-bench-server.log" 2>&1 &
+  server_pid=$!
+  wait_for_line "$server_pid" "$work/netz-bench-server.log" \
+    NETZ_WEBSOCKET_H3_BENCH_PORT >/dev/null
+  timeout 180s taskset -c "$client_cpu" "$work/quic-go-rfc9220-peer" \
+    -mode bench-client -addr "127.0.0.1:$port" -ca "$work/netz-ca.pem" \
+    "${go_args[@]}" >"$work/quic-go-bench-client.log" 2>&1
+  wait "$server_pid"
+  server_pid=
+  grep -Fq 'role_pair=quic-go-client+netz-server' \
+    "$work/quic-go-bench-client.log"
+  grep -Fq 'complete=true' "$work/quic-go-bench-client.log"
+  grep -Fq 'server_complete=true' "$work/netz-bench-server.log"
+  cat "$work/netz-bench-server.log"
+  cat "$work/quic-go-bench-client.log"
+  exit 0
+fi
 
 port=$(free_udp_port)
 "$work/quic-go-rfc9220-peer" \

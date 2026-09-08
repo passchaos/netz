@@ -813,6 +813,9 @@ zig build interop-http2-hyper-client -Doptimize=ReleaseFast
 # directions. The reverse case closes a partially-read quic-go response body
 # and requires netz to observe the exact cancellation before serving stream 4.
 zig build interop-http3-quic-go -Doptimize=ReleaseFast
+# Run the corresponding bidirectional RFC 9220 WebSocket gate, including
+# subprotocol/permessage-deflate negotiation, Ping/Pong, Close, and QUIC v1/v2.
+zig build interop-websocket-h3-quic-go -Doptimize=ReleaseFast
 # Use Hyper's HTTP/2 Extended CONNECT server to validate netz RFC 8441 frame
 # masking, text exchange, Ping/Pong, and the WebSocket Close handshake.
 zig build interop-websocket-hyper-h2 -Doptimize=ReleaseFast
@@ -881,6 +884,7 @@ zig build bench-http3-qpack -Doptimize=ReleaseFast
 zig build bench-websocket-frame -Doptimize=ReleaseFast
 zig build bench-websocket-receive-buffer -Doptimize=ReleaseFast
 zig build bench-websocket-h3-echo -Doptimize=ReleaseFast -- --warmup=20 --iterations=200
+zig build bench-websocket-h3-quic-go -Doptimize=ReleaseFast -- --warmup=20 --iterations=1000 --payload-bytes=4096
 zig build bench-mqtt-router -Doptimize=ReleaseFast
 zig build bench-quic-short-packet -Doptimize=ReleaseFast
 zig build bench-quic-padding-parse -Doptimize=ReleaseFast
@@ -988,8 +992,11 @@ per sample, matching payloads, flow windows, 1280-byte steady-state MTU, and
 1152-byte effective application chunks. Receiver-side byte, EOF, checksum, and
 status validation is mandatory. Results are labeled `same-application-shape`
 because quic-go's GSO/GRO and ACK/packetization policy are not all externally
-controllable. `bench-webtransport-wtransport` provides the analogous stream
-upload and DATAGRAM ping-pong comparison described above.
+controllable. `bench-websocket-h3-quic-go` uses the same two-CPU, dual-role
+layout for persistent RFC 9220 binary echo, with handshake and warmup outside
+the measured interval and byte-exact validation at both peers. It is also
+labeled `same-application-shape`. `bench-webtransport-wtransport` provides the
+analogous stream upload and DATAGRAM ping-pong comparison described above.
 
 The build script pins the package to Zig `0.16.0`.
 

@@ -2324,6 +2324,38 @@ sample removed `nextTimerDeadline` as a visible symbol and reduced aggregate
 `memcpy` samples from 9.52% to 1.58%; a compile-time receiver assertion guards
 against reintroducing the by-value copy.
 
+### RFC 9220 WebSocket versus quic-go, same application shape
+
+`bench-websocket-h3-quic-go` extends the bidirectional correctness peer with a
+persistent binary-echo workload. Both processes are pinned to separate CPUs,
+use certificate-verified QUIC v1, a 1280-byte steady-state MTU, 1 MiB stream /
+8 MiB connection windows, no WebSocket compression, and one 4 KiB binary
+message outstanding at a time. The RFC 9220 handshake and 20 warmup echoes
+finish before one interval times 1,000 measured round trips. Payload contents
+change with the round, and both peers independently validate every byte; they
+also require a normal WebSocket Close after the timed loop.
+
+```sh
+zig build bench-websocket-h3-quic-go -Doptimize=ReleaseFast -- \
+  --warmup=20 --iterations=1000 --payload-bytes=4096 --timeout-ms=30000
+```
+
+Five sequential runs on CPU 0/client and CPU 1/server measured:
+
+| Role pair | Latency | Logical payload throughput |
+|---|---:|---:|
+| netz client + quic-go server | 101.80-103.39 us/roundtrip | 75.57-76.75 MiB/s |
+| quic-go client + netz server | 102.25-103.34 us/roundtrip | 75.60-76.41 MiB/s |
+
+Every process pair verified 4,096,000 sent and received application bytes and
+aggregate checksum 522,240,000. The result belongs to each complete role pair;
+it does not isolate either library's client or server cost. It is
+`same-application-shape`, not equal-wire: netz explicitly disables GSO/GRO,
+while quic-go uses implementation defaults, and ACK timing, packetization,
+cipher exposure, syscall counts, and UDP datagram counts/bytes have not been
+equalized. No cross-library speed ratio is inferred from the overlapping
+ranges.
+
 ## MQTT 5 windowed QoS 1 broker fanout
 
 Captured on 2026-08-20 with one external client binary driving both brokers:

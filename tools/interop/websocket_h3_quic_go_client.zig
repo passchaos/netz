@@ -3,9 +3,13 @@
 
 const std = @import("std");
 const netz = @import("netz");
+const benchmark = @import("websocket_h3_quic_go_bench.zig");
 
 pub fn main(init: std.process.Init) !void {
     const args = try init.minimal.args.toSlice(init.arena.allocator());
+    if (args.len >= 4 and std.mem.eql(u8, args[1], "bench-client")) {
+        return runBenchmark(init, args[2..]);
+    }
     if (args.len < 3 or args.len > 4) return error.InvalidArgument;
     const port = try std.fmt.parseInt(u16, args[1], 10);
     if (port == 0 or !std.Io.Dir.path.isAbsolute(args[2])) {
@@ -172,6 +176,163 @@ pub fn main(init: std.process.Init) !void {
         "netz RFC 9220 client interoperated with quic-go: version={d} extended_connect=true tls_verified=true origin=true subprotocol=netz-chat masked_fragmented_text=true permessage_deflate=no_context_takeover ping_pong=true close=1000/done local_key_updates={d} peer_key_updates={d}\n",
         .{ versionNumber(version), local_key_updates, peer_key_updates },
     );
+}
+
+fn runBenchmark(_: std.process.Init, args: []const []const u8) !void {
+    if (args.len < 2) return error.InvalidArgument;
+    const port = try std.fmt.parseInt(u16, args[0], 10);
+    if (port == 0 or !std.Io.Dir.path.isAbsolute(args[1])) {
+        return error.InvalidArgument;
+    }
+    const config = try benchmark.Config.parse(args[2..]);
+    const allocator = std.heap.c_allocator;
+    var threaded = std.Io.Threaded.init(allocator, .{ .async_limit = .unlimited });
+    defer threaded.deinit();
+    const io = threaded.io();
+
+    const now = std.Io.Clock.real.now(io);
+    var ca_bundle: std.crypto.Certificate.Bundle = .empty;
+    defer ca_bundle.deinit(allocator);
+    try ca_bundle.addCertsFromFilePathAbsolute(allocator, io, now, args[1]);
+    var verifier = netz.quic.tls.trust.BundleVerifier{
+        .bundle = &ca_bundle,
+        .now_seconds = now.toSeconds(),
+    };
+    var original_dcid: [8]u8 = undefined;
+    var client_cid: [8]u8 = undefined;
+    try std.Io.randomSecure(io, &original_dcid);
+    try std.Io.randomSecure(io, &client_cid);
+    var warmup_header: [10]u8 = undefined;
+    var iterations_header: [10]u8 = undefined;
+    var payload_header: [10]u8 = undefined;
+    var timeout_header: [10]u8 = undefined;
+    const headers = try config.headers(
+        &warmup_header,
+        &iterations_header,
+        &payload_header,
+        &timeout_header,
+    );
+    var connection = try netz.websocket.runtime.h3.Client.connect(
+        allocator,
+        io,
+        .{ .ip4 = .loopback(0) },
+        .{ .ip4 = .loopback(port) },
+        .{ .quic = .{
+            .max_datagram_size = 4096,
+            .max_frames_per_datagram = 256,
+            .enable_gso_send = false,
+            .enable_gro_receive = false,
+        } },
+        .{
+            .connect_timeout = config.timeout(),
+            .handshake = .{
+                .original_destination_connection_id = &original_dcid,
+                .local_connection_id = &client_cid,
+                .version = .version_1,
+                .available_versions = &.{.version_1},
+                .server_name = "localhost",
+                .server_auth = verifier.clientVerifier(),
+                .local_transport_parameters = config.transportParameters(),
+                .initial_one_rtt_config = config.oneRttConfig(),
+                .max_crypto_buffer = 64 * 1024,
+            },
+            .session = config.sessionOptions(),
+        },
+        .{
+            .authority = "localhost",
+            .path = benchmark.path,
+            .origin = benchmark.origin,
+            .protocols = &.{benchmark.protocol},
+            .extra_headers = &headers,
+            .limits = config.websocketLimits(),
+        },
+    );
+    defer connection.deinit();
+    if (!std.mem.eql(u8, connection.negotiatedAlpn(), "h3") or
+        connection.peerCertificates() == null or
+        connection.peerCertificates().?.len == 0 or
+        connection.permessage_deflate or
+        connection.selectedProtocol() == null or
+        !std.mem.eql(u8, connection.selectedProtocol().?, benchmark.protocol))
+    {
+        return error.InvalidNegotiatedMetadata;
+    }
+
+    var ready = try connection.receiveMessageWithTimeout(config.timeout());
+    defer ready.deinit(allocator);
+    if (ready.opcode != .binary or
+        !std.mem.eql(u8, ready.payload, "NZWSREADY"))
+    {
+        return error.InvalidBenchmarkControl;
+    }
+    benchmark.printConfig("netz-client+quic-go-server", config);
+    const payload = try allocator.alloc(u8, config.payload_bytes);
+    defer allocator.free(payload);
+    const response_storage = try allocator.alloc(u8, config.payload_bytes);
+    defer allocator.free(response_storage);
+    for (0..config.warmup) |round| {
+        _ = try benchmarkRound(
+            &connection,
+            payload,
+            response_storage,
+            @intCast(round),
+            config.timeout(),
+        );
+    }
+    const started = benchmark.nowNs(io);
+    var checksum: u64 = 0;
+    for (0..config.iterations) |sample| {
+        const round = std.math.add(u32, config.warmup, @intCast(sample)) catch
+            return error.InvalidArgument;
+        checksum +%= try benchmarkRound(
+            &connection,
+            payload,
+            response_storage,
+            round,
+            config.timeout(),
+        );
+    }
+    const elapsed = benchmark.nowNs(io) -| started;
+    try connection.sendClose(.normal_closure, "done");
+    var close = try connection.receiveFrameWithTimeout(config.timeout());
+    defer close.deinit(allocator);
+    if (close.header.opcode != .close) return error.UnexpectedClose;
+    const parsed = (try netz.websocket.parseClosePayload(close.payload)) orelse
+        return error.MissingClosePayload;
+    if (parsed.code != .normal_closure or
+        !std.mem.eql(u8, parsed.reason, "done"))
+    {
+        return error.UnexpectedClose;
+    }
+    benchmark.printResult(
+        "netz-client+quic-go-server",
+        config,
+        elapsed,
+        checksum,
+    );
+}
+
+fn benchmarkRound(
+    connection: *netz.websocket.runtime.h3.ClientConnection,
+    payload: []u8,
+    response_storage: []u8,
+    round: u32,
+    timeout: std.Io.Duration,
+) !u64 {
+    const expected_checksum = benchmark.fillPayload(payload, round);
+    try connection.sendBinary(payload);
+    const response = try connection.receiveMessageIntoWithTimeout(
+        response_storage,
+        timeout,
+    );
+    if (response.opcode != .binary or response.was_compressed or
+        response.payload.len != payload.len)
+    {
+        return error.InvalidBenchmarkResponse;
+    }
+    const checksum = try benchmark.verifyPayload(response.payload, round);
+    if (checksum != expected_checksum) return error.InvalidBenchmarkResponse;
+    return checksum;
 }
 
 fn parseVersion(args: []const []const u8) !netz.quic.Version {
