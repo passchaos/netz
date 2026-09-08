@@ -240,6 +240,25 @@ pub const DynamicTable = struct {
         // emptied) no dynamic reference can be legal, so skip hash-map probes.
         if (absolute_index_limit == 0 or self.entryCount() == 0) return null;
         const name_hash = dynamicStringHash(name);
+        const latest_name_index = self.latest_name.get(name_hash) orelse
+            return null;
+        var name_match: ?u64 = null;
+        if (latest_name_index < absolute_index_limit) {
+            if (self.absolute(latest_name_index)) |entry| {
+                if (entry.name_hash == name_hash and
+                    std.mem.eql(u8, entry.name, name))
+                {
+                    if (std.mem.eql(u8, entry.value, value)) {
+                        return .{
+                            .absolute_index = latest_name_index,
+                            .full_match = true,
+                        };
+                    }
+                    name_match = latest_name_index;
+                }
+            }
+        }
+
         const value_hash = dynamicStringHash(value);
         const exact_key = DynamicExactKey{
             .name_hash = name_hash,
@@ -271,29 +290,17 @@ pub const DynamicTable = struct {
                 absolute_index_limit,
             );
         }
-
-        if (self.latest_name.get(name_hash)) |absolute_index| {
-            if (absolute_index < absolute_index_limit) {
-                if (self.absolute(absolute_index)) |entry| {
-                    if (entry.name_hash == name_hash and
-                        std.mem.eql(u8, entry.name, name))
-                    {
-                        return .{
-                            .absolute_index = absolute_index,
-                            .full_match = false,
-                        };
-                    }
-                }
-            }
-            return self.findMatchBeforeLinear(
-                name,
-                value,
-                name_hash,
-                value_hash,
-                absolute_index_limit,
-            );
-        }
-        return null;
+        if (name_match) |absolute_index| return .{
+            .absolute_index = absolute_index,
+            .full_match = false,
+        };
+        return self.findMatchBeforeLinear(
+            name,
+            value,
+            name_hash,
+            value_hash,
+            absolute_index_limit,
+        );
     }
 
     fn findMatchBeforeLinear(

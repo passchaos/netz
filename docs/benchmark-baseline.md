@@ -541,6 +541,14 @@ interleaved runs at the preceding prehashed-index commit (1.03-1.05x faster).
 Mixed static, name-only, literal, and never-indexed sections retain the general
 encoder; focused round-trip and second-allocation failure tests cover both
 branches and the pre-prefix rollback boundary.
+Dynamic lookup now checks the newest same-name entry before computing the value
+digest or probing the exact index. When that entry is also an exact match, as in
+both populated encode scenarios, the second hash and map lookup disappear; an
+older exact value still takes precedence over a newer name-only match. Three
+interleaved CPU-0 large-section comparisons measured 9.22-9.33 us/block versus
+9.45-9.57 us/block at the preceding reservation commit (1.01-1.04x faster).
+Two 1,000,000-iteration 32-field comparisons measured 711-715 ns/block versus
+733-736 ns/block.
 
 ### QUIC 1-RTT send
 

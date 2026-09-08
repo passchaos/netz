@@ -918,7 +918,8 @@ The aggregate `bench` step runs the current protocol microbenchmarks:
   one-shot exact-block output reservation, plus scenario/iteration selection
   for isolated profiling,
 - HTTP/3 QPACK dynamic-table churn with single-allocation name/value ownership,
-  prehashed exact-match index keys, and byte-verified collision fallback,
+  prehashed exact-match index keys, a newest-name exact-match fast path, and
+  byte-verified collision fallback,
 - WebSocket masked frame encoding with allocating, caller-buffer, and
   header-only streaming paths, plus retained no-context-takeover
   permessage-deflate throughput and wire-size reporting; stream transports

@@ -320,6 +320,13 @@ test "HTTP/3 QPACK dynamic match prefers exact then newest name before limit" {
         @as(?u64, 3),
         table.findExact("x-match", "new-exact"),
     );
+    const older_exact = table.findMatchBefore(
+        "x-match",
+        "old-exact",
+        table.insert_count,
+    ) orelse return error.TestUnexpectedResult;
+    try std.testing.expect(older_exact.full_match);
+    try std.testing.expectEqual(@as(u64, 0), older_exact.absolute_index);
 
     const name_only = table.findMatchBefore(
         "x-match",
