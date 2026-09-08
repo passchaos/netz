@@ -115,6 +115,50 @@ def read_rss(path: Path) -> int:
     return value
 
 
+def validate_traffic(
+    record: dict[str, str],
+    *,
+    role_pair: str,
+    implementation: str,
+    endpoint_role: str,
+    mode: str,
+    warmup: int,
+    iterations: int,
+    streams: int,
+    bytes_per_stream: int,
+    payload_bytes: int,
+    chunk_bytes: int,
+    stream_window: int,
+    timeout_ms: int,
+) -> None:
+    validate_shape(
+        record, role_pair=role_pair, implementation=implementation,
+        endpoint_role=endpoint_role, mode=mode, warmup=warmup,
+        iterations=iterations, streams=streams,
+        bytes_per_stream=bytes_per_stream, payload_bytes=payload_bytes,
+        chunk_bytes=chunk_bytes, stream_window=stream_window,
+        timeout_ms=timeout_ms,
+    )
+    expected_source = (
+        "netz-socket-counters"
+        if implementation == "netz"
+        else "quinn-connection-stats"
+    )
+    if (
+        record.get("traffic_scope") != "connection"
+        or record.get("socket_boundary") != "userspace-udp-payload"
+        or record.get("traffic_source") != expected_source
+        or record.get("logical_udp_segments") != "true"
+        or record.get("complete") != "true"
+    ):
+        raise SystemExit(f"invalid traffic scope/completion: {record}")
+    for key in (
+        "udp_sent_datagrams", "udp_sent_payload_bytes",
+        "udp_received_datagrams", "udp_received_payload_bytes",
+    ):
+        integer(record, key, positive=True)
+
+
 def main() -> None:
     parser = argparse.ArgumentParser()
     parser.add_argument("--role-pair", required=True)
@@ -131,6 +175,7 @@ def main() -> None:
     parser.add_argument("--server-log", required=True, type=Path)
     parser.add_argument("--client-rss", type=Path)
     parser.add_argument("--server-rss", type=Path)
+    parser.add_argument("--require-traffic", action="store_true")
     args = parser.parse_args()
 
     implementations = {
@@ -225,6 +270,59 @@ def main() -> None:
         f"warmup={args.warmup} iterations={args.iterations} streams={args.streams} "
         f"bytes={expected_bytes} checksum={expected_checksum} complete=true"
     )
+
+    if args.require_traffic:
+        joined: dict[str, dict[str, str]] = {}
+        for role, log_path in (("client", args.client_log), ("server", args.server_log)):
+            traffic_records = records(log_path, "traffic", args.role_pair)
+            if len(traffic_records) != 1:
+                raise SystemExit(
+                    f"expected one traffic record in {log_path}, found {len(traffic_records)}"
+                )
+            traffic_record = traffic_records[0]
+            validate_traffic(
+                traffic_record, role_pair=args.role_pair,
+                implementation=implementations[role], endpoint_role=role,
+                mode=args.mode, warmup=args.warmup, iterations=args.iterations,
+                streams=args.streams, bytes_per_stream=args.bytes_per_stream,
+                payload_bytes=args.payload_bytes, chunk_bytes=args.chunk_bytes,
+                stream_window=args.stream_window, timeout_ms=args.timeout_ms,
+            )
+            joined[role] = traffic_record
+        client = joined["client"]
+        server = joined["server"]
+        client_tx_datagrams = integer(client, "udp_sent_datagrams", positive=True)
+        client_tx_bytes = integer(client, "udp_sent_payload_bytes", positive=True)
+        client_rx_datagrams = integer(client, "udp_received_datagrams", positive=True)
+        client_rx_bytes = integer(client, "udp_received_payload_bytes", positive=True)
+        server_tx_datagrams = integer(server, "udp_sent_datagrams", positive=True)
+        server_tx_bytes = integer(server, "udp_sent_payload_bytes", positive=True)
+        server_rx_datagrams = integer(server, "udp_received_datagrams", positive=True)
+        server_rx_bytes = integer(server, "udp_received_payload_bytes", positive=True)
+        deltas = (
+            client_tx_datagrams - server_rx_datagrams,
+            client_tx_bytes - server_rx_bytes,
+            server_tx_datagrams - client_rx_datagrams,
+            server_tx_bytes - client_rx_bytes,
+        )
+        if any(delta < 0 for delta in deltas):
+            raise SystemExit(f"peer observed traffic not sent: deltas={deltas}")
+        print(
+            f"record=traffic-summary protocol=webtransport mode={args.mode} "
+            f"role_pair={args.role_pair} traffic_scope=connection "
+            f"socket_boundary=userspace-udp-payload "
+            f"client_udp_sent_datagrams={client_tx_datagrams} "
+            f"client_udp_sent_payload_bytes={client_tx_bytes} "
+            f"server_udp_sent_datagrams={server_tx_datagrams} "
+            f"server_udp_sent_payload_bytes={server_tx_bytes} "
+            f"total_udp_sent_datagrams={client_tx_datagrams + server_tx_datagrams} "
+            f"total_udp_sent_payload_bytes={client_tx_bytes + server_tx_bytes} "
+            f"client_to_server_observation_delta_datagrams={deltas[0]} "
+            f"client_to_server_observation_delta_bytes={deltas[1]} "
+            f"server_to_client_observation_delta_datagrams={deltas[2]} "
+            f"server_to_client_observation_delta_bytes={deltas[3]} "
+            "benchmark_scope=same-application-shape complete=true"
+        )
 
     if (args.client_rss is None) != (args.server_rss is None):
         raise SystemExit("both RSS files are required together")

@@ -995,6 +995,44 @@ pub fn printNetzMemory(
     );
 }
 
+pub fn printNetzTraffic(
+    role_pair: []const u8,
+    endpoint_role: []const u8,
+    config: Config,
+    traffic: netz.quic.runtime.SocketTrafficStats,
+) void {
+    std.debug.print(
+        "record=traffic implementation=netz protocol=webtransport transport=h3 " ++
+            "mode={s} direction={s} role_pair={s} endpoint_role={s} " ++
+            "connection_scope=persistent warmup={d} iterations={d} " ++
+            "streams={d} bytes_per_stream={d} payload_bytes={d} " ++
+            "chunk_bytes={d} stream_window={d} timeout_ms={d} " ++
+            "traffic_scope=connection socket_boundary=userspace-udp-payload " ++
+            "traffic_source=netz-socket-counters " ++
+            "udp_sent_datagrams={d} udp_sent_payload_bytes={d} " ++
+            "udp_received_datagrams={d} udp_received_payload_bytes={d} " ++
+            "logical_udp_segments=true complete=true\n",
+        .{
+            config.mode.name(),
+            config.mode.direction(),
+            role_pair,
+            endpoint_role,
+            config.warmup,
+            config.iterations,
+            config.streams,
+            config.bytes_per_stream,
+            config.payload_bytes,
+            config.chunk_bytes,
+            config.stream_window,
+            config.timeout_ms,
+            traffic.sent_datagrams,
+            traffic.sent_bytes,
+            traffic.received_datagrams,
+            traffic.received_bytes,
+        },
+    );
+}
+
 fn runPingServer(
     allocator: std.mem.Allocator,
     session: anytype,

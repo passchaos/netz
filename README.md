@@ -1026,6 +1026,11 @@ also accepts `--stats` for four-process peak RSS and separately scoped netz
 explicit-allocation / Rust system-requested-allocation telemetry. Its strict
 verifier checks every stream sample or the aggregate DATAGRAM result plus an
 independent server-completion record.
+Add `--traffic` in a separate run to join complete-connection userspace UDP
+payload bytes and logical datagram counts from the netz endpoint and Quinn
+connection statistics. This records wire-shape differences without presenting
+userspace accounting as kernel/interface capture; `--traffic` and `--stats`
+are deliberately mutually exclusive.
 
 The build script pins the package to Zig `0.16.0`.
 

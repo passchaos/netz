@@ -2976,6 +2976,34 @@ RSS is the cross-language metric, and the differently scoped allocator
 counters are not used as a cross-language ratio. These memory observations
 retain the same `same-application-shape` boundary as the timing results.
 
+`--traffic` is a separate opt-in pass because netz's thread-safe endpoint
+counters add atomic work. It joins one complete-connection record from each
+endpoint after handshake, all warmup and measured work, the benchmark
+acknowledgment, and CLOSE_ACK/grace. Netz reports successful socket I/O;
+wtransport reports Quinn `ConnectionStats.udp_tx/udp_rx`. Both count UDP
+payload bytes without IP/UDP headers and logical datagrams under GSO/GRO, but
+this is userspace evidence rather than kernel/interface capture. Three default
+runs recorded:
+
+| Mode / role pair | Total UDP payload bytes | Total logical UDP datagrams |
+|---|---:|---:|
+| stream, wtransport client + netz server | 112,093,715-112,114,364 | 180,705-180,728 |
+| stream, netz client + wtransport server | 108,989,778-109,108,480 | 115,105-117,800 |
+| DATAGRAM, wtransport client + netz server | 920,825-920,836 | 18,227 |
+| DATAGRAM, netz client + wtransport server | 920,357-920,359 | 18,229 |
+
+The stream connection transports 25 total 4-MiB application rounds (20
+warmups plus five measured). Its 3.0-3.1 MB total-payload and roughly
+63-66 thousand datagram differences show that ACK/control traffic and packet
+scheduling are materially different even though the application shape matches.
+The DATAGRAM shapes are much closer but still not byte-identical. Endpoint
+observation deltas were non-negative; Quinn-client/netz-server stream runs had
+423-441 client tail datagrams (505,870-528,038 bytes) not yet observed when the
+server snapshot was taken, while the reverse role pair differed by one final
+1200-byte client datagram and one 41-byte server datagram. These timing-boundary
+deltas are printed rather than hidden. `--traffic` and `--stats` must run
+separately, and neither changes the ordinary benchmark path.
+
 ## Reference context from `~/Work`
 
 The closest available reference document is

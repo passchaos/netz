@@ -465,8 +465,9 @@ directions for deterministic stream uploads and one-outstanding DATAGRAM
 ping-pong with CONFIG/GO/DONE boundaries, byte/checksum/FIN validation, warmup,
 and stable machine-readable results. It is deliberately reported as
 same-application-shape rather than equal-wire: the two peers currently expose
-different effective WebTransport DATAGRAM payload limits, and packet capture
-plus UDP datagram accounting is still needed to prove equivalent packetization.
+different effective WebTransport DATAGRAM payload limits. Userspace UDP
+accounting below proves the stream shapes differ; kernel/interface capture is
+still needed before any equivalent-packetization claim.
 Its opt-in process-memory matrix covers stream upload and DATAGRAM ping-pong in
 both role directions. Three default-shape runs measured stream RSS at 10,240
 KiB for the netz client versus 11,264-11,312 KiB for the wtransport client,
@@ -477,6 +478,16 @@ allocation records ended at zero live bytes; Rust system-requested counters
 remain separately scoped diagnostics. A strict verifier independently derives
 the expected bytes/checksum and requires distinct result, server-completion,
 and memory records.
+A separate `--traffic` pass joins both endpoints' userspace UDP payload bytes
+and logical datagram counts for the complete persistent connection. Three
+stream runs measured 112.094-112.114 MB / 180,705-180,728 datagrams for
+wtransport-client + netz-server, versus 108.990-109.108 MB /
+115,105-117,800 datagrams for netz-client + wtransport-server. The 32-byte
+DATAGRAM shapes were closer at 920.825-920.836 KB / 18,227 datagrams and
+920.357-920.359 KB / 18,229 datagrams. This proves the stream workloads are
+not equal-wire and keeps the comparison scoped accordingly; Quinn connection
+stats and netz socket counters still do not replace permitted-host kernel or
+interface capture.
 
 The RFC 9220 quic-go peer likewise exposes
 `bench-websocket-h3-quic-go`. It runs a certificate-verified persistent binary

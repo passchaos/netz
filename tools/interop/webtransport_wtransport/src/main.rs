@@ -43,10 +43,13 @@ fn main() -> Result<()> {
         ensure!(all_args.len() >= 3, "benchmark mode requires PORT");
         let role = all_args[1].clone();
         let mut stats = false;
+        let mut traffic = false;
         let mut filtered = all_args.drain(..3).collect::<Vec<_>>();
         for arg in all_args {
             if arg == "--stats" && !stats {
                 stats = true;
+            } else if arg == "--traffic" && !traffic {
+                traffic = true;
             } else {
                 filtered.push(arg);
             }
@@ -54,13 +57,17 @@ fn main() -> Result<()> {
         if stats && !cfg!(feature = "allocation-stats") {
             bail!("--stats requires the allocation-stats Cargo feature");
         }
+        ensure!(
+            !(stats && traffic),
+            "--stats and --traffic must run separately"
+        );
         let runtime = tokio::runtime::Builder::new_multi_thread()
             .enable_all()
             .build()
             .context("Tokio runtime")?;
         let config = match role.as_str() {
-            "bench-client" => runtime.block_on(bench::run_client(&filtered[2..]))?,
-            "bench-server" => runtime.block_on(bench::run_server(&filtered[2..]))?,
+            "bench-client" => runtime.block_on(bench::run_client(&filtered[2..], traffic))?,
+            "bench-server" => runtime.block_on(bench::run_server(&filtered[2..], traffic))?,
             _ => unreachable!(),
         };
         drop(runtime);

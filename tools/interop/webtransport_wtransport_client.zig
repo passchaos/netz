@@ -284,19 +284,23 @@ fn runBenchmark(_: std.process.Init, args: []const []const u8) !void {
     const port = try std.fmt.parseInt(u16, args[0], 10);
     if (port == 0) return error.InvalidArgument;
     var stats = false;
+    var traffic = false;
     var config_args: std.ArrayList([]const u8) = .empty;
     defer config_args.deinit(std.heap.c_allocator);
     for (args[1..]) |arg| {
         if (std.mem.eql(u8, arg, "--stats") and !stats) {
             stats = true;
+        } else if (std.mem.eql(u8, arg, "--traffic") and !traffic) {
+            traffic = true;
         } else {
             try config_args.append(std.heap.c_allocator, arg);
         }
     }
+    if (stats and traffic) return error.InvalidArgument;
     const config = try benchmark.Config.parse(config_args.items);
     var counting = CountingAllocator.init(std.heap.c_allocator);
     const allocator = if (stats) counting.allocator() else std.heap.c_allocator;
-    try runBenchmarkWithAllocator(allocator, port, config);
+    try runBenchmarkWithAllocator(allocator, port, config, traffic);
     if (stats) {
         const snapshot = counting.snapshot();
         if (snapshot.current_bytes != 0) return error.MemoryLeak;
@@ -313,6 +317,7 @@ fn runBenchmarkWithAllocator(
     allocator: std.mem.Allocator,
     port: u16,
     config: benchmark.Config,
+    traffic: bool,
 ) !void {
     var threaded = std.Io.Threaded.init(allocator, .{
         .async_limit = .unlimited,
@@ -323,6 +328,7 @@ fn runBenchmarkWithAllocator(
         [_]u8{ 0x6e, 0x7a, 0x77, 0x74, 0x62, 0x00, 0x00, 0x01 };
     const client_cid =
         [_]u8{ 0x6e, 0x7a, 0x77, 0x74, 0x62, 0x00, 0x00, 0x02 };
+    var socket_traffic: netz.quic.runtime.SocketTrafficCounters = .{};
     const uri = try std.fmt.allocPrint(
         allocator,
         "https://127.0.0.1:{d}/benchmark",
@@ -345,6 +351,10 @@ fn runBenchmarkWithAllocator(
                     .max_frames_per_datagram = 256,
                     .enable_gso_send = false,
                     .enable_gro_receive = false,
+                    .socket_traffic_counters = if (traffic)
+                        &socket_traffic
+                    else
+                        null,
                 } },
                 .max_session_streams = try config.sessionStreams(),
             },
@@ -372,4 +382,12 @@ fn runBenchmarkWithAllocator(
     try benchmark.runClient(allocator, io, &client, config);
     try benchmark.sendCloseReady(&client, config);
     try benchmark.receiveCloseAck(allocator, &client, config);
+    if (traffic) {
+        benchmark.printNetzTraffic(
+            "netz-client+wtransport-server",
+            "client",
+            config,
+            socket_traffic.stats(),
+        );
+    }
 }

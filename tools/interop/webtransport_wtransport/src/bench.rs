@@ -343,7 +343,7 @@ fn transport_config(config: &Config) -> Result<QuicTransportConfig> {
     Ok(transport)
 }
 
-pub async fn run_client(args: &[String]) -> Result<Config> {
+pub async fn run_client(args: &[String], traffic: bool) -> Result<Config> {
     let (port, options) = parse_port(args)?;
     ensure!(port != 0, "benchmark server port must be non-zero");
     let config = Config::parse(options)?;
@@ -402,10 +402,19 @@ pub async fn run_client(args: &[String]) -> Result<Config> {
         close_ack.round == config.rounds(),
         "CLOSE_ACK round mismatch"
     );
+    if traffic {
+        print_traffic(
+            "wtransport",
+            "wtransport-client+netz-server",
+            "client",
+            &config,
+            connection.quic_connection().stats(),
+        );
+    }
     Ok(config)
 }
 
-pub async fn run_server(args: &[String]) -> Result<Config> {
+pub async fn run_server(args: &[String], traffic: bool) -> Result<Config> {
     let (port, options) = parse_port(args)?;
     let config = Config::parse(options)?;
     let identity = Identity::self_signed(["localhost", "127.0.0.1"])?;
@@ -448,6 +457,15 @@ pub async fn run_server(args: &[String]) -> Result<Config> {
     .await?;
     tokio::time::sleep(Duration::from_millis(100)).await;
     print_server_complete("wtransport", "netz-client+wtransport-server", &config);
+    if traffic {
+        print_traffic(
+            "wtransport",
+            "netz-client+wtransport-server",
+            "server",
+            &config,
+            connection.quic_connection().stats(),
+        );
+    }
     Ok(config)
 }
 
@@ -925,6 +943,32 @@ fn print_server_complete(implementation: &str, role_pair: &str, config: &Config)
     );
 }
 
+fn print_traffic(
+    implementation: &str,
+    role_pair: &str,
+    endpoint_role: &str,
+    config: &Config,
+    stats: wtransport::quinn::ConnectionStats,
+) {
+    println!(
+        "record=traffic implementation={implementation} protocol=webtransport transport=h3 mode={} direction={} role_pair={role_pair} endpoint_role={endpoint_role} connection_scope=persistent warmup={} iterations={} streams={} bytes_per_stream={} payload_bytes={} chunk_bytes={} stream_window={} timeout_ms={} traffic_scope=connection socket_boundary=userspace-udp-payload traffic_source=quinn-connection-stats udp_sent_datagrams={} udp_sent_payload_bytes={} udp_received_datagrams={} udp_received_payload_bytes={} logical_udp_segments=true complete=true",
+        config.mode.name(),
+        config.mode.direction(),
+        config.warmup,
+        config.iterations,
+        config.streams,
+        config.bytes_per_stream,
+        config.payload_bytes,
+        config.chunk_bytes,
+        config.stream_window,
+        config.timeout_ms,
+        stats.udp_tx.datagrams,
+        stats.udp_tx.bytes,
+        stats.udp_rx.datagrams,
+        stats.udp_rx.bytes,
+    );
+}
+
 #[cfg(feature = "allocation-stats")]
 pub(crate) fn print_memory(
     role: &str,
@@ -1012,5 +1056,11 @@ mod tests {
         verify_ping(&ping, 17).unwrap();
         ping[31] ^= 1;
         assert!(verify_ping(&ping, 17).is_err());
+    }
+
+    #[tokio::test]
+    async fn benchmark_entrypoints_reject_missing_port() {
+        assert!(run_client(&[], false).await.is_err());
+        assert!(run_server(&[], false).await.is_err());
     }
 }

@@ -46,6 +46,7 @@ PY
   requested_modes=(stream datagram-pingpong)
   common_args=()
   stats=false
+  traffic=false
   warmup_override=
   iterations_override=
   streams=1
@@ -61,6 +62,7 @@ PY
       common_args+=("$arg")
       case "$arg" in
         --stats) stats=true ;;
+        --traffic) traffic=true ;;
         --warmup=*) warmup_override=${arg#--warmup=} ;;
         --iterations=*) iterations_override=${arg#--iterations=} ;;
         --streams=*) streams=${arg#--streams=} ;;
@@ -72,6 +74,10 @@ PY
       esac
     fi
   done
+  if [[ $stats == true && $traffic == true ]]; then
+    echo '--stats and --traffic must run separately' >&2
+    exit 2
+  fi
   time_bin=${TIME_BIN:-/usr/bin/time}
   if [[ $stats == true && ! -x $time_bin ]]; then
     echo "GNU time not found at $time_bin" >&2
@@ -132,6 +138,9 @@ PY
         --client-log="$2" --server-log="$3")
       if [[ -n ${4:-} ]]; then
         check_args+=(--client-rss="$4" --server-rss="$5")
+      fi
+      if [[ $traffic == true ]]; then
+        check_args+=(--require-traffic)
       fi
       "${check_args[@]}"
     }
