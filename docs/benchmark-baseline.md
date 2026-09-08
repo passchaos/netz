@@ -505,6 +505,13 @@ Both literal and dynamic decoder tests assert one final allocation, pointer
 layout and exhaustive allocation-failure cleanup. Five CPU-0 dynamic-decode
 runs measured 751-762 ns/block in four stable samples with one 835-ns outlier,
 versus the preceding 835-857 ns range (838-ns median).
+The follow-up owned builder retains encoded string plans rather than first
+decoding into a 16-KiB stack-backed staging list and copying those bytes again
+at finalization. It now decodes or copies each string directly into the final
+co-located allocation. Three interleaved 1,000,000-iteration CPU-0 runs measured
+638-653 ns/block versus 759-773 ns/block at the preceding commit (1.16-1.21x
+faster). A 40-field mixed Huffman/literal/dynamic allocation-failure test covers
+the heap plan fallback and final-allocation cleanup.
 
 The same executable now includes a 512-field/512-unique-reference section to
 expose reference-set bookkeeping that the ordinary 32-field block cannot.

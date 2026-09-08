@@ -1149,6 +1149,49 @@ test "HTTP/3 QPACK owned dynamic decode is allocation-failure safe" {
     );
 }
 
+fn checkLargeOwnedQpackDecode(allocator: std.mem.Allocator) !void {
+    var table = Qpack.DynamicTable.init(allocator, 4096);
+    defer table.deinit();
+    try table.setCapacity(4096);
+    _ = try table.insert("x-owned-large", "dynamic-value");
+
+    var fields: [40]Qpack.HeaderField = undefined;
+    for (&fields) |*field| {
+        field.* = .{ .name = "x-owned-large", .value = "dynamic-value" };
+    }
+    fields[17] = .{
+        .name = "x-owned-large",
+        .value = "compressible-new-value",
+        .never_indexed = true,
+    };
+    fields[33] = .{ .name = "x-literal-owned", .value = "literal-value" };
+
+    var block: std.ArrayList(u8) = .empty;
+    defer block.deinit(allocator);
+    try Qpack.encodeDynamicBlock(&block, allocator, &fields, table);
+    var decoded = try Qpack.decodeDynamicBlockOwnedWithLimit(
+        allocator,
+        block.items,
+        table,
+        4096,
+    );
+    defer Qpack.freeDynamicBlock(allocator, &decoded);
+    try std.testing.expectEqual(fields.len, decoded.fields.len);
+    for (fields, decoded.fields) |expected, actual| {
+        try std.testing.expectEqualStrings(expected.name, actual.name);
+        try std.testing.expectEqualStrings(expected.value, actual.value);
+        try std.testing.expectEqual(expected.never_indexed, actual.never_indexed);
+    }
+}
+
+test "HTTP/3 QPACK large owned dynamic decode is allocation-failure safe" {
+    try std.testing.checkAllAllocationFailures(
+        std.testing.allocator,
+        checkLargeOwnedQpackDecode,
+        .{},
+    );
+}
+
 test "HTTP/3 QPACK owned dynamic decode allocates one final field section" {
     const allocator = std.testing.allocator;
     var table = Qpack.DynamicTable.init(allocator, 512);

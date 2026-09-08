@@ -295,13 +295,10 @@ pub const DynamicBlockDecode = struct {
 };
 
 const owned_plan_stack_fields: usize = 32;
-const owned_string_stack_bytes: usize = 16 * 1024;
 
 const OwnedFieldPlan = struct {
-    name_offset: usize,
-    name_len: usize,
-    value_offset: usize,
-    value_len: usize,
+    name: EncodedString,
+    value: EncodedString,
     never_indexed: bool,
 };
 
@@ -970,8 +967,8 @@ fn decodeDynamicBlockWithLimitInternal(
     };
 }
 
-/// Decode a dynamic field section directly into its final two-allocation
-/// ownership form: one field array and one shared name/value byte block.
+/// Decode a dynamic field section directly into one final allocation holding
+/// both the field array and its shared name/value byte block.
 pub fn decodeDynamicBlockOwnedWithLimit(
     allocator: std.mem.Allocator,
     block: []const u8,
@@ -1004,14 +1001,9 @@ fn decodeDynamicBlockOwnedWithLimitInternal(
         owned_plan_stack_fields * @sizeOf(OwnedFieldPlan),
         allocator,
     );
-    var string_fallback = std.heap.stackFallback(
-        owned_string_stack_bytes,
-        allocator,
-    );
     var builder = OwnedFieldBuilder.init(
         allocator,
         plan_fallback.get(),
-        string_fallback.get(),
     );
     defer builder.deinit();
 
@@ -1352,14 +1344,9 @@ pub fn decodeLiteralBlockOwnedWithLimit(
         owned_plan_stack_fields * @sizeOf(OwnedFieldPlan),
         allocator,
     );
-    var string_fallback = std.heap.stackFallback(
-        owned_string_stack_bytes,
-        allocator,
-    );
     var builder = OwnedFieldBuilder.init(
         allocator,
         plan_fallback.get(),
-        string_fallback.get(),
     );
     defer builder.deinit();
     while (!cursor.eof()) {
@@ -1414,25 +1401,21 @@ pub fn decodeLiteralBlockOwnedWithLimit(
 const OwnedFieldBuilder = struct {
     allocator: std.mem.Allocator,
     plan_allocator: std.mem.Allocator,
-    string_allocator: std.mem.Allocator,
     plans: std.ArrayList(OwnedFieldPlan) = .empty,
-    strings: std.ArrayList(u8) = .empty,
+    string_bytes: usize = 0,
 
     fn init(
         allocator: std.mem.Allocator,
         plan_allocator: std.mem.Allocator,
-        string_allocator: std.mem.Allocator,
     ) OwnedFieldBuilder {
         return .{
             .allocator = allocator,
             .plan_allocator = plan_allocator,
-            .string_allocator = string_allocator,
         };
     }
 
     fn deinit(self: *OwnedFieldBuilder) void {
         self.plans.deinit(self.plan_allocator);
-        self.strings.deinit(self.string_allocator);
     }
 
     fn appendBorrowed(
@@ -1460,23 +1443,17 @@ const OwnedFieldBuilder = struct {
             name.decoded_len,
             value.decoded_len,
         ) catch return error.ExcessiveLoad;
-        try self.strings.ensureUnusedCapacity(
-            self.string_allocator,
+        const next_string_bytes = std.math.add(
+            usize,
+            self.string_bytes,
             additional,
-        );
-        const original_len = self.strings.items.len;
-        errdefer self.strings.items.len = original_len;
-        const name_offset = self.strings.items.len;
-        try name.appendDecodedAssumeCapacity(&self.strings);
-        const value_offset = self.strings.items.len;
-        try value.appendDecodedAssumeCapacity(&self.strings);
+        ) catch return error.ExcessiveLoad;
         self.plans.appendAssumeCapacity(.{
-            .name_offset = name_offset,
-            .name_len = name.decoded_len,
-            .value_offset = value_offset,
-            .value_len = value.decoded_len,
+            .name = name,
+            .value = value,
             .never_indexed = never_indexed,
         });
+        self.string_bytes = next_string_bytes;
     }
 
     fn finish(self: *OwnedFieldBuilder) ![]HeaderField {
@@ -1491,27 +1468,35 @@ const OwnedFieldBuilder = struct {
         const allocation_len = std.math.add(
             usize,
             field_bytes,
-            self.strings.items.len,
+            self.string_bytes,
         ) catch return error.OutOfMemory;
         const allocation = try self.allocator.alignedAlloc(
             u8,
             .of(HeaderField),
             allocation_len,
         );
+        errdefer self.allocator.free(allocation);
         const fields: []HeaderField = @as(
             [*]HeaderField,
             @ptrCast(allocation.ptr),
         )[0..self.plans.items.len];
         const strings = allocation[field_bytes..];
-        @memcpy(strings, self.strings.items);
+        var string_offset: usize = 0;
         for (self.plans.items, fields, 0..) |plan, *field, index| {
+            const name = strings[string_offset..][0..plan.name.decoded_len];
+            try plan.name.decodeInto(name);
+            string_offset += name.len;
+            const value = strings[string_offset..][0..plan.value.decoded_len];
+            try plan.value.decodeInto(value);
+            string_offset += value.len;
             field.* = .{
-                .name = strings[plan.name_offset..][0..plan.name_len],
-                .value = strings[plan.value_offset..][0..plan.value_len],
+                .name = name,
+                .value = value,
                 .never_indexed = plan.never_indexed,
                 .block_storage = if (index == 0) allocation else null,
             };
         }
+        std.debug.assert(string_offset == strings.len);
         return fields;
     }
 };
@@ -1605,19 +1590,6 @@ const EncodedString = struct {
             return huffman_codec.decodeHuffmanInto(output, self.raw);
         }
         @memcpy(output, self.raw);
-    }
-
-    fn appendDecodedAssumeCapacity(
-        self: EncodedString,
-        output: *std.ArrayList(u8),
-    ) !void {
-        std.debug.assert(
-            output.capacity - output.items.len >= self.decoded_len,
-        );
-        const start = output.items.len;
-        output.items.len += self.decoded_len;
-        errdefer output.items.len = start;
-        try self.decodeInto(output.items[start..]);
     }
 
     fn decode(
