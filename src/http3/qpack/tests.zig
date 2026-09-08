@@ -883,6 +883,10 @@ fn checkOwnedQpackDecode(allocator: std.mem.Allocator) !void {
     try std.testing.expectEqual(fields.len, decoded.fields.len);
     const storage = decoded.fields[0].block_storage orelse
         return error.TestUnexpectedResult;
+    try std.testing.expectEqual(
+        @intFromPtr(decoded.fields.ptr),
+        @intFromPtr(storage.ptr),
+    );
     for (fields, decoded.fields) |expected, actual| {
         try std.testing.expectEqualStrings(expected.name, actual.name);
         try std.testing.expectEqualStrings(expected.value, actual.value);
@@ -903,7 +907,37 @@ test "HTTP/3 QPACK owned dynamic decode is allocation-failure safe" {
     );
 }
 
-test "HTTP/3 QPACK owned decoders allocate final field section twice" {
+test "HTTP/3 QPACK owned dynamic decode allocates one final field section" {
+    const allocator = std.testing.allocator;
+    var table = Qpack.DynamicTable.init(allocator, 512);
+    defer table.deinit();
+    try table.setCapacity(512);
+    _ = try table.insert("x-owned", "dynamic-value");
+
+    var block: std.ArrayList(u8) = .empty;
+    defer block.deinit(allocator);
+    try Qpack.encodeDynamicBlock(&block, allocator, &.{.{
+        .name = "x-owned",
+        .value = "dynamic-value",
+    }}, table);
+
+    var tracking = std.testing.FailingAllocator.init(allocator, .{});
+    const before = tracking.allocations;
+    var decoded = try Qpack.decodeDynamicBlockOwnedWithLimit(
+        tracking.allocator(),
+        block.items,
+        table,
+        1024,
+    );
+    defer Qpack.freeDynamicBlock(tracking.allocator(), &decoded);
+    try std.testing.expectEqual(before + 1, tracking.allocations);
+    try std.testing.expectEqual(
+        @intFromPtr(decoded.fields.ptr),
+        @intFromPtr(decoded.fields[0].block_storage.?.ptr),
+    );
+}
+
+test "HTTP/3 QPACK owned decoders allocate one final field section" {
     const allocator = std.testing.allocator;
     var literal: std.ArrayList(u8) = .empty;
     defer literal.deinit(allocator);
@@ -920,9 +954,13 @@ test "HTTP/3 QPACK owned decoders allocate final field section twice" {
         1024,
     );
     defer Qpack.freeDecodedFields(tracking.allocator(), decoded);
-    try std.testing.expectEqual(before + 2, tracking.allocations);
+    try std.testing.expectEqual(before + 1, tracking.allocations);
     try std.testing.expect(decoded[0].block_storage != null);
     try std.testing.expect(decoded[1].block_storage == null);
+    try std.testing.expectEqual(
+        @intFromPtr(decoded.ptr),
+        @intFromPtr(decoded[0].block_storage.?.ptr),
+    );
 
     var no_alloc = std.testing.FailingAllocator.init(
         allocator,

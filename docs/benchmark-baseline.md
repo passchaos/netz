@@ -498,6 +498,13 @@ HTTP/3 QPACK dynamic encode benchmark
 ```
 
 Dynamic entries own name and value in one contiguous allocation rather than two independent blocks. This removes one allocation/free pair per insert/eviction while retaining separate borrowed slices. The immediately preceding two-block build measured 1,235-1,268 ns/block; the indexed lookup workload improved by about 1.40-1.47x. Quicz duplicates name and value separately and inserts at array index zero, adding a second allocation and an O(n) shift under churn.
+QPACK owned field-section decode now co-locates its `HeaderField` descriptors and
+contiguous name/value bytes in one aligned allocation, while the deallocator
+still accepts the prior separate `block_storage` layout used by other callers.
+Both literal and dynamic decoder tests assert one final allocation, pointer
+layout and exhaustive allocation-failure cleanup. Five CPU-0 dynamic-decode
+runs measured 751-762 ns/block in four stable samples with one 835-ns outlier,
+versus the preceding 835-857 ns range (838-ns median).
 
 The same executable now includes a 512-field/512-unique-reference section to
 expose reference-set bookkeeping that the ordinary 32-field block cannot.

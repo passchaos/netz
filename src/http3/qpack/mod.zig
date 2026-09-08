@@ -31,8 +31,9 @@ pub const HeaderField = struct {
     name_storage: ?[]u8 = null,
     value_storage: ?[]u8 = null,
     /// Optional allocation shared by every name/value in a finalized HTTP/3
-    /// field section. Only element zero owns this slice; per-field decoder
-    /// storage remains represented by `name_storage`/`value_storage`.
+    /// field section. Only element zero owns this slice; it may also contain
+    /// the field array itself. Per-field decoder storage remains represented
+    /// by `name_storage`/`value_storage`.
     block_storage: ?[]u8 = null,
 };
 
@@ -1262,16 +1263,36 @@ const OwnedFieldBuilder = struct {
     }
 
     fn finish(self: *OwnedFieldBuilder) ![]HeaderField {
-        const fields = try self.allocator.alloc(HeaderField, self.plans.items.len);
-        errdefer self.allocator.free(fields);
-        if (fields.len == 0) return fields;
-        const strings = try self.allocator.dupe(u8, self.strings.items);
+        if (self.plans.items.len == 0) {
+            return self.allocator.alloc(HeaderField, 0);
+        }
+        const field_bytes = std.math.mul(
+            usize,
+            self.plans.items.len,
+            @sizeOf(HeaderField),
+        ) catch return error.OutOfMemory;
+        const allocation_len = std.math.add(
+            usize,
+            field_bytes,
+            self.strings.items.len,
+        ) catch return error.OutOfMemory;
+        const allocation = try self.allocator.alignedAlloc(
+            u8,
+            .of(HeaderField),
+            allocation_len,
+        );
+        const fields: []HeaderField = @as(
+            [*]HeaderField,
+            @ptrCast(allocation.ptr),
+        )[0..self.plans.items.len];
+        const strings = allocation[field_bytes..];
+        @memcpy(strings, self.strings.items);
         for (self.plans.items, fields, 0..) |plan, *field, index| {
             field.* = .{
                 .name = strings[plan.name_offset..][0..plan.name_len],
                 .value = strings[plan.value_offset..][0..plan.value_len],
                 .never_indexed = plan.never_indexed,
-                .block_storage = if (index == 0) strings else null,
+                .block_storage = if (index == 0) allocation else null,
             };
         }
         return fields;
@@ -1279,6 +1300,16 @@ const OwnedFieldBuilder = struct {
 };
 
 pub fn freeDecodedFields(allocator: std.mem.Allocator, fields: []HeaderField) void {
+    if (fields.len != 0) {
+        if (fields[0].block_storage) |storage| {
+            if (@intFromPtr(fields.ptr) == @intFromPtr(storage.ptr)) {
+                const allocation: []align(@alignOf(HeaderField)) u8 =
+                    @alignCast(storage);
+                allocator.free(allocation);
+                return;
+            }
+        }
+    }
     freeFieldStorages(allocator, fields);
     allocator.free(fields);
 }
