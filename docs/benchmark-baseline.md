@@ -525,6 +525,8 @@ current table entry count rather than the lifetime insertion count. Five CPU-0
 samples measured 11.02-11.28 us/block (21-22 ns/field), another 1.24-1.32x
 improvement over the hash version and 4.35-4.49x over the original linear
 deduplication baseline; the 32-field block remained at 804-826 ns/block.
+Use `--scenario=encode|large|churn|decode` and `--iterations=N` to isolate one
+phase for profiling; omitting both options retains the combined default run.
 
 ### QUIC 1-RTT send
 

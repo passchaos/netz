@@ -914,7 +914,8 @@ The aggregate `bench` step runs the current protocol microbenchmarks:
   CONNECT-stream extension payloads,
 - HTTP/3 QPACK field-section encoding against a populated dynamic table,
 - HTTP/3 QPACK 512-entry reference-set encoding with a large-only
-  table-relative bitmap that preserves first-reference ordering,
+  table-relative bitmap that preserves first-reference ordering and
+  scenario/iteration selection for isolated profiling,
 - HTTP/3 QPACK dynamic-table churn with single-allocation name/value ownership,
 - WebSocket masked frame encoding with allocating, caller-buffer, and
   header-only streaming paths, plus retained no-context-takeover

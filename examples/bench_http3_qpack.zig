@@ -4,11 +4,18 @@ const netz = @import("netz");
 const table_entries: usize = 512;
 const fields_per_block: usize = 32;
 const large_fields_per_block: usize = 512;
-const iterations: usize = 100_000;
-const churn_iterations: usize = 100_000;
+const default_iterations: usize = 100_000;
 
-pub fn main() !void {
+const Scenario = enum { all, encode, large, churn, decode };
+
+const Options = struct {
+    scenario: Scenario = .all,
+    iterations: usize = default_iterations,
+};
+
+pub fn main(init: std.process.Init) !void {
     const allocator = std.heap.smp_allocator;
+    const options = try parseOptions(init, allocator);
     var threaded = std.Io.Threaded.init(allocator, .{});
     defer threaded.deinit();
     const io = threaded.io();
@@ -54,25 +61,18 @@ pub fn main() !void {
     var references: std.ArrayList(u64) = .empty;
     defer references.deinit(allocator);
 
-    // Warm allocator capacities before timing the lookup and representation
-    // work. The production encoder also retains both buffers across sections.
-    try netz.http3.Qpack.encodeDynamicBlockKnownReceived(
-        &encoded,
-        allocator,
-        &fields,
-        table,
-        table.insert_count,
-        &references,
-    );
-    const encoded_len = encoded.items.len;
-    const references_len = references.items.len;
-
     var encoded_total: usize = 0;
     var reference_total: usize = 0;
-    const started = nowNs(io);
-    for (0..iterations) |_| {
-        encoded.clearRetainingCapacity();
-        references.clearRetainingCapacity();
+    var encoded_len: usize = 0;
+    var references_len: usize = 0;
+    var encode_ns: u64 = 0;
+    if (options.scenario == .all or
+        options.scenario == .encode or
+        options.scenario == .decode)
+    {
+        // Warm allocator capacities before timing the lookup and
+        // representation work. The production encoder also retains both
+        // buffers across sections.
         try netz.http3.Qpack.encodeDynamicBlockKnownReceived(
             &encoded,
             allocator,
@@ -81,44 +81,88 @@ pub fn main() !void {
             table.insert_count,
             &references,
         );
-        encoded_total +|= encoded.items.len;
-        reference_total +|= references.items.len;
+        encoded_len = encoded.items.len;
+        references_len = references.items.len;
+        if (options.scenario == .all or options.scenario == .encode) {
+            const started = nowNs(io);
+            for (0..options.iterations) |_| {
+                encoded.clearRetainingCapacity();
+                references.clearRetainingCapacity();
+                try netz.http3.Qpack.encodeDynamicBlockKnownReceived(
+                    &encoded,
+                    allocator,
+                    &fields,
+                    table,
+                    table.insert_count,
+                    &references,
+                );
+                encoded_total +|= encoded.items.len;
+                reference_total +|= references.items.len;
+            }
+            encode_ns = nowNs(io) -| started;
+        }
     }
-    const elapsed = nowNs(io) -| started;
-    const large_ns = try measureLargeReferenceBlock(
-        allocator,
-        io,
-        table,
-        &name_slices,
-        &value_slices,
-    );
-    const churn_ns = try measureDynamicTableChurn(allocator, io);
-    const decode_ns = try measureOwnedDecode(allocator, io, table, encoded.items);
+    const large_ns = if (options.scenario == .all or options.scenario == .large)
+        try measureLargeReferenceBlock(
+            allocator,
+            io,
+            table,
+            &name_slices,
+            &value_slices,
+            options.iterations,
+        )
+    else
+        0;
+    const churn_ns = if (options.scenario == .all or options.scenario == .churn)
+        try measureDynamicTableChurn(allocator, io, options.iterations)
+    else
+        0;
+    const decode_ns = if (options.scenario == .all or options.scenario == .decode)
+        try measureOwnedDecode(
+            allocator,
+            io,
+            table,
+            encoded.items,
+            options.iterations,
+        )
+    else
+        0;
 
     std.debug.print(
-        \\HTTP/3 QPACK dynamic encode benchmark
-        \\  iterations: {d}, table entries: {d}, fields/block: {d}
-        \\  encoded bytes/block: {d}, references/block: {d}
-        \\  ns/block: {d}, ns/field: {d}
-        \\  512-reference block: {d} ns/block, {d} ns/field
-        \\  dynamic table churn: {d} ns/insert
-        \\  owned dynamic decode: {d} ns/block
+        "HTTP/3 QPACK dynamic benchmark\n  iterations: {d}, table entries: {d}\n",
+        .{ options.iterations, table.entryCount() },
+    );
+    if (options.scenario == .all or options.scenario == .encode) {
+        std.debug.print("  {d}-field encode: {d} bytes, {d} references, {d} ns/block, {d} ns/field\n", .{
+            fields_per_block,
+            encoded_len,
+            references_len,
+            encode_ns / options.iterations,
+            encode_ns / (options.iterations * fields_per_block),
+        });
+    }
+    if (options.scenario == .all or options.scenario == .large) {
+        std.debug.print("  512-reference encode: {d} ns/block, {d} ns/field\n", .{
+            large_ns / options.iterations,
+            large_ns / (options.iterations * large_fields_per_block),
+        });
+    }
+    if (options.scenario == .all or options.scenario == .churn) {
+        std.debug.print(
+            "  dynamic table churn: {d} ns/insert\n",
+            .{churn_ns / options.iterations},
+        );
+    }
+    if (options.scenario == .all or options.scenario == .decode) {
+        std.debug.print(
+            "  owned dynamic decode: {d} ns/block\n",
+            .{decode_ns / options.iterations},
+        );
+    }
+    std.debug.print(
         \\  checksum: {d}
         \\
-    , .{
-        iterations,
-        table.entryCount(),
-        fields_per_block,
-        encoded_len,
-        references_len,
-        elapsed / iterations,
-        elapsed / (iterations * fields_per_block),
-        large_ns / iterations,
-        large_ns / (iterations * large_fields_per_block),
-        churn_ns / churn_iterations,
-        decode_ns / iterations,
-        encoded_total +| reference_total,
-    });
+    , .{encoded_total +| reference_total});
 }
 
 fn measureOwnedDecode(
@@ -126,9 +170,10 @@ fn measureOwnedDecode(
     io: std.Io,
     table: netz.http3.Qpack.DynamicTable,
     encoded: []const u8,
+    iteration_count: usize,
 ) !u64 {
     const started = nowNs(io);
-    for (0..iterations) |_| {
+    for (0..iteration_count) |_| {
         var decoded = try netz.http3.Qpack.decodeDynamicBlockOwnedWithLimit(
             allocator,
             encoded,
@@ -146,6 +191,7 @@ fn measureLargeReferenceBlock(
     table: netz.http3.Qpack.DynamicTable,
     names: []const []const u8,
     values: []const []const u8,
+    iteration_count: usize,
 ) !u64 {
     var fields: [large_fields_per_block]netz.http3.Qpack.HeaderField =
         undefined;
@@ -168,7 +214,7 @@ fn measureLargeReferenceBlock(
         &references,
     );
     const started = nowNs(io);
-    for (0..iterations) |_| {
+    for (0..iteration_count) |_| {
         encoded.clearRetainingCapacity();
         references.clearRetainingCapacity();
         try netz.http3.Qpack.encodeDynamicBlockKnownReceived(
@@ -187,6 +233,7 @@ fn measureLargeReferenceBlock(
 fn measureDynamicTableChurn(
     allocator: std.mem.Allocator,
     io: std.Io,
+    iteration_count: usize,
 ) !u64 {
     var table = netz.http3.Qpack.DynamicTable.init(allocator, 4096);
     defer table.deinit();
@@ -194,7 +241,7 @@ fn measureDynamicTableChurn(
     var name_buf: [32]u8 = undefined;
     var value_buf: [32]u8 = undefined;
     const started = nowNs(io);
-    for (0..churn_iterations) |index| {
+    for (0..iteration_count) |index| {
         const name = try std.fmt.bufPrint(
             &name_buf,
             "x-qpack-churn-{d:0>5}",
@@ -208,6 +255,37 @@ fn measureDynamicTableChurn(
         _ = try table.insert(name, value);
     }
     return nowNs(io) -| started;
+}
+
+fn parseOptions(
+    init: std.process.Init,
+    allocator: std.mem.Allocator,
+) !Options {
+    var args = try std.process.Args.Iterator.initAllocator(
+        init.minimal.args,
+        allocator,
+    );
+    defer args.deinit();
+    _ = args.next();
+    var options: Options = .{};
+    while (args.next()) |arg| {
+        if (std.mem.startsWith(u8, arg, "--scenario=")) {
+            options.scenario = std.meta.stringToEnum(
+                Scenario,
+                arg["--scenario=".len..],
+            ) orelse return error.InvalidArgument;
+        } else if (std.mem.startsWith(u8, arg, "--iterations=")) {
+            options.iterations = try std.fmt.parseInt(
+                usize,
+                arg["--iterations=".len..],
+                10,
+            );
+            if (options.iterations == 0) return error.InvalidArgument;
+        } else {
+            return error.InvalidArgument;
+        }
+    }
+    return options;
 }
 
 fn nowNs(io: std.Io) u64 {
