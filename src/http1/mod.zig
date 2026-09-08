@@ -1642,22 +1642,39 @@ fn validUriScheme(scheme: []const u8) bool {
 pub fn validateHostValue(raw_host: []const u8) Error!void {
     const host = wire.trimOws(raw_host);
     if (host.len == 0) return error.InvalidHost;
-    if (std.mem.indexOf(u8, host, "://") != null) return error.InvalidHost;
-    try validateAuthorityForbiddenDelimiters(host, error.InvalidHost);
 
-    const port: ?[]const u8 = if (host[0] == '[') blk: {
-        const end = std.mem.indexOfScalar(u8, host, ']') orelse return error.InvalidHost;
+    const bracketed = host[0] == '[';
+    var closing_bracket: ?usize = null;
+    var port_colon: ?usize = null;
+    for (host, 0..) |byte, index| {
+        if (byte <= 0x20 or byte == 0x7f or byte == ',' or
+            byte == '/' or byte == '\\' or byte == '?' or
+            byte == '#' or byte == '@')
+        {
+            return error.InvalidHost;
+        }
+        if (bracketed) {
+            if (byte == ']' and closing_bracket == null) {
+                closing_bracket = index;
+            }
+            continue;
+        }
+        if (byte == '[' or byte == ']') return error.InvalidHost;
+        if (byte == ':') {
+            if (port_colon != null) return error.InvalidHost;
+            port_colon = index;
+        }
+    }
+
+    const port: ?[]const u8 = if (bracketed) blk: {
+        const end = closing_bracket orelse return error.InvalidHost;
         if (end <= 1) return error.InvalidHost;
         if (end + 1 == host.len) break :blk null;
         if (host[end + 1] != ':' or end + 2 >= host.len) return error.InvalidHost;
         break :blk host[end + 2 ..];
     } else blk: {
-        if (std.mem.indexOfScalar(u8, host, '[') != null or std.mem.indexOfScalar(u8, host, ']') != null) return error.InvalidHost;
-        const colon = std.mem.lastIndexOfScalar(u8, host, ':') orelse break :blk null;
+        const colon = port_colon orelse break :blk null;
         if (colon == 0 or colon + 1 >= host.len) return error.InvalidHost;
-        // IPv6 literals in URI/Host authority form must be bracketed.  Treat an
-        // additional colon before the final separator as an ambiguous authority.
-        if (std.mem.indexOfScalar(u8, host[0..colon], ':') != null) return error.InvalidHost;
         break :blk host[colon + 1 ..];
     };
 

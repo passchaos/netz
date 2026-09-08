@@ -118,6 +118,16 @@ measured 264-265 ns/op, reducing the isolated median from 282 to 264 ns (6.4%)
 and from the pre-pass 334 to 264 ns (21.0%). A dedicated regression preserves
 the existing rule that valid final `chunked` overrides even malformed
 Content-Length syntax while forcing connection close.
+The following profile placed ordinary Host validation at about 10% of sampled
+cycles. It previously scanned a typical `example.com` repeatedly for a URI
+marker, forbidden delimiters, brackets and a port colon. One structural pass
+now performs those checks together while preserving bracketed IPv6 and strict
+decimal-port validation. Five CPU-0 5-million-parse samples measured
+237-239 ns/op, improving the isolated median from 264 to 238 ns (9.8%) and from
+the pre-pass 334 to 238 ns (28.7%). Five default-shape runs measured
+240-242 ns borrowed, 795-797 ns owned and 818-822 ns owned plus explicit Host
+validation. Existing Host regressions cover URI/userinfo/list delimiters,
+queries/fragments, unbracketed IPv6, mixed brackets and port overflow.
 HTTP/1 aggregate message-boundary logic now lives under
 `runtime/message/framing.zig`: head limits, Content-Length and
 Transfer-Encoding classification, decoded chunk limits, trailer limits,

@@ -129,6 +129,11 @@ benchmark response:
   improved again from a 282-ns median to 264 ns. Valid final `chunked` retains
   precedence over malformed Content-Length while still forcing close, matching
   the existing anti-smuggling contract and its new explicit regression.
+- Host validation now finds structural delimiters, brackets and the optional
+  port colon in one pass instead of repeatedly searching the same authority.
+  The isolated borrowed parser improved from a 264-ns median to 238 ns; existing
+  malformed-authority, IPv6-literal and port-range tests retain the strict
+  request-smuggling boundary.
 
 Connection persistence and Upgrade decisions scan every repeated `Connection`
 field as one comma-separated token list while ordinary `header()` lookup still
