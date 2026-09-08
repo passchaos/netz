@@ -719,6 +719,24 @@ pub fn build(b: *std.Build) void {
     webtransport_wtransport_step.dependOn(
         &webtransport_wtransport.step,
     );
+    const webtransport_wtransport_bench = b.addSystemCommand(&.{
+        "tools/interop/webtransport_wtransport.sh",
+    });
+    webtransport_wtransport_bench.addArtifactArg(
+        webtransport_wtransport_server,
+    );
+    webtransport_wtransport_bench.addArtifactArg(
+        webtransport_wtransport_client,
+    );
+    webtransport_wtransport_bench.addArg("--bench");
+    if (b.args) |args| webtransport_wtransport_bench.addArgs(args);
+    const webtransport_wtransport_bench_step = b.step(
+        "bench-webtransport-wtransport",
+        "Compare verified WebTransport stream upload and DATAGRAM ping-pong with wtransport",
+    );
+    webtransport_wtransport_bench_step.dependOn(
+        &webtransport_wtransport_bench.step,
+    );
 
     const webtransport_churn_bench = b.addExecutable(.{
         .name = "netz-webtransport-stream-churn",

@@ -7,4 +7,4 @@ publish = false
 [dependencies]
 anyhow = "1"
 tokio = { version = "1", features = ["macros", "rt-multi-thread", "time"] }
-wtransport = { path = "../../../../../Work/wtransport/wtransport", features = ["dangerous-configuration"] }
+wtransport = { path = "../../../../../Work/wtransport/wtransport", features = ["dangerous-configuration", "quinn"] }

@@ -940,6 +940,13 @@ The aggregate `bench` step runs the current protocol microbenchmarks:
   avoiding full connection-state copies in HTTP/3, WebSocket, and WebTransport,
 - QUIC stream credit/stats/pagination queries through read-only connection
   references, avoiding equivalent copies in WebTransport stream scheduling,
+- bidirectional cross-process WebTransport comparison against `wtransport`
+  for stream upload and one-outstanding DATAGRAM ping-pong, with separate
+  client/server CPUs, matching application payloads and requested windows,
+  deterministic byte validation, receiver-confirmed completion, warmups, and
+  machine-readable output; results are labeled `same-application-shape`
+  because the implementations expose different effective DATAGRAM overhead
+  and not enough packetization controls for an equal-wire claim,
 - MQTT subscription-router combined ordinary/shared count+emit trie matching
   versus a linear filter scan, retained connection PUBLISH encoding scratch,
   and linear-time overlapping-subscription broker flush plans,

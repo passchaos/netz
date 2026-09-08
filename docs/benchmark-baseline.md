@@ -2518,6 +2518,80 @@ client datagrams, held 121-123, verified the same 2,097,152 bytes/checksum
 the end of a batch is now explicitly flushed, preventing the emulator from
 turning an intended reorder into accidental loss.
 
+## WebTransport versus wtransport, same application shape
+
+The external wtransport gate now has a separate benchmark mode that leaves its
+existing correctness conversation unchanged. Run both implementation-role
+directions on separate CPUs with:
+
+```sh
+zig build bench-webtransport-wtransport -Doptimize=ReleaseFast -- \
+  --mode=stream --warmup=20 --iterations=5 --streams=1 \
+  --bytes-per-stream=4194304 --chunk-bytes=16384 \
+  --stream-window=1048576 --timeout-ms=30000
+
+zig build bench-webtransport-wtransport -Doptimize=ReleaseFast -- \
+  --mode=datagram-pingpong --warmup=200 --iterations=5000 \
+  --payload-bytes=32 --timeout-ms=30000
+```
+
+The runner selects two CPUs from its current affinity mask and pins the client
+and server separately. Each pair performs a real QUIC v1/TLS/HTTP/3 CONNECT,
+then validates one fixed big-endian configuration message before timing. Stream
+rounds open and associate every bidirectional stream before GO; the sender
+writes deterministic bytes in the configured application chunks and stops only
+after the receiver has checked every byte and FIN and returned DONE. After that
+timed boundary, the sender returns ROUND_ACK, then the receiver emits an empty
+reverse FIN and the sender verifies it before starting the next round. Reverse
+half work therefore cannot be coalesced into the timed DONE packet, and
+bidirectional stream lifecycle/credit is not leaked across warmups. The harness
+sets both QUIC MAX_STREAMS and netz's
+legacy WebTransport stream SETTINGS from the total configured workload rather
+than relying on the default 16-stream cap. DATAGRAM
+latency keeps exactly one request outstanding and stops each sample only after
+receiving and byte-checking its matching echo. Warmups follow the same path but
+are excluded from reported samples. A final checksum-bound acknowledgment is
+received before the client sends CLOSE_READY; the server must receive that
+application teardown marker and return CLOSE_ACK before the runner accepts the
+pair. No QUIC close frame is part of the measurement or its success condition,
+preventing a transport close from overtaking the result boundary. The server
+keeps the connection alive for a 100 ms post-measurement ACK flush grace.
+`--timeout-ms` bounds handshake, control, and receive
+operations. The current netz WebTransport STREAM write/finish API has no
+deadline variant, so the runner's independent 180-second process deadline is
+the outer bound for a blocked sender; the output does not claim otherwise.
+
+Output uses stable `key=value` lines and always records role pair, requested and
+effective stream windows, payload/chunk shape, certificate policy, GSO/GRO,
+pacing, checksum, and `complete=true`. The harness deliberately reports
+`benchmark_scope=same-application-shape`, not equal-wire: both sides use a
+1200-byte path MTU, QUIC v1, disabled GSO, matching advertised flow windows,
+the same application chunks, and separate CPU placement. Netz explicitly
+disables GRO; Quinn opportunistically enables it without a public wtransport
+switch, so the Rust output records `gro=implementation-default`. The current
+APIs also produce different maximum WebTransport DATAGRAM payloads (1170 for
+netz and 1161 for wtransport in the smoke run) and do not expose every ACK or
+packet coalescing knob. Packet captures and UDP datagram counts are still
+required before upgrading this evidence to a strict equal-wire comparison.
+
+ReleaseFast smoke coverage has passed in both role directions for one and four
+streams at 64 KiB per stream and for ten measured 32-byte ping-pongs. The
+four-stream rounds verified 262,144 logical bytes, four FINs, and checksum
+33,423,360 on both receivers; ping-pong verified checksum 32,178. These short
+runs establish harness correctness only and are not retained as performance
+claims.
+
+The first full CPU-0/client, CPU-1/server run used 20 warmups plus five measured
+iterations. One 4-MiB stream measured 112.22-115.01 MiB/s with the wtransport
+client sender and 207.69-208.54 MiB/s with the netz client sender. Four 4-MiB
+streams measured 80.14-83.35 MiB/s and 194.44-195.46 MiB/s respectively; every
+sample verified 16,777,216 bytes, four FINs, and checksum 2,139,095,040. The
+final 200-warmup/5,000-sample 32-byte DATAGRAM ping-pong run measured
+wtransport-client p50/p90/p99/p99.9 at 31.932/35.980/38.803/43.953 us and
+netz-client at 32.125/36.024/38.434/45.025 us, with checksum 15,084,056 in
+both directions. These are same-application-shape cross-process samples, not
+equal-wire ratios or whole-library superiority claims.
+
 ## Reference context from `~/Work`
 
 The closest available reference document is

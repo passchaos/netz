@@ -5,6 +5,8 @@ use wtransport::endpoint::ConnectOptions;
 use wtransport::error::{StreamReadError, StreamWriteError};
 use wtransport::{ClientConfig, Endpoint, Identity, ServerConfig, VarInt};
 
+mod bench;
+
 const CLIENT_DATAGRAM: &[u8] = b"wtransport datagram";
 const SERVER_DATAGRAM: &[u8] = b"netz datagram";
 const CLIENT_BIDI: &[u8] = b"wtransport bidi";
@@ -28,6 +30,13 @@ fn mapped_stream_error(application_code: u32) -> VarInt {
 
 #[tokio::main]
 async fn main() -> Result<()> {
+    let all_args: Vec<String> = std::env::args().collect();
+    if all_args.get(1).map(String::as_str) == Some("bench-client") {
+        return bench::run_client(&all_args[2..]).await;
+    }
+    if all_args.get(1).map(String::as_str) == Some("bench-server") {
+        return bench::run_server(&all_args[2..]).await;
+    }
     let mut args = std::env::args().skip(1);
     let mode = args
         .next()

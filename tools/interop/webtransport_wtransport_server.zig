@@ -1,5 +1,6 @@
 const std = @import("std");
 const netz = @import("netz");
+const benchmark = @import("webtransport_wtransport_bench.zig");
 
 const client_datagram = "wtransport datagram";
 const server_datagram = "netz datagram";
@@ -64,6 +65,9 @@ fn receiveExpectedStream(
 
 pub fn main(init: std.process.Init) !void {
     const args = try init.minimal.args.toSlice(init.arena.allocator());
+    if (args.len >= 3 and std.mem.eql(u8, args[1], "bench-server")) {
+        return runBenchmark(init, args[2..]);
+    }
     // Browser certificate hashes impose a <=14-day validity window, so the
     // Chrome gate supplies a freshly generated DER leaf and raw P-256 scalar.
     // Native wtransport interop keeps using the stable built-in test identity.
@@ -133,7 +137,7 @@ pub fn main(init: std.process.Init) !void {
         .{
             .http3 = .{ .quic = .{
                 .max_datagram_size = 4096,
-                .max_frames_per_datagram = 16,
+                .max_frames_per_datagram = 256,
             } },
             .origin_policy = if (allowed_origins.len == 0)
                 .same_origin_or_absent
@@ -408,4 +412,83 @@ pub fn main(init: std.process.Init) !void {
                 "drain-before-close=true",
         },
     );
+}
+
+fn runBenchmark(_: std.process.Init, args: []const []const u8) !void {
+    if (args.len == 0) return error.InvalidArgument;
+    const port = try std.fmt.parseInt(u16, args[0], 10);
+    const config = try benchmark.Config.parse(args[1..]);
+    const allocator = std.heap.c_allocator;
+    var threaded = std.Io.Threaded.init(allocator, .{
+        .async_limit = .unlimited,
+    });
+    defer threaded.deinit();
+    const io = threaded.io();
+
+    var certificate_der: [netz.tls.testing.certificate_der_len]u8 = undefined;
+    try std.base64.standard.Decoder.decode(
+        &certificate_der,
+        netz.tls.testing.certificate_base64,
+    );
+    const key_pair = try netz.tls.testing.serverKeyPair();
+    const server_cid =
+        [_]u8{ 0x6e, 0x7a, 0x77, 0x74, 0x73, 0x00, 0x00, 0x01 };
+    var server = try netz.webtransport.runtime.HandshakeServer.bind(
+        allocator,
+        io,
+        .{ .ip4 = .loopback(port) },
+        .{
+            .http3 = .{ .quic = .{
+                .max_datagram_size = benchmark.max_datagram_size,
+                .max_frames_per_datagram = 16,
+                .enable_gso_send = false,
+                .enable_gro_receive = false,
+            } },
+            .max_session_streams = try config.sessionStreams(),
+        },
+        .{
+            .handshake = .{
+                .local_connection_id = &server_cid,
+                .local_transport_parameters = try config.transportParameters(),
+                .initial_one_rtt_config = try config.oneRttConfig(),
+                .max_crypto_buffer = 64 * 1024,
+                .identity = .{
+                    .certificate_chain = &.{&certificate_der},
+                    .signer = .{ .ecdsa_p256_sha256 = .{
+                        .key_pair = key_pair,
+                    } },
+                },
+            },
+            .session = try config.sessionOptions(),
+        },
+    );
+    defer server.deinit();
+    std.debug.print("NETZ_BENCH_PORT={d}\n", .{server.address().ip4.port});
+
+    var pending = try server.receiveSessionRequestWithTimeout(config.timeout());
+    var pending_owned = true;
+    defer if (pending_owned) pending.deinit();
+    if (!std.mem.eql(u8, pending.path(), "/benchmark") or
+        !std.mem.eql(
+            u8,
+            pending.userAgent() orelse return error.UnexpectedHeader,
+            "wtransport-benchmark",
+        ))
+    {
+        return error.UnexpectedBenchmarkConnect;
+    }
+    var session = try pending.accept();
+    pending_owned = false;
+    defer session.deinit();
+    const datagram_limit = try benchmark.validateDatagramLimit(&session, config);
+    try benchmark.printConfig(
+        "netz",
+        "wtransport-client+netz-server",
+        config,
+        datagram_limit,
+    );
+    try benchmark.runServer(allocator, &session, config);
+    try benchmark.receiveCloseReady(allocator, &session, config);
+    try benchmark.sendCloseAck(&session, config);
+    try std.Io.sleep(io, .fromMilliseconds(100), .awake);
 }

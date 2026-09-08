@@ -1,5 +1,6 @@
 const std = @import("std");
 const netz = @import("netz");
+const benchmark = @import("webtransport_wtransport_bench.zig");
 
 const client_datagram = "wtransport datagram";
 const server_datagram = "netz datagram";
@@ -76,6 +77,9 @@ fn receiveExpectedStream(
 
 pub fn main(init: std.process.Init) !void {
     const args = try init.minimal.args.toSlice(init.arena.allocator());
+    if (args.len >= 3 and std.mem.eql(u8, args[1], "bench-client")) {
+        return runBenchmark(init, args[2..]);
+    }
     if (args.len != 2) return error.InvalidArgument;
     const port = try std.fmt.parseInt(u16, args[1], 10);
     if (port == 0) return error.InvalidArgument;
@@ -271,4 +275,70 @@ pub fn main(init: std.process.Init) !void {
         "netz WebTransport client interop passed: CONNECT uri=true rejection=404 admission-headers=true DATAGRAM max_datagram_size={d} oversized_rejected=true bidi uni reset=73 stop=74 dropped_stop_sending=1 concurrent_sibling=true reuse=true peer-close\n",
         .{max_datagram_size},
     );
+}
+
+fn runBenchmark(_: std.process.Init, args: []const []const u8) !void {
+    if (args.len == 0) return error.InvalidArgument;
+    const port = try std.fmt.parseInt(u16, args[0], 10);
+    if (port == 0) return error.InvalidArgument;
+    const config = try benchmark.Config.parse(args[1..]);
+    const allocator = std.heap.c_allocator;
+    var threaded = std.Io.Threaded.init(allocator, .{
+        .async_limit = .unlimited,
+    });
+    defer threaded.deinit();
+    const io = threaded.io();
+    const original_dcid =
+        [_]u8{ 0x6e, 0x7a, 0x77, 0x74, 0x62, 0x00, 0x00, 0x01 };
+    const client_cid =
+        [_]u8{ 0x6e, 0x7a, 0x77, 0x74, 0x62, 0x00, 0x00, 0x02 };
+    const uri = try std.fmt.allocPrint(
+        allocator,
+        "https://127.0.0.1:{d}/benchmark",
+        .{port},
+    );
+    defer allocator.free(uri);
+    var client = try netz.webtransport.runtime.HandshakeClientSession.connectUri(
+        allocator,
+        io,
+        .{ .ip4 = .loopback(0) },
+        uri,
+        .{
+            .headers = &.{.{
+                .name = "user-agent",
+                .value = "netz-benchmark",
+            }},
+            .limits = .{
+                .http3 = .{ .quic = .{
+                    .max_datagram_size = benchmark.max_datagram_size,
+                    .max_frames_per_datagram = 256,
+                    .enable_gso_send = false,
+                    .enable_gro_receive = false,
+                } },
+                .max_session_streams = try config.sessionStreams(),
+            },
+            .h3 = .{
+                .connect_timeout = config.timeout(),
+                .handshake = .{
+                    .original_destination_connection_id = &original_dcid,
+                    .local_connection_id = &client_cid,
+                    .local_transport_parameters = try config.transportParameters(),
+                    .initial_one_rtt_config = try config.oneRttConfig(),
+                    .max_crypto_buffer = 64 * 1024,
+                },
+                .session = try config.sessionOptions(),
+            },
+        },
+    );
+    defer client.deinit();
+    const datagram_limit = try benchmark.validateDatagramLimit(&client, config);
+    try benchmark.printConfig(
+        "netz",
+        "netz-client+wtransport-server",
+        config,
+        datagram_limit,
+    );
+    try benchmark.runClient(allocator, io, &client, config);
+    try benchmark.sendCloseReady(&client, config);
+    try benchmark.receiveCloseAck(allocator, &client, config);
 }
