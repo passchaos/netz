@@ -512,6 +512,11 @@ co-located allocation. Three interleaved 1,000,000-iteration CPU-0 runs measured
 638-653 ns/block versus 759-773 ns/block at the preceding commit (1.16-1.21x
 faster). A 40-field mixed Huffman/literal/dynamic allocation-failure test covers
 the heap plan fallback and final-allocation cleanup.
+Pre-sizing the stack-fallback plan list to its 32-field inline budget removes
+the geometric grow/remap sequence from ordinary owned sections while retaining
+the same heap migration above that bound. Four stable interleaved CPU-0 runs
+measured 590-599 ns/block versus 634-647 ns/block at the direct-to-final commit
+(1.06-1.10x faster); one cold 921-ns baseline outlier was excluded.
 
 The same executable now includes a 512-field/512-unique-reference section to
 expose reference-set bookkeeping that the ordinary 32-field block cannot.

@@ -1006,6 +1006,7 @@ fn decodeDynamicBlockOwnedWithLimitInternal(
         plan_fallback.get(),
     );
     defer builder.deinit();
+    try builder.reservePlans(owned_plan_stack_fields);
 
     while (!cursor.eof()) {
         const first = try cursor.readByte();
@@ -1349,6 +1350,7 @@ pub fn decodeLiteralBlockOwnedWithLimit(
         plan_fallback.get(),
     );
     defer builder.deinit();
+    try builder.reservePlans(owned_plan_stack_fields);
     while (!cursor.eof()) {
         const first = try cursor.readByte();
         if ((first & 0xc0) == 0xc0) {
@@ -1416,6 +1418,13 @@ const OwnedFieldBuilder = struct {
 
     fn deinit(self: *OwnedFieldBuilder) void {
         self.plans.deinit(self.plan_allocator);
+    }
+
+    fn reservePlans(self: *OwnedFieldBuilder, capacity: usize) !void {
+        try self.plans.ensureTotalCapacityPrecise(
+            self.plan_allocator,
+            capacity,
+        );
     }
 
     fn appendBorrowed(

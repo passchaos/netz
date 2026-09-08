@@ -920,7 +920,8 @@ The aggregate `bench` step runs the current protocol microbenchmarks:
 - HTTP/3 QPACK dynamic-table churn with single-allocation name/value ownership,
   prehashed exact-match index keys, a newest-name exact-match fast path, and
   byte-verified collision fallback,
-- HTTP/3 QPACK owned decoding with direct-to-final-block string materialization,
+- HTTP/3 QPACK owned decoding with direct-to-final-block string materialization
+  and one-shot stack-plan reservation,
 - WebSocket masked frame encoding with allocating, caller-buffer, and
   header-only streaming paths, plus retained no-context-takeover
   permessage-deflate throughput and wire-size reporting; stream transports
