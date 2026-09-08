@@ -117,6 +117,12 @@ benchmark response:
   storage, borrows one receive buffer and consumes its prefix once per batch;
 - borrowed head parsing scans CRLF-delimited lines once instead of first
   scanning for CRLFCRLF and then rescanning every header line.
+- strict header-line parsing now combines colon discovery with RFC token
+  validation and combines value validation with OWS-boundary tracking. Its
+  token-byte classification uses a compile-time 256-entry table, following the
+  audited picohttpparser approach. An isolated borrowed-parser profile drove
+  this change; five CPU-0 runs improved from 333-335 to 280-282 ns/op, while a
+  full 0-255 equivalence test preserves the prior token grammar.
 
 Connection persistence and Upgrade decisions scan every repeated `Connection`
 field as one comma-separated token list while ordinary `header()` lookup still

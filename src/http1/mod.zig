@@ -976,20 +976,42 @@ fn parseHeaderLine(
     line: []const u8,
     allow_spaces_before_colon: bool,
 ) Error!Header {
-    const colon = std.mem.indexOfScalar(u8, line, ':') orelse
-        return error.MalformedHeader;
-    var name_end = colon;
+    var colon: usize = 0;
+    var name_end: usize = 0;
     if (allow_spaces_before_colon) {
+        colon = std.mem.indexOfScalar(u8, line, ':') orelse
+            return error.MalformedHeader;
+        name_end = colon;
         while (name_end != 0 and
             (line[name_end - 1] == ' ' or line[name_end - 1] == '\t'))
         {
             name_end -= 1;
         }
+        try validateHeaderName(line[0..name_end]);
+    } else {
+        while (colon < line.len and line[colon] != ':') : (colon += 1) {
+            if (!validHeaderNameByte(line[colon])) {
+                return error.MalformedHeader;
+            }
+        }
+        if (colon == 0 or colon == line.len) return error.MalformedHeader;
+        name_end = colon;
     }
     const name = line[0..name_end];
-    const value = wire.trimOws(line[colon + 1 ..]);
-    try validateHeaderName(name);
-    try validateHeaderValue(value);
+    var value_start = colon + 1;
+    while (value_start < line.len and
+        (line[value_start] == ' ' or line[value_start] == '\t'))
+    {
+        value_start += 1;
+    }
+    var value_end = value_start;
+    for (line[value_start..], value_start..) |byte, index| {
+        if ((byte < 0x20 and byte != '\t') or byte == 0x7f) {
+            return error.MalformedHeader;
+        }
+        if (byte != ' ' and byte != '\t') value_end = index + 1;
+    }
+    const value = line[value_start..value_end];
     return .{ .name = name, .value = value };
 }
 
@@ -1618,11 +1640,17 @@ pub fn validateHeaderValue(value: []const u8) Error!void {
     }
 }
 
-fn validHeaderNameByte(byte: u8) bool {
-    return std.ascii.isAlphanumeric(byte) or switch (byte) {
-        '!', '#', '$', '%', '&', '\'', '*', '+', '-', '.', '^', '_', '`', '|', '~' => true,
-        else => false,
-    };
+const valid_header_name_bytes: [256]bool = blk: {
+    var table = [_]bool{false} ** 256;
+    for ('0'..'9' + 1) |byte| table[byte] = true;
+    for ('A'..'Z' + 1) |byte| table[byte] = true;
+    for ('a'..'z' + 1) |byte| table[byte] = true;
+    for ("!#$%&'*+-.^_`|~") |byte| table[byte] = true;
+    break :blk table;
+};
+
+inline fn validHeaderNameByte(byte: u8) bool {
+    return valid_header_name_bytes[byte];
 }
 
 pub fn encodeChunked(list: *std.ArrayList(u8), allocator: std.mem.Allocator, chunks: []const []const u8, trailers: []const Header) !void {
@@ -2152,6 +2180,17 @@ test "HTTP/1 validates header field syntax" {
     try validateHeader(.{ .name = "X-Custom_123", .value = "text\tvalue" });
     try std.testing.expectError(error.MalformedHeader, validateHeader(.{ .name = "bad:name", .value = "value" }));
     try std.testing.expectError(error.MalformedHeader, validateHeader(.{ .name = "x-test", .value = "bad\x7fvalue" }));
+}
+
+test "HTTP/1 header name lookup table matches RFC token grammar" {
+    for (0..256) |raw| {
+        const byte: u8 = @intCast(raw);
+        const expected = std.ascii.isAlphanumeric(byte) or switch (byte) {
+            '!', '#', '$', '%', '&', '\'', '*', '+', '-', '.', '^', '_', '`', '|', '~' => true,
+            else => false,
+        };
+        try std.testing.expectEqual(expected, validHeaderNameByte(byte));
+    }
 }
 
 test "HTTP/1 optionally unfolds obsolete folded fields" {

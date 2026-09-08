@@ -1,7 +1,7 @@
 const std = @import("std");
 const netz = @import("netz");
 
-const iterations: usize = 100_000;
+const default_iterations: usize = 100_000;
 const raw_request =
     "POST /bench?mode=parse HTTP/1.1\r\n" ++
     "Host: example.com\r\n" ++
@@ -16,62 +16,133 @@ const raw_request =
     "Host: example.com\r\n" ++
     "\r\n";
 
-pub fn main() !void {
+const Scenario = enum { all, borrowed, owned, owned_checked };
+
+const Options = struct {
+    scenario: Scenario = .all,
+    iterations: usize = default_iterations,
+};
+
+pub fn main(init: std.process.Init) !void {
     const allocator = std.heap.smp_allocator;
+    const options = try parseOptions(init, allocator);
 
     var threaded = std.Io.Threaded.init(allocator, .{});
     defer threaded.deinit();
     const io = threaded.io();
 
     var headers: [32]netz.http1.Header = undefined;
-
-    const borrowed_start = nowNs(io);
     var borrowed_total: usize = 0;
-    for (0..iterations) |_| {
-        const head = try netz.http1.parseRequestHead(raw_request, &headers, .{});
-        borrowed_total += (try head.messageLength()).?;
+    var borrowed_ns: u64 = 0;
+    if (options.scenario == .all or options.scenario == .borrowed) {
+        const started = nowNs(io);
+        for (0..options.iterations) |_| {
+            const head = try netz.http1.parseRequestHead(
+                raw_request,
+                &headers,
+                .{},
+            );
+            borrowed_total += (try head.messageLength()).?;
+        }
+        borrowed_ns = nowNs(io) -| started;
     }
-    const borrowed_ns = nowNs(io) -| borrowed_start;
 
-    const owned_start = nowNs(io);
     var owned_total: usize = 0;
-    for (0..iterations) |_| {
-        var request = try netz.http1.parseRequest(allocator, raw_request, .{});
-        owned_total += request.consumed;
-        request.deinit(allocator);
+    var owned_ns: u64 = 0;
+    if (options.scenario == .all or options.scenario == .owned) {
+        const started = nowNs(io);
+        for (0..options.iterations) |_| {
+            var request = try netz.http1.parseRequest(
+                allocator,
+                raw_request,
+                .{},
+            );
+            owned_total += request.consumed;
+            request.deinit(allocator);
+        }
+        owned_ns = nowNs(io) -| started;
     }
-    const owned_ns = nowNs(io) -| owned_start;
 
-    const owned_checked_start = nowNs(io);
     var owned_checked_total: usize = 0;
-    for (0..iterations) |_| {
-        var request = try netz.http1.parseRequest(allocator, raw_request, .{});
-        try netz.http1.validateRequestHost(request);
-        owned_checked_total += request.consumed;
-        request.deinit(allocator);
+    var owned_checked_ns: u64 = 0;
+    if (options.scenario == .all or options.scenario == .owned_checked) {
+        const started = nowNs(io);
+        for (0..options.iterations) |_| {
+            var request = try netz.http1.parseRequest(
+                allocator,
+                raw_request,
+                .{},
+            );
+            try netz.http1.validateRequestHost(request);
+            owned_checked_total += request.consumed;
+            request.deinit(allocator);
+        }
+        owned_checked_ns = nowNs(io) -| started;
     }
-    const owned_checked_ns = nowNs(io) -| owned_checked_start;
-    const speedup_x100 = ratioTimes100(owned_checked_ns, borrowed_ns);
 
     std.debug.print(
-        \\HTTP/1 parse benchmark
-        \\  iterations: {d}
-        \\  borrowed total: {d}, ns/op: {d}
-        \\  owned total: {d}, ns/op: {d}
-        \\  owned+host total: {d}, ns/op: {d}
-        \\  strict borrowed speedup: {d}.{d:0>2}x
-        \\
-    , .{
-        iterations,
-        borrowed_total,
-        borrowed_ns / iterations,
-        owned_total,
-        owned_ns / iterations,
-        owned_checked_total,
-        owned_checked_ns / iterations,
-        speedup_x100 / 100,
-        speedup_x100 % 100,
-    });
+        "HTTP/1 parse benchmark\n  iterations: {d}\n",
+        .{options.iterations},
+    );
+    if (options.scenario == .all or options.scenario == .borrowed) {
+        std.debug.print(
+            "  borrowed total: {d}, ns/op: {d}\n",
+            .{ borrowed_total, borrowed_ns / options.iterations },
+        );
+    }
+    if (options.scenario == .all or options.scenario == .owned) {
+        std.debug.print(
+            "  owned total: {d}, ns/op: {d}\n",
+            .{ owned_total, owned_ns / options.iterations },
+        );
+    }
+    if (options.scenario == .all or options.scenario == .owned_checked) {
+        std.debug.print(
+            "  owned+host total: {d}, ns/op: {d}\n",
+            .{ owned_checked_total, owned_checked_ns / options.iterations },
+        );
+    }
+    if (options.scenario == .all) {
+        const speedup_x100 = ratioTimes100(
+            owned_checked_ns,
+            borrowed_ns,
+        );
+        std.debug.print(
+            "  strict borrowed speedup: {d}.{d:0>2}x\n",
+            .{ speedup_x100 / 100, speedup_x100 % 100 },
+        );
+    }
+}
+
+fn parseOptions(
+    init: std.process.Init,
+    allocator: std.mem.Allocator,
+) !Options {
+    var args = try std.process.Args.Iterator.initAllocator(
+        init.minimal.args,
+        allocator,
+    );
+    defer args.deinit();
+    _ = args.next();
+    var options: Options = .{};
+    while (args.next()) |arg| {
+        if (std.mem.startsWith(u8, arg, "--scenario=")) {
+            options.scenario = std.meta.stringToEnum(
+                Scenario,
+                arg["--scenario=".len..],
+            ) orelse return error.InvalidArgument;
+        } else if (std.mem.startsWith(u8, arg, "--iterations=")) {
+            options.iterations = try std.fmt.parseInt(
+                usize,
+                arg["--iterations=".len..],
+                10,
+            );
+            if (options.iterations == 0) return error.InvalidArgument;
+        } else {
+            return error.InvalidArgument;
+        }
+    }
+    return options;
 }
 
 fn ratioTimes100(numerator: u64, denominator: u64) u64 {

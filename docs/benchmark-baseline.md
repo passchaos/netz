@@ -98,6 +98,17 @@ implementation audit and remaining HTTP/1/HTTP/2 evidence are in
 The automatic-Date path was recaptured on 2026-09-04 with three CPU-0 runs:
 netz measured 0.733-0.750 us/request (11.73-12.00 us/batch), while Hyper
 measured 0.844-0.846 us/request (13.50-13.54 us/batch).
+The standalone HTTP/1 parser benchmark now accepts
+`--scenario=borrowed|owned|owned_checked` and `--iterations=N`, allowing CPU
+profiles to isolate borrowed parsing from ownership costs. A 20-million-parse
+profile attributed 22.6% of user samples to `parseHeaderLine` and 18.1% to
+scalar searches. Strict header parsing now validates the field-name token while
+locating its colon, and validates the value while tracking its trailing-OWS
+boundary; a 256-entry token table follows picohttpparser's classification
+strategy. Five CPU-0 5-million-parse samples improved from 333-335 ns/op to
+280-282 ns/op (334 to 282 ns median, 15.6%). Five ordinary 100,000-iteration
+runs measured 283-288 ns borrowed, 828-838 ns owned, and 881-886 ns for
+owned plus explicit Host validation.
 HTTP/1 aggregate message-boundary logic now lives under
 `runtime/message/framing.zig`: head limits, Content-Length and
 Transfer-Encoding classification, decoded chunk limits, trailer limits,
