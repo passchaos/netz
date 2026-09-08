@@ -22,6 +22,7 @@ const limits: netz.http2.runtime.Limits = .{
 const ScenarioId = enum {
     http2_consecutive_x1_empty,
     http2_consecutive_x1_req_10b,
+    http2_consecutive_x1_res_10b,
     http2_consecutive_x1_req_100kb,
     http2_parallel_x10_empty,
     http2_parallel_x10_req_10kb_100_chunks_max_window,
@@ -37,6 +38,7 @@ const Scenario = struct {
     id: ScenarioId,
     request: netz.http2.runtime.RequestOptions,
     response_body: []const u8 = "",
+    streaming_response: bool = false,
     parallel: usize = 1,
     warmups: usize = warmup_iterations,
     measured: usize = iterations,
@@ -86,6 +88,12 @@ pub fn main(init: std.process.Init) !void {
             const scenarios = [_]ScenarioServer{
                 .{ .id = .http2_consecutive_x1_empty, .request_body = "", .parallel = 1 },
                 .{ .id = .http2_consecutive_x1_req_10b, .request_body = request_body, .parallel = 1 },
+                .{
+                    .id = .http2_consecutive_x1_res_10b,
+                    .request_body = "",
+                    .response_body = request_body,
+                    .parallel = 1,
+                },
                 .{
                     .id = .http2_consecutive_x1_req_100kb,
                     .request_body = request_body_100kb,
@@ -282,6 +290,15 @@ pub fn main(init: std.process.Init) !void {
             .warmups = 100,
         },
         .{
+            .id = .http2_consecutive_x1_res_10b,
+            .request = .{
+                .path = "/hello",
+                .scheme = "http",
+                .authority = authority,
+            },
+            .response_body = request_body,
+        },
+        .{
             .id = .http2_parallel_x10_empty,
             .request = .{
                 .path = "/hello",
@@ -311,6 +328,7 @@ pub fn main(init: std.process.Init) !void {
                 .authority = authority,
             },
             .response_body = response_body_1mb,
+            .streaming_response = true,
             .parallel = 10,
             .warmups = 5,
             .measured = 20,
@@ -335,6 +353,7 @@ pub fn main(init: std.process.Init) !void {
                 requests[0..scenario.parallel],
                 allocator,
                 scenario.response_body.len,
+                scenario.streaming_response,
             );
         }
 
@@ -347,6 +366,7 @@ pub fn main(init: std.process.Init) !void {
                 requests[0..scenario.parallel],
                 allocator,
                 scenario.response_body.len,
+                scenario.streaming_response,
             );
             status_total += 200 * scenario.parallel;
         }
@@ -470,8 +490,9 @@ fn exchangeScenario(
     requests: []const netz.http2.runtime.RequestOptions,
     allocator: std.mem.Allocator,
     response_body_len: usize,
+    streaming_response: bool,
 ) !void {
-    if (response_body_len != 0) {
+    if (streaming_response) {
         var responses: [10]netz.http2.runtime.StreamingResponse = undefined;
         var body_bytes = [_]usize{0} ** 10;
         try client.requestBatchStreamingInto(
@@ -519,7 +540,13 @@ fn exchangeScenario(
         try client.requestBatchInto(requests, output);
     }
     defer for (output) |*response| response.deinit(allocator);
-    for (output) |response| try validateResponse(response);
+    for (output) |response| {
+        if (response.status != 200 or
+            response.body.len != response_body_len)
+        {
+            return error.UnexpectedResponse;
+        }
+    }
 }
 
 fn nowNs(io: std.Io) u64 {

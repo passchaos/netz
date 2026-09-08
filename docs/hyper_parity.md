@@ -1019,6 +1019,12 @@ allocated/copied the exact 10-byte result. Warmed h2c telemetry now reports
 three allocations per exchange rather than four, and the integration
 allocation regression first warms DATA flow-control storage before requiring
 only the combined request-header block and exact body allocation on the server.
+Known-length aggregate responses now use the same exact reservation and direct
+ownership transfer. A dedicated 10-byte response scenario dropped from four to
+three allocations per exchange and removed the same transient 143-byte growth
+block; its warmed fixed-binary range was 10.006-10.363 us/op versus the captured
+16.843-us pre-change sample. Client-side allocation regression permits only the
+combined response-header block and exact body allocation after warmup.
 Aggregate response batches now likewise consume ordinary frames through the
 reusable borrowed reader rather than duplicating every response frame. The
 parallel x10 empty workload removed 20,000 exact 11-byte allocations across

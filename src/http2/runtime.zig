@@ -5065,6 +5065,7 @@ pub const Connection = struct {
         content_length: ?usize = null,
         body: std.ArrayList(u8) = .empty,
         body_owned: ?[]u8 = null,
+        body_capacity_exact: bool = false,
         trailers: []http2.Hpack.HeaderField = &.{},
         forbids_body: bool = false,
         done: bool = false,
@@ -5227,6 +5228,18 @@ pub const Connection = struct {
                             return error.InvalidContentLength;
                         }
                     }
+                    if (!state.forbids_body) {
+                        if (lookup.content_length) |body_len| {
+                            if (body_len > self.limits.max_body_bytes) {
+                                return error.MessageTooLarge;
+                            }
+                            try state.body.ensureTotalCapacityPrecise(
+                                self.allocator,
+                                body_len,
+                            );
+                            state.body_capacity_exact = true;
+                        }
+                    }
                     if ((frame.header.flags & flag_end_stream) != 0) {
                         try validateExpectedContentLength(
                             lookup.content_length,
@@ -5288,7 +5301,10 @@ pub const Connection = struct {
         // Acquire all body ownership before exposing any output element, so an
         // allocation failure leaves cleanup entirely inside the state array.
         for (states) |*state| {
-            state.body_owned = try state.body.toOwnedSlice(self.allocator);
+            state.body_owned = if (state.body_capacity_exact)
+                state.body.toOwnedSliceAssert()
+            else
+                try state.body.toOwnedSlice(self.allocator);
         }
     }
 
@@ -10823,6 +10839,7 @@ pub const Connection = struct {
         errdefer body.deinit(self.allocator);
         var response_status: ?u16 = null;
         var response_content_length: ?usize = null;
+        var body_capacity_exact = false;
         var informational_count: usize = 0;
         var trailers_only = false;
 
@@ -10905,6 +10922,16 @@ pub const Connection = struct {
                             }
                             break;
                         }
+                        if (lookup.content_length) |body_len| {
+                            if (body_len > self.limits.max_body_bytes) {
+                                return error.MessageTooLarge;
+                            }
+                            try body.ensureTotalCapacityPrecise(
+                                self.allocator,
+                                body_len,
+                            );
+                            body_capacity_exact = true;
+                        }
                         if ((frame.header.flags & flag_end_stream) != 0) {
                             try validateExpectedContentLength(lookup.content_length, 0);
                             trailers_only = true;
@@ -10947,10 +10974,14 @@ pub const Connection = struct {
 
         const final_headers = headers orelse return error.MissingPseudoHeader;
         const status = response_status orelse return error.MissingPseudoHeader;
+        const owned_body = if (body_capacity_exact)
+            body.toOwnedSliceAssert()
+        else
+            try body.toOwnedSlice(self.allocator);
         return .{
             .headers = final_headers,
             .status = status,
-            .body = try body.toOwnedSlice(self.allocator),
+            .body = owned_body,
             .trailers = trailers,
             .trailers_only = trailers_only,
         };
@@ -16971,6 +17002,14 @@ test "HTTP/2 aggregate empty exchange borrows wire frames after warmup" {
                 break :blk request.stream_id;
             };
             try connection.writeResponse(post_stream_id, .{});
+
+            for (0..2) |_| {
+                var request = try connection.readRequest();
+                defer request.deinit(server_ptr.allocator);
+                try connection.writeResponse(request.stream_id, .{
+                    .body = "small-body",
+                });
+            }
         }
     };
 
@@ -17034,6 +17073,37 @@ test "HTTP/2 aggregate empty exchange borrows wire frames after warmup" {
         });
         defer response.deinit(allocator);
         try std.testing.expectEqual(@as(u16, 200), response.status);
+    }
+
+    {
+        var warmup = try client.request(.{
+            .path = "/measured",
+            .authority = "localhost",
+        });
+        defer warmup.deinit(allocator);
+        try std.testing.expectEqualStrings("small-body", warmup.body);
+    }
+    {
+        const response_pending = try client.sendCompleteRequest(.{
+            .path = "/measured",
+            .authority = "localhost",
+        });
+        var tracking = std.testing.FailingAllocator.init(allocator, .{});
+        const saved_allocator = client.allocator;
+        client.allocator = tracking.allocator();
+        defer client.allocator = saved_allocator;
+
+        var response = try client.readResponse(
+            response_pending.stream_id,
+            response_pending.request_method,
+            response_pending.extended_connect,
+            null,
+        );
+        defer response.deinit(client.allocator);
+        try std.testing.expectEqualStrings("small-body", response.body);
+        // The combined HPACK block and exact body buffer are the only owned
+        // allocations for a warmed known-length aggregate response.
+        try std.testing.expectEqual(@as(usize, 2), tracking.allocations);
     }
 
     thread.join();

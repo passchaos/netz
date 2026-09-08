@@ -300,6 +300,15 @@ removed that over-allocation and copy. A warmed run fell from four to three
 allocations per request and from 2,010,096 to 1,724,096 cumulative requested
 bytes over 2,000 requests; its remaining per-request allocations are exactly
 the request HPACK block, 10-byte body and response HPACK block.
+The symmetric aggregate response path is now covered by
+`http2_consecutive_x1_res_10b`. Before exact reservation it allocated a
+143-byte geometric body buffer and then copied into a 10-byte result, taking
+16.843 us/op in the captured baseline. Exact `Content-Length` reservation and
+direct transfer reduced the warmed shape from four to three allocations per
+request and cumulative requested bytes from 2,008,096 to 1,722,096 over 2,000
+requests. Five fixed-binary CPU-0 samples measured 10.006-10.363 us/op. The
+remaining allocations are the request HPACK block, response HPACK block and
+exact 10-byte response body.
 The aggregate parallel response reader now uses the same borrowed-frame cursor
 as its streaming counterpart. On `http2_parallel_x10_empty`, this removed one
 11-byte owned frame per response: a warmed 2,000-batch run fell from 80,000 to
