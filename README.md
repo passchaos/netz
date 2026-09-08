@@ -981,6 +981,16 @@ The aggregate `bench` step runs the current protocol microbenchmarks:
 - bounded QUIC receive-stream compaction across long absolute offsets, including
   retained-memory reduction versus the previous absolute-offset buffer model.
 
+External cross-process comparisons remain separate from the aggregate step.
+`bench-http3-quic-go` runs certificate-verified HTTP/3 upload/download in both
+client/server role pairings, with a fresh connection and untimed ready request
+per sample, matching payloads, flow windows, 1280-byte steady-state MTU, and
+1152-byte effective application chunks. Receiver-side byte, EOF, checksum, and
+status validation is mandatory. Results are labeled `same-application-shape`
+because quic-go's GSO/GRO and ACK/packetization policy are not all externally
+controllable. `bench-webtransport-wtransport` provides the analogous stream
+upload and DATAGRAM ping-pong comparison described above.
+
 The build script pins the package to Zig `0.16.0`.
 
 ## Implementation order

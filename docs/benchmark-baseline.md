@@ -1229,9 +1229,49 @@ three more repeated connection-level reads per response; the same shape measured
 These are internal regression samples, not an equal-wire comparison with quicz.
 
 This is now a real-handshake, paced single-stream and 4-stream upload/download
-result with the same 16 MiB transfer size as the quicz reference benchmark
-family. It is still not a completion claim: the next evidence step is to close
-the same-host quicz gap below and add memory/allocation evidence.
+internal result with the same 16 MiB transfer size as the quicz reference
+benchmark family. The cross-process quic-go comparison below closes the former
+single-stream full-stack evidence gap; multi-stream external comparison and
+allocation evidence remain open.
+
+### HTTP/3 versus quic-go, same application shape
+
+`bench-http3-quic-go` builds against quic-go v0.59.0 from the audited local
+fixture and runs both sender roles for upload and download. Client and server
+are pinned to separate CPUs. Every sample creates a fresh certificate-verified
+QUIC v1/H3 connection, completes an untimed `/benchmark/ready` request, then
+times one body through receiver-validated status, headers, EOF, bytes, and
+checksum. This prevents congestion, QPACK, and retired-stream history from one
+sample changing the next. Both sides use a fixed 1 MiB stream window, 8 MiB
+connection window, 1280-byte steady-state MTU, and 1152-byte effective
+application chunks. Netz explicitly disables GSO/GRO; quic-go reports its
+implementation defaults.
+
+```sh
+zig build bench-http3-quic-go -Doptimize=ReleaseFast -- \
+  --mode=upload --warmup=2 --iterations=5 --body-bytes=4194304 \
+  --chunk-bytes=16384 --stream-window=1048576 --timeout-ms=30000
+
+zig build bench-http3-quic-go -Doptimize=ReleaseFast -- \
+  --mode=download --warmup=2 --iterations=5 --body-bytes=4194304 \
+  --chunk-bytes=16384 --stream-window=1048576 --timeout-ms=30000
+```
+
+Sequential CPU-0/client, CPU-1/server samples on 2026-09-08 measured:
+
+| Sender implementation | Upload | Download |
+|---|---:|---:|
+| netz | 169.75-175.54 MiB/s | 169.03-176.47 MiB/s |
+| quic-go | 45.25-124.16 MiB/s | 50.55-73.21 MiB/s |
+
+Every sample verified status 200, exactly 4,194,304 logical bytes, and checksum
+534,773,760. The wide upload ranges are retained instead of compressed into a
+single ratio. This is `same-application-shape` evidence, not equal-wire and not
+a whole-library superiority claim: capture-level UDP datagram counts/bytes,
+GSO/GRO behavior, ACK policy, and cipher confirmation are still required before
+claiming identical wire work. The important result is that a reproducible
+full-stack comparison now exists and fails closed on any header, byte, EOF, or
+checksum mismatch.
 
 ### Same-host reference comparison against `~/Work/quicz`
 
@@ -1288,8 +1328,9 @@ CPU-0-pinned quicz run produced 15.97 MB/s single-stream and 16.12 MB/s
 four-stream because pinning both same-process endpoints to one CPU changes the
 scheduling shape dramatically. Netz's raw benchmark showed the same scheduling
 sensitivity. No equal-wire, equal-CPU quicz HTTP/3 benchmark is currently
-available, so neither raw transport result is accepted as an H3 superiority
-claim.
+available. The quic-go benchmark above supplies a full-stack
+same-application-shape reference, but neither it nor these raw transport
+numbers are treated as equal-wire H3 superiority evidence.
 
 Fresh 5-iteration netz single-stream sample:
 

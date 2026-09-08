@@ -493,6 +493,18 @@ pub fn build(b: *std.Build) void {
         "Run bidirectional HTTP/3 body, trailer, cancellation, and informational interop with quic-go",
     );
     http3_quic_go_step.dependOn(&http3_quic_go.step);
+    const http3_quic_go_bench = b.addSystemCommand(
+        &.{"tools/interop/http3_quic_go.sh"},
+    );
+    http3_quic_go_bench.addArtifactArg(http3_quic_go_client);
+    http3_quic_go_bench.addArtifactArg(http3_quic_go_server);
+    http3_quic_go_bench.addArg("--bench");
+    if (b.args) |args| http3_quic_go_bench.addArgs(args);
+    const http3_quic_go_bench_step = b.step(
+        "bench-http3-quic-go",
+        "Compare verified HTTP/3 upload and download against quic-go",
+    );
+    http3_quic_go_bench_step.dependOn(&http3_quic_go_bench.step);
 
     const websocket_h3_quic_go_client = b.addExecutable(.{
         .name = "netz-websocket-h3-quic-go-client",

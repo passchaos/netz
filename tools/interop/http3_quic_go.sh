@@ -35,7 +35,125 @@ cleanup() {
   fi
   rm -rf "$work"
 }
-trap cleanup EXIT
+on_exit() {
+  local status=$?
+  if [[ $status -ne 0 ]]; then
+    while IFS= read -r log_file; do
+      echo "===== $log_file =====" >&2
+      cat "$log_file" >&2
+    done < <(find "$work" -type f -name '*.log' -size +0c | sort)
+  fi
+  cleanup
+  exit "$status"
+}
+trap on_exit EXIT
+
+if [[ ${3:-} == --bench ]]; then
+  shift 3
+  free_udp_port() {
+    python3 - <<'PY'
+import socket
+with socket.socket(socket.AF_INET, socket.SOCK_DGRAM) as sock:
+    sock.bind(("127.0.0.1", 0))
+    print(sock.getsockname()[1])
+PY
+  }
+  cat >"$work/netz-ca.pem" <<'EOF'
+-----BEGIN CERTIFICATE-----
+MIIBMDCB1qADAgECAgISNDAKBggqhkjOPQQDAjAUMRIwEAYDVQQDDAlsb2NhbGhvc3QwHhcNMjYwMTAxMDAwMDAwWhcNMzYwMTAxMDAwMDAwWjAUMRIwEAYDVQQDDAlsb2NhbGhvc3QwWTATBgcqhkjOPQIBBggqhkjOPQMBBwNCAARawLjuCeZXZ7tsfTRAu+FcuRLUr+ELbhoX/6Hs0fLlSZe0NNZYPUqZa65oYGMMs9Ud19Qc/RZMzn4vZv5+EakUoxgwFjAUBgNVHREEDTALgglsb2NhbGhvc3QwCgYIKoZIzj0EAwIDSQAwRgIhAJFAj+UlV/FOGaVRnB/9l7wXgSet0zn4CdgFIckqC1hEAiEApPR1fJT2M9PVNn3fwdZBboKEoWrUYLVy6sMvbrhNjKU=
+-----END CERTIFICATE-----
+EOF
+  mapfile -t bench_cpus < <(python3 - <<'PY'
+import os
+for cpu in sorted(os.sched_getaffinity(0))[:2]:
+    print(cpu)
+PY
+  )
+  if [[ ${#bench_cpus[@]} -lt 2 ]]; then
+    echo 'HTTP/3 comparison requires two available CPUs' >&2
+    exit 1
+  fi
+  client_cpu=${bench_cpus[0]}
+  server_cpu=${bench_cpus[1]}
+  (cd "$fixture_dir" && go build \
+    -o "$work/quic-go-http3-bench" \
+    "$netz_root/tools/interop/http3_quic_go_bench.go")
+  requested_modes=(upload download)
+  common_args=()
+  for arg in "$@"; do
+    if [[ $arg == --mode=* ]]; then
+      requested_modes=("${arg#--mode=}")
+    else
+      common_args+=("$arg")
+    fi
+  done
+
+  wait_for_line() {
+    local pid=$1 log=$2 prefix=$3
+    local value=
+    for _ in $(seq 1 600); do
+      value=$(sed -n "s/^${prefix}=//p" "$log" | head -1)
+      if [[ -n $value ]]; then printf '%s\n' "$value"; return 0; fi
+      if ! kill -0 "$pid" 2>/dev/null; then cat "$log" >&2; return 1; fi
+      sleep 0.05
+    done
+    echo "timed out waiting for $prefix" >&2
+    cat "$log" >&2
+    return 1
+  }
+
+  echo "benchmark_cpu_layout=client:$client_cpu,server:$server_cpu"
+
+  for benchmark_mode in "${requested_modes[@]}"; do
+    if [[ $benchmark_mode != upload && $benchmark_mode != download ]]; then
+      echo "unsupported HTTP/3 benchmark mode: $benchmark_mode" >&2
+      exit 1
+    fi
+    mode_args=("--mode=$benchmark_mode" "${common_args[@]}")
+    go_args=("-bench-mode=$benchmark_mode")
+    for arg in "${common_args[@]}"; do
+      go_args+=("-${arg#--}")
+    done
+    pair_dir="$work/$benchmark_mode"
+    mkdir -p "$pair_dir"
+
+    port=$(free_udp_port)
+    timeout 180s taskset -c "$server_cpu" "$work/quic-go-http3-bench" \
+      -role=server -addr="127.0.0.1:$port" \
+      -ca-out="$pair_dir/quic-go-ca.pem" "${go_args[@]}" \
+      >"$pair_dir/quic-go-server.log" 2>&1 &
+    server_pid=$!
+    wait_for_line "$server_pid" "$pair_dir/quic-go-server.log" \
+      QUIC_GO_HTTP3_BENCH_ADDR >/dev/null
+    timeout 180s taskset -c "$client_cpu" "$client" \
+      bench-client "$port" "$pair_dir/quic-go-ca.pem" \
+      "${mode_args[@]}" >"$pair_dir/netz-client.log" 2>&1
+    wait "$server_pid"
+    server_pid=
+    grep -Fq 'role_pair=netz-client+quic-go-server' "$pair_dir/netz-client.log"
+    grep -Fq 'complete=true' "$pair_dir/netz-client.log"
+    cat "$pair_dir/quic-go-server.log"
+    cat "$pair_dir/netz-client.log"
+
+    port=$(free_udp_port)
+    timeout 180s taskset -c "$server_cpu" "$server" \
+      bench-server "$port" "${mode_args[@]}" \
+      >"$pair_dir/netz-server.log" 2>&1 &
+    server_pid=$!
+    wait_for_line "$server_pid" "$pair_dir/netz-server.log" \
+      NETZ_HTTP3_BENCH_PORT >/dev/null
+    timeout 180s taskset -c "$client_cpu" "$work/quic-go-http3-bench" \
+      -role=client -addr="127.0.0.1:$port" -ca="$work/netz-ca.pem" \
+      "${go_args[@]}" >"$pair_dir/quic-go-client.log" 2>&1
+    wait "$server_pid"
+    server_pid=
+    grep -Fq 'role_pair=quic-go-client+netz-server' "$pair_dir/quic-go-client.log"
+    grep -Fq 'complete=true' "$pair_dir/quic-go-client.log"
+    cat "$pair_dir/netz-server.log"
+    cat "$pair_dir/quic-go-client.log"
+  done
+  exit 0
+fi
 
 (cd "$fixture_dir" && go build \
   -o "$work/quic-go-http3-peer" ./http3_peer)

@@ -3,6 +3,7 @@
 
 const std = @import("std");
 const netz = @import("netz");
+const benchmark = @import("http3_quic_go_bench.zig");
 
 const cancellation_response_size = 128 * 1024;
 const stream_receive_window = 8 * 1024;
@@ -12,6 +13,9 @@ const cancellation_prefix = "n" ** read_before_cancel;
 
 pub fn main(init: std.process.Init) !void {
     const args = try init.minimal.args.toSlice(init.arena.allocator());
+    if (args.len >= 3 and std.mem.eql(u8, args[1], "bench-server")) {
+        return runBenchmark(init, args[2..]);
+    }
     if (args.len < 2 or args.len > 4) return error.InvalidArgument;
     const port = try std.fmt.parseInt(u16, args[1], 10);
     if (port == 0) return error.InvalidArgument;
@@ -230,6 +234,274 @@ pub fn main(init: std.process.Init) !void {
             cancellation_response_size,
         },
     );
+}
+
+const BenchmarkRequest = struct {
+    stream_id: u62,
+    close: bool,
+    ready: bool = false,
+    round: u32 = 0,
+    bytes: usize = 0,
+    checksum: u64 = 0,
+};
+
+fn runBenchmark(_: std.process.Init, args: []const []const u8) !void {
+    if (args.len == 0) return error.InvalidArgument;
+    const port = try std.fmt.parseInt(u16, args[0], 10);
+    const config = try benchmark.Config.parse(args[1..]);
+    const allocator = std.heap.c_allocator;
+    var threaded = std.Io.Threaded.init(allocator, .{ .async_limit = .unlimited });
+    defer threaded.deinit();
+    const io = threaded.io();
+
+    var certificate_der: [netz.tls.testing.certificate_der_len]u8 = undefined;
+    try std.base64.standard.Decoder.decode(
+        &certificate_der,
+        netz.tls.testing.certificate_base64,
+    );
+    const key_pair = try netz.tls.testing.serverKeyPair();
+    var server_cid: [8]u8 = undefined;
+    try std.Io.randomSecure(io, &server_cid);
+    var server = try netz.http3.runtime.HandshakeServer.bind(
+        allocator,
+        io,
+        .{ .ip4 = .loopback(port) },
+        .{ .quic = .{
+            .max_datagram_size = 4096,
+            .max_frames_per_datagram = benchmark.max_frames,
+            .enable_gso_send = false,
+            .enable_gro_receive = false,
+        } },
+        .{
+            .handshake = .{
+                .local_connection_id = &server_cid,
+                .version = .version_1,
+                .available_versions = &.{.version_1},
+                .local_transport_parameters = try config.transportParameters(),
+                .initial_one_rtt_config = try config.oneRttConfig(),
+                .identity = .{
+                    .certificate_chain = &.{&certificate_der},
+                    .signer = .{ .ecdsa_p256_sha256 = .{
+                        .key_pair = key_pair,
+                    } },
+                },
+                .max_crypto_buffer = 64 * 1024,
+            },
+            .session = try config.sessionOptions(),
+        },
+    );
+    defer server.deinit();
+    std.debug.print("NETZ_HTTP3_BENCH_PORT={d}\n", .{server.address().ip4.port});
+    try benchmark.printConfig(
+        if (config.mode == .upload) "quic-go" else "netz",
+        "quic-go-client+netz-server",
+        config,
+    );
+    const payload = try allocator.alloc(u8, @intCast(config.body_bytes));
+    defer allocator.free(payload);
+    const expected_checksum = benchmark.fillPayload(payload);
+    const read_buffer = try allocator.alloc(u8, config.effectiveChunk());
+    defer allocator.free(read_buffer);
+
+    for (0..try config.rounds()) |round_index| {
+        var session = try server.acceptWithTimeout(config.timeout());
+        defer session.deinit();
+        const ready = try receiveBenchmarkRequest(
+            allocator,
+            &session,
+            config,
+            0,
+            read_buffer,
+        );
+        if (!ready.ready) return error.InvalidRequest;
+        try session.sendResponsePacedWithTimeout(ready.stream_id, .{
+            .status = 200,
+            .headers = &.{.{ .name = "x-netz-bench-ready", .value = "ok" }},
+        }, config.timeout());
+        const request = try receiveBenchmarkRequest(
+            allocator,
+            &session,
+            config,
+            @intCast(round_index),
+            read_buffer,
+        );
+        if (request.close or request.ready) return error.InvalidRequest;
+        switch (config.mode) {
+            .upload => {
+                if (request.bytes != config.body_bytes or request.checksum != expected_checksum) {
+                    return error.InvalidRequest;
+                }
+                try sendBenchmarkResponse(&session, config, request.stream_id, request.round, expected_checksum, &.{});
+            },
+            .download => try sendBenchmarkResponse(&session, config, request.stream_id, request.round, expected_checksum, payload),
+        }
+        try session.waitForRecoveryIdleWithTimeout(config.timeout());
+    }
+}
+
+fn receiveBenchmarkRequest(
+    allocator: std.mem.Allocator,
+    session: *netz.http3.runtime.HandshakeServerSession,
+    config: benchmark.Config,
+    expected_round: u32,
+    buffer: []u8,
+) !BenchmarkRequest {
+    var result = BenchmarkRequest{ .stream_id = 0, .close = false };
+    var head_seen = false;
+    var finished = false;
+    while (!finished) {
+        var event = try session.receiveRequestEventWithTimeout(config.timeout());
+        defer event.deinit(allocator);
+        switch (event) {
+            .reset => return error.InvalidRequest,
+            .message => |message| switch (message.value) {
+                .head => |head| switch (head) {
+                    .request => |request| {
+                        if (head_seen) return error.InvalidRequest;
+                        result.stream_id = message.stream_id;
+                        result.close = std.mem.eql(
+                            u8,
+                            request.path,
+                            "/benchmark/close",
+                        );
+                        result.ready = std.mem.eql(
+                            u8,
+                            request.path,
+                            "/benchmark/ready",
+                        );
+                        if (result.close or result.ready) {
+                            if (!std.mem.eql(u8, request.method, "GET") or
+                                !std.mem.eql(u8, request.scheme, "https") or
+                                request.authority == null or
+                                !std.mem.eql(
+                                    u8,
+                                    request.authority.?,
+                                    "localhost",
+                                ) or
+                                request.content_length != null)
+                            {
+                                return error.InvalidRequest;
+                            }
+                        } else {
+                            const method = if (config.mode == .upload)
+                                "POST"
+                            else
+                                "GET";
+                            const path = if (config.mode == .upload)
+                                "/benchmark/upload"
+                            else
+                                "/benchmark/download";
+                            if (!std.mem.eql(u8, request.method, method) or
+                                !std.mem.eql(u8, request.path, path) or
+                                !std.mem.eql(
+                                    u8,
+                                    benchmark.header(
+                                        request.headers,
+                                        "x-netz-bench-mode",
+                                    ) orelse return error.InvalidRequest,
+                                    config.mode.name(),
+                                ) or
+                                try benchmark.parseHeaderInt(
+                                    request.headers,
+                                    "x-netz-bench-round",
+                                ) != expected_round or
+                                try benchmark.parseHeaderInt(
+                                    request.headers,
+                                    "x-netz-bench-bytes",
+                                ) != config.body_bytes or
+                                try benchmark.parseHeaderInt(
+                                    request.headers,
+                                    "x-netz-bench-chunk",
+                                ) != config.chunk_bytes or
+                                try benchmark.parseHeaderInt(
+                                    request.headers,
+                                    "x-netz-bench-window",
+                                ) != config.stream_window or
+                                (config.mode == .upload and
+                                    request.content_length != config.body_bytes) or
+                                (config.mode == .download and
+                                    request.content_length != null))
+                            {
+                                return error.InvalidRequest;
+                            }
+                            result.round = expected_round;
+                        }
+                        head_seen = true;
+                    },
+                    .response => return error.InvalidRequest,
+                },
+                .data_available => {
+                    if (!head_seen or result.close or result.ready or
+                        config.mode != .upload)
+                    {
+                        return error.InvalidRequest;
+                    }
+                    const count = try session.readRequestData(
+                        message.stream_id,
+                        buffer,
+                    );
+                    if (result.bytes + count > config.body_bytes) {
+                        return error.InvalidRequest;
+                    }
+                    try benchmark.verifyPayload(
+                        buffer[0..count],
+                        result.bytes,
+                        &result.checksum,
+                    );
+                    result.bytes += count;
+                },
+                .finished => {
+                    if (!head_seen or message.stream_id != result.stream_id) {
+                        return error.InvalidRequest;
+                    }
+                    finished = true;
+                },
+                .trailers, .push_promise => return error.InvalidRequest,
+            },
+        }
+    }
+    return result;
+}
+
+fn sendBenchmarkResponse(
+    session: *netz.http3.runtime.HandshakeServerSession,
+    config: benchmark.Config,
+    stream_id: u62,
+    round: u32,
+    checksum: u64,
+    body: []const u8,
+) !void {
+    var round_buffer: [10]u8 = undefined;
+    var bytes_buffer: [20]u8 = undefined;
+    var checksum_buffer: [20]u8 = undefined;
+    const headers = [_]netz.http3.Qpack.HeaderField{
+        .{ .name = "x-netz-bench-round", .value = try std.fmt.bufPrint(&round_buffer, "{d}", .{round}) },
+        .{ .name = "x-netz-bench-bytes", .value = try std.fmt.bufPrint(&bytes_buffer, "{d}", .{config.body_bytes}) },
+        .{ .name = "x-netz-bench-checksum", .value = try std.fmt.bufPrint(&checksum_buffer, "{d}", .{checksum}) },
+    };
+    if (body.len == 0) {
+        try session.sendResponsePacedWithTimeout(
+            stream_id,
+            .{ .status = 200, .headers = &headers },
+            config.timeout(),
+        );
+        return;
+    }
+    try session.startResponse(
+        stream_id,
+        .{ .status = 200, .headers = &headers },
+        body.len,
+    );
+    var offset: usize = 0;
+    while (offset < body.len) {
+        const end = @min(body.len, offset + config.effectiveChunk());
+        try session.sendResponseBodyPaced(
+            stream_id,
+            body[offset..end],
+            end == body.len,
+        );
+        offset = end;
+    }
 }
 
 fn headerEquals(
