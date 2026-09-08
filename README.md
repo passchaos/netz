@@ -884,6 +884,7 @@ zig build bench-http3-qpack -Doptimize=ReleaseFast
 zig build bench-websocket-frame -Doptimize=ReleaseFast
 zig build bench-websocket-receive-buffer -Doptimize=ReleaseFast
 zig build bench-websocket-h3-echo -Doptimize=ReleaseFast -- --warmup=20 --iterations=200
+zig build bench-websocket-hyper-h2 -Doptimize=ReleaseFast -- --warmup=20 --iterations=1000 --payload-bytes=4096
 zig build bench-websocket-h3-quic-go -Doptimize=ReleaseFast -- --warmup=20 --iterations=1000 --payload-bytes=4096
 zig build bench-mqtt-router -Doptimize=ReleaseFast
 zig build bench-quic-short-packet -Doptimize=ReleaseFast
@@ -1001,9 +1002,10 @@ per sample, matching payloads, flow windows, 1280-byte steady-state MTU, and
 1152-byte effective application chunks. Receiver-side byte, EOF, checksum, and
 status validation is mandatory. Results are labeled `same-application-shape`
 because quic-go's GSO/GRO and ACK/packetization policy are not all externally
-controllable. `bench-websocket-h3-quic-go` uses the same two-CPU, dual-role
-layout for persistent RFC 9220 binary echo, with handshake and warmup outside
-the measured interval and byte-exact validation at both peers. It is also
+controllable. `bench-websocket-hyper-h2` and
+`bench-websocket-h3-quic-go` use the same two-CPU, dual-role layout for
+persistent RFC 8441/RFC 9220 binary echo, with handshake and warmup outside the
+measured interval and byte-exact validation at both peers. They are also
 labeled `same-application-shape`. `bench-webtransport-wtransport` provides the
 analogous stream upload and DATAGRAM ping-pong comparison described above.
 

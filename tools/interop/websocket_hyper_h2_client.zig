@@ -3,9 +3,13 @@
 
 const std = @import("std");
 const netz = @import("netz");
+const benchmark = @import("websocket_hyper_h2_bench.zig");
 
 pub fn main(init: std.process.Init) !void {
     const args = try init.minimal.args.toSlice(init.arena.allocator());
+    if (args.len >= 3 and std.mem.eql(u8, args[1], "bench-client")) {
+        return runBenchmark(init, args[2..]);
+    }
     if (args.len != 2 and args.len != 3) return error.InvalidArgument;
     const port = try std.fmt.parseInt(u16, args[1], 10);
     if (port == 0) return error.InvalidArgument;
@@ -151,4 +155,105 @@ pub fn main(init: std.process.Init) !void {
             if (tls_enabled) "verified" else "n/a",
         },
     );
+}
+
+fn runBenchmark(_: std.process.Init, args: []const []const u8) !void {
+    if (args.len == 0) return error.InvalidArgument;
+    const port = try std.fmt.parseInt(u16, args[0], 10);
+    if (port == 0) return error.InvalidArgument;
+    const config = try benchmark.Config.parse(args[1..]);
+    const allocator = std.heap.c_allocator;
+    var threaded = std.Io.Threaded.init(allocator, .{ .async_limit = .unlimited });
+    defer threaded.deinit();
+    const io = threaded.io();
+    var h2 = try netz.http2.runtime.Client.connect(
+        allocator,
+        io,
+        .{ .ip4 = .loopback(port) },
+        config.clientH2Limits(),
+    );
+    defer h2.close();
+    var warmup_header: [10]u8 = undefined;
+    var iterations_header: [10]u8 = undefined;
+    var payload_header: [10]u8 = undefined;
+    var timeout_header: [10]u8 = undefined;
+    const headers = try config.headers(
+        &warmup_header,
+        &iterations_header,
+        &payload_header,
+        &timeout_header,
+    );
+    var ws = try netz.websocket.runtime.H2Client.openWithTimeout(
+        allocator,
+        &h2,
+        .{
+            .authority = "localhost",
+            .path = benchmark.path,
+            .scheme = "http",
+            .origin = benchmark.origin,
+            .protocols = &.{benchmark.protocol},
+            .extra_headers = &headers,
+            .limits = config.wsLimits(),
+        },
+        config.timeout(),
+    );
+    defer ws.close();
+    if (ws.permessage_deflate or ws.selected_protocol == null or
+        !std.mem.eql(u8, ws.selected_protocol.?, benchmark.protocol))
+    {
+        return error.InvalidNegotiatedMetadata;
+    }
+    var ready_message = try ws.receiveMessageWithTimeout(config.timeout());
+    defer ready_message.deinit(allocator);
+    if (ready_message.opcode != .binary or
+        !std.mem.eql(u8, ready_message.payload, benchmark.ready))
+    {
+        return error.InvalidBenchmarkControl;
+    }
+    benchmark.printConfig("netz-client+hyper-server", config);
+    const payload = try allocator.alloc(u8, config.payload_bytes);
+    defer allocator.free(payload);
+    const response = try allocator.alloc(u8, config.payload_bytes);
+    defer allocator.free(response);
+    for (0..config.warmup) |round| {
+        _ = try benchmarkRound(&ws, payload, response, @intCast(round), config);
+    }
+    const started = benchmark.nowNs(io);
+    var checksum: u64 = 0;
+    for (0..config.iterations) |sample| {
+        const round = std.math.add(u32, config.warmup, @intCast(sample)) catch
+            return error.InvalidArgument;
+        checksum +%= try benchmarkRound(&ws, payload, response, round, config);
+    }
+    const elapsed = benchmark.nowNs(io) -| started;
+    var close_event = try ws.closeWithTimeout(
+        .{ .code = .normal_closure, .reason = "done" },
+        config.timeout(),
+    );
+    defer close_event.deinit(allocator);
+    const close = close_event.closed orelse return error.MissingClosePayload;
+    if (close.code != .normal_closure or !std.mem.eql(u8, close.reason, "done")) {
+        return error.UnexpectedClose;
+    }
+    benchmark.printResult("netz-client+hyper-server", config, elapsed, checksum);
+}
+
+fn benchmarkRound(
+    ws: *netz.websocket.runtime.H2Connection,
+    payload: []u8,
+    response_storage: []u8,
+    round: u32,
+    config: benchmark.Config,
+) !u64 {
+    const expected = benchmark.fillPayload(payload, round);
+    try ws.sendBinary(payload);
+    const response = try ws.receiveMessageIntoWithTimeout(
+        response_storage,
+        config.timeout(),
+    );
+    if (response.opcode != .binary or response.was_compressed or
+        response.payload.len != payload.len) return error.InvalidBenchmarkPayload;
+    const checksum = try benchmark.verifyPayload(response.payload, round);
+    if (checksum != expected) return error.InvalidBenchmarkPayload;
+    return checksum;
 }

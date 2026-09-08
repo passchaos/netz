@@ -633,6 +633,30 @@ pub fn build(b: *std.Build) void {
         "Run netz RFC 8441 WebSocket interop with an audited Hyper server",
     );
     websocket_hyper_h2_step.dependOn(&websocket_hyper_h2.step);
+    const websocket_hyper_h2_server = b.addExecutable(.{
+        .name = "netz-websocket-hyper-h2-server",
+        .root_module = b.createModule(.{
+            .root_source_file = b.path(
+                "tools/interop/websocket_hyper_h2_server.zig",
+            ),
+            .target = target,
+            .optimize = optimize,
+            .imports = &.{.{ .name = "netz", .module = netz_mod }},
+        }),
+    });
+    const websocket_hyper_h2_bench = b.addSystemCommand(
+        &.{"tools/interop/websocket_hyper_h2_bench.sh"},
+    );
+    websocket_hyper_h2_bench.addArtifactArg(websocket_hyper_h2_client);
+    websocket_hyper_h2_bench.addArtifactArg(websocket_hyper_h2_server);
+    if (b.args) |args| websocket_hyper_h2_bench.addArgs(args);
+    const websocket_hyper_h2_bench_step = b.step(
+        "bench-websocket-hyper-h2",
+        "Compare persistent RFC 8441 echo against Hyper",
+    );
+    websocket_hyper_h2_bench_step.dependOn(
+        &websocket_hyper_h2_bench.step,
+    );
 
     const http1_hyper_client = b.addExecutable(.{
         .name = "netz-http1-hyper-client",

@@ -479,6 +479,17 @@ ranges are reported by role pair, not attributed to one library. This remains
 same-application-shape because GSO/GRO, ACK policy, packetization, and syscall
 counts have not been proven equal.
 
+The RFC 8441 Hyper 1.11 peer now also has a dual-role, two-CPU persistent echo
+gate, `bench-websocket-hyper-h2`. It excludes h2c/SETTINGS/CONNECT/READY and
+warmup from timing, disables compression and adaptive windows, uses one
+outstanding 4 KiB message, and validates every round-dependent payload at both
+peers before a normal Close. Five 1,000-round runs measured
+20.33-22.29 us/roundtrip for netz-client + Hyper-server and
+21.07-23.28 us/roundtrip for Hyper-client + netz-server. These are role-pair
+same-application-shape results, not equal-wire or isolated single-library
+costs, because HTTP/2 scheduling, HPACK, frame packing, masking, syscalls, and
+executor behavior remain implementation-specific.
+
 WebTransport's incremental and whole-stream readers now benefit from a QUIC
 receive-stream ID enumeration fast path: increasing physical IDs append
 directly, while swap-removal layouts retain the stable sorted fallback. Ten

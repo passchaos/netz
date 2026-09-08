@@ -2374,6 +2374,35 @@ the RFC 6455 frames into retained connection scratch and calling the existing
 flow-controlled tunnel writer once yields a 2.2-3.2x fragmented-path gain; the
 remaining 15.1-16.0% cost against the one-frame control represents actual
 frame header/mask handling. All samples verified checksum 51,000.
+
+The cross-process `bench-websocket-hyper-h2` harness runs a persistent RFC
+8441 binary echo against Hyper 1.11.0 (`084473f7`) in both client/server role
+pairings. Client and server are pinned to separate CPUs; h2c setup, peer
+SETTINGS, Extended CONNECT, READY, and 20 warmups are outside the timed loop.
+Both sides use TCP_NODELAY, fixed 1 MiB stream / 8 MiB connection windows, a
+16 KiB HTTP/2 frame limit, no adaptive receive windows, no compression, and
+one outstanding 4 KiB message. Client frames carry fresh random masks. Both
+peers validate every round-dependent payload and require Close(1000, `done`).
+
+```sh
+zig build bench-websocket-hyper-h2 -Doptimize=ReleaseFast -- \
+  --warmup=20 --iterations=1000 --payload-bytes=4096 --timeout-ms=30000
+```
+
+Five CPU-0/client and CPU-1/server runs measured:
+
+| Role pair | Latency | Logical payload throughput |
+|---|---:|---:|
+| netz client + Hyper server | 20.33-22.29 us/roundtrip | 350.42-384.33 MiB/s |
+| Hyper client + netz server | 21.07-23.28 us/roundtrip | 335.58-370.76 MiB/s |
+
+Every pair verified 4,096,000 bytes in each direction and aggregate checksum
+522,240,000. Results belong to complete role pairs rather than isolating one
+library's cost. They are `same-application-shape`, not
+equal-wire: the two implementations retain distinct HTTP/2 scheduling, HPACK,
+frame packing, masking, syscall, and executor behavior. No cross-library speed
+ratio is inferred.
+
 The RFC 9220 HTTP/3 benchmark also accepts `--warmup=N` and `--iterations=N`
 (defaults 20 and 200), allowing longer profiling runs without source edits.
 Its QUIC timer selector and the directly invoked read-only deadline helpers now
