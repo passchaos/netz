@@ -456,6 +456,8 @@ pub fn encodeDynamicBlockWithReferenceLimit(
             dynamic_matches,
             encoded_insert_count,
             base,
+            table.entries.items[table.head].absolute_index,
+            table.entryCount(),
             references,
         );
     }
@@ -564,22 +566,32 @@ fn encodeLargeDynamicFields(
     dynamic_matches: []const ?DynamicTable.Match,
     encoded_insert_count: u64,
     base: u64,
+    oldest_absolute_index: u64,
+    dynamic_entry_count: usize,
     references: *std.ArrayList(u64),
 ) !void {
-    var seen: std.AutoHashMapUnmanaged(u64, void) = .empty;
-    defer seen.deinit(allocator);
-    const max_references = std.math.add(
+    const bits_per_mask = @bitSizeOf(usize);
+    // Live dynamic-table absolute indexes are contiguous. Indexing from the
+    // oldest live entry therefore bounds scratch space by current table size,
+    // not by the connection's lifetime insertion count.
+    const mask_count = std.math.divCeil(
         usize,
-        references.items.len,
-        fields.len,
+        dynamic_entry_count,
+        bits_per_mask,
     ) catch return error.OutOfMemory;
-    try seen.ensureTotalCapacity(
-        allocator,
-        std.math.cast(u32, max_references) orelse return error.OutOfMemory,
-    );
+    const seen = try allocator.alloc(usize, mask_count);
+    defer allocator.free(seen);
+    @memset(seen, 0);
     for (references.items) |absolute_index| {
-        seen.putAssumeCapacity(absolute_index, {});
+        if (absolute_index < oldest_absolute_index) continue;
+        const offset = std.math.cast(
+            usize,
+            absolute_index - oldest_absolute_index,
+        ) orelse continue;
+        if (offset >= dynamic_entry_count) continue;
+        setReferenceBit(seen, offset);
     }
+    try references.ensureUnusedCapacity(allocator, fields.len);
     try encodePrefix(list, allocator, encoded_insert_count, 0);
 
     for (fields, dynamic_matches) |field, dynamic_match| {
@@ -587,11 +599,11 @@ fn encodeLargeDynamicFields(
             if (dynamic_match) |match| {
                 if (match.full_match) {
                     const absolute_index = match.absolute_index;
-                    try appendReferenceUniqueHashed(
+                    appendReferenceUniqueDense(
                         references,
-                        allocator,
                         absolute_index,
-                        &seen,
+                        oldest_absolute_index,
+                        seen,
                     );
                     if (absolute_index < base) {
                         try encodePrefixedInteger(
@@ -633,11 +645,11 @@ fn encodeLargeDynamicFields(
 
         if (dynamic_match) |match| {
             const absolute_index = match.absolute_index;
-            try appendReferenceUniqueHashed(
+            appendReferenceUniqueDense(
                 references,
-                allocator,
                 absolute_index,
-                &seen,
+                oldest_absolute_index,
+                seen,
             );
             if (absolute_index < base) {
                 try encodePrefixedInteger(
@@ -706,18 +718,24 @@ fn appendReferenceUnique(
     try references.append(allocator, absolute_index);
 }
 
-fn appendReferenceUniqueHashed(
+inline fn appendReferenceUniqueDense(
     references: *std.ArrayList(u64),
-    allocator: std.mem.Allocator,
     absolute_index: u64,
-    seen: *std.AutoHashMapUnmanaged(u64, void),
-) !void {
-    const slot = seen.getOrPutAssumeCapacity(absolute_index);
-    if (slot.found_existing) return;
-    references.append(allocator, absolute_index) catch |err| {
-        _ = seen.remove(absolute_index);
-        return err;
-    };
+    oldest_absolute_index: u64,
+    seen: []usize,
+) void {
+    const offset: usize = @intCast(absolute_index - oldest_absolute_index);
+    const mask_index = offset / @bitSizeOf(usize);
+    const bit = @as(usize, 1) << @as(std.math.Log2Int(usize), @truncate(offset));
+    if ((seen[mask_index] & bit) != 0) return;
+    seen[mask_index] |= bit;
+    references.appendAssumeCapacity(absolute_index);
+}
+
+fn setReferenceBit(seen: []usize, offset: usize) void {
+    const mask_index = offset / @bitSizeOf(usize);
+    const bit = @as(usize, 1) << @as(std.math.Log2Int(usize), @truncate(offset));
+    seen[mask_index] |= bit;
 }
 
 pub fn decodeDynamicBlock(

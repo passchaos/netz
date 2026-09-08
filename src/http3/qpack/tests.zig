@@ -469,9 +469,13 @@ test "HTTP/3 QPACK large encode scratch is allocation-failure safe" {
 test "HTTP/3 QPACK large dynamic block preserves unique reference order" {
     const allocator = std.testing.allocator;
     const reference_count = 128;
-    var table = Qpack.DynamicTable.init(allocator, 16 * 1024);
+    var table = Qpack.DynamicTable.init(allocator, 8 * 1024);
     defer table.deinit();
-    try table.setCapacity(16 * 1024);
+    try table.setCapacity(8 * 1024);
+    for (0..reference_count) |_| {
+        _ = try table.insert("x-retired", "old");
+    }
+    const first_reference = table.insert_count;
 
     var names: [reference_count][24]u8 = undefined;
     var values: [reference_count][24]u8 = undefined;
@@ -499,9 +503,11 @@ test "HTTP/3 QPACK large dynamic block preserves unique reference order" {
     defer encoded.deinit(allocator);
     var references: std.ArrayList(u64) = .empty;
     defer references.deinit(allocator);
-    // A caller may already have recorded a reference. It remains first and is
-    // not appended again when its field appears in this batch.
-    try references.append(allocator, 3);
+    // Callers may already have current or retired references. They retain
+    // their order, and a current one is not appended again when its field
+    // appears in this batch.
+    try references.append(allocator, 0);
+    try references.append(allocator, first_reference + 3);
     try Qpack.encodeDynamicBlockKnownReceived(
         &encoded,
         allocator,
@@ -511,17 +517,26 @@ test "HTTP/3 QPACK large dynamic block preserves unique reference order" {
         &references,
     );
 
-    var expected: [reference_count]u64 = undefined;
-    expected[0] = 3;
-    expected[1] = 90;
-    var expected_len: usize = 2;
+    var expected: [reference_count + 1]u64 = undefined;
+    expected[0] = 0;
+    expected[1] = first_reference + 3;
+    expected[2] = first_reference + 90;
+    var expected_len: usize = 3;
     for (0..reference_count) |index| {
         if (index == 3 or index == 90) continue;
-        expected[expected_len] = @intCast(index);
+        expected[expected_len] = first_reference + @as(u64, @intCast(index));
         expected_len += 1;
     }
-    try std.testing.expectEqual(reference_count, expected_len);
+    try std.testing.expectEqual(reference_count + 1, expected_len);
     try std.testing.expectEqualSlices(u64, &expected, references.items);
+
+    var decoded = try Qpack.decodeDynamicBlock(allocator, encoded.items, table);
+    defer Qpack.freeDynamicBlock(allocator, &decoded);
+    try std.testing.expectEqual(fields.len, decoded.fields.len);
+    for (fields, decoded.fields) |expected_field, actual_field| {
+        try std.testing.expectEqualStrings(expected_field.name, actual_field.name);
+        try std.testing.expectEqualStrings(expected_field.value, actual_field.value);
+    }
 }
 
 test "HTTP/3 QPACK small dynamic block keeps allocation-free scratch" {

@@ -519,6 +519,12 @@ without rescanning the growing reference list. Five CPU-0 samples measured
 the ordinary 32-field block at 821-827 ns/block after isolating hash-backed
 emission from its linear stack path. These are internal before/after results,
 not an equal-wire cross-library comparison.
+The follow-up replaces that large-only hash membership with a bitmap relative
+to the dynamic table's oldest live absolute index. Its space is bounded by the
+current table entry count rather than the lifetime insertion count. Five CPU-0
+samples measured 11.02-11.28 us/block (21-22 ns/field), another 1.24-1.32x
+improvement over the hash version and 4.35-4.49x over the original linear
+deduplication baseline; the 32-field block remained at 804-826 ns/block.
 
 ### QUIC 1-RTT send
 
