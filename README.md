@@ -1000,7 +1000,8 @@ counters; the runner joins them per sample and retains teardown observation
 deltas. Results remain `same-application-shape`: the counters demonstrate that
 ACK/pacing, packetization, and application scheduling are not externally
 equalized, and kernel/interface capture is still required for an equal-wire
-claim.
+claim. Add `--stats` to record whole-process peak RSS for both implementations,
+plus separately labeled netz explicit-allocator and Go runtime-heap telemetry.
 
 `bench-http3-quic-go` runs certificate-verified HTTP/3 upload/download in both
 client/server role pairings, with a fresh connection and untimed ready request

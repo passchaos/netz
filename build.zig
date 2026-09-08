@@ -40,6 +40,11 @@ pub fn build(b: *std.Build) void {
             .{ .name = "zio", .module = zio_dep.module("zio") },
         },
     });
+    const benchmark_counting_allocator_mod = b.createModule(.{
+        .root_source_file = b.path("examples/support/counting_allocator.zig"),
+        .target = target,
+        .optimize = optimize,
+    });
 
     const lib = b.addLibrary(.{
         .name = "netz",
@@ -731,7 +736,13 @@ pub fn build(b: *std.Build) void {
             ),
             .target = target,
             .optimize = optimize,
-            .imports = &.{.{ .name = "netz", .module = netz_mod }},
+            .imports = &.{
+                .{ .name = "netz", .module = netz_mod },
+                .{
+                    .name = "benchmark_counting_allocator",
+                    .module = benchmark_counting_allocator_mod,
+                },
+            },
         }),
     });
     const quic_quic_go_bench_server = b.addExecutable(.{
@@ -742,7 +753,13 @@ pub fn build(b: *std.Build) void {
             ),
             .target = target,
             .optimize = optimize,
-            .imports = &.{.{ .name = "netz", .module = netz_mod }},
+            .imports = &.{
+                .{ .name = "netz", .module = netz_mod },
+                .{
+                    .name = "benchmark_counting_allocator",
+                    .module = benchmark_counting_allocator_mod,
+                },
+            },
         }),
     });
     const quic_quic_go_bench = b.addSystemCommand(

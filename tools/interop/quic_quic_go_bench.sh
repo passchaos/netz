@@ -16,6 +16,16 @@ if ! command -v go >/dev/null 2>&1; then
   exit 127
 fi
 
+stats=false
+for arg in "$@"; do
+  if [[ $arg == --stats ]]; then stats=true; fi
+done
+time_bin=${TIME_BIN:-/usr/bin/time}
+if [[ $stats == true && ! -x $time_bin ]]; then
+  echo "GNU time not found at $time_bin" >&2
+  exit 127
+fi
+
 work=$(mktemp -d)
 server_pid=
 cleanup() {
@@ -31,7 +41,8 @@ on_exit() {
     while IFS= read -r log_file; do
       echo "===== $log_file =====" >&2
       cat "$log_file" >&2
-    done < <(find "$work" -type f -name '*.log' -size +0c | sort)
+    done < <(find "$work" -type f \
+      \( -name '*.log' -o -name '*.rss' \) -size +0c | sort)
   fi
   cleanup
   exit "$status"
@@ -62,6 +73,11 @@ wait_for_line() {
   done
   echo "timed out waiting for $prefix" >&2
   return 1
+}
+
+check_memory() {
+  if [[ $stats != true ]]; then return; fi
+  python3 "$repo_root/tools/interop/quic_memory_telemetry_check.py" "$@"
 }
 
 mapfile -t bench_cpus < <(python3 - <<'PY'
@@ -112,18 +128,34 @@ for stream_count in "${requested_streams[@]}"; do
     mkdir -p "$pair_dir"
 
     port=$(free_udp_port)
-    QUIC_GO_DISABLE_GSO=true timeout 300s taskset -c "$server_cpu" \
-      "$work/quic-go-raw-bench" -role=server \
-      -addr="127.0.0.1:$port" -ca-out="$pair_dir/quic-go-ca.pem" \
-      -sender="$sender_role" "${go_stream_args[@]}" \
-      >"$pair_dir/quic-go-server.log" 2>&1 &
+    if [[ $stats == true ]]; then
+      QUIC_GO_DISABLE_GSO=true timeout 300s \
+        "$time_bin" -f '%M' -o "$pair_dir/quic-go-server.rss" \
+        taskset -c "$server_cpu" "$work/quic-go-raw-bench" \
+        -role=server -addr="127.0.0.1:$port" \
+        -ca-out="$pair_dir/quic-go-ca.pem" -sender="$sender_role" \
+        "${go_stream_args[@]}" >"$pair_dir/quic-go-server.log" 2>&1 &
+    else
+      QUIC_GO_DISABLE_GSO=true timeout 300s taskset -c "$server_cpu" \
+        "$work/quic-go-raw-bench" -role=server \
+        -addr="127.0.0.1:$port" -ca-out="$pair_dir/quic-go-ca.pem" \
+        -sender="$sender_role" "${go_stream_args[@]}" \
+        >"$pair_dir/quic-go-server.log" 2>&1 &
+    fi
     server_pid=$!
     wait_for_line "$server_pid" "$pair_dir/quic-go-server.log" \
       QUIC_GO_RAW_BENCH_ADDR >/dev/null
-    timeout 300s taskset -c "$client_cpu" "$netz_client" \
-      bench-client "$port" "$pair_dir/quic-go-ca.pem" \
-      "--sender=$sender_role" "${stream_args[@]}" \
-      >"$pair_dir/netz-client.log" 2>&1
+    if [[ $stats == true ]]; then
+      timeout 300s "$time_bin" -f '%M' -o "$pair_dir/netz-client.rss" \
+        taskset -c "$client_cpu" "$netz_client" bench-client "$port" \
+        "$pair_dir/quic-go-ca.pem" "--sender=$sender_role" \
+        "${stream_args[@]}" >"$pair_dir/netz-client.log" 2>&1
+    else
+      timeout 300s taskset -c "$client_cpu" "$netz_client" \
+        bench-client "$port" "$pair_dir/quic-go-ca.pem" \
+        "--sender=$sender_role" "${stream_args[@]}" \
+        >"$pair_dir/netz-client.log" 2>&1
+    fi
     wait "$server_pid"
     server_pid=
     if [[ $sender_role == client ]]; then
@@ -137,21 +169,43 @@ for stream_count in "${requested_streams[@]}"; do
       --role-pair=netz-client+quic-go-server --sender="$sender_role" \
       --streams="$stream_count" --iterations="$iterations" \
       "$pair_dir/quic-go-server.log" "$pair_dir/netz-client.log"
+    check_memory --role-pair=netz-client+quic-go-server \
+      --sender="$sender_role" --streams="$stream_count" \
+      --client-log="$pair_dir/netz-client.log" \
+      --server-log="$pair_dir/quic-go-server.log" \
+      --client-rss="$pair_dir/netz-client.rss" \
+      --server-rss="$pair_dir/quic-go-server.rss"
     cat "$pair_dir/quic-go-server.log"
     cat "$pair_dir/netz-client.log"
 
     port=$(free_udp_port)
-    timeout 300s taskset -c "$server_cpu" "$netz_server" \
-      bench-server "$port" "--sender=$sender_role" \
-      "${stream_args[@]}" >"$pair_dir/netz-server.log" 2>&1 &
+    if [[ $stats == true ]]; then
+      timeout 300s "$time_bin" -f '%M' -o "$pair_dir/netz-server.rss" \
+        taskset -c "$server_cpu" "$netz_server" bench-server "$port" \
+        "--sender=$sender_role" "${stream_args[@]}" \
+        >"$pair_dir/netz-server.log" 2>&1 &
+    else
+      timeout 300s taskset -c "$server_cpu" "$netz_server" \
+        bench-server "$port" "--sender=$sender_role" \
+        "${stream_args[@]}" >"$pair_dir/netz-server.log" 2>&1 &
+    fi
     server_pid=$!
     wait_for_line "$server_pid" "$pair_dir/netz-server.log" \
       NETZ_QUIC_BENCH_PORT >/dev/null
-    QUIC_GO_DISABLE_GSO=true timeout 300s taskset -c "$client_cpu" \
-      "$work/quic-go-raw-bench" -role=client \
-      -addr="127.0.0.1:$port" -ca="$work/netz-ca.pem" \
-      -sender="$sender_role" "${go_stream_args[@]}" \
-      >"$pair_dir/quic-go-client.log" 2>&1
+    if [[ $stats == true ]]; then
+      QUIC_GO_DISABLE_GSO=true timeout 300s \
+        "$time_bin" -f '%M' -o "$pair_dir/quic-go-client.rss" \
+        taskset -c "$client_cpu" "$work/quic-go-raw-bench" \
+        -role=client -addr="127.0.0.1:$port" -ca="$work/netz-ca.pem" \
+        -sender="$sender_role" "${go_stream_args[@]}" \
+        >"$pair_dir/quic-go-client.log" 2>&1
+    else
+      QUIC_GO_DISABLE_GSO=true timeout 300s taskset -c "$client_cpu" \
+        "$work/quic-go-raw-bench" -role=client \
+        -addr="127.0.0.1:$port" -ca="$work/netz-ca.pem" \
+        -sender="$sender_role" "${go_stream_args[@]}" \
+        >"$pair_dir/quic-go-client.log" 2>&1
+    fi
     wait "$server_pid"
     server_pid=
     if [[ $sender_role == client ]]; then
@@ -165,6 +219,12 @@ for stream_count in "${requested_streams[@]}"; do
       --role-pair=quic-go-client+netz-server --sender="$sender_role" \
       --streams="$stream_count" --iterations="$iterations" \
       "$pair_dir/netz-server.log" "$pair_dir/quic-go-client.log"
+    check_memory --role-pair=quic-go-client+netz-server \
+      --sender="$sender_role" --streams="$stream_count" \
+      --client-log="$pair_dir/quic-go-client.log" \
+      --server-log="$pair_dir/netz-server.log" \
+      --client-rss="$pair_dir/quic-go-client.rss" \
+      --server-rss="$pair_dir/netz-server.rss"
     cat "$pair_dir/netz-server.log"
     cat "$pair_dir/quic-go-client.log"
   done

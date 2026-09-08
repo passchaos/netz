@@ -317,6 +317,36 @@ pub fn printSocketTraffic(
     );
 }
 
+pub fn printNetzMemory(
+    role_pair: []const u8,
+    endpoint_role: []const u8,
+    sender: Sender,
+    config: Config,
+    snapshot: anytype,
+) void {
+    std.debug.print(
+        "implementation=netz protocol=quic-stream role_pair={s} " ++
+            "endpoint_role={s} sender_role={s} streams={d} " ++
+            "memory_scope=benchmark-run-after-argument-parse " ++
+            "allocator_scope=netz-explicit alloc_count={d} free_count={d} " ++
+            "resize_count={d} remap_count={d} total_allocated_bytes={d} " ++
+            "live_bytes={d} peak_live_bytes={d} complete=true\n",
+        .{
+            role_pair,
+            endpoint_role,
+            @tagName(sender),
+            config.streams,
+            snapshot.alloc_count,
+            snapshot.free_count,
+            snapshot.resize_count,
+            snapshot.remap_count,
+            snapshot.total_allocated,
+            snapshot.current_bytes,
+            snapshot.peak_bytes,
+        },
+    );
+}
+
 pub const PayloadSet = struct {
     storage: []u8,
     streams: [4][]const u8,

@@ -1965,6 +1965,39 @@ denies unprivileged `tcpdump`, passwordless elevation, and user/network
 namespaces. Future promotion still requires capture-backed IP/UDP accounting
 plus equalized GRO, ACK/pacing, packetization, and application scheduling.
 
+The same harness accepts `--stats` for process and allocator memory evidence:
+
+```sh
+zig build bench-quic-quic-go -Doptimize=ReleaseFast -- \
+  --warmup=1 --iterations=3 --bytes-per-stream=4194304 \
+  --chunk-bytes=16384 --stream-window=1048576 --stats
+```
+
+GNU time measures whole-process maximum resident set size for every client and
+server process. This is the directly comparable cross-language metric. Netz
+also wraps its explicit allocator and requires zero live bytes after teardown;
+quic-go reports `runtime.MemStats` heap counters. Allocation counts, cumulative
+allocated bytes, netz peak-live bytes, and Go `HeapSys` are implementation- and
+runtime-specific diagnostics and are therefore not divided into cross-language
+ratios. The three-measured-connection run above produced:
+
+| Streams | Implementation workload | Process peak RSS (KiB) | Runtime allocation count | Runtime allocated bytes | Runtime peak/reserved bytes |
+|---:|---|---:|---:|---:|---:|
+| 1 | netz sender | 9,248-9,336 | 9,190-12,053 | 29,914,732-32,383,622 | peak live 6,301,599-6,304,088 |
+| 1 | netz receiver | 3,328-3,584 | 318-341 | 1,579,928-1,603,277 | peak live 319,319-321,809 |
+| 1 | quic-go sender | 26,368-26,624 | 103,129-103,674 | 29,403,816-30,041,488 | ending HeapSys 20,676,608-20,709,376 |
+| 1 | quic-go receiver | 10,752-11,008 | 56,668-60,240 | 2,274,320-2,515,000 | ending HeapSys 3,932,160 |
+| 4 | netz sender | 27,440-27,608 | 41,224-67,016 | 129,347,669-160,471,876 | peak live 24,982,425-25,000,639 |
+| 4 | netz receiver | 6,908-7,212 | 362-393 | 12,100,091-12,331,038 | peak live 3,128,072-3,171,815 |
+| 4 | quic-go sender | 51,332-51,456 | 402,043-406,112 | 106,536,616-107,394,072 | ending HeapSys 54,165,504-54,198,272 |
+| 4 | quic-go receiver | 13,312-19,968 | 265,700-301,569 | 11,257,960-19,460,168 | ending HeapSys 8,060,928-12,255,232 |
+
+Each range combines the two endpoint-role placements for that sender/receiver
+workload. The verifier required all 16 process records, positive RSS and
+runtime counters, the expected allocator scope, and `live_bytes=0` for every
+netz process. `--stats` is opt-in: default throughput runs do not instantiate
+the counting allocator, call Go `ReadMemStats`, or launch through GNU time.
+
 This comparison intentionally disables GSO/GRO. The host clamps
 `net.core.rmem_max` to 212,992 bytes, so a same-process multi-packet burst can
 overflow the effective UDP receive queue and create artificial loss. The
@@ -2873,7 +2906,8 @@ benchmark pass and does not replace the isolated ranges above.
   host that permits pcap. The current complete-connection userspace UDP
   counters prove the existing shapes differ and therefore remain
   `same-application-shape`.
-- Record allocation/peak-memory metrics for the benchmark processes.
+- Extend allocation/peak-memory telemetry from the raw QUIC process matrix to
+  the remaining HTTP/3, WebSocket, and WebTransport cross-process harnesses.
 - Add loss/reordering benchmark cases or interop-runner style scenarios for
   handshake loss, transfer loss, and corruption.
 - Keep public HTTP/3 smoke (`https://robotics.bytedance.com/ --verify --head`)

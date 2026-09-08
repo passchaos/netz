@@ -22,6 +22,7 @@ import (
 	"math/big"
 	"net"
 	"os"
+	"runtime"
 	"sync"
 	"sync/atomic"
 	"time"
@@ -69,6 +70,26 @@ type socketTraffic struct {
 	sentBytes         uint64
 	receivedDatagrams uint64
 	receivedBytes     uint64
+}
+
+type goMemorySnapshot struct {
+	mallocs    uint64
+	frees      uint64
+	totalAlloc uint64
+	heapAlloc  uint64
+	heapSys    uint64
+	sys        uint64
+	numGC      uint32
+}
+
+func readGoMemory() goMemorySnapshot {
+	var stats runtime.MemStats
+	runtime.ReadMemStats(&stats)
+	return goMemorySnapshot{
+		mallocs: stats.Mallocs, frees: stats.Frees, totalAlloc: stats.TotalAlloc,
+		heapAlloc: stats.HeapAlloc, heapSys: stats.HeapSys, sys: stats.Sys,
+		numGC: stats.NumGC,
+	}
 }
 
 func (current socketTraffic) since(previous socketTraffic) socketTraffic {
@@ -257,6 +278,7 @@ func main() {
 	chunkBytes := flag.Uint("chunk-bytes", 16*1024, "requested application write chunk")
 	streamWindow := flag.Uint64("stream-window", 1024*1024, "fixed stream receive window")
 	timeoutMS := flag.Uint("timeout-ms", 30000, "per-sample timeout milliseconds")
+	stats := flag.Bool("stats", false, "report Go runtime heap telemetry")
 	flag.Parse()
 	if *warmup > math.MaxUint32 || *iterations > math.MaxUint32 || *streams > math.MaxUint16 ||
 		*chunkBytes > math.MaxUint32 || *timeoutMS > math.MaxUint32 {
@@ -276,11 +298,21 @@ func main() {
 	} else if *senderName != "client" {
 		log.Fatal("invalid sender")
 	}
+	var memoryBefore goMemorySnapshot
+	if *stats {
+		memoryBefore = readGoMemory()
+	}
 	switch *role {
 	case "server":
 		runServer(*address, *caOut, c, s)
+		if *stats {
+			printGoMemory("netz-client+quic-go-server", "server", s, c, memoryBefore, readGoMemory())
+		}
 	case "client":
 		runClient(*address, *caPath, c, s)
+		if *stats {
+			printGoMemory("quic-go-client+netz-server", "client", s, c, memoryBefore, readGoMemory())
+		}
 	default:
 		log.Fatal("invalid role")
 	}
@@ -760,6 +792,10 @@ func printSample(implementation, rolePair string, c config, sample uint32, elaps
 
 func printSocketTraffic(implementation, rolePair, endpointRole string, c config, sample uint32, traffic socketTraffic) {
 	fmt.Printf("implementation=%s protocol=quic-stream role_pair=%s endpoint_role=%s sample=%d streams=%d traffic_scope=connection socket_boundary=userspace-udp-payload udp_sent_datagrams=%d udp_sent_payload_bytes=%d udp_received_datagrams=%d udp_received_payload_bytes=%d logical_udp_segments=true complete=true\n", implementation, rolePair, endpointRole, sample, c.streams, traffic.sentDatagrams, traffic.sentBytes, traffic.receivedDatagrams, traffic.receivedBytes)
+}
+
+func printGoMemory(rolePair, endpointRole string, s sender, c config, before, after goMemorySnapshot) {
+	fmt.Printf("implementation=quic-go protocol=quic-stream role_pair=%s endpoint_role=%s sender_role=%s streams=%d memory_scope=benchmark-run-after-argument-parse allocator_scope=go-runtime-heap alloc_count=%d free_count=%d total_allocated_bytes=%d heap_alloc_bytes_end=%d heap_sys_bytes_end=%d runtime_sys_bytes_end=%d gc_cycles=%d complete=true\n", rolePair, endpointRole, ifSender(s, "client", "server"), c.streams, after.mallocs-before.mallocs, after.frees-before.frees, after.totalAlloc-before.totalAlloc, after.heapAlloc, after.heapSys, after.sys, after.numGC-before.numGC)
 }
 
 func localhostCertificate() (tls.Certificate, []byte, error) {

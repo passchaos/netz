@@ -1,6 +1,8 @@
 const std = @import("std");
 const netz = @import("netz");
 const benchmark = @import("quic_quic_go_bench.zig");
+const CountingAllocator = @import("benchmark_counting_allocator")
+    .CountingAllocator;
 
 pub fn main(init: std.process.Init) !void {
     const args = try init.minimal.args.toSlice(init.arena.allocator());
@@ -12,6 +14,7 @@ pub fn main(init: std.process.Init) !void {
         return error.InvalidArgument;
     }
     var sender: ?benchmark.Sender = null;
+    var stats = false;
     var config_args: std.ArrayList([]const u8) = .empty;
     defer config_args.deinit(std.heap.c_allocator);
     for (args[4..]) |arg| {
@@ -21,13 +24,24 @@ pub fn main(init: std.process.Init) !void {
                 benchmark.Sender,
                 arg["--sender=".len..],
             ) orelse return error.InvalidArgument;
+        } else if (std.mem.eql(u8, arg, "--stats")) {
+            stats = true;
         } else {
             try config_args.append(std.heap.c_allocator, arg);
         }
     }
     const selected_sender = sender orelse return error.InvalidArgument;
     const config = try benchmark.Config.parse(config_args.items);
-    const allocator = std.heap.c_allocator;
+    const role_pair = "netz-client+quic-go-server";
+    var counting = CountingAllocator.init(std.heap.c_allocator);
+    const allocator = if (stats) counting.allocator() else std.heap.c_allocator;
+    defer if (stats) benchmark.printNetzMemory(
+        role_pair,
+        "client",
+        selected_sender,
+        config,
+        counting.snapshot(),
+    );
     var threaded = std.Io.Threaded.init(allocator, .{ .async_limit = .unlimited });
     defer threaded.deinit();
     const io = threaded.io();
@@ -41,7 +55,6 @@ pub fn main(init: std.process.Init) !void {
         .now_seconds = now.toSeconds(),
     };
     const sender_name = if (selected_sender == .client) "netz" else "quic-go";
-    const role_pair = "netz-client+quic-go-server";
     try benchmark.printConfig(sender_name, role_pair, config);
     for (0..try config.rounds()) |round_index| {
         try runRound(
