@@ -539,6 +539,48 @@ test "HTTP/3 QPACK large dynamic block preserves unique reference order" {
     }
 }
 
+test "HTTP/3 QPACK large mixed dynamic block uses general encoding" {
+    const allocator = std.testing.allocator;
+    var table = Qpack.DynamicTable.init(allocator, 4096);
+    defer table.deinit();
+    try table.setCapacity(4096);
+    _ = try table.insert("x-mixed", "indexed");
+
+    var fields: [65]Qpack.HeaderField = undefined;
+    for (&fields) |*field| {
+        field.* = .{ .name = "x-mixed", .value = "indexed" };
+    }
+    fields[17] = .{
+        .name = "x-mixed",
+        .value = "literal-value",
+        .never_indexed = true,
+    };
+    fields[48] = .{ .name = "x-literal", .value = "unindexed" };
+
+    var encoded: std.ArrayList(u8) = .empty;
+    defer encoded.deinit(allocator);
+    var references: std.ArrayList(u64) = .empty;
+    defer references.deinit(allocator);
+    try Qpack.encodeDynamicBlockKnownReceived(
+        &encoded,
+        allocator,
+        &fields,
+        table,
+        table.insert_count,
+        &references,
+    );
+    try std.testing.expectEqualSlices(u64, &.{0}, references.items);
+
+    var decoded = try Qpack.decodeDynamicBlock(allocator, encoded.items, table);
+    defer Qpack.freeDynamicBlock(allocator, &decoded);
+    try std.testing.expectEqual(fields.len, decoded.fields.len);
+    for (fields, decoded.fields) |expected, actual| {
+        try std.testing.expectEqualStrings(expected.name, actual.name);
+        try std.testing.expectEqualStrings(expected.value, actual.value);
+        try std.testing.expectEqual(expected.never_indexed, actual.never_indexed);
+    }
+}
+
 test "HTTP/3 QPACK small dynamic block keeps allocation-free scratch" {
     const allocator = std.testing.allocator;
     const field_count = 64;
@@ -621,6 +663,42 @@ test "HTTP/3 QPACK large reference scratch OOM precedes output mutation" {
     try std.testing.expect(failing.has_induced_failure);
     try std.testing.expectEqualSlices(u8, &.{ 0xaa, 0xbb }, encoded.items);
     try std.testing.expectEqualSlices(u64, &.{0}, references.items);
+}
+
+test "HTTP/3 QPACK large reference reserve OOM precedes output mutation" {
+    const allocator = std.testing.allocator;
+    var table = Qpack.DynamicTable.init(allocator, 4096);
+    defer table.deinit();
+    try table.setCapacity(4096);
+    _ = try table.insert("x-large-block", "repeated");
+    var fields: [65]Qpack.HeaderField = undefined;
+    for (&fields) |*field| {
+        field.* = .{ .name = "x-large-block", .value = "repeated" };
+    }
+
+    var encoded: std.ArrayList(u8) = .empty;
+    defer encoded.deinit(allocator);
+    try encoded.appendSlice(allocator, &.{ 0xaa, 0xbb });
+    var references: std.ArrayList(u64) = .empty;
+    var failing = std.testing.FailingAllocator.init(allocator, .{
+        // Match and bitmap allocations succeed; reference capacity fails.
+        .fail_index = 2,
+    });
+    defer references.deinit(failing.allocator());
+    try std.testing.expectError(
+        error.OutOfMemory,
+        Qpack.encodeDynamicBlockKnownReceived(
+            &encoded,
+            failing.allocator(),
+            &fields,
+            table,
+            table.insert_count,
+            &references,
+        ),
+    );
+    try std.testing.expect(failing.has_induced_failure);
+    try std.testing.expectEqualSlices(u8, &.{ 0xaa, 0xbb }, encoded.items);
+    try std.testing.expectEqual(@as(usize, 0), references.items.len);
 }
 
 test "HTTP/3 QPACK dynamic table evicts by capacity and rejects invalid instructions" {

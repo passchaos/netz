@@ -592,6 +592,63 @@ fn encodeLargeDynamicFields(
         setReferenceBit(seen, offset);
     }
     try references.ensureUnusedCapacity(allocator, fields.len);
+    var exact_encoded_len = prefixed_integer.encodedLen(
+        8,
+        encoded_insert_count,
+    ) + prefixed_integer.encodedLen(7, 0);
+    for (fields, dynamic_matches) |field, dynamic_match| {
+        if (field.never_indexed) break;
+        const match = dynamic_match orelse break;
+        if (!match.full_match) break;
+        exact_encoded_len = std.math.add(
+            usize,
+            exact_encoded_len,
+            if (match.absolute_index < base)
+                prefixed_integer.encodedLen(
+                    6,
+                    base - match.absolute_index - 1,
+                )
+            else
+                prefixed_integer.encodedLen(
+                    4,
+                    match.absolute_index - base,
+                ),
+        ) catch return error.OutOfMemory;
+    } else {
+        try list.ensureUnusedCapacity(allocator, exact_encoded_len);
+        encodePrefixedIntegerAssumeCapacity(
+            list,
+            8,
+            0x00,
+            encoded_insert_count,
+        );
+        encodePrefixedIntegerAssumeCapacity(list, 7, 0x00, 0);
+        for (dynamic_matches) |match| {
+            const absolute_index = match.?.absolute_index;
+            appendReferenceUniqueDense(
+                references,
+                absolute_index,
+                oldest_absolute_index,
+                seen,
+            );
+            if (absolute_index < base) {
+                encodePrefixedIntegerAssumeCapacity(
+                    list,
+                    6,
+                    0x80,
+                    base - absolute_index - 1,
+                );
+            } else {
+                encodePrefixedIntegerAssumeCapacity(
+                    list,
+                    4,
+                    0x10,
+                    absolute_index - base,
+                );
+            }
+        }
+        return;
+    }
     try encodePrefix(list, allocator, encoded_insert_count, 0);
 
     for (fields, dynamic_matches) |field, dynamic_match| {

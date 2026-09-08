@@ -533,6 +533,14 @@ Wyhash pass. Three interleaved CPU-0 comparisons measured 9.83-9.99 us/block
 versus 10.98-11.19 us/block at the preceding bitmap commit (1.10-1.14x faster).
 The index still stores both digests and verifies the original strings after a
 hit; a forced combined-hash collision test covers key separation.
+For large sections in which every field is an exact dynamic match, the encoder
+now computes the final indexed representation length and reserves output plus
+reference capacity once before emission. Five CPU-0 samples measured
+9.40-9.54 us/block (18 ns/field), versus 9.82-9.87 us/block in three
+interleaved runs at the preceding prehashed-index commit (1.03-1.05x faster).
+Mixed static, name-only, literal, and never-indexed sections retain the general
+encoder; focused round-trip and second-allocation failure tests cover both
+branches and the pre-prefix rollback boundary.
 
 ### QUIC 1-RTT send
 

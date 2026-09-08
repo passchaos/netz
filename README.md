@@ -915,7 +915,8 @@ The aggregate `bench` step runs the current protocol microbenchmarks:
 - HTTP/3 QPACK field-section encoding against a populated dynamic table,
 - HTTP/3 QPACK 512-entry reference-set encoding with a large-only
   table-relative bitmap that preserves first-reference ordering and
-  scenario/iteration selection for isolated profiling,
+  one-shot exact-block output reservation, plus scenario/iteration selection
+  for isolated profiling,
 - HTTP/3 QPACK dynamic-table churn with single-allocation name/value ownership,
   prehashed exact-match index keys, and byte-verified collision fallback,
 - WebSocket masked frame encoding with allocating, caller-buffer, and
