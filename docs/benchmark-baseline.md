@@ -2271,6 +2271,8 @@ the RFC 6455 frames into retained connection scratch and calling the existing
 flow-controlled tunnel writer once yields a 2.2-3.2x fragmented-path gain; the
 remaining 15.1-16.0% cost against the one-frame control represents actual
 frame header/mask handling. All samples verified checksum 51,000.
+The RFC 9220 HTTP/3 benchmark also accepts `--warmup=N` and `--iterations=N`
+(defaults 20 and 200), allowing longer profiling runs without source edits.
 
 ## MQTT 5 windowed QoS 1 broker fanout
 

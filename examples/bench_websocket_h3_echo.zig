@@ -4,13 +4,15 @@ const counting_allocator = @import("support/counting_allocator.zig");
 const CountingAllocator = counting_allocator.CountingAllocator;
 
 const payload_bytes: usize = 4096;
-const warmup_iterations: usize = 20;
-const iterations: usize = 200;
+const default_warmup_iterations: usize = 20;
+const default_iterations: usize = 200;
 const fragmented_slices: usize = 16;
 
 const Options = struct {
     fragmented: bool = false,
     stats: bool = false,
+    warmup_iterations: usize = default_warmup_iterations,
+    iterations: usize = default_iterations,
 };
 
 pub fn main(init: std.process.Init) !void {
@@ -54,6 +56,7 @@ pub fn main(init: std.process.Init) !void {
 
     const Shared = struct {
         server: *netz.websocket.runtime.h3.Server,
+        iterations: usize,
         err: ?anyerror = null,
 
         fn run(self: *@This()) void {
@@ -72,7 +75,7 @@ pub fn main(init: std.process.Init) !void {
             });
             defer ws.deinit();
             var storage: [payload_bytes]u8 align(64) = undefined;
-            for (0..warmup_iterations + iterations) |_| {
+            for (0..self.iterations) |_| {
                 const message = try ws.receiveMessageInto(&storage);
                 if (message.opcode != .binary or
                     message.payload.len != payload_bytes)
@@ -83,7 +86,10 @@ pub fn main(init: std.process.Init) !void {
             }
         }
     };
-    var shared = Shared{ .server = &server };
+    var shared = Shared{
+        .server = &server,
+        .iterations = options.warmup_iterations + options.iterations,
+    };
     const server_thread = try std.Thread.spawn(.{}, Shared.run, .{&shared});
 
     var ws = try netz.websocket.runtime.h3.Client.connect(
@@ -117,13 +123,13 @@ pub fn main(init: std.process.Init) !void {
     var payload: [payload_bytes]u8 align(64) = undefined;
     var response: [payload_bytes]u8 align(64) = undefined;
     for (&payload, 0..) |*byte, index| byte.* = @truncate(index);
-    for (0..warmup_iterations) |_| {
+    for (0..options.warmup_iterations) |_| {
         _ = try exchange(&ws, &payload, &response, options.fragmented);
     }
     const allocations_before = counting.snapshot();
     const started = nowNs(io);
     var checksum: u64 = 0;
-    for (0..iterations) |_| {
+    for (0..options.iterations) |_| {
         checksum +%= try exchange(
             &ws,
             &payload,
@@ -139,7 +145,7 @@ pub fn main(init: std.process.Init) !void {
     const roundtrips_per_second: u128 = if (elapsed == 0)
         0
     else
-        (@as(u128, iterations) * std.time.ns_per_s) / elapsed;
+        (@as(u128, options.iterations) * std.time.ns_per_s) / elapsed;
     std.debug.print(
         \\RFC 9220 WebSocket persistent echo benchmark
         \\  warmup iterations: {d}
@@ -154,13 +160,13 @@ pub fn main(init: std.process.Init) !void {
         \\  checksum: {d}
         \\
     , .{
-        warmup_iterations,
-        iterations,
+        options.warmup_iterations,
+        options.iterations,
         payload_bytes,
         if (options.fragmented) fragmented_slices else 1,
         h3_limits.quic.max_datagram_size,
         session_options.paced_body_chunk_bytes,
-        elapsed / iterations,
+        elapsed / options.iterations,
         roundtrips_per_second,
         @as(f64, @floatFromInt(
             roundtrips_per_second * payload_bytes * 2,
@@ -212,6 +218,19 @@ fn parseOptions(init: std.process.Init) !Options {
             options.fragmented = true;
         } else if (std.mem.eql(u8, arg, "--stats")) {
             options.stats = true;
+        } else if (std.mem.startsWith(u8, arg, "--warmup=")) {
+            options.warmup_iterations = try std.fmt.parseInt(
+                usize,
+                arg["--warmup=".len..],
+                10,
+            );
+        } else if (std.mem.startsWith(u8, arg, "--iterations=")) {
+            options.iterations = try std.fmt.parseInt(
+                usize,
+                arg["--iterations=".len..],
+                10,
+            );
+            if (options.iterations == 0) return error.InvalidArgument;
         } else {
             return error.InvalidArgument;
         }
