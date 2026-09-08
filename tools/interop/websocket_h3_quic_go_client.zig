@@ -4,6 +4,8 @@
 const std = @import("std");
 const netz = @import("netz");
 const benchmark = @import("websocket_h3_quic_go_bench.zig");
+const CountingAllocator = @import("benchmark_counting_allocator")
+    .CountingAllocator;
 
 pub fn main(init: std.process.Init) !void {
     const args = try init.minimal.args.toSlice(init.arena.allocator());
@@ -184,8 +186,38 @@ fn runBenchmark(_: std.process.Init, args: []const []const u8) !void {
     if (port == 0 or !std.Io.Dir.path.isAbsolute(args[1])) {
         return error.InvalidArgument;
     }
-    const config = try benchmark.Config.parse(args[2..]);
-    const allocator = std.heap.c_allocator;
+    var stats = false;
+    var config_args: std.ArrayList([]const u8) = .empty;
+    defer config_args.deinit(std.heap.c_allocator);
+    for (args[2..]) |arg| {
+        if (std.mem.eql(u8, arg, "--stats") and !stats) {
+            stats = true;
+        } else {
+            try config_args.append(std.heap.c_allocator, arg);
+        }
+    }
+    const config = try benchmark.Config.parse(config_args.items);
+    var counting = CountingAllocator.init(std.heap.c_allocator);
+    const allocator = if (stats) counting.allocator() else std.heap.c_allocator;
+    try runBenchmarkWithAllocator(allocator, port, args[1], config);
+    if (stats) {
+        const snapshot = counting.snapshot();
+        if (snapshot.current_bytes != 0) return error.MemoryLeak;
+        benchmark.printNetzMemory(
+            "netz-client+quic-go-server",
+            "client",
+            config,
+            snapshot,
+        );
+    }
+}
+
+fn runBenchmarkWithAllocator(
+    allocator: std.mem.Allocator,
+    port: u16,
+    ca_path: []const u8,
+    config: benchmark.Config,
+) !void {
     var threaded = std.Io.Threaded.init(allocator, .{ .async_limit = .unlimited });
     defer threaded.deinit();
     const io = threaded.io();
@@ -193,7 +225,7 @@ fn runBenchmark(_: std.process.Init, args: []const []const u8) !void {
     const now = std.Io.Clock.real.now(io);
     var ca_bundle: std.crypto.Certificate.Bundle = .empty;
     defer ca_bundle.deinit(allocator);
-    try ca_bundle.addCertsFromFilePathAbsolute(allocator, io, now, args[1]);
+    try ca_bundle.addCertsFromFilePathAbsolute(allocator, io, now, ca_path);
     var verifier = netz.quic.tls.trust.BundleVerifier{
         .bundle = &ca_bundle,
         .now_seconds = now.toSeconds(),

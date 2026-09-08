@@ -186,7 +186,7 @@ pub fn nowNs(io: std.Io) u64 {
 
 pub fn printConfig(role_pair: []const u8, config: Config) void {
     std.debug.print(
-        "protocol=websocket-h3 mode=binary-echo role_pair={s} " ++
+        "protocol=websocket-h3 transport=h3 mode=binary-echo role_pair={s} " ++
             "connection_scope=persistent benchmark_scope=same-application-shape " ++
             "warmup={d} iterations={d} payload_bytes={d} " ++
             "stream_window=1048576 connection_window=8388608 " ++
@@ -215,13 +215,18 @@ pub fn printResult(
         @as(f64, @floatFromInt(config.payload_bytes)) * 2.0 /
         (1024.0 * 1024.0);
     std.debug.print(
-        "protocol=websocket-h3 mode=binary-echo role_pair={s} " ++
+        "record=result implementation=netz protocol=websocket-h3 transport=h3 " ++
+            "mode=binary-echo role_pair={s} endpoint_role=client " ++
             "connection_scope=persistent benchmark_scope=same-application-shape " ++
+            "warmup={d} iterations={d} payload_bytes={d} " ++
             "elapsed_ns={d} ns_per_roundtrip={d:.3} " ++
             "roundtrips_per_s={d:.3} logical_MiB_s={d:.3} " ++
             "sent_bytes={d} received_bytes={d} checksum={d} complete=true\n",
         .{
             role_pair,
+            config.warmup,
+            config.iterations,
+            config.payload_bytes,
             elapsed_ns,
             @as(f64, @floatFromInt(elapsed_ns)) / @as(f64, @floatFromInt(config.iterations)),
             roundtrips_per_second,
@@ -229,6 +234,61 @@ pub fn printResult(
             @as(u64, config.iterations) * config.payload_bytes,
             @as(u64, config.iterations) * config.payload_bytes,
             checksum,
+        },
+    );
+}
+
+pub fn printServerComplete(
+    role_pair: []const u8,
+    config: Config,
+    checksum: u64,
+) void {
+    const bytes = @as(u64, config.iterations) * config.payload_bytes;
+    std.debug.print(
+        "record=server-complete implementation=netz protocol=websocket-h3 " ++
+            "transport=h3 mode=binary-echo role_pair={s} " ++
+            "endpoint_role=server connection_scope=persistent warmup={d} " ++
+            "iterations={d} payload_bytes={d} sent_bytes={d} " ++
+            "received_bytes={d} checksum={d} server_complete=true\n",
+        .{
+            role_pair,
+            config.warmup,
+            config.iterations,
+            config.payload_bytes,
+            bytes,
+            bytes,
+            checksum,
+        },
+    );
+}
+
+pub fn printNetzMemory(
+    role_pair: []const u8,
+    endpoint_role: []const u8,
+    config: Config,
+    snapshot: anytype,
+) void {
+    std.debug.print(
+        "record=memory implementation=netz protocol=websocket-h3 transport=h3 " ++
+            "mode=binary-echo role_pair={s} endpoint_role={s} " ++
+            "connection_scope=persistent warmup={d} iterations={d} " ++
+            "payload_bytes={d} memory_scope=benchmark-run-after-argument-parse " ++
+            "allocator_scope=netz-explicit alloc_count={d} free_count={d} " ++
+            "resize_count={d} remap_count={d} total_allocated_bytes={d} " ++
+            "live_bytes={d} peak_live_bytes={d} complete=true\n",
+        .{
+            role_pair,
+            endpoint_role,
+            config.warmup,
+            config.iterations,
+            config.payload_bytes,
+            snapshot.alloc_count,
+            snapshot.free_count,
+            snapshot.resize_count,
+            snapshot.remap_count,
+            snapshot.total_allocated,
+            snapshot.current_bytes,
+            snapshot.peak_bytes,
         },
     );
 }

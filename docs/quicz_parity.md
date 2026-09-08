@@ -478,6 +478,14 @@ and requires a normal Close. Five 1,000-round samples measured
 ranges are reported by role pair, not attributed to one library. This remains
 same-application-shape because GSO/GRO, ACK policy, packetization, and syscall
 counts have not been proven equal.
+An opt-in three-run memory pass over the same workload measured whole-process
+peak RSS of 3,840/3,584 KiB for the netz client/server and 13,056/13,056 KiB
+for the quic-go server/client role pairings. Both netz explicit-allocation
+records ended at zero live bytes. Go runtime-heap and netz allocator counters
+remain separately scoped diagnostics; only whole-process RSS is compared
+across languages. The strict runner independently recomputes the application
+checksum and requires distinct result and server-completion records before it
+accepts either memory record.
 
 The RFC 8441 Hyper 1.11 peer now also has a dual-role, two-CPU persistent echo
 gate, `bench-websocket-hyper-h2`. It excludes h2c/SETTINGS/CONNECT/READY and

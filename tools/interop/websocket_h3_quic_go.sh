@@ -41,7 +41,8 @@ on_exit() {
     while IFS= read -r log_file; do
       echo "===== $log_file =====" >&2
       cat "$log_file" >&2
-    done < <(find "$work" -type f -name '*.log' -size +0c | sort)
+    done < <(find "$work" -type f \
+      \( -name '*.log' -o -name '*.rss' \) -size +0c | sort)
   fi
   cleanup
   exit "$status"
@@ -77,8 +78,25 @@ PY
   fi
   client_cpu=${bench_cpus[0]}
   server_cpu=${bench_cpus[1]}
+  stats=false
+  warmup=20
+  iterations=1000
+  payload_bytes=4096
   go_args=()
-  for arg in "$@"; do go_args+=("-${arg#--}"); done
+  for arg in "$@"; do
+    go_args+=("-${arg#--}")
+    case "$arg" in
+      --stats) stats=true ;;
+      --warmup=*) warmup=${arg#--warmup=} ;;
+      --iterations=*) iterations=${arg#--iterations=} ;;
+      --payload-bytes=*) payload_bytes=${arg#--payload-bytes=} ;;
+    esac
+  done
+  time_bin=${TIME_BIN:-/usr/bin/time}
+  if [[ $stats == true && ! -x $time_bin ]]; then
+    echo "GNU time not found at $time_bin" >&2
+    exit 127
+  fi
 
   wait_for_line() {
     local pid=$1 log=$2 prefix=$3
@@ -93,6 +111,17 @@ PY
     return 1
   }
 
+  check_result() {
+    local check_args=(python3 \
+      "$repo_root/tools/interop/websocket_h3_benchmark_check.py" \
+      --role-pair="$1" --warmup="$warmup" --iterations="$iterations" \
+      --payload-bytes="$payload_bytes" --client-log="$2" --server-log="$3")
+    if [[ -n ${4:-} ]]; then
+      check_args+=(--client-rss="$4" --server-rss="$5")
+    fi
+    "${check_args[@]}"
+  }
+
   echo "benchmark_cpu_layout=client:$client_cpu,server:$server_cpu"
   cat >"$work/netz-ca.pem" <<'EOF'
 -----BEGIN CERTIFICATE-----
@@ -100,41 +129,77 @@ MIIBMDCB1qADAgECAgISNDAKBggqhkjOPQQDAjAUMRIwEAYDVQQDDAlsb2NhbGhvc3QwHhcNMjYwMTAx
 -----END CERTIFICATE-----
 EOF
   port=$(free_udp_port)
-  timeout 180s taskset -c "$server_cpu" "$work/quic-go-rfc9220-peer" \
-    -mode bench-server -addr "127.0.0.1:$port" \
-    -ca-out "$work/quic-go-bench-ca.pem" "${go_args[@]}" \
-    >"$work/quic-go-bench-server.log" 2>&1 &
+  if [[ $stats == true ]]; then
+    timeout 180s "$time_bin" -f '%M' -o "$work/quic-go-bench-server.rss" \
+      taskset -c "$server_cpu" "$work/quic-go-rfc9220-peer" \
+      -mode bench-server -addr "127.0.0.1:$port" \
+      -ca-out "$work/quic-go-bench-ca.pem" "${go_args[@]}" \
+      >"$work/quic-go-bench-server.log" 2>&1 &
+  else
+    timeout 180s taskset -c "$server_cpu" "$work/quic-go-rfc9220-peer" \
+      -mode bench-server -addr "127.0.0.1:$port" \
+      -ca-out "$work/quic-go-bench-ca.pem" "${go_args[@]}" \
+      >"$work/quic-go-bench-server.log" 2>&1 &
+  fi
   server_pid=$!
   wait_for_line "$server_pid" "$work/quic-go-bench-server.log" \
     QUIC_GO_WEBSOCKET_H3_BENCH_ADDR >/dev/null
   sleep 0.05
-  timeout 180s taskset -c "$client_cpu" "$client" \
-    bench-client "$port" "$work/quic-go-bench-ca.pem" "$@" \
-    >"$work/netz-bench-client.log" 2>&1
+  if [[ $stats == true ]]; then
+    timeout 180s "$time_bin" -f '%M' -o "$work/netz-bench-client.rss" \
+      taskset -c "$client_cpu" "$client" \
+      bench-client "$port" "$work/quic-go-bench-ca.pem" "$@" \
+      >"$work/netz-bench-client.log" 2>&1
+  else
+    timeout 180s taskset -c "$client_cpu" "$client" \
+      bench-client "$port" "$work/quic-go-bench-ca.pem" "$@" \
+      >"$work/netz-bench-client.log" 2>&1
+  fi
   wait "$server_pid"
   server_pid=
-  grep -Fq 'role_pair=netz-client+quic-go-server' \
-    "$work/netz-bench-client.log"
-  grep -Fq 'complete=true' "$work/netz-bench-client.log"
-  grep -Fq 'server_complete=true' "$work/quic-go-bench-server.log"
+  if [[ $stats == true ]]; then
+    check_result netz-client+quic-go-server "$work/netz-bench-client.log" \
+      "$work/quic-go-bench-server.log" "$work/netz-bench-client.rss" \
+      "$work/quic-go-bench-server.rss"
+  else
+    check_result netz-client+quic-go-server "$work/netz-bench-client.log" \
+      "$work/quic-go-bench-server.log"
+  fi
   cat "$work/quic-go-bench-server.log"
   cat "$work/netz-bench-client.log"
 
   port=$(free_udp_port)
-  timeout 180s taskset -c "$server_cpu" "$server" \
-    bench-server "$port" "$@" >"$work/netz-bench-server.log" 2>&1 &
+  if [[ $stats == true ]]; then
+    timeout 180s "$time_bin" -f '%M' -o "$work/netz-bench-server.rss" \
+      taskset -c "$server_cpu" "$server" bench-server "$port" "$@" \
+      >"$work/netz-bench-server.log" 2>&1 &
+  else
+    timeout 180s taskset -c "$server_cpu" "$server" \
+      bench-server "$port" "$@" >"$work/netz-bench-server.log" 2>&1 &
+  fi
   server_pid=$!
   wait_for_line "$server_pid" "$work/netz-bench-server.log" \
     NETZ_WEBSOCKET_H3_BENCH_PORT >/dev/null
-  timeout 180s taskset -c "$client_cpu" "$work/quic-go-rfc9220-peer" \
-    -mode bench-client -addr "127.0.0.1:$port" -ca "$work/netz-ca.pem" \
-    "${go_args[@]}" >"$work/quic-go-bench-client.log" 2>&1
+  if [[ $stats == true ]]; then
+    timeout 180s "$time_bin" -f '%M' -o "$work/quic-go-bench-client.rss" \
+      taskset -c "$client_cpu" "$work/quic-go-rfc9220-peer" \
+      -mode bench-client -addr "127.0.0.1:$port" -ca "$work/netz-ca.pem" \
+      "${go_args[@]}" >"$work/quic-go-bench-client.log" 2>&1
+  else
+    timeout 180s taskset -c "$client_cpu" "$work/quic-go-rfc9220-peer" \
+      -mode bench-client -addr "127.0.0.1:$port" -ca "$work/netz-ca.pem" \
+      "${go_args[@]}" >"$work/quic-go-bench-client.log" 2>&1
+  fi
   wait "$server_pid"
   server_pid=
-  grep -Fq 'role_pair=quic-go-client+netz-server' \
-    "$work/quic-go-bench-client.log"
-  grep -Fq 'complete=true' "$work/quic-go-bench-client.log"
-  grep -Fq 'server_complete=true' "$work/netz-bench-server.log"
+  if [[ $stats == true ]]; then
+    check_result quic-go-client+netz-server "$work/quic-go-bench-client.log" \
+      "$work/netz-bench-server.log" "$work/quic-go-bench-client.rss" \
+      "$work/netz-bench-server.rss"
+  else
+    check_result quic-go-client+netz-server "$work/quic-go-bench-client.log" \
+      "$work/netz-bench-server.log"
+  fi
   cat "$work/netz-bench-server.log"
   cat "$work/quic-go-bench-client.log"
   exit 0

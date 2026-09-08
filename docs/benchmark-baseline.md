@@ -2579,6 +2579,29 @@ cipher exposure, syscall counts, and UDP datagram counts/bytes have not been
 equalized. No cross-library speed ratio is inferred from the overlapping
 ranges.
 
+The same command accepts `--stats`. The runner then wraps all four processes
+with GNU time and requires a unique structured client result, server-completion
+record, and two memory records for each role pair. The verifier independently
+recomputes the checksum across the 1,000 measured rounds, so allocator
+telemetry cannot stand in for a missing application result. Three consecutive
+runs of the default workload recorded:
+
+| Implementation | Endpoint role | Process peak RSS (KiB) | Allocations | Allocated bytes | Peak/ending heap detail |
+|---|---|---:|---:|---:|---|
+| netz | client | 3,840 | 109 | 123,880-123,912 | peak explicit live 81,977-81,990; end live 0 |
+| netz | server | 3,584 | 105 | 122,331-122,372 | peak explicit live 74,471; end live 0 |
+| quic-go | client | 13,056 | 104,970-105,014 | 3,301,232-3,305,576 | ending HeapSys 8,093,696 |
+| quic-go | server | 13,056 | 105,480-105,538 | 3,170,472-3,183,744 | ending HeapSys 8,126,464 |
+
+Whole-process maximum RSS is the cross-language metric. The netz explicit
+allocator and Go runtime heap counters have different semantics and are not a
+cross-language allocation ratio. Both netz roles reached zero explicit live
+bytes after the HTTP/3, WebSocket, and threaded runtime teardown. The quic-go
+server now waits for `ListenAndServe` to exit before its final heap snapshot.
+Default benchmark runs do not enable either runtime's allocation telemetry or
+GNU time. These observations retain the same `same-application-shape` boundary
+as the timing results above.
+
 ## MQTT 5 windowed QoS 1 broker fanout
 
 Captured on 2026-08-20 with one external client binary driving both brokers:
@@ -2965,7 +2988,7 @@ benchmark pass and does not replace the isolated ranges above.
   counters prove the existing shapes differ and therefore remain
   `same-application-shape`.
 - Extend allocation/peak-memory telemetry from the raw QUIC, HTTP/3, and
-  WebSocket-over-H2 process matrices to WebSocket-over-H3 and WebTransport.
+  WebSocket-over-H2/H3 process matrices to WebTransport.
 - Add loss/reordering benchmark cases or interop-runner style scenarios for
   handshake loss, transfer loss, and corruption.
 - Keep public HTTP/3 smoke (`https://robotics.bytedance.com/ --verify --head`)
