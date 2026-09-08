@@ -4,6 +4,8 @@
 const std = @import("std");
 const netz = @import("netz");
 const benchmark = @import("http3_quic_go_bench.zig");
+const CountingAllocator = @import("benchmark_counting_allocator")
+    .CountingAllocator;
 
 const cancellation_response_size = 128 * 1024;
 const stream_receive_window = 8 * 1024;
@@ -248,8 +250,26 @@ const BenchmarkRequest = struct {
 fn runBenchmark(_: std.process.Init, args: []const []const u8) !void {
     if (args.len == 0) return error.InvalidArgument;
     const port = try std.fmt.parseInt(u16, args[0], 10);
-    const config = try benchmark.Config.parse(args[1..]);
-    const allocator = std.heap.c_allocator;
+    var stats = false;
+    var config_args: std.ArrayList([]const u8) = .empty;
+    defer config_args.deinit(std.heap.c_allocator);
+    for (args[1..]) |arg| {
+        if (std.mem.eql(u8, arg, "--stats") and !stats) {
+            stats = true;
+        } else {
+            try config_args.append(std.heap.c_allocator, arg);
+        }
+    }
+    const config = try benchmark.Config.parse(config_args.items);
+    const role_pair = "quic-go-client+netz-server";
+    var counting = CountingAllocator.init(std.heap.c_allocator);
+    const allocator = if (stats) counting.allocator() else std.heap.c_allocator;
+    defer if (stats) benchmark.printNetzMemory(
+        role_pair,
+        "server",
+        config,
+        counting.snapshot(),
+    );
     var threaded = std.Io.Threaded.init(allocator, .{ .async_limit = .unlimited });
     defer threaded.deinit();
     const io = threaded.io();
@@ -294,7 +314,7 @@ fn runBenchmark(_: std.process.Init, args: []const []const u8) !void {
     std.debug.print("NETZ_HTTP3_BENCH_PORT={d}\n", .{server.address().ip4.port});
     try benchmark.printConfig(
         if (config.mode == .upload) "quic-go" else "netz",
-        "quic-go-client+netz-server",
+        role_pair,
         config,
     );
     const payload = try allocator.alloc(u8, @intCast(config.body_bytes));

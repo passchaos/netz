@@ -41,7 +41,8 @@ on_exit() {
     while IFS= read -r log_file; do
       echo "===== $log_file =====" >&2
       cat "$log_file" >&2
-    done < <(find "$work" -type f -name '*.log' -size +0c | sort)
+    done < <(find "$work" -type f \
+      \( -name '*.log' -o -name '*.rss' \) -size +0c | sort)
   fi
   cleanup
   exit "$status"
@@ -80,13 +81,38 @@ PY
     "$netz_root/tools/interop/http3_quic_go_bench.go")
   requested_modes=(upload download)
   common_args=()
+  stats=false
+  warmup=10
+  iterations=5
+  body_bytes=4194304
   for arg in "$@"; do
     if [[ $arg == --mode=* ]]; then
       requested_modes=("${arg#--mode=}")
     else
       common_args+=("$arg")
+      case "$arg" in
+        --stats) stats=true ;;
+        --warmup=*) warmup=${arg#--warmup=} ;;
+        --iterations=*) iterations=${arg#--iterations=} ;;
+        --body-bytes=*) body_bytes=${arg#--body-bytes=} ;;
+      esac
     fi
   done
+  time_bin=${TIME_BIN:-/usr/bin/time}
+  if [[ $stats == true && ! -x $time_bin ]]; then
+    echo "GNU time not found at $time_bin" >&2
+    exit 127
+  fi
+
+  check_samples() {
+    python3 "$netz_root/tools/interop/http3_benchmark_check.py" "$@"
+  }
+
+  check_memory() {
+    if [[ $stats != true ]]; then return; fi
+    python3 "$netz_root/tools/interop/quic_memory_telemetry_check.py" \
+      --protocol=http3 "$@"
+  }
 
   wait_for_line() {
     local pid=$1 log=$2 prefix=$3
@@ -109,6 +135,11 @@ PY
       echo "unsupported HTTP/3 benchmark mode: $benchmark_mode" >&2
       exit 1
     fi
+    if [[ $benchmark_mode == upload ]]; then
+      sender_role=client
+    else
+      sender_role=server
+    fi
     mode_args=("--mode=$benchmark_mode" "${common_args[@]}")
     go_args=("-bench-mode=$benchmark_mode")
     for arg in "${common_args[@]}"; do
@@ -118,37 +149,83 @@ PY
     mkdir -p "$pair_dir"
 
     port=$(free_udp_port)
-    timeout 180s taskset -c "$server_cpu" "$work/quic-go-http3-bench" \
-      -role=server -addr="127.0.0.1:$port" \
-      -ca-out="$pair_dir/quic-go-ca.pem" "${go_args[@]}" \
-      >"$pair_dir/quic-go-server.log" 2>&1 &
+    if [[ $stats == true ]]; then
+      timeout 180s "$time_bin" -f '%M' -o "$pair_dir/quic-go-server.rss" \
+        taskset -c "$server_cpu" "$work/quic-go-http3-bench" \
+        -role=server -addr="127.0.0.1:$port" \
+        -ca-out="$pair_dir/quic-go-ca.pem" "${go_args[@]}" \
+        >"$pair_dir/quic-go-server.log" 2>&1 &
+    else
+      timeout 180s taskset -c "$server_cpu" "$work/quic-go-http3-bench" \
+        -role=server -addr="127.0.0.1:$port" \
+        -ca-out="$pair_dir/quic-go-ca.pem" "${go_args[@]}" \
+        >"$pair_dir/quic-go-server.log" 2>&1 &
+    fi
     server_pid=$!
     wait_for_line "$server_pid" "$pair_dir/quic-go-server.log" \
       QUIC_GO_HTTP3_BENCH_ADDR >/dev/null
-    timeout 180s taskset -c "$client_cpu" "$client" \
-      bench-client "$port" "$pair_dir/quic-go-ca.pem" \
-      "${mode_args[@]}" >"$pair_dir/netz-client.log" 2>&1
+    if [[ $stats == true ]]; then
+      timeout 180s "$time_bin" -f '%M' -o "$pair_dir/netz-client.rss" \
+        taskset -c "$client_cpu" "$client" bench-client "$port" \
+        "$pair_dir/quic-go-ca.pem" "${mode_args[@]}" \
+        >"$pair_dir/netz-client.log" 2>&1
+    else
+      timeout 180s taskset -c "$client_cpu" "$client" \
+        bench-client "$port" "$pair_dir/quic-go-ca.pem" \
+        "${mode_args[@]}" >"$pair_dir/netz-client.log" 2>&1
+    fi
     wait "$server_pid"
     server_pid=
-    grep -Fq 'role_pair=netz-client+quic-go-server' "$pair_dir/netz-client.log"
-    grep -Fq 'complete=true' "$pair_dir/netz-client.log"
+    check_samples --role-pair=netz-client+quic-go-server \
+      --mode="$benchmark_mode" --iterations="$iterations" \
+      --body-bytes="$body_bytes" "$pair_dir/netz-client.log"
+    check_memory --role-pair=netz-client+quic-go-server \
+      --sender="$sender_role" \
+      --streams=1 --mode="$benchmark_mode" --body-bytes="$body_bytes" \
+      --warmup="$warmup" --iterations="$iterations" \
+      --client-log="$pair_dir/netz-client.log" \
+      --server-log="$pair_dir/quic-go-server.log" \
+      --client-rss="$pair_dir/netz-client.rss" \
+      --server-rss="$pair_dir/quic-go-server.rss"
     cat "$pair_dir/quic-go-server.log"
     cat "$pair_dir/netz-client.log"
 
     port=$(free_udp_port)
-    timeout 180s taskset -c "$server_cpu" "$server" \
-      bench-server "$port" "${mode_args[@]}" \
-      >"$pair_dir/netz-server.log" 2>&1 &
+    if [[ $stats == true ]]; then
+      timeout 180s "$time_bin" -f '%M' -o "$pair_dir/netz-server.rss" \
+        taskset -c "$server_cpu" "$server" bench-server "$port" \
+        "${mode_args[@]}" >"$pair_dir/netz-server.log" 2>&1 &
+    else
+      timeout 180s taskset -c "$server_cpu" "$server" \
+        bench-server "$port" "${mode_args[@]}" \
+        >"$pair_dir/netz-server.log" 2>&1 &
+    fi
     server_pid=$!
     wait_for_line "$server_pid" "$pair_dir/netz-server.log" \
       NETZ_HTTP3_BENCH_PORT >/dev/null
-    timeout 180s taskset -c "$client_cpu" "$work/quic-go-http3-bench" \
-      -role=client -addr="127.0.0.1:$port" -ca="$work/netz-ca.pem" \
-      "${go_args[@]}" >"$pair_dir/quic-go-client.log" 2>&1
+    if [[ $stats == true ]]; then
+      timeout 180s "$time_bin" -f '%M' -o "$pair_dir/quic-go-client.rss" \
+        taskset -c "$client_cpu" "$work/quic-go-http3-bench" \
+        -role=client -addr="127.0.0.1:$port" -ca="$work/netz-ca.pem" \
+        "${go_args[@]}" >"$pair_dir/quic-go-client.log" 2>&1
+    else
+      timeout 180s taskset -c "$client_cpu" "$work/quic-go-http3-bench" \
+        -role=client -addr="127.0.0.1:$port" -ca="$work/netz-ca.pem" \
+        "${go_args[@]}" >"$pair_dir/quic-go-client.log" 2>&1
+    fi
     wait "$server_pid"
     server_pid=
-    grep -Fq 'role_pair=quic-go-client+netz-server' "$pair_dir/quic-go-client.log"
-    grep -Fq 'complete=true' "$pair_dir/quic-go-client.log"
+    check_samples --role-pair=quic-go-client+netz-server \
+      --mode="$benchmark_mode" --iterations="$iterations" \
+      --body-bytes="$body_bytes" "$pair_dir/quic-go-client.log"
+    check_memory --role-pair=quic-go-client+netz-server \
+      --sender="$sender_role" \
+      --streams=1 --mode="$benchmark_mode" --body-bytes="$body_bytes" \
+      --warmup="$warmup" --iterations="$iterations" \
+      --client-log="$pair_dir/quic-go-client.log" \
+      --server-log="$pair_dir/netz-server.log" \
+      --client-rss="$pair_dir/quic-go-client.rss" \
+      --server-rss="$pair_dir/netz-server.rss"
     cat "$pair_dir/netz-server.log"
     cat "$pair_dir/quic-go-client.log"
   done

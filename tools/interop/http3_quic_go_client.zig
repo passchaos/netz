@@ -4,6 +4,8 @@
 const std = @import("std");
 const netz = @import("netz");
 const benchmark = @import("http3_quic_go_bench.zig");
+const CountingAllocator = @import("benchmark_counting_allocator")
+    .CountingAllocator;
 
 const cancellation_response_size = 128 * 1024;
 const stream_receive_window = 8 * 1024;
@@ -284,8 +286,26 @@ fn runBenchmark(_: std.process.Init, args: []const []const u8) !void {
     if (port == 0 or !std.Io.Dir.path.isAbsolute(args[1])) {
         return error.InvalidArgument;
     }
-    const config = try benchmark.Config.parse(args[2..]);
-    const allocator = std.heap.c_allocator;
+    var stats = false;
+    var config_args: std.ArrayList([]const u8) = .empty;
+    defer config_args.deinit(std.heap.c_allocator);
+    for (args[2..]) |arg| {
+        if (std.mem.eql(u8, arg, "--stats") and !stats) {
+            stats = true;
+        } else {
+            try config_args.append(std.heap.c_allocator, arg);
+        }
+    }
+    const config = try benchmark.Config.parse(config_args.items);
+    const role_pair = "netz-client+quic-go-server";
+    var counting = CountingAllocator.init(std.heap.c_allocator);
+    const allocator = if (stats) counting.allocator() else std.heap.c_allocator;
+    defer if (stats) benchmark.printNetzMemory(
+        role_pair,
+        "client",
+        config,
+        counting.snapshot(),
+    );
     var threaded = std.Io.Threaded.init(allocator, .{ .async_limit = .unlimited });
     defer threaded.deinit();
     const io = threaded.io();
@@ -300,7 +320,7 @@ fn runBenchmark(_: std.process.Init, args: []const []const u8) !void {
     };
     try benchmark.printConfig(
         if (config.mode == .upload) "netz" else "quic-go",
-        "netz-client+quic-go-server",
+        role_pair,
         config,
     );
 
@@ -351,7 +371,7 @@ fn runBenchmark(_: std.process.Init, args: []const []const u8) !void {
         if (round >= config.warmup) {
             benchmark.printSample(
                 if (config.mode == .upload) "netz" else "quic-go",
-                "netz-client+quic-go-server",
+                role_pair,
                 config,
                 round - config.warmup + 1,
                 result.elapsed_ns,

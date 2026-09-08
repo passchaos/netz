@@ -21,6 +21,7 @@ import (
 	"math/big"
 	"net/http"
 	"os"
+	"runtime"
 	"strconv"
 	"sync/atomic"
 	"time"
@@ -41,6 +42,26 @@ type benchConfig struct {
 	timeout      time.Duration
 }
 
+type memorySnapshot struct {
+	mallocs    uint64
+	frees      uint64
+	totalAlloc uint64
+	heapAlloc  uint64
+	heapSys    uint64
+	sys        uint64
+	numGC      uint32
+}
+
+func readMemory() memorySnapshot {
+	var stats runtime.MemStats
+	runtime.ReadMemStats(&stats)
+	return memorySnapshot{
+		mallocs: stats.Mallocs, frees: stats.Frees, totalAlloc: stats.TotalAlloc,
+		heapAlloc: stats.HeapAlloc, heapSys: stats.HeapSys, sys: stats.Sys,
+		numGC: stats.NumGC,
+	}
+}
+
 func main() {
 	role := flag.String("role", "server", "server or client")
 	address := flag.String("addr", "127.0.0.1:0", "listen or peer UDP address")
@@ -53,6 +74,7 @@ func main() {
 	chunkBytes := flag.Uint64("chunk-bytes", 16*1024, "application read/write chunk bytes")
 	streamWindow := flag.Uint64("stream-window", 1024*1024, "fixed QUIC stream receive window")
 	timeoutMS := flag.Uint("timeout-ms", 30000, "per-operation timeout milliseconds")
+	stats := flag.Bool("stats", false, "report Go runtime heap telemetry")
 	flag.Parse()
 	config := benchConfig{
 		mode: *mode, warmup: *warmup, iterations: *iterations,
@@ -62,11 +84,21 @@ func main() {
 	if err := config.validate(); err != nil {
 		log.Fatal(err)
 	}
+	var before memorySnapshot
+	if *stats {
+		before = readMemory()
+	}
 	switch *role {
 	case "server":
 		runServer(*address, *caOut, config)
+		if *stats {
+			printMemory("netz-client+quic-go-server", "server", config, before, readMemory())
+		}
 	case "client":
 		runClient(*address, *caPath, config)
+		if *stats {
+			printMemory("quic-go-client+netz-server", "client", config, before, readMemory())
+		}
 	default:
 		log.Fatalf("unknown role %q", *role)
 	}
@@ -441,7 +473,15 @@ func printConfig(implementation, rolePair string, config benchConfig) {
 }
 func printSample(implementation, rolePair string, config benchConfig, sample uint, elapsed time.Duration, checksum uint64) {
 	mib := float64(config.bodyBytes) * 1e9 / float64(elapsed.Nanoseconds()) / (1024 * 1024)
-	fmt.Printf("implementation=%s protocol=http3 mode=%s role_pair=%s connection_scope=fresh-per-sample benchmark_scope=same-application-shape sample=%d elapsed_ns=%d logical_MiB_s=%.3f sent_bytes=%d received_bytes=%d checksum=%d status=200 complete=true\n", implementation, config.mode, rolePair, sample, elapsed.Nanoseconds(), mib, config.bodyBytes, config.bodyBytes, checksum)
+	fmt.Printf("implementation=%s protocol=http3 mode=%s role_pair=%s connection_scope=fresh-per-sample benchmark_scope=same-application-shape sample=%d streams=1 elapsed_ns=%d logical_MiB_s=%.3f sent_bytes=%d received_bytes=%d checksum=%d status=200 complete=true\n", implementation, config.mode, rolePair, sample, elapsed.Nanoseconds(), mib, config.bodyBytes, config.bodyBytes, checksum)
+}
+
+func printMemory(rolePair, endpointRole string, config benchConfig, before, after memorySnapshot) {
+	senderRole := "server"
+	if config.mode == "upload" {
+		senderRole = "client"
+	}
+	fmt.Printf("implementation=quic-go protocol=http3 mode=%s role_pair=%s endpoint_role=%s sender_role=%s streams=1 body_bytes=%d warmup=%d iterations=%d memory_scope=benchmark-run-after-argument-parse allocator_scope=go-runtime-heap alloc_count=%d free_count=%d total_allocated_bytes=%d heap_alloc_bytes_end=%d heap_sys_bytes_end=%d runtime_sys_bytes_end=%d gc_cycles=%d complete=true\n", config.mode, rolePair, endpointRole, senderRole, config.bodyBytes, config.warmup, config.iterations, after.mallocs-before.mallocs, after.frees-before.frees, after.totalAlloc-before.totalAlloc, after.heapAlloc, after.heapSys, after.sys, after.numGC-before.numGC)
 }
 
 func localhostCertificate() (tls.Certificate, []byte, error) {

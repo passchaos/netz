@@ -1332,6 +1332,39 @@ available. The quic-go benchmark above supplies a full-stack
 same-application-shape reference, but neither it nor these raw transport
 numbers are treated as equal-wire H3 superiority evidence.
 
+The process harness also accepts `--stats`. As with the raw QUIC comparison,
+GNU time's whole-process maximum RSS is the cross-language metric; netz's
+explicit allocator and Go's `runtime.MemStats` remain separately labeled
+runtime diagnostics rather than a shared allocation definition:
+
+```sh
+zig build bench-http3-quic-go -Doptimize=ReleaseFast -- \
+  --warmup=1 --iterations=3 --body-bytes=4194304 \
+  --chunk-bytes=16384 --stream-window=1048576 --stats
+```
+
+The complete upload/download, client/server-role matrix measured:
+
+| Mode | Implementation workload | Process peak RSS (KiB) | Runtime allocation count | Runtime allocated bytes | Runtime peak/reserved bytes |
+|---|---|---:|---:|---:|---:|
+| upload | netz sender/client | 9,984 | 5,982 | 17,173,866 | peak live 6,490,848 |
+| upload | quic-go receiver/server | 19,712 | 185,059 | 10,568,592 | ending HeapSys 12,189,696 |
+| upload | quic-go sender/client | 22,528 | 74,921 | 15,565,816 | ending HeapSys 16,482,304 |
+| upload | netz receiver/server | 7,936 | 454 | 5,849,150 | peak live 4,520,667 |
+| download | netz receiver/client | 10,240 | 442 | 8,335,289 | peak live 7,014,161 |
+| download | quic-go sender/server | 23,296 | 78,303 | 15,160,104 | ending HeapSys 16,416,768 |
+| download | quic-go receiver/client | 19,968 | 185,369 | 10,890,568 | ending HeapSys 12,255,232 |
+| download | netz sender/server | 9,772 | 4,698 | 13,823,909 | peak live 6,300,315 |
+
+All eight process records cover one warmup plus three measured fresh
+connections. The strict sample verifier independently requires exactly samples
+1 through 3 with matching mode, role pair, 4,194,304 bytes, checksum
+534,773,760, status 200, and completion. The memory verifier requires the
+expected role/implementation/runtime scope, positive RSS and runtime counters,
+and zero post-teardown live bytes for both netz processes in each mode. Default
+benchmark runs neither instantiate the counting allocator nor call Go
+`ReadMemStats` or GNU time.
+
 Fresh 5-iteration netz single-stream sample:
 
 ```text
@@ -2906,8 +2939,8 @@ benchmark pass and does not replace the isolated ranges above.
   host that permits pcap. The current complete-connection userspace UDP
   counters prove the existing shapes differ and therefore remain
   `same-application-shape`.
-- Extend allocation/peak-memory telemetry from the raw QUIC process matrix to
-  the remaining HTTP/3, WebSocket, and WebTransport cross-process harnesses.
+- Extend allocation/peak-memory telemetry from the raw QUIC and HTTP/3 process
+  matrices to the remaining WebSocket and WebTransport cross-process harnesses.
 - Add loss/reordering benchmark cases or interop-runner style scenarios for
   handshake loss, transfer loss, and corruption.
 - Keep public HTTP/3 smoke (`https://robotics.bytedance.com/ --verify --head`)

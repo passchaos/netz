@@ -234,9 +234,42 @@ pub fn printSample(
     std.debug.print(
         "implementation={s} protocol=http3 mode={s} role_pair={s} " ++
             "connection_scope=fresh-per-sample " ++
-            "benchmark_scope=same-application-shape sample={d} " ++
+            "benchmark_scope=same-application-shape sample={d} streams=1 " ++
             "elapsed_ns={d} logical_MiB_s={d:.3} sent_bytes={d} " ++
             "received_bytes={d} checksum={d} status=200 complete=true\n",
         .{ implementation, config.mode.name(), role_pair, sample, elapsed_ns, mib_s, config.body_bytes, config.body_bytes, checksum },
+    );
+}
+
+pub fn printNetzMemory(
+    role_pair: []const u8,
+    endpoint_role: []const u8,
+    config: Config,
+    snapshot: anytype,
+) void {
+    std.debug.print(
+        "implementation=netz protocol=http3 mode={s} role_pair={s} " ++
+            "endpoint_role={s} sender_role={s} streams=1 body_bytes={d} " ++
+            "warmup={d} iterations={d} " ++
+            "memory_scope=benchmark-run-after-argument-parse " ++
+            "allocator_scope=netz-explicit alloc_count={d} free_count={d} " ++
+            "resize_count={d} remap_count={d} total_allocated_bytes={d} " ++
+            "live_bytes={d} peak_live_bytes={d} complete=true\n",
+        .{
+            config.mode.name(),
+            role_pair,
+            endpoint_role,
+            if (config.mode == .upload) "client" else "server",
+            config.body_bytes,
+            config.warmup,
+            config.iterations,
+            snapshot.alloc_count,
+            snapshot.free_count,
+            snapshot.resize_count,
+            snapshot.remap_count,
+            snapshot.total_allocated,
+            snapshot.current_bytes,
+            snapshot.peak_bytes,
+        },
     );
 }
