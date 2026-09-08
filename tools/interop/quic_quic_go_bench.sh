@@ -79,11 +79,15 @@ server_cpu=${bench_cpus[1]}
 
 requested_streams=(1 4)
 common_args=()
+iterations=5
 for arg in "$@"; do
   if [[ $arg == --streams=* ]]; then
     requested_streams=("${arg#--streams=}")
   else
     common_args+=("$arg")
+    if [[ $arg == --iterations=* ]]; then
+      iterations=${arg#--iterations=}
+    fi
   fi
 done
 go_common=()
@@ -129,6 +133,10 @@ for stream_count in "${requested_streams[@]}"; do
       grep -Fq 'role_pair=netz-client+quic-go-server' "$pair_dir/quic-go-server.log"
       grep -Fq 'complete=true' "$pair_dir/quic-go-server.log"
     fi
+    python3 "$repo_root/tools/interop/quic_socket_traffic_check.py" \
+      --role-pair=netz-client+quic-go-server --sender="$sender_role" \
+      --streams="$stream_count" --iterations="$iterations" \
+      "$pair_dir/quic-go-server.log" "$pair_dir/netz-client.log"
     cat "$pair_dir/quic-go-server.log"
     cat "$pair_dir/netz-client.log"
 
@@ -153,6 +161,10 @@ for stream_count in "${requested_streams[@]}"; do
       grep -Fq 'role_pair=quic-go-client+netz-server' "$pair_dir/netz-server.log"
       grep -Fq 'complete=true' "$pair_dir/netz-server.log"
     fi
+    python3 "$repo_root/tools/interop/quic_socket_traffic_check.py" \
+      --role-pair=quic-go-client+netz-server --sender="$sender_role" \
+      --streams="$stream_count" --iterations="$iterations" \
+      "$pair_dir/netz-server.log" "$pair_dir/quic-go-client.log"
     cat "$pair_dir/netz-server.log"
     cat "$pair_dir/quic-go-client.log"
   done

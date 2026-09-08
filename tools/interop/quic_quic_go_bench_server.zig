@@ -34,6 +34,7 @@ pub fn main(init: std.process.Init) !void {
         netz.tls.testing.certificate_base64,
     );
     const key_pair = try netz.tls.testing.serverKeyPair();
+    var socket_traffic: netz.quic.runtime.SocketTrafficCounters = .{};
     var endpoint = try netz.quic.runtime.Endpoint.bind(
         allocator,
         io,
@@ -43,6 +44,7 @@ pub fn main(init: std.process.Init) !void {
             .max_frames_per_datagram = benchmark.max_frames,
             .enable_gso_send = false,
             .enable_gro_receive = false,
+            .socket_traffic_counters = &socket_traffic,
         },
     );
     defer endpoint.deinit();
@@ -52,6 +54,7 @@ pub fn main(init: std.process.Init) !void {
     try benchmark.printConfig(sender_name, role_pair, expected_config);
 
     for (0..try expected_config.rounds()) |round_index| {
+        const traffic_before = socket_traffic.stats();
         try runRound(
             allocator,
             io,
@@ -64,6 +67,16 @@ pub fn main(init: std.process.Init) !void {
             sender_name,
             role_pair,
         );
+        if (round_index >= expected_config.warmup) {
+            benchmark.printSocketTraffic(
+                "netz",
+                role_pair,
+                "server",
+                expected_config,
+                @intCast(round_index - expected_config.warmup + 1),
+                socket_traffic.stats().since(traffic_before),
+            );
+        }
     }
 }
 

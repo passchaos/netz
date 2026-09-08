@@ -267,7 +267,7 @@ pub fn printConfig(sender: []const u8, role_pair: []const u8, config: Config) !v
             "stream_window={d} connection_window={d} steady_state_mtu=1280 " ++
             "quic_version=1 cipher=negotiated-unexposed cert_verify=true " ++
             "netz_gso=false netz_gro=false quic_go_gso=false " ++
-            "quic_go_gro=implementation-default pacing=implementation-specific\n",
+            "quic_go_gro=false pacing=implementation-specific\n",
         .{
             sender,                  role_pair,          config.warmup,           config.iterations,    config.streams,
             config.bytes_per_stream, config.chunk_bytes, config.effectiveChunk(), config.stream_window, try config.connectionWindow(),
@@ -285,6 +285,35 @@ pub fn printSample(sender: []const u8, role_pair: []const u8, config: Config, sa
             "sample={d} elapsed_ns={d} logical_MiB_s={d:.3} streams={d} " ++
             "sent_bytes={d} received_bytes={d} checksum={d} complete=true\n",
         .{ sender, role_pair, sample, elapsed_ns, mib_s, config.streams, total, total, checksum },
+    );
+}
+
+pub fn printSocketTraffic(
+    implementation: []const u8,
+    role_pair: []const u8,
+    endpoint_role: []const u8,
+    config: Config,
+    sample: u32,
+    traffic: netz.quic.runtime.SocketTrafficStats,
+) void {
+    std.debug.print(
+        "implementation={s} protocol=quic-stream role_pair={s} " ++
+            "endpoint_role={s} sample={d} streams={d} " ++
+            "traffic_scope=connection socket_boundary=userspace-udp-payload " ++
+            "udp_sent_datagrams={d} udp_sent_payload_bytes={d} " ++
+            "udp_received_datagrams={d} udp_received_payload_bytes={d} " ++
+            "logical_udp_segments=true complete=true\n",
+        .{
+            implementation,
+            role_pair,
+            endpoint_role,
+            sample,
+            config.streams,
+            traffic.sent_datagrams,
+            traffic.sent_bytes,
+            traffic.received_datagrams,
+            traffic.received_bytes,
+        },
     );
 }
 

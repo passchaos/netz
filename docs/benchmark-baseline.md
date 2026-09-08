@@ -1892,7 +1892,7 @@ control stream exchanges CONFIG/READY before 1 or 4 unidirectional data streams
 transfer deterministic payloads; t1 occurs only after the receiver verifies
 every byte and FIN and returns DONE with the exact aggregate checksum. The
 sender returns DONE_ACK before the receiver closes the connection. Both
-processes disable GSO, netz disables GRO, both use fixed 1 MiB stream and 8 MiB
+processes disable GSO and do not enable UDP_GRO; both use fixed 1 MiB stream and 8 MiB
 connection windows, and the measured 1-RTT MTU is 1280 bytes.
 
 ```sh
@@ -1918,11 +1918,52 @@ Each 1-stream sample verified 4,194,304 bytes and checksum 534,773,760; each
 4-stream sample verified 16,777,216 bytes and checksum 2,139,095,040. The wide
 single-stream quic-go ranges and netz's role sensitivity are retained instead
 of compressed into a ratio. This is `same-application-shape`, not equal-wire:
-quic-go has no public GRO disable, advertises a different maximum UDP payload,
-uses per-stream goroutines while netz round-robins one event loop, and retains
-implementation-specific ACK/pacing/packetization. Capture-level UDP byte and
-datagram counts are still required before a general raw STREAM superiority
-claim.
+both processes disable GSO and do not enable UDP_GRO, but quic-go advertises a
+different maximum UDP payload, uses per-stream goroutines while netz
+round-robins one event loop, and retains implementation-specific
+ACK/pacing/packetization. Capture-level UDP byte and
+datagram accounting at the kernel/interface boundary is still required before
+a general raw STREAM superiority claim.
+
+The harness now also records complete-connection UDP payload bytes and logical
+datagram counts at both processes' userspace socket boundaries. The counters
+start before handshake and end after the benchmark close exchange, so they
+include Initial, Handshake, 1-RTT data, ACK/control, and teardown traffic. GSO
+is disabled for both stacks; netz disables GRO, while the audited quic-go
+v0.59 receive path uses `recvmmsg` batching and does not enable Linux UDP_GRO.
+Every counted logical segment is therefore one socket-visible UDP payload. The
+runner joins client and server records by role pair/sample, rejects
+missing/duplicate records and impossible negative
+send-versus-peer-receive deltas, and preserves positive deltas when one endpoint
+stops receiving after connection close. Telemetry is printed out-of-band rather
+than sent over the measured QUIC connection.
+
+Three CPU-0/client + CPU-1/server samples used `--warmup=1 --iterations=3`
+with the same 4 MiB-per-stream shape and measured these complete-connection
+ranges:
+
+| Streams | Sender implementation | Total UDP datagrams | Total UDP payload bytes | Payload overhead |
+|---:|---|---:|---:|---:|
+| 1 | netz | 3,950-4,195 | 4,323,315-4,334,573 | 3.08-3.34% |
+| 1 | quic-go | 7,318-7,328 | 4,448,566-4,454,107 | 6.06-6.19% |
+| 4 | netz | 15,687-20,057 | 17,275,226-17,497,963 | 2.97-4.30% |
+| 4 | quic-go | 29,661-30,103 | 18,357,564-18,895,334 | 9.42-12.62% |
+
+The ranges combine both client/server role pairings for each sender
+implementation rather than attributing peer ACK cost to only one process. All
+24 measured connections retained exact application bytes, checksum, FIN, and
+two endpoint telemetry records. Most one-stream directions had exact
+send/peer-receive equality. Positive teardown/read-stop deltas remained visible
+(one 29-byte quic-go close response in the stable one-stream case and larger
+ACK tails in some four-stream cases) instead of being silently subtracted.
+
+These socket-boundary numbers demonstrate that the workloads are **not
+equal-wire**: quic-go's sender shapes use materially more ACK/control traffic
+and roughly twice as many UDP datagrams in these samples. They strengthen the
+fairness audit but do not replace a kernel packet capture, since this host
+denies unprivileged `tcpdump`, passwordless elevation, and user/network
+namespaces. Future promotion still requires capture-backed IP/UDP accounting
+plus equalized GRO, ACK/pacing, packetization, and application scheduling.
 
 This comparison intentionally disables GSO/GRO. The host clamps
 `net.core.rmem_max` to 212,992 bytes, so a same-process multi-packet burst can
@@ -2828,6 +2869,10 @@ benchmark pass and does not replace the isolated ranges above.
 
 - Extend the same-host raw QUIC matrix to echo latency, handshake rate,
   loss/reordering, stream churn, and multi-connection aggregate throughput.
+- Capture the raw QUIC process matrix at the kernel/interface boundary on a
+  host that permits pcap. The current complete-connection userspace UDP
+  counters prove the existing shapes differ and therefore remain
+  `same-application-shape`.
 - Record allocation/peak-memory metrics for the benchmark processes.
 - Add loss/reordering benchmark cases or interop-runner style scenarios for
   handshake loss, transfer loss, and corruption.

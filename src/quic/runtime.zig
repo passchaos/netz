@@ -18,6 +18,64 @@ pub const ReceiveTimeoutError = Error ||
     std.Io.Timeout.Error ||
     std.Io.ConcurrentError;
 
+/// UDP payload traffic observed at the userspace socket boundary.
+///
+/// Byte counts exclude IP and UDP headers. With GSO or a valid GRO batch,
+/// datagram counts describe logical UDP segments rather than syscall count.
+pub const SocketTrafficStats = struct {
+    sent_datagrams: u64 = 0,
+    sent_bytes: u64 = 0,
+    received_datagrams: u64 = 0,
+    received_bytes: u64 = 0,
+
+    pub fn since(self: SocketTrafficStats, previous: SocketTrafficStats) SocketTrafficStats {
+        return .{
+            .sent_datagrams = self.sent_datagrams -% previous.sent_datagrams,
+            .sent_bytes = self.sent_bytes -% previous.sent_bytes,
+            .received_datagrams = self.received_datagrams -% previous.received_datagrams,
+            .received_bytes = self.received_bytes -% previous.received_bytes,
+        };
+    }
+};
+
+/// Optional thread-safe sink for complete Endpoint UDP traffic.
+///
+/// Keeping this caller-owned avoids imposing atomic increments on ordinary
+/// endpoints. The sink must outlive every operation using the endpoint.
+pub const SocketTrafficCounters = struct {
+    sent_datagrams: std.atomic.Value(u64) = .init(0),
+    sent_bytes: std.atomic.Value(u64) = .init(0),
+    received_datagrams: std.atomic.Value(u64) = .init(0),
+    received_bytes: std.atomic.Value(u64) = .init(0),
+
+    pub fn stats(self: *const SocketTrafficCounters) SocketTrafficStats {
+        return .{
+            .sent_datagrams = self.sent_datagrams.load(.monotonic),
+            .sent_bytes = self.sent_bytes.load(.monotonic),
+            .received_datagrams = self.received_datagrams.load(.monotonic),
+            .received_bytes = self.received_bytes.load(.monotonic),
+        };
+    }
+
+    fn recordSent(
+        self: *SocketTrafficCounters,
+        datagrams: usize,
+        bytes: usize,
+    ) void {
+        _ = self.sent_datagrams.fetchAdd(@intCast(datagrams), .monotonic);
+        _ = self.sent_bytes.fetchAdd(@intCast(bytes), .monotonic);
+    }
+
+    fn recordReceived(
+        self: *SocketTrafficCounters,
+        datagrams: usize,
+        bytes: usize,
+    ) void {
+        _ = self.received_datagrams.fetchAdd(@intCast(datagrams), .monotonic);
+        _ = self.received_bytes.fetchAdd(@intCast(bytes), .monotonic);
+    }
+};
+
 pub const Limits = struct {
     pub const SendInterceptor = struct {
         context: *anyopaque,
@@ -66,6 +124,10 @@ pub const Limits = struct {
     /// because single-datagram consumers cannot amortize GRO bookkeeping.
     enable_gro_receive: bool = false,
     send_interceptor: ?SendInterceptor = null,
+    /// Optional complete UDP payload accounting for diagnostics and
+    /// reproducible benchmarks. Null keeps the production fast path at one
+    /// predictable branch and performs no atomic operations.
+    socket_traffic_counters: ?*SocketTrafficCounters = null,
 };
 
 pub const SendManyBytesResult = struct {
@@ -350,6 +412,7 @@ pub const Endpoint = struct {
     ) Error!void {
         try self.applyOutgoingEcnMark(ecn);
         try self.socket.send(self.io, &to, bytes);
+        self.recordSocketSent(1, bytes.len);
     }
 
     fn flushHeldSend(self: *Endpoint) Error!void {
@@ -466,6 +529,7 @@ pub const Endpoint = struct {
                 // than treating an unsent datagram as lost.
                 return .{ .sent_count = offset + count, .send_error = error.Unexpected };
             }
+            self.recordSocketSentMessages(messages[0..sent_count]);
             for (messages[0..sent_count], chunk[0..sent_count]) |message, bytes| {
                 if (message.data_len != bytes.len) {
                     return .{
@@ -507,6 +571,12 @@ pub const Endpoint = struct {
             .{},
         );
         if (sent_count == 1) {
+            const actual_segments = std.math.divCeil(
+                usize,
+                message.data_len,
+                plan.segment_size,
+            ) catch 0;
+            self.recordSocketSent(actual_segments, message.data_len);
             return .{
                 .sent_count = plan.segment_count,
                 .send_error = if (message.data_len == plan.total_len)
@@ -531,6 +601,46 @@ pub const Endpoint = struct {
             return null;
         }
         return .{ .sent_count = 0, .send_error = err };
+    }
+
+    fn recordSocketSent(
+        self: *Endpoint,
+        datagrams: usize,
+        bytes: usize,
+    ) void {
+        const counters = self.limits.socket_traffic_counters orelse return;
+        counters.recordSent(datagrams, bytes);
+    }
+
+    fn recordSocketSentMessages(
+        self: *Endpoint,
+        messages: []const net.OutgoingMessage,
+    ) void {
+        const counters = self.limits.socket_traffic_counters orelse return;
+        var bytes: usize = 0;
+        for (messages) |message| bytes +|= message.data_len;
+        counters.recordSent(messages.len, bytes);
+    }
+
+    fn recordSocketReceived(
+        self: *Endpoint,
+        incoming: net.IncomingMessage,
+    ) void {
+        const counters = self.limits.socket_traffic_counters orelse return;
+        var datagrams: usize = 1;
+        if (self.gro_receive_enabled) {
+            const control = receiveControlFromBytes(incoming.control);
+            if (control.gro_segment_size) |segment_size| {
+                if (segment_size != 0) {
+                    datagrams = std.math.divCeil(
+                        usize,
+                        incoming.data.len,
+                        segment_size,
+                    ) catch 1;
+                }
+            }
+        }
+        counters.recordReceived(datagrams, incoming.data.len);
     }
 
     pub fn sendFrames(self: *Endpoint, to: net.IpAddress, frames: []const quic.Frame) Error!void {
@@ -1010,6 +1120,7 @@ pub const Endpoint = struct {
         } })).net_receive;
         if (maybe_err) |err| return err;
         std.debug.assert(count == 1);
+        self.recordSocketReceived(incoming);
         return self.finishKernelBytesBatch(buffer, incoming);
     }
 
@@ -1031,6 +1142,7 @@ pub const Endpoint = struct {
         })).net_receive;
         if (maybe_err) |err| return err;
         std.debug.assert(count == 1);
+        self.recordSocketReceived(incoming);
         return self.finishKernelBytesBatchView(incoming);
     }
 
@@ -1054,6 +1166,7 @@ pub const Endpoint = struct {
         )).net_receive;
         if (maybe_err) |err| return err;
         std.debug.assert(count == 1);
+        self.recordSocketReceived(incoming);
         return self.finishKernelBytesBatchView(incoming);
     }
 
@@ -1073,6 +1186,7 @@ pub const Endpoint = struct {
         } })).net_receive;
         if (maybe_err) |err| return err;
         std.debug.assert(count == 1);
+        self.recordSocketReceived(incoming);
         return self.finishKernelBytesInto(incoming);
     }
 
@@ -1096,6 +1210,7 @@ pub const Endpoint = struct {
         )).net_receive;
         if (maybe_err) |err| return err;
         std.debug.assert(count == 1);
+        self.recordSocketReceived(incoming);
         return self.finishKernelBytesInto(incoming);
     }
 
@@ -1146,6 +1261,7 @@ pub const Endpoint = struct {
         )).net_receive;
         if (maybe_err) |err| return err;
         std.debug.assert(count == 1);
+        self.recordSocketReceived(incoming);
         return self.finishKernelBytesBatch(buffer, incoming);
     }
 
@@ -1275,6 +1391,7 @@ pub const Endpoint = struct {
         )).net_receive;
         if (maybe_err) |err| return err;
         std.debug.assert(count == 1);
+        self.recordSocketReceived(incoming);
         if (incoming.data.len == 0) return error.EmptyDatagram;
         if (incoming.flags.trunc or incoming.flags.ctrunc) {
             return error.DatagramTooLarge;
@@ -2949,6 +3066,58 @@ test "QUIC UDP endpoint sends many datagrams in one batch" {
     try std.testing.expectError(error.EmptyDatagram, sender.sendManyBytes(receiver.address(), &invalid));
 }
 
+test "QUIC UDP socket traffic counts successful single and batch I/O" {
+    const allocator = std.testing.allocator;
+    var threaded = std.Io.Threaded.init(allocator, .{});
+    defer threaded.deinit();
+    const io = threaded.io();
+    var sender_traffic: SocketTrafficCounters = .{};
+    var receiver_traffic: SocketTrafficCounters = .{};
+    var receiver = try Endpoint.bind(
+        allocator,
+        io,
+        .{ .ip4 = .loopback(0) },
+        .{
+            .max_datagram_size = 128,
+            .enable_gro_receive = false,
+            .socket_traffic_counters = &receiver_traffic,
+        },
+    );
+    defer receiver.deinit();
+    var sender = try Endpoint.bind(
+        allocator,
+        io,
+        .{ .ip4 = .loopback(0) },
+        .{
+            .max_datagram_size = 128,
+            .enable_gso_send = false,
+            .socket_traffic_counters = &sender_traffic,
+        },
+    );
+    defer sender.deinit();
+
+    try sender.sendBytes(receiver.address(), "one");
+    try sender.sendManyBytes(receiver.address(), &.{ "two", "three" });
+    var storage: [128]u8 = undefined;
+    for ([_][]const u8{ "one", "two", "three" }) |expected| {
+        const received = try receiver.receiveBytesInto(&storage);
+        try std.testing.expectEqualStrings(expected, received.bytes);
+    }
+
+    try std.testing.expectEqual(SocketTrafficStats{
+        .sent_datagrams = 3,
+        .sent_bytes = 11,
+    }, sender_traffic.stats());
+    try std.testing.expectEqual(SocketTrafficStats{
+        .received_datagrams = 3,
+        .received_bytes = 11,
+    }, receiver_traffic.stats());
+    try std.testing.expectEqual(SocketTrafficStats{
+        .sent_datagrams = 3,
+        .sent_bytes = 11,
+    }, sender_traffic.stats().since(.{}));
+}
+
 test "QUIC UDP endpoint receives into caller storage" {
     const allocator = std.testing.allocator;
     var threaded = std.Io.Threaded.init(allocator, .{});
@@ -3453,12 +3622,18 @@ test "QUIC UDP GRO shared storage survives frame-datagram ownership transfer" {
     defer threaded.deinit();
     const io = threaded.io();
 
+    var sender_traffic: SocketTrafficCounters = .{};
+    var receiver_traffic: SocketTrafficCounters = .{};
     var receiver = try Endpoint.bind(allocator, io, .{ .ip4 = .loopback(0) }, .{
         .max_datagram_size = 128,
         .enable_gro_receive = true,
+        .socket_traffic_counters = &receiver_traffic,
     });
     defer receiver.deinit();
-    var sender = try Endpoint.bind(allocator, io, .{ .ip4 = .loopback(0) }, .{ .max_datagram_size = 128 });
+    var sender = try Endpoint.bind(allocator, io, .{ .ip4 = .loopback(0) }, .{
+        .max_datagram_size = 128,
+        .socket_traffic_counters = &sender_traffic,
+    });
     defer sender.deinit();
     if (!receiver.groReceiveEnabled()) return error.SkipZigTest;
 
@@ -3482,6 +3657,14 @@ test "QUIC UDP GRO shared storage survives frame-datagram ownership transfer" {
     try std.testing.expectEqual(@as(usize, 2), second.frames.len);
     try std.testing.expect(first.frames[0] == .ping);
     try std.testing.expect(second.frames[0] == .ping);
+    try std.testing.expectEqual(SocketTrafficStats{
+        .sent_datagrams = 2,
+        .sent_bytes = 32,
+    }, sender_traffic.stats());
+    try std.testing.expectEqual(SocketTrafficStats{
+        .received_datagrams = 2,
+        .received_bytes = 32,
+    }, receiver_traffic.stats());
 }
 
 const RejectFirstGsoSend = struct {
@@ -3509,6 +3692,31 @@ const RejectFirstGsoSend = struct {
             messages,
             flags,
         );
+    }
+};
+
+const AcceptFirstBatchDatagram = struct {
+    delegate: std.Io,
+    calls: usize = 0,
+
+    fn netSend(
+        userdata: ?*anyopaque,
+        socket_handle: net.Socket.Handle,
+        messages: []net.OutgoingMessage,
+        flags: net.SendFlags,
+    ) struct { ?net.Socket.SendError, usize } {
+        const self: *AcceptFirstBatchDatagram = @ptrCast(@alignCast(userdata));
+        self.calls += 1;
+        const send_error, const sent_count = self.delegate.vtable.netSend(
+            self.delegate.userdata,
+            socket_handle,
+            messages[0..@min(messages.len, 1)],
+            flags,
+        );
+        if (send_error != null or sent_count != 1) {
+            return .{ send_error orelse error.Unexpected, sent_count };
+        }
+        return .{ error.NetworkDown, 1 };
     }
 };
 
@@ -3561,9 +3769,17 @@ test "QUIC UDP endpoint disables rejected GSO and retries send-many" {
     defer threaded.deinit();
     const io = threaded.io();
 
-    var receiver = try Endpoint.bind(allocator, io, .{ .ip4 = .loopback(0) }, .{ .max_datagram_size = 128 });
+    var sender_traffic: SocketTrafficCounters = .{};
+    var receiver_traffic: SocketTrafficCounters = .{};
+    var receiver = try Endpoint.bind(allocator, io, .{ .ip4 = .loopback(0) }, .{
+        .max_datagram_size = 128,
+        .socket_traffic_counters = &receiver_traffic,
+    });
     defer receiver.deinit();
-    var sender = try Endpoint.bind(allocator, io, .{ .ip4 = .loopback(0) }, .{ .max_datagram_size = 128 });
+    var sender = try Endpoint.bind(allocator, io, .{ .ip4 = .loopback(0) }, .{
+        .max_datagram_size = 128,
+        .socket_traffic_counters = &sender_traffic,
+    });
     defer sender.deinit();
 
     var rejecting = RejectFirstGsoSend{ .delegate = sender.io };
@@ -3595,6 +3811,59 @@ test "QUIC UDP endpoint disables rejected GSO and retries send-many" {
         defer received.deinit(allocator);
         try std.testing.expectEqualStrings(expected, received.bytes);
     }
+    try std.testing.expectEqual(SocketTrafficStats{
+        .sent_datagrams = 4,
+        .sent_bytes = 16,
+    }, sender_traffic.stats());
+    try std.testing.expectEqual(SocketTrafficStats{
+        .received_datagrams = 4,
+        .received_bytes = 16,
+    }, receiver_traffic.stats());
+}
+
+test "QUIC UDP socket traffic commits only a partially sent batch prefix" {
+    const allocator = std.testing.allocator;
+    var threaded = std.Io.Threaded.init(allocator, .{});
+    defer threaded.deinit();
+    const io = threaded.io();
+    var sender_traffic: SocketTrafficCounters = .{};
+    var receiver_traffic: SocketTrafficCounters = .{};
+    var receiver = try Endpoint.bind(allocator, io, .{ .ip4 = .loopback(0) }, .{
+        .max_datagram_size = 64,
+        .socket_traffic_counters = &receiver_traffic,
+    });
+    defer receiver.deinit();
+    var sender = try Endpoint.bind(allocator, io, .{ .ip4 = .loopback(0) }, .{
+        .max_datagram_size = 64,
+        .enable_gso_send = false,
+        .socket_traffic_counters = &sender_traffic,
+    });
+    defer sender.deinit();
+
+    var partial = AcceptFirstBatchDatagram{ .delegate = sender.io };
+    var partial_vtable = sender.io.vtable.*;
+    partial_vtable.netSend = AcceptFirstBatchDatagram.netSend;
+    sender.io = .{ .userdata = &partial, .vtable = &partial_vtable };
+    defer sender.io = partial.delegate;
+
+    const result = try sender.sendManyBytesProgress(
+        receiver.address(),
+        &.{ "first", "second" },
+    );
+    try std.testing.expectEqual(@as(usize, 1), result.sent_count);
+    try std.testing.expectEqual(error.NetworkDown, result.send_error.?);
+    try std.testing.expectEqual(@as(usize, 1), partial.calls);
+    var received = try receiver.receiveBytes();
+    defer received.deinit(allocator);
+    try std.testing.expectEqualStrings("first", received.bytes);
+    try std.testing.expectEqual(SocketTrafficStats{
+        .sent_datagrams = 1,
+        .sent_bytes = 5,
+    }, sender_traffic.stats());
+    try std.testing.expectEqual(SocketTrafficStats{
+        .received_datagrams = 1,
+        .received_bytes = 5,
+    }, receiver_traffic.stats());
 }
 
 test "QUIC endpoint send interceptor drops selected single and batch datagrams" {
@@ -3603,6 +3872,8 @@ test "QUIC endpoint send interceptor drops selected single and batch datagrams" 
     defer threaded.deinit();
     const io = threaded.io();
     var calls: usize = 0;
+    var sender_traffic: SocketTrafficCounters = .{};
+    var receiver_traffic: SocketTrafficCounters = .{};
     const Interceptor = struct {
         fn drop(context: *anyopaque, bytes: []const u8) bool {
             const count: *usize = @ptrCast(@alignCast(context));
@@ -3614,7 +3885,10 @@ test "QUIC endpoint send interceptor drops selected single and batch datagrams" 
         allocator,
         io,
         .{ .ip4 = .loopback(0) },
-        .{ .max_datagram_size = 64 },
+        .{
+            .max_datagram_size = 64,
+            .socket_traffic_counters = &receiver_traffic,
+        },
     );
     defer receiver.deinit();
     var sender = try Endpoint.bind(
@@ -3627,6 +3901,7 @@ test "QUIC endpoint send interceptor drops selected single and batch datagrams" 
                 .context = &calls,
                 .should_drop = Interceptor.drop,
             },
+            .socket_traffic_counters = &sender_traffic,
         },
     );
     defer sender.deinit();
@@ -3647,6 +3922,14 @@ test "QUIC endpoint send interceptor drops selected single and batch datagrams" 
     try std.testing.expectEqualSlices(u8, &.{0xcc}, received.bytes);
     try std.testing.expectEqual(@as(usize, 4), calls);
     received.deinit(allocator);
+    try std.testing.expectEqual(SocketTrafficStats{
+        .sent_datagrams = 2,
+        .sent_bytes = 2,
+    }, sender_traffic.stats());
+    try std.testing.expectEqual(SocketTrafficStats{
+        .received_datagrams = 2,
+        .received_bytes = 2,
+    }, receiver_traffic.stats());
 }
 
 test "QUIC endpoint send interceptor reorders one datagram pair" {

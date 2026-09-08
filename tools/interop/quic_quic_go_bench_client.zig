@@ -69,6 +69,7 @@ fn runRound(
     sender_name: []const u8,
     role_pair: []const u8,
 ) !void {
+    var socket_traffic: netz.quic.runtime.SocketTrafficCounters = .{};
     var endpoint = try netz.quic.runtime.Endpoint.bind(
         allocator,
         io,
@@ -78,6 +79,7 @@ fn runRound(
             .max_frames_per_datagram = benchmark.max_frames,
             .enable_gso_send = false,
             .enable_gro_receive = false,
+            .socket_traffic_counters = &socket_traffic,
         },
     );
     defer endpoint.deinit();
@@ -169,6 +171,16 @@ fn runRound(
         try established.connection.closeApplication(0, "benchmark complete");
     } else {
         try waitForServerClose(&established.connection, deadline);
+    }
+    if (round >= config.warmup) {
+        benchmark.printSocketTraffic(
+            "netz",
+            role_pair,
+            "client",
+            config,
+            round - config.warmup + 1,
+            socket_traffic.stats(),
+        );
     }
 }
 

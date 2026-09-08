@@ -995,8 +995,12 @@ External cross-process comparisons remain separate from the aggregate step.
 or four streams, both sender roles, separate client/server CPUs, and a fresh
 connection per sample. Untimed control and stream preludes precede the timed
 payload, while DONE/DONE_ACK require exact byte, FIN, and checksum validation.
-Results remain `same-application-shape` because quic-go GRO, ACK/pacing, and
-packetization are not externally equalized.
+Both endpoints also emit complete-connection userspace UDP payload/datagram
+counters; the runner joins them per sample and retains teardown observation
+deltas. Results remain `same-application-shape`: the counters demonstrate that
+ACK/pacing, packetization, and application scheduling are not externally
+equalized, and kernel/interface capture is still required for an equal-wire
+claim.
 
 `bench-http3-quic-go` runs certificate-verified HTTP/3 upload/download in both
 client/server role pairings, with a fresh connection and untimed ready request
