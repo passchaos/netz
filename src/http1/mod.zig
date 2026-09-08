@@ -449,12 +449,8 @@ pub fn parseRequestHead(
         request_line.target,
         parsed.headers,
     );
-    const framing = try bodyFraming(parsed.headers);
-    const must_close = requestFramingMustClose(
-        parsed.headers,
-        framing,
-    );
-    const exposed_headers = if (framing == .chunked)
+    const framing = try requestFraming(parsed.headers);
+    const exposed_headers = if (framing.body == .chunked)
         stripHeaderInPlace(parsed.headers, "content-length")
     else
         parsed.headers;
@@ -463,10 +459,10 @@ pub fn parseRequestHead(
         .target = request_line.target,
         .version = version,
         .headers = exposed_headers,
-        .body_framing = framing,
-        .content_length = if (framing == .content_length) try contentLength(parsed.headers) else null,
+        .body_framing = framing.body,
+        .content_length = framing.content_length,
         .head_len = parsed.head_len,
-        .must_close = must_close,
+        .must_close = framing.must_close,
     };
 }
 
@@ -620,11 +616,15 @@ pub fn parseRequest(allocator: std.mem.Allocator, bytes: []const u8, options: Pa
     errdefer parsed_headers.deinit(allocator);
     try validateTransferEncodingForVersion(version, parsed_headers.headers);
     const consumed_head = head_end + 4;
-    const must_close = requestFramingMustClose(
-        parsed_headers.headers,
-        try bodyFraming(parsed_headers.headers),
+    const framing = try requestFraming(parsed_headers.headers);
+    const parsed_body = try parseBodyWithFraming(
+        allocator,
+        bytes,
+        consumed_head,
+        options,
+        framing.body,
+        framing.content_length,
     );
-    const parsed_body = try parseBody(allocator, bytes, consumed_head, parsed_headers.headers, options);
     errdefer parsed_body.deinit(allocator);
     if (parsed_body.framing == .chunked or parsed_body.framing == .close_delimited) {
         try parsed_headers.stripContentLength(allocator);
@@ -642,7 +642,7 @@ pub fn parseRequest(allocator: std.mem.Allocator, bytes: []const u8, options: Pa
         .header_value_storage = parsed_headers.value_storage,
         .trailer_value_storage = parsed_body.trailer_value_storage,
         .consumed = parsed_body.consumed,
-        .must_close = must_close,
+        .must_close = framing.must_close,
     };
 }
 
@@ -1069,14 +1069,36 @@ fn parseBody(
     headers: []const Header,
     options: ParseOptions,
 ) Error!ParsedBody {
-    return switch (try bodyFraming(headers)) {
+    const framing = try bodyFraming(headers);
+    return parseBodyWithFraming(
+        allocator,
+        bytes,
+        body_start,
+        options,
+        framing,
+        if (framing == .content_length)
+            (try contentLength(headers)).?
+        else
+            null,
+    );
+}
+
+fn parseBodyWithFraming(
+    allocator: std.mem.Allocator,
+    bytes: []const u8,
+    body_start: usize,
+    options: ParseOptions,
+    framing: BodyFraming,
+    declared_content_length: ?usize,
+) Error!ParsedBody {
+    return switch (framing) {
         .none => .{
             .framing = .none,
             .body = bytes[body_start..body_start],
             .consumed = body_start,
         },
         .content_length => blk: {
-            const len = (try contentLength(headers)).?;
+            const len = declared_content_length.?;
             const end = std.math.add(usize, body_start, len) catch return error.ContentLengthOverflow;
             if (bytes.len < end) return error.BufferTooShort;
             break :blk .{
@@ -1127,13 +1149,58 @@ pub fn bodyFraming(headers: []const Header) Error!BodyFraming {
     return .none;
 }
 
-fn requestFramingMustClose(
-    headers: []const Header,
-    framing: BodyFraming,
-) bool {
-    return framing == .chunked and
-        hasHeaderNamed(headers, "transfer-encoding") and
-        hasHeaderNamed(headers, "content-length");
+const RequestFraming = struct {
+    body: BodyFraming,
+    content_length: ?usize,
+    must_close: bool,
+};
+
+fn requestFraming(headers: []const Header) Error!RequestFraming {
+    var saw_transfer_encoding = false;
+    var saw_chunked = false;
+    var final_is_chunked = false;
+    var saw_content_length = false;
+    var content_length: ?usize = null;
+    var content_length_error: ?Error = null;
+
+    for (headers) |header| {
+        if (header.eqlName("transfer-encoding")) {
+            saw_transfer_encoding = true;
+            try updateTransferEncodingFraming(
+                header.value,
+                &saw_chunked,
+                &final_is_chunked,
+            );
+            continue;
+        }
+        if (!header.eqlName("content-length")) continue;
+        saw_content_length = true;
+        if (content_length_error != null) continue;
+        content_length = parseContentLengthFieldValue(
+            header.value,
+            content_length,
+        ) catch |err| {
+            content_length_error = err;
+            continue;
+        };
+    }
+
+    if (saw_transfer_encoding) {
+        if (!saw_chunked or !final_is_chunked) {
+            return error.InvalidTransferEncoding;
+        }
+        return .{
+            .body = .chunked,
+            .content_length = null,
+            .must_close = saw_content_length,
+        };
+    }
+    if (content_length_error) |err| return err;
+    return .{
+        .body = if (content_length != null) .content_length else .none,
+        .content_length = content_length,
+        .must_close = false,
+    };
 }
 
 pub fn contentLength(headers: []const Header) Error!?usize {
@@ -1181,27 +1248,36 @@ fn transferEncodingFraming(headers: []const Header) Error!?BodyFraming {
     for (headers) |header| {
         if (!header.eqlName("transfer-encoding")) continue;
         saw_transfer_encoding = true;
-        var tokens = std.mem.splitScalar(u8, header.value, ',');
-        while (tokens.next()) |raw_token| {
-            const token = wire.trimOws(raw_token);
-            if (token.len == 0) return error.InvalidTransferEncoding;
-            const is_chunked = std.ascii.eqlIgnoreCase(token, "chunked");
-            if (is_chunked) {
-                // RFC 9112 allows other transfer codings before chunked, but
-                // chunked itself may only be applied once and must be final.  We
-                // decode the final chunk framing while leaving any preceding
-                // transfer-coded bytes for the caller that understands that
-                // coding (matching Hyper's message-length decision).
-                if (saw_chunked) return error.InvalidTransferEncoding;
-                saw_chunked = true;
-            }
-            final_is_chunked = is_chunked;
-        }
+        try updateTransferEncodingFraming(
+            header.value,
+            &saw_chunked,
+            &final_is_chunked,
+        );
     }
 
     if (!saw_transfer_encoding) return null;
     if (!saw_chunked or !final_is_chunked) return error.InvalidTransferEncoding;
     return .chunked;
+}
+
+fn updateTransferEncodingFraming(
+    value: []const u8,
+    saw_chunked: *bool,
+    final_is_chunked: *bool,
+) Error!void {
+    var tokens = std.mem.splitScalar(u8, value, ',');
+    while (tokens.next()) |raw_token| {
+        const token = wire.trimOws(raw_token);
+        if (token.len == 0) return error.InvalidTransferEncoding;
+        const is_chunked = std.ascii.eqlIgnoreCase(token, "chunked");
+        if (is_chunked) {
+            // RFC 9112 allows other transfer codings before chunked, but
+            // chunked itself may only be applied once and must be final.
+            if (saw_chunked.*) return error.InvalidTransferEncoding;
+            saw_chunked.* = true;
+        }
+        final_is_chunked.* = is_chunked;
+    }
 }
 
 fn responseTransferEncodingIsCloseDelimited(headers: []const Header) bool {
@@ -2654,6 +2730,12 @@ test "HTTP/1 request TE plus CL is chunked but must close in either order" {
             "Connection: keep-alive\r\n" ++
             "Transfer-Encoding: chunked\r\n" ++
             "Content-Length: 999\r\n\r\n" ++
+            "2\r\nok\r\n0\r\n\r\n",
+        "POST /invalid-cl HTTP/1.1\r\n" ++
+            "Host: example.com\r\n" ++
+            "Connection: keep-alive\r\n" ++
+            "Content-Length: nope\r\n" ++
+            "Transfer-Encoding: chunked\r\n\r\n" ++
             "2\r\nok\r\n0\r\n\r\n",
     };
 

@@ -109,6 +109,15 @@ strategy. Five CPU-0 5-million-parse samples improved from 333-335 ns/op to
 280-282 ns/op (334 to 282 ns median, 15.6%). Five ordinary 100,000-iteration
 runs measured 283-288 ns borrowed, 828-838 ns owned, and 881-886 ns for
 owned plus explicit Host validation.
+The next profile identified duplicate request-framing scans: the borrowed head
+path parsed `Content-Length` once to choose framing and again to return the
+length, while TE+CL handling separately rescanned field names to choose the
+must-close safeguard. One internal scan now returns framing, parsed length and
+the smuggling-safe close decision together. Five CPU-0 5-million-parse runs
+measured 264-265 ns/op, reducing the isolated median from 282 to 264 ns (6.4%)
+and from the pre-pass 334 to 264 ns (21.0%). A dedicated regression preserves
+the existing rule that valid final `chunked` overrides even malformed
+Content-Length syntax while forcing connection close.
 HTTP/1 aggregate message-boundary logic now lives under
 `runtime/message/framing.zig`: head limits, Content-Length and
 Transfer-Encoding classification, decoded chunk limits, trailer limits,

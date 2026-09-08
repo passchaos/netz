@@ -123,6 +123,12 @@ benchmark response:
   audited picohttpparser approach. An isolated borrowed-parser profile drove
   this change; five CPU-0 runs improved from 333-335 to 280-282 ns/op, while a
   full 0-255 equivalence test preserves the prior token grammar.
+- request framing now returns the selected body mode, parsed Content-Length and
+  TE+CL must-close decision from one header scan. This removes the prior second
+  Content-Length parse and extra field-name scans; the isolated borrowed parser
+  improved again from a 282-ns median to 264 ns. Valid final `chunked` retains
+  precedence over malformed Content-Length while still forcing close, matching
+  the existing anti-smuggling contract and its new explicit regression.
 
 Connection persistence and Upgrade decisions scan every repeated `Connection`
 field as one comma-separated token list while ordinary `header()` lookup still
