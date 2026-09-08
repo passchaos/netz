@@ -756,6 +756,12 @@ development-runtime smoke runs with the default enabled measured 11.078-11.154
 us/request (89,653-90,262 requests/s).
 The development runtime benchmark accepts `--iterations=N` (default 1,000) so
 long profiling runs can collect enough samples without changing its source.
+Inbound request and response head validation now collects pseudo-header and
+Content-Length lookup metadata during the same semantic scan. Content-Length
+errors remain deferred until after structural and field-size validation,
+preserving the prior error precedence. Five interleaved CPU-0 runs over 100,000
+cleartext request/response exchanges measured 10.29-10.42 us/request versus
+10.49-10.53 us/request at the preceding commit (1.01-1.02x faster).
 
 A repeated 1 MiB real-handshake download exposed a short-lived-session race:
 the paced writer had submitted the final DATA/FIN packet, but the server then

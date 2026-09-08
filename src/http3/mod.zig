@@ -3519,13 +3519,13 @@ fn decodeRequestHeadFieldSection(
         settings.max_field_section_size,
     );
     errdefer Qpack.freeDecodedFields(allocator, decoded.fields);
-    try validateHeaderBlock(decoded.fields, .request);
+    const lookup = try validateRequestHeaderBlock(decoded.fields);
     try validateFieldSectionSize(
         decoded.fields,
         settings.max_field_section_size,
     );
+    if (lookup.content_length_invalid) return error.InvalidContentLength;
 
-    const lookup = try requestHeaderLookup(decoded.fields);
     const method_value = lookup.method(decoded.fields) orelse return error.MissingMethod;
     const has_protocol = lookup.hasProtocol();
     if (has_protocol and !settings.enable_connect_protocol) {
@@ -3647,12 +3647,12 @@ pub fn decodeResponseHeadFieldSectionWithDynamicTable(
         settings.max_field_section_size,
     );
     errdefer Qpack.freeDecodedFields(allocator, decoded.fields);
-    try validateHeaderBlock(decoded.fields, .response);
+    const lookup = try validateResponseHeaderBlock(decoded.fields);
     try validateFieldSectionSize(
         decoded.fields,
         settings.max_field_section_size,
     );
-    const lookup = try responseHeaderLookup(decoded.fields);
+    if (lookup.content_length_invalid) return error.InvalidContentLength;
     const status = lookup.status orelse return error.MissingStatus;
     const declared_length = lookup.content_length;
     try validateResponseBodyForStatusWithLength(
@@ -4345,12 +4345,12 @@ fn decodeResponseMessage(
         );
         var decoded_owned = true;
         defer if (decoded_owned) Qpack.freeDecodedFields(allocator, decoded.fields);
-        try validateHeaderBlock(decoded.fields, .response);
+        const lookup = try validateResponseHeaderBlock(decoded.fields);
         try validateFieldSectionSize(
             decoded.fields,
             settings.max_field_section_size,
         );
-        const lookup = try responseHeaderLookup(decoded.fields);
+        if (lookup.content_length_invalid) return error.InvalidContentLength;
         const status = lookup.status orelse return error.MissingStatus;
         if (status < 200) {
             try validateResponseBodyForStatusWithLength(
@@ -4440,17 +4440,16 @@ fn decodeMessage(
         decoded_headers.fields,
         settings.max_field_section_size,
     );
-    try validateHeaderBlock(
-        decoded_headers.fields,
-        switch (kind) {
-            .request => .request,
-            .response => .response,
-        },
-    );
     const request_lookup = if (kind == .request)
-        try requestHeaderLookup(decoded_headers.fields)
-    else
-        null;
+        try validateRequestHeaderBlock(decoded_headers.fields)
+    else blk: {
+        const lookup = try validateResponseHeaderBlock(decoded_headers.fields);
+        if (lookup.content_length_invalid) return error.InvalidContentLength;
+        break :blk null;
+    };
+    if (request_lookup) |lookup| {
+        if (lookup.content_length_invalid) return error.InvalidContentLength;
+    }
     headers_owned = false;
     var message = try decodeMessageAfterHeaders(
         allocator,
@@ -4606,6 +4605,7 @@ const RequestHeaderLookup = struct {
     host_index: ?usize = null,
     has_protocol_pseudo: bool = false,
     content_length: ?usize = null,
+    content_length_invalid: bool = false,
 
     fn method(self: RequestHeaderLookup, headers: []const Qpack.HeaderField) ?[]const u8 {
         const index = self.method_index orelse return null;
@@ -4657,6 +4657,7 @@ fn requestHeaderLookup(headers: []const Qpack.HeaderField) Error!RequestHeaderLo
 const ResponseHeaderLookup = struct {
     status: ?u16 = null,
     content_length: ?usize = null,
+    content_length_invalid: bool = false,
 };
 
 fn responseHeaderLookup(headers: []const Qpack.HeaderField) Error!ResponseHeaderLookup {
@@ -4755,6 +4756,32 @@ const HeaderBlockKind = enum {
 };
 
 fn validateHeaderBlock(headers: []const Qpack.HeaderField, kind: HeaderBlockKind) Error!void {
+    _ = try validateHeaderBlockImpl(false, headers, kind);
+}
+
+const HeaderBlockValidation = struct {
+    request: RequestHeaderLookup = .{},
+    response: ResponseHeaderLookup = .{},
+};
+
+fn validateRequestHeaderBlock(
+    headers: []const Qpack.HeaderField,
+) Error!RequestHeaderLookup {
+    return (try validateHeaderBlockImpl(true, headers, .request)).request;
+}
+
+fn validateResponseHeaderBlock(
+    headers: []const Qpack.HeaderField,
+) Error!ResponseHeaderLookup {
+    return (try validateHeaderBlockImpl(true, headers, .response)).response;
+}
+
+fn validateHeaderBlockImpl(
+    comptime collect_lookup: bool,
+    headers: []const Qpack.HeaderField,
+    kind: HeaderBlockKind,
+) Error!HeaderBlockValidation {
+    var lookup: HeaderBlockValidation = .{};
     var saw_regular = false;
     var seen_method = false;
     var seen_scheme = false;
@@ -4769,7 +4796,7 @@ fn validateHeaderBlock(headers: []const Qpack.HeaderField, kind: HeaderBlockKind
     var protocol_value: ?[]const u8 = null;
     var host_value: ?[]const u8 = null;
 
-    for (headers) |header| {
+    for (headers, 0..) |header, index| {
         try validateHeaderName(header.name);
         try validateHeaderValue(header.value);
         const pseudo = std.mem.startsWith(u8, header.name, ":");
@@ -4777,21 +4804,45 @@ fn validateHeaderBlock(headers: []const Qpack.HeaderField, kind: HeaderBlockKind
             if (saw_regular) return error.InvalidHeader;
             switch (kind) {
                 .request => {
-                    try markRequestPseudo(header.name, &seen_method, &seen_scheme, &seen_path, &seen_authority, &seen_protocol);
-                    if (std.mem.eql(u8, header.name, ":method")) method_value = header.value;
-                    if (std.mem.eql(u8, header.name, ":scheme")) scheme_value = header.value;
-                    if (std.mem.eql(u8, header.name, ":path")) path_value = header.value;
-                    if (std.mem.eql(u8, header.name, ":authority")) authority_value = header.value;
-                    if (std.mem.eql(u8, header.name, ":protocol")) protocol_value = header.value;
+                    switch (try markRequestPseudo(
+                        header.name,
+                        &seen_method,
+                        &seen_scheme,
+                        &seen_path,
+                        &seen_authority,
+                        &seen_protocol,
+                    )) {
+                        .method => {
+                            method_value = header.value;
+                            if (comptime collect_lookup) lookup.request.method_index = index;
+                        },
+                        .scheme => {
+                            scheme_value = header.value;
+                            if (comptime collect_lookup) lookup.request.scheme_index = index;
+                        },
+                        .path => {
+                            path_value = header.value;
+                            if (comptime collect_lookup) lookup.request.path_index = index;
+                        },
+                        .authority => {
+                            authority_value = header.value;
+                            if (comptime collect_lookup) lookup.request.authority_index = index;
+                        },
+                        .protocol => {
+                            protocol_value = header.value;
+                            if (comptime collect_lookup) lookup.request.has_protocol_pseudo = true;
+                        },
+                    }
                 },
                 .response => {
                     try markResponsePseudo(header.name, &seen_status);
-                    if (std.mem.eql(u8, header.name, ":status")) {
-                        if (header.value.len != 3) return error.InvalidStatus;
-                        for (header.value) |byte| if (!std.ascii.isDigit(byte)) return error.InvalidStatus;
-                        const parsed_status = std.fmt.parseInt(u16, header.value, 10) catch return error.InvalidStatus;
-                        if (parsed_status < 100) return error.InvalidStatus;
-                        if (parsed_status == 101) return error.InvalidStatus;
+                    if (header.value.len != 3) return error.InvalidStatus;
+                    for (header.value) |byte| if (!std.ascii.isDigit(byte)) return error.InvalidStatus;
+                    const parsed_status = std.fmt.parseInt(u16, header.value, 10) catch return error.InvalidStatus;
+                    if (parsed_status < 100) return error.InvalidStatus;
+                    if (parsed_status == 101) return error.InvalidStatus;
+                    if (comptime collect_lookup) {
+                        lookup.response.status = parsed_status;
                     }
                 },
                 .trailers => return error.InvalidHeader,
@@ -4804,6 +4855,26 @@ fn validateHeaderBlock(headers: []const Qpack.HeaderField, kind: HeaderBlockKind
         if (std.mem.eql(u8, header.name, "host")) {
             if (host_value != null) return error.InvalidHeader;
             host_value = header.value;
+            if (comptime collect_lookup) lookup.request.host_index = index;
+        }
+        if (comptime collect_lookup) {
+            if (std.ascii.eqlIgnoreCase(header.name, "content-length")) {
+                switch (kind) {
+                    .request => parseContentLengthHeaderValue(
+                        header.value,
+                        &lookup.request.content_length,
+                    ) catch {
+                        lookup.request.content_length_invalid = true;
+                    },
+                    .response => parseContentLengthHeaderValue(
+                        header.value,
+                        &lookup.response.content_length,
+                    ) catch {
+                        lookup.response.content_length_invalid = true;
+                    },
+                    .trailers => unreachable,
+                }
+            }
         }
         if (std.mem.eql(u8, header.name, "priority")) {
             _ = priority_field.Priority.parseStrict(header.value) catch {
@@ -4831,32 +4902,33 @@ fn validateHeaderBlock(headers: []const Qpack.HeaderField, kind: HeaderBlockKind
                 // falls through to the regular request-target requirements.
                 if (!seen_authority or seen_scheme or seen_path) return error.InvalidHeader;
                 try validateConnectAuthority(authority_value orelse return error.InvalidHeader);
-                return;
-            }
-            if (seen_protocol) {
-                try validateHttpToken(protocol_value orelse return error.InvalidHeader);
-                if (!is_connect) return error.InvalidHeader;
-            }
-            const scheme = scheme_value orelse return error.InvalidHeader;
-            try validateUriScheme(scheme);
-            const path = path_value orelse return error.MissingPath;
-            try validateUriPath(method, path);
-            if (authority_value) |authority| try validateRequestAuthority(authority);
-            if (host_value) |host| try validateRequestAuthority(host);
-            if (authority_value) |authority| {
-                if (host_value) |host| {
-                    if (!std.ascii.eqlIgnoreCase(authority, host)) return error.InvalidHeader;
+            } else {
+                if (seen_protocol) {
+                    try validateHttpToken(protocol_value orelse return error.InvalidHeader);
+                    if (!is_connect) return error.InvalidHeader;
                 }
-            }
-            if ((std.mem.eql(u8, scheme, "http") or std.mem.eql(u8, scheme, "https")) and
-                ((authority_value == null or authority_value.?.len == 0) and host_value == null))
-            {
-                return error.InvalidHeader;
+                const scheme = scheme_value orelse return error.InvalidHeader;
+                try validateUriScheme(scheme);
+                const path = path_value orelse return error.MissingPath;
+                try validateUriPath(method, path);
+                if (authority_value) |authority| try validateRequestAuthority(authority);
+                if (host_value) |host| try validateRequestAuthority(host);
+                if (authority_value) |authority| {
+                    if (host_value) |host| {
+                        if (!std.ascii.eqlIgnoreCase(authority, host)) return error.InvalidHeader;
+                    }
+                }
+                if ((std.mem.eql(u8, scheme, "http") or std.mem.eql(u8, scheme, "https")) and
+                    ((authority_value == null or authority_value.?.len == 0) and host_value == null))
+                {
+                    return error.InvalidHeader;
+                }
             }
         },
         .response => if (!seen_status) return error.MissingStatus,
         .trailers => {},
     }
+    return lookup;
 }
 
 fn validateHttpToken(value: []const u8) Error!void {
@@ -4969,6 +5041,8 @@ fn validHeaderNameByte(byte: u8) bool {
     };
 }
 
+const RequestPseudo = enum { method, scheme, path, authority, protocol };
+
 fn markRequestPseudo(
     name: []const u8,
     seen_method: *bool,
@@ -4976,12 +5050,27 @@ fn markRequestPseudo(
     seen_path: *bool,
     seen_authority: *bool,
     seen_protocol: *bool,
-) Error!void {
-    if (std.mem.eql(u8, name, ":method")) return markOnce(seen_method);
-    if (std.mem.eql(u8, name, ":scheme")) return markOnce(seen_scheme);
-    if (std.mem.eql(u8, name, ":path")) return markOnce(seen_path);
-    if (std.mem.eql(u8, name, ":authority")) return markOnce(seen_authority);
-    if (std.mem.eql(u8, name, ":protocol")) return markOnce(seen_protocol);
+) Error!RequestPseudo {
+    if (std.mem.eql(u8, name, ":method")) {
+        try markOnce(seen_method);
+        return .method;
+    }
+    if (std.mem.eql(u8, name, ":scheme")) {
+        try markOnce(seen_scheme);
+        return .scheme;
+    }
+    if (std.mem.eql(u8, name, ":path")) {
+        try markOnce(seen_path);
+        return .path;
+    }
+    if (std.mem.eql(u8, name, ":authority")) {
+        try markOnce(seen_authority);
+        return .authority;
+    }
+    if (std.mem.eql(u8, name, ":protocol")) {
+        try markOnce(seen_protocol);
+        return .protocol;
+    }
     return error.InvalidHeader;
 }
 
@@ -6973,6 +7062,26 @@ test "HTTP/3 message rejects bad frame order and content length" {
     try (Frame{ .frame_type = FrameType.headers, .payload = signed_block.items, .consumed = 0 }).write(&signed_length_request, allocator);
     try (Frame{ .frame_type = FrameType.data, .payload = "1234", .consumed = 0 }).write(&signed_length_request, allocator);
     try std.testing.expectError(error.InvalidContentLength, decodeRequest(allocator, signed_length_request.items));
+
+    var invalid_order_and_length: std.ArrayList(u8) = .empty;
+    defer invalid_order_and_length.deinit(allocator);
+    signed_block.clearRetainingCapacity();
+    try Qpack.encodeLiteralBlock(&signed_block, allocator, &.{
+        .{ .name = ":method", .value = "POST" },
+        .{ .name = "content-length", .value = "+4" },
+        .{ .name = ":path", .value = "/late-pseudo" },
+        .{ .name = ":scheme", .value = "https" },
+        .{ .name = ":authority", .value = "example.com" },
+    });
+    try (Frame{
+        .frame_type = FrameType.headers,
+        .payload = signed_block.items,
+        .consumed = 0,
+    }).write(&invalid_order_and_length, allocator);
+    try std.testing.expectError(
+        error.InvalidHeader,
+        decodeRequest(allocator, invalid_order_and_length.items),
+    );
 
     var connect_with_length = std.ArrayList(u8).empty;
     defer connect_with_length.deinit(allocator);
