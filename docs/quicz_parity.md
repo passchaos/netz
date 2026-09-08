@@ -479,6 +479,14 @@ ranges are reported by role pair, not attributed to one library. This remains
 same-application-shape because GSO/GRO, ACK policy, packetization, and syscall
 counts have not been proven equal.
 
+WebTransport's incremental and whole-stream readers now benefit from a QUIC
+receive-stream ID enumeration fast path: increasing physical IDs append
+directly, while swap-removal layouts retain the stable sorted fallback. Ten
+fixed-binary 64-stream pairs reduced the public enumeration call from a
+1,084.55 ns median to 97.64 ns (91.0%, 11.1x), with identical checksums. The
+end-to-end 64-stream transfer remains UDP-queue-bimodal, so this is recorded as
+a CPU-path improvement rather than a throughput ratio.
+
 Peer unidirectional streams are classified only after their offset-zero type
 varint becomes contiguous. A bounded connection-scoped reassembler retains
 out-of-order suffixes, so reserved/unknown streams are ignored and arbitrarily

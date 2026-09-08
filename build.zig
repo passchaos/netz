@@ -1033,6 +1033,12 @@ pub fn build(b: *std.Build) void {
             .description = "Benchmark real-handshake raw QUIC STREAM throughput",
         },
         .{
+            .exe_name = "netz-bench-quic-stream-ids",
+            .path = "examples/bench_quic_stream_ids.zig",
+            .run_step = "bench-quic-stream-ids",
+            .description = "Benchmark active QUIC receive-stream ID enumeration",
+        },
+        .{
             .exe_name = "netz-quic-close",
             .path = "examples/quic_close.zig",
             .run_step = "run-quic-close",

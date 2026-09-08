@@ -6189,7 +6189,16 @@ pub const Connection = struct {
         for (self.stream_recv_flows.items) |entry| {
             const stream_id: u62 = @intCast(entry.stream_id);
             if (after) |previous| if (stream_id <= previous) continue;
-
+            // Receive streams are normally appended in increasing ID order.
+            // Reclamation can swap a later entry into the middle, so only the
+            // ordered tail may bypass insertion; a full page still scans on
+            // for smaller out-of-order IDs that must displace its current tail.
+            if (count == 0 or stream_id > out[count - 1]) {
+                if (count == out.len) continue;
+                out[count] = stream_id;
+                count += 1;
+                continue;
+            }
             var insert_at: usize = 0;
             while (insert_at < count and out[insert_at] < stream_id) {
                 insert_at += 1;

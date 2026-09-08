@@ -1937,6 +1937,29 @@ the retained body, applications can borrow and incrementally consume
 contiguous STREAM data without allocation, and ACK-driven packet-threshold
 losses can be retransmitted in a bounded drain before waiting for PTO.
 
+WebTransport incremental and whole-stream pollers enumerate active QUIC receive
+stream IDs through `receivedStreamIdsAfterInto`. The stable pagination contract
+must survive swap-removal, but the common transport layout appends increasing
+stream IDs. An ordered-tail fast path now appends those IDs directly and falls
+back to the existing bounded insertion sort only after reclamation has made the
+physical table unordered. The dedicated public-API microbenchmark uses 64
+active receive streams and validates every sorted ID on every iteration:
+
+```sh
+taskset -c 0 zig build bench-quic-stream-ids -Doptimize=ReleaseFast -- \
+  --iterations=2000000
+```
+
+Ten alternating fixed-binary pairs measured 1,083.82-1,085.17 ns/enumeration
+before and 97.56-97.76 ns/enumeration after, with checksum 16,384,000,000 in
+every run. Median cost fell from 1,084.55 to 97.64 ns (91.0%, 11.1x). The
+ordinary one-stream WebTransport throughput guard moved only +0.17% in median,
+while the 64-stream end-to-end benchmark remained dominated by a host UDP
+queue bimodality and moved about -1.0% in median. Therefore this is recorded as
+a verified stream-enumeration CPU reduction, not an end-to-end throughput
+claim. Existing pagination tests continue to remove a stream between pages and
+require the remaining IDs in order, covering the unordered fallback.
+
 ### Raw QUIC TLS 1.3 handshake latency, rate, and memory
 
 Captured on 2026-08-19 using authenticated P-256 CertificateVerify, X25519,
