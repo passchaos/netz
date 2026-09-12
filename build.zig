@@ -12,6 +12,19 @@ pub fn build(b: *std.Build) void {
 
     const target = b.standardTargetOptions(.{});
     const optimize = b.standardOptimizeOption(.{});
+    const aws_lc_path = b.option(
+        []const u8,
+        "aws-lc-path",
+        "Path to an AWS-LC/BoringSSL-compatible prefix for Vail packet crypto",
+    );
+    const aws_lc_link = b.option(
+        bool,
+        "aws-lc-link",
+        "Link Vail's optional AWS-LC packet-crypto backend",
+    ) orelse false;
+    if (aws_lc_link and aws_lc_path == null) {
+        @panic("-Daws-lc-link requires -Daws-lc-path");
+    }
     const test_filters = b.option(
         []const []const u8,
         "test-filter",
@@ -20,6 +33,8 @@ pub fn build(b: *std.Build) void {
     const vail_dep = b.dependency("vail", .{
         .target = target,
         .optimize = optimize,
+        .@"aws-lc-path" = aws_lc_path,
+        .@"aws-lc-link" = aws_lc_link,
     });
     const zio_dep = b.dependency("zio", .{
         .target = target,

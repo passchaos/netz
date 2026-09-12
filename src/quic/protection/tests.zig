@@ -830,6 +830,132 @@ test "QUIC short packet final-storage sealing supports every traffic suite" {
     }
 }
 
+test "QUIC prepared short packet protection matches value-key paths" {
+    const suites = [_]protection.CipherSuite{
+        .aes_128_gcm_sha256,
+        .aes_256_gcm_sha384,
+        .chacha20_poly1305_sha256,
+        .sm4_gcm_sm3,
+    };
+    const options: protection.ShortPacketOptions = .{
+        .destination_connection_id = "prepared-dcid",
+        .packet_number = 0x34_5678,
+        .packet_number_len = 3,
+        .spin_bit = true,
+        .key_phase = true,
+        .payload = "prepared packet protection",
+    };
+    inline for (suites) |suite| {
+        const keys = try protection.deriveKeysForSecretForVersion(
+            version_1_wire_for_test,
+            suite,
+            trafficSecretForSuiteForTest(suite),
+        );
+        var prepared = protection.PreparedPacketProtectionKeys.init(keys);
+        defer prepared.deinit();
+
+        var expected_storage: [160]u8 = undefined;
+        const expected = try protection.sealShortPacketInto(
+            &expected_storage,
+            keys,
+            options,
+        );
+        var direct_storage: [160]u8 = undefined;
+        const direct = try protection.sealShortPacketIntoPrepared(
+            &direct_storage,
+            &prepared,
+            options,
+        );
+        try std.testing.expectEqualSlices(u8, expected, direct);
+
+        var in_place_storage: [160]u8 = undefined;
+        const payload_offset = 1 + options.destination_connection_id.len +
+            options.packet_number_len;
+        @memcpy(
+            in_place_storage[payload_offset..][0..options.payload.len],
+            options.payload,
+        );
+        const in_place = try protection.sealShortPacketInPlacePrepared(
+            &in_place_storage,
+            &prepared,
+            options,
+        );
+        try std.testing.expectEqualSlices(u8, expected, in_place);
+
+        var mismatch_storage: [160]u8 = undefined;
+        @memcpy(mismatch_storage[0..expected.len], expected);
+        const mismatch_before = mismatch_storage;
+        const mismatch = try protection
+            .openShortPacketInPlaceForPreparedKeyPhaseWithFixedBitPolicy(
+            &prepared,
+            false,
+            mismatch_storage[0..expected.len],
+            options.destination_connection_id.len,
+            options.packet_number,
+            false,
+        );
+        try std.testing.expect(mismatch == .key_phase_mismatch);
+        try std.testing.expectEqualSlices(
+            u8,
+            mismatch_before[0..expected.len],
+            mismatch_storage[0..expected.len],
+        );
+
+        var open_storage: [160]u8 = undefined;
+        @memcpy(open_storage[0..expected.len], expected);
+        const opened = try protection
+            .openShortPacketInPlaceForPreparedKeyPhaseWithFixedBitPolicy(
+            &prepared,
+            true,
+            open_storage[0..expected.len],
+            options.destination_connection_id.len,
+            options.packet_number,
+            false,
+        );
+        try std.testing.expect(opened == .opened);
+        try std.testing.expectEqualStrings(
+            options.payload,
+            opened.opened.payload,
+        );
+    }
+}
+
+test "QUIC prepared short packet protection replaces key generations" {
+    const current = protection.deriveAes128Keys(
+        [_]u8{0x71} ** protection.secret_len,
+    );
+    // Use unrelated material so the test covers both AEAD and cached header
+    // key replacement. Ordinary QUIC updates intentionally retain the header
+    // key across generations.
+    const replacement = protection.deriveAes128Keys(
+        [_]u8{0x72} ** protection.secret_len,
+    );
+    var prepared = protection.PreparedPacketProtectionKeys.init(current);
+    defer prepared.deinit();
+    prepared.replace(replacement);
+
+    const options: protection.ShortPacketOptions = .{
+        .destination_connection_id = "replace-dcid",
+        .packet_number = 77,
+        .packet_number_len = 2,
+        .key_phase = true,
+        .payload = "new generation",
+    };
+    var expected_storage: [128]u8 = undefined;
+    const expected = try protection.sealShortPacketInto(
+        &expected_storage,
+        replacement,
+        options,
+    );
+    var actual_storage: [128]u8 = undefined;
+    const actual = try protection.sealShortPacketIntoPrepared(
+        &actual_storage,
+        &prepared,
+        options,
+    );
+    try std.testing.expectEqualSlices(u8, expected, actual);
+}
+
 test "QUIC short packet in-place open matches owning open" {
     const allocator = std.testing.allocator;
     const keys = protection.deriveAes128Keys([_]u8{0x9d} ** protection.secret_len);

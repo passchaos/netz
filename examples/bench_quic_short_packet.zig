@@ -96,14 +96,45 @@ pub fn main() !void {
         chacha_in_place_ratio_x100 / 100,
         chacha_in_place_ratio_x100 % 100,
     });
+    printPreparedComparison("AES", aes);
+    printPreparedComparison("AES-256", aes256);
+    printPreparedComparison("ChaCha", chacha);
+    std.debug.print(
+        "  prepared connection backend enabled: {}\n",
+        .{netz.quic.protection.prepared_packet_protection_enabled},
+    );
 }
 
 const SuiteResult = struct {
     in_place_total: usize,
     in_place_ns: u64,
+    prepared_total: usize,
+    prepared_ns: u64,
+    open_ns: u64,
+    prepared_open_ns: u64,
     allocating_total: usize,
     allocating_ns: u64,
 };
+
+fn printPreparedComparison(name: []const u8, result: SuiteResult) void {
+    const seal_ratio = ratioTimes100(result.in_place_ns, result.prepared_ns);
+    const open_ratio = ratioTimes100(result.open_ns, result.prepared_open_ns);
+    std.debug.print(
+        "  {s} prepared seal: {d} ns/op vs value-key {d} ns/op ({d}.{d:0>2}x); open: {d} ns/op vs {d} ns/op ({d}.{d:0>2}x); total: {d}\n",
+        .{
+            name,
+            result.prepared_ns / iterations,
+            result.in_place_ns / iterations,
+            seal_ratio / 100,
+            seal_ratio % 100,
+            result.prepared_open_ns / iterations,
+            result.open_ns / iterations,
+            open_ratio / 100,
+            open_ratio % 100,
+            result.prepared_total,
+        },
+    );
+}
 
 fn benchSuite(
     allocator: std.mem.Allocator,
@@ -112,6 +143,8 @@ fn benchSuite(
     options: netz.quic.protection.ShortPacketOptions,
 ) !SuiteResult {
     var storage: [256]u8 = undefined;
+    var prepared = netz.quic.protection.PreparedPacketProtectionKeys.init(keys);
+    defer prepared.deinit();
     const in_place_start = nowNs(io);
     var in_place_total: usize = 0;
     for (0..iterations) |_| {
@@ -120,9 +153,63 @@ fn benchSuite(
             keys,
             options,
         );
-        in_place_total += packet.len;
+        in_place_total +%= packet.len + packet[packet.len - 1];
     }
     const in_place_ns = nowNs(io) -| in_place_start;
+
+    const prepared_start = nowNs(io);
+    var prepared_total: usize = 0;
+    for (0..iterations) |_| {
+        const packet = try netz.quic.protection.sealShortPacketIntoPrepared(
+            &storage,
+            &prepared,
+            options,
+        );
+        prepared_total +%= packet.len + packet[packet.len - 1];
+    }
+    const prepared_ns = nowNs(io) -| prepared_start;
+
+    var sealed_storage: [256]u8 = undefined;
+    const sealed = try netz.quic.protection.sealShortPacketInto(
+        &sealed_storage,
+        keys,
+        options,
+    );
+    const open_start = nowNs(io);
+    var open_total: usize = 0;
+    for (0..iterations) |_| {
+        @memcpy(storage[0..sealed.len], sealed);
+        const opened = try netz.quic.protection
+            .openShortPacketInPlaceForKeyPhaseWithFixedBitPolicy(
+            keys,
+            options.key_phase,
+            storage[0..sealed.len],
+            options.destination_connection_id.len,
+            options.packet_number,
+            false,
+        );
+        open_total +%= opened.opened.payload[0];
+    }
+    const open_ns = nowNs(io) -| open_start;
+
+    const prepared_open_start = nowNs(io);
+    var prepared_open_total: usize = 0;
+    for (0..iterations) |_| {
+        @memcpy(storage[0..sealed.len], sealed);
+        const opened = try netz.quic.protection
+            .openShortPacketInPlaceForPreparedKeyPhaseWithFixedBitPolicy(
+            &prepared,
+            options.key_phase,
+            storage[0..sealed.len],
+            options.destination_connection_id.len,
+            options.packet_number,
+            false,
+        );
+        prepared_open_total +%= opened.opened.payload[0];
+    }
+    const prepared_open_ns = nowNs(io) -| prepared_open_start;
+    std.mem.doNotOptimizeAway(open_total);
+    std.mem.doNotOptimizeAway(prepared_open_total);
 
     const allocating_start = nowNs(io);
     var allocating_total: usize = 0;
@@ -132,12 +219,16 @@ fn benchSuite(
             keys,
             options,
         );
-        allocating_total += packet.len;
+        allocating_total +%= packet.len + packet[packet.len - 1];
         allocator.free(packet);
     }
     return .{
         .in_place_total = in_place_total,
         .in_place_ns = in_place_ns,
+        .prepared_total = prepared_total,
+        .prepared_ns = prepared_ns,
+        .open_ns = open_ns,
+        .prepared_open_ns = prepared_open_ns,
         .allocating_total = allocating_total,
         .allocating_ns = nowNs(io) -| allocating_start,
     };

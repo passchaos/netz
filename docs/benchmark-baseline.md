@@ -601,6 +601,48 @@ interleaved CPU-0 large-section comparisons measured 9.22-9.33 us/block versus
 Two 1,000,000-iteration 32-field comparisons measured 711-715 ns/block versus
 733-736 ns/block.
 
+### QUIC prepared packet protection
+
+Connections built with Vail's linked AWS-LC-compatible backend now keep one
+initialized AES-GCM context and AES header-protection key schedule for each
+current send/receive key generation. This matches quiche's connection-owned
+packet/header key design: the expensive setup is paid when the connection is
+created or its key phase changes, rather than once per packet. AES-128-GCM and
+AES-256-GCM use the prepared path; ChaCha20 and SM4 retain the allocation-free
+Zig path. Builds without the linked backend do not allocate the two
+connection-owned contexts.
+
+The short-packet benchmark reports value-key and prepared-key seal/open paths
+separately and prints whether the build enables prepared connection state. To
+reproduce with an AWS-LC checkout whose static library has been built under
+`build/crypto`, run:
+
+```sh
+taskset -c 0 zig build bench-quic-short-packet -Doptimize=ReleaseFast \
+  -Daws-lc-path=/path/to/aws-lc -Daws-lc-link=true
+```
+
+Five CPU-0 runs on 2026-09-12 used the BoringSSL-compatible static crypto
+library already built by the local tquic checkout. Medians are reported below.
+Every operation includes short-header construction/removal and header
+protection, so these figures measure the complete protected short-packet
+primitive rather than AEAD alone.
+
+| 85-byte short packet | Value-key median | Prepared-key median | Throughput gain |
+| --- | ---: | ---: | ---: |
+| AES-128-GCM seal | 545 ns | 206 ns | 2.64x |
+| AES-128-GCM open | 544 ns | 251 ns | 2.17x |
+| AES-256-GCM seal | 558 ns | 225 ns | 2.48x |
+| AES-256-GCM open | 564 ns | 272 ns | 2.07x |
+
+The same benchmark showed no material prepared-wrapper change for ChaCha20
+(0.99-1.00x), and the non-linked build leaves prepared connection state
+disabled. Suite-wide equivalence tests cover seal, in-place seal, phase
+mismatch preservation, open, and key replacement. A connection-level test
+also proves that linked AES connections select prepared send/receive contexts
+and continue exchanging STREAM data across a key update, while ChaCha20 and
+SM4 remain on their existing paths.
+
 ### QUIC 1-RTT send
 
 ```text

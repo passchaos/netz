@@ -195,6 +195,27 @@ fn expectSingleStreamReceiveForSuite(
         .local_endpoint = .server,
     });
     defer server.deinit();
+    const expects_prepared =
+        quic.protection.prepared_packet_protection_enabled and switch (suite) {
+            .aes_128_gcm_sha256, .aes_256_gcm_sha384 => true,
+            else => false,
+        };
+    try std.testing.expectEqual(
+        expects_prepared,
+        one_rtt.testing.hasPreparedSendPacketProtection(&client),
+    );
+    try std.testing.expectEqual(
+        expects_prepared,
+        one_rtt.testing.hasPreparedReceivePacketProtection(&client),
+    );
+    try std.testing.expectEqual(
+        expects_prepared,
+        one_rtt.testing.hasPreparedSendPacketProtection(&server),
+    );
+    try std.testing.expectEqual(
+        expects_prepared,
+        one_rtt.testing.hasPreparedReceivePacketProtection(&server),
+    );
 
     try client.send(&[_]quic.Frame{.{ .stream = .{
         .stream_id = 0,
@@ -238,6 +259,24 @@ fn expectSingleStreamReceiveForSuite(
         storage[0..updated_event.data.bytes],
     );
     try std.testing.expect(updated_event.data.fin);
+
+    // The first updated packet takes the owning key-transition path above. A
+    // second packet in that generation must use the refreshed prepared current
+    // key in servicePacket's allocation-free receive path.
+    try client.send(&[_]quic.Frame{.{ .stream = .{
+        .stream_id = 8,
+        .data = "prepared current generation",
+        .fin = true,
+    } }});
+    try server.servicePacket();
+    const current_event = (try server.pollStreamId(8, &storage)) orelse
+        return error.TestUnexpectedResult;
+    try std.testing.expect(current_event == .data);
+    try std.testing.expectEqualStrings(
+        "prepared current generation",
+        storage[0..current_event.data.bytes],
+    );
+    try std.testing.expect(current_event.data.fin);
 }
 
 test "QUIC 1-RTT single STREAM receive and key update support every traffic suite" {

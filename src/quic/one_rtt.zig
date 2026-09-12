@@ -885,6 +885,11 @@ pub const Connection = struct {
     peer_close_frame_received: bool = false,
     send_key_phase: quic.protection.Aes128KeyPhaseState,
     receive_key_phase: quic.protection.Aes128KeyPhaseState,
+    /// Current-generation packet keys with optional backend AEAD setup kept
+    /// alive across packets. The movable key-phase state remains plain data;
+    /// these connection-owned contexts are refreshed only on phase changes.
+    prepared_send_keys: ?*quic.protection.PreparedPacketProtectionKeys,
+    prepared_receive_keys: ?*quic.protection.PreparedPacketProtectionKeys,
     pending_key_update_ack_threshold: ?u64 = null,
     send_key_generation_encrypted_packets: u64 = 0,
     receive_authentication_failures: u64 = 0,
@@ -1023,6 +1028,22 @@ pub const Connection = struct {
         var stable_config = config;
         stable_config.peer_connection_id =
             peer_connection_id_storage[0..config.peer_connection_id.len];
+        var prepared_send_keys = try quic.protection
+            .PreparedPacketProtectionKeys.createIfAccelerated(
+            endpoint.allocator,
+            config.send_keys,
+        );
+        errdefer if (prepared_send_keys) |prepared| {
+            prepared.destroy(endpoint.allocator);
+        };
+        var prepared_receive_keys = try quic.protection
+            .PreparedPacketProtectionKeys.createIfAccelerated(
+            endpoint.allocator,
+            config.receive_keys,
+        );
+        errdefer if (prepared_receive_keys) |prepared| {
+            prepared.destroy(endpoint.allocator);
+        };
         var connection = Connection{
             .endpoint = endpoint,
             .config = stable_config,
@@ -1065,6 +1086,8 @@ pub const Connection = struct {
                 false,
                 config.key_update_profile,
             ),
+            .prepared_send_keys = prepared_send_keys,
+            .prepared_receive_keys = prepared_receive_keys,
             .peer_max_streams_bidi = config.initial_send_max_streams_bidi,
             .peer_max_streams_uni = config.initial_send_max_streams_uni,
             .recv_max_streams_bidi = config.initial_receive_max_streams_bidi,
@@ -1081,6 +1104,8 @@ pub const Connection = struct {
             .requested_max_ack_delay = config.local_max_ack_delay_us,
             .ack_reordering_threshold = config.local_ack_reordering_threshold,
         };
+        prepared_send_keys = null;
+        prepared_receive_keys = null;
         peer_connection_id_storage_owned = false;
         errdefer connection.deinit();
         connection.fixed_bit_generator = try .init(
@@ -1163,6 +1188,12 @@ pub const Connection = struct {
         self.receive_packet_buffer.deinit(self.endpoint.allocator);
         self.receive_ack_range_buffer.deinit(self.endpoint.allocator);
         self.receive_frame_buffer.deinit(self.endpoint.allocator);
+        if (self.prepared_send_keys) |prepared| {
+            prepared.destroy(self.endpoint.allocator);
+        }
+        if (self.prepared_receive_keys) |prepared| {
+            prepared.destroy(self.endpoint.allocator);
+        }
         self.fixed_bit_generator.deinit();
         self.endpoint.allocator.free(self.peer_connection_id_storage);
         self.* = undefined;
@@ -1822,15 +1853,13 @@ pub const Connection = struct {
             };
             const sealed = if (recovery_payload != null and
                 packet.recovery_payload_len == packet.payload_len)
-                try quic.protection.sealShortPacketInto(
+                try self.sealCurrentShortPacketInto(
                     packet_storage,
-                    self.send_key_phase.currentKeys(),
                     packet_options,
                 )
             else
-                try quic.protection.sealShortPacketInPlace(
+                try self.sealCurrentShortPacketInPlace(
                     packet_storage,
-                    self.send_key_phase.currentKeys(),
                     packet_options,
                 );
             self.recordPacketEncrypted();
@@ -4152,6 +4181,48 @@ pub const Connection = struct {
         );
     }
 
+    fn sealCurrentShortPacketInto(
+        self: *const Connection,
+        packet: []u8,
+        options: quic.protection.ShortPacketOptions,
+    ) Error![]u8 {
+        if (comptime quic.protection.prepared_packet_protection_enabled) {
+            if (self.prepared_send_keys) |prepared| {
+                return quic.protection.sealShortPacketIntoPrepared(
+                    packet,
+                    prepared,
+                    options,
+                );
+            }
+        }
+        return quic.protection.sealShortPacketInto(
+            packet,
+            self.send_key_phase.currentKeys(),
+            options,
+        );
+    }
+
+    fn sealCurrentShortPacketInPlace(
+        self: *const Connection,
+        packet: []u8,
+        options: quic.protection.ShortPacketOptions,
+    ) Error![]u8 {
+        if (comptime quic.protection.prepared_packet_protection_enabled) {
+            if (self.prepared_send_keys) |prepared| {
+                return quic.protection.sealShortPacketInPlacePrepared(
+                    packet,
+                    prepared,
+                    options,
+                );
+            }
+        }
+        return quic.protection.sealShortPacketInPlace(
+            packet,
+            self.send_key_phase.currentKeys(),
+            options,
+        );
+    }
+
     fn sendPayloadPacketWithPacketNumberLenAt(
         self: *Connection,
         packet_number: u64,
@@ -4208,9 +4279,8 @@ pub const Connection = struct {
         try self.send_packet_buffer.ensureTotalCapacity(self.endpoint.allocator, packet_len);
         self.send_packet_buffer.items.len = self.send_packet_buffer.capacity;
         defer self.send_packet_buffer.items.len = 0;
-        const packet = try quic.protection.sealShortPacketInto(
+        const packet = try self.sealCurrentShortPacketInto(
             self.send_packet_buffer.items,
-            self.send_key_phase.currentKeys(),
             packet_options,
         );
         self.recordPacketEncrypted();
@@ -4285,6 +4355,9 @@ pub const Connection = struct {
         now_ns: ?u64,
     ) void {
         self.send_key_phase.initiateKeyUpdate();
+        if (self.prepared_send_keys) |prepared| {
+            prepared.replace(self.send_key_phase.currentKeys());
+        }
         self.pending_key_update_ack_threshold = first_packet_number;
         self.send_key_generation_encrypted_packets = 0;
         if (self.config.qlog_observer) |observer| {
@@ -4869,9 +4942,8 @@ pub const Connection = struct {
                 probe.packet_number,
                 sent_time_ns,
             );
-            const packet = try quic.protection.sealShortPacketInto(
+            const packet = try self.sealCurrentShortPacketInto(
                 self.send_packet_buffer.items[packet_offset..][0..probe.packet_len],
-                self.send_key_phase.currentKeys(),
                 .{
                     .destination_connection_id = self.config.peer_connection_id,
                     .packet_number = probe.packet_number,
@@ -9383,12 +9455,9 @@ pub const Connection = struct {
         context: anytype,
         comptime visitor: anytype,
     ) (Error || callbackErrorSet(visitor))!void {
-        const keys = self.receive_key_phase.keyUpdateKeys();
         const reset_candidate = quic.stateless_reset.tokenCandidate(bytes);
-        const current = quic.protection
-            .openShortPacketInPlaceForKeyPhaseWithFixedBitPolicy(
-            keys.current,
-            keys.current_key_phase,
+        const current = self.openCurrentShortPacketInPlaceForKeyPhase(
+            self.receive_key_phase.currentKeyPhase(),
             bytes,
             self.config.local_connection_id.len,
             self.expected_packet_number,
@@ -9427,6 +9496,38 @@ pub const Connection = struct {
             .frames = packet.frames,
             .peer_initiated_key_update = packet.peer_initiated_key_update,
         });
+    }
+
+    fn openCurrentShortPacketInPlaceForKeyPhase(
+        self: *const Connection,
+        current_key_phase: bool,
+        bytes: []u8,
+        destination_connection_id_len: usize,
+        expected_packet_number: u64,
+        allow_zero_fixed_bit: bool,
+    ) quic.protection.Error!quic.protection.CurrentKeyOpenResult {
+        if (comptime quic.protection.prepared_packet_protection_enabled) {
+            if (self.prepared_receive_keys) |prepared| {
+                return quic.protection
+                    .openShortPacketInPlaceForPreparedKeyPhaseWithFixedBitPolicy(
+                    prepared,
+                    current_key_phase,
+                    bytes,
+                    destination_connection_id_len,
+                    expected_packet_number,
+                    allow_zero_fixed_bit,
+                );
+            }
+        }
+        return quic.protection
+            .openShortPacketInPlaceForKeyPhaseWithFixedBitPolicy(
+            self.receive_key_phase.currentKeys(),
+            current_key_phase,
+            bytes,
+            destination_connection_id_len,
+            expected_packet_number,
+            allow_zero_fixed_bit,
+        );
     }
 
     pub fn servicePacketBatchAt(self: *Connection, now_ns: ?u64) Error!usize {
@@ -9482,12 +9583,9 @@ pub const Connection = struct {
             const bytes = datagrams.datagramAtMutable(index) orelse
                 return error.InvalidPacket;
             if (isDiscardedLongHeaderPacket(bytes)) continue;
-            const keys = self.receive_key_phase.keyUpdateKeys();
             const reset_candidate = quic.stateless_reset.tokenCandidate(bytes);
-            const current = quic.protection
-                .openShortPacketInPlaceForKeyPhaseWithFixedBitPolicy(
-                keys.current,
-                keys.current_key_phase,
+            const current = self.openCurrentShortPacketInPlaceForKeyPhase(
+                self.receive_key_phase.currentKeyPhase(),
                 bytes,
                 self.config.local_connection_id.len,
                 self.expected_packet_number,
@@ -9773,6 +9871,9 @@ pub const Connection = struct {
         now_ns: ?u64,
     ) Error!void {
         if (!self.receive_key_phase.updateAfterReceiving(peer_key_phase)) return;
+        if (self.prepared_receive_keys) |prepared| {
+            prepared.replace(self.receive_key_phase.currentKeys());
+        }
         if (self.config.qlog_observer) |observer| {
             observer.keyUpdated(
                 self.qlogEventTime(now_ns orelse self.monotonicNowNs()),
@@ -13207,6 +13308,18 @@ fn parsePacketFramesForType(
 /// to normal transport callers while allowing the large conformance suite to
 /// live outside the production module.
 pub const testing = struct {
+    pub fn hasPreparedSendPacketProtection(
+        connection: *const Connection,
+    ) bool {
+        return connection.prepared_send_keys != null;
+    }
+
+    pub fn hasPreparedReceivePacketProtection(
+        connection: *const Connection,
+    ) bool {
+        return connection.prepared_receive_keys != null;
+    }
+
     pub const LocalCloseInfo = struct {
         application: bool,
         error_code: u64,

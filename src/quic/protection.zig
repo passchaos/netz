@@ -30,6 +30,8 @@ pub const aead_tag_len = traffic_crypto.tag_len;
 pub const header_protection_sample_len = traffic_crypto.sample_len;
 pub const header_protection_mask_len = traffic_crypto.mask_len;
 pub const max_packet_number: u64 = varint.max_value;
+pub const prepared_packet_protection_enabled =
+    vail.crypto.backend.aws_lc_linked;
 /// RFC 9001 Section 6.6 / Appendix B.1 limits for AEAD_AES_128_GCM.
 pub const aes_128_gcm_confidentiality_limit =
     CipherSuite.aes_128_gcm_sha256.confidentialityLimit();
@@ -99,6 +101,126 @@ pub const PacketProtectionKeys = struct {
 
     pub fn integrityLimit(self: PacketProtectionKeys) u64 {
         return self.suite.integrityLimit();
+    }
+};
+
+/// Packet-protection keys prepared for repeated use by a live connection.
+///
+/// Vail keeps an initialized AEAD context when the optional AWS-LC backend is
+/// linked, while this wrapper also retains the AES header-protection schedule,
+/// matching the persistent packet/header-key design used by quiche. Other
+/// builds retain the same allocation-free pure-Zig AEAD primitives. This type
+/// owns backend state and must be deinitialized exactly once.
+pub const PreparedPacketProtectionKeys = struct {
+    inner: traffic_crypto.PreparedKeys,
+    aes_128_header: ?std.crypto.core.aes.AesEncryptCtx(
+        std.crypto.core.aes.Aes128,
+    ),
+    aes_256_header: ?std.crypto.core.aes.AesEncryptCtx(
+        std.crypto.core.aes.Aes256,
+    ),
+
+    pub fn init(keys: PacketProtectionKeys) PreparedPacketProtectionKeys {
+        return .{
+            .inner = .init(asVailKeys(keys)),
+            .aes_128_header = if (keys.suite == .aes_128_gcm_sha256)
+                std.crypto.core.aes.Aes128.initEnc(
+                    keys.suite_hp[0..aes_128_key_len].*,
+                )
+            else
+                null,
+            .aes_256_header = if (keys.suite == .aes_256_gcm_sha384)
+                std.crypto.core.aes.Aes256.initEnc(keys.suite_hp)
+            else
+                null,
+        };
+    }
+
+    pub fn deinit(self: *PreparedPacketProtectionKeys) void {
+        self.inner.deinit();
+        self.* = undefined;
+    }
+
+    /// Heap ownership gives backend contexts a stable address even when their
+    /// containing transport connection is moved by value during handoff.
+    pub fn createIfAccelerated(
+        allocator: std.mem.Allocator,
+        keys: PacketProtectionKeys,
+    ) std.mem.Allocator.Error!?*PreparedPacketProtectionKeys {
+        if (!prepared_packet_protection_enabled or switch (keys.suite) {
+            .aes_128_gcm_sha256, .aes_256_gcm_sha384 => false,
+            else => true,
+        }) return null;
+        const prepared = try allocator.create(PreparedPacketProtectionKeys);
+        prepared.* = .init(keys);
+        return prepared;
+    }
+
+    pub fn destroy(
+        self: *PreparedPacketProtectionKeys,
+        allocator: std.mem.Allocator,
+    ) void {
+        self.deinit();
+        allocator.destroy(self);
+    }
+
+    pub fn replace(
+        self: *PreparedPacketProtectionKeys,
+        keys: PacketProtectionKeys,
+    ) void {
+        self.inner.deinit();
+        self.* = .init(keys);
+    }
+
+    fn protect(
+        self: *const PreparedPacketProtectionKeys,
+        packet_number: u64,
+        associated_data: []const u8,
+        plaintext: []const u8,
+        ciphertext: []u8,
+        tag: *[aead_tag_len]u8,
+    ) error{InvalidPayloadLength}!void {
+        return self.inner.protect(
+            packet_number,
+            associated_data,
+            plaintext,
+            ciphertext,
+            tag,
+        );
+    }
+
+    fn open(
+        self: *const PreparedPacketProtectionKeys,
+        packet_number: u64,
+        associated_data: []const u8,
+        ciphertext: []const u8,
+        tag: [aead_tag_len]u8,
+        plaintext: []u8,
+    ) (error{InvalidPayloadLength} ||
+        std.crypto.errors.AuthenticationError)!void {
+        return self.inner.open(
+            packet_number,
+            associated_data,
+            ciphertext,
+            tag,
+            plaintext,
+        );
+    }
+
+    fn headerProtectionMask(
+        self: *const PreparedPacketProtectionKeys,
+        sample: [header_protection_sample_len]u8,
+    ) [header_protection_mask_len]u8 {
+        var encrypted: [header_protection_sample_len]u8 = undefined;
+        if (self.aes_128_header) |aes| {
+            aes.encrypt(&encrypted, &sample);
+            return encrypted[0..header_protection_mask_len].*;
+        }
+        if (self.aes_256_header) |aes| {
+            aes.encrypt(&encrypted, &sample);
+            return encrypted[0..header_protection_mask_len].*;
+        }
+        return self.inner.headerProtectionMask(sample);
     }
 };
 
@@ -675,12 +797,27 @@ pub fn applyHeaderProtectionForKeys(
     packet: []u8,
     pn_offset: usize,
 ) Error!void {
+    const provider = asVailKeys(keys);
+    return applyHeaderProtectionWithProvider(
+        &provider,
+        header_form,
+        packet,
+        pn_offset,
+    );
+}
+
+fn applyHeaderProtectionWithProvider(
+    provider: anytype,
+    header_form: HeaderForm,
+    packet: []u8,
+    pn_offset: usize,
+) Error!void {
     if (pn_offset + 4 + header_protection_sample_len > packet.len) {
         return error.InvalidHeaderProtectionSample;
     }
     const sample =
         packet[pn_offset + 4 ..][0..header_protection_sample_len].*;
-    const mask = asVailKeys(keys).headerProtectionMask(sample);
+    const mask = provider.headerProtectionMask(sample);
     const pn_len = @as(usize, (packet[0] & 0x03) + 1);
     try applyHeaderProtectionMask(
         header_form,
@@ -748,6 +885,21 @@ fn previewShortHeaderForKeysWithFixedBitPolicy(
     destination_connection_id_len: usize,
     allow_zero_fixed_bit: bool,
 ) Error!ShortHeaderPreview {
+    const provider = asVailKeys(keys);
+    return previewShortHeaderWithProvider(
+        &provider,
+        packet,
+        destination_connection_id_len,
+        allow_zero_fixed_bit,
+    );
+}
+
+fn previewShortHeaderWithProvider(
+    provider: anytype,
+    packet: []const u8,
+    destination_connection_id_len: usize,
+    allow_zero_fixed_bit: bool,
+) Error!ShortHeaderPreview {
     if (destination_connection_id_len > 20) return error.InvalidInitialPacket;
     if (packet.len < 1 + destination_connection_id_len + 1 + aead_tag_len or
         (packet[0] & 0x80) != 0 or
@@ -761,7 +913,7 @@ fn previewShortHeaderForKeysWithFixedBitPolicy(
     }
     const sample =
         packet[pn_offset + 4 ..][0..header_protection_sample_len].*;
-    const mask = asVailKeys(keys).headerProtectionMask(sample);
+    const mask = provider.headerProtectionMask(sample);
     const first = packet[0] ^ (mask[0] & 0x1f);
     if ((first & 0x80) != 0 or
         (!allow_zero_fixed_bit and (first & 0x40) == 0))
@@ -807,7 +959,8 @@ pub fn protectPayload(
     tag: *[aead_tag_len]u8,
 ) Error!void {
     try validatePacketNumber(packet_number);
-    try asVailKeys(keys).protect(
+    const provider = asVailKeys(keys);
+    try provider.protect(
         packet_number,
         associated_data,
         plaintext,
@@ -825,7 +978,8 @@ pub fn openPayload(
     plaintext: []u8,
 ) Error!void {
     try validatePacketNumber(packet_number);
-    try asVailKeys(keys).open(
+    const provider = asVailKeys(keys);
+    try provider.open(
         packet_number,
         associated_data,
         ciphertext,
@@ -1651,6 +1805,23 @@ pub fn sealShortPacketInto(
     keys: PacketProtectionKeys,
     options: ShortPacketOptions,
 ) Error![]u8 {
+    const provider = asVailKeys(keys);
+    return sealShortPacketIntoWithProvider(out, &provider, options);
+}
+
+pub fn sealShortPacketIntoPrepared(
+    out: []u8,
+    keys: *const PreparedPacketProtectionKeys,
+    options: ShortPacketOptions,
+) Error![]u8 {
+    return sealShortPacketIntoWithProvider(out, keys, options);
+}
+
+fn sealShortPacketIntoWithProvider(
+    out: []u8,
+    provider: anytype,
+    options: ShortPacketOptions,
+) Error![]u8 {
     const packet_len = try shortPacketLen(options);
     if (out.len < packet_len) return error.BufferTooShort;
 
@@ -1664,8 +1835,8 @@ pub fn sealShortPacketInto(
 
     const ciphertext = packet[payload_offset .. payload_offset + options.payload.len];
     const tag = packet[payload_offset + options.payload.len ..][0..aead_tag_len];
-    try protectPayload(keys, options.packet_number, packet[0..payload_offset], options.payload, ciphertext, tag);
-    try applyHeaderProtectionForKeys(keys, .short, packet, pn_offset);
+    try provider.protect(options.packet_number, packet[0..payload_offset], options.payload, ciphertext, tag);
+    try applyHeaderProtectionWithProvider(provider, .short, packet, pn_offset);
     return packet;
 }
 
@@ -1681,6 +1852,23 @@ pub fn sealShortPacketInto(
 pub fn sealShortPacketInPlace(
     packet: []u8,
     keys: PacketProtectionKeys,
+    options: ShortPacketOptions,
+) Error![]u8 {
+    const provider = asVailKeys(keys);
+    return sealShortPacketInPlaceWithProvider(packet, &provider, options);
+}
+
+pub fn sealShortPacketInPlacePrepared(
+    packet: []u8,
+    keys: *const PreparedPacketProtectionKeys,
+    options: ShortPacketOptions,
+) Error![]u8 {
+    return sealShortPacketInPlaceWithProvider(packet, keys, options);
+}
+
+fn sealShortPacketInPlaceWithProvider(
+    packet: []u8,
+    provider: anytype,
     options: ShortPacketOptions,
 ) Error![]u8 {
     const packet_len = try shortPacketLen(options);
@@ -1700,8 +1888,8 @@ pub fn sealShortPacketInPlace(
     // pure-Zig AEAD implementations encrypt via stream XOR before MACing the
     // resulting ciphertext. Keep this helper restricted to exact in-place
     // sealing rather than permitting partially-overlapping aliases.
-    try protectPayload(keys, options.packet_number, out[0..payload_offset], payload, payload, tag);
-    try applyHeaderProtectionForKeys(keys, .short, out, pn_offset);
+    try provider.protect(options.packet_number, out[0..payload_offset], payload, payload, tag);
+    try applyHeaderProtectionWithProvider(provider, .short, out, pn_offset);
     return out;
 }
 
@@ -1888,8 +2076,45 @@ pub fn openShortPacketInPlaceForKeyPhaseWithFixedBitPolicy(
     expected_packet_number: u64,
     allow_zero_fixed_bit: bool,
 ) Error!CurrentKeyOpenResult {
-    const preview = try previewShortHeaderForKeysWithFixedBitPolicy(
+    const provider = asVailKeys(keys);
+    return openShortPacketInPlaceForKeyPhaseWithProvider(
+        &provider,
+        current_key_phase,
+        packet,
+        destination_connection_id_len,
+        expected_packet_number,
+        allow_zero_fixed_bit,
+    );
+}
+
+pub fn openShortPacketInPlaceForPreparedKeyPhaseWithFixedBitPolicy(
+    keys: *const PreparedPacketProtectionKeys,
+    current_key_phase: bool,
+    packet: []u8,
+    destination_connection_id_len: usize,
+    expected_packet_number: u64,
+    allow_zero_fixed_bit: bool,
+) Error!CurrentKeyOpenResult {
+    return openShortPacketInPlaceForKeyPhaseWithProvider(
         keys,
+        current_key_phase,
+        packet,
+        destination_connection_id_len,
+        expected_packet_number,
+        allow_zero_fixed_bit,
+    );
+}
+
+fn openShortPacketInPlaceForKeyPhaseWithProvider(
+    provider: anytype,
+    current_key_phase: bool,
+    packet: []u8,
+    destination_connection_id_len: usize,
+    expected_packet_number: u64,
+    allow_zero_fixed_bit: bool,
+) Error!CurrentKeyOpenResult {
+    const preview = try previewShortHeaderWithProvider(
+        provider,
         packet,
         destination_connection_id_len,
         allow_zero_fixed_bit,
@@ -1897,8 +2122,8 @@ pub fn openShortPacketInPlaceForKeyPhaseWithFixedBitPolicy(
     if (preview.key_phase != current_key_phase) {
         return .{ .key_phase_mismatch = preview.key_phase };
     }
-    return .{ .opened = try openShortPacketInPlaceAfterPreview(
-        keys,
+    return .{ .opened = try openShortPacketInPlaceAfterPreviewWithProvider(
+        provider,
         packet,
         expected_packet_number,
         preview,
@@ -1907,6 +2132,21 @@ pub fn openShortPacketInPlaceForKeyPhaseWithFixedBitPolicy(
 
 fn openShortPacketInPlaceAfterPreview(
     keys: PacketProtectionKeys,
+    packet: []u8,
+    expected_packet_number: u64,
+    preview: ShortHeaderPreview,
+) Error!OpenedShortPacketView {
+    const provider = asVailKeys(keys);
+    return openShortPacketInPlaceAfterPreviewWithProvider(
+        &provider,
+        packet,
+        expected_packet_number,
+        preview,
+    );
+}
+
+fn openShortPacketInPlaceAfterPreviewWithProvider(
+    provider: anytype,
     packet: []u8,
     expected_packet_number: u64,
     preview: ShortHeaderPreview,
@@ -1925,8 +2165,7 @@ fn openShortPacketInPlaceAfterPreview(
     const payload_end = packet.len - aead_tag_len;
     const ciphertext = packet[payload_offset..payload_end];
     const tag = packet[payload_end..][0..aead_tag_len].*;
-    try openPayload(
-        keys,
+    try provider.open(
         packet_number,
         packet[0..payload_offset],
         ciphertext,

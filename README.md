@@ -849,6 +849,9 @@ authenticate those inputs.
 
 ```sh
 zig build test
+# Optional accelerated QUIC AES packet protection (requires a built AWS-LC or
+# BoringSSL-compatible prefix with build/crypto/libcrypto.a).
+zig build test -Daws-lc-path=/path/to/aws-lc -Daws-lc-link=true
 ```
 
 Runnable examples are under `examples/` and are wired into the build:
@@ -1049,8 +1052,10 @@ The aggregate `bench` step runs the current protocol microbenchmarks:
 - MQTT subscription-router combined ordinary/shared count+emit trie matching
   versus a linear filter scan, retained connection PUBLISH encoding scratch,
   and linear-time overlapping-subscription broker flush plans,
-- QUIC AES-128-GCM and ChaCha20-Poly1305 short-packet sealing with
-  caller-provided storage versus the allocating convenience wrapper,
+- QUIC AES-128-GCM, AES-256-GCM, ChaCha20-Poly1305, and SM4-GCM short-packet
+  sealing with caller-provided storage versus the allocating convenience
+  wrapper, plus optional connection-lifetime AWS-LC packet contexts and cached
+  AES header keys that avoid per-packet crypto setup and refresh on key updates,
 - bounded QUIC DATAGRAM receive queuing in an O(1) ring under
   `quic/one_rtt/datagram_queue.zig`, with exact one-time capacity reservation,
   newest-data retention, packet-number rollback, and explicit payload ownership,
