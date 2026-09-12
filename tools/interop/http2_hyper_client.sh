@@ -166,10 +166,13 @@ grep -Fq \
   'Hyper HTTP/2 keep-alive interoperated with netz: ack=true next_request=true' \
   "$work/hyper-client.log"
 grep -Fq \
+  'Hyper HTTP/2 client observed netz concurrent handlers: fast_before_slow=true requests=2' \
+  "$work/hyper-client.log"
+grep -Fq \
   'Hyper HTTP/2 client canceled flow-blocked netz stream and completed concurrent sibling: rst=CANCEL window=8192 received=8192 sibling=16384' \
   "$work/hyper-client.log"
 grep -Fq \
-  'Hyper HTTP/2 client drained netz GOAWAY: active_stream=9 new_request_refused=true' \
+  'Hyper HTTP/2 client drained netz GOAWAY: active_stream=13 new_request_refused=true' \
   "$work/hyper-client.log"
 grep -Fq \
   'transport=h2c alpn=n/a method=POST body=13 trailers=1 status=201 response_body=13 response_trailers=1' \
@@ -181,7 +184,10 @@ grep -Fq \
   'netz HTTP/2 server remained usable after Hyper keep-alive: transport=h2c next_request=true' \
   "$work/netz-server.log"
 grep -Fq \
-  'netz HTTP/2 server gracefully drained Hyper client: transport=h2c last_stream=9 new_request_refused=true' \
+  'netz HTTP/2 server completed concurrent handler batch: transport=h2c fast_before_slow=true requests=2' \
+  "$work/netz-server.log"
+grep -Fq \
+  'netz HTTP/2 server gracefully drained Hyper client: transport=h2c last_stream=13 new_request_refused=true' \
   "$work/netz-server.log"
 echo 'Hyper HTTP/2 client -> netz server interop passed'
 
@@ -268,13 +274,19 @@ grep -Fq \
   'Hyper HTTP/2 keep-alive interoperated with netz: ack=true next_request=true' \
   "$work/tls-hyper-client.log"
 grep -Fq \
-  'Hyper HTTP/2 client drained netz GOAWAY: active_stream=9 new_request_refused=true' \
+  'Hyper HTTP/2 client observed netz concurrent handlers: fast_before_slow=true requests=2' \
+  "$work/tls-hyper-client.log"
+grep -Fq \
+  'Hyper HTTP/2 client drained netz GOAWAY: active_stream=13 new_request_refused=true' \
   "$work/tls-hyper-client.log"
 grep -Fq \
   'netz HTTP/2 server remained usable after Hyper keep-alive: transport=tls next_request=true' \
   "$work/tls-netz-server.log"
 grep -Fq \
-  'netz HTTP/2 server gracefully drained Hyper client: transport=tls last_stream=9 new_request_refused=true' \
+  'netz HTTP/2 server completed concurrent handler batch: transport=tls fast_before_slow=true requests=2' \
+  "$work/tls-netz-server.log"
+grep -Fq \
+  'netz HTTP/2 server gracefully drained Hyper client: transport=tls last_stream=13 new_request_refused=true' \
   "$work/tls-netz-server.log"
 grep -Fq \
   'netz HTTP/2 server interoperated with rustls KeyUpdate: sent=1 received=1 next_request=true' \

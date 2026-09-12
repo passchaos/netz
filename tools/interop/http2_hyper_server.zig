@@ -143,6 +143,39 @@ pub fn main(init: std.process.Init) !void {
         .{if (tls_enabled) "tls" else "h2c"},
     );
 
+    const ConcurrentContext = struct {
+        io: std.Io,
+
+        fn handle(
+            self: *@This(),
+            request_value: netz.http2.runtime.OwnedRequest,
+        ) netz.http2.runtime.Error!netz.http2.runtime.ResponseOptions {
+            if (std.mem.eql(u8, request_value.path, "/slow-handler")) {
+                try std.Io.sleep(self.io, .fromSeconds(2), .awake);
+                return .{ .body = "slow-handler" };
+            }
+            if (std.mem.eql(u8, request_value.path, "/fast-handler")) {
+                return .{ .body = "fast-handler" };
+            }
+            return error.InvalidHeader;
+        }
+    };
+    var concurrent_context = ConcurrentContext{ .io = io };
+    var concurrent = try connection.serveRequestBatchConcurrent(
+        ConcurrentContext,
+        &concurrent_context,
+        ConcurrentContext.handle,
+        2,
+    );
+    defer concurrent.deinit();
+    if (concurrent.successCount() != 2 or concurrent.firstError() != null) {
+        return error.InvalidRequest;
+    }
+    std.debug.print(
+        "netz HTTP/2 server completed concurrent handler batch: transport={s} fast_before_slow=true requests=2\n",
+        .{if (tls_enabled) "tls" else "h2c"},
+    );
+
     // Hyper sends both requests before it consumes either response. Accept
     // both heads first so the test has two simultaneously active streams even
     // if the client's executor assigns their stream IDs in either order.
@@ -213,7 +246,7 @@ pub fn main(init: std.process.Init) !void {
 
     var graceful_request = try connection.readRequest();
     defer graceful_request.deinit(allocator);
-    if (graceful_request.stream_id != 9 or
+    if (graceful_request.stream_id != 13 or
         !std.mem.eql(
             u8,
             graceful_request.path,
@@ -235,7 +268,7 @@ pub fn main(init: std.process.Init) !void {
         .request_method = graceful_request.method,
     });
     std.debug.print(
-        "netz HTTP/2 server gracefully drained Hyper client: transport={s} last_stream=9 new_request_refused=true\n",
+        "netz HTTP/2 server gracefully drained Hyper client: transport={s} last_stream=13 new_request_refused=true\n",
         .{if (tls_enabled) "tls" else "h2c"},
     );
 }

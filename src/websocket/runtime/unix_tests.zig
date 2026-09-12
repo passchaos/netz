@@ -190,3 +190,37 @@ test "WebSocket Unix server caller timeout bounds HTTP upgrade" {
     thread.join();
     try std.testing.expectEqual(error.Timeout, shared.err.?);
 }
+
+test "WebSocket Unix listener accept deadline expires without a client" {
+    if (comptime @import("builtin").os.tag == .windows) {
+        return error.SkipZigTest;
+    }
+    const allocator = std.testing.allocator;
+    var threaded = std.Io.Threaded.init(allocator, .{});
+    defer threaded.deinit();
+    const io = threaded.io();
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    var path_storage: [std.fs.max_path_bytes]u8 = undefined;
+    const directory_len = try tmp.dir.realPath(io, &path_storage);
+    const socket_path = try std.fmt.bufPrint(
+        path_storage[directory_len..],
+        "/websocket-accept-deadline.sock",
+        .{},
+    );
+    const full_path = path_storage[0 .. directory_len + socket_path.len];
+    const address = try std.Io.net.UnixAddress.init(full_path);
+    var server = try runtime.UnixServer.listen(allocator, io, address, .{});
+    defer {
+        server.deinit();
+        std.Io.Dir.deleteFileAbsolute(io, full_path) catch {};
+    }
+
+    try std.testing.expectError(
+        error.Timeout,
+        server.receiveUpgradeRequestWithTimeout(
+            .{},
+            .fromMilliseconds(20),
+        ),
+    );
+}

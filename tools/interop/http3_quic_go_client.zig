@@ -4,6 +4,7 @@
 const std = @import("std");
 const netz = @import("netz");
 const benchmark = @import("http3_quic_go_bench.zig");
+const exact_certificate = @import("exact_certificate_verifier.zig");
 const CountingAllocator = @import("benchmark_counting_allocator")
     .CountingAllocator;
 
@@ -76,10 +77,18 @@ pub fn main(init: std.process.Init) !void {
         now,
         args[2],
     );
-    var verifier = netz.quic.tls.trust.BundleVerifier{
+    var bundle_verifier = netz.quic.tls.trust.BundleVerifier{
         .bundle = &ca_bundle,
         .now_seconds = now.toSeconds(),
     };
+    var exact_verifier = try exact_certificate.Verifier.init(
+        &ca_bundle,
+        now.toSeconds(),
+    );
+    const server_verifier = if (informational)
+        bundle_verifier.clientVerifier()
+    else
+        exact_verifier.clientVerifier();
 
     var original_dcid: [8]u8 = undefined;
     var client_cid: [8]u8 = undefined;
@@ -115,7 +124,7 @@ pub fn main(init: std.process.Init) !void {
                 else
                     &.{ .version_1, .version_2 },
                 .server_name = "localhost",
-                .server_auth = verifier.clientVerifier(),
+                .server_auth = server_verifier,
                 .max_crypto_buffer = 64 * 1024,
                 .local_transport_parameters = local_transport_parameters,
                 .initial_one_rtt_config = .{
@@ -324,9 +333,9 @@ fn runBenchmark(_: std.process.Init, args: []const []const u8) !void {
         config,
     );
 
-    const payload = try allocator.alloc(u8, @intCast(config.body_bytes));
-    defer allocator.free(payload);
-    const expected_checksum = benchmark.fillPayload(payload);
+    var payloads = try benchmark.PayloadSet.init(allocator, config);
+    defer payloads.deinit(allocator);
+    const expected_checksum = payloads.aggregate_checksum;
     const rounds = try config.rounds();
     for (0..rounds) |round_index| {
         const round: u32 = @intCast(round_index);
@@ -353,7 +362,7 @@ fn runBenchmark(_: std.process.Init, args: []const []const u8) !void {
                     &client,
                     config,
                     round,
-                    payload,
+                    &payloads,
                     expected_checksum,
                 ),
                 .download => try runBenchmarkDownload(
@@ -365,7 +374,7 @@ fn runBenchmark(_: std.process.Init, args: []const []const u8) !void {
                     expected_checksum,
                 ),
             };
-            try std.Io.sleep(io, .fromMilliseconds(100), .awake);
+            try benchmarkClose(allocator, &client, config, round);
             break :blk measured;
         };
         if (round >= config.warmup) {
@@ -378,6 +387,37 @@ fn runBenchmark(_: std.process.Init, args: []const []const u8) !void {
                 result.checksum,
             );
         }
+    }
+}
+
+fn benchmarkClose(
+    allocator: std.mem.Allocator,
+    client: *netz.http3.runtime.HandshakeClient,
+    config: benchmark.Config,
+    round: u32,
+) !void {
+    var round_buffer: [10]u8 = undefined;
+    var response = try client.requestWithTimeout(.{
+        .method = "GET",
+        .path = "/benchmark/close",
+        .scheme = "https",
+        .authority = "localhost",
+        .headers = &.{.{
+            .name = "x-netz-bench-round",
+            .value = try std.fmt.bufPrint(&round_buffer, "{d}", .{round}),
+        }},
+    }, config.timeout());
+    defer response.deinit(allocator);
+    if (response.response.status != 200 or
+        response.response.body.len != 0 or response.response.trailers.len != 0 or
+        !std.mem.eql(
+            u8,
+            benchmark.header(response.response.headers, "x-netz-bench-close") orelse
+                return error.InvalidResponse,
+            "ok",
+        ))
+    {
+        return error.InvalidResponse;
     }
 }
 
@@ -406,8 +446,11 @@ fn connectBenchmarkClient(
             .handshake = .{
                 .original_destination_connection_id = original_dcid,
                 .local_connection_id = client_cid,
-                .version = .version_1,
-                .available_versions = &.{.version_1},
+                .version = config.version,
+                .available_versions = if (config.version == .version_2)
+                    &.{.version_2}
+                else
+                    &.{.version_1},
                 .server_name = "localhost",
                 .server_auth = verifier,
                 .local_transport_parameters = try config.transportParameters(),
@@ -448,18 +491,25 @@ fn benchmarkReady(
 fn benchmarkHeaders(
     config: benchmark.Config,
     round: u32,
+    stream_index: usize,
     round_buffer: *[10]u8,
+    index_buffer: *[5]u8,
+    streams_buffer: *[5]u8,
     bytes_buffer: *[20]u8,
     chunk_buffer: *[10]u8,
     window_buffer: *[20]u8,
-) ![5]netz.http3.Qpack.HeaderField {
+) ![7]netz.http3.Qpack.HeaderField {
     const round_text = try std.fmt.bufPrint(round_buffer, "{d}", .{round});
+    const index_text = try std.fmt.bufPrint(index_buffer, "{d}", .{stream_index});
     const bytes_text = try std.fmt.bufPrint(bytes_buffer, "{d}", .{config.body_bytes});
     const chunk_text = try std.fmt.bufPrint(chunk_buffer, "{d}", .{config.chunk_bytes});
     const window_text = try std.fmt.bufPrint(window_buffer, "{d}", .{config.stream_window});
+    const streams_text = try std.fmt.bufPrint(streams_buffer, "{d}", .{config.streams});
     return .{
         .{ .name = "x-netz-bench-mode", .value = config.mode.name() },
         .{ .name = "x-netz-bench-round", .value = round_text },
+        .{ .name = "x-netz-bench-stream-index", .value = index_text },
+        .{ .name = "x-netz-bench-streams", .value = streams_text },
         .{ .name = "x-netz-bench-bytes", .value = bytes_text },
         .{ .name = "x-netz-bench-chunk", .value = chunk_text },
         .{ .name = "x-netz-bench-window", .value = window_text },
@@ -472,62 +522,58 @@ fn runBenchmarkUpload(
     client: *netz.http3.runtime.HandshakeClient,
     config: benchmark.Config,
     round: u32,
-    payload: []const u8,
+    payloads: *const benchmark.PayloadSet,
     expected_checksum: u64,
 ) !BenchmarkResult {
-    var round_buffer: [10]u8 = undefined;
-    var bytes_buffer: [20]u8 = undefined;
-    var chunk_buffer: [10]u8 = undefined;
-    var window_buffer: [20]u8 = undefined;
-    const headers = try benchmarkHeaders(
+    const deadline = deadlineFor(io, config);
+    const started = benchmark.nowNs(io);
+    var stream_ids: [benchmark.max_streams]u62 = undefined;
+    for (0..config.streams) |index| {
+        var round_buffer: [10]u8 = undefined;
+        var index_buffer: [5]u8 = undefined;
+        var streams_buffer: [5]u8 = undefined;
+        var bytes_buffer: [20]u8 = undefined;
+        var chunk_buffer: [10]u8 = undefined;
+        var window_buffer: [20]u8 = undefined;
+        const headers = try benchmarkHeaders(config, round, index, &round_buffer, &index_buffer, &streams_buffer, &bytes_buffer, &chunk_buffer, &window_buffer);
+        stream_ids[index] = try client.startRequest(.{
+            .method = "POST",
+            .path = "/benchmark/upload",
+            .scheme = "https",
+            .authority = "localhost",
+            .headers = &headers,
+        }, @intCast(config.body_bytes));
+    }
+    var offsets = [_]usize{0} ** benchmark.max_streams;
+    var chunks: [benchmark.max_streams]netz.http3.runtime.BodyChunk = undefined;
+    while (offsets[0] < config.body_bytes) {
+        for (stream_ids[0..config.streams], 0..) |stream_id, index| {
+            const end = @min(payloads.streams[index].len, offsets[index] + config.effectiveChunk());
+            chunks[index] = .{
+                .stream_id = stream_id,
+                .data = payloads.streams[index][offsets[index]..end],
+                .fin = end == payloads.streams[index].len,
+            };
+        }
+        var committed: usize = 0;
+        try client.sendRequestBodyBatchPacedWithDeadline(
+            chunks[0..config.streams],
+            &committed,
+            deadline,
+        );
+        if (committed != config.streams) return error.IncompleteBenchmarkSend;
+        for (0..config.streams) |index| offsets[index] += chunks[index].data.len;
+    }
+    try receiveBenchmarkResponses(
+        allocator,
+        client,
         config,
         round,
-        &round_buffer,
-        &bytes_buffer,
-        &chunk_buffer,
-        &window_buffer,
+        stream_ids[0..config.streams],
+        payloads,
+        false,
+        deadline,
     );
-    const started = benchmark.nowNs(io);
-    const stream_id = try client.startRequest(.{
-        .method = "POST",
-        .path = "/benchmark/upload",
-        .scheme = "https",
-        .authority = "localhost",
-        .headers = &headers,
-    }, payload.len);
-    var offset: usize = 0;
-    while (offset < payload.len) {
-        const end = @min(payload.len, offset + config.effectiveChunk());
-        try client.sendRequestBodyPaced(
-            stream_id,
-            payload[offset..end],
-            end == payload.len,
-        );
-        offset = end;
-    }
-    var response = try client.receiveResponseWithTimeout(
-        stream_id,
-        config.timeout(),
-    );
-    defer response.deinit(allocator);
-    if (response.response.status != 200 or
-        response.response.body.len != 0 or
-        response.response.trailers.len != 0 or
-        try benchmark.parseHeaderInt(
-            response.response.headers,
-            "x-netz-bench-round",
-        ) != round or
-        try benchmark.parseHeaderInt(
-            response.response.headers,
-            "x-netz-bench-bytes",
-        ) != config.body_bytes or
-        try benchmark.parseHeaderInt(
-            response.response.headers,
-            "x-netz-bench-checksum",
-        ) != expected_checksum)
-    {
-        return error.InvalidResponse;
-    }
     return .{
         .elapsed_ns = benchmark.nowNs(io) -| started,
         .checksum = expected_checksum,
@@ -542,76 +588,91 @@ fn runBenchmarkDownload(
     round: u32,
     expected_checksum: u64,
 ) !BenchmarkResult {
-    var round_buffer: [10]u8 = undefined;
-    var bytes_buffer: [20]u8 = undefined;
-    var chunk_buffer: [10]u8 = undefined;
-    var window_buffer: [20]u8 = undefined;
-    const headers = try benchmarkHeaders(config, round, &round_buffer, &bytes_buffer, &chunk_buffer, &window_buffer);
-    const buffer = try allocator.alloc(u8, config.effectiveChunk());
-    defer allocator.free(buffer);
     const deadline = std.Io.Clock.Timestamp.fromNow(io, .{
         .raw = config.timeout(),
         .clock = .awake,
     });
     const started = benchmark.nowNs(io);
-    const stream_id = try client.sendRequest(.{
-        .method = "GET",
-        .path = "/benchmark/download",
-        .scheme = "https",
-        .authority = "localhost",
-        .headers = &headers,
-    });
-    var received: usize = 0;
-    var checksum: u64 = 0;
-    var head_seen = false;
-    var finished = false;
-    while (!finished) {
-        var event = (try client.receiveResponseEventWithDeadline(
-            stream_id,
-            deadline,
-        )) orelse continue;
-        defer event.deinit(allocator);
-        switch (event) {
-            .head => |head| switch (head) {
-                .response => |response| {
-                    if (head_seen) return error.DuplicateResponseHead;
-                    if (response.status != 200) return error.InvalidResponseStatus;
-                    if (response.content_length != config.body_bytes) {
-                        return error.InvalidResponseLength;
-                    }
-                    if (try benchmark.parseHeaderInt(response.headers, "x-netz-bench-round") != round) {
-                        return error.InvalidResponseRound;
-                    }
-                    if (try benchmark.parseHeaderInt(response.headers, "x-netz-bench-bytes") != config.body_bytes) {
-                        return error.InvalidResponseBytes;
-                    }
-                    if (try benchmark.parseHeaderInt(response.headers, "x-netz-bench-checksum") != expected_checksum) {
-                        return error.InvalidResponseChecksum;
-                    }
-                    head_seen = true;
-                },
-                .request => return error.InvalidResponse,
-            },
-            .data_available => {
-                const count = try client.readResponseData(stream_id, buffer);
-                if (received + count > config.body_bytes) {
-                    return error.ResponseBodyTooLarge;
-                }
-                try benchmark.verifyPayload(buffer[0..count], received, &checksum);
-                received += count;
-            },
-            .finished => finished = true,
-            .trailers => return error.UnexpectedResponseTrailers,
-            .push_promise => return error.UnexpectedPushPromise,
-        }
+    var stream_ids: [benchmark.max_streams]u62 = undefined;
+    for (0..config.streams) |index| {
+        var round_buffer: [10]u8 = undefined;
+        var index_buffer: [5]u8 = undefined;
+        var streams_buffer: [5]u8 = undefined;
+        var bytes_buffer: [20]u8 = undefined;
+        var chunk_buffer: [10]u8 = undefined;
+        var window_buffer: [20]u8 = undefined;
+        const headers = try benchmarkHeaders(config, round, index, &round_buffer, &index_buffer, &streams_buffer, &bytes_buffer, &chunk_buffer, &window_buffer);
+        stream_ids[index] = try client.sendRequest(.{
+            .method = "GET",
+            .path = "/benchmark/download",
+            .scheme = "https",
+            .authority = "localhost",
+            .headers = &headers,
+        });
     }
-    if (!head_seen or received != config.body_bytes or checksum != expected_checksum) {
-        return error.InvalidResponseBody;
-    }
+    var payloads = try benchmark.PayloadSet.init(allocator, config);
+    defer payloads.deinit(allocator);
+    try receiveBenchmarkResponses(
+        allocator,
+        client,
+        config,
+        round,
+        stream_ids[0..config.streams],
+        &payloads,
+        true,
+        deadline,
+    );
     return .{
         .elapsed_ns = benchmark.nowNs(io) -| started,
-        .checksum = checksum,
+        .checksum = expected_checksum,
     };
+}
+
+fn deadlineFor(io: std.Io, config: benchmark.Config) std.Io.Clock.Timestamp {
+    return .fromNow(io, .{ .raw = config.timeout(), .clock = .awake });
+}
+
+fn receiveBenchmarkResponses(
+    allocator: std.mem.Allocator,
+    client: *netz.http3.runtime.HandshakeClient,
+    config: benchmark.Config,
+    round: u32,
+    stream_ids: []const u62,
+    payloads: *const benchmark.PayloadSet,
+    expect_body: bool,
+    deadline: std.Io.Clock.Timestamp,
+) !void {
+    var seen = [_]bool{false} ** benchmark.max_streams;
+    var complete: usize = 0;
+    while (complete < config.streams) {
+        var event = try client.receiveNextResponseWithDeadline(deadline);
+        defer event.deinit(allocator);
+        const response = switch (event) {
+            .reset => return error.UnexpectedResponseReset,
+            .response => |value| value,
+        };
+        const index = benchmark.streamIndexForId(stream_ids, response.stream_id) orelse
+            return error.UnexpectedResponseStream;
+        if (seen[index] or response.value.response.status != 200 or
+            response.value.response.trailers.len != 0 or
+            try benchmark.parseHeaderInt(response.value.response.headers, "x-netz-bench-round") != round or
+            try benchmark.parseHeaderInt(response.value.response.headers, "x-netz-bench-stream-index") != index or
+            try benchmark.parseHeaderInt(response.value.response.headers, "x-netz-bench-streams") != config.streams or
+            try benchmark.parseHeaderInt(response.value.response.headers, "x-netz-bench-bytes") != config.body_bytes or
+            try benchmark.parseHeaderInt(response.value.response.headers, "x-netz-bench-checksum") != payloads.checksums[index])
+        {
+            return error.InvalidResponse;
+        }
+        if (expect_body) {
+            if (!std.mem.eql(u8, response.value.response.body, payloads.streams[index])) {
+                return error.InvalidResponseBody;
+            }
+        } else if (response.value.response.body.len != 0) {
+            return error.InvalidResponseBody;
+        }
+        seen[index] = true;
+        complete += 1;
+    }
 }
 
 fn runInformational(

@@ -237,6 +237,28 @@ const ReceivedBitmap = struct {
         }
     }
 
+    fn firstUnsetFrom(self: ReceivedBitmap, start: usize) usize {
+        std.debug.assert(start <= self.bit_len);
+        if (start == self.bit_len) return start;
+
+        var word_index = wordIndex(start);
+        var word = self.words.items[word_index];
+        const start_bit: Shift = @truncate(start);
+        if (start_bit != 0) {
+            word |= (@as(Word, 1) << start_bit) - 1;
+        }
+        while (true) {
+            const unset = ~word;
+            if (unset != 0) {
+                const candidate = word_index * word_bits + @ctz(unset);
+                return @min(candidate, self.bit_len);
+            }
+            word_index += 1;
+            if (word_index == self.words.items.len) return self.bit_len;
+            word = self.words.items[word_index];
+        }
+    }
+
     fn removePrefix(self: *ReceivedBitmap, prefix_len: usize) void {
         std.debug.assert(prefix_len <= self.bit_len);
         const remaining = self.bit_len - prefix_len;
@@ -393,7 +415,6 @@ pub const RecvState = struct {
         if (frame.fin and absolute_end < self.highest_received_end) {
             return error.FinalSizeMismatch;
         }
-
         if (relative_end > self.buffer.items.len) {
             try self.buffer.resize(self.allocator, relative_end);
             try self.received.resize(
@@ -419,12 +440,10 @@ pub const RecvState = struct {
             self.contiguous_end = self.storage_offset + relative_end;
             contiguous_relative = relative_end;
         }
-        while (contiguous_relative < self.received.len() and
-            self.received.isSet(contiguous_relative))
-        {
-            contiguous_relative += 1;
-            self.contiguous_end += 1;
-        }
+        contiguous_relative = self.received.firstUnsetFrom(
+            contiguous_relative,
+        );
+        self.contiguous_end = self.storage_offset + contiguous_relative;
         self.highest_received_end = @max(
             self.highest_received_end,
             absolute_end,
@@ -791,6 +810,11 @@ test "QUIC receive bitmap matches byte model across range and prefix operations"
     for (model[0..191], 0..) |expected, index| {
         try std.testing.expectEqual(expected, bitmap.isSet(index));
     }
+    for (0..192) |start| {
+        var expected = start;
+        while (expected < 191 and model[expected]) : (expected += 1) {}
+        try std.testing.expectEqual(expected, bitmap.firstUnsetFrom(start));
+    }
 
     var cloned = try bitmap.clone(allocator);
     defer cloned.deinit(allocator);
@@ -807,6 +831,11 @@ test "QUIC receive bitmap matches byte model across range and prefix operations"
     for (model[13..191], 0..) |expected, index| {
         try std.testing.expectEqual(expected, bitmap.isSet(index));
         try std.testing.expectEqual(model[index], cloned.isSet(index));
+    }
+    for (0..179) |start| {
+        var expected = start;
+        while (expected < 178 and model[13 + expected]) : (expected += 1) {}
+        try std.testing.expectEqual(expected, bitmap.firstUnsetFrom(start));
     }
     try bitmap.resize(allocator, 65, false);
     for (model[13..78], 0..) |expected, index| {

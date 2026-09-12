@@ -408,7 +408,7 @@ including QoS 1, DUP, retain, a multibyte Remaining Length, and properties. A
 real TCP test sends two 1-KiB packets, disables all allocation after warmup, and
 verifies the prefix scratch remains smaller than the payload while the peer
 parses the complete bytes. WebSocket tests independently verify one-frame
-masked client and unmasked server messages assembled from two parts. The full 1,646-test suite, 132-scenario
+masked client and unmasked server messages assembled from two parts. The full 2,958-test Netz suite, 132-scenario
 Mosquitto-derived wire gate, and MQTT 3.1.1/5 WS/WSS gate remain green. Five
 CPU-0 native-TLS samples measured 11.292-11.761 us per QoS 1 PUBLISH/PUBACK
 (11.445 us mean). Five WebSocket samples measured 10.448-10.859 us with a

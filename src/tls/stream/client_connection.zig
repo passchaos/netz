@@ -9,6 +9,7 @@ const vail = @import("vail");
 const handshake_deadline = @import("handshake_deadline.zig");
 const record_io = @import("record_io.zig");
 const record_stream = @import("record_stream.zig");
+const stream_io = @import("../../internal/stream_io.zig");
 
 const net = std.Io.net;
 const tls_record = vail.tls.record;
@@ -303,6 +304,13 @@ pub const Connection = struct {
             );
         errdefer exporter_master_secret.deinit();
 
+        var records = record_stream.Stream.init(
+            read_keys,
+            write_keys,
+            verified.application.server_traffic_secret,
+            verified.application.client_traffic_secret,
+        );
+        records.allowNewSessionTickets();
         const connection = try allocator.create(Connection);
         // Transfer all established-session secrets only after the final
         // allocation succeeds; earlier failures stay owned by local errdefers.
@@ -310,12 +318,7 @@ pub const Connection = struct {
             .allocator = allocator,
             .io = io,
             .stream = stream,
-            .records = .init(
-                read_keys,
-                write_keys,
-                verified.application.server_traffic_secret,
-                verified.application.client_traffic_secret,
-            ),
+            .records = records,
             .selected_alpn = selected_alpn,
             .peer_certificate_chain = peer_certificate_chain,
             .cipher_suite = verified.cipher_suite,
@@ -504,6 +507,10 @@ pub const Connection = struct {
         return self.records.receivedCloseNotify();
     }
 
+    pub fn isReusableBoundary(self: *const Connection) bool {
+        return self.records.isReusableBoundary();
+    }
+
     pub fn read(self: *Connection, out: []u8) Error!usize {
         return self.records.read(self.io, self.stream, out);
     }
@@ -526,6 +533,32 @@ pub const Connection = struct {
         bytes: []const u8,
     ) Error!void {
         return self.records.writeAll(self.io, self.stream, bytes);
+    }
+
+    pub fn writeAllWithDeadline(
+        self: *Connection,
+        bytes: []const u8,
+        committed: *usize,
+        deadline: std.Io.Clock.Timestamp,
+    ) Error!void {
+        return self.records.writeAllWithDeadline(
+            self.io,
+            self.stream,
+            bytes,
+            committed,
+            deadline,
+        );
+    }
+
+    pub fn finishPendingWrite(
+        self: *Connection,
+        committed: *usize,
+    ) Error!void {
+        return self.records.finishPendingWrite(
+            self.io,
+            self.stream,
+            committed,
+        );
     }
 
     pub fn writeAllParts(
@@ -569,8 +602,13 @@ fn writeCleartextHandshake(
         @intCast(message.len),
         .big,
     );
-    try record_io.writeAll(io, stream, &header);
-    try record_io.writeAll(io, stream, message);
+    // Keep the TLS record header and ClientHello contiguous. TURN servers such
+    // as coturn share plain-TCP and TLS listeners and sniff the first receive;
+    // a single contiguous write avoids classifying a header-only first chunk.
+    var encoded: [tls_record.header_len + std.math.maxInt(u16)]u8 = undefined;
+    @memcpy(encoded[0..tls_record.header_len], &header);
+    @memcpy(encoded[tls_record.header_len..][0..message.len], message);
+    try record_io.writeAll(io, stream, encoded[0 .. tls_record.header_len + message.len]);
 }
 
 fn readCleartextHandshake(

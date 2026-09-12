@@ -3,6 +3,9 @@ const netz = @import("netz");
 
 test "public modules are reachable" {
     try std.testing.expect(@hasDecl(netz, "runtime"));
+    try std.testing.expect(@hasDecl(netz, "stream"));
+    inline for (&.{ "connect", "io", "socket_options", "tls" }) |decl|
+        try std.testing.expect(@hasDecl(netz.stream, decl));
     try std.testing.expect(@hasDecl(netz.runtime, "Backend"));
     try std.testing.expect(@hasDecl(netz.runtime.Backend, "initZio"));
     try std.testing.expect(!@hasDecl(netz.runtime, "zio"));
@@ -199,6 +202,9 @@ test "public modules are reachable" {
     try std.testing.expect(@hasField(netz.grpc.StreamingResponse, "reset"));
     try std.testing.expect(@hasDecl(netz, "tls"));
     try std.testing.expect(@hasDecl(netz.tls, "stream"));
+    try std.testing.expect(@hasDecl(netz.tls, "trust"));
+    try std.testing.expect(@hasDecl(netz.tls.trust, "BundleVerifier"));
+    try std.testing.expect(@hasDecl(netz.tls.trust, "SystemStore"));
     try std.testing.expect(@hasDecl(
         netz.tls.stream,
         "ServerConnection",
@@ -279,9 +285,17 @@ test "public modules are reachable" {
         "max_request_target_bytes",
     ));
     try std.testing.expect((netz.http1.runtime.Limits{}).keep_alive);
+    try std.testing.expectEqual(
+        netz.http1.runtime.WriteStrategy.auto,
+        (netz.http1.runtime.Limits{}).write_strategy,
+    );
     try std.testing.expect(@hasField(
         netz.http1.runtime.Limits,
         "keep_alive",
+    ));
+    try std.testing.expect(@hasField(
+        netz.http1.runtime.Limits,
+        "write_strategy",
     ));
     try std.testing.expect(@hasField(
         netz.http1.runtime.Limits,
@@ -292,6 +306,14 @@ test "public modules are reachable" {
         "handshake_timeout",
     ));
     try std.testing.expect(@hasDecl(netz.http1.runtime.Server, "serveConcurrent"));
+    try std.testing.expect(@hasDecl(
+        netz.http1.runtime.Server,
+        "acceptWithTimeout",
+    ));
+    try std.testing.expect(@hasDecl(
+        netz.http1.runtime.Server,
+        "acceptWithDeadline",
+    ));
     try std.testing.expect(@hasDecl(netz.http1, "client_pool"));
     try std.testing.expect(@hasDecl(netz.http1.client_pool, "Pool"));
     try std.testing.expect(@hasDecl(
@@ -580,11 +602,27 @@ test "public modules are reachable" {
     ));
     try std.testing.expect(@hasDecl(
         netz.http1.runtime.UnixServer,
+        "acceptWithTimeout",
+    ));
+    try std.testing.expect(@hasDecl(
+        netz.http1.runtime.UnixServer,
+        "acceptWithDeadline",
+    ));
+    try std.testing.expect(@hasDecl(
+        netz.http1.runtime.UnixServer,
         "serveUntil",
     ));
     try std.testing.expect(@hasDecl(
         netz.http1.runtime.TlsServer,
         "serveConcurrent",
+    ));
+    try std.testing.expect(@hasDecl(
+        netz.http1.runtime.TlsServer,
+        "serveOne",
+    ));
+    try std.testing.expect(@hasDecl(
+        netz.http1.runtime.TlsServer,
+        "serveConnection",
     ));
     try std.testing.expect(@hasDecl(
         netz.http1.runtime.TlsServer,
@@ -601,6 +639,10 @@ test "public modules are reachable" {
     try std.testing.expect(@hasDecl(
         netz.http1.runtime.TlsServer,
         "acceptStreamWithDeadline",
+    ));
+    try std.testing.expect(@hasDecl(
+        netz.http1.runtime.TlsServer,
+        "acceptStream",
     ));
     try std.testing.expect(@hasDecl(
         netz.http1.runtime.TlsServer,
@@ -913,6 +955,14 @@ test "public modules are reachable" {
     ));
     try std.testing.expect(@hasDecl(
         netz.http1.runtime.Tunnel,
+        "writeParts",
+    ));
+    try std.testing.expect(@hasDecl(
+        netz.http1.runtime.Tunnel,
+        "writeSlices",
+    ));
+    try std.testing.expect(@hasDecl(
+        netz.http1.runtime.Tunnel,
         "readWithTimeout",
     ));
     try std.testing.expect(@hasDecl(
@@ -946,6 +996,86 @@ test "public modules are reachable" {
     try std.testing.expect(@hasDecl(
         netz.http2.runtime.Connection,
         "requestBatchInto",
+    ));
+    try std.testing.expect(@hasDecl(
+        netz.http2.runtime.Connection,
+        "requestBatchIntoWithTimeout",
+    ));
+    try std.testing.expect(@hasDecl(
+        netz.http2.runtime.Connection,
+        "requestBatchIntoWithDeadline",
+    ));
+    try std.testing.expect(@hasDecl(
+        netz.http2.runtime.Connection,
+        "requestBatchWithInformationalIntoWithTimeout",
+    ));
+    try std.testing.expect(@hasDecl(
+        netz.http2.runtime.Connection,
+        "requestBatchWithInformationalIntoWithDeadline",
+    ));
+    try std.testing.expect(@hasDecl(
+        netz.http2.runtime.Connection,
+        "requestBatchStreamingIntoWithTimeout",
+    ));
+    try std.testing.expect(@hasDecl(
+        netz.http2.runtime.Connection,
+        "requestBatchStreamingIntoWithDeadline",
+    ));
+    try std.testing.expect(@hasDecl(
+        netz.http2.runtime.Connection,
+        "requestBatchStreamingWithInformationalIntoWithTimeout",
+    ));
+    try std.testing.expect(@hasDecl(
+        netz.http2.runtime.Connection,
+        "requestBatchStreamingWithInformationalIntoWithDeadline",
+    ));
+    try std.testing.expect(@hasDecl(
+        netz.http2.runtime.Connection,
+        "requestBodyBatchIntoWithTimeout",
+    ));
+    try std.testing.expect(@hasDecl(
+        netz.http2.runtime.Connection,
+        "requestBodyBatchIntoWithDeadline",
+    ));
+    try std.testing.expect(@hasDecl(
+        netz.http2.runtime.Connection,
+        "requestBodyBatchWithInformationalIntoWithTimeout",
+    ));
+    try std.testing.expect(@hasDecl(
+        netz.http2.runtime.Connection,
+        "requestBodyBatchWithInformationalIntoWithDeadline",
+    ));
+    try std.testing.expect(@hasDecl(
+        netz.http2.runtime.Connection,
+        "requestBodyBatchStreamingInto",
+    ));
+    try std.testing.expect(@hasDecl(
+        netz.http2.runtime.Connection,
+        "requestBodyBatchStreamingIntoWithTimeout",
+    ));
+    try std.testing.expect(@hasDecl(
+        netz.http2.runtime.Connection,
+        "requestBodyBatchStreamingIntoWithDeadline",
+    ));
+    try std.testing.expect(@hasDecl(
+        netz.http2.runtime.Connection,
+        "requestBodyBatchStreamingWithInformationalInto",
+    ));
+    try std.testing.expect(@hasDecl(
+        netz.http2.runtime.Connection,
+        "requestBodyBatchStreamingWithInformationalIntoWithTimeout",
+    ));
+    try std.testing.expect(@hasDecl(
+        netz.http2.runtime.Connection,
+        "requestBodyBatchStreamingWithInformationalIntoWithDeadline",
+    ));
+    try std.testing.expect(@hasDecl(
+        netz.http2.runtime.Connection,
+        "readRequestBatchStreamingIntoWithTimeout",
+    ));
+    try std.testing.expect(@hasDecl(
+        netz.http2.runtime.Connection,
+        "readRequestBatchStreamingIntoWithDeadline",
     ));
     try std.testing.expect(@hasDecl(
         netz.http2.runtime.Connection,
@@ -1012,6 +1142,18 @@ test "public modules are reachable" {
         "startRequest",
     ));
     try std.testing.expect(@hasDecl(
+        netz.http2.runtime.Connection,
+        "acceptDuplexRequest",
+    ));
+    try std.testing.expect(@hasDecl(
+        netz.http2.runtime.Connection,
+        "acceptDuplexRequestWithTimeout",
+    ));
+    try std.testing.expect(@hasDecl(
+        netz.http2.runtime.Connection,
+        "acceptDuplexRequestWithDeadline",
+    ));
+    try std.testing.expect(@hasDecl(
         netz.http2.runtime,
         "RequestWriter",
     ));
@@ -1023,14 +1165,88 @@ test "public modules are reachable" {
         netz.http2.runtime.RequestWriter,
         "readResponseStreaming",
     ));
+    inline for (&.{
+        "writeWithTimeout",
+        "writeWithDeadline",
+        "finishDataWithTimeout",
+        "finishDataWithDeadline",
+        "finishWithTimeout",
+        "finishWithDeadline",
+        "committedBytes",
+    }) |decl| {
+        try std.testing.expect(@hasDecl(
+            netz.http2.runtime.RequestWriter,
+            decl,
+        ));
+    }
     try std.testing.expect(@hasDecl(
         netz.http2.runtime,
         "ResponseWriter",
     ));
+    inline for (&.{
+        "writeWithTimeout",
+        "writeWithDeadline",
+        "finishDataWithTimeout",
+        "finishDataWithDeadline",
+        "finishWithTimeout",
+        "finishWithDeadline",
+        "committedBytes",
+    }) |decl| {
+        try std.testing.expect(@hasDecl(
+            netz.http2.runtime.ResponseWriter,
+            decl,
+        ));
+    }
     try std.testing.expect(@hasDecl(
         netz.http2.runtime.ResponseWriter,
         "finishTrailers",
     ));
+    try std.testing.expect(@hasDecl(
+        netz.http2.runtime,
+        "ClientDuplexStream",
+    ));
+    inline for (&.{
+        "writeWithTimeout",
+        "writeWithDeadline",
+        "writePartsWithTimeout",
+        "writePartsWithDeadline",
+        "writeRequestSlicesWithTimeout",
+        "writeRequestSlicesWithDeadline",
+        "finishRequestWithTimeout",
+        "finishRequestWithDeadline",
+        "finishRequestDataWithTimeout",
+        "finishRequestDataWithDeadline",
+        "finishRequestPartsWithTimeout",
+        "finishRequestPartsWithDeadline",
+        "requestCommittedBytes",
+    }) |decl| {
+        try std.testing.expect(@hasDecl(
+            netz.http2.runtime.ClientDuplexStream,
+            decl,
+        ));
+    }
+    try std.testing.expect(@hasDecl(
+        netz.http2.runtime,
+        "ServerDuplexStream",
+    ));
+    inline for (&.{
+        "writeResponseWithTimeout",
+        "writeResponseWithDeadline",
+        "writeResponsePartsWithTimeout",
+        "writeResponsePartsWithDeadline",
+        "writeResponseSlicesWithTimeout",
+        "writeResponseSlicesWithDeadline",
+        "finishResponseWithTimeout",
+        "finishResponseWithDeadline",
+        "finishResponseDataWithTimeout",
+        "finishResponseDataWithDeadline",
+        "responseCommittedBytes",
+    }) |decl| {
+        try std.testing.expect(@hasDecl(
+            netz.http2.runtime.ServerDuplexStream,
+            decl,
+        ));
+    }
     try std.testing.expect(@hasDecl(
         netz.http2.runtime.Connection,
         "readRequestStreaming",
@@ -1349,6 +1565,35 @@ test "public modules are reachable" {
         netz.websocket.runtime.h3.ClientConnection,
         "sendBinaryInPlace",
     ));
+    inline for (&.{
+        "sendTextWithTimeout",
+        "sendTextWithDeadline",
+        "sendBinaryWithTimeout",
+        "sendBinaryWithDeadline",
+        "sendPongWithTimeout",
+        "sendPongWithDeadline",
+        "sendPingWithTimeout",
+        "sendPingWithDeadline",
+        "sendCloseWithTimeout",
+        "sendCloseWithDeadline",
+        "sendCloseFrameWithTimeout",
+        "sendCloseFrameWithDeadline",
+        "sendFragmentedWithTimeout",
+        "sendFragmentedWithDeadline",
+        "sendBinaryInPlaceWithTimeout",
+        "sendBinaryInPlaceWithDeadline",
+        "sendBinarySlicesWithTimeout",
+        "sendBinarySlicesWithDeadline",
+    }) |decl| {
+        try std.testing.expect(@hasDecl(
+            netz.websocket.runtime.h3.ClientConnection,
+            decl,
+        ));
+        try std.testing.expect(@hasDecl(
+            netz.websocket.runtime.h3.ServerConnection,
+            decl,
+        ));
+    }
     try std.testing.expect(@hasDecl(
         netz.websocket.runtime.h3.ClientConnection,
         "pingWithTimeout",
@@ -1408,6 +1653,14 @@ test "public modules are reachable" {
     try std.testing.expect(@hasDecl(
         netz.websocket.runtime.h3,
         "Message",
+    ));
+    try std.testing.expect(@hasDecl(
+        netz.websocket.runtime.h3,
+        "MessageWriteProgress",
+    ));
+    try std.testing.expect(@hasDecl(
+        netz.websocket.runtime,
+        "MessageWriteProgress",
     ));
     try std.testing.expect(@hasDecl(
         netz.websocket.runtime,
@@ -1663,6 +1916,10 @@ test "public modules are reachable" {
     ));
     try std.testing.expect(@hasDecl(
         netz.websocket.runtime.Connection,
+        "pingWithDeadline",
+    ));
+    try std.testing.expect(@hasDecl(
+        netz.websocket.runtime.Connection,
         "continuePingWithDeadline",
     ));
     try std.testing.expect(@hasDecl(
@@ -1672,6 +1929,18 @@ test "public modules are reachable" {
     try std.testing.expect(@hasDecl(
         netz.websocket.runtime.Connection,
         "continueCloseWithTimeout",
+    ));
+    try std.testing.expect(@hasDecl(
+        netz.websocket.runtime.Connection,
+        "closeWithTimeout",
+    ));
+    try std.testing.expect(@hasDecl(
+        netz.websocket.runtime.Connection,
+        "closeWithDeadline",
+    ));
+    try std.testing.expect(@hasDecl(
+        netz.websocket.runtime.Connection,
+        "continueCloseWithDeadline",
     ));
     try std.testing.expect(@hasDecl(
         netz.websocket.runtime.H2Connection,
@@ -1741,11 +2010,61 @@ test "public modules are reachable" {
         netz.websocket.runtime.H2Connection,
         "sendBinaryInPlace",
     ));
+    inline for (&.{
+        "sendTextWithTimeout",
+        "sendTextWithDeadline",
+        "sendBinaryWithTimeout",
+        "sendBinaryWithDeadline",
+        "sendPongWithTimeout",
+        "sendPongWithDeadline",
+        "sendPingWithTimeout",
+        "sendPingWithDeadline",
+        "sendCloseWithTimeout",
+        "sendCloseWithDeadline",
+        "sendCloseFrameWithTimeout",
+        "sendCloseFrameWithDeadline",
+        "sendFragmentedWithTimeout",
+        "sendFragmentedWithDeadline",
+        "sendBinaryInPlaceWithTimeout",
+        "sendBinaryInPlaceWithDeadline",
+        "sendBinarySlicesWithTimeout",
+        "sendBinarySlicesWithDeadline",
+    }) |decl| {
+        try std.testing.expect(@hasDecl(
+            netz.websocket.runtime.H2Connection,
+            decl,
+        ));
+    }
     try std.testing.expect(@hasDecl(
         netz.websocket,
         "decompressMessageInto",
     ));
     try std.testing.expect(@hasDecl(netz.websocket.runtime.Connection, "sendMessage"));
+    inline for (&.{
+        "sendTextWithTimeout",
+        "sendTextWithDeadline",
+        "sendBinaryWithTimeout",
+        "sendBinaryWithDeadline",
+        "sendPongWithTimeout",
+        "sendPongWithDeadline",
+        "sendPingWithTimeout",
+        "sendPingWithDeadline",
+        "sendCloseWithTimeout",
+        "sendCloseWithDeadline",
+        "sendCloseFrameWithTimeout",
+        "sendCloseFrameWithDeadline",
+        "sendFragmentedWithTimeout",
+        "sendFragmentedWithDeadline",
+        "sendBinaryInPlaceWithTimeout",
+        "sendBinaryInPlaceWithDeadline",
+        "sendBinarySlicesWithTimeout",
+        "sendBinarySlicesWithDeadline",
+    }) |decl| {
+        try std.testing.expect(@hasDecl(
+            netz.websocket.runtime.Connection,
+            decl,
+        ));
+    }
     try std.testing.expect(@hasDecl(netz.websocket.runtime.Connection, "sendBinaryInPlace"));
     try std.testing.expect(@hasDecl(netz.websocket.runtime.Connection, "sendFragmented"));
     try std.testing.expect(@hasDecl(
@@ -1945,6 +2264,8 @@ test "public modules are reachable" {
     try std.testing.expectEqual(@as(u64, 9), netz.http2.FrameHeader.encoded_len);
     try std.testing.expectEqual(@as(usize, 16 * 1024 * 1024), (netz.http2.runtime.Limits{}).max_body_bytes);
     try std.testing.expectEqual(@as(usize, 16 * 1024), (netz.http2.runtime.Limits{}).max_header_list_size);
+    try std.testing.expectEqual(@as(usize, 256), (netz.http2.runtime.Limits{}).max_peer_origins);
+    try std.testing.expectEqual(@as(usize, 256), (netz.http2.runtime.Limits{}).max_alternative_services);
     try std.testing.expect(@hasField(
         netz.http2.runtime.Limits,
         "connect_timeout",
@@ -2147,6 +2468,42 @@ test "public modules are reachable" {
         netz.http2.runtime.Tunnel,
         "readWithDeadline",
     ));
+    try std.testing.expect(@hasDecl(
+        netz.http2.runtime,
+        "TunnelWriteProgress",
+    ));
+    inline for (&.{
+        "writeWithTimeout",
+        "writeWithDeadline",
+        "writePartsWithTimeout",
+        "writePartsWithDeadline",
+        "writeSlicesWithTimeout",
+        "writeSlicesWithDeadline",
+        "closeWriteWithTimeout",
+        "closeWriteWithDeadline",
+    }) |decl| {
+        try std.testing.expect(@hasDecl(
+            netz.http2.runtime.Tunnel,
+            decl,
+        ));
+    }
+    try std.testing.expect(@hasDecl(
+        netz.http2.runtime,
+        "TunnelWriter",
+    ));
+    inline for (&.{
+        "writeWithTimeout",
+        "writeWithDeadline",
+        "writePartsWithTimeout",
+        "writePartsWithDeadline",
+        "writeSlicesWithTimeout",
+        "writeSlicesWithDeadline",
+    }) |decl| {
+        try std.testing.expect(@hasDecl(
+            netz.http2.runtime.TunnelWriter,
+            decl,
+        ));
+    }
     try std.testing.expect(@hasDecl(netz.http2.runtime.Connection, "releaseReceivedCapacity"));
     const stream_reset_error: netz.http2.runtime.Error = error.StreamReset;
     try std.testing.expect(stream_reset_error == error.StreamReset);
@@ -2298,6 +2655,22 @@ test "public modules are reachable" {
     ));
     try std.testing.expect(@hasDecl(
         netz.http3.runtime.Server,
+        "sendResponseBodyWithTimeout",
+    ));
+    try std.testing.expect(@hasDecl(
+        netz.http3.runtime.Server,
+        "sendResponseBodyWithDeadline",
+    ));
+    try std.testing.expect(@hasDecl(
+        netz.http3.runtime.Server,
+        "sendDevelopmentStreamWithTimeout",
+    ));
+    try std.testing.expect(@hasDecl(
+        netz.http3.runtime.Server,
+        "sendDevelopmentStreamWithDeadline",
+    ));
+    try std.testing.expect(@hasDecl(
+        netz.http3.runtime.Server,
         "cancelRequest",
     ));
     try std.testing.expect(@hasDecl(
@@ -2323,6 +2696,22 @@ test "public modules are reachable" {
     try std.testing.expect(@hasDecl(
         netz.http3.runtime.Client,
         "sendRequestBody",
+    ));
+    try std.testing.expect(@hasDecl(
+        netz.http3.runtime.Client,
+        "sendRequestBodyWithTimeout",
+    ));
+    try std.testing.expect(@hasDecl(
+        netz.http3.runtime.Client,
+        "sendRequestBodyWithDeadline",
+    ));
+    try std.testing.expect(@hasDecl(
+        netz.http3.runtime.Client,
+        "sendDevelopmentStreamWithTimeout",
+    ));
+    try std.testing.expect(@hasDecl(
+        netz.http3.runtime.Client,
+        "sendDevelopmentStreamWithDeadline",
     ));
     try std.testing.expect(@hasDecl(
         netz.http3.runtime.Client,
@@ -2474,6 +2863,26 @@ test "public modules are reachable" {
         "BodyBatchProgress",
     ));
     try std.testing.expect(@hasDecl(
+        netz.http3.runtime,
+        "BodyWriteProgress",
+    ));
+    try std.testing.expect(@hasDecl(
+        netz.http3.runtime.HandshakeClient,
+        "sendRequestBodyPacedWithTimeout",
+    ));
+    try std.testing.expect(@hasDecl(
+        netz.http3.runtime.HandshakeClient,
+        "sendRequestBodyPacedWithDeadline",
+    ));
+    try std.testing.expect(@hasDecl(
+        netz.http3.runtime.HandshakeClient,
+        "sendRequestBodyPartsPacedWithTimeout",
+    ));
+    try std.testing.expect(@hasDecl(
+        netz.http3.runtime.HandshakeClient,
+        "sendRequestBodyPartsPacedWithDeadline",
+    ));
+    try std.testing.expect(@hasDecl(
         netz.http3.runtime.SharedHandshakeClientPool.Lease,
         "trySendRequestBodyParts",
     ));
@@ -2486,6 +2895,14 @@ test "public modules are reachable" {
     try std.testing.expect(@hasDecl(netz.http3.runtime.ProtectedClient, "sendGoAway"));
     try std.testing.expect(@hasDecl(
         netz.http3.runtime.ProtectedClient,
+        "sendGoAwayWithTimeout",
+    ));
+    try std.testing.expect(@hasDecl(
+        netz.http3.runtime.ProtectedClient,
+        "sendGoAwayWithDeadline",
+    ));
+    try std.testing.expect(@hasDecl(
+        netz.http3.runtime.ProtectedClient,
         "pollControlWithTimeout",
     ));
     try std.testing.expect(@hasDecl(
@@ -2493,8 +2910,40 @@ test "public modules are reachable" {
         "pollControlWithDeadline",
     ));
     try std.testing.expect(@hasDecl(netz.http3.runtime.ProtectedClient, "sendMaxPushId"));
+    try std.testing.expect(@hasDecl(
+        netz.http3.runtime.ProtectedClient,
+        "sendMaxPushIdWithTimeout",
+    ));
+    try std.testing.expect(@hasDecl(
+        netz.http3.runtime.ProtectedClient,
+        "sendMaxPushIdWithDeadline",
+    ));
     try std.testing.expect(@hasDecl(netz.http3.runtime.ProtectedClient, "cancelPush"));
+    try std.testing.expect(@hasDecl(
+        netz.http3.runtime.ProtectedClient,
+        "cancelPushWithTimeout",
+    ));
+    try std.testing.expect(@hasDecl(
+        netz.http3.runtime.ProtectedClient,
+        "cancelPushWithDeadline",
+    ));
     try std.testing.expect(@hasDecl(netz.http3.runtime.ProtectedServer, "sendGoAway"));
+    try std.testing.expect(@hasDecl(
+        netz.http3.runtime.ProtectedServer,
+        "sendGoAwayWithTimeout",
+    ));
+    try std.testing.expect(@hasDecl(
+        netz.http3.runtime.ProtectedServer,
+        "sendGoAwayWithDeadline",
+    ));
+    try std.testing.expect(@hasDecl(
+        netz.http3.runtime.ProtectedServer,
+        "sendOriginsWithTimeout",
+    ));
+    try std.testing.expect(@hasDecl(
+        netz.http3.runtime.ProtectedServer,
+        "sendOriginsWithDeadline",
+    ));
     try std.testing.expect(@hasDecl(
         netz.http3.runtime.ProtectedServer,
         "pollControlWithTimeout",
@@ -2505,8 +2954,32 @@ test "public modules are reachable" {
     ));
     try std.testing.expect(@hasDecl(netz.http3.runtime.ProtectedClient, "cancelRequest"));
     try std.testing.expect(@hasDecl(netz.http3.runtime.ProtectedClient, "sendPriorityUpdate"));
+    try std.testing.expect(@hasDecl(
+        netz.http3.runtime.ProtectedClient,
+        "sendPriorityUpdateWithTimeout",
+    ));
+    try std.testing.expect(@hasDecl(
+        netz.http3.runtime.ProtectedClient,
+        "sendPriorityUpdateWithDeadline",
+    ));
     try std.testing.expect(@hasDecl(netz.http3.runtime.ProtectedClient, "sendPushPriorityUpdate"));
+    try std.testing.expect(@hasDecl(
+        netz.http3.runtime.ProtectedClient,
+        "sendPushPriorityUpdateWithTimeout",
+    ));
+    try std.testing.expect(@hasDecl(
+        netz.http3.runtime.ProtectedClient,
+        "sendPushPriorityUpdateWithDeadline",
+    ));
     try std.testing.expect(@hasDecl(netz.http3.runtime.ProtectedClient, "sendRequest"));
+    try std.testing.expect(@hasDecl(
+        netz.http3.runtime.ProtectedClient,
+        "sendRequestWithTimeout",
+    ));
+    try std.testing.expect(@hasDecl(
+        netz.http3.runtime.ProtectedClient,
+        "sendRequestWithDeadline",
+    ));
     try std.testing.expect(@hasDecl(
         netz.http3.runtime.ProtectedClient,
         "requestWithTimeout",
@@ -2624,21 +3097,77 @@ test "public modules are reachable" {
         "skipPushData",
     ));
     try std.testing.expect(@hasDecl(netz.http3.runtime.ProtectedClient, "startRequest"));
+    try std.testing.expect(@hasDecl(
+        netz.http3.runtime.ProtectedClient,
+        "startRequestWithTimeout",
+    ));
+    try std.testing.expect(@hasDecl(
+        netz.http3.runtime.ProtectedClient,
+        "startRequestWithDeadline",
+    ));
     try std.testing.expect(@hasDecl(netz.http3.runtime.ProtectedClient, "sendRequestBody"));
+    try std.testing.expect(@hasDecl(
+        netz.http3.runtime.ProtectedClient,
+        "sendRequestBodyPacedWithTimeout",
+    ));
+    try std.testing.expect(@hasDecl(
+        netz.http3.runtime.ProtectedClient,
+        "sendRequestBodyPacedWithDeadline",
+    ));
     try std.testing.expect(@hasDecl(
         netz.http3.runtime.ProtectedClient,
         "sendRequestBodyPartsPaced",
     ));
     try std.testing.expect(@hasDecl(
         netz.http3.runtime.ProtectedClient,
+        "sendRequestBodyPartsPacedWithTimeout",
+    ));
+    try std.testing.expect(@hasDecl(
+        netz.http3.runtime.ProtectedClient,
+        "sendRequestBodyPartsPacedWithDeadline",
+    ));
+    try std.testing.expect(@hasDecl(
+        netz.http3.runtime.ProtectedClient,
         "sendRequestBodyBatchPaced",
     ));
+    try std.testing.expect(@hasDecl(
+        netz.http3.runtime.ProtectedClient,
+        "sendRequestBodyBatchPacedWithTimeout",
+    ));
+    try std.testing.expect(@hasDecl(
+        netz.http3.runtime.ProtectedClient,
+        "sendRequestBodyBatchPacedWithDeadline",
+    ));
     try std.testing.expect(@hasDecl(netz.http3.runtime.ProtectedClient, "finishRequestTrailers"));
+    try std.testing.expect(@hasDecl(
+        netz.http3.runtime.ProtectedClient,
+        "finishRequestTrailersPacedWithTimeout",
+    ));
+    try std.testing.expect(@hasDecl(
+        netz.http3.runtime.ProtectedClient,
+        "finishRequestTrailersPacedWithDeadline",
+    ));
     try std.testing.expect(@hasDecl(netz.http3.runtime, "OwnedProtectedResponseEvent"));
     try std.testing.expect(@hasDecl(netz.http3.runtime.ProtectedServer, "cancelRequest"));
     try std.testing.expect(@hasDecl(netz.http3.runtime.ProtectedServer, "rejectRequest"));
     try std.testing.expect(@hasDecl(netz.http3.runtime.ProtectedServer, "initiateShutdown"));
+    try std.testing.expect(@hasDecl(
+        netz.http3.runtime.ProtectedServer,
+        "initiateShutdownWithTimeout",
+    ));
+    try std.testing.expect(@hasDecl(
+        netz.http3.runtime.ProtectedServer,
+        "initiateShutdownWithDeadline",
+    ));
     try std.testing.expect(@hasDecl(netz.http3.runtime.ProtectedServer, "completeShutdown"));
+    try std.testing.expect(@hasDecl(
+        netz.http3.runtime.ProtectedServer,
+        "completeShutdownWithTimeout",
+    ));
+    try std.testing.expect(@hasDecl(
+        netz.http3.runtime.ProtectedServer,
+        "completeShutdownWithDeadline",
+    ));
     try std.testing.expect(@hasDecl(netz.http3.runtime.ProtectedServer, "drainComplete"));
     try std.testing.expect(@hasDecl(netz.http3.runtime.ProtectedServer, "receiveRequestEvent"));
     try std.testing.expect(@hasDecl(
@@ -2659,10 +3188,42 @@ test "public modules are reachable" {
         "skipRequestData",
     ));
     try std.testing.expect(@hasDecl(netz.http3.runtime.ProtectedServer, "startResponse"));
+    try std.testing.expect(@hasDecl(
+        netz.http3.runtime.ProtectedServer,
+        "startResponseWithTimeout",
+    ));
+    try std.testing.expect(@hasDecl(
+        netz.http3.runtime.ProtectedServer,
+        "startResponseWithDeadline",
+    ));
+    try std.testing.expect(@hasDecl(
+        netz.http3.runtime.ProtectedServer,
+        "sendResponseWithTimeout",
+    ));
+    try std.testing.expect(@hasDecl(
+        netz.http3.runtime.ProtectedServer,
+        "sendResponseWithDeadline",
+    ));
     try std.testing.expect(@hasDecl(netz.http3.runtime.ProtectedServer, "sendResponseBody"));
     try std.testing.expect(@hasDecl(
         netz.http3.runtime.ProtectedServer,
+        "sendResponseBodyPacedWithTimeout",
+    ));
+    try std.testing.expect(@hasDecl(
+        netz.http3.runtime.ProtectedServer,
+        "sendResponseBodyPacedWithDeadline",
+    ));
+    try std.testing.expect(@hasDecl(
+        netz.http3.runtime.ProtectedServer,
         "sendResponseBodyPartsPaced",
+    ));
+    try std.testing.expect(@hasDecl(
+        netz.http3.runtime.ProtectedServer,
+        "sendResponseBodyPartsPacedWithTimeout",
+    ));
+    try std.testing.expect(@hasDecl(
+        netz.http3.runtime.ProtectedServer,
+        "sendResponseBodyPartsPacedWithDeadline",
     ));
     try std.testing.expect(@hasDecl(
         netz.http3.runtime.ProtectedServer,
@@ -2670,10 +3231,42 @@ test "public modules are reachable" {
     ));
     try std.testing.expect(@hasDecl(
         netz.http3.runtime.ProtectedServer,
+        "sendResponseBodyBatchPacedWithTimeout",
+    ));
+    try std.testing.expect(@hasDecl(
+        netz.http3.runtime.ProtectedServer,
+        "sendResponseBodyBatchPacedWithDeadline",
+    ));
+    try std.testing.expect(@hasDecl(
+        netz.http3.runtime.ProtectedServer,
         "sendResponseBodiesPaced",
     ));
+    try std.testing.expect(@hasDecl(
+        netz.http3.runtime.ProtectedServer,
+        "sendResponseBodiesPacedWithTimeout",
+    ));
+    try std.testing.expect(@hasDecl(
+        netz.http3.runtime.ProtectedServer,
+        "sendResponseBodiesPacedWithDeadline",
+    ));
     try std.testing.expect(@hasDecl(netz.http3.runtime.ProtectedServer, "finishResponseTrailers"));
+    try std.testing.expect(@hasDecl(
+        netz.http3.runtime.ProtectedServer,
+        "finishResponseTrailersPacedWithTimeout",
+    ));
+    try std.testing.expect(@hasDecl(
+        netz.http3.runtime.ProtectedServer,
+        "finishResponseTrailersPacedWithDeadline",
+    ));
     try std.testing.expect(@hasDecl(netz.http3.runtime.HandshakeClient, "sendGoAway"));
+    try std.testing.expect(@hasDecl(
+        netz.http3.runtime.HandshakeClient,
+        "sendGoAwayWithTimeout",
+    ));
+    try std.testing.expect(@hasDecl(
+        netz.http3.runtime.HandshakeClient,
+        "sendGoAwayWithDeadline",
+    ));
     try std.testing.expect(@hasDecl(
         netz.http3.runtime.HandshakeClient,
         "pollControlWithTimeout",
@@ -2726,9 +3319,112 @@ test "public modules are reachable" {
         netz.http3.runtime.HandshakeServer,
         "acceptFromInitial",
     ));
+    try std.testing.expect(@hasDecl(
+        netz.http3.runtime.HandshakeServerSession,
+        "bindDispatcher",
+    ));
+    try std.testing.expect(@hasDecl(
+        netz.http3.runtime.HandshakeServerSession,
+        "dispatcherBound",
+    ));
+    try std.testing.expect(@hasDecl(
+        netz.http3.runtime.HandshakeServerSession,
+        "sendResponseBodyPartsPacedWithTimeout",
+    ));
+    try std.testing.expect(@hasDecl(
+        netz.http3.runtime.HandshakeServerSession,
+        "sendResponseBodyPartsPacedWithDeadline",
+    ));
+    try std.testing.expect(@hasDecl(
+        netz.http3.runtime.HandshakeServerSession,
+        "trySendResponseBodyParts",
+    ));
+    inline for (.{
+        "sendConnectDatagrams",
+        "trySendConnectDatagrams",
+        "sendConnectDatagramsWithTimeout",
+        "sendConnectDatagramsWithDeadline",
+    }) |name| {
+        try std.testing.expect(@hasDecl(
+            netz.http3.runtime.HandshakeServerSession,
+            name,
+        ));
+        try std.testing.expect(@hasDecl(
+            netz.http3.runtime.HandshakeClient,
+            name,
+        ));
+    }
     try std.testing.expect(@hasDecl(netz.http3.runtime.HandshakeClient, "sendMaxPushId"));
+    try std.testing.expect(@hasDecl(
+        netz.http3.runtime.HandshakeClient,
+        "sendMaxPushIdWithTimeout",
+    ));
+    try std.testing.expect(@hasDecl(
+        netz.http3.runtime.HandshakeClient,
+        "sendMaxPushIdWithDeadline",
+    ));
+    try std.testing.expect(@hasDecl(
+        netz.http3.runtime.HandshakeClient,
+        "trySendMaxPushId",
+    ));
     try std.testing.expect(@hasDecl(netz.http3.runtime.HandshakeClient, "cancelPush"));
+    try std.testing.expect(@hasDecl(
+        netz.http3.runtime.HandshakeClient,
+        "cancelPushWithTimeout",
+    ));
+    try std.testing.expect(@hasDecl(
+        netz.http3.runtime.HandshakeClient,
+        "cancelPushWithDeadline",
+    ));
+    try std.testing.expect(@hasDecl(
+        netz.http3.runtime.HandshakeClient,
+        "tryCancelPush",
+    ));
+    try std.testing.expect(@hasDecl(
+        netz.http3.runtime.HandshakeClient,
+        "trySendGoAway",
+    ));
     try std.testing.expect(@hasDecl(netz.http3.runtime.HandshakeServerSession, "sendGoAway"));
+    try std.testing.expect(@hasDecl(
+        netz.http3.runtime.HandshakeServerSession,
+        "sendGoAwayWithTimeout",
+    ));
+    try std.testing.expect(@hasDecl(
+        netz.http3.runtime.HandshakeServerSession,
+        "sendGoAwayWithDeadline",
+    ));
+    try std.testing.expect(@hasDecl(
+        netz.http3.runtime.HandshakeServerSession,
+        "initiateShutdownWithTimeout",
+    ));
+    try std.testing.expect(@hasDecl(
+        netz.http3.runtime.HandshakeServerSession,
+        "initiateShutdownWithDeadline",
+    ));
+    try std.testing.expect(@hasDecl(
+        netz.http3.runtime.HandshakeServerSession,
+        "completeShutdownWithTimeout",
+    ));
+    try std.testing.expect(@hasDecl(
+        netz.http3.runtime.HandshakeServerSession,
+        "completeShutdownWithDeadline",
+    ));
+    try std.testing.expect(@hasDecl(
+        netz.http3.runtime.HandshakeServerSession,
+        "trySendOrigins",
+    ));
+    try std.testing.expect(@hasDecl(
+        netz.http3.runtime.HandshakeServerSession,
+        "sendOriginsWithTimeout",
+    ));
+    try std.testing.expect(@hasDecl(
+        netz.http3.runtime.HandshakeServerSession,
+        "sendOriginsWithDeadline",
+    ));
+    try std.testing.expect(@hasDecl(
+        netz.http3.runtime.HandshakeServerSession,
+        "trySendGoAway",
+    ));
     try std.testing.expect(@hasDecl(
         netz.http3.runtime.HandshakeServerSession,
         "sendConnectDatagram",
@@ -2755,7 +3451,31 @@ test "public modules are reachable" {
     ));
     try std.testing.expect(@hasDecl(netz.http3.runtime.HandshakeClient, "cancelRequest"));
     try std.testing.expect(@hasDecl(netz.http3.runtime.HandshakeClient, "sendPriorityUpdate"));
+    try std.testing.expect(@hasDecl(
+        netz.http3.runtime.HandshakeClient,
+        "sendPriorityUpdateWithTimeout",
+    ));
+    try std.testing.expect(@hasDecl(
+        netz.http3.runtime.HandshakeClient,
+        "sendPriorityUpdateWithDeadline",
+    ));
+    try std.testing.expect(@hasDecl(
+        netz.http3.runtime.HandshakeClient,
+        "trySendPriorityUpdate",
+    ));
     try std.testing.expect(@hasDecl(netz.http3.runtime.HandshakeClient, "sendPushPriorityUpdate"));
+    try std.testing.expect(@hasDecl(
+        netz.http3.runtime.HandshakeClient,
+        "sendPushPriorityUpdateWithTimeout",
+    ));
+    try std.testing.expect(@hasDecl(
+        netz.http3.runtime.HandshakeClient,
+        "sendPushPriorityUpdateWithDeadline",
+    ));
+    try std.testing.expect(@hasDecl(
+        netz.http3.runtime.HandshakeClient,
+        "trySendPushPriorityUpdate",
+    ));
     try std.testing.expect(@hasDecl(netz.http3.runtime.HandshakeClient, "sendRequest"));
     try std.testing.expect(@hasDecl(netz.http3.runtime.HandshakeClient, "connectUri"));
     try std.testing.expect(@hasDecl(netz.http3.runtime.HandshakeClient, "requestUri"));
@@ -2891,12 +3611,28 @@ test "public modules are reachable" {
         "skipPushData",
     ));
     try std.testing.expect(@hasDecl(netz.http3.runtime.HandshakeClient, "startRequest"));
+    try std.testing.expect(@hasDecl(
+        netz.http3.runtime.HandshakeClient,
+        "startRequestWithTimeout",
+    ));
+    try std.testing.expect(@hasDecl(
+        netz.http3.runtime.HandshakeClient,
+        "startRequestWithDeadline",
+    ));
     try std.testing.expect(@hasDecl(netz.http3.runtime.HandshakeClient, "sendRequestBody"));
     try std.testing.expect(@hasDecl(netz.http3.runtime.HandshakeClient, "sendRequestBodyPaced"));
     try std.testing.expect(@hasDecl(netz.http3.runtime, "BodyChunk"));
     try std.testing.expect(@hasDecl(netz.http3.runtime.HandshakeClient, "sendRequestBodyBatchPaced"));
     try std.testing.expect(@hasDecl(netz.http3.runtime.HandshakeClient, "finishRequestTrailers"));
     try std.testing.expect(@hasDecl(netz.http3.runtime.HandshakeClient, "finishRequestTrailersPaced"));
+    try std.testing.expect(@hasDecl(
+        netz.http3.runtime.HandshakeClient,
+        "finishRequestTrailersPacedWithTimeout",
+    ));
+    try std.testing.expect(@hasDecl(
+        netz.http3.runtime.HandshakeClient,
+        "finishRequestTrailersPacedWithDeadline",
+    ));
     try std.testing.expect(@hasDecl(netz.http3.runtime, "OwnedHandshakeResponseEvent"));
     try std.testing.expect(@hasDecl(netz.http3.runtime.HandshakeServerSession, "cancelRequest"));
     try std.testing.expect(@hasDecl(netz.http3.runtime.HandshakeServerSession, "rejectRequest"));
@@ -2910,7 +3646,15 @@ test "public modules are reachable" {
         "finishRequest",
     ));
     try std.testing.expect(@hasDecl(netz.http3.runtime.HandshakeServerSession, "initiateShutdown"));
+    try std.testing.expect(@hasDecl(
+        netz.http3.runtime.HandshakeServerSession,
+        "tryInitiateShutdown",
+    ));
     try std.testing.expect(@hasDecl(netz.http3.runtime.HandshakeServerSession, "completeShutdown"));
+    try std.testing.expect(@hasDecl(
+        netz.http3.runtime.HandshakeServerSession,
+        "tryCompleteShutdown",
+    ));
     try std.testing.expect(@hasDecl(netz.http3.runtime.HandshakeServerSession, "drainComplete"));
     try std.testing.expect(@hasDecl(netz.http3.runtime.HandshakeServerSession, "receiveRequestEvent"));
     try std.testing.expect(@hasDecl(
@@ -2938,8 +3682,36 @@ test "public modules are reachable" {
         "processRequestPacket",
     ));
     try std.testing.expect(@hasDecl(netz.http3.runtime.HandshakeServerSession, "readRequestData"));
+    try std.testing.expect(@hasDecl(
+        netz.http3.runtime.HandshakeServerSession,
+        "readRequestDataOnce",
+    ));
     try std.testing.expect(@hasDecl(netz.http3.runtime.HandshakeServerSession, "skipRequestData"));
+    try std.testing.expect(@hasDecl(
+        netz.http3.runtime.HandshakeServerSession,
+        "skipRequestDataOnce",
+    ));
     try std.testing.expect(@hasDecl(netz.http3.runtime.HandshakeServerSession, "startResponse"));
+    try std.testing.expect(@hasDecl(
+        netz.http3.runtime.HandshakeServerSession,
+        "startResponseWithTimeout",
+    ));
+    try std.testing.expect(@hasDecl(
+        netz.http3.runtime.HandshakeServerSession,
+        "startResponseWithDeadline",
+    ));
+    try std.testing.expect(@hasDecl(
+        netz.http3.runtime.HandshakeServerSession,
+        "sendResponseWithTimeout",
+    ));
+    try std.testing.expect(@hasDecl(
+        netz.http3.runtime.HandshakeServerSession,
+        "sendResponseWithDeadline",
+    ));
+    try std.testing.expect(@hasDecl(
+        netz.http3.runtime.HandshakeServerSession,
+        "tryStartResponse",
+    ));
     try std.testing.expect(@hasDecl(netz.http3.runtime.HandshakeServerSession, "serveOne"));
     try std.testing.expect(@hasDecl(netz.http3.runtime.HandshakeServerSession, "serve"));
     try std.testing.expect(@hasDecl(
@@ -2954,11 +3726,47 @@ test "public modules are reachable" {
         netz.http3.runtime.HandshakeServerSession,
         "sendResponsePacedWithDeadline",
     ));
+    try std.testing.expect(@hasDecl(
+        netz.http3.runtime.HandshakeServerSession,
+        "receivePeerResponseCancellationWithTimeout",
+    ));
+    try std.testing.expect(@hasDecl(
+        netz.http3.runtime.HandshakeServerSession,
+        "receivePeerResponseCancellationWithDeadline",
+    ));
     try std.testing.expect(@hasDecl(netz.http3.runtime.HandshakeServerSession, "sendResponseBody"));
+    try std.testing.expect(@hasDecl(
+        netz.http3.runtime.HandshakeServerSession,
+        "trySendResponseLiteral",
+    ));
+    try std.testing.expect(@hasDecl(
+        netz.http3.runtime.HandshakeServerSession,
+        "trySendResponseBody",
+    ));
     try std.testing.expect(@hasDecl(netz.http3.runtime.HandshakeServerSession, "sendResponseBodyPaced"));
+    try std.testing.expect(@hasDecl(
+        netz.http3.runtime.HandshakeServerSession,
+        "sendResponseBodyPacedWithTimeout",
+    ));
+    try std.testing.expect(@hasDecl(
+        netz.http3.runtime.HandshakeServerSession,
+        "sendResponseBodyPacedWithDeadline",
+    ));
     try std.testing.expect(@hasDecl(netz.http3.runtime.HandshakeServerSession, "sendResponseBodyBatchPaced"));
     try std.testing.expect(@hasDecl(netz.http3.runtime.HandshakeServerSession, "finishResponseTrailers"));
+    try std.testing.expect(@hasDecl(
+        netz.http3.runtime.HandshakeServerSession,
+        "tryFinishResponseTrailers",
+    ));
     try std.testing.expect(@hasDecl(netz.http3.runtime.HandshakeServerSession, "finishResponseTrailersPaced"));
+    try std.testing.expect(@hasDecl(
+        netz.http3.runtime.HandshakeServerSession,
+        "finishResponseTrailersPacedWithTimeout",
+    ));
+    try std.testing.expect(@hasDecl(
+        netz.http3.runtime.HandshakeServerSession,
+        "finishResponseTrailersPacedWithDeadline",
+    ));
     try std.testing.expect(@hasDecl(netz.http3.runtime, "ShutdownState"));
     try std.testing.expect(@hasDecl(netz.http3, "SettingsState"));
     try std.testing.expectEqual(
@@ -5166,6 +5974,34 @@ test "public modules are reachable" {
         "receiveRequestWithDeadline",
     ));
     try std.testing.expect(@hasDecl(netz.http3.runtime.ProtectedServer, "sendResponseWithPush"));
+    try std.testing.expect(@hasDecl(
+        netz.http3.runtime.ProtectedServer,
+        "sendResponseWithPushPaced",
+    ));
+    try std.testing.expect(@hasDecl(
+        netz.http3.runtime.ProtectedServer,
+        "sendResponseWithPushPacedAndTimeout",
+    ));
+    try std.testing.expect(@hasDecl(
+        netz.http3.runtime.ProtectedServer,
+        "sendResponseWithPushPacedAndDeadline",
+    ));
+    try std.testing.expect(@hasDecl(
+        netz.http3.runtime.ProtectedServer,
+        "sendResponseWithPushAndTimeout",
+    ));
+    try std.testing.expect(@hasDecl(
+        netz.http3.runtime.ProtectedServer,
+        "sendResponseWithPushAndDeadline",
+    ));
+    try std.testing.expect(@hasDecl(
+        netz.http3.runtime.ProtectedServer,
+        "sendResponseWithInformationalAndTimeout",
+    ));
+    try std.testing.expect(@hasDecl(
+        netz.http3.runtime.ProtectedServer,
+        "sendResponseWithInformationalAndDeadline",
+    ));
     try std.testing.expect(@hasDecl(netz.http3.runtime.HandshakeServerSession, "receiveRequest"));
     try std.testing.expect(@hasDecl(
         netz.http3.runtime.HandshakeServerSession,
@@ -5184,6 +6020,34 @@ test "public modules are reachable" {
         "receiveDetachedRequestProgressWithDeadline",
     ));
     try std.testing.expect(@hasDecl(netz.http3.runtime.HandshakeServerSession, "sendResponseWithPush"));
+    try std.testing.expect(@hasDecl(
+        netz.http3.runtime.HandshakeServerSession,
+        "sendResponseWithPushPaced",
+    ));
+    try std.testing.expect(@hasDecl(
+        netz.http3.runtime.HandshakeServerSession,
+        "sendResponseWithPushPacedAndTimeout",
+    ));
+    try std.testing.expect(@hasDecl(
+        netz.http3.runtime.HandshakeServerSession,
+        "sendResponseWithPushPacedAndDeadline",
+    ));
+    try std.testing.expect(@hasDecl(
+        netz.http3.runtime.HandshakeServerSession,
+        "sendResponseWithPushAndTimeout",
+    ));
+    try std.testing.expect(@hasDecl(
+        netz.http3.runtime.HandshakeServerSession,
+        "sendResponseWithPushAndDeadline",
+    ));
+    try std.testing.expect(@hasDecl(
+        netz.http3.runtime.HandshakeServerSession,
+        "sendResponseWithInformationalAndTimeout",
+    ));
+    try std.testing.expect(@hasDecl(
+        netz.http3.runtime.HandshakeServerSession,
+        "sendResponseWithInformationalAndDeadline",
+    ));
     try std.testing.expect(@hasDecl(netz.quic.crypto_stream, "Reassembler"));
     try std.testing.expectEqual(@as(usize, 1200), netz.quic.initial_exchange.min_initial_udp_datagram_size);
     try std.testing.expect(@hasDecl(netz.quic, "appendPadding"));
@@ -5287,6 +6151,10 @@ test "public modules are reachable" {
     try std.testing.expect(@hasField(netz.quic.handshake.OneRttConfig, "congestion_algorithm"));
     try std.testing.expect(@hasField(netz.quic.handshake.OneRttConfig, "enable_hystart"));
     try std.testing.expect(@hasField(netz.quic.handshake.OneRttConfig, "enable_pacing"));
+    try std.testing.expect(@hasField(
+        netz.quic.handshake.OneRttConfig,
+        "enable_spin_bit",
+    ));
     try std.testing.expect(@hasField(netz.quic.handshake.OneRttConfig, "max_receive_window"));
     try std.testing.expect(@hasField(netz.quic.handshake.OneRttConfig, "max_stream_receive_window"));
     try std.testing.expect(@hasField(
@@ -5449,6 +6317,14 @@ test "public modules are reachable" {
     ));
     try std.testing.expect(@hasDecl(netz.quic.one_rtt.Connection, "resetStream"));
     try std.testing.expect(@hasDecl(netz.quic.one_rtt.Connection, "sendStopSending"));
+    try std.testing.expect(@hasDecl(
+        netz.quic.one_rtt.Connection,
+        "sendStopSendingWithTimeout",
+    ));
+    try std.testing.expect(@hasDecl(
+        netz.quic.one_rtt.Connection,
+        "sendStopSendingWithDeadline",
+    ));
     try std.testing.expect(@hasDecl(netz.quic.one_rtt.Connection, "streamResetReceived"));
     try std.testing.expect(@hasDecl(netz.quic.one_rtt, "StreamRead"));
     try std.testing.expect(@hasDecl(
@@ -5528,6 +6404,10 @@ test "public modules are reachable" {
     try std.testing.expect(@hasDecl(netz.quic.one_rtt.Connection, "draining"));
     try std.testing.expect(@hasDecl(netz.quic.one_rtt.Connection, "checkCloseExpired"));
     try std.testing.expect(@hasDecl(netz.quic.one_rtt.Connection, "sendDatagram"));
+    try std.testing.expect(@hasDecl(netz.quic.one_rtt.Connection, "sendDatagrams"));
+    try std.testing.expect(@hasDecl(netz.quic.one_rtt.Connection, "trySendDatagrams"));
+    try std.testing.expect(@hasDecl(netz.quic.one_rtt.Connection, "sendDatagramsWithTimeout"));
+    try std.testing.expect(@hasDecl(netz.quic.one_rtt.Connection, "sendDatagramsWithDeadline"));
     try std.testing.expect(@hasDecl(netz.quic.one_rtt.Connection, "popDatagram"));
     try std.testing.expect(@hasDecl(netz.quic.one_rtt.Connection, "maxDatagramPayloadSize"));
     try std.testing.expect(@hasDecl(netz.quic.one_rtt.Connection, "datagramReceiveQueueLen"));
@@ -6051,6 +6931,18 @@ test "public modules are reachable" {
         netz.webtransport.runtime.Server,
         "receiveDatagramWithDeadline",
     ));
+    inline for (.{
+        "sendDatagrams",
+        "sendDatagramsWithTimeout",
+        "sendDatagramsWithDeadline",
+        "maxDatagramPayloadSize",
+        "maxDatagramSize",
+    }) |name| {
+        try std.testing.expect(@hasDecl(
+            netz.webtransport.runtime.Server,
+            name,
+        ));
+    }
     try std.testing.expect(@hasDecl(
         netz.webtransport.runtime.Server,
         "receiveSessionRequestWithTimeout",
@@ -6069,6 +6961,14 @@ test "public modules are reachable" {
     ));
     try std.testing.expect(@hasDecl(
         netz.webtransport.runtime.Server,
+        "sendSessionDataWithTimeout",
+    ));
+    try std.testing.expect(@hasDecl(
+        netz.webtransport.runtime.Server,
+        "sendSessionDataWithDeadline",
+    ));
+    try std.testing.expect(@hasDecl(
+        netz.webtransport.runtime.Server,
         "receiveSessionData",
     ));
     try std.testing.expect(@hasDecl(
@@ -6085,7 +6985,23 @@ test "public modules are reachable" {
     ));
     try std.testing.expect(@hasDecl(
         netz.webtransport.runtime.AcceptedSession,
+        "drainWithTimeout",
+    ));
+    try std.testing.expect(@hasDecl(
+        netz.webtransport.runtime.AcceptedSession,
+        "drainWithDeadline",
+    ));
+    try std.testing.expect(@hasDecl(
+        netz.webtransport.runtime.AcceptedSession,
         "close",
+    ));
+    try std.testing.expect(@hasDecl(
+        netz.webtransport.runtime.AcceptedSession,
+        "closeWithTimeout",
+    ));
+    try std.testing.expect(@hasDecl(
+        netz.webtransport.runtime.AcceptedSession,
+        "closeWithDeadline",
     ));
     try std.testing.expect(@hasDecl(
         netz.webtransport.runtime.AcceptedSession,
@@ -6099,6 +7015,21 @@ test "public modules are reachable" {
         netz.webtransport.runtime.AcceptedSession,
         "receiveSessionEventWithDeadline",
     ));
+    inline for (.{
+        "sendDatagram",
+        "sendDatagramWithTimeout",
+        "sendDatagramWithDeadline",
+        "sendDatagrams",
+        "sendDatagramsWithTimeout",
+        "sendDatagramsWithDeadline",
+        "maxDatagramPayloadSize",
+        "maxDatagramSize",
+    }) |name| {
+        try std.testing.expect(@hasDecl(
+            netz.webtransport.runtime.AcceptedSession,
+            name,
+        ));
+    }
     try std.testing.expect(@hasDecl(
         netz.webtransport.runtime.AcceptedSession,
         "sessionId",
@@ -6106,6 +7037,14 @@ test "public modules are reachable" {
     try std.testing.expect(@hasDecl(
         netz.webtransport.runtime.AcceptedSession,
         "remoteAddress",
+    ));
+    try std.testing.expect(@hasDecl(
+        netz.webtransport.runtime.AcceptedSession,
+        "sendStreamWithTimeout",
+    ));
+    try std.testing.expect(@hasDecl(
+        netz.webtransport.runtime.AcceptedSession,
+        "sendStreamWithDeadline",
     ));
     try std.testing.expect(@hasDecl(
         netz.webtransport.runtime.PendingSession,
@@ -6120,6 +7059,10 @@ test "public modules are reachable" {
         "SessionDataRead",
     ));
     try std.testing.expect(@hasDecl(
+        netz.http3.runtime,
+        "DevelopmentBodyWriteProgress",
+    ));
+    try std.testing.expect(@hasDecl(
         netz.webtransport.runtime.ClientSession,
         "receiveDatagramWithTimeout",
     ));
@@ -6127,9 +7070,29 @@ test "public modules are reachable" {
         netz.webtransport.runtime.ClientSession,
         "receiveDatagramWithDeadline",
     ));
+    inline for (.{
+        "sendDatagrams",
+        "sendDatagramsWithTimeout",
+        "sendDatagramsWithDeadline",
+        "maxDatagramPayloadSize",
+        "maxDatagramSize",
+    }) |name| {
+        try std.testing.expect(@hasDecl(
+            netz.webtransport.runtime.ClientSession,
+            name,
+        ));
+    }
     try std.testing.expect(@hasDecl(
         netz.webtransport.runtime.ClientSession,
         "sendSessionData",
+    ));
+    try std.testing.expect(@hasDecl(
+        netz.webtransport.runtime.ClientSession,
+        "sendSessionDataWithTimeout",
+    ));
+    try std.testing.expect(@hasDecl(
+        netz.webtransport.runtime.ClientSession,
+        "sendSessionDataWithDeadline",
     ));
     try std.testing.expect(@hasDecl(
         netz.webtransport.runtime.ClientSession,
@@ -6149,7 +7112,23 @@ test "public modules are reachable" {
     ));
     try std.testing.expect(@hasDecl(
         netz.webtransport.runtime.ClientSession,
+        "drainWithTimeout",
+    ));
+    try std.testing.expect(@hasDecl(
+        netz.webtransport.runtime.ClientSession,
+        "drainWithDeadline",
+    ));
+    try std.testing.expect(@hasDecl(
+        netz.webtransport.runtime.ClientSession,
         "close",
+    ));
+    try std.testing.expect(@hasDecl(
+        netz.webtransport.runtime.ClientSession,
+        "closeWithTimeout",
+    ));
+    try std.testing.expect(@hasDecl(
+        netz.webtransport.runtime.ClientSession,
+        "closeWithDeadline",
     ));
     try std.testing.expect(@hasDecl(
         netz.webtransport.runtime.ClientSession,
@@ -6162,6 +7141,14 @@ test "public modules are reachable" {
     try std.testing.expect(@hasDecl(
         netz.webtransport.runtime.ClientSession,
         "receiveSessionEventWithDeadline",
+    ));
+    try std.testing.expect(@hasDecl(
+        netz.webtransport.runtime.ClientSession,
+        "sendStreamWithTimeout",
+    ));
+    try std.testing.expect(@hasDecl(
+        netz.webtransport.runtime.ClientSession,
+        "sendStreamWithDeadline",
     ));
     try std.testing.expect(@hasField(
         netz.webtransport.runtime.HandshakeUriConnectOptions,
@@ -6229,6 +7216,14 @@ test "public modules are reachable" {
         "connectAttemptWithTimeout",
     ));
     try std.testing.expect(@hasDecl(
+        netz.webtransport.runtime.ClientSession,
+        "sendDatagramWithTimeout",
+    ));
+    try std.testing.expect(@hasDecl(
+        netz.webtransport.runtime.ClientSession,
+        "sendDatagramWithDeadline",
+    ));
+    try std.testing.expect(@hasDecl(
         netz.webtransport.runtime,
         "ProtectedSessionRead",
     ));
@@ -6238,8 +7233,48 @@ test "public modules are reachable" {
     ));
     try std.testing.expect(@hasDecl(
         netz.webtransport.runtime.ProtectedClientSession,
+        "sendSessionDataWithTimeout",
+    ));
+    try std.testing.expect(@hasDecl(
+        netz.webtransport.runtime.ProtectedClientSession,
+        "sendSessionDataWithDeadline",
+    ));
+    try std.testing.expect(@hasDecl(
+        netz.webtransport.runtime.ProtectedClientSession,
+        "sendSessionDataSlices",
+    ));
+    try std.testing.expect(@hasDecl(
+        netz.webtransport.runtime.ProtectedClientSession,
+        "sendSessionDataSlicesWithTimeout",
+    ));
+    try std.testing.expect(@hasDecl(
+        netz.webtransport.runtime.ProtectedClientSession,
+        "sendSessionDataSlicesWithDeadline",
+    ));
+    try std.testing.expect(@hasDecl(
+        netz.webtransport.runtime.ProtectedClientSession,
         "receiveDatagramWithTimeout",
     ));
+    try std.testing.expect(@hasDecl(
+        netz.webtransport.runtime.ProtectedClientSession,
+        "sendDatagramWithTimeout",
+    ));
+    try std.testing.expect(@hasDecl(
+        netz.webtransport.runtime.ProtectedClientSession,
+        "sendDatagramWithDeadline",
+    ));
+    inline for (.{
+        "sendDatagrams",
+        "sendDatagramsWithTimeout",
+        "sendDatagramsWithDeadline",
+        "maxDatagramPayloadSize",
+        "maxDatagramSize",
+    }) |name| {
+        try std.testing.expect(@hasDecl(
+            netz.webtransport.runtime.ProtectedClientSession,
+            name,
+        ));
+    }
     try std.testing.expect(@hasDecl(
         netz.webtransport.runtime.ProtectedClientSession,
         "receiveDatagramWithDeadline",
@@ -6274,11 +7309,55 @@ test "public modules are reachable" {
     ));
     try std.testing.expect(@hasDecl(
         netz.webtransport.runtime.ProtectedClientSession,
+        "closeWithTimeout",
+    ));
+    try std.testing.expect(@hasDecl(
+        netz.webtransport.runtime.ProtectedClientSession,
+        "closeWithDeadline",
+    ));
+    try std.testing.expect(@hasDecl(
+        netz.webtransport.runtime.ProtectedClientSession,
         "drain",
+    ));
+    try std.testing.expect(@hasDecl(
+        netz.webtransport.runtime.ProtectedClientSession,
+        "drainWithTimeout",
+    ));
+    try std.testing.expect(@hasDecl(
+        netz.webtransport.runtime.ProtectedClientSession,
+        "drainWithDeadline",
     ));
     try std.testing.expect(@hasDecl(
         netz.webtransport.runtime.ProtectedServer,
         "sendSessionData",
+    ));
+    try std.testing.expect(@hasDecl(
+        netz.webtransport.runtime.Server,
+        "sendDatagramWithTimeout",
+    ));
+    try std.testing.expect(@hasDecl(
+        netz.webtransport.runtime.Server,
+        "sendDatagramWithDeadline",
+    ));
+    try std.testing.expect(@hasDecl(
+        netz.webtransport.runtime.ProtectedServer,
+        "sendSessionDataWithTimeout",
+    ));
+    try std.testing.expect(@hasDecl(
+        netz.webtransport.runtime.ProtectedServer,
+        "sendSessionDataWithDeadline",
+    ));
+    try std.testing.expect(@hasDecl(
+        netz.webtransport.runtime.ProtectedServer,
+        "sendSessionDataSlices",
+    ));
+    try std.testing.expect(@hasDecl(
+        netz.webtransport.runtime.ProtectedServer,
+        "sendSessionDataSlicesWithTimeout",
+    ));
+    try std.testing.expect(@hasDecl(
+        netz.webtransport.runtime.ProtectedServer,
+        "sendSessionDataSlicesWithDeadline",
     ));
     try std.testing.expect(@hasDecl(
         netz.webtransport.runtime.ProtectedServer,
@@ -6302,6 +7381,26 @@ test "public modules are reachable" {
     ));
     try std.testing.expect(@hasDecl(
         netz.webtransport.runtime.ProtectedServer,
+        "sendDatagramWithTimeout",
+    ));
+    try std.testing.expect(@hasDecl(
+        netz.webtransport.runtime.ProtectedServer,
+        "sendDatagramWithDeadline",
+    ));
+    inline for (.{
+        "sendDatagrams",
+        "sendDatagramsWithTimeout",
+        "sendDatagramsWithDeadline",
+        "maxDatagramPayloadSize",
+        "maxDatagramSize",
+    }) |name| {
+        try std.testing.expect(@hasDecl(
+            netz.webtransport.runtime.ProtectedServer,
+            name,
+        ));
+    }
+    try std.testing.expect(@hasDecl(
+        netz.webtransport.runtime.ProtectedServer,
         "receiveDatagramWithDeadline",
     ));
     try std.testing.expect(@hasDecl(
@@ -6318,7 +7417,23 @@ test "public modules are reachable" {
     ));
     try std.testing.expect(@hasDecl(
         netz.webtransport.runtime.AcceptedProtectedSession,
+        "drainWithTimeout",
+    ));
+    try std.testing.expect(@hasDecl(
+        netz.webtransport.runtime.AcceptedProtectedSession,
+        "drainWithDeadline",
+    ));
+    try std.testing.expect(@hasDecl(
+        netz.webtransport.runtime.AcceptedProtectedSession,
         "close",
+    ));
+    try std.testing.expect(@hasDecl(
+        netz.webtransport.runtime.AcceptedProtectedSession,
+        "closeWithTimeout",
+    ));
+    try std.testing.expect(@hasDecl(
+        netz.webtransport.runtime.AcceptedProtectedSession,
+        "closeWithDeadline",
     ));
     try std.testing.expect(@hasDecl(
         netz.webtransport.runtime.AcceptedProtectedSession,
@@ -6332,6 +7447,21 @@ test "public modules are reachable" {
         netz.webtransport.runtime.AcceptedProtectedSession,
         "receiveSessionEventWithDeadline",
     ));
+    inline for (.{
+        "sendDatagram",
+        "sendDatagramWithTimeout",
+        "sendDatagramWithDeadline",
+        "sendDatagrams",
+        "sendDatagramsWithTimeout",
+        "sendDatagramsWithDeadline",
+        "maxDatagramPayloadSize",
+        "maxDatagramSize",
+    }) |name| {
+        try std.testing.expect(@hasDecl(
+            netz.webtransport.runtime.AcceptedProtectedSession,
+            name,
+        ));
+    }
     try std.testing.expect(@hasDecl(netz.webtransport.runtime, "HandshakeClientSession"));
     try std.testing.expect(@hasDecl(
         netz.webtransport.runtime,
@@ -6377,9 +7507,121 @@ test "public modules are reachable" {
         netz.webtransport.runtime,
         "StatefulProtectedClientSession",
     ));
+    inline for (.{
+        "sendSessionData",
+        "sendSessionDataWithTimeout",
+        "sendSessionDataWithDeadline",
+        "sendSessionDataSlices",
+        "sendSessionDataSlicesWithTimeout",
+        "sendSessionDataSlicesWithDeadline",
+        "sendDatagrams",
+        "sendDatagramsWithTimeout",
+        "sendDatagramsWithDeadline",
+        "maxDatagramPayloadSize",
+        "maxDatagramSize",
+        "openBidirectionalStream",
+        "openBidirectionalStreamWithTimeout",
+        "openBidirectionalStreamWithDeadline",
+        "openUnidirectionalStream",
+        "openUnidirectionalStreamWithTimeout",
+        "openUnidirectionalStreamWithDeadline",
+        "sendStream",
+        "sendStreamWithTimeout",
+        "sendStreamWithDeadline",
+        "sendStreamSlices",
+        "sendStreamSlicesWithTimeout",
+        "sendStreamSlicesWithDeadline",
+        "writeStream",
+        "writeStreamWithTimeout",
+        "writeStreamWithDeadline",
+        "writeStreamSlices",
+        "writeStreamSlicesWithTimeout",
+        "writeStreamSlicesWithDeadline",
+        "setStreamPriority",
+        "streamPriority",
+        "writeStreams",
+        "writeStreamsWithTimeout",
+        "writeStreamsWithDeadline",
+        "finishStream",
+        "finishStreamWithTimeout",
+        "finishStreamWithDeadline",
+        "releaseCompletedPeerStream",
+        "receiveStream",
+        "receiveStreamWithTimeout",
+        "receiveStreamWithDeadline",
+        "pollCompleteStream",
+        "pollStream",
+        "readStream",
+        "readStreamWithTimeout",
+        "readStreamWithDeadline",
+        "readStreamId",
+        "readStreamIdWithTimeout",
+        "readStreamIdWithDeadline",
+        "flushPendingAck",
+        "serviceTransport",
+        "resetStream",
+        "resetStreamWithTimeout",
+        "resetStreamWithDeadline",
+        "stopStream",
+        "stopStreamWithTimeout",
+        "stopStreamWithDeadline",
+    }) |name| {
+        try std.testing.expect(@hasDecl(
+            netz.webtransport.runtime.StatefulProtectedClientSession,
+            name,
+        ));
+    }
     try std.testing.expect(@hasDecl(
         netz.webtransport.runtime,
         "PendingHandshakeSession",
+    ));
+    try std.testing.expect(@hasDecl(
+        netz.webtransport.runtime.AcceptedHandshakeSession,
+        "sendSessionData",
+    ));
+    try std.testing.expect(@hasDecl(
+        netz.webtransport.runtime.AcceptedHandshakeSession,
+        "sendSessionDataWithTimeout",
+    ));
+    try std.testing.expect(@hasDecl(
+        netz.webtransport.runtime.AcceptedHandshakeSession,
+        "sendSessionDataWithDeadline",
+    ));
+    try std.testing.expect(@hasDecl(
+        netz.webtransport.runtime.AcceptedHandshakeSession,
+        "sendSessionDataSlices",
+    ));
+    try std.testing.expect(@hasDecl(
+        netz.webtransport.runtime.AcceptedHandshakeSession,
+        "sendSessionDataSlicesWithTimeout",
+    ));
+    try std.testing.expect(@hasDecl(
+        netz.webtransport.runtime.AcceptedHandshakeSession,
+        "sendSessionDataSlicesWithDeadline",
+    ));
+    try std.testing.expect(@hasDecl(
+        netz.webtransport.runtime.HandshakeClientSession,
+        "sendSessionData",
+    ));
+    try std.testing.expect(@hasDecl(
+        netz.webtransport.runtime.HandshakeClientSession,
+        "sendSessionDataWithTimeout",
+    ));
+    try std.testing.expect(@hasDecl(
+        netz.webtransport.runtime.HandshakeClientSession,
+        "sendSessionDataWithDeadline",
+    ));
+    try std.testing.expect(@hasDecl(
+        netz.webtransport.runtime.HandshakeClientSession,
+        "sendSessionDataSlices",
+    ));
+    try std.testing.expect(@hasDecl(
+        netz.webtransport.runtime.HandshakeClientSession,
+        "sendSessionDataSlicesWithTimeout",
+    ));
+    try std.testing.expect(@hasDecl(
+        netz.webtransport.runtime.HandshakeClientSession,
+        "sendSessionDataSlicesWithDeadline",
     ));
     try std.testing.expect(@hasDecl(
         netz.webtransport.runtime,
@@ -6418,6 +7660,26 @@ test "public modules are reachable" {
         "sendDatagram",
     ));
     try std.testing.expect(@hasDecl(
+        netz.webtransport.runtime.EndpointAcceptedSession,
+        "sendDatagrams",
+    ));
+    try std.testing.expect(@hasDecl(
+        netz.webtransport.runtime.EndpointAcceptedSession,
+        "sendSessionData",
+    ));
+    try std.testing.expect(@hasDecl(
+        netz.webtransport.runtime.EndpointAcceptedSession,
+        "sendSessionDataSlices",
+    ));
+    try std.testing.expect(@hasDecl(
+        netz.webtransport.runtime.EndpointAcceptedSession,
+        "sendStreamSlices",
+    ));
+    try std.testing.expect(@hasDecl(
+        netz.webtransport.runtime.EndpointAcceptedSession,
+        "writeStreamSlices",
+    ));
+    try std.testing.expect(@hasDecl(
         netz.webtransport.runtime,
         "ReceiveTimeoutError",
     ));
@@ -6441,6 +7703,22 @@ test "public modules are reachable" {
         netz.webtransport.runtime.AcceptedHandshakeSession,
         "openUnidirectionalStreamWithDeadline",
     ));
+    inline for (.{
+        "sendDatagrams",
+        "sendDatagramsWithTimeout",
+        "sendDatagramsWithDeadline",
+        "sendStreamSlices",
+        "sendStreamSlicesWithTimeout",
+        "sendStreamSlicesWithDeadline",
+        "writeStreamSlices",
+        "writeStreamSlicesWithTimeout",
+        "writeStreamSlicesWithDeadline",
+    }) |name| {
+        try std.testing.expect(@hasDecl(
+            netz.webtransport.runtime.AcceptedHandshakeSession,
+            name,
+        ));
+    }
     try std.testing.expect(@hasDecl(
         netz.webtransport.runtime.AcceptedHandshakeSession,
         "releaseCompletedPeerStream",
@@ -6517,6 +7795,22 @@ test "public modules are reachable" {
         netz.webtransport.runtime.HandshakeClientSession,
         "openUnidirectionalStreamWithDeadline",
     ));
+    inline for (.{
+        "sendDatagrams",
+        "sendDatagramsWithTimeout",
+        "sendDatagramsWithDeadline",
+        "sendStreamSlices",
+        "sendStreamSlicesWithTimeout",
+        "sendStreamSlicesWithDeadline",
+        "writeStreamSlices",
+        "writeStreamSlicesWithTimeout",
+        "writeStreamSlicesWithDeadline",
+    }) |name| {
+        try std.testing.expect(@hasDecl(
+            netz.webtransport.runtime.HandshakeClientSession,
+            name,
+        ));
+    }
     try std.testing.expect(@hasDecl(
         netz.webtransport.runtime.HandshakeClientSession,
         "releaseCompletedPeerStream",
@@ -6568,6 +7862,22 @@ test "public modules are reachable" {
     try std.testing.expect(@hasDecl(
         netz.webtransport.runtime.HandshakeClientSession,
         "readStreamWithDeadline",
+    ));
+    try std.testing.expect(@hasDecl(
+        netz.webtransport.runtime.HandshakeClientSession,
+        "stopStreamWithTimeout",
+    ));
+    try std.testing.expect(@hasDecl(
+        netz.webtransport.runtime.HandshakeClientSession,
+        "stopStreamWithDeadline",
+    ));
+    try std.testing.expect(@hasDecl(
+        netz.webtransport.runtime.AcceptedHandshakeSession,
+        "stopStreamWithTimeout",
+    ));
+    try std.testing.expect(@hasDecl(
+        netz.webtransport.runtime.AcceptedHandshakeSession,
+        "stopStreamWithDeadline",
     ));
     try std.testing.expect(@hasDecl(
         netz.webtransport.runtime.HandshakeClientSession,
@@ -6660,6 +7970,30 @@ test "public modules are reachable" {
     try std.testing.expect(@hasDecl(
         netz.webtransport.runtime.StatefulProtectedClientSession,
         "readStreamWithDeadline",
+    ));
+    try std.testing.expect(@hasDecl(
+        netz.webtransport.runtime.StatefulProtectedClientSession,
+        "readStreamId",
+    ));
+    try std.testing.expect(@hasDecl(
+        netz.webtransport.runtime.StatefulProtectedClientSession,
+        "readStreamIdWithTimeout",
+    ));
+    try std.testing.expect(@hasDecl(
+        netz.webtransport.runtime.StatefulProtectedClientSession,
+        "readStreamIdWithDeadline",
+    ));
+    try std.testing.expect(@hasDecl(
+        netz.webtransport.runtime.StatefulProtectedClientSession,
+        "flushPendingAck",
+    ));
+    try std.testing.expect(@hasDecl(
+        netz.webtransport.runtime.StatefulProtectedClientSession,
+        "stopStreamWithTimeout",
+    ));
+    try std.testing.expect(@hasDecl(
+        netz.webtransport.runtime.StatefulProtectedClientSession,
+        "stopStreamWithDeadline",
     ));
     try std.testing.expect(@hasDecl(
         netz.webtransport.runtime.StatefulProtectedClientSession,
@@ -7089,6 +8423,22 @@ test "public modules are reachable" {
         netz.webtransport.runtime.StatefulProtectedClientSession,
         "pollPeerConnectionClose",
     ));
+    try std.testing.expect(@hasDecl(
+        netz.webtransport.runtime.StatefulProtectedClientSession,
+        "closeWithTimeout",
+    ));
+    try std.testing.expect(@hasDecl(
+        netz.webtransport.runtime.StatefulProtectedClientSession,
+        "closeWithDeadline",
+    ));
+    try std.testing.expect(@hasDecl(
+        netz.webtransport.runtime.StatefulProtectedClientSession,
+        "drainWithTimeout",
+    ));
+    try std.testing.expect(@hasDecl(
+        netz.webtransport.runtime.StatefulProtectedClientSession,
+        "drainWithDeadline",
+    ));
     try std.testing.expect(@hasField(netz.webtransport.runtime.OwnedHandshakeDatagram, "bytes"));
     try std.testing.expect(@hasDecl(netz.webtransport.runtime.HandshakeClientSession, "receiveManyDatagrams"));
     try std.testing.expect(@hasDecl(netz.webtransport.runtime.HandshakeClientSession, "maxDatagramPayloadSize"));
@@ -7176,6 +8526,38 @@ test "public modules are reachable" {
     ));
     try std.testing.expect(@hasDecl(
         netz.webtransport.runtime.AcceptedHandshakeSession,
+        "closeWithTimeout",
+    ));
+    try std.testing.expect(@hasDecl(
+        netz.webtransport.runtime.AcceptedHandshakeSession,
+        "closeWithDeadline",
+    ));
+    try std.testing.expect(@hasDecl(
+        netz.webtransport.runtime.AcceptedHandshakeSession,
+        "drainWithTimeout",
+    ));
+    try std.testing.expect(@hasDecl(
+        netz.webtransport.runtime.AcceptedHandshakeSession,
+        "drainWithDeadline",
+    ));
+    try std.testing.expect(@hasDecl(
+        netz.webtransport.runtime.HandshakeClientSession,
+        "closeWithTimeout",
+    ));
+    try std.testing.expect(@hasDecl(
+        netz.webtransport.runtime.HandshakeClientSession,
+        "closeWithDeadline",
+    ));
+    try std.testing.expect(@hasDecl(
+        netz.webtransport.runtime.HandshakeClientSession,
+        "drainWithTimeout",
+    ));
+    try std.testing.expect(@hasDecl(
+        netz.webtransport.runtime.HandshakeClientSession,
+        "drainWithDeadline",
+    ));
+    try std.testing.expect(@hasDecl(
+        netz.webtransport.runtime.AcceptedHandshakeSession,
         "receiveSessionEvent",
     ));
     try std.testing.expect(@hasDecl(
@@ -7199,87 +8581,6 @@ test "public modules are reachable" {
         "SendCredit",
     ));
     try std.testing.expect(@hasDecl(netz.webtransport.runtime.AcceptedHandshakeSession, "getStats"));
-    try std.testing.expectEqual(@as(u32, 0x2112A442), netz.webrtc.stun.magic_cookie);
-    try std.testing.expect(@hasDecl(netz.webrtc.stun, "writeIceBindingRequest"));
-    try std.testing.expect(@hasDecl(netz.webrtc.stun, "validateMessageIntegrity"));
-    try std.testing.expect(@hasDecl(netz.webrtc.stun, "validateFingerprint"));
-    try std.testing.expect(@hasDecl(netz.webrtc.stun, "BindingRequestOptions"));
-    try std.testing.expect(@hasDecl(netz.webrtc.rtp, "HeaderExtensionElement"));
-    try std.testing.expect(@hasDecl(netz.webrtc.rtp, "parseHeaderExtensionElements"));
-    try std.testing.expect(@hasDecl(netz.webrtc.rtp, "writeOneByteHeaderExtensions"));
-    try std.testing.expect(@hasDecl(netz.webrtc.rtp, "writeTwoByteHeaderExtensions"));
-    try std.testing.expect(@hasDecl(netz.webrtc.rtp, "transportWideSequenceNumber"));
-    try std.testing.expectEqual(@as(u16, 0xbede), netz.webrtc.rtp.one_byte_header_extension_profile);
-    try std.testing.expect(@hasDecl(netz.webrtc, "rtcp"));
-    try std.testing.expect(@hasDecl(netz.webrtc.rtcp, "SenderStats"));
-    try std.testing.expect(@hasDecl(netz.webrtc.rtcp, "ntpTimestamp"));
-    try std.testing.expect(@hasDecl(netz.webrtc.rtcp, "ReceiverReport"));
-    try std.testing.expect(@hasDecl(netz.webrtc.rtcp, "SourceDescription"));
-    try std.testing.expect(@hasDecl(netz.webrtc.rtcp, "writeCompound"));
-    try std.testing.expect(@hasDecl(netz.webrtc.rtcp, "parseCompound"));
-    try std.testing.expect(@hasDecl(netz.webrtc.rtcp, "ReceiverStats"));
-    try std.testing.expect(@hasDecl(netz.webrtc.rtcp, "PictureLossIndication"));
-    try std.testing.expect(@hasDecl(netz.webrtc.rtcp, "FullIntraRequest"));
-    try std.testing.expect(@hasDecl(netz.webrtc.rtcp, "FirEntry"));
-    try std.testing.expect(@hasDecl(netz.webrtc.rtcp, "TransportLayerNack"));
-    try std.testing.expect(@hasDecl(netz.webrtc.rtcp, "TransportWideCc"));
-    try std.testing.expect(@hasDecl(netz.webrtc.rtcp, "TwccPacketResult"));
-    try std.testing.expectEqual(@as(u5, 15), netz.webrtc.rtcp.transport_feedback_twcc);
-    try std.testing.expect(@hasDecl(netz.webrtc.rtcp, "NackTracker"));
-    try std.testing.expect(@hasDecl(netz.webrtc, "srtp"));
-    try std.testing.expect(@hasDecl(netz.webrtc.srtp, "Context"));
-    try std.testing.expect(@hasDecl(netz.webrtc.srtp.Context, "protectRtpPacket"));
-    try std.testing.expect(@hasDecl(netz.webrtc.srtp.Context, "unprotectRtp"));
-    try std.testing.expect(@hasDecl(netz.webrtc.srtp.Context, "protectRtcpPacket"));
-    try std.testing.expect(@hasDecl(netz.webrtc.srtp.Context, "unprotectRtcp"));
-    try std.testing.expectEqual(@as(usize, 10), netz.webrtc.srtp.auth_tag_len_80);
-    try std.testing.expect(@hasDecl(netz.webrtc.sdp, "extractFingerprint"));
-    try std.testing.expect(@hasDecl(netz.webrtc.sdp, "extractIceCredentials"));
-    try std.testing.expect(@hasDecl(netz.webrtc.sdp, "Fingerprint"));
-    try std.testing.expect(@hasDecl(netz.webrtc.sdp, "IceCredentials"));
-    try std.testing.expect(@hasDecl(netz.webrtc.sdp, "ExtMap"));
-    try std.testing.expect(@hasDecl(netz.webrtc.sdp, "parseExtMapAttribute"));
-    try std.testing.expect(@hasDecl(netz.webrtc.sdp, "findExtMapInSession"));
-    try std.testing.expectEqualStrings("urn:ietf:params:rtp-hdrext:sdes:mid", netz.webrtc.sdp.sdes_mid_uri);
-    try std.testing.expect(@hasDecl(netz.webrtc.sctp, "DataChunk"));
-    try std.testing.expect(@hasDecl(netz.webrtc.sctp, "Reassembler"));
-    try std.testing.expect(@hasDecl(netz.webrtc.sctp, "ReassembledMessage"));
-    try std.testing.expect(@hasDecl(netz.webrtc.sctp, "ReceiveState"));
-    try std.testing.expect(@hasDecl(netz.webrtc.sctp, "SackChunk"));
-    try std.testing.expect(@hasDecl(netz.webrtc.sctp, "writeSackPacket"));
-    try std.testing.expect(@hasDecl(netz.webrtc.sctp, "InitChunk"));
-    try std.testing.expect(@hasDecl(netz.webrtc.sctp, "writeInitPacket"));
-    try std.testing.expect(@hasDecl(netz.webrtc.sctp, "writeCookieEchoPacket"));
-    try std.testing.expect(@hasDecl(netz.webrtc.sctp, "writeCookieAckPacket"));
-    try std.testing.expect(@hasDecl(netz.webrtc.sctp, "ReconfigChunk"));
-    try std.testing.expect(@hasDecl(netz.webrtc.sctp, "writeReconfigPacket"));
-    try std.testing.expect(@hasDecl(netz.webrtc.sctp, "ForwardTsnChunk"));
-    try std.testing.expect(@hasDecl(netz.webrtc.sctp, "writeForwardTsnPacket"));
-    try std.testing.expect(@hasDecl(netz.webrtc.sctp, "HeartbeatChunk"));
-    try std.testing.expect(@hasDecl(netz.webrtc.sctp, "writeHeartbeatPacket"));
-    try std.testing.expect(@hasDecl(netz.webrtc.sctp, "ShutdownChunk"));
-    try std.testing.expect(@hasDecl(netz.webrtc.sctp, "writeShutdownPacket"));
-    try std.testing.expect(@hasDecl(netz.webrtc.sctp, "AbortChunk"));
-    try std.testing.expect(@hasDecl(netz.webrtc.sctp, "ErrorChunk"));
-    try std.testing.expect(@hasDecl(netz.webrtc.sctp, "writeAbortPacket"));
-    try std.testing.expect(@hasDecl(netz.webrtc.sctp, "writeErrorPacket"));
-    try std.testing.expect(@hasDecl(netz.webrtc.sctp, "writeDataPacket"));
-    try std.testing.expect(@hasDecl(netz.webrtc.sctp, "parseDcepMessage"));
-    try std.testing.expectEqual(@as(usize, 2048), (netz.webrtc.runtime.Limits{}).max_datagram_size);
-    try std.testing.expect(@hasDecl(netz.webrtc.runtime, "RtpClient"));
-    try std.testing.expect(@hasDecl(netz.webrtc.runtime, "Peer"));
-    try std.testing.expect(@hasDecl(netz.webrtc.runtime, "DtlsDatagram"));
-    try std.testing.expect(@hasDecl(netz.webrtc.runtime, "RtcpDatagram"));
-    try std.testing.expect(@hasDecl(netz.webrtc.runtime, "SrtpDatagram"));
-    try std.testing.expect(@hasDecl(netz.webrtc.runtime, "SrtcpDatagram"));
-    try std.testing.expect(@hasDecl(netz.webrtc.runtime.Peer, "sendSrtpPacket"));
-    try std.testing.expect(@hasDecl(netz.webrtc.runtime.Peer, "receiveSrtpPacket"));
-    try std.testing.expect(@hasDecl(netz.webrtc.runtime.Peer, "sendSrtcpPacket"));
-    try std.testing.expect(@hasDecl(netz.webrtc.runtime.Peer, "receiveSrtcpPacket"));
-    try std.testing.expect(@hasDecl(netz.webrtc.runtime.Peer, "sendRtcpPacket"));
-    try std.testing.expect(@hasDecl(netz.webrtc.runtime.Peer, "receiveRtcpPacket"));
-    try std.testing.expect(@hasDecl(netz.webrtc.runtime.Peer, "iceBindingRequest"));
-    try std.testing.expect(@hasDecl(netz.webrtc.runtime.StunClient, "iceBindingRequest"));
     try std.testing.expect(@hasField(netz.quic.handshake.OneRttConfig, "pto_jitter_percentage"));
     try std.testing.expect(@hasField(netz.quic.one_rtt.ConnectionConfig, "pto_jitter_percentage"));
     try std.testing.expect(@hasDecl(netz.quic, "ecn"));
@@ -7292,5 +8593,4 @@ test "public modules are reachable" {
         netz.quic.one_rtt.Connection,
         "resetPartialDeliveryEnabled",
     ));
-    try std.testing.expect(@hasDecl(netz.webrtc.runtime.Peer, "receiveManyConcurrent"));
 }

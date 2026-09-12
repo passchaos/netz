@@ -1,7 +1,127 @@
 const std = @import("std");
+const http2 = @import("../mod.zig");
 const runtime = @import("../runtime.zig");
 const tls_stream = @import("../../tls/mod.zig").stream;
 const tls_testing = @import("../../tls/testing.zig");
+
+test "HTTP/2 TLS serveConnection handles sequential requests" {
+    const allocator = std.testing.allocator;
+    var threaded = std.Io.Threaded.init(allocator, .{});
+    defer threaded.deinit();
+    const io = threaded.io();
+
+    var certificate_der: [tls_testing.certificate_der_len]u8 = undefined;
+    try std.base64.standard.Decoder.decode(
+        &certificate_der,
+        tls_testing.certificate_base64,
+    );
+    const key_pair = try tls_testing.serverKeyPair();
+    const public_key = key_pair.public_key.toUncompressedSec1();
+    const limits: runtime.Limits = .{
+        .max_frame_payload = 4096,
+        .max_body_bytes = 4096,
+    };
+    var server = try runtime.TlsServer.listen(
+        allocator,
+        io,
+        .{ .ip4 = .loopback(0) },
+        .{
+            .identity = .{
+                .certificate_chain = &.{&certificate_der},
+                .signer = .{ .ecdsa_p256_sha256 = .{
+                    .key_pair = key_pair,
+                } },
+            },
+            .limits = limits,
+            .cipher_suites = &.{.aes_128_gcm_sha256},
+        },
+    );
+    defer server.deinit();
+
+    const Context = struct {
+        count: usize = 0,
+
+        fn handle(
+            self: *@This(),
+            request: runtime.OwnedRequest,
+        ) runtime.Error!runtime.ResponseOptions {
+            const expected_path = if (self.count == 0) "/one" else "/two";
+            if (!std.mem.eql(u8, request.path, expected_path) or
+                !std.mem.eql(u8, request.scheme, "https"))
+            {
+                return error.Unexpected;
+            }
+            self.count += 1;
+            return .{ .body = if (self.count == 1) "first" else "second" };
+        }
+    };
+
+    const Shared = struct {
+        server: *runtime.TlsServer,
+        context: Context = .{},
+        served: usize = 0,
+        err: ?anyerror = null,
+
+        fn run(self: *@This()) void {
+            self.served = self.server.serveConnection(
+                Context,
+                &self.context,
+                Context.handle,
+                2,
+            ) catch |err| {
+                self.err = err;
+                return;
+            };
+        }
+    };
+
+    var shared = Shared{ .server = &server };
+    const thread = try std.Thread.spawn(.{}, Shared.run, .{&shared});
+    var joined = false;
+    defer if (!joined) thread.join();
+
+    var client = try runtime.Client.connectTlsHost(
+        allocator,
+        io,
+        "localhost",
+        server.address().ip4.port,
+        limits,
+        .{
+            .server_verifier = .{
+                .pinned_ecdsa_p256_public_key = public_key,
+            },
+            .cipher_suites = &.{.aes_128_gcm_sha256},
+        },
+    );
+    defer client.close();
+
+    var first = try client.request(.{ .path = "/one" });
+    defer first.deinit(allocator);
+    try std.testing.expectEqualStrings("first", first.body);
+    var second = try client.request(.{ .path = "/two" });
+    defer second.deinit(allocator);
+    try std.testing.expectEqualStrings("second", second.body);
+    var goaway = try client.readGoAway();
+    defer goaway.deinit(allocator);
+    try std.testing.expectEqual(
+        @as(u31, 3),
+        goaway.goaway.last_stream_id,
+    );
+    try std.testing.expectEqual(
+        http2.ErrorCode.no_error,
+        goaway.goaway.error_code,
+    );
+    try std.testing.expectEqualStrings(
+        "serve-complete",
+        goaway.goaway.debug_data,
+    );
+
+    thread.join();
+    joined = true;
+    if (shared.err) |err| return err;
+    try std.testing.expectEqual(@as(usize, 2), shared.served);
+    try std.testing.expectEqual(@as(usize, 2), shared.context.count);
+}
 
 test "HTTP/2 TLS runtime negotiates h2 and exchanges a request" {
     const allocator = std.testing.allocator;

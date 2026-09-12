@@ -113,6 +113,10 @@ pub const StreamState = struct {
     send_reset: ?webtransport.StreamError = null,
     /// Error received in RESET_STREAM for this stream's peer send direction.
     receive_reset: ?webtransport.StreamError = null,
+    /// QUIC final size paired with `receive_reset`. Keeping it in the session
+    /// registry lets transport storage be reclaimed before the application
+    /// consumes the one-shot reset event.
+    receive_reset_final_size: ?u64 = null,
     /// Error sent in STOP_SENDING for this stream's peer send direction.
     stop_sent: ?webtransport.StreamError = null,
     /// Error received in STOP_SENDING for this stream's local send direction.

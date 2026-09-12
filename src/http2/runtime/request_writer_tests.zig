@@ -911,6 +911,537 @@ test "HTTP/2 duplex flow-control writes report exact resumable progress" {
     if (shared.err) |err| return err;
 }
 
+test "HTTP/2 client duplex deadline resumes request slices after flow control" {
+    const allocator = std.testing.allocator;
+    const payload = "abcdefgh";
+    var threaded = std.Io.Threaded.init(allocator, .{ .async_limit = .unlimited });
+    defer threaded.deinit();
+    const io = threaded.io();
+    const limits: Limits = .{
+        .initial_window_size = 4,
+        .max_frame_payload = 4096,
+        .max_body_bytes = 4096,
+    };
+    var server = try Server.listen(
+        allocator,
+        io,
+        .{ .ip4 = .loopback(0) },
+        limits,
+    );
+    defer server.deinit();
+
+    const Shared = struct {
+        server: *Server,
+        accepted: std.Io.Event = .unset,
+        timeout_done: std.Io.Event = .unset,
+        credit_sent: std.Io.Event = .unset,
+        err: ?anyerror = null,
+
+        fn run(self: *@This()) void {
+            self.runFallible() catch |err| {
+                self.err = err;
+                self.accepted.set(self.server.io);
+                self.credit_sent.set(self.server.io);
+            };
+        }
+
+        fn runFallible(self: *@This()) !void {
+            var connection = try self.server.accept();
+            defer connection.close();
+            var stream = try connection.acceptDuplexRequest();
+            defer stream.deinit();
+            self.accepted.set(self.server.io);
+            try self.timeout_done.wait(self.server.io);
+
+            var prefix: [4]u8 = undefined;
+            var prefix_len: usize = 0;
+            while (prefix_len < prefix.len) {
+                var event = try stream.readRequestEventWithTimeout(
+                    .fromSeconds(2),
+                );
+                defer event.deinit(self.server.allocator);
+                try std.testing.expect(event == .data);
+                const data = event.data.data;
+                try std.testing.expect(data.len <= prefix.len - prefix_len);
+                @memcpy(prefix[prefix_len..][0..data.len], data);
+                prefix_len += data.len;
+            }
+            try std.testing.expectEqualStrings("abcd", &prefix);
+            try connection.releaseReceivedCapacity(
+                stream.stream_id,
+                prefix.len,
+            );
+            self.credit_sent.set(self.server.io);
+
+            var second = try stream.readRequestEventWithTimeout(
+                .fromSeconds(2),
+            );
+            defer second.deinit(self.server.allocator);
+            try std.testing.expectEqualStrings("efgh", second.data.data);
+            if (!stream.requestFinished()) {
+                var finished = try stream.readRequestEventWithTimeout(
+                    .fromSeconds(2),
+                );
+                defer finished.deinit(self.server.allocator);
+                try std.testing.expect(finished == .finished);
+            }
+            try stream.finishResponseHeaders(.{});
+        }
+    };
+
+    var shared = Shared{ .server = &server };
+    const thread = try std.Thread.spawn(.{}, Shared.run, .{&shared});
+    var joined = false;
+    defer if (!joined) {
+        shared.timeout_done.set(io);
+        thread.join();
+    };
+
+    var connection = try Client.connect(allocator, io, server.address(), limits);
+    defer connection.close();
+    var writer = try connection.startRequest(.{
+        .path = "/duplex-request-deadline",
+        .authority = "localhost",
+        .body_length = payload.len,
+    });
+    defer writer.deinit();
+    var stream = try writer.beginDuplex();
+    defer stream.deinit();
+    try shared.accepted.wait(io);
+    connection.send_connection_window.value = 4;
+    (try runtime.testing.sendStreamWindow(
+        &connection,
+        stream.stream_id,
+    )).value = 4;
+
+    try std.testing.expectError(
+        error.Timeout,
+        stream.finishRequestDataWithDeadline(payload, .{
+            .clock = .real,
+            .raw = .zero,
+        }),
+    );
+    try std.testing.expectEqual(@as(usize, 0), stream.requestCommittedBytes());
+
+    try std.testing.expectError(
+        error.Timeout,
+        stream.writeRequestSlicesWithTimeout(
+            &.{ "ab", "cdefgh" },
+            false,
+            .fromMilliseconds(80),
+        ),
+    );
+    try std.testing.expectEqual(@as(usize, 4), stream.requestCommittedBytes());
+    shared.timeout_done.set(io);
+    try shared.credit_sent.wait(io);
+
+    const suffix = payload[stream.requestCommittedBytes()..];
+    const resumed = try stream.finishRequestDataWithTimeout(
+        suffix,
+        .fromSeconds(2),
+    );
+    try std.testing.expectEqual(suffix.len, resumed.written);
+    try std.testing.expect(stream.requestFinished());
+    try std.testing.expectEqual(payload.len, stream.requestCommittedBytes());
+
+    var head = try stream.readResponseEventWithTimeout(.fromSeconds(2));
+    defer head.deinit(allocator);
+    try std.testing.expectEqual(@as(u16, 200), head.head.status);
+    var finished = try stream.readResponseEventWithTimeout(.fromSeconds(2));
+    defer finished.deinit(allocator);
+    try std.testing.expect(finished == .finished);
+
+    thread.join();
+    joined = true;
+    if (shared.err) |err| return err;
+}
+
+test "HTTP/2 server duplex deadline resumes response slices after flow control" {
+    const allocator = std.testing.allocator;
+    const payload = "ABCDEFGH";
+    var threaded = std.Io.Threaded.init(allocator, .{ .async_limit = .unlimited });
+    defer threaded.deinit();
+    const io = threaded.io();
+    const limits: Limits = .{
+        .max_frame_payload = 4096,
+        .max_body_bytes = 4096,
+    };
+    var server = try Server.listen(
+        allocator,
+        io,
+        .{ .ip4 = .loopback(0) },
+        limits,
+    );
+    defer server.deinit();
+
+    const Shared = struct {
+        server: *Server,
+        timeout_done: std.Io.Event = .unset,
+        allow_retry: std.Io.Event = .unset,
+        committed: usize = 0,
+        err: ?anyerror = null,
+
+        fn run(self: *@This()) void {
+            self.runFallible() catch |err| {
+                self.err = err;
+                self.timeout_done.set(self.server.io);
+            };
+        }
+
+        fn runFallible(self: *@This()) !void {
+            var connection = try self.server.accept();
+            defer connection.close();
+            var stream = try connection.acceptDuplexRequest();
+            defer stream.deinit();
+            try stream.startResponse(.{
+                .headers = &.{.{
+                    .name = "content-length",
+                    .value = "8",
+                }},
+            });
+            connection.send_connection_window.value = 4;
+            (try runtime.testing.sendStreamWindow(
+                &connection,
+                stream.stream_id,
+            )).value = 4;
+
+            try std.testing.expectError(
+                error.Timeout,
+                stream.finishResponseDataWithDeadline(payload, .{
+                    .clock = .real,
+                    .raw = .zero,
+                }),
+            );
+            try std.testing.expectEqual(
+                @as(usize, 0),
+                stream.responseCommittedBytes(),
+            );
+
+            try std.testing.expectError(
+                error.Timeout,
+                stream.writeResponseSlicesWithTimeout(
+                    &.{ "AB", "CDEFGH" },
+                    false,
+                    .fromMilliseconds(80),
+                ),
+            );
+            self.committed = stream.responseCommittedBytes();
+            self.timeout_done.set(self.server.io);
+            try self.allow_retry.wait(self.server.io);
+
+            const suffix = payload[stream.responseCommittedBytes()..];
+            const resumed = try stream.finishResponseDataWithTimeout(
+                suffix,
+                .fromSeconds(2),
+            );
+            try std.testing.expectEqual(suffix.len, resumed.written);
+            try std.testing.expect(stream.responseFinished());
+            try std.testing.expectEqual(
+                payload.len,
+                stream.responseCommittedBytes(),
+            );
+
+            var request_done = try stream.readRequestEventWithTimeout(
+                .fromSeconds(2),
+            );
+            defer request_done.deinit(self.server.allocator);
+            try std.testing.expect(request_done == .finished);
+        }
+    };
+
+    var shared = Shared{ .server = &server };
+    const thread = try std.Thread.spawn(.{}, Shared.run, .{&shared});
+    var joined = false;
+    defer if (!joined) {
+        shared.allow_retry.set(io);
+        thread.join();
+    };
+
+    var connection = try Client.connect(allocator, io, server.address(), limits);
+    defer connection.close();
+    var writer = try connection.startRequest(.{
+        .path = "/duplex-response-deadline",
+        .authority = "localhost",
+        .body_length = 0,
+    });
+    defer writer.deinit();
+    var stream = try writer.beginDuplex();
+    defer stream.deinit();
+
+    try shared.timeout_done.wait(io);
+    if (shared.err) |err| return err;
+    try std.testing.expectEqual(@as(usize, 4), shared.committed);
+
+    var head = try stream.readResponseEventWithTimeout(.fromSeconds(2));
+    defer head.deinit(allocator);
+    try std.testing.expectEqual(@as(u16, 200), head.head.status);
+    var prefix: [4]u8 = undefined;
+    var prefix_len: usize = 0;
+    while (prefix_len < prefix.len) {
+        var event = try stream.readResponseEventWithTimeout(.fromSeconds(2));
+        defer event.deinit(allocator);
+        try std.testing.expect(event == .data);
+        const data = event.data.data;
+        try std.testing.expect(data.len <= prefix.len - prefix_len);
+        @memcpy(prefix[prefix_len..][0..data.len], data);
+        prefix_len += data.len;
+    }
+    try std.testing.expectEqualStrings("ABCD", &prefix);
+    try connection.releaseReceivedCapacity(
+        stream.stream_id,
+        prefix.len,
+    );
+    shared.allow_retry.set(io);
+
+    var second = try stream.readResponseEventWithTimeout(.fromSeconds(2));
+    defer second.deinit(allocator);
+    try std.testing.expectEqualStrings("EFGH", second.data.data);
+    var response_done = try stream.readResponseEventWithTimeout(
+        .fromSeconds(2),
+    );
+    defer response_done.deinit(allocator);
+    try std.testing.expect(response_done == .finished);
+    const request_done = try stream.finishRequestWithTimeout(.fromSeconds(2));
+    try std.testing.expectEqual(@as(usize, 0), request_done.written);
+    try std.testing.expect(stream.requestFinished());
+
+    thread.join();
+    joined = true;
+    if (shared.err) |err| return err;
+}
+
+test "HTTP/2 tunnel deadline resumes exact bidirectional slice prefixes" {
+    const allocator = std.testing.allocator;
+    const client_payload = "abcdefgh";
+    const server_payload = "ABCDEFGH";
+    var threaded = std.Io.Threaded.init(allocator, .{ .async_limit = .unlimited });
+    defer threaded.deinit();
+    const io = threaded.io();
+    const limits: Limits = .{
+        .max_frame_payload = 4096,
+        .max_body_bytes = 4096,
+    };
+    var server = try Server.listen(
+        allocator,
+        io,
+        .{ .ip4 = .loopback(0) },
+        limits,
+    );
+    defer server.deinit();
+
+    const Shared = struct {
+        server: *Server,
+        accepted: std.Io.Event = .unset,
+        client_timeout_done: std.Io.Event = .unset,
+        client_credit_sent: std.Io.Event = .unset,
+        server_timeout_done: std.Io.Event = .unset,
+        server_credit_sent: std.Io.Event = .unset,
+        server_progress: runtime.TunnelWriteProgress = .{},
+        err: ?anyerror = null,
+
+        fn run(self: *@This()) void {
+            self.runFallible() catch |err| {
+                self.err = err;
+                self.accepted.set(self.server.io);
+                self.client_credit_sent.set(self.server.io);
+                self.server_timeout_done.set(self.server.io);
+            };
+        }
+
+        fn readExactTunnel(
+            tunnel: *runtime.Tunnel,
+            allocator_value: std.mem.Allocator,
+            out: []u8,
+            expect_fin: bool,
+        ) !void {
+            var offset: usize = 0;
+            var saw_fin = false;
+            while (offset < out.len or (expect_fin and !saw_fin)) {
+                var event = try tunnel.readWithTimeout(.fromSeconds(2));
+                defer event.deinit(allocator_value);
+                try std.testing.expect(event.data.len <= out.len - offset);
+                @memcpy(out[offset..][0..event.data.len], event.data);
+                offset += event.data.len;
+                saw_fin = event.end_stream;
+            }
+            try std.testing.expectEqual(expect_fin, saw_fin);
+        }
+
+        fn runFallible(self: *@This()) !void {
+            var connection = try self.server.accept();
+            defer connection.close();
+            var request = try connection.readRequest();
+            defer request.deinit(self.server.allocator);
+            var tunnel = try connection.acceptConnectTunnel(request, &.{});
+            self.accepted.set(self.server.io);
+
+            try self.client_timeout_done.wait(self.server.io);
+            var client_prefix: [4]u8 = undefined;
+            try readExactTunnel(
+                &tunnel,
+                self.server.allocator,
+                &client_prefix,
+                false,
+            );
+            try std.testing.expectEqualStrings("abcd", &client_prefix);
+            try connection.releaseReceivedCapacity(
+                tunnel.stream_id,
+                client_prefix.len,
+            );
+            self.client_credit_sent.set(self.server.io);
+
+            var client_suffix: [4]u8 = undefined;
+            try readExactTunnel(
+                &tunnel,
+                self.server.allocator,
+                &client_suffix,
+                true,
+            );
+            try std.testing.expectEqualStrings("efgh", &client_suffix);
+
+            connection.send_connection_window.value = 4;
+            (try runtime.testing.sendStreamWindow(
+                &connection,
+                tunnel.stream_id,
+            )).value = 4;
+            var writer = try tunnel.beginWriteSequence();
+            self.server_progress = .{
+                .committed_bytes = 99,
+                .fin_committed = true,
+            };
+            try std.testing.expectError(
+                error.Timeout,
+                writer.writeWithDeadline(
+                    server_payload,
+                    true,
+                    &self.server_progress,
+                    .{ .clock = .real, .raw = .zero },
+                ),
+            );
+            try std.testing.expectEqual(
+                @as(usize, 0),
+                self.server_progress.committed_bytes,
+            );
+            try std.testing.expect(!self.server_progress.fin_committed);
+
+            try std.testing.expectError(
+                error.Timeout,
+                writer.writePartsWithTimeout(
+                    "AB",
+                    "CDEFGH",
+                    false,
+                    &self.server_progress,
+                    .fromMilliseconds(80),
+                ),
+            );
+            self.server_timeout_done.set(self.server.io);
+            try self.server_credit_sent.wait(self.server.io);
+
+            var resumed: runtime.TunnelWriteProgress = .{};
+            try writer.writeWithTimeout(
+                server_payload[self.server_progress.committed_bytes..],
+                true,
+                &resumed,
+                .fromSeconds(2),
+            );
+            try std.testing.expectEqual(
+                server_payload.len - self.server_progress.committed_bytes,
+                resumed.committed_bytes,
+            );
+            try std.testing.expect(resumed.fin_committed);
+        }
+    };
+
+    var shared = Shared{ .server = &server };
+    const thread = try std.Thread.spawn(.{}, Shared.run, .{&shared});
+    var joined = false;
+    defer if (!joined) {
+        shared.client_timeout_done.set(io);
+        shared.server_credit_sent.set(io);
+        thread.join();
+    };
+
+    var connection = try Client.connect(allocator, io, server.address(), limits);
+    defer connection.close();
+    var response = try connection.openConnectTunnel(.{
+        .method = "CONNECT",
+        .authority = "example.com:443",
+    });
+    defer response.deinit(allocator);
+    var tunnel = response.tunnel;
+    try shared.accepted.wait(io);
+    connection.send_connection_window.value = 4;
+    (try runtime.testing.sendStreamWindow(
+        &connection,
+        tunnel.stream_id,
+    )).value = 4;
+
+    var client_progress: runtime.TunnelWriteProgress = .{
+        .committed_bytes = 99,
+        .fin_committed = true,
+    };
+    try std.testing.expectError(
+        error.Timeout,
+        tunnel.writeSlicesWithDeadline(
+            &.{ "ab", "cdefgh" },
+            true,
+            &client_progress,
+            .{ .clock = .real, .raw = .zero },
+        ),
+    );
+    try std.testing.expectEqual(@as(usize, 0), client_progress.committed_bytes);
+    try std.testing.expect(!client_progress.fin_committed);
+
+    try std.testing.expectError(
+        error.Timeout,
+        tunnel.writePartsWithTimeout(
+            "ab",
+            "cdefgh",
+            false,
+            &client_progress,
+            .fromMilliseconds(80),
+        ),
+    );
+    try std.testing.expectEqual(@as(usize, 4), client_progress.committed_bytes);
+    try std.testing.expect(!client_progress.fin_committed);
+    shared.client_timeout_done.set(io);
+    try shared.client_credit_sent.wait(io);
+
+    var client_resumed: runtime.TunnelWriteProgress = .{};
+    try tunnel.writeWithTimeout(
+        client_payload[client_progress.committed_bytes..],
+        true,
+        &client_resumed,
+        .fromSeconds(2),
+    );
+    try std.testing.expectEqual(@as(usize, 4), client_resumed.committed_bytes);
+    try std.testing.expect(client_resumed.fin_committed);
+
+    try shared.server_timeout_done.wait(io);
+    if (shared.err) |err| return err;
+    try std.testing.expectEqual(
+        @as(usize, 4),
+        shared.server_progress.committed_bytes,
+    );
+    try std.testing.expect(!shared.server_progress.fin_committed);
+    var server_prefix: [4]u8 = undefined;
+    try Shared.readExactTunnel(&tunnel, allocator, &server_prefix, false);
+    try std.testing.expectEqualStrings("ABCD", &server_prefix);
+    try connection.releaseReceivedCapacity(
+        tunnel.stream_id,
+        server_prefix.len,
+    );
+    shared.server_credit_sent.set(io);
+
+    var server_suffix: [4]u8 = undefined;
+    try Shared.readExactTunnel(&tunnel, allocator, &server_suffix, true);
+    try std.testing.expectEqualStrings("EFGH", &server_suffix);
+
+    thread.join();
+    joined = true;
+    if (shared.err) |err| return err;
+}
+
 test "HTTP/2 duplex request HEADERS timeout resumes CONTINUATION" {
     const allocator = std.testing.allocator;
     var threaded = std.Io.Threaded.init(allocator, .{ .async_limit = .unlimited });

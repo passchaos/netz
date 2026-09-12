@@ -15,6 +15,7 @@ const response_scheduler = @import(
 const bdp = @import("runtime/bdp.zig");
 const stream_io = @import("../internal/stream_io.zig");
 const deadline_policy = @import("../internal/deadline.zig");
+const accept_deadline = @import("../internal/accept.zig");
 const http_date = @import("../internal/http_date.zig");
 const tcp_connect = @import("../internal/tcp_connect.zig");
 const socket_options = @import("../internal/socket_options.zig");
@@ -73,6 +74,7 @@ const encodeWindowUpdateFrame = frame_wire.encodeWindowUpdate;
 const appendFrameBytes = frame_wire.appendFrame;
 const appendHeaderBlockBytes = frame_wire.appendHeaderBlock;
 const writeFrameTransport = frame_io.writeTransport;
+const writeFrameTransportWithDeadline = frame_io.writeTransportWithDeadline;
 
 pub const Error = http2.Error || http1_runtime.Error || tls_stream.Error || error{
     ConnectionClosed,
@@ -107,6 +109,7 @@ const ServeReadConnectionError = enum {
     compression,
     frame_sequence,
     excessive_header_block,
+    push_disabled,
 };
 
 const ServeReadStreamError = struct {
@@ -137,6 +140,21 @@ fn responseStreamErrorCode(err: anyerror) ?http2.ErrorCode {
         => .enhance_your_calm,
         else => null,
     };
+}
+
+/// A request handler supplies exactly one final response. Preserve the
+/// low-level informational-response API, but turn an accidental handler 1xx
+/// into a terminal response so the peer cannot wait forever for a final head.
+fn normalizeHandlerResponse(
+    response: *ResponseOptions,
+    request_method: []const u8,
+    extended_connect: bool,
+) bool {
+    const invalid_final = statusIsInformational(response.status);
+    if (invalid_final) response.* = .{ .status = 500 };
+    if (response.request_method == null) response.request_method = request_method;
+    response.extended_connect = extended_connect;
+    return invalid_final;
 }
 
 const flag_end_stream: u8 = 0x1;
@@ -255,6 +273,33 @@ const RuntimeTransport = union(enum) {
             .tcp => |tcp| writeAllToStream(tcp.io, tcp.stream, bytes),
             .tls_client => |connection| connection.writeAll(bytes),
             .tls_server => |connection| connection.writeAll(bytes),
+        };
+    }
+
+    pub fn writeAllWithDeadline(
+        self: RuntimeTransport,
+        bytes: []const u8,
+        committed: *usize,
+        deadline: std.Io.Clock.Timestamp,
+    ) Error!void {
+        return switch (self) {
+            .tcp => |tcp| stream_io.writeAllTrackedWithDeadline(
+                tcp.io,
+                tcp.stream,
+                bytes,
+                committed,
+                deadline,
+            ),
+            .tls_client => |connection| connection.writeAllWithDeadline(
+                bytes,
+                committed,
+                deadline,
+            ),
+            .tls_server => |connection| connection.writeAllWithDeadline(
+                bytes,
+                committed,
+                deadline,
+            ),
         };
     }
 
@@ -396,6 +441,12 @@ pub const Limits = struct {
     /// opened yet. This remains effective even when MAX_CONCURRENT_STREAMS is
     /// not advertised, preventing unbounded state from speculative IDs.
     max_idle_priority_updates: usize = 256,
+    /// Maximum distinct RFC 8336 origins retained from the peer for the
+    /// lifetime of one connection. Additional advisory entries are ignored.
+    max_peer_origins: usize = 256,
+    /// Maximum distinct RFC 7838 (stream ID, origin) advertisements retained
+    /// from the peer. Existing entries may still be replaced at capacity.
+    max_alternative_services: usize = 256,
     /// Maximum application frames retained while an explicit PING round trip
     /// waits for its matching ACK. Each retained frame is independently
     /// bounded by the inbound frame-size limits. Reaching this cap fails the
@@ -522,14 +573,17 @@ pub const Server = struct {
         return self.acceptStream(stream);
     }
 
-    /// Accept TCP, then apply one caller-owned deadline to the HTTP/2 preface
-    /// and SETTINGS bootstrap. The listener accept itself remains unbounded.
+    /// Apply one caller-owned deadline to TCP accept and HTTP/2 bootstrap.
     pub fn acceptWithDeadline(
         self: *Server,
         deadline: std.Io.Clock.Timestamp,
     ) Error!Connection {
         _ = try deadline_policy.usableAwake(self.io, deadline);
-        const stream = try self.listener.accept(self.io);
+        const stream = try accept_deadline.withDeadline(
+            &self.listener,
+            self.io,
+            deadline,
+        );
         return self.acceptStreamWithDeadline(stream, deadline);
     }
 
@@ -538,11 +592,16 @@ pub const Server = struct {
         timeout: std.Io.Duration,
     ) Error!Connection {
         if (timeout.nanoseconds <= 0) return error.Timeout;
-        const stream = try self.listener.accept(self.io);
-        return self.acceptStreamWithDeadline(
-            stream,
-            .fromNow(self.io, .{ .raw = timeout, .clock = .awake }),
+        const deadline = std.Io.Clock.Timestamp.fromNow(
+            self.io,
+            .{ .raw = timeout, .clock = .awake },
         );
+        const stream = try accept_deadline.withDeadline(
+            &self.listener,
+            self.io,
+            deadline,
+        );
+        return self.acceptStreamWithDeadline(stream, deadline);
     }
 
     /// Complete the HTTP/2 server handshake on an already-accepted stream.
@@ -608,7 +667,7 @@ pub const Server = struct {
     }
 
     /// Accept an h2c Upgrade under one caller-owned awake-clock deadline. The
-    /// budget begins after TCP accept and spans the complete HTTP/1.1 request,
+    /// budget spans TCP accept, the complete HTTP/1.1 request,
     /// the 101 write, client preface/SETTINGS, and SETTINGS acknowledgement.
     pub fn acceptUpgradeWithDeadline(
         self: *Server,
@@ -633,7 +692,10 @@ pub const Server = struct {
         self: *Server,
         deadline: ?std.Io.Clock.Timestamp,
     ) Error!H2cUpgradeRequest {
-        const stream = try self.listener.accept(self.io);
+        const stream = if (deadline) |absolute|
+            try accept_deadline.withDeadline(&self.listener, self.io, absolute)
+        else
+            try self.listener.accept(self.io);
         var stream_owned = true;
         errdefer if (stream_owned) stream.close(self.io);
         if (self.limits.tcp_nodelay) {
@@ -698,7 +760,7 @@ pub const Server = struct {
         );
         try http2.validateClientPreface(&preface_buf);
 
-        var client_settings = try readFrameTransportWithDeadline(
+        var client_settings = try readHandshakeFrameTransportWithDeadline(
             self.allocator,
             transport,
             self.limits,
@@ -738,7 +800,7 @@ pub const Server = struct {
         // applications can immediately answer the upgraded request without
         // leaving unread control bytes that would make a short-lived test/server
         // close look like a TCP reset to the client.
-        var client_ack = try readFrameTransportWithDeadline(
+        var client_ack = try readHandshakeFrameTransportWithDeadline(
             self.allocator,
             transport,
             self.limits,
@@ -875,14 +937,17 @@ pub const UnixServer = struct {
         );
     }
 
-    /// Accept a Unix stream, then apply one deadline to the complete HTTP/2
-    /// preface/SETTINGS bootstrap. The listener accept remains unbounded.
+    /// Apply one deadline to Unix accept and the HTTP/2 bootstrap.
     pub fn acceptWithDeadline(
         self: *UnixServer,
         deadline: std.Io.Clock.Timestamp,
     ) Error!Connection {
         _ = try deadline_policy.usableAwake(self.io, deadline);
-        const stream = try self.listener.accept(self.io);
+        const stream = try accept_deadline.withDeadline(
+            &self.listener,
+            self.io,
+            deadline,
+        );
         return acceptConnectionTransportMaybeBefore(
             self.allocator,
             self.io,
@@ -898,14 +963,22 @@ pub const UnixServer = struct {
         timeout: std.Io.Duration,
     ) Error!Connection {
         if (timeout.nanoseconds <= 0) return error.Timeout;
-        const stream = try self.listener.accept(self.io);
+        const deadline = std.Io.Clock.Timestamp.fromNow(
+            self.io,
+            .{ .raw = timeout, .clock = .awake },
+        );
+        const stream = try accept_deadline.withDeadline(
+            &self.listener,
+            self.io,
+            deadline,
+        );
         return acceptConnectionTransportMaybeBefore(
             self.allocator,
             self.io,
             stream,
             tcpTransport(self.io, stream),
             self.limits,
-            .fromNow(self.io, .{ .raw = timeout, .clock = .awake }),
+            deadline,
         );
     }
 
@@ -1033,7 +1106,7 @@ fn acceptConnectionTransportMaybeBefore(
         return err;
     };
 
-    var client_settings = try readFrameTransportWithDeadline(
+    var client_settings = try readHandshakeFrameTransportWithDeadline(
         allocator,
         transport,
         limits,
@@ -1146,14 +1219,18 @@ pub const TlsServer = struct {
         return self.acceptStream(stream);
     }
 
-    /// Accept TCP, then carry one caller-owned deadline through TLS and the
-    /// HTTP/2 preface/SETTINGS bootstrap. The listener accept is unbounded.
+    /// Carry one caller-owned deadline through TCP accept, TLS, and HTTP/2
+    /// bootstrap.
     pub fn acceptWithDeadline(
         self: *TlsServer,
         deadline: std.Io.Clock.Timestamp,
     ) Error!Connection {
         _ = try deadline_policy.usableAwake(self.io, deadline);
-        const stream = try self.listener.accept(self.io);
+        const stream = try accept_deadline.withDeadline(
+            &self.listener,
+            self.io,
+            deadline,
+        );
         return self.acceptStreamWithDeadline(stream, deadline);
     }
 
@@ -1162,11 +1239,16 @@ pub const TlsServer = struct {
         timeout: std.Io.Duration,
     ) Error!Connection {
         if (timeout.nanoseconds <= 0) return error.Timeout;
-        const stream = try self.listener.accept(self.io);
-        return self.acceptStreamWithDeadline(
-            stream,
-            .fromNow(self.io, .{ .raw = timeout, .clock = .awake }),
+        const deadline = std.Io.Clock.Timestamp.fromNow(
+            self.io,
+            .{ .raw = timeout, .clock = .awake },
         );
+        const stream = try accept_deadline.withDeadline(
+            &self.listener,
+            self.io,
+            deadline,
+        );
+        return self.acceptStreamWithDeadline(stream, deadline);
     }
 
     /// Complete TLS and HTTP/2 handshakes on an already accepted socket.
@@ -1240,6 +1322,26 @@ pub const TlsServer = struct {
             .{ .tls_server = tls_connection },
             self.limits,
             deadline,
+        );
+    }
+
+    pub fn serveConnection(
+        self: *TlsServer,
+        comptime HandlerContext: type,
+        context: *HandlerContext,
+        comptime handler: *const fn (
+            *HandlerContext,
+            OwnedRequest,
+        ) Error!ResponseOptions,
+        max_requests: usize,
+    ) Error!usize {
+        var connection = try self.accept();
+        defer connection.close();
+        return connection.serve(
+            HandlerContext,
+            context,
+            handler,
+            max_requests,
         );
     }
 
@@ -1317,6 +1419,37 @@ pub const ConcurrentServeResult = struct {
         return count;
     }
 };
+
+/// Per-request outcomes from one bounded same-connection concurrent handler
+/// batch. A null slot means the response was written successfully. A handler
+/// error is recorded after resetting that stream with INTERNAL_ERROR; an
+/// accidental final 1xx is recorded as InvalidStatus after writing final 500.
+pub const ConcurrentHandlerServeResult = struct {
+    allocator: std.mem.Allocator,
+    errors: []?anyerror,
+
+    pub fn deinit(self: *ConcurrentHandlerServeResult) void {
+        self.allocator.free(self.errors);
+        self.* = undefined;
+    }
+
+    pub fn firstError(self: ConcurrentHandlerServeResult) ?anyerror {
+        for (self.errors) |err| {
+            if (err) |value| return value;
+        }
+        return null;
+    }
+
+    pub fn successCount(self: ConcurrentHandlerServeResult) usize {
+        var count: usize = 0;
+        for (self.errors) |err| {
+            if (err == null) count += 1;
+        }
+        return count;
+    }
+};
+
+pub const ConcurrentHandlerServeError = Error || std.Io.ConcurrentError;
 
 /// RFC 9113 §6.8 processing certainty for a locally initiated request stream.
 /// A stream above the peer's GOAWAY Last-Stream-ID is guaranteed not to have
@@ -1569,13 +1702,16 @@ fn ServeTask(comptime HandlerContext: type) type {
                 task.result.* = err;
                 return;
             };
-            if (response.request_method == null) response.request_method = request.method;
-            response.extended_connect = request.protocol != null;
+            const invalid_final = normalizeHandlerResponse(
+                &response,
+                request.method,
+                request.protocol != null,
+            );
             connection.writeResponse(request.stream_id, response) catch |err| {
                 task.result.* = err;
                 return;
             };
-            task.result.* = null;
+            task.result.* = if (invalid_final) error.InvalidStatus else null;
         }
     };
 }
@@ -2692,7 +2828,7 @@ pub const Client = struct {
         var saw_server_settings = false;
         var saw_settings_ack = false;
         while (!saw_server_settings or !saw_settings_ack) {
-            var frame = try readFrameTransportWithDeadline(
+            var frame = try readHandshakeFrameTransportWithDeadline(
                 connection.allocator,
                 connection.transportForIo(),
                 connection.limits,
@@ -3103,6 +3239,11 @@ pub const Connection = struct {
     /// construction of two step drivers; ordinary APIs retain their documented
     /// requirement not to race a duplex owner.
     duplex_reader_active: bool = false,
+    /// User callbacks may borrow decoded headers or DATA backed by the active
+    /// read operation. Reentering any receive path from such a callback would
+    /// advance the shared frame reader and invalidate that borrow. Sending on
+    /// another stream remains legal until it itself needs receive progress.
+    callback_reader_active: bool = false,
     /// One active-stream frame captured by a flow-control wait. It is separate
     /// from sibling frames so the duplex reader can consume it first without
     /// repeatedly cycling an unrelated queued frame.
@@ -3143,10 +3284,11 @@ pub const Connection = struct {
         complete,
         failed,
     } = .open,
-    /// An aggregate request/response timeout may leave a partially decoded
-    /// HPACK block or DATA sequence whose ownership cannot be reconstructed by
-    /// a later call. Fail closed instead of allowing subsequent operations or
-    /// pooled reuse against ambiguous connection state.
+    /// An aggregate timeout or indeterminate transport write may leave a
+    /// partially decoded HPACK block, DATA sequence, or frame prefix whose
+    /// ownership cannot be reconstructed by a later call. Fail closed instead
+    /// of allowing subsequent operations or pooled reuse against ambiguous
+    /// connection state.
     aggregate_timeout_unusable: bool = false,
     /// Several frame and HPACK parsers share low-level errors such as
     /// BufferTooShort. Preserve only protocol failures whose RFC connection
@@ -3272,6 +3414,51 @@ pub const Connection = struct {
             !self.limits.enable_push;
     }
 
+    /// Return the current SETTINGS_MAX_CONCURRENT_STREAMS value advertised by
+    /// the peer. `null` means the peer omitted the setting and therefore left
+    /// the RFC default unbounded. Later SETTINGS frames may change this value.
+    pub fn peerMaxConcurrentStreams(self: *const Connection) ?u32 {
+        return self.peer_max_concurrent_streams;
+    }
+
+    /// Return the peer-concurrency capacity visible to the next locally
+    /// initiated stream. `null` means the peer advertised no finite limit;
+    /// zero means the next open will be rejected for concurrency. Idle request
+    /// streams reserved by PRIORITY_UPDATE count toward the limit, except that
+    /// a reservation for the exact next stream is not charged twice. Re-query
+    /// after each open because later stream IDs may have their own reservations.
+    pub fn availableLocalStreamCapacity(self: *const Connection) ?u32 {
+        const limit = self.peer_max_concurrent_streams orelse return null;
+        const used = self.localStreamConcurrencyUsed();
+        if (used >= limit) return 0;
+        return limit - @as(u32, @intCast(used));
+    }
+
+    pub fn activeLocalStreamCount(self: *const Connection) usize {
+        return self.active_local_streams.items.len;
+    }
+
+    pub fn activePeerStreamCount(self: *const Connection) usize {
+        return self.active_peer_streams.items.len;
+    }
+
+    /// Whether the peer has opted into RFC 8441 Extended CONNECT. The setting
+    /// is false until an enabling SETTINGS frame has been processed.
+    pub fn peerExtendedConnectEnabled(self: *const Connection) bool {
+        return self.peer_enable_connect_protocol;
+    }
+
+    fn localStreamConcurrencyUsed(self: *const Connection) usize {
+        if (self.role != .client) {
+            return self.active_local_streams.items.len;
+        }
+        const next_reserved =
+            self.priority_state.containsIdleRequest(self.next_client_stream_id);
+        return self.active_local_streams.items.len +
+            self.priority_state.idle_requests.items.len -
+            @intFromBool(next_reserved);
+    }
+
     fn transportForIo(self: *Connection) RuntimeTransport {
         return self.transport orelse tcpTransport(self.io, self.stream);
     }
@@ -3333,9 +3520,24 @@ pub const Connection = struct {
         self: *Connection,
         request_peer_update: bool,
     ) Error!void {
+        if (self.aggregate_timeout_unusable) return error.ConnectionClosed;
         const transport = self.transport orelse
             return error.PostHandshakeTlsUnavailable;
-        try transport.updateTrafficKeys(request_peer_update);
+        transport.updateTrafficKeys(request_peer_update) catch |err| {
+            return switch (err) {
+                // These are rejected before a KeyUpdate record or epoch change.
+                error.WriteInProgress,
+                error.KeyUpdateRequestPending,
+                => err,
+                // Every other TLS KeyUpdate failure is terminal at the record
+                // layer (including an unknown ciphertext prefix). Prevent HTTP/2
+                // siblings from appending records to that failed connection.
+                else => {
+                    self.aggregate_timeout_unusable = true;
+                    return err;
+                },
+            };
+        };
     }
 
     pub fn keyUpdateCounts(
@@ -3424,6 +3626,7 @@ pub const Connection = struct {
         informational: ?InformationalObserver,
         deadline: std.Io.Clock.Timestamp,
     ) ResponseTimeoutError!OwnedResponse {
+        if (self.callback_reader_active) return error.UnexpectedFrame;
         _ = try deadline_policy.usableAwake(self.io, deadline);
         const pending = try self.sendCompleteRequest(options);
         return self.readResponseUntil(
@@ -3527,6 +3730,7 @@ pub const Connection = struct {
         options: RequestOptions,
         informational: ?InformationalObserver,
     ) Error!OwnedResponse {
+        if (self.callback_reader_active) return error.UnexpectedFrame;
         const pending = try self.sendCompleteRequest(options);
         return self.readResponse(
             pending.stream_id,
@@ -3696,6 +3900,7 @@ pub const Connection = struct {
         comptime begin: anytype,
         comptime consume: anytype,
     ) !StreamingResponse {
+        if (self.callback_reader_active) return error.UnexpectedFrame;
         _ = try deadline_policy.usableAwake(self.io, deadline);
         const pending = try self.sendCompleteRequest(options);
         return self.readResponseStreamingWithHeadUntil(
@@ -3919,6 +4124,7 @@ pub const Connection = struct {
         comptime begin: anytype,
         comptime consume: anytype,
     ) !StreamingResponse {
+        if (self.callback_reader_active) return error.UnexpectedFrame;
         const pending = try self.sendCompleteRequest(options);
         return self.readResponseStreamingWithHead(
             pending,
@@ -3939,6 +4145,7 @@ pub const Connection = struct {
         comptime begin: anytype,
         comptime consume: anytype,
     ) !StreamingResponse {
+        if (self.callback_reader_active) return error.UnexpectedFrame;
         const pending = try self.sendCompleteRequest(options);
         return self.readResponseStreamingWithHead(
             pending,
@@ -4237,10 +4444,51 @@ pub const Connection = struct {
         requests: []const RequestOptions,
         responses: []OwnedResponse,
     ) Error!void {
-        return self.requestBatchWithInformationalInto(
+        return self.requestBatchWithInformationalIntoUntil(
             requests,
             responses,
             null,
+            null,
+        ) catch |err| switch (err) {
+            error.Timeout => unreachable,
+            else => |other| return @errorCast(other),
+        };
+    }
+
+    /// Send a bodyless request batch and aggregate every response under one
+    /// relative budget. The timeout is converted once before request staging;
+    /// it is not renewed by an interim or completed sibling response. Socket
+    /// writes retain the transport's blocking contract, while every response
+    /// frame and continuation read uses the resulting absolute deadline.
+    pub fn requestBatchIntoWithTimeout(
+        self: *Connection,
+        requests: []const RequestOptions,
+        responses: []OwnedResponse,
+        timeout: std.Io.Duration,
+    ) ResponseTimeoutError!void {
+        if (timeout.nanoseconds <= 0) return error.Timeout;
+        return self.requestBatchIntoWithDeadline(
+            requests,
+            responses,
+            .fromNow(self.io, .{ .raw = timeout, .clock = .awake }),
+        );
+    }
+
+    /// Absolute-deadline form of `requestBatchIntoWithTimeout`. The awake-clock
+    /// deadline is validated before stream IDs, HPACK state, or wire bytes are
+    /// mutated. A timeout after submission cancels unfinished streams and makes
+    /// the connection ineligible for reuse because aggregate state was lost.
+    pub fn requestBatchIntoWithDeadline(
+        self: *Connection,
+        requests: []const RequestOptions,
+        responses: []OwnedResponse,
+        deadline: std.Io.Clock.Timestamp,
+    ) ResponseTimeoutError!void {
+        return self.requestBatchWithInformationalIntoWithDeadline(
+            requests,
+            responses,
+            null,
+            deadline,
         );
     }
 
@@ -4253,6 +4501,62 @@ pub const Connection = struct {
         responses: []OwnedResponse,
         informational: ?BatchInformationalObserver,
     ) Error!void {
+        return self.requestBatchWithInformationalIntoUntil(
+            requests,
+            responses,
+            informational,
+            null,
+        ) catch |err| switch (err) {
+            error.Timeout => unreachable,
+            else => |other| return @errorCast(other),
+        };
+    }
+
+    /// Bounded bodyless batch aggregation with ordered 1xx observation.
+    /// Informational responses share the batch's single unrenewed budget.
+    pub fn requestBatchWithInformationalIntoWithTimeout(
+        self: *Connection,
+        requests: []const RequestOptions,
+        responses: []OwnedResponse,
+        informational: ?BatchInformationalObserver,
+        timeout: std.Io.Duration,
+    ) ResponseTimeoutError!void {
+        if (timeout.nanoseconds <= 0) return error.Timeout;
+        return self.requestBatchWithInformationalIntoWithDeadline(
+            requests,
+            responses,
+            informational,
+            .fromNow(self.io, .{ .raw = timeout, .clock = .awake }),
+        );
+    }
+
+    /// Absolute-deadline form of
+    /// `requestBatchWithInformationalIntoWithTimeout`.
+    pub fn requestBatchWithInformationalIntoWithDeadline(
+        self: *Connection,
+        requests: []const RequestOptions,
+        responses: []OwnedResponse,
+        informational: ?BatchInformationalObserver,
+        deadline: std.Io.Clock.Timestamp,
+    ) ResponseTimeoutError!void {
+        _ = try deadline_policy.usableAwake(self.io, deadline);
+        return self.requestBatchWithInformationalIntoUntil(
+            requests,
+            responses,
+            informational,
+            deadline,
+        );
+    }
+
+    fn requestBatchWithInformationalIntoUntil(
+        self: *Connection,
+        requests: []const RequestOptions,
+        responses: []OwnedResponse,
+        informational: ?BatchInformationalObserver,
+        deadline: ?std.Io.Clock.Timestamp,
+    ) ResponseTimeoutError!void {
+        if (self.aggregate_timeout_unusable) return error.ConnectionClosed;
+        if (self.callback_reader_active) return error.UnexpectedFrame;
         if (self.role != .client) return error.UnexpectedFrame;
         if (requests.len != responses.len) return error.InvalidResponse;
         if (requests.len == 0) return;
@@ -4286,8 +4590,15 @@ pub const Connection = struct {
         const staged_encoder = try self.prepareStagedHpackEncoder();
         var started: usize = 0;
         var requests_written = false;
-        errdefer {
-            if (requests_written) {
+        errdefer |err| {
+            if (requests_written and err == error.Timeout) {
+                self.aggregate_timeout_unusable = true;
+            }
+            if (requests_written and
+                (err == error.Timeout or
+                    self.serve_read_connection_error != null or
+                    !self.aggregate_timeout_unusable))
+            {
                 self.writeBatchResponseResets(
                     states[0..started],
                 ) catch {};
@@ -4310,11 +4621,15 @@ pub const Connection = struct {
             };
             started += 1;
         }
-        try self.transportForIo().writeAll(batch.items);
+        self.transportForIo().writeAll(batch.items) catch |err| {
+            self.commitStagedHpackEncoder();
+            self.aggregate_timeout_unusable = true;
+            return @errorCast(err);
+        };
         self.commitStagedHpackEncoder();
         requests_written = true;
 
-        try self.readResponseBatch(states, informational);
+        try self.readResponseBatch(states, informational, deadline);
         for (states, responses) |*state, *response| {
             response.* = .{
                 .headers = state.headers.?,
@@ -4345,10 +4660,55 @@ pub const Connection = struct {
         context: anytype,
         comptime consume: anytype,
     ) !void {
-        return self.requestBatchStreamingWithInformationalInto(
+        return self.requestBatchStreamingWithInformationalIntoUntil(
             requests,
             responses,
             null,
+            null,
+            context,
+            consume,
+        );
+    }
+
+    /// Stream a bodyless response batch under one relative budget. The
+    /// timeout is converted once before request staging and is not renewed by
+    /// control traffic, response heads, DATA, or completed sibling streams.
+    pub fn requestBatchStreamingIntoWithTimeout(
+        self: *Connection,
+        requests: []const RequestOptions,
+        responses: []StreamingResponse,
+        timeout: std.Io.Duration,
+        context: anytype,
+        comptime consume: anytype,
+    ) !void {
+        if (timeout.nanoseconds <= 0) return error.Timeout;
+        return self.requestBatchStreamingIntoWithDeadline(
+            requests,
+            responses,
+            .fromNow(self.io, .{ .raw = timeout, .clock = .awake }),
+            context,
+            consume,
+        );
+    }
+
+    /// Absolute-deadline form of `requestBatchStreamingIntoWithTimeout`. The
+    /// awake-clock timestamp is validated before stream IDs, HPACK state, or
+    /// wire bytes are mutated. A transport read timeout discards call-local
+    /// response state, so unfinished streams are cancelled and the connection
+    /// is retired from reuse.
+    pub fn requestBatchStreamingIntoWithDeadline(
+        self: *Connection,
+        requests: []const RequestOptions,
+        responses: []StreamingResponse,
+        deadline: std.Io.Clock.Timestamp,
+        context: anytype,
+        comptime consume: anytype,
+    ) !void {
+        return self.requestBatchStreamingWithInformationalIntoWithDeadline(
+            requests,
+            responses,
+            null,
+            deadline,
             context,
             consume,
         );
@@ -4365,6 +4725,71 @@ pub const Connection = struct {
         context: anytype,
         comptime consume: anytype,
     ) !void {
+        return self.requestBatchStreamingWithInformationalIntoUntil(
+            requests,
+            responses,
+            informational,
+            null,
+            context,
+            consume,
+        );
+    }
+
+    /// Stream a bodyless response batch with ordered 1xx observation under one
+    /// relative budget. Informational heads share the unrenewed batch timeout.
+    pub fn requestBatchStreamingWithInformationalIntoWithTimeout(
+        self: *Connection,
+        requests: []const RequestOptions,
+        responses: []StreamingResponse,
+        informational: ?BatchInformationalObserver,
+        timeout: std.Io.Duration,
+        context: anytype,
+        comptime consume: anytype,
+    ) !void {
+        if (timeout.nanoseconds <= 0) return error.Timeout;
+        return self.requestBatchStreamingWithInformationalIntoWithDeadline(
+            requests,
+            responses,
+            informational,
+            .fromNow(self.io, .{ .raw = timeout, .clock = .awake }),
+            context,
+            consume,
+        );
+    }
+
+    /// Absolute-deadline form of
+    /// `requestBatchStreamingWithInformationalIntoWithTimeout`.
+    pub fn requestBatchStreamingWithInformationalIntoWithDeadline(
+        self: *Connection,
+        requests: []const RequestOptions,
+        responses: []StreamingResponse,
+        informational: ?BatchInformationalObserver,
+        deadline: std.Io.Clock.Timestamp,
+        context: anytype,
+        comptime consume: anytype,
+    ) !void {
+        _ = try deadline_policy.usableAwake(self.io, deadline);
+        return self.requestBatchStreamingWithInformationalIntoUntil(
+            requests,
+            responses,
+            informational,
+            deadline,
+            context,
+            consume,
+        );
+    }
+
+    fn requestBatchStreamingWithInformationalIntoUntil(
+        self: *Connection,
+        requests: []const RequestOptions,
+        responses: []StreamingResponse,
+        informational: ?BatchInformationalObserver,
+        deadline: ?std.Io.Clock.Timestamp,
+        context: anytype,
+        comptime consume: anytype,
+    ) !void {
+        if (self.aggregate_timeout_unusable) return error.ConnectionClosed;
+        if (self.callback_reader_active) return error.UnexpectedFrame;
         if (self.role != .client) return error.UnexpectedFrame;
         if (requests.len != responses.len) return error.InvalidResponse;
         if (requests.len == 0) return;
@@ -4396,8 +4821,16 @@ pub const Connection = struct {
         const staged_encoder = try self.prepareStagedHpackEncoder();
         var started: usize = 0;
         var requests_written = false;
+        var read_timed_out = false;
         errdefer {
-            if (requests_written) {
+            if (read_timed_out) {
+                self.aggregate_timeout_unusable = true;
+            }
+            if (requests_written and
+                (read_timed_out or
+                    self.serve_read_connection_error != null or
+                    !self.aggregate_timeout_unusable))
+            {
                 self.writeBatchResponseResets(
                     states[0..started],
                 ) catch {};
@@ -4425,6 +4858,7 @@ pub const Connection = struct {
             // batches, retain advanced HPACK state and consumed stream IDs so
             // accidental reuse cannot pretend the transaction never started.
             self.commitStagedHpackEncoder();
+            self.aggregate_timeout_unusable = true;
             return err;
         };
         self.commitStagedHpackEncoder();
@@ -4433,6 +4867,8 @@ pub const Connection = struct {
         try self.readResponseBatchStreaming(
             states,
             informational,
+            deadline,
+            &read_timed_out,
             context,
             consume,
         );
@@ -4449,27 +4885,66 @@ pub const Connection = struct {
         }
     }
 
-    /// Send a batch whose complete bodies fit current flow-control credit.
-    ///
-    /// Unlike `requestBatchInto`, this accepts DATA but never pumps incoming
-    /// frames while opening the batch. The whole batch is rejected before any
-    /// wire write unless every body fits one peer stream window and their sum
-    /// fits the current connection window. That bounded contract is sufficient
-    /// for max-window parallel workloads and avoids the deadlock ambiguity of
-    /// a general blocking full-duplex scheduler. `body_chunk_size` preserves
-    /// the caller's application contribution size while HTTP/2 frame splitting
-    /// still obeys the negotiated maximum frame size.
+    /// Send a body-bearing batch with one connection-owned full-duplex pump.
+    /// Request DATA advances round-robin across streams. When every unfinished
+    /// body is flow-controlled, the same owner processes WINDOW_UPDATE and
+    /// early response frames before resuming the exact unsent suffix.
+    /// `body_chunk_size` preserves the caller's application contribution size
+    /// while HTTP/2 frame splitting still obeys the negotiated maximum.
     pub fn requestBodyBatchInto(
         self: *Connection,
         requests: []const RequestOptions,
         body_chunk_size: usize,
         responses: []OwnedResponse,
     ) Error!void {
-        return self.requestBodyBatchWithInformationalInto(
+        return self.requestBodyBatchWithInformationalIntoUntil(
             requests,
             body_chunk_size,
             responses,
             null,
+            null,
+        ) catch |err| switch (err) {
+            error.Timeout => unreachable,
+            else => |other| return @errorCast(other),
+        };
+    }
+
+    /// Send a body batch and aggregate every response under one relative
+    /// budget. The timeout is converted once before request staging and is not
+    /// renewed by upload flow-control progress or sibling responses.
+    pub fn requestBodyBatchIntoWithTimeout(
+        self: *Connection,
+        requests: []const RequestOptions,
+        body_chunk_size: usize,
+        responses: []OwnedResponse,
+        timeout: std.Io.Duration,
+    ) ResponseTimeoutError!void {
+        if (timeout.nanoseconds <= 0) return error.Timeout;
+        return self.requestBodyBatchIntoWithDeadline(
+            requests,
+            body_chunk_size,
+            responses,
+            .fromNow(self.io, .{ .raw = timeout, .clock = .awake }),
+        );
+    }
+
+    /// Absolute-deadline form of `requestBodyBatchIntoWithTimeout`. Deadline
+    /// validation precedes stream, HPACK, flow-control, and wire mutation. A
+    /// post-submission timeout cancels unfinished streams and retires the
+    /// connection from reuse.
+    pub fn requestBodyBatchIntoWithDeadline(
+        self: *Connection,
+        requests: []const RequestOptions,
+        body_chunk_size: usize,
+        responses: []OwnedResponse,
+        deadline: std.Io.Clock.Timestamp,
+    ) ResponseTimeoutError!void {
+        return self.requestBodyBatchWithInformationalIntoWithDeadline(
+            requests,
+            body_chunk_size,
+            responses,
+            null,
+            deadline,
         );
     }
 
@@ -4483,6 +4958,250 @@ pub const Connection = struct {
         responses: []OwnedResponse,
         informational: ?BatchInformationalObserver,
     ) Error!void {
+        return self.requestBodyBatchWithInformationalIntoUntil(
+            requests,
+            body_chunk_size,
+            responses,
+            informational,
+            null,
+        ) catch |err| switch (err) {
+            error.Timeout => unreachable,
+            else => |other| return @errorCast(other),
+        };
+    }
+
+    /// Bounded body-bearing batch aggregation with ordered 1xx observation.
+    /// Informational responses share the batch's single unrenewed budget.
+    pub fn requestBodyBatchWithInformationalIntoWithTimeout(
+        self: *Connection,
+        requests: []const RequestOptions,
+        body_chunk_size: usize,
+        responses: []OwnedResponse,
+        informational: ?BatchInformationalObserver,
+        timeout: std.Io.Duration,
+    ) ResponseTimeoutError!void {
+        if (timeout.nanoseconds <= 0) return error.Timeout;
+        return self.requestBodyBatchWithInformationalIntoWithDeadline(
+            requests,
+            body_chunk_size,
+            responses,
+            informational,
+            .fromNow(self.io, .{ .raw = timeout, .clock = .awake }),
+        );
+    }
+
+    /// Absolute-deadline form of
+    /// `requestBodyBatchWithInformationalIntoWithTimeout`.
+    pub fn requestBodyBatchWithInformationalIntoWithDeadline(
+        self: *Connection,
+        requests: []const RequestOptions,
+        body_chunk_size: usize,
+        responses: []OwnedResponse,
+        informational: ?BatchInformationalObserver,
+        deadline: std.Io.Clock.Timestamp,
+    ) ResponseTimeoutError!void {
+        _ = try deadline_policy.usableAwake(self.io, deadline);
+        return self.requestBodyBatchWithInformationalIntoUntil(
+            requests,
+            body_chunk_size,
+            responses,
+            informational,
+            deadline,
+        );
+    }
+
+    /// Send a flow-controlled request-body batch and stream every
+    /// interleaved response DATA slice to `consume`. Response metadata is
+    /// returned in request order without retaining aggregate response bodies.
+    pub fn requestBodyBatchStreamingInto(
+        self: *Connection,
+        requests: []const RequestOptions,
+        body_chunk_size: usize,
+        responses: []StreamingResponse,
+        context: anytype,
+        comptime consume: anytype,
+    ) !void {
+        return self.requestBodyBatchStreamingWithInformationalIntoUntil(
+            requests,
+            body_chunk_size,
+            responses,
+            null,
+            null,
+            context,
+            consume,
+        );
+    }
+
+    /// Relative-timeout form of `requestBodyBatchStreamingInto`. The budget is
+    /// converted once before request staging and is not renewed by completed
+    /// siblings, upload flow-control progress, or response callbacks.
+    pub fn requestBodyBatchStreamingIntoWithTimeout(
+        self: *Connection,
+        requests: []const RequestOptions,
+        body_chunk_size: usize,
+        responses: []StreamingResponse,
+        timeout: std.Io.Duration,
+        context: anytype,
+        comptime consume: anytype,
+    ) !void {
+        if (timeout.nanoseconds <= 0) return error.Timeout;
+        return self.requestBodyBatchStreamingIntoWithDeadline(
+            requests,
+            body_chunk_size,
+            responses,
+            .fromNow(self.io, .{ .raw = timeout, .clock = .awake }),
+            context,
+            consume,
+        );
+    }
+
+    /// Absolute-deadline form of `requestBodyBatchStreamingIntoWithTimeout`.
+    /// Validation precedes stream, HPACK, flow-control, and wire mutation.
+    pub fn requestBodyBatchStreamingIntoWithDeadline(
+        self: *Connection,
+        requests: []const RequestOptions,
+        body_chunk_size: usize,
+        responses: []StreamingResponse,
+        deadline: std.Io.Clock.Timestamp,
+        context: anytype,
+        comptime consume: anytype,
+    ) !void {
+        return self.requestBodyBatchStreamingWithInformationalIntoWithDeadline(
+            requests,
+            body_chunk_size,
+            responses,
+            null,
+            deadline,
+            context,
+            consume,
+        );
+    }
+
+    /// Stream responses to a bounded request-body batch while observing each
+    /// correlated informational head in wire order.
+    pub fn requestBodyBatchStreamingWithInformationalInto(
+        self: *Connection,
+        requests: []const RequestOptions,
+        body_chunk_size: usize,
+        responses: []StreamingResponse,
+        informational: ?BatchInformationalObserver,
+        context: anytype,
+        comptime consume: anytype,
+    ) !void {
+        return self.requestBodyBatchStreamingWithInformationalIntoUntil(
+            requests,
+            body_chunk_size,
+            responses,
+            informational,
+            null,
+            context,
+            consume,
+        );
+    }
+
+    /// Relative-timeout form of
+    /// `requestBodyBatchStreamingWithInformationalInto`.
+    pub fn requestBodyBatchStreamingWithInformationalIntoWithTimeout(
+        self: *Connection,
+        requests: []const RequestOptions,
+        body_chunk_size: usize,
+        responses: []StreamingResponse,
+        informational: ?BatchInformationalObserver,
+        timeout: std.Io.Duration,
+        context: anytype,
+        comptime consume: anytype,
+    ) !void {
+        if (timeout.nanoseconds <= 0) return error.Timeout;
+        return self.requestBodyBatchStreamingWithInformationalIntoWithDeadline(
+            requests,
+            body_chunk_size,
+            responses,
+            informational,
+            .fromNow(self.io, .{ .raw = timeout, .clock = .awake }),
+            context,
+            consume,
+        );
+    }
+
+    /// Absolute-deadline form of
+    /// `requestBodyBatchStreamingWithInformationalIntoWithTimeout`.
+    pub fn requestBodyBatchStreamingWithInformationalIntoWithDeadline(
+        self: *Connection,
+        requests: []const RequestOptions,
+        body_chunk_size: usize,
+        responses: []StreamingResponse,
+        informational: ?BatchInformationalObserver,
+        deadline: std.Io.Clock.Timestamp,
+        context: anytype,
+        comptime consume: anytype,
+    ) !void {
+        _ = try deadline_policy.usableAwake(self.io, deadline);
+        return self.requestBodyBatchStreamingWithInformationalIntoUntil(
+            requests,
+            body_chunk_size,
+            responses,
+            informational,
+            deadline,
+            context,
+            consume,
+        );
+    }
+
+    fn requestBodyBatchStreamingWithInformationalIntoUntil(
+        self: *Connection,
+        requests: []const RequestOptions,
+        body_chunk_size: usize,
+        responses: []StreamingResponse,
+        informational: ?BatchInformationalObserver,
+        deadline: ?std.Io.Clock.Timestamp,
+        context: anytype,
+        comptime consume: anytype,
+    ) !void {
+        return self.requestBodyBatchIntoMode(
+            true,
+            requests,
+            body_chunk_size,
+            responses,
+            informational,
+            deadline,
+            context,
+            consume,
+        );
+    }
+
+    fn requestBodyBatchWithInformationalIntoUntil(
+        self: *Connection,
+        requests: []const RequestOptions,
+        body_chunk_size: usize,
+        responses: []OwnedResponse,
+        informational: ?BatchInformationalObserver,
+        deadline: ?std.Io.Clock.Timestamp,
+    ) ResponseTimeoutError!void {
+        return self.requestBodyBatchIntoMode(
+            false,
+            requests,
+            body_chunk_size,
+            responses,
+            informational,
+            deadline,
+            {},
+            undefined,
+        ) catch |err| return @errorCast(err);
+    }
+
+    fn requestBodyBatchIntoMode(
+        self: *Connection,
+        comptime streaming_response: bool,
+        requests: []const RequestOptions,
+        body_chunk_size: usize,
+        responses: anytype,
+        informational: ?BatchInformationalObserver,
+        deadline: ?std.Io.Clock.Timestamp,
+        context: anytype,
+        comptime consume: anytype,
+    ) !void {
+        if (self.aggregate_timeout_unusable) return error.ConnectionClosed;
+        if (self.callback_reader_active) return error.UnexpectedFrame;
         if (self.role != .client) return error.UnexpectedFrame;
         if (requests.len != responses.len) return error.InvalidResponse;
         if (requests.len == 0) return;
@@ -4491,7 +5210,6 @@ pub const Connection = struct {
             return error.UnexpectedFrame;
         }
 
-        var total_body_bytes: usize = 0;
         for (requests) |request_options| {
             if (request_options.trailers.len != 0) {
                 return error.InvalidContentLength;
@@ -4499,22 +5217,6 @@ pub const Connection = struct {
             if (methodIsConnect(request_options.method)) {
                 return error.InvalidHeader;
             }
-            total_body_bytes = std.math.add(
-                usize,
-                total_body_bytes,
-                request_options.body.len,
-            ) catch return error.MessageTooLarge;
-            if (request_options.body.len >
-                @as(usize, @intCast(@max(
-                    self.peer_initial_stream_window,
-                    0,
-                ))))
-            {
-                return error.FlowControlBlocked;
-            }
-        }
-        if (total_body_bytes > self.send_connection_window.available()) {
-            return error.FlowControlBlocked;
         }
 
         var states_stack: [16]BatchResponseState = undefined;
@@ -4525,17 +5227,6 @@ pub const Connection = struct {
         defer if (states.ptr != states_stack[0..].ptr) {
             self.allocator.free(states);
         };
-        var credit_reserved_stack: [16]bool = undefined;
-        const credit_reserved =
-            if (requests.len <= credit_reserved_stack.len)
-                credit_reserved_stack[0..requests.len]
-            else
-                try self.allocator.alloc(bool, requests.len);
-        defer if (credit_reserved.ptr != credit_reserved_stack[0..].ptr) {
-            self.allocator.free(credit_reserved);
-        };
-        @memset(credit_reserved, false);
-
         const batch = &self.write_batch;
         batch.clearRetainingCapacity();
         const original_next_stream_id = self.next_client_stream_id;
@@ -4543,8 +5234,24 @@ pub const Connection = struct {
         var started: usize = 0;
         var request_heads_committed = false;
         var responses_pending = false;
-        errdefer {
-            if (responses_pending) {
+        var read_timed_out = false;
+        errdefer |err| {
+            if (request_heads_committed and
+                (if (streaming_response)
+                    read_timed_out
+                else
+                    err == error.Timeout))
+            {
+                self.aggregate_timeout_unusable = true;
+            }
+            if (responses_pending and
+                ((if (streaming_response)
+                    read_timed_out
+                else
+                    err == error.Timeout) or
+                    self.serve_read_connection_error != null or
+                    !self.aggregate_timeout_unusable))
+            {
                 self.writeBatchResponseResets(
                     states[0..started],
                 ) catch {};
@@ -4570,38 +5277,48 @@ pub const Connection = struct {
                 .stream_id = pending.stream_id,
                 .request_method = pending.request_method,
                 .extended_connect = pending.extended_connect,
+                .request_done = request_options.body.len == 0,
             };
             started += 1;
         }
-
-        var reserved_connection_bytes: usize = 0;
-        errdefer if (reserved_connection_bytes != 0) {
-            self.send_connection_window.update(
-                @intCast(reserved_connection_bytes),
-            ) catch unreachable;
-            for (requests, states, credit_reserved) |
-                request_options,
-                state,
-                stream_credit_reserved,
-            | {
-                if (!stream_credit_reserved) continue;
-                (self.sendStreamWindow(state.stream_id) catch continue)
-                    .update(@intCast(request_options.body.len)) catch
-                    unreachable;
-            }
+        var views_stack: [16]BatchDataView = undefined;
+        const views = if (requests.len <= views_stack.len)
+            views_stack[0..requests.len]
+        else
+            try self.allocator.alloc(BatchDataView, requests.len);
+        defer if (views.ptr != views_stack[0..].ptr) {
+            self.allocator.free(views);
         };
-        try self.send_connection_window.reserve(total_body_bytes);
-        reserved_connection_bytes = total_body_bytes;
-        for (requests, states, credit_reserved) |
-            request_options,
-            state,
-            *stream_credit_reserved,
-        | {
-            if (request_options.body.len == 0) continue;
-            try (try self.sendStreamWindow(state.stream_id)).reserve(
-                request_options.body.len,
-            );
-            stream_credit_reserved.* = true;
+        var offsets_stack: [16]usize = undefined;
+        const offsets = if (requests.len <= offsets_stack.len)
+            offsets_stack[0..requests.len]
+        else
+            try self.allocator.alloc(usize, requests.len);
+        defer if (offsets.ptr != offsets_stack[0..].ptr) {
+            self.allocator.free(offsets);
+        };
+        var round_reserved_stack: [16]usize = undefined;
+        const round_reserved =
+            if (requests.len <= round_reserved_stack.len)
+                round_reserved_stack[0..requests.len]
+            else
+                try self.allocator.alloc(usize, requests.len);
+        defer if (round_reserved.ptr != round_reserved_stack[0..].ptr) {
+            self.allocator.free(round_reserved);
+        };
+        @memset(offsets, 0);
+        for (views, requests, states) |*view, request_options, state| {
+            view.* = .{
+                .stream_id = state.stream_id,
+                .body = request_options.body,
+            };
+        }
+        try self.prepareBodyBatchData(views, body_chunk_size);
+
+        // Materialize every send window before HEADERS become visible. The
+        // DATA scheduler is then allocation-free after wire commitment.
+        for (states) |state| {
+            _ = try self.sendStreamWindow(state.stream_id);
         }
 
         self.transportForIo().writeAll(batch.items) catch |err| {
@@ -4610,38 +5327,62 @@ pub const Connection = struct {
             // state and stream IDs so any accidental reuse fails closed.
             self.commitStagedHpackEncoder();
             request_heads_committed = true;
-            return err;
+            self.aggregate_timeout_unusable = true;
+            return @errorCast(err);
         };
         self.commitStagedHpackEncoder();
         request_heads_committed = true;
-        var body_write_succeeded = false;
-        errdefer if (!body_write_succeeded) {
-            // A partial DATA submission has consumed an unknown wire prefix.
-            // Keep flow-control accounting conservative; this connection must
-            // be closed rather than retried.
-            reserved_connection_bytes = 0;
-        };
-        try self.writeRequestBodyBatchData(
-            requests,
-            states,
-            body_chunk_size,
-        );
-        body_write_succeeded = true;
-        reserved_connection_bytes = 0;
         responses_pending = true;
+        self.serve_read_connection_error = null;
+        self.serve_read_stream_error = null;
+        try self.writeRequestBodyBatchDataUntil(
+            streaming_response,
+            views,
+            offsets,
+            round_reserved,
+            body_chunk_size,
+            states,
+            informational,
+            deadline,
+            &read_timed_out,
+            context,
+            consume,
+        );
 
-        try self.readResponseBatch(states, informational);
-        for (states, responses) |*state, *response| {
-            response.* = .{
-                .headers = state.headers.?,
-                .status = state.status.?,
-                .body = state.body_owned.?,
-                .trailers = state.trailers,
-            };
-            state.headers = null;
-            state.body_owned = null;
-            state.trailers = &.{};
-            self.releaseLocalStream(state.stream_id);
+        if (streaming_response) {
+            try self.readResponseBatchStreaming(
+                states,
+                informational,
+                deadline,
+                &read_timed_out,
+                context,
+                consume,
+            );
+            for (states, responses) |*state, *response| {
+                response.* = .{
+                    .headers = state.headers.?,
+                    .status = state.status.?,
+                    .body_bytes = state.body_bytes,
+                    .trailers = state.trailers,
+                };
+                state.headers = null;
+                state.trailers = &.{};
+                self.releaseLocalStream(state.stream_id);
+            }
+        } else {
+            try self.readResponseBatch(states, informational, deadline);
+            for (states, responses) |*state, *response| {
+                response.* = .{
+                    .headers = state.headers.?,
+                    .status = state.status.?,
+                    .body = state.body_owned.?,
+                    .trailers = state.trailers,
+                };
+                state.headers = null;
+                state.body_owned = null;
+                state.trailers = &.{};
+                self.releaseLocalStream(state.stream_id);
+            }
         }
     }
 
@@ -4754,41 +5495,378 @@ pub const Connection = struct {
         };
     }
 
-    fn writeRequestBodyBatchData(
+    fn writeRequestBodyBatchDataUntil(
         self: *Connection,
-        requests: []const RequestOptions,
-        states: []const BatchResponseState,
+        comptime streaming_response: bool,
+        views: []const BatchDataView,
+        offsets: []usize,
+        round_reserved: []usize,
         application_chunk_size: usize,
-    ) Error!void {
-        var views_stack: [16]BatchDataView = undefined;
-        const views = if (requests.len <= views_stack.len)
-            views_stack[0..requests.len]
-        else
-            try self.allocator.alloc(BatchDataView, requests.len);
-        defer if (views.ptr != views_stack[0..].ptr) {
-            self.allocator.free(views);
-        };
-        var offsets_stack: [16]usize = undefined;
-        const offsets = if (requests.len <= offsets_stack.len)
-            offsets_stack[0..requests.len]
-        else
-            try self.allocator.alloc(usize, requests.len);
-        defer if (offsets.ptr != offsets_stack[0..].ptr) {
-            self.allocator.free(offsets);
-        };
-        @memset(offsets, 0);
-        for (views, requests, states) |*view, request_options, state| {
-            view.* = .{
-                .stream_id = state.stream_id,
-                .body = request_options.body,
-            };
+        states: []BatchResponseState,
+        informational: ?BatchInformationalObserver,
+        deadline: ?std.Io.Clock.Timestamp,
+        read_timed_out: *bool,
+        context: anytype,
+        comptime consume: anytype,
+    ) !void {
+        std.debug.assert(views.len == offsets.len);
+        std.debug.assert(views.len == round_reserved.len);
+        const frame_limit = self.outboundFramePayloadLimit();
+        var remaining_streams = views.len;
+        for (views) |view| {
+            if (view.body.len == 0) remaining_streams -= 1;
         }
-        try self.prepareBodyBatchData(views, application_chunk_size);
-        try self.writeBodyBatchData(
-            views,
-            offsets,
-            application_chunk_size,
-        );
+        var next_stream: usize = 0;
+
+        while (remaining_streams != 0) {
+            self.batch_data_headers.clearRetainingCapacity();
+            self.batch_data_parts.clearRetainingCapacity();
+            @memset(round_reserved, 0);
+            var made_progress = false;
+            var reserved_connection_bytes: usize = 0;
+            var wire_write_started = false;
+            errdefer if (!wire_write_started) {
+                self.send_connection_window.update(
+                    @intCast(reserved_connection_bytes),
+                ) catch unreachable;
+                for (views, round_reserved) |view, bytes| {
+                    if (bytes == 0) continue;
+                    (self.sendStreamWindow(view.stream_id) catch unreachable)
+                        .update(@intCast(bytes)) catch unreachable;
+                }
+            };
+
+            const pass_start = next_stream;
+            var scanned: usize = 0;
+            while (scanned < views.len) : (scanned += 1) {
+                const index = (pass_start + scanned) % views.len;
+                const view = views[index];
+                const offset = &offsets[index];
+                if (offset.* == view.body.len) continue;
+                if (self.send_connection_window.available() == 0) break;
+                const stream_window = try self.sendStreamWindow(
+                    view.stream_id,
+                );
+                const contribution_len = @min(
+                    application_chunk_size,
+                    view.body.len - offset.*,
+                    self.send_connection_window.available(),
+                    stream_window.available(),
+                );
+                if (contribution_len == 0) continue;
+                try self.appendBodyBatchContribution(
+                    view,
+                    offset,
+                    contribution_len,
+                    frame_limit,
+                    stream_window,
+                );
+                reserved_connection_bytes += contribution_len;
+                round_reserved[index] = contribution_len;
+                if (offset.* == view.body.len) remaining_streams -= 1;
+                made_progress = true;
+                next_stream = (index + 1) % views.len;
+            }
+
+            if (made_progress) {
+                if (deadline) |absolute| {
+                    _ = deadline_policy.usableAwake(
+                        self.io,
+                        absolute,
+                    ) catch |err| {
+                        read_timed_out.* = err == error.Timeout;
+                        return err;
+                    };
+                }
+                wire_write_started = true;
+                const wire_parts = self.batch_data_parts.items;
+                const transport = self.transportForIo();
+                (if (wire_parts.len == 2)
+                    transport.writeAllParts(wire_parts[0], wire_parts[1])
+                else
+                    transport.writeAllSlices(wire_parts)) catch |err| {
+                    self.aggregate_timeout_unusable = true;
+                    return err;
+                };
+                for (views, offsets, states, round_reserved) |
+                    view,
+                    offset,
+                    *state,
+                    bytes,
+                | {
+                    if (bytes != 0 and offset == view.body.len) {
+                        state.request_done = true;
+                    }
+                }
+                continue;
+            }
+
+            const frame = (self.readBufferedFrameWithDeadline(deadline) catch |err| {
+                read_timed_out.* = deadline != null and err == error.Timeout;
+                return err;
+            }).frame;
+            if (try self.handleConnectionFrame(frame)) continue;
+            if (frame.header.frame_type == .goaway) {
+                const goaway = try http2.GoAwayPayload.parse(frame);
+                try self.recordPeerGoAway(goaway);
+                for (states) |state| {
+                    if (!state.done and
+                        state.stream_id > goaway.last_stream_id)
+                    {
+                        return error.ConnectionGoAway;
+                    }
+                }
+                continue;
+            }
+            try self.processBodyBatchResponseFrame(
+                streaming_response,
+                states,
+                informational,
+                deadline,
+                read_timed_out,
+                context,
+                consume,
+                frame,
+            );
+        }
+    }
+
+    fn processBodyBatchResponseFrame(
+        self: *Connection,
+        comptime streaming_response: bool,
+        states: []BatchResponseState,
+        informational: ?BatchInformationalObserver,
+        deadline: ?std.Io.Clock.Timestamp,
+        read_timed_out: *bool,
+        context: anytype,
+        comptime consume: anytype,
+        frame: http2.Frame,
+    ) anyerror!void {
+        const state_index = findBatchResponseStateIndex(
+            states,
+            frame.header.stream_id,
+        ) orelse return error.UnexpectedFrame;
+        const state = &states[state_index];
+        if (state.done) return error.UnexpectedFrame;
+        errdefer |err| if (self.serve_read_connection_error == null) {
+            const code: ?http2.ErrorCode =
+                if (err == error.UnexpectedFrame)
+                    .protocol_error
+                else
+                    responseStreamErrorCode(err);
+            if (code) |value| {
+                self.recordResponseStreamReadError(
+                    state.stream_id,
+                    value,
+                );
+            }
+        };
+
+        switch (frame.header.frame_type) {
+            .push_promise => {
+                if (!self.limits.enable_push) {
+                    try self.rejectDisabledPushPromise(frame);
+                    unreachable;
+                }
+                self.receivePushPromiseUntil(frame, deadline) catch |err| {
+                    read_timed_out.* =
+                        deadline != null and err == error.Timeout;
+                    return @errorCast(err);
+                };
+            },
+            .headers => {
+                if (state.headers != null) {
+                    if (state.forbids_body) {
+                        if (streaming_response) {
+                            return error.UnexpectedFrame;
+                        }
+                        return error.InvalidContentLength;
+                    }
+                    if ((frame.header.flags & flag_end_stream) == 0) {
+                        return error.UnexpectedFrame;
+                    }
+                    state.trailers = self.readHeaderBlockUntil(
+                        frame,
+                        deadline,
+                    ) catch |err| {
+                        read_timed_out.* =
+                            deadline != null and err == error.Timeout;
+                        return @errorCast(err);
+                    };
+                    var trailers_owned = true;
+                    errdefer if (trailers_owned) {
+                        freeHeaders(self.allocator, state.trailers);
+                        state.trailers = &.{};
+                    };
+                    try validateHeaderBlock(
+                        state.trailers,
+                        .response_trailers,
+                    );
+                    try validateExpectedContentLength(
+                        state.content_length,
+                        if (streaming_response)
+                            state.body_bytes
+                        else
+                            state.body.items.len,
+                    );
+                    state.done = true;
+                    trailers_owned = false;
+                    return;
+                }
+
+                const headers = self.readHeaderBlockUntil(
+                    frame,
+                    deadline,
+                ) catch |err| {
+                    read_timed_out.* =
+                        deadline != null and err == error.Timeout;
+                    return @errorCast(err);
+                };
+                var headers_owned_by_state = false;
+                errdefer if (!headers_owned_by_state) {
+                    freeHeaders(self.allocator, headers);
+                };
+                try validateHeaderBlock(headers, .response);
+                const lookup = try responseHeaderLookup(headers);
+                const status_text = lookup.status orelse
+                    return error.MissingPseudoHeader;
+                const status = std.fmt.parseInt(
+                    u16,
+                    status_text,
+                    10,
+                ) catch return error.InvalidStatus;
+                if (informationalResponseToSkip(status)) {
+                    if ((frame.header.flags & flag_end_stream) != 0 or
+                        lookup.content_length != null)
+                    {
+                        return error.InvalidContentLength;
+                    }
+                    try countInformationalResponse(
+                        &state.informational_count,
+                        self.limits.max_informational_responses,
+                    );
+                    if (informational) |observer| {
+                        try self.beginBorrowedReadCallback();
+                        defer self.endBorrowedReadCallback();
+                        observer.on_response(
+                            observer.context,
+                            state_index,
+                            state.stream_id,
+                            .{ .headers = headers, .status = status },
+                        );
+                    }
+                    freeHeaders(self.allocator, headers);
+                    return;
+                }
+
+                state.headers = headers;
+                headers_owned_by_state = true;
+                state.status = status;
+                state.content_length = lookup.content_length;
+                state.forbids_body = responseForbidsBody(
+                    status,
+                    state.request_method,
+                    state.extended_connect,
+                );
+                if ((lookup.content_length orelse 0) >
+                    self.limits.max_body_bytes)
+                {
+                    return error.MessageTooLarge;
+                }
+                if (state.forbids_body) {
+                    const traditional_connect =
+                        methodIsConnect(state.request_method) and
+                        !state.extended_connect;
+                    if (traditional_connect and
+                        (lookup.content_length orelse 0) != 0)
+                    {
+                        return error.InvalidContentLength;
+                    }
+                    if ((statusIsInformational(status) or status == 204) and
+                        lookup.content_length != null)
+                    {
+                        return error.InvalidContentLength;
+                    }
+                } else if (!streaming_response) {
+                    if (lookup.content_length) |body_len| {
+                        try state.body.ensureTotalCapacityPrecise(
+                            self.allocator,
+                            body_len,
+                        );
+                        state.body_capacity_exact = true;
+                    }
+                }
+                if ((frame.header.flags & flag_end_stream) != 0) {
+                    try validateExpectedContentLength(
+                        lookup.content_length,
+                        0,
+                    );
+                    state.done = true;
+                    return;
+                }
+            },
+            .data => {
+                if (state.headers == null) return error.UnexpectedFrame;
+                const data = try self.receiveDataPayload(
+                    state.stream_id,
+                    frame,
+                );
+                if (state.forbids_body and data.data.len != 0) {
+                    self.releaseConnectionCapacity(frame.payload.len) catch {};
+                    return error.InvalidContentLength;
+                }
+                const body_len = std.math.add(
+                    usize,
+                    if (streaming_response)
+                        state.body_bytes
+                    else
+                        state.body.items.len,
+                    data.data.len,
+                ) catch return error.MessageTooLarge;
+                if (body_len > self.limits.max_body_bytes) {
+                    self.releaseConnectionCapacity(frame.payload.len) catch {};
+                    return error.MessageTooLarge;
+                }
+                if (streaming_response) {
+                    state.body_bytes = body_len;
+                    if (data.data.len != 0) {
+                        try self.beginBorrowedReadCallback();
+                        defer self.endBorrowedReadCallback();
+                        consume(context, state_index, data.data) catch |err| {
+                            self.releaseConnectionCapacity(
+                                frame.payload.len,
+                            ) catch {};
+                            if ((frame.header.flags & flag_end_stream) != 0) {
+                                state.done = true;
+                            }
+                            return @errorCast(err);
+                        };
+                    }
+                } else {
+                    try state.body.appendSlice(self.allocator, data.data);
+                }
+                try self.maybeReleaseReceivedCapacity(
+                    state.stream_id,
+                    (frame.header.flags & flag_end_stream) != 0,
+                );
+                if ((frame.header.flags & flag_end_stream) != 0) {
+                    try validateExpectedContentLength(
+                        state.content_length,
+                        body_len,
+                    );
+                    state.done = true;
+                    return;
+                }
+            },
+            .rst_stream => {
+                const reset = try http2.ResetStreamPayload.parse(frame);
+                try self.recordResetStream(reset);
+                state.request_done = true;
+                state.done = true;
+                return error.StreamReset;
+            },
+            else => return error.UnexpectedFrame,
+        }
     }
 
     const BatchDataView = struct {
@@ -4855,67 +5933,6 @@ pub const Connection = struct {
             self.allocator,
             parts_capacity,
         );
-    }
-
-    fn writeBodyBatchData(
-        self: *Connection,
-        views: []const BatchDataView,
-        offsets: []usize,
-        application_chunk_size: usize,
-    ) Error!void {
-        // Response batches call `prepareBodyBatchData` before HEADERS are
-        // written. The send loop is therefore allocation-free and cannot fail
-        // for local memory after committing those responses to the wire.
-        std.debug.assert(views.len == offsets.len);
-        const frame_limit = self.outboundFramePayloadLimit();
-
-        while (true) {
-            self.batch_data_headers.clearRetainingCapacity();
-            self.batch_data_parts.clearRetainingCapacity();
-            var has_data = false;
-            for (views, offsets) |
-                view,
-                *offset,
-            | {
-                if (offset.* == view.body.len) continue;
-                has_data = true;
-                const contribution_len = @min(
-                    application_chunk_size,
-                    view.body.len - offset.*,
-                );
-                const contribution_end = offset.* + contribution_len;
-                while (offset.* < contribution_end) {
-                    const end = @min(
-                        contribution_end,
-                        offset.* + frame_limit,
-                    );
-                    const header_index =
-                        self.batch_data_headers.items.len;
-                    self.batch_data_headers.appendAssumeCapacity(undefined);
-                    try encodeFrameHeader(
-                        &self.batch_data_headers.items[header_index],
-                        .data,
-                        if (end == view.body.len)
-                            flag_end_stream
-                        else
-                            0,
-                        view.stream_id,
-                        end - offset.*,
-                    );
-                    self.batch_data_parts.appendAssumeCapacity(
-                        &self.batch_data_headers.items[header_index],
-                    );
-                    self.batch_data_parts.appendAssumeCapacity(
-                        view.body[offset.*..end],
-                    );
-                    offset.* = end;
-                }
-            }
-            if (!has_data) return;
-            try self.transportForIo().writeAllSlices(
-                self.batch_data_parts.items,
-            );
-        }
     }
 
     fn appendBodylessRequestToBatch(
@@ -5071,6 +6088,7 @@ pub const Connection = struct {
         done: bool = false,
         body_bytes: usize = 0,
         informational_count: usize = 0,
+        request_done: bool = true,
 
         fn deinit(
             self: *BatchResponseState,
@@ -5091,7 +6109,8 @@ pub const Connection = struct {
         self: *Connection,
         states: []BatchResponseState,
         informational: ?BatchInformationalObserver,
-    ) Error!void {
+        deadline: ?std.Io.Clock.Timestamp,
+    ) ResponseTimeoutError!void {
         self.serve_read_connection_error = null;
         self.serve_read_stream_error = null;
         var current_stream_id: ?u31 = null;
@@ -5107,10 +6126,11 @@ pub const Connection = struct {
                 }
             }
         };
-        var remaining = states.len;
+        var remaining: usize = 0;
+        for (states) |state| remaining += @intFromBool(!state.done);
         while (remaining != 0) {
             current_stream_id = null;
-            const frame = try self.readFrameScratch();
+            const frame = (try self.readBufferedFrameWithDeadline(deadline)).frame;
             if (try self.handleConnectionFrame(frame)) continue;
             if (frame.header.frame_type == .goaway) {
                 const goaway = try http2.GoAwayPayload.parse(frame);
@@ -5133,12 +6153,10 @@ pub const Connection = struct {
             switch (frame.header.frame_type) {
                 .push_promise => {
                     if (!self.limits.enable_push) {
-                        _ = try self.validatePushPromiseForClientStream(
-                            frame,
-                        );
-                        return error.InvalidFrame;
+                        try self.rejectDisabledPushPromise(frame);
+                        unreachable;
                     }
-                    try self.receivePushPromise(frame);
+                    try self.receivePushPromiseUntil(frame, deadline);
                 },
                 .headers => {
                     if (state.headers != null) {
@@ -5148,7 +6166,10 @@ pub const Connection = struct {
                         if ((frame.header.flags & flag_end_stream) == 0) {
                             return error.UnexpectedFrame;
                         }
-                        state.trailers = try self.readHeaderBlock(frame);
+                        state.trailers = try self.readHeaderBlockUntil(
+                            frame,
+                            deadline,
+                        );
                         try validateHeaderBlock(
                             state.trailers,
                             .response_trailers,
@@ -5162,7 +6183,10 @@ pub const Connection = struct {
                         continue;
                     }
 
-                    const headers = try self.readHeaderBlock(frame);
+                    const headers = try self.readHeaderBlockUntil(
+                        frame,
+                        deadline,
+                    );
                     var headers_owned_by_state = false;
                     errdefer if (!headers_owned_by_state) {
                         freeHeaders(self.allocator, headers);
@@ -5193,6 +6217,8 @@ pub const Connection = struct {
                             return error.TooManyInformationalResponses;
                         };
                         if (informational) |observer| {
+                            try self.beginBorrowedReadCallback();
+                            defer self.endBorrowedReadCallback();
                             observer.on_response(
                                 observer.context,
                                 state_index,
@@ -5312,16 +6338,22 @@ pub const Connection = struct {
         self: *Connection,
         states: []BatchResponseState,
         informational: ?BatchInformationalObserver,
+        deadline: ?std.Io.Clock.Timestamp,
+        read_timed_out: *bool,
         context: anytype,
         comptime consume: anytype,
     ) !void {
         self.serve_read_connection_error = null;
         self.serve_read_stream_error = null;
         var current_stream_id: ?u31 = null;
-        var remaining = states.len;
+        var remaining: usize = 0;
+        for (states) |state| remaining += @intFromBool(!state.done);
         while (remaining != 0) {
             current_stream_id = null;
-            const frame = try self.readFrameScratch();
+            const frame = (self.readBufferedFrameWithDeadline(deadline) catch |err| {
+                read_timed_out.* = deadline != null and err == error.Timeout;
+                return err;
+            }).frame;
             if (try self.handleConnectionFrame(frame)) continue;
             if (frame.header.frame_type == .goaway) {
                 const goaway = try http2.GoAwayPayload.parse(frame);
@@ -5346,12 +6378,14 @@ pub const Connection = struct {
             switch (frame.header.frame_type) {
                 .push_promise => {
                     if (!self.limits.enable_push) {
-                        _ = try self.validatePushPromiseForClientStream(
-                            frame,
-                        );
-                        return error.InvalidFrame;
+                        try self.rejectDisabledPushPromise(frame);
+                        unreachable;
                     }
-                    try self.receivePushPromise(frame);
+                    self.receivePushPromiseUntil(frame, deadline) catch |err| {
+                        read_timed_out.* =
+                            deadline != null and err == error.Timeout;
+                        return err;
+                    };
                 },
                 .headers => {
                     if (state.headers != null) {
@@ -5360,7 +6394,14 @@ pub const Connection = struct {
                         {
                             return error.UnexpectedFrame;
                         }
-                        state.trailers = try self.readHeaderBlock(frame);
+                        state.trailers = self.readHeaderBlockUntil(
+                            frame,
+                            deadline,
+                        ) catch |err| {
+                            read_timed_out.* =
+                                deadline != null and err == error.Timeout;
+                            return err;
+                        };
                         var trailers_owned = true;
                         errdefer if (trailers_owned) {
                             freeHeaders(self.allocator, state.trailers);
@@ -5392,7 +6433,14 @@ pub const Connection = struct {
                         continue;
                     }
 
-                    const headers = try self.readHeaderBlock(frame);
+                    const headers = self.readHeaderBlockUntil(
+                        frame,
+                        deadline,
+                    ) catch |err| {
+                        read_timed_out.* =
+                            deadline != null and err == error.Timeout;
+                        return err;
+                    };
                     var headers_owned_by_state = false;
                     errdefer if (!headers_owned_by_state) {
                         freeHeaders(self.allocator, headers);
@@ -5444,6 +6492,8 @@ pub const Connection = struct {
                             return error.TooManyInformationalResponses;
                         };
                         if (informational) |observer| {
+                            try self.beginBorrowedReadCallback();
+                            defer self.endBorrowedReadCallback();
                             observer.on_response(
                                 observer.context,
                                 state_index,
@@ -5612,7 +6662,9 @@ pub const Connection = struct {
         var has_local_error_reset = false;
         if (self.serve_read_stream_error) |stream_error| {
             for (states) |state| {
-                if (!state.done and state.stream_id == stream_error.stream_id) {
+                if ((!state.done or !state.request_done) and
+                    state.stream_id == stream_error.stream_id)
+                {
                     has_local_error_reset = true;
                     break;
                 }
@@ -5623,7 +6675,7 @@ pub const Connection = struct {
         const batch = &self.write_batch;
         batch.clearRetainingCapacity();
         for (states) |state| {
-            if (state.done) continue;
+            if (state.done and state.request_done) continue;
             try http2.ResetStreamPayload.write(
                 batch,
                 self.allocator,
@@ -5639,15 +6691,16 @@ pub const Connection = struct {
         }
         if (batch.items.len != 0) {
             self.transportForIo().writeAll(batch.items) catch |err| {
-                if (has_local_error_reset) {
-                    self.aggregate_timeout_unusable = true;
-                }
+                // The transport cannot report how much of this RST_STREAM
+                // batch reached the peer. Even application-only cancellation
+                // therefore leaves the shared frame stream ambiguous.
+                self.aggregate_timeout_unusable = true;
                 return err;
             };
         }
         if (has_local_error_reset) self.local_error_reset_streams +|= 1;
         for (states) |state| {
-            if (!state.done) {
+            if (!state.done or !state.request_done) {
                 self.rememberLocallyResetStreamAssumeCapacity(
                     state.stream_id,
                 );
@@ -5712,6 +6765,8 @@ pub const Connection = struct {
         self: *Connection,
         promise: *PromisedRequest,
     ) Error!void {
+        if (self.aggregate_timeout_unusable) return error.ConnectionClosed;
+        if (self.callback_reader_active) return error.UnexpectedFrame;
         if (self.role != .client) return error.UnexpectedFrame;
         const promised_stream_id = promise.promised_stream_id;
         if (!self.push_state.isRemoteReserved(promised_stream_id)) {
@@ -5790,6 +6845,7 @@ pub const Connection = struct {
         stream_id: u31,
         field_value: []const u8,
     ) Error!void {
+        if (self.aggregate_timeout_unusable) return error.ConnectionClosed;
         if (self.role != .client) return error.UnexpectedFrame;
         if (!self.peer_no_rfc7540_priorities) {
             return error.UnexpectedFrame;
@@ -5828,7 +6884,10 @@ pub const Connection = struct {
             stream_id,
             field_value,
         );
-        try self.transportForIo().writeAll(encoded.items);
+        self.transportForIo().writeAll(encoded.items) catch |err| {
+            self.aggregate_timeout_unusable = true;
+            return err;
+        };
     }
 
     /// Read and apply the next peer PRIORITY_UPDATE, skipping ordinary
@@ -6811,24 +7870,33 @@ pub const Connection = struct {
         comptime consume: anytype,
         deadline: ?std.Io.Clock.Timestamp,
     ) !StreamingRequest {
+        if (self.callback_reader_active) return error.UnexpectedFrame;
         if (self.aggregate_timeout_unusable) return error.ConnectionClosed;
         if (self.role != .server) return error.UnexpectedFrame;
         if (self.popPendingRequest()) |pending_value| {
             var pending = pending_value;
             var pending_owned = true;
             errdefer if (pending_owned) pending.deinit(self.allocator);
-            begin(
-                context,
-                StreamingRequestHead.fromOwned(pending),
-            ) catch |err| {
-                self.cancelPeerRequest(pending.stream_id);
-                return err;
-            };
-            if (pending.body.len != 0) {
-                consume(context, pending.body) catch |err| {
+            {
+                try self.beginBorrowedReadCallback();
+                defer self.endBorrowedReadCallback();
+                begin(
+                    context,
+                    StreamingRequestHead.fromOwned(pending),
+                ) catch |err| {
                     self.cancelPeerRequest(pending.stream_id);
                     return err;
                 };
+            }
+            if (pending.body.len != 0) {
+                {
+                    try self.beginBorrowedReadCallback();
+                    defer self.endBorrowedReadCallback();
+                    consume(context, pending.body) catch |err| {
+                        self.cancelPeerRequest(pending.stream_id);
+                        return err;
+                    };
+                }
             }
             const result = streamingRequestFromOwned(pending);
             self.allocator.free(pending.body);
@@ -6911,21 +7979,26 @@ pub const Connection = struct {
                     return error.MessageTooLarge;
                 }
             }
-            begin(context, .{
-                .stream_id = stream_id,
-                .headers = headers,
-                .method = method,
-                .path = lookup.path orelse "",
-                .scheme = lookup.scheme orelse "",
-                .authority = lookup.requestAuthority(),
-                .protocol = protocol,
-            }) catch |err| {
-                // The peer's request half may already carry END_STREAM, but
-                // this server still owns the response half. Cancel the whole
-                // stream so a rejected head cannot leave the client waiting.
-                self.cancelPeerRequest(stream_id);
-                return err;
-            };
+            {
+                try self.beginBorrowedReadCallback();
+                defer self.endBorrowedReadCallback();
+                begin(context, .{
+                    .stream_id = stream_id,
+                    .headers = headers,
+                    .method = method,
+                    .path = lookup.path orelse "",
+                    .scheme = lookup.scheme orelse "",
+                    .authority = lookup.requestAuthority(),
+                    .protocol = protocol,
+                }) catch |err| {
+                    // The peer's request half may already carry END_STREAM,
+                    // but this server still owns the response half. Cancel
+                    // the whole stream so a rejected head cannot leave the
+                    // client waiting.
+                    self.cancelPeerRequest(stream_id);
+                    return err;
+                };
+            }
 
             var trailers: []http2.Hpack.HeaderField = &.{};
             var trailers_owned = false;
@@ -6980,22 +8053,27 @@ pub const Connection = struct {
                                 return error.MessageTooLarge;
                             }
                             if (data.data.len != 0) {
-                                consume(context, data.data) catch |err| {
-                                    // Mirror the response-side callback
-                                    // contract: once DATA has been consumed
-                                    // from the receive window, restore exact
-                                    // shared connection credit and cancel this
-                                    // stream before surfacing the application
-                                    // error.
-                                    self.releaseConnectionCapacity(
-                                        frame.payload.len,
-                                    ) catch {};
-                                    // Even final request DATA leaves the
-                                    // server response half open; terminate it
-                                    // when the application rejects the body.
-                                    self.cancelPeerRequest(stream_id);
-                                    return err;
-                                };
+                                {
+                                    try self.beginBorrowedReadCallback();
+                                    defer self.endBorrowedReadCallback();
+                                    consume(context, data.data) catch |err| {
+                                        // Mirror the response-side callback
+                                        // contract: once DATA has been
+                                        // consumed from the receive window,
+                                        // restore exact shared connection
+                                        // credit and cancel this stream before
+                                        // surfacing the application error.
+                                        self.releaseConnectionCapacity(
+                                            frame.payload.len,
+                                        ) catch {};
+                                        // Even final request DATA leaves the
+                                        // server response half open; terminate
+                                        // it when the application rejects the
+                                        // body.
+                                        self.cancelPeerRequest(stream_id);
+                                        return err;
+                                    };
+                                }
                             }
                             try self.maybeReleaseReceivedCapacity(
                                 stream_id,
@@ -7082,6 +8160,61 @@ pub const Connection = struct {
         context: anytype,
         comptime consume: anytype,
     ) !void {
+        return self.readRequestBatchStreamingIntoUntil(
+            requests,
+            null,
+            context,
+            consume,
+        );
+    }
+
+    /// Read an exact streaming request batch under one relative budget. The
+    /// timeout is converted once and is not renewed by control frames, newly
+    /// admitted streams, DATA callbacks, or completed sibling requests.
+    pub fn readRequestBatchStreamingIntoWithTimeout(
+        self: *Connection,
+        requests: []StreamingRequest,
+        timeout: std.Io.Duration,
+        context: anytype,
+        comptime consume: anytype,
+    ) !void {
+        if (timeout.nanoseconds <= 0) return error.Timeout;
+        return self.readRequestBatchStreamingIntoWithDeadline(
+            requests,
+            .fromNow(self.io, .{ .raw = timeout, .clock = .awake }),
+            context,
+            consume,
+        );
+    }
+
+    /// Absolute-deadline form of
+    /// `readRequestBatchStreamingIntoWithTimeout`. A timeout before stream
+    /// admission preserves the buffered frame for retry. Once any request is
+    /// admitted or a header block is being assembled, discarded batch state
+    /// makes the connection fail closed after cancelling every admitted stream.
+    pub fn readRequestBatchStreamingIntoWithDeadline(
+        self: *Connection,
+        requests: []StreamingRequest,
+        deadline: std.Io.Clock.Timestamp,
+        context: anytype,
+        comptime consume: anytype,
+    ) !void {
+        _ = try deadline_policy.usableAwake(self.io, deadline);
+        return self.readRequestBatchStreamingIntoUntil(
+            requests,
+            deadline,
+            context,
+            consume,
+        );
+    }
+
+    fn readRequestBatchStreamingIntoUntil(
+        self: *Connection,
+        requests: []StreamingRequest,
+        deadline: ?std.Io.Clock.Timestamp,
+        context: anytype,
+        comptime consume: anytype,
+    ) !void {
         if (self.aggregate_timeout_unusable or
             self.pending_accept_reset_overflowed)
         {
@@ -7110,7 +8243,20 @@ pub const Connection = struct {
 
         var initialized: usize = 0;
         var completed: usize = 0;
+        var active_uninitialized_stream_id: ?u31 = null;
+        var timeout_lost_state = false;
         errdefer {
+            if (timeout_lost_state) {
+                self.aggregate_timeout_unusable = true;
+                if (active_uninitialized_stream_id) |stream_id| {
+                    // The inner admission guard may already have removed the
+                    // active marker. The peer still needs an explicit cancel
+                    // for the incomplete header block visible on the wire.
+                    self.writeResetStreamFrame(stream_id, .cancel) catch {};
+                    self.releasePeerStream(stream_id);
+                    self.forgetStreamWindows(stream_id);
+                }
+            }
             for (requests[0..initialized]) |*streaming_request| {
                 // Every request still owns an open response half even when its
                 // inbound DATA already ended. Cancel the whole batch so a
@@ -7122,7 +8268,11 @@ pub const Connection = struct {
         }
 
         while (completed < requests.len) {
-            const frame = try self.readFrameScratch();
+            const frame = (self.readBufferedFrameWithDeadline(deadline) catch |err| {
+                timeout_lost_state = deadline != null and
+                    err == error.Timeout and initialized != 0;
+                return err;
+            }).frame;
             if (try self.handleConnectionFrame(frame)) continue;
             if (frame.header.frame_type == .goaway) {
                 try self.recordPeerGoAway(
@@ -7142,8 +8292,14 @@ pub const Connection = struct {
                         {
                             return error.UnexpectedFrame;
                         }
-                        requests[index].trailers =
-                            try self.readHeaderBlock(frame);
+                        requests[index].trailers = self.readHeaderBlockUntil(
+                            frame,
+                            deadline,
+                        ) catch |err| {
+                            timeout_lost_state =
+                                deadline != null and err == error.Timeout;
+                            return err;
+                        };
                         var trailers_owned = true;
                         errdefer if (trailers_owned) {
                             freeHeaders(
@@ -7171,14 +8327,19 @@ pub const Connection = struct {
                         stream_id,
                     );
                     if (admission != .admitted) {
-                        try self.refusePeerRequestStreamUntil(
+                        self.refusePeerRequestStreamUntil(
                             stream_id,
                             frame,
-                            null,
+                            deadline,
                             admission == .refused_reset_sent,
-                        );
+                        ) catch |err| {
+                            timeout_lost_state =
+                                deadline != null and err == error.Timeout;
+                            return err;
+                        };
                         continue;
                     }
+                    active_uninitialized_stream_id = stream_id;
                     var stream_reserved = true;
                     errdefer if (stream_reserved) {
                         self.releasePeerStream(stream_id);
@@ -7187,7 +8348,14 @@ pub const Connection = struct {
                         return error.UnexpectedFrame;
                     }
 
-                    const headers = try self.readHeaderBlock(frame);
+                    const headers = self.readHeaderBlockUntil(
+                        frame,
+                        deadline,
+                    ) catch |err| {
+                        timeout_lost_state =
+                            deadline != null and err == error.Timeout;
+                        return err;
+                    };
                     var headers_owned = true;
                     errdefer if (headers_owned) {
                         freeHeaders(self.allocator, headers);
@@ -7226,6 +8394,7 @@ pub const Connection = struct {
                     initialized += 1;
                     headers_owned = false;
                     stream_reserved = false;
+                    active_uninitialized_stream_id = null;
                     if ((frame.header.flags & flag_end_stream) != 0) {
                         try self.finishBatchStreamingRequest(
                             &requests[index],
@@ -7404,6 +8573,7 @@ pub const Connection = struct {
         self: *Connection,
         deadline: ?std.Io.Clock.Timestamp,
     ) Error!frame_io.BorrowedFrame {
+        if (self.callback_reader_active) return error.UnexpectedFrame;
         // A scratch borrow lasts until the next read. Release the owning frame
         // retained for the previous borrow before replacing its storage.
         if (self.borrowed_pending_frame) |*previous| {
@@ -7421,11 +8591,21 @@ pub const Connection = struct {
         return self.readTransportFrameWithDeadline(deadline);
     }
 
+    fn beginBorrowedReadCallback(self: *Connection) Error!void {
+        if (self.callback_reader_active) return error.UnexpectedFrame;
+        self.callback_reader_active = true;
+    }
+
+    fn endBorrowedReadCallback(self: *Connection) void {
+        std.debug.assert(self.callback_reader_active);
+        self.callback_reader_active = false;
+    }
+
     fn readTransportFrameWithDeadline(
         self: *Connection,
         deadline: ?std.Io.Clock.Timestamp,
     ) Error!frame_io.BorrowedFrame {
-        const borrowed = try self.frame_reader.readTransportWithDeadline(
+        const borrowed = self.frame_reader.readTransportWithDeadline(
             self.allocator,
             self.transportForIo(),
             @min(
@@ -7433,7 +8613,45 @@ pub const Connection = struct {
                 self.limits.max_frame_size,
             ),
             deadline,
-        );
+        ) catch |err| {
+            if (err == error.InvalidFrame) {
+                if (self.frame_reader.takeEnvelopeViolation()) |violation| {
+                    if (self.last_peer_frame_at != null) {
+                        self.last_peer_frame_at =
+                            std.Io.Clock.awake.now(self.io);
+                    }
+                    if (violation.stream_id) |stream_id| {
+                        if (self.streamIsIdle(stream_id)) {
+                            self.aggregate_timeout_unusable = true;
+                            self.sendGoAwayUntil(
+                                self.lastPeerProcessedStreamId(),
+                                .protocol_error,
+                                "frame-envelope",
+                                deadline,
+                            ) catch {};
+                        } else {
+                            self.writeLocalErrorResetStream(
+                                stream_id,
+                                violation.error_code,
+                            ) catch {};
+                            self.releaseLocalStream(stream_id);
+                            self.releasePeerStream(stream_id);
+                            self.forgetResponseSemantics(stream_id);
+                            self.forgetStreamWindows(stream_id);
+                        }
+                    } else {
+                        self.aggregate_timeout_unusable = true;
+                        self.sendGoAwayUntil(
+                            self.lastPeerProcessedStreamId(),
+                            violation.error_code,
+                            "frame-envelope",
+                            deadline,
+                        ) catch {};
+                    }
+                }
+            }
+            return err;
+        };
         if (self.last_peer_frame_at != null) {
             self.last_peer_frame_at = std.Io.Clock.awake.now(self.io);
         }
@@ -7487,6 +8705,7 @@ pub const Connection = struct {
         self: *Connection,
         deadline: ?std.Io.Clock.Timestamp,
     ) Error!OwnedFrame {
+        if (self.callback_reader_active) return error.UnexpectedFrame;
         if (self.borrowed_pending_frame) |*previous| {
             previous.deinit(self.allocator);
             self.borrowed_pending_frame = null;
@@ -7504,6 +8723,7 @@ pub const Connection = struct {
         self: *Connection,
         deadline: ?std.Io.Clock.Timestamp,
     ) Error!OwnedFrame {
+        if (self.callback_reader_active) return error.UnexpectedFrame;
         if (self.borrowed_pending_frame) |*previous| {
             previous.deinit(self.allocator);
             self.borrowed_pending_frame = null;
@@ -8360,7 +9580,11 @@ pub const Connection = struct {
         options: ResponseOptions,
         release_stream: bool,
     ) Error!void {
+        if (self.aggregate_timeout_unusable) return error.ConnectionClosed;
         if (self.role != .server) return error.UnexpectedFrame;
+        if (!self.outboundStreamIsActive(stream_id)) {
+            return error.InvalidStreamId;
+        }
         var status_buf: [3]u8 = undefined;
         if (options.status < 100 or options.status > 999) return error.InvalidStatus;
         if (statusIsInformational(options.status)) return error.InvalidStatus;
@@ -8461,6 +9685,7 @@ pub const Connection = struct {
         options: StreamingResponseOptions,
         release_at_headers: bool,
     ) Error!ResponseWriter {
+        if (self.aggregate_timeout_unusable) return error.ConnectionClosed;
         if (self.role != .server) return error.UnexpectedFrame;
         if (!self.outboundStreamIsActive(stream_id)) {
             return error.InvalidStreamId;
@@ -8541,10 +9766,9 @@ pub const Connection = struct {
             fields.items,
             ends_at_headers,
         ) catch |err| {
-            // HPACK state has already advanced once the block is encoded.
-            // Callers cannot safely retry `startResponse` on this connection
-            // after a transport write failure, so release the stream rather
-            // than leaving a half-started writer hidden in connection state.
+            // `writeHeaders` stages HPACK and marks a transport write failure
+            // terminal. Release this stream rather than leaving a half-started
+            // writer hidden in connection state.
             self.releasePeerStream(stream_id);
             return err;
         };
@@ -8571,6 +9795,7 @@ pub const Connection = struct {
         stream_ids: []const u31,
         responses: []const ResponseOptions,
     ) Error!void {
+        if (self.aggregate_timeout_unusable) return error.ConnectionClosed;
         if (self.role != .server) return error.UnexpectedFrame;
         if (stream_ids.len != responses.len) return error.InvalidResponse;
         if (stream_ids.len == 0) return;
@@ -8683,7 +9908,11 @@ pub const Connection = struct {
             );
         }
 
-        try self.transportForIo().writeAll(batch.items);
+        self.transportForIo().writeAll(batch.items) catch |err| {
+            self.commitStagedHpackEncoder();
+            self.aggregate_timeout_unusable = true;
+            return err;
+        };
         self.commitStagedHpackEncoder();
         for (stream_ids) |stream_id| self.releasePeerStream(stream_id);
     }
@@ -8706,6 +9935,7 @@ pub const Connection = struct {
         responses: []const ResponseOptions,
         body_chunk_size: usize,
     ) Error!void {
+        if (self.aggregate_timeout_unusable) return error.ConnectionClosed;
         if (self.role != .server) return error.UnexpectedFrame;
         if (stream_ids.len != responses.len) return error.InvalidResponse;
         if (stream_ids.len == 0) return;
@@ -8798,6 +10028,7 @@ pub const Connection = struct {
             // sequence. It cannot be retried or rolled back; commit encoder
             // state so accidental connection reuse fails closed.
             self.commitStagedHpackEncoder();
+            self.aggregate_timeout_unusable = true;
             return err;
         };
         self.commitStagedHpackEncoder();
@@ -8819,6 +10050,7 @@ pub const Connection = struct {
         candidates: []response_scheduler.Candidate,
         application_chunk_size: usize,
     ) Error!void {
+        if (self.aggregate_timeout_unusable) return error.ConnectionClosed;
         std.debug.assert(views.len == offsets.len);
         std.debug.assert(views.len == round_reserved.len);
         std.debug.assert(views.len == candidates.len);
@@ -8886,7 +10118,7 @@ pub const Connection = struct {
                 );
                 if (contribution_len == 0) continue;
 
-                try self.appendResponseBatchContribution(
+                try self.appendBodyBatchContribution(
                     view,
                     offset,
                     contribution_len,
@@ -8912,16 +10144,22 @@ pub const Connection = struct {
                 // credit. Keep the conservative reservation and require the
                 // caller to close rather than retry this response batch.
                 wire_write_started = true;
-                try self.transportForIo().writeAllSlices(
-                    self.batch_data_parts.items,
-                );
+                const wire_parts = self.batch_data_parts.items;
+                const transport = self.transportForIo();
+                (if (wire_parts.len == 2)
+                    transport.writeAllParts(wire_parts[0], wire_parts[1])
+                else
+                    transport.writeAllSlices(wire_parts)) catch |err| {
+                    self.aggregate_timeout_unusable = true;
+                    return err;
+                };
                 continue;
             }
             try self.waitForResponseBatchCapacity(views, offsets);
         }
     }
 
-    fn appendResponseBatchContribution(
+    fn appendBodyBatchContribution(
         self: *Connection,
         view: BatchDataView,
         offset: *usize,
@@ -9139,6 +10377,7 @@ pub const Connection = struct {
         parent_stream_id: u31,
         request_headers: []const http2.Hpack.HeaderField,
     ) Error!u31 {
+        if (self.aggregate_timeout_unusable) return error.ConnectionClosed;
         if (self.role != .server or !self.peerPushEnabled()) {
             return error.UnexpectedFrame;
         }
@@ -9163,18 +10402,18 @@ pub const Connection = struct {
                 findHeader(request_headers, "priority") orelse "",
             ),
         );
-        var block: std.ArrayList(u8) = .empty;
-        defer block.deinit(self.allocator);
-        try self.hpack_encoder.encodeBlock(
-            &block,
+        const encoder = try self.prepareStagedHpackEncoder();
+        const block = try encoder.encodeBlockRetained(
             self.allocator,
             request_headers,
         );
+        errdefer self.aggregate_timeout_unusable = true;
         try self.writePushPromiseBlock(
             parent_stream_id,
             promised_stream_id,
-            block.items,
+            block,
         );
+        self.commitStagedHpackEncoder();
         return promised_stream_id;
     }
 
@@ -9183,6 +10422,7 @@ pub const Connection = struct {
         promised_stream_id: u31,
         response: ResponseOptions,
     ) Error!void {
+        if (self.aggregate_timeout_unusable) return error.ConnectionClosed;
         if (self.role != .server) return error.UnexpectedFrame;
         const status = self.push_state.localStatus(
             promised_stream_id,
@@ -9247,9 +10487,13 @@ pub const Connection = struct {
         const stream_id = owned_request.stream_id;
         defer owned_request.deinit(self.allocator);
         var response = try handler(context, owned_request);
-        if (response.request_method == null) response.request_method = owned_request.method;
-        response.extended_connect = owned_request.protocol != null;
+        const invalid_final = normalizeHandlerResponse(
+            &response,
+            owned_request.method,
+            owned_request.protocol != null,
+        );
         try self.writeResponse(stream_id, response);
+        if (invalid_final) return error.InvalidStatus;
         return stream_id;
     }
 
@@ -9272,12 +10516,14 @@ pub const Connection = struct {
             .compression => .{ .code = .compression_error, .debug_data = "hpack-decode" },
             .frame_sequence => .{ .code = .protocol_error, .debug_data = "frame-sequence" },
             .excessive_header_block => .{ .code = .enhance_your_calm, .debug_data = "header-block-limit" },
+            .push_disabled => .{ .code = .protocol_error, .debug_data = "push-disabled" },
         };
         self.aggregate_timeout_unusable = true;
-        self.sendGoAway(
+        self.sendGoAwayUntil(
             self.lastPeerProcessedStreamId(),
             mapping.code,
             mapping.debug_data,
+            null,
         ) catch {};
     }
 
@@ -9297,8 +10543,232 @@ pub const Connection = struct {
         return served;
     }
 
-    pub fn writeInformationalResponse(self: *Connection, stream_id: u31, status_code: u16, headers: []const http2.Hpack.HeaderField) Error!void {
+    /// Read a bounded batch of complete requests, run the handlers
+    /// concurrently, and serialize responses in handler-completion order.
+    ///
+    /// `Connection` remains the sole frame-reader, HPACK owner, and socket
+    /// writer. Workers receive immutable owned requests and never touch the
+    /// connection. Response slices may borrow the corresponding request or
+    /// caller-managed context because every request remains alive until the
+    /// whole batch is complete. The context must support concurrent calls.
+    /// While handlers run, the owner services connection-control frames and
+    /// retains bounded application frames in wire order for later readers.
+    /// Handler failures reset only their stream with INTERNAL_ERROR and are
+    /// returned by input index. A handler-returned 1xx is replaced with final
+    /// 500 and recorded as InvalidStatus for that index. Setup, request-read,
+    /// queue, or response-write failures make the connection unusable and
+    /// abort the entire batch.
+    /// CONNECT requests are rejected because their open-ended tunnel lifetime
+    /// cannot be represented by this completed-response API.
+    pub fn serveRequestBatchConcurrent(
+        self: *Connection,
+        comptime HandlerContext: type,
+        context: *HandlerContext,
+        comptime handler: *const fn (
+            *HandlerContext,
+            OwnedRequest,
+        ) Error!ResponseOptions,
+        request_count: usize,
+    ) ConcurrentHandlerServeError!ConcurrentHandlerServeResult {
         if (self.role != .server) return error.UnexpectedFrame;
+        if (self.active_peer_streams.items.len != 0 or
+            self.pendingRequestCount() != 0 or
+            self.priority_state.idle_requests.items.len != 0)
+        {
+            return error.InvalidServeOptions;
+        }
+        if (self.limits.max_concurrent_streams) |limit| {
+            if (request_count > limit) return error.InvalidServeOptions;
+        }
+
+        const errors = try self.allocator.alloc(?anyerror, request_count);
+        errdefer self.allocator.free(errors);
+        @memset(errors, null);
+        if (request_count == 0) {
+            return .{ .allocator = self.allocator, .errors = errors };
+        }
+
+        const Worker = RequestBatchHandlerTask(
+            HandlerContext,
+            handler,
+        );
+        const requests = try self.allocator.alloc(
+            OwnedRequest,
+            request_count,
+        );
+        defer self.allocator.free(requests);
+        var initialized: usize = 0;
+        defer for (requests[0..initialized]) |*owned_request| {
+            owned_request.deinit(self.allocator);
+        };
+        const completion_storage = try self.allocator.alloc(
+            Worker.Completion,
+            request_count,
+        );
+        defer self.allocator.free(completion_storage);
+        var completions: Worker.CompletionQueue = .init(completion_storage);
+        var group: std.Io.Group = .init;
+        var group_finished = false;
+        defer if (!group_finished) group.cancel(self.io);
+        errdefer {
+            self.aggregate_timeout_unusable = true;
+            for (requests[0..initialized]) |owned_request| {
+                self.releasePeerStream(owned_request.stream_id);
+                self.forgetStreamWindows(owned_request.stream_id);
+            }
+        }
+
+        while (initialized < request_count) {
+            self.serve_read_connection_error = null;
+            self.serve_read_stream_error = null;
+            requests[initialized] = self.readRequest() catch |err| {
+                self.sendServeReadError(err);
+                return err;
+            };
+            const index = initialized;
+            initialized += 1;
+            if (methodIsConnect(requests[index].method)) {
+                return error.InvalidHeader;
+            }
+            try group.concurrent(self.io, Worker.run, .{Worker{
+                .io = self.io,
+                .completions = &completions,
+                .context = context,
+                .request = &requests[index],
+                .index = index,
+            }});
+        }
+
+        const CompletionWait = (std.Io.QueueClosedError ||
+            std.Io.Cancelable)!Worker.Completion;
+        const FrameWait = Error!OwnedFrame;
+        const Wake = union(enum) {
+            completion: CompletionWait,
+            frame: FrameWait,
+        };
+        var completed: usize = 0;
+        while (completed < request_count) {
+            var wake_buffer: [2]Wake = undefined;
+            var select: std.Io.Select(Wake) = .init(
+                self.io,
+                &wake_buffer,
+            );
+            var select_finished = false;
+            defer if (!select_finished) {
+                while (select.cancel()) |wake| switch (wake) {
+                    .completion => {},
+                    .frame => |result| if (result) |frame_value| {
+                        var frame = frame_value;
+                        frame.deinit(self.allocator);
+                    } else |_| {},
+                };
+            };
+            try select.concurrent(
+                .completion,
+                Worker.CompletionQueue.getOne,
+                .{ &completions, self.io },
+            );
+            try select.concurrent(
+                .frame,
+                Connection.readConcurrentHandlerFrame,
+                .{self},
+            );
+
+            var completion: ?Worker.Completion = null;
+            var frame: ?OwnedFrame = null;
+            switch (try select.await()) {
+                .completion => |result| completion = result catch |err|
+                    switch (err) {
+                        error.Closed => unreachable,
+                        error.Canceled => return error.Canceled,
+                    },
+                .frame => |result| frame = try result,
+            }
+            while (select.cancel()) |wake| switch (wake) {
+                .completion => |result| {
+                    if (result) |value| {
+                        completion = value;
+                    } else |err| switch (err) {
+                        error.Closed => unreachable,
+                        error.Canceled => {},
+                    }
+                },
+                .frame => |result| {
+                    if (result) |value| {
+                        frame = value;
+                    } else |err| switch (err) {
+                        error.Canceled => {},
+                        else => return err,
+                    }
+                },
+            };
+            select_finished = true;
+
+            if (frame) |frame_value| {
+                try self.handleConcurrentHandlerFrame(frame_value);
+            }
+            const handler_completion = completion orelse continue;
+            completed += 1;
+            const owned_request = &requests[handler_completion.index];
+            var response = handler_completion.result catch |handler_error| {
+                errors[handler_completion.index] = handler_error;
+                self.writeResetStreamFrame(
+                    owned_request.stream_id,
+                    .internal_error,
+                ) catch |write_error| {
+                    self.aggregate_timeout_unusable = true;
+                    return write_error;
+                };
+                self.releasePeerStream(owned_request.stream_id);
+                self.forgetStreamWindows(owned_request.stream_id);
+                continue;
+            };
+            const invalid_final = normalizeHandlerResponse(
+                &response,
+                owned_request.method,
+                owned_request.protocol != null,
+            );
+            self.writeResponse(owned_request.stream_id, response) catch |err| {
+                self.aggregate_timeout_unusable = true;
+                return err;
+            };
+            if (invalid_final) {
+                errors[handler_completion.index] = error.InvalidStatus;
+            }
+        }
+        try group.await(self.io);
+        group_finished = true;
+        return .{ .allocator = self.allocator, .errors = errors };
+    }
+
+    fn readConcurrentHandlerFrame(
+        self: *Connection,
+    ) Error!OwnedFrame {
+        return self.readOwnedTransportFrameWithDeadline(null);
+    }
+
+    fn handleConcurrentHandlerFrame(
+        self: *Connection,
+        frame_value: OwnedFrame,
+    ) Error!void {
+        var frame = frame_value;
+        var frame_owned = true;
+        defer if (frame_owned) frame.deinit(self.allocator);
+        if (try self.handleConnectionOrGoAwayFrame(frame.frame)) return;
+        self.queuePendingApplicationFrame(frame) catch |err| {
+            self.recoverPendingApplicationFrameAfterQueueFailure(frame);
+            frame_owned = false;
+            return err;
+        };
+        frame_owned = false;
+    }
+
+    pub fn writeInformationalResponse(self: *Connection, stream_id: u31, status_code: u16, headers: []const http2.Hpack.HeaderField) Error!void {
+        if (self.aggregate_timeout_unusable) return error.ConnectionClosed;
+        if (self.role != .server) return error.UnexpectedFrame;
+        if (!self.outboundStreamIsActive(stream_id)) {
+            return error.InvalidStreamId;
+        }
         if (!statusIsInformational(status_code)) return error.InvalidStatus;
         var status_buf: [3]u8 = undefined;
         const status = std.fmt.bufPrint(&status_buf, "{}", .{status_code}) catch return error.InvalidStatus;
@@ -9385,11 +10855,7 @@ pub const Connection = struct {
         if (self.graceful_shutdown_phase == .failed) {
             return error.ConnectionClosed;
         }
-        if (self.graceful_shutdown_phase == .complete or
-            self.graceful_shutdown_phase == .synchronized)
-        {
-            return self.gracefulShutdownUntil(null);
-        }
+        if (self.graceful_shutdown_phase == .complete) return;
         if (timeout.nanoseconds <= 0) return error.Timeout;
         return self.gracefulShutdownUntil(.fromNow(
             self.io,
@@ -9397,9 +10863,10 @@ pub const Connection = struct {
         ));
     }
 
-    /// Use one absolute awake-clock budget for the synchronization ACK. Frame
-    /// writes retain the transport's blocking semantics; a write error is
-    /// terminal because an unknown frame prefix may already be on the wire.
+    /// Use one absolute awake-clock budget for both GOAWAY writes, the
+    /// synchronization PING write, and its matching ACK. Any bounded write
+    /// error is terminal because an unknown frame prefix may already be on the
+    /// wire; an ACK-read timeout remains resumable without retransmitting.
     pub fn gracefulShutdownWithDeadline(
         self: *Connection,
         deadline: std.Io.Clock.Timestamp,
@@ -9408,11 +10875,7 @@ pub const Connection = struct {
         if (self.graceful_shutdown_phase == .failed) {
             return error.ConnectionClosed;
         }
-        if (self.graceful_shutdown_phase == .complete or
-            self.graceful_shutdown_phase == .synchronized)
-        {
-            return self.gracefulShutdownUntil(null);
-        }
+        if (self.graceful_shutdown_phase == .complete) return;
         return self.gracefulShutdownUntil(
             try deadline_policy.usableAwake(self.io, deadline),
         );
@@ -9422,6 +10885,7 @@ pub const Connection = struct {
         self: *Connection,
         deadline: ?std.Io.Clock.Timestamp,
     ) Error!void {
+        if (self.aggregate_timeout_unusable) return error.ConnectionClosed;
         if (self.role != .server) return error.UnexpectedFrame;
         if (self.graceful_shutdown_phase == .failed) {
             return error.ConnectionClosed;
@@ -9430,10 +10894,11 @@ pub const Connection = struct {
 
         if (self.graceful_shutdown_phase == .open) {
             if (self.local_goaway_last_stream_id == null) {
-                self.sendGoAway(
+                self.sendGoAwayUntil(
                     std.math.maxInt(u31),
                     .no_error,
                     &.{},
+                    deadline,
                 ) catch |err| {
                     // Stream writes expose no committed-byte count. An error
                     // can therefore leave a partial frame (or TLS record) on
@@ -9445,13 +10910,11 @@ pub const Connection = struct {
             if (self.pending_application_overflow != null) {
                 return error.MessageTooLarge;
             }
-            writeFrameTransport(
-                self.allocator,
-                self.transportForIo(),
+            self.writeControlFrameUntil(
                 .ping,
                 0,
-                0,
                 &graceful_shutdown_ping_payload,
+                deadline,
             ) catch |err| {
                 self.graceful_shutdown_phase = .failed;
                 return err;
@@ -9466,7 +10929,8 @@ pub const Connection = struct {
                 graceful_shutdown_ping_payload,
                 deadline,
             ) catch |err| {
-                if (err == error.Timeout) return err;
+                if (err == error.Timeout and
+                    !self.aggregate_timeout_unusable) return err;
                 if (err == error.MessageTooLarge or
                     err == error.ResponseAvailable)
                 {
@@ -9493,10 +10957,11 @@ pub const Connection = struct {
             self.local_goaway_last_stream_id orelse std.math.maxInt(u31),
             self.lastPeerProcessedStreamId(),
         );
-        self.sendGoAway(
+        self.sendGoAwayUntil(
             boundary,
             .no_error,
             &.{},
+            deadline,
         ) catch |err| {
             self.graceful_shutdown_phase = .failed;
             return err;
@@ -9594,13 +11059,14 @@ pub const Connection = struct {
         data: [8]u8,
         deadline: ?std.Io.Clock.Timestamp,
     ) Error![8]u8 {
+        if (self.aggregate_timeout_unusable) return error.ConnectionClosed;
         // An earlier bounded wait could retain one frame beyond the configured
         // queue cap. Require the application to drain it before another probe
         // can consume later wire data out of order.
         if (self.pending_application_overflow != null) {
             return error.MessageTooLarge;
         }
-        try writeFrameTransport(self.allocator, self.transportForIo(), .ping, 0, 0, &data);
+        try self.writeControlFrameUntil(.ping, 0, &data, deadline);
         return self.waitForPingAckUntil(data, deadline);
     }
 
@@ -9621,7 +11087,12 @@ pub const Connection = struct {
                     const ping_payload = try http2.PingPayload.parse(
                         borrowed.frame,
                     );
-                    try writeFrameTransport(self.allocator, self.transportForIo(), .ping, flag_ack, 0, &ping_payload.data);
+                    try self.writeControlFrameUntil(
+                        .ping,
+                        flag_ack,
+                        &ping_payload.data,
+                        deadline,
+                    );
                     continue;
                 }
                 const ack_payload =
@@ -9709,13 +11180,34 @@ pub const Connection = struct {
                 try self.applyAdaptivePingAck(ping_payload.data);
                 continue;
             }
-            try writeFrameTransport(self.allocator, self.transportForIo(), .ping, flag_ack, 0, &ping_payload.data);
+            try self.writeControlFrameUntil(
+                .ping,
+                flag_ack,
+                &ping_payload.data,
+                deadline,
+            );
             if (bdp.isProbePayload(ping_payload.data)) continue;
             return ping_payload.data;
         }
     }
 
     pub fn sendGoAway(self: *Connection, last_stream_id: u31, error_code: http2.ErrorCode, debug_data: []const u8) Error!void {
+        if (self.aggregate_timeout_unusable) return error.ConnectionClosed;
+        return self.sendGoAwayUntil(
+            last_stream_id,
+            error_code,
+            debug_data,
+            null,
+        );
+    }
+
+    fn sendGoAwayUntil(
+        self: *Connection,
+        last_stream_id: u31,
+        error_code: http2.ErrorCode,
+        debug_data: []const u8,
+        deadline: ?std.Io.Clock.Timestamp,
+    ) Error!void {
         try self.validateLocalGoAway(last_stream_id);
         var stack_storage: [256]u8 = undefined;
         const total_len = try http2.GoAwayPayload.encodedLen(debug_data.len);
@@ -9726,7 +11218,7 @@ pub const Connection = struct {
                 error_code,
                 debug_data,
             );
-            try self.transportForIo().writeAll(encoded);
+            try self.writeEncodedControlUntil(encoded, deadline);
         } else {
             const storage = try self.allocator.alloc(u8, total_len);
             defer self.allocator.free(storage);
@@ -9736,15 +11228,76 @@ pub const Connection = struct {
                 error_code,
                 debug_data,
             );
-            try self.transportForIo().writeAll(encoded);
+            try self.writeEncodedControlUntil(encoded, deadline);
         }
         self.local_goaway_last_stream_id = last_stream_id;
+    }
+
+    fn writeControlFrameUntil(
+        self: *Connection,
+        frame_type: http2.FrameType,
+        flags: u8,
+        payload: []const u8,
+        deadline: ?std.Io.Clock.Timestamp,
+    ) Error!void {
+        if (deadline) |absolute| {
+            var committed: usize = 0;
+            writeFrameTransportWithDeadline(
+                self.allocator,
+                self.transportForIo(),
+                frame_type,
+                flags,
+                0,
+                payload,
+                &committed,
+                absolute,
+            ) catch |err| {
+                self.aggregate_timeout_unusable = true;
+                return err;
+            };
+            return;
+        }
+        return writeFrameTransport(
+            self.allocator,
+            self.transportForIo(),
+            frame_type,
+            flags,
+            0,
+            payload,
+        ) catch |err| {
+            self.aggregate_timeout_unusable = true;
+            return err;
+        };
+    }
+
+    fn writeEncodedControlUntil(
+        self: *Connection,
+        encoded: []const u8,
+        deadline: ?std.Io.Clock.Timestamp,
+    ) Error!void {
+        if (deadline) |absolute| {
+            var committed: usize = 0;
+            self.transportForIo().writeAllWithDeadline(
+                encoded,
+                &committed,
+                absolute,
+            ) catch |err| {
+                self.aggregate_timeout_unusable = true;
+                return err;
+            };
+            return;
+        }
+        return self.transportForIo().writeAll(encoded) catch |err| {
+            self.aggregate_timeout_unusable = true;
+            return err;
+        };
     }
 
     pub fn sendOrigins(
         self: *Connection,
         origins: []const []const u8,
     ) Error!void {
+        if (self.aggregate_timeout_unusable) return error.ConnectionClosed;
         if (self.role != .server) return error.UnexpectedFrame;
         var encoded: std.ArrayList(u8) = .empty;
         defer encoded.deinit(self.allocator);
@@ -9753,7 +11306,10 @@ pub const Connection = struct {
             self.allocator,
             origins,
         );
-        try self.transportForIo().writeAll(encoded.items);
+        self.transportForIo().writeAll(encoded.items) catch |err| {
+            self.aggregate_timeout_unusable = true;
+            return err;
+        };
     }
 
     pub fn sendAlternativeService(
@@ -9762,6 +11318,7 @@ pub const Connection = struct {
         origin: []const u8,
         field_value: []const u8,
     ) Error!void {
+        if (self.aggregate_timeout_unusable) return error.ConnectionClosed;
         if (self.role != .server) return error.UnexpectedFrame;
         var encoded: std.ArrayList(u8) = .empty;
         defer encoded.deinit(self.allocator);
@@ -9772,7 +11329,10 @@ pub const Connection = struct {
             origin,
             field_value,
         );
-        try self.transportForIo().writeAll(encoded.items);
+        self.transportForIo().writeAll(encoded.items) catch |err| {
+            self.aggregate_timeout_unusable = true;
+            return err;
+        };
     }
 
     fn validateLocalGoAway(self: Connection, last_stream_id: u31) Error!void {
@@ -9847,6 +11407,8 @@ pub const Connection = struct {
     }
 
     pub fn sendResetStream(self: *Connection, stream_id: u31, error_code: http2.ErrorCode) Error!void {
+        if (self.aggregate_timeout_unusable) return error.ConnectionClosed;
+        if (self.callback_reader_active) return error.UnexpectedFrame;
         if (!self.outboundStreamIsActive(stream_id)) return error.InvalidStreamId;
         try self.writeResetStreamFrame(stream_id, error_code);
         self.releaseLocalStream(stream_id);
@@ -9863,7 +11425,37 @@ pub const Connection = struct {
         stream_id: u31,
     ) void {
         if (!self.outboundStreamIsActive(stream_id)) return;
-        self.writeResetStreamFrame(stream_id, .cancel) catch {};
+        if (!self.aggregate_timeout_unusable) {
+            self.writeResetStreamFrame(stream_id, .cancel) catch {};
+        }
+        self.releaseLocalStream(stream_id);
+        self.releasePeerStream(stream_id);
+        self.forgetStreamWindows(stream_id);
+    }
+
+    /// Fail a tunnel locally when its byte stream can no longer be framed
+    /// safely (for example after a timed write and a concurrent protocol
+    /// error). A successfully submitted RST preserves healthy siblings; if
+    /// the reset itself fails or times out, the parent is marked unusable
+    /// because the shared byte-stream prefix is then ambiguous.
+    pub fn abortExtendedConnect(
+        self: *Connection,
+        stream_id: u31,
+        deadline: ?std.Io.Clock.Timestamp,
+    ) void {
+        if (!self.aggregate_timeout_unusable and
+            self.outboundStreamIsActive(stream_id))
+        {
+            self.writeResetStreamFrameUntil(
+                stream_id,
+                .cancel,
+                deadline,
+            ) catch {
+                // A failed stream write has unknown prefix visibility. Keep
+                // the shared connection out of every reuse path.
+                self.aggregate_timeout_unusable = true;
+            };
+        }
         self.releaseLocalStream(stream_id);
         self.releasePeerStream(stream_id);
         self.forgetStreamWindows(stream_id);
@@ -9879,8 +11471,18 @@ pub const Connection = struct {
         stream_id: u31,
         error_code: http2.ErrorCode,
     ) void {
+        self.abandonPeerRequestInternal(stream_id, error_code, false);
+    }
+
+    fn abandonPeerRequestInternal(
+        self: *Connection,
+        stream_id: u31,
+        error_code: http2.ErrorCode,
+        allow_terminal_reset: bool,
+    ) void {
         if (self.active_peer_index.count() != 0 and
-            self.active_peer_index.contains(stream_id))
+            self.active_peer_index.contains(stream_id) and
+            (allow_terminal_reset or !self.aggregate_timeout_unusable))
         {
             self.writeResetStreamFrame(stream_id, error_code) catch {};
         }
@@ -9937,7 +11539,39 @@ pub const Connection = struct {
         stream_id: u31,
         error_code: http2.ErrorCode,
     ) Error!void {
+        return self.writeResetStreamFrameUntil(
+            stream_id,
+            error_code,
+            null,
+        );
+    }
+
+    fn writeResetStreamFrameUntil(
+        self: *Connection,
+        stream_id: u31,
+        error_code: http2.ErrorCode,
+        deadline: ?std.Io.Clock.Timestamp,
+    ) Error!void {
         try self.prepareLocallyResetStreams(1);
+        if (deadline) |absolute| {
+            var storage: [http2.ResetStreamPayload.encoded_len]u8 = undefined;
+            const encoded = try http2.ResetStreamPayload.writeInto(
+                &storage,
+                stream_id,
+                error_code,
+            );
+            var committed: usize = 0;
+            self.transportForIo().writeAllWithDeadline(
+                encoded,
+                &committed,
+                absolute,
+            ) catch |err| {
+                self.aggregate_timeout_unusable = true;
+                return err;
+            };
+            self.rememberLocallyResetStreamAssumeCapacity(stream_id);
+            return;
+        }
         return self.writeResetStreamFramePrepared(stream_id, error_code);
     }
 
@@ -9952,7 +11586,10 @@ pub const Connection = struct {
             stream_id,
             error_code,
         );
-        try self.transportForIo().writeAll(encoded);
+        self.transportForIo().writeAll(encoded) catch |err| {
+            self.aggregate_timeout_unusable = true;
+            return err;
+        };
         self.rememberLocallyResetStreamAssumeCapacity(stream_id);
     }
 
@@ -9976,10 +11613,11 @@ pub const Connection = struct {
         if (self.local_error_reset_streams < limit) return;
 
         self.aggregate_timeout_unusable = true;
-        self.sendGoAway(
+        self.sendGoAwayUntil(
             self.lastPeerProcessedStreamId(),
             .enhance_your_calm,
             "too_many_internal_resets",
+            null,
         ) catch {};
         return error.ConnectionGoAway;
     }
@@ -10291,15 +11929,17 @@ pub const Connection = struct {
 
     fn failPendingAcceptResetOverflow(self: *Connection) Error {
         self.cancelPendingAcceptOverflow();
-        self.sendGoAway(
+        self.sendGoAwayUntil(
             self.lastPeerProcessedStreamId(),
             .enhance_your_calm,
             "too_many_resets",
+            null,
         ) catch {};
         return error.ConnectionGoAway;
     }
 
     pub fn sendWindowUpdate(self: *Connection, stream_id: u31, increment: u31) Error!void {
+        if (self.aggregate_timeout_unusable) return error.ConnectionClosed;
         if (stream_id == 0) {
             try self.sendWindowUpdates(null, increment, null);
         } else {
@@ -10308,6 +11948,7 @@ pub const Connection = struct {
     }
 
     pub fn releaseReceivedCapacity(self: *Connection, stream_id: u31, amount: usize) Error!void {
+        if (self.aggregate_timeout_unusable) return error.ConnectionClosed;
         if (amount == 0) return;
         var remaining = amount;
         while (remaining != 0) {
@@ -10420,7 +12061,10 @@ pub const Connection = struct {
             );
             encoded_len += http2.FrameHeader.encoded_len + 4;
         }
-        try self.transportForIo().writeAll(encoded[0..encoded_len]);
+        self.transportForIo().writeAll(encoded[0..encoded_len]) catch |err| {
+            self.aggregate_timeout_unusable = true;
+            return err;
+        };
     }
 
     fn addActiveLocalStream(self: *Connection, stream_id: u31) Error!void {
@@ -10476,13 +12120,8 @@ pub const Connection = struct {
         if (self.peer_goaway_last_stream_id) |last| {
             if (stream_id > last) return error.ConnectionGoAway;
         }
-        if (self.peer_max_concurrent_streams) |max_streams| {
-            const was_priority_reserved =
-                self.priority_state.containsIdleRequest(stream_id);
-            const counted = self.active_local_streams.items.len +
-                self.priority_state.idle_requests.items.len -
-                @intFromBool(was_priority_reserved);
-            if (counted >= max_streams) return error.FlowControlBlocked;
+        if (self.availableLocalStreamCapacity()) |available| {
+            if (available == 0) return error.FlowControlBlocked;
         }
         try self.addActiveLocalStream(stream_id);
         _ = self.priority_state.activateRequest(stream_id);
@@ -10659,13 +12298,11 @@ pub const Connection = struct {
                 charged_len,
                 awakeNowNanos(self.io),
             )) |ping_payload| {
-                writeFrameTransport(
-                    self.allocator,
-                    self.transportForIo(),
+                self.writeControlFrameUntil(
                     .ping,
                     0,
-                    0,
                     &ping_payload,
+                    null,
                 ) catch |err| {
                     estimator.cancelProbe(ping_payload);
                     return err;
@@ -10729,7 +12366,7 @@ pub const Connection = struct {
         // tests and upgrade paths can surface already-materialized requests
         // without an active stream, where emitting RST_STREAM would itself be
         // invalid and may not have a usable transport.
-        self.abandonPeerRequest(stream_id, .cancel);
+        self.abandonPeerRequestInternal(stream_id, .cancel, true);
     }
 
     fn failTimedOutRequest(self: *Connection, stream_id: u31) void {
@@ -10827,6 +12464,7 @@ pub const Connection = struct {
         informational: ?InformationalObserver,
         deadline: ?std.Io.Clock.Timestamp,
     ) Error!OwnedResponse {
+        if (self.callback_reader_active) return error.UnexpectedFrame;
         self.serve_read_connection_error = null;
         self.serve_read_stream_error = null;
         defer self.releaseLocalStream(stream_id);
@@ -10871,10 +12509,8 @@ pub const Connection = struct {
             switch (frame.header.frame_type) {
                 .push_promise => {
                     if (!self.limits.enable_push) {
-                        _ = try self.validatePushPromiseForClientStream(
-                            frame,
-                        );
-                        return error.InvalidFrame;
+                        try self.rejectDisabledPushPromise(frame);
+                        unreachable;
                     }
                     try self.receivePushPromiseUntil(
                         frame,
@@ -10908,6 +12544,7 @@ pub const Connection = struct {
                             if ((frame.header.flags & flag_end_stream) != 0) return error.UnexpectedFrame;
                             if (lookup.content_length != null) return error.InvalidContentLength;
                             try notifyInformationalResponse(
+                                self,
                                 informational,
                                 .{ .headers = headers.?, .status = status },
                                 &informational_count,
@@ -11086,6 +12723,7 @@ pub const Connection = struct {
         comptime begin: anytype,
         comptime consume: anytype,
     ) anyerror!StreamingResponse {
+        if (self.callback_reader_active) return error.UnexpectedFrame;
         const stream_id = pending.stream_id;
         self.serve_read_connection_error = null;
         self.serve_read_stream_error = null;
@@ -11137,10 +12775,8 @@ pub const Connection = struct {
             switch (frame.header.frame_type) {
                 .push_promise => {
                     if (!self.limits.enable_push) {
-                        _ = try self.validatePushPromiseForClientStream(
-                            frame,
-                        );
-                        return error.InvalidFrame;
+                        try self.rejectDisabledPushPromise(frame);
+                        unreachable;
                     }
                     try self.receivePushPromiseUntil(frame, deadline);
                 },
@@ -11210,6 +12846,7 @@ pub const Connection = struct {
                             return error.InvalidContentLength;
                         }
                         try notifyInformationalResponse(
+                            self,
                             informational,
                             .{ .headers = decoded, .status = status },
                             &informational_count,
@@ -11224,19 +12861,23 @@ pub const Connection = struct {
                     decoded_owned = false;
                     status_value = status;
                     expected_body_len = lookup.content_length;
-                    begin(context, StreamingResponseHead{
-                        .headers = decoded,
-                        .status = status,
-                    }) catch |err| {
-                        if ((frame.header.flags & flag_end_stream) == 0) {
-                            self.writeResetStreamFrame(
-                                stream_id,
-                                .cancel,
-                            ) catch return err;
-                        }
-                        callback_failed = true;
-                        return err;
-                    };
+                    {
+                        try self.beginBorrowedReadCallback();
+                        defer self.endBorrowedReadCallback();
+                        begin(context, StreamingResponseHead{
+                            .headers = decoded,
+                            .status = status,
+                        }) catch |err| {
+                            if ((frame.header.flags & flag_end_stream) == 0) {
+                                self.writeResetStreamFrame(
+                                    stream_id,
+                                    .cancel,
+                                ) catch return err;
+                            }
+                            callback_failed = true;
+                            return err;
+                        };
+                    }
                     if (responseForbidsBody(
                         status,
                         pending.request_method,
@@ -11313,26 +12954,31 @@ pub const Connection = struct {
                         return error.MessageTooLarge;
                     }
                     if (data.data.len != 0) {
-                        consume(context, data.data) catch |err| {
-                            // DATA already consumed connection credit before
-                            // application delivery. Restore its exact charged
-                            // connection payload before canceling; a
-                            // low-watermark-only update would let repeated small
-                            // callback failures gradually starve siblings.
-                            self.releaseConnectionCapacity(
-                                frame.payload.len,
-                            ) catch return err;
-                            if ((frame.header.flags &
-                                flag_end_stream) == 0)
-                            {
-                                self.writeResetStreamFrame(
-                                    stream_id,
-                                    .cancel,
+                        {
+                            try self.beginBorrowedReadCallback();
+                            defer self.endBorrowedReadCallback();
+                            consume(context, data.data) catch |err| {
+                                // DATA already consumed connection credit
+                                // before application delivery. Restore its
+                                // exact charged connection payload before
+                                // canceling; a low-watermark-only update would
+                                // let repeated small callback failures
+                                // gradually starve siblings.
+                                self.releaseConnectionCapacity(
+                                    frame.payload.len,
                                 ) catch return err;
-                            }
-                            callback_failed = true;
-                            return err;
-                        };
+                                if ((frame.header.flags &
+                                    flag_end_stream) == 0)
+                                {
+                                    self.writeResetStreamFrame(
+                                        stream_id,
+                                        .cancel,
+                                    ) catch return err;
+                                }
+                                callback_failed = true;
+                                return err;
+                            };
+                        }
                     }
                     try self.maybeReleaseReceivedCapacity(
                         stream_id,
@@ -11414,6 +13060,7 @@ pub const Connection = struct {
                             return error.InvalidContentLength;
                         }
                         try notifyInformationalResponse(
+                            self,
                             null,
                             .{
                                 .headers = headers.?,
@@ -11557,6 +13204,7 @@ pub const Connection = struct {
                         if ((frame.frame.header.flags & flag_end_stream) != 0) return error.UnexpectedFrame;
                         if (lookup.content_length != null) return error.InvalidContentLength;
                         try notifyInformationalResponse(
+                            self,
                             null,
                             .{ .headers = decoded, .status = status },
                             &informational_count,
@@ -11717,6 +13365,16 @@ pub const Connection = struct {
         return promise;
     }
 
+    fn rejectDisabledPushPromise(
+        self: *Connection,
+        frame: http2.Frame,
+    ) Error!void {
+        _ = try self.validatePushPromiseForClientStream(frame);
+        self.aggregate_timeout_unusable = true;
+        self.serve_read_connection_error = .push_disabled;
+        return error.InvalidFrame;
+    }
+
     fn receivePushPromise(
         self: *Connection,
         frame: http2.Frame,
@@ -11823,14 +13481,21 @@ pub const Connection = struct {
     }
 
     fn writeHeaders(self: *Connection, stream_id: u31, headers: []const http2.Hpack.HeaderField, end_stream: bool) Error!void {
+        if (self.aggregate_timeout_unusable) return error.ConnectionClosed;
         try validateHeaderListSize(headers, self.peer_max_header_list_size);
         const activation = try self.ensureStreamTrackedForOutboundHeaders(stream_id);
         errdefer self.undoStreamActivation(activation, stream_id);
-        const block = try self.hpack_encoder.encodeBlockRetained(
+        const encoder = try self.prepareStagedHpackEncoder();
+        const block = try encoder.encodeBlockRetained(
             self.allocator,
             headers,
         );
+        // Any partial frame prefix makes the transport unrecoverable. HPACK is
+        // staged independently so an allocation failure before writing leaves
+        // the live encoder unchanged.
+        errdefer self.aggregate_timeout_unusable = true;
         try self.writeHeaderBlock(stream_id, block, end_stream);
+        self.commitStagedHpackEncoder();
     }
 
     /// Emit HEADERS and the first DATA burst in one stream write when the
@@ -11846,6 +13511,7 @@ pub const Connection = struct {
         data: []const u8,
         end_stream: bool,
     ) Error!void {
+        if (self.aggregate_timeout_unusable) return error.ConnectionClosed;
         std.debug.assert(data.len != 0);
         try validateHeaderListSize(
             headers,
@@ -11854,7 +13520,8 @@ pub const Connection = struct {
         const activation =
             try self.ensureStreamTrackedForOutboundHeaders(stream_id);
         errdefer self.undoStreamActivation(activation, stream_id);
-        const block = try self.hpack_encoder.encodeBlockRetained(
+        const encoder = try self.prepareStagedHpackEncoder();
+        const block = try encoder.encodeBlockRetained(
             self.allocator,
             headers,
         );
@@ -11868,7 +13535,11 @@ pub const Connection = struct {
             stream_window.available(),
         );
         if (block.len > frame_limit or first_data_len == 0) {
-            try self.writeHeaderBlock(stream_id, block, false);
+            {
+                errdefer self.aggregate_timeout_unusable = true;
+                try self.writeHeaderBlock(stream_id, block, false);
+            }
+            self.commitStagedHpackEncoder();
             try self.writeData(stream_id, data, end_stream);
             return;
         }
@@ -11917,9 +13588,11 @@ pub const Connection = struct {
             part_count += 2;
             offset = end;
         }
-        try self.transportForIo().writeAllSlices(
-            parts[0..part_count],
-        );
+        self.transportForIo().writeAllSlices(parts[0..part_count]) catch |err| {
+            self.aggregate_timeout_unusable = true;
+            return err;
+        };
+        self.commitStagedHpackEncoder();
         if (first_data_len < data.len) {
             try self.writeData(
                 stream_id,
@@ -12017,10 +13690,11 @@ pub const Connection = struct {
                 // A connection-window overflow terminates the whole HTTP/2
                 // connection with the precise RFC 9113 wire error.
                 self.aggregate_timeout_unusable = true;
-                self.sendGoAway(
+                self.sendGoAwayUntil(
                     self.lastPeerProcessedStreamId(),
                     .flow_control_error,
                     "connection-window-overflow",
+                    null,
                 ) catch {};
                 return error.ConnectionGoAway;
             };
@@ -12058,14 +13732,24 @@ pub const Connection = struct {
                     const settings = try http2.parseSettings(self.allocator, frame.payload);
                     defer self.allocator.free(settings);
                     try self.applySettings(settings);
-                    try writeFrameTransport(self.allocator, self.transportForIo(), .settings, flag_ack, 0, &.{});
+                    try self.writeControlFrameUntil(
+                        .settings,
+                        flag_ack,
+                        &.{},
+                        null,
+                    );
                 }
                 return true;
             },
             .ping => {
                 const ping_payload = try http2.PingPayload.parse(frame);
                 if ((frame.header.flags & flag_ack) == 0) {
-                    try writeFrameTransport(self.allocator, self.transportForIo(), .ping, flag_ack, 0, &ping_payload.data);
+                    try self.writeControlFrameUntil(
+                        .ping,
+                        flag_ack,
+                        &ping_payload.data,
+                        null,
+                    );
                 } else {
                     try self.applyAdaptivePingAck(ping_payload.data);
                 }
@@ -12370,17 +14054,24 @@ pub const Connection = struct {
         const chunk_size = self.outboundFramePayloadLimit();
         if (chunk_size <= 4) return error.InvalidFrame;
         const first_len = @min(block.len, chunk_size - 4);
-        var encoded: std.ArrayList(u8) = .empty;
-        defer encoded.deinit(self.allocator);
-        try http2.PushPromisePayload.write(
-            &encoded,
-            self.allocator,
+        var prefix: [http2.FrameHeader.encoded_len + 4]u8 = undefined;
+        try encodeFrameHeader(
+            prefix[0..http2.FrameHeader.encoded_len],
+            .push_promise,
+            if (first_len == block.len) flag_end_headers else 0,
             parent_stream_id,
-            promised_stream_id,
-            block[0..first_len],
-            .{ .end_headers = first_len == block.len },
+            4 + first_len,
         );
-        try self.transportForIo().writeAll(encoded.items);
+        std.mem.writeInt(
+            u32,
+            prefix[http2.FrameHeader.encoded_len..],
+            promised_stream_id,
+            .big,
+        );
+        try self.transportForIo().writeAllParts(
+            &prefix,
+            block[0..first_len],
+        );
         var offset = first_len;
         while (offset < block.len) {
             const end = @min(block.len, offset + chunk_size);
@@ -12443,6 +14134,7 @@ pub const Connection = struct {
         self: *Connection,
         stream_id: u31,
     ) Error!void {
+        if (self.aggregate_timeout_unusable) return error.ConnectionClosed;
         if (!self.outboundStreamIsActive(stream_id)) {
             return error.InvalidStreamId;
         }
@@ -12459,6 +14151,32 @@ pub const Connection = struct {
         slices: []const []const u8,
         end_stream: bool,
     ) Error!void {
+        var ignored_written: usize = 0;
+        return self.writeDataSlicesPreparedTrackedUntil(
+            stream_id,
+            slices,
+            end_stream,
+            &ignored_written,
+            null,
+        ) catch |err| switch (err) {
+            error.Timeout => unreachable,
+            else => |other| return @errorCast(other),
+        };
+    }
+
+    fn writeDataSlicesPreparedTrackedUntil(
+        self: *Connection,
+        stream_id: u31,
+        slices: []const []const u8,
+        end_stream: bool,
+        written: *usize,
+        deadline: ?std.Io.Clock.Timestamp,
+    ) ResponseTimeoutError!void {
+        written.* = 0;
+        if (self.aggregate_timeout_unusable) return error.ConnectionClosed;
+        if (deadline) |absolute| {
+            _ = try deadline_policy.usableAwake(self.io, absolute);
+        }
         var total_len: usize = 0;
         for (slices) |slice| {
             total_len = std.math.add(
@@ -12468,14 +14186,20 @@ pub const Connection = struct {
             ) catch return error.MessageTooLarge;
         }
         if (total_len == 0) {
-            try writeFrameTransport(
+            if (deadline) |absolute| {
+                _ = try deadline_policy.usableAwake(self.io, absolute);
+            }
+            writeFrameTransport(
                 self.allocator,
                 self.transportForIo(),
                 .data,
                 if (end_stream) flag_end_stream else 0,
                 stream_id,
                 &.{},
-            );
+            ) catch |err| {
+                self.aggregate_timeout_unusable = true;
+                return err;
+            };
             return;
         }
 
@@ -12488,7 +14212,7 @@ pub const Connection = struct {
         // four DATA-frame headers and possible boundary splits to stay on the
         // stack rather than trading a removed payload buffer for descriptor
         // allocation on the common compressed-fragment batch.
-        var wire_parts_stack: [48][]const u8 = undefined;
+        var wire_parts_stack: [80][]const u8 = undefined;
         const wire_parts = if (wire_part_capacity <= wire_parts_stack.len)
             wire_parts_stack[0..wire_part_capacity]
         else
@@ -12501,6 +14225,9 @@ pub const Connection = struct {
         var offset: usize = 0;
         var cursor = DataSliceCursor{ .slices = slices };
         while (offset < total_len) {
+            if (deadline) |absolute| {
+                _ = try deadline_policy.usableAwake(self.io, absolute);
+            }
             const stream_window = try self.sendStreamWindow(stream_id);
             const available_credit = @min(
                 total_len - offset,
@@ -12508,7 +14235,13 @@ pub const Connection = struct {
                 stream_window.available(),
             );
             if (available_credit == 0) {
-                try self.waitForSendCapacity(stream_id);
+                self.waitForDuplexSendCapacityUntil(
+                    stream_id,
+                    deadline,
+                ) catch |err| {
+                    written.* = offset;
+                    return err;
+                };
                 continue;
             }
 
@@ -12518,7 +14251,7 @@ pub const Connection = struct {
                 max_data_frames_per_write,
             ) catch std.math.maxInt(usize);
             const burst_len = @min(available_credit, burst_limit);
-            try self.writeDataSlicesBurst(
+            self.writeDataSlicesBurst(
                 stream_id,
                 &cursor,
                 burst_len,
@@ -12526,8 +14259,12 @@ pub const Connection = struct {
                 chunk_size,
                 stream_window,
                 wire_parts,
-            );
+            ) catch |err| {
+                self.aggregate_timeout_unusable = true;
+                return err;
+            };
             offset += burst_len;
+            written.* = offset;
         }
     }
 
@@ -12555,6 +14292,7 @@ pub const Connection = struct {
         written: *usize,
         deadline: ?std.Io.Clock.Timestamp,
     ) Error!void {
+        if (self.aggregate_timeout_unusable) return error.ConnectionClosed;
         if (!self.outboundStreamIsActive(stream_id)) return error.InvalidStreamId;
         if (self.role == .client and
             self.pendingApplicationFrameCount() != 0)
@@ -12567,14 +14305,17 @@ pub const Connection = struct {
         }
         const chunk_size = self.outboundFramePayloadLimit();
         if (data.len == 0) {
-            try writeFrameTransport(
+            writeFrameTransport(
                 self.allocator,
                 self.transportForIo(),
                 .data,
                 if (end_stream) flag_end_stream else 0,
                 stream_id,
                 &.{},
-            );
+            ) catch |err| {
+                self.aggregate_timeout_unusable = true;
+                return err;
+            };
             return;
         }
 
@@ -12597,13 +14338,16 @@ pub const Connection = struct {
                 max_data_frames_per_write,
             ) catch std.math.maxInt(usize);
             const burst_len = @min(available_credit, burst_limit);
-            try self.writeDataBurst(
+            self.writeDataBurst(
                 stream_id,
                 data[offset..][0..burst_len],
                 end_stream and offset + burst_len == data.len,
                 chunk_size,
                 stream_window,
-            );
+            ) catch |err| {
+                self.aggregate_timeout_unusable = true;
+                return err;
+            };
             offset += burst_len;
             written.* = offset;
         }
@@ -12636,6 +14380,7 @@ pub const Connection = struct {
         written: *usize,
         deadline: ?std.Io.Clock.Timestamp,
     ) Error!void {
+        if (self.aggregate_timeout_unusable) return error.ConnectionClosed;
         if (!self.outboundStreamIsActive(stream_id)) {
             return error.InvalidStreamId;
         }
@@ -12653,14 +14398,17 @@ pub const Connection = struct {
             return error.ResponseAvailable;
         }
         if (data.len == 0) {
-            try writeFrameTransport(
+            writeFrameTransport(
                 self.allocator,
                 self.transportForIo(),
                 .data,
                 if (end_stream) flag_end_stream else 0,
                 stream_id,
                 &.{},
-            );
+            ) catch |err| {
+                self.aggregate_timeout_unusable = true;
+                return err;
+            };
             return;
         }
 
@@ -12689,13 +14437,16 @@ pub const Connection = struct {
                 max_data_frames_per_write,
             ) catch std.math.maxInt(usize);
             const burst_len = @min(available_credit, burst_limit);
-            try self.writeDataBurst(
+            self.writeDataBurst(
                 stream_id,
                 data[offset..][0..burst_len],
                 end_stream and offset + burst_len == data.len,
                 chunk_size,
                 stream_window,
-            );
+            ) catch |err| {
+                self.aggregate_timeout_unusable = true;
+                return err;
+            };
             offset += burst_len;
             written.* = offset;
         }
@@ -12801,9 +14552,11 @@ pub const Connection = struct {
             part_count += 2;
             offset = end;
         }
-        try self.transportForIo().writeAllSlices(
-            parts[0..part_count],
-        );
+        if (part_count == 2) {
+            try self.transportForIo().writeAllParts(parts[0], parts[1]);
+        } else {
+            try self.transportForIo().writeAllSlices(parts[0..part_count]);
+        }
     }
 
     fn writeDataSlicesBurst(
@@ -12856,9 +14609,16 @@ pub const Connection = struct {
             cursor.appendTo(wire_parts, &wire_part_count, frame_len);
             frame_offset = frame_end;
         }
-        try self.transportForIo().writeAllSlices(
-            wire_parts[0..wire_part_count],
-        );
+        if (wire_part_count == 2) {
+            try self.transportForIo().writeAllParts(
+                wire_parts[0],
+                wire_parts[1],
+            );
+        } else {
+            try self.transportForIo().writeAllSlices(
+                wire_parts[0..wire_part_count],
+            );
+        }
     }
 
     fn waitForSendCapacity(self: *Connection, stream_id: u31) Error!void {
@@ -12966,6 +14726,7 @@ pub const Connection = struct {
         self: *Connection,
         target: u32,
     ) Error!bool {
+        if (self.aggregate_timeout_unusable) return error.ConnectionClosed;
         if (target <= self.recv_stream_window_target and
             target <= self.recv_connection_window_target) return true;
         if (self.awaiting_settings_ack) return false;
@@ -13034,7 +14795,14 @@ pub const Connection = struct {
             &settings_payload,
         );
         encoded_len += settings_payload.len;
-        try self.transportForIo().writeAll(encoded[0..encoded_len]);
+        self.transportForIo().writeAll(encoded[0..encoded_len]) catch |err| {
+            // WINDOW_UPDATE and SETTINGS share one transport submission. A
+            // failure can expose an unknown prefix of either frame, so neither
+            // the wire state nor the local receive-window transaction is
+            // retryable on this connection.
+            self.aggregate_timeout_unusable = true;
+            return err;
+        };
 
         if (connection_increment) |increment| {
             try self.recv_connection_window.update(increment);
@@ -13156,6 +14924,8 @@ pub const Connection = struct {
                 return;
             }
         }
+        if (self.alternative_services.items.len >=
+            self.limits.max_alternative_services) return;
         const slot = try self.alternative_service_index.getOrPut(
             self.allocator,
             key,
@@ -13184,6 +14954,9 @@ pub const Connection = struct {
     fn storePeerOrigin(self: *Connection, origin: []const u8) Error!void {
         if (self.peer_origin_index.count() != 0 and
             self.peer_origin_index.contains(origin)) return;
+        if (self.peer_origins.items.len >= self.limits.max_peer_origins) {
+            return;
+        }
         const slot = try self.peer_origin_index.getOrPut(
             self.allocator,
             origin,
@@ -13334,6 +15107,37 @@ pub const Connection = struct {
             self.recv_stream_window_index.contains(stream_id);
     }
 };
+
+fn RequestBatchHandlerTask(
+    comptime HandlerContext: type,
+    comptime handler: *const fn (
+        *HandlerContext,
+        OwnedRequest,
+    ) Error!ResponseOptions,
+) type {
+    return struct {
+        const Self = @This();
+
+        pub const Completion = struct {
+            index: usize,
+            result: Error!ResponseOptions,
+        };
+        pub const CompletionQueue = std.Io.Queue(Completion);
+
+        io: std.Io,
+        completions: *CompletionQueue,
+        context: *HandlerContext,
+        request: *const OwnedRequest,
+        index: usize,
+
+        fn run(task: Self) std.Io.Cancelable!void {
+            task.completions.putOneUncancelable(task.io, .{
+                .index = task.index,
+                .result = handler(task.context, task.request.*),
+            }) catch unreachable;
+        }
+    };
+}
 
 pub const RequestOptions = struct {
     method: []const u8 = "GET",
@@ -13584,6 +15388,7 @@ fn countInformationalResponse(
 }
 
 fn notifyInformationalResponse(
+    connection: *Connection,
     observer: ?InformationalObserver,
     response: StreamingResponseHead,
     count: *usize,
@@ -13591,11 +15396,14 @@ fn notifyInformationalResponse(
 ) Error!void {
     try countInformationalResponse(count, limit);
     if (observer) |value| {
+        try connection.beginBorrowedReadCallback();
+        defer connection.endBorrowedReadCallback();
         value.on_response(value.context, response);
     }
 }
 
 fn notifyBatchInformationalResponse(
+    connection: *Connection,
     observer: ?BatchInformationalObserver,
     request_index: usize,
     stream_id: u31,
@@ -13605,6 +15413,8 @@ fn notifyBatchInformationalResponse(
 ) Error!void {
     try countInformationalResponse(count, limit);
     if (observer) |value| {
+        try connection.beginBorrowedReadCallback();
+        defer connection.endBorrowedReadCallback();
         value.on_response(
             value.context,
             request_index,
@@ -13671,6 +15481,18 @@ pub const RequestWriter = struct {
         return self.writeUntil(data, deadline);
     }
 
+    pub fn writeWithTimeout(
+        self: *RequestWriter,
+        data: []const u8,
+        timeout: std.Io.Duration,
+    ) ResponseTimeoutError!void {
+        if (timeout.nanoseconds <= 0) return error.Timeout;
+        return self.writeWithDeadline(data, .fromNow(self.connection.io, .{
+            .raw = timeout,
+            .clock = .awake,
+        }));
+    }
+
     fn writeUntil(
         self: *RequestWriter,
         data: []const u8,
@@ -13700,10 +15522,15 @@ pub const RequestWriter = struct {
                     flag_end_stream,
                     self.stream_id,
                     &.{},
-                ) catch {};
+                ) catch {
+                    self.connection.aggregate_timeout_unusable = true;
+                };
                 return error.ResponseAvailable;
             },
-            else => return err,
+            else => {
+                self.written += sent;
+                return err;
+            },
         };
         self.written += sent;
     }
@@ -13722,6 +15549,18 @@ pub const RequestWriter = struct {
     ) ResponseTimeoutError!void {
         _ = try deadline_policy.usableAwake(self.connection.io, deadline);
         return self.finishDataUntil(data, deadline);
+    }
+
+    pub fn finishDataWithTimeout(
+        self: *RequestWriter,
+        data: []const u8,
+        timeout: std.Io.Duration,
+    ) ResponseTimeoutError!void {
+        if (timeout.nanoseconds <= 0) return error.Timeout;
+        return self.finishDataWithDeadline(data, .fromNow(
+            self.connection.io,
+            .{ .raw = timeout, .clock = .awake },
+        ));
     }
 
     fn finishDataUntil(
@@ -13749,10 +15588,15 @@ pub const RequestWriter = struct {
                     flag_end_stream,
                     self.stream_id,
                     &.{},
-                ) catch {};
+                ) catch {
+                    self.connection.aggregate_timeout_unusable = true;
+                };
                 return error.ResponseAvailable;
             },
-            else => return err,
+            else => {
+                self.written += sent;
+                return err;
+            },
         };
         self.written += sent;
         self.body_finished = true;
@@ -13767,6 +15611,20 @@ pub const RequestWriter = struct {
         deadline: std.Io.Clock.Timestamp,
     ) ResponseTimeoutError!void {
         return self.finishDataWithDeadline(&.{}, deadline);
+    }
+
+    pub fn finishWithTimeout(
+        self: *RequestWriter,
+        timeout: std.Io.Duration,
+    ) ResponseTimeoutError!void {
+        return self.finishDataWithTimeout(&.{}, timeout);
+    }
+
+    /// Cumulative application body bytes committed by successful DATA
+    /// bursts. This advances even when a bounded write later times out, so a
+    /// caller can retry only the uncommitted suffix.
+    pub fn committedBytes(self: RequestWriter) usize {
+        return self.written;
     }
 
     pub fn finishTrailers(
@@ -13852,6 +15710,9 @@ pub const RequestWriter = struct {
         informational: ?InformationalObserver,
         deadline: ?std.Io.Clock.Timestamp,
     ) Error!OwnedResponse {
+        if (self.connection.callback_reader_active) {
+            return error.UnexpectedFrame;
+        }
         if (!self.body_finished or self.completed) {
             return error.UnexpectedFrame;
         }
@@ -14019,6 +15880,9 @@ pub const RequestWriter = struct {
         comptime begin: anytype,
         comptime consume: anytype,
     ) !StreamingResponse {
+        if (self.connection.callback_reader_active) {
+            return error.UnexpectedFrame;
+        }
         _ = try deadline_policy.usableAwake(self.connection.io, deadline);
         if (!self.body_finished or self.completed) {
             return error.UnexpectedFrame;
@@ -14079,6 +15943,9 @@ pub const RequestWriter = struct {
         comptime begin: anytype,
         comptime consume: anytype,
     ) !StreamingResponse {
+        if (self.connection.callback_reader_active) {
+            return error.UnexpectedFrame;
+        }
         if (!self.body_finished or self.completed) {
             return error.UnexpectedFrame;
         }
@@ -14106,7 +15973,9 @@ pub const RequestWriter = struct {
     /// Transfer this request's two half-streams to a single step-driven owner.
     /// The original writer becomes inert and must not be used again.
     pub fn beginDuplex(self: *RequestWriter) Error!ClientDuplexStream {
-        if (self.completed or self.connection.duplex_reader_active) {
+        if (self.completed or self.connection.duplex_reader_active or
+            self.connection.callback_reader_active)
+        {
             return error.UnexpectedFrame;
         }
         self.connection.duplex_reader_active = true;
@@ -14379,12 +16248,54 @@ pub const ClientDuplexStream = struct {
         return self.writeRequestSlicesUntil(&.{data}, false, deadline);
     }
 
+    pub fn writeWithTimeout(
+        self: *ClientDuplexStream,
+        data: []const u8,
+        timeout: std.Io.Duration,
+    ) ResponseTimeoutError!DuplexWriteResult {
+        if (timeout.nanoseconds <= 0) return error.Timeout;
+        return self.writeWithDeadline(data, .fromNow(self.connection.io, .{
+            .raw = timeout,
+            .clock = .awake,
+        }));
+    }
+
     pub fn writeParts(
         self: *ClientDuplexStream,
         first: []const u8,
         second: []const u8,
     ) Error!DuplexWriteResult {
         return self.writeRequestSlices(&.{ first, second }, false);
+    }
+
+    pub fn writePartsWithTimeout(
+        self: *ClientDuplexStream,
+        first: []const u8,
+        second: []const u8,
+        timeout: std.Io.Duration,
+    ) ResponseTimeoutError!DuplexWriteResult {
+        if (timeout.nanoseconds <= 0) return error.Timeout;
+        return self.writePartsWithDeadline(
+            first,
+            second,
+            .fromNow(self.connection.io, .{
+                .raw = timeout,
+                .clock = .awake,
+            }),
+        );
+    }
+
+    pub fn writePartsWithDeadline(
+        self: *ClientDuplexStream,
+        first: []const u8,
+        second: []const u8,
+        deadline: std.Io.Clock.Timestamp,
+    ) ResponseTimeoutError!DuplexWriteResult {
+        return self.writeRequestSlicesWithDeadline(
+            &.{ first, second },
+            false,
+            deadline,
+        );
     }
 
     pub fn finishRequest(
@@ -14398,6 +16309,13 @@ pub const ClientDuplexStream = struct {
         deadline: std.Io.Clock.Timestamp,
     ) ResponseTimeoutError!DuplexWriteResult {
         return self.finishRequestDataWithDeadline(&.{}, deadline);
+    }
+
+    pub fn finishRequestWithTimeout(
+        self: *ClientDuplexStream,
+        timeout: std.Io.Duration,
+    ) ResponseTimeoutError!DuplexWriteResult {
+        return self.finishRequestDataWithTimeout(&.{}, timeout);
     }
 
     pub fn requestFinished(self: ClientDuplexStream) bool {
@@ -14437,12 +16355,54 @@ pub const ClientDuplexStream = struct {
         return self.writeRequestSlicesUntil(&.{data}, true, deadline);
     }
 
+    pub fn finishRequestDataWithTimeout(
+        self: *ClientDuplexStream,
+        data: []const u8,
+        timeout: std.Io.Duration,
+    ) ResponseTimeoutError!DuplexWriteResult {
+        if (timeout.nanoseconds <= 0) return error.Timeout;
+        return self.finishRequestDataWithDeadline(data, .fromNow(
+            self.connection.io,
+            .{ .raw = timeout, .clock = .awake },
+        ));
+    }
+
     pub fn finishRequestParts(
         self: *ClientDuplexStream,
         first: []const u8,
         second: []const u8,
     ) Error!DuplexWriteResult {
         return self.writeRequestSlices(&.{ first, second }, true);
+    }
+
+    pub fn finishRequestPartsWithTimeout(
+        self: *ClientDuplexStream,
+        first: []const u8,
+        second: []const u8,
+        timeout: std.Io.Duration,
+    ) ResponseTimeoutError!DuplexWriteResult {
+        if (timeout.nanoseconds <= 0) return error.Timeout;
+        return self.finishRequestPartsWithDeadline(
+            first,
+            second,
+            .fromNow(self.connection.io, .{
+                .raw = timeout,
+                .clock = .awake,
+            }),
+        );
+    }
+
+    pub fn finishRequestPartsWithDeadline(
+        self: *ClientDuplexStream,
+        first: []const u8,
+        second: []const u8,
+        deadline: std.Io.Clock.Timestamp,
+    ) ResponseTimeoutError!DuplexWriteResult {
+        return self.writeRequestSlicesWithDeadline(
+            &.{ first, second },
+            true,
+            deadline,
+        );
     }
 
     pub fn finishRequestTrailers(
@@ -14469,6 +16429,39 @@ pub const ClientDuplexStream = struct {
         end_stream: bool,
     ) Error!DuplexWriteResult {
         return self.writeRequestSlicesUntil(slices, end_stream, null);
+    }
+
+    pub fn writeRequestSlicesWithTimeout(
+        self: *ClientDuplexStream,
+        slices: []const []const u8,
+        end_stream: bool,
+        timeout: std.Io.Duration,
+    ) ResponseTimeoutError!DuplexWriteResult {
+        if (timeout.nanoseconds <= 0) return error.Timeout;
+        return self.writeRequestSlicesWithDeadline(
+            slices,
+            end_stream,
+            .fromNow(self.connection.io, .{
+                .raw = timeout,
+                .clock = .awake,
+            }),
+        );
+    }
+
+    pub fn writeRequestSlicesWithDeadline(
+        self: *ClientDuplexStream,
+        slices: []const []const u8,
+        end_stream: bool,
+        deadline: std.Io.Clock.Timestamp,
+    ) ResponseTimeoutError!DuplexWriteResult {
+        _ = try deadline_policy.usableAwake(self.connection.io, deadline);
+        return self.writeRequestSlicesUntil(slices, end_stream, deadline);
+    }
+
+    /// Cumulative request DATA bytes committed by this duplex stream. This
+    /// remains authoritative after a bounded write returns `error.Timeout`.
+    pub fn requestCommittedBytes(self: ClientDuplexStream) usize {
+        return self.request_written;
     }
 
     fn writeRequestSlicesUntil(
@@ -14953,7 +16946,28 @@ pub const ServerDuplexStream = struct {
         self: *ServerDuplexStream,
         data: []const u8,
     ) Error!DuplexWriteResult {
-        return self.writeResponseData(data, false);
+        return self.writeResponseDataUntil(data, false, null);
+    }
+
+    pub fn writeResponseWithTimeout(
+        self: *ServerDuplexStream,
+        data: []const u8,
+        timeout: std.Io.Duration,
+    ) ResponseTimeoutError!DuplexWriteResult {
+        if (timeout.nanoseconds <= 0) return error.Timeout;
+        return self.writeResponseWithDeadline(data, .fromNow(
+            self.connection.io,
+            .{ .raw = timeout, .clock = .awake },
+        ));
+    }
+
+    pub fn writeResponseWithDeadline(
+        self: *ServerDuplexStream,
+        data: []const u8,
+        deadline: std.Io.Clock.Timestamp,
+    ) ResponseTimeoutError!DuplexWriteResult {
+        _ = try deadline_policy.usableAwake(self.connection.io, deadline);
+        return self.writeResponseDataUntil(data, false, deadline);
     }
 
     pub fn writeResponseParts(
@@ -14961,13 +16975,88 @@ pub const ServerDuplexStream = struct {
         first: []const u8,
         second: []const u8,
     ) Error!DuplexWriteResult {
-        return self.writeResponseSlices(&.{ first, second }, false);
+        return self.writeResponseSlicesUntil(
+            &.{ first, second },
+            false,
+            null,
+        );
+    }
+
+    pub fn writeResponsePartsWithTimeout(
+        self: *ServerDuplexStream,
+        first: []const u8,
+        second: []const u8,
+        timeout: std.Io.Duration,
+    ) ResponseTimeoutError!DuplexWriteResult {
+        if (timeout.nanoseconds <= 0) return error.Timeout;
+        return self.writeResponsePartsWithDeadline(
+            first,
+            second,
+            .fromNow(self.connection.io, .{
+                .raw = timeout,
+                .clock = .awake,
+            }),
+        );
+    }
+
+    pub fn writeResponsePartsWithDeadline(
+        self: *ServerDuplexStream,
+        first: []const u8,
+        second: []const u8,
+        deadline: std.Io.Clock.Timestamp,
+    ) ResponseTimeoutError!DuplexWriteResult {
+        _ = try deadline_policy.usableAwake(self.connection.io, deadline);
+        return self.writeResponseSlicesUntil(
+            &.{ first, second },
+            false,
+            deadline,
+        );
     }
 
     pub fn writeResponseSlices(
         self: *ServerDuplexStream,
         slices: []const []const u8,
         end_stream: bool,
+    ) Error!DuplexWriteResult {
+        return self.writeResponseSlicesUntil(slices, end_stream, null);
+    }
+
+    pub fn writeResponseSlicesWithTimeout(
+        self: *ServerDuplexStream,
+        slices: []const []const u8,
+        end_stream: bool,
+        timeout: std.Io.Duration,
+    ) ResponseTimeoutError!DuplexWriteResult {
+        if (timeout.nanoseconds <= 0) return error.Timeout;
+        return self.writeResponseSlicesWithDeadline(
+            slices,
+            end_stream,
+            .fromNow(self.connection.io, .{
+                .raw = timeout,
+                .clock = .awake,
+            }),
+        );
+    }
+
+    pub fn writeResponseSlicesWithDeadline(
+        self: *ServerDuplexStream,
+        slices: []const []const u8,
+        end_stream: bool,
+        deadline: std.Io.Clock.Timestamp,
+    ) ResponseTimeoutError!DuplexWriteResult {
+        _ = try deadline_policy.usableAwake(self.connection.io, deadline);
+        return self.writeResponseSlicesUntil(
+            slices,
+            end_stream,
+            deadline,
+        );
+    }
+
+    fn writeResponseSlicesUntil(
+        self: *ServerDuplexStream,
+        slices: []const []const u8,
+        end_stream: bool,
+        deadline: ?std.Io.Clock.Timestamp,
     ) Error!DuplexWriteResult {
         var additional: usize = 0;
         for (slices) |slice| {
@@ -14992,9 +17081,10 @@ pub const ServerDuplexStream = struct {
         for (slices) |slice| {
             if (slice.len == 0) continue;
             remaining_non_empty -= 1;
-            const result = try self.writeResponseData(
+            const result = try self.writeResponseDataUntil(
                 slice,
                 end_stream and remaining_non_empty == 0,
+                deadline,
             );
             written += result.written;
             if (result.response_available) {
@@ -15005,7 +17095,11 @@ pub const ServerDuplexStream = struct {
             }
         }
         if (written == 0 and end_stream) {
-            const result = try self.writeResponseData(&.{}, true);
+            const result = try self.writeResponseDataUntil(
+                &.{},
+                true,
+                deadline,
+            );
             return .{
                 .written = 0,
                 .response_available = result.response_available,
@@ -15020,11 +17114,52 @@ pub const ServerDuplexStream = struct {
         return self.finishResponseData(&.{});
     }
 
+    pub fn finishResponseWithTimeout(
+        self: *ServerDuplexStream,
+        timeout: std.Io.Duration,
+    ) ResponseTimeoutError!DuplexWriteResult {
+        return self.finishResponseDataWithTimeout(&.{}, timeout);
+    }
+
+    pub fn finishResponseWithDeadline(
+        self: *ServerDuplexStream,
+        deadline: std.Io.Clock.Timestamp,
+    ) ResponseTimeoutError!DuplexWriteResult {
+        return self.finishResponseDataWithDeadline(&.{}, deadline);
+    }
+
     pub fn finishResponseData(
         self: *ServerDuplexStream,
         data: []const u8,
     ) Error!DuplexWriteResult {
-        return self.writeResponseData(data, true);
+        return self.writeResponseDataUntil(data, true, null);
+    }
+
+    pub fn finishResponseDataWithTimeout(
+        self: *ServerDuplexStream,
+        data: []const u8,
+        timeout: std.Io.Duration,
+    ) ResponseTimeoutError!DuplexWriteResult {
+        if (timeout.nanoseconds <= 0) return error.Timeout;
+        return self.finishResponseDataWithDeadline(data, .fromNow(
+            self.connection.io,
+            .{ .raw = timeout, .clock = .awake },
+        ));
+    }
+
+    pub fn finishResponseDataWithDeadline(
+        self: *ServerDuplexStream,
+        data: []const u8,
+        deadline: std.Io.Clock.Timestamp,
+    ) ResponseTimeoutError!DuplexWriteResult {
+        _ = try deadline_policy.usableAwake(self.connection.io, deadline);
+        return self.writeResponseDataUntil(data, true, deadline);
+    }
+
+    /// Cumulative response DATA bytes committed by this duplex stream. This
+    /// remains authoritative after a bounded write returns `error.Timeout`.
+    pub fn responseCommittedBytes(self: ServerDuplexStream) usize {
+        return self.response_written;
     }
 
     pub fn finishResponseTrailers(
@@ -15045,10 +17180,11 @@ pub const ServerDuplexStream = struct {
         self.maybeRelease();
     }
 
-    fn writeResponseData(
+    fn writeResponseDataUntil(
         self: *ServerDuplexStream,
         data: []const u8,
         end_stream: bool,
+        deadline: ?std.Io.Clock.Timestamp,
     ) Error!DuplexWriteResult {
         if (!self.response_started or self.response_finished or self.released) {
             return error.ConnectionClosed;
@@ -15064,11 +17200,12 @@ pub const ServerDuplexStream = struct {
             }
         }
         var sent: usize = 0;
-        self.connection.writeDataDuplexTracked(
+        self.connection.writeDataDuplexTrackedUntil(
             self.stream_id,
             data,
             end_stream,
             &sent,
+            deadline,
         ) catch |err| switch (err) {
             error.ResponseAvailable => {
                 self.response_written += sent;
@@ -15373,10 +17510,49 @@ pub const ResponseWriter = struct {
         self: *ResponseWriter,
         data: []const u8,
     ) Error!void {
+        return self.writeUntil(data, null);
+    }
+
+    pub fn writeWithTimeout(
+        self: *ResponseWriter,
+        data: []const u8,
+        timeout: std.Io.Duration,
+    ) ResponseTimeoutError!void {
+        if (timeout.nanoseconds <= 0) return error.Timeout;
+        return self.writeWithDeadline(data, .fromNow(self.connection.io, .{
+            .raw = timeout,
+            .clock = .awake,
+        }));
+    }
+
+    pub fn writeWithDeadline(
+        self: *ResponseWriter,
+        data: []const u8,
+        deadline: std.Io.Clock.Timestamp,
+    ) ResponseTimeoutError!void {
+        _ = try deadline_policy.usableAwake(self.connection.io, deadline);
+        return self.writeUntil(data, deadline);
+    }
+
+    fn writeUntil(
+        self: *ResponseWriter,
+        data: []const u8,
+        deadline: ?std.Io.Clock.Timestamp,
+    ) Error!void {
         try self.ensureWritable();
         try self.reserveLength(data.len, false);
-        try self.connection.writeData(self.stream_id, data, false);
-        self.written += data.len;
+        var sent: usize = 0;
+        self.connection.writeDataTrackedUntil(
+            self.stream_id,
+            data,
+            false,
+            &sent,
+            deadline,
+        ) catch |err| {
+            self.written += sent;
+            return err;
+        };
+        self.written += sent;
     }
 
     /// Write the final DATA chunk with END_STREAM.
@@ -15384,16 +17560,76 @@ pub const ResponseWriter = struct {
         self: *ResponseWriter,
         data: []const u8,
     ) Error!void {
+        return self.finishDataUntil(data, null);
+    }
+
+    pub fn finishDataWithTimeout(
+        self: *ResponseWriter,
+        data: []const u8,
+        timeout: std.Io.Duration,
+    ) ResponseTimeoutError!void {
+        if (timeout.nanoseconds <= 0) return error.Timeout;
+        return self.finishDataWithDeadline(data, .fromNow(
+            self.connection.io,
+            .{ .raw = timeout, .clock = .awake },
+        ));
+    }
+
+    pub fn finishDataWithDeadline(
+        self: *ResponseWriter,
+        data: []const u8,
+        deadline: std.Io.Clock.Timestamp,
+    ) ResponseTimeoutError!void {
+        _ = try deadline_policy.usableAwake(self.connection.io, deadline);
+        return self.finishDataUntil(data, deadline);
+    }
+
+    fn finishDataUntil(
+        self: *ResponseWriter,
+        data: []const u8,
+        deadline: ?std.Io.Clock.Timestamp,
+    ) Error!void {
         try self.ensureWritable();
         try self.reserveLength(data.len, true);
-        try self.connection.writeData(self.stream_id, data, true);
-        self.written += data.len;
+        var sent: usize = 0;
+        self.connection.writeDataTrackedUntil(
+            self.stream_id,
+            data,
+            true,
+            &sent,
+            deadline,
+        ) catch |err| {
+            self.written += sent;
+            return err;
+        };
+        self.written += sent;
         self.finishState();
     }
 
     /// Finish a response with an empty END_STREAM DATA frame.
     pub fn finish(self: *ResponseWriter) Error!void {
         return self.finishData(&.{});
+    }
+
+    pub fn finishWithTimeout(
+        self: *ResponseWriter,
+        timeout: std.Io.Duration,
+    ) ResponseTimeoutError!void {
+        return self.finishDataWithTimeout(&.{}, timeout);
+    }
+
+    pub fn finishWithDeadline(
+        self: *ResponseWriter,
+        deadline: std.Io.Clock.Timestamp,
+    ) ResponseTimeoutError!void {
+        return self.finishDataWithDeadline(&.{}, deadline);
+    }
+
+    /// Cumulative application body bytes committed by successful DATA
+    /// bursts. This advances even when a bounded write later times out, so a
+    /// caller can retry only the uncommitted suffix.
+    pub fn committedBytes(self: ResponseWriter) usize {
+        return self.written;
     }
 
     /// Finish with response trailers. Trailers carry END_STREAM themselves.
@@ -15566,6 +17802,13 @@ pub const OwnedTunnelData = struct {
     }
 };
 
+pub const TunnelWriteProgress = struct {
+    /// Exact application-byte prefix committed by complete DATA bursts.
+    committed_bytes: usize = 0,
+    /// True only when the DATA END_STREAM flag reached the transport.
+    fin_committed: bool = false,
+};
+
 pub const Tunnel = struct {
     connection: *Connection,
     stream_id: u31,
@@ -15577,9 +17820,55 @@ pub const Tunnel = struct {
     released: std.atomic.Value(bool) = .init(false),
 
     pub fn write(self: *Tunnel, data: []const u8, end_stream: bool) Error!void {
-        try self.ensureWritable();
-        try self.connection.writeData(self.stream_id, data, end_stream);
-        if (end_stream) self.finishSend();
+        var progress: TunnelWriteProgress = .{};
+        return self.writeSlicesUntil(
+            &.{data},
+            end_stream,
+            &progress,
+            null,
+            false,
+        ) catch |err| switch (err) {
+            error.Timeout => unreachable,
+            else => |other| return @errorCast(other),
+        };
+    }
+
+    pub fn writeWithTimeout(
+        self: *Tunnel,
+        data: []const u8,
+        end_stream: bool,
+        progress: *TunnelWriteProgress,
+        timeout: std.Io.Duration,
+    ) ResponseTimeoutError!void {
+        progress.* = .{};
+        if (timeout.nanoseconds <= 0) return error.Timeout;
+        return self.writeWithDeadline(
+            data,
+            end_stream,
+            progress,
+            .fromNow(self.connection.io, .{
+                .raw = timeout,
+                .clock = .awake,
+            }),
+        );
+    }
+
+    pub fn writeWithDeadline(
+        self: *Tunnel,
+        data: []const u8,
+        end_stream: bool,
+        progress: *TunnelWriteProgress,
+        deadline: std.Io.Clock.Timestamp,
+    ) ResponseTimeoutError!void {
+        progress.* = .{};
+        _ = try deadline_policy.usableAwake(self.connection.io, deadline);
+        return self.writeSlicesUntil(
+            &.{data},
+            end_stream,
+            progress,
+            deadline,
+            false,
+        );
     }
 
     /// Write two borrowed slices as one ordered tunnel byte sequence. DATA
@@ -15591,14 +17880,45 @@ pub const Tunnel = struct {
         second: []const u8,
         end_stream: bool,
     ) Error!void {
-        try self.ensureWritable();
-        try self.connection.writeDataParts(
-            self.stream_id,
+        return self.writeSlices(&.{ first, second }, end_stream);
+    }
+
+    pub fn writePartsWithTimeout(
+        self: *Tunnel,
+        first: []const u8,
+        second: []const u8,
+        end_stream: bool,
+        progress: *TunnelWriteProgress,
+        timeout: std.Io.Duration,
+    ) ResponseTimeoutError!void {
+        progress.* = .{};
+        if (timeout.nanoseconds <= 0) return error.Timeout;
+        return self.writePartsWithDeadline(
             first,
             second,
             end_stream,
+            progress,
+            .fromNow(self.connection.io, .{
+                .raw = timeout,
+                .clock = .awake,
+            }),
         );
-        if (end_stream) self.finishSend();
+    }
+
+    pub fn writePartsWithDeadline(
+        self: *Tunnel,
+        first: []const u8,
+        second: []const u8,
+        end_stream: bool,
+        progress: *TunnelWriteProgress,
+        deadline: std.Io.Clock.Timestamp,
+    ) ResponseTimeoutError!void {
+        return self.writeSlicesWithDeadline(
+            &.{ first, second },
+            end_stream,
+            progress,
+            deadline,
+        );
     }
 
     /// Write borrowed slices as one ordered tunnel byte sequence. The HTTP/2
@@ -15609,13 +17929,55 @@ pub const Tunnel = struct {
         slices: []const []const u8,
         end_stream: bool,
     ) Error!void {
-        try self.ensureWritable();
-        try self.connection.writeDataSlices(
-            self.stream_id,
+        var progress: TunnelWriteProgress = .{};
+        return self.writeSlicesUntil(
             slices,
             end_stream,
+            &progress,
+            null,
+            false,
+        ) catch |err| switch (err) {
+            error.Timeout => unreachable,
+            else => |other| return @errorCast(other),
+        };
+    }
+
+    pub fn writeSlicesWithTimeout(
+        self: *Tunnel,
+        slices: []const []const u8,
+        end_stream: bool,
+        progress: *TunnelWriteProgress,
+        timeout: std.Io.Duration,
+    ) ResponseTimeoutError!void {
+        progress.* = .{};
+        if (timeout.nanoseconds <= 0) return error.Timeout;
+        return self.writeSlicesWithDeadline(
+            slices,
+            end_stream,
+            progress,
+            .fromNow(self.connection.io, .{
+                .raw = timeout,
+                .clock = .awake,
+            }),
         );
-        if (end_stream) self.finishSend();
+    }
+
+    pub fn writeSlicesWithDeadline(
+        self: *Tunnel,
+        slices: []const []const u8,
+        end_stream: bool,
+        progress: *TunnelWriteProgress,
+        deadline: std.Io.Clock.Timestamp,
+    ) ResponseTimeoutError!void {
+        progress.* = .{};
+        _ = try deadline_policy.usableAwake(self.connection.io, deadline);
+        return self.writeSlicesUntil(
+            slices,
+            end_stream,
+            progress,
+            deadline,
+            false,
+        );
     }
 
     /// Begin one logical multi-call tunnel write. The initial preflight is
@@ -15633,9 +17995,34 @@ pub const Tunnel = struct {
         return self.write(&.{}, true);
     }
 
+    pub fn closeWriteWithTimeout(
+        self: *Tunnel,
+        timeout: std.Io.Duration,
+    ) ResponseTimeoutError!void {
+        var progress: TunnelWriteProgress = .{};
+        return self.writeWithTimeout(&.{}, true, &progress, timeout);
+    }
+
+    pub fn closeWriteWithDeadline(
+        self: *Tunnel,
+        deadline: std.Io.Clock.Timestamp,
+    ) ResponseTimeoutError!void {
+        var progress: TunnelWriteProgress = .{};
+        return self.writeWithDeadline(&.{}, true, &progress, deadline);
+    }
+
     pub fn reset(self: *Tunnel, error_code: http2.ErrorCode) Error!void {
         if (self.released.load(.acquire)) return error.ConnectionClosed;
         try self.connection.sendResetStream(self.stream_id, error_code);
+        self.finishReset();
+    }
+
+    pub fn abort(
+        self: *Tunnel,
+        deadline: ?std.Io.Clock.Timestamp,
+    ) void {
+        if (self.released.load(.acquire)) return;
+        self.connection.abortExtendedConnect(self.stream_id, deadline);
         self.finishReset();
     }
 
@@ -15757,6 +18144,34 @@ pub const Tunnel = struct {
         }
     }
 
+    fn writeSlicesUntil(
+        self: *Tunnel,
+        slices: []const []const u8,
+        end_stream: bool,
+        progress: *TunnelWriteProgress,
+        deadline: ?std.Io.Clock.Timestamp,
+        prepared: bool,
+    ) ResponseTimeoutError!void {
+        progress.* = .{};
+        if (deadline) |absolute| {
+            _ = try deadline_policy.usableAwake(
+                self.connection.io,
+                absolute,
+            );
+        }
+        try self.ensureWritable();
+        if (!prepared) try self.connection.prepareDataWrite(self.stream_id);
+        self.connection.writeDataSlicesPreparedTrackedUntil(
+            self.stream_id,
+            slices,
+            end_stream,
+            &progress.committed_bytes,
+            deadline,
+        ) catch |err| return err;
+        progress.fin_committed = end_stream;
+        if (end_stream) self.finishSend();
+    }
+
     fn finishSend(self: *Tunnel) void {
         self.send_finished.store(true, .release);
         self.maybeRelease();
@@ -15794,6 +18209,36 @@ pub const TunnelWriter = struct {
         return self.writeSlices(&.{data}, end_stream);
     }
 
+    pub fn writeWithTimeout(
+        self: *TunnelWriter,
+        data: []const u8,
+        end_stream: bool,
+        progress: *TunnelWriteProgress,
+        timeout: std.Io.Duration,
+    ) ResponseTimeoutError!void {
+        return self.writeSlicesWithTimeout(
+            &.{data},
+            end_stream,
+            progress,
+            timeout,
+        );
+    }
+
+    pub fn writeWithDeadline(
+        self: *TunnelWriter,
+        data: []const u8,
+        end_stream: bool,
+        progress: *TunnelWriteProgress,
+        deadline: std.Io.Clock.Timestamp,
+    ) ResponseTimeoutError!void {
+        return self.writeSlicesWithDeadline(
+            &.{data},
+            end_stream,
+            progress,
+            deadline,
+        );
+    }
+
     pub fn writeParts(
         self: *TunnelWriter,
         first: []const u8,
@@ -15803,25 +18248,95 @@ pub const TunnelWriter = struct {
         return self.writeSlices(&.{ first, second }, end_stream);
     }
 
+    pub fn writePartsWithTimeout(
+        self: *TunnelWriter,
+        first: []const u8,
+        second: []const u8,
+        end_stream: bool,
+        progress: *TunnelWriteProgress,
+        timeout: std.Io.Duration,
+    ) ResponseTimeoutError!void {
+        return self.writeSlicesWithTimeout(
+            &.{ first, second },
+            end_stream,
+            progress,
+            timeout,
+        );
+    }
+
+    pub fn writePartsWithDeadline(
+        self: *TunnelWriter,
+        first: []const u8,
+        second: []const u8,
+        end_stream: bool,
+        progress: *TunnelWriteProgress,
+        deadline: std.Io.Clock.Timestamp,
+    ) ResponseTimeoutError!void {
+        return self.writeSlicesWithDeadline(
+            &.{ first, second },
+            end_stream,
+            progress,
+            deadline,
+        );
+    }
+
     pub fn writeSlices(
         self: *TunnelWriter,
         slices: []const []const u8,
         end_stream: bool,
     ) Error!void {
-        if (self.tunnel.send_finished.load(.acquire)) {
-            return error.ConnectionClosed;
-        }
-        if (!self.tunnel.connection.outboundStreamIsActive(
-            self.tunnel.stream_id,
-        )) {
-            return error.StreamReset;
-        }
-        try self.tunnel.connection.writeDataSlicesPrepared(
-            self.tunnel.stream_id,
+        var progress: TunnelWriteProgress = .{};
+        return self.tunnel.writeSlicesUntil(
             slices,
             end_stream,
+            &progress,
+            null,
+            true,
+        ) catch |err| switch (err) {
+            error.Timeout => unreachable,
+            else => |other| return @errorCast(other),
+        };
+    }
+
+    pub fn writeSlicesWithTimeout(
+        self: *TunnelWriter,
+        slices: []const []const u8,
+        end_stream: bool,
+        progress: *TunnelWriteProgress,
+        timeout: std.Io.Duration,
+    ) ResponseTimeoutError!void {
+        progress.* = .{};
+        if (timeout.nanoseconds <= 0) return error.Timeout;
+        return self.writeSlicesWithDeadline(
+            slices,
+            end_stream,
+            progress,
+            .fromNow(self.tunnel.connection.io, .{
+                .raw = timeout,
+                .clock = .awake,
+            }),
         );
-        if (end_stream) self.tunnel.finishSend();
+    }
+
+    pub fn writeSlicesWithDeadline(
+        self: *TunnelWriter,
+        slices: []const []const u8,
+        end_stream: bool,
+        progress: *TunnelWriteProgress,
+        deadline: std.Io.Clock.Timestamp,
+    ) ResponseTimeoutError!void {
+        progress.* = .{};
+        _ = try deadline_policy.usableAwake(
+            self.tunnel.connection.io,
+            deadline,
+        );
+        return self.tunnel.writeSlicesUntil(
+            slices,
+            end_stream,
+            progress,
+            deadline,
+            true,
+        );
     }
 };
 
@@ -15892,6 +18407,33 @@ fn readFrameTransportWithDeadline(
     );
 }
 
+fn readHandshakeFrameTransportWithDeadline(
+    allocator: std.mem.Allocator,
+    transport: RuntimeTransport,
+    limits: Limits,
+    deadline: ?std.Io.Clock.Timestamp,
+) Error!OwnedFrame {
+    var violation: ?frame_wire.EnvelopeViolation = null;
+    return frame_io.readOwnedTransportWithDeadlineClassified(
+        allocator,
+        transport,
+        @min(limits.max_frame_payload, limits.max_frame_size),
+        deadline,
+        &violation,
+    ) catch |err| {
+        if (violation) |value| {
+            writeConnectionErrorGoAwayTransportUntil(
+                allocator,
+                transport,
+                value.error_code,
+                "frame-envelope",
+                deadline,
+            ) catch {};
+        }
+        return err;
+    };
+}
+
 fn writeConnectionErrorGoAway(
     allocator: std.mem.Allocator,
     io: std.Io,
@@ -15913,6 +18455,22 @@ fn writeConnectionErrorGoAwayTransport(
     error_code: http2.ErrorCode,
     debug_data: []const u8,
 ) Error!void {
+    return writeConnectionErrorGoAwayTransportUntil(
+        allocator,
+        transport,
+        error_code,
+        debug_data,
+        null,
+    );
+}
+
+fn writeConnectionErrorGoAwayTransportUntil(
+    allocator: std.mem.Allocator,
+    transport: RuntimeTransport,
+    error_code: http2.ErrorCode,
+    debug_data: []const u8,
+    deadline: ?std.Io.Clock.Timestamp,
+) Error!void {
     var encoded: std.ArrayList(u8) = .empty;
     defer encoded.deinit(allocator);
     try http2.GoAwayPayload.write(
@@ -15922,7 +18480,16 @@ fn writeConnectionErrorGoAwayTransport(
         error_code,
         debug_data,
     );
-    try transport.writeAll(encoded.items);
+    if (deadline) |absolute| {
+        var committed: usize = 0;
+        try transport.writeAllWithDeadline(
+            encoded.items,
+            &committed,
+            absolute,
+        );
+    } else {
+        try transport.writeAll(encoded.items);
+    }
 }
 
 fn writeFrame(
@@ -16545,7 +19112,7 @@ test "HTTP/2 runtime accumulates server ORIGIN entries" {
         allocator,
         io,
         server.address(),
-        .{ .max_frame_payload = 4096 },
+        .{ .max_frame_payload = 4096, .max_peer_origins = 2 },
     );
     defer client.close();
     // Any connection-level read pumps ORIGIN through shared state. Two reads
@@ -16556,15 +19123,15 @@ test "HTTP/2 runtime accumulates server ORIGIN entries" {
     var second = try readFrame(allocator, io, client.stream, client.limits);
     defer second.deinit(allocator);
     try std.testing.expect(try client.handleConnectionFrame(second.frame));
-    try std.testing.expectEqual(@as(usize, 3), client.peerOrigins().len);
+    try std.testing.expectEqual(@as(usize, 2), client.peerOrigins().len);
     try std.testing.expectEqualStrings(
-        "https://img.example.com",
-        client.peerOrigins()[2],
+        "https://cdn.example.com",
+        client.peerOrigins()[1],
     );
     try std.testing.expect(client.peerOriginKnown("https://cdn.example.com"));
-    try std.testing.expect(client.peerOriginKnown("https://img.example.com"));
+    try std.testing.expect(!client.peerOriginKnown("https://img.example.com"));
     try std.testing.expectEqual(@as(?usize, 1), client.peer_origin_index.get("https://cdn.example.com"));
-    try std.testing.expectEqual(@as(?usize, 2), client.peer_origin_index.get("https://img.example.com"));
+    try std.testing.expect(client.peer_origin_index.get("https://img.example.com") == null);
     try std.testing.expect(client.peer_origin_index.get("https://missing.example.com") == null);
     _ = try client.ping([_]u8{0x41} ** 8);
 
@@ -16599,6 +19166,42 @@ test "HTTP/2 duplicate ORIGIN entry does not allocate" {
     try connection.storePeerOrigin("https://example.com");
     try std.testing.expect(!no_alloc.has_induced_failure);
     try std.testing.expectEqual(@as(usize, 1), connection.peer_origins.items.len);
+}
+
+test "HTTP/2 ORIGIN state enforces connection bound" {
+    const allocator = std.testing.allocator;
+    var connection = Connection{
+        .io = undefined,
+        .allocator = allocator,
+        .stream = undefined,
+        .role = .client,
+        .limits = .{ .max_peer_origins = 2 },
+    };
+    defer {
+        for (connection.peer_origins.items) |origin| allocator.free(origin);
+        connection.peer_origins.deinit(allocator);
+        connection.peer_origin_index.deinit(allocator);
+        connection.hpack_decoder.deinit(allocator);
+        connection.hpack_encoder.deinit(allocator);
+    }
+
+    try connection.storePeerOrigin("https://one.example");
+    try connection.storePeerOrigin("https://two.example");
+    const capacity = connection.peer_origins.capacity;
+    var no_alloc = std.testing.FailingAllocator.init(allocator, .{
+        .fail_index = 0,
+    });
+    const saved_allocator = connection.allocator;
+    connection.allocator = no_alloc.allocator();
+    defer connection.allocator = saved_allocator;
+    try connection.storePeerOrigin("https://one.example");
+    try connection.storePeerOrigin("https://three.example");
+    try std.testing.expect(!no_alloc.has_induced_failure);
+    try std.testing.expectEqual(@as(usize, 2), connection.peer_origins.items.len);
+    try std.testing.expectEqual(capacity, connection.peer_origins.capacity);
+    try std.testing.expect(!connection.peerOriginKnown(
+        "https://three.example",
+    ));
 }
 
 test "HTTP/2 runtime ignores invalid ORIGIN envelope and client origin" {
@@ -16708,6 +19311,14 @@ test "HTTP/2 runtime receives connection and stream ALTSVC frames" {
                 shared.err = err;
                 return;
             };
+            connection.sendAlternativeService(
+                3,
+                "",
+                "h2=\"ignored.example.com:443\"",
+            ) catch |err| {
+                shared.err = err;
+                return;
+            };
             _ = connection.readPing() catch |err| {
                 shared.err = err;
                 return;
@@ -16721,10 +19332,13 @@ test "HTTP/2 runtime receives connection and stream ALTSVC frames" {
         allocator,
         io,
         server.address(),
-        .{ .max_frame_payload = 4096 },
+        .{
+            .max_frame_payload = 4096,
+            .max_alternative_services = 2,
+        },
     );
     defer client.close();
-    inline for (0..3) |_| {
+    inline for (0..4) |_| {
         var frame = try readFrame(
             allocator,
             io,
@@ -16768,6 +19382,10 @@ test "HTTP/2 runtime receives connection and stream ALTSVC frames" {
         .stream_id = 0,
         .origin = "https://missing.example.com",
     }) == null);
+    try std.testing.expect(client.alternative_service_index.get(.{
+        .stream_id = 3,
+        .origin = "",
+    }) == null);
     _ = try client.ping([_]u8{0x42} ** 8);
     thread.join();
     if (shared.err) |err| return err;
@@ -16810,6 +19428,110 @@ test "HTTP/2 ALTSVC identical replacement does not allocate" {
     );
     try std.testing.expect(!no_alloc.has_induced_failure);
     try std.testing.expectEqual(@as(usize, 1), connection.alternative_services.items.len);
+}
+
+test "HTTP/2 ALTSVC state enforces connection bound" {
+    const allocator = std.testing.allocator;
+    var connection = Connection{
+        .io = undefined,
+        .allocator = allocator,
+        .stream = undefined,
+        .role = .client,
+        .limits = .{ .max_alternative_services = 2 },
+    };
+    defer {
+        for (connection.alternative_services.items) |*service| {
+            service.deinit(allocator);
+        }
+        connection.alternative_services.deinit(allocator);
+        connection.alternative_service_index.deinit(allocator);
+        connection.hpack_decoder.deinit(allocator);
+        connection.hpack_encoder.deinit(allocator);
+    }
+
+    try connection.storeAlternativeService(
+        0,
+        "https://one.example",
+        "h3=\":443\"; ma=60",
+    );
+    try connection.storeAlternativeService(
+        1,
+        "",
+        "h2=\"two.example:443\"",
+    );
+    try connection.storeAlternativeService(
+        0,
+        "https://one.example",
+        "h3=\":8443\"; ma=30",
+    );
+    try std.testing.expectEqual(
+        @as(usize, 2),
+        connection.alternative_services.items.len,
+    );
+    try std.testing.expectEqualStrings(
+        "h3=\":8443\"; ma=30",
+        connection.alternative_services.items[0].field_value,
+    );
+
+    const capacity = connection.alternative_services.capacity;
+    var no_alloc = std.testing.FailingAllocator.init(allocator, .{
+        .fail_index = 0,
+    });
+    const saved_allocator = connection.allocator;
+    connection.allocator = no_alloc.allocator();
+    defer connection.allocator = saved_allocator;
+    try connection.storeAlternativeService(
+        3,
+        "",
+        "h3=\"three.example:443\"",
+    );
+    try std.testing.expect(!no_alloc.has_induced_failure);
+    try std.testing.expectEqual(
+        @as(usize, 2),
+        connection.alternative_services.items.len,
+    );
+    try std.testing.expectEqual(
+        capacity,
+        connection.alternative_services.capacity,
+    );
+}
+
+test "HTTP/2 zero advertisement bounds retain no peer metadata" {
+    const allocator = std.testing.allocator;
+    var no_alloc = std.testing.FailingAllocator.init(allocator, .{
+        .fail_index = 0,
+    });
+    var connection = Connection{
+        .io = undefined,
+        .allocator = no_alloc.allocator(),
+        .stream = undefined,
+        .role = .client,
+        .limits = .{
+            .max_peer_origins = 0,
+            .max_alternative_services = 0,
+        },
+    };
+    defer {
+        connection.peer_origins.deinit(allocator);
+        connection.peer_origin_index.deinit(allocator);
+        connection.alternative_services.deinit(allocator);
+        connection.alternative_service_index.deinit(allocator);
+        connection.hpack_decoder.deinit(allocator);
+        connection.hpack_encoder.deinit(allocator);
+    }
+
+    try connection.storePeerOrigin("https://ignored.example");
+    try connection.storeAlternativeService(
+        0,
+        "https://ignored.example",
+        "h3=\":443\"",
+    );
+    try std.testing.expect(!no_alloc.has_induced_failure);
+    try std.testing.expectEqual(@as(usize, 0), connection.peerOrigins().len);
+    try std.testing.expectEqual(
+        @as(usize, 0),
+        connection.alternativeServices().len,
+    );
 }
 
 test "HTTP/2 h2c runtime client and server exchange over TCP" {
@@ -17227,6 +19949,511 @@ test "HTTP/2 serveConnection handles sequential requests" {
     try std.testing.expectEqual(@as(usize, 2), shared.context.count);
 }
 
+test "HTTP/2 serveOne converts handler informational status to final 500" {
+    const allocator = std.testing.allocator;
+    var threaded = std.Io.Threaded.init(allocator, .{
+        .async_limit = .unlimited,
+    });
+    defer threaded.deinit();
+    const io = threaded.io();
+    var server = try Server.listen(
+        allocator,
+        io,
+        .{ .ip4 = .loopback(0) },
+        .{ .max_frame_payload = 4096, .max_body_bytes = 4096 },
+    );
+    defer server.deinit();
+
+    const Context = struct {
+        calls: usize = 0,
+
+        fn handle(
+            self: *@This(),
+            request: OwnedRequest,
+        ) Error!ResponseOptions {
+            self.calls += 1;
+            if (std.mem.eql(u8, request.path, "/invalid-final")) {
+                return .{ .status = 103 };
+            }
+            return .{ .status = 204 };
+        }
+    };
+    const Shared = struct {
+        server: *Server,
+        context: Context = .{},
+        first_error: ?anyerror = null,
+        err: ?anyerror = null,
+
+        fn run(self: *@This()) void {
+            self.runFallible() catch |err| {
+                self.err = err;
+            };
+        }
+
+        fn runFallible(self: *@This()) !void {
+            var connection = try self.server.accept();
+            defer connection.close();
+            _ = connection.serveOne(
+                Context,
+                &self.context,
+                Context.handle,
+            ) catch |err| {
+                self.first_error = err;
+            };
+            _ = try connection.serveOne(
+                Context,
+                &self.context,
+                Context.handle,
+            );
+        }
+    };
+    var shared = Shared{ .server = &server };
+    const thread = try std.Thread.spawn(.{}, Shared.run, .{&shared});
+    var joined = false;
+    defer if (!joined) thread.join();
+
+    var client = try Client.connect(allocator, io, server.address(), .{
+        .max_frame_payload = 4096,
+        .max_body_bytes = 4096,
+    });
+    defer client.close();
+    var invalid = try client.request(.{
+        .path = "/invalid-final",
+        .authority = "localhost",
+    });
+    defer invalid.deinit(allocator);
+    try std.testing.expectEqual(@as(u16, 500), invalid.status);
+    try std.testing.expectEqualStrings("", invalid.body);
+    var sibling = try client.request(.{
+        .path = "/sibling",
+        .authority = "localhost",
+    });
+    defer sibling.deinit(allocator);
+    try std.testing.expectEqual(@as(u16, 204), sibling.status);
+
+    thread.join();
+    joined = true;
+    if (shared.err) |err| return err;
+    try std.testing.expectEqual(error.InvalidStatus, shared.first_error.?);
+    try std.testing.expectEqual(@as(usize, 2), shared.context.calls);
+}
+
+test "HTTP/2 concurrent handler batch converts informational status and isolates its error" {
+    const allocator = std.testing.allocator;
+    var threaded = std.Io.Threaded.init(allocator, .{
+        .async_limit = .unlimited,
+    });
+    defer threaded.deinit();
+    const io = threaded.io();
+    var server = try Server.listen(
+        allocator,
+        io,
+        .{ .ip4 = .loopback(0) },
+        .{ .max_frame_payload = 4096, .max_body_bytes = 4096 },
+    );
+    defer server.deinit();
+
+    const Context = struct {
+        fn handle(
+            _: *@This(),
+            request: OwnedRequest,
+        ) Error!ResponseOptions {
+            if (std.mem.eql(u8, request.path, "/invalid-final")) {
+                return .{ .status = 103 };
+            }
+            if (std.mem.eql(u8, request.path, "/sibling")) {
+                return .{ .status = 204 };
+            }
+            return .{ .body = request.path };
+        }
+    };
+    const Shared = struct {
+        server: *Server,
+        context: Context = .{},
+        successes: usize = 0,
+        first_error: ?anyerror = null,
+        err: ?anyerror = null,
+
+        fn run(self: *@This()) void {
+            self.runFallible() catch |err| {
+                self.err = err;
+            };
+        }
+
+        fn runFallible(self: *@This()) !void {
+            var connection = try self.server.accept();
+            defer connection.close();
+            var result = try connection.serveRequestBatchConcurrent(
+                Context,
+                &self.context,
+                Context.handle,
+                2,
+            );
+            defer result.deinit();
+            self.successes = result.successCount();
+            self.first_error = result.firstError();
+            try std.testing.expectEqual(@as(usize, 2), result.errors.len);
+            try std.testing.expectEqual(error.InvalidStatus, result.errors[0].?);
+            try std.testing.expect(result.errors[1] == null);
+            _ = try connection.serveOne(
+                Context,
+                &self.context,
+                Context.handle,
+            );
+        }
+    };
+    var shared = Shared{ .server = &server };
+    const thread = try std.Thread.spawn(.{}, Shared.run, .{&shared});
+    var joined = false;
+    defer if (!joined) thread.join();
+
+    var client = try Client.connect(allocator, io, server.address(), .{
+        .max_frame_payload = 4096,
+        .max_body_bytes = 4096,
+    });
+    defer client.close();
+    const invalid_request = try client.sendCompleteRequest(.{
+        .path = "/invalid-final",
+        .authority = "localhost",
+    });
+    const sibling_request = try client.sendCompleteRequest(.{
+        .path = "/sibling",
+        .authority = "localhost",
+    });
+    {
+        var states = [_]Connection.BatchResponseState{
+            .{
+                .stream_id = invalid_request.stream_id,
+                .request_method = invalid_request.request_method,
+                .extended_connect = invalid_request.extended_connect,
+            },
+            .{
+                .stream_id = sibling_request.stream_id,
+                .request_method = sibling_request.request_method,
+                .extended_connect = sibling_request.extended_connect,
+            },
+        };
+        defer for (&states) |*state| {
+            client.releaseLocalStream(state.stream_id);
+            state.deinit(allocator);
+        };
+        try client.readResponseBatch(&states, null, null);
+        try std.testing.expectEqual(@as(?u16, 500), states[0].status);
+        try std.testing.expectEqualStrings("", states[0].body_owned.?);
+        try std.testing.expectEqual(@as(?u16, 204), states[1].status);
+    }
+    var after = try client.request(.{
+        .path = "/after",
+        .authority = "localhost",
+    });
+    defer after.deinit(allocator);
+    try std.testing.expectEqual(@as(u16, 200), after.status);
+    try std.testing.expectEqualStrings("/after", after.body);
+
+    thread.join();
+    joined = true;
+    if (shared.err) |err| return err;
+    try std.testing.expectEqual(@as(usize, 1), shared.successes);
+    try std.testing.expectEqual(error.InvalidStatus, shared.first_error.?);
+}
+
+test "HTTP/2 concurrent handler batch writes responses in completion order" {
+    const allocator = std.testing.allocator;
+    var threaded = std.Io.Threaded.init(allocator, .{
+        .async_limit = .unlimited,
+    });
+    defer threaded.deinit();
+    const io = threaded.io();
+    var server = try Server.listen(
+        allocator,
+        io,
+        .{ .ip4 = .loopback(0) },
+        .{ .max_frame_payload = 4096, .max_body_bytes = 4096 },
+    );
+    defer server.deinit();
+
+    const Context = struct {
+        io: std.Io,
+        slow_started: std.Io.Event = .unset,
+        release_slow: std.Io.Event = .unset,
+
+        fn handle(
+            self: *@This(),
+            request: OwnedRequest,
+        ) Error!ResponseOptions {
+            if (std.mem.eql(u8, request.path, "/slow")) {
+                self.slow_started.set(self.io);
+                try self.release_slow.wait(self.io);
+                return .{ .body = request.path };
+            }
+            try self.slow_started.wait(self.io);
+            return .{ .body = request.path };
+        }
+    };
+    const Shared = struct {
+        server: *Server,
+        context: Context,
+        successes: usize = 0,
+        err: ?anyerror = null,
+
+        fn run(self: *@This()) void {
+            self.runFallible() catch |err| {
+                self.err = err;
+            };
+        }
+
+        fn runFallible(self: *@This()) !void {
+            var connection = try self.server.accept();
+            defer connection.close();
+            var result = try connection.serveRequestBatchConcurrent(
+                Context,
+                &self.context,
+                Context.handle,
+                2,
+            );
+            defer result.deinit();
+            self.successes = result.successCount();
+            if (result.firstError()) |err| return err;
+            _ = try connection.serveOne(
+                Context,
+                &self.context,
+                Context.handle,
+            );
+            try connection.sendGoAway(5, .no_error, "batch-complete");
+        }
+    };
+    var shared = Shared{
+        .server = &server,
+        .context = .{ .io = io },
+    };
+    const thread = try std.Thread.spawn(.{}, Shared.run, .{&shared});
+    var joined = false;
+    defer if (!joined) {
+        shared.context.release_slow.set(io);
+        thread.join();
+    };
+
+    var client = try Client.connect(allocator, io, server.address(), .{
+        .max_frame_payload = 4096,
+        .max_body_bytes = 4096,
+    });
+    defer client.close();
+    const slow = try client.sendCompleteRequest(.{
+        .path = "/slow",
+        .authority = "localhost",
+    });
+    const fast = try client.sendCompleteRequest(.{
+        .path = "/fast",
+        .authority = "localhost",
+    });
+    var fast_response = try client.readResponse(
+        fast.stream_id,
+        fast.request_method,
+        fast.extended_connect,
+        null,
+    );
+    defer fast_response.deinit(allocator);
+    try std.testing.expectEqualStrings("/fast", fast_response.body);
+    shared.context.release_slow.set(io);
+    var slow_response = try client.readResponse(
+        slow.stream_id,
+        slow.request_method,
+        slow.extended_connect,
+        null,
+    );
+    defer slow_response.deinit(allocator);
+    try std.testing.expectEqualStrings("/slow", slow_response.body);
+    var after = try client.request(.{
+        .path = "/after",
+        .authority = "localhost",
+    });
+    defer after.deinit(allocator);
+    try std.testing.expectEqualStrings("/after", after.body);
+    var goaway = try client.readGoAway();
+    defer goaway.deinit(allocator);
+    try std.testing.expectEqualStrings("batch-complete", goaway.goaway.debug_data);
+
+    thread.join();
+    joined = true;
+    if (shared.err) |err| return err;
+    try std.testing.expectEqual(@as(usize, 2), shared.successes);
+}
+
+test "HTTP/2 concurrent handler batch isolates handler errors" {
+    const allocator = std.testing.allocator;
+    var threaded = std.Io.Threaded.init(allocator, .{
+        .async_limit = .unlimited,
+    });
+    defer threaded.deinit();
+    const io = threaded.io();
+    var server = try Server.listen(
+        allocator,
+        io,
+        .{ .ip4 = .loopback(0) },
+        .{ .max_frame_payload = 4096, .max_body_bytes = 4096 },
+    );
+    defer server.deinit();
+
+    const Context = struct {
+        io: std.Io,
+        release_failure: std.Io.Event = .unset,
+
+        fn handle(
+            self: *@This(),
+            request: OwnedRequest,
+        ) Error!ResponseOptions {
+            if (std.mem.eql(u8, request.path, "/error")) {
+                try self.release_failure.wait(self.io);
+                return error.InvalidResponse;
+            }
+            return .{ .body = request.path };
+        }
+    };
+    const Shared = struct {
+        server: *Server,
+        context: Context,
+        successes: usize = 0,
+        first_error: ?anyerror = null,
+        err: ?anyerror = null,
+
+        fn run(self: *@This()) void {
+            self.runFallible() catch |err| {
+                self.err = err;
+            };
+        }
+
+        fn runFallible(self: *@This()) !void {
+            var connection = try self.server.accept();
+            defer connection.close();
+            var result = try connection.serveRequestBatchConcurrent(
+                Context,
+                &self.context,
+                Context.handle,
+                2,
+            );
+            defer result.deinit();
+            self.successes = result.successCount();
+            self.first_error = result.firstError();
+            try std.testing.expectEqual(@as(usize, 2), result.errors.len);
+            try std.testing.expectEqual(
+                error.InvalidResponse,
+                result.errors[0].?,
+            );
+            try std.testing.expect(result.errors[1] == null);
+            _ = try connection.serveOne(
+                Context,
+                &self.context,
+                Context.handle,
+            );
+        }
+    };
+    var shared = Shared{
+        .server = &server,
+        .context = .{ .io = io },
+    };
+    const thread = try std.Thread.spawn(.{}, Shared.run, .{&shared});
+    var joined = false;
+    defer if (!joined) {
+        shared.context.release_failure.set(io);
+        thread.join();
+    };
+
+    var client = try Client.connect(allocator, io, server.address(), .{
+        .max_frame_payload = 4096,
+        .max_body_bytes = 4096,
+    });
+    defer client.close();
+    const failed = try client.sendCompleteRequest(.{
+        .path = "/error",
+        .authority = "localhost",
+    });
+    const fast = try client.sendCompleteRequest(.{
+        .path = "/fast",
+        .authority = "localhost",
+    });
+    var fast_response = try client.readResponse(
+        fast.stream_id,
+        fast.request_method,
+        fast.extended_connect,
+        null,
+    );
+    defer fast_response.deinit(allocator);
+    try std.testing.expectEqualStrings("/fast", fast_response.body);
+    shared.context.release_failure.set(io);
+    var reset = try client.readResetStream();
+    defer reset.deinit(allocator);
+    try std.testing.expectEqual(failed.stream_id, reset.reset.stream_id);
+    try std.testing.expectEqual(http2.ErrorCode.internal_error, reset.reset.error_code);
+    var after = try client.request(.{
+        .path = "/after",
+        .authority = "localhost",
+    });
+    defer after.deinit(allocator);
+    try std.testing.expectEqualStrings("/after", after.body);
+
+    thread.join();
+    joined = true;
+    if (shared.err) |err| return err;
+    try std.testing.expectEqual(@as(usize, 1), shared.successes);
+    try std.testing.expectEqual(error.InvalidResponse, shared.first_error.?);
+}
+
+test "HTTP/2 concurrent handler batch accepts an empty server batch" {
+    const Context = struct {
+        fn handle(
+            _: *@This(),
+            _: OwnedRequest,
+        ) Error!ResponseOptions {
+            unreachable;
+        }
+    };
+    var context: Context = .{};
+    var connection = Connection{
+        .io = undefined,
+        .allocator = std.testing.allocator,
+        .stream = undefined,
+        .role = .server,
+    };
+    defer {
+        connection.active_peer_streams.deinit(std.testing.allocator);
+        connection.active_peer_index.deinit(std.testing.allocator);
+    }
+    var result = try connection.serveRequestBatchConcurrent(
+        Context,
+        &context,
+        Context.handle,
+        0,
+    );
+    defer result.deinit();
+    try std.testing.expectEqual(@as(usize, 0), result.errors.len);
+    try std.testing.expectEqual(@as(usize, 0), result.successCount());
+    try std.testing.expect(result.firstError() == null);
+
+    connection.limits.max_concurrent_streams = 1;
+    try std.testing.expectError(
+        error.InvalidServeOptions,
+        connection.serveRequestBatchConcurrent(
+            Context,
+            &context,
+            Context.handle,
+            2,
+        ),
+    );
+
+    connection.limits.max_concurrent_streams = null;
+    try connection.addActivePeerStream(1);
+    defer connection.releasePeerStream(1);
+    try std.testing.expectError(
+        error.InvalidServeOptions,
+        connection.serveRequestBatchConcurrent(
+            Context,
+            &context,
+            Context.handle,
+            1,
+        ),
+    );
+}
+
 test "HTTP/2 client connects by host name" {
     const allocator = std.testing.allocator;
 
@@ -17556,6 +20783,270 @@ test "HTTP/2 server accepts body-bearing h2c upgrade request" {
     if (shared.err) |err| return err;
     try std.testing.expectEqual(@as(u16, 200), response.status);
     try std.testing.expectEqualStrings("server-upgraded", response.body);
+}
+
+test "HTTP/2 concurrent handler batch answers PING while a handler waits" {
+    const allocator = std.testing.allocator;
+    var threaded = std.Io.Threaded.init(allocator, .{
+        .async_limit = .unlimited,
+    });
+    defer threaded.deinit();
+    const io = threaded.io();
+    var server = try Server.listen(
+        allocator,
+        io,
+        .{ .ip4 = .loopback(0) },
+        .{ .max_frame_payload = 4096, .max_body_bytes = 4096 },
+    );
+    defer server.deinit();
+
+    const Context = struct {
+        io: std.Io,
+        slow_started: std.Io.Event = .unset,
+        release_slow: std.Io.Event = .unset,
+
+        fn handle(
+            self: *@This(),
+            request: OwnedRequest,
+        ) Error!ResponseOptions {
+            if (std.mem.eql(u8, request.path, "/slow-ping")) {
+                self.slow_started.set(self.io);
+                try self.release_slow.wait(self.io);
+            } else {
+                try self.slow_started.wait(self.io);
+            }
+            return .{ .body = request.path };
+        }
+    };
+    const Shared = struct {
+        server: *Server,
+        context: Context,
+        successes: usize = 0,
+        err: ?anyerror = null,
+
+        fn run(self: *@This()) void {
+            self.runFallible() catch |err| {
+                self.err = err;
+            };
+        }
+
+        fn runFallible(self: *@This()) !void {
+            var connection = try self.server.accept();
+            defer connection.close();
+            var result = try connection.serveRequestBatchConcurrent(
+                Context,
+                &self.context,
+                Context.handle,
+                2,
+            );
+            defer result.deinit();
+            self.successes = result.successCount();
+            if (result.firstError()) |err| return err;
+            _ = try connection.serveOne(
+                Context,
+                &self.context,
+                Context.handle,
+            );
+        }
+    };
+    var shared = Shared{
+        .server = &server,
+        .context = .{ .io = io },
+    };
+    const thread = try std.Thread.spawn(.{}, Shared.run, .{&shared});
+    var joined = false;
+    defer if (!joined) {
+        shared.context.release_slow.set(io);
+        thread.join();
+    };
+
+    var client = try Client.connect(allocator, io, server.address(), .{
+        .max_frame_payload = 4096,
+        .max_body_bytes = 4096,
+    });
+    defer client.close();
+    const slow = try client.sendCompleteRequest(.{
+        .path = "/slow-ping",
+        .authority = "localhost",
+    });
+    const fast = try client.sendCompleteRequest(.{
+        .path = "/fast-ping",
+        .authority = "localhost",
+    });
+    try shared.context.slow_started.wait(io);
+
+    // Put an application HEADERS frame ahead of the PING. The batch owner
+    // must retain it for the next serveOne call while still reaching and
+    // acknowledging the connection-level frame behind it.
+    const after = try client.sendCompleteRequest(.{
+        .path = "/after-ping",
+        .authority = "localhost",
+    });
+    const ping_payload = [_]u8{ 3, 1, 4, 1, 5, 9, 2, 6 };
+    const ping_ack = try client.pingWithTimeout(
+        ping_payload,
+        .fromMilliseconds(500),
+    );
+    try std.testing.expectEqualSlices(u8, &ping_payload, &ping_ack);
+
+    var fast_response = try client.readResponse(
+        fast.stream_id,
+        fast.request_method,
+        fast.extended_connect,
+        null,
+    );
+    defer fast_response.deinit(allocator);
+    try std.testing.expectEqualStrings("/fast-ping", fast_response.body);
+
+    shared.context.release_slow.set(io);
+    var slow_response = try client.readResponse(
+        slow.stream_id,
+        slow.request_method,
+        slow.extended_connect,
+        null,
+    );
+    defer slow_response.deinit(allocator);
+    try std.testing.expectEqualStrings("/slow-ping", slow_response.body);
+    var after_response = try client.readResponse(
+        after.stream_id,
+        after.request_method,
+        after.extended_connect,
+        null,
+    );
+    defer after_response.deinit(allocator);
+    try std.testing.expectEqualStrings("/after-ping", after_response.body);
+
+    thread.join();
+    joined = true;
+    if (shared.err) |err| return err;
+    try std.testing.expectEqual(@as(usize, 2), shared.successes);
+}
+
+test "HTTP/2 concurrent handler batch does not delay completion behind partial frame" {
+    const allocator = std.testing.allocator;
+    var threaded = std.Io.Threaded.init(allocator, .{
+        .async_limit = .unlimited,
+    });
+    defer threaded.deinit();
+    const io = threaded.io();
+    var server = try Server.listen(
+        allocator,
+        io,
+        .{ .ip4 = .loopback(0) },
+        .{ .max_frame_payload = 4096, .max_body_bytes = 4096 },
+    );
+    defer server.deinit();
+
+    const Context = struct {
+        io: std.Io,
+        handlers_started: std.atomic.Value(usize) = .init(0),
+        release_fast: std.Io.Event = .unset,
+        release_slow: std.Io.Event = .unset,
+
+        fn handle(
+            self: *@This(),
+            request: OwnedRequest,
+        ) Error!ResponseOptions {
+            _ = self.handlers_started.fetchAdd(1, .release);
+            if (std.mem.eql(u8, request.path, "/partial-slow")) {
+                try self.release_slow.wait(self.io);
+            } else {
+                try self.release_fast.wait(self.io);
+            }
+            return .{ .body = request.path };
+        }
+    };
+    const Shared = struct {
+        server: *Server,
+        context: Context,
+        err: ?anyerror = null,
+
+        fn run(self: *@This()) void {
+            self.runFallible() catch |err| {
+                self.err = err;
+            };
+        }
+
+        fn runFallible(self: *@This()) !void {
+            var connection = try self.server.accept();
+            defer connection.close();
+            var result = try connection.serveRequestBatchConcurrent(
+                Context,
+                &self.context,
+                Context.handle,
+                2,
+            );
+            defer result.deinit();
+            try std.testing.expectEqual(@as(usize, 2), result.successCount());
+        }
+    };
+    var shared = Shared{
+        .server = &server,
+        .context = .{ .io = io },
+    };
+    const thread = try std.Thread.spawn(.{}, Shared.run, .{&shared});
+    var joined = false;
+    defer if (!joined) {
+        shared.context.release_fast.set(io);
+        shared.context.release_slow.set(io);
+        thread.join();
+    };
+
+    var client = try Client.connect(allocator, io, server.address(), .{
+        .max_frame_payload = 4096,
+        .max_body_bytes = 4096,
+    });
+    defer client.close();
+    const slow = try client.sendCompleteRequest(.{
+        .path = "/partial-slow",
+        .authority = "localhost",
+    });
+    const fast = try client.sendCompleteRequest(.{
+        .path = "/partial-fast",
+        .authority = "localhost",
+    });
+    while (shared.context.handlers_started.load(.acquire) != 2) {
+        try std.Io.sleep(io, .fromMilliseconds(1), .awake);
+    }
+
+    var ping_header: [http2.FrameHeader.encoded_len]u8 = undefined;
+    try encodeFrameHeader(&ping_header, .ping, 0, 0, 8);
+    try writeAll(io, client.stream, ping_header[0..1]);
+    try std.Io.sleep(io, .fromMilliseconds(20), .awake);
+    shared.context.release_fast.set(io);
+
+    var fast_response = try client.readResponseWithTimeout(
+        fast.stream_id,
+        fast.request_method,
+        fast.extended_connect,
+        .fromMilliseconds(500),
+    );
+    defer fast_response.deinit(allocator);
+    try std.testing.expectEqualStrings("/partial-fast", fast_response.body);
+
+    const first_ping = [_]u8{ 1, 2, 3, 4, 5, 6, 7, 8 };
+    try writeAll(io, client.stream, ping_header[1..]);
+    try writeAll(io, client.stream, &first_ping);
+    const second_ping = [_]u8{ 8, 7, 6, 5, 4, 3, 2, 1 };
+    const ping_ack = try client.pingWithTimeout(
+        second_ping,
+        .fromMilliseconds(500),
+    );
+    try std.testing.expectEqualSlices(u8, &second_ping, &ping_ack);
+
+    shared.context.release_slow.set(io);
+    var slow_response = try client.readResponse(
+        slow.stream_id,
+        slow.request_method,
+        slow.extended_connect,
+        null,
+    );
+    defer slow_response.deinit(allocator);
+    try std.testing.expectEqualStrings("/partial-slow", slow_response.body);
+
+    thread.join();
+    joined = true;
+    if (shared.err) |err| return err;
 }
 
 test "HTTP/2 readPing ignores ACK frames" {
@@ -18264,7 +21755,147 @@ test "HTTP/2 graceful shutdown write failure is terminal" {
     try std.testing.expectEqual(writes, writer.writes);
 }
 
-test "HTTP/2 graceful shutdown synchronized phase ignores expired deadline" {
+test "HTTP/2 graceful shutdown deadline bounds a blocked GOAWAY write" {
+    if (comptime @import("builtin").os.tag == .windows) return;
+    const allocator = std.testing.allocator;
+    var threaded = std.Io.Threaded.init(allocator, .{
+        .async_limit = .unlimited,
+    });
+    defer threaded.deinit();
+    const io = threaded.io();
+    var listener = try (net.IpAddress{ .ip4 = .loopback(0) }).listen(
+        io,
+        .{ .reuse_address = true },
+    );
+    defer listener.deinit(io);
+    const sender = try listener.socket.address.connect(
+        io,
+        .{ .mode = .stream },
+    );
+    const peer = try listener.accept(io);
+    defer peer.close(io);
+
+    const send_buffer: c_int = 4096;
+    try std.posix.setsockopt(
+        sender.socket.handle,
+        std.posix.SOL.SOCKET,
+        std.posix.SO.SNDBUF,
+        std.mem.asBytes(&send_buffer),
+    );
+    const filler = [_]u8{0xa5} ** 4096;
+    while (true) {
+        const rc = std.posix.system.sendto(
+            sender.socket.handle,
+            filler[0..].ptr,
+            filler.len,
+            std.posix.MSG.DONTWAIT | std.posix.MSG.NOSIGNAL,
+            null,
+            0,
+        );
+        switch (std.posix.errno(rc)) {
+            .SUCCESS => {},
+            .INTR => continue,
+            .AGAIN => break,
+            else => |err| return std.posix.unexpectedErrno(err),
+        }
+    }
+
+    var connection = Connection{
+        .io = io,
+        .allocator = allocator,
+        .stream = sender,
+        .role = .server,
+    };
+    defer connection.close();
+    try std.testing.expectError(
+        error.Timeout,
+        connection.gracefulShutdownWithTimeout(.fromMilliseconds(20)),
+    );
+    try std.testing.expectEqual(.failed, connection.graceful_shutdown_phase);
+    try std.testing.expectEqual(
+        @as(?u31, null),
+        connection.local_goaway_last_stream_id,
+    );
+    try std.testing.expect(connection.aggregate_timeout_unusable);
+    try std.testing.expect(!connection.isReusable());
+}
+
+test "HTTP/2 graceful shutdown fails closed when PING ACK write times out" {
+    if (comptime @import("builtin").os.tag == .windows) return;
+    const allocator = std.testing.allocator;
+    var threaded = std.Io.Threaded.init(allocator, .{
+        .async_limit = .unlimited,
+    });
+    defer threaded.deinit();
+    const io = threaded.io();
+    var listener = try (net.IpAddress{ .ip4 = .loopback(0) }).listen(
+        io,
+        .{ .reuse_address = true },
+    );
+    defer listener.deinit(io);
+    const sender = try listener.socket.address.connect(
+        io,
+        .{ .mode = .stream },
+    );
+    const peer = try listener.accept(io);
+    defer peer.close(io);
+
+    const send_buffer: c_int = 4096;
+    try std.posix.setsockopt(
+        sender.socket.handle,
+        std.posix.SOL.SOCKET,
+        std.posix.SO.SNDBUF,
+        std.mem.asBytes(&send_buffer),
+    );
+    const filler = [_]u8{0xa5} ** 4096;
+    while (true) {
+        const rc = std.posix.system.sendto(
+            sender.socket.handle,
+            filler[0..].ptr,
+            filler.len,
+            std.posix.MSG.DONTWAIT | std.posix.MSG.NOSIGNAL,
+            null,
+            0,
+        );
+        switch (std.posix.errno(rc)) {
+            .SUCCESS => {},
+            .INTR => continue,
+            .AGAIN => break,
+            else => |err| return std.posix.unexpectedErrno(err),
+        }
+    }
+
+    var connection = Connection{
+        .io = io,
+        .allocator = allocator,
+        .stream = sender,
+        .role = .server,
+        .local_goaway_last_stream_id = std.math.maxInt(u31),
+        .graceful_shutdown_phase = .synchronizing,
+    };
+    defer connection.close();
+    var ping_storage: [http2.PingPayload.encoded_len]u8 = undefined;
+    const peer_ping = http2.PingPayload.writeInto(
+        &ping_storage,
+        .{ 9, 8, 7, 6, 5, 4, 3, 2 },
+        false,
+    );
+    try connection.frame_reader.buffer.appendSlice(allocator, peer_ping);
+
+    try std.testing.expectError(
+        error.Timeout,
+        connection.gracefulShutdownWithTimeout(.fromMilliseconds(20)),
+    );
+    try std.testing.expectEqual(.failed, connection.graceful_shutdown_phase);
+    try std.testing.expect(connection.aggregate_timeout_unusable);
+    try std.testing.expect(!connection.isReusable());
+    try std.testing.expectError(
+        error.ConnectionClosed,
+        connection.gracefulShutdownWithTimeout(.fromSeconds(1)),
+    );
+}
+
+test "HTTP/2 graceful shutdown bounds final GOAWAY write" {
     const RecordingWriter = struct {
         bytes: std.ArrayList(u8) = .empty,
 
@@ -18325,17 +21956,19 @@ test "HTTP/2 graceful shutdown synchronized phase ignores expired deadline" {
         connection.hpack_encoder.deinit(std.testing.allocator);
     }
 
-    try connection.gracefulShutdownWithDeadline(.{
-        .raw = .zero,
-        .clock = .real,
-    });
-    try std.testing.expect(connection.gracefulShutdownComplete());
-    const frame = try http2.Frame.parse(writer.bytes.items);
-    try std.testing.expectEqual(http2.FrameType.goaway, frame.header.frame_type);
-    try std.testing.expectEqual(
-        @as(u31, 0),
-        (try http2.GoAwayPayload.parse(frame)).last_stream_id,
+    try std.testing.expectError(
+        error.Timeout,
+        connection.gracefulShutdownWithDeadline(.{
+            .raw = .zero,
+            .clock = .real,
+        }),
     );
+    try std.testing.expect(!connection.gracefulShutdownComplete());
+    try std.testing.expectEqual(
+        .synchronized,
+        connection.graceful_shutdown_phase,
+    );
+    try std.testing.expectEqual(@as(usize, 0), writer.bytes.items.len);
 }
 
 test "HTTP/2 graceful shutdown timeout resumes one outstanding ping" {
@@ -19936,6 +23569,100 @@ test "HTTP/2 client skips informational responses before final response" {
     try std.testing.expectEqualStrings("final", response.body);
 }
 
+test "HTTP/2 response writers reject a stream after its final response" {
+    const allocator = std.testing.allocator;
+
+    var threaded = std.Io.Threaded.init(allocator, .{});
+    defer threaded.deinit();
+    const io = threaded.io();
+
+    var server = try Server.listen(
+        allocator,
+        io,
+        .{ .ip4 = .loopback(0) },
+        .{
+            .max_frame_payload = 4096,
+            .max_body_bytes = 4096,
+            .max_concurrent_streams = 1,
+        },
+    );
+    defer server.deinit();
+
+    const Shared = struct {
+        server: *Server,
+        err: ?anyerror = null,
+
+        fn run(shared: *@This()) void {
+            runFallible(shared.server) catch |err| {
+                shared.err = err;
+            };
+        }
+
+        fn runFallible(server_ptr: *Server) !void {
+            var connection = try server_ptr.accept();
+            defer connection.close();
+
+            var first = try connection.readRequest();
+            defer first.deinit(server_ptr.allocator);
+            try std.testing.expectEqualStrings("/first", first.path);
+            try connection.writeResponse(first.stream_id, .{ .body = "one" });
+            try std.testing.expectEqual(
+                @as(usize, 0),
+                connection.activePeerStreamCount(),
+            );
+            try std.testing.expectError(
+                error.InvalidStreamId,
+                connection.writeResponse(first.stream_id, .{ .body = "duplicate" }),
+            );
+            try std.testing.expectError(
+                error.InvalidStreamId,
+                connection.writeInformationalResponse(
+                    first.stream_id,
+                    103,
+                    &.{},
+                ),
+            );
+            try std.testing.expectEqual(
+                @as(usize, 0),
+                connection.activePeerStreamCount(),
+            );
+
+            var second = try connection.readRequest();
+            defer second.deinit(server_ptr.allocator);
+            try std.testing.expectEqualStrings("/second", second.path);
+            try connection.writeResponse(second.stream_id, .{ .body = "two" });
+        }
+    };
+
+    var shared = Shared{ .server = &server };
+    const thread = try std.Thread.spawn(.{}, Shared.run, .{&shared});
+
+    var client = try Client.connect(allocator, io, server.address(), .{
+        .max_frame_payload = 4096,
+        .max_body_bytes = 4096,
+    });
+    defer client.close();
+
+    var first = try client.request(.{
+        .method = "GET",
+        .path = "/first",
+        .authority = "localhost",
+    });
+    defer first.deinit(allocator);
+    try std.testing.expectEqualStrings("one", first.body);
+
+    var second = try client.request(.{
+        .method = "GET",
+        .path = "/second",
+        .authority = "localhost",
+    });
+    defer second.deinit(allocator);
+    try std.testing.expectEqualStrings("two", second.body);
+
+    thread.join();
+    if (shared.err) |err| return err;
+}
+
 test "HTTP/2 client observes bounded informational responses in order" {
     const allocator = std.testing.allocator;
     var threaded = std.Io.Threaded.init(allocator, .{});
@@ -20602,6 +24329,247 @@ test "HTTP/2 aggregate batch does not reset an already peer-reset member" {
     if (shared.err) |err| return err;
 }
 
+fn expectClientEnvelopeGoAway(
+    frame_type: http2.FrameType,
+    stream_id: u31,
+    payload: []const u8,
+    expected_code: http2.ErrorCode,
+) !void {
+    const allocator = std.testing.allocator;
+    var threaded = std.Io.Threaded.init(allocator, .{});
+    defer threaded.deinit();
+    const io = threaded.io();
+    var server = try Server.listen(
+        allocator,
+        io,
+        .{ .ip4 = .loopback(0) },
+        .{ .max_frame_payload = 4096 },
+    );
+    defer server.deinit();
+
+    const Shared = struct {
+        server: *Server,
+        frame_type: http2.FrameType,
+        stream_id: u31,
+        payload: []const u8,
+        expected_code: http2.ErrorCode,
+        err: ?anyerror = null,
+
+        fn run(shared: *@This()) void {
+            shared.runFallible() catch |err| {
+                shared.err = err;
+            };
+        }
+
+        fn runFallible(shared: *@This()) !void {
+            var connection = try shared.server.accept();
+            defer connection.close();
+            var request = try connection.readRequest();
+            defer request.deinit(shared.server.allocator);
+            try writeFrame(
+                shared.server.allocator,
+                shared.server.io,
+                connection.stream,
+                shared.frame_type,
+                0,
+                shared.stream_id,
+                shared.payload,
+            );
+            var goaway = try connection.readGoAwayWithTimeout(
+                .fromSeconds(2),
+            );
+            defer goaway.deinit(shared.server.allocator);
+            try std.testing.expectEqual(
+                shared.expected_code,
+                goaway.goaway.error_code,
+            );
+            try std.testing.expectEqual(@as(u31, 0), goaway.goaway.last_stream_id);
+            try std.testing.expectEqualStrings(
+                "frame-envelope",
+                goaway.goaway.debug_data,
+            );
+        }
+    };
+
+    var shared = Shared{
+        .server = &server,
+        .frame_type = frame_type,
+        .stream_id = stream_id,
+        .payload = payload,
+        .expected_code = expected_code,
+    };
+    const thread = try std.Thread.spawn(.{}, Shared.run, .{&shared});
+    var joined = false;
+    defer if (!joined) thread.join();
+
+    var client = try Client.connect(allocator, io, server.address(), .{
+        .max_frame_payload = 4096,
+    });
+    defer client.close();
+    try std.testing.expectError(error.InvalidFrame, client.request(.{
+        .path = "/invalid-frame-envelope",
+        .authority = "localhost",
+    }));
+    try std.testing.expect(!client.isReusable());
+
+    thread.join();
+    joined = true;
+    if (shared.err) |err| return err;
+}
+
+test "HTTP/2 client maps SETTINGS on a stream to PROTOCOL_ERROR GOAWAY" {
+    try expectClientEnvelopeGoAway(.settings, 1, &.{}, .protocol_error);
+}
+
+test "HTTP/2 server maps invalid initial SETTINGS envelope to GOAWAY" {
+    const allocator = std.testing.allocator;
+    var threaded = std.Io.Threaded.init(allocator, .{});
+    defer threaded.deinit();
+    const io = threaded.io();
+    var server = try Server.listen(
+        allocator,
+        io,
+        .{ .ip4 = .loopback(0) },
+        .{ .handshake_timeout = .fromSeconds(2) },
+    );
+    defer server.deinit();
+
+    const Shared = struct {
+        server: *Server,
+        err: ?anyerror = null,
+
+        fn run(shared: *@This()) void {
+            if (shared.server.accept()) |connection_value| {
+                var connection = connection_value;
+                connection.close();
+                shared.err = error.TestUnexpectedResult;
+            } else |err| {
+                if (err != error.InvalidFrame) shared.err = err;
+            }
+        }
+    };
+
+    var shared = Shared{ .server = &server };
+    const thread = try std.Thread.spawn(.{}, Shared.run, .{&shared});
+    var joined = false;
+    defer if (!joined) thread.join();
+
+    const stream = try server.address().connect(io, .{ .mode = .stream });
+    defer stream.close(io);
+    try writeAll(io, stream, http2.connection_preface);
+    try writeFrame(allocator, io, stream, .settings, 0, 1, &.{});
+
+    var goaway = try readFrame(allocator, io, stream, .{});
+    defer goaway.deinit(allocator);
+    try std.testing.expectEqual(
+        http2.FrameType.goaway,
+        goaway.frame.header.frame_type,
+    );
+    const payload = try http2.GoAwayPayload.parse(goaway.frame);
+    try std.testing.expectEqual(
+        http2.ErrorCode.protocol_error,
+        payload.error_code,
+    );
+    try std.testing.expectEqualStrings("frame-envelope", payload.debug_data);
+
+    thread.join();
+    joined = true;
+    if (shared.err) |err| return err;
+}
+
+test "HTTP/2 client maps malformed PING length to FRAME_SIZE_ERROR GOAWAY" {
+    try expectClientEnvelopeGoAway(
+        .ping,
+        0,
+        &.{ 0, 1, 2, 3, 4, 5, 6 },
+        .frame_size_error,
+    );
+}
+
+test "HTTP/2 client resets zero WINDOW_UPDATE stream and keeps connection" {
+    const allocator = std.testing.allocator;
+    var threaded = std.Io.Threaded.init(allocator, .{});
+    defer threaded.deinit();
+    const io = threaded.io();
+    var server = try Server.listen(
+        allocator,
+        io,
+        .{ .ip4 = .loopback(0) },
+        .{ .max_frame_payload = 4096 },
+    );
+    defer server.deinit();
+
+    const Shared = struct {
+        server: *Server,
+        err: ?anyerror = null,
+
+        fn run(shared: *@This()) void {
+            shared.runFallible() catch |err| {
+                shared.err = err;
+            };
+        }
+
+        fn runFallible(shared: *@This()) !void {
+            var connection = try shared.server.accept();
+            defer connection.close();
+            var first = try connection.readRequest();
+            defer first.deinit(shared.server.allocator);
+            try writeFrame(
+                shared.server.allocator,
+                shared.server.io,
+                connection.stream,
+                .window_update,
+                0,
+                first.stream_id,
+                &.{ 0, 0, 0, 0 },
+            );
+            var reset = try connection.readResetStreamWithTimeout(
+                .fromSeconds(2),
+            );
+            defer reset.deinit(shared.server.allocator);
+            try std.testing.expectEqual(first.stream_id, reset.reset.stream_id);
+            try std.testing.expectEqual(
+                http2.ErrorCode.protocol_error,
+                reset.reset.error_code,
+            );
+
+            var second = try connection.readRequest();
+            defer second.deinit(shared.server.allocator);
+            try connection.writeResponse(second.stream_id, .{
+                .status = 200,
+                .body = "reused",
+                .request_method = second.method,
+            });
+        }
+    };
+
+    var shared = Shared{ .server = &server };
+    const thread = try std.Thread.spawn(.{}, Shared.run, .{&shared});
+    var joined = false;
+    defer if (!joined) thread.join();
+
+    var client = try Client.connect(allocator, io, server.address(), .{
+        .max_frame_payload = 4096,
+    });
+    defer client.close();
+    try std.testing.expectError(error.InvalidFrame, client.request(.{
+        .path = "/zero-window",
+        .authority = "localhost",
+    }));
+    try std.testing.expect(client.isReusable());
+
+    var response = try client.request(.{
+        .path = "/after-zero-window",
+        .authority = "localhost",
+    });
+    defer response.deinit(allocator);
+    try std.testing.expectEqualStrings("reused", response.body);
+
+    thread.join();
+    joined = true;
+    if (shared.err) |err| return err;
+}
+
 test "HTTP/2 client maps malformed response HPACK to COMPRESSION_ERROR GOAWAY" {
     const allocator = std.testing.allocator;
     var threaded = std.Io.Threaded.init(allocator, .{});
@@ -20742,6 +24710,149 @@ test "HTTP/2 client maps cross-stream response CONTINUATION to PROTOCOL_ERROR GO
     }));
 
     thread.join();
+    if (shared.err) |err| return err;
+}
+
+test "HTTP/2 informational callback cannot reenter frame reader" {
+    const allocator = std.testing.allocator;
+    var threaded = std.Io.Threaded.init(allocator, .{});
+    defer threaded.deinit();
+    const io = threaded.io();
+
+    var server = try Server.listen(
+        allocator,
+        io,
+        .{ .ip4 = .loopback(0) },
+        .{ .max_frame_payload = 4096, .max_body_bytes = 4096 },
+    );
+    defer server.deinit();
+
+    const Shared = struct {
+        server: *Server,
+        err: ?anyerror = null,
+
+        fn run(shared: *@This()) void {
+            shared.runFallible() catch |err| {
+                shared.err = err;
+            };
+        }
+
+        fn runFallible(shared: *@This()) !void {
+            var connection = try shared.server.accept();
+            defer connection.close();
+            var first = try connection.readRequest();
+            defer first.deinit(shared.server.allocator);
+            try std.testing.expectEqual(@as(u31, 1), first.stream_id);
+            try connection.writeInformationalResponse(
+                first.stream_id,
+                103,
+                &.{.{ .name = "link", .value = "</next>" }},
+            );
+            var second = try connection.readRequest();
+            defer second.deinit(shared.server.allocator);
+            try std.testing.expectEqual(@as(u31, 3), second.stream_id);
+            try connection.writeResponse(first.stream_id, .{
+                .body = "one",
+                .request_method = first.method,
+            });
+            try connection.writeResponse(second.stream_id, .{
+                .body = "two",
+                .request_method = second.method,
+            });
+        }
+    };
+
+    const Observer = struct {
+        connection: *Connection,
+        second: ?Connection.PendingResponse = null,
+        error_seen: ?anyerror = null,
+        reset_error_seen: ?anyerror = null,
+        unexpectedly_read: bool = false,
+
+        fn observe(
+            raw: *anyopaque,
+            head: StreamingResponseHead,
+        ) void {
+            const self: *@This() = @ptrCast(@alignCast(raw));
+            if (head.status != 103) @panic("unexpected interim status");
+            self.second = self.connection.sendCompleteRequest(.{
+                .path = "/second",
+                .authority = "localhost",
+            }) catch |err| {
+                self.error_seen = err;
+                return;
+            };
+            var nested = self.connection.readResponse(
+                self.second.?.stream_id,
+                self.second.?.request_method,
+                self.second.?.extended_connect,
+                null,
+            ) catch |err| {
+                self.error_seen = err;
+                self.probeReset();
+                return;
+            };
+            self.unexpectedly_read = true;
+            nested.deinit(self.connection.allocator);
+            self.probeReset();
+        }
+
+        fn probeReset(self: *@This()) void {
+            self.connection.sendResetStream(
+                self.second.?.stream_id,
+                .cancel,
+            ) catch |err| {
+                self.reset_error_seen = err;
+                return;
+            };
+            self.unexpectedly_read = true;
+        }
+    };
+
+    var shared = Shared{ .server = &server };
+    const thread = try std.Thread.spawn(.{}, Shared.run, .{&shared});
+    var joined = false;
+    defer if (!joined) thread.join();
+    var client = try Client.connect(allocator, io, server.address(), .{
+        .max_frame_payload = 4096,
+        .max_body_bytes = 4096,
+    });
+    defer client.close();
+    const first = try client.sendCompleteRequest(.{
+        .path = "/first",
+        .authority = "localhost",
+    });
+    var observer = Observer{ .connection = &client };
+    var first_response = try client.readResponse(
+        first.stream_id,
+        first.request_method,
+        first.extended_connect,
+        .{ .context = &observer, .on_response = Observer.observe },
+    );
+    defer first_response.deinit(allocator);
+    try std.testing.expect(!observer.unexpectedly_read);
+    switch (observer.error_seen orelse return error.TestUnexpectedResult) {
+        error.UnexpectedFrame => {},
+        else => return error.TestUnexpectedResult,
+    }
+    switch (observer.reset_error_seen orelse return error.TestUnexpectedResult) {
+        error.UnexpectedFrame => {},
+        else => return error.TestUnexpectedResult,
+    }
+    try std.testing.expectEqualStrings("one", first_response.body);
+
+    const second = observer.second orelse return error.TestUnexpectedResult;
+    var second_response = try client.readResponse(
+        second.stream_id,
+        second.request_method,
+        second.extended_connect,
+        null,
+    );
+    defer second_response.deinit(allocator);
+    try std.testing.expectEqualStrings("two", second_response.body);
+
+    thread.join();
+    joined = true;
     if (shared.err) |err| return err;
 }
 
@@ -20907,6 +25018,17 @@ test "HTTP/2 client rejects PUSH_PROMISE after disabling push" {
             defer promise.deinit(server_ptr.allocator);
             try http2.PushPromisePayload.write(&promise, server_ptr.allocator, request.stream_id, 2, promised_block.items, .{});
             try writeAll(server_ptr.io, connection.stream, promise.items);
+
+            var goaway = try connection.readGoAway();
+            defer goaway.deinit(server_ptr.allocator);
+            try std.testing.expectEqual(
+                http2.ErrorCode.protocol_error,
+                goaway.goaway.error_code,
+            );
+            try std.testing.expectEqualStrings(
+                "push-disabled",
+                goaway.goaway.debug_data,
+            );
         }
     };
 
@@ -20924,6 +25046,7 @@ test "HTTP/2 client rejects PUSH_PROMISE after disabling push" {
         .path = "/push-disabled",
         .authority = "localhost",
     }));
+    try std.testing.expect(!client.isReusable());
 
     thread.join();
     if (shared.err) |err| return err;
@@ -23081,6 +27204,119 @@ test "HTTP/2 async std.Io server handles concurrent h2c clients" {
     try std.testing.expectEqual(@as(usize, 2), result.successCount());
 }
 
+test "HTTP/2 serveConcurrent converts handler informational status per connection" {
+    const allocator = std.testing.allocator;
+
+    var threaded = std.Io.Threaded.init(allocator, .{ .async_limit = .unlimited });
+    defer threaded.deinit();
+    const io = threaded.io();
+
+    var server = try Server.listen(
+        allocator,
+        io,
+        .{ .ip4 = .loopback(0) },
+        .{ .max_frame_payload = 4096, .max_body_bytes = 4096 },
+    );
+    defer server.deinit();
+
+    const Context = struct {
+        fn handle(_: *@This(), request: OwnedRequest) Error!ResponseOptions {
+            if (std.mem.eql(u8, request.path, "/invalid-final")) {
+                return .{ .status = 103 };
+            }
+            return .{ .status = 204 };
+        }
+    };
+    const Shared = struct {
+        server: *Server,
+        context: Context = .{},
+        result: ?ConcurrentServeResult = null,
+        err: ?anyerror = null,
+
+        fn run(shared: *@This()) void {
+            shared.result = shared.server.serveConcurrent(
+                Context,
+                &shared.context,
+                Context.handle,
+                2,
+            ) catch |err| {
+                shared.err = err;
+                return;
+            };
+        }
+    };
+    var shared = Shared{ .server = &server };
+    const server_thread = try std.Thread.spawn(.{}, Shared.run, .{&shared});
+
+    const ClientTask = struct {
+        allocator: std.mem.Allocator,
+        io: std.Io,
+        address: net.IpAddress,
+        path: []const u8,
+        expected_status: u16,
+        err: ?anyerror = null,
+
+        fn run(task: *@This()) void {
+            task.runFallible() catch |err| {
+                task.err = err;
+            };
+        }
+
+        fn runFallible(task: *@This()) !void {
+            var client = try Client.connect(task.allocator, task.io, task.address, .{
+                .max_frame_payload = 4096,
+                .max_body_bytes = 4096,
+            });
+            defer client.close();
+            var response = try client.request(.{
+                .path = task.path,
+                .authority = "localhost",
+            });
+            defer response.deinit(task.allocator);
+            try std.testing.expectEqual(task.expected_status, response.status);
+            try std.testing.expectEqualStrings("", response.body);
+        }
+    };
+    var clients = [_]ClientTask{
+        .{
+            .allocator = allocator,
+            .io = io,
+            .address = server.address(),
+            .path = "/invalid-final",
+            .expected_status = 500,
+        },
+        .{
+            .allocator = allocator,
+            .io = io,
+            .address = server.address(),
+            .path = "/sibling",
+            .expected_status = 204,
+        },
+    };
+    const invalid_client = try std.Thread.spawn(.{}, ClientTask.run, .{&clients[0]});
+    const sibling_client = try std.Thread.spawn(.{}, ClientTask.run, .{&clients[1]});
+
+    invalid_client.join();
+    sibling_client.join();
+    server_thread.join();
+    defer if (shared.result) |*result| result.deinit();
+
+    if (clients[0].err) |err| return err;
+    if (clients[1].err) |err| return err;
+    if (shared.err) |err| return err;
+    const result = shared.result.?;
+    try std.testing.expectEqual(@as(usize, 1), result.successCount());
+    try std.testing.expectEqual(error.InvalidStatus, result.firstError().?);
+    var invalid_count: usize = 0;
+    for (result.errors) |result_error| {
+        if (result_error) |err| {
+            try std.testing.expectEqual(error.InvalidStatus, err);
+            invalid_count += 1;
+        }
+    }
+    try std.testing.expectEqual(@as(usize, 1), invalid_count);
+}
+
 test "HTTP/2 runtime validates request content-length" {
     const allocator = std.testing.allocator;
 
@@ -23897,7 +28133,7 @@ test "HTTP/2 CONNECT informational response omits automatic Date" {
 
     var client = try Client.connect(allocator, io, server.address(), .{});
     defer client.close();
-    try std.testing.expect(client.peer_enable_connect_protocol);
+    try std.testing.expect(client.peerExtendedConnectEnabled());
     const stream_id = try client.reserveNextClientStreamId();
     try client.writeHeaders(stream_id, &.{
         .{ .name = ":method", .value = "CONNECT" },
@@ -24200,9 +28436,25 @@ test "HTTP/2 tunnel releases concurrency only after both halves close" {
         fn runFallible(server_ptr: *Server) !void {
             var connection = try server_ptr.accept();
             defer connection.close();
+            try std.testing.expectEqual(
+                @as(?u32, null),
+                connection.peerMaxConcurrentStreams(),
+            );
+            try std.testing.expectEqual(
+                @as(?u32, null),
+                connection.availableLocalStreamCapacity(),
+            );
+            try std.testing.expectEqual(
+                @as(usize, 0),
+                connection.activePeerStreamCount(),
+            );
 
             var first_request = try connection.readRequest();
             defer first_request.deinit(server_ptr.allocator);
+            try std.testing.expectEqual(
+                @as(usize, 1),
+                connection.activePeerStreamCount(),
+            );
             var first = try connection.acceptConnectTunnel(
                 first_request,
                 &.{},
@@ -24210,7 +28462,7 @@ test "HTTP/2 tunnel releases concurrency only after both halves close" {
             try first.write("server half close", true);
             try std.testing.expectEqual(
                 @as(usize, 1),
-                connection.active_peer_streams.items.len,
+                connection.activePeerStreamCount(),
             );
             try std.testing.expectError(
                 error.FlowControlViolation,
@@ -24225,7 +28477,7 @@ test "HTTP/2 tunnel releases concurrency only after both halves close" {
             try std.testing.expect(first_end.end_stream);
             try std.testing.expectEqual(
                 @as(usize, 0),
-                connection.active_peer_streams.items.len,
+                connection.activePeerStreamCount(),
             );
             try std.testing.expect(
                 connection.send_stream_window_index.get(first.stream_id) == null,
@@ -24251,7 +28503,7 @@ test "HTTP/2 tunnel releases concurrency only after both halves close" {
             try std.testing.expect(second_end.end_stream);
             try std.testing.expectEqual(
                 @as(usize, 0),
-                connection.active_peer_streams.items.len,
+                connection.activePeerStreamCount(),
             );
         }
     };
@@ -24265,7 +28517,19 @@ test "HTTP/2 tunnel releases concurrency only after both halves close" {
         .max_body_bytes = 4096,
     });
     defer client.close();
-    try std.testing.expectEqual(@as(?u32, 1), client.peer_max_concurrent_streams);
+    try std.testing.expectEqual(
+        @as(?u32, 1),
+        client.peerMaxConcurrentStreams(),
+    );
+    try std.testing.expectEqual(
+        @as(?u32, 1),
+        client.availableLocalStreamCapacity(),
+    );
+    try std.testing.expectEqual(
+        @as(usize, 0),
+        client.activeLocalStreamCount(),
+    );
+    try std.testing.expect(!client.peerExtendedConnectEnabled());
 
     var first_response = try client.openConnectTunnel(.{
         .method = "CONNECT",
@@ -24279,7 +28543,11 @@ test "HTTP/2 tunnel releases concurrency only after both halves close" {
     try std.testing.expect(first_data.end_stream);
     try std.testing.expectEqual(
         @as(usize, 1),
-        client.active_local_streams.items.len,
+        client.activeLocalStreamCount(),
+    );
+    try std.testing.expectEqual(
+        @as(?u32, 0),
+        client.availableLocalStreamCapacity(),
     );
     try std.testing.expectError(
         error.FlowControlBlocked,
@@ -24292,7 +28560,11 @@ test "HTTP/2 tunnel releases concurrency only after both halves close" {
     try std.testing.expectError(error.ConnectionClosed, first.closeWrite());
     try std.testing.expectEqual(
         @as(usize, 0),
-        client.active_local_streams.items.len,
+        client.activeLocalStreamCount(),
+    );
+    try std.testing.expectEqual(
+        @as(?u32, 1),
+        client.availableLocalStreamCapacity(),
     );
     try std.testing.expect(
         client.send_stream_window_index.get(first.stream_id) == null,
@@ -24322,7 +28594,11 @@ test "HTTP/2 tunnel releases concurrency only after both halves close" {
     try std.testing.expect(second_data.end_stream);
     try std.testing.expectEqual(
         @as(usize, 0),
-        client.active_local_streams.items.len,
+        client.activeLocalStreamCount(),
+    );
+    try std.testing.expectEqual(
+        @as(?u32, 1),
+        client.availableLocalStreamCapacity(),
     );
     try std.testing.expect(client.isReusable());
 
@@ -24349,9 +28625,12 @@ test "HTTP/2 writers reject status-forbidden response bodies" {
         connection.send_stream_window_index.deinit(std.testing.allocator);
         connection.recv_stream_windows.deinit(std.testing.allocator);
         connection.recv_stream_window_index.deinit(std.testing.allocator);
+        connection.active_peer_streams.deinit(std.testing.allocator);
+        connection.active_peer_index.deinit(std.testing.allocator);
         connection.hpack_decoder.deinit(std.testing.allocator);
         connection.hpack_encoder.deinit(std.testing.allocator);
     }
+    try connection.reservePeerStream(1);
     try std.testing.expectError(error.InvalidContentLength, connection.writeResponse(1, .{
         .status = 204,
         .body = "body",
@@ -24511,7 +28790,7 @@ test "HTTP/2 runtime supports RFC 8441 extended CONNECT" {
         .max_body_bytes = 4096,
     });
     defer client.close();
-    try std.testing.expect(client.peer_enable_connect_protocol);
+    try std.testing.expect(client.peerExtendedConnectEnabled());
 
     var response = try client.request(.{
         .method = "CONNECT",
@@ -24945,6 +29224,10 @@ test "HTTP/2 DATA send waits for WINDOW_UPDATE capacity" {
                 try std.testing.expectEqual(http2.FrameType.headers, headers.frame.header.frame_type);
                 try std.testing.expectEqual(@as(u31, 1), headers.frame.header.stream_id);
                 try std.testing.expect((headers.frame.header.flags & flag_end_stream) == 0);
+                // This test deliberately bypasses the high-level request
+                // parser, so mirror its stream reservation before using the
+                // high-level response writer below.
+                try connection.reservePeerStream(1);
                 break;
             }
 
@@ -24994,6 +29277,327 @@ test "HTTP/2 DATA send waits for WINDOW_UPDATE capacity" {
     try std.testing.expectEqualStrings("ok", response.body);
 
     thread.join();
+    if (shared.err) |err| return err;
+}
+
+test "HTTP/2 request writer deadline reports committed flow-control prefix" {
+    const allocator = std.testing.allocator;
+    const payload = "hello world";
+
+    var threaded = std.Io.Threaded.init(allocator, .{});
+    defer threaded.deinit();
+    const io = threaded.io();
+
+    var server = try Server.listen(
+        allocator,
+        io,
+        .{ .ip4 = .loopback(0) },
+        .{ .max_frame_payload = 4096, .max_body_bytes = 4096 },
+    );
+    defer server.deinit();
+
+    const Shared = struct {
+        server: *Server,
+        allow_credit: std.Io.Event = .unset,
+        err: ?anyerror = null,
+
+        fn run(shared: *@This()) void {
+            shared.runFallible() catch |err| {
+                shared.err = err;
+            };
+        }
+
+        fn runFallible(shared: *@This()) !void {
+            var connection = try shared.server.accept();
+            defer connection.close();
+            const deadline = std.Io.Clock.Timestamp.fromNow(
+                shared.server.io,
+                .{ .raw = .fromSeconds(2), .clock = .awake },
+            );
+
+            while (true) {
+                var frame = try connection.readOwnedFrameWithDeadline(
+                    deadline,
+                );
+                defer frame.deinit(shared.server.allocator);
+                if (try connection.handleConnectionFrame(frame.frame)) {
+                    continue;
+                }
+                try std.testing.expectEqual(
+                    http2.FrameType.headers,
+                    frame.frame.header.frame_type,
+                );
+                try std.testing.expectEqual(@as(u31, 1), frame.frame.header.stream_id);
+                try std.testing.expect(
+                    (frame.frame.header.flags & flag_end_stream) == 0,
+                );
+                try connection.addActivePeerStream(1);
+                break;
+            }
+
+            var first = try connection.readOwnedFrameWithDeadline(deadline);
+            defer first.deinit(shared.server.allocator);
+            try std.testing.expectEqual(
+                http2.FrameType.data,
+                first.frame.header.frame_type,
+            );
+            const first_data = try http2.DataPayload.parse(first.frame);
+            try std.testing.expectEqualStrings("hello", first_data.data);
+            try std.testing.expect(
+                (first.frame.header.flags & flag_end_stream) == 0,
+            );
+
+            try shared.allow_credit.wait(shared.server.io);
+            const increment = [_]u8{ 0, 0, 0, 64 };
+            try writeFrame(
+                shared.server.allocator,
+                shared.server.io,
+                connection.stream,
+                .window_update,
+                0,
+                0,
+                &increment,
+            );
+            try writeFrame(
+                shared.server.allocator,
+                shared.server.io,
+                connection.stream,
+                .window_update,
+                0,
+                1,
+                &increment,
+            );
+
+            var second = try connection.readOwnedFrameWithDeadline(deadline);
+            defer second.deinit(shared.server.allocator);
+            try std.testing.expectEqual(
+                http2.FrameType.data,
+                second.frame.header.frame_type,
+            );
+            const second_data = try http2.DataPayload.parse(second.frame);
+            try std.testing.expectEqualStrings(" world", second_data.data);
+            try std.testing.expect(
+                (second.frame.header.flags & flag_end_stream) != 0,
+            );
+            try connection.writeResponse(1, .{ .body = "ok" });
+        }
+    };
+
+    var shared = Shared{ .server = &server };
+    const thread = try std.Thread.spawn(.{}, Shared.run, .{&shared});
+    var joined = false;
+    defer if (!joined) {
+        shared.allow_credit.set(io);
+        thread.join();
+    };
+
+    var client = try Client.connect(allocator, io, server.address(), .{
+        .max_frame_payload = 4096,
+        .max_body_bytes = 4096,
+    });
+    defer client.close();
+    var writer = try client.startRequest(.{
+        .path = "/deadline-upload",
+        .authority = "localhost",
+        .body_length = payload.len,
+    });
+    defer writer.deinit();
+    client.send_connection_window.value = 5;
+    (try client.sendStreamWindow(1)).value = 5;
+
+    try std.testing.expectError(
+        error.Timeout,
+        writer.finishDataWithDeadline(payload, .{
+            .raw = .zero,
+            .clock = .real,
+        }),
+    );
+    try std.testing.expectEqual(@as(usize, 0), writer.committedBytes());
+    try std.testing.expectEqual(@as(i64, 5), client.send_connection_window.value);
+    try std.testing.expectEqual(@as(i64, 5), (try client.sendStreamWindow(1)).value);
+
+    try std.testing.expectError(
+        error.Timeout,
+        writer.writeWithTimeout(payload, .fromMilliseconds(80)),
+    );
+    try std.testing.expectEqual(@as(usize, 5), writer.committedBytes());
+    try std.testing.expectEqual(@as(i64, 0), client.send_connection_window.value);
+    try std.testing.expectEqual(@as(i64, 0), (try client.sendStreamWindow(1)).value);
+
+    shared.allow_credit.set(io);
+    try writer.finishData(payload[writer.committedBytes()..]);
+    try std.testing.expectEqual(payload.len, writer.committedBytes());
+
+    var response = try writer.readResponse();
+    defer response.deinit(allocator);
+    try std.testing.expectEqualStrings("ok", response.body);
+
+    thread.join();
+    joined = true;
+    if (shared.err) |err| return err;
+}
+
+test "HTTP/2 response writer deadline reports committed flow-control prefix" {
+    const allocator = std.testing.allocator;
+    const payload = "hello world";
+
+    var threaded = std.Io.Threaded.init(allocator, .{});
+    defer threaded.deinit();
+    const io = threaded.io();
+
+    var server = try Server.listen(
+        allocator,
+        io,
+        .{ .ip4 = .loopback(0) },
+        .{ .max_frame_payload = 4096, .max_body_bytes = 4096 },
+    );
+    defer server.deinit();
+
+    const Shared = struct {
+        server: *Server,
+        timeout_done: std.Io.Event = .unset,
+        allow_retry: std.Io.Event = .unset,
+        committed_after_timeout: usize = 0,
+        connection_window_after_timeout: i64 = -1,
+        stream_window_after_timeout: i64 = -1,
+        err: ?anyerror = null,
+
+        fn run(shared: *@This()) void {
+            shared.runFallible() catch |err| {
+                shared.err = err;
+                shared.timeout_done.set(shared.server.io);
+            };
+        }
+
+        fn runFallible(shared: *@This()) !void {
+            var connection = try shared.server.accept();
+            defer connection.close();
+            var request = try connection.readRequest();
+            defer request.deinit(shared.server.allocator);
+
+            var writer = try connection.startResponse(request.stream_id, .{
+                .headers = &.{.{
+                    .name = "content-length",
+                    .value = "11",
+                }},
+            });
+            defer writer.deinit();
+            connection.send_connection_window.value = 5;
+            (try connection.sendStreamWindow(request.stream_id)).value = 5;
+
+            try std.testing.expectError(
+                error.Timeout,
+                writer.finishDataWithDeadline(payload, .{
+                    .raw = .zero,
+                    .clock = .real,
+                }),
+            );
+            try std.testing.expectEqual(@as(usize, 0), writer.committedBytes());
+            try std.testing.expectEqual(
+                @as(i64, 5),
+                connection.send_connection_window.value,
+            );
+            try std.testing.expectEqual(
+                @as(i64, 5),
+                (try connection.sendStreamWindow(request.stream_id)).value,
+            );
+
+            try std.testing.expectError(
+                error.Timeout,
+                writer.finishDataWithTimeout(payload, .fromMilliseconds(80)),
+            );
+            shared.committed_after_timeout = writer.committedBytes();
+            shared.connection_window_after_timeout =
+                connection.send_connection_window.value;
+            shared.stream_window_after_timeout =
+                (try connection.sendStreamWindow(request.stream_id)).value;
+            shared.timeout_done.set(shared.server.io);
+
+            try shared.allow_retry.wait(shared.server.io);
+            try writer.finishData(payload[writer.committedBytes()..]);
+            try std.testing.expectEqual(payload.len, writer.committedBytes());
+        }
+    };
+
+    var shared = Shared{ .server = &server };
+    const thread = try std.Thread.spawn(.{}, Shared.run, .{&shared});
+    var joined = false;
+    defer if (!joined) {
+        shared.allow_retry.set(io);
+        thread.join();
+    };
+
+    var client = try Client.connect(allocator, io, server.address(), .{
+        .max_frame_payload = 4096,
+        .max_body_bytes = 4096,
+    });
+    defer client.close();
+    const pending = try client.sendCompleteRequest(.{
+        .path = "/deadline-response",
+        .authority = "localhost",
+    });
+    defer client.releaseLocalStream(pending.stream_id);
+    const deadline = std.Io.Clock.Timestamp.fromNow(
+        io,
+        .{ .raw = .fromSeconds(2), .clock = .awake },
+    );
+
+    while (true) {
+        var frame = try client.readOwnedFrameWithDeadline(deadline);
+        defer frame.deinit(allocator);
+        if (try client.handleConnectionFrame(frame.frame)) continue;
+        try std.testing.expectEqual(
+            http2.FrameType.headers,
+            frame.frame.header.frame_type,
+        );
+        try std.testing.expectEqual(pending.stream_id, frame.frame.header.stream_id);
+        try std.testing.expect((frame.frame.header.flags & flag_end_stream) == 0);
+        break;
+    }
+
+    var first = try client.readOwnedFrameWithDeadline(deadline);
+    defer first.deinit(allocator);
+    try std.testing.expectEqual(http2.FrameType.data, first.frame.header.frame_type);
+    const first_data = try http2.DataPayload.parse(first.frame);
+    try std.testing.expectEqualStrings("hello", first_data.data);
+    try std.testing.expect((first.frame.header.flags & flag_end_stream) == 0);
+
+    try shared.timeout_done.wait(io);
+    if (shared.err) |err| return err;
+    try std.testing.expectEqual(@as(usize, 5), shared.committed_after_timeout);
+    try std.testing.expectEqual(@as(i64, 0), shared.connection_window_after_timeout);
+    try std.testing.expectEqual(@as(i64, 0), shared.stream_window_after_timeout);
+
+    const increment = [_]u8{ 0, 0, 0, 64 };
+    try writeFrame(
+        allocator,
+        io,
+        client.stream,
+        .window_update,
+        0,
+        0,
+        &increment,
+    );
+    try writeFrame(
+        allocator,
+        io,
+        client.stream,
+        .window_update,
+        0,
+        pending.stream_id,
+        &increment,
+    );
+    shared.allow_retry.set(io);
+
+    var second = try client.readOwnedFrameWithDeadline(deadline);
+    defer second.deinit(allocator);
+    try std.testing.expectEqual(http2.FrameType.data, second.frame.header.frame_type);
+    const second_data = try http2.DataPayload.parse(second.frame);
+    try std.testing.expectEqualStrings(" world", second_data.data);
+    try std.testing.expect((second.frame.header.flags & flag_end_stream) != 0);
+
+    thread.join();
+    joined = true;
     if (shared.err) |err| return err;
 }
 
@@ -25233,6 +29837,988 @@ test "HTTP/2 response batch reorders out-of-order responses" {
     if (shared.err) |err| return err;
 }
 
+test "HTTP/2 response batch deadline is not renewed by partial completion" {
+    const allocator = std.testing.allocator;
+    var threaded = std.Io.Threaded.init(allocator, .{
+        .async_limit = .unlimited,
+    });
+    defer threaded.deinit();
+    const io = threaded.io();
+    var server = try Server.listen(
+        allocator,
+        io,
+        .{ .ip4 = .loopback(0) },
+        .{ .max_frame_payload = 4096, .max_body_bytes = 4096 },
+    );
+    defer server.deinit();
+
+    const Shared = struct {
+        server: *Server,
+        reset_stream_id: ?u31 = null,
+        err: ?anyerror = null,
+
+        fn run(self: *@This()) void {
+            self.runFallible() catch |err| {
+                self.err = err;
+            };
+        }
+
+        fn runFallible(self: *@This()) !void {
+            var connection = try self.server.accept();
+            defer connection.close();
+            var first = try connection.readRequest();
+            defer first.deinit(self.server.allocator);
+            var second = try connection.readRequest();
+            defer second.deinit(self.server.allocator);
+
+            try std.Io.sleep(
+                self.server.io,
+                .fromMilliseconds(150),
+                .awake,
+            );
+            try connection.writeResponse(first.stream_id, .{
+                .body = "first",
+            });
+            try std.Io.sleep(
+                self.server.io,
+                .fromMilliseconds(350),
+                .awake,
+            );
+            try connection.writeResponse(second.stream_id, .{
+                .body = "late",
+            });
+            var reset = try connection.readResetStreamWithTimeout(
+                .fromSeconds(1),
+            );
+            defer reset.deinit(self.server.allocator);
+            self.reset_stream_id = reset.reset.stream_id;
+            try std.testing.expectEqual(
+                http2.ErrorCode.cancel,
+                reset.reset.error_code,
+            );
+        }
+    };
+
+    var shared = Shared{ .server = &server };
+    const thread = try std.Thread.spawn(.{}, Shared.run, .{&shared});
+    var joined = false;
+    defer if (!joined) thread.join();
+
+    var client = try Client.connect(
+        allocator,
+        io,
+        server.address(),
+        .{ .max_frame_payload = 4096, .max_body_bytes = 4096 },
+    );
+    defer client.close();
+    const requests = [_]RequestOptions{
+        .{ .path = "/first", .authority = "localhost" },
+        .{ .path = "/second", .authority = "localhost" },
+    };
+    var responses: [requests.len]OwnedResponse = undefined;
+    try std.testing.expectError(
+        error.Timeout,
+        client.requestBatchIntoWithTimeout(
+            &requests,
+            &responses,
+            .fromMilliseconds(400),
+        ),
+    );
+    try std.testing.expect(!client.isReusable());
+    try std.testing.expectEqual(@as(usize, 0), client.activeLocalStreamCount());
+
+    thread.join();
+    joined = true;
+    if (shared.err) |err| return err;
+    try std.testing.expectEqual(@as(?u31, 3), shared.reset_stream_id);
+}
+
+test "HTTP/2 batch deadlines validate before stream or wire mutation" {
+    const allocator = std.testing.allocator;
+    var threaded = std.Io.Threaded.init(allocator, .{});
+    defer threaded.deinit();
+    var connection = Connection{
+        .io = threaded.io(),
+        .allocator = allocator,
+        .stream = undefined,
+        .role = .client,
+        .default_scheme = "http",
+    };
+    defer {
+        connection.send_stream_windows.deinit(allocator);
+        connection.send_stream_window_index.deinit(allocator);
+        connection.active_local_streams.deinit(allocator);
+        connection.active_local_index.deinit(allocator);
+        connection.priority_state.deinit(allocator);
+        connection.write_batch.deinit(allocator);
+        connection.batch_data_headers.deinit(allocator);
+        connection.batch_data_parts.deinit(allocator);
+        connection.hpack_decoder.deinit(allocator);
+        connection.hpack_encoder.deinit(allocator);
+        connection.hpack_encoder_staging.deinit(allocator);
+    }
+    const requests = [_]RequestOptions{.{
+        .authority = "localhost",
+    }};
+    const body_requests = [_]RequestOptions{.{
+        .method = "POST",
+        .authority = "localhost",
+        .body = "body",
+    }};
+    var responses: [1]OwnedResponse = undefined;
+    var streaming_responses: [1]StreamingResponse = undefined;
+    const noopConsume = struct {
+        fn consume(_: void, _: usize, _: []const u8) !void {}
+    }.consume;
+    try std.testing.expectError(
+        error.Timeout,
+        connection.requestBatchIntoWithTimeout(
+            &requests,
+            &responses,
+            .zero,
+        ),
+    );
+    try std.testing.expectError(
+        error.Timeout,
+        connection.requestBodyBatchIntoWithDeadline(
+            &body_requests,
+            4,
+            &responses,
+            .fromNow(connection.io, .{
+                .raw = .fromSeconds(1),
+                .clock = .real,
+            }),
+        ),
+    );
+    try std.testing.expectError(
+        error.Timeout,
+        connection.requestBatchStreamingIntoWithTimeout(
+            &requests,
+            &streaming_responses,
+            .zero,
+            {},
+            noopConsume,
+        ),
+    );
+    try std.testing.expectError(
+        error.Timeout,
+        connection.requestBatchStreamingWithInformationalIntoWithDeadline(
+            &requests,
+            &streaming_responses,
+            null,
+            .fromNow(connection.io, .{
+                .raw = .fromSeconds(1),
+                .clock = .real,
+            }),
+            {},
+            noopConsume,
+        ),
+    );
+    try std.testing.expectError(
+        error.Timeout,
+        connection.requestBodyBatchStreamingIntoWithTimeout(
+            &body_requests,
+            4,
+            &streaming_responses,
+            .zero,
+            {},
+            noopConsume,
+        ),
+    );
+    try std.testing.expectError(
+        error.Timeout,
+        connection.requestBodyBatchStreamingWithInformationalIntoWithDeadline(
+            &body_requests,
+            4,
+            &streaming_responses,
+            null,
+            .fromNow(connection.io, .{
+                .raw = .fromSeconds(1),
+                .clock = .real,
+            }),
+            {},
+            noopConsume,
+        ),
+    );
+    try std.testing.expectError(
+        error.Timeout,
+        connection.requestBodyBatchStreamingWithInformationalIntoWithTimeout(
+            &body_requests,
+            4,
+            &streaming_responses,
+            null,
+            .zero,
+            {},
+            noopConsume,
+        ),
+    );
+    try std.testing.expectError(
+        error.InvalidFrameSize,
+        connection.requestBodyBatchStreamingWithInformationalInto(
+            &body_requests,
+            0,
+            &streaming_responses,
+            null,
+            {},
+            noopConsume,
+        ),
+    );
+    connection.role = .server;
+    var inbound_requests: [1]StreamingRequest = undefined;
+    try std.testing.expectError(
+        error.Timeout,
+        connection.readRequestBatchStreamingIntoWithTimeout(
+            &inbound_requests,
+            .zero,
+            {},
+            struct {
+                fn consume(_: void, _: u31, _: []const u8) !void {}
+            }.consume,
+        ),
+    );
+    try std.testing.expectEqual(@as(u31, 1), connection.next_client_stream_id);
+    try std.testing.expectEqual(@as(usize, 0), connection.activeLocalStreamCount());
+    try std.testing.expectEqual(@as(u31, 0), connection.last_peer_client_stream_id);
+    try std.testing.expectEqual(@as(usize, 0), connection.activePeerStreamCount());
+    try std.testing.expectEqual(@as(usize, 0), connection.write_batch.items.len);
+    try std.testing.expectEqual(
+        @as(usize, 0),
+        connection.hpack_encoder.dynamic_table.entries.items.len,
+    );
+    try std.testing.expect(!connection.aggregate_timeout_unusable);
+}
+
+test "HTTP/2 bodyless request batch partial HEADERS write fails closed" {
+    const allocator = std.testing.allocator;
+    const PartialWriter = struct {
+        writes: usize = 0,
+
+        fn write(
+            context: ?*anyopaque,
+            _: net.Socket.Handle,
+            bytes: []const u8,
+            _: []const []const u8,
+            _: usize,
+        ) net.Stream.Writer.Error!usize {
+            const self: *@This() = @ptrCast(@alignCast(context.?));
+            self.writes += 1;
+            if (self.writes == 1) return @min(bytes.len, 4);
+            return error.NetworkDown;
+        }
+    };
+
+    var threaded = std.Io.Threaded.init(allocator, .{});
+    defer threaded.deinit();
+    var writer: PartialWriter = .{};
+    var vtable = threaded.io().vtable.*;
+    vtable.netWrite = PartialWriter.write;
+    var connection = Connection{
+        .io = .{ .userdata = &writer, .vtable = &vtable },
+        .allocator = allocator,
+        .stream = undefined,
+        .role = .client,
+        .default_scheme = "http",
+    };
+    defer {
+        connection.send_stream_windows.deinit(allocator);
+        connection.send_stream_window_index.deinit(allocator);
+        connection.active_local_streams.deinit(allocator);
+        connection.active_local_index.deinit(allocator);
+        connection.priority_state.deinit(allocator);
+        connection.write_batch.deinit(allocator);
+        connection.hpack_decoder.deinit(allocator);
+        connection.hpack_encoder.deinit(allocator);
+        connection.hpack_encoder_staging.deinit(allocator);
+    }
+
+    const requests = [_]RequestOptions{
+        .{ .path = "/first", .authority = "localhost" },
+        .{ .path = "/second", .authority = "localhost" },
+    };
+    var responses: [requests.len]OwnedResponse = undefined;
+    try std.testing.expectError(
+        error.NetworkDown,
+        connection.requestBatchInto(&requests, &responses),
+    );
+    try std.testing.expectEqual(@as(usize, 2), writer.writes);
+    try std.testing.expectEqual(@as(u31, 5), connection.next_client_stream_id);
+    try std.testing.expectEqual(@as(usize, 0), connection.activeLocalStreamCount());
+    try std.testing.expect(connection.aggregate_timeout_unusable);
+    try std.testing.expect(!connection.isReusable());
+    try std.testing.expectError(
+        error.ConnectionClosed,
+        connection.sendCompleteRequest(.{ .authority = "localhost" }),
+    );
+}
+
+test "HTTP/2 single request partial HEADERS write fails closed" {
+    const allocator = std.testing.allocator;
+    const PartialWriter = struct {
+        writes: usize = 0,
+
+        fn write(
+            context: ?*anyopaque,
+            _: net.Socket.Handle,
+            bytes: []const u8,
+            _: []const []const u8,
+            _: usize,
+        ) net.Stream.Writer.Error!usize {
+            const self: *@This() = @ptrCast(@alignCast(context.?));
+            self.writes += 1;
+            if (self.writes == 1) return @min(bytes.len, 4);
+            return error.NetworkDown;
+        }
+    };
+
+    var threaded = std.Io.Threaded.init(allocator, .{});
+    defer threaded.deinit();
+    var writer: PartialWriter = .{};
+    var vtable = threaded.io().vtable.*;
+    vtable.netWrite = PartialWriter.write;
+    var connection = Connection{
+        .io = .{ .userdata = &writer, .vtable = &vtable },
+        .allocator = allocator,
+        .stream = undefined,
+        .role = .client,
+        .default_scheme = "http",
+    };
+    defer {
+        connection.send_stream_windows.deinit(allocator);
+        connection.send_stream_window_index.deinit(allocator);
+        connection.active_local_streams.deinit(allocator);
+        connection.active_local_index.deinit(allocator);
+        connection.priority_state.deinit(allocator);
+        connection.write_batch.deinit(allocator);
+        connection.hpack_decoder.deinit(allocator);
+        connection.hpack_encoder.deinit(allocator);
+        connection.hpack_encoder_staging.deinit(allocator);
+    }
+
+    try std.testing.expectError(
+        error.NetworkDown,
+        connection.sendCompleteRequest(.{ .authority = "localhost" }),
+    );
+    try std.testing.expectEqual(@as(usize, 2), writer.writes);
+    try std.testing.expectEqual(@as(usize, 0), connection.activeLocalStreamCount());
+    try std.testing.expect(connection.aggregate_timeout_unusable);
+    try std.testing.expect(!connection.isReusable());
+    try std.testing.expectError(
+        error.ConnectionClosed,
+        connection.sendCompleteRequest(.{ .authority = "localhost" }),
+    );
+    try std.testing.expectEqual(@as(usize, 2), writer.writes);
+}
+
+test "HTTP/2 single HEADERS encode failure preserves live HPACK state" {
+    const allocator = std.testing.allocator;
+    var connection = Connection{
+        .io = undefined,
+        .allocator = allocator,
+        .stream = undefined,
+        .role = .client,
+        .default_scheme = "http",
+    };
+    defer {
+        connection.send_stream_windows.deinit(allocator);
+        connection.send_stream_window_index.deinit(allocator);
+        connection.active_local_streams.deinit(allocator);
+        connection.active_local_index.deinit(allocator);
+        connection.priority_state.deinit(allocator);
+        connection.write_batch.deinit(allocator);
+        connection.hpack_decoder.deinit(allocator);
+        connection.hpack_encoder.deinit(allocator);
+        connection.hpack_encoder_staging.deinit(allocator);
+    }
+
+    _ = try connection.hpack_encoder.encodeBlockRetained(allocator, &.{.{
+        .name = "x-live",
+        .value = "one",
+    }});
+    const live_entries =
+        connection.hpack_encoder.dynamic_table.entries.items.len;
+    try connection.addActiveLocalStream(1);
+    {
+        var failing = std.testing.FailingAllocator.init(
+            allocator,
+            .{ .fail_index = 0 },
+        );
+        connection.allocator = failing.allocator();
+        defer connection.allocator = allocator;
+        try std.testing.expectError(
+            error.OutOfMemory,
+            connection.writeHeaders(1, &.{.{
+                .name = "x-staged",
+                .value = "two",
+            }}, true),
+        );
+        try std.testing.expect(failing.has_induced_failure);
+    }
+    try std.testing.expectEqual(
+        live_entries,
+        connection.hpack_encoder.dynamic_table.entries.items.len,
+    );
+    try std.testing.expect(!connection.aggregate_timeout_unusable);
+    try std.testing.expect(connection.outboundStreamIsActive(1));
+}
+
+test "HTTP/2 PUSH_PROMISE partial write rolls back state and fails closed" {
+    const allocator = std.testing.allocator;
+    const PartialWriter = struct {
+        writes: usize = 0,
+
+        fn write(
+            context: ?*anyopaque,
+            _: net.Socket.Handle,
+            bytes: []const u8,
+            _: []const []const u8,
+            _: usize,
+        ) net.Stream.Writer.Error!usize {
+            const self: *@This() = @ptrCast(@alignCast(context.?));
+            self.writes += 1;
+            if (self.writes == 1) return @min(bytes.len, 4);
+            return error.NetworkDown;
+        }
+    };
+
+    var threaded = std.Io.Threaded.init(allocator, .{});
+    defer threaded.deinit();
+    var writer: PartialWriter = .{};
+    var vtable = threaded.io().vtable.*;
+    vtable.netWrite = PartialWriter.write;
+    var connection = Connection{
+        .io = .{ .userdata = &writer, .vtable = &vtable },
+        .allocator = allocator,
+        .stream = undefined,
+        .role = .server,
+    };
+    defer {
+        connection.active_peer_streams.deinit(allocator);
+        connection.active_peer_index.deinit(allocator);
+        connection.push_state.deinit(allocator);
+        connection.priority_state.deinit(allocator);
+        connection.response_semantics.deinit(allocator);
+        connection.response_semantics_index.deinit(allocator);
+        connection.hpack_decoder.deinit(allocator);
+        connection.hpack_encoder.deinit(allocator);
+        connection.hpack_encoder_staging.deinit(allocator);
+    }
+    try connection.addActivePeerStream(1);
+
+    const headers = [_]http2.Hpack.HeaderField{
+        .{ .name = ":method", .value = "GET" },
+        .{ .name = ":scheme", .value = "https" },
+        .{ .name = ":path", .value = "/pushed" },
+        .{ .name = ":authority", .value = "localhost" },
+        .{ .name = "x-push-dynamic", .value = "one" },
+    };
+    try std.testing.expectError(
+        error.NetworkDown,
+        connection.promisePush(1, &headers),
+    );
+    try std.testing.expectEqual(@as(usize, 2), writer.writes);
+    try std.testing.expect(connection.push_state.localStatus(2) == null);
+    try std.testing.expect(!connection.response_semantics_index.contains(2));
+    try std.testing.expectEqual(
+        @as(usize, 0),
+        connection.hpack_encoder.dynamic_table.entries.items.len,
+    );
+    try std.testing.expect(connection.aggregate_timeout_unusable);
+    try std.testing.expectError(
+        error.ConnectionClosed,
+        connection.promisePush(1, &headers),
+    );
+    try std.testing.expectEqual(@as(usize, 2), writer.writes);
+}
+
+test "HTTP/2 partial DATA frame write fails connection closed" {
+    const allocator = std.testing.allocator;
+    const PartialWriter = struct {
+        writes: usize = 0,
+
+        fn write(
+            context: ?*anyopaque,
+            _: net.Socket.Handle,
+            bytes: []const u8,
+            _: []const []const u8,
+            _: usize,
+        ) net.Stream.Writer.Error!usize {
+            const self: *@This() = @ptrCast(@alignCast(context.?));
+            self.writes += 1;
+            if (self.writes == 1) return @min(bytes.len, 4);
+            return error.NetworkDown;
+        }
+    };
+
+    var threaded = std.Io.Threaded.init(allocator, .{});
+    defer threaded.deinit();
+    var writer: PartialWriter = .{};
+    var vtable = threaded.io().vtable.*;
+    vtable.netWrite = PartialWriter.write;
+    var connection = Connection{
+        .io = .{ .userdata = &writer, .vtable = &vtable },
+        .allocator = allocator,
+        .stream = undefined,
+        .role = .client,
+    };
+    defer {
+        connection.send_stream_windows.deinit(allocator);
+        connection.send_stream_window_index.deinit(allocator);
+        connection.active_local_streams.deinit(allocator);
+        connection.active_local_index.deinit(allocator);
+    }
+    try connection.addActiveLocalStream(1);
+
+    try std.testing.expectError(
+        error.NetworkDown,
+        connection.writeData(1, "payload", false),
+    );
+    try std.testing.expectEqual(@as(usize, 2), writer.writes);
+    try std.testing.expect(connection.aggregate_timeout_unusable);
+    try std.testing.expectError(
+        error.ConnectionClosed,
+        connection.writeData(1, "retry", false),
+    );
+    try std.testing.expectEqual(@as(usize, 2), writer.writes);
+}
+
+test "HTTP/2 partial extension control write fails connection closed" {
+    const allocator = std.testing.allocator;
+    const PartialWriter = struct {
+        writes: usize = 0,
+
+        fn write(
+            context: ?*anyopaque,
+            _: net.Socket.Handle,
+            bytes: []const u8,
+            _: []const []const u8,
+            _: usize,
+        ) net.Stream.Writer.Error!usize {
+            const self: *@This() = @ptrCast(@alignCast(context.?));
+            self.writes += 1;
+            if (self.writes == 1) return @min(bytes.len, 4);
+            return error.NetworkDown;
+        }
+    };
+
+    var threaded = std.Io.Threaded.init(allocator, .{});
+    defer threaded.deinit();
+    var writer: PartialWriter = .{};
+    var vtable = threaded.io().vtable.*;
+    vtable.netWrite = PartialWriter.write;
+    var connection = Connection{
+        .io = .{ .userdata = &writer, .vtable = &vtable },
+        .allocator = allocator,
+        .stream = undefined,
+        .role = .server,
+    };
+    defer {
+        connection.peer_origins.deinit(allocator);
+        connection.peer_origin_index.deinit(allocator);
+        connection.alternative_services.deinit(allocator);
+        connection.alternative_service_index.deinit(allocator);
+    }
+
+    try std.testing.expectError(
+        error.NetworkDown,
+        connection.sendOrigins(&.{"https://example.com"}),
+    );
+    try std.testing.expectEqual(@as(usize, 2), writer.writes);
+    try std.testing.expect(connection.aggregate_timeout_unusable);
+    try std.testing.expectError(
+        error.ConnectionClosed,
+        connection.sendAlternativeService(
+            0,
+            "https://example.com",
+            "h3=\":443\"",
+        ),
+    );
+    try std.testing.expectEqual(@as(usize, 2), writer.writes);
+}
+
+test "HTTP/2 application batch reset partial write fails closed" {
+    const allocator = std.testing.allocator;
+    const PartialWriter = struct {
+        writes: usize = 0,
+
+        fn write(
+            context: ?*anyopaque,
+            _: net.Socket.Handle,
+            bytes: []const u8,
+            _: []const []const u8,
+            _: usize,
+        ) net.Stream.Writer.Error!usize {
+            const self: *@This() = @ptrCast(@alignCast(context.?));
+            self.writes += 1;
+            if (self.writes == 1) return @min(bytes.len, 4);
+            return error.NetworkDown;
+        }
+    };
+
+    var threaded = std.Io.Threaded.init(allocator, .{});
+    defer threaded.deinit();
+    var writer: PartialWriter = .{};
+    var vtable = threaded.io().vtable.*;
+    vtable.netWrite = PartialWriter.write;
+    var connection = Connection{
+        .io = .{ .userdata = &writer, .vtable = &vtable },
+        .allocator = allocator,
+        .stream = undefined,
+        .role = .client,
+        .limits = .{ .max_reset_stream_history = 0 },
+    };
+    defer connection.write_batch.deinit(allocator);
+
+    const states = [_]Connection.BatchResponseState{
+        .{
+            .stream_id = 1,
+            .request_method = "GET",
+            .extended_connect = false,
+        },
+        .{
+            .stream_id = 3,
+            .request_method = "GET",
+            .extended_connect = false,
+        },
+    };
+    try std.testing.expectError(
+        error.NetworkDown,
+        connection.writeBatchResponseResets(&states),
+    );
+    try std.testing.expectEqual(@as(usize, 2), writer.writes);
+    try std.testing.expect(connection.aggregate_timeout_unusable);
+    try std.testing.expectError(
+        error.ConnectionClosed,
+        connection.sendGoAway(0, .no_error, &.{}),
+    );
+    var responses: [1]OwnedResponse = undefined;
+    try std.testing.expectError(
+        error.ConnectionClosed,
+        connection.requestBatchInto(
+            &.{.{ .authority = "localhost" }},
+            &responses,
+        ),
+    );
+    try std.testing.expectEqual(@as(usize, 2), writer.writes);
+}
+
+test "HTTP/2 adaptive window partial write fails closed without local commit" {
+    const allocator = std.testing.allocator;
+    const PartialWriter = struct {
+        writes: usize = 0,
+
+        fn write(
+            context: ?*anyopaque,
+            _: net.Socket.Handle,
+            bytes: []const u8,
+            _: []const []const u8,
+            _: usize,
+        ) net.Stream.Writer.Error!usize {
+            const self: *@This() = @ptrCast(@alignCast(context.?));
+            self.writes += 1;
+            if (self.writes == 1) return @min(bytes.len, 4);
+            return error.NetworkDown;
+        }
+    };
+
+    var threaded = std.Io.Threaded.init(allocator, .{});
+    defer threaded.deinit();
+    var writer: PartialWriter = .{};
+    var vtable = threaded.io().vtable.*;
+    vtable.netWrite = PartialWriter.write;
+    var connection = Connection{
+        .io = .{ .userdata = &writer, .vtable = &vtable },
+        .allocator = allocator,
+        .stream = undefined,
+        .role = .client,
+    };
+    defer {
+        connection.recv_stream_windows.deinit(allocator);
+        connection.recv_stream_window_index.deinit(allocator);
+    }
+
+    const target: u32 = 100_000;
+    try std.testing.expectError(
+        error.NetworkDown,
+        connection.sendAdaptiveWindowUpdate(target),
+    );
+    try std.testing.expectEqual(@as(usize, 2), writer.writes);
+    try std.testing.expect(connection.aggregate_timeout_unusable);
+    try std.testing.expectEqual(
+        @as(u32, @intCast(default_flow_window)),
+        connection.recv_connection_window_target,
+    );
+    try std.testing.expectEqual(
+        @as(u32, @intCast(default_flow_window)),
+        connection.recv_stream_window_target,
+    );
+    try std.testing.expect(!connection.awaiting_settings_ack);
+    try std.testing.expectError(
+        error.ConnectionClosed,
+        connection.sendWindowUpdate(0, 1),
+    );
+    try std.testing.expectEqual(@as(usize, 2), writer.writes);
+}
+
+test "HTTP/2 internal error GOAWAY bypasses public fail-fast guard" {
+    const allocator = std.testing.allocator;
+    const RecordingWriter = struct {
+        bytes: [128]u8 = undefined,
+        len: usize = 0,
+        writes: usize = 0,
+
+        fn write(
+            context: ?*anyopaque,
+            _: net.Socket.Handle,
+            header: []const u8,
+            _: []const []const u8,
+            _: usize,
+        ) net.Stream.Writer.Error!usize {
+            const self: *@This() = @ptrCast(@alignCast(context.?));
+            self.writes += 1;
+            const count = @min(header.len, self.bytes.len - self.len);
+            if (count == 0) return error.SocketUnconnected;
+            @memcpy(self.bytes[self.len..][0..count], header[0..count]);
+            self.len += count;
+            return count;
+        }
+    };
+
+    var threaded = std.Io.Threaded.init(allocator, .{});
+    defer threaded.deinit();
+    var writer: RecordingWriter = .{};
+    var vtable = threaded.io().vtable.*;
+    vtable.netWrite = RecordingWriter.write;
+    var connection = Connection{
+        .io = .{ .userdata = &writer, .vtable = &vtable },
+        .allocator = allocator,
+        .stream = undefined,
+        .role = .server,
+        .serve_read_connection_error = .frame_sequence,
+    };
+
+    connection.sendServeReadError(error.UnexpectedFrame);
+    try std.testing.expect(connection.aggregate_timeout_unusable);
+    try std.testing.expect(writer.len != 0);
+    const frame = try http2.Frame.parse(writer.bytes[0..writer.len]);
+    try std.testing.expectEqual(http2.FrameType.goaway, frame.header.frame_type);
+    const goaway = try http2.GoAwayPayload.parse(frame);
+    try std.testing.expectEqual(http2.ErrorCode.protocol_error, goaway.error_code);
+    try std.testing.expectEqualStrings("frame-sequence", goaway.debug_data);
+
+    const writes = writer.writes;
+    try std.testing.expectError(
+        error.ConnectionClosed,
+        connection.sendGoAway(0, .no_error, &.{}),
+    );
+    try std.testing.expectEqual(writes, writer.writes);
+}
+
+test "HTTP/2 streaming request batch partial HEADERS write fails closed" {
+    const allocator = std.testing.allocator;
+    const PartialWriter = struct {
+        writes: usize = 0,
+
+        fn write(
+            context: ?*anyopaque,
+            _: net.Socket.Handle,
+            bytes: []const u8,
+            _: []const []const u8,
+            _: usize,
+        ) net.Stream.Writer.Error!usize {
+            const self: *@This() = @ptrCast(@alignCast(context.?));
+            self.writes += 1;
+            if (self.writes == 1) return @min(bytes.len, 4);
+            return error.NetworkDown;
+        }
+    };
+
+    var threaded = std.Io.Threaded.init(allocator, .{});
+    defer threaded.deinit();
+    var writer: PartialWriter = .{};
+    var vtable = threaded.io().vtable.*;
+    vtable.netWrite = PartialWriter.write;
+    var connection = Connection{
+        .io = .{ .userdata = &writer, .vtable = &vtable },
+        .allocator = allocator,
+        .stream = undefined,
+        .role = .client,
+        .default_scheme = "http",
+    };
+    defer {
+        connection.send_stream_windows.deinit(allocator);
+        connection.send_stream_window_index.deinit(allocator);
+        connection.active_local_streams.deinit(allocator);
+        connection.active_local_index.deinit(allocator);
+        connection.priority_state.deinit(allocator);
+        connection.write_batch.deinit(allocator);
+        connection.hpack_decoder.deinit(allocator);
+        connection.hpack_encoder.deinit(allocator);
+        connection.hpack_encoder_staging.deinit(allocator);
+    }
+
+    const requests = [_]RequestOptions{
+        .{ .path = "/first", .authority = "localhost" },
+        .{ .path = "/second", .authority = "localhost" },
+    };
+    var responses: [requests.len]StreamingResponse = undefined;
+    try std.testing.expectError(
+        error.NetworkDown,
+        connection.requestBatchStreamingInto(
+            &requests,
+            &responses,
+            {},
+            struct {
+                fn consume(_: void, _: usize, _: []const u8) !void {}
+            }.consume,
+        ),
+    );
+    try std.testing.expectEqual(@as(usize, 2), writer.writes);
+    try std.testing.expectEqual(@as(u31, 5), connection.next_client_stream_id);
+    try std.testing.expectEqual(@as(usize, 0), connection.activeLocalStreamCount());
+    try std.testing.expect(connection.aggregate_timeout_unusable);
+    try std.testing.expect(!connection.isReusable());
+    try std.testing.expectError(
+        error.ConnectionClosed,
+        connection.sendCompleteRequest(.{ .authority = "localhost" }),
+    );
+}
+
+test "HTTP/2 body request streaming response batch partial HEADERS fails closed" {
+    const allocator = std.testing.allocator;
+    const PartialWriter = struct {
+        writes: usize = 0,
+
+        fn write(
+            context: ?*anyopaque,
+            _: net.Socket.Handle,
+            bytes: []const u8,
+            _: []const []const u8,
+            _: usize,
+        ) net.Stream.Writer.Error!usize {
+            const self: *@This() = @ptrCast(@alignCast(context.?));
+            self.writes += 1;
+            if (self.writes == 1) return @min(bytes.len, 4);
+            return error.NetworkDown;
+        }
+    };
+
+    var threaded = std.Io.Threaded.init(allocator, .{});
+    defer threaded.deinit();
+    var writer: PartialWriter = .{};
+    var vtable = threaded.io().vtable.*;
+    vtable.netWrite = PartialWriter.write;
+    var connection = Connection{
+        .io = .{ .userdata = &writer, .vtable = &vtable },
+        .allocator = allocator,
+        .stream = undefined,
+        .role = .client,
+        .default_scheme = "http",
+    };
+    defer {
+        connection.send_stream_windows.deinit(allocator);
+        connection.send_stream_window_index.deinit(allocator);
+        connection.active_local_streams.deinit(allocator);
+        connection.active_local_index.deinit(allocator);
+        connection.priority_state.deinit(allocator);
+        connection.write_batch.deinit(allocator);
+        connection.batch_data_headers.deinit(allocator);
+        connection.batch_data_parts.deinit(allocator);
+        connection.hpack_decoder.deinit(allocator);
+        connection.hpack_encoder.deinit(allocator);
+        connection.hpack_encoder_staging.deinit(allocator);
+    }
+
+    const requests = [_]RequestOptions{
+        .{ .method = "POST", .authority = "localhost", .body = "one" },
+        .{ .method = "POST", .authority = "localhost", .body = "two" },
+    };
+    var responses: [requests.len]StreamingResponse = undefined;
+    try std.testing.expectError(
+        error.NetworkDown,
+        connection.requestBodyBatchStreamingInto(
+            &requests,
+            3,
+            &responses,
+            {},
+            struct {
+                fn consume(_: void, _: usize, _: []const u8) !void {}
+            }.consume,
+        ),
+    );
+    try std.testing.expectEqual(@as(usize, 2), writer.writes);
+    try std.testing.expectEqual(@as(u31, 5), connection.next_client_stream_id);
+    try std.testing.expectEqual(@as(usize, 0), connection.activeLocalStreamCount());
+    try std.testing.expect(connection.aggregate_timeout_unusable);
+    try std.testing.expect(!connection.isReusable());
+}
+
+test "HTTP/2 request body batch partial DATA does not append cleanup resets" {
+    const allocator = std.testing.allocator;
+    const PartialDataWriter = struct {
+        writes: usize = 0,
+
+        fn write(
+            context: ?*anyopaque,
+            _: net.Socket.Handle,
+            bytes: []const u8,
+            _: []const []const u8,
+            _: usize,
+        ) net.Stream.Writer.Error!usize {
+            const self: *@This() = @ptrCast(@alignCast(context.?));
+            self.writes += 1;
+            if (self.writes == 1) return bytes.len;
+            if (self.writes == 2) return @min(bytes.len, 4);
+            return error.NetworkDown;
+        }
+    };
+
+    var threaded = std.Io.Threaded.init(allocator, .{});
+    defer threaded.deinit();
+    var writer: PartialDataWriter = .{};
+    var vtable = threaded.io().vtable.*;
+    vtable.netWrite = PartialDataWriter.write;
+    var connection = Connection{
+        .io = .{ .userdata = &writer, .vtable = &vtable },
+        .allocator = allocator,
+        .stream = undefined,
+        .role = .client,
+        .default_scheme = "http",
+    };
+    defer {
+        connection.send_stream_windows.deinit(allocator);
+        connection.send_stream_window_index.deinit(allocator);
+        connection.active_local_streams.deinit(allocator);
+        connection.active_local_index.deinit(allocator);
+        connection.priority_state.deinit(allocator);
+        connection.write_batch.deinit(allocator);
+        connection.batch_data_headers.deinit(allocator);
+        connection.batch_data_parts.deinit(allocator);
+        connection.hpack_decoder.deinit(allocator);
+        connection.hpack_encoder.deinit(allocator);
+        connection.hpack_encoder_staging.deinit(allocator);
+    }
+
+    const requests = [_]RequestOptions{.{
+        .method = "POST",
+        .authority = "localhost",
+        .body = "payload",
+    }};
+    var responses: [1]OwnedResponse = undefined;
+    try std.testing.expectError(
+        error.NetworkDown,
+        connection.requestBodyBatchInto(
+            &requests,
+            requests[0].body.len,
+            &responses,
+        ),
+    );
+    // HEADERS, one partial DATA prefix, then the failing continuation. The
+    // unwind path must not attempt a fourth write for RST_STREAM cleanup.
+    try std.testing.expectEqual(@as(usize, 3), writer.writes);
+    try std.testing.expect(connection.aggregate_timeout_unusable);
+    try std.testing.expectEqual(@as(usize, 0), connection.activeLocalStreamCount());
+}
+
 test "HTTP/2 aggregate response batch borrows wire frames after warmup" {
     const allocator = std.testing.allocator;
     const parallel = 3;
@@ -25361,21 +30947,15 @@ test "HTTP/2 aggregate response batch borrows wire frames after warmup" {
     if (shared.err) |err| return err;
 }
 
-test "HTTP/2 request body batch sends bounded parallel bodies" {
+test "HTTP/2 request body batch crosses connection flow-control window" {
     const allocator = std.testing.allocator;
-    const request_body = "batch-body-" ** 1024;
+    // Each body exceeds the default 65,535-byte stream window and the batch
+    // exceeds the connection window, forcing both WINDOW_UPDATE paths.
+    const request_body = "batch-body-" ** 8192;
     const parallel = 3;
     const total_body_bytes = request_body.len * parallel;
     const limits: Limits = .{
         .max_body_bytes = request_body.len,
-        .initial_window_size = @max(
-            total_body_bytes,
-            @as(usize, @intCast(default_flow_window)),
-        ),
-        .initial_connection_window_size = @max(
-            total_body_bytes,
-            @as(usize, @intCast(default_flow_window)),
-        ),
     };
 
     var threaded = std.Io.Threaded.init(allocator, .{});
@@ -25418,8 +30998,9 @@ test "HTTP/2 request body batch sends bounded parallel bodies" {
                 }
             };
             var context: Context = .{};
-            try connection.readRequestBatchStreamingInto(
+            try connection.readRequestBatchStreamingIntoWithTimeout(
                 &requests,
+                .fromSeconds(2),
                 &context,
                 Context.consume,
             );
@@ -25495,10 +31076,11 @@ test "HTTP/2 request body batch sends bounded parallel bodies" {
         },
     };
     var responses: [parallel]OwnedResponse = undefined;
-    try client.requestBodyBatchInto(
+    try client.requestBodyBatchIntoWithTimeout(
         &requests,
         request_body.len,
         &responses,
+        .fromSeconds(2),
     );
     defer for (&responses) |*response| response.deinit(allocator);
     try std.testing.expectEqualStrings(
@@ -25515,6 +31097,235 @@ test "HTTP/2 request body batch sends bounded parallel bodies" {
     );
 
     thread.join();
+    if (shared.err) |err| return err;
+}
+
+test "HTTP/2 request body batch consumes an early response while another upload waits" {
+    const allocator = std.testing.allocator;
+    const large_body = "large-upload-" ** 8192;
+    const limits: Limits = .{ .max_body_bytes = large_body.len };
+
+    var threaded = std.Io.Threaded.init(allocator, .{});
+    defer threaded.deinit();
+    const io = threaded.io();
+    var server = try Server.listen(
+        allocator,
+        io,
+        .{ .ip4 = .loopback(0) },
+        limits,
+    );
+    defer server.deinit();
+
+    const Shared = struct {
+        server: *Server,
+        connection: ?*Connection = null,
+        early_bytes: usize = 0,
+        early_response_sent: bool = false,
+        large_bytes: usize = 0,
+        err: ?anyerror = null,
+
+        fn run(self: *@This()) void {
+            self.runFallible() catch |err| {
+                self.err = err;
+            };
+        }
+
+        fn consume(
+            self: *@This(),
+            stream_id: u31,
+            data: []const u8,
+        ) !void {
+            if (stream_id == 1) {
+                self.early_bytes += data.len;
+                if (self.early_bytes == "small".len) {
+                    try self.connection.?.writeResponseInternal(
+                        stream_id,
+                        .{
+                            .body = "early-finished",
+                            .request_method = "POST",
+                        },
+                        false,
+                    );
+                    self.early_response_sent = true;
+                }
+                return;
+            }
+            self.large_bytes += data.len;
+        }
+
+        fn runFallible(self: *@This()) !void {
+            var connection = try self.server.accept();
+            defer connection.close();
+            self.connection = &connection;
+            defer self.connection = null;
+            var incoming: [2]StreamingRequest = undefined;
+            try connection.readRequestBatchStreamingInto(
+                &incoming,
+                self,
+                @This().consume,
+            );
+            defer for (&incoming) |*request| {
+                request.deinit(self.server.allocator);
+            };
+            try std.testing.expect(self.early_response_sent);
+            try std.testing.expectEqualStrings("/early", incoming[0].path);
+            try std.testing.expectEqualStrings("/large", incoming[1].path);
+            try std.testing.expectEqual(large_body.len, incoming[1].body_bytes);
+            connection.releasePeerStream(incoming[0].stream_id);
+            try connection.writeResponse(incoming[1].stream_id, .{
+                .body = "large-finished",
+            });
+        }
+    };
+    var shared = Shared{ .server = &server };
+    const thread = try std.Thread.spawn(.{}, Shared.run, .{&shared});
+    var joined = false;
+    defer if (!joined) thread.join();
+
+    var client = try Client.connect(
+        allocator,
+        io,
+        server.address(),
+        limits,
+    );
+    defer client.close();
+    const requests = [_]RequestOptions{
+        .{
+            .method = "POST",
+            .path = "/early",
+            .authority = "localhost",
+            .body = "small",
+        },
+        .{
+            .method = "POST",
+            .path = "/large",
+            .authority = "localhost",
+            .body = large_body,
+        },
+    };
+    var responses: [requests.len]StreamingResponse = undefined;
+    const ResponseContext = struct {
+        bodies: [requests.len][32]u8 = undefined,
+        lengths: [requests.len]usize = .{0} ** requests.len,
+
+        fn consume(
+            self: *@This(),
+            index: usize,
+            data: []const u8,
+        ) !void {
+            if (self.lengths[index] + data.len > self.bodies[index].len) {
+                return error.MessageTooLarge;
+            }
+            @memcpy(
+                self.bodies[index][self.lengths[index]..][0..data.len],
+                data,
+            );
+            self.lengths[index] += data.len;
+        }
+    };
+    var response_context: ResponseContext = .{};
+    try client.requestBodyBatchStreamingIntoWithTimeout(
+        &requests,
+        16 * 1024,
+        &responses,
+        .fromSeconds(2),
+        &response_context,
+        ResponseContext.consume,
+    );
+    defer for (&responses) |*response| response.deinit(allocator);
+    try std.testing.expectEqual(@as(u16, 200), responses[0].status);
+    try std.testing.expectEqual(@as(u16, 200), responses[1].status);
+    try std.testing.expectEqualStrings(
+        "early-finished",
+        response_context.bodies[0][0..response_context.lengths[0]],
+    );
+    try std.testing.expectEqualStrings(
+        "large-finished",
+        response_context.bodies[1][0..response_context.lengths[1]],
+    );
+
+    thread.join();
+    joined = true;
+    if (shared.err) |err| return err;
+    try std.testing.expectEqual(large_body.len, shared.large_bytes);
+}
+
+test "HTTP/2 request body batch deadline covers blocked upload" {
+    const allocator = std.testing.allocator;
+    const large_body = "deadline-upload-" ** 8192;
+    const limits: Limits = .{ .max_body_bytes = large_body.len };
+
+    var threaded = std.Io.Threaded.init(allocator, .{});
+    defer threaded.deinit();
+    const io = threaded.io();
+    var server = try Server.listen(
+        allocator,
+        io,
+        .{ .ip4 = .loopback(0) },
+        limits,
+    );
+    defer server.deinit();
+
+    const Shared = struct {
+        server: *Server,
+        err: ?anyerror = null,
+
+        fn run(self: *@This()) void {
+            var connection = self.server.accept() catch |err| {
+                self.err = err;
+                return;
+            };
+            defer connection.close();
+            std.Io.sleep(
+                self.server.io,
+                .fromMilliseconds(100),
+                .awake,
+            ) catch |err| {
+                self.err = err;
+            };
+        }
+    };
+    var shared = Shared{ .server = &server };
+    const thread = try std.Thread.spawn(.{}, Shared.run, .{&shared});
+    var joined = false;
+    defer if (!joined) thread.join();
+
+    var client = try Client.connect(
+        allocator,
+        io,
+        server.address(),
+        limits,
+    );
+    defer client.close();
+    const requests = [_]RequestOptions{
+        .{
+            .method = "POST",
+            .path = "/blocked-one",
+            .authority = "localhost",
+            .body = large_body,
+        },
+        .{
+            .method = "POST",
+            .path = "/blocked-two",
+            .authority = "localhost",
+            .body = large_body,
+        },
+    };
+    var responses: [requests.len]OwnedResponse = undefined;
+    try std.testing.expectError(
+        error.Timeout,
+        client.requestBodyBatchIntoWithTimeout(
+            &requests,
+            16 * 1024,
+            &responses,
+            .fromMilliseconds(20),
+        ),
+    );
+    try std.testing.expect(!client.isReusable());
+    try std.testing.expectEqual(@as(usize, 0), client.activeLocalStreamCount());
+
+    thread.join();
+    joined = true;
     if (shared.err) |err| return err;
 }
 
@@ -25630,55 +31441,6 @@ test "HTTP/2 request body batch streaming ignores duplicate reset and admits lat
 
     thread.join();
     if (shared.err) |err| return err;
-}
-
-test "HTTP/2 request body batch rejects insufficient credit before write" {
-    const allocator = std.testing.allocator;
-    var connection = Connection{
-        .io = undefined,
-        .allocator = allocator,
-        .stream = undefined,
-        .role = .client,
-        .default_scheme = "http",
-    };
-    defer {
-        connection.active_local_streams.deinit(allocator);
-        connection.active_local_index.deinit(allocator);
-        connection.priority_state.deinit(allocator);
-        connection.write_batch.deinit(allocator);
-        connection.batch_data_headers.deinit(allocator);
-        connection.batch_data_parts.deinit(allocator);
-        connection.hpack_decoder.deinit(allocator);
-        connection.hpack_encoder.deinit(allocator);
-    }
-    connection.send_connection_window.value = 7;
-    connection.peer_initial_stream_window = 4;
-    const requests = [_]RequestOptions{
-        .{
-            .method = "POST",
-            .authority = "localhost",
-            .body = "1234",
-        },
-        .{
-            .method = "POST",
-            .authority = "localhost",
-            .body = "5678",
-        },
-    };
-    var responses: [requests.len]OwnedResponse = undefined;
-    try std.testing.expectError(
-        error.FlowControlBlocked,
-        connection.requestBodyBatchInto(&requests, 4, &responses),
-    );
-    try std.testing.expectEqual(
-        @as(usize, 0),
-        connection.write_batch.items.len,
-    );
-    try std.testing.expectEqual(
-        @as(usize, 0),
-        connection.active_local_streams.items.len,
-    );
-    try std.testing.expectEqual(@as(i64, 7), connection.send_connection_window.value);
 }
 
 test "HTTP/2 streaming request consumes body without aggregation" {
@@ -25989,6 +31751,69 @@ test "HTTP/2 response batch validates transactionally" {
     );
     try std.testing.expect(connection.outboundStreamIsActive(1));
     try std.testing.expect(connection.outboundStreamIsActive(3));
+}
+
+test "HTTP/2 response batch partial HEADERS write fails closed" {
+    const allocator = std.testing.allocator;
+    const PartialWriter = struct {
+        writes: usize = 0,
+
+        fn write(
+            context: ?*anyopaque,
+            _: net.Socket.Handle,
+            bytes: []const u8,
+            _: []const []const u8,
+            _: usize,
+        ) net.Stream.Writer.Error!usize {
+            const self: *@This() = @ptrCast(@alignCast(context.?));
+            self.writes += 1;
+            if (self.writes == 1) return @min(bytes.len, 4);
+            return error.NetworkDown;
+        }
+    };
+
+    var threaded = std.Io.Threaded.init(allocator, .{});
+    defer threaded.deinit();
+    var writer: PartialWriter = .{};
+    var vtable = threaded.io().vtable.*;
+    vtable.netWrite = PartialWriter.write;
+    var connection = Connection{
+        .io = .{ .userdata = &writer, .vtable = &vtable },
+        .allocator = allocator,
+        .stream = undefined,
+        .role = .server,
+        .limits = .{ .auto_date_header = false },
+    };
+    defer {
+        connection.active_peer_streams.deinit(allocator);
+        connection.active_peer_index.deinit(allocator);
+        connection.response_semantics.deinit(allocator);
+        connection.response_semantics_index.deinit(allocator);
+        connection.write_batch.deinit(allocator);
+        connection.hpack_decoder.deinit(allocator);
+        connection.hpack_encoder.deinit(allocator);
+        connection.hpack_encoder_staging.deinit(allocator);
+    }
+    try connection.addActivePeerStream(1);
+    try connection.addActivePeerStream(3);
+
+    try std.testing.expectError(
+        error.NetworkDown,
+        connection.writeResponseBatch(&.{ 1, 3 }, &.{
+            .{ .headers = &.{.{ .name = "x-first", .value = "one" }} },
+            .{ .headers = &.{.{ .name = "x-second", .value = "two" }} },
+        }),
+    );
+    try std.testing.expectEqual(@as(usize, 2), writer.writes);
+    try std.testing.expect(connection.aggregate_timeout_unusable);
+    try std.testing.expect(
+        connection.hpack_encoder.dynamic_table.entries.items.len != 0,
+    );
+    try std.testing.expectError(
+        error.ConnectionClosed,
+        connection.writeResponseBatch(&.{1}, &.{.{}}),
+    );
+    try std.testing.expectEqual(@as(usize, 2), writer.writes);
 }
 
 test "HTTP/2 DATA receive releases WINDOW_UPDATE capacity" {
@@ -27810,14 +33635,40 @@ test "HTTP/2 peer max concurrent streams limits locally opened streams" {
         connection.hpack_encoder.deinit(std.testing.allocator);
     }
 
+    try std.testing.expectEqual(
+        @as(?u32, 1),
+        connection.peerMaxConcurrentStreams(),
+    );
+    try std.testing.expectEqual(
+        @as(?u32, 1),
+        connection.availableLocalStreamCapacity(),
+    );
+    try std.testing.expectEqual(
+        @as(usize, 0),
+        connection.activeLocalStreamCount(),
+    );
+    try std.testing.expectEqual(
+        @as(usize, 0),
+        connection.activePeerStreamCount(),
+    );
+    try std.testing.expect(!connection.peerExtendedConnectEnabled());
+
     const first = try connection.reserveNextClientStreamId();
     try std.testing.expectEqual(@as(u31, 1), first);
     try std.testing.expectEqual(@as(usize, 1), connection.active_local_streams.items.len);
     try std.testing.expectEqual(@as(?usize, 0), connection.active_local_index.get(first));
+    try std.testing.expectEqual(
+        @as(?u32, 0),
+        connection.availableLocalStreamCapacity(),
+    );
     try std.testing.expectError(error.FlowControlBlocked, connection.reserveNextClientStreamId());
     try std.testing.expectEqual(@as(u31, 3), connection.next_client_stream_id);
 
     connection.releaseLocalStream(first);
+    try std.testing.expectEqual(
+        @as(?u32, 1),
+        connection.availableLocalStreamCapacity(),
+    );
     const second = try connection.reserveNextClientStreamId();
     try std.testing.expectEqual(@as(u31, 3), second);
     try std.testing.expectEqual(@as(usize, 1), connection.active_local_streams.items.len);
@@ -27841,6 +33692,281 @@ test "HTTP/2 peer max concurrent streams limits locally opened streams" {
         .error_code = .no_error,
         .debug_data = &.{},
     }));
+}
+
+test "HTTP/2 available local stream capacity matches priority reservations" {
+    const allocator = std.testing.allocator;
+    var connection = Connection{
+        .io = undefined,
+        .allocator = allocator,
+        .stream = undefined,
+        .role = .client,
+        .peer_max_concurrent_streams = 2,
+    };
+    defer {
+        connection.active_local_streams.deinit(allocator);
+        connection.active_local_index.deinit(allocator);
+        connection.priority_state.deinit(allocator);
+    }
+
+    try std.testing.expectEqual(
+        @as(?u32, 2),
+        connection.availableLocalStreamCapacity(),
+    );
+    try connection.priority_state.reserveIdleRequest(
+        allocator,
+        3,
+        connection.activeLocalStreamCount(),
+        connection.peerMaxConcurrentStreams(),
+        connection.limits.max_idle_priority_updates,
+    );
+    try std.testing.expectEqual(
+        @as(?u32, 1),
+        connection.availableLocalStreamCapacity(),
+    );
+    try connection.priority_state.reserveIdleRequest(
+        allocator,
+        connection.next_client_stream_id,
+        connection.activeLocalStreamCount(),
+        connection.peerMaxConcurrentStreams(),
+        connection.limits.max_idle_priority_updates,
+    );
+    // The next request consumes its existing reservation rather than charging
+    // the peer limit twice. One later unreserved stream also still fits.
+    try std.testing.expectEqual(
+        @as(?u32, 1),
+        connection.availableLocalStreamCapacity(),
+    );
+    const first = try connection.reserveNextClientStreamId();
+    try std.testing.expectEqual(@as(u31, 1), first);
+    try std.testing.expectEqual(
+        @as(?u32, 1),
+        connection.availableLocalStreamCapacity(),
+    );
+    const second = try connection.reserveNextClientStreamId();
+    try std.testing.expectEqual(@as(u31, 3), second);
+    try std.testing.expectEqual(
+        @as(?u32, 0),
+        connection.availableLocalStreamCapacity(),
+    );
+}
+
+test "HTTP/2 public peer capabilities track SETTINGS updates" {
+    const allocator = std.testing.allocator;
+    var threaded = std.Io.Threaded.init(allocator, .{});
+    defer threaded.deinit();
+    const io = threaded.io();
+
+    var listener = try (net.IpAddress{ .ip4 = .loopback(0) }).listen(
+        io,
+        .{ .reuse_address = true },
+    );
+    defer listener.deinit(io);
+
+    const Shared = struct {
+        allocator: std.mem.Allocator,
+        io: std.Io,
+        listener: *net.Server,
+        err: ?anyerror = null,
+
+        fn run(self: *@This()) void {
+            self.runFallible() catch |err| {
+                self.err = err;
+            };
+        }
+
+        fn writeSettingsUpdate(
+            self: *@This(),
+            stream: net.Stream,
+            settings: []const http2.Setting,
+        ) !void {
+            var payload: std.ArrayList(u8) = .empty;
+            defer payload.deinit(self.allocator);
+            try http2.writeSettings(&payload, self.allocator, settings);
+            try writeFrame(
+                self.allocator,
+                self.io,
+                stream,
+                .settings,
+                0,
+                0,
+                payload.items,
+            );
+        }
+
+        fn waitForSettingsAckAndPing(
+            self: *@This(),
+            stream: net.Stream,
+            expected_ping: [8]u8,
+        ) !void {
+            var saw_settings_ack = false;
+            var saw_ping = false;
+            while (!saw_settings_ack or !saw_ping) {
+                var frame = try readFrame(
+                    self.allocator,
+                    self.io,
+                    stream,
+                    .{},
+                );
+                defer frame.deinit(self.allocator);
+                switch (frame.frame.header.frame_type) {
+                    .settings => {
+                        try std.testing.expect(
+                            frame.frame.header.flags & flag_ack != 0,
+                        );
+                        saw_settings_ack = true;
+                    },
+                    .ping => {
+                        try std.testing.expectEqual(
+                            @as(u8, 0),
+                            frame.frame.header.flags & flag_ack,
+                        );
+                        const ping = try http2.PingPayload.parse(frame.frame);
+                        try std.testing.expectEqualSlices(
+                            u8,
+                            &expected_ping,
+                            &ping.data,
+                        );
+                        try writeFrame(
+                            self.allocator,
+                            self.io,
+                            stream,
+                            .ping,
+                            flag_ack,
+                            0,
+                            &ping.data,
+                        );
+                        saw_ping = true;
+                    },
+                    else => return error.UnexpectedFrame,
+                }
+            }
+        }
+
+        fn runFallible(self: *@This()) !void {
+            const stream = try self.listener.accept(self.io);
+            defer stream.close(self.io);
+            var preface: [http2.connection_preface.len]u8 = undefined;
+            try readExact(self.io, stream, &preface);
+            try http2.validateClientPreface(&preface);
+
+            var client_settings = try readFrame(
+                self.allocator,
+                self.io,
+                stream,
+                .{},
+            );
+            defer client_settings.deinit(self.allocator);
+            try std.testing.expectEqual(
+                http2.FrameType.settings,
+                client_settings.frame.header.frame_type,
+            );
+            try std.testing.expectEqual(
+                @as(u8, 0),
+                client_settings.frame.header.flags & flag_ack,
+            );
+
+            try self.writeSettingsUpdate(stream, &.{.{
+                .id = .max_concurrent_streams,
+                .value = 3,
+            }});
+            try writeFrame(
+                self.allocator,
+                self.io,
+                stream,
+                .settings,
+                flag_ack,
+                0,
+                &.{},
+            );
+            var initial_ack = try readFrame(
+                self.allocator,
+                self.io,
+                stream,
+                .{},
+            );
+            defer initial_ack.deinit(self.allocator);
+            try std.testing.expectEqual(
+                http2.FrameType.settings,
+                initial_ack.frame.header.frame_type,
+            );
+            try std.testing.expect(
+                initial_ack.frame.header.flags & flag_ack != 0,
+            );
+
+            try self.writeSettingsUpdate(stream, &.{
+                .{ .id = .max_concurrent_streams, .value = 1 },
+                .{ .id = .enable_connect_protocol, .value = 1 },
+            });
+            const first_ping = [_]u8{ 1, 2, 3, 4, 5, 6, 7, 8 };
+            try self.waitForSettingsAckAndPing(stream, first_ping);
+
+            try self.writeSettingsUpdate(stream, &.{.{
+                .id = .max_concurrent_streams,
+                .value = 4,
+            }});
+            const second_ping = [_]u8{ 8, 7, 6, 5, 4, 3, 2, 1 };
+            try self.waitForSettingsAckAndPing(stream, second_ping);
+        }
+    };
+
+    var shared = Shared{
+        .allocator = allocator,
+        .io = io,
+        .listener = &listener,
+    };
+    const thread = try std.Thread.spawn(.{}, Shared.run, .{&shared});
+    var joined = false;
+    defer if (!joined) thread.join();
+
+    var client = try Client.connect(
+        allocator,
+        io,
+        listener.socket.address,
+        .{},
+    );
+    defer client.close();
+    try std.testing.expectEqual(
+        @as(?u32, 3),
+        client.peerMaxConcurrentStreams(),
+    );
+    try std.testing.expectEqual(
+        @as(?u32, 3),
+        client.availableLocalStreamCapacity(),
+    );
+    try std.testing.expect(!client.peerExtendedConnectEnabled());
+
+    const first_ping = [_]u8{ 1, 2, 3, 4, 5, 6, 7, 8 };
+    try std.testing.expectEqualSlices(u8, &first_ping, &(try client.ping(first_ping)));
+    try std.testing.expectEqual(
+        @as(?u32, 1),
+        client.peerMaxConcurrentStreams(),
+    );
+    try std.testing.expectEqual(
+        @as(?u32, 1),
+        client.availableLocalStreamCapacity(),
+    );
+    try std.testing.expect(client.peerExtendedConnectEnabled());
+
+    const second_ping = [_]u8{ 8, 7, 6, 5, 4, 3, 2, 1 };
+    try std.testing.expectEqualSlices(
+        u8,
+        &second_ping,
+        &(try client.ping(second_ping)),
+    );
+    try std.testing.expectEqual(
+        @as(?u32, 4),
+        client.peerMaxConcurrentStreams(),
+    );
+    try std.testing.expectEqual(
+        @as(?u32, 4),
+        client.availableLocalStreamCapacity(),
+    );
+    try std.testing.expect(client.peerExtendedConnectEnabled());
+
+    thread.join();
+    joined = true;
+    if (shared.err) |err| return err;
 }
 
 test "HTTP/2 client stream id allocation detects overflow" {
@@ -28234,22 +34360,25 @@ test "HTTP/2 runtime validates SETTINGS frame-size and window bounds" {
         .{ .id = .no_rfc7540_priorities, .value = 1 },
     });
     try std.testing.expectEqual(@as(usize, 32_768), connection.peer_max_frame_size);
-    try std.testing.expectEqual(@as(?u32, 7), connection.peer_max_concurrent_streams);
+    try std.testing.expectEqual(
+        @as(?u32, 7),
+        connection.peerMaxConcurrentStreams(),
+    );
     try std.testing.expectEqual(@as(usize, 128), connection.hpack_encoder.dynamic_table.size_limit);
     try std.testing.expect(connection.peer_no_rfc7540_priorities);
 
     try connection.applySettings(&.{
         .{ .id = .enable_connect_protocol, .value = 0 },
     });
-    try std.testing.expect(!connection.peer_enable_connect_protocol);
+    try std.testing.expect(!connection.peerExtendedConnectEnabled());
     try connection.applySettings(&.{
         .{ .id = .enable_connect_protocol, .value = 1 },
     });
-    try std.testing.expect(connection.peer_enable_connect_protocol);
+    try std.testing.expect(connection.peerExtendedConnectEnabled());
     try std.testing.expectError(error.InvalidSetting, connection.applySettings(&.{
         .{ .id = .enable_connect_protocol, .value = 0 },
     }));
-    try std.testing.expect(connection.peer_enable_connect_protocol);
+    try std.testing.expect(connection.peerExtendedConnectEnabled());
     try connection.applySettings(&.{
         .{ .id = .no_rfc7540_priorities, .value = 1 },
     });

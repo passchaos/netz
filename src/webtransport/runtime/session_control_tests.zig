@@ -4,6 +4,247 @@ const runtime = @import("../runtime.zig");
 const http3 = @import("../../http3/mod.zig");
 const quic = @import("../../quic/mod.zig");
 
+test "WebTransport classifies terminal close send failures" {
+    inline for (&.{
+        error.RequestCancelled,
+        error.RequestRejected,
+        error.StreamStopped,
+        error.StreamStateError,
+        error.UnexpectedStream,
+        error.ConnectionClosed,
+        error.ConnectionUnusable,
+    }) |err| {
+        try std.testing.expect(
+            runtime.testing.classifyTerminalSessionBodySendError(err),
+        );
+    }
+    inline for (&.{
+        error.Timeout,
+        error.Canceled,
+        error.PacingLimited,
+        error.CongestionLimited,
+        error.FlowControlBlocked,
+        error.DatagramTooLarge,
+    }) |err| {
+        try std.testing.expect(
+            !runtime.testing.classifyTerminalSessionBodySendError(err),
+        );
+    }
+}
+
+test "WebTransport control records permanent local close failure" {
+    var control = try @import("session_control.zig").Control.init(
+        .init(0),
+    );
+    try control.beginLocalClose();
+    control.recordLocalCloseFailure(0x10203040);
+    try std.testing.expect(!control.local_close_started);
+    try std.testing.expect(control.local_close_failed);
+    try std.testing.expect(!control.local_close_sent);
+    try std.testing.expect(control.state.closed);
+    try std.testing.expectEqual(
+        @as(?u32, 0x10203040),
+        control.state.close_code,
+    );
+    try std.testing.expectError(
+        error.InvalidSessionState,
+        control.ensureOpen(),
+    );
+}
+
+test "WebTransport permanent CLOSE send failure becomes terminal" {
+    const allocator = std.testing.allocator;
+    var threaded = std.Io.Threaded.init(allocator, .{
+        .async_limit = .unlimited,
+    });
+    defer threaded.deinit();
+    const io = threaded.io();
+
+    const original_dcid =
+        [_]u8{ 0x57, 0x54, 0x46, 0x11, 0x57, 0x54, 0x46, 0x12 };
+    const client_cid = [_]u8{ 0x57, 0x54, 0x46, 0x13 };
+    const server_cid = [_]u8{ 0x57, 0x54, 0x46, 0x14 };
+    var server = try runtime.HandshakeServer.bind(
+        allocator,
+        io,
+        .{ .ip4 = .loopback(0) },
+        .{ .http3 = .{ .quic = .{ .max_datagram_size = 4096 } } },
+        .{ .handshake = .{
+            .local_connection_id = &server_cid,
+            .random = [_]u8{0xb7} ** 32,
+            .x25519_secret_key = [_]u8{0xb8} ** 32,
+        } },
+    );
+    defer server.deinit();
+
+    const Shared = struct {
+        server: *runtime.HandshakeServer,
+        release: std.Io.Event = .unset,
+        err: ?anyerror = null,
+
+        fn run(self: *@This()) void {
+            self.runFallible() catch |err| {
+                self.err = err;
+            };
+        }
+
+        fn runFallible(self: *@This()) !void {
+            var session = try self.server.accept();
+            defer session.deinit();
+            try self.release.wait(self.server.h3.quic_server.endpoint.io);
+        }
+    };
+    var shared = Shared{ .server = &server };
+    const thread = try std.Thread.spawn(.{}, Shared.run, .{&shared});
+    var joined = false;
+    defer if (!joined) {
+        shared.release.set(io);
+        thread.join();
+    };
+
+    var client = try runtime.HandshakeClientSession.connect(
+        allocator,
+        io,
+        .{ .ip4 = .loopback(0) },
+        server.address(),
+        .{
+            .authority = "localhost",
+            .path = "/wt-terminal-close-send",
+            .h3 = .{ .handshake = .{
+                .original_destination_connection_id = &original_dcid,
+                .local_connection_id = &client_cid,
+                .server_name = "localhost",
+                .random = [_]u8{0xb5} ** 32,
+                .x25519_secret_key = [_]u8{0xb6} ** 32,
+            } },
+        },
+    );
+    defer client.deinit();
+
+    client.h3.abandonExtendedConnect(client.session_id.value);
+    try std.testing.expectError(
+        error.UnexpectedStream,
+        client.closeWithTimeout(401, "retired", .fromSeconds(1)),
+    );
+    try std.testing.expect(
+        runtime.testing.pendingCloseProgress(&client) == null,
+    );
+    try std.testing.expect(runtime.testing.localCloseFailed(&client));
+    try std.testing.expect(!runtime.testing.localCloseSent(&client));
+    try std.testing.expect(client.control.state.closed);
+    try std.testing.expectError(
+        error.InvalidSessionState,
+        client.openBidirectionalStream(),
+    );
+    // The CONNECT direction is terminal, so a later close only resumes
+    // associated-stream cleanup and never rebuilds the discarded capsule.
+    try client.closeWithTimeout(999, "ignored", .fromSeconds(1));
+    try std.testing.expect(
+        runtime.testing.pendingCloseProgress(&client) == null,
+    );
+
+    shared.release.set(io);
+    thread.join();
+    joined = true;
+    if (shared.err) |err| return err;
+}
+
+test "WebTransport server permanent CLOSE send failure becomes terminal" {
+    const allocator = std.testing.allocator;
+    var threaded = std.Io.Threaded.init(allocator, .{
+        .async_limit = .unlimited,
+    });
+    defer threaded.deinit();
+    const io = threaded.io();
+
+    const original_dcid =
+        [_]u8{ 0x57, 0x54, 0x46, 0x21, 0x57, 0x54, 0x46, 0x22 };
+    const client_cid = [_]u8{ 0x57, 0x54, 0x46, 0x23 };
+    const server_cid = [_]u8{ 0x57, 0x54, 0x46, 0x24 };
+    var server = try runtime.HandshakeServer.bind(
+        allocator,
+        io,
+        .{ .ip4 = .loopback(0) },
+        .{ .http3 = .{ .quic = .{ .max_datagram_size = 4096 } } },
+        .{ .handshake = .{
+            .local_connection_id = &server_cid,
+            .random = [_]u8{0xc7} ** 32,
+            .x25519_secret_key = [_]u8{0xc8} ** 32,
+        } },
+    );
+    defer server.deinit();
+
+    const Shared = struct {
+        server: *runtime.HandshakeServer,
+        ready: std.Io.Event = .unset,
+        release: std.Io.Event = .unset,
+        failed: bool = false,
+        err: ?anyerror = null,
+
+        fn run(self: *@This()) void {
+            self.runFallible() catch |err| {
+                self.err = err;
+            };
+        }
+
+        fn runFallible(self: *@This()) !void {
+            var session = try self.server.accept();
+            defer session.deinit();
+            try session.h3.finishRequest(session.session_id.value);
+            try std.testing.expectError(
+                error.UnexpectedStream,
+                session.closeWithTimeout(402, "retired", .fromSeconds(1)),
+            );
+            try std.testing.expect(
+                runtime.testing.pendingCloseProgress(&session) == null,
+            );
+            try std.testing.expect(runtime.testing.localCloseFailed(&session));
+            try std.testing.expect(!runtime.testing.localCloseSent(&session));
+            try std.testing.expect(session.control.state.closed);
+            try std.testing.expectError(
+                error.InvalidSessionState,
+                session.sendDatagram("late"),
+            );
+            try session.closeWithTimeout(999, "ignored", .fromSeconds(1));
+            self.failed = true;
+            self.ready.set(self.server.h3.quic_server.endpoint.io);
+            try self.release.wait(self.server.h3.quic_server.endpoint.io);
+        }
+    };
+    var shared = Shared{ .server = &server };
+    const thread = try std.Thread.spawn(.{}, Shared.run, .{&shared});
+    var joined = false;
+    defer if (!joined) {
+        shared.release.set(io);
+        thread.join();
+    };
+
+    var client = try runtime.HandshakeClientSession.connect(
+        allocator,
+        io,
+        .{ .ip4 = .loopback(0) },
+        server.address(),
+        .{
+            .authority = "localhost",
+            .path = "/wt-server-terminal-close-send",
+            .h3 = .{ .handshake = .{
+                .original_destination_connection_id = &original_dcid,
+                .local_connection_id = &client_cid,
+                .server_name = "localhost",
+                .random = [_]u8{0xc5} ** 32,
+                .x25519_secret_key = [_]u8{0xc6} ** 32,
+            } },
+        },
+    );
+    defer client.deinit();
+    try shared.ready.wait(io);
+    try std.testing.expect(shared.failed);
+    shared.release.set(io);
+    thread.join();
+    joined = true;
+    if (shared.err) |err| return err;
+}
+
 test "WebTransport handshake sessions exchange drain and close capsules" {
     const allocator = std.testing.allocator;
     var threaded = std.Io.Threaded.init(allocator, .{});
@@ -128,6 +369,712 @@ test "WebTransport handshake sessions exchange drain and close capsules" {
     );
 
     thread.join();
+    if (shared.err) |err| return err;
+}
+
+test "WebTransport authenticated close deadline resumes capsule and stream cleanup" {
+    const allocator = std.testing.allocator;
+    var threaded = std.Io.Threaded.init(allocator, .{});
+    defer threaded.deinit();
+    const io = threaded.io();
+
+    const FixedSendIo = struct {
+        delegate: std.Io,
+        now_ns: i96 = 1_000_000,
+        send_calls: usize = 0,
+        sleep_calls: usize = 0,
+        expire_after_send_call: ?usize = null,
+
+        fn now(
+            context: ?*anyopaque,
+            _: std.Io.Clock,
+        ) std.Io.Timestamp {
+            const self: *@This() = @ptrCast(@alignCast(context.?));
+            return .fromNanoseconds(self.now_ns);
+        }
+
+        fn sleep(
+            context: ?*anyopaque,
+            _: std.Io.Timeout,
+        ) std.Io.Cancelable!void {
+            const self: *@This() = @ptrCast(@alignCast(context.?));
+            self.sleep_calls += 1;
+            return error.Canceled;
+        }
+
+        fn netSend(
+            context: ?*anyopaque,
+            socket_handle: std.Io.net.Socket.Handle,
+            messages: []std.Io.net.OutgoingMessage,
+            flags: std.Io.net.SendFlags,
+        ) struct { ?std.Io.net.Socket.SendError, usize } {
+            const self: *@This() = @ptrCast(@alignCast(context.?));
+            self.send_calls += 1;
+            const result = self.delegate.vtable.netSend(
+                self.delegate.userdata,
+                socket_handle,
+                messages,
+                flags,
+            );
+            if (self.expire_after_send_call == self.send_calls and
+                result[0] == null and result[1] != 0)
+            {
+                self.now_ns += 2;
+            }
+            return result;
+        }
+    };
+
+    const original_dcid =
+        [_]u8{ 0x57, 0x54, 0x44, 0x01, 0x57, 0x54, 0x44, 0x02 };
+    const client_cid = [_]u8{ 0x57, 0x54, 0x44, 0x03 };
+    const server_cid = [_]u8{ 0x57, 0x54, 0x44, 0x04 };
+    const limits: runtime.Limits = .{ .http3 = .{ .quic = .{
+        .max_datagram_size = 4096,
+        .max_frames_per_datagram = 8,
+    } } };
+    const h3_session: http3.runtime.HandshakeSessionOptions = .{
+        .max_stream_frame_data = 5,
+        .max_frames_per_packet = 1,
+    };
+    var server = try runtime.HandshakeServer.bind(
+        allocator,
+        io,
+        .{ .ip4 = .loopback(0) },
+        limits,
+        .{
+            .handshake = .{
+                .local_connection_id = &server_cid,
+                .random = [_]u8{0xd7} ** 32,
+                .x25519_secret_key = [_]u8{0xd8} ** 32,
+            },
+            .session = h3_session,
+        },
+    );
+    defer server.deinit();
+
+    const reason = "0123456789" ** 12;
+    const Shared = struct {
+        server: *runtime.HandshakeServer,
+        err: ?anyerror = null,
+
+        fn run(self: *@This()) void {
+            self.runFallible() catch |err| {
+                self.err = err;
+            };
+        }
+
+        fn runFallible(self: *@This()) !void {
+            var session = try self.server.accept();
+            defer session.deinit();
+            const event = try session.receiveSessionEventWithTimeout(
+                .fromSeconds(5),
+            );
+            try std.testing.expect(event == .closed);
+            try std.testing.expectEqual(@as(u32, 117), event.closed.code);
+            try std.testing.expectEqualStrings(reason, event.closed.reason);
+        }
+    };
+    var shared = Shared{ .server = &server };
+    const thread = try std.Thread.spawn(.{}, Shared.run, .{&shared});
+    var joined = false;
+    defer if (!joined) thread.join();
+
+    var client = try runtime.HandshakeClientSession.connect(
+        allocator,
+        io,
+        .{ .ip4 = .loopback(0) },
+        server.address(),
+        .{
+            .authority = "localhost",
+            .path = "/wt-close-deadline",
+            .limits = limits,
+            .h3 = .{
+                .handshake = .{
+                    .original_destination_connection_id = &original_dcid,
+                    .local_connection_id = &client_cid,
+                    .server_name = "localhost",
+                    .initial_one_rtt_config = .{
+                        .max_datagram_size = 1400,
+                        .enable_pacing = true,
+                    },
+                    .random = [_]u8{0xd5} ** 32,
+                    .x25519_secret_key = [_]u8{0xd6} ** 32,
+                },
+                .session = h3_session,
+            },
+        },
+    );
+    defer client.deinit();
+
+    const packets_before_invalid_deadline = client.getStats().packets_sent;
+    try std.testing.expectError(
+        error.Timeout,
+        client.closeWithDeadline(117, reason, .{
+            .clock = .real,
+            .raw = .zero,
+        }),
+    );
+    try std.testing.expect(
+        runtime.testing.pendingCloseProgress(&client) == null,
+    );
+    try std.testing.expect(!runtime.testing.localCloseSent(&client));
+    try std.testing.expectEqual(
+        packets_before_invalid_deadline,
+        client.getStats().packets_sent,
+    );
+
+    const bidi = try client.openBidirectionalStream();
+    try client.sendStream(bidi, "bidi", false);
+    const uni = try client.openUnidirectionalStream();
+    try client.sendStream(uni, "uni", false);
+
+    var fixed = FixedSendIo{ .delegate = client.h3.endpoint.io };
+    var vtable = fixed.delegate.vtable.*;
+    vtable.now = FixedSendIo.now;
+    vtable.sleep = FixedSendIo.sleep;
+    vtable.netSend = FixedSendIo.netSend;
+    client.h3.endpoint.io = .{ .userdata = &fixed, .vtable = &vtable };
+    quic.one_rtt.testing.setPacingBudgetAt(
+        &client.h3.established.connection,
+        64,
+        @intCast(fixed.now_ns),
+    );
+    try std.testing.expectError(
+        error.Timeout,
+        client.closeWithDeadline(117, reason, .{
+            .clock = .awake,
+            .raw = .fromNanoseconds(fixed.now_ns + 1),
+        }),
+    );
+    const progress = runtime.testing.pendingCloseProgress(&client) orelse
+        return error.TestUnexpectedResult;
+    try std.testing.expect(progress.committed > 0);
+    try std.testing.expect(progress.committed < progress.total);
+    try std.testing.expect(!runtime.testing.localCloseSent(&client));
+    try std.testing.expect(fixed.send_calls > 0);
+    try std.testing.expectEqual(@as(usize, 0), fixed.sleep_calls);
+    try std.testing.expectError(
+        error.InvalidSessionState,
+        client.sendStream(bidi, "must-not-interleave", false),
+    );
+    try std.testing.expectError(
+        error.InvalidSessionState,
+        client.closeWithDeadline(118, "different", .{
+            .clock = .awake,
+            .raw = .fromNanoseconds(fixed.now_ns + 1),
+        }),
+    );
+    const remaining = progress.total - progress.committed;
+    quic.one_rtt.testing.setPacingBudgetAt(
+        &client.h3.established.connection,
+        100_000,
+        @intCast(fixed.now_ns),
+    );
+    fixed.expire_after_send_call = fixed.send_calls + remaining + 1;
+    try std.testing.expectError(
+        error.Timeout,
+        client.closeWithDeadline(117, reason, .{
+            .clock = .awake,
+            .raw = .fromNanoseconds(fixed.now_ns + 1),
+        }),
+    );
+    try std.testing.expect(
+        runtime.testing.pendingCloseProgress(&client) == null,
+    );
+    try std.testing.expect(runtime.testing.localCloseSent(&client));
+    const bidi_state = client.streams.get(bidi) orelse
+        return error.TestUnexpectedResult;
+    try std.testing.expect(bidi_state.send_reset != null);
+    try std.testing.expect(bidi_state.stop_sent == null);
+    const uni_state_before_resume = client.streams.get(uni) orelse
+        return error.TestUnexpectedResult;
+    try std.testing.expect(uni_state_before_resume.send_reset == null);
+
+    client.h3.endpoint.io = fixed.delegate;
+    try client.closeWithTimeout(117, reason, .fromSeconds(5));
+    try std.testing.expectEqual(
+        webtransport.ApplicationErrorCode.session_gone,
+        bidi_state.send_reset.?.http3_code,
+    );
+    try std.testing.expectEqual(
+        webtransport.ApplicationErrorCode.session_gone,
+        bidi_state.stop_sent.?.http3_code,
+    );
+    const uni_state = client.streams.get(uni) orelse
+        return error.TestUnexpectedResult;
+    try std.testing.expectEqual(
+        webtransport.ApplicationErrorCode.session_gone,
+        uni_state.send_reset.?.http3_code,
+    );
+    try std.testing.expect(uni_state.stop_sent == null);
+    const packets_after_close = client.getStats().packets_sent;
+    try client.closeWithTimeout(999, "already closed", .fromSeconds(1));
+    try std.testing.expectEqual(
+        packets_after_close,
+        client.getStats().packets_sent,
+    );
+
+    thread.join();
+    joined = true;
+    if (shared.err) |err| return err;
+}
+
+test "WebTransport authenticated drain deadline resumes exact capsule" {
+    const allocator = std.testing.allocator;
+    var threaded = std.Io.Threaded.init(allocator, .{});
+    defer threaded.deinit();
+    const io = threaded.io();
+
+    const FixedSendIo = struct {
+        delegate: std.Io,
+        now_ns: i96 = 1_000_000,
+        send_calls: usize = 0,
+        sleep_calls: usize = 0,
+
+        fn now(
+            context: ?*anyopaque,
+            _: std.Io.Clock,
+        ) std.Io.Timestamp {
+            const self: *@This() = @ptrCast(@alignCast(context.?));
+            return .fromNanoseconds(self.now_ns);
+        }
+
+        fn sleep(
+            context: ?*anyopaque,
+            _: std.Io.Timeout,
+        ) std.Io.Cancelable!void {
+            const self: *@This() = @ptrCast(@alignCast(context.?));
+            self.sleep_calls += 1;
+            return error.Canceled;
+        }
+
+        fn netSend(
+            context: ?*anyopaque,
+            socket_handle: std.Io.net.Socket.Handle,
+            messages: []std.Io.net.OutgoingMessage,
+            flags: std.Io.net.SendFlags,
+        ) struct { ?std.Io.net.Socket.SendError, usize } {
+            const self: *@This() = @ptrCast(@alignCast(context.?));
+            self.send_calls += 1;
+            return self.delegate.vtable.netSend(
+                self.delegate.userdata,
+                socket_handle,
+                messages,
+                flags,
+            );
+        }
+    };
+
+    const original_dcid =
+        [_]u8{ 0x57, 0x54, 0x49, 0x01, 0x57, 0x54, 0x49, 0x02 };
+    const client_cid = [_]u8{ 0x57, 0x54, 0x49, 0x03 };
+    const server_cid = [_]u8{ 0x57, 0x54, 0x49, 0x04 };
+    const limits: runtime.Limits = .{ .http3 = .{ .quic = .{
+        .max_datagram_size = 4096,
+        .max_frames_per_datagram = 8,
+    } } };
+    const h3_session: http3.runtime.HandshakeSessionOptions = .{
+        .max_stream_frame_data = 5,
+        .max_frames_per_packet = 1,
+        .paced_body_chunk_bytes = 1,
+    };
+    var server = try runtime.HandshakeServer.bind(
+        allocator,
+        io,
+        .{ .ip4 = .loopback(0) },
+        limits,
+        .{
+            .handshake = .{
+                .local_connection_id = &server_cid,
+                .random = [_]u8{0xdb} ** 32,
+                .x25519_secret_key = [_]u8{0xdc} ** 32,
+            },
+            .session = h3_session,
+        },
+    );
+    defer server.deinit();
+
+    const Shared = struct {
+        server: *runtime.HandshakeServer,
+        err: ?anyerror = null,
+
+        fn run(self: *@This()) void {
+            self.runFallible() catch |err| {
+                self.err = err;
+            };
+        }
+
+        fn runFallible(self: *@This()) !void {
+            var session = try self.server.accept();
+            defer session.deinit();
+            const drain = try session.receiveSessionEventWithTimeout(
+                .fromSeconds(5),
+            );
+            try std.testing.expect(drain == .draining);
+            const close = try session.receiveSessionEventWithTimeout(
+                .fromSeconds(5),
+            );
+            try std.testing.expect(close == .closed);
+            try std.testing.expectEqual(@as(u32, 0), close.closed.code);
+        }
+    };
+    var shared = Shared{ .server = &server };
+    const thread = try std.Thread.spawn(.{}, Shared.run, .{&shared});
+    var joined = false;
+    defer if (!joined) thread.join();
+
+    var client = try runtime.HandshakeClientSession.connect(
+        allocator,
+        io,
+        .{ .ip4 = .loopback(0) },
+        server.address(),
+        .{
+            .authority = "localhost",
+            .path = "/wt-drain-deadline",
+            .limits = limits,
+            .h3 = .{
+                .handshake = .{
+                    .original_destination_connection_id = &original_dcid,
+                    .local_connection_id = &client_cid,
+                    .server_name = "localhost",
+                    .initial_one_rtt_config = .{
+                        .max_datagram_size = 1400,
+                        .enable_pacing = true,
+                    },
+                    .random = [_]u8{0xd9} ** 32,
+                    .x25519_secret_key = [_]u8{0xda} ** 32,
+                },
+                .session = h3_session,
+            },
+        },
+    );
+    defer client.deinit();
+
+    try std.testing.expectError(
+        error.Timeout,
+        client.drainWithDeadline(.{ .clock = .real, .raw = .zero }),
+    );
+    try std.testing.expect(
+        runtime.testing.pendingDrainProgress(&client) == null,
+    );
+
+    var fixed = FixedSendIo{ .delegate = client.h3.endpoint.io };
+    var vtable = fixed.delegate.vtable.*;
+    vtable.now = FixedSendIo.now;
+    vtable.sleep = FixedSendIo.sleep;
+    vtable.netSend = FixedSendIo.netSend;
+    client.h3.endpoint.io = .{ .userdata = &fixed, .vtable = &vtable };
+    quic.one_rtt.testing.setPacingBudgetAt(
+        &client.h3.established.connection,
+        64,
+        @intCast(fixed.now_ns),
+    );
+    try std.testing.expectError(
+        error.Timeout,
+        client.drainWithDeadline(.{
+            .clock = .awake,
+            .raw = .fromNanoseconds(fixed.now_ns + 1),
+        }),
+    );
+    const progress = runtime.testing.pendingDrainProgress(&client) orelse
+        return error.TestUnexpectedResult;
+    try std.testing.expect(progress.committed > 0);
+    try std.testing.expect(progress.committed < progress.total);
+    try std.testing.expectError(
+        error.InvalidSessionState,
+        client.sendStream(try client.streams.prepareLocal(.bidirectional), "must-not-interleave", false),
+    );
+    try std.testing.expectError(
+        error.InvalidSessionState,
+        client.close(9, "must-not-interleave"),
+    );
+
+    client.h3.endpoint.io = fixed.delegate;
+    try client.drainWithTimeout(.fromSeconds(5));
+    try std.testing.expect(
+        runtime.testing.pendingDrainProgress(&client) == null,
+    );
+    try std.testing.expect(client.control.local_drain_sent);
+    const stream_id = try client.openBidirectionalStream();
+    try client.sendStream(stream_id, "after drain", true);
+    try client.closeWithTimeout(0, "", .fromSeconds(5));
+
+    thread.join();
+    joined = true;
+    if (shared.err) |err| return err;
+}
+
+test "WebTransport server close deadline resumes one exact capsule" {
+    const allocator = std.testing.allocator;
+    var threaded = std.Io.Threaded.init(allocator, .{});
+    defer threaded.deinit();
+    const io = threaded.io();
+
+    const FixedSendIo = struct {
+        delegate: std.Io,
+        now_ns: i96 = 1_000_000,
+        send_calls: usize = 0,
+        sleep_calls: usize = 0,
+
+        fn now(
+            context: ?*anyopaque,
+            _: std.Io.Clock,
+        ) std.Io.Timestamp {
+            const self: *@This() = @ptrCast(@alignCast(context.?));
+            return .fromNanoseconds(self.now_ns);
+        }
+
+        fn sleep(
+            context: ?*anyopaque,
+            _: std.Io.Timeout,
+        ) std.Io.Cancelable!void {
+            const self: *@This() = @ptrCast(@alignCast(context.?));
+            self.sleep_calls += 1;
+            return error.Canceled;
+        }
+
+        fn netSend(
+            context: ?*anyopaque,
+            socket_handle: std.Io.net.Socket.Handle,
+            messages: []std.Io.net.OutgoingMessage,
+            flags: std.Io.net.SendFlags,
+        ) struct { ?std.Io.net.Socket.SendError, usize } {
+            const self: *@This() = @ptrCast(@alignCast(context.?));
+            self.send_calls += 1;
+            return self.delegate.vtable.netSend(
+                self.delegate.userdata,
+                socket_handle,
+                messages,
+                flags,
+            );
+        }
+    };
+
+    const original_dcid =
+        [_]u8{ 0x57, 0x54, 0x45, 0x01, 0x57, 0x54, 0x45, 0x02 };
+    const client_cid = [_]u8{ 0x57, 0x54, 0x45, 0x03 };
+    const server_cid = [_]u8{ 0x57, 0x54, 0x45, 0x04 };
+    const limits: runtime.Limits = .{ .http3 = .{ .quic = .{
+        .max_datagram_size = 4096,
+        .max_frames_per_datagram = 8,
+    } } };
+    const h3_session: http3.runtime.HandshakeSessionOptions = .{
+        .max_stream_frame_data = 5,
+        .max_frames_per_packet = 1,
+    };
+    var server = try runtime.HandshakeServer.bind(
+        allocator,
+        io,
+        .{ .ip4 = .loopback(0) },
+        limits,
+        .{
+            .handshake = .{
+                .local_connection_id = &server_cid,
+                .random = [_]u8{0xe7} ** 32,
+                .x25519_secret_key = [_]u8{0xe8} ** 32,
+            },
+            .session = h3_session,
+        },
+    );
+    defer server.deinit();
+
+    const reason = "server-close-" ** 10;
+    const Shared = struct {
+        server: *runtime.HandshakeServer,
+        err: ?anyerror = null,
+
+        fn run(self: *@This()) void {
+            self.runFallible() catch |err| {
+                self.err = err;
+            };
+        }
+
+        fn runFallible(self: *@This()) !void {
+            var session = try self.server.accept();
+            defer session.deinit();
+            var fixed = FixedSendIo{
+                .delegate = session.h3.established.connection.endpoint.io,
+            };
+            var vtable = fixed.delegate.vtable.*;
+            vtable.now = FixedSendIo.now;
+            vtable.sleep = FixedSendIo.sleep;
+            vtable.netSend = FixedSendIo.netSend;
+            session.h3.established.connection.endpoint.io = .{
+                .userdata = &fixed,
+                .vtable = &vtable,
+            };
+            quic.one_rtt.testing.setPacingBudgetAt(
+                &session.h3.established.connection,
+                64,
+                @intCast(fixed.now_ns),
+            );
+            try std.testing.expectError(
+                error.Timeout,
+                session.closeWithDeadline(211, reason, .{
+                    .clock = .awake,
+                    .raw = .fromNanoseconds(fixed.now_ns + 1),
+                }),
+            );
+            const progress = runtime.testing.pendingCloseProgress(&session) orelse
+                return error.TestUnexpectedResult;
+            try std.testing.expect(progress.committed > 0);
+            try std.testing.expect(progress.committed < progress.total);
+            try std.testing.expect(!runtime.testing.localCloseSent(&session));
+            try std.testing.expect(fixed.send_calls > 0);
+            try std.testing.expectEqual(@as(usize, 0), fixed.sleep_calls);
+
+            session.h3.established.connection.endpoint.io = fixed.delegate;
+            try session.closeWithTimeout(211, reason, .fromSeconds(5));
+            try std.testing.expect(
+                runtime.testing.pendingCloseProgress(&session) == null,
+            );
+            try std.testing.expect(runtime.testing.localCloseSent(&session));
+        }
+    };
+    var shared = Shared{ .server = &server };
+    const thread = try std.Thread.spawn(.{}, Shared.run, .{&shared});
+    var joined = false;
+    defer if (!joined) thread.join();
+
+    var client = try runtime.HandshakeClientSession.connect(
+        allocator,
+        io,
+        .{ .ip4 = .loopback(0) },
+        server.address(),
+        .{
+            .authority = "localhost",
+            .path = "/wt-server-close-deadline",
+            .limits = limits,
+            .h3 = .{
+                .handshake = .{
+                    .original_destination_connection_id = &original_dcid,
+                    .local_connection_id = &client_cid,
+                    .server_name = "localhost",
+                    .random = [_]u8{0xe5} ** 32,
+                    .x25519_secret_key = [_]u8{0xe6} ** 32,
+                },
+                .session = h3_session,
+            },
+        },
+    );
+    defer client.deinit();
+
+    const event = try client.receiveSessionEventWithTimeout(.fromSeconds(5));
+    try std.testing.expect(event == .closed);
+    try std.testing.expectEqual(@as(u32, 211), event.closed.code);
+    try std.testing.expectEqualStrings(reason, event.closed.reason);
+
+    thread.join();
+    joined = true;
+    if (shared.err) |err| return err;
+}
+
+test "WebTransport terminal event survives cleanup timeout" {
+    const allocator = std.testing.allocator;
+    var threaded = std.Io.Threaded.init(allocator, .{});
+    defer threaded.deinit();
+    const io = threaded.io();
+
+    const original_dcid =
+        [_]u8{ 0x57, 0x54, 0x4f, 0x01, 0x57, 0x54, 0x4f, 0x02 };
+    const client_cid = [_]u8{ 0x57, 0x54, 0x4f, 0x03 };
+    const server_cid = [_]u8{ 0x57, 0x54, 0x4f, 0x04 };
+    const limits: runtime.Limits = .{ .http3 = .{ .quic = .{
+        .max_datagram_size = 4096,
+        .max_frames_per_datagram = 8,
+    } } };
+    var server = try runtime.HandshakeServer.bind(
+        allocator,
+        io,
+        .{ .ip4 = .loopback(0) },
+        limits,
+        .{ .handshake = .{
+            .local_connection_id = &server_cid,
+            .random = [_]u8{0xf7} ** 32,
+            .x25519_secret_key = [_]u8{0xf8} ** 32,
+        } },
+    );
+    defer server.deinit();
+
+    const Shared = struct {
+        server: *runtime.HandshakeServer,
+        err: ?anyerror = null,
+
+        fn run(self: *@This()) void {
+            self.runFallible() catch |err| {
+                self.err = err;
+            };
+        }
+
+        fn runFallible(self: *@This()) !void {
+            var session = try self.server.accept();
+            defer session.deinit();
+            try session.close(313, "peer terminal retained");
+        }
+    };
+    var shared = Shared{ .server = &server };
+    const thread = try std.Thread.spawn(.{}, Shared.run, .{&shared});
+    var joined = false;
+    defer if (!joined) thread.join();
+
+    var client = try runtime.HandshakeClientSession.connect(
+        allocator,
+        io,
+        .{ .ip4 = .loopback(0) },
+        server.address(),
+        .{
+            .authority = "localhost",
+            .path = "/wt-terminal-event-timeout",
+            .limits = limits,
+            .h3 = .{ .handshake = .{
+                .original_destination_connection_id = &original_dcid,
+                .local_connection_id = &client_cid,
+                .server_name = "localhost",
+                .random = [_]u8{0xf5} ** 32,
+                .x25519_secret_key = [_]u8{0xf6} ** 32,
+            } },
+        },
+    );
+    defer client.deinit();
+
+    while ((client.h3.established.connection.recvStreamStats(
+        client.session_id.value,
+    ) orelse return error.TestUnexpectedResult).final_size == null) {
+        var packet = try client.h3.established.connection
+            .receivePacketServicingTimersTimeout(.{
+            .duration = .{
+                .raw = .fromSeconds(5),
+                .clock = .awake,
+            },
+        });
+        defer packet.deinit(allocator);
+        try client.processPacket(&packet);
+    }
+
+    quic.one_rtt.testing.exhaustPacingAt(
+        &client.h3.established.connection,
+        @intCast(std.Io.Clock.awake.now(io).nanoseconds),
+    );
+    try std.testing.expectError(
+        error.Timeout,
+        client.receiveSessionEventWithTimeout(.fromNanoseconds(1)),
+    );
+    quic.one_rtt.testing.setPacingBudgetAt(
+        &client.h3.established.connection,
+        100_000,
+        @intCast(std.Io.Clock.awake.now(io).nanoseconds),
+    );
+    const event = try client.receiveSessionEventWithTimeout(.fromSeconds(5));
+    try std.testing.expect(event == .closed);
+    try std.testing.expectEqual(@as(u32, 313), event.closed.code);
+    try std.testing.expectEqualStrings(
+        "peer terminal retained",
+        event.closed.reason,
+    );
+
+    thread.join();
+    joined = true;
     if (shared.err) |err| return err;
 }
 
@@ -560,6 +1507,125 @@ test "WebTransport terminal sweep discovers buffered associated streams" {
         bidi.len,
         connection.availableReceivedStream(12).?.len,
     );
+}
+
+test "WebTransport deadline cleanup retains completed stream prefix" {
+    const allocator = std.testing.allocator;
+    var threaded = std.Io.Threaded.init(allocator, .{});
+    defer threaded.deinit();
+    const io = threaded.io();
+    var endpoint = try quic.runtime.Endpoint.bind(
+        allocator,
+        io,
+        .{ .ip4 = .loopback(0) },
+        .{ .max_datagram_size = 4096 },
+    );
+    defer endpoint.deinit();
+    const keys = quic.protection.deriveAes128Keys(
+        [_]u8{0xc8} ** quic.protection.secret_len,
+    );
+    var connection = try quic.one_rtt.Connection.init(&endpoint, .{
+        .peer = endpoint.address(),
+        .receive_keys = keys,
+        .send_keys = keys,
+        .local_connection_id = "wt-dl-srv",
+        .peer_connection_id = "wt-dl-cli",
+        .local_endpoint = .client,
+        .enable_pacing = false,
+    });
+    defer connection.deinit();
+    var registry = try webtransport.StreamRegistry.init(
+        allocator,
+        .init(0),
+        .client,
+        .{ .max_local_bidi = 2 },
+    );
+    defer registry.deinit();
+    _ = try registry.registerLocal(4, .bidirectional);
+    _ = try registry.registerLocal(8, .bidirectional);
+    try connection.send(&.{.{ .stream = .{
+        .stream_id = 4,
+        .data = "first",
+    } }});
+    try connection.send(&.{.{ .stream = .{
+        .stream_id = 8,
+        .data = "second",
+    } }});
+
+    const ExpiringSendIo = struct {
+        delegate: std.Io,
+        now_ns: i96 = 1_000_000,
+        send_calls: usize = 0,
+
+        fn now(
+            context: ?*anyopaque,
+            _: std.Io.Clock,
+        ) std.Io.Timestamp {
+            const self: *@This() = @ptrCast(@alignCast(context.?));
+            return .fromNanoseconds(self.now_ns);
+        }
+
+        fn netSend(
+            context: ?*anyopaque,
+            socket_handle: std.Io.net.Socket.Handle,
+            messages: []std.Io.net.OutgoingMessage,
+            flags: std.Io.net.SendFlags,
+        ) struct { ?std.Io.net.Socket.SendError, usize } {
+            const self: *@This() = @ptrCast(@alignCast(context.?));
+            self.send_calls += 1;
+            const result = self.delegate.vtable.netSend(
+                self.delegate.userdata,
+                socket_handle,
+                messages,
+                flags,
+            );
+            if (self.send_calls == 1 and result[0] == null and result[1] != 0) {
+                self.now_ns += 2;
+            }
+            return result;
+        }
+    };
+    var fixed = ExpiringSendIo{ .delegate = endpoint.io };
+    var vtable = fixed.delegate.vtable.*;
+    vtable.now = ExpiringSendIo.now;
+    vtable.netSend = ExpiringSendIo.netSend;
+    endpoint.io = .{ .userdata = &fixed, .vtable = &vtable };
+    try std.testing.expectError(
+        error.Timeout,
+        @import("session_control.zig").terminateStreamsWithDeadline(
+            &connection,
+            &registry,
+            .{
+                .clock = .awake,
+                .raw = .fromNanoseconds(fixed.now_ns + 1),
+            },
+        ),
+    );
+    try std.testing.expect(registry.get(4).?.send_reset != null);
+    try std.testing.expect(registry.get(8).?.send_reset == null);
+
+    endpoint.io = fixed.delegate;
+    try @import("session_control.zig").terminateStreamsWithDeadline(
+        &connection,
+        &registry,
+        .fromNow(io, .{ .raw = .fromSeconds(1), .clock = .awake }),
+    );
+    try std.testing.expectEqual(
+        webtransport.ApplicationErrorCode.session_gone,
+        registry.get(4).?.send_reset.?.http3_code,
+    );
+    try std.testing.expectEqual(
+        webtransport.ApplicationErrorCode.session_gone,
+        registry.get(8).?.send_reset.?.http3_code,
+    );
+    try std.testing.expect(quic.one_rtt.testing.localStreamReleaseRequested(
+        &connection,
+        4,
+    ));
+    try std.testing.expect(quic.one_rtt.testing.localStreamReleaseRequested(
+        &connection,
+        8,
+    ));
 }
 
 test "WebTransport session control parses split framed capsules and skips unknown" {

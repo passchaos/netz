@@ -333,6 +333,10 @@ test "HTTP/3 push cancellation queue reuses consumed FIFO slots" {
     try std.testing.expectEqual(@as(usize, 0), pushes.entryCount());
     try std.testing.expectEqual(@as(usize, 0), pushes.promiseCount());
     try std.testing.expectEqual(@as(usize, 1), pushes.completedPromiseRangeCount());
+    for ([_]u62{ 15, 19, 23, 27 }) |stream_id| {
+        try std.testing.expect(pushes.isCancelledStream(stream_id));
+    }
+    try std.testing.expect(!pushes.isCancelledStream(31));
     for ([_]u64{ 1, 2, 3, 4 }) |push_id| {
         try std.testing.expect(pushes.hasPromise(push_id));
     }
@@ -363,4 +367,88 @@ test "HTTP/3 completed push history preserves sparse IDs compactly" {
         try std.testing.expect(!pushes.hasPromise(push_id));
     }
     try std.testing.expectEqual(@as(usize, 0), pushes.promiseCount());
+}
+
+test "HTTP/3 cancelled promise drains one late push stream" {
+    const allocator = std.testing.allocator;
+    const from: net.IpAddress = .{ .ip4 = .loopback(443) };
+    const control = http3.ControlState{ .local_max_push_id = 3 };
+    var pushes = PushSet.init(allocator, 4, 512, .{});
+    defer pushes.deinit();
+    try pushes.reservePromisesThrough(3);
+    try pushes.registerPromise(3, 0);
+    try pushes.preparePeerCancellation(3);
+    try pushes.observePeerCancellation(3);
+    try std.testing.expect(pushes.isCancelledPush(3));
+
+    var bytes: std.ArrayList(u8) = .empty;
+    defer bytes.deinit(allocator);
+    try quic.varint.encode(
+        &bytes,
+        allocator,
+        @intFromEnum(http3.StreamType.push),
+    );
+    try quic.varint.encode(&bytes, allocator, 3);
+    try (http3.Response{ .status = 204 }).write(&bytes, allocator);
+    try std.testing.expect(try pushes.insert(from, .{
+        .stream_id = 15,
+        .data = bytes.items,
+        .fin = true,
+    }, control));
+    try std.testing.expect(pushes.isCancelledStream(15));
+    try std.testing.expectEqual(@as(usize, 0), pushes.entryCount());
+    try std.testing.expectEqual(@as(usize, 1), pushes.cancelledStreamCount());
+    try std.testing.expectEqual(
+        @as(u62, 15),
+        pushes.takeCancelledStream() orelse return error.TestUnexpectedResult,
+    );
+
+    try std.testing.expectError(error.DuplicatePushId, pushes.insert(from, .{
+        .stream_id = 19,
+        .data = bytes.items,
+        .fin = true,
+    }, control));
+}
+
+test "HTTP/3 cancelled dynamic push requires decoder stream cancellation" {
+    const allocator = std.testing.allocator;
+    var pushes = PushSet.init(allocator, 1, 512, .{});
+    defer pushes.deinit();
+    try pushes.reservePromisesThrough(0);
+    try pushes.registerPromise(0, 0);
+
+    var table = http3.Qpack.DynamicTable.init(allocator, 256);
+    defer table.deinit();
+    try table.setCapacity(256);
+    _ = try table.insert("x-push-dynamic", "yes");
+    var block: std.ArrayList(u8) = .empty;
+    defer block.deinit(allocator);
+    try http3.Qpack.encodeDynamicBlock(
+        &block,
+        allocator,
+        &.{.{ .name = "x-push-dynamic", .value = "yes" }},
+        table,
+    );
+    var bytes: std.ArrayList(u8) = .empty;
+    defer bytes.deinit(allocator);
+    try quic.varint.encode(
+        &bytes,
+        allocator,
+        @intFromEnum(http3.StreamType.push),
+    );
+    try quic.varint.encode(&bytes, allocator, 0);
+    try (http3.Frame{
+        .frame_type = http3.FrameType.headers,
+        .payload = block.items,
+        .consumed = 0,
+    }).write(&bytes, allocator);
+    try std.testing.expect(try pushes.insert(
+        .{ .ip4 = .loopback(443) },
+        .{ .stream_id = 15, .data = bytes.items },
+        http3.ControlState{ .local_max_push_id = 0 },
+    ));
+    try std.testing.expect(try pushes.hasUnacknowledgedDynamicSection(
+        15,
+        table,
+    ));
 }

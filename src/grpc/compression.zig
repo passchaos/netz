@@ -5,7 +5,7 @@
 //! the protocol and important for per-message compression opt-out.
 
 const std = @import("std");
-const vort = @import("vort");
+const vort = @import("../internal/vort.zig");
 
 pub const Error = error{
     CompressionFailed,
@@ -129,7 +129,7 @@ pub fn compressAlloc(
     if (level > 9) return error.InvalidCompressionLevel;
 
     // gRPC "deflate" is an RFC 1950 zlib wrapper, never a raw RFC 1951
-    // stream. Vort's strict wrapper encoders make that distinction explicit.
+    // stream. The strict wrapper encoders make that distinction explicit.
     const encoded = switch (algorithm) {
         .identity => unreachable,
         .deflate => vort.encodeZlibLevelAlloc(
@@ -170,7 +170,7 @@ pub const DecodedPayload = struct {
 
 /// Decodes exactly one wrapper stream and caps the materialized message.
 ///
-/// The strict Vort entry points validate checksums and reject trailing bytes.
+/// The strict codec entry points validate checksums and reject trailing bytes.
 /// That prevents accepting a valid first member followed by smuggled data and
 /// matches gRPC Core's "all input consumed" requirement.
 pub fn decompressAlloc(

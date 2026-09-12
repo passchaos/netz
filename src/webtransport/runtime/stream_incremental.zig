@@ -3,9 +3,11 @@
 const std = @import("std");
 const webtransport = @import("../mod.zig");
 const quic = @import("../../quic/mod.zig");
+const deadline_policy = @import("../../internal/deadline.zig");
 const association = @import("stream_association.zig");
 
 pub const Error = association.Error;
+pub const TimeoutError = Error || quic.runtime.ReceiveTimeoutError;
 
 pub const Read = union(enum) {
     data: struct {
@@ -67,10 +69,74 @@ pub fn readWithDeadline(
     deadline: std.Io.Clock.Timestamp,
 ) (Error || quic.runtime.ReceiveTimeoutError)!Read {
     if (out.len == 0) return error.BufferTooShort;
+    _ = try deadline_policy.usableAwake(connection.endpoint.io, deadline);
     while (true) {
         if (try poll(connection, registry, session_id, out)) |event| {
             return event;
         }
+        try serviceReceiveWithDeadline(connection, deadline);
+    }
+}
+
+/// Read the next event for one associated stream without consuming ready data
+/// from sibling streams. This is useful for long-lived control streams that
+/// share a WebTransport session with independently scheduled application data.
+pub fn readId(
+    connection: *quic.one_rtt.Connection,
+    registry: *webtransport.StreamRegistry,
+    session_id: webtransport.SessionId,
+    stream_id: u62,
+    out: []u8,
+) Error!Read {
+    if (out.len == 0) return error.BufferTooShort;
+    while (true) {
+        _ = try association.drainAbandonedReceives(
+            connection,
+            registry,
+            false,
+        );
+        var transport_progressed = false;
+        if (try pollStream(
+            connection,
+            registry,
+            session_id,
+            stream_id,
+            out,
+            false,
+            &transport_progressed,
+        )) |event| return event;
+        try serviceReceive(connection);
+    }
+}
+
+/// Deadline-bounded targeted stream read. One absolute deadline spans sibling
+/// packets and all earlier QUIC transport timers.
+pub fn readIdWithDeadline(
+    connection: *quic.one_rtt.Connection,
+    registry: *webtransport.StreamRegistry,
+    session_id: webtransport.SessionId,
+    stream_id: u62,
+    out: []u8,
+    deadline: std.Io.Clock.Timestamp,
+) (Error || quic.runtime.ReceiveTimeoutError)!Read {
+    if (out.len == 0) return error.BufferTooShort;
+    _ = try deadline_policy.usableAwake(connection.endpoint.io, deadline);
+    while (true) {
+        _ = try association.drainAbandonedReceives(
+            connection,
+            registry,
+            false,
+        );
+        var transport_progressed = false;
+        if (try pollStream(
+            connection,
+            registry,
+            session_id,
+            stream_id,
+            out,
+            false,
+            &transport_progressed,
+        )) |event| return event;
         try serviceReceiveWithDeadline(connection, deadline);
     }
 }
@@ -94,6 +160,173 @@ fn serviceReceiveWithDeadline(
     );
 }
 
+test "WebTransport incremental poll rejects wrong-session bidi before sibling" {
+    const allocator = std.testing.allocator;
+    var threaded = std.Io.Threaded.init(allocator, .{});
+    defer threaded.deinit();
+    const io = threaded.io();
+    var receiver = try quic.runtime.Endpoint.bind(
+        allocator,
+        io,
+        .{ .ip4 = .loopback(0) },
+        .{ .max_datagram_size = 4096 },
+    );
+    defer receiver.deinit();
+    var sender = try quic.runtime.Endpoint.bind(
+        allocator,
+        io,
+        .{ .ip4 = .loopback(0) },
+        .{ .max_datagram_size = 4096 },
+    );
+    defer sender.deinit();
+    const keys = quic.protection.deriveAes128Keys(
+        [_]u8{0x8d} ** quic.protection.secret_len,
+    );
+    var connection = try quic.one_rtt.Connection.init(&receiver, .{
+        .peer = sender.address(),
+        .receive_keys = keys,
+        .send_keys = keys,
+        .local_connection_id = "wt-wrong-bidi-server",
+        .peer_connection_id = "wt-wrong-bidi-client",
+        .local_endpoint = .server,
+        .initial_receive_max_data = 32,
+        .receive_window = 32,
+        .max_receive_window = 32,
+        .initial_receive_max_stream_data = 12,
+        .stream_receive_window = 12,
+        .max_stream_receive_window = 12,
+        .initial_receive_max_streams_bidi = 3,
+        .enable_pacing = false,
+    });
+    defer connection.deinit();
+    const session_id: webtransport.SessionId = .init(0);
+    var registry = try webtransport.StreamRegistry.init(
+        allocator,
+        session_id,
+        .server,
+        .{ .max_peer_bidi = 2 },
+    );
+    defer registry.deinit();
+
+    var wrong_header_storage: [16]u8 = undefined;
+    const wrong_header = try webtransport.BidirectionalStreamHeader.writeInto(
+        &wrong_header_storage,
+        .init(4),
+    );
+    var wrong_bytes_storage: [32]u8 = undefined;
+    const wrong_bytes = wrong_bytes_storage[0 .. wrong_header.len + "wrong!".len];
+    @memcpy(wrong_bytes[0..wrong_header.len], wrong_header);
+    @memcpy(wrong_bytes[wrong_header.len..], "wrong!");
+    var valid_header_storage: [16]u8 = undefined;
+    const valid_header = try webtransport.BidirectionalStreamHeader.writeInto(
+        &valid_header_storage,
+        session_id,
+    );
+    var valid_bytes_storage: [32]u8 = undefined;
+    const valid_bytes = valid_bytes_storage[0 .. valid_header.len + "ok".len];
+    @memcpy(valid_bytes[0..valid_header.len], valid_header);
+    @memcpy(valid_bytes[valid_header.len..], "ok");
+    try quic.one_rtt.testing.applyReceivedFrames(
+        &connection,
+        0,
+        &.{
+            .{ .stream = .{
+                .stream_id = 4,
+                .data = wrong_bytes,
+                .fin = true,
+            } },
+            .{ .stream = .{
+                .stream_id = 8,
+                .data = valid_bytes,
+                .fin = true,
+            } },
+        },
+        null,
+        .not_ect,
+    );
+
+    var out: [8]u8 = undefined;
+    try std.testing.expect((try pollOnce(
+        &connection,
+        &registry,
+        session_id,
+        &out,
+    )) == null);
+    const rejection_code =
+        webtransport.ApplicationErrorCode.buffered_stream_rejected;
+    try std.testing.expectEqual(
+        rejection_code,
+        connection.sendStreamStats(4).?.reset.?.application_error_code,
+    );
+    try std.testing.expectEqual(
+        rejection_code,
+        connection.recvStreamStats(4).?.stop_sending_sent.?
+            .application_error_code,
+    );
+    var rejection_datagram = try sender.receiveBytes();
+    defer rejection_datagram.deinit(allocator);
+    var rejection = try quic.one_rtt.openReceivedBytes(
+        &sender,
+        rejection_datagram.from,
+        rejection_datagram.bytes,
+        keys,
+        "wt-wrong-bidi-client".len,
+        0,
+        4,
+    );
+    defer rejection.deinit(allocator);
+    var saw_reset = false;
+    var saw_stop = false;
+    for (rejection.frames) |frame| switch (frame) {
+        .reset_stream => |reset_info| {
+            try std.testing.expectEqual(@as(u64, 4), reset_info.stream_id);
+            try std.testing.expectEqual(
+                rejection_code,
+                reset_info.application_error_code,
+            );
+            saw_reset = true;
+        },
+        .stop_sending => |stop_info| {
+            try std.testing.expectEqual(@as(u64, 4), stop_info.stream_id);
+            try std.testing.expectEqual(
+                rejection_code,
+                stop_info.application_error_code,
+            );
+            saw_stop = true;
+        },
+        else => {},
+    };
+    try std.testing.expect(saw_reset);
+    try std.testing.expect(saw_stop);
+    try std.testing.expectEqual(@as(u64, 0), quic.one_rtt.testing.receiveDataConsumed(&connection));
+    try std.testing.expect(registry.get(4) == null);
+
+    // The next bounded turn drains retained bytes and restores connection
+    // credit without also publishing an application event.
+    try std.testing.expect((try pollOnce(
+        &connection,
+        &registry,
+        session_id,
+        &out,
+    )) == null);
+    try std.testing.expectEqual(@as(u64, wrong_bytes.len), quic.one_rtt.testing.receiveDataConsumed(&connection));
+    try std.testing.expectEqual(
+        @as(usize, 0),
+        quic.one_rtt.testing.receiveStreamAvailableLen(&connection, 4).?,
+    );
+
+    const event = (try pollOnce(
+        &connection,
+        &registry,
+        session_id,
+        &out,
+    )) orelse return error.TestUnexpectedResult;
+    try std.testing.expect(event == .data);
+    try std.testing.expectEqual(@as(u62, 8), event.data.stream_id);
+    try std.testing.expectEqualStrings("ok", out[0..event.data.bytes]);
+    try std.testing.expect(event.data.fin);
+}
+
 /// Abort the local send direction with a mapped WebTransport error code.
 pub fn reset(
     connection: *quic.one_rtt.Connection,
@@ -111,6 +344,33 @@ pub fn reset(
     const http3_code =
         webtransport.applicationErrorCodeToHttp3(application_error_code);
     try connection.resetStream(stream_id, http3_code);
+    stream.send_reset = .fromHttp3(http3_code);
+    try association.requestAfterSendTerminal(connection, stream);
+}
+
+/// Abort the local send direction under one absolute awake-clock deadline.
+/// The registry is committed only after RESET_STREAM reaches the socket.
+pub fn resetWithDeadline(
+    connection: *quic.one_rtt.Connection,
+    registry: *webtransport.StreamRegistry,
+    stream_id: u62,
+    application_error_code: u32,
+    deadline: std.Io.Clock.Timestamp,
+) TimeoutError!void {
+    const stream = registry.get(stream_id) orelse
+        return error.UnknownStream;
+    if (stream.direction == .unidirectional and
+        !stream.locally_initiated)
+    {
+        return error.InvalidStreamState;
+    }
+    const http3_code =
+        webtransport.applicationErrorCodeToHttp3(application_error_code);
+    try connection.resetStreamWithDeadline(
+        stream_id,
+        http3_code,
+        deadline,
+    );
     stream.send_reset = .fromHttp3(http3_code);
     try association.requestAfterSendTerminal(connection, stream);
 }
@@ -155,6 +415,35 @@ pub fn stop(
         webtransport.applicationErrorCodeToHttp3(application_error_code);
     try connection.sendStopSending(stream_id, http3_code);
     stream.stop_sent = .fromHttp3(http3_code);
+    _ = try connection.discardStoppedReceived(stream_id);
+}
+
+/// Cancel the peer send direction under one absolute awake-clock deadline.
+/// Registry state changes only after STOP_SENDING reaches the socket, so a
+/// timeout can be retried without suppressing the cancellation.
+pub fn stopWithDeadline(
+    connection: *quic.one_rtt.Connection,
+    registry: *webtransport.StreamRegistry,
+    stream_id: u62,
+    application_error_code: u32,
+    deadline: std.Io.Clock.Timestamp,
+) TimeoutError!void {
+    const stream = registry.get(stream_id) orelse
+        return error.UnknownStream;
+    if (stream.direction == .unidirectional and
+        stream.locally_initiated)
+    {
+        return error.InvalidStreamState;
+    }
+    const http3_code =
+        webtransport.applicationErrorCodeToHttp3(application_error_code);
+    try connection.sendStopSendingWithDeadline(
+        stream_id,
+        http3_code,
+        deadline,
+    );
+    stream.stop_sent = .fromHttp3(http3_code);
+    _ = try connection.discardStoppedReceived(stream_id);
 }
 
 /// Cancel the peer send direction once without sleeping for QUIC pacing.
@@ -206,7 +495,14 @@ fn pollInternal(
     out: []u8,
     single_attempt: bool,
 ) Error!?Read {
+    const drained = try association.drainAbandonedReceives(
+        connection,
+        registry,
+        single_attempt,
+    );
+    if (single_attempt and drained) return null;
     if (try pollKnownStopped(connection, registry)) |event| return event;
+    if (try pollKnownReset(connection, registry, null)) |event| return event;
 
     var stream_ids: [256]u62 = undefined;
     const previous = registry.incremental_poll_cursor;
@@ -214,6 +510,7 @@ fn pollInternal(
     while (true) {
         const ids = connection.receivedStreamIdsAfterInto(after, &stream_ids);
         for (ids) |stream_id| {
+            var transport_progressed = false;
             if (try pollStreamId(
                 connection,
                 registry,
@@ -221,7 +518,9 @@ fn pollInternal(
                 stream_id,
                 out,
                 single_attempt,
+                &transport_progressed,
             )) |event| return event;
+            if (single_attempt and transport_progressed) return null;
         }
         if (ids.len != 0) after = ids[ids.len - 1];
         if (ids.len < stream_ids.len) break;
@@ -236,6 +535,7 @@ fn pollInternal(
         const ids = connection.receivedStreamIdsAfterInto(after, &stream_ids);
         for (ids) |stream_id| {
             if (stream_id > previous.?) return null;
+            var transport_progressed = false;
             if (try pollStreamId(
                 connection,
                 registry,
@@ -243,7 +543,9 @@ fn pollInternal(
                 stream_id,
                 out,
                 single_attempt,
+                &transport_progressed,
             )) |event| return event;
+            if (single_attempt and transport_progressed) return null;
         }
         if (ids.len != 0) after = ids[ids.len - 1];
         if (ids.len < stream_ids.len) return null;
@@ -257,6 +559,7 @@ fn pollStreamId(
     stream_id: u62,
     out: []u8,
     single_attempt: bool,
+    transport_progressed: *bool,
 ) Error!?Read {
     // Association-prefix parsing, rather than numeric guesses, distinguishes
     // HTTP/3 critical/push streams from WebTransport.
@@ -268,6 +571,7 @@ fn pollStreamId(
         stream_id,
         out,
         single_attempt,
+        transport_progressed,
     ) orelse return null;
     registry.incremental_poll_cursor = switch (event) {
         inline else => |value| value.stream_id,
@@ -282,6 +586,7 @@ fn pollStream(
     stream_id: u62,
     out: []u8,
     single_attempt: bool,
+    transport_progressed: *bool,
 ) Error!?Read {
     // A session can mix whole-stream and incremental consumption as long as a
     // single receive direction never changes mode. Skip streams claimed by
@@ -290,8 +595,8 @@ fn pollStream(
     if (registry.get(stream_id)) |registered| {
         if (registered.receive_mode == .whole) return null;
     }
-    const stream = (if (single_attempt)
-        association.identifyOnce(
+    const identification = (if (single_attempt)
+        association.identifyClassifiedOnce(
             connection,
             registry,
             session_id,
@@ -299,7 +604,7 @@ fn pollStream(
             .incremental,
         )
     else
-        association.identify(
+        association.identifyClassified(
             connection,
             registry,
             session_id,
@@ -311,7 +616,15 @@ fn pollStream(
         error.FlowControlBlocked,
         => return null,
         else => return err,
-    } orelse return null;
+    };
+    const stream = switch (identification) {
+        .associated => |value| value,
+        .rejected => |progressed| {
+            transport_progressed.* = progressed;
+            return null;
+        },
+        .unclaimed => return null,
+    };
 
     if (connection.sendStreamStats(stream_id)) |stats| {
         if (stats.reset) |reset_info| {
@@ -329,6 +642,9 @@ fn pollStream(
             }
         }
     }
+    if (try pollKnownReset(connection, registry, stream_id)) |event| {
+        return event;
+    }
 
     const recv_stats = connection.recvStreamStats(stream_id) orelse
         return null;
@@ -336,22 +652,22 @@ fn pollStream(
         if (stream.receive_reset == null) {
             stream.receive_reset =
                 .fromHttp3(reset_info.application_error_code);
+            stream.receive_reset_final_size = reset_info.final_size;
         }
         if (!stream.reset_reported) {
             // RESET_STREAM terminates the receive direction at packet
             // application time. It can overtake earlier STREAM packets, so
             // retained or later-arriving bytes are never exposed after reset.
+            _ = try connection.discardResetReceived(stream_id);
             _ = try association.requestTransportRetirement(connection, stream);
             stream.reset_reported = true;
             return resetEvent(stream, stream_id, reset_info.final_size);
         }
         return null;
     }
-    if (stream.stop_sent != null) {
-        // Bytes already in flight remain bounded in QUIC but are not delivered
-        // after the application has cancelled this receive direction.
-        return null;
-    }
+    // The shared pre-poll sweep has already discarded any locally stopped
+    // receive direction, including when this call targets a sibling stream.
+    if (stream.stop_sent != null) return null;
 
     const available = connection.availableReceivedStream(stream_id) orelse
         return null;
@@ -418,6 +734,35 @@ fn pollKnownStopped(
         try association.requestAfterSendTerminal(connection, stream);
         stream.stopped_reported = true;
         return stoppedEvent(stream, stream.stream_id);
+    }
+    return null;
+}
+
+fn pollKnownReset(
+    connection: *quic.one_rtt.Connection,
+    registry: *webtransport.StreamRegistry,
+    target_stream_id: ?u62,
+) Error!?Read {
+    for (registry.registered()) |*stream| {
+        if (target_stream_id) |target| {
+            if (stream.stream_id != target) continue;
+        }
+        if (stream.receive_mode == .whole or stream.reset_reported or
+            stream.receive_reset == null or
+            stream.receive_reset_final_size == null)
+        {
+            continue;
+        }
+        if (stream.receive_mode == .unset) {
+            stream.receive_mode = .incremental;
+        }
+        try association.requestAfterSendTerminal(connection, stream);
+        stream.reset_reported = true;
+        return resetEvent(
+            stream,
+            stream.stream_id,
+            stream.receive_reset_final_size.?,
+        );
     }
     return null;
 }
@@ -812,4 +1157,639 @@ test "WebTransport incremental polling rotates across busy streams" {
     try std.testing.expect(wrapped == .data);
     try std.testing.expectEqual(@as(u62, 4), wrapped.data.stream_id);
     try std.testing.expectEqualStrings("u", &byte);
+}
+
+test "WebTransport stopped receive drains connection credit only" {
+    const allocator = std.testing.allocator;
+    var threaded = std.Io.Threaded.init(allocator, .{});
+    defer threaded.deinit();
+    const io = threaded.io();
+    var receiver = try quic.runtime.Endpoint.bind(
+        allocator,
+        io,
+        .{ .ip4 = .loopback(0) },
+        .{ .max_datagram_size = 4096 },
+    );
+    defer receiver.deinit();
+    var sender = try quic.runtime.Endpoint.bind(
+        allocator,
+        io,
+        .{ .ip4 = .loopback(0) },
+        .{ .max_datagram_size = 4096 },
+    );
+    defer sender.deinit();
+    const keys = quic.protection.deriveAes128Keys(
+        [_]u8{0x92} ** quic.protection.secret_len,
+    );
+    var connection = try quic.one_rtt.Connection.init(&receiver, .{
+        .peer = sender.address(),
+        .receive_keys = keys,
+        .send_keys = keys,
+        .local_connection_id = "wt-stop-server",
+        .peer_connection_id = "wt-stop-client",
+        .local_endpoint = .server,
+        .initial_receive_max_data = 16,
+        .receive_window = 16,
+        .max_receive_window = 16,
+        .initial_receive_max_stream_data = 16,
+        .stream_receive_window = 16,
+        .max_stream_receive_window = 16,
+        .initial_receive_max_streams_bidi = 2,
+        .enable_pacing = false,
+    });
+    defer connection.deinit();
+    const session_id: webtransport.SessionId = .init(0);
+    var registry = try webtransport.StreamRegistry.init(
+        allocator,
+        session_id,
+        .server,
+        .{ .max_peer_bidi = 2 },
+    );
+    defer registry.deinit();
+
+    var prefix_storage: [16]u8 = undefined;
+    const prefix = try webtransport.BidirectionalStreamHeader.writeInto(
+        &prefix_storage,
+        session_id,
+    );
+    var first_bytes: [16]u8 = undefined;
+    @memcpy(first_bytes[0..prefix.len], prefix);
+    @memset(first_bytes[prefix.len..], 0xa5);
+    try quic.one_rtt.testing.applyReceivedFrames(
+        &connection,
+        0,
+        &.{.{ .stream = .{
+            .stream_id = 4,
+            .data = &first_bytes,
+            .fin = true,
+        } }},
+        null,
+        .not_ect,
+    );
+    var out: [1]u8 = undefined;
+    const first = (try poll(
+        &connection,
+        &registry,
+        session_id,
+        &out,
+    )) orelse return error.TestUnexpectedResult;
+    try std.testing.expect(first == .data);
+    try stop(&connection, &registry, 4, 17);
+    var stop_datagram = try sender.receiveBytes();
+    defer stop_datagram.deinit(allocator);
+
+    try std.testing.expect((try poll(
+        &connection,
+        &registry,
+        session_id,
+        &out,
+    )) == null);
+    try std.testing.expectEqual(
+        @as(usize, 0),
+        quic.one_rtt.testing.receiveStreamAvailableLen(&connection, 4).?,
+    );
+    try std.testing.expectEqual(
+        @as(u64, 16),
+        connection.recvStreamStats(4).?.receive_limit,
+    );
+    try std.testing.expect(registry.get(4).?.peer_fin);
+    var credit_datagram = try sender.receiveBytes();
+    defer credit_datagram.deinit(allocator);
+    var credit = try quic.one_rtt.openReceivedBytes(
+        &sender,
+        credit_datagram.from,
+        credit_datagram.bytes,
+        keys,
+        "wt-stop-client".len,
+        0,
+        8,
+    );
+    defer credit.deinit(allocator);
+    try std.testing.expectEqual(@as(usize, 1), credit.frames.len);
+    try std.testing.expect(credit.frames[0] == .max_data);
+    try std.testing.expectEqual(
+        @as(u64, 32),
+        credit.frames[0].max_data.maximum_data,
+    );
+}
+
+test "WebTransport targeted read drains stopped sibling" {
+    const allocator = std.testing.allocator;
+    var threaded = std.Io.Threaded.init(allocator, .{});
+    defer threaded.deinit();
+    const io = threaded.io();
+    var receiver = try quic.runtime.Endpoint.bind(
+        allocator,
+        io,
+        .{ .ip4 = .loopback(0) },
+        .{ .max_datagram_size = 4096 },
+    );
+    defer receiver.deinit();
+    var sender = try quic.runtime.Endpoint.bind(
+        allocator,
+        io,
+        .{ .ip4 = .loopback(0) },
+        .{ .max_datagram_size = 4096 },
+    );
+    defer sender.deinit();
+    const keys = quic.protection.deriveAes128Keys(
+        [_]u8{0x96} ** quic.protection.secret_len,
+    );
+    var connection = try quic.one_rtt.Connection.init(&receiver, .{
+        .peer = sender.address(),
+        .receive_keys = keys,
+        .send_keys = keys,
+        .local_connection_id = "wt-target-server",
+        .peer_connection_id = "wt-target-client",
+        .local_endpoint = .server,
+        .initial_receive_max_data = 16,
+        .receive_window = 16,
+        .max_receive_window = 16,
+        .initial_receive_max_stream_data = 16,
+        .stream_receive_window = 16,
+        .max_stream_receive_window = 16,
+        .initial_receive_max_streams_bidi = 3,
+        .enable_pacing = false,
+    });
+    defer connection.deinit();
+    const session_id: webtransport.SessionId = .init(0);
+    var registry = try webtransport.StreamRegistry.init(
+        allocator,
+        session_id,
+        .server,
+        .{ .max_peer_bidi = 3 },
+    );
+    defer registry.deinit();
+
+    var prefix_storage: [16]u8 = undefined;
+    const prefix = try webtransport.BidirectionalStreamHeader.writeInto(
+        &prefix_storage,
+        session_id,
+    );
+    var cancelled_start: [17]u8 = undefined;
+    @memcpy(cancelled_start[0..prefix.len], prefix);
+    cancelled_start[prefix.len] = 'a';
+    const cancelled_start_len = prefix.len + 1;
+    try quic.one_rtt.testing.applyReceivedFrames(
+        &connection,
+        0,
+        &.{.{ .stream = .{
+            .stream_id = 4,
+            .data = cancelled_start[0..cancelled_start_len],
+        } }},
+        null,
+        .not_ect,
+    );
+    var out: [8]u8 = undefined;
+    const first = (try poll(
+        &connection,
+        &registry,
+        session_id,
+        &out,
+    )) orelse return error.TestUnexpectedResult;
+    try std.testing.expect(first == .data);
+    try std.testing.expectEqualStrings("a", out[0..first.data.bytes]);
+    try stop(&connection, &registry, 4, 21);
+    var stop_datagram = try sender.receiveBytes();
+    defer stop_datagram.deinit(allocator);
+
+    var target_bytes: [18]u8 = undefined;
+    @memcpy(target_bytes[0..prefix.len], prefix);
+    @memcpy(target_bytes[prefix.len..][0..2], "ok");
+    const target_len = prefix.len + 2;
+    try quic.one_rtt.testing.applyReceivedFrames(
+        &connection,
+        1,
+        &.{
+            .{ .stream = .{
+                .stream_id = 4,
+                .offset = cancelled_start_len,
+                .data = "late",
+                .fin = true,
+            } },
+            .{ .stream = .{
+                .stream_id = 8,
+                .data = target_bytes[0..target_len],
+                .fin = true,
+            } },
+        },
+        null,
+        .not_ect,
+    );
+
+    const target = try readId(
+        &connection,
+        &registry,
+        session_id,
+        8,
+        &out,
+    );
+    try std.testing.expect(target == .data);
+    try std.testing.expectEqual(@as(u62, 8), target.data.stream_id);
+    try std.testing.expectEqualStrings("ok", out[0..target.data.bytes]);
+    try std.testing.expect(target.data.fin);
+    try std.testing.expectEqual(
+        @as(usize, 0),
+        quic.one_rtt.testing.receiveStreamAvailableLen(&connection, 4).?,
+    );
+    try std.testing.expectEqual(
+        @as(u64, 16),
+        connection.recvStreamStats(4).?.receive_limit,
+    );
+    try std.testing.expect(registry.get(4).?.peer_fin);
+}
+
+test "WebTransport reset event restores final-size connection credit" {
+    const allocator = std.testing.allocator;
+    var threaded = std.Io.Threaded.init(allocator, .{});
+    defer threaded.deinit();
+    const io = threaded.io();
+    var receiver = try quic.runtime.Endpoint.bind(
+        allocator,
+        io,
+        .{ .ip4 = .loopback(0) },
+        .{ .max_datagram_size = 4096 },
+    );
+    defer receiver.deinit();
+    var sender = try quic.runtime.Endpoint.bind(
+        allocator,
+        io,
+        .{ .ip4 = .loopback(0) },
+        .{ .max_datagram_size = 4096 },
+    );
+    defer sender.deinit();
+    const keys = quic.protection.deriveAes128Keys(
+        [_]u8{0x97} ** quic.protection.secret_len,
+    );
+    var connection = try quic.one_rtt.Connection.init(&receiver, .{
+        .peer = sender.address(),
+        .receive_keys = keys,
+        .send_keys = keys,
+        .local_connection_id = "wt-reset-server",
+        .peer_connection_id = "wt-reset-client",
+        .local_endpoint = .server,
+        .initial_receive_max_data = 8,
+        .receive_window = 8,
+        .max_receive_window = 8,
+        .initial_receive_max_stream_data = 8,
+        .stream_receive_window = 8,
+        .max_stream_receive_window = 8,
+        .initial_receive_max_streams_bidi = 2,
+        .enable_pacing = false,
+    });
+    defer connection.deinit();
+    const session_id: webtransport.SessionId = .init(0);
+    var registry = try webtransport.StreamRegistry.init(
+        allocator,
+        session_id,
+        .server,
+        .{ .max_peer_bidi = 2 },
+    );
+    defer registry.deinit();
+
+    var storage: [16]u8 = undefined;
+    const prefix = try webtransport.BidirectionalStreamHeader.writeInto(
+        &storage,
+        session_id,
+    );
+    var initial: [17]u8 = undefined;
+    @memcpy(initial[0..prefix.len], prefix);
+    initial[prefix.len] = 'x';
+    try quic.one_rtt.testing.applyReceivedFrames(
+        &connection,
+        0,
+        &.{
+            .{ .stream = .{
+                .stream_id = 4,
+                .data = initial[0 .. prefix.len + 1],
+            } },
+            .{ .reset_stream = .{
+                .stream_id = 4,
+                .application_error_code = webtransport.applicationErrorCodeToHttp3(24),
+                .final_size = 8,
+            } },
+        },
+        null,
+        .not_ect,
+    );
+    var out: [8]u8 = undefined;
+    const event = (try poll(
+        &connection,
+        &registry,
+        session_id,
+        &out,
+    )) orelse return error.TestUnexpectedResult;
+    try std.testing.expect(event == .reset);
+    try std.testing.expectEqual(@as(u62, 4), event.reset.stream_id);
+    try std.testing.expectEqual(
+        @as(?u32, 24),
+        event.reset.error_info.application_code,
+    );
+    try std.testing.expectEqual(@as(u64, 8), event.reset.final_size);
+    try std.testing.expectEqual(
+        @as(u64, 8),
+        connection.recvStreamStats(4).?.receive_limit,
+    );
+
+    var credit_datagram = try sender.receiveBytes();
+    defer credit_datagram.deinit(allocator);
+    var credit = try quic.one_rtt.openReceivedBytes(
+        &sender,
+        credit_datagram.from,
+        credit_datagram.bytes,
+        keys,
+        "wt-reset-client".len,
+        0,
+        8,
+    );
+    defer credit.deinit(allocator);
+    try std.testing.expectEqual(@as(usize, 1), credit.frames.len);
+    try std.testing.expect(credit.frames[0] == .max_data);
+    try std.testing.expectEqual(
+        @as(u64, 16),
+        credit.frames[0].max_data.maximum_data,
+    );
+}
+
+test "WebTransport targeted sibling preserves reset after transport reclaim" {
+    const allocator = std.testing.allocator;
+    var threaded = std.Io.Threaded.init(allocator, .{});
+    defer threaded.deinit();
+    const io = threaded.io();
+    var endpoint = try quic.runtime.Endpoint.bind(
+        allocator,
+        io,
+        .{ .ip4 = .loopback(0) },
+        .{ .max_datagram_size = 4096 },
+    );
+    defer endpoint.deinit();
+    const keys = quic.protection.deriveAes128Keys(
+        [_]u8{0x98} ** quic.protection.secret_len,
+    );
+    var connection = try quic.one_rtt.Connection.init(&endpoint, .{
+        .peer = endpoint.address(),
+        .receive_keys = keys,
+        .send_keys = keys,
+        .local_connection_id = "wt-reclaim-local",
+        .peer_connection_id = "wt-reclaim-peer",
+        .local_endpoint = .server,
+        .initial_receive_max_data = 16,
+        .receive_window = 16,
+        .max_receive_window = 16,
+        .initial_receive_max_stream_data = 16,
+        .stream_receive_window = 16,
+        .max_stream_receive_window = 16,
+        .initial_receive_max_streams_bidi = 2,
+        .initial_receive_max_streams_uni = 1,
+        .enable_pacing = false,
+    });
+    defer connection.deinit();
+    const session_id: webtransport.SessionId = .init(0);
+    var registry = try webtransport.StreamRegistry.init(
+        allocator,
+        session_id,
+        .server,
+        .{ .max_peer_bidi = 2, .max_peer_uni = 1 },
+    );
+    defer registry.deinit();
+
+    var reset_bytes: std.ArrayList(u8) = .empty;
+    defer reset_bytes.deinit(allocator);
+    try webtransport.UnidirectionalStreamHeader.writeWebTransport(
+        &reset_bytes,
+        allocator,
+        session_id,
+    );
+    try reset_bytes.append(allocator, 'x');
+    try quic.one_rtt.testing.applyReceivedFrames(
+        &connection,
+        0,
+        &.{.{ .stream = .{
+            .stream_id = 2,
+            .data = reset_bytes.items,
+        } }},
+        null,
+        .not_ect,
+    );
+    var out: [8]u8 = undefined;
+    const first = (try poll(
+        &connection,
+        &registry,
+        session_id,
+        &out,
+    )) orelse return error.TestUnexpectedResult;
+    try std.testing.expect(first == .data);
+    try std.testing.expectEqual(@as(u62, 2), first.data.stream_id);
+    try std.testing.expectEqualStrings("x", out[0..first.data.bytes]);
+
+    var target_storage: [16]u8 = undefined;
+    const target_prefix = try webtransport.BidirectionalStreamHeader.writeInto(
+        &target_storage,
+        session_id,
+    );
+    var target_bytes: [18]u8 = undefined;
+    @memcpy(target_bytes[0..target_prefix.len], target_prefix);
+    @memcpy(target_bytes[target_prefix.len..][0..2], "ok");
+    const reset_final_size: u64 = 8;
+    try quic.one_rtt.testing.applyReceivedFrames(
+        &connection,
+        1,
+        &.{
+            .{ .reset_stream = .{
+                .stream_id = 2,
+                .application_error_code = webtransport.applicationErrorCodeToHttp3(25),
+                .final_size = reset_final_size,
+            } },
+            .{ .stream = .{
+                .stream_id = 4,
+                .data = target_bytes[0 .. target_prefix.len + 2],
+                .fin = true,
+            } },
+        },
+        null,
+        .not_ect,
+    );
+
+    const target = try readId(
+        &connection,
+        &registry,
+        session_id,
+        4,
+        &out,
+    );
+    try std.testing.expect(target == .data);
+    try std.testing.expectEqualStrings("ok", out[0..target.data.bytes]);
+    try std.testing.expect(target.data.fin);
+    try std.testing.expect(connection.peerStreamClosed(2));
+    try std.testing.expect(connection.recvStreamStats(2) == null);
+
+    const reset_event = (try poll(
+        &connection,
+        &registry,
+        session_id,
+        &out,
+    )) orelse return error.TestUnexpectedResult;
+    try std.testing.expect(reset_event == .reset);
+    try std.testing.expectEqual(@as(u62, 2), reset_event.reset.stream_id);
+    try std.testing.expectEqual(
+        @as(?u32, 25),
+        reset_event.reset.error_info.application_code,
+    );
+    try std.testing.expectEqual(
+        reset_final_size,
+        reset_event.reset.final_size,
+    );
+    try std.testing.expect((try poll(
+        &connection,
+        &registry,
+        session_id,
+        &out,
+    )) == null);
+}
+
+test "WebTransport incremental deadlines preserve buffered stream events" {
+    const allocator = std.testing.allocator;
+    var threaded = std.Io.Threaded.init(allocator, .{});
+    defer threaded.deinit();
+    const io = threaded.io();
+    var endpoint = try quic.runtime.Endpoint.bind(
+        allocator,
+        io,
+        .{ .ip4 = .loopback(0) },
+        .{ .max_datagram_size = 4096 },
+    );
+    defer endpoint.deinit();
+    const keys = quic.protection.deriveAes128Keys(
+        [_]u8{0x93} ** quic.protection.secret_len,
+    );
+    var connection = try quic.one_rtt.Connection.init(&endpoint, .{
+        .peer = endpoint.address(),
+        .receive_keys = keys,
+        .send_keys = keys,
+        .local_connection_id = "wt-deadline-server",
+        .peer_connection_id = "wt-deadline-client",
+        .local_endpoint = .server,
+        .enable_pacing = false,
+    });
+    defer connection.deinit();
+    const session_id: webtransport.SessionId = .init(0);
+    var registry = try webtransport.StreamRegistry.init(
+        allocator,
+        session_id,
+        .server,
+        .{ .max_peer_bidi = 2 },
+    );
+    defer registry.deinit();
+
+    var prefix_storage: [16]u8 = undefined;
+    const prefix = try webtransport.BidirectionalStreamHeader.writeInto(
+        &prefix_storage,
+        session_id,
+    );
+    var encoded: [21]u8 = undefined;
+    @memcpy(encoded[0..prefix.len], prefix);
+    @memcpy(encoded[prefix.len..][0..5], "ready");
+    const stream_bytes = encoded[0 .. prefix.len + 5];
+    try quic.one_rtt.testing.applyReceivedFrames(
+        &connection,
+        0,
+        &.{
+            .{ .stream = .{
+                .stream_id = 4,
+                .data = stream_bytes,
+                .fin = true,
+            } },
+            .{ .stream = .{
+                .stream_id = 8,
+                .data = stream_bytes,
+                .fin = true,
+            } },
+        },
+        null,
+        .not_ect,
+    );
+
+    var out = [_]u8{0xa5} ** 5;
+    try std.testing.expectEqual(
+        @as(u64, 0),
+        connection.recvStreamStats(4).?.bytes_read,
+    );
+    try std.testing.expect(registry.get(4) == null);
+    try std.testing.expectError(
+        error.Timeout,
+        readWithDeadline(
+            &connection,
+            &registry,
+            session_id,
+            &out,
+            .fromNow(io, .{
+                .clock = .real,
+                .raw = .fromSeconds(1),
+            }),
+        ),
+    );
+    try std.testing.expectEqualSlices(u8, &([_]u8{0xa5} ** 5), &out);
+    try std.testing.expectEqual(
+        @as(u64, 0),
+        connection.recvStreamStats(4).?.bytes_read,
+    );
+    try std.testing.expect(registry.get(4) == null);
+
+    const first = try readWithDeadline(
+        &connection,
+        &registry,
+        session_id,
+        &out,
+        .fromNow(io, .{
+            .clock = .awake,
+            .raw = .fromSeconds(1),
+        }),
+    );
+    try std.testing.expect(first == .data);
+    try std.testing.expectEqual(@as(u62, 4), first.data.stream_id);
+    try std.testing.expectEqualStrings("ready", &out);
+    try std.testing.expect(first.data.fin);
+
+    @memset(&out, 0xa5);
+    try std.testing.expectEqual(
+        @as(u64, 0),
+        connection.recvStreamStats(8).?.bytes_read,
+    );
+    try std.testing.expect(registry.get(8) == null);
+    try std.testing.expectError(
+        error.Timeout,
+        readIdWithDeadline(
+            &connection,
+            &registry,
+            session_id,
+            8,
+            &out,
+            .fromNow(io, .{
+                .clock = .real,
+                .raw = .fromSeconds(1),
+            }),
+        ),
+    );
+    try std.testing.expectEqualSlices(u8, &([_]u8{0xa5} ** 5), &out);
+    try std.testing.expectEqual(
+        @as(u64, 0),
+        connection.recvStreamStats(8).?.bytes_read,
+    );
+    try std.testing.expect(registry.get(8) == null);
+
+    const second = try readIdWithDeadline(
+        &connection,
+        &registry,
+        session_id,
+        8,
+        &out,
+        .fromNow(io, .{
+            .clock = .awake,
+            .raw = .fromSeconds(1),
+        }),
+    );
+    try std.testing.expect(second == .data);
+    try std.testing.expectEqual(@as(u62, 8), second.data.stream_id);
+    try std.testing.expectEqualStrings("ready", &out);
+    try std.testing.expect(second.data.fin);
 }

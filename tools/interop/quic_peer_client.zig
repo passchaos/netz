@@ -5,6 +5,7 @@
 
 const std = @import("std");
 const netz = @import("netz");
+const exact_certificate = @import("exact_certificate_verifier.zig");
 
 const payloads = [_][]const u8{ "hello", "world" };
 const key_update_payloads = [_][]const u8{
@@ -81,10 +82,15 @@ pub fn main(init: std.process.Init) !void {
         now,
         args[2],
     );
-    var verifier = netz.quic.tls.trust.BundleVerifier{
+    var bundle_verifier = netz.quic.tls.trust.BundleVerifier{
         .bundle = &ca_bundle,
         .now_seconds = now.toSeconds(),
     };
+    var exact_verifier: exact_certificate.Verifier = undefined;
+    const server_verifier = if (peer == .quic_go) blk: {
+        exact_verifier = try .init(&ca_bundle, now.toSeconds());
+        break :blk exact_verifier.clientVerifier();
+    } else bundle_verifier.clientVerifier();
 
     var endpoint = try netz.quic.runtime.Endpoint.bind(
         allocator,
@@ -116,7 +122,7 @@ pub fn main(init: std.process.Init) !void {
             // X25519 profile keeps the ClientHello in one Initial datagram and
             // still exercises the standard RFC 9001 handshake path.
             .key_exchange_groups = key_exchange_groups,
-            .server_auth = verifier.clientVerifier(),
+            .server_auth = server_verifier,
             .max_crypto_buffer = 64 * 1024,
             .handshake_recovery = .{
                 .initial_pto_ms = 250,

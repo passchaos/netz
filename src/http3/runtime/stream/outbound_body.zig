@@ -47,12 +47,36 @@ pub const Set = struct {
     }
 
     pub fn reserveOpen(self: *Set, stream_id: u62) Error!void {
-        if (!self.isEmpty() and self.find(stream_id) != null) {
-            return error.UnexpectedStream;
+        return self.reserveOpenMany(&.{stream_id});
+    }
+
+    /// Reserve all bookkeeping needed to publish several streaming heads in
+    /// one transport operation. Validation happens before either collection
+    /// grows, so callers never discover the stream-count bound after bytes for
+    /// a multi-stream operation are already visible.
+    pub fn reserveOpenMany(self: *Set, stream_ids: []const u62) Error!void {
+        for (stream_ids, 0..) |stream_id, index| {
+            if ((!self.isEmpty() and self.find(stream_id) != null) or
+                std.mem.indexOfScalar(u62, stream_ids[0..index], stream_id) != null)
+            {
+                return error.UnexpectedStream;
+            }
         }
-        if (self.count() >= self.max_streams) return error.ExcessiveLoad;
-        try self.entries.ensureUnusedCapacity(self.allocator, 1);
-        try self.entry_index.ensureUnusedCapacity(self.allocator, 1);
+        const next_count = std.math.add(
+            usize,
+            self.count(),
+            stream_ids.len,
+        ) catch return error.ExcessiveLoad;
+        if (next_count > self.max_streams) return error.ExcessiveLoad;
+        try self.entries.ensureUnusedCapacity(self.allocator, stream_ids.len);
+        const index_capacity = std.math.cast(
+            std.AutoHashMapUnmanaged(u62, usize).Size,
+            stream_ids.len,
+        ) orelse return error.ExcessiveLoad;
+        try self.entry_index.ensureUnusedCapacity(
+            self.allocator,
+            index_capacity,
+        );
     }
 
     pub fn appendOpenAssumeCapacity(
@@ -214,4 +238,34 @@ test "HTTP/3 outbound body set indexes open streaming bodies" {
     try std.testing.expect(bodies.isEmpty());
     try std.testing.expect(!bodies.finish(16));
     try std.testing.expect(bodies.find(16) == null);
+}
+
+test "HTTP/3 outbound body set reserves multiple heads transactionally" {
+    const allocator = std.testing.allocator;
+    var bodies = Set.init(allocator, 2);
+    defer bodies.deinit();
+
+    try bodies.reserveOpenMany(&.{ 0, 15 });
+    bodies.appendOpenAssumeCapacity(
+        0,
+        quic.stream_state.SendState.init(0),
+        3,
+    );
+    bodies.appendOpenAssumeCapacity(
+        15,
+        quic.stream_state.SendState.init(15),
+        7,
+    );
+    try std.testing.expectEqual(@as(usize, 2), bodies.count());
+    try std.testing.expect(bodies.find(0) != null);
+    try std.testing.expect(bodies.find(15) != null);
+    try std.testing.expectError(
+        error.UnexpectedStream,
+        bodies.reserveOpenMany(&.{ 19, 19 }),
+    );
+    try std.testing.expectError(
+        error.ExcessiveLoad,
+        bodies.reserveOpenMany(&.{19}),
+    );
+    try std.testing.expectEqual(@as(usize, 2), bodies.count());
 }

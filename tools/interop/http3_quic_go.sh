@@ -76,7 +76,10 @@ PY
   fi
   client_cpu=${bench_cpus[0]}
   server_cpu=${bench_cpus[1]}
-  (cd "$fixture_dir" && go build \
+  (cd "$fixture_dir" && go test -mod=readonly \
+    "$netz_root/tools/interop/http3_quic_go_bench.go" \
+    "$netz_root/tools/interop/http3_quic_go_bench_test.go")
+  (cd "$fixture_dir" && go build -mod=readonly \
     -o "$work/quic-go-http3-bench" \
     "$netz_root/tools/interop/http3_quic_go_bench.go")
   requested_modes=(upload download)
@@ -85,9 +88,13 @@ PY
   warmup=10
   iterations=5
   body_bytes=4194304
+  streams=1
   for arg in "$@"; do
     if [[ $arg == --mode=* ]]; then
       requested_modes=("${arg#--mode=}")
+    elif [[ $arg == --version=* || $arg == --v2-only ]]; then
+      echo 'select benchmark QUIC version with NETZ_HTTP3_INTEROP_VERSION=1|2' >&2
+      exit 2
     else
       common_args+=("$arg")
       case "$arg" in
@@ -95,6 +102,7 @@ PY
         --warmup=*) warmup=${arg#--warmup=} ;;
         --iterations=*) iterations=${arg#--iterations=} ;;
         --body-bytes=*) body_bytes=${arg#--body-bytes=} ;;
+        --streams=*) streams=${arg#--streams=} ;;
       esac
     fi
   done
@@ -118,7 +126,9 @@ PY
     local pid=$1 log=$2 prefix=$3
     local value=
     for _ in $(seq 1 600); do
-      value=$(sed -n "s/^${prefix}=//p" "$log" | head -1)
+      if [[ -f $log ]]; then
+        value=$(sed -n "s/^${prefix}=//p" "$log" | head -1)
+      fi
       if [[ -n $value ]]; then printf '%s\n' "$value"; return 0; fi
       if ! kill -0 "$pid" 2>/dev/null; then cat "$log" >&2; return 1; fi
       sleep 0.05
@@ -140,8 +150,8 @@ PY
     else
       sender_role=server
     fi
-    mode_args=("--mode=$benchmark_mode" "${common_args[@]}")
-    go_args=("-bench-mode=$benchmark_mode")
+    mode_args=("--mode=$benchmark_mode" "${netz_version_args[@]}" "${common_args[@]}")
+    go_args=("-bench-mode=$benchmark_mode" "${go_version_args[@]}")
     for arg in "${common_args[@]}"; do
       go_args+=("-${arg#--}")
     done
@@ -178,10 +188,13 @@ PY
     server_pid=
     check_samples --role-pair=netz-client+quic-go-server \
       --mode="$benchmark_mode" --iterations="$iterations" \
-      --body-bytes="$body_bytes" "$pair_dir/netz-client.log"
+      --streams="$streams" --body-bytes="$body_bytes" --quic-version="$version" \
+      --client-log="$pair_dir/netz-client.log" \
+      --server-log="$pair_dir/quic-go-server.log"
     check_memory --role-pair=netz-client+quic-go-server \
       --sender="$sender_role" \
-      --streams=1 --mode="$benchmark_mode" --body-bytes="$body_bytes" \
+      --streams="$streams" --mode="$benchmark_mode" --body-bytes="$body_bytes" \
+      --quic-version="$version" \
       --warmup="$warmup" --iterations="$iterations" \
       --client-log="$pair_dir/netz-client.log" \
       --server-log="$pair_dir/quic-go-server.log" \
@@ -217,10 +230,13 @@ PY
     server_pid=
     check_samples --role-pair=quic-go-client+netz-server \
       --mode="$benchmark_mode" --iterations="$iterations" \
-      --body-bytes="$body_bytes" "$pair_dir/quic-go-client.log"
+      --streams="$streams" --body-bytes="$body_bytes" --quic-version="$version" \
+      --client-log="$pair_dir/quic-go-client.log" \
+      --server-log="$pair_dir/netz-server.log"
     check_memory --role-pair=quic-go-client+netz-server \
       --sender="$sender_role" \
-      --streams=1 --mode="$benchmark_mode" --body-bytes="$body_bytes" \
+      --streams="$streams" --mode="$benchmark_mode" --body-bytes="$body_bytes" \
+      --quic-version="$version" \
       --warmup="$warmup" --iterations="$iterations" \
       --client-log="$pair_dir/quic-go-client.log" \
       --server-log="$pair_dir/netz-server.log" \

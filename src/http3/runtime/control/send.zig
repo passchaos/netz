@@ -1,4 +1,5 @@
 const std = @import("std");
+const deadline_policy = @import("../../../internal/deadline.zig");
 const http3 = @import("../../mod.zig");
 const quic = @import("../../../quic/mod.zig");
 const runtime_error = @import("../error.zig");
@@ -55,6 +56,24 @@ fn sendConnectionFrames(
     );
 }
 
+fn sendConnectionFramesUntil(
+    connection: *quic.one_rtt.Connection,
+    frames: []const quic.Frame,
+    max_frames_per_packet: usize,
+    deadline: ?std.Io.Clock.Timestamp,
+) runtime_error.ReceiveTimeoutError!void {
+    if (deadline) |absolute| {
+        return send_packetizer.sendWithDeadline(
+            connection.endpoint.allocator,
+            connection,
+            frames,
+            max_frames_per_packet,
+            absolute,
+        );
+    }
+    try sendConnectionFrames(connection, frames, max_frames_per_packet);
+}
+
 fn sendProtectedFrames(
     endpoint: *quic.runtime.Endpoint,
     to: net.IpAddress,
@@ -105,6 +124,73 @@ pub fn sendConnectionControlFrame(
     try sendConnectionControlBytes(connection, control_send, options, payload);
 }
 
+pub fn sendConnectionControlFrameWithDeadline(
+    connection: *quic.one_rtt.Connection,
+    control: *http3.ControlState,
+    control_send: *quic.stream_state.SendState,
+    options: anytype,
+    kind: ControlFrameKind,
+    value: u64,
+    deadline: std.Io.Clock.Timestamp,
+) runtime_error.ReceiveTimeoutError!void {
+    _ = try deadline_policy.usableAwake(connection.endpoint.io, deadline);
+    var payload_storage: [http3.max_single_varint_frame_len]u8 = undefined;
+    const previous_goaway_id = control.local_goaway_id;
+    errdefer control.local_goaway_id = previous_goaway_id;
+    const payload = try controlFramePayloadInto(
+        control,
+        &payload_storage,
+        kind,
+        value,
+    );
+    const previous_send = control_send.*;
+    errdefer control_send.* = previous_send;
+    var frame_storage: [http3.max_priority_update_frame_len]quic.Frame =
+        undefined;
+    const frames = try controlFramesInto(
+        control_send,
+        &frame_storage,
+        payload,
+        maxStreamFrameData(options),
+    );
+    try sendConnectionFramesUntil(
+        connection,
+        frames,
+        maxFramesPerPacket(options),
+        deadline,
+    );
+}
+
+/// Submit one small control frame without waiting for pacing or reading UDP.
+/// Control state and stream offsets roll back together when the one-packet
+/// attempt cannot be submitted.
+pub fn trySendConnectionControlFrame(
+    connection: *quic.one_rtt.Connection,
+    control: *http3.ControlState,
+    control_send: *quic.stream_state.SendState,
+    options: anytype,
+    kind: ControlFrameKind,
+    value: u64,
+) Error!void {
+    var payload_storage: [http3.max_single_varint_frame_len]u8 = undefined;
+    const previous_goaway_id = control.local_goaway_id;
+    const previous_send = control_send.*;
+    errdefer control.local_goaway_id = previous_goaway_id;
+    errdefer control_send.* = previous_send;
+    const payload = try controlFramePayloadInto(
+        control,
+        &payload_storage,
+        kind,
+        value,
+    );
+    try trySendConnectionControlBytes(
+        connection,
+        control_send,
+        options,
+        payload,
+    );
+}
+
 pub fn pushControlFramePayloadInto(
     control: *http3.ControlState,
     storage: *[http3.max_single_varint_frame_len]u8,
@@ -138,6 +224,37 @@ pub fn sendConnectionControlBytes(
         maxStreamFrameData(options),
     );
     try sendConnectionFrames(connection, frames, maxFramesPerPacket(options));
+}
+
+/// Submit one complete control-stream payload in one QUIC packet. The stream
+/// cursor advances only after socket submission, so callers may retry pacing,
+/// congestion, flow-control, and size failures verbatim.
+pub fn trySendConnectionControlBytes(
+    connection: *quic.one_rtt.Connection,
+    control_send: *quic.stream_state.SendState,
+    options: anytype,
+    payload: []const u8,
+) Error!void {
+    if (payload.len > http3.max_priority_update_frame_len) {
+        return error.DatagramTooLarge;
+    }
+    const previous_send = control_send.*;
+    errdefer control_send.* = previous_send;
+    var frame_storage: [http3.max_priority_update_frame_len]quic.Frame =
+        undefined;
+    const frames = try controlFramesInto(
+        control_send,
+        &frame_storage,
+        payload,
+        maxStreamFrameData(options),
+    );
+    if (frames.len > @max(@as(usize, 1), maxFramesPerPacket(options)) or
+        try connection.packetLenForFramesAtOffset(0, frames) >
+            connection.currentSendDatagramSize())
+    {
+        return error.DatagramTooLarge;
+    }
+    try connection.trySend(frames);
 }
 
 /// Split a small control message without allocating a temporary frame list.
@@ -198,6 +315,68 @@ pub fn sendConnectionPushControl(
     try sendConnectionControlBytes(connection, control_send, options, payload);
 }
 
+pub fn sendConnectionPushControlWithDeadline(
+    connection: *quic.one_rtt.Connection,
+    control: *http3.ControlState,
+    control_send: *quic.stream_state.SendState,
+    options: anytype,
+    kind: PushControlFrameKind,
+    push_id: u64,
+    deadline: std.Io.Clock.Timestamp,
+) runtime_error.ReceiveTimeoutError!void {
+    _ = try deadline_policy.usableAwake(connection.endpoint.io, deadline);
+    var payload_storage: [http3.max_single_varint_frame_len]u8 = undefined;
+    const previous_max_push_id = control.local_max_push_id;
+    errdefer control.local_max_push_id = previous_max_push_id;
+    const payload = try pushControlFramePayloadInto(
+        control,
+        &payload_storage,
+        kind,
+        push_id,
+    );
+    const previous_send = control_send.*;
+    errdefer control_send.* = previous_send;
+    var frame_storage: [http3.max_priority_update_frame_len]quic.Frame =
+        undefined;
+    const frames = try controlFramesInto(
+        control_send,
+        &frame_storage,
+        payload,
+        maxStreamFrameData(options),
+    );
+    try sendConnectionFramesUntil(
+        connection,
+        frames,
+        maxFramesPerPacket(options),
+        deadline,
+    );
+}
+
+pub fn trySendConnectionPushControl(
+    connection: *quic.one_rtt.Connection,
+    control: *http3.ControlState,
+    control_send: *quic.stream_state.SendState,
+    options: anytype,
+    kind: PushControlFrameKind,
+    push_id: u64,
+) Error!void {
+    var payload_storage: [http3.max_single_varint_frame_len]u8 = undefined;
+    const previous_max_push_id = control.local_max_push_id;
+    errdefer control.local_max_push_id = previous_max_push_id;
+    const payload = try pushControlFramePayloadInto(
+        control,
+        &payload_storage,
+        kind,
+        push_id,
+    );
+    try trySendConnectionControlBytes(
+        connection,
+        control_send,
+        options,
+        payload,
+    );
+}
+
 pub fn sendConnectionPriorityUpdate(
     connection: *quic.one_rtt.Connection,
     control_send: *quic.stream_state.SendState,
@@ -240,6 +419,78 @@ pub fn sendConnectionPriorityUpdateRaw(
     try sendConnectionControlBytes(connection, control_send, options, payload);
 }
 
+pub fn sendConnectionPriorityUpdateRawWithDeadline(
+    connection: *quic.one_rtt.Connection,
+    control_send: *quic.stream_state.SendState,
+    options: anytype,
+    frame_type: u64,
+    prioritized_element_id: u64,
+    priority: http3.Priority,
+    deadline: std.Io.Clock.Timestamp,
+) runtime_error.ReceiveTimeoutError!void {
+    _ = try deadline_policy.usableAwake(connection.endpoint.io, deadline);
+    var payload_storage: [http3.max_priority_update_frame_len]u8 = undefined;
+    const payload = switch (frame_type) {
+        http3.FrameType.priority_update_request => try http3.writePriorityUpdateFrameInto(
+            &payload_storage,
+            prioritized_element_id,
+            priority,
+        ),
+        http3.FrameType.priority_update_push => try http3.writePushPriorityUpdateFrameInto(
+            &payload_storage,
+            prioritized_element_id,
+            priority,
+        ),
+        else => return error.InvalidPriorityUpdate,
+    };
+    const previous_send = control_send.*;
+    errdefer control_send.* = previous_send;
+    var frame_storage: [http3.max_priority_update_frame_len]quic.Frame =
+        undefined;
+    const frames = try controlFramesInto(
+        control_send,
+        &frame_storage,
+        payload,
+        maxStreamFrameData(options),
+    );
+    try sendConnectionFramesUntil(
+        connection,
+        frames,
+        maxFramesPerPacket(options),
+        deadline,
+    );
+}
+
+pub fn trySendConnectionPriorityUpdateRaw(
+    connection: *quic.one_rtt.Connection,
+    control_send: *quic.stream_state.SendState,
+    options: anytype,
+    frame_type: u64,
+    prioritized_element_id: u64,
+    priority: http3.Priority,
+) Error!void {
+    var payload_storage: [http3.max_priority_update_frame_len]u8 = undefined;
+    const payload = switch (frame_type) {
+        http3.FrameType.priority_update_request => try http3.writePriorityUpdateFrameInto(
+            &payload_storage,
+            prioritized_element_id,
+            priority,
+        ),
+        http3.FrameType.priority_update_push => try http3.writePushPriorityUpdateFrameInto(
+            &payload_storage,
+            prioritized_element_id,
+            priority,
+        ),
+        else => return error.InvalidPriorityUpdate,
+    };
+    try trySendConnectionControlBytes(
+        connection,
+        control_send,
+        options,
+        payload,
+    );
+}
+
 pub fn sendProtectedControlFrame(
     endpoint: *quic.runtime.Endpoint,
     to: net.IpAddress,
@@ -251,6 +502,62 @@ pub fn sendProtectedControlFrame(
     kind: ControlFrameKind,
     value: u64,
 ) Error!void {
+    return sendProtectedControlFrameUntil(
+        endpoint,
+        to,
+        config,
+        control,
+        control_send,
+        next_packet_number,
+        protected_send,
+        kind,
+        value,
+        null,
+    ) catch |err| switch (err) {
+        error.Timeout, error.ConcurrencyUnavailable => unreachable,
+        else => |other| return @errorCast(other),
+    };
+}
+
+pub fn sendProtectedControlFrameWithDeadline(
+    endpoint: *quic.runtime.Endpoint,
+    to: net.IpAddress,
+    config: anytype,
+    control: *http3.ControlState,
+    control_send: *quic.stream_state.SendState,
+    next_packet_number: *u64,
+    protected_send: *ProtectedSendState,
+    kind: ControlFrameKind,
+    value: u64,
+    deadline: std.Io.Clock.Timestamp,
+) runtime_error.ReceiveTimeoutError!void {
+    _ = try deadline_policy.usableAwake(endpoint.io, deadline);
+    return sendProtectedControlFrameUntil(
+        endpoint,
+        to,
+        config,
+        control,
+        control_send,
+        next_packet_number,
+        protected_send,
+        kind,
+        value,
+        deadline,
+    );
+}
+
+fn sendProtectedControlFrameUntil(
+    endpoint: *quic.runtime.Endpoint,
+    to: net.IpAddress,
+    config: anytype,
+    control: *http3.ControlState,
+    control_send: *quic.stream_state.SendState,
+    next_packet_number: *u64,
+    protected_send: *ProtectedSendState,
+    kind: ControlFrameKind,
+    value: u64,
+    deadline: ?std.Io.Clock.Timestamp,
+) runtime_error.ReceiveTimeoutError!void {
     var payload_storage: [http3.max_single_varint_frame_len]u8 = undefined;
     const previous_goaway_id = control.local_goaway_id;
     errdefer control.local_goaway_id = previous_goaway_id;
@@ -260,15 +567,28 @@ pub fn sendProtectedControlFrame(
         kind,
         value,
     );
-    try sendProtectedControlBytes(
-        endpoint,
-        to,
-        config,
-        control_send,
-        next_packet_number,
-        protected_send,
-        payload,
-    );
+    if (deadline) |absolute| {
+        try sendProtectedControlBytesWithDeadline(
+            endpoint,
+            to,
+            config,
+            control_send,
+            next_packet_number,
+            protected_send,
+            payload,
+            absolute,
+        );
+    } else {
+        try sendProtectedControlBytes(
+            endpoint,
+            to,
+            config,
+            control_send,
+            next_packet_number,
+            protected_send,
+            payload,
+        );
+    }
 }
 
 pub fn sendProtectedPushControl(
@@ -302,6 +622,40 @@ pub fn sendProtectedPushControl(
     );
 }
 
+pub fn sendProtectedPushControlWithDeadline(
+    endpoint: *quic.runtime.Endpoint,
+    to: net.IpAddress,
+    config: anytype,
+    control: *http3.ControlState,
+    control_send: *quic.stream_state.SendState,
+    next_packet_number: *u64,
+    protected_send: *ProtectedSendState,
+    kind: PushControlFrameKind,
+    push_id: u64,
+    deadline: std.Io.Clock.Timestamp,
+) runtime_error.ReceiveTimeoutError!void {
+    _ = try deadline_policy.usableAwake(endpoint.io, deadline);
+    var payload_storage: [http3.max_single_varint_frame_len]u8 = undefined;
+    const previous_max_push_id = control.local_max_push_id;
+    errdefer control.local_max_push_id = previous_max_push_id;
+    const payload = try pushControlFramePayloadInto(
+        control,
+        &payload_storage,
+        kind,
+        push_id,
+    );
+    try sendProtectedControlBytesWithDeadline(
+        endpoint,
+        to,
+        config,
+        control_send,
+        next_packet_number,
+        protected_send,
+        payload,
+        deadline,
+    );
+}
+
 pub fn sendProtectedControlBytes(
     endpoint: *quic.runtime.Endpoint,
     to: net.IpAddress,
@@ -311,6 +665,54 @@ pub fn sendProtectedControlBytes(
     protected_send: *ProtectedSendState,
     payload: []const u8,
 ) Error!void {
+    return sendProtectedControlBytesUntil(
+        endpoint,
+        to,
+        config,
+        control_send,
+        next_packet_number,
+        protected_send,
+        payload,
+        null,
+    ) catch |err| switch (err) {
+        error.Timeout, error.ConcurrencyUnavailable => unreachable,
+        else => |other| return @errorCast(other),
+    };
+}
+
+pub fn sendProtectedControlBytesWithDeadline(
+    endpoint: *quic.runtime.Endpoint,
+    to: net.IpAddress,
+    config: anytype,
+    control_send: *quic.stream_state.SendState,
+    next_packet_number: *u64,
+    protected_send: *ProtectedSendState,
+    payload: []const u8,
+    deadline: std.Io.Clock.Timestamp,
+) runtime_error.ReceiveTimeoutError!void {
+    _ = try deadline_policy.usableAwake(endpoint.io, deadline);
+    return sendProtectedControlBytesUntil(
+        endpoint,
+        to,
+        config,
+        control_send,
+        next_packet_number,
+        protected_send,
+        payload,
+        deadline,
+    );
+}
+
+fn sendProtectedControlBytesUntil(
+    endpoint: *quic.runtime.Endpoint,
+    to: net.IpAddress,
+    config: anytype,
+    control_send: *quic.stream_state.SendState,
+    next_packet_number: *u64,
+    protected_send: *ProtectedSendState,
+    payload: []const u8,
+    deadline: ?std.Io.Clock.Timestamp,
+) runtime_error.ReceiveTimeoutError!void {
     const previous_send = control_send.*;
     errdefer control_send.* = previous_send;
     var frame_storage: [http3.max_priority_update_frame_len]quic.Frame = undefined;
@@ -320,16 +722,29 @@ pub fn sendProtectedControlBytes(
         payload,
         config.max_stream_frame_data,
     );
-    try sendProtectedFrames(
-        endpoint,
-        to,
-        config.send_keys,
-        config.peer_connection_id,
-        next_packet_number,
-        frames,
-        config.max_frames_per_packet,
-        protected_send,
-    );
+    if (deadline) |absolute| {
+        try protected_send.sendFramesWithDeadline(
+            endpoint,
+            to,
+            config.send_keys,
+            config.peer_connection_id,
+            next_packet_number,
+            frames,
+            config.max_frames_per_packet,
+            absolute,
+        );
+    } else {
+        try sendProtectedFrames(
+            endpoint,
+            to,
+            config.send_keys,
+            config.peer_connection_id,
+            next_packet_number,
+            frames,
+            config.max_frames_per_packet,
+            protected_send,
+        );
+    }
 }
 
 pub fn sendProtectedPriorityUpdate(
@@ -391,6 +806,45 @@ pub fn sendProtectedPriorityUpdateRaw(
     );
 }
 
+pub fn sendProtectedPriorityUpdateRawWithDeadline(
+    endpoint: *quic.runtime.Endpoint,
+    to: net.IpAddress,
+    config: anytype,
+    control_send: *quic.stream_state.SendState,
+    next_packet_number: *u64,
+    protected_send: *ProtectedSendState,
+    frame_type: u64,
+    prioritized_element_id: u64,
+    priority: http3.Priority,
+    deadline: std.Io.Clock.Timestamp,
+) runtime_error.ReceiveTimeoutError!void {
+    _ = try deadline_policy.usableAwake(endpoint.io, deadline);
+    var payload_storage: [http3.max_priority_update_frame_len]u8 = undefined;
+    const payload = switch (frame_type) {
+        http3.FrameType.priority_update_request => try http3.writePriorityUpdateFrameInto(
+            &payload_storage,
+            prioritized_element_id,
+            priority,
+        ),
+        http3.FrameType.priority_update_push => try http3.writePushPriorityUpdateFrameInto(
+            &payload_storage,
+            prioritized_element_id,
+            priority,
+        ),
+        else => return error.InvalidPriorityUpdate,
+    };
+    try sendProtectedControlBytesWithDeadline(
+        endpoint,
+        to,
+        config,
+        control_send,
+        next_packet_number,
+        protected_send,
+        payload,
+        deadline,
+    );
+}
+
 pub fn sendConnectionSettings(
     connection: *quic.one_rtt.Connection,
     scratch: *CriticalStreamSendScratch,
@@ -403,6 +857,65 @@ pub fn sendConnectionSettings(
     options: anytype,
     stream_id: u62,
 ) Error!void {
+    return sendConnectionSettingsUntil(
+        connection,
+        scratch,
+        control,
+        control_send,
+        qpack_encoder_send,
+        qpack_encoder_prefix_sent,
+        qpack_decoder_send,
+        qpack_decoder_prefix_sent,
+        options,
+        stream_id,
+        null,
+    ) catch |err| switch (err) {
+        error.Timeout, error.ConcurrencyUnavailable => unreachable,
+        else => |other| return @errorCast(other),
+    };
+}
+
+pub fn sendConnectionSettingsWithDeadline(
+    connection: *quic.one_rtt.Connection,
+    scratch: *CriticalStreamSendScratch,
+    control: *http3.ControlState,
+    control_send: *quic.stream_state.SendState,
+    qpack_encoder_send: *quic.stream_state.SendState,
+    qpack_encoder_prefix_sent: *bool,
+    qpack_decoder_send: *quic.stream_state.SendState,
+    qpack_decoder_prefix_sent: *bool,
+    options: anytype,
+    stream_id: u62,
+    deadline: std.Io.Clock.Timestamp,
+) runtime_error.ReceiveTimeoutError!void {
+    return sendConnectionSettingsUntil(
+        connection,
+        scratch,
+        control,
+        control_send,
+        qpack_encoder_send,
+        qpack_encoder_prefix_sent,
+        qpack_decoder_send,
+        qpack_decoder_prefix_sent,
+        options,
+        stream_id,
+        deadline,
+    );
+}
+
+fn sendConnectionSettingsUntil(
+    connection: *quic.one_rtt.Connection,
+    scratch: *CriticalStreamSendScratch,
+    control: *http3.ControlState,
+    control_send: *quic.stream_state.SendState,
+    qpack_encoder_send: *quic.stream_state.SendState,
+    qpack_encoder_prefix_sent: *bool,
+    qpack_decoder_send: *quic.stream_state.SendState,
+    qpack_decoder_prefix_sent: *bool,
+    options: anytype,
+    stream_id: u62,
+    deadline: ?std.Io.Clock.Timestamp,
+) runtime_error.ReceiveTimeoutError!void {
     if (control.settings.sent) return;
 
     const previous_settings = control.settings;
@@ -477,10 +990,11 @@ pub fn sendConnectionSettings(
             false,
         );
     }
-    try sendConnectionFrames(
+    try sendConnectionFramesUntil(
         connection,
         scratch.frames.items,
         maxFramesPerPacket(options),
+        deadline,
     );
     if (encoder_end != encoder_start) qpack_encoder_prefix_sent.* = true;
     if (scratch.payload.items.len != decoder_start) {
@@ -606,6 +1120,49 @@ pub fn sendConnectionQpackEncoderInstructions(
     prefix_sent: *bool,
     options: anytype,
 ) Error!void {
+    return sendConnectionQpackEncoderInstructionsUntil(
+        connection,
+        scratch,
+        qpack,
+        send_state,
+        prefix_sent,
+        options,
+        null,
+    ) catch |err| switch (err) {
+        error.Timeout, error.ConcurrencyUnavailable => unreachable,
+        else => |other| return @errorCast(other),
+    };
+}
+
+pub fn sendConnectionQpackEncoderInstructionsWithDeadline(
+    connection: *quic.one_rtt.Connection,
+    scratch: *CriticalStreamSendScratch,
+    qpack: *QpackEncodeState,
+    send_state: *quic.stream_state.SendState,
+    prefix_sent: *bool,
+    options: anytype,
+    deadline: std.Io.Clock.Timestamp,
+) runtime_error.ReceiveTimeoutError!void {
+    return sendConnectionQpackEncoderInstructionsUntil(
+        connection,
+        scratch,
+        qpack,
+        send_state,
+        prefix_sent,
+        options,
+        deadline,
+    );
+}
+
+fn sendConnectionQpackEncoderInstructionsUntil(
+    connection: *quic.one_rtt.Connection,
+    scratch: *CriticalStreamSendScratch,
+    qpack: *QpackEncodeState,
+    send_state: *quic.stream_state.SendState,
+    prefix_sent: *bool,
+    options: anytype,
+    deadline: ?std.Io.Clock.Timestamp,
+) runtime_error.ReceiveTimeoutError!void {
     const pending = qpack.pendingEncoderInstructions();
     if (pending.len == 0) return;
 
@@ -633,10 +1190,11 @@ pub fn sendConnectionQpackEncoderInstructions(
     );
     // Keep the critical encoder stream in an earlier packet than any field
     // section that may depend on it, including when frame-list chunking is one.
-    try sendConnectionFrames(
+    try sendConnectionFramesUntil(
         connection,
         scratch.frames.items,
         maxFramesPerPacket(options),
+        deadline,
     );
     prefix_sent.* = true;
     qpack.clearEncoderInstructions();
@@ -650,6 +1208,49 @@ pub fn sendConnectionQpackFeedback(
     prefix_sent: *bool,
     options: anytype,
 ) Error!void {
+    return sendConnectionQpackFeedbackUntil(
+        connection,
+        scratch,
+        qpack,
+        send_state,
+        prefix_sent,
+        options,
+        null,
+    ) catch |err| switch (err) {
+        error.Timeout, error.ConcurrencyUnavailable => unreachable,
+        else => |other| return @errorCast(other),
+    };
+}
+
+pub fn sendConnectionQpackFeedbackWithDeadline(
+    connection: *quic.one_rtt.Connection,
+    scratch: *CriticalStreamSendScratch,
+    qpack: *QpackDecodeState,
+    send_state: *quic.stream_state.SendState,
+    prefix_sent: *bool,
+    options: anytype,
+    deadline: std.Io.Clock.Timestamp,
+) runtime_error.ReceiveTimeoutError!void {
+    return sendConnectionQpackFeedbackUntil(
+        connection,
+        scratch,
+        qpack,
+        send_state,
+        prefix_sent,
+        options,
+        deadline,
+    );
+}
+
+fn sendConnectionQpackFeedbackUntil(
+    connection: *quic.one_rtt.Connection,
+    scratch: *CriticalStreamSendScratch,
+    qpack: *QpackDecodeState,
+    send_state: *quic.stream_state.SendState,
+    prefix_sent: *bool,
+    options: anytype,
+    deadline: ?std.Io.Clock.Timestamp,
+) runtime_error.ReceiveTimeoutError!void {
     const pending = qpack.pendingDecoderInstructions();
     if (pending.len == 0) return;
 
@@ -672,10 +1273,11 @@ pub fn sendConnectionQpackFeedback(
         maxStreamFrameData(options),
         false,
     );
-    try sendConnectionFrames(
+    try sendConnectionFramesUntil(
         connection,
         scratch.frames.items,
         maxFramesPerPacket(options),
+        deadline,
     );
     prefix_sent.* = true;
     qpack.clearDecoderInstructions();
@@ -795,6 +1397,74 @@ pub fn sendProtectedSettings(
     protected_send: *ProtectedSendState,
     stream_id: u62,
 ) Error!void {
+    return sendProtectedSettingsUntil(
+        endpoint,
+        to,
+        config,
+        control,
+        control_send,
+        qpack_encoder_send,
+        qpack_encoder_prefix_sent,
+        qpack_decoder_send,
+        qpack_decoder_prefix_sent,
+        next_packet_number,
+        protected_send,
+        stream_id,
+        null,
+    ) catch |err| switch (err) {
+        error.Timeout, error.ConcurrencyUnavailable => unreachable,
+        else => |other| return @errorCast(other),
+    };
+}
+
+pub fn sendProtectedSettingsWithDeadline(
+    endpoint: *quic.runtime.Endpoint,
+    to: net.IpAddress,
+    config: anytype,
+    control: *http3.ControlState,
+    control_send: *quic.stream_state.SendState,
+    qpack_encoder_send: *quic.stream_state.SendState,
+    qpack_encoder_prefix_sent: *bool,
+    qpack_decoder_send: *quic.stream_state.SendState,
+    qpack_decoder_prefix_sent: *bool,
+    next_packet_number: *u64,
+    protected_send: *ProtectedSendState,
+    stream_id: u62,
+    deadline: std.Io.Clock.Timestamp,
+) runtime_error.ReceiveTimeoutError!void {
+    _ = try deadline_policy.usableAwake(endpoint.io, deadline);
+    return sendProtectedSettingsUntil(
+        endpoint,
+        to,
+        config,
+        control,
+        control_send,
+        qpack_encoder_send,
+        qpack_encoder_prefix_sent,
+        qpack_decoder_send,
+        qpack_decoder_prefix_sent,
+        next_packet_number,
+        protected_send,
+        stream_id,
+        deadline,
+    );
+}
+
+fn sendProtectedSettingsUntil(
+    endpoint: *quic.runtime.Endpoint,
+    to: net.IpAddress,
+    config: anytype,
+    control: *http3.ControlState,
+    control_send: *quic.stream_state.SendState,
+    qpack_encoder_send: *quic.stream_state.SendState,
+    qpack_encoder_prefix_sent: *bool,
+    qpack_decoder_send: *quic.stream_state.SendState,
+    qpack_decoder_prefix_sent: *bool,
+    next_packet_number: *u64,
+    protected_send: *ProtectedSendState,
+    stream_id: u62,
+    deadline: ?std.Io.Clock.Timestamp,
+) runtime_error.ReceiveTimeoutError!void {
     if (control.settings.sent) return;
 
     const previous_settings = control.settings;
@@ -867,16 +1537,29 @@ pub fn sendProtectedSettings(
             false,
         );
     }
-    try sendProtectedFrames(
-        endpoint,
-        to,
-        config.send_keys,
-        config.peer_connection_id,
-        next_packet_number,
-        frames.items,
-        config.max_frames_per_packet,
-        protected_send,
-    );
+    if (deadline) |absolute| {
+        try protected_send.sendFramesWithDeadline(
+            endpoint,
+            to,
+            config.send_keys,
+            config.peer_connection_id,
+            next_packet_number,
+            frames.items,
+            config.max_frames_per_packet,
+            absolute,
+        );
+    } else {
+        try sendProtectedFrames(
+            endpoint,
+            to,
+            config.send_keys,
+            config.peer_connection_id,
+            next_packet_number,
+            frames.items,
+            config.max_frames_per_packet,
+            protected_send,
+        );
+    }
     if (encoder_end != encoder_start) qpack_encoder_prefix_sent.* = true;
     if (payload.items.len != decoder_start) qpack_decoder_prefix_sent.* = true;
 }
@@ -891,6 +1574,58 @@ pub fn sendProtectedQpackEncoderInstructions(
     next_packet_number: *u64,
     protected_send: *ProtectedSendState,
 ) Error!void {
+    return sendProtectedQpackEncoderInstructionsUntil(
+        endpoint,
+        to,
+        config,
+        qpack,
+        send_state,
+        prefix_sent,
+        next_packet_number,
+        protected_send,
+        null,
+    ) catch |err| switch (err) {
+        error.Timeout, error.ConcurrencyUnavailable => unreachable,
+        else => |other| return @errorCast(other),
+    };
+}
+
+pub fn sendProtectedQpackEncoderInstructionsWithDeadline(
+    endpoint: *quic.runtime.Endpoint,
+    to: net.IpAddress,
+    config: anytype,
+    qpack: *QpackEncodeState,
+    send_state: *quic.stream_state.SendState,
+    prefix_sent: *bool,
+    next_packet_number: *u64,
+    protected_send: *ProtectedSendState,
+    deadline: std.Io.Clock.Timestamp,
+) runtime_error.ReceiveTimeoutError!void {
+    _ = try deadline_policy.usableAwake(endpoint.io, deadline);
+    return sendProtectedQpackEncoderInstructionsUntil(
+        endpoint,
+        to,
+        config,
+        qpack,
+        send_state,
+        prefix_sent,
+        next_packet_number,
+        protected_send,
+        deadline,
+    );
+}
+
+fn sendProtectedQpackEncoderInstructionsUntil(
+    endpoint: *quic.runtime.Endpoint,
+    to: net.IpAddress,
+    config: anytype,
+    qpack: *QpackEncodeState,
+    send_state: *quic.stream_state.SendState,
+    prefix_sent: *bool,
+    next_packet_number: *u64,
+    protected_send: *ProtectedSendState,
+    deadline: ?std.Io.Clock.Timestamp,
+) runtime_error.ReceiveTimeoutError!void {
     const pending = qpack.pendingEncoderInstructions();
     if (pending.len == 0) return;
 
@@ -918,16 +1653,29 @@ pub fn sendProtectedQpackEncoderInstructions(
     // Encoder-stream bytes must be visible before any request/response field
     // section that could depend on them. A separate send also preserves this
     // ordering when max_frames_per_packet would otherwise split one frame list.
-    try sendProtectedFrames(
-        endpoint,
-        to,
-        config.send_keys,
-        config.peer_connection_id,
-        next_packet_number,
-        frames.items,
-        config.max_frames_per_packet,
-        protected_send,
-    );
+    if (deadline) |absolute| {
+        try protected_send.sendFramesWithDeadline(
+            endpoint,
+            to,
+            config.send_keys,
+            config.peer_connection_id,
+            next_packet_number,
+            frames.items,
+            config.max_frames_per_packet,
+            absolute,
+        );
+    } else {
+        try sendProtectedFrames(
+            endpoint,
+            to,
+            config.send_keys,
+            config.peer_connection_id,
+            next_packet_number,
+            frames.items,
+            config.max_frames_per_packet,
+            protected_send,
+        );
+    }
     prefix_sent.* = true;
     qpack.clearEncoderInstructions();
 }
@@ -976,6 +1724,55 @@ pub fn sendProtectedQpackFeedback(
         frames.items,
         config.max_frames_per_packet,
         protected_send,
+    );
+    prefix_sent.* = true;
+    qpack.clearDecoderInstructions();
+}
+
+pub fn sendProtectedQpackFeedbackWithDeadline(
+    endpoint: *quic.runtime.Endpoint,
+    to: net.IpAddress,
+    config: anytype,
+    qpack: *QpackDecodeState,
+    send_state: *quic.stream_state.SendState,
+    prefix_sent: *bool,
+    next_packet_number: *u64,
+    protected_send: *ProtectedSendState,
+    deadline: std.Io.Clock.Timestamp,
+) runtime_error.ReceiveTimeoutError!void {
+    const pending = qpack.pendingDecoderInstructions();
+    if (pending.len == 0) return;
+
+    const previous_send = send_state.*;
+    errdefer send_state.* = previous_send;
+    protected_send.resetCriticalStreamScratch();
+    const payload = &protected_send.critical_stream_payload;
+    const frames = &protected_send.critical_stream_frames;
+    try payload.ensureTotalCapacity(
+        endpoint.allocator,
+        @intFromBool(!prefix_sent.*) + pending.len,
+    );
+    if (!prefix_sent.*) try http3.writeQpackDecoderStreamPrefix(
+        payload,
+        endpoint.allocator,
+    );
+    payload.appendSliceAssumeCapacity(pending);
+    try send_state.appendFrames(
+        frames,
+        endpoint.allocator,
+        payload.items,
+        config.max_stream_frame_data,
+        false,
+    );
+    try protected_send.sendFramesWithDeadline(
+        endpoint,
+        to,
+        config.send_keys,
+        config.peer_connection_id,
+        next_packet_number,
+        frames.items,
+        config.max_frames_per_packet,
+        deadline,
     );
     prefix_sent.* = true;
     qpack.clearDecoderInstructions();

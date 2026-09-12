@@ -496,6 +496,128 @@ test "QUIC v2 Initial and Handshake packet seal/open roundtrip" {
     try std.testing.expectEqualStrings("v2 handshake", opened_handshake.payload);
 }
 
+test "QUIC long packet in-place sealing matches allocating wrappers" {
+    const allocator = std.testing.allocator;
+    const dcid = [_]u8{ 0x51, 0x52, 0x53, 0x54, 0x55, 0x56, 0x57, 0x58 };
+    const scid = [_]u8{ 0x61, 0x62, 0x63, 0x64 };
+    const initial_keys = (try protection.deriveInitialSecretsForVersion(
+        version_2_wire_for_test,
+        &dcid,
+    )).client;
+    const initial_options = protection.InitialPacketOptions{
+        .version = version_2_wire_for_test,
+        .destination_connection_id = &dcid,
+        .source_connection_id = &scid,
+        .token = "retry-token",
+        .packet_number = 0x10203,
+        .packet_number_len = 3,
+        .payload = "initial in-place payload",
+    };
+    const allocated_initial = try protection.sealInitialPacket(
+        allocator,
+        initial_keys,
+        initial_options,
+    );
+    defer allocator.free(allocated_initial);
+    const initial_storage = try allocator.alloc(u8, allocated_initial.len);
+    defer allocator.free(initial_storage);
+    const in_place_initial = try protection.sealInitialPacketInto(
+        initial_storage,
+        initial_keys,
+        initial_options,
+    );
+    try std.testing.expectEqualSlices(
+        u8,
+        allocated_initial,
+        in_place_initial,
+    );
+    try std.testing.expectError(
+        error.BufferTooShort,
+        protection.sealInitialPacketInto(
+            initial_storage[0 .. initial_storage.len - 1],
+            initial_keys,
+            initial_options,
+        ),
+    );
+
+    const handshake_keys = try protection.deriveAes128KeysForVersion(
+        version_2_wire_for_test,
+        [_]u8{0x71} ** protection.secret_len,
+    );
+    const handshake_options = protection.HandshakePacketOptions{
+        .version = version_2_wire_for_test,
+        .destination_connection_id = &dcid,
+        .source_connection_id = &scid,
+        .packet_number = 0x405,
+        .packet_number_len = 2,
+        .payload = "handshake in-place payload",
+    };
+    const allocated_handshake = try protection.sealHandshakePacket(
+        allocator,
+        handshake_keys,
+        handshake_options,
+    );
+    defer allocator.free(allocated_handshake);
+    const handshake_storage = try allocator.alloc(
+        u8,
+        allocated_handshake.len,
+    );
+    defer allocator.free(handshake_storage);
+    const in_place_handshake = try protection.sealHandshakePacketInto(
+        handshake_storage,
+        handshake_keys,
+        handshake_options,
+    );
+    try std.testing.expectEqualSlices(
+        u8,
+        allocated_handshake,
+        in_place_handshake,
+    );
+    try std.testing.expectError(
+        error.BufferTooShort,
+        protection.sealHandshakePacketInto(
+            handshake_storage[0 .. handshake_storage.len - 1],
+            handshake_keys,
+            handshake_options,
+        ),
+    );
+
+    const zero_rtt_options = protection.ZeroRttPacketOptions{
+        .version = version_2_wire_for_test,
+        .destination_connection_id = &dcid,
+        .source_connection_id = &scid,
+        .packet_number = 0x607,
+        .packet_number_len = 2,
+        .payload = "zero-rtt in-place payload",
+    };
+    const allocated_zero_rtt = try protection.sealZeroRttPacket(
+        allocator,
+        handshake_keys,
+        zero_rtt_options,
+    );
+    defer allocator.free(allocated_zero_rtt);
+    const zero_rtt_storage = try allocator.alloc(u8, allocated_zero_rtt.len);
+    defer allocator.free(zero_rtt_storage);
+    const in_place_zero_rtt = try protection.sealZeroRttPacketInto(
+        zero_rtt_storage,
+        handshake_keys,
+        zero_rtt_options,
+    );
+    try std.testing.expectEqualSlices(
+        u8,
+        allocated_zero_rtt,
+        in_place_zero_rtt,
+    );
+    try std.testing.expectError(
+        error.BufferTooShort,
+        protection.sealZeroRttPacketInto(
+            zero_rtt_storage[0 .. zero_rtt_storage.len - 1],
+            handshake_keys,
+            zero_rtt_options,
+        ),
+    );
+}
+
 test "QUIC 0-RTT long packet seal/open roundtrip" {
     const allocator = std.testing.allocator;
     const keys = protection.deriveAes128Keys([_]u8{0x68} ** protection.secret_len);

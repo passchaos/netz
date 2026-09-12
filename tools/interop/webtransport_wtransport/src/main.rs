@@ -6,6 +6,7 @@ use wtransport::error::{StreamReadError, StreamWriteError};
 use wtransport::{ClientConfig, Endpoint, Identity, ServerConfig, VarInt};
 
 mod bench;
+mod churn;
 #[cfg(feature = "allocation-stats")]
 mod counting_allocator;
 #[cfg(feature = "allocation-stats")]
@@ -44,12 +45,21 @@ fn main() -> Result<()> {
         let role = all_args[1].clone();
         let mut stats = false;
         let mut traffic = false;
+        let mut churn_fault = None;
+        let mut proxy_control_port = None;
         let mut filtered = all_args.drain(..3).collect::<Vec<_>>();
         for arg in all_args {
             if arg == "--stats" && !stats {
                 stats = true;
             } else if arg == "--traffic" && !traffic {
                 traffic = true;
+            } else if let Some(fault) = arg.strip_prefix("--churn=") {
+                ensure!(churn_fault.is_none(), "duplicate churn mode");
+                churn_fault = Some(fault.to_owned());
+            } else if let Some(port) = arg.strip_prefix("--proxy-control-port=") {
+                ensure!(proxy_control_port.is_none(), "duplicate proxy control port");
+                proxy_control_port =
+                    Some(port.parse::<u16>().context("invalid proxy control port")?);
             } else {
                 filtered.push(arg);
             }
@@ -58,6 +68,10 @@ fn main() -> Result<()> {
             bail!("--stats requires the allocation-stats Cargo feature");
         }
         ensure!(
+            proxy_control_port.is_none() || churn_fault.is_some(),
+            "--proxy-control-port requires --churn"
+        );
+        ensure!(
             !(stats && traffic),
             "--stats and --traffic must run separately"
         );
@@ -65,9 +79,31 @@ fn main() -> Result<()> {
             .enable_all()
             .build()
             .context("Tokio runtime")?;
-        let config = match role.as_str() {
-            "bench-client" => runtime.block_on(bench::run_client(&filtered[2..], traffic))?,
-            "bench-server" => runtime.block_on(bench::run_server(&filtered[2..], traffic))?,
+        let config = match (role.as_str(), churn_fault.as_deref()) {
+            ("bench-client", None) => {
+                runtime.block_on(bench::run_client(&filtered[2..], traffic))?
+            }
+            ("bench-server", None) => {
+                runtime.block_on(bench::run_server(&filtered[2..], traffic))?
+            }
+            ("bench-server", Some(fault)) => {
+                ensure!(
+                    !stats && !traffic,
+                    "churn does not accept benchmark telemetry"
+                );
+                runtime.block_on(bench::run_churn_server(&filtered[2..], fault))?
+            }
+            ("bench-client", Some(fault)) => {
+                ensure!(
+                    !stats && !traffic,
+                    "churn does not accept benchmark telemetry"
+                );
+                runtime.block_on(bench::run_churn_client(
+                    &filtered[2..],
+                    fault,
+                    proxy_control_port.context("churn client requires proxy control port")?,
+                ))?
+            }
             _ => unreachable!(),
         };
         drop(runtime);

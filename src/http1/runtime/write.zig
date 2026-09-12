@@ -97,6 +97,10 @@ pub const StreamingHead = struct {
 /// a later response cannot expose a valid prefix on the wire.
 pub const Scratch = struct {
     encoded: std.ArrayList(u8) = .empty,
+    /// Independent contiguous transport staging. This cannot share `encoded`:
+    /// prepared message heads and streaming terminators may still borrow that
+    /// storage while a connection-level flatten policy copies all parts.
+    flattened: std.ArrayList(u8) = .empty,
     batch_encoded: std.ArrayList(u8) = .empty,
     batch_parts: std.ArrayList([]const u8) = .empty,
     batch_part_descriptors: std.ArrayList(BatchPart) = .empty,
@@ -122,6 +126,7 @@ pub const Scratch = struct {
 
     pub fn deinit(self: *Scratch, allocator: std.mem.Allocator) void {
         self.encoded.deinit(allocator);
+        self.flattened.deinit(allocator);
         self.batch_encoded.deinit(allocator);
         self.batch_parts.deinit(allocator);
         self.batch_part_descriptors.deinit(allocator);

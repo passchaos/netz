@@ -651,6 +651,27 @@ test "HTTP/3 QPACK stream cancellation compacts pending sections stably" {
     try std.testing.expectEqual(@as(?usize, 1), encoder.reference_counts.get(2));
 }
 
+test "HTTP/3 QPACK stream cancellation without references is a no-op" {
+    const allocator = std.testing.allocator;
+    var encoder = QpackEncodeState.init(allocator, 256, 512);
+    defer encoder.deinit();
+    var feedback: std.ArrayList(u8) = .empty;
+    defer feedback.deinit(allocator);
+    try http3.writeQpackDecoderStreamPrefix(&feedback, allocator);
+    try http3.Qpack.writeDecoderInstruction(
+        &feedback,
+        allocator,
+        .{ .stream_cancellation = 15 },
+    );
+    var control: http3.ControlState = .{};
+    defer control.deinit(allocator);
+    try encoder.applyDecoderStreamFrame(&control, .{
+        .stream_id = client_qpack_decoder_stream_id,
+        .data = feedback.items,
+    });
+    try std.testing.expectEqual(@as(usize, 0), encoder.pending_sections.items.len);
+}
+
 test "HTTP/3 QPACK pending section index repairs shifted streams" {
     const allocator = std.testing.allocator;
     var encoder = QpackEncodeState.init(allocator, 512, 4096);

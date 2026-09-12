@@ -137,7 +137,7 @@ test "WebTransport endpoint admission HEADERS do not wait for pacing" {
     var request_packet = try h3.established.connection.receivePacket();
     defer request_packet.deinit(allocator);
     try h3.processRequestPacket(&request_packet);
-    var request_event = (try h3.pollRequestEvent()) orelse
+    var request_event = (try h3.pollRequestEventOnce()) orelse
         return error.TestUnexpectedResult;
     defer request_event.deinit(allocator);
     var request_head = switch (request_event) {
@@ -1272,7 +1272,10 @@ test "WebTransport endpoint stream write leaves UDP receive to dispatcher" {
     try std.testing.expectEqual(handle, credit.packet.connection_handle);
     try std.testing.expectEqual(
         @as(usize, 1),
-        try accepted.writeStream(stream_id, "x"),
+        try accepted.writeStreamSlices(
+            stream_id,
+            &.{ &.{}, "x", &.{} },
+        ),
     );
     try std.testing.expectEqual(@as(u64, 1), stream.bytes_sent);
     try accepted.finishStream(stream_id);
@@ -1543,12 +1546,118 @@ test "WebTransport endpoint control and datagram sends do not wait for pacing" {
         accepted.stats().datagrams_sent,
     );
 
+    var datagram_batch_count: usize = 99;
+    try std.testing.expectError(
+        error.PacingLimited,
+        accepted.sendDatagrams(
+            &.{ "batch-one", "batch-two" },
+            &datagram_batch_count,
+        ),
+    );
+    try std.testing.expectEqual(@as(usize, 0), datagram_batch_count);
+    try std.testing.expectEqual(@as(usize, 0), fixed_io.sleep_calls);
+    try std.testing.expectEqual(
+        before_datagram.datagrams_sent + 2,
+        accepted.stats().datagrams_sent,
+    );
+    const datagram_batch_timer = dispatcher.nextTimerDeadline() orelse
+        return error.TestUnexpectedResult;
+    try std.testing.expectEqual(
+        quic.one_rtt.TimerDeadlineKind.pacing,
+        datagram_batch_timer.timer.kind,
+    );
+    fixed_io.now_ns = @intCast(datagram_batch_timer.timer.deadline_ns);
+    _ = (try dispatcher.serviceNextTimerAt(
+        datagram_batch_timer.timer.deadline_ns,
+    )) orelse return error.TestUnexpectedResult;
+    try accepted.sendDatagrams(
+        &.{ "batch-one", "batch-two" },
+        &datagram_batch_count,
+    );
+    try std.testing.expectEqual(@as(usize, 1), datagram_batch_count);
+    try std.testing.expectEqual(@as(usize, 0), fixed_io.sleep_calls);
+    try std.testing.expectEqual(
+        before_datagram.datagrams_sent + 3,
+        accepted.stats().datagrams_sent,
+    );
+    const datagram_suffix_timer = dispatcher.nextTimerDeadline() orelse
+        return error.TestUnexpectedResult;
+    try std.testing.expectEqual(
+        quic.one_rtt.TimerDeadlineKind.pacing,
+        datagram_suffix_timer.timer.kind,
+    );
+    fixed_io.now_ns = @intCast(datagram_suffix_timer.timer.deadline_ns);
+    _ = (try dispatcher.serviceNextTimerAt(
+        datagram_suffix_timer.timer.deadline_ns,
+    )) orelse return error.TestUnexpectedResult;
+    var datagram_suffix_count: usize = 99;
+    try accepted.sendDatagrams(
+        (&[_][]const u8{ "batch-one", "batch-two" })[datagram_batch_count..],
+        &datagram_suffix_count,
+    );
+    try std.testing.expectEqual(@as(usize, 1), datagram_suffix_count);
+    try std.testing.expectEqual(
+        before_datagram.datagrams_sent + 4,
+        accepted.stats().datagrams_sent,
+    );
+
     const body_offset = h3.outbound_bodies.find(0).?.send.next_offset;
+    try std.testing.expectError(
+        error.PacingLimited,
+        accepted.sendSessionData("not-sent", false),
+    );
+    try std.testing.expectEqual(@as(usize, 0), fixed_io.sleep_calls);
+    try std.testing.expectEqual(
+        body_offset,
+        h3.outbound_bodies.find(0).?.send.next_offset,
+    );
+    const body_timer = dispatcher.nextTimerDeadline() orelse
+        return error.TestUnexpectedResult;
+    try std.testing.expectEqual(handle, body_timer.connection_id);
+    try std.testing.expectEqual(
+        quic.one_rtt.TimerDeadlineKind.pacing,
+        body_timer.timer.kind,
+    );
+    fixed_io.now_ns = @intCast(body_timer.timer.deadline_ns);
+    _ = (try dispatcher.serviceNextTimerAt(
+        body_timer.timer.deadline_ns,
+    )) orelse return error.TestUnexpectedResult;
+    var body_sent = false;
+    for (0..4) |_| {
+        accepted.sendSessionDataSlices(
+            &.{ "unknown-", &.{}, "capsule" },
+            false,
+        ) catch |err| switch (err) {
+            error.PacingLimited => {
+                const retry_timer = dispatcher.nextTimerDeadline() orelse
+                    return error.TestUnexpectedResult;
+                try std.testing.expectEqual(
+                    quic.one_rtt.TimerDeadlineKind.pacing,
+                    retry_timer.timer.kind,
+                );
+                fixed_io.now_ns = @intCast(retry_timer.timer.deadline_ns);
+                _ = (try dispatcher.serviceNextTimerAt(
+                    retry_timer.timer.deadline_ns,
+                )) orelse return error.TestUnexpectedResult;
+                continue;
+            },
+            else => return err,
+        };
+        body_sent = true;
+        break;
+    }
+    try std.testing.expect(body_sent);
+    try std.testing.expectEqual(@as(usize, 0), fixed_io.sleep_calls);
+    try std.testing.expect(
+        h3.outbound_bodies.find(0).?.send.next_offset > body_offset,
+    );
+
+    const before_drain_offset = h3.outbound_bodies.find(0).?.send.next_offset;
     try std.testing.expectError(error.PacingLimited, accepted.drain());
     try std.testing.expectEqual(@as(usize, 0), fixed_io.sleep_calls);
     try std.testing.expect(!accepted.control.local_drain_sent);
     try std.testing.expectEqual(
-        body_offset,
+        before_drain_offset,
         h3.outbound_bodies.find(0).?.send.next_offset,
     );
     const drain_timer = dispatcher.nextTimerDeadline() orelse
@@ -1565,7 +1674,7 @@ test "WebTransport endpoint control and datagram sends do not wait for pacing" {
     try std.testing.expectEqual(@as(usize, 0), fixed_io.sleep_calls);
     try std.testing.expect(accepted.control.local_drain_sent);
     try std.testing.expect(
-        h3.outbound_bodies.find(0).?.send.next_offset > body_offset,
+        h3.outbound_bodies.find(0).?.send.next_offset > before_drain_offset,
     );
 
     // Keep the earlier bidi cancellation fixtures out of close cleanup so
@@ -3770,6 +3879,48 @@ test "WebTransport dispatcher client stream polls do not wait for credit" {
         error.InvalidDispatcherState,
         session.receiveSessionEventWithTimeout(.fromMilliseconds(1)),
     );
+    const bounded_stream = (try session.streams.openLocal(.bidirectional))
+        .stream_id;
+    const bounded_writes = [_]runtime.StreamWrite{.{
+        .stream_id = bounded_stream,
+        .data = "bounded",
+    }};
+    var bounded_counts = [_]usize{99};
+    const sends_before_bounded_batch = fixed_io.send_calls;
+    try std.testing.expectError(
+        error.InvalidDispatcherState,
+        session.resetStreamWithDeadline(
+            bounded_stream,
+            42,
+            .fromNow(endpoint.io, .{
+                .raw = .fromSeconds(1),
+                .clock = .awake,
+            }),
+        ),
+    );
+    try std.testing.expectEqual(sends_before_bounded_batch, fixed_io.send_calls);
+    try std.testing.expectError(
+        error.InvalidDispatcherState,
+        session.writeStreamsWithDeadline(
+            &bounded_writes,
+            &bounded_counts,
+            .fromNow(endpoint.io, .{
+                .raw = .fromSeconds(1),
+                .clock = .awake,
+            }),
+        ),
+    );
+    try std.testing.expectEqual(@as(usize, 0), bounded_counts[0]);
+    try std.testing.expectEqual(sends_before_bounded_batch, fixed_io.send_calls);
+    const bounded_state = session.streams.get(bounded_stream) orelse
+        return error.TestUnexpectedResult;
+    try std.testing.expect(!bounded_state.prefix_sent);
+    try std.testing.expectEqual(@as(u64, 0), bounded_state.send_offset);
+    try std.testing.expectEqual(@as(u64, 0), bounded_state.bytes_sent);
+    try std.testing.expectEqual(
+        @as(?webtransport.StreamError, null),
+        bounded_state.send_reset,
+    );
     try std.testing.expectEqual(@as(usize, 0), fixed_io.sleep_calls);
 }
 
@@ -4169,7 +4320,8 @@ test "WebTransport handshake admission polls routed CONNECT state" {
     h3 = undefined;
     var admission_owned = true;
     defer if (admission_owned) admission.deinit();
-    admission.h3.control.settings.markSent(settings);
+    try admission.h3.ensureSettingsSent();
+    try admission.h3.bindDispatcher();
     admission.h3.control.settings.markReceived(settings);
     try std.testing.expect((try admission.pollSessionRequest()) == null);
 
@@ -4207,9 +4359,20 @@ test "WebTransport handshake admission polls routed CONNECT state" {
     var pending = (try admission.pollSessionRequest()) orelse
         return error.TestUnexpectedResult;
     admission_owned = false;
-    defer pending.deinit();
+    var pending_owned = true;
+    defer if (pending_owned) pending.deinit();
     try std.testing.expectEqualStrings("localhost", pending.authority().?);
     try std.testing.expectEqualStrings("/routed", pending.path());
+    var accepted = try pending.accept();
+    pending_owned = false;
+    defer accepted.deinit();
+    try std.testing.expectError(
+        error.InvalidDispatcherState,
+        accepted.closeWithDeadline(1, "routed", .fromNow(
+            io,
+            .{ .raw = .fromSeconds(1), .clock = .awake },
+        )),
+    );
 }
 
 test "WebTransport routed Initial timeout preserves event ownership" {

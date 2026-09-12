@@ -13,6 +13,7 @@ pub const min_initial_udp_datagram_size =
 pub const SendInitialOptions = flight.SendInitialOptions;
 pub const SendInitialFlightOptions = flight.SendOptions;
 pub const SentInitialFlight = flight.Sent;
+pub const InitialFlightSendProgress = flight.SendProgress;
 pub const ReceiveInitialFlightOptions = flight.ReceiveOptions;
 pub const ReceivedInitialFlight = flight.Received;
 pub const insertCryptoPayload = flight.insertCryptoPayload;
@@ -76,6 +77,7 @@ pub fn sendInitialCrypto(
 }
 
 pub const sendInitialCryptoFlight = flight.send;
+pub const sendInitialCryptoFlightProgress = flight.sendProgress;
 
 pub fn sendCoalescedInitialHandshakeCrypto(
     endpoint: *quic.runtime.Endpoint,
@@ -132,6 +134,11 @@ pub fn sendCoalescedInitialHandshakeCrypto(
 /// send the Handshake flight separately. Separating encryption levels keeps
 /// the common one-packet ClientHello response simple while allowing a large
 /// ServerHello (for example an ML-KEM ciphertext) to span Initial packets.
+///
+/// This compatibility wrapper is one-shot: once packet protection begins, an
+/// error can still mean that packet numbers were consumed. Stateful callers
+/// should use the progress/prepared APIs below and never retry the same packet
+/// numbers after an error.
 pub fn sendInitialThenHandshakeCrypto(
     endpoint: *quic.runtime.Endpoint,
     to: net.IpAddress,
@@ -140,18 +147,25 @@ pub fn sendInitialThenHandshakeCrypto(
     handshake_keys: quic.protection.PacketProtectionKeys,
     handshake_options: SendInitialOptions,
 ) Error!SentInitialFlight {
+    var prepared_handshake = try prepareHandshakeCrypto(
+        endpoint,
+        handshake_keys,
+        handshake_options,
+    );
+    defer prepared_handshake.deinit(endpoint.allocator);
     const sent = try flight.send(
         endpoint,
         to,
         initial_keys,
         initial_options,
     );
-    try sendHandshakeCrypto(
+    const handshake_progress = sendPreparedHandshakeCryptoProgress(
         endpoint,
         to,
-        handshake_keys,
-        handshake_options,
+        prepared_handshake,
     );
+    if (handshake_progress.send_error) |err| return err;
+    std.debug.assert(handshake_progress.sent_count == 1);
     return sent;
 }
 
@@ -257,6 +271,8 @@ pub fn sendCoalescedInitialZeroRtt(
 /// A large post-quantum ClientHello cannot be coalesced with 0-RTT inside a
 /// 1200-byte path-MTU budget. RFC 9000 permits separate UDP datagrams; preserving
 /// packet-number spaces and CRYPTO offsets is more important than coalescing.
+/// This compatibility wrapper is likewise one-shot; callers that retry must
+/// advance both Initial and application-data packet-number spaces.
 pub fn sendInitialFlightThenZeroRtt(
     endpoint: *quic.runtime.Endpoint,
     to: net.IpAddress,
@@ -265,18 +281,25 @@ pub fn sendInitialFlightThenZeroRtt(
     zero_rtt_keys: quic.protection.PacketProtectionKeys,
     zero_rtt_options: quic.zero_rtt.SendOptions,
 ) Error!SentInitialFlight {
+    var prepared_zero_rtt = try quic.zero_rtt.prepareFrames(
+        endpoint,
+        zero_rtt_keys,
+        zero_rtt_options,
+    );
+    defer prepared_zero_rtt.deinit(endpoint.allocator);
     const sent = try flight.send(
         endpoint,
         to,
         initial_keys,
         initial_options,
     );
-    try quic.zero_rtt.sendFrames(
+    const zero_rtt_progress = quic.zero_rtt.sendPreparedFramesProgress(
         endpoint,
         to,
-        zero_rtt_keys,
-        zero_rtt_options,
+        prepared_zero_rtt,
     );
+    if (zero_rtt_progress.send_error) |err| return err;
+    std.debug.assert(zero_rtt_progress.sent_count == 1);
     return sent;
 }
 
@@ -301,26 +324,123 @@ pub fn sendHandshakeCrypto(
     keys: quic.protection.PacketProtectionKeys,
     options: SendInitialOptions,
 ) Error!void {
-    var payload: std.ArrayList(u8) = .empty;
-    defer payload.deinit(endpoint.allocator);
+    const progress = try sendHandshakeCryptoProgress(
+        endpoint,
+        to,
+        keys,
+        options,
+    );
+    if (progress.send_error) |err| return err;
+    std.debug.assert(progress.sent_count == 1);
+}
+
+pub const HandshakeSendProgress = struct {
+    sent_count: usize,
+    protected_count: usize,
+    packet_len: usize,
+    send_error: ?quic.runtime.Error = null,
+};
+
+pub const PreparedHandshakeCrypto = struct {
+    storage: []u8,
+    packet: []u8,
+
+    pub fn deinit(self: *PreparedHandshakeCrypto, allocator: std.mem.Allocator) void {
+        allocator.free(self.storage);
+        self.* = undefined;
+    }
+};
+
+pub fn prepareHandshakeCrypto(
+    endpoint: *quic.runtime.Endpoint,
+    keys: quic.protection.PacketProtectionKeys,
+    options: SendInitialOptions,
+) Error!PreparedHandshakeCrypto {
+    const payload_len = try quic.crypto_stream.cryptoFramesWireLen(
+        options.crypto_offset,
+        options.crypto_data.len,
+        options.max_crypto_frame_data_len,
+    );
+    const packet_len = try quic.protection.protectedLongPacketCapacity(
+        options.destination_connection_id.len,
+        options.source_connection_id.len,
+        0,
+        false,
+        options.packet_number_len,
+        payload_len,
+    );
+    if (packet_len > endpoint.limits.max_datagram_size) {
+        return error.DatagramTooLarge;
+    }
+    const storage_len = std.math.add(
+        usize,
+        payload_len,
+        packet_len,
+    ) catch return error.InvalidFrameLength;
+    const storage = try endpoint.allocator.alloc(u8, storage_len);
+    errdefer endpoint.allocator.free(storage);
+    var payload = std.ArrayList(u8).initBuffer(storage[0..payload_len]);
+    var no_extra_storage: [0]u8 = .{};
+    var no_extra_allocations = std.heap.FixedBufferAllocator.init(
+        &no_extra_storage,
+    );
     try quic.crypto_stream.writeCryptoFrames(
         &payload,
-        endpoint.allocator,
+        no_extra_allocations.allocator(),
         options.crypto_offset,
         options.crypto_data,
         options.max_crypto_frame_data_len,
     );
-    const packet = try quic.protection.sealHandshakePacket(endpoint.allocator, keys, .{
-        .version = options.version,
-        .destination_connection_id = options.destination_connection_id,
-        .source_connection_id = options.source_connection_id,
-        .packet_number = options.packet_number,
-        .packet_number_len = options.packet_number_len,
-        .fixed_bit = options.fixed_bit,
-        .payload = payload.items,
-    });
-    defer endpoint.allocator.free(packet);
-    try endpoint.sendBytes(to, packet);
+    const packet = try quic.protection.sealHandshakePacketInto(
+        storage[payload_len..],
+        keys,
+        .{
+            .version = options.version,
+            .destination_connection_id = options.destination_connection_id,
+            .source_connection_id = options.source_connection_id,
+            .packet_number = options.packet_number,
+            .packet_number_len = options.packet_number_len,
+            .fixed_bit = options.fixed_bit,
+            .payload = payload.items,
+        },
+    );
+    std.debug.assert(packet.len == packet_len);
+    return .{ .storage = storage, .packet = storage[payload_len..] };
+}
+
+pub fn sendPreparedHandshakeCryptoProgress(
+    endpoint: *quic.runtime.Endpoint,
+    to: net.IpAddress,
+    prepared: PreparedHandshakeCrypto,
+) HandshakeSendProgress {
+    const packet = prepared.packet;
+    const send_result = endpoint.sendManyBytesProgress(to, &.{packet}) catch |err| {
+        return .{
+            .sent_count = 0,
+            .protected_count = 1,
+            .packet_len = packet.len,
+            .send_error = err,
+        };
+    };
+    return .{
+        .sent_count = send_result.sent_count,
+        .protected_count = 1,
+        .packet_len = packet.len,
+        .send_error = send_result.send_error,
+    };
+}
+
+/// Protect and submit one Handshake CRYPTO packet while keeping socket
+/// progress separate from pre-send validation and protection failures.
+pub fn sendHandshakeCryptoProgress(
+    endpoint: *quic.runtime.Endpoint,
+    to: net.IpAddress,
+    keys: quic.protection.PacketProtectionKeys,
+    options: SendInitialOptions,
+) Error!HandshakeSendProgress {
+    var prepared = try prepareHandshakeCrypto(endpoint, keys, options);
+    defer prepared.deinit(endpoint.allocator);
+    return sendPreparedHandshakeCryptoProgress(endpoint, to, prepared);
 }
 
 pub fn receiveHandshakeCrypto(

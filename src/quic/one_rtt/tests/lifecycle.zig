@@ -608,7 +608,7 @@ test "QUIC 1-RTT local close installs state when socket send fails" {
         transport.close_info.?.reason_phrase,
     );
     try std.testing.expectEqual(@as(?one_rtt.PeerCloseInfo, null), transport.peerCloseInfo());
-    try std.testing.expectEqual(@as(u64, 0), transport.next_packet_number);
+    try std.testing.expectEqual(@as(u64, 1), transport.next_packet_number);
     try std.testing.expectEqual(@as(usize, 0), transport.sent.packets.items.len);
     try std.testing.expectError(
         error.ConnectionClosed,
@@ -638,7 +638,7 @@ test "QUIC 1-RTT local close installs state when socket send fails" {
     // The owned diagnostic remains available for the dedicated retransmit
     // path after the original caller's send attempt has failed.
     try transport.resendClose();
-    try std.testing.expectEqual(@as(u64, 1), transport.next_packet_number);
+    try std.testing.expectEqual(@as(u64, 2), transport.next_packet_number);
     try std.testing.expectEqual(@as(usize, 1), transport.sent.packets.items.len);
 
     var application_endpoint = try quic.runtime.Endpoint.bind(
@@ -699,7 +699,7 @@ test "QUIC 1-RTT local close installs state when socket send fails" {
         application.close_info.?.reason_phrase,
     );
     try std.testing.expectEqual(@as(?one_rtt.PeerCloseInfo, null), application.peerCloseInfo());
-    try std.testing.expectEqual(@as(u64, 0), application.next_packet_number);
+    try std.testing.expectEqual(@as(u64, 1), application.next_packet_number);
     try std.testing.expectEqual(@as(usize, 0), application.sent.packets.items.len);
     try std.testing.expect(std.mem.indexOf(
         u8,

@@ -12,8 +12,9 @@ const default_response_body_bytes: usize = "Hello, World!".len;
 const large_response_body_bytes: usize = 64 * 1024;
 pub fn main(init: std.process.Init) !void {
     const allocator = std.heap.smp_allocator;
-    const response_body_bytes = parseResponseBodyBytes(init) catch
+    const config = parseConfig(init) catch
         return error.InvalidArgument;
+    const response_body_bytes = config.response_body_bytes;
     const response_body = try allocator.alloc(u8, response_body_bytes);
     defer allocator.free(response_body);
     @memset(response_body, 'x');
@@ -40,7 +41,11 @@ pub fn main(init: std.process.Init) !void {
         allocator,
         io,
         .{ .ip4 = .loopback(0) },
-        .{ .max_head_bytes = 4096, .max_body_bytes = 0 },
+        .{
+            .max_head_bytes = 4096,
+            .max_body_bytes = 0,
+            .write_strategy = config.write_strategy,
+        },
     );
     defer server.deinit();
 
@@ -144,6 +149,7 @@ pub fn main(init: std.process.Init) !void {
         \\  warmup iterations: {d}
         \\  iterations: {d}
         \\  response body bytes: {d}
+        \\  write strategy: {s}
         \\  requests: {d}
         \\  ns/request: {d}
         \\  requests/s: {d}
@@ -154,6 +160,7 @@ pub fn main(init: std.process.Init) !void {
         warmup_iterations,
         iterations,
         response_body_bytes,
+        @tagName(config.write_strategy),
         request_count,
         elapsed / request_count,
         requests_per_second,
@@ -161,22 +168,32 @@ pub fn main(init: std.process.Init) !void {
     });
 }
 
-fn parseResponseBodyBytes(init: std.process.Init) !usize {
+const Config = struct {
+    response_body_bytes: usize = default_response_body_bytes,
+    write_strategy: netz.http1.runtime.WriteStrategy = .auto,
+};
+
+fn parseConfig(init: std.process.Init) !Config {
     const args = try init.minimal.args.toSlice(init.arena.allocator());
-    var value = default_response_body_bytes;
+    var config: Config = .{};
     for (args[1..]) |arg| {
         if (std.mem.eql(u8, arg, "--large-body")) {
-            value = large_response_body_bytes;
+            config.response_body_bytes = large_response_body_bytes;
         } else if (std.mem.startsWith(u8, arg, "--body-bytes=")) {
-            value = try std.fmt.parseInt(
+            config.response_body_bytes = try std.fmt.parseInt(
                 usize,
                 arg["--body-bytes=".len..],
                 10,
             );
+        } else if (std.mem.startsWith(u8, arg, "--write-strategy=")) {
+            config.write_strategy = std.meta.stringToEnum(
+                netz.http1.runtime.WriteStrategy,
+                arg["--write-strategy=".len..],
+            ) orelse return error.InvalidArgument;
         } else return error.InvalidArgument;
     }
-    if (value == 0) return error.InvalidArgument;
-    return value;
+    if (config.response_body_bytes == 0) return error.InvalidArgument;
+    return config;
 }
 
 fn exchangeBatch(

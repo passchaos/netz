@@ -197,11 +197,15 @@ pub fn appendDataStreamFrames(
 
 /// Append one HTTP/3 DATA frame whose payload is borrowed from several caller
 /// slices. The DATA prefix gets its own STREAM frame; non-empty payload parts
-/// are split only at `max_stream_frame_data`, without joining or copying them.
+/// are split only at `max_stream_frame_data`, without joining them. When slice
+/// boundaries alone would increase the packet count, the minimum leading body
+/// prefix is copied into the bounded DATA-prefix scratch to recover the same
+/// descriptor budget as a contiguous body.
 ///
-/// This helper is intended for one-packet transactional sends. It returns
-/// `false` when the descriptor count exceeds the caller's packet frame budget,
-/// leaving `send` unchanged so the exact same parts can be retried.
+/// It returns `false` when the descriptor count cannot fit the caller's frame
+/// budget even after the bounded prefix copy, leaving `send` unchanged so the
+/// exact same parts can be retried. Nonblocking callers separately require the
+/// resulting descriptors to fit one actual QUIC packet.
 pub fn appendDataStreamPartFrames(
     send: *quic.stream_state.SendState,
     frames: *std.ArrayList(quic.Frame),
@@ -246,14 +250,6 @@ pub fn appendDataStreamPartFrames(
     prefix_len += length_bytes.len;
     if (prefix_len > max_stream_frame_data) return false;
 
-    const frame_count = std.math.add(
-        usize,
-        1,
-        payload_frame_count,
-    ) catch return error.InvalidFrameLength;
-    if (frame_count > @max(@as(usize, 1), max_frames_per_packet)) {
-        return false;
-    }
     const encoded_len = std.math.add(usize, prefix_len, payload_len) catch
         return error.InvalidFrameLength;
     const encoded_len_u64 = std.math.cast(u64, encoded_len) orelse
@@ -266,18 +262,94 @@ pub fn appendDataStreamPartFrames(
     if (final_next_offset > quic.varint.max_value) {
         return error.InvalidStreamRange;
     }
+    const packet_frame_budget = @max(
+        @as(usize, 1),
+        max_frames_per_packet,
+    );
+    const coalesced_frame_count = std.math.divCeil(
+        usize,
+        encoded_len,
+        max_stream_frame_data,
+    ) catch return error.InvalidFrameLength;
+    const coalesced_packet_count = std.math.divCeil(
+        usize,
+        coalesced_frame_count,
+        packet_frame_budget,
+    ) catch return error.InvalidFrameLength;
+    const descriptor_capacity =
+        coalesced_packet_count *| packet_frame_budget;
 
+    var copied_body_len: usize = 0;
+    var remaining_payload_frames = payload_frame_count;
+    const max_copied_body = @min(
+        payload_len,
+        @min(
+            max_stream_frame_data - prefix_len,
+            prefix.len - prefix_len,
+        ),
+    );
+    for (parts) |part| {
+        var remaining_part = part.len;
+        while (remaining_part != 0 and
+            1 + remaining_payload_frames > descriptor_capacity)
+        {
+            const part_frames = std.math.divCeil(
+                usize,
+                remaining_part,
+                max_stream_frame_data,
+            ) catch return error.InvalidFrameLength;
+            const bytes_to_remove_frame = remaining_part -
+                (part_frames - 1) * max_stream_frame_data;
+            if (bytes_to_remove_frame > max_copied_body - copied_body_len) {
+                return false;
+            }
+            copied_body_len += bytes_to_remove_frame;
+            remaining_part -= bytes_to_remove_frame;
+            remaining_payload_frames -= 1;
+        }
+        if (1 + remaining_payload_frames <= descriptor_capacity) break;
+    }
+    if (1 + remaining_payload_frames > descriptor_capacity) return false;
+    if (copied_body_len == payload_len) return false;
+
+    var copy_remaining = copied_body_len;
+    var copy_part_index: usize = 0;
+    var copy_part_offset: usize = 0;
+    var copied: usize = 0;
+    while (copy_remaining != 0) {
+        while (copy_part_index < parts.len and
+            copy_part_offset == parts[copy_part_index].len)
+        {
+            copy_part_index += 1;
+            copy_part_offset = 0;
+        }
+        std.debug.assert(copy_part_index < parts.len);
+        const count = @min(
+            copy_remaining,
+            parts[copy_part_index].len - copy_part_offset,
+        );
+        @memcpy(
+            prefix[prefix_len + copied ..][0..count],
+            parts[copy_part_index][copy_part_offset..][0..count],
+        );
+        copied += count;
+        copy_remaining -= count;
+        copy_part_offset += count;
+    }
+
+    const frame_count = 1 + remaining_payload_frames;
     try frames.ensureUnusedCapacity(allocator, frame_count);
     var next_offset = send.next_offset;
     frames.appendAssumeCapacity(.{ .stream = .{
         .stream_id = send.stream_id,
         .offset = next_offset,
-        .data = prefix[0..prefix_len],
+        .data = prefix[0 .. prefix_len + copied_body_len],
+        .fin = fin and remaining_payload_frames == 0,
     } });
-    next_offset += prefix_len;
-    var remaining_frames = payload_frame_count;
-    for (parts) |part| {
-        var part_offset: usize = 0;
+    next_offset += prefix_len + copied_body_len;
+    var remaining_frames = remaining_payload_frames;
+    for (parts[copy_part_index..], 0..) |part, relative_index| {
+        var part_offset = if (relative_index == 0) copy_part_offset else 0;
         while (part_offset < part.len) {
             const chunk_len = @min(
                 max_stream_frame_data,
@@ -421,22 +493,54 @@ test "HTTP/3 body parts borrow slices in one DATA frame" {
     );
 }
 
-test "HTTP/3 body parts reject excess descriptors transactionally" {
+test "HTTP/3 body parts compact only the minimum leading slice prefix" {
+    const allocator = std.testing.allocator;
+    var frames: std.ArrayList(quic.Frame) = .empty;
+    defer frames.deinit(allocator);
+    var prefix: Prefix = undefined;
+    var send = quic.stream_state.SendState.init(4);
+
+    try std.testing.expect(try appendDataStreamPartFrames(
+        &send,
+        &frames,
+        allocator,
+        &prefix,
+        &.{ "a", "b", "c", "d", "e", "f", "g", "h" },
+        true,
+        64,
+        8,
+    ));
+    try std.testing.expectEqual(@as(usize, 8), frames.items.len);
+    try std.testing.expectEqualSlices(
+        u8,
+        &.{ 0, 8, 'a' },
+        frames.items[0].stream.data,
+    );
+    try std.testing.expectEqualStrings("b", frames.items[1].stream.data);
+    try std.testing.expectEqualStrings("h", frames.items[7].stream.data);
+    try std.testing.expect(frames.items[7].stream.fin);
+    try std.testing.expectEqual(@as(u64, 10), send.next_offset);
+}
+
+test "HTTP/3 body parts reject a required copy larger than prefix scratch" {
     const allocator = std.testing.allocator;
     var frames: std.ArrayList(quic.Frame) = .empty;
     defer frames.deinit(allocator);
     var prefix: Prefix = undefined;
     var send = quic.stream_state.SendState.init(0);
 
+    const payload = [_]u8{0xaa} ** (prefix_capacity + 1);
+    var parts: [prefix_capacity + 1][]const u8 = undefined;
+    for (&parts, 0..) |*part, index| part.* = payload[index..][0..1];
     try std.testing.expect(!try appendDataStreamPartFrames(
         &send,
         &frames,
         allocator,
         &prefix,
-        &.{ "one", "two" },
+        &parts,
         true,
-        8,
-        2,
+        prefix_capacity + 16,
+        1,
     ));
     try std.testing.expectEqual(@as(usize, 0), frames.items.len);
     try std.testing.expectEqual(@as(u64, 0), send.next_offset);

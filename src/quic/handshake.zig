@@ -189,6 +189,10 @@ pub const ServerOptions = struct {
 pub const OneRttConfig = struct {
     max_ack_ranges: usize = 64,
     max_frames_per_packet: usize = 16,
+    /// Maximum unique peer PATH_CHALLENGEs retained until their matching
+    /// PATH_RESPONSE packets can be submitted. Excess challenges are ignored.
+    max_pending_path_responses: usize =
+        quic.path_validation.default_max_pending_responses,
     /// Legacy direct 1-RTT flow-control knobs are retained for source
     /// compatibility, but integrated handshakes now derive the actual send and
     /// receive limits from negotiated transport parameters.  Set
@@ -214,6 +218,11 @@ pub const OneRttConfig = struct {
     /// Randomize established-connection PTOs by up to this percentage. Valid
     /// values are 0...50; zero is deterministic and consumes no entropy.
     pto_jitter_percentage: u8 = 0,
+    /// Allow RFC 9000 latency spin-bit generation on the established
+    /// connection. Disabled by default for privacy and wire compatibility.
+    /// When allowed, the handshake independently suppresses the signal for
+    /// one in sixteen connections using its fresh TLS random.
+    enable_spin_bit: bool = false,
     /// Automatically test ordinary application traffic with ECT(0).
     ///
     /// This setting is copied into the established 1-RTT connection so a
@@ -226,6 +235,12 @@ pub const OneRttConfig = struct {
     /// default to retain reset-first compatibility.
     enable_reset_partial_delivery: bool = false,
     keep_alive_period_ms: u64 = 0,
+    /// Local receive ACK cadence for handshake-established 1-RTT traffic.
+    /// One/zero/default-packet-threshold preserves historical behavior.
+    local_ack_eliciting_threshold: u64 = 1,
+    local_max_ack_delay_us: u64 = 0,
+    local_ack_reordering_threshold: u64 =
+        quic.packet_space.default_packet_threshold,
 
     fn apply(
         self: OneRttConfig,
@@ -250,6 +265,7 @@ pub const OneRttConfig = struct {
             .local_endpoint = local_endpoint,
             .max_ack_ranges = self.max_ack_ranges,
             .max_frames_per_packet = self.max_frames_per_packet,
+            .max_pending_path_responses = self.max_pending_path_responses,
             .initial_send_max_data = @min(self.initial_send_max_data, peer_transport_parameters.initial_max_data),
             .initial_receive_max_data = @min(self.initial_receive_max_data, local_transport_parameters.initial_max_data),
             .receive_window = self.receive_window,
@@ -277,6 +293,7 @@ pub const OneRttConfig = struct {
             .enable_pacing = self.enable_pacing,
             .pacing_max_burst_packets = self.pacing_max_burst_packets,
             .pto_jitter_percentage = self.pto_jitter_percentage,
+            .enable_spin_bit = self.enable_spin_bit,
             .automatic_ecn_policy = self.automatic_ecn_policy,
             .enable_reset_partial_delivery = self.enable_reset_partial_delivery,
             .active_connection_id_limit = std.math.cast(usize, local_transport_parameters.active_connection_id_limit) orelse std.math.maxInt(usize),
@@ -284,6 +301,16 @@ pub const OneRttConfig = struct {
             .local_max_idle_timeout_ms = local_transport_parameters.max_idle_timeout,
             .peer_max_idle_timeout_ms = peer_transport_parameters.max_idle_timeout,
             .keep_alive_period_ms = self.keep_alive_period_ms,
+            .local_ack_eliciting_threshold = self.local_ack_eliciting_threshold,
+            .local_max_ack_delay_us = @min(
+                self.local_max_ack_delay_us,
+                std.math.mul(
+                    u64,
+                    local_transport_parameters.max_ack_delay,
+                    1_000,
+                ) catch std.math.maxInt(u64),
+            ),
+            .local_ack_reordering_threshold = self.local_ack_reordering_threshold,
             .local_ack_delay_exponent = local_transport_parameters.ack_delay_exponent,
             .peer_ack_delay_exponent = peer_transport_parameters.ack_delay_exponent,
             .peer_max_ack_delay_ms = peer_transport_parameters.max_ack_delay,
@@ -353,6 +380,10 @@ pub const EstablishedConnection = struct {
     retry_processed: bool = false,
     resumed: bool = false,
     early_data_status: quic.zero_rtt.handshake.Status = .not_offered,
+    /// Application packet numbers consumed by 0-RTT protection and the subset
+    /// actually handed to the socket. They can differ after send failure.
+    early_data_protected_packet_count: u64 = 0,
+    early_data_sent_packet_count: usize = 0,
     /// Absent when 1-RTT state was installed without the TLS transcript secret.
     /// Application data remains fully stateful, but post-handshake tickets are
     /// unavailable unless the external key negotiator supplies this secret.
@@ -1100,7 +1131,10 @@ const EarlyDataFlight = struct {
     initial_options: quic.initial_exchange.SendInitialFlightOptions,
     zero_rtt_keys: quic.protection.PacketProtectionKeys,
     zero_rtt_options: quic.zero_rtt.SendOptions,
-    transmitted_packet_count: u64 = 0,
+    protected_packet_count: u64 = 0,
+    sent_packet_numbers: [256]u64 = undefined,
+    sent_packet_count: usize = 0,
+    sent_packet_len: usize = 0,
 
     fn send(context: *anyopaque, retransmission: u8) anyerror!void {
         const self: *EarlyDataFlight = @ptrCast(@alignCast(context));
@@ -1118,21 +1152,48 @@ const EarlyDataFlight = struct {
         zero_rtt_options.packet_number = std.math.add(
             u64,
             self.zero_rtt_options.packet_number,
-            retransmission,
+            self.protected_packet_count,
         ) catch return error.InvalidPacketNumber;
-        _ = try quic.initial_exchange.sendInitialFlightThenZeroRtt(
+        // Complete 0-RTT validation, allocation and protection before the
+        // Initial flight becomes visible. Once this succeeds its application
+        // packet number is consumed even if either socket send reports zero.
+        var prepared_zero_rtt = try quic.zero_rtt.prepareFrames(
+            self.endpoint,
+            self.zero_rtt_keys,
+            zero_rtt_options,
+        );
+        defer prepared_zero_rtt.deinit(self.endpoint.allocator);
+        self.protected_packet_count = std.math.add(
+            u64,
+            self.protected_packet_count,
+            1,
+        ) catch return error.InvalidPacketNumber;
+        const initial_progress = try quic.initial_exchange
+            .sendInitialCryptoFlightProgress(
             self.endpoint,
             self.peer,
             self.initial_keys,
             initial_options,
-            self.zero_rtt_keys,
-            zero_rtt_options,
         );
-        self.transmitted_packet_count = std.math.add(
-            u64,
-            self.transmitted_packet_count,
-            1,
-        ) catch return error.InvalidPacketNumber;
+        if (initial_progress.sent_count < initial_progress.protected_count) {
+            return;
+        }
+        _ = initial_progress.send_error;
+        const zero_rtt_progress = quic.zero_rtt.sendPreparedFramesProgress(
+            self.endpoint,
+            self.peer,
+            prepared_zero_rtt,
+        );
+        if (zero_rtt_progress.sent_count != 0) {
+            std.debug.assert(
+                self.sent_packet_count < self.sent_packet_numbers.len,
+            );
+            self.sent_packet_numbers[self.sent_packet_count] =
+                zero_rtt_options.packet_number;
+            self.sent_packet_count += 1;
+            self.sent_packet_len = zero_rtt_progress.packet_len;
+        }
+        _ = zero_rtt_progress.send_error;
     }
 };
 
@@ -1201,6 +1262,7 @@ pub fn connectFrom(
             peer,
             options,
             false,
+            false,
         );
         defer session.deinit();
         var resumed_options = options;
@@ -1213,9 +1275,10 @@ pub fn connectFrom(
             peer,
             resumed_options,
             false,
+            false,
         );
     }
-    return connectAttempt(endpoint, source, peer, options, false);
+    return connectAttempt(endpoint, source, peer, options, false, false);
 }
 
 pub fn connectFromWithDeadline(
@@ -1278,6 +1341,7 @@ fn connectAttempt(
     peer: net.IpAddress,
     options: ClientOptions,
     version_negotiation_processed: bool,
+    early_data_offered_before_version_negotiation: bool,
 ) Error!EstablishedConnection {
     try validateConfiguredVersions(options.version, options.available_versions);
     if (options.retry_source_connection_id.len != 0 and options.address_validation_token.len == 0) {
@@ -1410,7 +1474,10 @@ fn connectAttempt(
     var active_initial_secrets = initial_secrets;
     var active_initial_packet_number = options.client_initial_packet_number;
     var send_early_data = options.early_data != null;
-    var sent_early_data_packet_count: u64 = 0;
+    var protected_early_data_packet_count: u64 = 0;
+    var sent_early_data_packet_numbers: [256]u64 = undefined;
+    var sent_early_data_packet_count: usize = 0;
+    var sent_early_data_packet_len: usize = 0;
     var server_datagram: quic.runtime.OwnedBytes = undefined;
 
     while (true) {
@@ -1419,6 +1486,7 @@ fn connectAttempt(
             .version = options.version,
             .original_destination_connection_id = options.original_destination_connection_id,
             .initial_source_connection_id = options.local_connection_id,
+            .initial_keys = active_initial_secrets.server,
             .retry_already_processed = retry_processed,
             .allow_zero_fixed_bit = local_transport_parameters.grease_quic_bit,
         };
@@ -1469,18 +1537,28 @@ fn connectAttempt(
                     &response_filter,
                     retry.InitialResponseFilter.accept,
                 ) catch |err| {
-                    // A successful coalesced socket write consumes the
-                    // exclusive lease even if the peer rejects the handshake.
-                    if (early_data.lease.state == .active) {
+                    // Packet protection consumes the exclusive lease even if
+                    // the socket reports zero progress.
+                    if (send_context.protected_packet_count != 0 and
+                        early_data.lease.state == .active)
+                    {
                         early_data.cache.consumeEarlyData(
                             early_data.lease,
                         ) catch unreachable;
                     }
                     return err;
                 };
-            sent_early_data_packet_count =
-                send_context.transmitted_packet_count;
-            if (early_data.lease.state == .active) {
+            protected_early_data_packet_count =
+                send_context.protected_packet_count;
+            sent_early_data_packet_count = send_context.sent_packet_count;
+            sent_early_data_packet_len = send_context.sent_packet_len;
+            @memcpy(
+                sent_early_data_packet_numbers[0..sent_early_data_packet_count],
+                send_context.sent_packet_numbers[0..sent_early_data_packet_count],
+            );
+            if (protected_early_data_packet_count != 0 and
+                early_data.lease.state == .active)
+            {
                 early_data.cache.consumeEarlyData(
                     early_data.lease,
                 ) catch unreachable;
@@ -1579,7 +1657,14 @@ fn connectAttempt(
         // rather than replaying early data under the negotiated version.
         next.early_data = null;
         next.resumption_session = resumption_session;
-        return connectAttempt(endpoint, source, peer, next, true);
+        return connectAttempt(
+            endpoint,
+            source,
+            peer,
+            next,
+            true,
+            early_data_offered_before_version_negotiation or offer_early_data,
+        );
     }
 
     const server_initial_deadline = passiveHandshakeTimeout(
@@ -1752,7 +1837,7 @@ fn connectAttempt(
         options.available_versions,
         version_negotiation_processed,
     );
-    const early_data_status = if (offer_early_data and retry_processed)
+    const attempt_early_data_status = if (offer_early_data and retry_processed)
         quic.zero_rtt.handshake.Status.rejected
     else
         try quic.zero_rtt.handshake.validateClientAcceptance(
@@ -1765,6 +1850,11 @@ fn connectAttempt(
                 quic.resumption.Snapshot.fromTransportParameters(.{}),
             peer_transport_parameters,
         );
+    const early_data_status = if (early_data_offered_before_version_negotiation and
+        attempt_early_data_status == .not_offered)
+        quic.zero_rtt.handshake.Status.rejected
+    else
+        attempt_early_data_status;
     var peer_certificate: ?quic.tls.auth.ParsedCertificate = null;
     defer if (peer_certificate) |*certificate| {
         certificate.deinit(endpoint.allocator);
@@ -1971,7 +2061,10 @@ fn connectAttempt(
         application.client_quic,
         options.local_connection_id,
         server_initial.packet.source_connection_id,
-        options.initial_one_rtt_config,
+        sampledSpinBitConfig(
+            options.initial_one_rtt_config,
+            client_random,
+        ),
         .client,
         local_transport_parameters,
         peer_transport_parameters,
@@ -2005,18 +2098,26 @@ fn connectAttempt(
         );
     }
     if (options.early_data) |early_data| {
-        if (early_data_status == .accepted) {
-            try established.connection.importSentEarlyDataCopies(
+        if (early_data_status == .accepted and
+            sent_early_data_packet_count != 0)
+        {
+            try established.connection.importSentEarlyDataPacketNumbers(
                 0,
-                sent_early_data_packet_count,
+                protected_early_data_packet_count,
+                sent_early_data_packet_numbers[0..sent_early_data_packet_count],
+                sent_early_data_packet_len,
                 early_data.frames,
             );
-        } else if (sent_early_data_packet_count != 0) {
+        } else if (protected_early_data_packet_count != 0) {
             try established.connection.discardSentEarlyDataCopies(
                 0,
-                sent_early_data_packet_count,
+                protected_early_data_packet_count,
             );
         }
+        established.early_data_protected_packet_count =
+            protected_early_data_packet_count;
+        established.early_data_sent_packet_count =
+            sent_early_data_packet_count;
     }
     return established;
 }
@@ -2599,7 +2700,7 @@ fn acceptInternal(
                 client_initial.packet.destination_connection_id,
                 client_initial.packet.source_connection_id,
                 options.local_transport_parameters.grease_quic_bit,
-                options.handshake_recovery.deadline,
+                options.handshake_recovery,
                 &anti_amplification,
             ) catch |err| {
                 if (err == error.InvalidReservedBits) {
@@ -2635,7 +2736,9 @@ fn acceptInternal(
             source,
             client_initial.from,
             client_initial.coalesced_tail,
-            options.handshake_recovery.deadline,
+            options.version,
+            options.local_transport_parameters.grease_quic_bit,
+            options.handshake_recovery,
             &anti_amplification,
         );
     } else if (client_initial.coalesced_tail.len != 0) {
@@ -2933,7 +3036,10 @@ fn acceptInternal(
         application.server_quic,
         options.local_connection_id,
         client_initial.packet.source_connection_id,
-        options.initial_one_rtt_config,
+        sampledSpinBitConfig(
+            options.initial_one_rtt_config,
+            server_random,
+        ),
         .server,
         local_transport_parameters,
         peer_transport_parameters,
@@ -3554,6 +3660,7 @@ fn openClientInitialDatagram(
             .expected_packet_number = expected_packet_number,
             .max_crypto_buffer = max_crypto_buffer,
             .min_datagram_size = quic.initial_exchange.min_initial_udp_datagram_size,
+            .first_datagram_size_validated = true,
             .allow_zero_fixed_bit = allow_zero_fixed_bit,
             .deadline = caller_deadline,
             .discard_invalid_first = true,
@@ -3628,6 +3735,7 @@ fn receiveRetriedClientInitial(
                 .expected_packet_number = 0,
                 .max_crypto_buffer = max_crypto_buffer,
                 .min_datagram_size = quic.initial_exchange.min_initial_udp_datagram_size,
+                .first_datagram_size_validated = true,
                 .allow_zero_fixed_bit = allow_zero_fixed_bit,
                 .discard_invalid_first = true,
             },
@@ -4119,24 +4227,35 @@ fn receiveStandaloneClientEarlyData(
     expected_destination_connection_id: []const u8,
     expected_source_connection_id: []const u8,
     allow_zero_fixed_bit: bool,
-    caller_deadline: ?std.Io.Clock.Timestamp,
+    recovery: retransmit.Config,
     anti_amplification: *retransmit.AntiAmplificationBudget,
 ) Error!?quic.zero_rtt.Packet {
-    var datagram = try receiveFromSourceBefore(source, caller_deadline);
-    defer datagram.deinit(endpoint.allocator);
-    if (!datagram.from.eql(&expected_from)) return null;
-    anti_amplification.recordReceived(datagram.bytes.len);
-    return openClientEarlyData(
-        endpoint,
-        datagram.from,
-        datagram.bytes,
-        keys,
-        expected_packet_number,
-        max_frames,
-        expected_destination_connection_id,
-        expected_source_connection_id,
-        allow_zero_fixed_bit,
-    );
+    const deadline = passiveHandshakeTimeout(endpoint.io, recovery);
+    while (true) {
+        var datagram = source.receiveTimeout(deadline) catch |err|
+            switch (err) {
+                error.Timeout => return error.HandshakeTimeout,
+                error.ConcurrencyUnavailable => return error.HandshakeReceiveFailed,
+                else => |other| return @errorCast(other),
+            };
+        defer datagram.deinit(endpoint.allocator);
+        if (!datagram.from.eql(&expected_from)) continue;
+        anti_amplification.recordReceived(datagram.bytes.len);
+        if (try openClientEarlyData(
+            endpoint,
+            datagram.from,
+            datagram.bytes,
+            keys,
+            expected_packet_number,
+            max_frames,
+            expected_destination_connection_id,
+            expected_source_connection_id,
+            allow_zero_fixed_bit,
+        )) |packet| return packet;
+        // PTO sends Initial before its standalone 0-RTT copy. Ignore that
+        // retransmitted Initial (and unrelated unauthenticated datagrams) under
+        // the same absolute handshake budget, then inspect the next datagram.
+    }
 }
 
 fn discardClientEarlyData(
@@ -4144,18 +4263,39 @@ fn discardClientEarlyData(
     source: quic.runtime.DatagramSource,
     expected_from: net.IpAddress,
     coalesced_tail: []const u8,
-    caller_deadline: ?std.Io.Clock.Timestamp,
+    version: quic.Version,
+    allow_zero_fixed_bit: bool,
+    recovery: retransmit.Config,
     anti_amplification: *retransmit.AntiAmplificationBudget,
 ) Error!void {
     if (coalesced_tail.len != 0) {
         return validateRejectedEarlyData(coalesced_tail);
     }
-    var datagram = try receiveFromSourceBefore(source, caller_deadline);
-    defer datagram.deinit(endpoint.allocator);
-    if (datagram.from.eql(&expected_from)) {
+    const deadline = passiveHandshakeTimeout(endpoint.io, recovery);
+    while (true) {
+        var datagram = source.receiveTimeout(deadline) catch |err|
+            switch (err) {
+                error.Timeout => return error.HandshakeTimeout,
+                error.ConcurrencyUnavailable => return error.HandshakeReceiveFailed,
+                else => |other| return @errorCast(other),
+            };
+        defer datagram.deinit(endpoint.allocator);
+        if (!datagram.from.eql(&expected_from)) continue;
         anti_amplification.recordReceived(datagram.bytes.len);
+        const info = quic.protection
+            .peekProtectedLongPacketInfoWithFixedBitPolicy(
+            datagram.bytes,
+            allow_zero_fixed_bit,
+        ) catch return error.InvalidHandshakeFlight;
+        if (info.version != version.wireValue() or info.len != datagram.bytes.len) {
+            return error.InvalidHandshakeFlight;
+        }
+        switch (info.packet_type) {
+            .zero_rtt => return,
+            .initial => continue,
+            .handshake, .retry => return error.InvalidHandshakeFlight,
+        }
     }
-    try validateRejectedEarlyData(datagram.bytes);
 }
 
 fn validateRejectedEarlyData(bytes: []const u8) Error!void {
@@ -4585,6 +4725,148 @@ fn random32(io: std.Io, provided: ?[32]u8) std.Io.RandomSecureError![32]u8 {
     return out;
 }
 
+fn sampledSpinBitConfig(
+    config: OneRttConfig,
+    connection_random: [32]u8,
+) OneRttConfig {
+    var effective = config;
+    effective.enable_spin_bit = config.enable_spin_bit and
+        (connection_random[0] & 0x0f) != 0;
+    return effective;
+}
+
+test "QUIC early-data flight skips protected PN after zero socket progress" {
+    const allocator = std.testing.allocator;
+    var threaded = std.Io.Threaded.init(allocator, .{});
+    defer threaded.deinit();
+    const io = threaded.io();
+    var receiver = try quic.runtime.Endpoint.bind(
+        allocator,
+        io,
+        .{ .ip4 = .loopback(0) },
+        .{ .max_datagram_size = 1200 },
+    );
+    defer receiver.deinit();
+    var sender = try quic.runtime.Endpoint.bind(
+        allocator,
+        io,
+        .{ .ip4 = .loopback(0) },
+        .{ .max_datagram_size = 1200, .enable_gso_send = false },
+    );
+    defer sender.deinit();
+
+    const RejectFirstZeroRtt = struct {
+        delegate: std.Io,
+        rejected: bool = false,
+
+        fn netSend(
+            userdata: ?*anyopaque,
+            socket_handle: net.Socket.Handle,
+            messages: []net.OutgoingMessage,
+            flags: net.SendFlags,
+        ) struct { ?net.Socket.SendError, usize } {
+            const self: *@This() = @ptrCast(@alignCast(userdata));
+            if (!self.rejected and messages.len == 1) {
+                const bytes = messages[0].data_ptr[0..messages[0].data_len];
+                if ((bytes[0] & 0x30) == 0x10) {
+                    self.rejected = true;
+                    return .{ error.NetworkDown, 0 };
+                }
+            }
+            return self.delegate.vtable.netSend(
+                self.delegate.userdata,
+                socket_handle,
+                messages,
+                flags,
+            );
+        }
+    };
+    var reject = RejectFirstZeroRtt{ .delegate = sender.io };
+    var rejecting_vtable = sender.io.vtable.*;
+    rejecting_vtable.netSend = RejectFirstZeroRtt.netSend;
+    sender.io = .{ .userdata = &reject, .vtable = &rejecting_vtable };
+    defer sender.io = reject.delegate;
+
+    const initial_keys = quic.protection
+        .deriveInitialSecrets("earlypn1").client;
+    const zero_rtt_keys = quic.protection.deriveAes128Keys(
+        [_]u8{0xd8} ** quic.protection.secret_len,
+    );
+    var context = EarlyDataFlight{
+        .endpoint = &sender,
+        .peer = receiver.address(),
+        .initial_keys = initial_keys,
+        .initial_options = .{
+            .initial = .{
+                .destination_connection_id = "earlypn1",
+                .source_connection_id = "client",
+                .packet_number = 10,
+                .crypto_data = "initial",
+            },
+            .max_datagram_size = 1200,
+            .max_datagrams = 4,
+        },
+        .zero_rtt_keys = zero_rtt_keys,
+        .zero_rtt_options = .{
+            .destination_connection_id = "earlypn1",
+            .source_connection_id = "client",
+            .packet_number = 0,
+            .frames = &.{.{ .stream = .{
+                .stream_id = 0,
+                .data = "early",
+            } }},
+        },
+    };
+    try EarlyDataFlight.send(&context, 0);
+    try std.testing.expectEqual(@as(u64, 1), context.protected_packet_count);
+    try std.testing.expectEqual(@as(usize, 0), context.sent_packet_count);
+    try EarlyDataFlight.send(&context, 1);
+    try std.testing.expectEqual(@as(u64, 2), context.protected_packet_count);
+    try std.testing.expectEqual(@as(usize, 1), context.sent_packet_count);
+    try std.testing.expectEqual(@as(u64, 1), context.sent_packet_numbers[0]);
+
+    var first_initial = try receiver.receiveBytes();
+    defer first_initial.deinit(allocator);
+    var opened_first_initial = try quic.protection.openInitialPacket(
+        allocator,
+        initial_keys,
+        first_initial.bytes,
+        10,
+    );
+    defer opened_first_initial.deinit(allocator);
+    try std.testing.expectEqual(
+        @as(u64, 10),
+        opened_first_initial.packet_number,
+    );
+
+    var retry_initial = try receiver.receiveBytes();
+    defer retry_initial.deinit(allocator);
+    var opened_retry_initial = try quic.protection.openInitialPacket(
+        allocator,
+        initial_keys,
+        retry_initial.bytes,
+        14,
+    );
+    defer opened_retry_initial.deinit(allocator);
+    try std.testing.expectEqual(
+        @as(u64, 14),
+        opened_retry_initial.packet_number,
+    );
+
+    var early = try receiver.receiveBytes();
+    defer early.deinit(allocator);
+    var opened_early = try quic.zero_rtt.openBytes(
+        &receiver,
+        early.from,
+        early.bytes,
+        zero_rtt_keys,
+        1,
+        8,
+    );
+    defer opened_early.deinit(allocator);
+    try std.testing.expectEqual(@as(u64, 1), opened_early.packet.packet_number);
+}
+
 fn chooseAlpn(server_protocol: []const u8, client_protocols: []const []const u8) Error![]const u8 {
     for (client_protocols) |protocol| {
         if (std.mem.eql(u8, protocol, server_protocol)) return server_protocol;
@@ -4597,6 +4879,85 @@ fn ensureOfferedAlpn(offered: []const []const u8, selected: []const u8) Error!vo
         if (std.mem.eql(u8, protocol, selected)) return;
     }
     return error.MissingAlpn;
+}
+
+test "QUIC handshake one-RTT config propagates local ACK policy" {
+    const keys = quic.protection.deriveAes128Keys(
+        [_]u8{0xa1} ** quic.protection.secret_len,
+    );
+    const applied = (OneRttConfig{
+        .local_ack_eliciting_threshold = 2,
+        .local_max_ack_delay_us = 25_000,
+        .local_ack_reordering_threshold = 3,
+    }).apply(
+        .version_1,
+        .{ .ip4 = .loopback(443) },
+        keys,
+        keys,
+        "local",
+        "peer",
+        .client,
+        .{},
+        .{},
+    );
+    try std.testing.expectEqual(@as(u64, 2), applied.local_ack_eliciting_threshold);
+    try std.testing.expectEqual(@as(u64, 25_000), applied.local_max_ack_delay_us);
+    try std.testing.expectEqual(@as(u64, 3), applied.local_ack_reordering_threshold);
+    const clamped = (OneRttConfig{
+        .local_ack_eliciting_threshold = 2,
+        .local_max_ack_delay_us = 25_000,
+    }).apply(
+        .version_1,
+        .{ .ip4 = .loopback(443) },
+        keys,
+        keys,
+        "local",
+        "peer",
+        .client,
+        .{ .max_ack_delay = 10 },
+        .{},
+    );
+    try std.testing.expectEqual(@as(u64, 10_000), clamped.local_max_ack_delay_us);
+}
+
+test "QUIC handshake one-RTT config propagates spin-bit policy" {
+    const keys = quic.protection.deriveAes128Keys(
+        [_]u8{0xa2} ** quic.protection.secret_len,
+    );
+    const enabled = (OneRttConfig{
+        .enable_spin_bit = true,
+    }).apply(
+        .version_1,
+        .{ .ip4 = .loopback(443) },
+        keys,
+        keys,
+        "local",
+        "peer",
+        .client,
+        .{},
+        .{},
+    );
+    try std.testing.expect(enabled.enable_spin_bit);
+    const disabled = (OneRttConfig{}).apply(
+        .version_1,
+        .{ .ip4 = .loopback(443) },
+        keys,
+        keys,
+        "local",
+        "peer",
+        .server,
+        .{},
+        .{},
+    );
+    try std.testing.expect(!disabled.enable_spin_bit);
+    try std.testing.expect(sampledSpinBitConfig(.{
+        .enable_spin_bit = true,
+    }, [_]u8{0x11} ** 32).enable_spin_bit);
+    try std.testing.expect(!sampledSpinBitConfig(.{
+        .enable_spin_bit = true,
+    }, [_]u8{0x10} ** 32).enable_spin_bit);
+    try std.testing.expect(!sampledSpinBitConfig(.{}, [_]u8{0x11} ** 32)
+        .enable_spin_bit);
 }
 
 test {

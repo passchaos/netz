@@ -6,6 +6,7 @@
 //! with different runtimes.
 
 pub const runtime = @import("runtime.zig");
+pub const stream = @import("stream.zig");
 pub const tls = @import("tls/mod.zig");
 pub const http1 = @import("http1/mod.zig");
 pub const http2 = @import("http2/mod.zig");
@@ -15,10 +16,10 @@ pub const quic = @import("quic/mod.zig");
 pub const websocket = @import("websocket/mod.zig");
 pub const mqtt = @import("mqtt/mod.zig");
 pub const webtransport = @import("webtransport/mod.zig");
-pub const webrtc = @import("webrtc/mod.zig");
 
 comptime {
     _ = runtime;
+    _ = stream;
     _ = tls;
     _ = http1;
     _ = http2;
@@ -28,5 +29,4 @@ comptime {
     _ = websocket;
     _ = mqtt;
     _ = webtransport;
-    _ = webrtc;
 }

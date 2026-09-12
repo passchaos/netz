@@ -637,9 +637,7 @@ test "MQTT persistent change autosave tracks durable subscription lifecycle" {
     const thread = try std.Thread.spawn(.{}, @TypeOf(serve).run, .{&serve});
     var joined = false;
     defer if (!joined) {
-        for (broker.slots) |*slot| {
-            if (slot.connection) |*connection| connection.shutdown() catch {};
-        }
+        broker.shutdownActiveConnections();
         thread.join();
     };
 
@@ -999,9 +997,7 @@ test "MQTT broker commit log persists acknowledgement boundaries" {
     const thread = try std.Thread.spawn(.{}, @TypeOf(serve).run, .{&serve});
     var joined = false;
     defer if (!joined) {
-        for (source.slots) |*slot| {
-            if (slot.connection) |*connection| connection.shutdown() catch {};
-        }
+        source.shutdownActiveConnections();
         thread.join();
     };
 
@@ -1075,9 +1071,7 @@ test "MQTT broker commit log persists acknowledgement boundaries" {
     // or orderly broker teardown append another transaction.
     publisher.close();
     publisher_closed = true;
-    for (source.slots) |*slot| {
-        if (slot.connection) |*connection| connection.shutdown() catch {};
-    }
+    source.shutdownActiveConnections();
     thread.join();
     joined = true;
     source.deinit();
@@ -1131,9 +1125,7 @@ test "MQTT broker commit log persists graceful Session removal" {
     const thread = try std.Thread.spawn(.{}, @TypeOf(serve).run, .{&serve});
     var joined = false;
     defer if (!joined) {
-        for (source.slots) |*slot| {
-            if (slot.connection) |*connection| connection.shutdown() catch {};
-        }
+        source.shutdownActiveConnections();
         thread.join();
     };
 
@@ -1671,9 +1663,7 @@ test "MQTT live snapshot checkpoints an active broker connection" {
     const thread = try std.Thread.spawn(.{}, @TypeOf(serve).run, .{&serve});
     var joined = false;
     defer if (!joined) {
-        if (source.slots[0].connection) |*connection| {
-            connection.shutdown() catch {};
-        }
+        source.shutdownActiveConnections();
         thread.join();
     };
 

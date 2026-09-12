@@ -430,6 +430,16 @@ test "ordinary vail WSS client exposes TLS state and KeyUpdate" {
     const updates = client.keyUpdateCounts().?;
     try std.testing.expectEqual(@as(u64, 1), updates.sent);
     try std.testing.expectEqual(@as(u64, 1), updates.received);
+    client.receive_failed.store(true, .release);
+    const before_terminal = client.keyUpdateCounts().?;
+    try std.testing.expectError(
+        error.ConnectionClosed,
+        client.updateTrafficKeys(false),
+    );
+    try std.testing.expectEqual(
+        before_terminal,
+        client.keyUpdateCounts().?,
+    );
 
     thread.join();
     joined = true;

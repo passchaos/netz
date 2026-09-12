@@ -2,6 +2,7 @@ const std = @import("std");
 const http3 = @import("../../../../mod.zig");
 const runtime = @import("../../../../runtime.zig");
 const quic = @import("../../../../../quic/mod.zig");
+const control_receive = @import("../../../control/receive.zig");
 
 const ProtectedServer = runtime.ProtectedServer;
 const ProtectedClient = runtime.ProtectedClient;
@@ -31,6 +32,38 @@ const FailOnCall = struct {
             messages,
             flags,
         );
+    }
+};
+
+const DeadlineAfterSendIo = struct {
+    delegate: std.Io,
+    now_ns: i96,
+    send_calls: usize = 0,
+
+    fn now(
+        userdata: ?*anyopaque,
+        _: std.Io.Clock,
+    ) std.Io.Timestamp {
+        const self: *@This() = @ptrCast(@alignCast(userdata.?));
+        return .fromNanoseconds(self.now_ns);
+    }
+
+    fn netSend(
+        userdata: ?*anyopaque,
+        socket_handle: std.Io.net.Socket.Handle,
+        messages: []std.Io.net.OutgoingMessage,
+        flags: std.Io.net.SendFlags,
+    ) struct { ?std.Io.net.Socket.SendError, usize } {
+        const self: *@This() = @ptrCast(@alignCast(userdata.?));
+        self.send_calls += 1;
+        const result = self.delegate.vtable.netSend(
+            self.delegate.userdata,
+            socket_handle,
+            messages,
+            flags,
+        );
+        if (result[1] != 0) self.now_ns += std.time.ns_per_s;
+        return result;
     }
 };
 
@@ -303,12 +336,26 @@ test "HTTP/3 protected client retains pending push cancellation on send failure"
             .send_keys = client_keys,
             .local_connection_id = &client_cid,
             .peer_connection_id = &server_cid,
+            .local_settings = .{ .qpack_max_table_capacity = 256 },
         },
     );
     defer client.deinit();
 
     try client.sendMaxPushId(0);
     try client.push_streams.registerPromise(0, 0);
+    try client.qpack_decode.table.setCapacity(256);
+    _ = try client.qpack_decode.table.insert("x-cancelled-push", "dynamic");
+    var push_block: std.ArrayList(u8) = .empty;
+    defer push_block.deinit(allocator);
+    try http3.Qpack.encodeDynamicBlock(
+        &push_block,
+        allocator,
+        &.{
+            .{ .name = ":status", .value = "200" },
+            .{ .name = "x-cancelled-push", .value = "dynamic" },
+        },
+        client.qpack_decode.table,
+    );
     var push_bytes: std.ArrayList(u8) = .empty;
     defer push_bytes.deinit(allocator);
     try quic.varint.encode(
@@ -317,7 +364,11 @@ test "HTTP/3 protected client retains pending push cancellation on send failure"
         @intFromEnum(http3.StreamType.push),
     );
     try quic.varint.encode(&push_bytes, allocator, 0);
-    try (http3.Response{ .status = 204 }).write(&push_bytes, allocator);
+    try (http3.Frame{
+        .frame_type = http3.FrameType.headers,
+        .payload = push_block.items,
+        .consumed = 0,
+    }).write(&push_bytes, allocator);
     try std.testing.expect(try client.push_streams.insert(
         server.address(),
         .{
@@ -344,13 +395,20 @@ test "HTTP/3 protected client retains pending push cancellation on send failure"
         @as(?u62, first_server_push_stream_id),
         client.push_streams.firstCancelledStream(),
     );
+    try std.testing.expectEqual(
+        @as(usize, 0),
+        client.qpack_decode.pendingDecoderInstructions().len,
+    );
 
     client.quic_client.endpoint.io = failed_send.delegate;
     try std.testing.expect((try client.pollPushEvent()) == null);
     try std.testing.expectEqual(@as(usize, 0), client.push_streams.cancelledStreamCount());
 
+    var feedback: std.ArrayList(u8) = .empty;
+    defer feedback.deinit(allocator);
     var saw_stop = false;
-    while (!saw_stop) {
+    var saw_qpack_cancel = false;
+    while (!saw_stop or !saw_qpack_cancel) {
         var packet = try server.receive_packets.takeWithDeadline(
             &server.quic_server.endpoint,
             server.config.receive_keys,
@@ -361,6 +419,166 @@ test "HTTP/3 protected client retains pending push cancellation on send failure"
         );
         defer packet.deinit(allocator);
         for (packet.frames) |frame| switch (frame) {
+            .stop_sending => |stop| if (stop.stream_id == first_server_push_stream_id) {
+                try std.testing.expectEqual(
+                    @as(u64, http3.ApplicationErrorCode.request_cancelled),
+                    stop.application_error_code,
+                );
+                saw_stop = true;
+            },
+            .stream => |stream| if (stream.stream_id ==
+                client_qpack_decoder_stream_id)
+            {
+                try feedback.appendSlice(allocator, stream.data);
+            },
+            else => {},
+        };
+        var offset: usize = @intFromBool(
+            feedback.items.len != 0 and
+                feedback.items[0] ==
+                    @intFromEnum(http3.StreamType.qpack_decoder),
+        );
+        while (offset < feedback.items.len) {
+            const decoded = http3.Qpack.decodeDecoderInstruction(
+                feedback.items[offset..],
+            ) catch |err| switch (err) {
+                error.BufferTooShort => break,
+                else => return err,
+            };
+            if (decoded.instruction == .stream_cancellation and
+                decoded.instruction.stream_cancellation ==
+                    first_server_push_stream_id)
+            {
+                saw_qpack_cancel = true;
+            }
+            offset += decoded.consumed;
+        }
+    }
+    try std.testing.expectEqual(
+        @as(usize, 0),
+        client.qpack_decode.pendingDecoderInstructions().len,
+    );
+}
+
+test "HTTP/3 protected client resumes pending push cancellation after deadline" {
+    const allocator = std.testing.allocator;
+    var threaded = std.Io.Threaded.init(allocator, .{});
+    defer threaded.deinit();
+    const io = threaded.io();
+    const client_cid = [_]u8{ 0xd5, 0x10, 0x20, 0x30 };
+    const server_cid = [_]u8{ 0xd6, 0x10, 0x20, 0x30 };
+    const client_keys = quic.protection.deriveAes128Keys(
+        [_]u8{0xd7} ** quic.protection.secret_len,
+    );
+    const server_keys = quic.protection.deriveAes128Keys(
+        [_]u8{0xd8} ** quic.protection.secret_len,
+    );
+    var server = try ProtectedServer.bind(
+        allocator,
+        io,
+        .{ .ip4 = .loopback(0) },
+        .{},
+        .{
+            .receive_keys = client_keys,
+            .send_keys = server_keys,
+            .local_connection_id = &server_cid,
+            .peer_connection_id = &client_cid,
+        },
+    );
+    defer server.deinit();
+    var client = try ProtectedClient.connect(
+        allocator,
+        io,
+        .{ .ip4 = .loopback(0) },
+        server.address(),
+        .{},
+        .{
+            .receive_keys = server_keys,
+            .send_keys = client_keys,
+            .local_connection_id = &client_cid,
+            .peer_connection_id = &server_cid,
+        },
+    );
+    defer client.deinit();
+
+    try client.sendMaxPushIdWithTimeout(0, .fromSeconds(1));
+    try client.push_streams.registerPromise(0, 0);
+    var push_bytes: std.ArrayList(u8) = .empty;
+    defer push_bytes.deinit(allocator);
+    try quic.varint.encode(
+        &push_bytes,
+        allocator,
+        @intFromEnum(http3.StreamType.push),
+    );
+    try quic.varint.encode(&push_bytes, allocator, 0);
+    try (http3.Response{ .status = 204 }).write(&push_bytes, allocator);
+    try std.testing.expect(try client.push_streams.insert(
+        server.address(),
+        .{
+            .stream_id = first_server_push_stream_id,
+            .data = push_bytes.items,
+            .fin = true,
+        },
+        client.control,
+    ));
+
+    var timed_io = DeadlineAfterSendIo{
+        .delegate = client.quic_client.endpoint.io,
+        .now_ns = 1_000_000,
+    };
+    var timed_vtable = client.quic_client.endpoint.io.vtable.*;
+    timed_vtable.now = DeadlineAfterSendIo.now;
+    timed_vtable.netSend = DeadlineAfterSendIo.netSend;
+    client.quic_client.endpoint.io = .{
+        .userdata = &timed_io,
+        .vtable = &timed_vtable,
+    };
+    defer client.quic_client.endpoint.io = timed_io.delegate;
+
+    const cancel_offset = client.control_send.next_offset;
+    try std.testing.expectError(
+        error.Timeout,
+        client.cancelPushWithDeadline(0, .{
+            .clock = .awake,
+            .raw = .fromNanoseconds(timed_io.now_ns + 1),
+        }),
+    );
+    try std.testing.expectEqual(@as(usize, 1), timed_io.send_calls);
+    try std.testing.expect(client.control_send.next_offset > cancel_offset);
+    try std.testing.expectEqual(@as(usize, 0), client.push_streams.promiseCount());
+    try std.testing.expectEqual(@as(usize, 1), client.push_streams.cancelledStreamCount());
+
+    const committed_offset = client.control_send.next_offset;
+    client.quic_client.endpoint.io = timed_io.delegate;
+    try client.cancelPushWithTimeout(0, .fromSeconds(1));
+    try std.testing.expectEqual(committed_offset, client.control_send.next_offset);
+    try std.testing.expectEqual(@as(usize, 0), client.push_streams.cancelledStreamCount());
+
+    var saw_cancel = false;
+    var saw_stop = false;
+    while (!saw_cancel or !saw_stop) {
+        var packet = try server.receive_packets.takeWithDeadline(
+            &server.quic_server.endpoint,
+            server.config.receive_keys,
+            server.config.local_connection_id.len,
+            &server.expected_packet_number,
+            server.config.max_frames_per_packet,
+            .fromNow(io, .{ .raw = .fromSeconds(1), .clock = .awake }),
+        );
+        defer packet.deinit(allocator);
+        for (packet.frames) |frame| switch (frame) {
+            .stream => |stream| {
+                _ = try control_receive.applyControlStreamFrameForRoleWithPushes(
+                    &server.control,
+                    allocator,
+                    stream,
+                    .server,
+                    .{ .slice = &.{0} },
+                    null,
+                    null,
+                );
+                saw_cancel = saw_cancel or server.control.pushCancelled(0);
+            },
             .stop_sending => |stop| if (stop.stream_id == first_server_push_stream_id) {
                 try std.testing.expectEqual(
                     @as(u64, http3.ApplicationErrorCode.request_cancelled),

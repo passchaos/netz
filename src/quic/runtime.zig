@@ -379,14 +379,20 @@ pub const Endpoint = struct {
             }
             if (self.held_send != null) {
                 try self.sendSocketDatagram(to, bytes, ecn);
-                try self.flushHeldSend();
+                // The current datagram is already socket-visible here. The
+                // interceptor exists to emulate reordering/loss; reporting a
+                // later held-packet flush error would make stateful QUIC callers
+                // roll back this successfully sent packet and reuse its nonce.
+                // Treat the older held datagram as lost so recovery can repair it.
+                self.flushHeldSend() catch {};
                 return;
             }
             if (interceptor.should_hold) |should_hold| {
                 if (should_hold(interceptor.context, bytes)) {
+                    const held_bytes = try self.allocator.dupe(u8, bytes);
                     self.held_send = .{
                         .to = to,
-                        .bytes = try self.allocator.dupe(u8, bytes),
+                        .bytes = held_bytes,
                         .ecn = ecn,
                     };
                     return;
@@ -483,13 +489,54 @@ pub const Endpoint = struct {
             // A dropped datagram is still consumed from QUIC's perspective;
             // submitting individually preserves exact deterministic filtering
             // and prevents GSO from hiding segment boundaries.
+            var sent_count: usize = 0;
             for (datagrams) |bytes| {
-                try self.sendBytesWithEcnLocked(to, bytes, ecn);
+                self.sendBytesWithEcnLocked(to, bytes, ecn) catch |err| {
+                    const send_error: ?net.Socket.SendError = switch (err) {
+                        error.MessageOversize => error.MessageOversize,
+                        error.SystemResources => error.SystemResources,
+                        error.NetworkUnreachable => error.NetworkUnreachable,
+                        error.HostUnreachable => error.HostUnreachable,
+                        error.NetworkDown => error.NetworkDown,
+                        error.ConnectionRefused => error.ConnectionRefused,
+                        error.AddressFamilyUnsupported => error.AddressFamilyUnsupported,
+                        error.FastOpenAlreadyInProgress => error.FastOpenAlreadyInProgress,
+                        error.ConnectionResetByPeer => error.ConnectionResetByPeer,
+                        error.SocketUnconnected => error.SocketUnconnected,
+                        error.AccessDenied => error.AccessDenied,
+                        error.Canceled => error.Canceled,
+                        error.Unexpected => error.Unexpected,
+                        else => null,
+                    };
+                    if (send_error) |value| {
+                        return .{
+                            .sent_count = sent_count,
+                            .send_error = value,
+                        };
+                    }
+                    // A prior interceptor datagram was already consumed, but
+                    // the progress result cannot carry non-socket failures such
+                    // as an allocation error from a later corrupt/hold action.
+                    // Preserve the visible prefix and surface a terminal generic
+                    // send error instead of losing that progress to the union.
+                    if (sent_count != 0) {
+                        return .{
+                            .sent_count = sent_count,
+                            .send_error = error.Unexpected,
+                        };
+                    }
+                    return err;
+                };
+                sent_count += 1;
             }
             // A batch ending exactly on a selected packet has no later call
             // inside this batch to release it. Flush at the batch boundary so
             // deterministic reordering never silently becomes packet loss.
-            try self.flushHeldSend();
+            // A held packet is a deliberately delayed/lossy test artifact. If
+            // its final flush fails, every caller datagram has nevertheless
+            // been consumed and any already-visible successor must stay
+            // committed. Recovery will retransmit the missing older packet.
+            self.flushHeldSend() catch {};
             return .{ .sent_count = datagrams.len };
         }
         try self.applyOutgoingEcnMark(ecn);
@@ -3975,6 +4022,44 @@ test "QUIC endpoint send interceptor reorders one datagram pair" {
     var first = try receiver.receiveBytes();
     defer first.deinit(allocator);
     try std.testing.expectEqualStrings("first", first.bytes);
+}
+
+test "QUIC endpoint hold interceptor publishes state only after allocation" {
+    const allocator = std.testing.allocator;
+    var threaded = std.Io.Threaded.init(allocator, .{});
+    defer threaded.deinit();
+    const io = threaded.io();
+    const AlwaysHold = struct {
+        fn hold(_: *anyopaque, _: []const u8) bool {
+            return true;
+        }
+    };
+    var context: u8 = 0;
+    var sender = try Endpoint.bind(
+        allocator,
+        io,
+        .{ .ip4 = .loopback(0) },
+        .{
+            .max_datagram_size = 64,
+            .send_interceptor = .{
+                .context = &context,
+                .should_hold = AlwaysHold.hold,
+            },
+        },
+    );
+    defer sender.deinit();
+
+    var failing = std.testing.FailingAllocator.init(allocator, .{
+        .fail_index = 0,
+    });
+    sender.allocator = failing.allocator();
+    try std.testing.expectError(
+        error.OutOfMemory,
+        sender.sendBytes(sender.address(), "held"),
+    );
+    sender.allocator = allocator;
+    try std.testing.expect(sender.held_send == null);
+    try std.testing.expect(failing.has_induced_failure);
 }
 
 test "QUIC endpoint send interceptor corrupts an owned datagram copy" {

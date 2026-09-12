@@ -13,12 +13,179 @@ const origin_policy = @import("origin_policy.zig");
 const handshake_headers = @import("handshake/headers.zig");
 const handshake_storage = @import("handshake/storage.zig");
 const message_buffer = @import("message/buffer.zig");
+const message_state = @import("message/state.zig");
 const deadline_policy = @import("../../internal/deadline.zig");
 const http3 = @import("../../http3/mod.zig");
 const rejection_drain_timeout: std.Io.Duration = .fromSeconds(5);
 const max_payload_read_chunk: usize = 16 * 1024;
 const fragmented_write_scratch_len: usize = 16 * 1024;
 const max_batched_fragments: usize = 16;
+const max_batched_payload_slices: usize = 64;
+const max_control_frame_len = websocket.max_frame_header_len + 125;
+
+const PendingClose = struct {
+    bytes: [max_control_frame_len]u8 = undefined,
+    len: usize = 0,
+    committed: usize = 0,
+    payload: [125]u8 = undefined,
+    payload_len: usize = 0,
+
+    fn matches(self: *const PendingClose, value: []const u8) bool {
+        return std.mem.eql(u8, self.payload[0..self.payload_len], value);
+    }
+};
+
+const PendingPing = struct {
+    bytes: [max_control_frame_len]u8 = undefined,
+    len: usize = 0,
+    committed: usize = 0,
+    payload: [125]u8 = undefined,
+    payload_len: usize = 0,
+
+    fn matches(self: *const PendingPing, value: []const u8) bool {
+        return std.mem.eql(u8, self.payload[0..self.payload_len], value);
+    }
+};
+
+pub const MessageWriteProgress = common.MessageWriteProgress;
+const PendingAutomaticControl = common.PendingAutomaticControl;
+
+const PendingMessage = struct {
+    const Source = enum { contiguous, slices, fragmented, in_place };
+
+    opcode: websocket.Opcode,
+    source: Source = .contiguous,
+    original_ptr: usize,
+    original_len: usize,
+    header: [websocket.max_frame_header_len]u8 = undefined,
+    header_len: usize = 0,
+    payload_len: usize = 0,
+    committed: usize = 0,
+    mask_key: ?[4]u8 = null,
+    compressed: bool = false,
+    fragment_index: usize = 0,
+    fragment_start: usize = 0,
+    fragmented_payload_total: usize = 0,
+    wire_total: usize = 0,
+
+    fn matches(
+        self: *const PendingMessage,
+        opcode: websocket.Opcode,
+        payload: []const u8,
+    ) bool {
+        return self.source == .contiguous and
+            self.opcode == opcode and
+            self.original_len == payload.len and
+            (payload.len == 0 or
+                self.original_ptr == @intFromPtr(payload.ptr));
+    }
+
+    fn matchesParts(
+        self: *const PendingMessage,
+        parts: []const []const u8,
+    ) bool {
+        return self.source == .slices and
+            self.opcode == .binary and
+            self.original_len == parts.len and
+            (parts.len == 0 or
+                self.original_ptr == @intFromPtr(parts.ptr));
+    }
+
+    fn matchesInPlace(
+        self: *const PendingMessage,
+        payload: []const u8,
+    ) bool {
+        return self.source == .in_place and
+            self.opcode == .binary and
+            self.original_len == payload.len and
+            (payload.len == 0 or
+                self.original_ptr == @intFromPtr(payload.ptr));
+    }
+
+    fn matchesFragments(
+        self: *const PendingMessage,
+        opcode: websocket.Opcode,
+        fragments: []const []const u8,
+    ) bool {
+        return self.source == .fragmented and
+            self.opcode == opcode and
+            self.original_len == fragments.len and
+            (fragments.len == 0 or
+                self.original_ptr == @intFromPtr(fragments.ptr));
+    }
+
+    fn totalLen(self: *const PendingMessage) usize {
+        return if (self.source == .fragmented)
+            self.wire_total
+        else
+            self.header_len + self.payload_len;
+    }
+};
+
+fn copyMessagePartsAt(
+    destination: []u8,
+    parts: []const []const u8,
+    start_offset: usize,
+    mask_key: ?[4]u8,
+) websocket.Error!void {
+    var skip = start_offset;
+    var written: usize = 0;
+    for (parts) |part| {
+        if (skip >= part.len) {
+            skip -= part.len;
+            continue;
+        }
+        const count = @min(
+            destination.len - written,
+            part.len - skip,
+        );
+        const source = part[skip..][0..count];
+        if (mask_key) |mask| {
+            try websocket.applyMaskCopy(
+                destination[written..][0..count],
+                source,
+                mask,
+                start_offset + written,
+            );
+        } else {
+            @memcpy(destination[written..][0..count], source);
+        }
+        written += count;
+        skip = 0;
+        if (written == destination.len) return;
+    }
+    std.debug.assert(written == destination.len);
+}
+
+fn fragmentedWireLen(
+    fragments: []const []const u8,
+    compressed_len: ?usize,
+    masked: bool,
+) websocket.Error!usize {
+    var total: usize = 0;
+    for (fragments, 0..) |fragment, index| {
+        const payload_len = if (compressed_len) |len| blk: {
+            const range = compressedFragmentRange(
+                len,
+                fragments.len,
+                index,
+            );
+            break :blk range.end - range.start;
+        } else fragment.len;
+        var header: [websocket.max_frame_header_len]u8 = undefined;
+        const encoded = try websocket.writeFrameHeaderForLengthInto(
+            &header,
+            if (index == 0) .binary else .continuation,
+            payload_len,
+            .{ .mask_key = if (masked) [4]u8{ 0, 0, 0, 0 } else null },
+        );
+        total = std.math.add(usize, total, encoded.len) catch
+            return error.PayloadTooLarge;
+        total = std.math.add(usize, total, payload_len) catch
+            return error.PayloadTooLarge;
+    }
+    return total;
+}
 
 const IncomingDataKind = enum {
     none,
@@ -26,6 +193,17 @@ const IncomingDataKind = enum {
     text,
     compressed_text,
 };
+
+fn isAbruptReceiveEnd(err: anyerror) bool {
+    return switch (err) {
+        error.ConnectionClosed,
+        error.RequestCancelled,
+        error.RequestRejected,
+        error.ConnectionResetByPeer,
+        => true,
+        else => false,
+    };
+}
 
 const MessageFrameReceiveState = struct {
     header: ?websocket.FrameHeader = null,
@@ -51,6 +229,7 @@ pub const Error = websocket.Error || http3.runtime.Error || error{
     InvalidSubprotocol,
     MessageTooLarge,
     UnexpectedPong,
+    WriteInProgress,
     Timeout,
 } || std.Io.RandomSecureError;
 
@@ -232,6 +411,30 @@ pub fn Connection(comptime role: common.Role) type {
         /// observations race-free without holding that mutex across QUIC reads.
         close_sent: std.atomic.Value(bool) = .init(false),
         close_received: std.atomic.Value(bool) = .init(false),
+        /// A protocol failure or abrupt FIN/reset terminates parsing and
+        /// releases receive-only storage instead of retaining/reparsing the
+        /// incomplete DATA prefix.
+        receive_failed: std.atomic.Value(bool) = .init(false),
+        /// A retained outbound frame forced the Extended CONNECT stream to be
+        /// cancelled instead of appending a Close after a partial frame.
+        write_aborted: std.atomic.Value(bool) = .init(false),
+        application_write_pending: std.atomic.Value(bool) = .init(false),
+        automatic_write_pending: std.atomic.Value(bool) = .init(false),
+        /// Present while a deadline-bounded Close frame has only a prefix on
+        /// the HTTP/3 stream. The encoded client mask and bytes remain stable
+        /// across continuation calls.
+        pending_close: ?PendingClose = null,
+        /// Present while a deadline-bounded Ping has only a prefix on the
+        /// HTTP/3 stream. The encoded client mask and bytes remain stable
+        /// across continuation calls.
+        pending_ping: ?PendingPing = null,
+        /// Automatic Pong/Close bytes plus an optional peer control frame that
+        /// remains owned until a bounded reply is fully committed.
+        pending_auto_control: ?PendingAutomaticControl = null,
+        /// A bounded application message retains only framing/mask/cursor
+        /// state. The caller keeps the original payload slice alive and stable
+        /// until a retry commits the complete frame.
+        pending_message: ?PendingMessage = null,
         receive_finished: bool = false,
 
         fn init(
@@ -259,6 +462,23 @@ pub fn Connection(comptime role: common.Role) type {
         }
 
         pub fn deinit(self: *Self) void {
+            if (self.pending_message) |*pending| {
+                std.crypto.secureZero(u8, &pending.header);
+                if (pending.mask_key) |*mask| {
+                    std.crypto.secureZero(u8, mask);
+                }
+            }
+            if (self.pending_ping) |*pending| {
+                std.crypto.secureZero(u8, &pending.bytes);
+                std.crypto.secureZero(u8, &pending.payload);
+            }
+            if (self.pending_close) |*pending| {
+                std.crypto.secureZero(u8, &pending.bytes);
+                std.crypto.secureZero(u8, &pending.payload);
+            }
+            if (self.pending_auto_control) |*pending| {
+                pending.deinit(self.allocator);
+            }
             if (self.selected_protocol) |protocol| {
                 self.allocator.free(protocol);
             }
@@ -306,6 +526,13 @@ pub fn Connection(comptime role: common.Role) type {
         pub fn initiateKeyUpdate(self: *Self) Error!void {
             self.send_mutex.lockUncancelable(self.io());
             defer self.send_mutex.unlock(self.io());
+            if (self.pending_message != null or
+                self.pending_ping != null or
+                self.pending_close != null or
+                self.pending_auto_control != null)
+            {
+                return error.WriteInProgress;
+            }
             try self.h3.initiateKeyUpdate();
         }
 
@@ -331,6 +558,45 @@ pub fn Connection(comptime role: common.Role) type {
             try self.sendDataFrameValidatedLocked(.text, text);
         }
 
+        pub fn sendTextWithTimeout(
+            self: *Self,
+            text: []const u8,
+            progress: *MessageWriteProgress,
+            timeout: std.Io.Duration,
+        ) Error!void {
+            progress.* = .{};
+            if (timeout.nanoseconds <= 0) return error.Timeout;
+            return self.sendTextWithDeadline(
+                text,
+                progress,
+                .fromNow(self.io(), .{
+                    .raw = timeout,
+                    .clock = .awake,
+                }),
+            );
+        }
+
+        /// Send one text frame under an absolute deadline. If the deadline
+        /// expires after a prefix commits, retry this method with the exact
+        /// same slice; its address, length, and contents must remain stable
+        /// until `progress.frame_committed` becomes true.
+        pub fn sendTextWithDeadline(
+            self: *Self,
+            text: []const u8,
+            progress: *MessageWriteProgress,
+            deadline: std.Io.Clock.Timestamp,
+        ) Error!void {
+            progress.* = .{};
+            _ = try deadline_policy.usableAwake(self.io(), deadline);
+            try common.validateOutgoingMessage(self.limits, .text, text);
+            return self.sendMessageWithDeadlineLocked(
+                .text,
+                text,
+                progress,
+                deadline,
+            );
+        }
+
         pub fn sendBinary(self: *Self, payload: []const u8) Error!void {
             if (self.closeSent() or self.closeReceived()) {
                 return error.ConnectionClosed;
@@ -345,6 +611,49 @@ pub fn Connection(comptime role: common.Role) type {
             try self.sendDataFrameValidatedLocked(.binary, payload);
         }
 
+        pub fn sendBinaryWithTimeout(
+            self: *Self,
+            payload: []const u8,
+            progress: *MessageWriteProgress,
+            timeout: std.Io.Duration,
+        ) Error!void {
+            progress.* = .{};
+            if (timeout.nanoseconds <= 0) return error.Timeout;
+            return self.sendBinaryWithDeadline(
+                payload,
+                progress,
+                .fromNow(self.io(), .{
+                    .raw = timeout,
+                    .clock = .awake,
+                }),
+            );
+        }
+
+        /// Binary counterpart to `sendTextWithDeadline`. Progress is
+        /// cumulative across retries and counts the complete RFC 6455 frame,
+        /// including its header. The caller retains the same immutable payload
+        /// slice until the frame commits.
+        pub fn sendBinaryWithDeadline(
+            self: *Self,
+            payload: []const u8,
+            progress: *MessageWriteProgress,
+            deadline: std.Io.Clock.Timestamp,
+        ) Error!void {
+            progress.* = .{};
+            _ = try deadline_policy.usableAwake(self.io(), deadline);
+            try common.validateOutgoingMessage(
+                self.limits,
+                .binary,
+                payload,
+            );
+            return self.sendMessageWithDeadlineLocked(
+                .binary,
+                payload,
+                progress,
+                deadline,
+            );
+        }
+
         /// Mask a mutable client payload in place and send it without the
         /// bounded copy used by immutable client sends. The payload remains
         /// masked after return, matching websocket.zig's mutable send contract.
@@ -357,6 +666,12 @@ pub fn Connection(comptime role: common.Role) type {
             try self.validateBinaryInPlace(payload.len);
             self.send_mutex.lockUncancelable(self.io());
             defer self.send_mutex.unlock(self.io());
+            if (self.pending_message != null) return error.WriteInProgress;
+            if (self.pending_ping != null) return error.WriteInProgress;
+            if (self.pending_close != null) return error.WriteInProgress;
+            if (self.pending_auto_control != null) {
+                return error.WriteInProgress;
+            }
             if (self.closeSent() or self.closeReceived()) {
                 return error.ConnectionClosed;
             }
@@ -377,6 +692,127 @@ pub fn Connection(comptime role: common.Role) type {
             try self.writeParts(&.{ header, payload }, false);
         }
 
+        pub fn sendBinaryInPlaceWithTimeout(
+            self: *Self,
+            payload: []u8,
+            progress: *MessageWriteProgress,
+            timeout: std.Io.Duration,
+        ) Error!void {
+            progress.* = .{};
+            if (timeout.nanoseconds <= 0) return error.Timeout;
+            return self.sendBinaryInPlaceWithDeadline(
+                payload,
+                progress,
+                .fromNow(self.io(), .{ .raw = timeout, .clock = .awake }),
+            );
+        }
+
+        pub fn sendBinaryInPlaceWithDeadline(
+            self: *Self,
+            payload: []u8,
+            progress: *MessageWriteProgress,
+            deadline: std.Io.Clock.Timestamp,
+        ) Error!void {
+            progress.* = .{};
+            _ = try deadline_policy.usableAwake(self.io(), deadline);
+            try self.validateBinaryInPlace(payload.len);
+            self.send_mutex.lockUncancelable(self.io());
+            defer self.send_mutex.unlock(self.io());
+            _ = try deadline_policy.usableAwake(self.io(), deadline);
+            if (self.pending_ping != null or self.pending_close != null) {
+                return error.WriteInProgress;
+            }
+            if (self.pending_message) |*pending| {
+                if (!pending.matchesInPlace(payload)) {
+                    progress.* = .{
+                        .committed_bytes = pending.committed,
+                        .total_bytes = pending.totalLen(),
+                    };
+                    return error.WriteInProgress;
+                }
+            } else {
+                if (self.pending_auto_control != null) {
+                    return error.WriteInProgress;
+                }
+                try self.beginPendingInPlaceLocked(payload);
+            }
+            try self.resumePendingInPlaceLocked(payload, progress, deadline);
+        }
+
+        fn beginPendingInPlaceLocked(
+            self: *Self,
+            payload: []u8,
+        ) Error!void {
+            var pending = PendingMessage{
+                .opcode = .binary,
+                .source = .in_place,
+                .original_ptr = @intFromPtr(payload.ptr),
+                .original_len = payload.len,
+                .payload_len = payload.len,
+            };
+            var key: [4]u8 = undefined;
+            try std.Io.randomSecure(self.io(), &key);
+            pending.mask_key = key;
+            const header = try websocket.writeFrameHeaderForLengthInto(
+                &pending.header,
+                .binary,
+                payload.len,
+                .{ .mask_key = key },
+            );
+            pending.header_len = header.len;
+            websocket.applyMask(payload, key, 0);
+            self.pending_message = pending;
+            self.application_write_pending.store(true, .release);
+        }
+
+        fn resumePendingInPlaceLocked(
+            self: *Self,
+            payload: []const u8,
+            progress: *MessageWriteProgress,
+            deadline: std.Io.Clock.Timestamp,
+        ) Error!void {
+            if (self.receiveFailed()) return error.ConnectionClosed;
+            const pending = &self.pending_message.?;
+            while (pending.committed < pending.totalLen()) {
+                const header_offset = @min(
+                    pending.committed,
+                    pending.header_len,
+                );
+                const payload_offset = pending.committed - header_offset;
+                const bytes = if (header_offset < pending.header_len)
+                    pending.header[header_offset..pending.header_len]
+                else
+                    payload[payload_offset..];
+                var body_progress: http3.runtime.BodyWriteProgress = .{};
+                const send_result = if (comptime role == .client)
+                    self.h3.sendRequestBodyPacedWithDeadline(
+                        self.stream_id,
+                        bytes,
+                        false,
+                        &body_progress,
+                        deadline,
+                    )
+                else
+                    return error.InvalidFrame;
+                send_result catch |err| {
+                    pending.committed += body_progress.committed_bytes;
+                    progress.* = .{
+                        .committed_bytes = pending.committed,
+                        .total_bytes = pending.totalLen(),
+                    };
+                    return err;
+                };
+                pending.committed += body_progress.committed_bytes;
+            }
+            progress.* = .{
+                .committed_bytes = pending.committed,
+                .total_bytes = pending.totalLen(),
+                .frame_committed = true,
+            };
+            self.pending_message = null;
+            self.application_write_pending.store(false, .release);
+        }
+
         /// Test the role/extension/state validation without constructing a
         /// live QUIC session. Kept private to the implementation module's
         /// testing facade below.
@@ -393,26 +829,36 @@ pub fn Connection(comptime role: common.Role) type {
             );
         }
 
-        /// Send two borrowed slices as one binary WebSocket message. The H3
-        /// server path preserves both slices through HTTP/3 DATA framing; the
-        /// client masks them through bounded stack storage while maintaining
-        /// one continuous RFC 6455 mask offset. Compression consumes both
-        /// slices directly without first joining caller plaintext.
+        /// Compatibility wrapper for the two-slice binary-message form.
         pub fn sendBinaryParts(
             self: *Self,
             first: []const u8,
             second: []const u8,
         ) Error!void {
+            return self.sendBinarySlices(&.{ first, second });
+        }
+
+        /// Send borrowed slices as one FIN-terminated RFC 6455 binary frame.
+        /// HTTP/3 DATA boundaries remain invisible to the WebSocket peer.
+        pub fn sendBinarySlices(
+            self: *Self,
+            parts: []const []const u8,
+        ) Error!void {
             if (self.closeSent() or self.closeReceived()) {
                 return error.ConnectionClosed;
             }
-            const parts = [_][]const u8{ first, second };
             const payload_len = try common.validateOutgoingMessageParts(
                 self.limits,
-                &parts,
+                parts,
             );
             self.send_mutex.lockUncancelable(self.io());
             defer self.send_mutex.unlock(self.io());
+            if (self.pending_message != null) return error.WriteInProgress;
+            if (self.pending_ping != null) return error.WriteInProgress;
+            if (self.pending_close != null) return error.WriteInProgress;
+            if (self.pending_auto_control != null) {
+                return error.WriteInProgress;
+            }
             if (self.closeSent() or self.closeReceived()) {
                 return error.ConnectionClosed;
             }
@@ -420,7 +866,7 @@ pub fn Connection(comptime role: common.Role) type {
                 payload_len >= self.compression_threshold)
             {
                 const compressed = try self.compressMessageParts(
-                    &parts,
+                    parts,
                     payload_len,
                 );
                 if (compressed.len < payload_len) {
@@ -434,10 +880,69 @@ pub fn Connection(comptime role: common.Role) type {
                     return;
                 }
             }
-            try self.writeBinaryParts(
-                first,
-                second,
-                payload_len,
+            try self.writeBinarySlices(parts, payload_len);
+        }
+
+        pub fn sendBinarySlicesWithTimeout(
+            self: *Self,
+            parts: []const []const u8,
+            progress: *MessageWriteProgress,
+            timeout: std.Io.Duration,
+        ) Error!void {
+            progress.* = .{};
+            if (timeout.nanoseconds <= 0) return error.Timeout;
+            return self.sendBinarySlicesWithDeadline(
+                parts,
+                progress,
+                .fromNow(self.io(), .{
+                    .raw = timeout,
+                    .clock = .awake,
+                }),
+            );
+        }
+
+        /// Send borrowed slices as one binary frame under an absolute
+        /// deadline. Until the frame commits, retries must pass the same slice
+        /// descriptor array and keep every referenced payload byte stable.
+        pub fn sendBinarySlicesWithDeadline(
+            self: *Self,
+            parts: []const []const u8,
+            progress: *MessageWriteProgress,
+            deadline: std.Io.Clock.Timestamp,
+        ) Error!void {
+            progress.* = .{};
+            _ = try deadline_policy.usableAwake(self.io(), deadline);
+            const payload_len = try common.validateOutgoingMessageParts(
+                self.limits,
+                parts,
+            );
+            self.send_mutex.lockUncancelable(self.io());
+            defer self.send_mutex.unlock(self.io());
+            _ = try deadline_policy.usableAwake(self.io(), deadline);
+            if (self.pending_ping != null or self.pending_close != null) {
+                return error.WriteInProgress;
+            }
+            if (self.pending_message) |*pending| {
+                if (!pending.matchesParts(parts)) {
+                    progress.* = .{
+                        .committed_bytes = pending.committed,
+                        .total_bytes = pending.totalLen(),
+                    };
+                    return error.WriteInProgress;
+                }
+            } else {
+                if (self.pending_auto_control != null) {
+                    return error.WriteInProgress;
+                }
+                if (self.closeSent() or self.closeReceived()) {
+                    return error.ConnectionClosed;
+                }
+                try self.beginPendingMessagePartsLocked(parts, payload_len);
+            }
+            try self.resumePendingMessagePartsLocked(
+                parts,
+                progress,
+                deadline,
             );
         }
 
@@ -460,6 +965,12 @@ pub fn Connection(comptime role: common.Role) type {
             );
             self.send_mutex.lockUncancelable(self.io());
             defer self.send_mutex.unlock(self.io());
+            if (self.pending_message != null) return error.WriteInProgress;
+            if (self.pending_ping != null) return error.WriteInProgress;
+            if (self.pending_close != null) return error.WriteInProgress;
+            if (self.pending_auto_control != null) {
+                return error.WriteInProgress;
+            }
             if (self.closeSent() or self.closeReceived()) {
                 return error.ConnectionClosed;
             }
@@ -498,12 +1009,672 @@ pub fn Connection(comptime role: common.Role) type {
             }
         }
 
+        pub fn sendFragmentedWithTimeout(
+            self: *Self,
+            opcode: websocket.Opcode,
+            fragments: []const []const u8,
+            progress: *MessageWriteProgress,
+            timeout: std.Io.Duration,
+        ) Error!void {
+            progress.* = .{};
+            if (timeout.nanoseconds <= 0) return error.Timeout;
+            return self.sendFragmentedWithDeadline(
+                opcode,
+                fragments,
+                progress,
+                .fromNow(self.io(), .{ .raw = timeout, .clock = .awake }),
+            );
+        }
+
+        pub fn sendFragmentedWithDeadline(
+            self: *Self,
+            opcode: websocket.Opcode,
+            fragments: []const []const u8,
+            progress: *MessageWriteProgress,
+            deadline: std.Io.Clock.Timestamp,
+        ) Error!void {
+            progress.* = .{};
+            _ = try deadline_policy.usableAwake(self.io(), deadline);
+            const plain_len = try common.validateOutgoingFragments(
+                self.limits,
+                opcode,
+                fragments,
+            );
+            self.send_mutex.lockUncancelable(self.io());
+            defer self.send_mutex.unlock(self.io());
+            _ = try deadline_policy.usableAwake(self.io(), deadline);
+            if (self.pending_ping != null or self.pending_close != null) {
+                return error.WriteInProgress;
+            }
+            if (self.pending_message) |*pending| {
+                if (!pending.matchesFragments(opcode, fragments)) {
+                    progress.* = .{
+                        .committed_bytes = pending.committed,
+                        .total_bytes = pending.totalLen(),
+                    };
+                    return error.WriteInProgress;
+                }
+            } else {
+                if (self.pending_auto_control != null) {
+                    return error.WriteInProgress;
+                }
+                if (self.closeSent() or self.closeReceived()) {
+                    return error.ConnectionClosed;
+                }
+                try self.beginPendingFragmentedLocked(
+                    opcode,
+                    fragments,
+                    plain_len,
+                );
+            }
+            try self.resumePendingFragmentedLocked(
+                fragments,
+                progress,
+                deadline,
+            );
+        }
+
+        fn beginPendingFragmentedLocked(
+            self: *Self,
+            opcode: websocket.Opcode,
+            fragments: []const []const u8,
+            plain_len: usize,
+        ) Error!void {
+            var pending = PendingMessage{
+                .opcode = opcode,
+                .source = .fragmented,
+                .original_ptr = @intFromPtr(fragments.ptr),
+                .original_len = fragments.len,
+            };
+            if (self.permessage_deflate and
+                plain_len >= self.compression_threshold)
+            {
+                try self.compression_send.prepare(self.allocator, plain_len);
+                const compressed = try websocket
+                    .compressMessageFragmentsVortIntoWindowWithEncoder(
+                    &self.compression_send.encoder.?,
+                    &self.compression_send.payload,
+                    fragments,
+                    self.compression_send_max_window_bits,
+                );
+                pending.compressed = compressed.len < plain_len;
+                if (pending.compressed) {
+                    pending.fragmented_payload_total = compressed.len;
+                }
+            }
+            pending.wire_total = try fragmentedWireLen(
+                fragments,
+                if (pending.compressed) pending.fragmented_payload_total else null,
+                role == .client,
+            );
+            self.pending_message = pending;
+            self.application_write_pending.store(true, .release);
+            try self.preparePendingFragmentLocked(fragments);
+        }
+
+        fn preparePendingFragmentLocked(
+            self: *Self,
+            fragments: []const []const u8,
+        ) Error!void {
+            const pending = &self.pending_message.?;
+            const range: FragmentRange = if (pending.compressed)
+                compressedFragmentRange(
+                    pending.fragmented_payload_total,
+                    fragments.len,
+                    pending.fragment_index,
+                )
+            else
+                .{ .start = 0, .end = fragments[pending.fragment_index].len };
+            pending.payload_len = range.end - range.start;
+            pending.fragment_start = pending.committed;
+            pending.mask_key = if (role == .client) blk: {
+                var key: [4]u8 = undefined;
+                try std.Io.randomSecure(self.io(), &key);
+                break :blk key;
+            } else null;
+            const header = try websocket.writeFrameHeaderForLengthInto(
+                &pending.header,
+                if (pending.fragment_index == 0) pending.opcode else .continuation,
+                pending.payload_len,
+                .{
+                    .fin = pending.fragment_index + 1 == fragments.len,
+                    .mask_key = pending.mask_key,
+                    .rsv1 = pending.compressed and pending.fragment_index == 0,
+                },
+            );
+            pending.header_len = header.len;
+        }
+
+        fn resumePendingFragmentedLocked(
+            self: *Self,
+            fragments: []const []const u8,
+            progress: *MessageWriteProgress,
+            deadline: std.Io.Clock.Timestamp,
+        ) Error!void {
+            if (self.receiveFailed()) return error.ConnectionClosed;
+            var scratch: [fragmented_write_scratch_len]u8 = undefined;
+            while (self.pending_message) |*pending| {
+                const frame_committed =
+                    pending.committed - pending.fragment_start;
+                const header_offset = @min(
+                    frame_committed,
+                    pending.header_len,
+                );
+                const payload_offset = frame_committed - header_offset;
+                var len: usize = 0;
+                if (header_offset < pending.header_len) {
+                    const header =
+                        pending.header[header_offset..pending.header_len];
+                    @memcpy(scratch[0..header.len], header);
+                    len = header.len;
+                }
+                const payload = if (pending.compressed) blk: {
+                    const range = compressedFragmentRange(
+                        self.compression_send.payload.items.len,
+                        fragments.len,
+                        pending.fragment_index,
+                    );
+                    break :blk self.compression_send.payload.items[range.start..range.end];
+                } else fragments[pending.fragment_index];
+                const count = @min(
+                    scratch.len - len,
+                    payload.len - payload_offset,
+                );
+                if (pending.mask_key) |mask| {
+                    try websocket.applyMaskCopy(
+                        scratch[len..][0..count],
+                        payload[payload_offset..][0..count],
+                        mask,
+                        payload_offset,
+                    );
+                } else {
+                    @memcpy(
+                        scratch[len..][0..count],
+                        payload[payload_offset..][0..count],
+                    );
+                }
+                len += count;
+                var body_progress: http3.runtime.BodyWriteProgress = .{};
+                const send_result = switch (role) {
+                    .client => self.h3.sendRequestBodyPacedWithDeadline(
+                        self.stream_id,
+                        scratch[0..len],
+                        false,
+                        &body_progress,
+                        deadline,
+                    ),
+                    .server => self.h3.sendResponseBodyPacedWithDeadline(
+                        self.stream_id,
+                        scratch[0..len],
+                        false,
+                        &body_progress,
+                        deadline,
+                    ),
+                };
+                send_result catch |err| {
+                    pending.committed += body_progress.committed_bytes;
+                    progress.* = .{
+                        .committed_bytes = pending.committed,
+                        .total_bytes = pending.wire_total,
+                    };
+                    return err;
+                };
+                pending.committed += body_progress.committed_bytes;
+                if (pending.committed - pending.fragment_start ==
+                    pending.header_len + pending.payload_len)
+                {
+                    pending.fragment_index += 1;
+                    if (pending.fragment_index == fragments.len) {
+                        progress.* = .{
+                            .committed_bytes = pending.committed,
+                            .total_bytes = pending.wire_total,
+                            .frame_committed = true,
+                        };
+                        self.pending_message = null;
+                        self.application_write_pending.store(false, .release);
+                        return;
+                    }
+                    try self.preparePendingFragmentLocked(fragments);
+                }
+            }
+        }
+
+        fn sendMessageWithDeadlineLocked(
+            self: *Self,
+            opcode: websocket.Opcode,
+            payload: []const u8,
+            progress: *MessageWriteProgress,
+            deadline: std.Io.Clock.Timestamp,
+        ) Error!void {
+            progress.* = .{};
+            _ = try deadline_policy.usableAwake(self.io(), deadline);
+            self.send_mutex.lockUncancelable(self.io());
+            defer self.send_mutex.unlock(self.io());
+            _ = try deadline_policy.usableAwake(self.io(), deadline);
+
+            if (self.pending_message) |*pending| {
+                if (!pending.matches(opcode, payload)) {
+                    progress.* = .{
+                        .committed_bytes = pending.committed,
+                        .total_bytes = pending.totalLen(),
+                    };
+                    return error.WriteInProgress;
+                }
+            } else {
+                if (self.pending_ping != null) return error.WriteInProgress;
+                if (self.pending_close != null) return error.WriteInProgress;
+                if (self.pending_auto_control != null) {
+                    return error.WriteInProgress;
+                }
+                if (self.closeSent() or self.closeReceived()) {
+                    return error.ConnectionClosed;
+                }
+                try self.beginPendingMessageLocked(opcode, payload);
+            }
+            try self.resumePendingMessageLocked(payload, progress, deadline);
+        }
+
+        fn beginPendingMessageLocked(
+            self: *Self,
+            opcode: websocket.Opcode,
+            payload: []const u8,
+        ) Error!void {
+            std.debug.assert(self.pending_message == null);
+            var pending = PendingMessage{
+                .opcode = opcode,
+                .original_ptr = @intFromPtr(payload.ptr),
+                .original_len = payload.len,
+            };
+            var encoded_payload = payload;
+            if (self.permessage_deflate and
+                payload.len >= self.compression_threshold)
+            {
+                const compressed = try self.compressMessage(payload);
+                if (compressed.len < payload.len) {
+                    encoded_payload = compressed;
+                    pending.compressed = true;
+                }
+            }
+            if (role == .client) {
+                var key: [4]u8 = undefined;
+                try std.Io.randomSecure(self.io(), &key);
+                pending.mask_key = key;
+            }
+            const header = try websocket.writeFrameHeaderForLengthInto(
+                &pending.header,
+                opcode,
+                encoded_payload.len,
+                .{
+                    .mask_key = pending.mask_key,
+                    .rsv1 = pending.compressed,
+                },
+            );
+            pending.header_len = header.len;
+            pending.payload_len = encoded_payload.len;
+            self.pending_message = pending;
+            self.application_write_pending.store(true, .release);
+        }
+
+        fn beginPendingPongLocked(
+            self: *Self,
+            payload: []const u8,
+        ) Error!void {
+            std.debug.assert(self.pending_message == null);
+            var pending = PendingMessage{
+                .opcode = .pong,
+                .original_ptr = @intFromPtr(payload.ptr),
+                .original_len = payload.len,
+                .payload_len = payload.len,
+            };
+            if (role == .client) {
+                var key: [4]u8 = undefined;
+                try std.Io.randomSecure(self.io(), &key);
+                pending.mask_key = key;
+            }
+            const header = try websocket.writeFrameHeaderForLengthInto(
+                &pending.header,
+                .pong,
+                payload.len,
+                .{ .mask_key = pending.mask_key },
+            );
+            pending.header_len = header.len;
+            self.pending_message = pending;
+            self.application_write_pending.store(true, .release);
+        }
+
+        fn beginPendingMessagePartsLocked(
+            self: *Self,
+            parts: []const []const u8,
+            payload_len: usize,
+        ) Error!void {
+            std.debug.assert(self.pending_message == null);
+            var pending = PendingMessage{
+                .opcode = .binary,
+                .source = .slices,
+                .original_ptr = @intFromPtr(parts.ptr),
+                .original_len = parts.len,
+            };
+            var encoded_len = payload_len;
+            if (self.permessage_deflate and
+                payload_len >= self.compression_threshold)
+            {
+                const compressed = try self.compressMessageParts(
+                    parts,
+                    payload_len,
+                );
+                if (compressed.len < payload_len) {
+                    encoded_len = compressed.len;
+                    pending.compressed = true;
+                }
+            }
+            if (role == .client) {
+                var key: [4]u8 = undefined;
+                try std.Io.randomSecure(self.io(), &key);
+                pending.mask_key = key;
+            }
+            const header = try websocket.writeFrameHeaderForLengthInto(
+                &pending.header,
+                .binary,
+                encoded_len,
+                .{
+                    .mask_key = pending.mask_key,
+                    .rsv1 = pending.compressed,
+                },
+            );
+            pending.header_len = header.len;
+            pending.payload_len = encoded_len;
+            self.pending_message = pending;
+            self.application_write_pending.store(true, .release);
+        }
+
+        fn resumePendingMessageLocked(
+            self: *Self,
+            original_payload: []const u8,
+            progress: *MessageWriteProgress,
+            deadline: std.Io.Clock.Timestamp,
+        ) Error!void {
+            if (self.receiveFailed()) return error.ConnectionClosed;
+            const pending = &self.pending_message.?;
+            const encoded_payload = if (pending.compressed)
+                self.compression_send.payload.items[0..pending.payload_len]
+            else
+                original_payload;
+            var masked: [16 * 1024]u8 align(64) = undefined;
+
+            while (pending.committed < pending.totalLen()) {
+                const header_offset = @min(
+                    pending.committed,
+                    pending.header_len,
+                );
+                const payload_offset = pending.committed - header_offset;
+                const header = pending.header[header_offset..pending.header_len];
+                const remaining_payload = encoded_payload[payload_offset..];
+                var parts: [2][]const u8 = undefined;
+                var part_count: usize = 0;
+                if (header.len != 0) {
+                    parts[part_count] = header;
+                    part_count += 1;
+                }
+                if (remaining_payload.len != 0) {
+                    if (pending.mask_key) |mask| {
+                        const count = @min(masked.len, remaining_payload.len);
+                        try websocket.applyMaskCopy(
+                            masked[0..count],
+                            remaining_payload[0..count],
+                            mask,
+                            payload_offset,
+                        );
+                        parts[part_count] = masked[0..count];
+                    } else {
+                        parts[part_count] = remaining_payload;
+                    }
+                    part_count += 1;
+                }
+
+                var body_progress: http3.runtime.BodyWriteProgress = .{};
+                const send_result = switch (role) {
+                    .client => self.h3.sendRequestBodyPartsPacedWithDeadline(
+                        self.stream_id,
+                        parts[0..part_count],
+                        false,
+                        &body_progress,
+                        deadline,
+                    ),
+                    .server => self.h3.sendResponseBodyPartsPacedWithDeadline(
+                        self.stream_id,
+                        parts[0..part_count],
+                        false,
+                        &body_progress,
+                        deadline,
+                    ),
+                };
+                send_result catch |err| {
+                    pending.committed += body_progress.committed_bytes;
+                    progress.* = .{
+                        .committed_bytes = pending.committed,
+                        .total_bytes = pending.totalLen(),
+                    };
+                    return err;
+                };
+                pending.committed += body_progress.committed_bytes;
+            }
+
+            progress.* = .{
+                .committed_bytes = pending.committed,
+                .total_bytes = pending.totalLen(),
+                .frame_committed = true,
+            };
+            self.pending_message = null;
+            self.application_write_pending.store(false, .release);
+        }
+
+        fn resumePendingMessagePartsLocked(
+            self: *Self,
+            parts: []const []const u8,
+            progress: *MessageWriteProgress,
+            deadline: std.Io.Clock.Timestamp,
+        ) Error!void {
+            if (self.receiveFailed()) return error.ConnectionClosed;
+            const pending = &self.pending_message.?;
+            var scratch: [16 * 1024 + websocket.max_frame_header_len]u8 align(64) = undefined;
+
+            while (pending.committed < pending.totalLen()) {
+                const header_offset = @min(
+                    pending.committed,
+                    pending.header_len,
+                );
+                const payload_offset = pending.committed - header_offset;
+                var wire_len: usize = 0;
+                if (header_offset < pending.header_len) {
+                    const header = pending.header[header_offset..pending.header_len];
+                    @memcpy(scratch[0..header.len], header);
+                    wire_len = header.len;
+                }
+                const payload_capacity = @min(
+                    scratch.len - wire_len,
+                    pending.payload_len - payload_offset,
+                );
+                if (payload_capacity != 0) {
+                    const destination = scratch[wire_len..][0..payload_capacity];
+                    if (pending.compressed) {
+                        const source = self.compression_send.payload.items[payload_offset..][0..payload_capacity];
+                        if (pending.mask_key) |mask| {
+                            try websocket.applyMaskCopy(
+                                destination,
+                                source,
+                                mask,
+                                payload_offset,
+                            );
+                        } else {
+                            @memcpy(destination, source);
+                        }
+                    } else {
+                        try copyMessagePartsAt(
+                            destination,
+                            parts,
+                            payload_offset,
+                            pending.mask_key,
+                        );
+                    }
+                    wire_len += payload_capacity;
+                }
+
+                var body_progress: http3.runtime.BodyWriteProgress = .{};
+                const send_result = switch (role) {
+                    .client => self.h3.sendRequestBodyPacedWithDeadline(
+                        self.stream_id,
+                        scratch[0..wire_len],
+                        false,
+                        &body_progress,
+                        deadline,
+                    ),
+                    .server => self.h3.sendResponseBodyPacedWithDeadline(
+                        self.stream_id,
+                        scratch[0..wire_len],
+                        false,
+                        &body_progress,
+                        deadline,
+                    ),
+                };
+                send_result catch |err| {
+                    pending.committed += body_progress.committed_bytes;
+                    progress.* = .{
+                        .committed_bytes = pending.committed,
+                        .total_bytes = pending.totalLen(),
+                    };
+                    return err;
+                };
+                pending.committed += body_progress.committed_bytes;
+            }
+
+            progress.* = .{
+                .committed_bytes = pending.committed,
+                .total_bytes = pending.totalLen(),
+                .frame_committed = true,
+            };
+            self.pending_message = null;
+            self.application_write_pending.store(false, .release);
+        }
+
         pub fn sendPing(self: *Self, payload: []const u8) Error!void {
             try self.sendControlFrame(.ping, payload);
         }
 
+        pub fn sendPingWithTimeout(
+            self: *Self,
+            payload: []const u8,
+            progress: *MessageWriteProgress,
+            timeout: std.Io.Duration,
+        ) Error!void {
+            progress.* = .{};
+            if (timeout.nanoseconds <= 0) return error.Timeout;
+            return self.sendPingWithDeadline(
+                payload,
+                progress,
+                .fromNow(self.io(), .{ .raw = timeout, .clock = .awake }),
+            );
+        }
+
+        pub fn sendPingWithDeadline(
+            self: *Self,
+            payload: []const u8,
+            progress: *MessageWriteProgress,
+            deadline: std.Io.Clock.Timestamp,
+        ) Error!void {
+            progress.* = .{};
+            _ = try deadline_policy.usableAwake(self.io(), deadline);
+            try common.validateOutgoingControlFrame(
+                self.limits,
+                .ping,
+                payload,
+            );
+            self.send_mutex.lockUncancelable(self.io());
+            defer self.send_mutex.unlock(self.io());
+            _ = try deadline_policy.usableAwake(self.io(), deadline);
+            if (self.pending_message != null or self.pending_close != null) {
+                return error.WriteInProgress;
+            }
+            if (self.pending_ping == null) {
+                if (self.pending_auto_control != null) {
+                    return error.WriteInProgress;
+                }
+                if (self.closeSent() or self.closeReceived()) {
+                    return error.ConnectionClosed;
+                }
+                try self.beginPendingPingLocked(payload);
+            }
+            const total = self.pending_ping.?.len;
+            self.resumePendingPingLocked(payload, deadline) catch |err| {
+                const pending = self.pending_ping.?;
+                progress.* = .{
+                    .committed_bytes = pending.committed,
+                    .total_bytes = pending.len,
+                };
+                return err;
+            };
+            progress.* = .{
+                .committed_bytes = total,
+                .total_bytes = total,
+                .frame_committed = true,
+            };
+        }
+
         pub fn sendPong(self: *Self, payload: []const u8) Error!void {
             try self.sendControlFrame(.pong, payload);
+        }
+
+        pub fn sendPongWithTimeout(
+            self: *Self,
+            payload: []const u8,
+            progress: *MessageWriteProgress,
+            timeout: std.Io.Duration,
+        ) Error!void {
+            progress.* = .{};
+            if (timeout.nanoseconds <= 0) return error.Timeout;
+            return self.sendPongWithDeadline(
+                payload,
+                progress,
+                .fromNow(self.io(), .{ .raw = timeout, .clock = .awake }),
+            );
+        }
+
+        pub fn sendPongWithDeadline(
+            self: *Self,
+            payload: []const u8,
+            progress: *MessageWriteProgress,
+            deadline: std.Io.Clock.Timestamp,
+        ) Error!void {
+            progress.* = .{};
+            _ = try deadline_policy.usableAwake(self.io(), deadline);
+            try common.validateOutgoingControlFrame(
+                self.limits,
+                .pong,
+                payload,
+            );
+            self.send_mutex.lockUncancelable(self.io());
+            defer self.send_mutex.unlock(self.io());
+            _ = try deadline_policy.usableAwake(self.io(), deadline);
+            if (self.pending_ping != null or self.pending_close != null) {
+                return error.WriteInProgress;
+            }
+            if (self.pending_message) |*pending| {
+                if (!pending.matches(.pong, payload)) {
+                    progress.* = .{
+                        .committed_bytes = pending.committed,
+                        .total_bytes = pending.totalLen(),
+                    };
+                    return error.WriteInProgress;
+                }
+            } else {
+                if (self.pending_auto_control != null) {
+                    return error.WriteInProgress;
+                }
+                if (self.closeSent() or self.closeReceived()) {
+                    return error.ConnectionClosed;
+                }
+                try self.beginPendingPongLocked(payload);
+            }
+            try self.resumePendingMessageLocked(payload, progress, deadline);
         }
 
         /// Send Ping once and wait for the matching Pong under one relative
@@ -537,11 +1708,31 @@ pub fn Connection(comptime role: common.Role) type {
                 .ping,
                 payload,
             );
+            if (self.automatic_write_pending.load(.acquire) and
+                !self.application_write_pending.load(.acquire))
+            {
+                _ = try self.pendingAutomaticControlOpcode(.ping_wait);
+                return self.readPingEvent(payload, deadline);
+            }
             {
                 self.send_mutex.lockUncancelable(self.io());
                 defer self.send_mutex.unlock(self.io());
                 _ = try deadline_policy.usableAwake(self.io(), deadline);
-                try self.sendControlFrameLocked(.ping, payload);
+                if (self.pending_message != null or
+                    self.pending_close != null)
+                {
+                    return error.WriteInProgress;
+                }
+                if (self.pending_ping == null) {
+                    if (self.pending_auto_control != null) {
+                        return error.WriteInProgress;
+                    }
+                    if (self.closeSent() or self.closeReceived()) {
+                        return error.ConnectionClosed;
+                    }
+                    try self.beginPendingPingLocked(payload);
+                }
+                try self.resumePendingPingLocked(payload, deadline);
             }
             return self.readPingEvent(payload, deadline);
         }
@@ -567,6 +1758,22 @@ pub fn Connection(comptime role: common.Role) type {
             deadline: std.Io.Clock.Timestamp,
         ) Error!PingEvent {
             _ = try deadline_policy.usableAwake(self.io(), deadline);
+            if (self.automatic_write_pending.load(.acquire) and
+                !self.application_write_pending.load(.acquire))
+            {
+                _ = try self.pendingAutomaticControlOpcode(.ping_wait);
+                return self.readPingEvent(payload, deadline);
+            }
+            {
+                self.send_mutex.lockUncancelable(self.io());
+                defer self.send_mutex.unlock(self.io());
+                if (self.pending_message != null or
+                    self.pending_close != null)
+                {
+                    return error.WriteInProgress;
+                }
+                try self.resumePendingPingLocked(payload, deadline);
+            }
             return self.readPingEvent(payload, deadline);
         }
 
@@ -575,6 +1782,9 @@ pub fn Connection(comptime role: common.Role) type {
             code: websocket.CloseCode,
             reason: []const u8,
         ) Error!void {
+            if (self.receiveFailed() or self.writeAborted()) {
+                return error.ConnectionClosed;
+            }
             var storage: [125]u8 = undefined;
             const payload = try websocket.writeClosePayloadInto(
                 &storage,
@@ -588,6 +1798,111 @@ pub fn Connection(comptime role: common.Role) type {
             self.send_mutex.lockUncancelable(self.io());
             defer self.send_mutex.unlock(self.io());
             try self.sendControlFrameLocked(.close, payload);
+        }
+
+        pub fn sendCloseWithTimeout(
+            self: *Self,
+            code: websocket.CloseCode,
+            reason: []const u8,
+            progress: *MessageWriteProgress,
+            timeout: std.Io.Duration,
+        ) Error!void {
+            return self.sendCloseFrameWithTimeout(
+                .{ .code = code, .reason = reason },
+                progress,
+                timeout,
+            );
+        }
+
+        pub fn sendCloseWithDeadline(
+            self: *Self,
+            code: websocket.CloseCode,
+            reason: []const u8,
+            progress: *MessageWriteProgress,
+            deadline: std.Io.Clock.Timestamp,
+        ) Error!void {
+            return self.sendCloseFrameWithDeadline(
+                .{ .code = code, .reason = reason },
+                progress,
+                deadline,
+            );
+        }
+
+        pub fn sendCloseFrameWithTimeout(
+            self: *Self,
+            close_frame: ?websocket.CloseFrame,
+            progress: *MessageWriteProgress,
+            timeout: std.Io.Duration,
+        ) Error!void {
+            progress.* = .{};
+            if (timeout.nanoseconds <= 0) return error.Timeout;
+            return self.sendCloseFrameWithDeadline(
+                close_frame,
+                progress,
+                .fromNow(self.io(), .{ .raw = timeout, .clock = .awake }),
+            );
+        }
+
+        pub fn sendCloseFrameWithDeadline(
+            self: *Self,
+            close_frame: ?websocket.CloseFrame,
+            progress: *MessageWriteProgress,
+            deadline: std.Io.Clock.Timestamp,
+        ) Error!void {
+            progress.* = .{};
+            _ = try deadline_policy.usableAwake(self.io(), deadline);
+            if (self.receiveFailed() or self.writeAborted()) {
+                return error.ConnectionClosed;
+            }
+            var storage: [125]u8 = undefined;
+            const payload = try websocket.writeClosePayloadInto(
+                &storage,
+                close_frame,
+            );
+            try common.validateOutgoingControlFrame(
+                self.limits,
+                .close,
+                payload,
+            );
+            self.send_mutex.lockUncancelable(self.io());
+            defer self.send_mutex.unlock(self.io());
+            _ = try deadline_policy.usableAwake(self.io(), deadline);
+            if (self.receiveFailed() or self.writeAborted()) {
+                return error.ConnectionClosed;
+            }
+            if (self.pending_message != null or self.pending_ping != null) {
+                return error.WriteInProgress;
+            }
+            if (self.pending_close) |*pending| {
+                if (!pending.matches(payload)) return error.WriteInProgress;
+            } else {
+                if (self.pending_auto_control != null) {
+                    return error.WriteInProgress;
+                }
+                if (self.closeSent()) return error.ConnectionClosed;
+                try self.beginPendingCloseLocked(payload);
+            }
+            const total = self.pending_close.?.len;
+            self.resumePendingCloseLocked(deadline) catch |err| {
+                const pending = self.pending_close orelse {
+                    progress.* = .{
+                        .committed_bytes = total,
+                        .total_bytes = total,
+                        .frame_committed = true,
+                    };
+                    return err;
+                };
+                progress.* = .{
+                    .committed_bytes = pending.committed,
+                    .total_bytes = pending.len,
+                };
+                return err;
+            };
+            progress.* = .{
+                .committed_bytes = total,
+                .total_bytes = total,
+                .frame_committed = true,
+            };
         }
 
         /// Send a Close frame with optional status metadata. Passing null emits
@@ -609,14 +1924,6 @@ pub fn Connection(comptime role: common.Role) type {
             self.send_mutex.lockUncancelable(self.io());
             defer self.send_mutex.unlock(self.io());
             try self.sendControlFrameLocked(.close, payload);
-        }
-
-        fn echoCloseFrame(self: *Self, payload: []const u8) Error!void {
-            self.send_mutex.lockUncancelable(self.io());
-            defer self.send_mutex.unlock(self.io());
-            if (!self.closeSent()) {
-                try self.sendControlFrameLocked(.close, payload);
-            }
         }
 
         /// Receive and own metadata from the next frame when it is Close.
@@ -692,7 +1999,16 @@ pub fn Connection(comptime role: common.Role) type {
             deadline: std.Io.Clock.Timestamp,
         ) Error!CloseHandshakeEvent {
             _ = try deadline_policy.usableAwake(self.io(), deadline);
-            if (!self.closeSent()) {
+            if (self.receiveFailed() or self.writeAborted()) {
+                return error.ConnectionClosed;
+            }
+            if (self.automatic_write_pending.load(.acquire) and
+                !self.application_write_pending.load(.acquire))
+            {
+                _ = try self.pendingAutomaticControlOpcode(.close_wait);
+                return self.readCloseHandshakeEvent(deadline);
+            }
+            if (!self.closeSent() or self.pending_close != null) {
                 var storage: [125]u8 = undefined;
                 const payload = try websocket.writeClosePayloadInto(
                     &storage,
@@ -707,9 +2023,25 @@ pub fn Connection(comptime role: common.Role) type {
                     self.send_mutex.lockUncancelable(self.io());
                     defer self.send_mutex.unlock(self.io());
                     _ = try deadline_policy.usableAwake(self.io(), deadline);
-                    if (!self.closeSent()) {
-                        try self.sendControlFrameLocked(.close, payload);
+                    if (self.receiveFailed() or self.writeAborted()) {
+                        return error.ConnectionClosed;
                     }
+                    if (self.pending_message != null or
+                        self.pending_ping != null)
+                    {
+                        return error.WriteInProgress;
+                    }
+                    if (self.pending_close) |*pending| {
+                        if (!pending.matches(payload)) {
+                            return error.WriteInProgress;
+                        }
+                    } else if (!self.closeSent()) {
+                        if (self.pending_auto_control != null) {
+                            return error.WriteInProgress;
+                        }
+                        try self.beginPendingCloseLocked(payload);
+                    }
+                    try self.resumePendingCloseLocked(deadline);
                 }
             }
             return self.readCloseHandshakeEvent(deadline);
@@ -733,7 +2065,31 @@ pub fn Connection(comptime role: common.Role) type {
             deadline: std.Io.Clock.Timestamp,
         ) Error!CloseHandshakeEvent {
             _ = try deadline_policy.usableAwake(self.io(), deadline);
-            if (!self.closeSent()) return error.InvalidFrame;
+            if (self.receiveFailed() or self.writeAborted()) {
+                return error.ConnectionClosed;
+            }
+            if (self.automatic_write_pending.load(.acquire) and
+                !self.application_write_pending.load(.acquire))
+            {
+                _ = try self.pendingAutomaticControlOpcode(.close_wait);
+                return self.readCloseHandshakeEvent(deadline);
+            }
+            {
+                self.send_mutex.lockUncancelable(self.io());
+                defer self.send_mutex.unlock(self.io());
+                if (self.receiveFailed() or self.writeAborted()) {
+                    return error.ConnectionClosed;
+                }
+                if (self.pending_message != null or
+                    self.pending_ping != null)
+                {
+                    return error.WriteInProgress;
+                }
+                if (!self.closeSent() and self.pending_close == null) {
+                    return error.InvalidFrame;
+                }
+                try self.resumePendingCloseLocked(deadline);
+            }
             return self.readCloseHandshakeEvent(deadline);
         }
 
@@ -767,8 +2123,16 @@ pub fn Connection(comptime role: common.Role) type {
             self: *Self,
             deadline: ?std.Io.Clock.Timestamp,
         ) Error!common.OwnedMessage {
-            errdefer |err| self.closeAfterReceiveError(err);
+            if (self.receiveFailed()) return error.ConnectionClosed;
             if (self.message_into.active()) return error.InvalidFrame;
+            if (try self.pendingAutomaticControlOpcode(.message)) |opcode| {
+                std.debug.assert(
+                    (try self.resumeAutomaticControl(deadline)) == null,
+                );
+                if (opcode == .close) return error.ConnectionClosed;
+            }
+            try self.ensureNoPendingWrites();
+            errdefer |err| self.closeAfterReceiveError(err, deadline);
             if (self.message_assembler == null) {
                 self.message_assembler = websocket.MessageAssembler.initLimited(
                     self.allocator,
@@ -780,12 +2144,19 @@ pub fn Connection(comptime role: common.Role) type {
                 switch (frame.header.opcode) {
                     .ping => {
                         if (!self.closeSent()) {
-                            self.sendPong(frame.payload) catch |err| {
-                                self.discardBuffered(frame.consumed);
-                                return @errorCast(err);
-                            };
+                            try self.beginAutomaticControl(
+                                .pong,
+                                frame.payload,
+                                .message,
+                                null,
+                            );
                         }
                         self.discardBuffered(frame.consumed);
+                        if (self.pending_auto_control != null) {
+                            std.debug.assert(
+                                (try self.resumeAutomaticControl(deadline)) == null,
+                            );
+                        }
                         continue;
                     },
                     .pong => {
@@ -794,13 +2165,22 @@ pub fn Connection(comptime role: common.Role) type {
                     },
                     .close => {
                         self.close_received.store(true, .release);
+                        self.message_assembler.?.deinit();
+                        self.message_assembler = null;
                         if (!self.closeSent()) {
-                            self.echoCloseFrame(frame.payload) catch |err| {
-                                self.discardBuffered(frame.consumed);
-                                return @errorCast(err);
-                            };
+                            try self.beginAutomaticControl(
+                                .close,
+                                frame.payload,
+                                .message,
+                                null,
+                            );
                         }
                         self.discardBuffered(frame.consumed);
+                        if (self.pending_auto_control != null) {
+                            std.debug.assert(
+                                (try self.resumeAutomaticControl(deadline)) == null,
+                            );
+                        }
                         return error.ConnectionClosed;
                     },
                     else => {
@@ -820,30 +2200,11 @@ pub fn Connection(comptime role: common.Role) type {
                         self.discardBuffered(frame.consumed);
                         self.message_assembler.?.deinit();
                         self.message_assembler = null;
-                        if (assembled.compressed) {
-                            errdefer self.allocator.free(assembled.payload);
-                            const payload = try websocket.decompressMessage(
-                                self.allocator,
-                                assembled.payload,
-                                self.limits.max_message_bytes,
-                            );
-                            self.allocator.free(assembled.payload);
-                            errdefer self.allocator.free(payload);
-                            if (assembled.opcode == .text and
-                                !std.unicode.utf8ValidateSlice(payload))
-                            {
-                                return error.InvalidUtf8;
-                            }
-                            return .{
-                                .opcode = assembled.opcode,
-                                .payload = payload,
-                                .was_compressed = true,
-                            };
-                        }
-                        return .{
-                            .opcode = assembled.opcode,
-                            .payload = assembled.payload,
-                        };
+                        return message_state.finishIncomingMessage(
+                            self.allocator,
+                            assembled,
+                            self.limits.max_message_bytes,
+                        );
                     },
                 }
             }
@@ -963,13 +2324,21 @@ pub fn Connection(comptime role: common.Role) type {
             out: []u8,
             deadline: ?std.Io.Clock.Timestamp,
         ) Error!Message {
+            if (self.receiveFailed()) return error.ConnectionClosed;
             if (self.message_assembler != null) return error.InvalidFrame;
             if (out.len < self.limits.max_message_bytes) {
                 return error.BufferTooShort;
             }
             try self.message_into.validateOutput(out);
             errdefer |err| self.resetMessageIntoAfterError(err);
-            errdefer |err| self.closeAfterReceiveError(err);
+            errdefer |err| self.closeAfterReceiveError(err, deadline);
+            if (try self.pendingAutomaticControlOpcode(.message)) |opcode| {
+                std.debug.assert(
+                    (try self.resumeAutomaticControl(deadline)) == null,
+                );
+                if (opcode == .close) return error.ConnectionClosed;
+            }
+            try self.ensureNoPendingWrites();
 
             var control_storage: [125]u8 = undefined;
             while (true) {
@@ -979,8 +2348,35 @@ pub fn Connection(comptime role: common.Role) type {
                     deadline,
                 );
                 switch (frame.header.opcode) {
-                    .ping, .pong => continue,
-                    .close => return error.ConnectionClosed,
+                    .ping => {
+                        if (!self.closeSent()) {
+                            try self.beginAutomaticControl(
+                                .pong,
+                                frame.payload,
+                                .message,
+                                null,
+                            );
+                            std.debug.assert(
+                                (try self.resumeAutomaticControl(deadline)) == null,
+                            );
+                        }
+                        continue;
+                    },
+                    .pong => continue,
+                    .close => {
+                        if (!self.closeSent()) {
+                            try self.beginAutomaticControl(
+                                .close,
+                                frame.payload,
+                                .message,
+                                null,
+                            );
+                            std.debug.assert(
+                                (try self.resumeAutomaticControl(deadline)) == null,
+                            );
+                        }
+                        return error.ConnectionClosed;
+                    },
                     .text, .binary => {
                         std.debug.assert(self.message_into.active());
                     },
@@ -1094,12 +2490,9 @@ pub fn Connection(comptime role: common.Role) type {
             );
             self.discardBuffered(frame.consumed);
             switch (frame.header.opcode) {
-                .ping => {
-                    if (!self.closeSent()) try self.sendPong(frame.payload);
-                },
+                .ping => {},
                 .close => {
                     self.close_received.store(true, .release);
-                    if (!self.closeSent()) try self.echoCloseFrame(frame.payload);
                 },
                 else => {},
             }
@@ -1341,7 +2734,7 @@ pub fn Connection(comptime role: common.Role) type {
             if (self.message_assembler != null or self.message_into.active()) {
                 return error.InvalidFrame;
             }
-            return self.receiveFrameInternal(null);
+            return self.receiveFrameInternal(null, .frame);
         }
 
         pub fn receiveFrameWithTimeout(
@@ -1352,10 +2745,13 @@ pub fn Connection(comptime role: common.Role) type {
             if (self.message_assembler != null or self.message_into.active()) {
                 return error.InvalidFrame;
             }
-            return self.receiveFrameInternal(.fromNow(
-                self.io(),
-                .{ .raw = timeout, .clock = .awake },
-            ));
+            return self.receiveFrameInternal(
+                .fromNow(
+                    self.io(),
+                    .{ .raw = timeout, .clock = .awake },
+                ),
+                .frame,
+            );
         }
 
         pub fn receiveFrameWithDeadline(
@@ -1366,7 +2762,7 @@ pub fn Connection(comptime role: common.Role) type {
             if (self.message_assembler != null or self.message_into.active()) {
                 return error.InvalidFrame;
             }
-            return self.receiveFrameInternal(deadline);
+            return self.receiveFrameInternal(deadline, .frame);
         }
 
         fn readPingEvent(
@@ -1375,7 +2771,10 @@ pub fn Connection(comptime role: common.Role) type {
             deadline: std.Io.Clock.Timestamp,
         ) Error!PingEvent {
             while (true) {
-                var frame = try self.receiveFrameInternal(deadline);
+                var frame = try self.receiveFrameInternal(
+                    deadline,
+                    .ping_wait,
+                );
                 switch (frame.header.opcode) {
                     .ping => {
                         frame.deinit(self.allocator);
@@ -1411,7 +2810,10 @@ pub fn Connection(comptime role: common.Role) type {
             deadline: std.Io.Clock.Timestamp,
         ) Error!CloseHandshakeEvent {
             while (true) {
-                var frame = try self.receiveFrameInternal(deadline);
+                var frame = try self.receiveFrameInternal(
+                    deadline,
+                    .close_wait,
+                );
                 switch (frame.header.opcode) {
                     .ping, .pong => {
                         frame.deinit(self.allocator);
@@ -1438,8 +2840,17 @@ pub fn Connection(comptime role: common.Role) type {
         fn receiveFrameInternal(
             self: *Self,
             deadline: ?std.Io.Clock.Timestamp,
+            delivery: PendingAutomaticControl.Delivery,
         ) Error!websocket.Frame {
-            errdefer |err| self.closeAfterReceiveError(err);
+            if (self.receiveFailed()) return error.ConnectionClosed;
+            if (try self.pendingAutomaticControlOpcode(delivery)) |_| {
+                if (try self.resumeAutomaticControl(deadline)) |frame| {
+                    return frame;
+                }
+                return self.receiveFrameInternal(deadline, delivery);
+            }
+            try self.ensureNoPendingWrites();
+            errdefer |err| self.closeAfterReceiveError(err, deadline);
             if (self.closeSent() and self.closeReceived()) {
                 return error.ConnectionClosed;
             }
@@ -1496,7 +2907,7 @@ pub fn Connection(comptime role: common.Role) type {
                     .validate_utf8 = false,
                 },
             };
-            const frame = try websocket.parseFrameWithHeader(
+            var frame = try websocket.parseFrameWithHeader(
                 self.allocator,
                 available[0..total_len],
                 header,
@@ -1505,23 +2916,126 @@ pub fn Connection(comptime role: common.Role) type {
             self.discardBuffered(frame.consumed);
             switch (frame.header.opcode) {
                 .ping => {
-                    if (!self.closeSent()) try self.sendPong(frame.payload);
+                    if (self.closeSent()) return frame;
+                    self.beginAutomaticControl(
+                        .pong,
+                        frame.payload,
+                        delivery,
+                        frame,
+                    ) catch |err| {
+                        frame.deinit(self.allocator);
+                        return @errorCast(err);
+                    };
+                    return (try self.resumeAutomaticControl(deadline)) orelse
+                        unreachable;
                 },
                 .close => {
                     self.close_received.store(true, .release);
-                    if (!self.closeSent()) try self.echoCloseFrame(frame.payload);
+                    if (self.closeSent()) return frame;
+                    self.beginAutomaticControl(
+                        .close,
+                        frame.payload,
+                        delivery,
+                        frame,
+                    ) catch |err| {
+                        frame.deinit(self.allocator);
+                        return @errorCast(err);
+                    };
+                    return (try self.resumeAutomaticControl(deadline)) orelse
+                        unreachable;
                 },
                 else => {},
             }
             return frame;
         }
 
-        fn closeAfterReceiveError(self: *Self, err: anyerror) void {
-            const code = common.closeCodeForReceiveError(err) orelse return;
-            // Nested receive helpers can observe the same error. Emit at most
-            // one failure Close while preserving the original receive error.
+        fn closeAfterReceiveError(
+            self: *Self,
+            err: anyerror,
+            deadline: ?std.Io.Clock.Timestamp,
+        ) void {
+            if (common.closeCodeForReceiveError(err)) |code| {
+                // Nested receive helpers can observe the same error. Emit at
+                // most one failure Close while preserving the receive error.
+                if (!self.failReceive()) return;
+                self.finishReceiveFailure(code, deadline);
+                return;
+            }
+            if (!isAbruptReceiveEnd(err) or
+                self.close_received.load(.acquire))
+            {
+                return;
+            }
+            // QUIC FIN/reset without a WebSocket Close is an abnormal closure.
+            // Do not invent a Close frame after the peer ended this direction.
+            if (!self.failReceive()) return;
+            self.finishAbruptReceiveEnd();
+        }
+
+        fn abortStreamAfterReceiveFailureLocked(self: *Self) void {
+            self.write_aborted.store(true, .release);
+            self.h3.tryCancelRequest(
+                self.stream_id,
+                http3.ApplicationErrorCode.request_cancelled,
+            ) catch {};
+            common.clearPendingOutboundLocked(self);
+        }
+
+        fn finishReceiveFailure(
+            self: *Self,
+            code: websocket.CloseCode,
+            deadline: ?std.Io.Clock.Timestamp,
+        ) void {
+            self.send_mutex.lockUncancelable(self.io());
+            defer self.send_mutex.unlock(self.io());
+            if (self.pending_message != null or
+                self.pending_ping != null or
+                self.pending_close != null or
+                self.pending_auto_control != null)
+            {
+                self.abortStreamAfterReceiveFailureLocked();
+                return;
+            }
             if (self.closeSent()) return;
-            self.sendClose(code, "") catch {};
+            var storage: [125]u8 = undefined;
+            const payload = websocket.writeClosePayloadInto(
+                &storage,
+                .{ .code = code },
+            ) catch return;
+            if (deadline) |absolute| {
+                self.beginPendingCloseLocked(payload) catch return;
+                self.resumePendingCloseLocked(absolute) catch {
+                    self.abortStreamAfterReceiveFailureLocked();
+                };
+                return;
+            }
+            self.writeFrame(.close, payload, true, true) catch {
+                self.abortStreamAfterReceiveFailureLocked();
+                return;
+            };
+            self.close_sent.store(true, .release);
+        }
+
+        fn finishAbruptReceiveEnd(self: *Self) void {
+            self.send_mutex.lockUncancelable(self.io());
+            defer self.send_mutex.unlock(self.io());
+            self.abortStreamAfterReceiveFailureLocked();
+        }
+
+        fn failReceive(self: *Self) bool {
+            if (self.receive_failed.swap(true, .acq_rel)) return false;
+            if (self.message_assembler) |*assembler| assembler.deinit();
+            self.message_assembler = null;
+            self.message_into.reset();
+            self.message_frame_receive.reset();
+            self.incoming_data_kind = .none;
+            self.incoming_text_utf8.reset();
+            self.incoming_frame_validated = 0;
+            self.inbuf.clearAndFree(self.allocator);
+            self.inbuf_consumed = 0;
+            self.compression_receive.deinit(self.allocator);
+            self.compression_receive = .{};
+            return true;
         }
 
         fn sendDataFrameValidatedLocked(
@@ -1529,6 +3043,13 @@ pub fn Connection(comptime role: common.Role) type {
             opcode: websocket.Opcode,
             payload: []const u8,
         ) Error!void {
+            if (self.pending_message != null or
+                self.pending_ping != null or
+                self.pending_close != null or
+                self.pending_auto_control != null)
+            {
+                return error.WriteInProgress;
+            }
             if (self.closeSent() or self.closeReceived()) {
                 return error.ConnectionClosed;
             }
@@ -1570,17 +3091,330 @@ pub fn Connection(comptime role: common.Role) type {
             opcode: websocket.Opcode,
             payload: []const u8,
         ) Error!void {
-            if (self.closeSent()) return error.ConnectionClosed;
-            try self.writeFrame(opcode, payload, true, opcode == .close);
+            if (self.writeAborted()) return error.ConnectionClosed;
+            if (self.pending_message != null) return error.WriteInProgress;
+            if (self.pending_ping != null) return error.WriteInProgress;
+            if (self.pending_close != null) return error.WriteInProgress;
+            if (self.pending_auto_control != null) {
+                return error.WriteInProgress;
+            }
+            if (self.receiveFailed() or self.closeSent()) {
+                return error.ConnectionClosed;
+            }
+            self.writeFrame(
+                opcode,
+                payload,
+                true,
+                opcode == .close,
+            ) catch |err| {
+                // The unbounded HTTP/3 sender does not expose how much of a
+                // multi-packet frame became visible. A failed Close therefore
+                // cannot be retried safely from byte zero. Keep close_sent as
+                // an acknowledgement of success and fail this stream closed.
+                if (opcode == .close) {
+                    self.write_aborted.store(true, .release);
+                }
+                return err;
+            };
             if (opcode == .close) self.close_sent.store(true, .release);
+        }
+
+        fn beginAutomaticControl(
+            self: *Self,
+            opcode: websocket.Opcode,
+            payload: []const u8,
+            delivery: PendingAutomaticControl.Delivery,
+            frame: ?websocket.Frame,
+        ) Error!void {
+            self.send_mutex.lockUncancelable(self.io());
+            defer self.send_mutex.unlock(self.io());
+            if (self.pending_auto_control != null) {
+                return error.WriteInProgress;
+            }
+
+            var pending = PendingAutomaticControl{
+                .opcode = opcode,
+                .delivery = delivery,
+                .frame = frame,
+            };
+            const mask_key = if (role == .client) blk: {
+                var key: [4]u8 = undefined;
+                try std.Io.randomSecure(self.io(), &key);
+                break :blk key;
+            } else null;
+            const encoded = try websocket.writeFrameInto(
+                &pending.bytes,
+                opcode,
+                payload,
+                .{ .mask_key = mask_key },
+            );
+            pending.len = encoded.len;
+            self.pending_auto_control = pending;
+            self.automatic_write_pending.store(true, .release);
+        }
+
+        fn resumeAutomaticControl(
+            self: *Self,
+            deadline: ?std.Io.Clock.Timestamp,
+        ) Error!?websocket.Frame {
+            self.send_mutex.lockUncancelable(self.io());
+            defer self.send_mutex.unlock(self.io());
+            const pending = if (self.pending_auto_control) |*value|
+                value
+            else
+                return null;
+            if (self.pending_message != null or
+                self.pending_ping != null or
+                self.pending_close != null)
+            {
+                return error.WriteInProgress;
+            }
+            if (self.closeSent()) pending.writes_reply = false;
+
+            var progress: http3.runtime.BodyWriteProgress = .{};
+            const bytes = pending.bytes[pending.committed..pending.len];
+            const fin = pending.opcode == .close;
+            if (!pending.complete() and deadline != null) {
+                const absolute = deadline.?;
+                _ = try deadline_policy.usableAwake(self.io(), absolute);
+                switch (role) {
+                    .client => self.h3.sendRequestBodyPacedWithDeadline(
+                        self.stream_id,
+                        bytes,
+                        fin,
+                        &progress,
+                        absolute,
+                    ) catch |err| {
+                        pending.committed += progress.committed_bytes;
+                        pending.fin_committed =
+                            pending.fin_committed or progress.fin_committed;
+                        return err;
+                    },
+                    .server => self.h3.sendResponseBodyPacedWithDeadline(
+                        self.stream_id,
+                        bytes,
+                        fin,
+                        &progress,
+                        absolute,
+                    ) catch |err| {
+                        pending.committed += progress.committed_bytes;
+                        pending.fin_committed =
+                            pending.fin_committed or progress.fin_committed;
+                        return err;
+                    },
+                }
+            } else if (!pending.complete()) {
+                switch (role) {
+                    .client => try self.h3.sendRequestBodyPaced(
+                        self.stream_id,
+                        bytes,
+                        fin,
+                    ),
+                    .server => try self.h3.sendResponseBodyPaced(
+                        self.stream_id,
+                        bytes,
+                        fin,
+                    ),
+                }
+                progress.committed_bytes = bytes.len;
+                progress.fin_committed = fin;
+            }
+            pending.committed += progress.committed_bytes;
+            pending.fin_committed =
+                pending.fin_committed or progress.fin_committed;
+            std.debug.assert(pending.complete());
+            if (pending.opcode == .close) {
+                self.close_sent.store(true, .release);
+            }
+            const frame = pending.frame;
+            pending.frame = null;
+            std.crypto.secureZero(u8, &pending.bytes);
+            self.pending_auto_control = null;
+            self.automatic_write_pending.store(false, .release);
+            return frame;
+        }
+
+        fn beginPendingPingLocked(
+            self: *Self,
+            payload: []const u8,
+        ) Error!void {
+            std.debug.assert(self.pending_ping == null);
+            var pending: PendingPing = .{};
+            @memcpy(pending.payload[0..payload.len], payload);
+            pending.payload_len = payload.len;
+            var mask_key: ?[4]u8 = null;
+            if (role == .client) {
+                var key: [4]u8 = undefined;
+                try std.Io.randomSecure(self.io(), &key);
+                mask_key = key;
+            }
+            const encoded = try websocket.writeFrameInto(
+                &pending.bytes,
+                .ping,
+                payload,
+                .{ .mask_key = mask_key },
+            );
+            pending.len = encoded.len;
+            self.pending_ping = pending;
+            self.application_write_pending.store(true, .release);
+        }
+
+        fn resumePendingPingLocked(
+            self: *Self,
+            payload: []const u8,
+            deadline: std.Io.Clock.Timestamp,
+        ) Error!void {
+            if (self.receiveFailed()) return error.ConnectionClosed;
+            const pending = if (self.pending_ping) |*value|
+                value
+            else
+                return;
+            if (!pending.matches(payload)) return error.WriteInProgress;
+            var progress: http3.runtime.BodyWriteProgress = .{};
+            switch (role) {
+                .client => self.h3.sendRequestBodyPacedWithDeadline(
+                    self.stream_id,
+                    pending.bytes[pending.committed..pending.len],
+                    false,
+                    &progress,
+                    deadline,
+                ) catch |err| {
+                    pending.committed += progress.committed_bytes;
+                    return err;
+                },
+                .server => self.h3.sendResponseBodyPacedWithDeadline(
+                    self.stream_id,
+                    pending.bytes[pending.committed..pending.len],
+                    false,
+                    &progress,
+                    deadline,
+                ) catch |err| {
+                    pending.committed += progress.committed_bytes;
+                    return err;
+                },
+            }
+            pending.committed += progress.committed_bytes;
+            std.debug.assert(pending.committed == pending.len);
+            self.pending_ping = null;
+            self.application_write_pending.store(false, .release);
+        }
+
+        fn beginPendingCloseLocked(
+            self: *Self,
+            payload: []const u8,
+        ) Error!void {
+            std.debug.assert(self.pending_close == null);
+            var pending: PendingClose = .{};
+            @memcpy(pending.payload[0..payload.len], payload);
+            pending.payload_len = payload.len;
+            var mask_key: ?[4]u8 = null;
+            if (role == .client) {
+                var key: [4]u8 = undefined;
+                try std.Io.randomSecure(self.io(), &key);
+                mask_key = key;
+            }
+            const encoded = try websocket.writeFrameInto(
+                &pending.bytes,
+                .close,
+                payload,
+                .{ .mask_key = mask_key },
+            );
+            pending.len = encoded.len;
+            self.pending_close = pending;
+            self.application_write_pending.store(true, .release);
+        }
+
+        fn resumePendingCloseLocked(
+            self: *Self,
+            deadline: std.Io.Clock.Timestamp,
+        ) Error!void {
+            if (self.writeAborted()) return error.ConnectionClosed;
+            const pending = if (self.pending_close) |*value|
+                value
+            else
+                return;
+            var progress: http3.runtime.BodyWriteProgress = .{};
+            switch (role) {
+                .client => self.h3.sendRequestBodyPacedWithDeadline(
+                    self.stream_id,
+                    pending.bytes[pending.committed..pending.len],
+                    true,
+                    &progress,
+                    deadline,
+                ) catch |err| {
+                    pending.committed += progress.committed_bytes;
+                    if (progress.fin_committed) {
+                        self.pending_close = null;
+                        self.application_write_pending.store(false, .release);
+                        self.close_sent.store(true, .release);
+                    }
+                    return err;
+                },
+                .server => self.h3.sendResponseBodyPacedWithDeadline(
+                    self.stream_id,
+                    pending.bytes[pending.committed..pending.len],
+                    true,
+                    &progress,
+                    deadline,
+                ) catch |err| {
+                    pending.committed += progress.committed_bytes;
+                    if (progress.fin_committed) {
+                        self.pending_close = null;
+                        self.application_write_pending.store(false, .release);
+                        self.close_sent.store(true, .release);
+                    }
+                    return err;
+                },
+            }
+            pending.committed += progress.committed_bytes;
+            std.debug.assert(
+                pending.committed == pending.len and progress.fin_committed,
+            );
+            self.pending_close = null;
+            self.application_write_pending.store(false, .release);
+            self.close_sent.store(true, .release);
         }
 
         fn closeSent(self: *const Self) bool {
             return self.close_sent.load(.acquire);
         }
 
+        fn closeFullySent(self: *const Self) bool {
+            return self.closeSent() and self.pending_close == null;
+        }
+
         fn closeReceived(self: *const Self) bool {
-            return self.close_received.load(.acquire);
+            return self.receiveFailed() or self.close_received.load(.acquire);
+        }
+
+        fn receiveFailed(self: *const Self) bool {
+            return self.receive_failed.load(.acquire);
+        }
+
+        fn writeAborted(self: *const Self) bool {
+            return self.write_aborted.load(.acquire);
+        }
+
+        fn ensureNoPendingWrites(self: *Self) Error!void {
+            if (self.application_write_pending.load(.acquire) or
+                self.automatic_write_pending.load(.acquire))
+            {
+                return error.WriteInProgress;
+            }
+        }
+
+        fn pendingAutomaticControlOpcode(
+            self: *Self,
+            delivery: PendingAutomaticControl.Delivery,
+        ) Error!?websocket.Opcode {
+            if (!self.automatic_write_pending.load(.acquire)) return null;
+            self.send_mutex.lockUncancelable(self.io());
+            defer self.send_mutex.unlock(self.io());
+            const pending = self.pending_auto_control orelse return null;
+            if (pending.delivery != delivery) {
+                return error.WriteInProgress;
+            }
+            return pending.opcode;
         }
 
         fn writeFrame(
@@ -1646,10 +3480,9 @@ pub fn Connection(comptime role: common.Role) type {
             }
         }
 
-        fn writeBinaryParts(
+        fn writeBinarySlices(
             self: *Self,
-            first: []const u8,
-            second: []const u8,
+            parts: []const []const u8,
             payload_len: usize,
         ) Error!void {
             var mask_key: ?[4]u8 = null;
@@ -1668,17 +3501,42 @@ pub fn Connection(comptime role: common.Role) type {
             if (mask_key) |mask| {
                 try self.writeMaskedParts(
                     header,
-                    &.{ first, second },
+                    parts,
                     mask,
                     false,
                 );
                 return;
             }
 
-            // The HTTP/3 body API accepts arbitrary slices and emits one
-            // continuous byte stream, so the server can retain both borrowed
-            // inputs without allocating a plaintext join.
-            try self.writeParts(&.{ header, first, second }, false);
+            try self.writeUnmaskedParts(header, parts);
+        }
+
+        fn writeUnmaskedParts(
+            self: *Self,
+            header: []const u8,
+            payload_parts: []const []const u8,
+        ) Error!void {
+            var parts: [max_batched_payload_slices + 1][]const u8 = undefined;
+            var part_index: usize = 0;
+            var header_pending = true;
+            while (true) {
+                var count: usize = 0;
+                if (header_pending) {
+                    parts[count] = header;
+                    count += 1;
+                    header_pending = false;
+                }
+                while (part_index < payload_parts.len and count < parts.len) {
+                    const part = payload_parts[part_index];
+                    part_index += 1;
+                    if (part.len == 0) continue;
+                    parts[count] = part;
+                    count += 1;
+                }
+                if (count == 0) return;
+                try self.writeParts(parts[0..count], false);
+                if (part_index == payload_parts.len) return;
+            }
         }
 
         fn writeMaskedParts(
@@ -3681,11 +5539,159 @@ fn compressedFragmentRange(
 pub const testing = if (builtin.is_test) struct {
     pub const FragmentRangeForTest = FragmentRange;
 
+    pub fn pendingCloseProgress(
+        connection: anytype,
+    ) ?struct { committed: usize, total: usize } {
+        const pending = connection.pending_close orelse return null;
+        return .{ .committed = pending.committed, .total = pending.len };
+    }
+
+    pub fn pendingPingProgress(
+        connection: anytype,
+    ) ?struct { committed: usize, total: usize } {
+        const pending = connection.pending_ping orelse return null;
+        return .{ .committed = pending.committed, .total = pending.len };
+    }
+
+    pub fn pendingAutomaticControlProgress(
+        connection: anytype,
+    ) ?struct {
+        opcode: websocket.Opcode,
+        committed: usize,
+        total: usize,
+        retains_frame: bool,
+    } {
+        const pending = connection.pending_auto_control orelse return null;
+        return .{
+            .opcode = pending.opcode,
+            .committed = pending.committed,
+            .total = pending.len,
+            .retains_frame = pending.frame != null,
+        };
+    }
+
+    pub fn bufferInitial(connection: anytype, bytes: []const u8) !void {
+        try message_buffer.appendAfterConsumed(
+            &connection.inbuf,
+            &connection.inbuf_consumed,
+            connection.allocator,
+            bytes,
+        );
+    }
+
+    pub fn queueAutomaticControl(
+        connection: anytype,
+        opcode: websocket.Opcode,
+        payload: []const u8,
+    ) !void {
+        try connection.beginAutomaticControl(
+            opcode,
+            payload,
+            .message,
+            null,
+        );
+    }
+
+    pub fn pendingMessageProgress(
+        connection: anytype,
+    ) ?MessageWriteProgress {
+        const pending = connection.pending_message orelse return null;
+        return .{
+            .committed_bytes = pending.committed,
+            .total_bytes = pending.totalLen(),
+        };
+    }
+
     pub fn validateBinaryInPlace(
         connection: anytype,
         payload_len: usize,
     ) Error!void {
         return connection.validateBinaryInPlace(payload_len);
+    }
+
+    pub fn receiveStorageReleased(connection: anytype) bool {
+        return connection.receiveFailed() and
+            connection.inbuf.capacity == 0 and
+            connection.inbuf.items.len == 0 and
+            connection.inbuf_consumed == 0 and
+            connection.message_assembler == null and
+            !connection.message_into.active() and
+            connection.message_frame_receive.header == null and
+            connection.compression_receive.payload.capacity == 0 and
+            connection.compression_receive.flate_window == null;
+    }
+
+    pub fn writeAborted(connection: anytype) bool {
+        return connection.writeAborted();
+    }
+
+    pub fn outboundStorageReleased(connection: anytype) bool {
+        return connection.pending_message == null and
+            connection.pending_ping == null and
+            connection.pending_close == null and
+            connection.pending_auto_control == null and
+            !connection.application_write_pending.load(.acquire) and
+            !connection.automatic_write_pending.load(.acquire) and
+            connection.compression_send.payload.capacity == 0 and
+            connection.compression_send.encoder == null;
+    }
+
+    pub fn beginPendingMessage(
+        connection: anytype,
+        opcode: websocket.Opcode,
+        payload: []const u8,
+    ) !void {
+        try connection.beginPendingMessageLocked(opcode, payload);
+    }
+
+    pub fn beginPendingControl(
+        connection: anytype,
+        opcode: websocket.Opcode,
+        payload: []const u8,
+    ) !void {
+        return switch (opcode) {
+            .ping => connection.beginPendingPingLocked(payload),
+            .close => connection.beginPendingCloseLocked(payload),
+            else => error.InvalidFrame,
+        };
+    }
+
+    pub fn markPendingMessageCommitted(
+        connection: anytype,
+        committed: usize,
+    ) void {
+        std.debug.assert(connection.pending_message != null);
+        std.debug.assert(
+            committed <= connection.pending_message.?.totalLen(),
+        );
+        connection.pending_message.?.committed = committed;
+    }
+
+    pub fn markPendingControlCommitted(
+        connection: anytype,
+        opcode: websocket.Opcode,
+        committed: usize,
+    ) void {
+        switch (opcode) {
+            .ping => {
+                std.debug.assert(committed <= connection.pending_ping.?.len);
+                connection.pending_ping.?.committed = committed;
+            },
+            .close => {
+                std.debug.assert(committed <= connection.pending_close.?.len);
+                connection.pending_close.?.committed = committed;
+            },
+            else => unreachable,
+        }
+    }
+
+    pub fn failReceiveAndFinish(
+        connection: anytype,
+        code: websocket.CloseCode,
+    ) void {
+        if (connection.failReceive()) {
+            connection.finishReceiveFailure(code, null);
+        }
     }
 
     /// Split one message around control traffic without exposing raw frame

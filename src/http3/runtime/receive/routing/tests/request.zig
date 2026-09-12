@@ -129,7 +129,7 @@ test "HTTP/3 request router handles duplicate reset idempotently" {
         &streaming,
         &lifecycle,
         .{ .static_limit = 1 },
-        &.{},
+        .{ .slice = &.{} },
         null,
         null,
     )) orelse return error.TestUnexpectedResult;
@@ -149,7 +149,7 @@ test "HTTP/3 request router handles duplicate reset idempotently" {
         &streaming,
         &lifecycle,
         .{ .static_limit = 1 },
-        &.{},
+        .{ .slice = &.{} },
         null,
         null,
     )) == null);
@@ -201,7 +201,7 @@ test "HTTP/3 request router classifies reordered peer uni streams by prefix" {
         &streaming,
         &lifecycle,
         .{ .static_limit = 2 },
-        &.{},
+        .{ .slice = &.{} },
         null,
         null,
     )) == null);
@@ -221,7 +221,7 @@ test "HTTP/3 request router classifies reordered peer uni streams by prefix" {
         &streaming,
         &lifecycle,
         .{ .static_limit = 2 },
-        &.{},
+        .{ .slice = &.{} },
         null,
         null,
     )) == null);
@@ -253,7 +253,7 @@ test "HTTP/3 request router classifies reordered peer uni streams by prefix" {
         &streaming,
         &lifecycle,
         .{ .static_limit = 2 },
-        &.{},
+        .{ .slice = &.{} },
         null,
         null,
     )) == null);
@@ -273,7 +273,7 @@ test "HTTP/3 request router classifies reordered peer uni streams by prefix" {
         &streaming,
         &lifecycle,
         .{ .static_limit = 2 },
-        &.{},
+        .{ .slice = &.{} },
         null,
         null,
     )) == null);
@@ -371,7 +371,7 @@ test "HTTP/3 request router returns QPACK receive credit to QUIC" {
         &streaming,
         &lifecycle,
         .{ .connection = &connection },
-        &.{},
+        .{ .slice = &.{} },
         null,
         null,
     )) == null);
@@ -458,7 +458,7 @@ test "HTTP/3 request router retires drained unknown uni stream" {
         &streaming,
         &lifecycle,
         .{ .connection = &connection },
-        &.{},
+        .{ .slice = &.{} },
         null,
         null,
     )) == null);
@@ -489,7 +489,7 @@ test "HTTP/3 request router retires drained unknown uni stream" {
         &streaming,
         &lifecycle,
         .{ .connection = &connection },
-        &.{},
+        .{ .slice = &.{} },
         null,
         null,
     )) == null);
@@ -594,7 +594,7 @@ test "HTTP/3 request router preserves reordered WebTransport uni prefix" {
             &streaming,
             &lifecycle,
             .{ .connection = &connection },
-            &.{},
+            .{ .slice = &.{} },
             null,
             &detached,
         )) == null);
@@ -690,7 +690,7 @@ test "HTTP/3 request router preserves reset WebTransport uni stream" {
             &streaming,
             &lifecycle,
             .{ .connection = &connection },
-            &.{},
+            .{ .slice = &.{} },
             null,
             &detached,
         )) == null);
@@ -767,7 +767,7 @@ test "HTTP/3 request router ignores late STREAM after QUIC reclamation" {
         &streaming,
         &lifecycle,
         .{ .connection = &connection },
-        &.{},
+        .{ .slice = &.{} },
         null,
         null,
     )) == null);
@@ -840,7 +840,7 @@ test "HTTP/3 request reset automatically registers QUIC retirement" {
         &streaming,
         &lifecycle,
         .{ .connection = &connection },
-        &.{},
+        .{ .slice = &.{} },
         null,
         null,
     )) orelse return error.TestUnexpectedResult;
@@ -935,7 +935,7 @@ test "HTTP/3 request router enforces blocked budget across buffered and streamin
             &streaming,
             &lifecycle,
             .{ .static_limit = 2 },
-            &.{},
+            .{ .slice = &.{} },
             null,
             null,
         ),

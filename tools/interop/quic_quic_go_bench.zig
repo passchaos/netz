@@ -15,6 +15,7 @@ pub const Kind = enum(u8) {
     ready = 3,
     done = 4,
     done_ack = 5,
+    start = 6,
 };
 
 pub const Sender = enum(u8) { client = 1, server = 2 };
@@ -66,7 +67,7 @@ pub const Config = struct {
             return error.InvalidArgument;
         }
         if (self.warmup > 4096 or self.iterations == 0 or
-            self.iterations > 4096 or self.bytes_per_stream == 0 or
+            self.iterations > 100_000 or self.bytes_per_stream == 0 or
             self.bytes_per_stream > 1024 * 1024 * 1024 or
             self.chunk_bytes == 0 or self.chunk_bytes > 1024 * 1024 or
             self.chunk_bytes > self.bytes_per_stream or

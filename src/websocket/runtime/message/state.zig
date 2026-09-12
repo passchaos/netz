@@ -55,3 +55,20 @@ pub fn compressedFragmentRange(
     const len = base + @intFromBool(index < extra);
     return .{ .start = start, .end = start + len };
 }
+
+test "WebSocket incoming compressed invalid UTF-8 releases both buffers once" {
+    const allocator = std.testing.allocator;
+    const invalid_utf8 = "\xc0\x80";
+    const compressed = try websocket.compressMessage(allocator, invalid_utf8);
+    // Ownership transfers to finishIncomingMessage even on failure. The
+    // testing allocator makes a leaked or double-freed compressed/decoded
+    // buffer fail this test directly.
+    try std.testing.expectError(
+        error.InvalidUtf8,
+        finishIncomingMessage(allocator, .{
+            .opcode = .text,
+            .payload = compressed,
+            .compressed = true,
+        }, 32),
+    );
+}

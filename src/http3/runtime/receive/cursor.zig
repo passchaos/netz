@@ -98,6 +98,12 @@ pub const Connection = struct {
             quic.one_rtt.ReceivedPacketView,
         ) Error!void,
     ) (Error || quic.runtime.ReceiveTimeoutError)!void {
+        // Validate before ACK emission or retained-GRO cursor advancement. An
+        // expired or wrong-clock deadline is a side-effect-free operation.
+        _ = try deadline_policy.usableAwake(
+            connection.endpoint.io,
+            deadline,
+        );
         if (self.ack_pending) {
             try connection.sendAck(0);
             self.ack_pending = false;
@@ -111,8 +117,6 @@ pub const Connection = struct {
             batch.deinit();
             self.batch = null;
         }
-        if (deadline.durationFromNow(connection.endpoint.io)
-            .raw.nanoseconds <= 0) return error.Timeout;
         if (connection.endpoint.groReceiveEnabled()) {
             return self.visitBatchWithDeadline(
                 connection,
@@ -189,6 +193,98 @@ pub fn packetView(
         .frames = packet.frames,
         .peer_initiated_key_update = packet.peer_initiated_key_update,
     };
+}
+
+test "HTTP/3 connection cursor deadline validation preserves retained batch" {
+    const allocator = std.testing.allocator;
+    var threaded = std.Io.Threaded.init(allocator, .{});
+    defer threaded.deinit();
+    const io = threaded.io();
+    var endpoint = try quic.runtime.Endpoint.bind(
+        allocator,
+        io,
+        .{ .ip4 = .loopback(0) },
+        .{ .max_datagram_size = 4096 },
+    );
+    defer endpoint.deinit();
+    const keys = quic.protection.deriveAes128Keys(
+        [_]u8{0x5a} ** quic.protection.secret_len,
+    );
+    var connection = try quic.one_rtt.Connection.init(&endpoint, .{
+        .peer = endpoint.address(),
+        .receive_keys = keys,
+        .send_keys = keys,
+        .local_connection_id = "cursor-local",
+        .peer_connection_id = "cursor-peer",
+    });
+    defer connection.deinit();
+
+    const frames = try allocator.alloc(quic.Frame, 1);
+    frames[0] = .{ .ping = {} };
+    const packets = try allocator.alloc(quic.one_rtt.ReceivedPacket, 1);
+    packets[0] = .{
+        .from = endpoint.address(),
+        .packet = .{
+            .destination_connection_id = try allocator.dupe(
+                u8,
+                "cursor-local",
+            ),
+            .packet_number = 7,
+            .fixed_bit = true,
+            .spin_bit = false,
+            .key_phase = false,
+            .payload = try allocator.alloc(u8, 0),
+        },
+        .frames = frames,
+    };
+    var cursor = Connection{
+        .batch = .{ .allocator = allocator, .packets = packets },
+        .ack_pending = true,
+    };
+    defer cursor.deinit();
+
+    const Visitor = struct {
+        fn visit(count: *usize, packet: quic.one_rtt.ReceivedPacketView) Error!void {
+            if (packet.packet_number != 7) return error.InvalidPacketNumber;
+            count.* += 1;
+        }
+    };
+    var visits: usize = 0;
+    try std.testing.expectError(
+        error.Timeout,
+        cursor.visitWithDeadline(
+            &connection,
+            .{ .clock = .real, .raw = .zero },
+            &visits,
+            Visitor.visit,
+        ),
+    );
+    try std.testing.expect(cursor.ack_pending);
+    try std.testing.expectEqual(@as(usize, 0), visits);
+    try std.testing.expectEqual(@as(usize, 0), cursor.batch.?.next_index);
+
+    try std.testing.expectError(
+        error.Timeout,
+        cursor.visitWithDeadline(
+            &connection,
+            .{ .clock = .awake, .raw = .zero },
+            &visits,
+            Visitor.visit,
+        ),
+    );
+    try std.testing.expect(cursor.ack_pending);
+    try std.testing.expectEqual(@as(usize, 0), visits);
+    try std.testing.expectEqual(@as(usize, 0), cursor.batch.?.next_index);
+
+    cursor.ack_pending = false;
+    try cursor.visitWithDeadline(
+        &connection,
+        .fromNow(io, .{ .raw = .fromSeconds(1), .clock = .awake }),
+        &visits,
+        Visitor.visit,
+    );
+    try std.testing.expectEqual(@as(usize, 1), visits);
+    try std.testing.expectEqual(@as(usize, 1), cursor.batch.?.next_index);
 }
 
 /// Stateless-key counterpart used by the preconfigured protected runtime.

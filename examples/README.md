@@ -24,14 +24,23 @@ zig build run-quic-datagram-echo
 zig build run-quic-close
 zig build run-websocket-echo
 taskset -c 0 zig build bench-http1-pipeline -Doptimize=ReleaseFast
+taskset -c 0 zig build bench-http1-pipeline -Doptimize=ReleaseFast -- \
+  --write-strategy=auto
+taskset -c 0 zig build bench-http1-pipeline -Doptimize=ReleaseFast -- \
+  --large-body --write-strategy=vectored
 taskset -c 0 zig build bench-http1-body -Doptimize=ReleaseFast -- \
   --mode=fixed --warmup=20 --iterations=200
 taskset -c 0 zig build bench-http2-h2c -Doptimize=ReleaseFast
 taskset -c 0 zig build bench-quic-one-rtt-receive -Doptimize=ReleaseFast -- \
   --mode=visitor --frame=stream --warmup=200 --iterations=5000
+taskset -c 0 zig build bench-quic-one-rtt-receive -Doptimize=ReleaseFast -- \
+  --mode=visitor --frame=stream_gap --warmup=200 --iterations=5000
+taskset -c 0 zig build bench-quic-one-rtt-send -Doptimize=ReleaseFast -- \
+  --stream-fragments=4 --warmup=200 --iterations=10000
 zig build bench-websocket-frame -Doptimize=ReleaseFast
 zig build bench-websocket-receive-buffer -Doptimize=ReleaseFast
 zig build bench-websocket-h3-echo -Doptimize=ReleaseFast
+zig build bench-websocket-slices-ab -Doptimize=ReleaseFast
 zig build run-webtransport-handshake-stream -Doptimize=ReleaseFast
 ```
 
@@ -79,6 +88,14 @@ the library can call `Broker.stats()` or `Broker.publishSystemStats()` directly.
 The URI helpers derive Host / `:authority` / `:scheme` from the URI. Host names,
 IPv4 literals, and bracketed IPv6 literals such as `http://[::1]:8080/` are
 supported by the HTTP/1, HTTP/2 h2c, and WebSocket client examples.
+WebSocket connections over HTTP/1, RFC 8441, and RFC 9220 expose
+`sendBinarySlices`; it sends any number of borrowed slices, including empty
+ones, as one FIN-terminated binary frame without requiring a plaintext join.
+`sendBinaryParts` remains the two-slice compatibility wrapper.
+`bench-websocket-slices-ab` exercises that API over HTTP/1, RFC 8441, and RFC
+9220. It compares direct eight-slice sends with a caller-prejoined buffer, pins
+one CPU, alternates run order, validates every echo/checksum record, and reports
+five-sample medians without imposing a performance threshold.
 
 HTTP/1 WebSocket servers can stop after parsing the Upgrade request and make an
 application decision before any 101 bytes are sent. The same API is available
@@ -150,6 +167,11 @@ concurrent streams each carry 100 round-robin 10-KiB contributions under max
 connection/stream windows. The
 `http2_parallel_x10_res_1mb` scenario sends ten bodyless requests and streams a
 1-MiB response on every stream without client-side body aggregation. The
+`http2_parallel_x10_duplex_1mb_aggregate` and
+`http2_parallel_x10_duplex_1mb_streaming` scenarios use the same ten 1-MiB
+POST bodies and ten 1-MiB responses, differing only in whether the client
+retains or callback-streams the response bodies. Run either scenario with
+`--stats` in a fresh process to compare allocation and peak-live memory. The
 benchmark uses the runtime's default automatic Date and Hyper-style receive
 windows so steady-state wire sizes and flow-control shape match the reference. The 100-KiB
 server path consumes DATA through `readRequestStreaming` without aggregation.
@@ -208,12 +230,54 @@ so individual 1-RTT features are easy to inspect:
   `--rtt-us=N`) or `--reorder-every=N` to fault both directions after the real
   handshake; the benchmark verifies exact terminal counts, stream IDs,
   checksum, deterministic injection counts, and both endpoint statistics.
+- `bench-quic-handshake-external` measures fresh certificate-verified QUIC v1
+  connects for all four netz/quic-go client/server role pairs. It pins the two
+  processes to distinct CPUs and verifies a round-specific echo plus peer close
+  outside each timed connect sample.
+- `bench-quic-persistent-external` covers the complementary long-lived shapes
+  against the audited quic-go v0.59 fixture. `--mode=echo` measures one
+  outstanding 1-KiB STREAM round trip after warmup; `--mode=aggregate` uses a
+  synchronized GO barrier for four parallel independent UDP connections and
+  both sender roles. A strict dual-log verifier recomputes every checksum and
+  requires the complete DONE/DONE_ACK exchange from all connections.
 - `run-quic-datagram-echo` exercises RFC 9221 DATAGRAM send, receive queueing,
   and echo.
+- `interop-quic-handshake-fault` covers QUIC v1/v2, both netz/quic-go endpoint
+  pairings, and both handshake directions under one deterministic
+  first-datagram loss or one-bit corruption. All 16 cases still require
+  certificate/ALPN/version, exact two-stream echo, peer close, and exact proxy
+  counters.
+- `interop-quic-quic-go-churn` exercises 32/64 raw QUIC unidirectional streams
+  in both client/server sender roles and both netz/quic-go connection pairings.
+  Half RESET after an acknowledged 256-byte prefix and half finish at 16 KiB;
+  a user-space relay forces loss or pair reordering in both terminal phases.
+- `bench-http3-quic-go-multistream` exercises true concurrent HTTP/3 request
+  streams against quic-go with 4- and 16-stream upload/download samples in both
+  connection-role pairings. Every stream carries an index-distinct payload,
+  and a strict dual-log verifier requires exact per-stream and aggregate proof
+  from both endpoints before accepting a sample.
 - `bench-webtransport-datagram` keeps its lightweight ping-pong baseline by
   default; `--burst --iterations=N --send-timeout-ms=N` switches to a real
   QUIC/TLS + HTTP/3 WebTransport session and measures deadline-bounded
-  DATAGRAM sends under congestion backpressure.
+  DATAGRAM sends under congestion backpressure. `--batch-size=N` (up to 64)
+  groups the burst into ordered socket batches and reports both logical
+  DATAGRAM count and API call count.
+- `bench-webtransport-stream` measures real-handshake associated STREAM
+  transfer, fair cross-stream batching, cancellation, loss, and reordering.
+  `--send-timeout-ms=N` supplies one absolute budget shared by every payload
+  write and FIN in the measured transfer. Its bounded internal churn shape
+  configures both peers for and accepts up to 256 streams;
+  `--send-all --stream-slices=N` sends one logical stream from `N` borrowed
+  slices without a caller-side join, allowing direct contiguous/vectored A/B
+  runs while retaining identical bytes and checksum;
+  `NETZ_WEBTRANSPORT_CHURN_STREAMS`,
+  `NETZ_WEBTRANSPORT_CHURN_BYTES`, and `NETZ_WEBTRANSPORT_CHURN_RUNS` tune the
+  repeatability gate.
+- `interop-webtransport-wtransport-churn` runs 32/64 concurrent associated
+  unidirectional streams in both netz/wtransport sender roles, resets every
+  second stream after an acknowledged 256-byte prefix, and verifies the
+  remaining FIN streams under deterministic loss and reordering. A user-space
+  UDP relay faults wtransport's outbound path without requiring privileges.
 - `run-quic-close` sends an application close frame and verifies that the peer
   enters draining with the expected error code and reason phrase.
 
@@ -223,6 +287,23 @@ certificate validation, `--discover` performs best-effort Alt-Svc discovery
 using an HTTP/3 HEAD probe before issuing the final request, and
 `--alt-svc='h3=":443"; ma=2592000'` lets interop tests provide a known
 HTTP/3 alternative service explicitly.
+The same verified path accepts cross-signed roots when the system bundle holds
+the self-signed certificate for the identical Subject and public key. For an
+independent public endpoint, run:
+
+```sh
+zig build run-http3-fetch -Doptimize=ReleaseFast -- \
+  '--alt-svc=h3=":443"; ma=86400' --verify --expect-status=200 \
+  --min-body-bytes=100000 https://cloudflare-quic.com/
+zig build run-http3-fetch -Doptimize=ReleaseFast -- \
+  '--alt-svc=h3=":8443"; ma=86400' --verify --expect-status=200 \
+  --min-body-bytes=400 https://quic.tech/
+```
+
+`zig build interop-http3-public -Doptimize=ReleaseFast` runs the maintained
+ByteDance, Cloudflare, quiche, and Meta cases together. It is an optional
+network gate rather than part of `zig build test`. Set
+`NETZ_HTTP3_PUBLIC_TIMEOUT_SECONDS` to change the per-origin outer timeout.
 
 `run-webtransport-handshake-stream` performs a real QUIC/TLS + HTTP/3
 WebTransport CONNECT, then exercises a client-opened bidirectional echo,

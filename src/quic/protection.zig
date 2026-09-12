@@ -977,6 +977,40 @@ pub fn sealInitialPacket(
     keys: PacketProtectionKeys,
     options: InitialPacketOptions,
 ) Error![]u8 {
+    if (keys.suite != .aes_128_gcm_sha256) {
+        return error.InvalidCipherSuite;
+    }
+    try validateProtectedVersion(options.version);
+    try validatePacketNumberLen(options.packet_number_len);
+    try validatePacketNumber(options.packet_number);
+    if (options.destination_connection_id.len > 20 or
+        options.source_connection_id.len > 20)
+    {
+        return error.InvalidInitialPacket;
+    }
+    const packet_len = try protectedLongPacketCapacity(
+        options.destination_connection_id.len,
+        options.source_connection_id.len,
+        options.token.len,
+        true,
+        options.packet_number_len,
+        options.payload.len,
+    );
+    const packet = try allocator.alloc(u8, packet_len);
+    errdefer allocator.free(packet);
+    const written = try sealInitialPacketInto(packet, keys, options);
+    std.debug.assert(written.len == packet.len);
+    return packet;
+}
+
+/// Seal an Initial packet directly into caller-provided storage. This keeps a
+/// preallocated multi-packet flight free of allocator calls after the first
+/// AEAD nonce has been consumed.
+pub fn sealInitialPacketInto(
+    out: []u8,
+    keys: PacketProtectionKeys,
+    options: InitialPacketOptions,
+) Error![]u8 {
     // RFC 9001 fixes Initial protection to AES-128-GCM independently of the
     // later TLS cipher-suite negotiation.
     if (keys.suite != .aes_128_gcm_sha256) {
@@ -984,53 +1018,89 @@ pub fn sealInitialPacket(
     }
     try validateProtectedVersion(options.version);
     try validatePacketNumberLen(options.packet_number_len);
+    try validatePacketNumber(options.packet_number);
     if (options.destination_connection_id.len > 20 or options.source_connection_id.len > 20) return error.InvalidInitialPacket;
 
-    var out: std.ArrayList(u8) = .empty;
-    errdefer out.deinit(allocator);
-
     const pn_len = @as(usize, options.packet_number_len);
-    try out.ensureUnusedCapacity(
-        allocator,
-        try protectedLongPacketCapacity(
-            options.destination_connection_id.len,
-            options.source_connection_id.len,
-            options.token.len,
-            true,
-            pn_len,
-            options.payload.len,
-        ),
+    const packet_len = try protectedLongPacketCapacity(
+        options.destination_connection_id.len,
+        options.source_connection_id.len,
+        options.token.len,
+        true,
+        pn_len,
+        options.payload.len,
     );
+    if (out.len < packet_len) return error.BufferTooShort;
+    const packet = out[0..packet_len];
+    var offset: usize = 0;
     const first_byte: u8 = longHeaderFirstByte(
         options.version,
         .initial,
         options.packet_number_len,
         options.fixed_bit,
     );
-    out.appendAssumeCapacity(first_byte);
-    var version_bytes: [4]u8 = undefined;
-    std.mem.writeInt(u32, &version_bytes, options.version, .big);
-    out.appendSliceAssumeCapacity(&version_bytes);
-    out.appendAssumeCapacity(@intCast(options.destination_connection_id.len));
-    out.appendSliceAssumeCapacity(options.destination_connection_id);
-    out.appendAssumeCapacity(@intCast(options.source_connection_id.len));
-    out.appendSliceAssumeCapacity(options.source_connection_id);
-    try varint.encodeAssumeCapacity(&out, options.token.len);
-    out.appendSliceAssumeCapacity(options.token);
+    packet[offset] = first_byte;
+    offset += 1;
+    std.mem.writeInt(u32, packet[offset..][0..4], options.version, .big);
+    offset += 4;
+    packet[offset] = @intCast(options.destination_connection_id.len);
+    offset += 1;
+    @memcpy(
+        packet[offset..][0..options.destination_connection_id.len],
+        options.destination_connection_id,
+    );
+    offset += options.destination_connection_id.len;
+    packet[offset] = @intCast(options.source_connection_id.len);
+    offset += 1;
+    @memcpy(
+        packet[offset..][0..options.source_connection_id.len],
+        options.source_connection_id,
+    );
+    offset += options.source_connection_id.len;
+    const encoded_token_len = try varint.encodeInto(
+        packet[offset..],
+        options.token.len,
+    );
+    offset += encoded_token_len.len;
+    @memcpy(packet[offset..][0..options.token.len], options.token);
+    offset += options.token.len;
 
-    const protected_payload_len = options.payload.len + aead_tag_len;
-    try varint.encodeAssumeCapacity(&out, pn_len + protected_payload_len);
-    const pn_offset = out.items.len;
-    try appendTruncatedPacketNumberAssumeCapacity(&out, options.packet_number, options.packet_number_len);
-    const payload_offset = out.items.len;
+    const protected_payload_len = std.math.add(
+        usize,
+        options.payload.len,
+        aead_tag_len,
+    ) catch return error.InvalidPayloadLength;
+    const protected_len = std.math.add(
+        usize,
+        pn_len,
+        protected_payload_len,
+    ) catch return error.InvalidPayloadLength;
+    try validateLongHeaderProtectionSampleBounds(protected_len);
+    const encoded_protected_len = try varint.encodeInto(
+        packet[offset..],
+        protected_len,
+    );
+    offset += encoded_protected_len.len;
+    const pn_offset = offset;
+    try writeTruncatedPacketNumber(
+        packet[offset..][0..pn_len],
+        options.packet_number,
+    );
+    offset += pn_len;
+    const payload_offset = offset;
 
-    out.items.len = payload_offset + options.payload.len + aead_tag_len;
-    const ciphertext = out.items[payload_offset .. payload_offset + options.payload.len];
-    const tag = out.items[payload_offset + options.payload.len ..][0..aead_tag_len];
-    try protectPayload(keys, options.packet_number, out.items[0..payload_offset], options.payload, ciphertext, tag);
-
-    try applyHeaderProtectionForKeys(keys, .long, out.items, pn_offset);
-    return out.toOwnedSlice(allocator);
+    const ciphertext = packet[payload_offset..][0..options.payload.len];
+    const tag = packet[payload_offset + options.payload.len ..][0..aead_tag_len];
+    try protectPayload(
+        keys,
+        options.packet_number,
+        packet[0..payload_offset],
+        options.payload,
+        ciphertext,
+        tag,
+    );
+    try applyHeaderProtectionForKeys(keys, .long, packet, pn_offset);
+    return packet;
 }
 
 pub fn openInitialPacket(
@@ -1128,51 +1198,111 @@ pub fn sealHandshakePacket(
 ) Error![]u8 {
     try validateProtectedVersion(options.version);
     try validatePacketNumberLen(options.packet_number_len);
+    try validatePacketNumber(options.packet_number);
+    if (options.destination_connection_id.len > 20 or
+        options.source_connection_id.len > 20)
+    {
+        return error.InvalidInitialPacket;
+    }
+    const packet_len = try protectedLongPacketCapacity(
+        options.destination_connection_id.len,
+        options.source_connection_id.len,
+        0,
+        false,
+        options.packet_number_len,
+        options.payload.len,
+    );
+    const packet = try allocator.alloc(u8, packet_len);
+    errdefer allocator.free(packet);
+    const written = try sealHandshakePacketInto(packet, keys, options);
+    std.debug.assert(written.len == packet.len);
+    return packet;
+}
+
+/// Seal a Handshake packet directly into caller-provided storage.
+pub fn sealHandshakePacketInto(
+    out: []u8,
+    keys: PacketProtectionKeys,
+    options: HandshakePacketOptions,
+) Error![]u8 {
+    try validateProtectedVersion(options.version);
+    try validatePacketNumberLen(options.packet_number_len);
+    try validatePacketNumber(options.packet_number);
     if (options.destination_connection_id.len > 20 or options.source_connection_id.len > 20) return error.InvalidInitialPacket;
 
-    var out: std.ArrayList(u8) = .empty;
-    errdefer out.deinit(allocator);
-
     const pn_len = @as(usize, options.packet_number_len);
-    try out.ensureUnusedCapacity(
-        allocator,
-        try protectedLongPacketCapacity(
-            options.destination_connection_id.len,
-            options.source_connection_id.len,
-            0,
-            false,
-            pn_len,
-            options.payload.len,
-        ),
+    const packet_len = try protectedLongPacketCapacity(
+        options.destination_connection_id.len,
+        options.source_connection_id.len,
+        0,
+        false,
+        pn_len,
+        options.payload.len,
     );
+    if (out.len < packet_len) return error.BufferTooShort;
+    const packet = out[0..packet_len];
+    var offset: usize = 0;
     const first_byte: u8 = longHeaderFirstByte(
         options.version,
         .handshake,
         options.packet_number_len,
         options.fixed_bit,
     );
-    out.appendAssumeCapacity(first_byte);
-    var version_bytes: [4]u8 = undefined;
-    std.mem.writeInt(u32, &version_bytes, options.version, .big);
-    out.appendSliceAssumeCapacity(&version_bytes);
-    out.appendAssumeCapacity(@intCast(options.destination_connection_id.len));
-    out.appendSliceAssumeCapacity(options.destination_connection_id);
-    out.appendAssumeCapacity(@intCast(options.source_connection_id.len));
-    out.appendSliceAssumeCapacity(options.source_connection_id);
+    packet[offset] = first_byte;
+    offset += 1;
+    std.mem.writeInt(u32, packet[offset..][0..4], options.version, .big);
+    offset += 4;
+    packet[offset] = @intCast(options.destination_connection_id.len);
+    offset += 1;
+    @memcpy(
+        packet[offset..][0..options.destination_connection_id.len],
+        options.destination_connection_id,
+    );
+    offset += options.destination_connection_id.len;
+    packet[offset] = @intCast(options.source_connection_id.len);
+    offset += 1;
+    @memcpy(
+        packet[offset..][0..options.source_connection_id.len],
+        options.source_connection_id,
+    );
+    offset += options.source_connection_id.len;
 
-    const protected_payload_len = options.payload.len + aead_tag_len;
-    try varint.encodeAssumeCapacity(&out, pn_len + protected_payload_len);
-    const pn_offset = out.items.len;
-    try appendTruncatedPacketNumberAssumeCapacity(&out, options.packet_number, options.packet_number_len);
-    const payload_offset = out.items.len;
+    const protected_payload_len = std.math.add(
+        usize,
+        options.payload.len,
+        aead_tag_len,
+    ) catch return error.InvalidPayloadLength;
+    const protected_len = std.math.add(
+        usize,
+        pn_len,
+        protected_payload_len,
+    ) catch return error.InvalidPayloadLength;
+    try validateLongHeaderProtectionSampleBounds(protected_len);
+    const encoded_protected_len = try varint.encodeInto(
+        packet[offset..],
+        protected_len,
+    );
+    offset += encoded_protected_len.len;
+    const pn_offset = offset;
+    try writeTruncatedPacketNumber(
+        packet[offset..][0..pn_len],
+        options.packet_number,
+    );
+    offset += pn_len;
+    const payload_offset = offset;
 
-    out.items.len = payload_offset + options.payload.len + aead_tag_len;
-    const ciphertext = out.items[payload_offset .. payload_offset + options.payload.len];
-    const tag = out.items[payload_offset + options.payload.len ..][0..aead_tag_len];
-    try protectPayload(keys, options.packet_number, out.items[0..payload_offset], options.payload, ciphertext, tag);
-
-    try applyHeaderProtectionForKeys(keys, .long, out.items, pn_offset);
-    return out.toOwnedSlice(allocator);
+    const ciphertext = packet[payload_offset..][0..options.payload.len];
+    const tag = packet[payload_offset + options.payload.len ..][0..aead_tag_len];
+    try protectPayload(
+        keys,
+        options.packet_number,
+        packet[0..payload_offset],
+        options.payload,
+        ciphertext,
+        tag,
+    );
+    try applyHeaderProtectionForKeys(keys, .long, packet, pn_offset);
+    return packet;
 }
 
 pub fn openHandshakePacket(
@@ -1262,51 +1392,111 @@ pub fn sealZeroRttPacket(
 ) Error![]u8 {
     try validateProtectedVersion(options.version);
     try validatePacketNumberLen(options.packet_number_len);
+    try validatePacketNumber(options.packet_number);
+    if (options.destination_connection_id.len > 20 or
+        options.source_connection_id.len > 20)
+    {
+        return error.InvalidInitialPacket;
+    }
+    const packet_len = try protectedLongPacketCapacity(
+        options.destination_connection_id.len,
+        options.source_connection_id.len,
+        0,
+        false,
+        options.packet_number_len,
+        options.payload.len,
+    );
+    const packet = try allocator.alloc(u8, packet_len);
+    errdefer allocator.free(packet);
+    const written = try sealZeroRttPacketInto(packet, keys, options);
+    std.debug.assert(written.len == packet.len);
+    return packet;
+}
+
+/// Seal a 0-RTT packet directly into caller-provided storage.
+pub fn sealZeroRttPacketInto(
+    out: []u8,
+    keys: PacketProtectionKeys,
+    options: ZeroRttPacketOptions,
+) Error![]u8 {
+    try validateProtectedVersion(options.version);
+    try validatePacketNumberLen(options.packet_number_len);
+    try validatePacketNumber(options.packet_number);
     if (options.destination_connection_id.len > 20 or options.source_connection_id.len > 20) return error.InvalidInitialPacket;
 
-    var out: std.ArrayList(u8) = .empty;
-    errdefer out.deinit(allocator);
-
     const pn_len = @as(usize, options.packet_number_len);
-    try out.ensureUnusedCapacity(
-        allocator,
-        try protectedLongPacketCapacity(
-            options.destination_connection_id.len,
-            options.source_connection_id.len,
-            0,
-            false,
-            pn_len,
-            options.payload.len,
-        ),
+    const packet_len = try protectedLongPacketCapacity(
+        options.destination_connection_id.len,
+        options.source_connection_id.len,
+        0,
+        false,
+        pn_len,
+        options.payload.len,
     );
+    if (out.len < packet_len) return error.BufferTooShort;
+    const packet = out[0..packet_len];
+    var offset: usize = 0;
     const first_byte: u8 = longHeaderFirstByte(
         options.version,
         .zero_rtt,
         options.packet_number_len,
         options.fixed_bit,
     );
-    out.appendAssumeCapacity(first_byte);
-    var version_bytes: [4]u8 = undefined;
-    std.mem.writeInt(u32, &version_bytes, options.version, .big);
-    out.appendSliceAssumeCapacity(&version_bytes);
-    out.appendAssumeCapacity(@intCast(options.destination_connection_id.len));
-    out.appendSliceAssumeCapacity(options.destination_connection_id);
-    out.appendAssumeCapacity(@intCast(options.source_connection_id.len));
-    out.appendSliceAssumeCapacity(options.source_connection_id);
+    packet[offset] = first_byte;
+    offset += 1;
+    std.mem.writeInt(u32, packet[offset..][0..4], options.version, .big);
+    offset += 4;
+    packet[offset] = @intCast(options.destination_connection_id.len);
+    offset += 1;
+    @memcpy(
+        packet[offset..][0..options.destination_connection_id.len],
+        options.destination_connection_id,
+    );
+    offset += options.destination_connection_id.len;
+    packet[offset] = @intCast(options.source_connection_id.len);
+    offset += 1;
+    @memcpy(
+        packet[offset..][0..options.source_connection_id.len],
+        options.source_connection_id,
+    );
+    offset += options.source_connection_id.len;
 
-    const protected_payload_len = options.payload.len + aead_tag_len;
-    try varint.encodeAssumeCapacity(&out, pn_len + protected_payload_len);
-    const pn_offset = out.items.len;
-    try appendTruncatedPacketNumberAssumeCapacity(&out, options.packet_number, options.packet_number_len);
-    const payload_offset = out.items.len;
+    const protected_payload_len = std.math.add(
+        usize,
+        options.payload.len,
+        aead_tag_len,
+    ) catch return error.InvalidPayloadLength;
+    const protected_len = std.math.add(
+        usize,
+        pn_len,
+        protected_payload_len,
+    ) catch return error.InvalidPayloadLength;
+    try validateLongHeaderProtectionSampleBounds(protected_len);
+    const encoded_protected_len = try varint.encodeInto(
+        packet[offset..],
+        protected_len,
+    );
+    offset += encoded_protected_len.len;
+    const pn_offset = offset;
+    try writeTruncatedPacketNumber(
+        packet[offset..][0..pn_len],
+        options.packet_number,
+    );
+    offset += pn_len;
+    const payload_offset = offset;
 
-    out.items.len = payload_offset + options.payload.len + aead_tag_len;
-    const ciphertext = out.items[payload_offset .. payload_offset + options.payload.len];
-    const tag = out.items[payload_offset + options.payload.len ..][0..aead_tag_len];
-    try protectPayload(keys, options.packet_number, out.items[0..payload_offset], options.payload, ciphertext, tag);
-
-    try applyHeaderProtectionForKeys(keys, .long, out.items, pn_offset);
-    return out.toOwnedSlice(allocator);
+    const ciphertext = packet[payload_offset..][0..options.payload.len];
+    const tag = packet[payload_offset + options.payload.len ..][0..aead_tag_len];
+    try protectPayload(
+        keys,
+        options.packet_number,
+        packet[0..payload_offset],
+        options.payload,
+        ciphertext,
+        tag,
+    );
+    try applyHeaderProtectionForKeys(keys, .long, packet, pn_offset);
+    return packet;
 }
 
 pub fn openZeroRttPacket(

@@ -325,7 +325,44 @@ test "HTTP/3 handshake server schedules response bodies by priority" {
                     .data = shared.body,
                 };
             }
-            try session.sendResponseBodiesPaced(&responses);
+            var committed = [_]usize{99} ** responses.len;
+            try std.testing.expectError(
+                error.Timeout,
+                session.sendResponseBodiesPacedWithTimeout(
+                    &responses,
+                    &committed,
+                    .zero,
+                ),
+            );
+            for (committed) |count| {
+                try std.testing.expectEqual(@as(usize, 0), count);
+            }
+            @memset(&committed, 99);
+            try std.testing.expectError(
+                error.Timeout,
+                session.sendResponseBodiesPacedWithDeadline(
+                    &responses,
+                    &committed,
+                    .fromNow(
+                        session.established.connection.endpoint.io,
+                        .{ .raw = .fromSeconds(1), .clock = .real },
+                    ),
+                ),
+            );
+            for (committed) |count| {
+                try std.testing.expectEqual(@as(usize, 0), count);
+            }
+            try session.sendResponseBodiesPacedWithDeadline(
+                &responses,
+                &committed,
+                .fromNow(
+                    session.established.connection.endpoint.io,
+                    .{ .raw = .fromSeconds(2), .clock = .awake },
+                ),
+            );
+            for (committed) |count| {
+                try std.testing.expectEqual(shared.body.len, count);
+            }
         }
     };
 

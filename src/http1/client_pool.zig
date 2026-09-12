@@ -411,6 +411,15 @@ pub const Pool = struct {
                 slot.port == endpoint.port and
                 hostEqual(slot.tls_host, endpoint.tls_host))
             {
+                if (!slot.client.isReusableForPool()) {
+                    var stale = self.idle.swapRemove(index);
+                    stale.deinit(self.allocator);
+                    self.connections -= 1;
+                    // swapRemove may move another same-authority candidate
+                    // into this slot. Revisit it on the next reverse step.
+                    if (index < self.idle.items.len) index += 1;
+                    continue;
+                }
                 const owned = self.idle.swapRemove(index);
                 self.finishAdmissionLocked(waiter);
                 self.mutex.unlock(self.io);
@@ -683,7 +692,10 @@ pub const Lease = struct {
     }
 
     pub fn release(self: *Lease) void {
-        self.pool.release(self.slot, self.slot.client.isReusable());
+        self.pool.release(
+            self.slot,
+            self.slot.client.isReusableForPool(),
+        );
         self.active = false;
     }
 

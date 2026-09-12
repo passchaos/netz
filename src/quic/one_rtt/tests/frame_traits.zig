@@ -20,6 +20,8 @@ test "QUIC 1-RTT frame traits classify ACK padding and close" {
     try std.testing.expect(!traits.ack_eliciting);
     try std.testing.expect(traits.in_flight);
     try std.testing.expect(!traits.retransmittable);
+    try std.testing.expect(traits.has_non_retransmittable);
+    try std.testing.expect(!traits.allPayloadBytesRetransmittable());
     try std.testing.expect(traits.ack_or_close);
     try std.testing.expectEqual(@as(?u64, 7), traits.largest_acknowledged);
     try std.testing.expect(!traits.autoEcnEligible());
@@ -33,6 +35,7 @@ test "QUIC 1-RTT frame traits distinguish unreliable and probing frames" {
     try std.testing.expect(datagram.ack_eliciting);
     try std.testing.expect(datagram.in_flight);
     try std.testing.expect(!datagram.retransmittable);
+    try std.testing.expect(datagram.has_non_retransmittable);
     try std.testing.expect(datagram.autoEcnEligible());
 
     const path = try frame_traits.analyze(&.{
@@ -68,5 +71,18 @@ test "QUIC 1-RTT frame traits aggregate stream bytes and ACK watermark" {
     try std.testing.expectEqual(@as(?u64, 9), traits.largest_acknowledged);
     try std.testing.expect(traits.handshake_done);
     try std.testing.expect(traits.retransmittable);
+    try std.testing.expect(traits.has_non_retransmittable);
+    try std.testing.expect(!traits.allPayloadBytesRetransmittable());
     try std.testing.expect(!traits.autoEcnEligible());
+}
+
+test "QUIC 1-RTT frame traits identify fully retransmittable payloads" {
+    const traits = try frame_traits.analyze(&.{
+        .{ .stream = .{ .stream_id = 0, .offset = 0, .data = "abc" } },
+        .{ .ping = {} },
+        .{ .max_data = .{ .maximum_data = 4096 } },
+    });
+    try std.testing.expect(traits.retransmittable);
+    try std.testing.expect(!traits.has_non_retransmittable);
+    try std.testing.expect(traits.allPayloadBytesRetransmittable());
 }

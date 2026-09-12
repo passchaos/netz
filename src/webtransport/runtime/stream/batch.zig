@@ -7,9 +7,11 @@
 const std = @import("std");
 const webtransport = @import("../../mod.zig");
 const quic = @import("../../../quic/mod.zig");
+const deadline_policy = @import("../../../internal/deadline.zig");
 const stream_runtime = @import("../stream.zig");
 
 pub const Error = stream_runtime.Error;
+pub const TimeoutError = Error || quic.runtime.ReceiveTimeoutError;
 
 pub const Write = struct {
     stream_id: u62,
@@ -79,20 +81,68 @@ pub fn write(
     writes: []const Write,
     counts: []usize,
 ) Error!Result {
+    return writeUntil(
+        connection,
+        registry,
+        session_id,
+        writes,
+        counts,
+        null,
+    ) catch |err| switch (err) {
+        error.Timeout, error.ConcurrencyUnavailable => unreachable,
+        else => |other| return @errorCast(other),
+    };
+}
+
+/// Write one fair packet-sized slice per sendable stream while retaining one
+/// absolute awake-clock deadline across flow-control, congestion, and pacing
+/// waits. `counts` is cleared before deadline validation and always describes
+/// only the application bytes accepted by the socket during this call.
+pub fn writeWithDeadline(
+    connection: *quic.one_rtt.Connection,
+    registry: *webtransport.StreamRegistry,
+    session_id: webtransport.SessionId,
+    writes: []const Write,
+    counts: []usize,
+    deadline: std.Io.Clock.Timestamp,
+) TimeoutError!Result {
+    if (counts.len < writes.len) return error.BufferTooShort;
+    @memset(counts[0..writes.len], 0);
+    _ = try deadline_policy.usableAwake(connection.endpoint.io, deadline);
+    return writeUntil(
+        connection,
+        registry,
+        session_id,
+        writes,
+        counts,
+        deadline,
+    );
+}
+
+fn writeUntil(
+    connection: *quic.one_rtt.Connection,
+    registry: *webtransport.StreamRegistry,
+    session_id: webtransport.SessionId,
+    writes: []const Write,
+    counts: []usize,
+    deadline: ?std.Io.Clock.Timestamp,
+) TimeoutError!Result {
     while (true) {
-        const result = writeOnce(
+        try ensureDeadline(connection, deadline);
+        const result = writeOnceUntil(
             connection,
             registry,
             session_id,
             writes,
             counts,
+            deadline,
         ) catch |err| switch (err) {
             error.FlowControlBlocked, error.CongestionLimited => {
-                try stream_runtime.receiveSendProgress(connection);
+                try receiveSendProgressUntil(connection, deadline);
                 continue;
             },
             error.PacingLimited => {
-                try connection.waitForPacingAvailability();
+                try waitForPacingUntil(connection, deadline);
                 continue;
             },
             else => |other| return other,
@@ -103,7 +153,7 @@ pub fn write(
         {
             return result;
         }
-        try stream_runtime.receiveSendProgress(connection);
+        try receiveSendProgressUntil(connection, deadline);
     }
 }
 
@@ -117,6 +167,27 @@ pub fn writeOnce(
     writes: []const Write,
     counts: []usize,
 ) Error!Result {
+    return writeOnceUntil(
+        connection,
+        registry,
+        session_id,
+        writes,
+        counts,
+        null,
+    ) catch |err| switch (err) {
+        error.Timeout, error.ConcurrencyUnavailable => unreachable,
+        else => |other| return @errorCast(other),
+    };
+}
+
+fn writeOnceUntil(
+    connection: *quic.one_rtt.Connection,
+    registry: *webtransport.StreamRegistry,
+    session_id: webtransport.SessionId,
+    writes: []const Write,
+    counts: []usize,
+    deadline: ?std.Io.Clock.Timestamp,
+) TimeoutError!Result {
     if (counts.len < writes.len) return error.BufferTooShort;
     @memset(counts[0..writes.len], 0);
     if (writes.len == 0) return .{ .progressed = 0 };
@@ -126,6 +197,10 @@ pub fn writeOnce(
     var packets: [quic.one_rtt.max_batch_packets][]const quic.Frame = undefined;
     var input_indices: [quic.one_rtt.max_batch_packets]usize = undefined;
     var byte_counts: [quic.one_rtt.max_batch_packets]usize = undefined;
+    var committed_streams: [quic.one_rtt.max_batch_packets]*webtransport.StreamState =
+        undefined;
+    var committed_offsets: [quic.one_rtt.max_batch_packets]u64 = undefined;
+    var committed_bytes: [quic.one_rtt.max_batch_packets]u64 = undefined;
 
     const validation = try validateBatch(registry, writes);
     const packet_count = if (validation.all_prefixes_sent)
@@ -150,6 +225,7 @@ pub fn writeOnce(
             &packets,
             &input_indices,
             &byte_counts,
+            deadline,
         );
 
     if (packet_count == 0) {
@@ -166,7 +242,31 @@ pub fn writeOnce(
             error.FlowControlBlocked;
     }
 
-    const sent = try connection.sendManyProgress(packets[0..packet_count]);
+    // Complete every fallible registry lookup and overflow check before any
+    // staged packet becomes socket-visible. The commit loop after send then
+    // consists only of infallible assignments and caller-count updates.
+    for (0..packet_count) |packet_index| {
+        const input_index = input_indices[packet_index];
+        const stream = registry.get(writes[input_index].stream_id) orelse
+            return error.UnknownStream;
+        committed_streams[packet_index] = stream;
+        committed_offsets[packet_index] = std.math.add(
+            u64,
+            stream.send_offset,
+            byte_counts[packet_index],
+        ) catch return error.IntegerOverflow;
+        committed_bytes[packet_index] = std.math.add(
+            u64,
+            stream.bytes_sent,
+            byte_counts[packet_index],
+        ) catch return error.IntegerOverflow;
+    }
+
+    try ensureDeadline(connection, deadline);
+    const sent = try connection.sendManyProgressAt(
+        packets[0..packet_count],
+        monotonicNowNs(connection),
+    );
     if (sent.sent_count > packet_count or
         sent.sent_count > sent.protected_count)
     {
@@ -175,17 +275,10 @@ pub fn writeOnce(
 
     for (0..sent.sent_count) |packet_index| {
         const input_index = input_indices[packet_index];
-        const stream_id = writes[input_index].stream_id;
-        const count = byte_counts[packet_index];
-        const stream = registry.get(stream_id) orelse
-            return error.UnknownStream;
-        stream.send_offset = std.math.add(
-            u64,
-            stream.send_offset,
-            count,
-        ) catch return error.IntegerOverflow;
-        try registry.recordSent(stream_id, count, false);
-        counts[input_index] = count;
+        const stream = committed_streams[packet_index];
+        stream.send_offset = committed_offsets[packet_index];
+        stream.bytes_sent = committed_bytes[packet_index];
+        counts[input_index] = byte_counts[packet_index];
     }
     if (sent.sent_count == 0 and sent.send_error == null) {
         return error.Unexpected;
@@ -194,6 +287,41 @@ pub fn writeOnce(
         .progressed = sent.sent_count,
         .send_error = sent.send_error,
     };
+}
+
+fn ensureDeadline(
+    connection: *quic.one_rtt.Connection,
+    deadline: ?std.Io.Clock.Timestamp,
+) TimeoutError!void {
+    if (deadline) |absolute| {
+        _ = try deadline_policy.usableAwake(connection.endpoint.io, absolute);
+    }
+}
+
+fn receiveSendProgressUntil(
+    connection: *quic.one_rtt.Connection,
+    deadline: ?std.Io.Clock.Timestamp,
+) TimeoutError!void {
+    if (deadline) |absolute| {
+        return connection.servicePacketServicingTimersDeadline(absolute);
+    }
+    return stream_runtime.receiveSendProgress(connection);
+}
+
+fn waitForPacingUntil(
+    connection: *quic.one_rtt.Connection,
+    deadline: ?std.Io.Clock.Timestamp,
+) TimeoutError!void {
+    if (deadline) |absolute| {
+        return connection.waitForPacingAvailabilityWithDeadline(absolute);
+    }
+    return connection.waitForPacingAvailability();
+}
+
+fn monotonicNowNs(connection: *const quic.one_rtt.Connection) u64 {
+    const timestamp = std.Io.Clock.awake.now(connection.endpoint.io).nanoseconds;
+    if (timestamp <= 0) return 0;
+    return std.math.cast(u64, timestamp) orelse std.math.maxInt(u64);
 }
 
 fn hasApplicationData(writes: []const Write) bool {
@@ -307,6 +435,7 @@ fn stagePrefixAwareBatch(
         input_indices,
         byte_counts,
         stream_runtime.prepare,
+        null,
     );
 }
 
@@ -320,7 +449,8 @@ fn stagePrefixAwareBatchOnce(
     packets: *[quic.one_rtt.max_batch_packets][]const quic.Frame,
     input_indices: *[quic.one_rtt.max_batch_packets]usize,
     byte_counts: *[quic.one_rtt.max_batch_packets]usize,
-) Error!usize {
+    deadline: ?std.Io.Clock.Timestamp,
+) TimeoutError!usize {
     return stagePrefixAwareBatchWith(
         connection,
         registry,
@@ -332,6 +462,7 @@ fn stagePrefixAwareBatchOnce(
         input_indices,
         byte_counts,
         stream_runtime.prepareOnce,
+        deadline,
     );
 }
 
@@ -346,10 +477,12 @@ fn stagePrefixAwareBatchWith(
     input_indices: *[quic.one_rtt.max_batch_packets]usize,
     byte_counts: *[quic.one_rtt.max_batch_packets]usize,
     comptime prepare_stream: anytype,
-) Error!usize {
+    deadline: ?std.Io.Clock.Timestamp,
+) TimeoutError!usize {
     var packet_count: usize = 0;
     const selection_epoch = registry.beginBatchEpoch();
     while (packet_count < packet_limit) {
+        try ensureDeadline(connection, deadline);
         const input_index = (try nextSendableWriteIndex(
             connection,
             registry,

@@ -180,6 +180,44 @@ fn main() {
         assert_eq!(body, b"netz-still-alive".as_slice());
         println!("Hyper HTTP/2 keep-alive interoperated with netz: ack=true next_request=true");
 
+        let slow_request = Request::builder()
+            .method(Method::GET)
+            .uri("http://localhost/slow-handler")
+            .body(empty_body())
+            .expect("slow handler request");
+        let fast_request = Request::builder()
+            .method(Method::GET)
+            .uri("http://localhost/fast-handler")
+            .body(empty_body())
+            .expect("fast handler request");
+        let mut slow_sender = sender.clone();
+        let mut fast_sender = sender.clone();
+        let slow_response = slow_sender.send_request(slow_request);
+        let fast_response = fast_sender.send_request(fast_request);
+        let fast_response = tokio::time::timeout(
+            std::time::Duration::from_secs(1),
+            fast_response,
+        )
+        .await
+        .expect("fast response blocked behind slow handler")
+        .expect("fast handler response");
+        let fast_body = fast_response
+            .into_body()
+            .collect()
+            .await
+            .expect("collect fast handler response")
+            .to_bytes();
+        assert_eq!(fast_body, b"fast-handler".as_slice());
+        let slow_response = slow_response.await.expect("slow handler response");
+        let slow_body = slow_response
+            .into_body()
+            .collect()
+            .await
+            .expect("collect slow handler response")
+            .to_bytes();
+        assert_eq!(slow_body, b"slow-handler".as_slice());
+        println!("Hyper HTTP/2 client observed netz concurrent handlers: fast_before_slow=true requests=2");
+
         let cancel_request = Request::builder()
             .method(Method::GET)
             .uri(
@@ -301,7 +339,7 @@ fn main() {
             "unexpected post-GOAWAY readiness error: {refusal}"
         );
         println!(
-            "Hyper HTTP/2 client drained netz GOAWAY: active_stream=9 new_request_refused=true"
+            "Hyper HTTP/2 client drained netz GOAWAY: active_stream=13 new_request_refused=true"
         );
     });
 }

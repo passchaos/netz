@@ -21,10 +21,6 @@ pub fn build(b: *std.Build) void {
         .target = target,
         .optimize = optimize,
     });
-    const vort_dep = b.dependency("vort", .{
-        .target = target,
-        .optimize = optimize,
-    });
     const zio_dep = b.dependency("zio", .{
         .target = target,
         .optimize = optimize,
@@ -36,7 +32,6 @@ pub fn build(b: *std.Build) void {
         .optimize = optimize,
         .imports = &.{
             .{ .name = "vail", .module = vail_dep.module("vail") },
-            .{ .name = "vort", .module = vort_dep.module("vort") },
             .{ .name = "zio", .module = zio_dep.module("zio") },
         },
     });
@@ -68,10 +63,99 @@ pub fn build(b: *std.Build) void {
         .filters = test_filters,
     });
     const run_package_tests = b.addRunArtifact(package_tests);
+    const quic_handshake_bench_tests = b.addTest(.{
+        .root_module = b.createModule(.{
+            .root_source_file = b.path(
+                "tools/interop/quic_handshake_bench.zig",
+            ),
+            .target = target,
+            .optimize = optimize,
+            .imports = &.{.{ .name = "netz", .module = netz_mod }},
+        }),
+        .filters = test_filters,
+    });
+    const run_quic_handshake_bench_tests = b.addRunArtifact(
+        quic_handshake_bench_tests,
+    );
+    const quic_persistent_bench_tests = b.addTest(.{
+        .root_module = b.createModule(.{
+            .root_source_file = b.path(
+                "tools/interop/quic_persistent_bench.zig",
+            ),
+            .target = target,
+            .optimize = optimize,
+            .imports = &.{.{ .name = "netz", .module = netz_mod }},
+        }),
+        .filters = test_filters,
+    });
+    const run_quic_persistent_bench_tests = b.addRunArtifact(
+        quic_persistent_bench_tests,
+    );
+    const quic_quic_go_churn_tests = b.addTest(.{
+        .root_module = b.createModule(.{
+            .root_source_file = b.path(
+                "tools/interop/quic_quic_go_churn.zig",
+            ),
+            .target = target,
+            .optimize = optimize,
+            .imports = &.{.{ .name = "netz", .module = netz_mod }},
+        }),
+        .filters = test_filters,
+    });
+    const run_quic_quic_go_churn_tests = b.addRunArtifact(
+        quic_quic_go_churn_tests,
+    );
+    const http3_quic_go_bench_tests = b.addTest(.{
+        .root_module = b.createModule(.{
+            .root_source_file = b.path(
+                "tools/interop/http3_quic_go_bench.zig",
+            ),
+            .target = target,
+            .optimize = optimize,
+            .imports = &.{.{ .name = "netz", .module = netz_mod }},
+        }),
+        .filters = test_filters,
+    });
+    const run_http3_quic_go_bench_tests = b.addRunArtifact(
+        http3_quic_go_bench_tests,
+    );
+    const exact_certificate_verifier_tests = b.addTest(.{
+        .root_module = b.createModule(.{
+            .root_source_file = b.path(
+                "tools/interop/exact_certificate_verifier.zig",
+            ),
+            .target = target,
+            .optimize = optimize,
+            .imports = &.{.{ .name = "netz", .module = netz_mod }},
+        }),
+        .filters = test_filters,
+    });
+    const run_exact_certificate_verifier_tests = b.addRunArtifact(
+        exact_certificate_verifier_tests,
+    );
+    const websocket_send_shape_tests = b.addTest(.{
+        .root_module = b.createModule(.{
+            .root_source_file = b.path(
+                "examples/support/websocket_send_shape.zig",
+            ),
+            .target = target,
+            .optimize = optimize,
+        }),
+        .filters = test_filters,
+    });
+    const run_websocket_send_shape_tests = b.addRunArtifact(
+        websocket_send_shape_tests,
+    );
 
     const test_step = b.step("test", "Run all tests");
     test_step.dependOn(&run_lib_tests.step);
     test_step.dependOn(&run_package_tests.step);
+    test_step.dependOn(&run_quic_handshake_bench_tests.step);
+    test_step.dependOn(&run_quic_persistent_bench_tests.step);
+    test_step.dependOn(&run_quic_quic_go_churn_tests.step);
+    test_step.dependOn(&run_http3_quic_go_bench_tests.step);
+    test_step.dependOn(&run_exact_certificate_verifier_tests.step);
+    test_step.dependOn(&run_websocket_send_shape_tests.step);
 
     const mqtt_mtls_server = b.addExecutable(.{
         .name = "netz-mqtt-mtls-server",
@@ -522,6 +606,18 @@ pub fn build(b: *std.Build) void {
         "Compare verified HTTP/3 upload and download against quic-go",
     );
     http3_quic_go_bench_step.dependOn(&http3_quic_go_bench.step);
+    const http3_quic_go_multistream = b.addSystemCommand(
+        &.{"tools/interop/http3_quic_go_multistream.sh"},
+    );
+    http3_quic_go_multistream.addArtifactArg(http3_quic_go_client);
+    http3_quic_go_multistream.addArtifactArg(http3_quic_go_server);
+    const http3_quic_go_multistream_step = b.step(
+        "bench-http3-quic-go-multistream",
+        "Compare verified 4/16-stream HTTP/3 transfers against quic-go",
+    );
+    http3_quic_go_multistream_step.dependOn(
+        &http3_quic_go_multistream.step,
+    );
 
     const websocket_h3_quic_go_client = b.addExecutable(.{
         .name = "netz-websocket-h3-quic-go-client",
@@ -764,6 +860,16 @@ pub fn build(b: *std.Build) void {
         "Run verified QUIC lifecycle, migration, flow-control, and loss interop with local quic-go fixtures",
     );
     quic_quic_go_step.dependOn(&quic_quic_go.step);
+    const quic_handshake_fault = b.addSystemCommand(
+        &.{"tools/interop/quic_handshake_fault.sh"},
+    );
+    quic_handshake_fault.addArtifactArg(quic_peer_client);
+    quic_handshake_fault.addArtifactArg(quic_peer_server);
+    const quic_handshake_fault_step = b.step(
+        "interop-quic-handshake-fault",
+        "Verify bidirectional QUIC v1/v2 quic-go handshake recovery after deterministic loss/corruption",
+    );
+    quic_handshake_fault_step.dependOn(&quic_handshake_fault.step);
     const quic_quic_go_bench_client = b.addExecutable(.{
         .name = "netz-quic-quic-go-bench-client",
         .root_module = b.createModule(.{
@@ -809,6 +915,57 @@ pub fn build(b: *std.Build) void {
         "Compare verified raw QUIC STREAM transfer against quic-go",
     );
     quic_quic_go_bench_step.dependOn(&quic_quic_go_bench.step);
+    const quic_persistent_bench_exe = b.addExecutable(.{
+        .name = "netz-quic-persistent-bench",
+        .root_module = b.createModule(.{
+            .root_source_file = b.path(
+                "tools/interop/quic_persistent_bench.zig",
+            ),
+            .target = target,
+            .optimize = optimize,
+            .imports = &.{.{ .name = "netz", .module = netz_mod }},
+        }),
+    });
+    const quic_persistent_bench = b.addSystemCommand(
+        &.{"tools/interop/quic_persistent_benchmark.sh"},
+    );
+    quic_persistent_bench.addArtifactArg(quic_persistent_bench_exe);
+    if (b.args) |args| quic_persistent_bench.addArgs(args);
+    const quic_persistent_bench_step = b.step(
+        "bench-quic-persistent-external",
+        "Compare persistent QUIC echo latency and aggregate multi-connection throughput against quic-go",
+    );
+    quic_persistent_bench_step.dependOn(&quic_persistent_bench.step);
+    const quic_handshake_bench_exe = b.addExecutable(.{
+        .name = "netz-quic-handshake-bench",
+        .root_module = b.createModule(.{
+            .root_source_file = b.path(
+                "tools/interop/quic_handshake_bench.zig",
+            ),
+            .target = target,
+            .optimize = optimize,
+            .imports = &.{.{ .name = "netz", .module = netz_mod }},
+        }),
+    });
+    const quic_handshake_bench = b.addSystemCommand(
+        &.{"tools/interop/quic_handshake_benchmark.sh"},
+    );
+    quic_handshake_bench.addArtifactArg(quic_handshake_bench_exe);
+    const quic_handshake_bench_step = b.step(
+        "bench-quic-handshake-external",
+        "Compare fresh certificate-verified QUIC handshakes across netz/quic-go role pairs",
+    );
+    quic_handshake_bench_step.dependOn(&quic_handshake_bench.step);
+    const quic_quic_go_churn = b.addSystemCommand(
+        &.{"tools/interop/quic_quic_go_churn.sh"},
+    );
+    quic_quic_go_churn.addArtifactArg(quic_quic_go_bench_client);
+    quic_quic_go_churn.addArtifactArg(quic_quic_go_bench_server);
+    const quic_quic_go_churn_step = b.step(
+        "interop-quic-quic-go-churn",
+        "Exercise raw QUIC mixed FIN/reset recovery with quic-go under loss/reordering",
+    );
+    quic_quic_go_churn_step.dependOn(&quic_quic_go_churn.step);
 
     const quic_s2n = b.addSystemCommand(
         &.{"tools/interop/quic_s2n.sh"},
@@ -910,6 +1067,23 @@ pub fn build(b: *std.Build) void {
         "Repeat mixed WebTransport FIN/reset traffic under loss/reordering",
     );
     webtransport_churn_step.dependOn(&webtransport_churn.step);
+
+    const webtransport_wtransport_churn = b.addSystemCommand(&.{
+        "tools/interop/webtransport_wtransport_churn.sh",
+    });
+    webtransport_wtransport_churn.addArtifactArg(
+        webtransport_wtransport_client,
+    );
+    webtransport_wtransport_churn.addArtifactArg(
+        webtransport_wtransport_server,
+    );
+    const webtransport_wtransport_churn_step = b.step(
+        "interop-webtransport-wtransport-churn",
+        "Exercise bidirectional-role WebTransport FIN/reset recovery with wtransport",
+    );
+    webtransport_wtransport_churn_step.dependOn(
+        &webtransport_wtransport_churn.step,
+    );
 
     const webtransport_chrome = b.addSystemCommand(&.{
         "tools/interop/webtransport_chrome.sh",
@@ -1252,4 +1426,63 @@ pub fn build(b: *std.Build) void {
             bench_step.dependOn(&run.step);
         }
     }
+
+    const http3_public_fetch = b.addExecutable(.{
+        .name = "netz-http3-public-fetch",
+        .root_module = b.createModule(.{
+            .root_source_file = b.path("examples/http3_fetch.zig"),
+            .target = target,
+            .optimize = optimize,
+            .imports = &.{.{ .name = "netz", .module = netz_mod }},
+        }),
+    });
+    const http3_public = b.addSystemCommand(&.{
+        "sh",
+        "tools/interop/http3_public.sh",
+    });
+    http3_public.addArtifactArg(http3_public_fetch);
+    const http3_public_step = b.step(
+        "interop-http3-public",
+        "Verify public HTTP/3 endpoints with system trust",
+    );
+    http3_public_step.dependOn(&http3_public.step);
+
+    const websocket_slices_h1 = b.addExecutable(.{
+        .name = "netz-websocket-slices-h1",
+        .root_module = b.createModule(.{
+            .root_source_file = b.path("examples/bench_websocket_echo.zig"),
+            .target = target,
+            .optimize = optimize,
+            .imports = &.{.{ .name = "netz", .module = netz_mod }},
+        }),
+    });
+    const websocket_slices_h2 = b.addExecutable(.{
+        .name = "netz-websocket-slices-h2",
+        .root_module = b.createModule(.{
+            .root_source_file = b.path("examples/bench_websocket_h2_echo.zig"),
+            .target = target,
+            .optimize = optimize,
+            .imports = &.{.{ .name = "netz", .module = netz_mod }},
+        }),
+    });
+    const websocket_slices_h3 = b.addExecutable(.{
+        .name = "netz-websocket-slices-h3",
+        .root_module = b.createModule(.{
+            .root_source_file = b.path("examples/bench_websocket_h3_echo.zig"),
+            .target = target,
+            .optimize = optimize,
+            .imports = &.{.{ .name = "netz", .module = netz_mod }},
+        }),
+    });
+    const websocket_slices_ab = b.addSystemCommand(&.{
+        "tools/interop/websocket_slices_ab.sh",
+    });
+    websocket_slices_ab.addArtifactArg(websocket_slices_h1);
+    websocket_slices_ab.addArtifactArg(websocket_slices_h2);
+    websocket_slices_ab.addArtifactArg(websocket_slices_h3);
+    const websocket_slices_ab_step = b.step(
+        "bench-websocket-slices-ab",
+        "Compare caller-joined and direct-slice WebSocket sends over H1/H2/H3",
+    );
+    websocket_slices_ab_step.dependOn(&websocket_slices_ab.step);
 }

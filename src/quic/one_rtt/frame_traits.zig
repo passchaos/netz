@@ -5,6 +5,7 @@ pub const Traits = struct {
     ack_eliciting: bool = false,
     in_flight: bool = false,
     retransmittable: bool = false,
+    has_non_retransmittable: bool = false,
     path_validation: bool = false,
     ack_or_close: bool = false,
     handshake_done: bool = false,
@@ -18,6 +19,8 @@ pub const Traits = struct {
         self.ack_eliciting = self.ack_eliciting or traits.ack_eliciting;
         self.in_flight = self.in_flight or traits.in_flight;
         self.retransmittable = self.retransmittable or traits.retransmittable;
+        self.has_non_retransmittable = self.has_non_retransmittable or
+            traits.has_non_retransmittable;
         self.path_validation = self.path_validation or traits.path_validation;
         self.ack_or_close = self.ack_or_close or traits.ack_or_close;
         self.handshake_done = self.handshake_done or traits.handshake_done;
@@ -55,40 +58,60 @@ pub const Traits = struct {
             !self.path_validation and
             !self.ack_or_close;
     }
+
+    pub fn allPayloadBytesRetransmittable(self: Traits) bool {
+        return self.retransmittable and !self.has_non_retransmittable;
+    }
 };
 
 pub fn classify(frame: quic.Frame) Traits {
-    var traits: Traits = switch (frame) {
+    return switch (frame) {
         // RFC 9000 section 13.2.1: ACK, PADDING, and CONNECTION_CLOSE are
         // non-ack-eliciting. RFC 9002 still counts PADDING in flight.
         .ack => |ack| .{
             .ack_or_close = true,
+            .has_non_retransmittable = true,
             .largest_acknowledged = ack.largest_acknowledged,
         },
-        .padding => .{ .in_flight = true },
+        .padding => .{
+            .in_flight = true,
+            .has_non_retransmittable = true,
+        },
         .connection_close, .application_close => .{
             .ack_or_close = true,
+            .has_non_retransmittable = true,
         },
-        else => .{ .ack_eliciting = true, .in_flight = true },
+        // RFC 9221 DATAGRAM data and PATH_RESPONSE are ack-eliciting and count
+        // in flight, but their application/probe bytes are never retransmitted.
+        .path_response => .{
+            .ack_eliciting = true,
+            .in_flight = true,
+            .has_non_retransmittable = true,
+            .path_validation = true,
+        },
+        .datagram => .{
+            .ack_eliciting = true,
+            .in_flight = true,
+            .has_non_retransmittable = true,
+        },
+        .path_challenge => .{
+            .ack_eliciting = true,
+            .in_flight = true,
+            .retransmittable = true,
+            .path_validation = true,
+        },
+        .handshake_done => .{
+            .ack_eliciting = true,
+            .in_flight = true,
+            .retransmittable = true,
+            .handshake_done = true,
+        },
+        else => .{
+            .ack_eliciting = true,
+            .in_flight = true,
+            .retransmittable = true,
+        },
     };
-    switch (frame) {
-        // RFC 9221 DATAGRAM data and PATH_RESPONSE are never retransmitted.
-        .ack,
-        .padding,
-        .path_response,
-        .connection_close,
-        .application_close,
-        .datagram,
-        => {},
-        else => traits.retransmittable = true,
-    }
-    switch (frame) {
-        .path_challenge, .path_response => traits.path_validation = true,
-        .handshake_done => traits.handshake_done = true,
-        .stream => {},
-        else => {},
-    }
-    return traits;
 }
 
 pub fn analyze(frames: []const quic.Frame) error{InvalidFrameLength}!Traits {

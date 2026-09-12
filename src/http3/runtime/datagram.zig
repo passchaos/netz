@@ -15,6 +15,11 @@ pub const Owned = struct {
     }
 };
 
+pub const EncodedBatch = struct {
+    storage: []const u8,
+    datagrams: []const []const u8,
+};
+
 pub const Limits = struct {
     max_associations: usize,
     max_queued_per_association: usize,
@@ -121,6 +126,8 @@ pub const Registry = struct {
     index: std.AutoHashMapUnmanaged(u62, usize) = .empty,
     receive_scratch: std.ArrayList(u8) = .empty,
     send_scratch: std.ArrayList(u8) = .empty,
+    send_batch_storage: std.ArrayList(u8) = .empty,
+    send_batch_datagrams: std.ArrayList([]const u8) = .empty,
 
     pub fn init(allocator: std.mem.Allocator, limits: Limits) Registry {
         return .{ .allocator = allocator, .limits = limits };
@@ -128,6 +135,8 @@ pub const Registry = struct {
 
     pub fn deinit(self: *Registry) void {
         for (self.associations.items) |*association| association.deinit(self.allocator);
+        self.send_batch_datagrams.deinit(self.allocator);
+        self.send_batch_storage.deinit(self.allocator);
         self.send_scratch.deinit(self.allocator);
         self.receive_scratch.deinit(self.allocator);
         self.associations.deinit(self.allocator);
@@ -293,6 +302,58 @@ pub const Registry = struct {
         return self.send_scratch.items;
     }
 
+    /// Encode an ordered application batch into reusable registry-owned
+    /// storage. Returned slices remain stable until the next mutable registry
+    /// operation or `Registry.deinit`.
+    pub fn encodeBatch(
+        self: *Registry,
+        stream_id: u62,
+        payloads: []const []const u8,
+    ) !EncodedBatch {
+        try validateStreamId(stream_id);
+        if (!self.contains(stream_id)) return error.UnexpectedStream;
+        const quarter_stream_id = stream_id / 4;
+        const prefix_len = try quic.varint.length(quarter_stream_id);
+        var total_len: usize = 0;
+        for (payloads) |payload| {
+            total_len = std.math.add(
+                usize,
+                total_len,
+                std.math.add(usize, prefix_len, payload.len) catch
+                    return error.IntegerOverflow,
+            ) catch return error.IntegerOverflow;
+        }
+        self.send_batch_storage.clearRetainingCapacity();
+        self.send_batch_datagrams.clearRetainingCapacity();
+        try self.send_batch_storage.ensureTotalCapacityPrecise(
+            self.allocator,
+            total_len,
+        );
+        try self.send_batch_datagrams.ensureTotalCapacityPrecise(
+            self.allocator,
+            payloads.len,
+        );
+        self.send_batch_storage.items.len = total_len;
+        self.send_batch_datagrams.items.len = payloads.len;
+        const storage = self.send_batch_storage.items;
+        const datagrams = self.send_batch_datagrams.items;
+
+        var offset: usize = 0;
+        for (payloads, datagrams) |payload, *encoded| {
+            const start = offset;
+            const prefix = try quic.varint.encodeInto(
+                storage[offset..][0..prefix_len],
+                quarter_stream_id,
+            );
+            offset += prefix.len;
+            @memcpy(storage[offset..][0..payload.len], payload);
+            offset += payload.len;
+            encoded.* = storage[start..offset];
+        }
+        std.debug.assert(offset == storage.len);
+        return .{ .storage = storage, .datagrams = datagrams };
+    }
+
     pub fn poll(self: *Registry, stream_id: u62) !?Owned {
         try validateStreamId(stream_id);
         const index = self.index.get(stream_id) orelse return error.UnexpectedStream;
@@ -386,6 +447,47 @@ test "HTTP/3 CONNECT datagram registry isolates unknown associations" {
     try encoded.appendSlice(allocator, "overflow");
     try std.testing.expectError(error.InvalidFrame, registry.route(encoded.items));
     try std.testing.expectEqual(@as(usize, 0), try registry.queuedCount(0));
+}
+
+test "HTTP/3 CONNECT datagram batch uses stable exact backing storage" {
+    const allocator = std.testing.allocator;
+    var registry = Registry.init(allocator, .{
+        .max_associations = 1,
+        .max_queued_per_association = 1,
+        .max_queued_bytes_per_association = 64,
+    });
+    defer registry.deinit();
+    try registry.register(0);
+
+    const payloads = [_][]const u8{ "one", &.{}, "three" };
+    const batch = try registry.encodeBatch(0, &payloads);
+    try std.testing.expectEqual(payloads.len, batch.datagrams.len);
+    try std.testing.expectEqual(
+        payloads[0].len + payloads[1].len + payloads[2].len + payloads.len,
+        batch.storage.len,
+    );
+    for (batch.datagrams, payloads) |encoded, expected| {
+        const datagram = try http3.Datagram.parse(encoded);
+        try std.testing.expectEqual(@as(u64, 0), datagram.quarter_stream_id);
+        try std.testing.expectEqualStrings(expected, datagram.payload);
+        try std.testing.expect(@intFromPtr(encoded.ptr) >=
+            @intFromPtr(batch.storage.ptr));
+        try std.testing.expect(@intFromPtr(encoded.ptr) + encoded.len <=
+            @intFromPtr(batch.storage.ptr) + batch.storage.len);
+    }
+
+    var failing = std.testing.FailingAllocator.init(allocator, .{
+        .fail_index = 0,
+    });
+    registry.allocator = failing.allocator();
+    const reused = try registry.encodeBatch(0, &payloads);
+    registry.allocator = allocator;
+    try std.testing.expectEqual(batch.storage.ptr, reused.storage.ptr);
+    try std.testing.expectEqual(batch.datagrams.ptr, reused.datagrams.ptr);
+    for (reused.datagrams, payloads) |encoded, expected| {
+        const datagram = try http3.Datagram.parse(encoded);
+        try std.testing.expectEqualStrings(expected, datagram.payload);
+    }
 }
 
 test "HTTP/3 CONNECT datagram queue allocation failure is transactional" {

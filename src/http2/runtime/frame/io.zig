@@ -76,8 +76,30 @@ pub fn readOwnedTransportWithDeadline(
     inbound_payload_limit: usize,
     deadline: ?std.Io.Clock.Timestamp,
 ) !OwnedFrame {
+    return readOwnedTransportWithDeadlineClassified(
+        allocator,
+        transport,
+        inbound_payload_limit,
+        deadline,
+        null,
+    );
+}
+
+pub fn readOwnedTransportWithDeadlineClassified(
+    allocator: std.mem.Allocator,
+    transport: anytype,
+    inbound_payload_limit: usize,
+    deadline: ?std.Io.Clock.Timestamp,
+    envelope_violation: ?*?wire.EnvelopeViolation,
+) !OwnedFrame {
+    if (envelope_violation) |out| out.* = null;
     if (deadline == null) {
-        return readOwnedFrom(allocator, transport, inbound_payload_limit);
+        return readOwnedFromClassified(
+            allocator,
+            transport,
+            inbound_payload_limit,
+            envelope_violation,
+        );
     }
 
     var header_bytes: [http2.FrameHeader.encoded_len]u8 = undefined;
@@ -88,6 +110,7 @@ pub fn readOwnedTransportWithDeadline(
         &header_bytes,
         inbound_payload_limit,
         deadline,
+        envelope_violation,
     );
 }
 
@@ -95,6 +118,20 @@ fn readOwnedFrom(
     allocator: std.mem.Allocator,
     source: anytype,
     inbound_payload_limit: usize,
+) !OwnedFrame {
+    return readOwnedFromClassified(
+        allocator,
+        source,
+        inbound_payload_limit,
+        null,
+    );
+}
+
+fn readOwnedFromClassified(
+    allocator: std.mem.Allocator,
+    source: anytype,
+    inbound_payload_limit: usize,
+    envelope_violation: ?*?wire.EnvelopeViolation,
 ) !OwnedFrame {
     var header_bytes: [http2.FrameHeader.encoded_len]u8 = undefined;
     try readExact(source, &header_bytes);
@@ -104,6 +141,7 @@ fn readOwnedFrom(
         &header_bytes,
         inbound_payload_limit,
         null,
+        envelope_violation,
     );
 }
 
@@ -113,6 +151,7 @@ fn finishOwnedRead(
     header_bytes: *const [http2.FrameHeader.encoded_len]u8,
     inbound_payload_limit: usize,
     deadline: ?std.Io.Clock.Timestamp,
+    envelope_violation: ?*?wire.EnvelopeViolation,
 ) !OwnedFrame {
     const header = try http2.FrameHeader.parse(header_bytes);
     const payload_len: usize = header.length;
@@ -134,7 +173,10 @@ fn finishOwnedRead(
         try readExact(source, bytes[http2.FrameHeader.encoded_len..]);
     }
     const frame = try http2.Frame.parse(bytes);
-    try wire.validateEnvelope(frame);
+    if (wire.classifyEnvelope(frame)) |violation| {
+        if (envelope_violation) |out| out.* = violation;
+        return error.InvalidFrame;
+    }
     return .{ .bytes = bytes, .frame = frame };
 }
 
@@ -156,6 +198,42 @@ pub fn writeTransport(
         payload.len,
     );
     try transport.writeAllParts(&header, payload);
+}
+
+/// Encode one complete frame contiguously and write it under an absolute
+/// deadline. `committed` reports the exact HTTP/2 wire prefix accepted by a
+/// cleartext transport, or complete TLS-record plaintext progress.
+pub fn writeTransportWithDeadline(
+    allocator: std.mem.Allocator,
+    transport: anytype,
+    frame_type: http2.FrameType,
+    flags: u8,
+    stream_id: u31,
+    payload: []const u8,
+    committed: *usize,
+    deadline: std.Io.Clock.Timestamp,
+) !void {
+    committed.* = 0;
+    const total_len = std.math.add(
+        usize,
+        http2.FrameHeader.encoded_len,
+        payload.len,
+    ) catch return error.InvalidFrameSize;
+    var stack_storage: [256]u8 = undefined;
+    const storage = if (total_len <= stack_storage.len)
+        stack_storage[0..total_len]
+    else
+        try allocator.alloc(u8, total_len);
+    defer if (storage.ptr != stack_storage[0..].ptr) allocator.free(storage);
+    try wire.encodeHeader(
+        storage[0..http2.FrameHeader.encoded_len],
+        frame_type,
+        flags,
+        stream_id,
+        payload.len,
+    );
+    @memcpy(storage[http2.FrameHeader.encoded_len..], payload);
+    try transport.writeAllWithDeadline(storage, committed, deadline);
 }
 
 fn readExact(source: anytype, buffer: []u8) !void {
@@ -189,6 +267,7 @@ fn readExactWithDeadline(
 pub const Reader = struct {
     buffer: std.ArrayList(u8) = .empty,
     start: usize = 0,
+    last_envelope_violation: ?wire.EnvelopeViolation = null,
 
     pub fn deinit(self: *Reader, allocator: std.mem.Allocator) void {
         self.buffer.deinit(allocator);
@@ -270,6 +349,7 @@ pub const Reader = struct {
         source: anytype,
         inbound_payload_limit: usize,
     ) !BorrowedFrame {
+        self.last_envelope_violation = null;
         while (true) {
             const available = self.buffer.items[self.start..];
             var target_read_size = default_read_size;
@@ -288,7 +368,10 @@ pub const Reader = struct {
                     const bytes = available[0..total_len];
                     const frame = try http2.Frame.parse(bytes);
                     self.start += total_len;
-                    try wire.validateEnvelope(frame);
+                    if (wire.classifyEnvelope(frame)) |violation| {
+                        self.last_envelope_violation = violation;
+                        return error.InvalidFrame;
+                    }
                     return .{ .bytes = bytes, .frame = frame };
                 }
                 target_read_size = @max(total_len, default_read_size);
@@ -325,5 +408,14 @@ pub const Reader = struct {
             }
             self.buffer.items.len -= destination.len - count;
         }
+    }
+
+    /// Take classification for the immediately preceding InvalidFrame. Other
+    /// parse/read failures clear this slot on entry and cannot be mistaken for
+    /// peer envelope violations by the connection runtime.
+    pub fn takeEnvelopeViolation(self: *Reader) ?wire.EnvelopeViolation {
+        const violation = self.last_envelope_violation;
+        self.last_envelope_violation = null;
+        return violation;
     }
 };

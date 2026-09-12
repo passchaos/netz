@@ -55,6 +55,7 @@ fn receiveClientInitialForTest(
             .expected_packet_number = expected_packet_number,
             .max_crypto_buffer = max_crypto_buffer,
             .min_datagram_size = quic.initial_exchange.min_initial_udp_datagram_size,
+            .first_datagram_size_validated = true,
         },
     );
     errdefer flight.deinit(endpoint.allocator);
@@ -423,6 +424,100 @@ test "QUIC integrated handshake establishes 1-RTT stream exchange" {
     if (shared.err) |err| return err;
 
     try std.testing.expectEqualStrings("OK", response.frames[0].stream.data);
+}
+
+test "QUIC integrated handshake enables spin bit on established traffic" {
+    const allocator = std.testing.allocator;
+
+    var threaded = std.Io.Threaded.init(allocator, .{});
+    defer threaded.deinit();
+    const io = threaded.io();
+
+    var server_endpoint = try quic.runtime.Endpoint.bind(
+        allocator,
+        io,
+        .{ .ip4 = .loopback(0) },
+        .{ .max_datagram_size = 4096 },
+    );
+    defer server_endpoint.deinit();
+    var client_endpoint = try quic.runtime.Endpoint.bind(
+        allocator,
+        io,
+        .{ .ip4 = .loopback(0) },
+        .{ .max_datagram_size = 4096 },
+    );
+    defer client_endpoint.deinit();
+
+    const Shared = struct {
+        endpoint: *quic.runtime.Endpoint,
+        err: ?anyerror = null,
+
+        fn run(shared: *@This()) void {
+            runFallible(shared.endpoint) catch |err| {
+                shared.err = err;
+            };
+        }
+
+        fn runFallible(endpoint: *quic.runtime.Endpoint) !void {
+            var established = try handshake.accept(endpoint, .{
+                .local_connection_id = "spin-server",
+                .initial_one_rtt_config = .{
+                    .enable_spin_bit = true,
+                    .enable_pacing = false,
+                },
+                // Low nibble zero selects the RFC-mandated 1/16 disabled
+                // sample even though the administrator enabled the feature.
+                .random = [_]u8{0x60} ** 32,
+                .x25519_secret_key = [_]u8{0x68} ** 32,
+            });
+            defer established.deinit();
+            try std.testing.expect(!established.connection.config.enable_spin_bit);
+            var request = try established.connection.receivePacket();
+            defer request.deinit(endpoint.allocator);
+            try std.testing.expect(!request.packet.spin_bit);
+            try std.testing.expect(!established.connection.nextSpinBit());
+            try established.connection.send(&.{.{ .ping = {} }});
+            var saw_spun_packet = false;
+            for (0..4) |_| {
+                var follow_up = try established.connection.receivePacket();
+                defer follow_up.deinit(endpoint.allocator);
+                if (follow_up.packet.spin_bit) {
+                    saw_spun_packet = true;
+                    break;
+                }
+            }
+            try std.testing.expect(saw_spun_packet);
+        }
+    };
+
+    var shared = Shared{ .endpoint = &server_endpoint };
+    const thread = try std.Thread.spawn(.{}, Shared.run, .{&shared});
+    var established = try handshake.connect(
+        &client_endpoint,
+        server_endpoint.address(),
+        .{
+            .original_destination_connection_id = "spinorig",
+            .local_connection_id = "spin-client",
+            .server_name = "localhost",
+            .initial_one_rtt_config = .{
+                .enable_spin_bit = true,
+                .enable_pacing = false,
+            },
+            .random = [_]u8{0x65} ** 32,
+            .x25519_secret_key = [_]u8{0x67} ** 32,
+        },
+    );
+    defer established.deinit();
+    try std.testing.expect(established.connection.config.enable_spin_bit);
+    try established.connection.send(&.{.{ .ping = {} }});
+    var response = try established.connection.receivePacket();
+    defer response.deinit(allocator);
+    try std.testing.expect(!response.packet.spin_bit);
+    try std.testing.expect(established.connection.nextSpinBit());
+    try established.connection.send(&.{.{ .ping = {} }});
+
+    thread.join();
+    if (shared.err) |err| return err;
 }
 
 test "QUIC server handshake consumes a dispatcher-owned Initial" {

@@ -49,6 +49,35 @@ test "HTTP/2 frame wire validates envelope rules" {
     }
 }
 
+test "HTTP/2 frame wire classifies envelope error codes and scope" {
+    const settings_stream = wire.classifyEnvelope(
+        frame(.settings, 1, 0, &.{}),
+    ).?;
+    try std.testing.expectEqual(
+        http2.ErrorCode.protocol_error,
+        settings_stream.error_code,
+    );
+    try std.testing.expectEqual(@as(?u31, null), settings_stream.stream_id);
+
+    const short_ping = wire.classifyEnvelope(
+        frame(.ping, 0, 0, &.{ 0, 1, 2, 3, 4, 5, 6 }),
+    ).?;
+    try std.testing.expectEqual(
+        http2.ErrorCode.frame_size_error,
+        short_ping.error_code,
+    );
+    try std.testing.expectEqual(@as(?u31, null), short_ping.stream_id);
+
+    const zero_stream_window = wire.classifyEnvelope(
+        frame(.window_update, 7, 0, &.{ 0, 0, 0, 0 }),
+    ).?;
+    try std.testing.expectEqual(
+        http2.ErrorCode.protocol_error,
+        zero_stream_window.error_code,
+    );
+    try std.testing.expectEqual(@as(?u31, 7), zero_stream_window.stream_id);
+}
+
 test "HTTP/2 frame wire appends HEADERS and CONTINUATION transactionally" {
     const allocator = std.testing.allocator;
     var encoded: std.ArrayList(u8) = .empty;

@@ -7,7 +7,7 @@ const default_iterations: usize = 1_000;
 const default_warmup_iterations: usize = 100;
 
 const Mode = enum { all, gro, gro_service, plain, service, visitor };
-const FrameShape = enum { padding, stream };
+const FrameShape = enum { padding, stream, stream_gap };
 
 const Options = struct {
     mode: Mode = .all,
@@ -282,6 +282,7 @@ fn measureVisitor(
             frame_shape,
             &stream_offset,
         );
+        reorderStreamGapDatagrams(frame_shape, &datagrams);
         try client_endpoint.sendManyBytes(server_endpoint.address(), &datagrams);
 
         const started = nowNs(io);
@@ -304,7 +305,9 @@ fn measureVisitor(
     if (observed_frames != iteration_count * batch_size) {
         return error.UnexpectedPacketCount;
     }
-    if (frame_shape == .stream and observed_stream_bytes != stream_offset) {
+    if (isStreamFrame(frame_shape) and
+        observed_stream_bytes != stream_offset)
+    {
         return error.UnexpectedPacketCount;
     }
     return total_ns;
@@ -390,7 +393,7 @@ fn observePacket(
     packet: netz.quic.one_rtt.ReceivedPacketView,
 ) !void {
     context.observed_frames.* += @intFromBool(packet.frames.len != 0);
-    if (context.frame_shape == .stream) {
+    if (isStreamFrame(context.frame_shape)) {
         context.observed_stream_bytes.* += try drainStream(context.connection);
     }
 }
@@ -454,6 +457,7 @@ fn measure(
             &stream_offset,
         );
         _ = written;
+        reorderStreamGapDatagrams(frame_shape, &datagrams);
         try client_endpoint.sendManyBytes(server_endpoint.address(), &datagrams);
 
         const started = nowNs(io);
@@ -461,7 +465,7 @@ fn measure(
             if (try server.servicePacketBatchAt(started) != batch_size) {
                 return error.UnexpectedPacketCount;
             }
-            if (frame_shape == .stream) {
+            if (isStreamFrame(frame_shape)) {
                 observed_stream_bytes += try drainStream(&server);
             }
         } else if (enable_gro) {
@@ -476,13 +480,13 @@ fn measure(
             if (consumed != batch_size) {
                 return error.UnexpectedPacketCount;
             }
-            if (frame_shape == .stream) {
+            if (isStreamFrame(frame_shape)) {
                 observed_stream_bytes += try drainStream(&server);
             }
         } else if (service_in_place) {
             for (0..batch_size) |_| {
                 try server.servicePacketAt(started);
-                if (frame_shape == .stream) {
+                if (isStreamFrame(frame_shape)) {
                     observed_stream_bytes += try drainStream(&server);
                 }
             }
@@ -490,7 +494,7 @@ fn measure(
             for (0..batch_size) |_| {
                 var received = try server.receivePacketAt(started);
                 defer received.deinit(allocator);
-                if (frame_shape == .stream) {
+                if (isStreamFrame(frame_shape)) {
                     observed_stream_bytes += try drainStream(&server);
                 }
             }
@@ -498,7 +502,9 @@ fn measure(
         total_ns +|= nowNs(io) -| started;
         first_packet_number += batch_size;
     }
-    if (frame_shape == .stream and observed_stream_bytes != stream_offset) {
+    if (isStreamFrame(frame_shape) and
+        observed_stream_bytes != stream_offset)
+    {
         return error.UnexpectedPacketCount;
     }
     return total_ns;
@@ -625,6 +631,24 @@ fn fillPayload(
         } else {
             data_len += payload_size - frame_len;
         }
+    }
+}
+
+fn isStreamFrame(frame_shape: FrameShape) bool {
+    return frame_shape == .stream or frame_shape == .stream_gap;
+}
+
+fn reorderStreamGapDatagrams(
+    frame_shape: FrameShape,
+    datagrams: *[batch_size][]const u8,
+) void {
+    if (frame_shape != .stream_gap) return;
+    for (0..batch_size / 2) |pair| {
+        std.mem.swap(
+            []const u8,
+            &datagrams[pair * 2],
+            &datagrams[pair * 2 + 1],
+        );
     }
 }
 

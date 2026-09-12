@@ -8,6 +8,9 @@ pub const TimedReadError = net.Stream.Reader.Error ||
     std.Io.Operation.NetReceive.Error || std.Io.Timeout.Error ||
     std.Io.ConcurrentError;
 
+pub const TimedWriteError = net.Stream.Writer.Error ||
+    std.Io.Timeout.Error || std.Io.ConcurrentError;
+
 /// Read connected stream bytes under an absolute deadline.
 ///
 /// Windows socket handles require the network operation. POSIX stream sockets
@@ -51,6 +54,122 @@ pub fn readSomeWithDeadline(
         error.EndOfStream => 0,
         else => return @errorCast(err),
     };
+}
+
+/// Submit one non-empty connected-stream prefix under an absolute deadline.
+///
+/// `std.Io` currently exposes timed writes through the streaming-file
+/// operation rather than `netWrite`. Stream sockets are file handles on the
+/// supported backends; marking the temporary view nonblocking lets the I/O
+/// implementation wait for writability without changing the socket itself.
+/// The returned count is the only prefix the caller may consider committed.
+pub fn writeSomeWithDeadline(
+    io: std.Io,
+    stream: net.Stream,
+    bytes: []const u8,
+    deadline: std.Io.Clock.Timestamp,
+) TimedWriteError!usize {
+    if (bytes.len == 0) return 0;
+    if (builtin.os.tag == .windows) {
+        return writeSomeWithDeadlineWindows(
+            io,
+            stream,
+            bytes,
+            deadline,
+        );
+    }
+    while (true) {
+        const result = try io.operateTimeout(
+            .{ .file_write_streaming = .{
+                .file = .{
+                    .handle = stream.socket.handle,
+                    .flags = .{ .nonblocking = true },
+                },
+                .data = &.{bytes},
+            } },
+            .{ .deadline = deadline },
+        );
+        const count = result.file_write_streaming catch |err| switch (err) {
+            // Writability can race another writer. Keep the original absolute
+            // deadline rather than turning a transient EAGAIN into failure.
+            error.WouldBlock => continue,
+            error.BrokenPipe => return error.SocketUnconnected,
+            error.SystemResources => return error.SystemResources,
+            else => return error.Unexpected,
+        };
+        if (count == 0) return error.SocketUnconnected;
+        return count;
+    }
+}
+
+fn writeSomeWithDeadlineWindows(
+    io: std.Io,
+    stream: net.Stream,
+    bytes: []const u8,
+    deadline: std.Io.Clock.Timestamp,
+) TimedWriteError!usize {
+    const WriteResult = net.Stream.Writer.Error!usize;
+    const Wake = union(enum) {
+        write: WriteResult,
+        timeout: std.Io.Cancelable!void,
+    };
+    const Task = struct {
+        fn write(
+            task_io: std.Io,
+            task_stream: net.Stream,
+            task_bytes: []const u8,
+        ) WriteResult {
+            const count = try task_io.vtable.netWrite(
+                task_io.userdata,
+                task_stream.socket.handle,
+                task_bytes,
+                &.{""},
+                0,
+            );
+            if (count == 0) return error.SocketUnconnected;
+            return count;
+        }
+
+        fn waitUntil(
+            task_io: std.Io,
+            task_deadline: std.Io.Clock.Timestamp,
+        ) std.Io.Cancelable!void {
+            try task_deadline.wait(task_io);
+        }
+    };
+
+    var wake_buffer: [2]Wake = undefined;
+    var select: std.Io.Select(Wake) = .init(io, &wake_buffer);
+    defer select.cancelDiscard();
+    try select.concurrent(.write, Task.write, .{ io, stream, bytes });
+    try select.concurrent(.timeout, Task.waitUntil, .{ io, deadline });
+    return switch (try select.await()) {
+        .write => |result| result,
+        .timeout => |result| {
+            try result;
+            return error.Timeout;
+        },
+    };
+}
+
+/// Write one borrowed slice under an absolute deadline while preserving the
+/// exact committed prefix on every return path.
+pub fn writeAllTrackedWithDeadline(
+    io: std.Io,
+    stream: net.Stream,
+    bytes: []const u8,
+    committed: *usize,
+    deadline: std.Io.Clock.Timestamp,
+) TimedWriteError!void {
+    committed.* = 0;
+    while (committed.* < bytes.len) {
+        committed.* += try writeSomeWithDeadline(
+            io,
+            stream,
+            bytes[committed.*..],
+            deadline,
+        );
+    }
 }
 
 /// Write two borrowed slices as one logical stream write.

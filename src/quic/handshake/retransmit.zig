@@ -136,6 +136,12 @@ pub const AntiAmplificationBudget = struct {
             bytes,
         ) catch std.math.maxInt(usize);
     }
+
+    pub fn release(self: *AntiAmplificationBudget, bytes: usize) void {
+        if (self.validated) return;
+        std.debug.assert(bytes <= self.bytes_sent);
+        self.bytes_sent -= bytes;
+    }
 };
 
 pub const SendFn = *const fn (
@@ -508,12 +514,17 @@ pub const InitialFlight = struct {
             self.options.max_datagrams,
             retransmission,
         );
-        _ = try quic.initial_exchange.sendInitialCryptoFlight(
+        const progress = try quic.initial_exchange
+            .sendInitialCryptoFlightProgress(
             self.endpoint,
             self.peer,
             self.keys,
             options,
         );
+        // Once protection has completed, the whole packet-number range is
+        // retired. A socket-rejected suffix behaves like packet loss: let the
+        // PTO loop wait and retry the CRYPTO data under the next fresh range.
+        _ = progress.send_error;
     }
 };
 
@@ -525,9 +536,9 @@ pub const InitialHandshakeFlight = struct {
     handshake_keys: quic.protection.PacketProtectionKeys,
     handshake_options: quic.initial_exchange.SendInitialOptions,
     anti_amplification: AntiAmplificationBudget = .{ .validated = true },
-    /// First Handshake packet number not consumed by a successful flight
-    /// transmission. A fatal receive error can use it for CONNECTION_CLOSE
-    /// without reusing an AEAD nonce from an earlier retransmission.
+    /// First Handshake packet number not consumed by packet protection. A
+    /// fatal receive error can use it for CONNECTION_CLOSE without reusing an
+    /// AEAD nonce, including after a zero-progress socket failure.
     next_handshake_packet_number: ?u64 = null,
 
     pub fn send(context: *anyopaque, retransmission: u8) anyerror!void {
@@ -549,23 +560,66 @@ pub const InitialHandshakeFlight = struct {
             initial_options,
             handshake_options,
         );
-        // This reservation is intentionally not rolled back on a send error:
-        // the socket API cannot prove that no prefix reached the network, and
-        // conservative over-accounting is required before address validation.
         try self.anti_amplification.reserve(flight_bytes);
-        _ = try quic.initial_exchange.sendInitialThenHandshakeCrypto(
+        var committed_bytes: usize = 0;
+        var reservation_active = true;
+        errdefer if (reservation_active) {
+            self.anti_amplification.release(flight_bytes - committed_bytes);
+        };
+
+        // Prepare the Handshake packet before any Initial datagram becomes
+        // visible. After protection succeeds, both encryption-level PN ranges
+        // are retired even when the socket rejects a suffix.
+        var prepared_handshake = try quic.initial_exchange
+            .prepareHandshakeCrypto(
+            self.endpoint,
+            self.handshake_keys,
+            handshake_options,
+        );
+        defer prepared_handshake.deinit(self.endpoint.allocator);
+        self.next_handshake_packet_number = if (handshake_options.packet_number <
+            quic.protection.max_packet_number)
+            handshake_options.packet_number + 1
+        else
+            null;
+
+        const initial_progress = try quic.initial_exchange
+            .sendInitialCryptoFlightProgress(
             self.endpoint,
             self.peer,
             self.initial_keys,
             initial_options,
-            self.handshake_keys,
-            handshake_options,
         );
-        self.next_handshake_packet_number = std.math.add(
-            u64,
-            handshake_options.packet_number,
-            1,
-        ) catch null;
+        committed_bytes = initial_progress.sent_bytes;
+        if (initial_progress.sent_count < initial_progress.protected_count) {
+            self.anti_amplification.release(
+                flight_bytes - committed_bytes,
+            );
+            reservation_active = false;
+            return;
+        }
+
+        const handshake_progress = quic.initial_exchange
+            .sendPreparedHandshakeCryptoProgress(
+            self.endpoint,
+            self.peer,
+            prepared_handshake,
+        );
+        if (handshake_progress.sent_count != 0) {
+            committed_bytes = std.math.add(
+                usize,
+                committed_bytes,
+                handshake_progress.packet_len,
+            ) catch flight_bytes;
+        }
+        self.anti_amplification.release(flight_bytes - committed_bytes);
+        reservation_active = false;
+        _ = initial_progress.send_error;
+        // The complete Initial flight is already visible. A socket-rejected
+        // Handshake packet is therefore a lost suffix, not a zero-progress
+        // send failure; wait for the PTO loop and retry both levels under fresh
+        // packet numbers.
+        _ = handshake_progress.send_error;
     }
 
     pub fn observeReceived(

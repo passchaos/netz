@@ -111,7 +111,7 @@ test "HTTP/2 batch informational observers correlate interleaved streams" {
         }
 
         fn runFallible(self: *@This()) !void {
-            for (0..3) |scenario| {
+            for (0..4) |scenario| {
                 var connection = try self.server.accept();
                 defer connection.close();
 
@@ -140,7 +140,7 @@ test "HTTP/2 batch informational observers correlate interleaved streams" {
                     "/two",
                 ));
                 try std.testing.expectEqual(
-                    if (scenario == 2) @as(usize, 5) else 0,
+                    if (scenario >= 2) @as(usize, 5) else 0,
                     body_bytes,
                 );
 
@@ -228,13 +228,14 @@ test "HTTP/2 batch informational observers correlate interleaved streams" {
             }
         };
         var body_context: BodyContext = .{};
-        try client.requestBatchStreamingWithInformationalInto(
+        try client.requestBatchStreamingWithInformationalIntoWithTimeout(
             &requests,
             &responses,
             .{
                 .context = &observer,
                 .on_response = BatchObserverContext.observe,
             },
+            .fromSeconds(2),
             &body_context,
             BodyContext.consume,
         );
@@ -277,6 +278,59 @@ test "HTTP/2 batch informational observers correlate interleaved streams" {
         try expectInterleavedEvents(&observer);
         try std.testing.expectEqualStrings("one", responses[0].body);
         try std.testing.expectEqualStrings("two", responses[1].body);
+    }
+
+    {
+        var client = try Client.connect(allocator, io, server.address(), limits);
+        defer client.close();
+        const requests = [_]RequestOptions{
+            .{
+                .method = "POST",
+                .path = "/body-streaming/one",
+                .authority = "localhost",
+                .body = "one",
+            },
+            .{
+                .method = "POST",
+                .path = "/body-streaming/two",
+                .authority = "localhost",
+                .body = "22",
+            },
+        };
+        var responses: [requests.len]runtime.StreamingResponse = undefined;
+        var observer: BatchObserverContext = .{};
+        const BodyContext = struct {
+            bytes: [2]usize = @splat(0),
+
+            fn consume(
+                self: *@This(),
+                request_index: usize,
+                data: []const u8,
+            ) !void {
+                self.bytes[request_index] += data.len;
+            }
+        };
+        var body_context: BodyContext = .{};
+        try client.requestBodyBatchStreamingWithInformationalIntoWithDeadline(
+            &requests,
+            1,
+            &responses,
+            .{
+                .context = &observer,
+                .on_response = BatchObserverContext.observe,
+            },
+            .fromNow(io, .{
+                .raw = .fromSeconds(2),
+                .clock = .awake,
+            }),
+            &body_context,
+            BodyContext.consume,
+        );
+        defer for (&responses) |*response| response.deinit(allocator);
+        try expectInterleavedEvents(&observer);
+        try std.testing.expectEqualSlices(usize, &.{ 3, 3 }, &body_context.bytes);
+        try std.testing.expectEqual(@as(usize, 3), responses[0].body_bytes);
+        try std.testing.expectEqual(@as(usize, 3), responses[1].body_bytes);
     }
 
     thread.join();

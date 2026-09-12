@@ -55,10 +55,70 @@ pub const Limits = struct {
 
 pub const max_connection_close_reason: usize = 1024;
 
+const PendingSessionClose = struct {
+    bytes: [4 + session_control.max_close_reason + 16]u8 = undefined,
+    len: usize = 0,
+    committed: usize = 0,
+    code: u32 = 0,
+
+    fn init(code: u32, reason: []const u8) Error!PendingSessionClose {
+        var pending: PendingSessionClose = .{ .code = code };
+        const encoded = try session_control.writeCloseInto(
+            &pending.bytes,
+            code,
+            reason,
+        );
+        pending.len = encoded.len;
+        return pending;
+    }
+
+    fn matches(
+        self: *const PendingSessionClose,
+        code: u32,
+        reason: []const u8,
+    ) Error!bool {
+        const candidate = try init(code, reason);
+        return self.len == candidate.len and
+            std.mem.eql(
+                u8,
+                self.bytes[0..self.len],
+                candidate.bytes[0..candidate.len],
+            );
+    }
+};
+
+const PendingSessionDrain = struct {
+    bytes: [16]u8 = undefined,
+    len: usize = 0,
+    committed: usize = 0,
+
+    fn init() Error!PendingSessionDrain {
+        var pending: PendingSessionDrain = .{};
+        const encoded = try session_control.writeDrainInto(&pending.bytes);
+        pending.len = encoded.len;
+        return pending;
+    }
+};
+
+fn terminalSessionBodySendError(err: anyerror) bool {
+    return switch (err) {
+        error.RequestCancelled,
+        error.RequestRejected,
+        error.StreamStopped,
+        error.StreamStateError,
+        error.UnexpectedStream,
+        error.ConnectionClosed,
+        error.ConnectionUnusable,
+        => true,
+        else => false,
+    };
+}
+
 pub const Server = struct {
     h3: http3.runtime.Server,
     max_session_streams: usize,
     origin_policy: OriginPolicy,
+    datagram_batch_scratch: datagram_send.DevelopmentBatchScratch = .{},
 
     pub fn bind(allocator: std.mem.Allocator, io: std.Io, bind_address: net.IpAddress, limits: Limits) Error!Server {
         return .{
@@ -69,6 +129,9 @@ pub const Server = struct {
     }
 
     pub fn deinit(self: *Server) void {
+        self.datagram_batch_scratch.deinit(
+            self.h3.quic_server.endpoint.allocator,
+        );
         self.h3.deinit();
         self.* = undefined;
     }
@@ -219,6 +282,125 @@ pub const Server = struct {
         try sendDatagramFromEndpoint(&self.h3.quic_server.endpoint, to, session_id, payload);
     }
 
+    pub fn sendDatagramWithTimeout(
+        self: *Server,
+        to: net.IpAddress,
+        session_id: webtransport.SessionId,
+        payload: []const u8,
+        timeout: std.Io.Duration,
+    ) ReceiveTimeoutError!void {
+        if (timeout.nanoseconds <= 0) return error.Timeout;
+        return self.sendDatagramWithDeadline(
+            to,
+            session_id,
+            payload,
+            .fromNow(self.h3.quic_server.endpoint.io, .{
+                .raw = timeout,
+                .clock = .awake,
+            }),
+        );
+    }
+
+    pub fn sendDatagramWithDeadline(
+        self: *Server,
+        to: net.IpAddress,
+        session_id: webtransport.SessionId,
+        payload: []const u8,
+        deadline: std.Io.Clock.Timestamp,
+    ) ReceiveTimeoutError!void {
+        _ = try deadline_policy.usableAwake(
+            self.h3.quic_server.endpoint.io,
+            deadline,
+        );
+        return sendDatagramFromEndpointWithDeadline(
+            &self.h3.quic_server.endpoint,
+            to,
+            session_id,
+            payload,
+            deadline,
+        );
+    }
+
+    pub fn sendDatagrams(
+        self: *Server,
+        to: net.IpAddress,
+        session_id: webtransport.SessionId,
+        payloads: []const []const u8,
+        committed_count: *usize,
+    ) Error!void {
+        return datagram_send.developmentBatch(
+            &self.h3.quic_server.endpoint,
+            to,
+            session_id,
+            payloads,
+            committed_count,
+            &self.datagram_batch_scratch,
+        );
+    }
+
+    pub fn sendDatagramsWithTimeout(
+        self: *Server,
+        to: net.IpAddress,
+        session_id: webtransport.SessionId,
+        payloads: []const []const u8,
+        committed_count: *usize,
+        timeout: std.Io.Duration,
+    ) ReceiveTimeoutError!void {
+        committed_count.* = 0;
+        if (timeout.nanoseconds <= 0) return error.Timeout;
+        return self.sendDatagramsWithDeadline(
+            to,
+            session_id,
+            payloads,
+            committed_count,
+            .fromNow(self.h3.quic_server.endpoint.io, .{
+                .raw = timeout,
+                .clock = .awake,
+            }),
+        );
+    }
+
+    pub fn sendDatagramsWithDeadline(
+        self: *Server,
+        to: net.IpAddress,
+        session_id: webtransport.SessionId,
+        payloads: []const []const u8,
+        committed_count: *usize,
+        deadline: std.Io.Clock.Timestamp,
+    ) ReceiveTimeoutError!void {
+        committed_count.* = 0;
+        _ = try deadline_policy.usableAwake(
+            self.h3.quic_server.endpoint.io,
+            deadline,
+        );
+        return datagram_send.developmentBatchWithDeadline(
+            &self.h3.quic_server.endpoint,
+            to,
+            session_id,
+            payloads,
+            committed_count,
+            &self.datagram_batch_scratch,
+            deadline,
+        );
+    }
+
+    pub fn maxDatagramPayloadSize(
+        self: *const Server,
+        session_id: webtransport.SessionId,
+    ) ?usize {
+        return datagram_send.developmentPayloadLimit(
+            self.h3.quic_server.endpoint.limits.max_datagram_size,
+            session_id,
+        );
+    }
+
+    pub fn maxDatagramSize(
+        self: *const Server,
+        session_id: webtransport.SessionId,
+    ) usize {
+        return self.maxDatagramPayloadSize(session_id) orelse 0;
+    }
+
     /// Send Capsule Protocol bytes on the development CONNECT response stream.
     ///
     /// The stream remains open after the successful 2xx response head, so the
@@ -231,6 +413,44 @@ pub const Server = struct {
         fin: bool,
     ) Error!void {
         try self.h3.sendResponseBody(to, session_id.value, data, fin);
+    }
+
+    pub fn sendSessionDataWithTimeout(
+        self: *Server,
+        to: net.IpAddress,
+        session_id: webtransport.SessionId,
+        data: []const u8,
+        fin: bool,
+        progress: *http3.runtime.DevelopmentBodyWriteProgress,
+        timeout: std.Io.Duration,
+    ) ReceiveTimeoutError!void {
+        return self.h3.sendResponseBodyWithTimeout(
+            to,
+            session_id.value,
+            data,
+            fin,
+            progress,
+            timeout,
+        );
+    }
+
+    pub fn sendSessionDataWithDeadline(
+        self: *Server,
+        to: net.IpAddress,
+        session_id: webtransport.SessionId,
+        data: []const u8,
+        fin: bool,
+        progress: *http3.runtime.DevelopmentBodyWriteProgress,
+        deadline: std.Io.Clock.Timestamp,
+    ) ReceiveTimeoutError!void {
+        return self.h3.sendResponseBodyWithDeadline(
+            to,
+            session_id.value,
+            data,
+            fin,
+            progress,
+            deadline,
+        );
     }
 
     pub fn receiveSessionData(
@@ -324,6 +544,7 @@ pub const Server = struct {
 pub const ProtectedServer = struct {
     h3: http3.runtime.ProtectedServer,
     origin_policy: OriginPolicy,
+    datagram_batch_scratch: datagram_send.ProtectedBatchScratch = .{},
 
     pub fn bind(
         allocator: std.mem.Allocator,
@@ -345,6 +566,9 @@ pub const ProtectedServer = struct {
     }
 
     pub fn deinit(self: *ProtectedServer) void {
+        self.datagram_batch_scratch.deinit(
+            self.h3.quic_server.endpoint.allocator,
+        );
         self.h3.deinit();
         self.* = undefined;
     }
@@ -499,6 +723,156 @@ pub const ProtectedServer = struct {
         );
     }
 
+    pub fn sendDatagramWithTimeout(
+        self: *ProtectedServer,
+        to: net.IpAddress,
+        session_id: webtransport.SessionId,
+        payload: []const u8,
+        timeout: std.Io.Duration,
+    ) ReceiveTimeoutError!void {
+        if (timeout.nanoseconds <= 0) return error.Timeout;
+        return self.sendDatagramWithDeadline(
+            to,
+            session_id,
+            payload,
+            .fromNow(self.h3.quic_server.endpoint.io, .{
+                .raw = timeout,
+                .clock = .awake,
+            }),
+        );
+    }
+
+    pub fn sendDatagramWithDeadline(
+        self: *ProtectedServer,
+        to: net.IpAddress,
+        session_id: webtransport.SessionId,
+        payload: []const u8,
+        deadline: std.Io.Clock.Timestamp,
+    ) ReceiveTimeoutError!void {
+        _ = try deadline_policy.usableAwake(
+            self.h3.quic_server.endpoint.io,
+            deadline,
+        );
+        try webtransport.ensureDatagramsNegotiated(
+            self.h3.config.local_settings,
+            self.h3.control.settings.peer,
+        );
+        try sendProtectedDatagramFromEndpointWithDeadline(
+            &self.h3.quic_server.endpoint,
+            to,
+            self.h3.config.send_keys,
+            self.h3.config.peer_connection_id,
+            &self.h3.next_packet_number,
+            session_id,
+            payload,
+            deadline,
+        );
+    }
+
+    /// Submit one ordered batch of independently protected DATAGRAMs. The
+    /// batch is capped by QUIC's socket-batch bound; `committed_count` reports
+    /// only the socket-visible input prefix.
+    pub fn sendDatagrams(
+        self: *ProtectedServer,
+        to: net.IpAddress,
+        session_id: webtransport.SessionId,
+        payloads: []const []const u8,
+        committed_count: *usize,
+    ) Error!void {
+        committed_count.* = 0;
+        try webtransport.ensureDatagramsNegotiated(
+            self.h3.config.local_settings,
+            self.h3.control.settings.peer,
+        );
+        return datagram_send.protectedBatch(
+            &self.h3.quic_server.endpoint,
+            to,
+            self.h3.config.send_keys,
+            self.h3.config.peer_connection_id,
+            &self.h3.next_packet_number,
+            session_id,
+            payloads,
+            committed_count,
+            &self.datagram_batch_scratch,
+        );
+    }
+
+    pub fn sendDatagramsWithTimeout(
+        self: *ProtectedServer,
+        to: net.IpAddress,
+        session_id: webtransport.SessionId,
+        payloads: []const []const u8,
+        committed_count: *usize,
+        timeout: std.Io.Duration,
+    ) ReceiveTimeoutError!void {
+        committed_count.* = 0;
+        if (timeout.nanoseconds <= 0) return error.Timeout;
+        return self.sendDatagramsWithDeadline(
+            to,
+            session_id,
+            payloads,
+            committed_count,
+            .fromNow(self.h3.quic_server.endpoint.io, .{
+                .raw = timeout,
+                .clock = .awake,
+            }),
+        );
+    }
+
+    pub fn sendDatagramsWithDeadline(
+        self: *ProtectedServer,
+        to: net.IpAddress,
+        session_id: webtransport.SessionId,
+        payloads: []const []const u8,
+        committed_count: *usize,
+        deadline: std.Io.Clock.Timestamp,
+    ) ReceiveTimeoutError!void {
+        committed_count.* = 0;
+        _ = try deadline_policy.usableAwake(
+            self.h3.quic_server.endpoint.io,
+            deadline,
+        );
+        try webtransport.ensureDatagramsNegotiated(
+            self.h3.config.local_settings,
+            self.h3.control.settings.peer,
+        );
+        return datagram_send.protectedBatchWithDeadline(
+            &self.h3.quic_server.endpoint,
+            to,
+            self.h3.config.send_keys,
+            self.h3.config.peer_connection_id,
+            &self.h3.next_packet_number,
+            session_id,
+            payloads,
+            committed_count,
+            &self.datagram_batch_scratch,
+            deadline,
+        );
+    }
+
+    pub fn maxDatagramPayloadSize(
+        self: *const ProtectedServer,
+        session_id: webtransport.SessionId,
+    ) ?usize {
+        webtransport.ensureDatagramsNegotiated(
+            self.h3.config.local_settings,
+            self.h3.control.settings.peer,
+        ) catch return null;
+        return datagram_send.protectedPayloadLimit(
+            self.h3.quic_server.endpoint.limits.max_datagram_size,
+            self.h3.config.peer_connection_id.len,
+            self.h3.next_packet_number,
+            session_id,
+        );
+    }
+
+    pub fn maxDatagramSize(
+        self: *const ProtectedServer,
+        session_id: webtransport.SessionId,
+    ) usize {
+        return self.maxDatagramPayloadSize(session_id) orelse 0;
+    }
+
     /// Send Capsule Protocol bytes on the long-lived Extended CONNECT stream.
     pub fn sendSessionData(
         self: *ProtectedServer,
@@ -512,6 +886,107 @@ pub const ProtectedServer = struct {
             session_id.value,
             data,
             fin,
+        );
+    }
+
+    pub fn sendSessionDataWithTimeout(
+        self: *ProtectedServer,
+        to: net.IpAddress,
+        session_id: webtransport.SessionId,
+        data: []const u8,
+        fin: bool,
+        progress: *http3.runtime.BodyWriteProgress,
+        timeout: std.Io.Duration,
+    ) ReceiveTimeoutError!void {
+        return self.h3.sendResponseBodyPacedWithTimeout(
+            to,
+            session_id.value,
+            data,
+            fin,
+            progress,
+            timeout,
+        );
+    }
+
+    pub fn sendSessionDataWithDeadline(
+        self: *ProtectedServer,
+        to: net.IpAddress,
+        session_id: webtransport.SessionId,
+        data: []const u8,
+        fin: bool,
+        progress: *http3.runtime.BodyWriteProgress,
+        deadline: std.Io.Clock.Timestamp,
+    ) ReceiveTimeoutError!void {
+        return self.h3.sendResponseBodyPacedWithDeadline(
+            to,
+            session_id.value,
+            data,
+            fin,
+            progress,
+            deadline,
+        );
+    }
+
+    pub fn sendSessionDataSlices(
+        self: *ProtectedServer,
+        to: net.IpAddress,
+        session_id: webtransport.SessionId,
+        parts: []const []const u8,
+        fin: bool,
+    ) Error!void {
+        return self.h3.sendResponseBodyPartsPaced(
+            to,
+            session_id.value,
+            parts,
+            fin,
+        );
+    }
+
+    /// Send borrowed Capsule Protocol slices without joining them. On error,
+    /// `progress.committed_bytes` is the exact socket-visible prefix across
+    /// the concatenation of `parts`, so callers can retry only its suffix.
+    pub fn sendSessionDataSlicesWithTimeout(
+        self: *ProtectedServer,
+        to: net.IpAddress,
+        session_id: webtransport.SessionId,
+        parts: []const []const u8,
+        fin: bool,
+        progress: *http3.runtime.BodyWriteProgress,
+        timeout: std.Io.Duration,
+    ) ReceiveTimeoutError!void {
+        progress.* = .{};
+        if (timeout.nanoseconds <= 0) return error.Timeout;
+        return self.h3.sendResponseBodyPartsPacedWithTimeout(
+            to,
+            session_id.value,
+            parts,
+            fin,
+            progress,
+            timeout,
+        );
+    }
+
+    pub fn sendSessionDataSlicesWithDeadline(
+        self: *ProtectedServer,
+        to: net.IpAddress,
+        session_id: webtransport.SessionId,
+        parts: []const []const u8,
+        fin: bool,
+        progress: *http3.runtime.BodyWriteProgress,
+        deadline: std.Io.Clock.Timestamp,
+    ) ReceiveTimeoutError!void {
+        progress.* = .{};
+        _ = try deadline_policy.usableAwake(
+            self.h3.quic_server.endpoint.io,
+            deadline,
+        );
+        return self.h3.sendResponseBodyPartsPacedWithDeadline(
+            to,
+            session_id.value,
+            parts,
+            fin,
+            progress,
+            deadline,
         );
     }
 
@@ -1293,7 +1768,11 @@ pub const HandshakeServer = struct {
         var session = try self.h3.acceptFromInitialSource(source, initial);
         errdefer session.deinit();
         try session.ensureSettingsSent();
-        return .{ .h3 = session, .limits = self.limits };
+        try session.bindDispatcher();
+        return .{
+            .h3 = session,
+            .limits = self.limits,
+        };
     }
 
     pub fn beginSessionAdmissionFromInitialSourceWithDeadline(
@@ -1313,6 +1792,7 @@ pub const HandshakeServer = struct {
             deadline,
         );
         try session.ensureSettingsSent();
+        try session.bindDispatcher();
         return .{
             .h3 = session,
             .limits = self.limits,
@@ -1524,10 +2004,16 @@ pub const HandshakeAdmission = struct {
                         const limits = self.limits;
                         const deadline = self.deadline;
                         self.* = undefined;
-                        return .{ .h3 = h3, .limits = limits, .request = .{
-                            .stream_id = message.stream_id,
-                            .request = request,
-                        }, .session_id = session_id, .deadline = deadline };
+                        return .{
+                            .h3 = h3,
+                            .limits = limits,
+                            .request = .{
+                                .stream_id = message.stream_id,
+                                .request = request,
+                            },
+                            .session_id = session_id,
+                            .deadline = deadline,
+                        };
                     },
                     else => return error.InvalidConnect,
                 },
@@ -1728,6 +2214,63 @@ pub const EndpointAcceptedSession = struct {
         try result;
     }
 
+    /// Attempt one ordered DATAGRAM socket batch without reading the shared
+    /// endpoint. `committed_count` is the exact socket-visible input prefix.
+    pub fn sendDatagrams(
+        self: *EndpointAcceptedSession,
+        payloads: []const []const u8,
+        committed_count: *usize,
+    ) EndpointServerError!void {
+        committed_count.* = 0;
+        try self.control.ensureOpen();
+        try webtransport.ensureDatagramsNegotiated(
+            self.h3.options.local_settings,
+            self.h3.control.settings.peer,
+        );
+        const result = self.h3.trySendConnectDatagrams(
+            self.session_id.value,
+            payloads,
+            committed_count,
+        );
+        try self.refreshTimer();
+        try result;
+    }
+
+    /// Attempt one Capsule Protocol DATA send without waiting or reading the
+    /// endpoint's shared UDP socket. Backpressure leaves the complete input
+    /// retryable and the dispatcher timer is refreshed on every outcome.
+    pub fn sendSessionData(
+        self: *EndpointAcceptedSession,
+        data: []const u8,
+        fin: bool,
+    ) EndpointServerError!void {
+        try self.control.ensureOpen();
+        const result = self.h3.trySendResponseBody(
+            self.session_id.value,
+            data,
+            fin,
+        );
+        try self.refreshTimer();
+        try result;
+    }
+
+    /// Scatter/gather counterpart to `sendSessionData`. All borrowed slices
+    /// form one transactional HTTP/3 DATA contribution in one QUIC packet.
+    pub fn sendSessionDataSlices(
+        self: *EndpointAcceptedSession,
+        parts: []const []const u8,
+        fin: bool,
+    ) EndpointServerError!void {
+        try self.control.ensureOpen();
+        const result = self.h3.trySendResponseBodyParts(
+            self.session_id.value,
+            parts,
+            fin,
+        );
+        try self.refreshTimer();
+        try result;
+    }
+
     /// Attempt to reserve one bidirectional stream without waiting for peer
     /// credit or pacing; dispatcher progress makes a later retry possible.
     pub fn openBidirectionalStream(
@@ -1840,6 +2383,25 @@ pub const EndpointAcceptedSession = struct {
         return try result;
     }
 
+    /// Attempt one packet-sized scatter/gather write without reading the
+    /// shared UDP socket. The count excludes any association-prefix bytes.
+    pub fn writeStreamSlices(
+        self: *EndpointAcceptedSession,
+        stream_id: u62,
+        parts: []const []const u8,
+    ) EndpointServerError!usize {
+        try self.control.ensureOpen();
+        const result = handshake_stream.writeSlicesOnce(
+            &self.h3.established.connection,
+            &self.streams,
+            self.session_id,
+            stream_id,
+            parts,
+        );
+        try self.refreshTimer();
+        return try result;
+    }
+
     /// Atomically submit one complete payload and optional FIN in one QUIC
     /// packet. Backpressure or an oversized packet is returned without partial
     /// application progress; use `writeStream` plus `finishStream` for larger
@@ -1857,6 +2419,27 @@ pub const EndpointAcceptedSession = struct {
             self.session_id,
             stream_id,
             payload,
+            fin,
+        );
+        try self.refreshTimer();
+        try result;
+    }
+
+    /// Atomically submit borrowed payload slices and optional FIN in one QUIC
+    /// packet without joining them or reading the shared UDP socket.
+    pub fn sendStreamSlices(
+        self: *EndpointAcceptedSession,
+        stream_id: u62,
+        parts: []const []const u8,
+        fin: bool,
+    ) EndpointServerError!void {
+        try self.control.ensureOpen();
+        const result = handshake_stream.sendSlicesOnce(
+            &self.h3.established.connection,
+            &self.streams,
+            self.session_id,
+            stream_id,
+            parts,
             fin,
         );
         try self.refreshTimer();
@@ -2970,6 +3553,9 @@ pub const AcceptedSession = struct {
     /// detached QUIC bytes. This keeps timeout-resumable Capsule parsing and
     /// suffix retention identical across the lightweight runtimes.
     control: protected_control.Reader,
+    pending_drain: ?PendingSessionDrain = null,
+    pending_close: ?PendingSessionClose = null,
+    pending_session_event: ?SessionEvent = null,
 
     pub fn sessionId(self: AcceptedSession) webtransport.SessionId {
         return self.session_id;
@@ -2977,6 +3563,113 @@ pub const AcceptedSession = struct {
 
     pub fn remoteAddress(self: AcceptedSession) net.IpAddress {
         return self.request.from;
+    }
+
+    pub fn sendDatagram(
+        self: *AcceptedSession,
+        payload: []const u8,
+    ) Error!void {
+        try self.control.control.ensureOpen();
+        return self.server.sendDatagram(
+            self.request.from,
+            self.session_id,
+            payload,
+        );
+    }
+
+    pub fn sendDatagramWithTimeout(
+        self: *AcceptedSession,
+        payload: []const u8,
+        timeout: std.Io.Duration,
+    ) ReceiveTimeoutError!void {
+        if (timeout.nanoseconds <= 0) return error.Timeout;
+        try self.control.control.ensureOpen();
+        return self.server.sendDatagramWithTimeout(
+            self.request.from,
+            self.session_id,
+            payload,
+            timeout,
+        );
+    }
+
+    pub fn sendDatagramWithDeadline(
+        self: *AcceptedSession,
+        payload: []const u8,
+        deadline: std.Io.Clock.Timestamp,
+    ) ReceiveTimeoutError!void {
+        _ = try deadline_policy.usableAwake(
+            self.server.h3.quic_server.endpoint.io,
+            deadline,
+        );
+        try self.control.control.ensureOpen();
+        return self.server.sendDatagramWithDeadline(
+            self.request.from,
+            self.session_id,
+            payload,
+            deadline,
+        );
+    }
+
+    pub fn sendDatagrams(
+        self: *AcceptedSession,
+        payloads: []const []const u8,
+        committed_count: *usize,
+    ) Error!void {
+        committed_count.* = 0;
+        try self.control.control.ensureOpen();
+        return self.server.sendDatagrams(
+            self.request.from,
+            self.session_id,
+            payloads,
+            committed_count,
+        );
+    }
+
+    pub fn sendDatagramsWithTimeout(
+        self: *AcceptedSession,
+        payloads: []const []const u8,
+        committed_count: *usize,
+        timeout: std.Io.Duration,
+    ) ReceiveTimeoutError!void {
+        committed_count.* = 0;
+        if (timeout.nanoseconds <= 0) return error.Timeout;
+        try self.control.control.ensureOpen();
+        return self.server.sendDatagramsWithTimeout(
+            self.request.from,
+            self.session_id,
+            payloads,
+            committed_count,
+            timeout,
+        );
+    }
+
+    pub fn sendDatagramsWithDeadline(
+        self: *AcceptedSession,
+        payloads: []const []const u8,
+        committed_count: *usize,
+        deadline: std.Io.Clock.Timestamp,
+    ) ReceiveTimeoutError!void {
+        committed_count.* = 0;
+        _ = try deadline_policy.usableAwake(
+            self.server.h3.quic_server.endpoint.io,
+            deadline,
+        );
+        try self.control.control.ensureOpen();
+        return self.server.sendDatagramsWithDeadline(
+            self.request.from,
+            self.session_id,
+            payloads,
+            committed_count,
+            deadline,
+        );
+    }
+
+    pub fn maxDatagramPayloadSize(self: AcceptedSession) ?usize {
+        return self.server.maxDatagramPayloadSize(self.session_id);
+    }
+
+    pub fn maxDatagramSize(self: AcceptedSession) usize {
+        return self.maxDatagramPayloadSize() orelse 0;
     }
 
     pub fn openBidirectionalStream(self: *AcceptedSession) Error!u62 {
@@ -3058,6 +3751,92 @@ pub const AcceptedSession = struct {
         try self.streams.recordSent(stream_id, payload.len, fin);
     }
 
+    pub fn sendStreamWithTimeout(
+        self: *AcceptedSession,
+        stream_id: u62,
+        payload: []const u8,
+        fin: bool,
+        progress: *http3.runtime.DevelopmentBodyWriteProgress,
+        timeout: std.Io.Duration,
+    ) ReceiveTimeoutError!void {
+        progress.* = .{};
+        if (timeout.nanoseconds <= 0) return error.Timeout;
+        return self.sendStreamWithDeadline(
+            stream_id,
+            payload,
+            fin,
+            progress,
+            .fromNow(self.server.h3.quic_server.endpoint.io, .{
+                .raw = timeout,
+                .clock = .awake,
+            }),
+        );
+    }
+
+    pub fn sendStreamWithDeadline(
+        self: *AcceptedSession,
+        stream_id: u62,
+        payload: []const u8,
+        fin: bool,
+        progress: *http3.runtime.DevelopmentBodyWriteProgress,
+        deadline: std.Io.Clock.Timestamp,
+    ) ReceiveTimeoutError!void {
+        progress.* = .{};
+        _ = try deadline_policy.usableAwake(
+            self.server.h3.quic_server.endpoint.io,
+            deadline,
+        );
+        try self.control.control.ensureOpen();
+        const stream = try developmentWritableStream(&self.streams, stream_id);
+        if (!stream.prefix_sent) {
+            var storage: [16]u8 = undefined;
+            self.server.h3.sendDevelopmentStreamPartsWithDeadline(
+                self.request.from,
+                self.session_id.value,
+                stream_id,
+                try development_stream.prefix(
+                    &storage,
+                    stream.direction,
+                    self.session_id,
+                ),
+                payload,
+                fin,
+                progress,
+                deadline,
+            ) catch |err| {
+                if (progress.send_attempted or
+                    terminalSessionBodySendError(err))
+                {
+                    stream.prefix_sent = true;
+                    stream.send_reset = .fromHttp3(
+                        webtransport.ApplicationErrorCode.session_gone,
+                    );
+                }
+                return err;
+            };
+            stream.prefix_sent = true;
+            try self.streams.recordSent(stream_id, payload.len, fin);
+            return;
+        }
+        self.server.h3.sendDevelopmentStreamWithDeadline(
+            self.request.from,
+            self.session_id.value,
+            stream_id,
+            payload,
+            fin,
+            progress,
+            deadline,
+        ) catch |err| {
+            if (progress.send_attempted or terminalSessionBodySendError(err)) {
+                stream.send_reset = .fromHttp3(
+                    webtransport.ApplicationErrorCode.session_gone,
+                );
+            }
+            return err;
+        };
+        try self.streams.recordSent(stream_id, payload.len, fin);
+    }
+
     pub fn receiveStream(self: *AcceptedSession) Error!OwnedDevelopmentStream {
         const match = development_stream.match(
             &self.streams,
@@ -3124,15 +3903,74 @@ pub const AcceptedSession = struct {
 
     pub fn drain(self: *AcceptedSession) Error!void {
         if (self.control.control.local_drain_sent) return;
-        try self.control.control.ensureOpen();
-        var encoded: [16]u8 = undefined;
-        const capsule = try session_control.writeDrainInto(&encoded);
-        try self.server.sendSessionData(
+        if (self.pending_close != null) return error.InvalidSessionState;
+        if (self.pending_drain == null) {
+            const pending = try PendingSessionDrain.init();
+            try self.control.control.beginLocalDrain();
+            self.pending_drain = pending;
+        }
+        const pending = &self.pending_drain.?;
+        self.server.sendSessionData(
             self.request.from,
             self.session_id,
-            capsule,
+            pending.bytes[pending.committed..pending.len],
             false,
+        ) catch |err| {
+            if (terminalSessionBodySendError(err)) {
+                self.pending_drain = null;
+                self.control.control.recordLocalCloseFailure(0);
+            }
+            return err;
+        };
+        self.pending_drain = null;
+        try self.control.control.recordLocalDrain();
+    }
+
+    pub fn drainWithTimeout(
+        self: *AcceptedSession,
+        timeout: std.Io.Duration,
+    ) ReceiveTimeoutError!void {
+        if (timeout.nanoseconds <= 0) return error.Timeout;
+        return self.drainWithDeadline(.fromNow(
+            self.server.h3.quic_server.endpoint.io,
+            .{ .raw = timeout, .clock = .awake },
+        ));
+    }
+
+    pub fn drainWithDeadline(
+        self: *AcceptedSession,
+        deadline: std.Io.Clock.Timestamp,
+    ) ReceiveTimeoutError!void {
+        _ = try deadline_policy.usableAwake(
+            self.server.h3.quic_server.endpoint.io,
+            deadline,
         );
+        if (self.control.control.local_drain_sent or
+            self.control.control.local_close_failed) return;
+        if (self.pending_close != null) return error.InvalidSessionState;
+        if (self.pending_drain == null) {
+            const pending = try PendingSessionDrain.init();
+            try self.control.control.beginLocalDrain();
+            self.pending_drain = pending;
+        }
+        const pending = &self.pending_drain.?;
+        var progress: http3.runtime.DevelopmentBodyWriteProgress = .{};
+        self.server.sendSessionDataWithDeadline(
+            self.request.from,
+            self.session_id,
+            pending.bytes[pending.committed..pending.len],
+            false,
+            &progress,
+            deadline,
+        ) catch |err| {
+            if (progress.send_attempted or terminalSessionBodySendError(err)) {
+                self.pending_drain = null;
+                self.control.control.recordLocalCloseFailure(0);
+            }
+            return err;
+        };
+        std.debug.assert(progress.completed);
+        self.pending_drain = null;
         try self.control.control.recordLocalDrain();
     }
 
@@ -3141,22 +3979,92 @@ pub const AcceptedSession = struct {
         code: u32,
         reason: []const u8,
     ) Error!void {
-        if (self.control.control.local_close_sent) return;
-        try self.control.control.ensureOpen();
-        var encoded: [4 + session_control.max_close_reason + 16]u8 =
-            undefined;
-        const capsule = try session_control.writeCloseInto(
-            &encoded,
-            code,
-            reason,
-        );
-        try self.server.sendSessionData(
+        if (self.control.control.local_close_sent or
+            self.control.control.local_close_failed) return;
+        try self.preparePendingClose(code, reason);
+        const pending = &self.pending_close.?;
+        self.server.sendSessionData(
             self.request.from,
             self.session_id,
-            capsule,
+            pending.bytes[pending.committed..pending.len],
             true,
+        ) catch |err| {
+            if (terminalSessionBodySendError(err)) {
+                const failed_code = pending.code;
+                self.pending_close = null;
+                self.control.control.recordLocalCloseFailure(failed_code);
+            }
+            return err;
+        };
+        const committed_code = pending.code;
+        self.pending_close = null;
+        try self.control.control.recordLocalClose(committed_code);
+    }
+
+    pub fn closeWithTimeout(
+        self: *AcceptedSession,
+        code: u32,
+        reason: []const u8,
+        timeout: std.Io.Duration,
+    ) ReceiveTimeoutError!void {
+        if (timeout.nanoseconds <= 0) return error.Timeout;
+        return self.closeWithDeadline(code, reason, .fromNow(
+            self.server.h3.quic_server.endpoint.io,
+            .{ .raw = timeout, .clock = .awake },
+        ));
+    }
+
+    pub fn closeWithDeadline(
+        self: *AcceptedSession,
+        code: u32,
+        reason: []const u8,
+        deadline: std.Io.Clock.Timestamp,
+    ) ReceiveTimeoutError!void {
+        _ = try deadline_policy.usableAwake(
+            self.server.h3.quic_server.endpoint.io,
+            deadline,
         );
-        try self.control.control.recordLocalClose(code);
+        if (self.control.control.local_close_sent or
+            self.control.control.local_close_failed) return;
+        try self.preparePendingClose(code, reason);
+        const pending = &self.pending_close.?;
+        var progress: http3.runtime.DevelopmentBodyWriteProgress = .{};
+        self.server.sendSessionDataWithDeadline(
+            self.request.from,
+            self.session_id,
+            pending.bytes[pending.committed..pending.len],
+            true,
+            &progress,
+            deadline,
+        ) catch |err| {
+            if (progress.send_attempted or terminalSessionBodySendError(err)) {
+                const failed_code = pending.code;
+                self.pending_close = null;
+                self.control.control.recordLocalCloseFailure(failed_code);
+            }
+            return err;
+        };
+        std.debug.assert(progress.completed);
+        const committed_code = pending.code;
+        self.pending_close = null;
+        try self.control.control.recordLocalClose(committed_code);
+    }
+
+    fn preparePendingClose(
+        self: *AcceptedSession,
+        code: u32,
+        reason: []const u8,
+    ) Error!void {
+        if (self.pending_drain != null) return error.InvalidSessionState;
+        if (self.pending_close) |*pending| {
+            if (!try pending.matches(code, reason)) {
+                return error.InvalidSessionState;
+            }
+            return;
+        }
+        const pending = try PendingSessionClose.init(code, reason);
+        try self.control.control.beginLocalClose();
+        self.pending_close = pending;
     }
 
     pub fn receiveSessionEvent(self: *AcceptedSession) Error!SessionEvent {
@@ -3226,10 +4134,131 @@ pub const AcceptedProtectedSession = struct {
     request: OwnedProtectedConnectRequest,
     session_id: webtransport.SessionId,
     control: protected_control.Reader,
+    pending_drain: ?PendingSessionDrain = null,
+    pending_close: ?PendingSessionClose = null,
+    pending_session_event: ?SessionEvent = null,
 
     pub fn deinit(self: *AcceptedProtectedSession, allocator: std.mem.Allocator) void {
         self.request.deinit(allocator);
         self.* = undefined;
+    }
+
+    pub fn sendDatagram(
+        self: *AcceptedProtectedSession,
+        server: *ProtectedServer,
+        payload: []const u8,
+    ) Error!void {
+        try self.control.control.ensureOpen();
+        return server.sendDatagram(
+            self.request.from,
+            self.session_id,
+            payload,
+        );
+    }
+
+    pub fn sendDatagramWithTimeout(
+        self: *AcceptedProtectedSession,
+        server: *ProtectedServer,
+        payload: []const u8,
+        timeout: std.Io.Duration,
+    ) ReceiveTimeoutError!void {
+        if (timeout.nanoseconds <= 0) return error.Timeout;
+        try self.control.control.ensureOpen();
+        return server.sendDatagramWithTimeout(
+            self.request.from,
+            self.session_id,
+            payload,
+            timeout,
+        );
+    }
+
+    pub fn sendDatagramWithDeadline(
+        self: *AcceptedProtectedSession,
+        server: *ProtectedServer,
+        payload: []const u8,
+        deadline: std.Io.Clock.Timestamp,
+    ) ReceiveTimeoutError!void {
+        _ = try deadline_policy.usableAwake(
+            server.h3.quic_server.endpoint.io,
+            deadline,
+        );
+        try self.control.control.ensureOpen();
+        return server.sendDatagramWithDeadline(
+            self.request.from,
+            self.session_id,
+            payload,
+            deadline,
+        );
+    }
+
+    pub fn sendDatagrams(
+        self: *AcceptedProtectedSession,
+        server: *ProtectedServer,
+        payloads: []const []const u8,
+        committed_count: *usize,
+    ) Error!void {
+        try self.control.control.ensureOpen();
+        return server.sendDatagrams(
+            self.request.from,
+            self.session_id,
+            payloads,
+            committed_count,
+        );
+    }
+
+    pub fn sendDatagramsWithTimeout(
+        self: *AcceptedProtectedSession,
+        server: *ProtectedServer,
+        payloads: []const []const u8,
+        committed_count: *usize,
+        timeout: std.Io.Duration,
+    ) ReceiveTimeoutError!void {
+        committed_count.* = 0;
+        if (timeout.nanoseconds <= 0) return error.Timeout;
+        try self.control.control.ensureOpen();
+        return server.sendDatagramsWithTimeout(
+            self.request.from,
+            self.session_id,
+            payloads,
+            committed_count,
+            timeout,
+        );
+    }
+
+    pub fn sendDatagramsWithDeadline(
+        self: *AcceptedProtectedSession,
+        server: *ProtectedServer,
+        payloads: []const []const u8,
+        committed_count: *usize,
+        deadline: std.Io.Clock.Timestamp,
+    ) ReceiveTimeoutError!void {
+        committed_count.* = 0;
+        _ = try deadline_policy.usableAwake(
+            server.h3.quic_server.endpoint.io,
+            deadline,
+        );
+        try self.control.control.ensureOpen();
+        return server.sendDatagramsWithDeadline(
+            self.request.from,
+            self.session_id,
+            payloads,
+            committed_count,
+            deadline,
+        );
+    }
+
+    pub fn maxDatagramPayloadSize(
+        self: AcceptedProtectedSession,
+        server: *const ProtectedServer,
+    ) ?usize {
+        return server.maxDatagramPayloadSize(self.session_id);
+    }
+
+    pub fn maxDatagramSize(
+        self: AcceptedProtectedSession,
+        server: *const ProtectedServer,
+    ) usize {
+        return self.maxDatagramPayloadSize(server) orelse 0;
     }
 
     pub fn drain(
@@ -3237,15 +4266,71 @@ pub const AcceptedProtectedSession = struct {
         server: *ProtectedServer,
     ) Error!void {
         if (self.control.control.local_drain_sent) return;
-        try self.control.control.ensureOpen();
-        var encoded: [16]u8 = undefined;
-        const capsule = try session_control.writeDrainInto(&encoded);
+        if (self.pending_close != null) return error.InvalidSessionState;
+        if (self.pending_drain == null) {
+            const pending = try PendingSessionDrain.init();
+            try self.control.control.beginLocalDrain();
+            self.pending_drain = pending;
+        }
+        const pending = &self.pending_drain.?;
         try server.sendSessionData(
             self.request.from,
             self.session_id,
-            capsule,
+            pending.bytes[pending.committed..pending.len],
             false,
         );
+        self.pending_drain = null;
+        try self.control.control.recordLocalDrain();
+    }
+
+    pub fn drainWithTimeout(
+        self: *AcceptedProtectedSession,
+        server: *ProtectedServer,
+        timeout: std.Io.Duration,
+    ) ReceiveTimeoutError!void {
+        if (timeout.nanoseconds <= 0) return error.Timeout;
+        return self.drainWithDeadline(server, .fromNow(
+            server.h3.quic_server.endpoint.io,
+            .{ .raw = timeout, .clock = .awake },
+        ));
+    }
+
+    pub fn drainWithDeadline(
+        self: *AcceptedProtectedSession,
+        server: *ProtectedServer,
+        deadline: std.Io.Clock.Timestamp,
+    ) ReceiveTimeoutError!void {
+        _ = try deadline_policy.usableAwake(
+            server.h3.quic_server.endpoint.io,
+            deadline,
+        );
+        if (self.control.control.local_drain_sent) return;
+        if (self.pending_close != null) return error.InvalidSessionState;
+        if (self.pending_drain == null) {
+            const pending = try PendingSessionDrain.init();
+            try self.control.control.beginLocalDrain();
+            self.pending_drain = pending;
+        }
+        const pending = &self.pending_drain.?;
+        var progress: http3.runtime.BodyWriteProgress = .{};
+        server.sendSessionDataWithDeadline(
+            self.request.from,
+            self.session_id,
+            pending.bytes[pending.committed..pending.len],
+            false,
+            &progress,
+            deadline,
+        ) catch |err| {
+            pending.committed += progress.committed_bytes;
+            if (pending.committed == pending.len) {
+                self.pending_drain = null;
+                try self.control.control.recordLocalDrain();
+            }
+            return err;
+        };
+        pending.committed += progress.committed_bytes;
+        std.debug.assert(pending.committed == pending.len);
+        self.pending_drain = null;
         try self.control.control.recordLocalDrain();
     }
 
@@ -3255,22 +4340,102 @@ pub const AcceptedProtectedSession = struct {
         code: u32,
         reason: []const u8,
     ) Error!void {
-        if (self.control.control.local_close_sent) return;
-        try self.control.control.ensureOpen();
-        var encoded: [4 + session_control.max_close_reason + 16]u8 =
-            undefined;
-        const capsule = try session_control.writeCloseInto(
-            &encoded,
-            code,
-            reason,
-        );
-        try server.sendSessionData(
+        if (self.control.control.local_close_sent or
+            self.control.control.local_close_failed) return;
+        try self.preparePendingClose(code, reason);
+        const pending = &self.pending_close.?;
+        server.sendSessionData(
             self.request.from,
             self.session_id,
-            capsule,
+            pending.bytes[pending.committed..pending.len],
             true,
+        ) catch |err| {
+            if (terminalSessionBodySendError(err)) {
+                const failed_code = pending.code;
+                self.pending_close = null;
+                self.control.control.recordLocalCloseFailure(failed_code);
+            }
+            return err;
+        };
+        const committed_code = pending.code;
+        self.pending_close = null;
+        try self.control.control.recordLocalClose(committed_code);
+    }
+
+    pub fn closeWithTimeout(
+        self: *AcceptedProtectedSession,
+        server: *ProtectedServer,
+        code: u32,
+        reason: []const u8,
+        timeout: std.Io.Duration,
+    ) ReceiveTimeoutError!void {
+        if (timeout.nanoseconds <= 0) return error.Timeout;
+        return self.closeWithDeadline(server, code, reason, .fromNow(
+            server.h3.quic_server.endpoint.io,
+            .{ .raw = timeout, .clock = .awake },
+        ));
+    }
+
+    pub fn closeWithDeadline(
+        self: *AcceptedProtectedSession,
+        server: *ProtectedServer,
+        code: u32,
+        reason: []const u8,
+        deadline: std.Io.Clock.Timestamp,
+    ) ReceiveTimeoutError!void {
+        _ = try deadline_policy.usableAwake(
+            server.h3.quic_server.endpoint.io,
+            deadline,
         );
-        try self.control.control.recordLocalClose(code);
+        if (self.control.control.local_close_sent or
+            self.control.control.local_close_failed) return;
+        try self.preparePendingClose(code, reason);
+        const pending = &self.pending_close.?;
+        var progress: http3.runtime.BodyWriteProgress = .{};
+        server.sendSessionDataWithDeadline(
+            self.request.from,
+            self.session_id,
+            pending.bytes[pending.committed..pending.len],
+            true,
+            &progress,
+            deadline,
+        ) catch |err| {
+            pending.committed += progress.committed_bytes;
+            if (progress.fin_committed) {
+                const committed_code = pending.code;
+                self.pending_close = null;
+                try self.control.control.recordLocalClose(committed_code);
+            } else if (terminalSessionBodySendError(err)) {
+                const failed_code = pending.code;
+                self.pending_close = null;
+                self.control.control.recordLocalCloseFailure(failed_code);
+            }
+            return err;
+        };
+        pending.committed += progress.committed_bytes;
+        std.debug.assert(
+            pending.committed == pending.len and progress.fin_committed,
+        );
+        const committed_code = pending.code;
+        self.pending_close = null;
+        try self.control.control.recordLocalClose(committed_code);
+    }
+
+    fn preparePendingClose(
+        self: *AcceptedProtectedSession,
+        code: u32,
+        reason: []const u8,
+    ) Error!void {
+        if (self.pending_drain != null) return error.InvalidSessionState;
+        if (self.pending_close) |*pending| {
+            if (!try pending.matches(code, reason)) {
+                return error.InvalidSessionState;
+            }
+            return;
+        }
+        const pending = try PendingSessionClose.init(code, reason);
+        try self.control.control.beginLocalClose();
+        self.pending_close = pending;
     }
 
     pub fn receiveSessionEvent(
@@ -3462,18 +4627,25 @@ pub const PendingHandshakeSession = struct {
         );
         errdefer streams.deinit();
         const control = try session_control.Control.init(self.session_id);
-        try self.h3.prepareConnectDatagramAssociation(
-            self.session_id.value,
-        );
-        errdefer self.h3.cancelPreparedConnectDatagramAssociation(
-            self.session_id.value,
-        );
-        try self.h3.startResponse(
-            self.session_id.value,
-            connectResponseWithHeaders(prepared_headers.fields),
-            null,
-        );
-        try self.h3.detachRequestStream(self.session_id.value);
+        if (self.h3.dispatcherBound()) {
+            try self.h3.tryAcceptConnectResponse(
+                self.session_id.value,
+                connectResponseWithHeaders(prepared_headers.fields),
+            );
+        } else {
+            try self.h3.prepareConnectDatagramAssociation(
+                self.session_id.value,
+            );
+            errdefer self.h3.cancelPreparedConnectDatagramAssociation(
+                self.session_id.value,
+            );
+            try self.h3.startResponse(
+                self.session_id.value,
+                connectResponseWithHeaders(prepared_headers.fields),
+                null,
+            );
+            try self.h3.detachRequestStream(self.session_id.value);
+        }
         const h3 = self.h3;
         const request = self.request;
         const session_id = self.session_id;
@@ -3603,6 +4775,15 @@ pub const AcceptedHandshakeSession = struct {
     streams: webtransport.StreamRegistry,
     control: session_control.Control,
     request_rejection_pending: ?u62 = null,
+    pending_drain: ?PendingSessionDrain = null,
+    pending_close: ?PendingSessionClose = null,
+    pending_session_event: ?SessionEvent = null,
+
+    fn ensureApplicationSendOpen(
+        self: *const AcceptedHandshakeSession,
+    ) Error!void {
+        try self.control.ensureOpen();
+    }
 
     pub fn deinit(self: *AcceptedHandshakeSession) void {
         const allocator = self.h3.established.connection.endpoint.allocator;
@@ -3793,7 +4974,7 @@ pub const AcceptedHandshakeSession = struct {
     }
 
     pub fn sendDatagram(self: *AcceptedHandshakeSession, payload: []const u8) Error!void {
-        try self.control.ensureOpen();
+        try self.ensureApplicationSendOpen();
         try webtransport.ensureDatagramsNegotiated(self.h3.options.local_settings, self.h3.control.settings.peer);
         try self.h3.sendConnectDatagram(self.session_id.value, payload);
     }
@@ -3817,7 +4998,7 @@ pub const AcceptedHandshakeSession = struct {
         payload: []const u8,
         deadline: std.Io.Clock.Timestamp,
     ) ReceiveTimeoutError!void {
-        try self.control.ensureOpen();
+        try self.ensureApplicationSendOpen();
         try webtransport.ensureDatagramsNegotiated(
             self.h3.options.local_settings,
             self.h3.control.settings.peer,
@@ -3825,6 +5006,170 @@ pub const AcceptedHandshakeSession = struct {
         try self.h3.sendConnectDatagramWithDeadline(
             self.session_id.value,
             payload,
+            deadline,
+        );
+    }
+
+    pub fn sendDatagrams(
+        self: *AcceptedHandshakeSession,
+        payloads: []const []const u8,
+        committed_count: *usize,
+    ) Error!void {
+        committed_count.* = 0;
+        try self.ensureApplicationSendOpen();
+        try webtransport.ensureDatagramsNegotiated(
+            self.h3.options.local_settings,
+            self.h3.control.settings.peer,
+        );
+        return self.h3.sendConnectDatagrams(
+            self.session_id.value,
+            payloads,
+            committed_count,
+        );
+    }
+
+    pub fn sendDatagramsWithTimeout(
+        self: *AcceptedHandshakeSession,
+        payloads: []const []const u8,
+        committed_count: *usize,
+        timeout: std.Io.Duration,
+    ) ReceiveTimeoutError!void {
+        committed_count.* = 0;
+        if (timeout.nanoseconds <= 0) return error.Timeout;
+        try self.ensureApplicationSendOpen();
+        try webtransport.ensureDatagramsNegotiated(
+            self.h3.options.local_settings,
+            self.h3.control.settings.peer,
+        );
+        return self.h3.sendConnectDatagramsWithTimeout(
+            self.session_id.value,
+            payloads,
+            committed_count,
+            timeout,
+        );
+    }
+
+    pub fn sendDatagramsWithDeadline(
+        self: *AcceptedHandshakeSession,
+        payloads: []const []const u8,
+        committed_count: *usize,
+        deadline: std.Io.Clock.Timestamp,
+    ) ReceiveTimeoutError!void {
+        committed_count.* = 0;
+        _ = try deadline_policy.usableAwake(
+            self.h3.established.connection.endpoint.io,
+            deadline,
+        );
+        try self.ensureApplicationSendOpen();
+        try webtransport.ensureDatagramsNegotiated(
+            self.h3.options.local_settings,
+            self.h3.control.settings.peer,
+        );
+        return self.h3.sendConnectDatagramsWithDeadline(
+            self.session_id.value,
+            payloads,
+            committed_count,
+            deadline,
+        );
+    }
+
+    /// Send Capsule Protocol bytes on this Session's Extended CONNECT stream.
+    pub fn sendSessionData(
+        self: *AcceptedHandshakeSession,
+        data: []const u8,
+        fin: bool,
+    ) Error!void {
+        try self.ensureApplicationSendOpen();
+        return self.h3.sendResponseBodyPaced(
+            self.session_id.value,
+            data,
+            fin,
+        );
+    }
+
+    pub fn sendSessionDataWithTimeout(
+        self: *AcceptedHandshakeSession,
+        data: []const u8,
+        fin: bool,
+        progress: *http3.runtime.BodyWriteProgress,
+        timeout: std.Io.Duration,
+    ) ReceiveTimeoutError!void {
+        return self.sendSessionDataSlicesWithTimeout(
+            &.{data},
+            fin,
+            progress,
+            timeout,
+        );
+    }
+
+    pub fn sendSessionDataWithDeadline(
+        self: *AcceptedHandshakeSession,
+        data: []const u8,
+        fin: bool,
+        progress: *http3.runtime.BodyWriteProgress,
+        deadline: std.Io.Clock.Timestamp,
+    ) ReceiveTimeoutError!void {
+        return self.sendSessionDataSlicesWithDeadline(
+            &.{data},
+            fin,
+            progress,
+            deadline,
+        );
+    }
+
+    pub fn sendSessionDataSlices(
+        self: *AcceptedHandshakeSession,
+        parts: []const []const u8,
+        fin: bool,
+    ) Error!void {
+        try self.ensureApplicationSendOpen();
+        return self.h3.sendResponseBodyPartsPaced(
+            self.session_id.value,
+            parts,
+            fin,
+        );
+    }
+
+    /// Send borrowed Capsule Protocol slices on this Extended CONNECT stream
+    /// under one timeout. Progress spans the logical concatenation of all
+    /// slices and therefore identifies the exact suffix to retry.
+    pub fn sendSessionDataSlicesWithTimeout(
+        self: *AcceptedHandshakeSession,
+        parts: []const []const u8,
+        fin: bool,
+        progress: *http3.runtime.BodyWriteProgress,
+        timeout: std.Io.Duration,
+    ) ReceiveTimeoutError!void {
+        progress.* = .{};
+        if (timeout.nanoseconds <= 0) return error.Timeout;
+        try self.ensureApplicationSendOpen();
+        return self.h3.sendResponseBodyPartsPacedWithTimeout(
+            self.session_id.value,
+            parts,
+            fin,
+            progress,
+            timeout,
+        );
+    }
+
+    pub fn sendSessionDataSlicesWithDeadline(
+        self: *AcceptedHandshakeSession,
+        parts: []const []const u8,
+        fin: bool,
+        progress: *http3.runtime.BodyWriteProgress,
+        deadline: std.Io.Clock.Timestamp,
+    ) ReceiveTimeoutError!void {
+        progress.* = .{};
+        _ = try deadline_policy.usableAwake(
+            self.h3.established.connection.endpoint.io,
+            deadline,
+        );
+        try self.ensureApplicationSendOpen();
+        return self.h3.sendResponseBodyPartsPacedWithDeadline(
+            self.session_id.value,
+            parts,
+            fin,
+            progress,
             deadline,
         );
     }
@@ -3954,7 +5299,7 @@ pub const AcceptedHandshakeSession = struct {
                 absolute,
             );
         }
-        try self.control.ensureOpen();
+        try self.ensureApplicationSendOpen();
         try webtransport.ensureNegotiated(
             self.h3.options.local_settings,
             self.h3.control.settings.peer,
@@ -3986,7 +5331,7 @@ pub const AcceptedHandshakeSession = struct {
         payload: []const u8,
         fin: bool,
     ) Error!void {
-        try self.control.ensureOpen();
+        try self.ensureApplicationSendOpen();
         try sendHandshakeSessionStream(
             &self.h3.established.connection,
             &self.streams,
@@ -3997,12 +5342,125 @@ pub const AcceptedHandshakeSession = struct {
         );
     }
 
+    pub fn sendStreamWithTimeout(
+        self: *AcceptedHandshakeSession,
+        stream_id: u62,
+        payload: []const u8,
+        fin: bool,
+        committed: *usize,
+        timeout: std.Io.Duration,
+    ) ReceiveTimeoutError!void {
+        committed.* = 0;
+        if (timeout.nanoseconds <= 0) return error.Timeout;
+        return self.sendStreamWithDeadline(
+            stream_id,
+            payload,
+            fin,
+            committed,
+            .fromNow(self.h3.established.connection.endpoint.io, .{
+                .raw = timeout,
+                .clock = .awake,
+            }),
+        );
+    }
+
+    pub fn sendStreamWithDeadline(
+        self: *AcceptedHandshakeSession,
+        stream_id: u62,
+        payload: []const u8,
+        fin: bool,
+        committed: *usize,
+        deadline: std.Io.Clock.Timestamp,
+    ) ReceiveTimeoutError!void {
+        committed.* = 0;
+        _ = try deadline_policy.usableAwake(
+            self.h3.established.connection.endpoint.io,
+            deadline,
+        );
+        try self.ensureApplicationSendOpen();
+        return handshake_stream.sendWithDeadline(
+            &self.h3.established.connection,
+            &self.streams,
+            self.session_id,
+            stream_id,
+            payload,
+            fin,
+            committed,
+            deadline,
+        );
+    }
+
+    pub fn sendStreamSlices(
+        self: *AcceptedHandshakeSession,
+        stream_id: u62,
+        parts: []const []const u8,
+        fin: bool,
+    ) Error!void {
+        try self.ensureApplicationSendOpen();
+        return handshake_stream.sendSlices(
+            &self.h3.established.connection,
+            &self.streams,
+            self.session_id,
+            stream_id,
+            parts,
+            fin,
+        );
+    }
+
+    pub fn sendStreamSlicesWithTimeout(
+        self: *AcceptedHandshakeSession,
+        stream_id: u62,
+        parts: []const []const u8,
+        fin: bool,
+        committed: *usize,
+        timeout: std.Io.Duration,
+    ) ReceiveTimeoutError!void {
+        committed.* = 0;
+        if (timeout.nanoseconds <= 0) return error.Timeout;
+        return self.sendStreamSlicesWithDeadline(
+            stream_id,
+            parts,
+            fin,
+            committed,
+            .fromNow(self.h3.established.connection.endpoint.io, .{
+                .raw = timeout,
+                .clock = .awake,
+            }),
+        );
+    }
+
+    pub fn sendStreamSlicesWithDeadline(
+        self: *AcceptedHandshakeSession,
+        stream_id: u62,
+        parts: []const []const u8,
+        fin: bool,
+        committed: *usize,
+        deadline: std.Io.Clock.Timestamp,
+    ) ReceiveTimeoutError!void {
+        committed.* = 0;
+        _ = try deadline_policy.usableAwake(
+            self.h3.established.connection.endpoint.io,
+            deadline,
+        );
+        try self.ensureApplicationSendOpen();
+        return handshake_stream.sendSlicesWithDeadline(
+            &self.h3.established.connection,
+            &self.streams,
+            self.session_id,
+            stream_id,
+            parts,
+            fin,
+            committed,
+            deadline,
+        );
+    }
+
     pub fn writeStream(
         self: *AcceptedHandshakeSession,
         stream_id: u62,
         payload: []const u8,
     ) Error!usize {
-        try self.control.ensureOpen();
+        try self.ensureApplicationSendOpen();
         return handshake_stream.write(
             &self.h3.established.connection,
             &self.streams,
@@ -4012,12 +5470,103 @@ pub const AcceptedHandshakeSession = struct {
         );
     }
 
+    pub fn writeStreamWithTimeout(
+        self: *AcceptedHandshakeSession,
+        stream_id: u62,
+        payload: []const u8,
+        timeout: std.Io.Duration,
+    ) ReceiveTimeoutError!usize {
+        if (timeout.nanoseconds <= 0) return error.Timeout;
+        return self.writeStreamWithDeadline(
+            stream_id,
+            payload,
+            .fromNow(self.h3.established.connection.endpoint.io, .{
+                .raw = timeout,
+                .clock = .awake,
+            }),
+        );
+    }
+
+    pub fn writeStreamWithDeadline(
+        self: *AcceptedHandshakeSession,
+        stream_id: u62,
+        payload: []const u8,
+        deadline: std.Io.Clock.Timestamp,
+    ) ReceiveTimeoutError!usize {
+        _ = try deadline_policy.usableAwake(
+            self.h3.established.connection.endpoint.io,
+            deadline,
+        );
+        try self.ensureApplicationSendOpen();
+        return handshake_stream.writeWithDeadline(
+            &self.h3.established.connection,
+            &self.streams,
+            self.session_id,
+            stream_id,
+            payload,
+            deadline,
+        );
+    }
+
+    pub fn writeStreamSlices(
+        self: *AcceptedHandshakeSession,
+        stream_id: u62,
+        parts: []const []const u8,
+    ) Error!usize {
+        try self.ensureApplicationSendOpen();
+        return handshake_stream.writeSlices(
+            &self.h3.established.connection,
+            &self.streams,
+            self.session_id,
+            stream_id,
+            parts,
+        );
+    }
+
+    pub fn writeStreamSlicesWithTimeout(
+        self: *AcceptedHandshakeSession,
+        stream_id: u62,
+        parts: []const []const u8,
+        timeout: std.Io.Duration,
+    ) ReceiveTimeoutError!usize {
+        if (timeout.nanoseconds <= 0) return error.Timeout;
+        return self.writeStreamSlicesWithDeadline(
+            stream_id,
+            parts,
+            .fromNow(self.h3.established.connection.endpoint.io, .{
+                .raw = timeout,
+                .clock = .awake,
+            }),
+        );
+    }
+
+    pub fn writeStreamSlicesWithDeadline(
+        self: *AcceptedHandshakeSession,
+        stream_id: u62,
+        parts: []const []const u8,
+        deadline: std.Io.Clock.Timestamp,
+    ) ReceiveTimeoutError!usize {
+        _ = try deadline_policy.usableAwake(
+            self.h3.established.connection.endpoint.io,
+            deadline,
+        );
+        try self.ensureApplicationSendOpen();
+        return handshake_stream.writeSlicesWithDeadline(
+            &self.h3.established.connection,
+            &self.streams,
+            self.session_id,
+            stream_id,
+            parts,
+            deadline,
+        );
+    }
+
     pub fn setStreamPriority(
         self: *AcceptedHandshakeSession,
         stream_id: u62,
         priority: i32,
     ) Error!void {
-        try self.control.ensureOpen();
+        try self.ensureApplicationSendOpen();
         try self.streams.setPriority(stream_id, priority);
     }
 
@@ -4035,13 +5584,55 @@ pub const AcceptedHandshakeSession = struct {
         writes: []const StreamWrite,
         counts: []usize,
     ) Error!StreamWriteResult {
-        try self.control.ensureOpen();
+        try self.ensureApplicationSendOpen();
         return stream_batch.write(
             &self.h3.established.connection,
             &self.streams,
             self.session_id,
             writes,
             counts,
+        );
+    }
+
+    pub fn writeStreamsWithTimeout(
+        self: *AcceptedHandshakeSession,
+        writes: []const StreamWrite,
+        counts: []usize,
+        timeout: std.Io.Duration,
+    ) ReceiveTimeoutError!StreamWriteResult {
+        if (counts.len < writes.len) return error.BufferTooShort;
+        @memset(counts[0..writes.len], 0);
+        if (timeout.nanoseconds <= 0) return error.Timeout;
+        return self.writeStreamsWithDeadline(
+            writes,
+            counts,
+            .fromNow(self.h3.established.connection.endpoint.io, .{
+                .raw = timeout,
+                .clock = .awake,
+            }),
+        );
+    }
+
+    pub fn writeStreamsWithDeadline(
+        self: *AcceptedHandshakeSession,
+        writes: []const StreamWrite,
+        counts: []usize,
+        deadline: std.Io.Clock.Timestamp,
+    ) ReceiveTimeoutError!StreamWriteResult {
+        if (counts.len < writes.len) return error.BufferTooShort;
+        @memset(counts[0..writes.len], 0);
+        _ = try deadline_policy.usableAwake(
+            self.h3.established.connection.endpoint.io,
+            deadline,
+        );
+        try self.ensureApplicationSendOpen();
+        return stream_batch.writeWithDeadline(
+            &self.h3.established.connection,
+            &self.streams,
+            self.session_id,
+            writes,
+            counts,
+            deadline,
         );
     }
 
@@ -4057,6 +5648,40 @@ pub const AcceptedHandshakeSession = struct {
             &self.streams,
             self.session_id,
             stream_id,
+        );
+    }
+
+    pub fn finishStreamWithTimeout(
+        self: *AcceptedHandshakeSession,
+        stream_id: u62,
+        timeout: std.Io.Duration,
+    ) ReceiveTimeoutError!void {
+        if (timeout.nanoseconds <= 0) return error.Timeout;
+        return self.finishStreamWithDeadline(
+            stream_id,
+            .fromNow(self.h3.established.connection.endpoint.io, .{
+                .raw = timeout,
+                .clock = .awake,
+            }),
+        );
+    }
+
+    pub fn finishStreamWithDeadline(
+        self: *AcceptedHandshakeSession,
+        stream_id: u62,
+        deadline: std.Io.Clock.Timestamp,
+    ) ReceiveTimeoutError!void {
+        _ = try deadline_policy.usableAwake(
+            self.h3.established.connection.endpoint.io,
+            deadline,
+        );
+        try self.control.ensureOpen();
+        return handshake_stream.finishWithDeadline(
+            &self.h3.established.connection,
+            &self.streams,
+            self.session_id,
+            stream_id,
+            deadline,
         );
     }
 
@@ -4167,6 +5792,59 @@ pub const AcceptedHandshakeSession = struct {
         );
     }
 
+    /// Read only `stream_id`, leaving ready sibling streams untouched.
+    pub fn readStreamId(
+        self: *AcceptedHandshakeSession,
+        stream_id: u62,
+        out: []u8,
+    ) Error!StreamRead {
+        return incremental_stream.readId(
+            &self.h3.established.connection,
+            &self.streams,
+            self.session_id,
+            stream_id,
+            out,
+        );
+    }
+
+    pub fn readStreamIdWithTimeout(
+        self: *AcceptedHandshakeSession,
+        stream_id: u62,
+        out: []u8,
+        timeout: std.Io.Duration,
+    ) ReceiveTimeoutError!StreamRead {
+        if (timeout.nanoseconds <= 0) return error.Timeout;
+        return self.readStreamIdWithDeadline(
+            stream_id,
+            out,
+            .fromNow(self.h3.established.connection.endpoint.io, .{
+                .raw = timeout,
+                .clock = .awake,
+            }),
+        );
+    }
+
+    pub fn readStreamIdWithDeadline(
+        self: *AcceptedHandshakeSession,
+        stream_id: u62,
+        out: []u8,
+        deadline: std.Io.Clock.Timestamp,
+    ) ReceiveTimeoutError!StreamRead {
+        return incremental_stream.readIdWithDeadline(
+            &self.h3.established.connection,
+            &self.streams,
+            self.session_id,
+            stream_id,
+            out,
+            deadline,
+        );
+    }
+
+    /// Flush a delayed transport ACK before a one-shot session is torn down.
+    pub fn flushPendingAck(self: *AcceptedHandshakeSession) Error!bool {
+        return self.h3.established.connection.flushPendingAck();
+    }
+
     /// Apply one packet selected by the endpoint-wide QUIC dispatcher. HTTP/3
     /// control/QPACK and unrelated requests progress while the detached
     /// WebTransport CONNECT stream and associated streams remain available to
@@ -4222,19 +5900,23 @@ pub const AcceptedHandshakeSession = struct {
     pub fn pollSessionEvent(
         self: *AcceptedHandshakeSession,
     ) Error!?SessionEvent {
-        const event = self.control.poll(
-            &self.h3.established.connection,
-        ) catch |err| switch (err) {
-            error.InvalidCapsule => {
-                try self.h3.established.connection.resetStream(
-                    self.session_id.value,
-                    http3.ApplicationErrorCode.message_error,
-                );
-                return err;
-            },
-            else => return err,
-        };
-        if (event) |value| try self.finishPolledSessionEvent(value);
+        if (self.pending_session_event == null) {
+            self.pending_session_event = self.control.poll(
+                &self.h3.established.connection,
+            ) catch |err| switch (err) {
+                error.InvalidCapsule => {
+                    try self.h3.established.connection.resetStream(
+                        self.session_id.value,
+                        http3.ApplicationErrorCode.message_error,
+                    );
+                    return err;
+                },
+                else => return err,
+            };
+        }
+        const event = self.pending_session_event orelse return null;
+        try self.finishPolledSessionEvent(event);
+        self.pending_session_event = null;
         return event;
     }
 
@@ -4243,6 +5925,7 @@ pub const AcceptedHandshakeSession = struct {
         stream_id: u62,
         application_error_code: u32,
     ) Error!void {
+        try self.ensureApplicationSendOpen();
         return resetHandshakeSessionStream(
             &self.h3.established.connection,
             &self.streams,
@@ -4251,11 +5934,49 @@ pub const AcceptedHandshakeSession = struct {
         );
     }
 
+    pub fn resetStreamWithTimeout(
+        self: *AcceptedHandshakeSession,
+        stream_id: u62,
+        application_error_code: u32,
+        timeout: std.Io.Duration,
+    ) ReceiveTimeoutError!void {
+        if (timeout.nanoseconds <= 0) return error.Timeout;
+        return self.resetStreamWithDeadline(
+            stream_id,
+            application_error_code,
+            .fromNow(self.h3.established.connection.endpoint.io, .{
+                .raw = timeout,
+                .clock = .awake,
+            }),
+        );
+    }
+
+    pub fn resetStreamWithDeadline(
+        self: *AcceptedHandshakeSession,
+        stream_id: u62,
+        application_error_code: u32,
+        deadline: std.Io.Clock.Timestamp,
+    ) ReceiveTimeoutError!void {
+        _ = try deadline_policy.usableAwake(
+            self.h3.established.connection.endpoint.io,
+            deadline,
+        );
+        try self.ensureApplicationSendOpen();
+        return incremental_stream.resetWithDeadline(
+            &self.h3.established.connection,
+            &self.streams,
+            stream_id,
+            application_error_code,
+            deadline,
+        );
+    }
+
     pub fn stopStream(
         self: *AcceptedHandshakeSession,
         stream_id: u62,
         application_error_code: u32,
     ) Error!void {
+        try self.ensureApplicationSendOpen();
         return stopHandshakeSessionStream(
             &self.h3.established.connection,
             &self.streams,
@@ -4264,15 +5985,105 @@ pub const AcceptedHandshakeSession = struct {
         );
     }
 
+    pub fn stopStreamWithTimeout(
+        self: *AcceptedHandshakeSession,
+        stream_id: u62,
+        application_error_code: u32,
+        timeout: std.Io.Duration,
+    ) ReceiveTimeoutError!void {
+        if (timeout.nanoseconds <= 0) return error.Timeout;
+        return self.stopStreamWithDeadline(
+            stream_id,
+            application_error_code,
+            .fromNow(self.h3.established.connection.endpoint.io, .{
+                .raw = timeout,
+                .clock = .awake,
+            }),
+        );
+    }
+
+    pub fn stopStreamWithDeadline(
+        self: *AcceptedHandshakeSession,
+        stream_id: u62,
+        application_error_code: u32,
+        deadline: std.Io.Clock.Timestamp,
+    ) ReceiveTimeoutError!void {
+        _ = try deadline_policy.usableAwake(
+            self.h3.established.connection.endpoint.io,
+            deadline,
+        );
+        try self.ensureApplicationSendOpen();
+        return incremental_stream.stopWithDeadline(
+            &self.h3.established.connection,
+            &self.streams,
+            stream_id,
+            application_error_code,
+            deadline,
+        );
+    }
+
     pub fn drain(self: *AcceptedHandshakeSession) Error!void {
         if (self.control.local_drain_sent) return;
-        var encoded: [16]u8 = undefined;
-        const capsule = try session_control.writeDrainInto(&encoded);
+        if (self.pending_drain == null) {
+            const pending = try PendingSessionDrain.init();
+            try self.control.beginLocalDrain();
+            self.pending_drain = pending;
+        }
+        const pending = &self.pending_drain.?;
         try self.h3.sendResponseBodyPaced(
             self.session_id.value,
-            capsule,
+            pending.bytes[pending.committed..pending.len],
             false,
         );
+        self.pending_drain = null;
+        try self.control.recordLocalDrain();
+    }
+
+    pub fn drainWithTimeout(
+        self: *AcceptedHandshakeSession,
+        timeout: std.Io.Duration,
+    ) ReceiveTimeoutError!void {
+        if (timeout.nanoseconds <= 0) return error.Timeout;
+        return self.drainWithDeadline(.fromNow(
+            self.h3.established.connection.endpoint.io,
+            .{ .raw = timeout, .clock = .awake },
+        ));
+    }
+
+    pub fn drainWithDeadline(
+        self: *AcceptedHandshakeSession,
+        deadline: std.Io.Clock.Timestamp,
+    ) ReceiveTimeoutError!void {
+        _ = try deadline_policy.usableAwake(
+            self.h3.established.connection.endpoint.io,
+            deadline,
+        );
+        if (self.h3.dispatcherBound()) return error.InvalidDispatcherState;
+        if (self.control.local_drain_sent) return;
+        if (self.pending_drain == null) {
+            const pending = try PendingSessionDrain.init();
+            try self.control.beginLocalDrain();
+            self.pending_drain = pending;
+        }
+        const pending = &self.pending_drain.?;
+        var progress: http3.runtime.BodyWriteProgress = .{};
+        self.h3.sendResponseBodyPacedWithDeadline(
+            self.session_id.value,
+            pending.bytes[pending.committed..pending.len],
+            false,
+            &progress,
+            deadline,
+        ) catch |err| {
+            pending.committed += progress.committed_bytes;
+            if (pending.committed == pending.len) {
+                self.pending_drain = null;
+                try self.control.recordLocalDrain();
+            }
+            return err;
+        };
+        pending.committed += progress.committed_bytes;
+        std.debug.assert(pending.committed == pending.len);
+        self.pending_drain = null;
         try self.control.recordLocalDrain();
     }
 
@@ -4281,7 +6092,16 @@ pub const AcceptedHandshakeSession = struct {
         code: u32,
         reason: []const u8,
     ) Error!void {
-        if (self.control.local_close_sent) return;
+        if (self.control.local_close_sent or
+            self.control.local_close_failed)
+        {
+            return session_control.terminateStreams(
+                &self.h3.established.connection,
+                &self.streams,
+            );
+        }
+        if (self.pending_drain != null) return error.InvalidSessionState;
+        if (self.pending_close != null) return error.InvalidSessionState;
         var encoded: [4 + session_control.max_close_reason + 16]u8 =
             undefined;
         const capsule = try session_control.writeCloseInto(
@@ -4289,11 +6109,16 @@ pub const AcceptedHandshakeSession = struct {
             code,
             reason,
         );
-        try self.h3.sendResponseBodyPaced(
+        self.h3.sendResponseBodyPaced(
             self.session_id.value,
             capsule,
             true,
-        );
+        ) catch |err| {
+            if (terminalSessionBodySendError(err)) {
+                self.control.recordLocalCloseFailure(code);
+            }
+            return err;
+        };
         // Preserve receive-side routing after the local half-close. The
         // terminal event handler retires the association once peer FIN/reset
         // has been consumed.
@@ -4302,6 +6127,95 @@ pub const AcceptedHandshakeSession = struct {
             &self.h3.established.connection,
             &self.streams,
         );
+    }
+
+    pub fn closeWithTimeout(
+        self: *AcceptedHandshakeSession,
+        code: u32,
+        reason: []const u8,
+        timeout: std.Io.Duration,
+    ) ReceiveTimeoutError!void {
+        if (timeout.nanoseconds <= 0) return error.Timeout;
+        return self.closeWithDeadline(code, reason, .fromNow(
+            self.h3.established.connection.endpoint.io,
+            .{ .raw = timeout, .clock = .awake },
+        ));
+    }
+
+    /// Send the CLOSE_WEBTRANSPORT_SESSION capsule, CONNECT FIN, and all
+    /// associated SESSION_GONE terminal frames under one absolute deadline.
+    /// A timed-out capsule send retains its exact socket-visible offset.
+    pub fn closeWithDeadline(
+        self: *AcceptedHandshakeSession,
+        code: u32,
+        reason: []const u8,
+        deadline: std.Io.Clock.Timestamp,
+    ) ReceiveTimeoutError!void {
+        _ = try deadline_policy.usableAwake(
+            self.h3.established.connection.endpoint.io,
+            deadline,
+        );
+        if (self.h3.dispatcherBound()) return error.InvalidDispatcherState;
+        if (self.control.local_close_failed) {
+            return session_control.terminateStreamsWithDeadline(
+                &self.h3.established.connection,
+                &self.streams,
+                deadline,
+            );
+        }
+        if (!self.control.local_close_sent) {
+            try self.preparePendingClose(code, reason);
+            const pending = &self.pending_close.?;
+            var progress: http3.runtime.BodyWriteProgress = .{};
+            self.h3.sendResponseBodyPacedWithDeadline(
+                self.session_id.value,
+                pending.bytes[pending.committed..pending.len],
+                true,
+                &progress,
+                deadline,
+            ) catch |err| {
+                pending.committed += progress.committed_bytes;
+                if (progress.fin_committed) {
+                    const committed_code = pending.code;
+                    self.pending_close = null;
+                    try self.control.recordLocalClose(committed_code);
+                } else if (terminalSessionBodySendError(err)) {
+                    const failed_code = pending.code;
+                    self.pending_close = null;
+                    self.control.recordLocalCloseFailure(failed_code);
+                }
+                return err;
+            };
+            pending.committed += progress.committed_bytes;
+            std.debug.assert(
+                pending.committed == pending.len and progress.fin_committed,
+            );
+            const committed_code = pending.code;
+            self.pending_close = null;
+            try self.control.recordLocalClose(committed_code);
+        }
+        try session_control.terminateStreamsWithDeadline(
+            &self.h3.established.connection,
+            &self.streams,
+            deadline,
+        );
+    }
+
+    fn preparePendingClose(
+        self: *AcceptedHandshakeSession,
+        code: u32,
+        reason: []const u8,
+    ) Error!void {
+        if (self.pending_drain != null) return error.InvalidSessionState;
+        if (self.pending_close) |*pending| {
+            if (!try pending.matches(code, reason)) {
+                return error.InvalidSessionState;
+            }
+            return;
+        }
+        const pending = try PendingSessionClose.init(code, reason);
+        try self.control.beginLocalClose();
+        self.pending_close = pending;
     }
 
     pub fn receiveSessionEvent(
@@ -4323,11 +6237,7 @@ pub const AcceptedHandshakeSession = struct {
             self.h3.established.connection.endpoint.io,
             .{ .raw = timeout, .clock = .awake },
         );
-        const event = while (true) {
-            if (try self.pollSessionEvent()) |ready| break ready;
-            try self.receiveControlProgressWithDeadline(deadline);
-        };
-        return event;
+        return self.receiveSessionEventWithDeadline(deadline);
     }
 
     pub fn receiveSessionEventWithDeadline(
@@ -4335,9 +6245,41 @@ pub const AcceptedHandshakeSession = struct {
         deadline: std.Io.Clock.Timestamp,
     ) ReceiveTimeoutError!SessionEvent {
         return while (true) {
-            if (try self.pollSessionEvent()) |ready| break ready;
+            if (try self.pollSessionEventWithCleanupDeadline(deadline)) |ready| {
+                break ready;
+            }
             try self.receiveControlProgressWithDeadline(deadline);
         };
+    }
+
+    fn pollSessionEventWithCleanupDeadline(
+        self: *AcceptedHandshakeSession,
+        deadline: std.Io.Clock.Timestamp,
+    ) ReceiveTimeoutError!?SessionEvent {
+        _ = try deadline_policy.usableAwake(
+            self.h3.established.connection.endpoint.io,
+            deadline,
+        );
+        if (self.pending_session_event == null) {
+            self.pending_session_event = self.control.pollOnce(
+                &self.h3.established.connection,
+            ) catch |err| switch (err) {
+                error.InvalidCapsule => {
+                    try self.h3.established.connection
+                        .resetStreamWithDeadline(
+                        self.session_id.value,
+                        http3.ApplicationErrorCode.message_error,
+                        deadline,
+                    );
+                    return err;
+                },
+                else => return err,
+            };
+        }
+        const event = self.pending_session_event orelse return null;
+        try self.finishPolledSessionEventWithDeadline(event, deadline);
+        self.pending_session_event = null;
+        return event;
     }
 
     fn finishPolledSessionEvent(
@@ -4345,13 +6287,30 @@ pub const AcceptedHandshakeSession = struct {
         event: SessionEvent,
     ) Error!void {
         if (event == .closed or event == .reset) {
-            if (event == .closed and !self.control.local_close_sent) {
-                try self.h3.sendResponseBodyPaced(
-                    self.session_id.value,
-                    &.{},
-                    true,
-                );
-                self.control.local_close_sent = true;
+            if (event == .closed and
+                !self.control.local_close_sent and
+                !self.control.local_close_failed)
+            {
+                // A caller may still own a partially sent local CLOSE. Do not
+                // truncate it with an empty FIN; closeWithDeadline can resume
+                // that exact suffix after this peer event is delivered.
+                if (self.pending_close == null) {
+                    self.h3.sendResponseBodyPaced(
+                        self.session_id.value,
+                        &.{},
+                        true,
+                    ) catch |err| {
+                        const stream_stats = self.h3.established.connection
+                            .sendStreamStats(self.session_id.value);
+                        if (stream_stats != null and
+                            stream_stats.?.final_size != null)
+                        {
+                            self.control.local_close_sent = true;
+                        }
+                        return err;
+                    };
+                    self.control.local_close_sent = true;
+                }
             }
             // Retain the terminal association until session teardown so late
             // datagrams are discarded by terminal state instead of becoming
@@ -4361,6 +6320,39 @@ pub const AcceptedHandshakeSession = struct {
                 &self.streams,
             );
         }
+    }
+
+    fn finishPolledSessionEventWithDeadline(
+        self: *AcceptedHandshakeSession,
+        event: SessionEvent,
+        deadline: std.Io.Clock.Timestamp,
+    ) ReceiveTimeoutError!void {
+        if (event != .closed and event != .reset) return;
+        if (event == .closed and !self.control.local_close_sent and
+            !self.control.local_close_failed and
+            self.pending_close == null)
+        {
+            var progress: http3.runtime.BodyWriteProgress = .{};
+            self.h3.sendResponseBodyPacedWithDeadline(
+                self.session_id.value,
+                &.{},
+                true,
+                &progress,
+                deadline,
+            ) catch |err| {
+                if (progress.fin_committed) {
+                    self.control.local_close_sent = true;
+                }
+                return err;
+            };
+            std.debug.assert(progress.fin_committed);
+            self.control.local_close_sent = true;
+        }
+        try session_control.terminateStreamsWithDeadline(
+            &self.h3.established.connection,
+            &self.streams,
+            deadline,
+        );
     }
 
     fn receiveControlProgress(
@@ -4403,6 +6395,10 @@ pub const ClientSession = struct {
     response: http3.DecodedResponseHead,
     streams: webtransport.StreamRegistry,
     control: protected_control.Reader,
+    pending_drain: ?PendingSessionDrain = null,
+    pending_close: ?PendingSessionClose = null,
+    pending_session_event: ?SessionEvent = null,
+    datagram_batch_scratch: datagram_send.DevelopmentBatchScratch = .{},
 
     pub fn connect(
         allocator: std.mem.Allocator,
@@ -4585,6 +6581,9 @@ pub const ClientSession = struct {
         // server's peer-shared runtime. Clear even unclassified partial
         // prefixes before releasing the transport.
         self.h3.clearDevelopmentStreams();
+        self.datagram_batch_scratch.deinit(
+            self.h3.quic_client.endpoint.allocator,
+        );
         self.response.deinit(self.h3.quic_client.endpoint.allocator);
         self.streams.deinit();
         self.h3.deinit();
@@ -4676,6 +6675,90 @@ pub const ClientSession = struct {
         try self.streams.recordSent(stream_id, payload.len, fin);
     }
 
+    pub fn sendStreamWithTimeout(
+        self: *ClientSession,
+        stream_id: u62,
+        payload: []const u8,
+        fin: bool,
+        progress: *http3.runtime.DevelopmentBodyWriteProgress,
+        timeout: std.Io.Duration,
+    ) ReceiveTimeoutError!void {
+        progress.* = .{};
+        if (timeout.nanoseconds <= 0) return error.Timeout;
+        return self.sendStreamWithDeadline(
+            stream_id,
+            payload,
+            fin,
+            progress,
+            .fromNow(self.h3.quic_client.endpoint.io, .{
+                .raw = timeout,
+                .clock = .awake,
+            }),
+        );
+    }
+
+    pub fn sendStreamWithDeadline(
+        self: *ClientSession,
+        stream_id: u62,
+        payload: []const u8,
+        fin: bool,
+        progress: *http3.runtime.DevelopmentBodyWriteProgress,
+        deadline: std.Io.Clock.Timestamp,
+    ) ReceiveTimeoutError!void {
+        progress.* = .{};
+        _ = try deadline_policy.usableAwake(
+            self.h3.quic_client.endpoint.io,
+            deadline,
+        );
+        try self.control.control.ensureOpen();
+        const stream = try developmentWritableStream(&self.streams, stream_id);
+        if (!stream.prefix_sent) {
+            var storage: [16]u8 = undefined;
+            self.h3.sendDevelopmentStreamPartsWithDeadline(
+                self.session_id.value,
+                stream_id,
+                try development_stream.prefix(
+                    &storage,
+                    stream.direction,
+                    self.session_id,
+                ),
+                payload,
+                fin,
+                progress,
+                deadline,
+            ) catch |err| {
+                if (progress.send_attempted or
+                    terminalSessionBodySendError(err))
+                {
+                    stream.prefix_sent = true;
+                    stream.send_reset = .fromHttp3(
+                        webtransport.ApplicationErrorCode.session_gone,
+                    );
+                }
+                return err;
+            };
+            stream.prefix_sent = true;
+            try self.streams.recordSent(stream_id, payload.len, fin);
+            return;
+        }
+        self.h3.sendDevelopmentStreamWithDeadline(
+            self.session_id.value,
+            stream_id,
+            payload,
+            fin,
+            progress,
+            deadline,
+        ) catch |err| {
+            if (progress.send_attempted or terminalSessionBodySendError(err)) {
+                stream.send_reset = .fromHttp3(
+                    webtransport.ApplicationErrorCode.session_gone,
+                );
+            }
+            return err;
+        };
+        try self.streams.recordSent(stream_id, payload.len, fin);
+    }
+
     pub fn receiveStream(self: *ClientSession) Error!OwnedDevelopmentStream {
         const match = development_stream.match(
             &self.streams,
@@ -4718,6 +6801,106 @@ pub const ClientSession = struct {
         try sendDatagramFromEndpoint(&self.h3.quic_client.endpoint, self.h3.quic_client.peer, self.session_id, payload);
     }
 
+    pub fn sendDatagramWithTimeout(
+        self: *ClientSession,
+        payload: []const u8,
+        timeout: std.Io.Duration,
+    ) ReceiveTimeoutError!void {
+        if (timeout.nanoseconds <= 0) return error.Timeout;
+        return self.sendDatagramWithDeadline(payload, .fromNow(
+            self.h3.quic_client.endpoint.io,
+            .{ .raw = timeout, .clock = .awake },
+        ));
+    }
+
+    pub fn sendDatagramWithDeadline(
+        self: *ClientSession,
+        payload: []const u8,
+        deadline: std.Io.Clock.Timestamp,
+    ) ReceiveTimeoutError!void {
+        _ = try deadline_policy.usableAwake(
+            self.h3.quic_client.endpoint.io,
+            deadline,
+        );
+        try self.control.control.ensureOpen();
+        return sendDatagramFromEndpointWithDeadline(
+            &self.h3.quic_client.endpoint,
+            self.h3.quic_client.peer,
+            self.session_id,
+            payload,
+            deadline,
+        );
+    }
+
+    pub fn sendDatagrams(
+        self: *ClientSession,
+        payloads: []const []const u8,
+        committed_count: *usize,
+    ) Error!void {
+        committed_count.* = 0;
+        try self.control.control.ensureOpen();
+        return datagram_send.developmentBatch(
+            &self.h3.quic_client.endpoint,
+            self.h3.quic_client.peer,
+            self.session_id,
+            payloads,
+            committed_count,
+            &self.datagram_batch_scratch,
+        );
+    }
+
+    pub fn sendDatagramsWithTimeout(
+        self: *ClientSession,
+        payloads: []const []const u8,
+        committed_count: *usize,
+        timeout: std.Io.Duration,
+    ) ReceiveTimeoutError!void {
+        committed_count.* = 0;
+        if (timeout.nanoseconds <= 0) return error.Timeout;
+        return self.sendDatagramsWithDeadline(
+            payloads,
+            committed_count,
+            .fromNow(self.h3.quic_client.endpoint.io, .{
+                .raw = timeout,
+                .clock = .awake,
+            }),
+        );
+    }
+
+    pub fn sendDatagramsWithDeadline(
+        self: *ClientSession,
+        payloads: []const []const u8,
+        committed_count: *usize,
+        deadline: std.Io.Clock.Timestamp,
+    ) ReceiveTimeoutError!void {
+        committed_count.* = 0;
+        _ = try deadline_policy.usableAwake(
+            self.h3.quic_client.endpoint.io,
+            deadline,
+        );
+        try self.control.control.ensureOpen();
+        return datagram_send.developmentBatchWithDeadline(
+            &self.h3.quic_client.endpoint,
+            self.h3.quic_client.peer,
+            self.session_id,
+            payloads,
+            committed_count,
+            &self.datagram_batch_scratch,
+            deadline,
+        );
+    }
+
+    pub fn maxDatagramPayloadSize(self: ClientSession) ?usize {
+        return datagram_send.developmentPayloadLimit(
+            self.h3.quic_client.endpoint.limits.max_datagram_size,
+            self.session_id,
+        );
+    }
+
+    pub fn maxDatagramSize(self: ClientSession) usize {
+        return self.maxDatagramPayloadSize() orelse 0;
+    }
+
     pub fn receiveDatagram(self: *ClientSession) Error!OwnedDatagram {
         var datagram = try self.h3.receiveDatagram();
         errdefer datagram.deinit(self.h3.quic_client.endpoint.allocator);
@@ -4757,6 +6940,47 @@ pub const ClientSession = struct {
     ) Error!void {
         try self.control.control.ensureOpen();
         try self.h3.sendRequestBody(self.session_id.value, data, fin);
+    }
+
+    pub fn sendSessionDataWithTimeout(
+        self: *ClientSession,
+        data: []const u8,
+        fin: bool,
+        progress: *http3.runtime.DevelopmentBodyWriteProgress,
+        timeout: std.Io.Duration,
+    ) ReceiveTimeoutError!void {
+        progress.* = .{};
+        if (timeout.nanoseconds <= 0) return error.Timeout;
+        try self.control.control.ensureOpen();
+        return self.h3.sendRequestBodyWithTimeout(
+            self.session_id.value,
+            data,
+            fin,
+            progress,
+            timeout,
+        );
+    }
+
+    pub fn sendSessionDataWithDeadline(
+        self: *ClientSession,
+        data: []const u8,
+        fin: bool,
+        progress: *http3.runtime.DevelopmentBodyWriteProgress,
+        deadline: std.Io.Clock.Timestamp,
+    ) ReceiveTimeoutError!void {
+        progress.* = .{};
+        _ = try deadline_policy.usableAwake(
+            self.h3.quic_client.endpoint.io,
+            deadline,
+        );
+        try self.control.control.ensureOpen();
+        return self.h3.sendRequestBodyWithDeadline(
+            self.session_id.value,
+            data,
+            fin,
+            progress,
+            deadline,
+        );
     }
 
     pub fn receiveSessionData(
@@ -4828,9 +7052,72 @@ pub const ClientSession = struct {
 
     pub fn drain(self: *ClientSession) Error!void {
         if (self.control.control.local_drain_sent) return;
-        var encoded: [16]u8 = undefined;
-        const capsule = try session_control.writeDrainInto(&encoded);
-        try self.sendSessionData(capsule, false);
+        if (self.pending_close != null) return error.InvalidSessionState;
+        if (self.pending_drain == null) {
+            const pending = try PendingSessionDrain.init();
+            try self.control.control.beginLocalDrain();
+            self.pending_drain = pending;
+        }
+        const pending = &self.pending_drain.?;
+        self.h3.sendRequestBody(
+            self.session_id.value,
+            pending.bytes[pending.committed..pending.len],
+            false,
+        ) catch |err| {
+            if (terminalSessionBodySendError(err)) {
+                self.pending_drain = null;
+                self.control.control.recordLocalCloseFailure(0);
+            }
+            return err;
+        };
+        self.pending_drain = null;
+        try self.control.control.recordLocalDrain();
+    }
+
+    pub fn drainWithTimeout(
+        self: *ClientSession,
+        timeout: std.Io.Duration,
+    ) ReceiveTimeoutError!void {
+        if (timeout.nanoseconds <= 0) return error.Timeout;
+        return self.drainWithDeadline(.fromNow(
+            self.h3.quic_client.endpoint.io,
+            .{ .raw = timeout, .clock = .awake },
+        ));
+    }
+
+    pub fn drainWithDeadline(
+        self: *ClientSession,
+        deadline: std.Io.Clock.Timestamp,
+    ) ReceiveTimeoutError!void {
+        _ = try deadline_policy.usableAwake(
+            self.h3.quic_client.endpoint.io,
+            deadline,
+        );
+        if (self.control.control.local_drain_sent or
+            self.control.control.local_close_failed) return;
+        if (self.pending_close != null) return error.InvalidSessionState;
+        if (self.pending_drain == null) {
+            const pending = try PendingSessionDrain.init();
+            try self.control.control.beginLocalDrain();
+            self.pending_drain = pending;
+        }
+        const pending = &self.pending_drain.?;
+        var progress: http3.runtime.DevelopmentBodyWriteProgress = .{};
+        self.h3.sendRequestBodyWithDeadline(
+            self.session_id.value,
+            pending.bytes[pending.committed..pending.len],
+            false,
+            &progress,
+            deadline,
+        ) catch |err| {
+            if (progress.send_attempted or terminalSessionBodySendError(err)) {
+                self.pending_drain = null;
+                self.control.control.recordLocalCloseFailure(0);
+            }
+            return err;
+        };
+        std.debug.assert(progress.completed);
+        self.pending_drain = null;
         try self.control.control.recordLocalDrain();
     }
 
@@ -4839,16 +7126,90 @@ pub const ClientSession = struct {
         code: u32,
         reason: []const u8,
     ) Error!void {
-        if (self.control.control.local_close_sent) return;
-        var encoded: [4 + session_control.max_close_reason + 16]u8 =
-            undefined;
-        const capsule = try session_control.writeCloseInto(
-            &encoded,
-            code,
-            reason,
+        if (self.control.control.local_close_sent or
+            self.control.control.local_close_failed) return;
+        try self.preparePendingClose(code, reason);
+        const pending = &self.pending_close.?;
+        self.h3.sendRequestBody(
+            self.session_id.value,
+            pending.bytes[pending.committed..pending.len],
+            true,
+        ) catch |err| {
+            if (terminalSessionBodySendError(err)) {
+                const failed_code = pending.code;
+                self.pending_close = null;
+                self.control.control.recordLocalCloseFailure(failed_code);
+            }
+            return err;
+        };
+        const committed_code = pending.code;
+        self.pending_close = null;
+        try self.control.control.recordLocalClose(committed_code);
+    }
+
+    pub fn closeWithTimeout(
+        self: *ClientSession,
+        code: u32,
+        reason: []const u8,
+        timeout: std.Io.Duration,
+    ) ReceiveTimeoutError!void {
+        if (timeout.nanoseconds <= 0) return error.Timeout;
+        return self.closeWithDeadline(code, reason, .fromNow(
+            self.h3.quic_client.endpoint.io,
+            .{ .raw = timeout, .clock = .awake },
+        ));
+    }
+
+    pub fn closeWithDeadline(
+        self: *ClientSession,
+        code: u32,
+        reason: []const u8,
+        deadline: std.Io.Clock.Timestamp,
+    ) ReceiveTimeoutError!void {
+        _ = try deadline_policy.usableAwake(
+            self.h3.quic_client.endpoint.io,
+            deadline,
         );
-        try self.sendSessionData(capsule, true);
-        try self.control.control.recordLocalClose(code);
+        if (self.control.control.local_close_sent or
+            self.control.control.local_close_failed) return;
+        try self.preparePendingClose(code, reason);
+        const pending = &self.pending_close.?;
+        var progress: http3.runtime.DevelopmentBodyWriteProgress = .{};
+        self.h3.sendRequestBodyWithDeadline(
+            self.session_id.value,
+            pending.bytes[pending.committed..pending.len],
+            true,
+            &progress,
+            deadline,
+        ) catch |err| {
+            if (progress.send_attempted or terminalSessionBodySendError(err)) {
+                const failed_code = pending.code;
+                self.pending_close = null;
+                self.control.control.recordLocalCloseFailure(failed_code);
+            }
+            return err;
+        };
+        std.debug.assert(progress.completed);
+        const committed_code = pending.code;
+        self.pending_close = null;
+        try self.control.control.recordLocalClose(committed_code);
+    }
+
+    fn preparePendingClose(
+        self: *ClientSession,
+        code: u32,
+        reason: []const u8,
+    ) Error!void {
+        if (self.pending_drain != null) return error.InvalidSessionState;
+        if (self.pending_close) |*pending| {
+            if (!try pending.matches(code, reason)) {
+                return error.InvalidSessionState;
+            }
+            return;
+        }
+        const pending = try PendingSessionClose.init(code, reason);
+        try self.control.control.beginLocalClose();
+        self.pending_close = pending;
     }
 
     pub fn receiveSessionEvent(self: *ClientSession) Error!SessionEvent {
@@ -4987,6 +7348,15 @@ pub const HandshakeClientSession = struct {
     dispatcher: ?*quic.endpoint_dispatcher.Dispatcher = null,
     dispatcher_handle: ?quic.endpoint_dispatcher.ConnectionHandle = null,
     close_response_pending: bool = false,
+    pending_drain: ?PendingSessionDrain = null,
+    pending_close: ?PendingSessionClose = null,
+    pending_session_event: ?SessionEvent = null,
+
+    fn ensureApplicationSendOpen(
+        self: *const HandshakeClientSession,
+    ) Error!void {
+        try self.control.ensureOpen();
+    }
 
     /// Open WebTransport on an existing authenticated HTTP/3 connection. The
     /// caller retains `h3` on failure and transfers it on success.
@@ -5757,7 +8127,7 @@ pub const HandshakeClientSession = struct {
     }
 
     pub fn sendDatagram(self: *HandshakeClientSession, payload: []const u8) Error!void {
-        try self.control.ensureOpen();
+        try self.ensureApplicationSendOpen();
         try webtransport.ensureDatagramsNegotiated(self.h3.options.local_settings, self.h3.control.settings.peer);
         const result = if (self.dispatcher != null)
             self.h3.trySendConnectDatagram(self.session_id.value, payload)
@@ -5786,7 +8156,7 @@ pub const HandshakeClientSession = struct {
         payload: []const u8,
         deadline: std.Io.Clock.Timestamp,
     ) ReceiveTimeoutError!void {
-        try self.control.ensureOpen();
+        try self.ensureApplicationSendOpen();
         try webtransport.ensureDatagramsNegotiated(
             self.h3.options.local_settings,
             self.h3.control.settings.peer,
@@ -5805,6 +8175,201 @@ pub const HandshakeClientSession = struct {
             );
         try self.refreshDispatcherTimer();
         try result;
+    }
+
+    /// Submit at most one ordered DATAGRAM socket batch. This form remains
+    /// nonblocking when the session belongs to a shared endpoint dispatcher.
+    pub fn sendDatagrams(
+        self: *HandshakeClientSession,
+        payloads: []const []const u8,
+        committed_count: *usize,
+    ) Error!void {
+        committed_count.* = 0;
+        try self.ensureApplicationSendOpen();
+        try webtransport.ensureDatagramsNegotiated(
+            self.h3.options.local_settings,
+            self.h3.control.settings.peer,
+        );
+        const result = if (self.dispatcher != null)
+            self.h3.trySendConnectDatagrams(
+                self.session_id.value,
+                payloads,
+                committed_count,
+            )
+        else
+            self.h3.sendConnectDatagrams(
+                self.session_id.value,
+                payloads,
+                committed_count,
+            );
+        try self.refreshDispatcherTimer();
+        try result;
+    }
+
+    pub fn sendDatagramsWithTimeout(
+        self: *HandshakeClientSession,
+        payloads: []const []const u8,
+        committed_count: *usize,
+        timeout: std.Io.Duration,
+    ) ReceiveTimeoutError!void {
+        committed_count.* = 0;
+        if (timeout.nanoseconds <= 0) return error.Timeout;
+        if (self.dispatcher != null) return error.InvalidDispatcherState;
+        try self.ensureApplicationSendOpen();
+        try webtransport.ensureDatagramsNegotiated(
+            self.h3.options.local_settings,
+            self.h3.control.settings.peer,
+        );
+        return self.h3.sendConnectDatagramsWithTimeout(
+            self.session_id.value,
+            payloads,
+            committed_count,
+            timeout,
+        );
+    }
+
+    pub fn sendDatagramsWithDeadline(
+        self: *HandshakeClientSession,
+        payloads: []const []const u8,
+        committed_count: *usize,
+        deadline: std.Io.Clock.Timestamp,
+    ) ReceiveTimeoutError!void {
+        committed_count.* = 0;
+        _ = try deadline_policy.usableAwake(
+            self.h3.established.connection.endpoint.io,
+            deadline,
+        );
+        if (self.dispatcher != null) return error.InvalidDispatcherState;
+        try self.ensureApplicationSendOpen();
+        try webtransport.ensureDatagramsNegotiated(
+            self.h3.options.local_settings,
+            self.h3.control.settings.peer,
+        );
+        return self.h3.sendConnectDatagramsWithDeadline(
+            self.session_id.value,
+            payloads,
+            committed_count,
+            deadline,
+        );
+    }
+
+    /// Send Capsule Protocol bytes on this Session's Extended CONNECT stream.
+    pub fn sendSessionData(
+        self: *HandshakeClientSession,
+        data: []const u8,
+        fin: bool,
+    ) Error!void {
+        try self.ensureApplicationSendOpen();
+        const result = if (self.dispatcher != null)
+            self.h3.trySendRequestBody(
+                self.session_id.value,
+                data,
+                fin,
+            )
+        else
+            self.h3.sendRequestBodyPaced(
+                self.session_id.value,
+                data,
+                fin,
+            );
+        try self.refreshDispatcherTimer();
+        return result;
+    }
+
+    pub fn sendSessionDataWithTimeout(
+        self: *HandshakeClientSession,
+        data: []const u8,
+        fin: bool,
+        progress: *http3.runtime.BodyWriteProgress,
+        timeout: std.Io.Duration,
+    ) ReceiveTimeoutError!void {
+        return self.sendSessionDataSlicesWithTimeout(
+            &.{data},
+            fin,
+            progress,
+            timeout,
+        );
+    }
+
+    pub fn sendSessionDataWithDeadline(
+        self: *HandshakeClientSession,
+        data: []const u8,
+        fin: bool,
+        progress: *http3.runtime.BodyWriteProgress,
+        deadline: std.Io.Clock.Timestamp,
+    ) ReceiveTimeoutError!void {
+        return self.sendSessionDataSlicesWithDeadline(
+            &.{data},
+            fin,
+            progress,
+            deadline,
+        );
+    }
+
+    pub fn sendSessionDataSlices(
+        self: *HandshakeClientSession,
+        parts: []const []const u8,
+        fin: bool,
+    ) Error!void {
+        try self.ensureApplicationSendOpen();
+        const result = if (self.dispatcher != null)
+            self.h3.trySendRequestBodyParts(
+                self.session_id.value,
+                parts,
+                fin,
+            )
+        else
+            self.h3.sendRequestBodyPartsPaced(
+                self.session_id.value,
+                parts,
+                fin,
+            );
+        try self.refreshDispatcherTimer();
+        return result;
+    }
+
+    /// Send borrowed Capsule Protocol slices on this Extended CONNECT stream
+    /// under one timeout. Dispatcher-bound sessions use their nonblocking
+    /// event-loop send path and therefore reject this blocking API.
+    pub fn sendSessionDataSlicesWithTimeout(
+        self: *HandshakeClientSession,
+        parts: []const []const u8,
+        fin: bool,
+        progress: *http3.runtime.BodyWriteProgress,
+        timeout: std.Io.Duration,
+    ) ReceiveTimeoutError!void {
+        progress.* = .{};
+        if (timeout.nanoseconds <= 0) return error.Timeout;
+        try self.ensureApplicationSendOpen();
+        return self.h3.sendRequestBodyPartsPacedWithTimeout(
+            self.session_id.value,
+            parts,
+            fin,
+            progress,
+            timeout,
+        );
+    }
+
+    pub fn sendSessionDataSlicesWithDeadline(
+        self: *HandshakeClientSession,
+        parts: []const []const u8,
+        fin: bool,
+        progress: *http3.runtime.BodyWriteProgress,
+        deadline: std.Io.Clock.Timestamp,
+    ) ReceiveTimeoutError!void {
+        progress.* = .{};
+        _ = try deadline_policy.usableAwake(
+            self.h3.established.connection.endpoint.io,
+            deadline,
+        );
+        try self.ensureApplicationSendOpen();
+        return self.h3.sendRequestBodyPartsPacedWithDeadline(
+            self.session_id.value,
+            parts,
+            fin,
+            progress,
+            deadline,
+        );
     }
 
     pub fn receiveDatagram(self: *HandshakeClientSession) Error!OwnedHandshakeDatagram {
@@ -6065,7 +8630,7 @@ pub const HandshakeClientSession = struct {
                 absolute,
             );
         }
-        try self.control.ensureOpen();
+        try self.ensureApplicationSendOpen();
         try webtransport.ensureNegotiated(
             self.h3.options.local_settings,
             self.h3.control.settings.peer,
@@ -6096,7 +8661,7 @@ pub const HandshakeClientSession = struct {
         self: *HandshakeClientSession,
         direction: webtransport.StreamDirection,
     ) Error!u62 {
-        try self.control.ensureOpen();
+        try self.ensureApplicationSendOpen();
         try webtransport.ensureNegotiated(
             self.h3.options.local_settings,
             self.h3.control.settings.peer,
@@ -6128,7 +8693,7 @@ pub const HandshakeClientSession = struct {
         payload: []const u8,
         fin: bool,
     ) Error!void {
-        try self.control.ensureOpen();
+        try self.ensureApplicationSendOpen();
         if (self.dispatcher != null) {
             const result = handshake_stream.sendOnce(
                 &self.h3.established.connection,
@@ -6152,12 +8717,139 @@ pub const HandshakeClientSession = struct {
         }
     }
 
+    pub fn sendStreamWithTimeout(
+        self: *HandshakeClientSession,
+        stream_id: u62,
+        payload: []const u8,
+        fin: bool,
+        committed: *usize,
+        timeout: std.Io.Duration,
+    ) ReceiveTimeoutError!void {
+        committed.* = 0;
+        if (timeout.nanoseconds <= 0) return error.Timeout;
+        return self.sendStreamWithDeadline(
+            stream_id,
+            payload,
+            fin,
+            committed,
+            .fromNow(self.h3.established.connection.endpoint.io, .{
+                .raw = timeout,
+                .clock = .awake,
+            }),
+        );
+    }
+
+    pub fn sendStreamWithDeadline(
+        self: *HandshakeClientSession,
+        stream_id: u62,
+        payload: []const u8,
+        fin: bool,
+        committed: *usize,
+        deadline: std.Io.Clock.Timestamp,
+    ) ReceiveTimeoutError!void {
+        committed.* = 0;
+        _ = try deadline_policy.usableAwake(
+            self.h3.established.connection.endpoint.io,
+            deadline,
+        );
+        if (self.dispatcher != null) return error.InvalidDispatcherState;
+        try self.ensureApplicationSendOpen();
+        return handshake_stream.sendWithDeadline(
+            &self.h3.established.connection,
+            &self.streams,
+            self.session_id,
+            stream_id,
+            payload,
+            fin,
+            committed,
+            deadline,
+        );
+    }
+
+    pub fn sendStreamSlices(
+        self: *HandshakeClientSession,
+        stream_id: u62,
+        parts: []const []const u8,
+        fin: bool,
+    ) Error!void {
+        try self.ensureApplicationSendOpen();
+        if (self.dispatcher != null) {
+            const result = handshake_stream.sendSlicesOnce(
+                &self.h3.established.connection,
+                &self.streams,
+                self.session_id,
+                stream_id,
+                parts,
+                fin,
+            );
+            try self.refreshDispatcherTimer();
+            return result;
+        }
+        return handshake_stream.sendSlices(
+            &self.h3.established.connection,
+            &self.streams,
+            self.session_id,
+            stream_id,
+            parts,
+            fin,
+        );
+    }
+
+    pub fn sendStreamSlicesWithTimeout(
+        self: *HandshakeClientSession,
+        stream_id: u62,
+        parts: []const []const u8,
+        fin: bool,
+        committed: *usize,
+        timeout: std.Io.Duration,
+    ) ReceiveTimeoutError!void {
+        committed.* = 0;
+        if (timeout.nanoseconds <= 0) return error.Timeout;
+        return self.sendStreamSlicesWithDeadline(
+            stream_id,
+            parts,
+            fin,
+            committed,
+            .fromNow(self.h3.established.connection.endpoint.io, .{
+                .raw = timeout,
+                .clock = .awake,
+            }),
+        );
+    }
+
+    pub fn sendStreamSlicesWithDeadline(
+        self: *HandshakeClientSession,
+        stream_id: u62,
+        parts: []const []const u8,
+        fin: bool,
+        committed: *usize,
+        deadline: std.Io.Clock.Timestamp,
+    ) ReceiveTimeoutError!void {
+        committed.* = 0;
+        _ = try deadline_policy.usableAwake(
+            self.h3.established.connection.endpoint.io,
+            deadline,
+        );
+        if (self.dispatcher != null) return error.InvalidDispatcherState;
+        try self.ensureApplicationSendOpen();
+        return handshake_stream.sendSlicesWithDeadline(
+            &self.h3.established.connection,
+            &self.streams,
+            self.session_id,
+            stream_id,
+            parts,
+            fin,
+            committed,
+            deadline,
+        );
+    }
+
     pub fn writeStream(
         self: *HandshakeClientSession,
         stream_id: u62,
         payload: []const u8,
     ) Error!usize {
-        try self.control.ensureOpen();
+        try self.ensureApplicationSendOpen();
         if (self.dispatcher != null) {
             const result = handshake_stream.writeOnce(
                 &self.h3.established.connection,
@@ -6178,12 +8870,116 @@ pub const HandshakeClientSession = struct {
         );
     }
 
+    pub fn writeStreamWithTimeout(
+        self: *HandshakeClientSession,
+        stream_id: u62,
+        payload: []const u8,
+        timeout: std.Io.Duration,
+    ) ReceiveTimeoutError!usize {
+        if (timeout.nanoseconds <= 0) return error.Timeout;
+        return self.writeStreamWithDeadline(
+            stream_id,
+            payload,
+            .fromNow(self.h3.established.connection.endpoint.io, .{
+                .raw = timeout,
+                .clock = .awake,
+            }),
+        );
+    }
+
+    pub fn writeStreamWithDeadline(
+        self: *HandshakeClientSession,
+        stream_id: u62,
+        payload: []const u8,
+        deadline: std.Io.Clock.Timestamp,
+    ) ReceiveTimeoutError!usize {
+        _ = try deadline_policy.usableAwake(
+            self.h3.established.connection.endpoint.io,
+            deadline,
+        );
+        if (self.dispatcher != null) return error.InvalidDispatcherState;
+        try self.ensureApplicationSendOpen();
+        return handshake_stream.writeWithDeadline(
+            &self.h3.established.connection,
+            &self.streams,
+            self.session_id,
+            stream_id,
+            payload,
+            deadline,
+        );
+    }
+
+    pub fn writeStreamSlices(
+        self: *HandshakeClientSession,
+        stream_id: u62,
+        parts: []const []const u8,
+    ) Error!usize {
+        try self.ensureApplicationSendOpen();
+        if (self.dispatcher != null) {
+            const result = handshake_stream.writeSlicesOnce(
+                &self.h3.established.connection,
+                &self.streams,
+                self.session_id,
+                stream_id,
+                parts,
+            );
+            try self.refreshDispatcherTimer();
+            return result;
+        }
+        return handshake_stream.writeSlices(
+            &self.h3.established.connection,
+            &self.streams,
+            self.session_id,
+            stream_id,
+            parts,
+        );
+    }
+
+    pub fn writeStreamSlicesWithTimeout(
+        self: *HandshakeClientSession,
+        stream_id: u62,
+        parts: []const []const u8,
+        timeout: std.Io.Duration,
+    ) ReceiveTimeoutError!usize {
+        if (timeout.nanoseconds <= 0) return error.Timeout;
+        return self.writeStreamSlicesWithDeadline(
+            stream_id,
+            parts,
+            .fromNow(self.h3.established.connection.endpoint.io, .{
+                .raw = timeout,
+                .clock = .awake,
+            }),
+        );
+    }
+
+    pub fn writeStreamSlicesWithDeadline(
+        self: *HandshakeClientSession,
+        stream_id: u62,
+        parts: []const []const u8,
+        deadline: std.Io.Clock.Timestamp,
+    ) ReceiveTimeoutError!usize {
+        _ = try deadline_policy.usableAwake(
+            self.h3.established.connection.endpoint.io,
+            deadline,
+        );
+        if (self.dispatcher != null) return error.InvalidDispatcherState;
+        try self.ensureApplicationSendOpen();
+        return handshake_stream.writeSlicesWithDeadline(
+            &self.h3.established.connection,
+            &self.streams,
+            self.session_id,
+            stream_id,
+            parts,
+            deadline,
+        );
+    }
+
     pub fn setStreamPriority(
         self: *HandshakeClientSession,
         stream_id: u62,
         priority: i32,
     ) Error!void {
-        try self.control.ensureOpen();
+        try self.ensureApplicationSendOpen();
         try self.streams.setPriority(stream_id, priority);
     }
 
@@ -6201,7 +8997,7 @@ pub const HandshakeClientSession = struct {
         writes: []const StreamWrite,
         counts: []usize,
     ) Error!StreamWriteResult {
-        try self.control.ensureOpen();
+        try self.ensureApplicationSendOpen();
         if (self.dispatcher != null) {
             const result = stream_batch.writeOnce(
                 &self.h3.established.connection,
@@ -6222,12 +9018,55 @@ pub const HandshakeClientSession = struct {
         );
     }
 
+    pub fn writeStreamsWithTimeout(
+        self: *HandshakeClientSession,
+        writes: []const StreamWrite,
+        counts: []usize,
+        timeout: std.Io.Duration,
+    ) ReceiveTimeoutError!StreamWriteResult {
+        if (counts.len < writes.len) return error.BufferTooShort;
+        @memset(counts[0..writes.len], 0);
+        if (timeout.nanoseconds <= 0) return error.Timeout;
+        return self.writeStreamsWithDeadline(
+            writes,
+            counts,
+            .fromNow(self.h3.established.connection.endpoint.io, .{
+                .raw = timeout,
+                .clock = .awake,
+            }),
+        );
+    }
+
+    pub fn writeStreamsWithDeadline(
+        self: *HandshakeClientSession,
+        writes: []const StreamWrite,
+        counts: []usize,
+        deadline: std.Io.Clock.Timestamp,
+    ) ReceiveTimeoutError!StreamWriteResult {
+        if (counts.len < writes.len) return error.BufferTooShort;
+        @memset(counts[0..writes.len], 0);
+        _ = try deadline_policy.usableAwake(
+            self.h3.established.connection.endpoint.io,
+            deadline,
+        );
+        if (self.dispatcher != null) return error.InvalidDispatcherState;
+        try self.ensureApplicationSendOpen();
+        return stream_batch.writeWithDeadline(
+            &self.h3.established.connection,
+            &self.streams,
+            self.session_id,
+            writes,
+            counts,
+            deadline,
+        );
+    }
+
     pub fn finishStream(
         self: *HandshakeClientSession,
         stream_id: u62,
     ) Error!void {
         // Completion means the FIN packet was submitted, not yet acknowledged.
-        try self.control.ensureOpen();
+        try self.ensureApplicationSendOpen();
         if (self.dispatcher != null) {
             const result = handshake_stream.finishOnce(
                 &self.h3.established.connection,
@@ -6244,6 +9083,41 @@ pub const HandshakeClientSession = struct {
             &self.streams,
             self.session_id,
             stream_id,
+        );
+    }
+
+    pub fn finishStreamWithTimeout(
+        self: *HandshakeClientSession,
+        stream_id: u62,
+        timeout: std.Io.Duration,
+    ) ReceiveTimeoutError!void {
+        if (timeout.nanoseconds <= 0) return error.Timeout;
+        return self.finishStreamWithDeadline(
+            stream_id,
+            .fromNow(self.h3.established.connection.endpoint.io, .{
+                .raw = timeout,
+                .clock = .awake,
+            }),
+        );
+    }
+
+    pub fn finishStreamWithDeadline(
+        self: *HandshakeClientSession,
+        stream_id: u62,
+        deadline: std.Io.Clock.Timestamp,
+    ) ReceiveTimeoutError!void {
+        _ = try deadline_policy.usableAwake(
+            self.h3.established.connection.endpoint.io,
+            deadline,
+        );
+        if (self.dispatcher != null) return error.InvalidDispatcherState;
+        try self.control.ensureOpen();
+        return handshake_stream.finishWithDeadline(
+            &self.h3.established.connection,
+            &self.streams,
+            self.session_id,
+            stream_id,
+            deadline,
         );
     }
 
@@ -6343,7 +9217,9 @@ pub const HandshakeClientSession = struct {
         try self.refreshDispatcherTimer();
         try result;
         if (self.dispatcher != null and
-            (self.control.local_close_sent or self.control.terminal_reported))
+            (self.control.local_close_sent or
+                self.control.local_close_failed or
+                self.control.terminal_reported))
         {
             const cleanup = self.advanceTerminalCleanupOnce();
             try self.refreshDispatcherTimer();
@@ -6430,6 +9306,62 @@ pub const HandshakeClientSession = struct {
         );
     }
 
+    /// Read only `stream_id`, leaving ready sibling streams untouched.
+    pub fn readStreamId(
+        self: *HandshakeClientSession,
+        stream_id: u62,
+        out: []u8,
+    ) Error!StreamRead {
+        if (self.dispatcher != null) return error.InvalidDispatcherState;
+        return incremental_stream.readId(
+            &self.h3.established.connection,
+            &self.streams,
+            self.session_id,
+            stream_id,
+            out,
+        );
+    }
+
+    pub fn readStreamIdWithTimeout(
+        self: *HandshakeClientSession,
+        stream_id: u62,
+        out: []u8,
+        timeout: std.Io.Duration,
+    ) ReceiveTimeoutError!StreamRead {
+        if (timeout.nanoseconds <= 0) return error.Timeout;
+        return self.readStreamIdWithDeadline(
+            stream_id,
+            out,
+            .fromNow(self.h3.established.connection.endpoint.io, .{
+                .raw = timeout,
+                .clock = .awake,
+            }),
+        );
+    }
+
+    pub fn readStreamIdWithDeadline(
+        self: *HandshakeClientSession,
+        stream_id: u62,
+        out: []u8,
+        deadline: std.Io.Clock.Timestamp,
+    ) ReceiveTimeoutError!StreamRead {
+        if (self.dispatcher != null) return error.InvalidDispatcherState;
+        return incremental_stream.readIdWithDeadline(
+            &self.h3.established.connection,
+            &self.streams,
+            self.session_id,
+            stream_id,
+            out,
+            deadline,
+        );
+    }
+
+    /// Flush a delayed transport ACK before a one-shot session is torn down.
+    pub fn flushPendingAck(self: *HandshakeClientSession) Error!bool {
+        if (self.dispatcher != null) return error.InvalidDispatcherState;
+        return self.h3.established.connection.flushPendingAck();
+    }
+
     /// Drive one timer-aware QUIC receive without consuming WebTransport data.
     ///
     /// Event loops waiting on a peer-side terminal condition still need to
@@ -6448,6 +9380,7 @@ pub const HandshakeClientSession = struct {
         stream_id: u62,
         application_error_code: u32,
     ) Error!void {
+        try self.control.ensureOpen();
         const result = if (self.dispatcher != null)
             incremental_stream.resetOnce(
                 &self.h3.established.connection,
@@ -6466,11 +9399,50 @@ pub const HandshakeClientSession = struct {
         try result;
     }
 
+    pub fn resetStreamWithTimeout(
+        self: *HandshakeClientSession,
+        stream_id: u62,
+        application_error_code: u32,
+        timeout: std.Io.Duration,
+    ) ReceiveTimeoutError!void {
+        if (timeout.nanoseconds <= 0) return error.Timeout;
+        return self.resetStreamWithDeadline(
+            stream_id,
+            application_error_code,
+            .fromNow(self.h3.established.connection.endpoint.io, .{
+                .raw = timeout,
+                .clock = .awake,
+            }),
+        );
+    }
+
+    pub fn resetStreamWithDeadline(
+        self: *HandshakeClientSession,
+        stream_id: u62,
+        application_error_code: u32,
+        deadline: std.Io.Clock.Timestamp,
+    ) ReceiveTimeoutError!void {
+        _ = try deadline_policy.usableAwake(
+            self.h3.established.connection.endpoint.io,
+            deadline,
+        );
+        if (self.dispatcher != null) return error.InvalidDispatcherState;
+        try self.control.ensureOpen();
+        return incremental_stream.resetWithDeadline(
+            &self.h3.established.connection,
+            &self.streams,
+            stream_id,
+            application_error_code,
+            deadline,
+        );
+    }
+
     pub fn stopStream(
         self: *HandshakeClientSession,
         stream_id: u62,
         application_error_code: u32,
     ) Error!void {
+        try self.control.ensureOpen();
         const result = if (self.dispatcher != null)
             incremental_stream.stopOnce(
                 &self.h3.established.connection,
@@ -6489,24 +9461,120 @@ pub const HandshakeClientSession = struct {
         try result;
     }
 
+    pub fn stopStreamWithTimeout(
+        self: *HandshakeClientSession,
+        stream_id: u62,
+        application_error_code: u32,
+        timeout: std.Io.Duration,
+    ) ReceiveTimeoutError!void {
+        if (timeout.nanoseconds <= 0) return error.Timeout;
+        return self.stopStreamWithDeadline(
+            stream_id,
+            application_error_code,
+            .fromNow(self.h3.established.connection.endpoint.io, .{
+                .raw = timeout,
+                .clock = .awake,
+            }),
+        );
+    }
+
+    pub fn stopStreamWithDeadline(
+        self: *HandshakeClientSession,
+        stream_id: u62,
+        application_error_code: u32,
+        deadline: std.Io.Clock.Timestamp,
+    ) ReceiveTimeoutError!void {
+        _ = try deadline_policy.usableAwake(
+            self.h3.established.connection.endpoint.io,
+            deadline,
+        );
+        if (self.dispatcher != null) return error.InvalidDispatcherState;
+        try self.control.ensureOpen();
+        return incremental_stream.stopWithDeadline(
+            &self.h3.established.connection,
+            &self.streams,
+            stream_id,
+            application_error_code,
+            deadline,
+        );
+    }
+
     pub fn drain(self: *HandshakeClientSession) Error!void {
         if (self.control.local_drain_sent) return;
-        var encoded: [16]u8 = undefined;
-        const capsule = try session_control.writeDrainInto(&encoded);
-        const result = if (self.dispatcher != null)
-            self.h3.trySendRequestBody(
-                self.session_id.value,
-                capsule,
-                false,
-            )
-        else
-            self.h3.sendRequestBodyPaced(
+        if (self.dispatcher != null) {
+            try self.ensureApplicationSendOpen();
+            var encoded: [16]u8 = undefined;
+            const capsule = try session_control.writeDrainInto(&encoded);
+            const result = self.h3.trySendRequestBody(
                 self.session_id.value,
                 capsule,
                 false,
             );
-        try self.refreshDispatcherTimer();
-        try result;
+            try self.refreshDispatcherTimer();
+            try result;
+            try self.control.recordLocalDrain();
+            return;
+        }
+        if (self.pending_drain == null) {
+            const pending = try PendingSessionDrain.init();
+            try self.control.beginLocalDrain();
+            self.pending_drain = pending;
+        }
+        const pending = &self.pending_drain.?;
+        try self.h3.sendRequestBodyPaced(
+            self.session_id.value,
+            pending.bytes[pending.committed..pending.len],
+            false,
+        );
+        self.pending_drain = null;
+        try self.control.recordLocalDrain();
+    }
+
+    pub fn drainWithTimeout(
+        self: *HandshakeClientSession,
+        timeout: std.Io.Duration,
+    ) ReceiveTimeoutError!void {
+        if (timeout.nanoseconds <= 0) return error.Timeout;
+        return self.drainWithDeadline(.fromNow(
+            self.h3.established.connection.endpoint.io,
+            .{ .raw = timeout, .clock = .awake },
+        ));
+    }
+
+    pub fn drainWithDeadline(
+        self: *HandshakeClientSession,
+        deadline: std.Io.Clock.Timestamp,
+    ) ReceiveTimeoutError!void {
+        _ = try deadline_policy.usableAwake(
+            self.h3.established.connection.endpoint.io,
+            deadline,
+        );
+        if (self.dispatcher != null) return error.InvalidDispatcherState;
+        if (self.control.local_drain_sent) return;
+        if (self.pending_drain == null) {
+            const pending = try PendingSessionDrain.init();
+            try self.control.beginLocalDrain();
+            self.pending_drain = pending;
+        }
+        const pending = &self.pending_drain.?;
+        var progress: http3.runtime.BodyWriteProgress = .{};
+        self.h3.sendRequestBodyPacedWithDeadline(
+            self.session_id.value,
+            pending.bytes[pending.committed..pending.len],
+            false,
+            &progress,
+            deadline,
+        ) catch |err| {
+            pending.committed += progress.committed_bytes;
+            if (pending.committed == pending.len) {
+                self.pending_drain = null;
+                try self.control.recordLocalDrain();
+            }
+            return err;
+        };
+        pending.committed += progress.committed_bytes;
+        std.debug.assert(pending.committed == pending.len);
+        self.pending_drain = null;
         try self.control.recordLocalDrain();
     }
 
@@ -6515,7 +9583,9 @@ pub const HandshakeClientSession = struct {
         code: u32,
         reason: []const u8,
     ) Error!void {
-        if (self.control.local_close_sent) {
+        if (self.control.local_close_sent or
+            self.control.local_close_failed)
+        {
             if (self.dispatcher != null) {
                 const cleanup = self.advanceTerminalCleanupOnce();
                 try self.refreshDispatcherTimer();
@@ -6526,40 +9596,31 @@ pub const HandshakeClientSession = struct {
                     => return,
                     else => return err,
                 };
+                return;
             }
-            return;
-        }
-        var encoded: [4 + session_control.max_close_reason + 16]u8 =
-            undefined;
-        const capsule = try session_control.writeCloseInto(
-            &encoded,
-            code,
-            reason,
-        );
-        const result = if (self.dispatcher != null)
-            self.h3.trySendRequestBody(
-                self.session_id.value,
-                capsule,
-                true,
-            )
-        else
-            self.h3.sendRequestBodyPaced(
-                self.session_id.value,
-                capsule,
-                true,
-            );
-        try self.refreshDispatcherTimer();
-        try result;
-        // A local FIN does not close the peer-to-client direction. Retain the
-        // association so receiveSessionEvent can process the peer's terminal
-        // capsule/FIN; finishPolledSessionEvent performs final retirement.
-        try self.control.recordLocalClose(code);
-        if (self.dispatcher == null) {
-            try session_control.terminateStreams(
+            return session_control.terminateStreams(
                 &self.h3.established.connection,
                 &self.streams,
             );
-        } else {
+        }
+        if (self.pending_drain != null) return error.InvalidSessionState;
+        if (self.pending_close != null) return error.InvalidSessionState;
+        if (self.dispatcher != null) {
+            var encoded: [4 + session_control.max_close_reason + 16]u8 =
+                undefined;
+            const capsule = try session_control.writeCloseInto(
+                &encoded,
+                code,
+                reason,
+            );
+            const result = self.h3.trySendRequestBody(
+                self.session_id.value,
+                capsule,
+                true,
+            );
+            try self.refreshDispatcherTimer();
+            try result;
+            try self.control.recordLocalClose(code);
             const cleanup = self.advanceTerminalCleanupOnce();
             try self.refreshDispatcherTimer();
             _ = cleanup catch |err| switch (err) {
@@ -6569,7 +9630,122 @@ pub const HandshakeClientSession = struct {
                 => return,
                 else => return err,
             };
+            return;
         }
+        var encoded: [4 + session_control.max_close_reason + 16]u8 =
+            undefined;
+        const capsule = try session_control.writeCloseInto(
+            &encoded,
+            code,
+            reason,
+        );
+        self.h3.sendRequestBodyPaced(
+            self.session_id.value,
+            capsule,
+            true,
+        ) catch |err| {
+            if (terminalSessionBodySendError(err)) {
+                self.control.recordLocalCloseFailure(code);
+            }
+            return err;
+        };
+        // A local FIN does not close the peer-to-client direction. Retain the
+        // association so receiveSessionEvent can process the peer's terminal
+        // capsule/FIN; finishPolledSessionEvent performs final retirement.
+        try self.control.recordLocalClose(code);
+        try session_control.terminateStreams(
+            &self.h3.established.connection,
+            &self.streams,
+        );
+    }
+
+    pub fn closeWithTimeout(
+        self: *HandshakeClientSession,
+        code: u32,
+        reason: []const u8,
+        timeout: std.Io.Duration,
+    ) ReceiveTimeoutError!void {
+        if (timeout.nanoseconds <= 0) return error.Timeout;
+        return self.closeWithDeadline(code, reason, .fromNow(
+            self.h3.established.connection.endpoint.io,
+            .{ .raw = timeout, .clock = .awake },
+        ));
+    }
+
+    /// Send the CLOSE_WEBTRANSPORT_SESSION capsule, CONNECT FIN, and all
+    /// associated SESSION_GONE terminal frames under one absolute deadline.
+    /// Dispatcher-bound sessions retain their event-loop one-shot close path.
+    pub fn closeWithDeadline(
+        self: *HandshakeClientSession,
+        code: u32,
+        reason: []const u8,
+        deadline: std.Io.Clock.Timestamp,
+    ) ReceiveTimeoutError!void {
+        _ = try deadline_policy.usableAwake(
+            self.h3.established.connection.endpoint.io,
+            deadline,
+        );
+        if (self.dispatcher != null) return error.InvalidDispatcherState;
+        if (self.control.local_close_failed) {
+            return session_control.terminateStreamsWithDeadline(
+                &self.h3.established.connection,
+                &self.streams,
+                deadline,
+            );
+        }
+        if (!self.control.local_close_sent) {
+            try self.preparePendingClose(code, reason);
+            const pending = &self.pending_close.?;
+            var progress: http3.runtime.BodyWriteProgress = .{};
+            self.h3.sendRequestBodyPacedWithDeadline(
+                self.session_id.value,
+                pending.bytes[pending.committed..pending.len],
+                true,
+                &progress,
+                deadline,
+            ) catch |err| {
+                pending.committed += progress.committed_bytes;
+                if (progress.fin_committed) {
+                    const committed_code = pending.code;
+                    self.pending_close = null;
+                    try self.control.recordLocalClose(committed_code);
+                } else if (terminalSessionBodySendError(err)) {
+                    const failed_code = pending.code;
+                    self.pending_close = null;
+                    self.control.recordLocalCloseFailure(failed_code);
+                }
+                return err;
+            };
+            pending.committed += progress.committed_bytes;
+            std.debug.assert(
+                pending.committed == pending.len and progress.fin_committed,
+            );
+            const committed_code = pending.code;
+            self.pending_close = null;
+            try self.control.recordLocalClose(committed_code);
+        }
+        try session_control.terminateStreamsWithDeadline(
+            &self.h3.established.connection,
+            &self.streams,
+            deadline,
+        );
+    }
+
+    fn preparePendingClose(
+        self: *HandshakeClientSession,
+        code: u32,
+        reason: []const u8,
+    ) Error!void {
+        if (self.pending_drain != null) return error.InvalidSessionState;
+        if (self.pending_close) |*pending| {
+            if (!try pending.matches(code, reason)) {
+                return error.InvalidSessionState;
+            }
+            return;
+        }
+        const pending = try PendingSessionClose.init(code, reason);
+        try self.control.beginLocalClose();
+        self.pending_close = pending;
     }
 
     pub fn receiveSessionEvent(
@@ -6589,19 +9765,23 @@ pub const HandshakeClientSession = struct {
         self: *HandshakeClientSession,
     ) Error!?SessionEvent {
         if (self.dispatcher == null) {
-            const event = self.control.poll(
-                &self.h3.established.connection,
-            ) catch |err| switch (err) {
-                error.InvalidCapsule => {
-                    try self.h3.established.connection.resetStream(
-                        self.session_id.value,
-                        http3.ApplicationErrorCode.message_error,
-                    );
-                    return err;
-                },
-                else => return err,
-            };
-            if (event) |value| try self.finishPolledSessionEvent(value);
+            if (self.pending_session_event == null) {
+                self.pending_session_event = self.control.poll(
+                    &self.h3.established.connection,
+                ) catch |err| switch (err) {
+                    error.InvalidCapsule => {
+                        try self.h3.established.connection.resetStream(
+                            self.session_id.value,
+                            http3.ApplicationErrorCode.message_error,
+                        );
+                        return err;
+                    },
+                    else => return err,
+                };
+            }
+            const event = self.pending_session_event orelse return null;
+            try self.finishPolledSessionEvent(event);
+            self.pending_session_event = null;
             return event;
         }
 
@@ -6621,10 +9801,7 @@ pub const HandshakeClientSession = struct {
             self.h3.established.connection.endpoint.io,
             .{ .raw = timeout, .clock = .awake },
         );
-        return while (true) {
-            if (try self.pollSessionEvent()) |ready| break ready;
-            try self.receiveControlProgressWithDeadline(deadline);
-        };
+        return self.receiveSessionEventWithDeadline(deadline);
     }
 
     pub fn receiveSessionEventWithDeadline(
@@ -6633,9 +9810,41 @@ pub const HandshakeClientSession = struct {
     ) ReceiveTimeoutError!SessionEvent {
         if (self.dispatcher != null) return error.InvalidDispatcherState;
         return while (true) {
-            if (try self.pollSessionEvent()) |ready| break ready;
+            if (try self.pollSessionEventWithCleanupDeadline(deadline)) |ready| {
+                break ready;
+            }
             try self.receiveControlProgressWithDeadline(deadline);
         };
+    }
+
+    fn pollSessionEventWithCleanupDeadline(
+        self: *HandshakeClientSession,
+        deadline: std.Io.Clock.Timestamp,
+    ) ReceiveTimeoutError!?SessionEvent {
+        _ = try deadline_policy.usableAwake(
+            self.h3.established.connection.endpoint.io,
+            deadline,
+        );
+        if (self.pending_session_event == null) {
+            self.pending_session_event = self.control.pollOnce(
+                &self.h3.established.connection,
+            ) catch |err| switch (err) {
+                error.InvalidCapsule => {
+                    try self.h3.established.connection
+                        .resetStreamWithDeadline(
+                        self.session_id.value,
+                        http3.ApplicationErrorCode.message_error,
+                        deadline,
+                    );
+                    return err;
+                },
+                else => return err,
+            };
+        }
+        const event = self.pending_session_event orelse return null;
+        try self.finishPolledSessionEventWithDeadline(event, deadline);
+        self.pending_session_event = null;
+        return event;
     }
 
     fn finishPolledSessionEvent(
@@ -6643,13 +9852,29 @@ pub const HandshakeClientSession = struct {
         event: SessionEvent,
     ) Error!void {
         if (event == .closed or event == .reset) {
-            if (event == .closed and !self.control.local_close_sent) {
-                try self.h3.sendRequestBodyPaced(
-                    self.session_id.value,
-                    &.{},
-                    true,
-                );
-                self.control.local_close_sent = true;
+            if (event == .closed and
+                !self.control.local_close_sent and
+                !self.control.local_close_failed)
+            {
+                // Preserve a partially sent local CLOSE until its explicit
+                // continuation; an empty FIN here would truncate its capsule.
+                if (self.pending_close == null) {
+                    self.h3.sendRequestBodyPaced(
+                        self.session_id.value,
+                        &.{},
+                        true,
+                    ) catch |err| {
+                        const stream_stats = self.h3.established.connection
+                            .sendStreamStats(self.session_id.value);
+                        if (stream_stats != null and
+                            stream_stats.?.final_size != null)
+                        {
+                            self.control.local_close_sent = true;
+                        }
+                        return err;
+                    };
+                    self.control.local_close_sent = true;
+                }
             }
             // Keep the terminal association until deinit so late packets are
             // classified and dropped without reviving application state.
@@ -6658,6 +9883,39 @@ pub const HandshakeClientSession = struct {
                 &self.streams,
             );
         }
+    }
+
+    fn finishPolledSessionEventWithDeadline(
+        self: *HandshakeClientSession,
+        event: SessionEvent,
+        deadline: std.Io.Clock.Timestamp,
+    ) ReceiveTimeoutError!void {
+        if (event != .closed and event != .reset) return;
+        if (event == .closed and !self.control.local_close_sent and
+            !self.control.local_close_failed and
+            self.pending_close == null)
+        {
+            var progress: http3.runtime.BodyWriteProgress = .{};
+            self.h3.sendRequestBodyPacedWithDeadline(
+                self.session_id.value,
+                &.{},
+                true,
+                &progress,
+                deadline,
+            ) catch |err| {
+                if (progress.fin_committed) {
+                    self.control.local_close_sent = true;
+                }
+                return err;
+            };
+            std.debug.assert(progress.fin_committed);
+            self.control.local_close_sent = true;
+        }
+        try session_control.terminateStreamsWithDeadline(
+            &self.h3.established.connection,
+            &self.streams,
+            deadline,
+        );
     }
 
     fn pollSessionEventOnce(
@@ -6721,6 +9979,7 @@ pub const HandshakeClientSession = struct {
             return .submitted;
         }
         if (!self.control.local_close_sent and
+            !self.control.local_close_failed and
             !self.control.terminal_reported)
         {
             return .complete;
@@ -7167,6 +10426,10 @@ pub const ProtectedClientSession = struct {
     /// Owns the final CONNECT response, including custom admission headers.
     response: http3.DecodedResponseHead,
     control: protected_control.Reader,
+    pending_drain: ?PendingSessionDrain = null,
+    pending_close: ?PendingSessionClose = null,
+    pending_session_event: ?SessionEvent = null,
+    datagram_batch_scratch: datagram_send.ProtectedBatchScratch = .{},
 
     pub fn connect(
         allocator: std.mem.Allocator,
@@ -7351,6 +10614,9 @@ pub const ProtectedClientSession = struct {
     }
 
     pub fn deinit(self: *ProtectedClientSession) void {
+        self.datagram_batch_scratch.deinit(
+            self.h3.quic_client.endpoint.allocator,
+        );
         self.response.deinit(self.h3.quic_client.endpoint.allocator);
         self.h3.deinit();
         self.* = undefined;
@@ -7375,6 +10641,132 @@ pub const ProtectedClientSession = struct {
             self.session_id,
             payload,
         );
+    }
+
+    pub fn sendDatagramWithTimeout(
+        self: *ProtectedClientSession,
+        payload: []const u8,
+        timeout: std.Io.Duration,
+    ) ReceiveTimeoutError!void {
+        if (timeout.nanoseconds <= 0) return error.Timeout;
+        return self.sendDatagramWithDeadline(payload, .fromNow(
+            self.h3.quic_client.endpoint.io,
+            .{ .raw = timeout, .clock = .awake },
+        ));
+    }
+
+    pub fn sendDatagramWithDeadline(
+        self: *ProtectedClientSession,
+        payload: []const u8,
+        deadline: std.Io.Clock.Timestamp,
+    ) ReceiveTimeoutError!void {
+        _ = try deadline_policy.usableAwake(
+            self.h3.quic_client.endpoint.io,
+            deadline,
+        );
+        try self.control.control.ensureOpen();
+        try webtransport.ensureDatagramsNegotiated(
+            self.h3.config.local_settings,
+            self.h3.control.settings.peer,
+        );
+        try sendProtectedDatagramFromEndpointWithDeadline(
+            &self.h3.quic_client.endpoint,
+            self.h3.quic_client.peer,
+            self.h3.config.send_keys,
+            self.h3.config.peer_connection_id,
+            &self.h3.next_packet_number,
+            self.session_id,
+            payload,
+            deadline,
+        );
+    }
+
+    pub fn sendDatagrams(
+        self: *ProtectedClientSession,
+        payloads: []const []const u8,
+        committed_count: *usize,
+    ) Error!void {
+        committed_count.* = 0;
+        try self.control.control.ensureOpen();
+        try webtransport.ensureDatagramsNegotiated(
+            self.h3.config.local_settings,
+            self.h3.control.settings.peer,
+        );
+        return datagram_send.protectedBatch(
+            &self.h3.quic_client.endpoint,
+            self.h3.quic_client.peer,
+            self.h3.config.send_keys,
+            self.h3.config.peer_connection_id,
+            &self.h3.next_packet_number,
+            self.session_id,
+            payloads,
+            committed_count,
+            &self.datagram_batch_scratch,
+        );
+    }
+
+    pub fn sendDatagramsWithTimeout(
+        self: *ProtectedClientSession,
+        payloads: []const []const u8,
+        committed_count: *usize,
+        timeout: std.Io.Duration,
+    ) ReceiveTimeoutError!void {
+        committed_count.* = 0;
+        if (timeout.nanoseconds <= 0) return error.Timeout;
+        return self.sendDatagramsWithDeadline(
+            payloads,
+            committed_count,
+            .fromNow(self.h3.quic_client.endpoint.io, .{
+                .raw = timeout,
+                .clock = .awake,
+            }),
+        );
+    }
+
+    pub fn sendDatagramsWithDeadline(
+        self: *ProtectedClientSession,
+        payloads: []const []const u8,
+        committed_count: *usize,
+        deadline: std.Io.Clock.Timestamp,
+    ) ReceiveTimeoutError!void {
+        committed_count.* = 0;
+        _ = try deadline_policy.usableAwake(
+            self.h3.quic_client.endpoint.io,
+            deadline,
+        );
+        try self.control.control.ensureOpen();
+        try webtransport.ensureDatagramsNegotiated(
+            self.h3.config.local_settings,
+            self.h3.control.settings.peer,
+        );
+        return datagram_send.protectedBatchWithDeadline(
+            &self.h3.quic_client.endpoint,
+            self.h3.quic_client.peer,
+            self.h3.config.send_keys,
+            self.h3.config.peer_connection_id,
+            &self.h3.next_packet_number,
+            self.session_id,
+            payloads,
+            committed_count,
+            &self.datagram_batch_scratch,
+            deadline,
+        );
+    }
+
+    pub fn maxDatagramPayloadSize(
+        self: ProtectedClientSession,
+    ) ?usize {
+        if (!self.datagramsNegotiated()) return null;
+        return datagram_send.protectedPayloadLimit(
+            self.h3.quic_client.endpoint.limits.max_datagram_size,
+            self.h3.config.peer_connection_id.len,
+            self.h3.next_packet_number,
+            self.session_id,
+        );
+    }
+
+    pub fn maxDatagramSize(self: ProtectedClientSession) usize {
+        return self.maxDatagramPayloadSize() orelse 0;
     }
 
     pub fn receiveDatagram(self: *ProtectedClientSession) Error!OwnedProtectedDatagram {
@@ -7435,6 +10827,103 @@ pub const ProtectedClientSession = struct {
             self.session_id.value,
             data,
             fin,
+        );
+    }
+
+    pub fn sendSessionDataWithTimeout(
+        self: *ProtectedClientSession,
+        data: []const u8,
+        fin: bool,
+        progress: *http3.runtime.BodyWriteProgress,
+        timeout: std.Io.Duration,
+    ) ReceiveTimeoutError!void {
+        progress.* = .{};
+        if (timeout.nanoseconds <= 0) return error.Timeout;
+        try self.control.control.ensureOpen();
+        return self.h3.sendRequestBodyPacedWithTimeout(
+            self.session_id.value,
+            data,
+            fin,
+            progress,
+            timeout,
+        );
+    }
+
+    pub fn sendSessionDataWithDeadline(
+        self: *ProtectedClientSession,
+        data: []const u8,
+        fin: bool,
+        progress: *http3.runtime.BodyWriteProgress,
+        deadline: std.Io.Clock.Timestamp,
+    ) ReceiveTimeoutError!void {
+        _ = try deadline_policy.usableAwake(
+            self.h3.quic_client.endpoint.io,
+            deadline,
+        );
+        try self.control.control.ensureOpen();
+        return self.h3.sendRequestBodyPacedWithDeadline(
+            self.session_id.value,
+            data,
+            fin,
+            progress,
+            deadline,
+        );
+    }
+
+    pub fn sendSessionDataSlices(
+        self: *ProtectedClientSession,
+        parts: []const []const u8,
+        fin: bool,
+    ) Error!void {
+        try self.control.control.ensureOpen();
+        return self.h3.sendRequestBodyPartsPaced(
+            self.session_id.value,
+            parts,
+            fin,
+        );
+    }
+
+    /// Send borrowed Capsule Protocol slices without joining them. On error,
+    /// `progress.committed_bytes` is the exact socket-visible prefix across
+    /// the concatenation of `parts`, so callers can retry only its suffix.
+    pub fn sendSessionDataSlicesWithTimeout(
+        self: *ProtectedClientSession,
+        parts: []const []const u8,
+        fin: bool,
+        progress: *http3.runtime.BodyWriteProgress,
+        timeout: std.Io.Duration,
+    ) ReceiveTimeoutError!void {
+        progress.* = .{};
+        if (timeout.nanoseconds <= 0) return error.Timeout;
+        try self.control.control.ensureOpen();
+        return self.h3.sendRequestBodyPartsPacedWithTimeout(
+            self.session_id.value,
+            parts,
+            fin,
+            progress,
+            timeout,
+        );
+    }
+
+    pub fn sendSessionDataSlicesWithDeadline(
+        self: *ProtectedClientSession,
+        parts: []const []const u8,
+        fin: bool,
+        progress: *http3.runtime.BodyWriteProgress,
+        deadline: std.Io.Clock.Timestamp,
+    ) ReceiveTimeoutError!void {
+        progress.* = .{};
+        _ = try deadline_policy.usableAwake(
+            self.h3.quic_client.endpoint.io,
+            deadline,
+        );
+        try self.control.control.ensureOpen();
+        return self.h3.sendRequestBodyPartsPacedWithDeadline(
+            self.session_id.value,
+            parts,
+            fin,
+            progress,
+            deadline,
         );
     }
 
@@ -7507,9 +10996,67 @@ pub const ProtectedClientSession = struct {
 
     pub fn drain(self: *ProtectedClientSession) Error!void {
         if (self.control.control.local_drain_sent) return;
-        var encoded: [16]u8 = undefined;
-        const capsule = try session_control.writeDrainInto(&encoded);
-        try self.sendSessionData(capsule, false);
+        if (self.pending_close != null) return error.InvalidSessionState;
+        if (self.pending_drain == null) {
+            const pending = try PendingSessionDrain.init();
+            try self.control.control.beginLocalDrain();
+            self.pending_drain = pending;
+        }
+        const pending = &self.pending_drain.?;
+        try self.h3.sendRequestBody(
+            self.session_id.value,
+            pending.bytes[pending.committed..pending.len],
+            false,
+        );
+        self.pending_drain = null;
+        try self.control.control.recordLocalDrain();
+    }
+
+    pub fn drainWithTimeout(
+        self: *ProtectedClientSession,
+        timeout: std.Io.Duration,
+    ) ReceiveTimeoutError!void {
+        if (timeout.nanoseconds <= 0) return error.Timeout;
+        return self.drainWithDeadline(.fromNow(
+            self.h3.quic_client.endpoint.io,
+            .{ .raw = timeout, .clock = .awake },
+        ));
+    }
+
+    pub fn drainWithDeadline(
+        self: *ProtectedClientSession,
+        deadline: std.Io.Clock.Timestamp,
+    ) ReceiveTimeoutError!void {
+        _ = try deadline_policy.usableAwake(
+            self.h3.quic_client.endpoint.io,
+            deadline,
+        );
+        if (self.control.control.local_drain_sent) return;
+        if (self.pending_close != null) return error.InvalidSessionState;
+        if (self.pending_drain == null) {
+            const pending = try PendingSessionDrain.init();
+            try self.control.control.beginLocalDrain();
+            self.pending_drain = pending;
+        }
+        const pending = &self.pending_drain.?;
+        var progress: http3.runtime.BodyWriteProgress = .{};
+        self.h3.sendRequestBodyPacedWithDeadline(
+            self.session_id.value,
+            pending.bytes[pending.committed..pending.len],
+            false,
+            &progress,
+            deadline,
+        ) catch |err| {
+            pending.committed += progress.committed_bytes;
+            if (pending.committed == pending.len) {
+                self.pending_drain = null;
+                try self.control.control.recordLocalDrain();
+            }
+            return err;
+        };
+        pending.committed += progress.committed_bytes;
+        std.debug.assert(pending.committed == pending.len);
+        self.pending_drain = null;
         try self.control.control.recordLocalDrain();
     }
 
@@ -7518,16 +11065,98 @@ pub const ProtectedClientSession = struct {
         code: u32,
         reason: []const u8,
     ) Error!void {
-        if (self.control.control.local_close_sent) return;
-        var encoded: [4 + session_control.max_close_reason + 16]u8 =
-            undefined;
-        const capsule = try session_control.writeCloseInto(
-            &encoded,
-            code,
-            reason,
+        if (self.control.control.local_close_sent or
+            self.control.control.local_close_failed) return;
+        try self.preparePendingClose(code, reason);
+        const pending = &self.pending_close.?;
+        self.h3.sendRequestBody(
+            self.session_id.value,
+            pending.bytes[pending.committed..pending.len],
+            true,
+        ) catch |err| {
+            if (terminalSessionBodySendError(err)) {
+                const failed_code = pending.code;
+                self.pending_close = null;
+                self.control.control.recordLocalCloseFailure(failed_code);
+            }
+            return err;
+        };
+        const committed_code = pending.code;
+        self.pending_close = null;
+        try self.control.control.recordLocalClose(committed_code);
+    }
+
+    pub fn closeWithTimeout(
+        self: *ProtectedClientSession,
+        code: u32,
+        reason: []const u8,
+        timeout: std.Io.Duration,
+    ) ReceiveTimeoutError!void {
+        if (timeout.nanoseconds <= 0) return error.Timeout;
+        return self.closeWithDeadline(code, reason, .fromNow(
+            self.h3.quic_client.endpoint.io,
+            .{ .raw = timeout, .clock = .awake },
+        ));
+    }
+
+    pub fn closeWithDeadline(
+        self: *ProtectedClientSession,
+        code: u32,
+        reason: []const u8,
+        deadline: std.Io.Clock.Timestamp,
+    ) ReceiveTimeoutError!void {
+        _ = try deadline_policy.usableAwake(
+            self.h3.quic_client.endpoint.io,
+            deadline,
         );
-        try self.sendSessionData(capsule, true);
-        try self.control.control.recordLocalClose(code);
+        if (self.control.control.local_close_sent or
+            self.control.control.local_close_failed) return;
+        try self.preparePendingClose(code, reason);
+        const pending = &self.pending_close.?;
+        var progress: http3.runtime.BodyWriteProgress = .{};
+        self.h3.sendRequestBodyPacedWithDeadline(
+            self.session_id.value,
+            pending.bytes[pending.committed..pending.len],
+            true,
+            &progress,
+            deadline,
+        ) catch |err| {
+            pending.committed += progress.committed_bytes;
+            if (progress.fin_committed) {
+                const committed_code = pending.code;
+                self.pending_close = null;
+                try self.control.control.recordLocalClose(committed_code);
+            } else if (terminalSessionBodySendError(err)) {
+                const failed_code = pending.code;
+                self.pending_close = null;
+                self.control.control.recordLocalCloseFailure(failed_code);
+            }
+            return err;
+        };
+        pending.committed += progress.committed_bytes;
+        std.debug.assert(
+            pending.committed == pending.len and progress.fin_committed,
+        );
+        const committed_code = pending.code;
+        self.pending_close = null;
+        try self.control.control.recordLocalClose(committed_code);
+    }
+
+    fn preparePendingClose(
+        self: *ProtectedClientSession,
+        code: u32,
+        reason: []const u8,
+    ) Error!void {
+        if (self.pending_drain != null) return error.InvalidSessionState;
+        if (self.pending_close) |*pending| {
+            if (!try pending.matches(code, reason)) {
+                return error.InvalidSessionState;
+            }
+            return;
+        }
+        const pending = try PendingSessionClose.init(code, reason);
+        try self.control.control.beginLocalClose();
+        self.pending_close = pending;
     }
 
     pub fn receiveSessionEvent(
@@ -7653,50 +11282,75 @@ fn receiveDevelopmentServerEvent(
     session: *AcceptedSession,
     deadline: ?std.Io.Clock.Timestamp,
 ) ReceiveTimeoutError!SessionEvent {
-    if (try session.control.pollPending()) |event| {
-        return completeDevelopmentServerEvent(session, event);
-    }
-    var buffer: [protected_control.buffer_capacity]u8 = undefined;
-    while (true) {
-        const read = if (deadline) |absolute|
-            try session.server.receiveSessionDataWithDeadline(
-                session.request.from,
-                session.session_id,
-                &buffer,
-                absolute,
-            )
-        else
-            try session.server.receiveSessionData(
-                session.request.from,
-                session.session_id,
-                &buffer,
-            );
-        if (read.fin) {
-            const event = (try session.control.finish()) orelse
-                return error.InvalidSessionState;
-            return completeDevelopmentServerEvent(session, event);
+    if (session.pending_session_event == null) {
+        if (try session.control.pollPending()) |event| {
+            session.pending_session_event = event;
+        } else {
+            var buffer: [protected_control.buffer_capacity]u8 = undefined;
+            while (session.pending_session_event == null) {
+                const read = if (deadline) |absolute|
+                    try session.server.receiveSessionDataWithDeadline(
+                        session.request.from,
+                        session.session_id,
+                        &buffer,
+                        absolute,
+                    )
+                else
+                    try session.server.receiveSessionData(
+                        session.request.from,
+                        session.session_id,
+                        &buffer,
+                    );
+                if (read.fin) {
+                    session.pending_session_event =
+                        (try session.control.finish()) orelse
+                        return error.InvalidSessionState;
+                } else if (try session.control.consume(
+                    buffer[0..read.bytes],
+                )) |event| {
+                    session.pending_session_event = event;
+                }
+            }
         }
-        if (try session.control.consume(buffer[0..read.bytes])) |event| {
-            return completeDevelopmentServerEvent(session, event);
-        }
     }
+    const event = session.pending_session_event.?;
+    if (deadline) |absolute| {
+        try finishDevelopmentServerEventWithDeadline(
+            session,
+            event,
+            absolute,
+        );
+    } else {
+        try finishDevelopmentServerEvent(session, event);
+    }
+    session.pending_session_event = null;
+    return event;
 }
 
-fn completeDevelopmentServerEvent(
+fn finishDevelopmentServerEvent(
     session: *AcceptedSession,
     event: SessionEvent,
-) Error!SessionEvent {
-    if (event == .closed and !session.control.control.local_close_sent) {
+) Error!void {
+    if (event == .closed and
+        !session.control.control.local_close_sent and
+        !session.control.control.local_close_failed and
+        session.pending_close == null)
+    {
         // A peer CLOSE capsule or a clean peer FIN only terminates its send
         // half of the CONNECT stream. WebTransport still requires one empty
         // FIN reply on our side so the HTTP/3 stream reaches a symmetric clean
         // close instead of lingering half-open forever.
-        try session.server.sendSessionData(
+        session.server.sendSessionData(
             session.request.from,
             session.session_id,
             &.{},
             true,
-        );
+        ) catch |err| {
+            if (terminalSessionBodySendError(err)) {
+                session.control.control.recordLocalCloseFailure(0);
+            }
+            return err;
+        };
         session.control.control.local_close_sent = true;
     }
     if (event == .closed or event == .reset) {
@@ -7712,7 +11366,45 @@ fn completeDevelopmentServerEvent(
             ),
         );
     }
-    return event;
+}
+
+fn finishDevelopmentServerEventWithDeadline(
+    session: *AcceptedSession,
+    event: SessionEvent,
+    deadline: std.Io.Clock.Timestamp,
+) ReceiveTimeoutError!void {
+    if (event == .closed and
+        !session.control.control.local_close_sent and
+        !session.control.control.local_close_failed and
+        session.pending_close == null)
+    {
+        var progress: http3.runtime.DevelopmentBodyWriteProgress = .{};
+        session.server.sendSessionDataWithDeadline(
+            session.request.from,
+            session.session_id,
+            &.{},
+            true,
+            &progress,
+            deadline,
+        ) catch |err| {
+            if (progress.send_attempted or terminalSessionBodySendError(err)) {
+                session.control.control.recordLocalCloseFailure(0);
+            }
+            return err;
+        };
+        std.debug.assert(progress.completed);
+        session.control.control.local_close_sent = true;
+    }
+    if (event == .closed or event == .reset) {
+        session.server.h3.closeDevelopmentSession(
+            session.request.from,
+            development_stream.match(
+                &session.streams,
+                session.session_id,
+                .server,
+            ),
+        );
+    }
 }
 
 fn receiveProtectedServerEvent(
@@ -7720,35 +11412,52 @@ fn receiveProtectedServerEvent(
     session: *AcceptedProtectedSession,
     deadline: ?std.Io.Clock.Timestamp,
 ) ReceiveTimeoutError!SessionEvent {
-    if (try session.control.pollPending()) |event| {
-        return completeProtectedServerEvent(server, session, event);
-    }
-    var buffer: [protected_control.buffer_capacity]u8 = undefined;
-    while (true) {
-        const read = if (deadline) |absolute|
-            try server.receiveSessionDataWithDeadline(
-                session.session_id,
-                &buffer,
-                absolute,
-            )
-        else
-            try server.receiveSessionData(session.session_id, &buffer);
-        if (read.fin) {
-            const event = (try session.control.finish()) orelse
-                return error.InvalidSessionState;
-            return completeProtectedServerEvent(server, session, event);
+    if (session.pending_session_event == null) {
+        if (try session.control.pollPending()) |event| {
+            session.pending_session_event = event;
+        } else {
+            var buffer: [protected_control.buffer_capacity]u8 = undefined;
+            while (session.pending_session_event == null) {
+                const read = if (deadline) |absolute|
+                    try server.receiveSessionDataWithDeadline(
+                        session.session_id,
+                        &buffer,
+                        absolute,
+                    )
+                else
+                    try server.receiveSessionData(session.session_id, &buffer);
+                if (read.fin) {
+                    session.pending_session_event =
+                        (try session.control.finish()) orelse
+                        return error.InvalidSessionState;
+                } else if (try session.control.consume(
+                    buffer[0..read.bytes],
+                )) |event| {
+                    session.pending_session_event = event;
+                }
+            }
         }
-        if (try session.control.consume(buffer[0..read.bytes])) |event| {
-            return completeProtectedServerEvent(server, session, event);
-        }
     }
+    const event = session.pending_session_event.?;
+    if (deadline) |absolute| {
+        try finishProtectedServerEventWithDeadline(
+            server,
+            session,
+            event,
+            absolute,
+        );
+    } else {
+        try finishProtectedServerEvent(server, session, event);
+    }
+    session.pending_session_event = null;
+    return event;
 }
 
-fn completeProtectedServerEvent(
+fn finishProtectedServerEvent(
     server: *ProtectedServer,
     session: *AcceptedProtectedSession,
     event: SessionEvent,
-) Error!SessionEvent {
+) Error!void {
     if (event == .closed and
         !session.control.control.local_close_sent)
     {
@@ -7763,37 +11472,82 @@ fn completeProtectedServerEvent(
         );
         session.control.control.local_close_sent = true;
     }
-    return event;
+}
+
+fn finishProtectedServerEventWithDeadline(
+    server: *ProtectedServer,
+    session: *AcceptedProtectedSession,
+    event: SessionEvent,
+    deadline: std.Io.Clock.Timestamp,
+) ReceiveTimeoutError!void {
+    if (event != .closed or
+        session.control.control.local_close_sent or
+        session.pending_close != null) return;
+    var progress: http3.runtime.BodyWriteProgress = .{};
+    server.h3.sendResponseBodyPacedWithDeadline(
+        session.request.from,
+        session.session_id.value,
+        &.{},
+        true,
+        &progress,
+        deadline,
+    ) catch |err| {
+        if (progress.fin_committed) {
+            session.control.control.local_close_sent = true;
+        }
+        return err;
+    };
+    std.debug.assert(progress.fin_committed);
+    session.control.control.local_close_sent = true;
 }
 
 fn receiveProtectedClientEvent(
     session: *ProtectedClientSession,
     deadline: ?std.Io.Clock.Timestamp,
 ) ReceiveTimeoutError!SessionEvent {
-    if (try session.control.pollPending()) |event| {
-        return completeProtectedClientEvent(session, event);
-    }
-    var buffer: [protected_control.buffer_capacity]u8 = undefined;
-    while (true) {
-        const read = if (deadline) |absolute|
-            try session.receiveSessionDataWithDeadline(&buffer, absolute)
-        else
-            try session.receiveSessionData(&buffer);
-        if (read.fin) {
-            const event = (try session.control.finish()) orelse
-                return error.InvalidSessionState;
-            return completeProtectedClientEvent(session, event);
+    if (session.pending_session_event == null) {
+        if (try session.control.pollPending()) |event| {
+            session.pending_session_event = event;
+        } else {
+            var buffer: [protected_control.buffer_capacity]u8 = undefined;
+            while (session.pending_session_event == null) {
+                const read = if (deadline) |absolute|
+                    try session.receiveSessionDataWithDeadline(
+                        &buffer,
+                        absolute,
+                    )
+                else
+                    try session.receiveSessionData(&buffer);
+                if (read.fin) {
+                    session.pending_session_event =
+                        (try session.control.finish()) orelse
+                        return error.InvalidSessionState;
+                } else if (try session.control.consume(
+                    buffer[0..read.bytes],
+                )) |event| {
+                    session.pending_session_event = event;
+                }
+            }
         }
-        if (try session.control.consume(buffer[0..read.bytes])) |event| {
-            return completeProtectedClientEvent(session, event);
-        }
     }
+    const event = session.pending_session_event.?;
+    if (deadline) |absolute| {
+        try finishProtectedClientEventWithDeadline(
+            session,
+            event,
+            absolute,
+        );
+    } else {
+        try finishProtectedClientEvent(session, event);
+    }
+    session.pending_session_event = null;
+    return event;
 }
 
-fn completeProtectedClientEvent(
+fn finishProtectedClientEvent(
     session: *ProtectedClientSession,
     event: SessionEvent,
-) Error!SessionEvent {
+) Error!void {
     if (event == .closed and
         !session.control.control.local_close_sent)
     {
@@ -7806,42 +11560,98 @@ fn completeProtectedClientEvent(
         );
         session.control.control.local_close_sent = true;
     }
-    return event;
+}
+
+fn finishProtectedClientEventWithDeadline(
+    session: *ProtectedClientSession,
+    event: SessionEvent,
+    deadline: std.Io.Clock.Timestamp,
+) ReceiveTimeoutError!void {
+    if (event != .closed or
+        session.control.control.local_close_sent or
+        session.pending_close != null) return;
+    var progress: http3.runtime.BodyWriteProgress = .{};
+    session.h3.sendRequestBodyPacedWithDeadline(
+        session.session_id.value,
+        &.{},
+        true,
+        &progress,
+        deadline,
+    ) catch |err| {
+        if (progress.fin_committed) {
+            session.control.control.local_close_sent = true;
+        }
+        return err;
+    };
+    std.debug.assert(progress.fin_committed);
+    session.control.control.local_close_sent = true;
 }
 
 fn receiveDevelopmentClientEvent(
     session: *ClientSession,
     deadline: ?std.Io.Clock.Timestamp,
 ) ReceiveTimeoutError!SessionEvent {
-    if (try session.control.pollPending()) |event| {
-        return completeDevelopmentClientEvent(session, event);
-    }
-    var buffer: [protected_control.buffer_capacity]u8 = undefined;
-    while (true) {
-        const read = if (deadline) |absolute|
-            try session.receiveSessionDataWithDeadline(&buffer, absolute)
-        else
-            try session.receiveSessionData(&buffer);
-        if (read.fin) {
-            const event = (try session.control.finish()) orelse
-                return error.InvalidSessionState;
-            return completeDevelopmentClientEvent(session, event);
+    if (session.pending_session_event == null) {
+        if (try session.control.pollPending()) |event| {
+            session.pending_session_event = event;
+        } else {
+            var buffer: [protected_control.buffer_capacity]u8 = undefined;
+            while (session.pending_session_event == null) {
+                const read = if (deadline) |absolute|
+                    try session.receiveSessionDataWithDeadline(
+                        &buffer,
+                        absolute,
+                    )
+                else
+                    try session.receiveSessionData(&buffer);
+                if (read.fin) {
+                    session.pending_session_event =
+                        (try session.control.finish()) orelse
+                        return error.InvalidSessionState;
+                } else if (try session.control.consume(
+                    buffer[0..read.bytes],
+                )) |event| {
+                    session.pending_session_event = event;
+                }
+            }
         }
-        if (try session.control.consume(buffer[0..read.bytes])) |event| {
-            return completeDevelopmentClientEvent(session, event);
-        }
     }
+    const event = session.pending_session_event.?;
+    if (deadline) |absolute| {
+        try finishDevelopmentClientEventWithDeadline(
+            session,
+            event,
+            absolute,
+        );
+    } else {
+        try finishDevelopmentClientEvent(session, event);
+    }
+    session.pending_session_event = null;
+    return event;
 }
 
-fn completeDevelopmentClientEvent(
+fn finishDevelopmentClientEvent(
     session: *ClientSession,
     event: SessionEvent,
-) Error!SessionEvent {
-    if (event == .closed and !session.control.control.local_close_sent) {
+) Error!void {
+    if (event == .closed and
+        !session.control.control.local_close_sent and
+        !session.control.control.local_close_failed and
+        session.pending_close == null)
+    {
         // The control parser already transitioned the public session state to
         // closed. Send the mandatory empty FIN directly through HTTP/3 so the
         // reply does not trip the public open-state guard.
-        try session.h3.sendRequestBody(session.session_id.value, &.{}, true);
+        session.h3.sendRequestBody(
+            session.session_id.value,
+            &.{},
+            true,
+        ) catch |err| {
+            if (terminalSessionBodySendError(err)) {
+                session.control.control.recordLocalCloseFailure(0);
+            }
+            return err;
+        };
         session.control.control.local_close_sent = true;
     }
     if (event == .closed or event == .reset) {
@@ -7851,7 +11661,41 @@ fn completeDevelopmentClientEvent(
             .client,
         ));
     }
-    return event;
+}
+
+fn finishDevelopmentClientEventWithDeadline(
+    session: *ClientSession,
+    event: SessionEvent,
+    deadline: std.Io.Clock.Timestamp,
+) ReceiveTimeoutError!void {
+    if (event == .closed and
+        !session.control.control.local_close_sent and
+        !session.control.control.local_close_failed and
+        session.pending_close == null)
+    {
+        var progress: http3.runtime.DevelopmentBodyWriteProgress = .{};
+        session.h3.sendRequestBodyWithDeadline(
+            session.session_id.value,
+            &.{},
+            true,
+            &progress,
+            deadline,
+        ) catch |err| {
+            if (progress.send_attempted or terminalSessionBodySendError(err)) {
+                session.control.control.recordLocalCloseFailure(0);
+            }
+            return err;
+        };
+        std.debug.assert(progress.completed);
+        session.control.control.local_close_sent = true;
+    }
+    if (event == .closed or event == .reset) {
+        session.h3.closeDevelopmentSession(development_stream.match(
+            &session.streams,
+            session.session_id,
+            .client,
+        ));
+    }
 }
 
 pub const ConnectOptions = struct {
@@ -8172,6 +12016,82 @@ pub const StatefulProtectedClientSession = struct {
         return self.session.keyUpdateAwaitingAck();
     }
 
+    pub fn sendSessionData(
+        self: *StatefulProtectedClientSession,
+        data: []const u8,
+        fin: bool,
+    ) Error!void {
+        return self.session.sendSessionData(data, fin);
+    }
+
+    pub fn sendSessionDataWithTimeout(
+        self: *StatefulProtectedClientSession,
+        data: []const u8,
+        fin: bool,
+        progress: *http3.runtime.BodyWriteProgress,
+        timeout: std.Io.Duration,
+    ) ReceiveTimeoutError!void {
+        return self.session.sendSessionDataWithTimeout(
+            data,
+            fin,
+            progress,
+            timeout,
+        );
+    }
+
+    pub fn sendSessionDataWithDeadline(
+        self: *StatefulProtectedClientSession,
+        data: []const u8,
+        fin: bool,
+        progress: *http3.runtime.BodyWriteProgress,
+        deadline: std.Io.Clock.Timestamp,
+    ) ReceiveTimeoutError!void {
+        return self.session.sendSessionDataWithDeadline(
+            data,
+            fin,
+            progress,
+            deadline,
+        );
+    }
+
+    pub fn sendSessionDataSlices(
+        self: *StatefulProtectedClientSession,
+        parts: []const []const u8,
+        fin: bool,
+    ) Error!void {
+        return self.session.sendSessionDataSlices(parts, fin);
+    }
+
+    pub fn sendSessionDataSlicesWithTimeout(
+        self: *StatefulProtectedClientSession,
+        parts: []const []const u8,
+        fin: bool,
+        progress: *http3.runtime.BodyWriteProgress,
+        timeout: std.Io.Duration,
+    ) ReceiveTimeoutError!void {
+        return self.session.sendSessionDataSlicesWithTimeout(
+            parts,
+            fin,
+            progress,
+            timeout,
+        );
+    }
+
+    pub fn sendSessionDataSlicesWithDeadline(
+        self: *StatefulProtectedClientSession,
+        parts: []const []const u8,
+        fin: bool,
+        progress: *http3.runtime.BodyWriteProgress,
+        deadline: std.Io.Clock.Timestamp,
+    ) ReceiveTimeoutError!void {
+        return self.session.sendSessionDataSlicesWithDeadline(
+            parts,
+            fin,
+            progress,
+            deadline,
+        );
+    }
+
     pub fn openBidirectionalStream(
         self: *StatefulProtectedClientSession,
     ) Error!u62 {
@@ -8221,12 +12141,149 @@ pub const StatefulProtectedClientSession = struct {
         return self.session.sendStream(stream_id, payload, fin);
     }
 
+    pub fn sendStreamWithTimeout(
+        self: *StatefulProtectedClientSession,
+        stream_id: u62,
+        payload: []const u8,
+        fin: bool,
+        committed: *usize,
+        timeout: std.Io.Duration,
+    ) ReceiveTimeoutError!void {
+        return self.session.sendStreamWithTimeout(
+            stream_id,
+            payload,
+            fin,
+            committed,
+            timeout,
+        );
+    }
+
+    pub fn sendStreamWithDeadline(
+        self: *StatefulProtectedClientSession,
+        stream_id: u62,
+        payload: []const u8,
+        fin: bool,
+        committed: *usize,
+        deadline: std.Io.Clock.Timestamp,
+    ) ReceiveTimeoutError!void {
+        return self.session.sendStreamWithDeadline(
+            stream_id,
+            payload,
+            fin,
+            committed,
+            deadline,
+        );
+    }
+
+    pub fn sendStreamSlices(
+        self: *StatefulProtectedClientSession,
+        stream_id: u62,
+        parts: []const []const u8,
+        fin: bool,
+    ) Error!void {
+        return self.session.sendStreamSlices(stream_id, parts, fin);
+    }
+
+    pub fn sendStreamSlicesWithTimeout(
+        self: *StatefulProtectedClientSession,
+        stream_id: u62,
+        parts: []const []const u8,
+        fin: bool,
+        committed: *usize,
+        timeout: std.Io.Duration,
+    ) ReceiveTimeoutError!void {
+        return self.session.sendStreamSlicesWithTimeout(
+            stream_id,
+            parts,
+            fin,
+            committed,
+            timeout,
+        );
+    }
+
+    pub fn sendStreamSlicesWithDeadline(
+        self: *StatefulProtectedClientSession,
+        stream_id: u62,
+        parts: []const []const u8,
+        fin: bool,
+        committed: *usize,
+        deadline: std.Io.Clock.Timestamp,
+    ) ReceiveTimeoutError!void {
+        return self.session.sendStreamSlicesWithDeadline(
+            stream_id,
+            parts,
+            fin,
+            committed,
+            deadline,
+        );
+    }
+
     pub fn writeStream(
         self: *StatefulProtectedClientSession,
         stream_id: u62,
         payload: []const u8,
     ) Error!usize {
         return self.session.writeStream(stream_id, payload);
+    }
+
+    pub fn writeStreamWithTimeout(
+        self: *StatefulProtectedClientSession,
+        stream_id: u62,
+        payload: []const u8,
+        timeout: std.Io.Duration,
+    ) ReceiveTimeoutError!usize {
+        return self.session.writeStreamWithTimeout(
+            stream_id,
+            payload,
+            timeout,
+        );
+    }
+
+    pub fn writeStreamWithDeadline(
+        self: *StatefulProtectedClientSession,
+        stream_id: u62,
+        payload: []const u8,
+        deadline: std.Io.Clock.Timestamp,
+    ) ReceiveTimeoutError!usize {
+        return self.session.writeStreamWithDeadline(
+            stream_id,
+            payload,
+            deadline,
+        );
+    }
+
+    pub fn writeStreamSlices(
+        self: *StatefulProtectedClientSession,
+        stream_id: u62,
+        parts: []const []const u8,
+    ) Error!usize {
+        return self.session.writeStreamSlices(stream_id, parts);
+    }
+
+    pub fn writeStreamSlicesWithTimeout(
+        self: *StatefulProtectedClientSession,
+        stream_id: u62,
+        parts: []const []const u8,
+        timeout: std.Io.Duration,
+    ) ReceiveTimeoutError!usize {
+        return self.session.writeStreamSlicesWithTimeout(
+            stream_id,
+            parts,
+            timeout,
+        );
+    }
+
+    pub fn writeStreamSlicesWithDeadline(
+        self: *StatefulProtectedClientSession,
+        stream_id: u62,
+        parts: []const []const u8,
+        deadline: std.Io.Clock.Timestamp,
+    ) ReceiveTimeoutError!usize {
+        return self.session.writeStreamSlicesWithDeadline(
+            stream_id,
+            parts,
+            deadline,
+        );
     }
 
     pub fn setStreamPriority(
@@ -8252,11 +12309,49 @@ pub const StatefulProtectedClientSession = struct {
         return self.session.writeStreams(writes, counts);
     }
 
+    pub fn writeStreamsWithTimeout(
+        self: *StatefulProtectedClientSession,
+        writes: []const StreamWrite,
+        counts: []usize,
+        timeout: std.Io.Duration,
+    ) ReceiveTimeoutError!StreamWriteResult {
+        return self.session.writeStreamsWithTimeout(writes, counts, timeout);
+    }
+
+    pub fn writeStreamsWithDeadline(
+        self: *StatefulProtectedClientSession,
+        writes: []const StreamWrite,
+        counts: []usize,
+        deadline: std.Io.Clock.Timestamp,
+    ) ReceiveTimeoutError!StreamWriteResult {
+        return self.session.writeStreamsWithDeadline(
+            writes,
+            counts,
+            deadline,
+        );
+    }
+
     pub fn finishStream(
         self: *StatefulProtectedClientSession,
         stream_id: u62,
     ) Error!void {
         return self.session.finishStream(stream_id);
+    }
+
+    pub fn finishStreamWithTimeout(
+        self: *StatefulProtectedClientSession,
+        stream_id: u62,
+        timeout: std.Io.Duration,
+    ) ReceiveTimeoutError!void {
+        return self.session.finishStreamWithTimeout(stream_id, timeout);
+    }
+
+    pub fn finishStreamWithDeadline(
+        self: *StatefulProtectedClientSession,
+        stream_id: u62,
+        deadline: std.Io.Clock.Timestamp,
+    ) ReceiveTimeoutError!void {
+        return self.session.finishStreamWithDeadline(stream_id, deadline);
     }
 
     pub fn releaseCompletedPeerStream(
@@ -8329,6 +12424,46 @@ pub const StatefulProtectedClientSession = struct {
         return self.session.readStreamWithDeadline(out, deadline);
     }
 
+    pub fn readStreamId(
+        self: *StatefulProtectedClientSession,
+        stream_id: u62,
+        out: []u8,
+    ) Error!StreamRead {
+        return self.session.readStreamId(stream_id, out);
+    }
+
+    pub fn readStreamIdWithTimeout(
+        self: *StatefulProtectedClientSession,
+        stream_id: u62,
+        out: []u8,
+        timeout: std.Io.Duration,
+    ) ReceiveTimeoutError!StreamRead {
+        return self.session.readStreamIdWithTimeout(
+            stream_id,
+            out,
+            timeout,
+        );
+    }
+
+    pub fn readStreamIdWithDeadline(
+        self: *StatefulProtectedClientSession,
+        stream_id: u62,
+        out: []u8,
+        deadline: std.Io.Clock.Timestamp,
+    ) ReceiveTimeoutError!StreamRead {
+        return self.session.readStreamIdWithDeadline(
+            stream_id,
+            out,
+            deadline,
+        );
+    }
+
+    pub fn flushPendingAck(
+        self: *StatefulProtectedClientSession,
+    ) Error!bool {
+        return self.session.flushPendingAck();
+    }
+
     pub fn serviceTransport(
         self: *StatefulProtectedClientSession,
     ) Error!void {
@@ -8343,12 +12478,64 @@ pub const StatefulProtectedClientSession = struct {
         return self.session.resetStream(stream_id, application_error_code);
     }
 
+    pub fn resetStreamWithTimeout(
+        self: *StatefulProtectedClientSession,
+        stream_id: u62,
+        application_error_code: u32,
+        timeout: std.Io.Duration,
+    ) ReceiveTimeoutError!void {
+        return self.session.resetStreamWithTimeout(
+            stream_id,
+            application_error_code,
+            timeout,
+        );
+    }
+
+    pub fn resetStreamWithDeadline(
+        self: *StatefulProtectedClientSession,
+        stream_id: u62,
+        application_error_code: u32,
+        deadline: std.Io.Clock.Timestamp,
+    ) ReceiveTimeoutError!void {
+        return self.session.resetStreamWithDeadline(
+            stream_id,
+            application_error_code,
+            deadline,
+        );
+    }
+
     pub fn stopStream(
         self: *StatefulProtectedClientSession,
         stream_id: u62,
         application_error_code: u32,
     ) Error!void {
         return self.session.stopStream(stream_id, application_error_code);
+    }
+
+    pub fn stopStreamWithTimeout(
+        self: *StatefulProtectedClientSession,
+        stream_id: u62,
+        application_error_code: u32,
+        timeout: std.Io.Duration,
+    ) ReceiveTimeoutError!void {
+        return self.session.stopStreamWithTimeout(
+            stream_id,
+            application_error_code,
+            timeout,
+        );
+    }
+
+    pub fn stopStreamWithDeadline(
+        self: *StatefulProtectedClientSession,
+        stream_id: u62,
+        application_error_code: u32,
+        deadline: std.Io.Clock.Timestamp,
+    ) ReceiveTimeoutError!void {
+        return self.session.stopStreamWithDeadline(
+            stream_id,
+            application_error_code,
+            deadline,
+        );
     }
 
     pub fn sendDatagram(
@@ -8372,6 +12559,40 @@ pub const StatefulProtectedClientSession = struct {
         deadline: std.Io.Clock.Timestamp,
     ) ReceiveTimeoutError!void {
         return self.session.sendDatagramWithDeadline(payload, deadline);
+    }
+
+    pub fn sendDatagrams(
+        self: *StatefulProtectedClientSession,
+        payloads: []const []const u8,
+        committed_count: *usize,
+    ) Error!void {
+        return self.session.sendDatagrams(payloads, committed_count);
+    }
+
+    pub fn sendDatagramsWithTimeout(
+        self: *StatefulProtectedClientSession,
+        payloads: []const []const u8,
+        committed_count: *usize,
+        timeout: std.Io.Duration,
+    ) ReceiveTimeoutError!void {
+        return self.session.sendDatagramsWithTimeout(
+            payloads,
+            committed_count,
+            timeout,
+        );
+    }
+
+    pub fn sendDatagramsWithDeadline(
+        self: *StatefulProtectedClientSession,
+        payloads: []const []const u8,
+        committed_count: *usize,
+        deadline: std.Io.Clock.Timestamp,
+    ) ReceiveTimeoutError!void {
+        return self.session.sendDatagramsWithDeadline(
+            payloads,
+            committed_count,
+            deadline,
+        );
     }
 
     pub fn receiveDatagram(
@@ -8445,12 +12666,44 @@ pub const StatefulProtectedClientSession = struct {
         return self.session.drain();
     }
 
+    pub fn drainWithTimeout(
+        self: *StatefulProtectedClientSession,
+        timeout: std.Io.Duration,
+    ) ReceiveTimeoutError!void {
+        return self.session.drainWithTimeout(timeout);
+    }
+
+    pub fn drainWithDeadline(
+        self: *StatefulProtectedClientSession,
+        deadline: std.Io.Clock.Timestamp,
+    ) ReceiveTimeoutError!void {
+        return self.session.drainWithDeadline(deadline);
+    }
+
     pub fn close(
         self: *StatefulProtectedClientSession,
         code: u32,
         reason: []const u8,
     ) Error!void {
         return self.session.close(code, reason);
+    }
+
+    pub fn closeWithTimeout(
+        self: *StatefulProtectedClientSession,
+        code: u32,
+        reason: []const u8,
+        timeout: std.Io.Duration,
+    ) ReceiveTimeoutError!void {
+        return self.session.closeWithTimeout(code, reason, timeout);
+    }
+
+    pub fn closeWithDeadline(
+        self: *StatefulProtectedClientSession,
+        code: u32,
+        reason: []const u8,
+        deadline: std.Io.Clock.Timestamp,
+    ) ReceiveTimeoutError!void {
+        return self.session.closeWithDeadline(code, reason, deadline);
     }
 
     pub fn receiveSessionEvent(
@@ -9129,7 +13382,66 @@ pub const StreamWriteResult = stream_batch.Result;
 /// Narrow white-box hooks for deterministic CPU regression benchmarks.
 pub const testing = struct {
     pub const stream_batch = @import("runtime/stream/batch.zig").testing;
+
+    pub const PendingCloseProgress = struct {
+        committed: usize,
+        total: usize,
+    };
+
+    pub fn pendingCloseProgress(
+        session: anytype,
+    ) ?PendingCloseProgress {
+        const pending = session.pending_close orelse return null;
+        return .{
+            .committed = pending.committed,
+            .total = pending.len,
+        };
+    }
+
+    pub fn pendingDrainProgress(
+        session: anytype,
+    ) ?PendingCloseProgress {
+        const pending = session.pending_drain orelse return null;
+        return .{
+            .committed = pending.committed,
+            .total = pending.len,
+        };
+    }
+
+    pub fn localCloseSent(session: anytype) bool {
+        return session.control.local_close_sent;
+    }
+
+    pub fn localCloseFailed(session: anytype) bool {
+        return session.control.local_close_failed;
+    }
+
+    pub fn classifyTerminalSessionBodySendError(err: anyerror) bool {
+        return terminalSessionBodySendError(err);
+    }
 };
+
+fn testBodyPartsSuffix(
+    parts: []const []const u8,
+    committed: usize,
+    storage: [][]const u8,
+) []const []const u8 {
+    std.debug.assert(storage.len >= parts.len);
+    var skip = committed;
+    var count: usize = 0;
+    for (parts) |part| {
+        if (skip >= part.len) {
+            skip -= part.len;
+            continue;
+        }
+        storage[count] = part[skip..];
+        count += 1;
+        skip = 0;
+    }
+    std.debug.assert(skip == 0);
+    return storage[0..count];
+}
+
 pub const SessionEvent = session_control.Event;
 const initHandshakeStreamRegistry = handshake_stream.initRegistry;
 const sendHandshakeSessionStream = handshake_stream.send;
@@ -9164,6 +13476,8 @@ fn developmentWritableStream(
 }
 
 const sendDatagramFromEndpoint = datagram_send.development;
+const sendDatagramFromEndpointWithDeadline =
+    datagram_send.developmentWithDeadline;
 
 test "WebTransport DATAGRAM waiter recovers a lost control packet" {
     const allocator = std.testing.allocator;
@@ -9442,6 +13756,8 @@ fn receiveManyHandshakeDatagramsUntil(
 }
 
 const sendProtectedDatagramFromEndpoint = datagram_send.protected;
+const sendProtectedDatagramFromEndpointWithDeadline =
+    datagram_send.protectedWithDeadline;
 
 fn receiveProtectedDatagramFromEndpoint(
     endpoint: *quic.runtime.Endpoint,
@@ -9970,6 +14286,41 @@ test "WebTransport protected pending deinit retires request capacity" {
 
 test "WebTransport runtime CONNECT and datagrams over HTTP/3 dev runtime" {
     const allocator = std.testing.allocator;
+    const ExpireAfterFirstCheckIo = struct {
+        delegate: std.Io,
+        now_ns: i96,
+        now_calls: usize = 0,
+        send_calls: usize = 0,
+
+        fn now(
+            userdata: ?*anyopaque,
+            _: std.Io.Clock,
+        ) std.Io.Timestamp {
+            const self: *@This() = @ptrCast(@alignCast(userdata.?));
+            self.now_calls += 1;
+            const advance: i96 = if (self.now_calls == 1)
+                0
+            else
+                std.time.ns_per_s;
+            return .fromNanoseconds(self.now_ns + advance);
+        }
+
+        fn netSend(
+            userdata: ?*anyopaque,
+            socket_handle: net.Socket.Handle,
+            messages: []net.OutgoingMessage,
+            flags: net.SendFlags,
+        ) struct { ?net.Socket.SendError, usize } {
+            const self: *@This() = @ptrCast(@alignCast(userdata.?));
+            self.send_calls += 1;
+            return self.delegate.vtable.netSend(
+                self.delegate.userdata,
+                socket_handle,
+                messages,
+                flags,
+            );
+        }
+    };
 
     var threaded = std.Io.Threaded.init(allocator, .{});
     defer threaded.deinit();
@@ -9994,13 +14345,131 @@ test "WebTransport runtime CONNECT and datagrams over HTTP/3 dev runtime" {
             var accepted = try server_ptr.accept();
             defer accepted.deinit(server_ptr.h3.quic_server.endpoint.allocator);
             try std.testing.expect(accepted.session_id.isClientInitiatedBidirectional());
+            try std.testing.expectEqual(
+                @as(?usize, 4092),
+                accepted.maxDatagramPayloadSize(),
+            );
+            var maximum = try server_ptr.receiveDatagram();
+            defer maximum.deinit(
+                server_ptr.h3.quic_server.endpoint.allocator,
+            );
+            try std.testing.expectEqual(
+                accepted.session_id.value,
+                maximum.datagram.session_id.value,
+            );
+            try std.testing.expectEqual(
+                @as(usize, 4092),
+                maximum.datagram.payload.len,
+            );
+            try std.testing.expect(std.mem.allEqual(
+                u8,
+                maximum.datagram.payload,
+                0xa5,
+            ));
 
-            var datagram = try server_ptr.receiveDatagram();
-            defer datagram.deinit(server_ptr.h3.quic_server.endpoint.allocator);
-            try std.testing.expectEqual(accepted.session_id.value, datagram.datagram.session_id.value);
-            try std.testing.expectEqualStrings("client-dgram", datagram.datagram.payload);
+            for ([_][]const u8{ "client-one", "client-two" }) |expected| {
+                var datagram = try server_ptr.receiveDatagram();
+                defer datagram.deinit(
+                    server_ptr.h3.quic_server.endpoint.allocator,
+                );
+                try std.testing.expectEqual(
+                    accepted.session_id.value,
+                    datagram.datagram.session_id.value,
+                );
+                try std.testing.expectEqualStrings(
+                    expected,
+                    datagram.datagram.payload,
+                );
+            }
 
-            try server_ptr.sendDatagram(datagram.quic_datagram.from, accepted.session_id, "server-dgram");
+            try std.testing.expectError(
+                error.Timeout,
+                server_ptr.sendDatagramWithDeadline(
+                    accepted.request.from,
+                    accepted.session_id,
+                    "not-sent",
+                    .{ .clock = .real, .raw = .zero },
+                ),
+            );
+            var rejected_batch_count: usize = 99;
+            try std.testing.expectError(
+                error.Timeout,
+                accepted.sendDatagramsWithDeadline(
+                    &.{ "not", "sent" },
+                    &rejected_batch_count,
+                    .{ .clock = .real, .raw = .zero },
+                ),
+            );
+            try std.testing.expectEqual(
+                @as(usize, 0),
+                rejected_batch_count,
+            );
+            var server_committed: usize = 99;
+            try accepted.sendDatagramsWithTimeout(
+                &.{ "server-one", "server-two" },
+                &server_committed,
+                .fromSeconds(1),
+            );
+            try std.testing.expectEqual(@as(usize, 2), server_committed);
+            try std.testing.expectError(
+                error.Timeout,
+                accepted.drainWithDeadline(
+                    .{ .clock = .real, .raw = .zero },
+                ),
+            );
+            try std.testing.expect(
+                testing.pendingDrainProgress(&accepted) == null,
+            );
+            try std.testing.expect(
+                !accepted.control.control.local_drain_started,
+            );
+            server_ptr.h3.peer_state_mutex.lockUncancelable(
+                server_ptr.h3.quic_server.endpoint.io,
+            );
+            try std.testing.expectError(
+                error.ConcurrencyUnavailable,
+                accepted.drainWithDeadline(.fromNow(
+                    server_ptr.h3.quic_server.endpoint.io,
+                    .{ .raw = .fromSeconds(1), .clock = .awake },
+                )),
+            );
+            server_ptr.h3.peer_state_mutex.unlock(
+                server_ptr.h3.quic_server.endpoint.io,
+            );
+            const drain_progress = testing.pendingDrainProgress(
+                &accepted,
+            ) orelse return error.TestUnexpectedResult;
+            try std.testing.expectEqual(@as(usize, 0), drain_progress.committed);
+            try std.testing.expect(accepted.control.control.local_drain_started);
+            try accepted.drainWithTimeout(.fromSeconds(1));
+            try std.testing.expect(accepted.control.control.local_drain_sent);
+            server_ptr.h3.response_send_mutex.lockUncancelable(
+                server_ptr.h3.quic_server.endpoint.io,
+            );
+            try std.testing.expectError(
+                error.ConcurrencyUnavailable,
+                accepted.receiveSessionEventWithTimeout(.fromSeconds(1)),
+            );
+            server_ptr.h3.response_send_mutex.unlock(
+                server_ptr.h3.quic_server.endpoint.io,
+            );
+            const pending_close = accepted.pending_session_event orelse
+                return error.TestUnexpectedResult;
+            try std.testing.expect(pending_close == .closed);
+            try std.testing.expectEqual(@as(u32, 31), pending_close.closed.code);
+            try std.testing.expectEqualStrings(
+                "dev done",
+                pending_close.closed.reason,
+            );
+            try std.testing.expect(
+                !accepted.control.control.local_close_sent,
+            );
+            const closed = try accepted.receiveSessionEventWithTimeout(
+                .fromSeconds(1),
+            );
+            try std.testing.expect(closed == .closed);
+            try std.testing.expectEqual(@as(u32, 31), closed.closed.code);
+            try std.testing.expectEqualStrings("dev done", closed.closed.reason);
         }
     };
 
@@ -10013,6 +14482,39 @@ test "WebTransport runtime CONNECT and datagrams over HTTP/3 dev runtime" {
         .limits = .{ .http3 = .{ .quic = .{ .max_datagram_size = 4096, .max_frames_per_datagram = 8 } } },
     });
     defer client.deinit();
+    try std.testing.expectEqual(@as(usize, 4092), client.maxDatagramSize());
+    const maximum_datagram = try allocator.alloc(
+        u8,
+        client.maxDatagramSize(),
+    );
+    defer allocator.free(maximum_datagram);
+    @memset(maximum_datagram, 0xa5);
+    const oversized_datagram = try allocator.alloc(
+        u8,
+        client.maxDatagramSize() + 1,
+    );
+    defer allocator.free(oversized_datagram);
+
+    var size_probe = ExpireAfterFirstCheckIo{
+        .delegate = client.h3.quic_client.endpoint.io,
+        .now_ns = std.Io.Clock.awake.now(
+            client.h3.quic_client.endpoint.io,
+        ).nanoseconds,
+    };
+    var size_probe_vtable = size_probe.delegate.vtable.*;
+    size_probe_vtable.now = ExpireAfterFirstCheckIo.now;
+    size_probe_vtable.netSend = ExpireAfterFirstCheckIo.netSend;
+    client.h3.quic_client.endpoint.io = .{
+        .userdata = &size_probe,
+        .vtable = &size_probe_vtable,
+    };
+    try std.testing.expectError(
+        error.DatagramTooLarge,
+        client.sendDatagram(oversized_datagram),
+    );
+    try std.testing.expectEqual(@as(usize, 0), size_probe.send_calls);
+    client.h3.quic_client.endpoint.io = size_probe.delegate;
+    try client.sendDatagram(maximum_datagram);
 
     try std.testing.expectError(
         error.Timeout,
@@ -10024,18 +14526,355 @@ test "WebTransport runtime CONNECT and datagrams over HTTP/3 dev runtime" {
             .{ .raw = .zero, .clock = .real },
         ),
     );
-    try client.sendDatagram("client-dgram");
-    var response = try client.receiveDatagram();
-    defer response.deinit(allocator);
-    try std.testing.expectEqual(client.session_id.value, response.datagram.session_id.value);
-    try std.testing.expectEqualStrings("server-dgram", response.datagram.payload);
+    try std.testing.expectError(
+        error.Timeout,
+        client.sendDatagramWithTimeout("not-sent", .zero),
+    );
+    var rejected_batch_count: usize = 99;
+    try std.testing.expectError(
+        error.Timeout,
+        client.sendDatagramsWithTimeout(
+            &.{ "not", "sent" },
+            &rejected_batch_count,
+            .zero,
+        ),
+    );
+    try std.testing.expectEqual(@as(usize, 0), rejected_batch_count);
+    var body_progress: http3.runtime.DevelopmentBodyWriteProgress = .{
+        .send_attempted = true,
+        .completed = true,
+    };
+    try std.testing.expectError(
+        error.Timeout,
+        client.sendSessionDataWithTimeout(
+            "not-sent",
+            false,
+            &body_progress,
+            .zero,
+        ),
+    );
+    try std.testing.expect(!body_progress.send_attempted);
+    try std.testing.expect(!body_progress.completed);
+    var client_committed: usize = 99;
+    try client.sendDatagramsWithDeadline(
+        &.{ "client-one", "client-two" },
+        &client_committed,
+        .fromNow(io, .{ .raw = .fromSeconds(1), .clock = .awake }),
+    );
+    try std.testing.expectEqual(@as(usize, 2), client_committed);
+    for ([_][]const u8{ "server-one", "server-two" }) |expected| {
+        var response = try client.receiveDatagram();
+        defer response.deinit(allocator);
+        try std.testing.expectEqual(
+            client.session_id.value,
+            response.datagram.session_id.value,
+        );
+        try std.testing.expectEqualStrings(expected, response.datagram.payload);
+    }
+    const draining = try client.receiveSessionEventWithTimeout(
+        .fromSeconds(1),
+    );
+    try std.testing.expect(draining == .draining);
+    try std.testing.expectError(
+        error.Timeout,
+        client.closeWithDeadline(
+            31,
+            "dev done",
+            .{ .clock = .real, .raw = .zero },
+        ),
+    );
+    try std.testing.expect(testing.pendingCloseProgress(&client) == null);
+    try std.testing.expect(!client.control.control.local_close_started);
+    var expiring = ExpireAfterFirstCheckIo{
+        .delegate = client.h3.quic_client.endpoint.io,
+        .now_ns = std.Io.Clock.awake.now(
+            client.h3.quic_client.endpoint.io,
+        ).nanoseconds,
+    };
+    var expiring_vtable = expiring.delegate.vtable.*;
+    expiring_vtable.now = ExpireAfterFirstCheckIo.now;
+    expiring_vtable.netSend = ExpireAfterFirstCheckIo.netSend;
+    client.h3.quic_client.endpoint.io = .{
+        .userdata = &expiring,
+        .vtable = &expiring_vtable,
+    };
+    try std.testing.expectError(
+        error.Timeout,
+        client.closeWithDeadline(31, "dev done", .{
+            .clock = .awake,
+            .raw = .fromNanoseconds(expiring.now_ns + 1),
+        }),
+    );
+    const close_progress = testing.pendingCloseProgress(&client) orelse
+        return error.TestUnexpectedResult;
+    try std.testing.expectEqual(@as(usize, 0), close_progress.committed);
+    try std.testing.expectEqual(@as(usize, 0), expiring.send_calls);
+    try std.testing.expect(client.control.control.local_close_started);
+    try std.testing.expect(!client.control.control.local_close_failed);
+    try std.testing.expect(!client.h3.request_unusable);
+    client.h3.quic_client.endpoint.io = expiring.delegate;
+    try client.closeWithTimeout(31, "dev done", .fromSeconds(1));
+    const peer_fin = try client.receiveSessionEventWithTimeout(
+        .fromSeconds(1),
+    );
+    try std.testing.expect(peer_fin == .closed);
+    try std.testing.expectEqual(@as(u32, 0), peer_fin.closed.code);
 
     thread.join();
     if (shared.err) |err| return err;
 }
 
+test "WebTransport development close deadline fails closed after a visible prefix" {
+    const allocator = std.testing.allocator;
+    var threaded = std.Io.Threaded.init(allocator, .{});
+    defer threaded.deinit();
+    const io = threaded.io();
+
+    var server = try Server.bind(
+        allocator,
+        io,
+        .{ .ip4 = .loopback(0) },
+        .{ .http3 = .{ .quic = .{ .max_datagram_size = 4096 } } },
+    );
+    defer server.deinit();
+    const Shared = struct {
+        server: *Server,
+        accepted: std.Io.Event = .unset,
+        release: std.Io.Event = .unset,
+        err: ?anyerror = null,
+
+        fn run(self: *@This()) void {
+            self.runFallible() catch |err| {
+                self.err = err;
+                self.accepted.set(self.server.h3.quic_server.endpoint.io);
+            };
+        }
+
+        fn runFallible(self: *@This()) !void {
+            var session = try self.server.accept();
+            defer session.deinit(
+                self.server.h3.quic_server.endpoint.allocator,
+            );
+            self.accepted.set(self.server.h3.quic_server.endpoint.io);
+            try self.release.wait(self.server.h3.quic_server.endpoint.io);
+        }
+    };
+    var shared = Shared{ .server = &server };
+    const thread = try std.Thread.spawn(.{}, Shared.run, .{&shared});
+    var joined = false;
+    defer if (!joined) {
+        shared.release.set(io);
+        thread.join();
+    };
+
+    var client = try ClientSession.connect(
+        allocator,
+        io,
+        .{ .ip4 = .loopback(0) },
+        server.address(),
+        .{
+            .authority = "localhost",
+            .path = "/development-close-fail-closed",
+            .limits = .{ .http3 = .{
+                .quic = .{ .max_datagram_size = 4096 },
+                .max_stream_frame_data = 32,
+            } },
+        },
+    );
+    defer client.deinit();
+    try shared.accepted.wait(io);
+    client.h3.quic_client.endpoint.limits.max_datagram_size = 96;
+
+    const DeadlineAfterSendIo = struct {
+        delegate: std.Io,
+        now_ns: i96,
+        send_calls: usize = 0,
+
+        fn now(
+            userdata: ?*anyopaque,
+            _: std.Io.Clock,
+        ) std.Io.Timestamp {
+            const self: *@This() = @ptrCast(@alignCast(userdata.?));
+            return .fromNanoseconds(self.now_ns);
+        }
+
+        fn netSend(
+            userdata: ?*anyopaque,
+            socket_handle: net.Socket.Handle,
+            messages: []net.OutgoingMessage,
+            flags: net.SendFlags,
+        ) struct { ?net.Socket.SendError, usize } {
+            const self: *@This() = @ptrCast(@alignCast(userdata.?));
+            self.send_calls += 1;
+            const result = self.delegate.vtable.netSend(
+                self.delegate.userdata,
+                socket_handle,
+                messages,
+                flags,
+            );
+            if (result[1] != 0) self.now_ns += std.time.ns_per_s;
+            return result;
+        }
+    };
+    var timed = DeadlineAfterSendIo{
+        .delegate = client.h3.quic_client.endpoint.io,
+        .now_ns = std.Io.Clock.awake.now(
+            client.h3.quic_client.endpoint.io,
+        ).nanoseconds,
+    };
+    var timed_vtable = timed.delegate.vtable.*;
+    timed_vtable.now = DeadlineAfterSendIo.now;
+    timed_vtable.netSend = DeadlineAfterSendIo.netSend;
+    client.h3.quic_client.endpoint.io = .{
+        .userdata = &timed,
+        .vtable = &timed_vtable,
+    };
+    defer client.h3.quic_client.endpoint.io = timed.delegate;
+
+    const reason = "0123456789abcdef" ** 16;
+    try std.testing.expectError(
+        error.Timeout,
+        client.closeWithDeadline(41, reason, .{
+            .clock = .awake,
+            .raw = .fromNanoseconds(timed.now_ns + 1),
+        }),
+    );
+    try std.testing.expectEqual(@as(usize, 1), timed.send_calls);
+    try std.testing.expect(client.h3.request_unusable);
+    try std.testing.expect(client.control.control.local_close_failed);
+    try std.testing.expect(!client.control.control.local_close_started);
+    try std.testing.expect(testing.pendingCloseProgress(&client) == null);
+    try std.testing.expectError(
+        error.InvalidSessionState,
+        client.sendDatagram("must-not-send"),
+    );
+    try client.closeWithTimeout(99, "ignored", .fromSeconds(1));
+
+    shared.release.set(io);
+    thread.join();
+    joined = true;
+    if (shared.err) |err| return err;
+}
+
+test "WebTransport development server close deadline preserves zero-progress state" {
+    const allocator = std.testing.allocator;
+    var threaded = std.Io.Threaded.init(allocator, .{});
+    defer threaded.deinit();
+    const io = threaded.io();
+
+    var server = try Server.bind(
+        allocator,
+        io,
+        .{ .ip4 = .loopback(0) },
+        .{ .http3 = .{ .quic = .{ .max_datagram_size = 4096 } } },
+    );
+    defer server.deinit();
+    const Shared = struct {
+        server: *Server,
+        err: ?anyerror = null,
+
+        fn run(self: *@This()) void {
+            self.runFallible() catch |err| {
+                self.err = err;
+            };
+        }
+
+        fn runFallible(self: *@This()) !void {
+            var session = try self.server.accept();
+            defer session.deinit(
+                self.server.h3.quic_server.endpoint.allocator,
+            );
+            try std.testing.expectError(
+                error.Timeout,
+                session.closeWithDeadline(
+                    42,
+                    "server done",
+                    .{ .clock = .real, .raw = .zero },
+                ),
+            );
+            try std.testing.expect(
+                testing.pendingCloseProgress(&session) == null,
+            );
+            try std.testing.expect(
+                !session.control.control.local_close_started,
+            );
+            try session.closeWithTimeout(
+                42,
+                "server done",
+                .fromSeconds(1),
+            );
+            try std.testing.expect(session.control.control.local_close_sent);
+            const peer_fin = try session.receiveSessionEventWithTimeout(
+                .fromSeconds(1),
+            );
+            try std.testing.expect(peer_fin == .closed);
+            try std.testing.expectEqual(@as(u32, 0), peer_fin.closed.code);
+        }
+    };
+    var shared = Shared{ .server = &server };
+    const thread = try std.Thread.spawn(.{}, Shared.run, .{&shared});
+    var joined = false;
+    defer if (!joined) thread.join();
+
+    var client = try ClientSession.connect(
+        allocator,
+        io,
+        .{ .ip4 = .loopback(0) },
+        server.address(),
+        .{
+            .authority = "localhost",
+            .path = "/development-server-close-deadline",
+            .limits = .{ .http3 = .{
+                .quic = .{ .max_datagram_size = 4096 },
+            } },
+        },
+    );
+    defer client.deinit();
+    const closed = try client.receiveSessionEventWithTimeout(
+        .fromSeconds(1),
+    );
+    try std.testing.expect(closed == .closed);
+    try std.testing.expectEqual(@as(u32, 42), closed.closed.code);
+    try std.testing.expectEqualStrings("server done", closed.closed.reason);
+
+    thread.join();
+    joined = true;
+    if (shared.err) |err| return err;
+}
+
 test "WebTransport protected runtime CONNECT and datagrams over QUIC 1-RTT" {
     const allocator = std.testing.allocator;
+    const DeadlineAfterSendIo = struct {
+        delegate: std.Io,
+        now_ns: i96,
+        send_calls: usize = 0,
+
+        fn now(
+            userdata: ?*anyopaque,
+            _: std.Io.Clock,
+        ) std.Io.Timestamp {
+            const self: *@This() = @ptrCast(@alignCast(userdata.?));
+            return .fromNanoseconds(self.now_ns);
+        }
+
+        fn netSend(
+            userdata: ?*anyopaque,
+            socket_handle: net.Socket.Handle,
+            messages: []net.OutgoingMessage,
+            flags: net.SendFlags,
+        ) struct { ?net.Socket.SendError, usize } {
+            const self: *@This() = @ptrCast(@alignCast(userdata.?));
+            self.send_calls += 1;
+            const result = self.delegate.vtable.netSend(
+                self.delegate.userdata,
+                socket_handle,
+                messages,
+                flags,
+            );
+            if (result[1] != 0) self.now_ns += std.time.ns_per_s;
+            return result;
+        }
+    };
 
     var threaded = std.Io.Threaded.init(allocator, .{});
     defer threaded.deinit();
@@ -10109,6 +14948,10 @@ test "WebTransport protected runtime CONNECT and datagrams over QUIC 1-RTT" {
             }});
             pending_owned = false;
             defer accepted.deinit(server_ptr.h3.quic_server.endpoint.allocator);
+            try std.testing.expectEqual(
+                @as(?usize, 4067),
+                accepted.maxDatagramPayloadSize(server_ptr),
+            );
             var control_buffer: [64]u8 = undefined;
             const expected_control = "protected-client-control";
             var control_len: usize = 0;
@@ -10154,14 +14997,138 @@ test "WebTransport protected runtime CONNECT and datagrams over QUIC 1-RTT" {
                 shared.sibling_stream_id,
                 .{ .status = 204 },
             );
-            try accepted.drain(server_ptr);
-            var datagram = try server_ptr.receiveDatagram();
-            defer datagram.deinit(server_ptr.h3.quic_server.endpoint.allocator);
-            try std.testing.expectEqual(accepted.session_id.value, datagram.datagram.session_id.value);
-            try std.testing.expectEqualStrings("protected-client-dgram", datagram.datagram.payload);
-            try server_ptr.sendDatagram(datagram.packet.from, accepted.session_id, "protected-server-dgram");
-            const close_event = try accepted.receiveSessionEvent(
+            try std.testing.expectError(
+                error.Timeout,
+                accepted.drainWithDeadline(
+                    server_ptr,
+                    .{ .clock = .real, .raw = .zero },
+                ),
+            );
+            try std.testing.expect(
+                testing.pendingDrainProgress(&accepted) == null,
+            );
+            try std.testing.expect(
+                !accepted.control.control.local_drain_started,
+            );
+            var timed = DeadlineAfterSendIo{
+                .delegate = server_ptr.h3.quic_server.endpoint.io,
+                .now_ns = std.Io.Clock.awake.now(
+                    server_ptr.h3.quic_server.endpoint.io,
+                ).nanoseconds,
+            };
+            var timed_vtable = timed.delegate.vtable.*;
+            timed_vtable.now = DeadlineAfterSendIo.now;
+            timed_vtable.netSend = DeadlineAfterSendIo.netSend;
+            server_ptr.h3.quic_server.endpoint.io = .{
+                .userdata = &timed,
+                .vtable = &timed_vtable,
+            };
+            try std.testing.expectError(
+                error.Timeout,
+                accepted.drainWithDeadline(
+                    server_ptr,
+                    .{
+                        .clock = .awake,
+                        .raw = .fromNanoseconds(timed.now_ns + 1),
+                    },
+                ),
+            );
+            const drain_progress = testing.pendingDrainProgress(
+                &accepted,
+            ) orelse return error.TestUnexpectedResult;
+            try std.testing.expect(drain_progress.committed > 0);
+            try std.testing.expect(
+                drain_progress.committed < drain_progress.total,
+            );
+            try std.testing.expectEqual(@as(usize, 1), timed.send_calls);
+            try std.testing.expect(
+                !accepted.control.control.local_drain_sent,
+            );
+            server_ptr.h3.quic_server.endpoint.io = timed.delegate;
+            try accepted.drainWithTimeout(server_ptr, .fromSeconds(1));
+            try std.testing.expect(
+                testing.pendingDrainProgress(&accepted) == null,
+            );
+            try std.testing.expect(accepted.control.control.local_drain_sent);
+            var maximum = try server_ptr.receiveDatagram();
+            defer maximum.deinit(
+                server_ptr.h3.quic_server.endpoint.allocator,
+            );
+            try std.testing.expectEqual(
+                accepted.session_id.value,
+                maximum.datagram.session_id.value,
+            );
+            try std.testing.expectEqual(
+                @as(usize, 4067),
+                maximum.datagram.payload.len,
+            );
+            try std.testing.expect(std.mem.allEqual(
+                u8,
+                maximum.datagram.payload,
+                0x5a,
+            ));
+            for ([_][]const u8{ "protected-client-one", "protected-client-two" }) |expected| {
+                var datagram = try server_ptr.receiveDatagram();
+                defer datagram.deinit(
+                    server_ptr.h3.quic_server.endpoint.allocator,
+                );
+                try std.testing.expectEqual(
+                    accepted.session_id.value,
+                    datagram.datagram.session_id.value,
+                );
+                try std.testing.expectEqualStrings(
+                    expected,
+                    datagram.datagram.payload,
+                );
+            }
+            const datagram_packet_number = server_ptr.h3.next_packet_number;
+            try std.testing.expectError(
+                error.Timeout,
+                server_ptr.sendDatagramWithDeadline(
+                    accepted.request.from,
+                    accepted.session_id,
+                    "not-sent",
+                    .{ .clock = .real, .raw = .zero },
+                ),
+            );
+            try std.testing.expectEqual(
+                datagram_packet_number,
+                server_ptr.h3.next_packet_number,
+            );
+            var server_committed: usize = 99;
+            try accepted.sendDatagramsWithTimeout(
                 server_ptr,
+                &.{ "protected-server-one", "protected-server-two" },
+                &server_committed,
+                .fromSeconds(1),
+            );
+            try std.testing.expectEqual(@as(usize, 2), server_committed);
+            const response_entry = server_ptr.h3.outbound_bodies.find(
+                accepted.session_id.value,
+            ).?;
+            response_entry.flow_limit = response_entry.send.next_offset - 1;
+            try std.testing.expectError(
+                error.Timeout,
+                accepted.receiveSessionEventWithTimeout(
+                    server_ptr,
+                    .fromMilliseconds(20),
+                ),
+            );
+            const pending_close = accepted.pending_session_event orelse
+                return error.TestUnexpectedResult;
+            try std.testing.expect(pending_close == .closed);
+            try std.testing.expectEqual(@as(u32, 91), pending_close.closed.code);
+            try std.testing.expectEqualStrings(
+                "protected done",
+                pending_close.closed.reason,
+            );
+            try std.testing.expect(
+                !accepted.control.control.local_close_sent,
+            );
+            response_entry.flow_limit = null;
+            const close_event = try accepted.receiveSessionEventWithTimeout(
+                server_ptr,
+                .fromSeconds(1),
             );
             try std.testing.expect(close_event == .closed);
             try std.testing.expectEqual(
@@ -10222,6 +15189,43 @@ test "WebTransport protected runtime CONNECT and datagrams over QUIC 1-RTT" {
         .fromNow(io, .{ .raw = .fromSeconds(1), .clock = .awake }),
     );
     defer client.deinit();
+    try std.testing.expectEqual(@as(usize, 4067), client.maxDatagramSize());
+    const maximum_datagram = try allocator.alloc(
+        u8,
+        client.maxDatagramSize(),
+    );
+    defer allocator.free(maximum_datagram);
+    @memset(maximum_datagram, 0x5a);
+    const oversized_datagram = try allocator.alloc(
+        u8,
+        client.maxDatagramSize() + 1,
+    );
+    defer allocator.free(oversized_datagram);
+
+    var size_probe = DeadlineAfterSendIo{
+        .delegate = client.h3.quic_client.endpoint.io,
+        .now_ns = std.Io.Clock.awake.now(
+            client.h3.quic_client.endpoint.io,
+        ).nanoseconds,
+    };
+    var size_probe_vtable = size_probe.delegate.vtable.*;
+    size_probe_vtable.now = DeadlineAfterSendIo.now;
+    size_probe_vtable.netSend = DeadlineAfterSendIo.netSend;
+    client.h3.quic_client.endpoint.io = .{
+        .userdata = &size_probe,
+        .vtable = &size_probe_vtable,
+    };
+    const size_probe_packet_number = client.h3.next_packet_number;
+    try std.testing.expectError(
+        error.DatagramTooLarge,
+        client.sendDatagram(oversized_datagram),
+    );
+    try std.testing.expectEqual(@as(usize, 0), size_probe.send_calls);
+    try std.testing.expectEqual(
+        size_probe_packet_number,
+        client.h3.next_packet_number,
+    );
+    client.h3.quic_client.endpoint.io = size_probe.delegate;
     try std.testing.expectEqualStrings(
         "accepted",
         client.responseHeader("x-protected-admission").?,
@@ -10245,12 +15249,72 @@ test "WebTransport protected runtime CONNECT and datagrams over QUIC 1-RTT" {
     );
     const drain = try client.receiveSessionEvent();
     try std.testing.expect(drain == .draining);
-    try client.sendDatagram("protected-client-dgram");
-    var response = try client.receiveDatagram();
-    defer response.deinit(allocator);
-    try std.testing.expectEqual(client.session_id.value, response.datagram.session_id.value);
-    try std.testing.expectEqualStrings("protected-server-dgram", response.datagram.payload);
-    try client.close(91, "protected done");
+    try client.sendDatagram(maximum_datagram);
+    const datagram_packet_number = client.h3.next_packet_number;
+    try std.testing.expectError(
+        error.Timeout,
+        client.sendDatagramWithTimeout("not-sent", .zero),
+    );
+    try std.testing.expectEqual(
+        datagram_packet_number,
+        client.h3.next_packet_number,
+    );
+    var client_committed: usize = 99;
+    try client.sendDatagramsWithDeadline(
+        &.{ "protected-client-one", "protected-client-two" },
+        &client_committed,
+        .fromNow(io, .{ .raw = .fromSeconds(1), .clock = .awake }),
+    );
+    try std.testing.expectEqual(@as(usize, 2), client_committed);
+    for ([_][]const u8{ "protected-server-one", "protected-server-two" }) |expected| {
+        var response = try client.receiveDatagram();
+        defer response.deinit(allocator);
+        try std.testing.expectEqual(
+            client.session_id.value,
+            response.datagram.session_id.value,
+        );
+        try std.testing.expectEqualStrings(expected, response.datagram.payload);
+    }
+    try std.testing.expectError(
+        error.Timeout,
+        client.closeWithDeadline(
+            91,
+            "protected done",
+            .{ .clock = .real, .raw = .zero },
+        ),
+    );
+    try std.testing.expect(testing.pendingCloseProgress(&client) == null);
+    try std.testing.expect(!client.control.control.local_close_started);
+    var timed = DeadlineAfterSendIo{
+        .delegate = client.h3.quic_client.endpoint.io,
+        .now_ns = std.Io.Clock.awake.now(
+            client.h3.quic_client.endpoint.io,
+        ).nanoseconds,
+    };
+    var timed_vtable = timed.delegate.vtable.*;
+    timed_vtable.now = DeadlineAfterSendIo.now;
+    timed_vtable.netSend = DeadlineAfterSendIo.netSend;
+    client.h3.quic_client.endpoint.io = .{
+        .userdata = &timed,
+        .vtable = &timed_vtable,
+    };
+    try std.testing.expectError(
+        error.Timeout,
+        client.closeWithDeadline(91, "protected done", .{
+            .clock = .awake,
+            .raw = .fromNanoseconds(timed.now_ns + 1),
+        }),
+    );
+    const close_progress = testing.pendingCloseProgress(&client) orelse
+        return error.TestUnexpectedResult;
+    try std.testing.expect(close_progress.committed > 0);
+    try std.testing.expect(close_progress.committed < close_progress.total);
+    try std.testing.expectEqual(@as(usize, 1), timed.send_calls);
+    try std.testing.expect(!client.control.control.local_close_sent);
+    client.h3.quic_client.endpoint.io = timed.delegate;
+    try client.closeWithTimeout(91, "protected done", .fromSeconds(1));
+    try std.testing.expect(testing.pendingCloseProgress(&client) == null);
+    try std.testing.expect(client.control.control.local_close_sent);
     try std.testing.expectError(
         error.InvalidSessionState,
         client.sendDatagram("protected-late"),
@@ -10261,6 +15325,266 @@ test "WebTransport protected runtime CONNECT and datagrams over QUIC 1-RTT" {
     try std.testing.expectEqualStrings("", peer_fin.closed.reason);
 
     thread.join();
+    if (shared.err) |err| return err;
+}
+
+test "WebTransport protected session DATA slices resume exact suffix" {
+    const allocator = std.testing.allocator;
+    const DeadlineAfterSendIo = struct {
+        delegate: std.Io,
+        now_ns: i96,
+        send_calls: usize = 0,
+
+        fn now(
+            userdata: ?*anyopaque,
+            _: std.Io.Clock,
+        ) std.Io.Timestamp {
+            const self: *@This() = @ptrCast(@alignCast(userdata.?));
+            return .fromNanoseconds(self.now_ns);
+        }
+
+        fn netSend(
+            userdata: ?*anyopaque,
+            socket_handle: net.Socket.Handle,
+            messages: []net.OutgoingMessage,
+            flags: net.SendFlags,
+        ) struct { ?net.Socket.SendError, usize } {
+            const self: *@This() = @ptrCast(@alignCast(userdata.?));
+            self.send_calls += 1;
+            const result = self.delegate.vtable.netSend(
+                self.delegate.userdata,
+                socket_handle,
+                messages,
+                flags,
+            );
+            if (result[1] != 0) self.now_ns += std.time.ns_per_s;
+            return result;
+        }
+    };
+
+    var threaded = std.Io.Threaded.init(allocator, .{});
+    defer threaded.deinit();
+    const io = threaded.io();
+
+    const client_cid = [_]u8{ 0x6d, 0x73, 0x67, 0x01 };
+    const server_cid = [_]u8{ 0x6d, 0x73, 0x67, 0x02 };
+    const client_keys = quic.protection.deriveAes128Keys(
+        [_]u8{0xc1} ** quic.protection.secret_len,
+    );
+    const server_keys = quic.protection.deriveAes128Keys(
+        [_]u8{0xc2} ** quic.protection.secret_len,
+    );
+
+    var server = try ProtectedServer.bind(
+        allocator,
+        io,
+        .{ .ip4 = .loopback(0) },
+        .{ .http3 = .{ .quic = .{
+            .max_datagram_size = 4096,
+            .max_frames_per_datagram = 8,
+        } } },
+        .{
+            .receive_keys = client_keys,
+            .send_keys = server_keys,
+            .local_connection_id = &server_cid,
+            .peer_connection_id = &client_cid,
+            .max_frames_per_packet = 2,
+            .max_stream_frame_data = 48,
+        },
+    );
+    defer server.deinit();
+
+    var expected_storage: [256]u8 = undefined;
+    const expected_capsule = try http3.capsule.writeInto(
+        &expected_storage,
+        0x2a,
+        "protected-sliced-control-payload",
+    );
+    const split_a = 1;
+    const split_b = expected_capsule.len - 4;
+    const parts = [_][]const u8{
+        expected_capsule[0..split_a],
+        &.{},
+        expected_capsule[split_a..split_b],
+        expected_capsule[split_b..],
+    };
+
+    const Shared = struct {
+        server: *ProtectedServer,
+        io: std.Io,
+        expected: []const u8,
+        err: ?anyerror = null,
+
+        fn run(shared: *@This()) void {
+            shared.runFallible() catch |err| {
+                shared.err = err;
+            };
+        }
+
+        fn runFallible(shared: *@This()) !void {
+            var pending = try shared.server.receiveSessionRequest();
+            var pending_owned = true;
+            defer if (pending_owned) pending.deinit();
+            var accepted = try pending.accept();
+            pending_owned = false;
+            defer accepted.deinit(
+                shared.server.h3.quic_server.endpoint.allocator,
+            );
+
+            var received: [256]u8 = undefined;
+            var used: usize = 0;
+            while (used < shared.expected.len) {
+                const read = try shared.server.receiveSessionData(
+                    accepted.session_id,
+                    received[used..],
+                );
+                try std.testing.expect(!read.fin);
+                used += read.bytes;
+            }
+            try std.testing.expectEqualSlices(
+                u8,
+                shared.expected,
+                received[0..used],
+            );
+
+            var response_progress: http3.runtime.BodyWriteProgress = .{};
+            try shared.server.sendSessionDataSlicesWithTimeout(
+                accepted.request.from,
+                accepted.session_id,
+                &.{ shared.expected[0..2], &.{}, shared.expected[2..] },
+                false,
+                &response_progress,
+                .fromSeconds(1),
+            );
+            try std.testing.expectEqual(
+                shared.expected.len,
+                response_progress.committed_bytes,
+            );
+            try std.testing.expect(!response_progress.fin_committed);
+        }
+    };
+
+    var shared = Shared{
+        .server = &server,
+        .io = io,
+        .expected = expected_capsule,
+    };
+    const thread = try std.Thread.spawn(.{}, Shared.run, .{&shared});
+    var joined = false;
+    defer if (!joined) thread.join();
+
+    var client = try ProtectedClientSession.connect(
+        allocator,
+        io,
+        .{ .ip4 = .loopback(0) },
+        server.address(),
+        .{
+            .authority = "localhost",
+            .path = "/wt-protected-slices",
+            .limits = .{ .http3 = .{ .quic = .{
+                .max_datagram_size = 4096,
+                .max_frames_per_datagram = 8,
+            } } },
+            .config = .{
+                .receive_keys = server_keys,
+                .send_keys = client_keys,
+                .local_connection_id = &client_cid,
+                .peer_connection_id = &server_cid,
+                .max_frames_per_packet = 2,
+                .max_stream_frame_data = 48,
+            },
+        },
+    );
+    defer client.deinit();
+
+    var invalid_progress: http3.runtime.BodyWriteProgress = .{
+        .committed_bytes = 99,
+        .fin_committed = true,
+    };
+    try std.testing.expectError(
+        error.Timeout,
+        client.sendSessionDataSlicesWithTimeout(
+            &parts,
+            false,
+            &invalid_progress,
+            .zero,
+        ),
+    );
+    try std.testing.expectEqual(
+        @as(usize, 0),
+        invalid_progress.committed_bytes,
+    );
+    try std.testing.expect(!invalid_progress.fin_committed);
+
+    var timed = DeadlineAfterSendIo{
+        .delegate = client.h3.quic_client.endpoint.io,
+        .now_ns = std.Io.Clock.awake.now(
+            client.h3.quic_client.endpoint.io,
+        ).nanoseconds,
+    };
+    var timed_vtable = timed.delegate.vtable.*;
+    timed_vtable.now = DeadlineAfterSendIo.now;
+    timed_vtable.netSend = DeadlineAfterSendIo.netSend;
+    client.h3.quic_client.endpoint.io = .{
+        .userdata = &timed,
+        .vtable = &timed_vtable,
+    };
+    var progress: http3.runtime.BodyWriteProgress = .{};
+    try std.testing.expectError(
+        error.Timeout,
+        client.sendSessionDataSlicesWithDeadline(
+            &parts,
+            false,
+            &progress,
+            .{
+                .clock = .awake,
+                .raw = .fromNanoseconds(timed.now_ns + 1),
+            },
+        ),
+    );
+    try std.testing.expect(progress.committed_bytes > 0);
+    try std.testing.expect(
+        progress.committed_bytes < expected_capsule.len,
+    );
+    try std.testing.expect(!progress.fin_committed);
+    try std.testing.expectEqual(@as(usize, 1), timed.send_calls);
+
+    client.h3.quic_client.endpoint.io = timed.delegate;
+    var suffix_storage: [parts.len][]const u8 = undefined;
+    const suffix = testBodyPartsSuffix(
+        &parts,
+        progress.committed_bytes,
+        &suffix_storage,
+    );
+    try client.sendSessionDataSlicesWithTimeout(
+        suffix,
+        false,
+        &progress,
+        .fromSeconds(1),
+    );
+    var suffix_len: usize = 0;
+    for (suffix) |part| suffix_len += part.len;
+    try std.testing.expectEqual(suffix_len, progress.committed_bytes);
+    try std.testing.expect(!progress.fin_committed);
+
+    var response: [256]u8 = undefined;
+    var response_len: usize = 0;
+    while (response_len < expected_capsule.len) {
+        const read = try client.receiveSessionDataWithTimeout(
+            response[response_len..],
+            .fromSeconds(1),
+        );
+        try std.testing.expect(!read.fin);
+        response_len += read.bytes;
+    }
+    try std.testing.expectEqualSlices(
+        u8,
+        expected_capsule,
+        response[0..response_len],
+    );
+
+    thread.join();
+    joined = true;
     if (shared.err) |err| return err;
 }
 
@@ -10418,9 +15742,25 @@ test "WebTransport protected control receive deadlines preserve parser state" {
         error.Timeout,
         client.receiveSessionEventWithTimeout(.fromMilliseconds(5)),
     );
-    const closed = try client.receiveSessionEventWithTimeout(
-        .fromSeconds(1),
+    const request_entry = client.h3.outbound_bodies.find(
+        client.session_id.value,
+    ).?;
+    request_entry.flow_limit = request_entry.send.next_offset - 1;
+    try std.testing.expectError(
+        error.Timeout,
+        client.receiveSessionEventWithTimeout(.fromMilliseconds(50)),
     );
+    const pending_close = client.pending_session_event orelse
+        return error.TestUnexpectedResult;
+    try std.testing.expect(pending_close == .closed);
+    try std.testing.expectEqual(@as(u32, 71), pending_close.closed.code);
+    try std.testing.expectEqualStrings(
+        "server done",
+        pending_close.closed.reason,
+    );
+    try std.testing.expect(!client.control.control.local_close_sent);
+    request_entry.flow_limit = null;
+    const closed = try client.receiveSessionEventWithTimeout(.fromSeconds(1));
     try std.testing.expect(closed == .closed);
     try std.testing.expectEqual(@as(u32, 71), closed.closed.code);
     try std.testing.expectEqualStrings("server done", closed.closed.reason);
@@ -10471,6 +15811,47 @@ test "WebTransport protected control deadlines reject invalid budgets" {
             .{ .raw = .zero, .clock = .real },
         ),
     );
+    var server_datagram_committed: usize = 99;
+    const server_packet_number = server.h3.next_packet_number;
+    try std.testing.expectError(
+        error.Timeout,
+        server_session.sendDatagramsWithDeadline(
+            &server,
+            &.{ "not", "sent" },
+            &server_datagram_committed,
+            .{ .raw = .zero, .clock = .real },
+        ),
+    );
+    try std.testing.expectEqual(@as(usize, 0), server_datagram_committed);
+    try std.testing.expectEqual(
+        server_packet_number,
+        server.h3.next_packet_number,
+    );
+    try std.testing.expectError(
+        error.Timeout,
+        server_session.drainWithTimeout(&server, .zero),
+    );
+    try std.testing.expect(
+        testing.pendingDrainProgress(&server_session) == null,
+    );
+    try std.testing.expect(
+        !server_session.control.control.local_drain_started,
+    );
+    try std.testing.expectError(
+        error.Timeout,
+        server_session.closeWithDeadline(
+            &server,
+            70,
+            "invalid-clock",
+            .{ .raw = .zero, .clock = .real },
+        ),
+    );
+    try std.testing.expect(
+        testing.pendingCloseProgress(&server_session) == null,
+    );
+    try std.testing.expect(
+        !server_session.control.control.local_close_started,
+    );
 
     var client_h3 = try http3.runtime.ProtectedClient.connect(
         allocator,
@@ -10501,6 +15882,58 @@ test "WebTransport protected control deadlines reject invalid budgets" {
             .{ .raw = .zero, .clock = .real },
         ),
     );
+    var client_datagram_committed: usize = 99;
+    const client_packet_number = client_session.h3.next_packet_number;
+    try std.testing.expectError(
+        error.Timeout,
+        client_session.sendDatagramsWithTimeout(
+            &.{ "not", "sent" },
+            &client_datagram_committed,
+            .zero,
+        ),
+    );
+    try std.testing.expectEqual(@as(usize, 0), client_datagram_committed);
+    try std.testing.expectEqual(
+        client_packet_number,
+        client_session.h3.next_packet_number,
+    );
+    var progress: http3.runtime.BodyWriteProgress = .{
+        .committed_bytes = 99,
+        .fin_committed = true,
+    };
+    try std.testing.expectError(
+        error.Timeout,
+        client_session.sendSessionDataWithTimeout(
+            "not-sent",
+            false,
+            &progress,
+            .zero,
+        ),
+    );
+    try std.testing.expectEqual(@as(usize, 0), progress.committed_bytes);
+    try std.testing.expect(!progress.fin_committed);
+    try std.testing.expectError(
+        error.Timeout,
+        client_session.drainWithDeadline(
+            .{ .raw = .zero, .clock = .real },
+        ),
+    );
+    try std.testing.expect(
+        testing.pendingDrainProgress(&client_session) == null,
+    );
+    try std.testing.expect(
+        !client_session.control.control.local_drain_started,
+    );
+    try std.testing.expectError(
+        error.Timeout,
+        client_session.closeWithTimeout(70, "zero", .zero),
+    );
+    try std.testing.expect(
+        testing.pendingCloseProgress(&client_session) == null,
+    );
+    try std.testing.expect(
+        !client_session.control.control.local_close_started,
+    );
 }
 
 test "WebTransport stateful preconfigured runtime exchanges associated streams" {
@@ -10518,6 +15951,23 @@ test "WebTransport stateful preconfigured runtime exchanges associated streams" 
         [_]u8{0xc2} ** quic.protection.secret_len,
     );
     const local_settings = webtransport.defaultSettings(.{});
+    var drop_associated_stream = false;
+    var dropped_associated_datagrams: usize = 0;
+    const DropFirstAssociatedDatagram = struct {
+        fn send(context: *anyopaque, _: []const u8) bool {
+            const state: *struct {
+                enabled: *bool,
+                count: *usize,
+            } = @ptrCast(@alignCast(context));
+            if (!state.enabled.* or state.count.* != 0) return false;
+            state.count.* = 1;
+            return true;
+        }
+    };
+    var drop_state = .{
+        .enabled = &drop_associated_stream,
+        .count = &dropped_associated_datagrams,
+    };
 
     var server = try StatefulProtectedServer.bind(
         allocator,
@@ -10573,30 +16023,80 @@ test "WebTransport stateful preconfigured runtime exchanges associated streams" 
                 .{ .raw = .fromSeconds(1), .clock = .awake },
             ));
             defer session.deinit();
-
-            var client_bidi = try session.receiveStream();
-            defer client_bidi.deinit();
-            try std.testing.expectEqual(
-                webtransport.StreamDirection.bidirectional,
-                client_bidi.direction,
+            var datagrams = try session.receiveManyDatagramsWithTimeout(
+                3,
+                .fromSeconds(3),
             );
-            try std.testing.expectEqualStrings("client-bidi", client_bidi.payload);
-            try session.sendStream(client_bidi.stream_id, "server-bidi", true);
-
-            var client_uni = try session.receiveStream();
-            defer client_uni.deinit();
-            try std.testing.expectEqual(
-                webtransport.StreamDirection.unidirectional,
-                client_uni.direction,
+            defer datagrams.deinit();
+            if (datagrams.firstError()) |err| return err;
+            const expected_datagrams = [_][]const u8{
+                "stateful-one",
+                "stateful-two",
+                "stateful-three",
+            };
+            for (datagrams.datagrams, expected_datagrams) |maybe, expected| {
+                const datagram = maybe orelse return error.MissingDatagram;
+                try std.testing.expectEqualStrings(
+                    expected,
+                    datagram.datagram.payload,
+                );
+            }
+            var datagrams_sent: usize = 99;
+            try session.sendDatagramsWithTimeout(
+                &.{ "stateful-reply-one", "stateful-reply-two" },
+                &datagrams_sent,
+                .fromSeconds(3),
             );
-            try std.testing.expectEqualStrings("client-uni", client_uni.payload);
+            try std.testing.expectEqual(@as(usize, 2), datagrams_sent);
+            const session_data_event = try session
+                .receiveSessionEventWithTimeout(.fromSeconds(3));
+            try std.testing.expect(session_data_event == .draining);
+
+            // The first bidi packet is deliberately lost below, so the later
+            // uni stream may complete first. Association routing must remain
+            // correct across streams while the missing bidi prefix/data is
+            // recovered.
+            var received_bidi = false;
+            var received_uni = false;
+            while (!received_bidi or !received_uni) {
+                var received = try session.receiveStreamWithTimeout(
+                    .fromSeconds(3),
+                );
+                defer received.deinit();
+                switch (received.direction) {
+                    .bidirectional => {
+                        try std.testing.expect(!received_bidi);
+                        try std.testing.expectEqualStrings(
+                            "client-bidi",
+                            received.payload,
+                        );
+                        try session.sendStreamSlices(
+                            received.stream_id,
+                            &.{ "server-", &.{}, "bidi" },
+                            true,
+                        );
+                        received_bidi = true;
+                    },
+                    .unidirectional => {
+                        try std.testing.expect(!received_uni);
+                        try std.testing.expectEqualStrings(
+                            "client-uni",
+                            received.payload,
+                        );
+                        received_uni = true;
+                    },
+                }
+            }
 
             const server_uni = try session.openUnidirectionalStream();
             try session.sendStream(server_uni, "server-uni", true);
 
             var reset_buffer: [32]u8 = undefined;
             while (true) {
-                const event = try session.readStream(&reset_buffer);
+                const event = try session.readStreamWithTimeout(
+                    &reset_buffer,
+                    .fromSeconds(3),
+                );
                 switch (event) {
                     .reset => |reset| {
                         try std.testing.expectEqual(
@@ -10613,7 +16113,10 @@ test "WebTransport stateful preconfigured runtime exchanges associated streams" 
             const stopped_uni = try session.openUnidirectionalStream();
             try session.sendStream(stopped_uni, "stop-this", false);
             while (true) {
-                const event = try session.readStream(&reset_buffer);
+                const event = try session.readStreamWithTimeout(
+                    &reset_buffer,
+                    .fromSeconds(3),
+                );
                 switch (event) {
                     .stopped => |stopped| {
                         try std.testing.expectEqual(stopped_uni, stopped.stream_id);
@@ -10629,7 +16132,9 @@ test "WebTransport stateful preconfigured runtime exchanges associated streams" 
             }
 
             try session.drain();
-            const close_event = try session.receiveSessionEvent();
+            const close_event = try session.receiveSessionEventWithTimeout(
+                .fromSeconds(3),
+            );
             try std.testing.expect(close_event == .closed);
             try std.testing.expectEqual(
                 @as(u32, 93),
@@ -10651,7 +16156,13 @@ test "WebTransport stateful preconfigured runtime exchanges associated streams" 
         .authority = "localhost",
         .path = "/wt-stateful-protected",
         .limits = .{
-            .http3 = .{ .quic = .{ .max_datagram_size = 4096 } },
+            .http3 = .{ .quic = .{
+                .max_datagram_size = 4096,
+                .send_interceptor = .{
+                    .context = &drop_state,
+                    .should_drop = DropFirstAssociatedDatagram.send,
+                },
+            } },
             .max_session_streams = 2,
         },
         .h3 = .{ .local_settings = local_settings },
@@ -10702,6 +16213,40 @@ test "WebTransport stateful preconfigured runtime exchanges associated streams" 
         client.address(),
         client.session.h3.address(),
     );
+    var invalid_datagram_count: usize = 99;
+    try std.testing.expectError(
+        error.Timeout,
+        client.sendDatagramsWithTimeout(
+            &.{"not-sent"},
+            &invalid_datagram_count,
+            .zero,
+        ),
+    );
+    try std.testing.expectEqual(@as(usize, 0), invalid_datagram_count);
+    var datagrams_sent: usize = 99;
+    try client.sendDatagramsWithDeadline(
+        &.{ "stateful-one", "stateful-two", "stateful-three" },
+        &datagrams_sent,
+        .fromNow(io, .{ .raw = .fromSeconds(3), .clock = .awake }),
+    );
+    try std.testing.expectEqual(@as(usize, 3), datagrams_sent);
+    var datagrams = try client.receiveManyDatagramsWithTimeout(
+        2,
+        .fromSeconds(3),
+    );
+    defer datagrams.deinit();
+    if (datagrams.firstError()) |err| return err;
+    const expected_datagrams = [_][]const u8{
+        "stateful-reply-one",
+        "stateful-reply-two",
+    };
+    for (datagrams.datagrams, expected_datagrams) |maybe, expected| {
+        const datagram = maybe orelse return error.MissingDatagram;
+        try std.testing.expectEqualStrings(
+            expected,
+            datagram.datagram.payload,
+        );
+    }
     const before_invalid_open = client.stats().outgoing_streams_created;
     const before_invalid_registry = client.session.streams.registered().len;
     try std.testing.expectError(
@@ -10723,6 +16268,26 @@ test "WebTransport stateful preconfigured runtime exchanges associated streams" 
         before_invalid_registry,
         client.session.streams.registered().len,
     );
+    var unknown_storage: [64]u8 = undefined;
+    const unknown = try http3.capsule.writeInto(
+        &unknown_storage,
+        0x2a,
+        "stateful-session-data",
+    );
+    var drain_storage: [16]u8 = undefined;
+    const drain = try session_control.writeDrainInto(&drain_storage);
+    var session_data_progress: http3.runtime.BodyWriteProgress = .{};
+    try client.sendSessionDataSlicesWithTimeout(
+        &.{ unknown[0..1], unknown[1..], &.{}, drain },
+        false,
+        &session_data_progress,
+        .fromSeconds(1),
+    );
+    try std.testing.expectEqual(
+        unknown.len + drain.len,
+        session_data_progress.committed_bytes,
+    );
+    try std.testing.expect(!session_data_progress.fin_committed);
 
     // Practical transport parameters provide immediate credit. Exercise both
     // bounded directions and verify the QUIC reservation counter advances.
@@ -10733,7 +16298,16 @@ test "WebTransport stateful preconfigured runtime exchanges associated streams" 
         before_invalid_open + 1,
         client.stats().outgoing_streams_created,
     );
-    try client.sendStream(bidi, "client-bidi", true);
+    // CONNECT and SETTINGS are complete, so the next client datagram carries
+    // the first associated stream's modern prefix. Consume it before the UDP
+    // socket and require the complete 1-RTT owner to recover it while later
+    // STREAM offsets are already in flight.
+    drop_associated_stream = true;
+    try client.sendStreamSlices(
+        bidi,
+        &.{ "client-", &.{}, "bi", "di" },
+        true,
+    );
     const uni = try client.openUnidirectionalStreamWithDeadline(.fromNow(
         io,
         .{ .raw = .fromSeconds(1), .clock = .awake },
@@ -10744,17 +16318,22 @@ test "WebTransport stateful preconfigured runtime exchanges associated streams" 
     );
     try client.sendStream(uni, "client-uni", true);
 
-    var response_bidi = try client.receiveStream();
+    var response_bidi = try client.receiveStreamWithTimeout(.fromSeconds(3));
     defer response_bidi.deinit();
     try std.testing.expectEqual(bidi, response_bidi.stream_id);
     try std.testing.expectEqualStrings("server-bidi", response_bidi.payload);
-    var response_uni = try client.receiveStream();
+    var response_uni = try client.receiveStreamWithTimeout(.fromSeconds(3));
     defer response_uni.deinit();
     try std.testing.expectEqual(
         webtransport.StreamDirection.unidirectional,
         response_uni.direction,
     );
     try std.testing.expectEqualStrings("server-uni", response_uni.payload);
+    try std.testing.expectEqual(
+        @as(usize, 1),
+        dropped_associated_datagrams,
+    );
+    try std.testing.expect(client.stats().packets_lost >= 1);
 
     const reset_bidi = try client.openBidirectionalStream();
     try std.testing.expectError(
@@ -10766,20 +16345,45 @@ test "WebTransport stateful preconfigured runtime exchanges associated streams" 
     var stop_buffer: [32]u8 = undefined;
     var stop_sent = false;
     while (!stop_sent) {
-        const event = try client.readStream(&stop_buffer);
+        const event = try client.readStreamWithTimeout(
+            &stop_buffer,
+            .fromSeconds(3),
+        );
         switch (event) {
             .data => |data| {
                 if (data.direction == .unidirectional and
                     !data.locally_initiated)
                 {
-                    try client.stopStream(data.stream_id, 92);
+                    const stream = client.session.streams.get(
+                        data.stream_id,
+                    ) orelse return error.UnknownStream;
+                    try std.testing.expect(stream.stop_sent == null);
+                    try std.testing.expectError(
+                        error.Timeout,
+                        client.stopStreamWithTimeout(
+                            data.stream_id,
+                            92,
+                            .zero,
+                        ),
+                    );
+                    try std.testing.expect(stream.stop_sent == null);
+                    try client.stopStreamWithDeadline(
+                        data.stream_id,
+                        92,
+                        .fromNow(io, .{
+                            .raw = .fromSeconds(3),
+                            .clock = .awake,
+                        }),
+                    );
                     stop_sent = true;
                 }
             },
             else => {},
         }
     }
-    const drain_event = try client.receiveSessionEvent();
+    const drain_event = try client.receiveSessionEventWithTimeout(
+        .fromSeconds(3),
+    );
     try std.testing.expect(drain_event == .draining);
     try client.close(93, "stateful done");
     try std.testing.expectError(
@@ -10793,7 +16397,9 @@ test "WebTransport stateful preconfigured runtime exchanges associated streams" 
     try std.testing.expect(client.session.h3.hasConnectDatagramAssociation(
         client.session.session_id.value,
     ));
-    const peer_fin = try client.receiveSessionEvent();
+    const peer_fin = try client.receiveSessionEventWithTimeout(
+        .fromSeconds(3),
+    );
     try std.testing.expect(peer_fin == .closed);
     try std.testing.expect(client.session.h3.hasConnectDatagramAssociation(
         client.session.session_id.value,
@@ -10909,14 +16515,40 @@ test "WebTransport handshake runtime CONNECT and datagrams over QUIC handshake" 
                 true,
             );
 
-            var datagram = try accepted.receiveDatagram();
-            defer datagram.deinit(accepted.h3.established.connection.endpoint.allocator);
-            try std.testing.expectEqual(accepted.session_id.value, datagram.datagram.session_id.value);
-            try std.testing.expectEqualStrings("handshake-client-dgram", datagram.datagram.payload);
-            try accepted.sendDatagram("handshake-server-dgram");
+            var datagrams = try accepted.receiveManyDatagrams(3);
+            defer datagrams.deinit();
+            if (datagrams.firstError()) |err| return err;
+            try std.testing.expectEqual(@as(usize, 3), datagrams.receivedCount());
+            const client_payloads = [_][]const u8{
+                "handshake-client-one",
+                "handshake-client-two",
+                "handshake-client-three",
+            };
+            for (datagrams.datagrams, client_payloads) |maybe, expected| {
+                const datagram = maybe orelse return error.MissingDatagram;
+                try std.testing.expectEqual(
+                    accepted.session_id.value,
+                    datagram.datagram.session_id.value,
+                );
+                try std.testing.expectEqualStrings(
+                    expected,
+                    datagram.datagram.payload,
+                );
+            }
+            var committed: usize = 99;
+            try accepted.sendDatagramsWithTimeout(
+                &.{
+                    "handshake-server-one",
+                    "handshake-server-two",
+                    "handshake-server-three",
+                },
+                &committed,
+                .fromSeconds(1),
+            );
+            try std.testing.expectEqual(@as(usize, 3), committed);
             const stats = accepted.getStats();
-            try std.testing.expectEqual(@as(u64, 1), stats.datagrams_received);
-            try std.testing.expectEqual(@as(u64, 1), stats.datagrams_sent);
+            try std.testing.expectEqual(@as(u64, 3), stats.datagrams_received);
+            try std.testing.expectEqual(@as(u64, 3), stats.datagrams_sent);
             try std.testing.expect(stats.packets_received > 0);
             try std.testing.expect(stats.packets_sent > 0);
         }
@@ -10951,6 +16583,38 @@ test "WebTransport handshake runtime CONNECT and datagrams over QUIC handshake" 
         error.DatagramTooLarge,
         client.sendDatagram(oversized),
     );
+    const before_invalid_batch = client.stats();
+    var oversized_batch_count: usize = 99;
+    try std.testing.expectError(
+        error.DatagramTooLarge,
+        client.sendDatagramsWithDeadline(
+            &.{ "valid", oversized },
+            &oversized_batch_count,
+            .fromNow(io, .{ .raw = .fromSeconds(1), .clock = .awake }),
+        ),
+    );
+    try std.testing.expectEqual(@as(usize, 0), oversized_batch_count);
+    try std.testing.expectEqual(
+        before_invalid_batch.packets_sent,
+        client.stats().packets_sent,
+    );
+    try std.testing.expectEqual(
+        before_invalid_batch.datagrams_sent,
+        client.stats().datagrams_sent,
+    );
+    var invalid_datagram_batch_progress: usize = 99;
+    try std.testing.expectError(
+        error.Timeout,
+        client.sendDatagramsWithTimeout(
+            &.{"not-sent"},
+            &invalid_datagram_batch_progress,
+            .zero,
+        ),
+    );
+    try std.testing.expectEqual(
+        @as(usize, 0),
+        invalid_datagram_batch_progress,
+    );
 
     const client_bidi_id = try client.openBidirectionalStream();
     try client.sendStream(client_bidi_id, "client-bidi", true);
@@ -10974,18 +16638,429 @@ test "WebTransport handshake runtime CONNECT and datagrams over QUIC handshake" 
     try std.testing.expect(!server_uni.locally_initiated);
     try std.testing.expectEqualStrings("server-uni", server_uni.payload);
 
-    try client.sendDatagram("handshake-client-dgram");
-    var response = try client.receiveDatagram();
-    defer response.deinit(allocator);
-    try std.testing.expectEqual(client.session_id.value, response.datagram.session_id.value);
-    try std.testing.expectEqualStrings("handshake-server-dgram", response.datagram.payload);
+    var committed_datagrams: usize = 99;
+    try client.sendDatagramsWithDeadline(
+        &.{
+            "handshake-client-one",
+            "handshake-client-two",
+            "handshake-client-three",
+        },
+        &committed_datagrams,
+        .fromNow(io, .{ .raw = .fromSeconds(1), .clock = .awake }),
+    );
+    try std.testing.expectEqual(@as(usize, 3), committed_datagrams);
+    var responses = try client.receiveManyDatagramsWithTimeout(
+        3,
+        .fromSeconds(1),
+    );
+    defer responses.deinit();
+    if (responses.firstError()) |err| return err;
+    try std.testing.expectEqual(@as(usize, 3), responses.receivedCount());
+    const server_payloads = [_][]const u8{
+        "handshake-server-one",
+        "handshake-server-two",
+        "handshake-server-three",
+    };
+    for (responses.datagrams, server_payloads) |maybe, expected| {
+        const datagram = maybe orelse return error.MissingDatagram;
+        try std.testing.expectEqual(
+            client.session_id.value,
+            datagram.datagram.session_id.value,
+        );
+        try std.testing.expectEqualStrings(
+            expected,
+            datagram.datagram.payload,
+        );
+    }
     const stats = client.stats();
-    try std.testing.expectEqual(@as(u64, 1), stats.datagrams_sent);
-    try std.testing.expectEqual(@as(u64, 1), stats.datagrams_received);
+    try std.testing.expectEqual(@as(u64, 3), stats.datagrams_sent);
+    try std.testing.expectEqual(@as(u64, 3), stats.datagrams_received);
     try std.testing.expect(stats.packets_sent > 0);
     try std.testing.expect(stats.packets_received > 0);
 
     thread.join();
+    if (shared.err) |err| return err;
+}
+
+test "WebTransport handshake session DATA slices resume exact suffix" {
+    const allocator = std.testing.allocator;
+    const DeadlineAfterSendIo = struct {
+        delegate: std.Io,
+        now_ns: i96,
+        send_calls: usize = 0,
+
+        fn now(
+            userdata: ?*anyopaque,
+            _: std.Io.Clock,
+        ) std.Io.Timestamp {
+            const self: *@This() = @ptrCast(@alignCast(userdata.?));
+            return .fromNanoseconds(self.now_ns);
+        }
+
+        fn netSend(
+            userdata: ?*anyopaque,
+            socket_handle: net.Socket.Handle,
+            messages: []net.OutgoingMessage,
+            flags: net.SendFlags,
+        ) struct { ?net.Socket.SendError, usize } {
+            const self: *@This() = @ptrCast(@alignCast(userdata.?));
+            self.send_calls += 1;
+            const result = self.delegate.vtable.netSend(
+                self.delegate.userdata,
+                socket_handle,
+                messages,
+                flags,
+            );
+            if (result[1] != 0) self.now_ns += std.time.ns_per_s;
+            return result;
+        }
+    };
+
+    var threaded = std.Io.Threaded.init(allocator, .{});
+    defer threaded.deinit();
+    const io = threaded.io();
+
+    const original_dcid =
+        [_]u8{ 0x73, 0x6c, 0x69, 0x63, 0x65, 0x73, 0x01, 0x02 };
+    const client_cid = [_]u8{ 0x73, 0x6c, 0x69, 0x01 };
+    const server_cid = [_]u8{ 0x73, 0x6c, 0x69, 0x02 };
+    const session_options: http3.runtime.HandshakeSessionOptions = .{
+        .max_frames_per_packet = 2,
+        .max_stream_frame_data = 48,
+        .paced_body_chunk_bytes = 16,
+    };
+    const stream_payload = try allocator.alloc(u8, 32 * 1024);
+    defer allocator.free(stream_payload);
+    for (stream_payload, 0..) |*byte, index| byte.* = @truncate(index);
+
+    var server = try HandshakeServer.bind(
+        allocator,
+        io,
+        .{ .ip4 = .loopback(0) },
+        .{ .http3 = .{ .quic = .{
+            .max_datagram_size = 4096,
+            .max_frames_per_datagram = 8,
+        } } },
+        .{
+            .handshake = .{
+                .local_connection_id = &server_cid,
+                .random = [_]u8{0xa3} ** 32,
+                .x25519_secret_key = [_]u8{0xa4} ** 32,
+            },
+            .session = session_options,
+        },
+    );
+    defer server.deinit();
+
+    var unknown_storage: [128]u8 = undefined;
+    const unknown = try http3.capsule.writeInto(
+        &unknown_storage,
+        0x2a,
+        "handshake-session-data-slices-cross-packet-boundary-0123456789",
+    );
+    var drain_storage: [16]u8 = undefined;
+    const drain = try session_control.writeDrainInto(&drain_storage);
+    const parts = [_][]const u8{
+        unknown[0..1],
+        &.{},
+        unknown[1 .. unknown.len - 3],
+        unknown[unknown.len - 3 ..],
+        drain[0..1],
+        drain[1..],
+    };
+    const total_len = unknown.len + drain.len;
+
+    const Shared = struct {
+        server: *HandshakeServer,
+        io: std.Io,
+        parts: []const []const u8,
+        total_len: usize,
+        stream_payload: []const u8,
+        err: ?anyerror = null,
+
+        fn run(shared: *@This()) void {
+            shared.runFallible() catch |err| {
+                shared.err = err;
+            };
+        }
+
+        fn runFallible(shared: *@This()) !void {
+            var accepted = try shared.server.accept();
+            defer accepted.deinit();
+
+            const request_event = try accepted
+                .receiveSessionEventWithTimeout(.fromSeconds(2));
+            try std.testing.expect(request_event == .draining);
+
+            var invalid_progress: http3.runtime.BodyWriteProgress = .{
+                .committed_bytes = 99,
+                .fin_committed = true,
+            };
+            try std.testing.expectError(
+                error.Timeout,
+                accepted.sendSessionDataSlicesWithDeadline(
+                    shared.parts,
+                    false,
+                    &invalid_progress,
+                    .{ .clock = .real, .raw = .zero },
+                ),
+            );
+            try std.testing.expectEqual(
+                @as(usize, 0),
+                invalid_progress.committed_bytes,
+            );
+            try std.testing.expect(!invalid_progress.fin_committed);
+
+            var timed = DeadlineAfterSendIo{
+                .delegate = accepted.h3.established.connection.endpoint.io,
+                .now_ns = std.Io.Clock.awake.now(
+                    accepted.h3.established.connection.endpoint.io,
+                ).nanoseconds,
+            };
+            var timed_vtable = timed.delegate.vtable.*;
+            timed_vtable.now = DeadlineAfterSendIo.now;
+            timed_vtable.netSend = DeadlineAfterSendIo.netSend;
+            accepted.h3.established.connection.endpoint.io = .{
+                .userdata = &timed,
+                .vtable = &timed_vtable,
+            };
+            var progress: http3.runtime.BodyWriteProgress = .{};
+            try std.testing.expectError(
+                error.Timeout,
+                accepted.sendSessionDataSlicesWithDeadline(
+                    shared.parts,
+                    false,
+                    &progress,
+                    .{
+                        .clock = .awake,
+                        .raw = .fromNanoseconds(timed.now_ns + 1),
+                    },
+                ),
+            );
+            try std.testing.expect(progress.committed_bytes > 0);
+            try std.testing.expect(
+                progress.committed_bytes < shared.total_len,
+            );
+            try std.testing.expect(!progress.fin_committed);
+            try std.testing.expectEqual(@as(usize, 1), timed.send_calls);
+
+            accepted.h3.established.connection.endpoint.io = timed.delegate;
+            var suffix_storage: [parts.len][]const u8 = undefined;
+            const suffix = testBodyPartsSuffix(
+                shared.parts,
+                progress.committed_bytes,
+                &suffix_storage,
+            );
+            const remaining = shared.total_len - progress.committed_bytes;
+            try accepted.sendSessionDataSlicesWithTimeout(
+                suffix,
+                false,
+                &progress,
+                .fromSeconds(2),
+            );
+            try std.testing.expectEqual(
+                remaining,
+                progress.committed_bytes,
+            );
+            try std.testing.expect(!progress.fin_committed);
+
+            var received = try accepted.receiveStreamWithTimeout(
+                .fromSeconds(3),
+            );
+            defer received.deinit();
+            try std.testing.expectEqual(
+                webtransport.StreamDirection.bidirectional,
+                received.direction,
+            );
+            try std.testing.expectEqualStrings(
+                "seed",
+                received.payload[0..4],
+            );
+            try std.testing.expectEqualSlices(
+                u8,
+                shared.stream_payload,
+                received.payload[4..],
+            );
+            var response_committed: usize = 99;
+            try accepted.sendStreamSlicesWithTimeout(
+                received.stream_id,
+                &.{ "server-", &.{}, "reply" },
+                true,
+                &response_committed,
+                .fromSeconds(2),
+            );
+            try std.testing.expectEqual(
+                "server-reply".len,
+                response_committed,
+            );
+        }
+    };
+
+    var shared = Shared{
+        .server = &server,
+        .io = io,
+        .parts = &parts,
+        .total_len = total_len,
+        .stream_payload = stream_payload,
+    };
+    const thread = try std.Thread.spawn(.{}, Shared.run, .{&shared});
+    var joined = false;
+    defer if (!joined) thread.join();
+
+    var client = try HandshakeClientSession.connect(
+        allocator,
+        io,
+        .{ .ip4 = .loopback(0) },
+        server.address(),
+        .{
+            .authority = "localhost",
+            .path = "/wt-handshake-slices",
+            .limits = .{ .http3 = .{ .quic = .{
+                .max_datagram_size = 4096,
+                .max_frames_per_datagram = 8,
+            } } },
+            .h3 = .{
+                .handshake = .{
+                    .original_destination_connection_id = &original_dcid,
+                    .local_connection_id = &client_cid,
+                    .server_name = "localhost",
+                    .random = [_]u8{0xa1} ** 32,
+                    .x25519_secret_key = [_]u8{0xa2} ** 32,
+                },
+                .session = session_options,
+            },
+        },
+    );
+    defer client.deinit();
+    const stream_id = try client.openBidirectionalStream();
+    var invalid_stream_progress: usize = 99;
+    try std.testing.expectError(
+        error.Timeout,
+        client.sendStreamSlicesWithTimeout(
+            stream_id,
+            &.{"not-sent"},
+            false,
+            &invalid_stream_progress,
+            .zero,
+        ),
+    );
+    try std.testing.expectEqual(@as(usize, 0), invalid_stream_progress);
+    try std.testing.expect(
+        !client.streams.get(stream_id).?.prefix_sent,
+    );
+    try client.sendStream(stream_id, "seed", false);
+
+    var timed = DeadlineAfterSendIo{
+        .delegate = client.h3.established.connection.endpoint.io,
+        .now_ns = std.Io.Clock.awake.now(
+            client.h3.established.connection.endpoint.io,
+        ).nanoseconds,
+    };
+    var timed_vtable = timed.delegate.vtable.*;
+    timed_vtable.now = DeadlineAfterSendIo.now;
+    timed_vtable.netSend = DeadlineAfterSendIo.netSend;
+    client.h3.established.connection.endpoint.io = .{
+        .userdata = &timed,
+        .vtable = &timed_vtable,
+    };
+    var progress: http3.runtime.BodyWriteProgress = .{};
+    try std.testing.expectError(
+        error.Timeout,
+        client.sendSessionDataSlicesWithDeadline(
+            &parts,
+            false,
+            &progress,
+            .{
+                .clock = .awake,
+                .raw = .fromNanoseconds(timed.now_ns + 1),
+            },
+        ),
+    );
+    try std.testing.expect(progress.committed_bytes > 0);
+    try std.testing.expect(progress.committed_bytes < total_len);
+    try std.testing.expect(!progress.fin_committed);
+    try std.testing.expectEqual(@as(usize, 1), timed.send_calls);
+
+    client.h3.established.connection.endpoint.io = timed.delegate;
+    var suffix_storage: [parts.len][]const u8 = undefined;
+    const suffix = testBodyPartsSuffix(
+        &parts,
+        progress.committed_bytes,
+        &suffix_storage,
+    );
+    const remaining = total_len - progress.committed_bytes;
+    try client.sendSessionDataSlicesWithTimeout(
+        suffix,
+        false,
+        &progress,
+        .fromSeconds(2),
+    );
+    try std.testing.expectEqual(remaining, progress.committed_bytes);
+    try std.testing.expect(!progress.fin_committed);
+
+    const stream_parts = [_][]const u8{
+        stream_payload[0..1],
+        &.{},
+        stream_payload[1..8193],
+        stream_payload[8193..24577],
+        stream_payload[24577..],
+    };
+    timed.now_ns = std.Io.Clock.awake.now(timed.delegate).nanoseconds;
+    timed.send_calls = 0;
+    client.h3.established.connection.endpoint.io = .{
+        .userdata = &timed,
+        .vtable = &timed_vtable,
+    };
+    var stream_progress: usize = 99;
+    try std.testing.expectError(
+        error.Timeout,
+        client.sendStreamSlicesWithDeadline(
+            stream_id,
+            &stream_parts,
+            true,
+            &stream_progress,
+            .{
+                .clock = .awake,
+                .raw = .fromNanoseconds(timed.now_ns + 1),
+            },
+        ),
+    );
+    try std.testing.expect(stream_progress > 0);
+    try std.testing.expect(stream_progress < stream_payload.len);
+    try std.testing.expectEqual(@as(usize, 1), timed.send_calls);
+
+    client.h3.established.connection.endpoint.io = timed.delegate;
+    var stream_suffix_storage: [stream_parts.len][]const u8 = undefined;
+    const stream_suffix = testBodyPartsSuffix(
+        &stream_parts,
+        stream_progress,
+        &stream_suffix_storage,
+    );
+    const stream_remaining = stream_payload.len - stream_progress;
+    try client.sendStreamSlicesWithTimeout(
+        stream_id,
+        stream_suffix,
+        true,
+        &stream_progress,
+        .fromSeconds(3),
+    );
+    try std.testing.expectEqual(stream_remaining, stream_progress);
+
+    const response_event = try client
+        .receiveSessionEventWithTimeout(.fromSeconds(2));
+    try std.testing.expect(response_event == .draining);
+    var response_stream = try client.receiveStreamWithTimeout(
+        .fromSeconds(3),
+    );
+    defer response_stream.deinit();
+    try std.testing.expectEqual(stream_id, response_stream.stream_id);
+    try std.testing.expectEqualStrings(
+        "server-reply",
+        response_stream.payload,
+    );
+
+    thread.join();
+    joined = true;
     if (shared.err) |err| return err;
 }
 
@@ -11328,6 +17403,7 @@ test {
     _ = @import("runtime/datagram/tests/codec.zig");
     _ = @import("runtime/datagram/tests/send.zig");
     _ = @import("runtime/stream_tests.zig");
+    _ = @import("runtime/stream_incremental.zig");
     _ = @import("runtime/stream/tests/batch.zig");
     _ = @import("runtime/stream/pagination_tests.zig");
     _ = @import("runtime/development_control_tests.zig");

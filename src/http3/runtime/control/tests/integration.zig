@@ -4,6 +4,38 @@ const runtime = @import("../../../runtime.zig");
 const quic = @import("../../../../quic/mod.zig");
 const control_receive = @import("../receive.zig");
 
+const DeadlineAfterSendIo = struct {
+    delegate: std.Io,
+    now_ns: i96,
+    send_calls: usize = 0,
+
+    fn now(
+        context: ?*anyopaque,
+        _: std.Io.Clock,
+    ) std.Io.Timestamp {
+        const self: *@This() = @ptrCast(@alignCast(context.?));
+        return .fromNanoseconds(self.now_ns);
+    }
+
+    fn netSend(
+        context: ?*anyopaque,
+        socket_handle: std.Io.net.Socket.Handle,
+        messages: []std.Io.net.OutgoingMessage,
+        flags: std.Io.net.SendFlags,
+    ) struct { ?std.Io.net.Socket.SendError, usize } {
+        const self: *@This() = @ptrCast(@alignCast(context.?));
+        self.send_calls += 1;
+        const result = self.delegate.vtable.netSend(
+            self.delegate.userdata,
+            socket_handle,
+            messages,
+            flags,
+        );
+        if (result[1] != 0) self.now_ns += std.time.ns_per_s;
+        return result;
+    }
+};
+
 fn findStreamFrame(frames: []const quic.Frame) ?quic.StreamFrame {
     for (frames) |frame| {
         if (frame == .stream) return frame.stream;
@@ -55,7 +87,51 @@ test "HTTP/3 connection control frames advance control stream offset" {
     );
     defer client.deinit();
 
-    try client.sendGoAway(0);
+    const packet_number = client.next_packet_number;
+    const control_offset = client.control_send.next_offset;
+    try std.testing.expectError(
+        error.Timeout,
+        client.sendGoAwayWithDeadline(
+            0,
+            .{ .clock = .real, .raw = .zero },
+        ),
+    );
+    try std.testing.expectEqual(packet_number, client.next_packet_number);
+    try std.testing.expectEqual(control_offset, client.control_send.next_offset);
+    try std.testing.expectEqual(@as(?u64, null), client.control.local_goaway_id);
+
+    var timed_io = DeadlineAfterSendIo{
+        .delegate = client.quic_client.endpoint.io,
+        .now_ns = 1_000_000,
+    };
+    var timed_vtable = client.quic_client.endpoint.io.vtable.*;
+    timed_vtable.now = DeadlineAfterSendIo.now;
+    timed_vtable.netSend = DeadlineAfterSendIo.netSend;
+    client.quic_client.endpoint.io = .{
+        .userdata = &timed_io,
+        .vtable = &timed_vtable,
+    };
+    defer client.quic_client.endpoint.io = timed_io.delegate;
+    try std.testing.expectError(
+        error.Timeout,
+        client.sendGoAwayWithDeadline(0, .{
+            .clock = .awake,
+            .raw = .fromNanoseconds(timed_io.now_ns + 1),
+        }),
+    );
+    try std.testing.expect(client.control.settings.sent);
+    try std.testing.expect(timed_io.send_calls != 0);
+    try std.testing.expectEqual(@as(?u64, null), client.control.local_goaway_id);
+    const settings_packet_number = client.next_packet_number;
+    const settings_control_offset = client.control_send.next_offset;
+    try std.testing.expect(settings_packet_number > packet_number);
+    try std.testing.expect(settings_control_offset > control_offset);
+
+    client.quic_client.endpoint.io = timed_io.delegate;
+    try client.sendGoAwayWithTimeout(0, .fromSeconds(1));
+    try std.testing.expect(client.next_packet_number > settings_packet_number);
+    try std.testing.expect(client.control_send.next_offset > settings_control_offset);
+    try std.testing.expectEqual(@as(?u64, 0), client.control.local_goaway_id);
     var first = try quic.one_rtt.receive(
         &server.quic_server.endpoint,
         client_keys,
@@ -153,10 +229,60 @@ test "HTTP/3 protected runtime sends and accumulates RFC 9412 origins" {
     );
     defer client.deinit();
 
-    try server.sendOrigins(client.quic_client.address(), &.{
+    const packet_number = server.next_packet_number;
+    const control_offset = server.control_send.next_offset;
+    try std.testing.expect(!server.control.local_origin_set_sent);
+    try std.testing.expectError(
+        error.Timeout,
+        server.sendOriginsWithDeadline(
+            client.quic_client.address(),
+            &.{"https://must-not-send.example"},
+            .{ .clock = .real, .raw = .zero },
+        ),
+    );
+    try std.testing.expectEqual(packet_number, server.next_packet_number);
+    try std.testing.expectEqual(control_offset, server.control_send.next_offset);
+    try std.testing.expect(!server.control.local_origin_set_sent);
+
+    var timed_io = DeadlineAfterSendIo{
+        .delegate = server.quic_server.endpoint.io,
+        .now_ns = 1_000_000,
+    };
+    var timed_vtable = server.quic_server.endpoint.io.vtable.*;
+    timed_vtable.now = DeadlineAfterSendIo.now;
+    timed_vtable.netSend = DeadlineAfterSendIo.netSend;
+    server.quic_server.endpoint.io = .{
+        .userdata = &timed_io,
+        .vtable = &timed_vtable,
+    };
+    defer server.quic_server.endpoint.io = timed_io.delegate;
+    try std.testing.expectError(
+        error.Timeout,
+        server.sendOriginsWithDeadline(
+            client.quic_client.address(),
+            &.{"https://must-not-send.example"},
+            .{
+                .clock = .awake,
+                .raw = .fromNanoseconds(timed_io.now_ns + 1),
+            },
+        ),
+    );
+    try std.testing.expect(server.control.settings.sent);
+    try std.testing.expect(timed_io.send_calls != 0);
+    try std.testing.expect(server.next_packet_number > packet_number);
+    const settings_packet_number = server.next_packet_number;
+    const settings_control_offset = server.control_send.next_offset;
+    try std.testing.expect(settings_control_offset > control_offset);
+    try std.testing.expect(!server.control.local_origin_set_sent);
+
+    server.quic_server.endpoint.io = timed_io.delegate;
+    try server.sendOriginsWithTimeout(client.quic_client.address(), &.{
         "https://Example.COM",
         "https://cdn.example.com:8443",
-    });
+    }, .fromSeconds(1));
+    try std.testing.expect(server.next_packet_number > settings_packet_number);
+    try std.testing.expect(server.control_send.next_offset > settings_control_offset);
+    try std.testing.expect(server.control.local_origin_set_sent);
     try server.sendOrigins(client.quic_client.address(), &.{
         "https://example.com:443",
         "https://img.example.com",
@@ -237,11 +363,27 @@ test "HTTP/3 protected client sends persistent priority updates" {
     );
     defer client.deinit();
 
-    try client.sendPriorityUpdate(0, .{ .urgency = 1 });
-    try client.sendPriorityUpdate(0, .{
+    const packet_number = client.next_packet_number;
+    const control_offset = client.control_send.next_offset;
+    try std.testing.expectError(
+        error.Timeout,
+        client.sendPriorityUpdateWithDeadline(
+            0,
+            .{ .urgency = 1 },
+            .{ .clock = .real, .raw = .zero },
+        ),
+    );
+    try std.testing.expectEqual(packet_number, client.next_packet_number);
+    try std.testing.expectEqual(control_offset, client.control_send.next_offset);
+    try client.sendPriorityUpdateWithTimeout(
+        0,
+        .{ .urgency = 1 },
+        .fromSeconds(1),
+    );
+    try client.sendPriorityUpdateWithDeadline(0, .{
         .urgency = 6,
         .incremental = true,
-    });
+    }, .fromNow(io, .{ .raw = .fromSeconds(1), .clock = .awake }));
     try std.testing.expectError(
         error.UnexpectedFrame,
         client.sendPriorityUpdate(4, .{}),
@@ -324,8 +466,20 @@ test "HTTP/3 protected client advertises and cancels server push IDs" {
     );
     defer client.deinit();
 
-    try client.sendMaxPushId(4);
-    try client.sendMaxPushId(8);
+    const packet_number = client.next_packet_number;
+    const control_offset = client.control_send.next_offset;
+    try std.testing.expectError(
+        error.Timeout,
+        client.sendMaxPushIdWithDeadline(
+            4,
+            .{ .clock = .real, .raw = .zero },
+        ),
+    );
+    try std.testing.expectEqual(packet_number, client.next_packet_number);
+    try std.testing.expectEqual(control_offset, client.control_send.next_offset);
+    try std.testing.expectEqual(@as(?u64, null), client.control.local_max_push_id);
+    try client.sendMaxPushIdWithTimeout(4, .fromSeconds(1));
+    try client.sendMaxPushIdWithTimeout(8, .fromSeconds(1));
     try std.testing.expectError(
         error.MaxPushIdReduced,
         client.sendMaxPushId(7),
@@ -333,8 +487,8 @@ test "HTTP/3 protected client advertises and cancels server push IDs" {
     try std.testing.expectError(error.PushIdExceeded, client.cancelPush(9));
     try client.push_streams.registerPromise(7, 0);
     try client.push_streams.registerPromise(3, 0);
-    try client.cancelPush(7);
-    try client.cancelPush(3);
+    try client.cancelPushWithTimeout(7, .fromSeconds(1));
+    try client.cancelPushWithTimeout(3, .fromSeconds(1));
 
     while (server.control.peer_max_push_id != 8 or
         !server.control.pushCancelled(7) or
@@ -351,11 +505,14 @@ test "HTTP/3 protected client advertises and cancels server push IDs" {
         server.expected_packet_number = packet.packet.packet_number + 1;
         for (packet.frames) |frame| {
             if (frame != .stream) continue;
-            if (try control_receive.applyControlStreamFrameForRole(
+            if (try control_receive.applyControlStreamFrameForRoleWithPushes(
                 &server.control,
                 allocator,
                 frame.stream,
                 .server,
+                .{ .slice = &.{ 7, 3 } },
+                null,
+                null,
             )) {
                 try control_receive.configureQpackEncoderFromPeerSettings(
                     server.control,
@@ -370,6 +527,6 @@ test "HTTP/3 protected client advertises and cancels server push IDs" {
     );
     try std.testing.expectEqual(
         @as(usize, 2),
-        server.control.peer_cancelled_push_ids.items.len,
+        server.control.cancelledPushRangeCount(),
     );
 }

@@ -30,7 +30,7 @@ existing HTTP/2 runtime:
 - typed `identity`, `deflate`, and `gzip` algorithms plus
   `grpc-accept-encoding` parsing/formatting that ignores unknown extensions,
 - per-message gzip and RFC 1950 zlib-wrapped `deflate` compression using the
-  user-owned `~/project-z/vort` library, with no cross-message codec state,
+  package-local focused DEFLATE backend, with no cross-message codec state,
 - strict single-stream decompression with checksum/trailer validation,
   decompressed-size limits, raw-deflate and trailing-data rejection,
 - gRPC Core-compatible compression fallback when an encoded message is not

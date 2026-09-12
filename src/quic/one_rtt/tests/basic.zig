@@ -312,7 +312,50 @@ test "QUIC 1-RTT consumes a preloaded coalesced-handshake suffix first" {
         connection.preloadReceivedDatagram(sender.address(), packet, .not_ect),
     );
 
-    var received = try connection.receivePacket();
+    const Visitor = struct {
+        fn visit(called: *usize, _: one_rtt.ReceivedPacketView) error{}!void {
+            called.* += 1;
+        }
+    };
+    var visitor_calls: usize = 0;
+    const wrong_clock: std.Io.Clock.Timestamp = .{
+        .clock = .real,
+        .raw = .zero,
+    };
+    const expired: std.Io.Clock.Timestamp = .{
+        .clock = .awake,
+        .raw = .zero,
+    };
+    try std.testing.expectError(
+        error.Timeout,
+        connection.receivePacketServicingTimersDeadline(wrong_clock),
+    );
+    try std.testing.expectError(
+        error.Timeout,
+        connection.receivePacketBatchServicingTimersDeadline(expired),
+    );
+    try std.testing.expectError(
+        error.Timeout,
+        connection.servicePacketBatchServicingTimersDeadline(wrong_clock),
+    );
+    try std.testing.expectError(
+        error.Timeout,
+        connection.visitPacketServicingTimersDeadline(
+            expired,
+            &visitor_calls,
+            Visitor.visit,
+        ),
+    );
+    try std.testing.expectError(
+        error.Timeout,
+        connection.servicePacketServicingTimersDeadline(wrong_clock),
+    );
+    try std.testing.expectEqual(@as(usize, 0), visitor_calls);
+
+    // Every rejected operation above must leave the preloaded datagram intact.
+    var received = try connection.receivePacketServicingTimersDeadline(
+        .fromNow(io, .{ .raw = .fromSeconds(1), .clock = .awake }),
+    );
     defer received.deinit(allocator);
     try std.testing.expectEqual(@as(u64, 3), received.packet.packet_number);
     try std.testing.expectEqual(@as(usize, 1), received.frames.len);
@@ -376,6 +419,69 @@ test "QUIC 1-RTT batch send protects consecutive packets" {
             try std.testing.expectEqual(@intFromEnum(expected), @intFromEnum(actual));
         }
     }
+}
+
+test "QUIC 1-RTT batch progress retains protected count after interceptor allocation failure" {
+    const allocator = std.testing.allocator;
+    var threaded = std.Io.Threaded.init(allocator, .{});
+    defer threaded.deinit();
+    const io = threaded.io();
+
+    const AlwaysHold = struct {
+        fn hold(_: *anyopaque, _: []const u8) bool {
+            return true;
+        }
+    };
+    var interceptor_context: u8 = 0;
+    var endpoint = try quic.runtime.Endpoint.bind(
+        allocator,
+        io,
+        .{ .ip4 = .loopback(0) },
+        .{
+            .max_datagram_size = 4096,
+            .send_interceptor = .{
+                .context = &interceptor_context,
+                .should_hold = AlwaysHold.hold,
+            },
+        },
+    );
+    defer endpoint.deinit();
+
+    const keys = quic.protection.deriveAes128Keys(
+        [_]u8{0xb2} ** quic.protection.secret_len,
+    );
+    const first = [_]quic.Frame{.{ .ping = {} }};
+    const second = [_]quic.Frame{.{ .ping = {} }};
+    const packets = [_][]const quic.Frame{ &first, &second };
+    const options: one_rtt.BatchSendOptions = .{
+        .destination_connection_id = "batch-cid",
+        .first_packet_number = 9,
+        .packets = &packets,
+    };
+    const sizes = try one_rtt.batchStorageSizes(options);
+    const payload_storage = try allocator.alloc(u8, sizes.payload);
+    defer allocator.free(payload_storage);
+    const packet_storage = try allocator.alloc(u8, sizes.packet);
+    defer allocator.free(packet_storage);
+
+    var failing = std.testing.FailingAllocator.init(allocator, .{
+        .fail_index = 0,
+    });
+    endpoint.allocator = failing.allocator();
+    defer endpoint.allocator = allocator;
+    const result = try one_rtt.sendFramesBatchIntoProgress(
+        &endpoint,
+        endpoint.address(),
+        keys,
+        options,
+        payload_storage,
+        packet_storage,
+    );
+    try std.testing.expectEqual(@as(usize, 0), result.sent_count);
+    try std.testing.expectEqual(@as(usize, 2), result.protected_count);
+    try std.testing.expectEqual(@as(usize, 0), result.sent_bytes);
+    try std.testing.expect(result.send_error.? == error.OutOfMemory);
+    try std.testing.expect(failing.has_induced_failure);
 }
 
 test "QUIC 1-RTT caller-buffer single send matches wire and allocates nothing" {
@@ -1028,6 +1134,85 @@ test "QUIC 1-RTT spin bit follows enabled single-path policy" {
 
     client.resetSpinBit();
     try std.testing.expect(!client.nextSpinBit());
+}
+
+test "QUIC 1-RTT spin bit ignores reordered lower packet numbers" {
+    const allocator = std.testing.allocator;
+    var threaded = std.Io.Threaded.init(allocator, .{});
+    defer threaded.deinit();
+    const io = threaded.io();
+
+    var receiver = try quic.runtime.Endpoint.bind(
+        allocator,
+        io,
+        .{ .ip4 = .loopback(0) },
+        .{ .max_datagram_size = 4096 },
+    );
+    defer receiver.deinit();
+    var sender = try quic.runtime.Endpoint.bind(
+        allocator,
+        io,
+        .{ .ip4 = .loopback(0) },
+        .{ .max_datagram_size = 4096 },
+    );
+    defer sender.deinit();
+
+    const local_cid = [_]u8{ 0xc5, 0xc6, 0xc7, 0xc8 };
+    const peer_cid = [_]u8{ 0xd5, 0xd6, 0xd7, 0xd8 };
+    const keys = quic.protection.deriveAes128Keys(
+        [_]u8{0xad} ** quic.protection.secret_len,
+    );
+    var server = try one_rtt.Connection.init(&receiver, .{
+        .peer = sender.address(),
+        .receive_keys = keys,
+        .send_keys = keys,
+        .local_connection_id = &local_cid,
+        .peer_connection_id = &peer_cid,
+        .local_endpoint = .server,
+        .enable_spin_bit = true,
+    });
+    defer server.deinit();
+
+    const payload = try one_rtt.encodeFrames(
+        allocator,
+        &.{.{ .ping = {} }},
+    );
+    defer allocator.free(payload);
+    const newest = try quic.protection.sealShortPacket(allocator, keys, .{
+        .destination_connection_id = &local_cid,
+        .packet_number = 2,
+        .packet_number_len = 4,
+        .spin_bit = true,
+        .payload = payload,
+    });
+    defer allocator.free(newest);
+    var newest_packet = try one_rtt.testing.processReceivedBytesAt(
+        &server,
+        sender.address(),
+        newest,
+        .not_ect,
+        10,
+    );
+    newest_packet.deinit(allocator);
+    try std.testing.expect(server.nextSpinBit());
+
+    const reordered = try quic.protection.sealShortPacket(allocator, keys, .{
+        .destination_connection_id = &local_cid,
+        .packet_number = 1,
+        .packet_number_len = 4,
+        .spin_bit = false,
+        .payload = payload,
+    });
+    defer allocator.free(reordered);
+    var reordered_packet = try one_rtt.testing.processReceivedBytesAt(
+        &server,
+        sender.address(),
+        reordered,
+        .not_ect,
+        11,
+    );
+    reordered_packet.deinit(allocator);
+    try std.testing.expect(server.nextSpinBit());
 }
 
 test "QUIC 1-RTT spin bit remains disabled by default" {
@@ -1793,6 +1978,20 @@ test "QUIC 1-RTT pollStream reports data FIN and reset once" {
     } }});
     var packet = try server.receivePacket();
     defer packet.deinit(allocator);
+    try std.testing.expectError(
+        error.Timeout,
+        server.receiveStreamWithDeadline(&out, .{
+            .clock = .real,
+            .raw = .zero,
+        }),
+    );
+    try std.testing.expectError(
+        error.Timeout,
+        server.receiveStreamIdWithDeadline(0, &out, .{
+            .clock = .awake,
+            .raw = .zero,
+        }),
+    );
     const first = (try server.pollStream(&out)) orelse
         return error.TestUnexpectedResult;
     try std.testing.expect(first == .data);

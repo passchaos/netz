@@ -1,7 +1,7 @@
 const std = @import("std");
 const http3 = @import("../../../mod.zig");
 const quic = @import("../../../../quic/mod.zig");
-const closed_ranges = @import("../../../../quic/one_rtt/closed_streams.zig");
+const exact_range_set = @import("../../../../internal/exact_range_set.zig");
 const wire = @import("../../../../internal/wire.zig");
 const Error = @import("../../error.zig").Error;
 const reader_module = @import("../reader.zig");
@@ -137,7 +137,23 @@ pub const Set = struct {
     /// Exact lifetime history without one tombstone per completed push. RFC
     /// 9114 only recommends sequential Push IDs, so retain sparse merged
     /// ranges rather than assuming every lower ID was used.
-    completed_promises: closed_ranges.Set = .{},
+    completed_promises: exact_range_set.Set = .{},
+    /// Push IDs cancelled before or after their stream association arrives.
+    /// Completion history alone cannot distinguish this legal late-stream
+    /// case from a duplicate completed push.
+    cancelled_push_history: exact_range_set.Set = .{},
+    /// Cancelled Push IDs whose single push-stream association has already
+    /// been observed. This preserves duplicate-Push-ID validation even when
+    /// the first stream was drained instead of exposed to the application.
+    cancelled_push_stream_seen: exact_range_set.Set = .{},
+    /// Server-initiated unidirectional stream ordinals cancelled locally.
+    /// This prevents reordered/in-flight STREAM frames from recreating a push
+    /// reader after its CANCEL_PUSH transaction retired the active entry.
+    cancelled_stream_ordinals: exact_range_set.Set = .{},
+    /// Push IDs paired with `cancelled_stream_ids`. Entries exist only while
+    /// a locally committed CANCEL_PUSH still needs a transport STOP_SENDING,
+    /// so retry bookkeeping remains bounded by concurrent push streams.
+    cancelled_push_ids: std.ArrayList(u64) = .empty,
     cancelled_stream_ids: std.ArrayList(u62) = .empty,
     cancelled_stream_head: usize = 0,
     max_streams: usize,
@@ -184,6 +200,10 @@ pub const Set = struct {
         self.promises.deinit(self.allocator);
         self.promise_index.deinit(self.allocator);
         self.completed_promises.deinit(self.allocator);
+        self.cancelled_push_history.deinit(self.allocator);
+        self.cancelled_push_stream_seen.deinit(self.allocator);
+        self.cancelled_stream_ordinals.deinit(self.allocator);
+        self.cancelled_push_ids.deinit(self.allocator);
         self.cancelled_stream_ids.deinit(self.allocator);
         self.* = undefined;
     }
@@ -267,6 +287,24 @@ pub const Set = struct {
             self.findPromise(push_id) != null;
     }
 
+    /// True after a promise has reached a terminal state, including a locally
+    /// committed CANCEL_PUSH whose transport STOP_SENDING may still be queued.
+    pub fn pendingLocalCancellation(self: Set, push_id: u64) bool {
+        for (self.cancelled_push_ids.items[self.cancelled_stream_head..]) |id| {
+            if (id == push_id) return true;
+        }
+        return false;
+    }
+
+    pub fn isCancelledStream(self: Set, stream_id: u64) bool {
+        if ((stream_id & 0x03) != 0x03) return false;
+        return self.cancelled_stream_ordinals.contains(stream_id >> 2);
+    }
+
+    pub fn isCancelledPush(self: Set, push_id: u64) bool {
+        return self.cancelled_push_history.contains(push_id);
+    }
+
     pub fn completedPromiseRangeCount(self: Set) usize {
         return self.completed_promises.rangeCount();
     }
@@ -286,6 +324,22 @@ pub const Set = struct {
                 return error.OutOfMemory,
         );
         try self.cancelled_stream_ids.ensureTotalCapacity(
+            self.allocator,
+            self.max_streams,
+        );
+        try self.cancelled_push_ids.ensureTotalCapacity(
+            self.allocator,
+            self.max_streams,
+        );
+        try self.cancelled_stream_ordinals.prepareInsert(
+            self.allocator,
+            self.max_streams,
+        );
+        try self.cancelled_push_history.prepareInsert(
+            self.allocator,
+            self.max_streams,
+        );
+        try self.cancelled_push_stream_seen.prepareInsert(
             self.allocator,
             self.max_streams,
         );
@@ -396,6 +450,23 @@ pub const Set = struct {
             )) {
                 .incomplete => {},
                 .push => {
+                    if (entry.push_id) |push_id| {
+                        if (self.isCancelledPush(push_id)) {
+                            if (self.cancelled_push_stream_seen.contains(
+                                push_id,
+                            )) return error.DuplicatePushId;
+                            try self.prepareCancelledStreamQueue(
+                                push_id,
+                                @intCast(frame.stream_id),
+                            );
+                            self.queueCancelledStreamAssumeCapacity(
+                                push_id,
+                                @intCast(frame.stream_id),
+                            );
+                            self.removeStream(frame.stream_id);
+                            return true;
+                        }
+                    }
                     try self.validateBinding(entry);
                     try self.rememberPushBinding(entry);
                 },
@@ -448,6 +519,23 @@ pub const Set = struct {
         )) {
             .incomplete => {},
             .push => {
+                if (entry.push_id) |push_id| {
+                    if (self.isCancelledPush(push_id)) {
+                        if (self.cancelled_push_stream_seen.contains(
+                            push_id,
+                        )) return error.DuplicatePushId;
+                        try self.prepareCancelledStreamQueue(
+                            push_id,
+                            @intCast(frame.stream_id),
+                        );
+                        self.queueCancelledStreamAssumeCapacity(
+                            push_id,
+                            @intCast(frame.stream_id),
+                        );
+                        self.removeStream(frame.stream_id);
+                        return true;
+                    }
+                }
                 try self.validateBinding(entry);
                 try self.rememberPushBinding(entry);
             },
@@ -635,14 +723,46 @@ pub const Set = struct {
             {
                 return error.ExcessiveLoad;
             }
-            self.cancelled_stream_ids.appendAssumeCapacity(stream_id);
+            std.debug.assert(
+                self.cancelled_push_ids.items.len <
+                    self.cancelled_push_ids.capacity,
+            );
+            self.queueCancelledStreamAssumeCapacity(push_id, stream_id);
             self.removeStream(stream_id);
         }
+        self.cancelled_push_history.insertAssumeCapacity(push_id);
         self.retirePromiseAssumeCapacity(push_id);
+    }
+
+    /// Complete every fallible local check/allocation needed before a
+    /// CANCEL_PUSH becomes socket-visible. The caller may then send once and
+    /// commit with `observePeerCancellation` without risking split wire/local
+    /// state.
+    pub fn preparePeerCancellation(
+        self: *Set,
+        push_id: u64,
+    ) Error!void {
+        if (self.completed_promises.contains(push_id)) return;
+        _ = self.findPromise(push_id) orelse return error.UnexpectedStream;
+        if (self.findByPushId(push_id)) |entry| {
+            try self.prepareCancelledStreamQueue(
+                push_id,
+                @intCast(entry.streamId()),
+            );
+        }
+        try self.completed_promises.prepareInsert(
+            self.allocator,
+            self.promises.items.len,
+        );
+        try self.cancelled_push_history.prepareInsertValue(
+            self.allocator,
+            push_id,
+        );
     }
 
     pub fn takeCancelledStream(self: *Set) ?u62 {
         if (self.cancelledStreamCount() == 0) return null;
+        _ = self.cancelled_push_ids.items[self.cancelled_stream_head];
         const stream_id = self.cancelled_stream_ids.items[self.cancelled_stream_head];
         self.cancelled_stream_head += 1;
         self.compactCancelledStreamQueueIfSparse();
@@ -721,12 +841,71 @@ pub const Set = struct {
         const remaining = self.cancelledStreamCount();
         if (remaining != 0) {
             @memmove(
+                self.cancelled_push_ids.items[0..remaining],
+                self.cancelled_push_ids.items[self.cancelled_stream_head..],
+            );
+            @memmove(
                 self.cancelled_stream_ids.items[0..remaining],
                 self.cancelled_stream_ids.items[self.cancelled_stream_head..],
             );
         }
+        self.cancelled_push_ids.items.len = remaining;
         self.cancelled_stream_ids.items.len = remaining;
         self.cancelled_stream_head = 0;
+    }
+
+    fn queueCancelledStreamAssumeCapacity(
+        self: *Set,
+        push_id: u64,
+        stream_id: u62,
+    ) void {
+        if (self.cancelled_stream_head != 0 and
+            self.cancelled_stream_ids.items.len ==
+                self.cancelled_stream_ids.capacity)
+        {
+            self.compactCancelledStreamQueue();
+        }
+        std.debug.assert(
+            self.cancelled_push_ids.items.len <
+                self.cancelled_push_ids.capacity,
+        );
+        std.debug.assert(
+            self.cancelled_stream_ids.items.len <
+                self.cancelled_stream_ids.capacity,
+        );
+        self.cancelled_push_ids.appendAssumeCapacity(push_id);
+        self.cancelled_stream_ids.appendAssumeCapacity(stream_id);
+        self.cancelled_stream_ordinals.insertAssumeCapacity(stream_id >> 2);
+        self.cancelled_push_stream_seen.insertAssumeCapacity(push_id);
+    }
+
+    fn prepareCancelledStreamQueue(
+        self: *Set,
+        push_id: u64,
+        stream_id: u62,
+    ) Error!void {
+        if (self.cancelled_stream_head != 0 and
+            self.cancelled_stream_ids.items.len ==
+                self.cancelled_stream_ids.capacity)
+        {
+            self.compactCancelledStreamQueue();
+        }
+        try self.cancelled_stream_ids.ensureUnusedCapacity(
+            self.allocator,
+            1,
+        );
+        try self.cancelled_push_ids.ensureUnusedCapacity(
+            self.allocator,
+            1,
+        );
+        try self.cancelled_stream_ordinals.prepareInsertValue(
+            self.allocator,
+            stream_id >> 2,
+        );
+        try self.cancelled_push_stream_seen.prepareInsertValue(
+            self.allocator,
+            push_id,
+        );
     }
 
     fn findByStreamId(self: *Set, stream_id: u64) ?*Entry {
@@ -742,6 +921,11 @@ pub const Set = struct {
         const index = self.push_index.get(push_id) orelse return null;
         if (index >= self.entries.items.len) return null;
         return &self.entries.items[index];
+    }
+
+    pub fn streamIdForPush(self: *Set, push_id: u64) ?u62 {
+        const entry = self.findByPushId(push_id) orelse return null;
+        return @intCast(entry.streamId());
     }
 
     fn removeStream(self: *Set, stream_id: u64) void {

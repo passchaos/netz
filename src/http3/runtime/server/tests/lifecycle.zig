@@ -81,6 +81,7 @@ test "HTTP/3 protected cancellation clears request state on send failure" {
     try std.testing.expect(!server.request_streams.contains(stream_id));
     try std.testing.expect(!server.streaming_requests.contains(stream_id));
     try std.testing.expect(server.outbound_bodies.find(stream_id) == null);
+    try std.testing.expect(!server.protected_send.isUsable());
 }
 
 test "HTTP/3 protected aggregate request queues QPACK ack across send failure" {
@@ -545,13 +546,56 @@ test "HTTP/3 protected server performs two-phase graceful shutdown" {
 
     var request = try server.receiveRequest();
     defer request.deinit(allocator);
-    try server.initiateShutdown(request.from);
+    const packet_number = server.next_packet_number;
+    const control_offset = server.control_send.next_offset;
+    try std.testing.expectError(
+        error.Timeout,
+        server.initiateShutdownWithDeadline(
+            request.from,
+            .{ .clock = .real, .raw = .zero },
+        ),
+    );
+    try std.testing.expectEqual(packet_number, server.next_packet_number);
+    try std.testing.expectEqual(control_offset, server.control_send.next_offset);
+    try std.testing.expectEqual(
+        runtime.ShutdownState.active,
+        server.request_lifecycle.state(),
+    );
+    try std.testing.expectEqual(@as(?u64, null), server.control.local_goaway_id);
+    try server.initiateShutdownWithTimeout(
+        request.from,
+        .fromSeconds(1),
+    );
     try std.testing.expectEqual(
         runtime.ShutdownState.initial_goaway,
         server.request_lifecycle.state(),
     );
     try std.testing.expect(!server.drainComplete());
-    try server.completeShutdown(request.from);
+    const initial_goaway_id = server.control.local_goaway_id;
+    const initial_control_offset = server.control_send.next_offset;
+    try std.testing.expectError(
+        error.Timeout,
+        server.completeShutdownWithDeadline(
+            request.from,
+            .{ .clock = .real, .raw = .zero },
+        ),
+    );
+    try std.testing.expectEqual(
+        runtime.ShutdownState.initial_goaway,
+        server.request_lifecycle.state(),
+    );
+    try std.testing.expectEqual(
+        initial_goaway_id,
+        server.control.local_goaway_id,
+    );
+    try std.testing.expectEqual(
+        initial_control_offset,
+        server.control_send.next_offset,
+    );
+    try server.completeShutdownWithTimeout(
+        request.from,
+        .fromSeconds(1),
+    );
     try std.testing.expectEqual(
         runtime.ShutdownState.final_goaway,
         server.request_lifecycle.state(),

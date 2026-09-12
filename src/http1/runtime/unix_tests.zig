@@ -1,6 +1,38 @@
 const std = @import("std");
 const runtime = @import("../runtime.zig");
 
+test "HTTP/1 Unix listener accept deadline expires without a client" {
+    if (comptime @import("builtin").os.tag == .windows) {
+        return error.SkipZigTest;
+    }
+
+    const allocator = std.testing.allocator;
+    var threaded = std.Io.Threaded.init(allocator, .{});
+    defer threaded.deinit();
+    const io = threaded.io();
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    var path_storage: [std.fs.max_path_bytes]u8 = undefined;
+    const directory_len = try tmp.dir.realPath(io, &path_storage);
+    const suffix = try std.fmt.bufPrint(
+        path_storage[directory_len..],
+        "/http1-accept-timeout.sock",
+        .{},
+    );
+    const full_path = path_storage[0 .. directory_len + suffix.len];
+    const address = try std.Io.net.UnixAddress.init(full_path);
+    var server = try runtime.UnixServer.listen(allocator, io, address, .{});
+    defer {
+        server.deinit();
+        std.Io.Dir.deleteFileAbsolute(io, full_path) catch {};
+    }
+
+    try std.testing.expectError(
+        error.Timeout,
+        server.acceptWithTimeout(.fromMilliseconds(20)),
+    );
+}
+
 test "HTTP/1 client and server exchange over a Unix socket" {
     if (comptime @import("builtin").os.tag == .windows) {
         return error.SkipZigTest;

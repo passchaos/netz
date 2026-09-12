@@ -765,9 +765,11 @@ pub const QpackEncodeState = struct {
                 self.rebuildBlockedSectionCounts();
             },
             .stream_cancellation => |stream_id| {
-                if (self.releaseSectionsForStream(stream_id) == 0) {
-                    return error.QpackDecoderStreamError;
-                }
+                // RFC 9204 §2.2.2.2 requires a decoder to emit this whenever
+                // it abandons a stream (unless its maximum table capacity is
+                // zero). The stream might not actually contain a dynamic
+                // reference, so an empty release is a valid idempotent no-op.
+                _ = self.releaseSectionsForStream(stream_id);
             },
         }
     }

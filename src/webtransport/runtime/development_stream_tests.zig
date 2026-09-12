@@ -1,6 +1,7 @@
 const std = @import("std");
 const webtransport = @import("../mod.zig");
 const runtime = @import("../runtime.zig");
+const http3 = @import("../../http3/mod.zig");
 
 fn futureDeadline(io: std.Io) std.Io.Clock.Timestamp {
     return .fromNow(io, .{
@@ -65,7 +66,15 @@ test "WebTransport development streams preserve prefixes reverse path and limits
             try std.testing.expect(!bidi.locally_initiated);
             try std.testing.expect(bidi.from.eql(&session.remoteAddress()));
             try std.testing.expectEqualStrings("client bidi", bidi.payload);
-            try session.sendStream(bidi.stream_id, "reverse", true);
+            var progress: http3.runtime.DevelopmentBodyWriteProgress = .{};
+            try session.sendStreamWithTimeout(
+                bidi.stream_id,
+                "reverse",
+                true,
+                &progress,
+                .fromSeconds(1),
+            );
+            try std.testing.expect(progress.completed);
 
             var uni = try session.receiveStreamWithDeadline(
                 futureDeadline(self.io),
@@ -78,7 +87,32 @@ test "WebTransport development streams preserve prefixes reverse path and limits
             try std.testing.expectEqualStrings("client uni", uni.payload);
 
             const server_bidi = try session.openBidirectionalStream();
-            try session.sendStream(server_bidi, "server bidi", true);
+            try std.testing.expectError(
+                error.Timeout,
+                session.sendStreamWithDeadline(
+                    server_bidi,
+                    "server bidi",
+                    true,
+                    &progress,
+                    .{ .clock = .real, .raw = .zero },
+                ),
+            );
+            try std.testing.expect(!progress.send_attempted);
+            try std.testing.expect(!progress.completed);
+            const server_bidi_state = session.streams.get(server_bidi).?;
+            try std.testing.expect(!server_bidi_state.prefix_sent);
+            try std.testing.expectEqual(
+                @as(u64, 0),
+                server_bidi_state.bytes_sent,
+            );
+            try session.sendStreamWithDeadline(
+                server_bidi,
+                "server bidi",
+                true,
+                &progress,
+                futureDeadline(self.io),
+            );
+            try std.testing.expect(progress.completed);
             var server_reverse = try session.receiveStreamWithDeadline(
                 futureDeadline(self.io),
             );
@@ -91,7 +125,14 @@ test "WebTransport development streams preserve prefixes reverse path and limits
             );
 
             const server_uni = try session.openUnidirectionalStream();
-            try session.sendStream(server_uni, "server uni", true);
+            try session.sendStreamWithTimeout(
+                server_uni,
+                "server uni",
+                true,
+                &progress,
+                .fromSeconds(1),
+            );
+            try std.testing.expect(progress.completed);
             const counts = self.server.h3.developmentStreamDebugCounts(
                 session.remoteAddress(),
                 session.sessionId().value,
@@ -148,9 +189,39 @@ test "WebTransport development streams preserve prefixes reverse path and limits
     defer client.deinit();
 
     const bidi = try client.openBidirectionalStream();
-    try client.sendStream(bidi, "client bidi", true);
+    var progress: http3.runtime.DevelopmentBodyWriteProgress = .{};
+    try std.testing.expectError(
+        error.Timeout,
+        client.sendStreamWithDeadline(
+            bidi,
+            "client bidi",
+            true,
+            &progress,
+            .{ .clock = .real, .raw = .zero },
+        ),
+    );
+    try std.testing.expect(!progress.send_attempted);
+    try std.testing.expect(!progress.completed);
+    const bidi_state = client.streams.get(bidi).?;
+    try std.testing.expect(!bidi_state.prefix_sent);
+    try std.testing.expectEqual(@as(u64, 0), bidi_state.bytes_sent);
+    try client.sendStreamWithTimeout(
+        bidi,
+        "client bidi",
+        true,
+        &progress,
+        .fromSeconds(1),
+    );
+    try std.testing.expect(progress.completed);
     const uni = try client.openUnidirectionalStream();
-    try client.sendStream(uni, "client uni", true);
+    try client.sendStreamWithDeadline(
+        uni,
+        "client uni",
+        true,
+        &progress,
+        futureDeadline(io),
+    );
+    try std.testing.expect(progress.completed);
     try std.testing.expectError(
         error.StreamLimitExceeded,
         client.openBidirectionalStream(),
@@ -170,7 +241,14 @@ test "WebTransport development streams preserve prefixes reverse path and limits
     );
     try std.testing.expect(!server_bidi.locally_initiated);
     try std.testing.expectEqualStrings("server bidi", server_bidi.payload);
-    try client.sendStream(server_bidi.stream_id, "client reverse", true);
+    try client.sendStreamWithTimeout(
+        server_bidi.stream_id,
+        "client reverse",
+        true,
+        &progress,
+        .fromSeconds(1),
+    );
+    try std.testing.expect(progress.completed);
 
     var server_uni = try client.receiveStreamWithDeadline(futureDeadline(io));
     defer server_uni.deinit();
@@ -186,6 +264,168 @@ test "WebTransport development streams preserve prefixes reverse path and limits
     joined = true;
     if (shared.err) |err| return err;
     try std.testing.expect(streams_released.load(.acquire));
+}
+
+test "WebTransport development stream deadline isolates a visible prefix" {
+    const allocator = std.testing.allocator;
+    var threaded = std.Io.Threaded.init(allocator, .{});
+    defer threaded.deinit();
+    const io = threaded.io();
+
+    const limits: runtime.Limits = .{
+        .http3 = .{
+            .max_stream_frame_data = 32,
+            .quic = .{
+                .max_datagram_size = 4096,
+                .max_frames_per_datagram = 8,
+            },
+        },
+        .max_session_streams = 2,
+    };
+    var server = try runtime.Server.bind(
+        allocator,
+        io,
+        .{ .ip4 = .loopback(0) },
+        limits,
+    );
+    defer server.deinit();
+
+    const Shared = struct {
+        server: *runtime.Server,
+        err: ?anyerror = null,
+
+        fn run(self: *@This()) void {
+            self.runFallible() catch |err| {
+                self.err = err;
+            };
+        }
+
+        fn runFallible(self: *@This()) !void {
+            var session = try self.server.acceptWithDeadline(
+                futureDeadline(self.server.h3.quic_server.endpoint.io),
+            );
+            defer session.deinit(
+                self.server.h3.quic_server.endpoint.allocator,
+            );
+            var sibling = try session.receiveStreamWithDeadline(
+                futureDeadline(self.server.h3.quic_server.endpoint.io),
+            );
+            defer sibling.deinit();
+            try std.testing.expectEqualStrings("sibling", sibling.payload);
+        }
+    };
+    var shared = Shared{ .server = &server };
+    const thread = try std.Thread.spawn(.{}, Shared.run, .{&shared});
+    var joined = false;
+    defer if (!joined) thread.join();
+
+    var client = try runtime.ClientSession.connectWithDeadline(
+        allocator,
+        io,
+        .{ .ip4 = .loopback(0) },
+        server.address(),
+        .{
+            .authority = "localhost",
+            .path = "/development-stream-deadline",
+            .limits = limits,
+        },
+        futureDeadline(io),
+    );
+    defer client.deinit();
+    const failed_stream = try client.openBidirectionalStream();
+    client.h3.quic_client.endpoint.limits.max_datagram_size = 96;
+
+    const DeadlineAfterSendIo = struct {
+        delegate: std.Io,
+        now_ns: i96,
+        send_calls: usize = 0,
+
+        fn now(
+            userdata: ?*anyopaque,
+            _: std.Io.Clock,
+        ) std.Io.Timestamp {
+            const self: *@This() = @ptrCast(@alignCast(userdata.?));
+            return .fromNanoseconds(self.now_ns);
+        }
+
+        fn netSend(
+            userdata: ?*anyopaque,
+            socket_handle: std.Io.net.Socket.Handle,
+            messages: []std.Io.net.OutgoingMessage,
+            flags: std.Io.net.SendFlags,
+        ) struct { ?std.Io.net.Socket.SendError, usize } {
+            const self: *@This() = @ptrCast(@alignCast(userdata.?));
+            self.send_calls += 1;
+            const result = self.delegate.vtable.netSend(
+                self.delegate.userdata,
+                socket_handle,
+                messages,
+                flags,
+            );
+            if (result[1] != 0) self.now_ns += std.time.ns_per_s;
+            return result;
+        }
+    };
+    var timed = DeadlineAfterSendIo{
+        .delegate = client.h3.quic_client.endpoint.io,
+        .now_ns = std.Io.Clock.awake.now(
+            client.h3.quic_client.endpoint.io,
+        ).nanoseconds,
+    };
+    var timed_vtable = timed.delegate.vtable.*;
+    timed_vtable.now = DeadlineAfterSendIo.now;
+    timed_vtable.netSend = DeadlineAfterSendIo.netSend;
+    client.h3.quic_client.endpoint.io = .{
+        .userdata = &timed,
+        .vtable = &timed_vtable,
+    };
+    defer client.h3.quic_client.endpoint.io = timed.delegate;
+
+    const payload = [_]u8{0xb7} ** 256;
+    var progress: http3.runtime.DevelopmentBodyWriteProgress = .{};
+    try std.testing.expectError(
+        error.Timeout,
+        client.sendStreamWithDeadline(
+            failed_stream,
+            &payload,
+            true,
+            &progress,
+            .{
+                .clock = .awake,
+                .raw = .fromNanoseconds(timed.now_ns + 1),
+            },
+        ),
+    );
+    try std.testing.expect(progress.send_attempted);
+    try std.testing.expect(!progress.completed);
+    try std.testing.expectEqual(@as(usize, 1), timed.send_calls);
+    const failed_state = client.streams.get(failed_stream).?;
+    try std.testing.expect(failed_state.prefix_sent);
+    try std.testing.expect(failed_state.send_reset != null);
+    try std.testing.expect(
+        client.h3.development_stream_sends
+            .findEntry(failed_stream).?.unusable,
+    );
+    try std.testing.expectError(
+        error.InvalidStreamState,
+        client.sendStream(failed_stream, "must-not-replay", false),
+    );
+
+    client.h3.quic_client.endpoint.io = timed.delegate;
+    client.h3.quic_client.endpoint.limits.max_datagram_size = 4096;
+    const sibling = try client.openBidirectionalStream();
+    try client.sendStreamWithTimeout(
+        sibling,
+        "sibling",
+        true,
+        &progress,
+        .fromSeconds(1),
+    );
+    try std.testing.expect(progress.completed);
+
+    thread.join();
+    joined = true;
+    if (shared.err) |err| return err;
 }
 
 test "WebTransport development peer churn reclaims cursor and partial prefix" {

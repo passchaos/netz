@@ -1211,6 +1211,625 @@ test "HTTP/3 request once send preserves its stream across pacing" {
     );
 }
 
+test "HTTP/3 dispatcher client control frames retry transactionally" {
+    const allocator = std.testing.allocator;
+    var threaded = std.Io.Threaded.init(allocator, .{});
+    defer threaded.deinit();
+    const io = threaded.io();
+
+    var peer_endpoint = try quic.runtime.Endpoint.bind(
+        allocator,
+        io,
+        .{ .ip4 = .loopback(0) },
+        .{ .max_datagram_size = 4096 },
+    );
+    defer peer_endpoint.deinit();
+    var endpoint = try quic.runtime.Endpoint.bind(
+        allocator,
+        io,
+        .{ .ip4 = .loopback(0) },
+        .{ .max_datagram_size = 4096 },
+    );
+    defer endpoint.deinit();
+    const client_keys = quic.protection.deriveAes128Keys(
+        [_]u8{0xe7} ** quic.protection.secret_len,
+    );
+    const server_keys = quic.protection.deriveAes128Keys(
+        [_]u8{0xe8} ** quic.protection.secret_len,
+    );
+    var client = try runtime.HandshakeClient.initEstablished(
+        &endpoint,
+        peer_endpoint.address(),
+        try quic.handshake.establishPreconfigured(
+            &endpoint,
+            peer_endpoint.address(),
+            .client,
+            .{
+                .receive_keys = server_keys,
+                .send_keys = client_keys,
+                .local_connection_id = "control-client",
+                .peer_connection_id = "control-server",
+                .one_rtt = .{
+                    .max_datagram_size = 1200,
+                    .pacing_max_burst_packets = 1,
+                },
+            },
+        ),
+        .{},
+    );
+    defer client.deinit();
+    var peer = try quic.one_rtt.Connection.init(&peer_endpoint, .{
+        .peer = endpoint.address(),
+        .receive_keys = client_keys,
+        .send_keys = server_keys,
+        .local_connection_id = "control-server",
+        .peer_connection_id = "control-client",
+        .local_endpoint = .server,
+        .enable_pacing = false,
+    });
+    defer peer.deinit();
+
+    try client.ensureSettingsSentOnce();
+    var settings_packet = try peer.receivePacket();
+    settings_packet.deinit(allocator);
+    try client.bindDispatcher();
+    var fixed_io = FixedClockIo{
+        .delegate = endpoint.io,
+        .now_ns = 9_000_000,
+    };
+    var fixed_vtable = endpoint.io.vtable.*;
+    fixed_vtable.now = FixedClockIo.now;
+    fixed_vtable.sleep = FixedClockIo.sleep;
+    fixed_vtable.netSend = FixedClockIo.netSend;
+    endpoint.io = .{ .userdata = &fixed_io, .vtable = &fixed_vtable };
+    defer endpoint.io = fixed_io.delegate;
+
+    quic.one_rtt.testing.exhaustPacingAt(
+        &client.established.connection,
+        @intCast(fixed_io.now_ns),
+    );
+    var packet_number = client.established.connection.next_packet_number;
+    var control_offset = runtime.testing.clientControlSendOffset(&client);
+    try std.testing.expectError(
+        error.PacingLimited,
+        client.trySendGoAway(9),
+    );
+    try std.testing.expectEqual(
+        @as(?u64, null),
+        runtime.testing.clientLocalGoAwayId(&client),
+    );
+    try std.testing.expectEqual(
+        control_offset,
+        runtime.testing.clientControlSendOffset(&client),
+    );
+    try std.testing.expectEqual(
+        packet_number,
+        client.established.connection.next_packet_number,
+    );
+
+    var timer = client.established.connection.nextTimerDeadline() orelse
+        return error.TestUnexpectedResult;
+    fixed_io.now_ns = @intCast(timer.deadline_ns);
+    _ = (try client.established.connection.serviceNextTimerAt(
+        timer.deadline_ns,
+    )) orelse return error.TestUnexpectedResult;
+    try client.trySendGoAway(9);
+
+    var received = try peer.receivePacket();
+    defer received.deinit(allocator);
+    var control_bytes: []const u8 = &.{};
+    for (received.frames) |frame| switch (frame) {
+        .stream => |stream| if (stream.stream_id == 2) {
+            control_bytes = stream.data;
+        },
+        else => {},
+    };
+    const goaway = try http3.Frame.parse(control_bytes);
+    try std.testing.expectEqual(http3.FrameType.goaway, goaway.frame_type);
+    try std.testing.expectEqual(
+        @as(u64, 9),
+        (try quic.varint.decodeSlice(goaway.payload)).value,
+    );
+
+    quic.one_rtt.testing.exhaustPacingAt(
+        &client.established.connection,
+        @intCast(fixed_io.now_ns),
+    );
+    packet_number = client.established.connection.next_packet_number;
+    control_offset = runtime.testing.clientControlSendOffset(&client);
+    try std.testing.expectError(
+        error.PacingLimited,
+        client.trySendMaxPushId(4),
+    );
+    try std.testing.expectEqual(
+        @as(?u64, null),
+        runtime.testing.clientLocalMaxPushId(&client),
+    );
+    try std.testing.expectEqual(
+        control_offset,
+        runtime.testing.clientControlSendOffset(&client),
+    );
+    try std.testing.expectEqual(
+        packet_number,
+        client.established.connection.next_packet_number,
+    );
+
+    timer = client.established.connection.nextTimerDeadline() orelse
+        return error.TestUnexpectedResult;
+    fixed_io.now_ns = @intCast(timer.deadline_ns);
+    _ = (try client.established.connection.serviceNextTimerAt(
+        timer.deadline_ns,
+    )) orelse return error.TestUnexpectedResult;
+    try client.trySendMaxPushId(4);
+    received.deinit(allocator);
+    received = try peer.receivePacket();
+    control_bytes = &.{};
+    for (received.frames) |frame| switch (frame) {
+        .stream => |stream| if (stream.stream_id == 2) {
+            control_bytes = stream.data;
+        },
+        else => {},
+    };
+    const max_push_id = try http3.Frame.parse(control_bytes);
+    try std.testing.expectEqual(
+        http3.FrameType.max_push_id,
+        max_push_id.frame_type,
+    );
+    try std.testing.expectEqual(
+        @as(u64, 4),
+        (try quic.varint.decodeSlice(max_push_id.payload)).value,
+    );
+    try client.push_streams.registerPromise(3, 0);
+    quic.one_rtt.testing.exhaustPacingAt(
+        &client.established.connection,
+        @intCast(fixed_io.now_ns),
+    );
+    packet_number = client.established.connection.next_packet_number;
+    control_offset = runtime.testing.clientControlSendOffset(&client);
+    try std.testing.expectError(
+        error.PacingLimited,
+        client.tryCancelPush(3),
+    );
+    try std.testing.expect(runtime.testing.clientHasPushPromise(&client, 3));
+    try std.testing.expectEqual(
+        @as(usize, 1),
+        runtime.testing.clientPushPromiseCount(&client),
+    );
+    try std.testing.expectEqual(
+        control_offset,
+        runtime.testing.clientControlSendOffset(&client),
+    );
+    try std.testing.expectEqual(
+        packet_number,
+        client.established.connection.next_packet_number,
+    );
+
+    timer = client.established.connection.nextTimerDeadline() orelse
+        return error.TestUnexpectedResult;
+    fixed_io.now_ns = @intCast(timer.deadline_ns);
+    _ = (try client.established.connection.serviceNextTimerAt(
+        timer.deadline_ns,
+    )) orelse return error.TestUnexpectedResult;
+    try client.tryCancelPush(3);
+    // Completed/cancelled IDs remain in compact lifetime history, while the
+    // active promise slot itself is retired.
+    try std.testing.expect(runtime.testing.clientHasPushPromise(&client, 3));
+    try std.testing.expectEqual(
+        @as(usize, 0),
+        runtime.testing.clientPushPromiseCount(&client),
+    );
+    received.deinit(allocator);
+    received = try peer.receivePacket();
+    control_bytes = &.{};
+    for (received.frames) |frame| switch (frame) {
+        .stream => |stream| if (stream.stream_id == 2) {
+            control_bytes = stream.data;
+        },
+        else => {},
+    };
+    const cancel_push = try http3.Frame.parse(control_bytes);
+    try std.testing.expectEqual(
+        http3.FrameType.cancel_push,
+        cancel_push.frame_type,
+    );
+    try std.testing.expectEqual(
+        @as(u64, 3),
+        (try quic.varint.decodeSlice(cancel_push.payload)).value,
+    );
+
+    quic.one_rtt.testing.exhaustPacingAt(
+        &client.established.connection,
+        @intCast(fixed_io.now_ns),
+    );
+    packet_number = client.established.connection.next_packet_number;
+    control_offset = runtime.testing.clientControlSendOffset(&client);
+    try std.testing.expectError(
+        error.PacingLimited,
+        client.trySendPriorityUpdate(0, .{ .urgency = 2, .incremental = true }),
+    );
+    try std.testing.expectEqual(
+        control_offset,
+        runtime.testing.clientControlSendOffset(&client),
+    );
+    try std.testing.expectEqual(
+        packet_number,
+        client.established.connection.next_packet_number,
+    );
+
+    timer = client.established.connection.nextTimerDeadline() orelse
+        return error.TestUnexpectedResult;
+    fixed_io.now_ns = @intCast(timer.deadline_ns);
+    _ = (try client.established.connection.serviceNextTimerAt(
+        timer.deadline_ns,
+    )) orelse return error.TestUnexpectedResult;
+    try client.trySendPriorityUpdate(0, .{
+        .urgency = 2,
+        .incremental = true,
+    });
+    received.deinit(allocator);
+    received = try peer.receivePacket();
+    control_bytes = &.{};
+    for (received.frames) |frame| switch (frame) {
+        .stream => |stream| if (stream.stream_id == 2) {
+            control_bytes = stream.data;
+        },
+        else => {},
+    };
+    const priority_frame = try http3.Frame.parse(control_bytes);
+    try std.testing.expectEqual(
+        http3.FrameType.priority_update_request,
+        priority_frame.frame_type,
+    );
+    const priority = try http3.parsePriorityUpdatePayload(
+        priority_frame.payload,
+    );
+    try std.testing.expectEqual(@as(u64, 0), priority.prioritized_element_id);
+    try std.testing.expectEqual(@as(u3, 2), priority.priority().urgency);
+    try std.testing.expect(priority.priority().incremental);
+
+    try client.push_streams.registerPromise(4, 0);
+    quic.one_rtt.testing.exhaustPacingAt(
+        &client.established.connection,
+        @intCast(fixed_io.now_ns),
+    );
+    packet_number = client.established.connection.next_packet_number;
+    control_offset = runtime.testing.clientControlSendOffset(&client);
+    try std.testing.expectError(
+        error.PacingLimited,
+        client.trySendPushPriorityUpdate(4, .{ .urgency = 5 }),
+    );
+    try std.testing.expectEqual(
+        control_offset,
+        runtime.testing.clientControlSendOffset(&client),
+    );
+    try std.testing.expectEqual(
+        packet_number,
+        client.established.connection.next_packet_number,
+    );
+
+    timer = client.established.connection.nextTimerDeadline() orelse
+        return error.TestUnexpectedResult;
+    fixed_io.now_ns = @intCast(timer.deadline_ns);
+    _ = (try client.established.connection.serviceNextTimerAt(
+        timer.deadline_ns,
+    )) orelse return error.TestUnexpectedResult;
+    try client.trySendPushPriorityUpdate(4, .{ .urgency = 5 });
+    received.deinit(allocator);
+    received = try peer.receivePacket();
+    control_bytes = &.{};
+    for (received.frames) |frame| switch (frame) {
+        .stream => |stream| if (stream.stream_id == 2) {
+            control_bytes = stream.data;
+        },
+        else => {},
+    };
+    const push_priority_frame = try http3.Frame.parse(control_bytes);
+    try std.testing.expectEqual(
+        http3.FrameType.priority_update_push,
+        push_priority_frame.frame_type,
+    );
+    const push_priority = try http3.parsePriorityUpdatePayload(
+        push_priority_frame.payload,
+    );
+    try std.testing.expectEqual(
+        @as(u64, 4),
+        push_priority.prioritized_element_id,
+    );
+    try std.testing.expectEqual(
+        @as(u3, 5),
+        push_priority.priority().urgency,
+    );
+    try std.testing.expectEqual(@as(usize, 0), fixed_io.sleep_calls);
+}
+
+test "HTTP/3 dispatcher shutdown retries GOAWAY transactionally" {
+    const allocator = std.testing.allocator;
+    var threaded = std.Io.Threaded.init(allocator, .{});
+    defer threaded.deinit();
+    const io = threaded.io();
+
+    var server_endpoint = try quic.runtime.Endpoint.bind(
+        allocator,
+        io,
+        .{ .ip4 = .loopback(0) },
+        .{ .max_datagram_size = 4096 },
+    );
+    defer server_endpoint.deinit();
+    const client_keys = quic.protection.deriveAes128Keys(
+        [_]u8{0xc7} ** quic.protection.secret_len,
+    );
+    const server_keys = quic.protection.deriveAes128Keys(
+        [_]u8{0xc8} ** quic.protection.secret_len,
+    );
+    const client_cid = "shutdown-client";
+    const server_cid = "shutdown-server";
+    const transport_options: quic.handshake.PreconfiguredConnectionOptions = .{
+        .receive_keys = server_keys,
+        .send_keys = client_keys,
+        .local_connection_id = client_cid,
+        .peer_connection_id = server_cid,
+        .one_rtt = .{
+            .max_datagram_size = 1200,
+            .pacing_max_burst_packets = 1,
+        },
+    };
+    var client = try runtime.HandshakeClient.initPreconfigured(
+        allocator,
+        io,
+        .{ .ip4 = .loopback(0) },
+        server_endpoint.address(),
+        .{ .quic = .{ .max_datagram_size = 4096 } },
+        .{},
+        transport_options,
+    );
+    defer client.deinit();
+    var server = try runtime.HandshakeServerSession.initPreconfigured(
+        &server_endpoint,
+        client.address(),
+        .{},
+        .{
+            .receive_keys = client_keys,
+            .send_keys = server_keys,
+            .local_connection_id = server_cid,
+            .peer_connection_id = client_cid,
+            .one_rtt = .{
+                .max_datagram_size = 1200,
+                .pacing_max_burst_packets = 1,
+            },
+        },
+    );
+    defer server.deinit();
+
+    // Admission sends all critical stream prefixes before transferring sole
+    // socket ownership to the endpoint dispatcher.
+    try server.ensureSettingsSent();
+    try server.bindDispatcher();
+
+    var fixed_io = FixedClockIo{
+        .delegate = server_endpoint.io,
+        .now_ns = 6_000_000,
+    };
+    var fixed_vtable = server_endpoint.io.vtable.*;
+    fixed_vtable.now = FixedClockIo.now;
+    fixed_vtable.sleep = FixedClockIo.sleep;
+    fixed_vtable.netSend = FixedClockIo.netSend;
+    server_endpoint.io = .{ .userdata = &fixed_io, .vtable = &fixed_vtable };
+    defer server_endpoint.io = fixed_io.delegate;
+
+    const maximum_goaway_id =
+        @as(u64, quic.varint.max_value) & ~@as(u64, 0x3);
+    quic.one_rtt.testing.exhaustPacingAt(
+        &server.established.connection,
+        @intCast(fixed_io.now_ns),
+    );
+    const initial_offset = server.control_send.next_offset;
+    const initial_packet_number =
+        server.established.connection.next_packet_number;
+    const sends_before_initial = fixed_io.send_calls;
+    try std.testing.expectError(
+        error.PacingLimited,
+        server.tryInitiateShutdown(),
+    );
+    try std.testing.expectEqual(
+        .active,
+        server.request_lifecycle.state(),
+    );
+    try std.testing.expectEqual(@as(?u64, null), server.control.local_goaway_id);
+    try std.testing.expectEqual(initial_offset, server.control_send.next_offset);
+    try std.testing.expectEqual(
+        initial_packet_number,
+        server.established.connection.next_packet_number,
+    );
+    try std.testing.expectEqual(sends_before_initial, fixed_io.send_calls);
+    try std.testing.expectEqual(@as(usize, 0), fixed_io.sleep_calls);
+
+    var timer = server.established.connection.nextTimerDeadline() orelse
+        return error.TestUnexpectedResult;
+    try std.testing.expectEqual(quic.one_rtt.TimerDeadlineKind.pacing, timer.kind);
+    fixed_io.now_ns = @intCast(timer.deadline_ns);
+    _ = (try server.established.connection.serviceNextTimerAt(
+        timer.deadline_ns,
+    )) orelse return error.TestUnexpectedResult;
+    try server.tryInitiateShutdown();
+    try std.testing.expectEqual(
+        .initial_goaway,
+        server.request_lifecycle.state(),
+    );
+    try std.testing.expectEqual(
+        @as(?u64, maximum_goaway_id),
+        server.control.local_goaway_id,
+    );
+
+    while (client.peerGoAwayId() != maximum_goaway_id) {
+        try client.pollControlWithTimeout(.fromSeconds(1));
+    }
+
+    // A second one-attempt call is independently retryable. The failed final
+    // GOAWAY must preserve the already-visible maximum ID and lifecycle.
+    quic.one_rtt.testing.exhaustPacingAt(
+        &server.established.connection,
+        @intCast(fixed_io.now_ns),
+    );
+    const final_offset = server.control_send.next_offset;
+    const final_packet_number = server.established.connection.next_packet_number;
+    const sends_before_final = fixed_io.send_calls;
+    try std.testing.expectError(
+        error.PacingLimited,
+        server.tryCompleteShutdown(),
+    );
+    try std.testing.expectEqual(
+        .initial_goaway,
+        server.request_lifecycle.state(),
+    );
+    try std.testing.expectEqual(
+        @as(?u64, maximum_goaway_id),
+        server.control.local_goaway_id,
+    );
+    try std.testing.expectEqual(final_offset, server.control_send.next_offset);
+    try std.testing.expectEqual(
+        final_packet_number,
+        server.established.connection.next_packet_number,
+    );
+    try std.testing.expectEqual(sends_before_final, fixed_io.send_calls);
+    try std.testing.expectEqual(@as(usize, 0), fixed_io.sleep_calls);
+
+    timer = server.established.connection.nextTimerDeadline() orelse
+        return error.TestUnexpectedResult;
+    try std.testing.expectEqual(quic.one_rtt.TimerDeadlineKind.pacing, timer.kind);
+    fixed_io.now_ns = @intCast(timer.deadline_ns);
+    _ = (try server.established.connection.serviceNextTimerAt(
+        timer.deadline_ns,
+    )) orelse return error.TestUnexpectedResult;
+    try server.tryCompleteShutdown();
+    try std.testing.expectEqual(
+        .final_goaway,
+        server.request_lifecycle.state(),
+    );
+    try std.testing.expectEqual(@as(?u64, 0), server.control.local_goaway_id);
+
+    while (client.peerGoAwayId() != 0) {
+        try client.pollControlWithTimeout(.fromSeconds(1));
+    }
+    try std.testing.expectEqual(@as(?u64, 0), client.peerGoAwayId());
+    try std.testing.expect(server.drainComplete());
+    try std.testing.expectEqual(@as(usize, 0), fixed_io.sleep_calls);
+}
+
+test "HTTP/3 dispatcher server ORIGIN retries transactionally" {
+    const allocator = std.testing.allocator;
+    var threaded = std.Io.Threaded.init(allocator, .{});
+    defer threaded.deinit();
+    const io = threaded.io();
+
+    var server_endpoint = try quic.runtime.Endpoint.bind(
+        allocator,
+        io,
+        .{ .ip4 = .loopback(0) },
+        .{ .max_datagram_size = 4096 },
+    );
+    defer server_endpoint.deinit();
+    const client_keys = quic.protection.deriveAes128Keys(
+        [_]u8{0xc9} ** quic.protection.secret_len,
+    );
+    const server_keys = quic.protection.deriveAes128Keys(
+        [_]u8{0xca} ** quic.protection.secret_len,
+    );
+    const client_cid = "origin-client";
+    const server_cid = "origin-server";
+    var client = try runtime.HandshakeClient.initPreconfigured(
+        allocator,
+        io,
+        .{ .ip4 = .loopback(0) },
+        server_endpoint.address(),
+        .{ .quic = .{ .max_datagram_size = 4096 } },
+        .{},
+        .{
+            .receive_keys = server_keys,
+            .send_keys = client_keys,
+            .local_connection_id = client_cid,
+            .peer_connection_id = server_cid,
+            .one_rtt = .{ .enable_pacing = false },
+        },
+    );
+    defer client.deinit();
+    var server = try runtime.HandshakeServerSession.initPreconfigured(
+        &server_endpoint,
+        client.address(),
+        .{},
+        .{
+            .receive_keys = client_keys,
+            .send_keys = server_keys,
+            .local_connection_id = server_cid,
+            .peer_connection_id = client_cid,
+            .one_rtt = .{
+                .max_datagram_size = 1200,
+                .pacing_max_burst_packets = 1,
+            },
+        },
+    );
+    defer server.deinit();
+
+    try server.ensureSettingsSent();
+    try server.bindDispatcher();
+
+    var fixed_io = FixedClockIo{
+        .delegate = server_endpoint.io,
+        .now_ns = 11_000_000,
+    };
+    var fixed_vtable = server_endpoint.io.vtable.*;
+    fixed_vtable.now = FixedClockIo.now;
+    fixed_vtable.sleep = FixedClockIo.sleep;
+    fixed_vtable.netSend = FixedClockIo.netSend;
+    server_endpoint.io = .{ .userdata = &fixed_io, .vtable = &fixed_vtable };
+    defer server_endpoint.io = fixed_io.delegate;
+
+    const origins = [_][]const u8{
+        "https://example.test",
+        "https://api.example.test:8443",
+    };
+    quic.one_rtt.testing.exhaustPacingAt(
+        &server.established.connection,
+        @intCast(fixed_io.now_ns),
+    );
+    const packet_number = server.established.connection.next_packet_number;
+    const control_offset = runtime.testing.serverControlSendOffset(&server);
+    try std.testing.expectError(
+        error.PacingLimited,
+        server.trySendOrigins(&origins),
+    );
+    try std.testing.expect(!runtime.testing.serverHasSentOriginSet(&server));
+    try std.testing.expectEqual(
+        control_offset,
+        runtime.testing.serverControlSendOffset(&server),
+    );
+    try std.testing.expectEqual(
+        packet_number,
+        server.established.connection.next_packet_number,
+    );
+    try std.testing.expectEqual(@as(usize, 0), fixed_io.sleep_calls);
+
+    const timer = server.established.connection.nextTimerDeadline() orelse
+        return error.TestUnexpectedResult;
+    fixed_io.now_ns = @intCast(timer.deadline_ns);
+    _ = (try server.established.connection.serviceNextTimerAt(
+        timer.deadline_ns,
+    )) orelse return error.TestUnexpectedResult;
+    try server.trySendOrigins(&origins);
+    try std.testing.expect(runtime.testing.serverHasSentOriginSet(&server));
+
+    while (!client.peerOriginSetInitialized()) {
+        try client.pollControlWithTimeout(.fromSeconds(1));
+    }
+    try std.testing.expectEqual(@as(usize, 2), client.peerOrigins().len);
+    try std.testing.expect(client.peerOriginKnown(
+        try http3.originFromSerialized(origins[0]),
+    ));
+    try std.testing.expect(client.peerOriginKnown(
+        try http3.originFromSerialized(origins[1]),
+    ));
+    try std.testing.expectEqual(@as(usize, 0), fixed_io.sleep_calls);
+}
+
 test "HTTP/3 tryStartRequest stream limit is transactional and nonblocking" {
     const allocator = std.testing.allocator;
     var threaded = std.Io.Threaded.init(allocator, .{});

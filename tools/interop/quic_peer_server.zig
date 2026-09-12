@@ -30,6 +30,7 @@ const Mode = enum {
     application_pto,
     initial_pto,
     peer_close,
+    peer_close_v2,
     migration,
     migration_loss,
     nat_rebinding,
@@ -282,8 +283,11 @@ pub fn main(init: std.process.Init) !void {
     }
     var established = try netz.quic.handshake.accept(&endpoint, .{
         .local_connection_id = &server_cid,
-        .version = if (mode == .v2) .version_2 else .version_1,
-        .available_versions = if (mode == .v2)
+        .version = if (mode == .v2 or mode == .peer_close_v2)
+            .version_2
+        else
+            .version_1,
+        .available_versions = if (mode == .v2 or mode == .peer_close_v2)
             &.{.version_2}
         else
             &.{ .version_1, .version_2 },
@@ -477,7 +481,7 @@ pub fn main(init: std.process.Init) !void {
     }
 
     switch (mode) {
-        .echo, .application_pto, .initial_pto, .peer_close, .v2, .s2n => {
+        .echo, .application_pto, .initial_pto, .peer_close, .peer_close_v2, .v2, .s2n => {
             for (payloads, 0..) |expected, index| {
                 const stream_id: u64 = @intCast(index * 4);
                 try receiveExpectedStream(
@@ -611,7 +615,7 @@ pub fn main(init: std.process.Init) !void {
         .nat_rebinding => unreachable,
     }
 
-    if (mode == .peer_close or mode == .s2n or
+    if (mode == .peer_close or mode == .peer_close_v2 or mode == .s2n or
         mode == .s2n_reset or mode == .s2n_stop or
         mode == .s2n_reset_loss or mode == .s2n_stop_loss)
     {
@@ -655,6 +659,10 @@ pub fn main(init: std.process.Init) !void {
                 "netz QUIC close server interoperated with quic-go: alpn=hq-interop peer_close=58\n",
                 .{},
             ),
+            .peer_close_v2 => std.debug.print(
+                "netz QUIC v2 close server interoperated with quic-go: version=2 alpn=hq-interop peer_close=58\n",
+                .{},
+            ),
             else => unreachable,
         }
         return;
@@ -695,6 +703,7 @@ pub fn main(init: std.process.Init) !void {
             .{},
         ),
         .peer_close => unreachable,
+        .peer_close_v2 => unreachable,
         .s2n => unreachable,
         .s2n_reset => unreachable,
         .s2n_stop => unreachable,

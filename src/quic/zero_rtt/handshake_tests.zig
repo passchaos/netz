@@ -4,24 +4,199 @@ const quic = @import("../mod.zig");
 const handshake = quic.handshake;
 
 test "QUIC integrated handshake accepts authenticated 0-RTT stream data" {
-    try runAcceptedEarlyData(.aes_128_gcm_sha256, false);
+    try runAcceptedEarlyData(.aes_128_gcm_sha256, false, false);
 }
 
 test "QUIC integrated handshake accepts ChaCha20 0-RTT and 1-RTT data" {
-    try runAcceptedEarlyData(.chacha20_poly1305_sha256, false);
+    try runAcceptedEarlyData(.chacha20_poly1305_sha256, false, false);
 }
 
 test "QUIC integrated handshake accepts AES-256 SHA-384 0-RTT and 1-RTT" {
-    try runAcceptedEarlyData(.aes_256_gcm_sha384, false);
+    try runAcceptedEarlyData(.aes_256_gcm_sha384, false, false);
 }
 
 test "QUIC integrated handshake preserves retransmitted 0-RTT packet numbers" {
-    try runAcceptedEarlyData(.aes_128_gcm_sha256, true);
+    try runAcceptedEarlyData(.aes_128_gcm_sha256, true, false);
+}
+
+test "QUIC integrated handshake retires socket-rejected 0-RTT packet number" {
+    try runAcceptedEarlyData(.aes_128_gcm_sha256, false, true);
+}
+
+test "QUIC Version Negotiation reports prior 0-RTT offer as rejected" {
+    const allocator = std.testing.allocator;
+    var threaded = std.Io.Threaded.init(allocator, .{});
+    defer threaded.deinit();
+    const io = threaded.io();
+    var server_endpoint = try quic.runtime.Endpoint.bind(
+        allocator,
+        io,
+        .{ .ip4 = .loopback(0) },
+        .{ .max_datagram_size = 4096 },
+    );
+    defer server_endpoint.deinit();
+    var client_endpoint = try quic.runtime.Endpoint.bind(
+        allocator,
+        io,
+        .{ .ip4 = .loopback(0) },
+        .{ .max_datagram_size = 4096 },
+    );
+    defer client_endpoint.deinit();
+    const ticket = "vn-early-ticket";
+    const psk = [_]u8{0xda} ** 32;
+    var cache = try quic.resumption.Cache.init(allocator, 1);
+    defer cache.deinit();
+    try cache.store(earlyTicket(
+        ticket,
+        .fromSha256(psk),
+        .aes_128_gcm_sha256,
+    ));
+    var lease = (try cache.beginEarlyData(
+        "localhost:443",
+        "h3",
+        1500,
+    )).?;
+    defer lease.deinit();
+
+    const Shared = struct {
+        endpoint: *quic.runtime.Endpoint,
+        err: ?anyerror = null,
+        resumed: bool = false,
+        status: quic.zero_rtt.handshake.Status = .not_offered,
+        first_one_rtt_packet_number: ?u64 = null,
+
+        fn run(self: *@This()) void {
+            self.runFallible() catch |err| {
+                self.err = err;
+            };
+        }
+
+        fn runFallible(self: *@This()) !void {
+            var first_initial = try self.endpoint.receiveBytes();
+            defer first_initial.deinit(self.endpoint.allocator);
+            const first_header = try quic.LongHeader.parse(first_initial.bytes);
+            try std.testing.expectEqual(
+                quic.Version.version_1.wireValue(),
+                first_header.version,
+            );
+            try std.testing.expectEqual(
+                quic.PacketType.initial,
+                first_header.packet_type,
+            );
+
+            var first_early = try self.endpoint.receiveBytes();
+            defer first_early.deinit(self.endpoint.allocator);
+            const early_info = try quic.protection
+                .peekProtectedLongPacketInfo(first_early.bytes);
+            try std.testing.expectEqual(
+                quic.Version.version_1.wireValue(),
+                early_info.version,
+            );
+            try std.testing.expectEqual(
+                quic.protection.ProtectedLongPacketType.zero_rtt,
+                early_info.packet_type,
+            );
+
+            var vn: std.ArrayList(u8) = .empty;
+            defer vn.deinit(self.endpoint.allocator);
+            try quic.writeVersionNegotiationPacket(
+                &vn,
+                self.endpoint.allocator,
+                .{
+                    .destination_connection_id = first_header.source_connection_id,
+                    .source_connection_id = first_header.destination_connection_id,
+                    .versions = &.{quic.Version.version_2.wireValue()},
+                },
+            );
+            try self.endpoint.sendBytes(first_initial.from, vn.items);
+
+            var established = try handshake.accept(self.endpoint, .{
+                .version = .version_2,
+                .available_versions = &.{.version_2},
+                .local_connection_id = "server",
+                .random = [_]u8{0xdb} ** 32,
+                .x25519_secret_key = [_]u8{0xdc} ** 32,
+                .key_exchange_groups = &.{.x25519},
+                .psk = .{
+                    .identity = ticket,
+                    .secret = psk,
+                    .age_add = 17,
+                    .issued_at_ms = 1000,
+                    .lifetime_seconds = 3600,
+                    .now_ms = 1500,
+                },
+            });
+            defer established.deinit();
+            self.resumed = established.resumed;
+            self.status = established.early_data_status;
+            var packet = try established.connection.receivePacket();
+            defer packet.deinit(self.endpoint.allocator);
+            self.first_one_rtt_packet_number = packet.packet.packet_number;
+        }
+    };
+    var shared = Shared{ .endpoint = &server_endpoint };
+    const thread = try std.Thread.spawn(.{}, Shared.run, .{&shared});
+    var joined = false;
+    defer if (!joined) thread.join();
+
+    const early_frames = [_]quic.Frame{.{ .stream = .{
+        .stream_id = 0,
+        .data = "old-version-early",
+        .fin = true,
+    } }};
+    var established = try handshake.connect(
+        &client_endpoint,
+        server_endpoint.address(),
+        .{
+            .version = .version_1,
+            .available_versions = &.{ .version_2, .version_1 },
+            .original_destination_connection_id = "vnearly1",
+            .local_connection_id = "client",
+            .random = [_]u8{0xdd} ** 32,
+            .x25519_secret_key = [_]u8{0xde} ** 32,
+            .key_exchange_groups = &.{.x25519},
+            .resumption_now_ms = 1500,
+            .resumption_server_id = "localhost:443",
+            .early_data = .{
+                .cache = &cache,
+                .lease = &lease,
+                .frames = &early_frames,
+            },
+        },
+    );
+    defer established.deinit();
+    try std.testing.expect(established.resumed);
+    try std.testing.expectEqual(
+        quic.zero_rtt.handshake.Status.rejected,
+        established.early_data_status,
+    );
+    try std.testing.expectEqual(
+        @as(u64, 0),
+        established.early_data_protected_packet_count,
+    );
+    try std.testing.expectEqual(
+        @as(usize, 0),
+        established.early_data_sent_packet_count,
+    );
+    try std.testing.expectEqual(@as(u64, 0), established.connection.next_packet_number);
+    try established.connection.send(&.{.{ .ping = {} }});
+
+    thread.join();
+    joined = true;
+    if (shared.err) |err| return err;
+    try std.testing.expect(shared.resumed);
+    try std.testing.expectEqual(
+        quic.zero_rtt.handshake.Status.not_offered,
+        shared.status,
+    );
+    try std.testing.expectEqual(@as(?u64, 0), shared.first_one_rtt_packet_number);
+    try std.testing.expectEqual(.consumed, lease.state);
 }
 
 fn runAcceptedEarlyData(
     cipher_suite: quic.tls_client_hello.CipherSuite,
     drop_first_server_flight: bool,
+    reject_first_client_zero_rtt: bool,
 ) !void {
     const allocator = std.testing.allocator;
     var threaded = std.Io.Threaded.init(allocator, .{});
@@ -42,6 +217,48 @@ fn runAcceptedEarlyData(
         .{ .max_datagram_size = 4096 },
     );
     defer client_endpoint.deinit();
+    const RejectFirstZeroRtt = struct {
+        delegate: std.Io,
+        enabled: bool,
+        rejected: bool = false,
+
+        fn netSend(
+            userdata: ?*anyopaque,
+            socket_handle: std.Io.net.Socket.Handle,
+            messages: []std.Io.net.OutgoingMessage,
+            flags: std.Io.net.SendFlags,
+        ) struct { ?std.Io.net.Socket.SendError, usize } {
+            const self: *@This() = @ptrCast(@alignCast(userdata));
+            if (self.enabled and !self.rejected and messages.len == 1) {
+                const bytes = messages[0].data_ptr[0..messages[0].data_len];
+                if (bytes.len >= 5 and
+                    std.mem.readInt(u32, bytes[1..5], .big) ==
+                        quic.Version.version_1.wireValue() and
+                    (bytes[0] & 0x30) == 0x10)
+                {
+                    self.rejected = true;
+                    return .{ error.NetworkDown, 0 };
+                }
+            }
+            return self.delegate.vtable.netSend(
+                self.delegate.userdata,
+                socket_handle,
+                messages,
+                flags,
+            );
+        }
+    };
+    var reject = RejectFirstZeroRtt{
+        .delegate = client_endpoint.io,
+        .enabled = reject_first_client_zero_rtt,
+    };
+    var rejecting_vtable = client_endpoint.io.vtable.*;
+    rejecting_vtable.netSend = RejectFirstZeroRtt.netSend;
+    client_endpoint.io = .{
+        .userdata = &reject,
+        .vtable = &rejecting_vtable,
+    };
+    defer client_endpoint.io = reject.delegate;
 
     const ticket = "early-ticket";
     const psk = pskForSuite(cipher_suite);
@@ -190,17 +407,40 @@ fn runAcceptedEarlyData(
         shared.early_data orelse return error.TestUnexpectedResult,
     );
     try std.testing.expectEqual(.consumed, lease.state);
+    const protected_early_data_packets =
+        established.early_data_protected_packet_count;
     const sent_early_data_packets =
-        established.connection.next_packet_number;
+        established.early_data_sent_packet_count;
+    try std.testing.expectEqual(
+        protected_early_data_packets,
+        established.connection.next_packet_number,
+    );
     try std.testing.expect(sent_early_data_packets >= 1);
     if (drop_first_server_flight)
-        try std.testing.expect(sent_early_data_packets > 1);
+        try std.testing.expect(protected_early_data_packets > 1);
+    if (reject_first_client_zero_rtt) {
+        try std.testing.expect(reject.rejected);
+        try std.testing.expectEqual(@as(u64, 2), protected_early_data_packets);
+        try std.testing.expectEqual(@as(usize, 1), sent_early_data_packets);
+        try std.testing.expect(
+            quic.one_rtt.testing.recoveryPayloadForPacket(
+                &established.connection,
+                0,
+            ) == null,
+        );
+        try std.testing.expect(
+            quic.one_rtt.testing.recoveryPayloadForPacket(
+                &established.connection,
+                1,
+            ) != null,
+        );
+    }
     try std.testing.expectEqual(
-        @as(usize, @intCast(sent_early_data_packets)),
+        sent_early_data_packets,
         established.connection.stats().sent_packet_stats.tracked_packets,
     );
     try std.testing.expectEqual(
-        @as(usize, @intCast(sent_early_data_packets)),
+        sent_early_data_packets,
         established.connection.stats().recovery_queue_stats.packet_number_copies,
     );
     // X25519MLKEM768 makes ClientHello exceed one 1200-byte Initial. Reaching
@@ -210,10 +450,10 @@ fn runAcceptedEarlyData(
     var one_rtt = try sharedEndpointReceive(
         &server_endpoint,
         established.connection.config.send_keys,
-        sent_early_data_packets,
+        protected_early_data_packets,
     );
     try std.testing.expectEqual(
-        sent_early_data_packets,
+        protected_early_data_packets,
         one_rtt.packet.packet_number,
     );
     one_rtt.deinit(allocator);
@@ -239,6 +479,44 @@ test "QUIC integrated handshake rejects 0-RTT but resumes with PSK" {
         .{ .max_datagram_size = 4096 },
     );
     defer client_endpoint.deinit();
+    const RejectFirstZeroRtt = struct {
+        delegate: std.Io,
+        rejected: bool = false,
+
+        fn netSend(
+            userdata: ?*anyopaque,
+            socket_handle: std.Io.net.Socket.Handle,
+            messages: []std.Io.net.OutgoingMessage,
+            flags: std.Io.net.SendFlags,
+        ) struct { ?std.Io.net.Socket.SendError, usize } {
+            const self: *@This() = @ptrCast(@alignCast(userdata));
+            if (!self.rejected and messages.len == 1) {
+                const bytes = messages[0].data_ptr[0..messages[0].data_len];
+                if (bytes.len >= 5 and
+                    std.mem.readInt(u32, bytes[1..5], .big) ==
+                        quic.Version.version_1.wireValue() and
+                    (bytes[0] & 0x30) == 0x10)
+                {
+                    self.rejected = true;
+                    return .{ error.NetworkDown, 0 };
+                }
+            }
+            return self.delegate.vtable.netSend(
+                self.delegate.userdata,
+                socket_handle,
+                messages,
+                flags,
+            );
+        }
+    };
+    var reject = RejectFirstZeroRtt{ .delegate = client_endpoint.io };
+    var rejecting_vtable = client_endpoint.io.vtable.*;
+    rejecting_vtable.netSend = RejectFirstZeroRtt.netSend;
+    client_endpoint.io = .{
+        .userdata = &reject,
+        .vtable = &rejecting_vtable,
+    };
+    defer client_endpoint.io = reject.delegate;
 
     const ticket = "rejected-ticket";
     const psk = [_]u8{0xc1} ** 32;
@@ -326,6 +604,11 @@ test "QUIC integrated handshake rejects 0-RTT but resumes with PSK" {
                 .lease = &lease,
                 .frames = &frames,
             },
+            .handshake_recovery = .{
+                .initial_pto_ms = 5,
+                .max_pto_ms = 10,
+                .max_retries = 5,
+            },
         },
     );
     defer established.deinit();
@@ -347,7 +630,16 @@ test "QUIC integrated handshake rejects 0-RTT but resumes with PSK" {
         shared.status,
     );
     try std.testing.expectEqual(.consumed, lease.state);
-    try std.testing.expect(established.connection.next_packet_number >= 1);
+    try std.testing.expect(reject.rejected);
+    try std.testing.expectEqual(
+        @as(u64, 2),
+        established.early_data_protected_packet_count,
+    );
+    try std.testing.expectEqual(
+        @as(usize, 1),
+        established.early_data_sent_packet_count,
+    );
+    try std.testing.expectEqual(@as(u64, 2), established.connection.next_packet_number);
     try std.testing.expectEqual(
         @as(usize, 0),
         established.connection.stats().sent_packet_stats.tracked_packets,

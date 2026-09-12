@@ -7,15 +7,16 @@ const payload_size: usize = 1024;
 // ranges can produce several adjacent STREAM descriptors for the same stream.
 const default_stream_fragments_per_packet: usize = 1;
 const max_stream_fragments_per_packet: usize = 16;
-const warmup_iterations: usize = 100;
-const measured_iterations: usize = 1_000;
+const default_warmup_iterations: usize = 100;
+const default_measured_iterations: usize = 1_000;
 
 pub fn main(init: std.process.Init) !void {
     const allocator = std.heap.smp_allocator;
-    const stream_fragments_per_packet = try parseStreamFragments(
+    const options = try parseOptions(
         init,
         allocator,
     );
+    const stream_fragments_per_packet = options.stream_fragments_per_packet;
     var threaded = std.Io.Threaded.init(allocator, .{});
     defer threaded.deinit();
     const io = threaded.io();
@@ -103,19 +104,19 @@ pub fn main(init: std.process.Init) !void {
     try runSequential(
         &sequential,
         &packets,
-        warmup_iterations,
+        options.warmup_iterations,
     );
     try runBatch(
         &batched,
         &packets,
-        warmup_iterations,
+        options.warmup_iterations,
     );
 
     const sequential_started = nowNs(io);
     try runSequential(
         &sequential,
         &packets,
-        measured_iterations,
+        options.measured_iterations,
     );
     const sequential_ns = nowNs(io) -| sequential_started;
 
@@ -123,11 +124,11 @@ pub fn main(init: std.process.Init) !void {
     try runBatch(
         &batched,
         &packets,
-        measured_iterations,
+        options.measured_iterations,
     );
     const batch_ns = nowNs(io) -| batch_started;
 
-    const total_packets = measured_iterations * batch_size;
+    const total_packets = options.measured_iterations * batch_size;
     const ratio_x100 = ratioTimes100(sequential_ns, batch_ns);
     std.debug.print(
         \\QUIC 1-RTT send benchmark
@@ -139,14 +140,14 @@ pub fn main(init: std.process.Init) !void {
         \\  total packets/path: {d}
         \\
     , .{
-        measured_iterations,
+        options.measured_iterations,
         batch_size,
         stream_fragments_per_packet,
         payload_size,
         batch_sender.gsoSendEnabled(),
-        sequential_ns / measured_iterations,
+        sequential_ns / options.measured_iterations,
         sequential_ns / total_packets,
-        batch_ns / measured_iterations,
+        batch_ns / options.measured_iterations,
         batch_ns / total_packets,
         ratio_x100 / 100,
         ratio_x100 % 100,
@@ -184,26 +185,51 @@ fn ratioTimes100(numerator: u64, denominator: u64) u64 {
     return (numerator *| 100) / denominator;
 }
 
-fn parseStreamFragments(
+const Options = struct {
+    stream_fragments_per_packet: usize = default_stream_fragments_per_packet,
+    warmup_iterations: usize = default_warmup_iterations,
+    measured_iterations: usize = default_measured_iterations,
+};
+
+fn parseOptions(
     init: std.process.Init,
     allocator: std.mem.Allocator,
-) !usize {
+) !Options {
     var args = try std.process.Args.Iterator.initAllocator(
         init.minimal.args,
         allocator,
     );
     defer args.deinit();
     _ = args.next();
-    var fragments = default_stream_fragments_per_packet;
+    var options: Options = .{};
     while (args.next()) |arg| {
-        const prefix = "--stream-fragments=";
-        if (!std.mem.startsWith(u8, arg, prefix)) return error.InvalidArgument;
-        fragments = try std.fmt.parseInt(usize, arg[prefix.len..], 10);
+        if (std.mem.startsWith(u8, arg, "--stream-fragments=")) {
+            options.stream_fragments_per_packet = try std.fmt.parseInt(
+                usize,
+                arg["--stream-fragments=".len..],
+                10,
+            );
+        } else if (std.mem.startsWith(u8, arg, "--warmup=")) {
+            options.warmup_iterations = try std.fmt.parseInt(
+                usize,
+                arg["--warmup=".len..],
+                10,
+            );
+        } else if (std.mem.startsWith(u8, arg, "--iterations=")) {
+            options.measured_iterations = try std.fmt.parseInt(
+                usize,
+                arg["--iterations=".len..],
+                10,
+            );
+        } else return error.InvalidArgument;
     }
-    if (fragments == 0 or fragments > max_stream_fragments_per_packet) {
+    if (options.stream_fragments_per_packet == 0 or
+        options.stream_fragments_per_packet > max_stream_fragments_per_packet or
+        options.measured_iterations == 0)
+    {
         return error.InvalidArgument;
     }
-    return fragments;
+    return options;
 }
 
 fn nowNs(io: std.Io) u64 {

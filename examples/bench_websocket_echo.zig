@@ -2,6 +2,7 @@ const std = @import("std");
 const netz = @import("netz");
 const CountingAllocator = @import("support/counting_allocator.zig")
     .CountingAllocator;
+const send_shape = @import("support/websocket_send_shape.zig");
 
 const max_payload_bytes: usize = 4096;
 const fixed_payload_bytes: usize = max_payload_bytes;
@@ -13,8 +14,8 @@ const mixed_payload_sizes = [_]usize{ 1, 7, 125, 126, 1024, 4096 };
 // make long runs expensive on kernels that apply delayed ACK. Keep the shared
 // comparison shape short enough for repeated pinned samples while retaining a
 // meaningful untimed warmup.
-const warmup_iterations: usize = 20;
-const iterations: usize = 200;
+const default_warmup_iterations: usize = 20;
+const default_iterations: usize = 200;
 const max_message_bytes: usize = max_payload_bytes;
 const default_connections: usize = 1;
 const max_connections: usize = 256;
@@ -59,6 +60,8 @@ pub fn main(init: std.process.Init) !void {
         connection_count: usize,
         compression: bool,
         mixed: bool,
+        shape: send_shape.Shape,
+        parts: usize,
 
         fn run(shared: *@This()) void {
             shared.result = shared.server.serveConcurrent(
@@ -78,6 +81,7 @@ pub fn main(init: std.process.Init) !void {
             connection: *netz.websocket.runtime.Connection,
         ) netz.websocket.runtime.Error!void {
             var storage: [max_message_bytes]u8 align(64) = undefined;
+            var joined: [max_message_bytes]u8 align(64) = undefined;
             for (0..shared.expected_exchanges) |iteration| {
                 const message = try connection.receiveMessageInto(&storage);
                 if (message.opcode != .binary or
@@ -88,16 +92,27 @@ pub fn main(init: std.process.Init) !void {
                 {
                     return error.InvalidFrame;
                 }
-                try connection.sendBinary(message.payload);
+                send_shape.sendBinary(
+                    connection,
+                    message.payload,
+                    shared.shape,
+                    shared.parts,
+                    &joined,
+                ) catch |err| switch (err) {
+                    error.InvalidArgument => return error.InvalidFrame,
+                    else => |other| return other,
+                };
             }
         }
     };
     var shared = Shared{
         .server = &server,
-        .expected_exchanges = warmup_iterations + iterations,
+        .expected_exchanges = options.warmup_iterations + options.iterations,
         .connection_count = connections,
         .compression = options.compression,
         .mixed = options.mixed,
+        .shape = options.send_shape,
+        .parts = options.parts,
     };
     const server_thread = try std.Thread.spawn(
         .{},
@@ -144,12 +159,12 @@ pub fn main(init: std.process.Init) !void {
     defer allocator.free(checksums);
     @memset(checksums, 0);
     const latency_samples = if (options.latency)
-        try allocator.alloc(u64, iterations * connections)
+        try allocator.alloc(u64, options.iterations * connections)
     else
         null;
     defer if (latency_samples) |samples| allocator.free(samples);
     const latency_scratch = if (options.latency)
-        try allocator.alloc(u64, iterations * connections)
+        try allocator.alloc(u64, options.iterations * connections)
     else
         null;
     defer if (latency_scratch) |samples| allocator.free(samples);
@@ -168,6 +183,10 @@ pub fn main(init: std.process.Init) !void {
         seed: u8,
         fragmented: bool,
         mixed: bool,
+        shape: send_shape.Shape,
+        parts: usize,
+        warmup_iterations: usize,
+        iterations: usize,
 
         fn run(worker: *@This()) void {
             runFallible(worker) catch |err| {
@@ -179,22 +198,26 @@ pub fn main(init: std.process.Init) !void {
         fn runFallible(worker: *@This()) !void {
             var payload: [max_payload_bytes]u8 align(64) = undefined;
             var response: [max_payload_bytes]u8 align(64) = undefined;
+            var joined: [max_payload_bytes]u8 align(64) = undefined;
             for (&payload, 0..) |*byte, index| {
                 byte.* = worker.seed +% @as(u8, @truncate(index));
             }
-            for (0..warmup_iterations) |iteration| {
+            for (0..worker.warmup_iterations) |iteration| {
                 _ = try exchange(
                     worker.client,
                     &payload,
                     &response,
                     worker.fragmented,
+                    worker.shape,
+                    worker.parts,
+                    &joined,
                     payloadLength(worker.mixed, iteration),
                 );
             }
             _ = worker.ready.fetchAdd(1, .release);
             worker.start.waitUncancelable(worker.io);
             var checksum: u64 = 0;
-            for (0..iterations) |iteration| {
+            for (0..worker.iterations) |iteration| {
                 const started = if (worker.latency_samples != null)
                     nowNs(worker.io)
                 else
@@ -204,9 +227,12 @@ pub fn main(init: std.process.Init) !void {
                     &payload,
                     &response,
                     worker.fragmented,
+                    worker.shape,
+                    worker.parts,
+                    &joined,
                     payloadLength(
                         worker.mixed,
-                        warmup_iterations + iteration,
+                        worker.warmup_iterations + iteration,
                     ),
                 );
                 if (worker.latency_samples) |samples| {
@@ -230,12 +256,16 @@ pub fn main(init: std.process.Init) !void {
             .finished_ns = &finished_ns[index],
             .checksum = &checksums[index],
             .latency_samples = if (latency_samples) |samples|
-                samples[index * iterations ..][0..iterations]
+                samples[index * options.iterations ..][0..options.iterations]
             else
                 null,
             .seed = @truncate(index * 17),
             .fragmented = options.fragmented,
             .mixed = options.mixed,
+            .shape = options.send_shape,
+            .parts = options.parts,
+            .warmup_iterations = options.warmup_iterations,
+            .iterations = options.iterations,
         };
         workers[index] = try std.Thread.spawn(
             .{},
@@ -272,11 +302,19 @@ pub fn main(init: std.process.Init) !void {
         return err;
     }
     serve_result.deinit();
-    const measured_roundtrips = iterations * connections;
+    const measured_roundtrips = options.iterations * connections;
     const logical_payload_bytes =
-        measuredPayloadBytes(options.mixed) * connections;
+        measuredPayloadBytes(
+            options.mixed,
+            options.warmup_iterations,
+            options.iterations,
+        ) * connections;
     const uncompressed_wire_bytes =
-        measuredWireBytes(options.mixed) * connections;
+        measuredWireBytes(
+            options.mixed,
+            options.warmup_iterations,
+            options.iterations,
+        ) * connections;
     const roundtrips_per_second: u128 = if (elapsed == 0)
         0
     else
@@ -290,6 +328,8 @@ pub fn main(init: std.process.Init) !void {
         \\  payload schedule: {s}
         \\  logical payload bytes: {d}
         \\  permessage-deflate: {}
+        \\  send shape: {s}
+        \\  application parts: {d}
         \\  fragmented send slices: {d}
         \\  uncompressed-equivalent wire bytes: {d}
         \\  aggregate ns/roundtrip: {d}
@@ -300,11 +340,13 @@ pub fn main(init: std.process.Init) !void {
         \\
     , .{
         connections,
-        warmup_iterations,
-        iterations,
+        options.warmup_iterations,
+        options.iterations,
         if (options.mixed) "1,7,125,126,1024,4096" else "4096",
         logical_payload_bytes,
         options.compression,
+        options.send_shape.label(),
+        options.parts,
         if (options.fragmented) fragmented_slices else 1,
         uncompressed_wire_bytes,
         elapsed / measured_roundtrips,
@@ -320,11 +362,39 @@ pub fn main(init: std.process.Init) !void {
         )) / (1024.0 * 1024.0),
         checksum,
     });
+    std.debug.print(
+        "record=result implementation=netz protocol=websocket-h1 " ++
+            "transport=tcp mode=binary-echo role_pair=netz-self " ++
+            "connection_scope=persistent benchmark_scope={s} " ++
+            "connections={d} warmup={d} iterations={d} payload_bytes={d} " ++
+            "payload_schedule={s} send_shape={s} parts={d} compression={} " ++
+            "logical_bytes={d} elapsed_ns={d} " ++
+            "checksum={d} complete=true\n",
+        .{
+            if (options.parts == 1)
+                "single-buffer-echo"
+            else
+                "caller-copy-vs-direct-slices",
+            connections,
+            options.warmup_iterations,
+            options.iterations,
+            fixed_payload_bytes,
+            if (options.mixed) "mixed" else "fixed",
+            options.send_shape.label(),
+            options.parts,
+            options.compression,
+            logical_payload_bytes,
+            elapsed,
+            checksum,
+        },
+    );
     if (latency_samples) |samples| {
         printLatencyByPayload(
             samples,
             latency_scratch.?,
             options.mixed,
+            options.warmup_iterations,
+            options.iterations,
         );
     }
     if (options.stats) {
@@ -340,6 +410,10 @@ const Options = struct {
     fragmented: bool = false,
     mixed: bool = false,
     latency: bool = false,
+    send_shape: send_shape.Shape = .contiguous,
+    parts: usize = 1,
+    warmup_iterations: usize = default_warmup_iterations,
+    iterations: usize = default_iterations,
 };
 
 fn parseOptions(init: std.process.Init) !Options {
@@ -367,6 +441,28 @@ fn parseOptions(init: std.process.Init) !Options {
             options.mixed = true;
         } else if (std.mem.eql(u8, arg, "--latency")) {
             options.latency = true;
+        } else if (std.mem.startsWith(u8, arg, "--send-shape=")) {
+            options.send_shape = try send_shape.Shape.parse(
+                arg["--send-shape=".len..],
+            );
+        } else if (std.mem.startsWith(u8, arg, "--parts=")) {
+            options.parts = try std.fmt.parseInt(
+                usize,
+                arg["--parts=".len..],
+                10,
+            );
+        } else if (std.mem.startsWith(u8, arg, "--warmup=")) {
+            options.warmup_iterations = try std.fmt.parseInt(
+                usize,
+                arg["--warmup=".len..],
+                10,
+            );
+        } else if (std.mem.startsWith(u8, arg, "--iterations=")) {
+            options.iterations = try std.fmt.parseInt(
+                usize,
+                arg["--iterations=".len..],
+                10,
+            );
         } else {
             return error.InvalidArgument;
         }
@@ -377,6 +473,13 @@ fn parseOptions(init: std.process.Init) !Options {
     if (options.fragmented and !options.compression) {
         return error.InvalidArgument;
     }
+    try send_shape.validatePartCount(options.parts);
+    if (options.iterations == 0) return error.InvalidArgument;
+    if (options.fragmented and
+        (options.send_shape != .contiguous or options.parts != 1))
+    {
+        return error.InvalidArgument;
+    }
     return options;
 }
 
@@ -385,6 +488,9 @@ fn exchange(
     payload: *[max_payload_bytes]u8,
     response_storage: *[max_payload_bytes]u8,
     fragmented: bool,
+    shape: send_shape.Shape,
+    part_count: usize,
+    joined: *[max_payload_bytes]u8,
     payload_len: usize,
 ) !u64 {
     const data = payload[0..payload_len];
@@ -397,6 +503,14 @@ fn exchange(
             fragment.* = data[start..end];
         }
         try client.sendFragmented(.binary, fragments[0..fragment_count]);
+    } else if (shape == .slices or part_count != 1) {
+        try send_shape.sendBinary(
+            client,
+            data,
+            shape,
+            part_count,
+            joined,
+        );
     } else if (client.permessage_deflate) {
         try client.sendBinary(data);
     } else {
@@ -424,18 +538,26 @@ fn payloadLength(mixed: bool, iteration: usize) usize {
         fixed_payload_bytes;
 }
 
-fn measuredPayloadBytes(mixed: bool) usize {
+fn measuredPayloadBytes(
+    mixed: bool,
+    warmup_count: usize,
+    iteration_count: usize,
+) usize {
     var total: usize = 0;
-    for (0..iterations) |iteration| {
-        total += payloadLength(mixed, warmup_iterations + iteration) * 2;
+    for (0..iteration_count) |iteration| {
+        total += payloadLength(mixed, warmup_count + iteration) * 2;
     }
     return total;
 }
 
-fn measuredWireBytes(mixed: bool) usize {
+fn measuredWireBytes(
+    mixed: bool,
+    warmup_count: usize,
+    iteration_count: usize,
+) usize {
     var total: usize = 0;
-    for (0..iterations) |iteration| {
-        const len = payloadLength(mixed, warmup_iterations + iteration);
+    for (0..iteration_count) |iteration| {
+        const len = payloadLength(mixed, warmup_count + iteration);
         total += clientFrameLen(len) + serverFrameLen(len);
     }
     return total;
@@ -457,13 +579,29 @@ fn printLatencyByPayload(
     samples: []const u64,
     scratch: []u64,
     mixed: bool,
+    warmup_count: usize,
+    iteration_count: usize,
 ) void {
     if (mixed) {
         for (mixed_payload_sizes) |payload_bytes| {
-            printLatencyClass(samples, scratch, true, payload_bytes);
+            printLatencyClass(
+                samples,
+                scratch,
+                true,
+                warmup_count,
+                iteration_count,
+                payload_bytes,
+            );
         }
     } else {
-        printLatencyClass(samples, scratch, false, fixed_payload_bytes);
+        printLatencyClass(
+            samples,
+            scratch,
+            false,
+            warmup_count,
+            iteration_count,
+            fixed_payload_bytes,
+        );
     }
 }
 
@@ -471,14 +609,16 @@ fn printLatencyClass(
     samples: []const u64,
     scratch: []u64,
     mixed: bool,
+    warmup_count: usize,
+    iteration_count: usize,
     payload_bytes: usize,
 ) void {
     var count: usize = 0;
     for (samples, 0..) |sample, index| {
-        const iteration = index % iterations;
+        const iteration = index % iteration_count;
         if (payloadLength(
             mixed,
-            warmup_iterations + iteration,
+            warmup_count + iteration,
         ) != payload_bytes) continue;
         scratch[count] = sample;
         count += 1;

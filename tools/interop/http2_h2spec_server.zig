@@ -94,7 +94,13 @@ fn acceptAndServe(
     allocator: std.mem.Allocator,
     stream: std.Io.net.Stream,
 ) void {
-    var connection = server.acceptStream(stream) catch return;
+    var connection = server.acceptStream(stream) catch |err| {
+        std.debug.print(
+            "netz h2spec connection accept failed: {s}\n",
+            .{@errorName(err)},
+        );
+        return;
+    };
     while (true) {
         var request = connection.readRequest() catch |err| {
             if (err == error.StreamReset) {

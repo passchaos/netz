@@ -105,6 +105,126 @@ fn ignorePeerCloseWriteError(err: anyerror) !void {
     }
 }
 
+test "HTTP/2 listener accept deadline expires without a client" {
+    const allocator = std.testing.allocator;
+    var threaded = std.Io.Threaded.init(allocator, .{
+        .async_limit = .unlimited,
+    });
+    defer threaded.deinit();
+    const io = threaded.io();
+    var server = try runtime.Server.listen(
+        allocator,
+        io,
+        .{ .ip4 = .loopback(0) },
+        .{},
+    );
+    defer server.deinit();
+
+    try std.testing.expectError(
+        error.Timeout,
+        server.acceptWithTimeout(.fromMilliseconds(20)),
+    );
+}
+
+test "HTTP/2 h2c upgrade accept deadline expires without a client" {
+    const allocator = std.testing.allocator;
+    var threaded = std.Io.Threaded.init(allocator, .{
+        .async_limit = .unlimited,
+    });
+    defer threaded.deinit();
+    const io = threaded.io();
+    var server = try runtime.Server.listen(
+        allocator,
+        io,
+        .{ .ip4 = .loopback(0) },
+        .{},
+    );
+    defer server.deinit();
+
+    try std.testing.expectError(
+        error.Timeout,
+        server.acceptUpgradeWithTimeout(.fromMilliseconds(20)),
+    );
+}
+
+test "HTTP/2 TLS listener accept deadline expires without a client" {
+    const allocator = std.testing.allocator;
+    var threaded = std.Io.Threaded.init(allocator, .{
+        .async_limit = .unlimited,
+    });
+    defer threaded.deinit();
+    const io = threaded.io();
+    var certificate_der: [tls_testing.certificate_der_len]u8 = undefined;
+    try std.base64.standard.Decoder.decode(
+        &certificate_der,
+        tls_testing.certificate_base64,
+    );
+    const key_pair = try tls_testing.serverKeyPair();
+    var server = try runtime.TlsServer.listen(
+        allocator,
+        io,
+        .{ .ip4 = .loopback(0) },
+        .{ .identity = .{
+            .certificate_chain = &.{&certificate_der},
+            .signer = .{ .ecdsa_p256_sha256 = .{
+                .key_pair = key_pair,
+            } },
+        } },
+    );
+    defer server.deinit();
+
+    try std.testing.expectError(
+        error.Timeout,
+        server.acceptWithTimeout(.fromMilliseconds(20)),
+    );
+}
+
+test "HTTP/2 listener timeout includes accept and bootstrap" {
+    const allocator = std.testing.allocator;
+    var threaded = std.Io.Threaded.init(allocator, .{
+        .async_limit = .unlimited,
+    });
+    defer threaded.deinit();
+    const io = threaded.io();
+    var server = try runtime.Server.listen(
+        allocator,
+        io,
+        .{ .ip4 = .loopback(0) },
+        .{},
+    );
+    defer server.deinit();
+
+    const Shared = struct {
+        server: *runtime.Server,
+        elapsed_ns: i96 = 0,
+        err: ?anyerror = null,
+
+        fn run(self: *@This()) void {
+            const started = std.Io.Clock.awake.now(self.server.io);
+            var connection = self.server.acceptWithTimeout(
+                .fromMilliseconds(120),
+            ) catch |err| {
+                self.elapsed_ns = std.Io.Clock.awake.now(self.server.io)
+                    .nanoseconds - started.nanoseconds;
+                self.err = err;
+                return;
+            };
+            connection.close();
+            self.err = error.TestUnexpectedResult;
+        }
+    };
+    var shared = Shared{ .server = &server };
+    const thread = try std.Thread.spawn(.{}, Shared.run, .{&shared});
+    try std.Io.sleep(io, .fromMilliseconds(80), .awake);
+    const client = try server.address().connect(io, .{ .mode = .stream });
+    defer client.close(io);
+
+    thread.join();
+    try std.testing.expectEqual(error.Timeout, shared.err.?);
+    try std.testing.expect(shared.elapsed_ns <
+        std.time.ns_per_ms * 190);
+}
+
 test "HTTP/2 server handshake times out before the client preface" {
     const allocator = std.testing.allocator;
     var threaded = std.Io.Threaded.init(allocator, .{
@@ -201,8 +321,8 @@ test "HTTP/2 accepted stream timeout bounds cleartext bootstrap" {
         err: ?anyerror = null,
 
         fn run(self: *@This()) void {
-            const stream = self.server.listener.accept(self.server.io) catch
-                |err| {
+            const stream = self.server.listener.accept(self.server.io) catch |err|
+                {
                     self.err = err;
                     return;
                 };
@@ -1283,8 +1403,8 @@ test "HTTP/2 accepted TLS stream timeout bounds handshake" {
         err: ?anyerror = null,
 
         fn run(self: *@This()) void {
-            const stream = self.server.listener.accept(self.server.io) catch
-                |err| {
+            const stream = self.server.listener.accept(self.server.io) catch |err|
+                {
                     self.err = err;
                     return;
                 };

@@ -208,6 +208,119 @@ test "HTTP/3 handshake serveConnection handles bounded persistent requests" {
     try std.testing.expectEqual(@as(usize, 1), drop.dropped.load(.acquire));
 }
 
+test "HTTP/3 handshake serveOne converts handler informational status to final 500" {
+    const allocator = std.testing.allocator;
+    var threaded = std.Io.Threaded.init(allocator, .{});
+    defer threaded.deinit();
+    const io = threaded.io();
+
+    const original_dcid = [_]u8{ 0xa1, 0xa2, 0xa3, 0xa4, 0xa5, 0xa6, 0xa7, 0xa8 };
+    const client_cid = [_]u8{ 0xa9, 0xaa, 0xab, 0xac };
+    const server_cid = [_]u8{ 0xad, 0xae, 0xaf, 0xb0 };
+    var server = try runtime.HandshakeServer.bind(
+        allocator,
+        io,
+        .{ .ip4 = .loopback(0) },
+        .{ .quic = .{
+            .max_datagram_size = 4096,
+            .max_frames_per_datagram = 16,
+        } },
+        .{ .handshake = .{
+            .local_connection_id = &server_cid,
+            .random = [_]u8{0xb1} ** 32,
+            .x25519_secret_key = [_]u8{0xb2} ** 32,
+        } },
+    );
+    defer server.deinit();
+
+    const Context = struct {
+        calls: usize = 0,
+
+        fn handle(
+            self: *@This(),
+            request: runtime.OwnedHandshakeRequest,
+        ) runtime.Error!http3.Response {
+            self.calls += 1;
+            if (std.mem.eql(u8, request.request.path, "/invalid-final")) {
+                return .{ .status = 103 };
+            }
+            return .{ .status = 204 };
+        }
+    };
+    const Shared = struct {
+        server: *runtime.HandshakeServer,
+        context: Context = .{},
+        first_error: ?anyerror = null,
+        err: ?anyerror = null,
+
+        fn run(self: *@This()) void {
+            self.runFallible() catch |err| {
+                self.err = err;
+            };
+        }
+
+        fn runFallible(self: *@This()) !void {
+            var session = try self.server.accept();
+            defer session.deinit();
+            _ = session.serveOne(
+                Context,
+                &self.context,
+                Context.handle,
+            ) catch |err| {
+                self.first_error = err;
+            };
+            _ = try session.serveOne(
+                Context,
+                &self.context,
+                Context.handle,
+            );
+            try session.waitForRecoveryIdleWithTimeout(.fromSeconds(2));
+        }
+    };
+    var shared = Shared{ .server = &server };
+    const server_thread = try std.Thread.spawn(.{}, Shared.run, .{&shared});
+
+    var client = try runtime.HandshakeClient.connect(
+        allocator,
+        io,
+        .{ .ip4 = .loopback(0) },
+        server.address(),
+        .{ .quic = .{
+            .max_datagram_size = 4096,
+            .max_frames_per_datagram = 16,
+        } },
+        .{ .handshake = .{
+            .original_destination_connection_id = &original_dcid,
+            .local_connection_id = &client_cid,
+            .server_name = "localhost",
+            .random = [_]u8{0xb3} ** 32,
+            .x25519_secret_key = [_]u8{0xb4} ** 32,
+        } },
+    );
+    defer client.deinit();
+
+    var invalid = try client.request(.{
+        .method = "GET",
+        .path = "/invalid-final",
+        .authority = "localhost",
+    });
+    defer invalid.deinit(allocator);
+    try std.testing.expectEqual(@as(u16, 500), invalid.response.status);
+    try std.testing.expectEqualStrings("", invalid.response.body);
+    var sibling = try client.request(.{
+        .method = "GET",
+        .path = "/sibling",
+        .authority = "localhost",
+    });
+    defer sibling.deinit(allocator);
+    try std.testing.expectEqual(@as(u16, 204), sibling.response.status);
+
+    server_thread.join();
+    if (shared.err) |err| return err;
+    try std.testing.expectEqual(error.InvalidStatus, shared.first_error.?);
+    try std.testing.expectEqual(@as(usize, 2), shared.context.calls);
+}
+
 test "HTTP/3 handshake server automatically retires completed request streams" {
     const allocator = std.testing.allocator;
     var threaded = std.Io.Threaded.init(allocator, .{
@@ -1386,6 +1499,9 @@ test "HTTP/3 handshake supervisor establishes concurrent clients" {
                 var owned = true;
                 defer if (owned) completion.deinit();
                 promoted[completed] = try supervisor.promote(&completion);
+                try std.testing.expect(
+                    promoted[completed].?.session.dispatcherBound(),
+                );
                 owned = false;
                 completed += 1;
             },
@@ -1439,7 +1555,7 @@ test "HTTP/3 handshake supervisor establishes concurrent clients" {
                     try dispatcher.refreshConnectionTimer(
                         routed.connection_handle,
                     );
-                    while (try promoted_session.session.pollRequestEvent()) |request_value| {
+                    while (try promoted_session.session.pollRequestEventOnce()) |request_value| {
                         var request = request_value;
                         defer request.deinit(allocator);
                         if (request != .message) return error.TestUnexpectedResult;
@@ -1457,7 +1573,7 @@ test "HTTP/3 handshake supervisor establishes concurrent clients" {
                                     head.request.path,
                                     "/two",
                                 )) "response-two" else return error.TestUnexpectedResult;
-                                try promoted_session.session.sendResponse(
+                                try promoted_session.session.trySendResponseLiteral(
                                     request.message.stream_id,
                                     .{ .status = 200, .body = body },
                                 );

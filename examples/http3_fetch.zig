@@ -32,6 +32,8 @@ pub fn main(init: std.process.Init) !void {
     var verify_server = false;
     var discover = false;
     var manual_alt_svc: ?[]const u8 = null;
+    var expected_status: ?u16 = null;
+    var min_body_bytes: ?usize = null;
     while (args.next()) |arg| {
         if (std.mem.eql(u8, arg, "--verify")) {
             verify_server = true;
@@ -43,6 +45,18 @@ pub fn main(init: std.process.Init) !void {
             method = arg["--method=".len..];
         } else if (std.mem.startsWith(u8, arg, "--alt-svc=")) {
             manual_alt_svc = arg["--alt-svc=".len..];
+        } else if (std.mem.startsWith(u8, arg, "--expect-status=")) {
+            expected_status = try std.fmt.parseInt(
+                u16,
+                arg["--expect-status=".len..],
+                10,
+            );
+        } else if (std.mem.startsWith(u8, arg, "--min-body-bytes=")) {
+            min_body_bytes = try std.fmt.parseInt(
+                usize,
+                arg["--min-body-bytes=".len..],
+                10,
+            );
         } else {
             uri_text = arg;
         }
@@ -66,6 +80,14 @@ pub fn main(init: std.process.Init) !void {
     // public HTTP/3 reachability while the verifier policy remains pluggable.
     var response = try fetchWithRetries(allocator, io, uri, method, verify_server, if (discovered) |*target| target else null);
     defer response.deinit(allocator);
+    if (expected_status) |expected| {
+        if (response.response.status != expected) return error.UnexpectedStatus;
+    }
+    if (min_body_bytes) |minimum| {
+        if (response.response.body.len < minimum) {
+            return error.ResponseBodyTooShort;
+        }
+    }
 
     std.debug.print("HTTP/3 {s} -> {d}\n", .{ uri_text, response.response.status });
     for (response.response.headers) |header| {

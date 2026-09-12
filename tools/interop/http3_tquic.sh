@@ -6,6 +6,7 @@ netz_server=${2:?netz HTTP/3 server executable path}
 tquic_root=${TQUIC_ROOT:-"$HOME/Work/tquic"}
 tquic_client="$tquic_root/target/release/tquic_client"
 tquic_server="$tquic_root/target/release/tquic_server"
+tquic_log_level=${TQUIC_LOG_LEVEL:-OFF}
 
 if [[ ! -f "$tquic_root/tools/Cargo.toml" ]]; then
   echo "tquic checkout not found under $tquic_root" >&2
@@ -31,7 +32,19 @@ cleanup() {
   fi
   rm -rf "$work"
 }
-trap cleanup EXIT
+on_exit() {
+  local status=$?
+  if [[ $status -ne 0 ]]; then
+    find "$work" -type f -name '*.log' -size +0c -print0 | sort -z |
+      while IFS= read -r -d '' log; do
+        echo "===== $log =====" >&2
+        sed -n '1,240p' "$log" >&2
+      done
+  fi
+  cleanup
+  exit "$status"
+}
+trap on_exit EXIT
 
 free_udp_port() {
   python3 - <<'PY'
@@ -201,7 +214,7 @@ run_tquic_client_case() {
   timeout 20s "$tquic_client" -c "127.0.0.1:$port" -a h3 \
     --max-concurrent-requests 2 --max-requests-per-conn 2 \
     --total-requests-per-thread 2 --dump-dir "$work/downloads" \
-    --log-level OFF "https://localhost:$port/one.txt" \
+    --log-level "$tquic_log_level" "https://localhost:$port/one.txt" \
     "https://localhost:$port/two.txt" \
     >"$work/tquic-client-$retry.log" 2>&1
   wait "$server_pid"

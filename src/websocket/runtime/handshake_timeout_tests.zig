@@ -112,6 +112,79 @@ test "WebSocket server caller timeout bounds the HTTP upgrade" {
     try std.testing.expectEqual(error.Timeout, shared.err.?);
 }
 
+test "WebSocket TCP listener accept deadline expires without a client" {
+    const allocator = std.testing.allocator;
+    var threaded = std.Io.Threaded.init(allocator, .{});
+    defer threaded.deinit();
+    const io = threaded.io();
+    var server = try runtime.Server.listen(
+        allocator,
+        io,
+        .{ .ip4 = .loopback(0) },
+        .{},
+    );
+    defer server.deinit();
+
+    try std.testing.expectError(
+        error.Timeout,
+        server.receiveUpgradeRequestWithTimeout(
+            .{},
+            .fromMilliseconds(20),
+        ),
+    );
+}
+
+test "WebSocket listener timeout spans accept and HTTP upgrade" {
+    const allocator = std.testing.allocator;
+    var threaded = std.Io.Threaded.init(allocator, .{
+        .async_limit = .unlimited,
+    });
+    defer threaded.deinit();
+    const io = threaded.io();
+    var server = try runtime.Server.listen(
+        allocator,
+        io,
+        .{ .ip4 = .loopback(0) },
+        .{ .http1_handshake_timeout = .fromSeconds(1) },
+    );
+    defer server.deinit();
+
+    const Shared = struct {
+        server: *runtime.Server,
+        finished: std.Io.Event = .unset,
+        err: ?anyerror = null,
+
+        fn run(self: *@This()) void {
+            defer self.finished.set(self.server.http.io);
+            var pending = self.server.receiveUpgradeRequestWithTimeout(
+                .{},
+                .fromMilliseconds(100),
+            ) catch |err| {
+                self.err = err;
+                return;
+            };
+            pending.deinit();
+            self.err = error.TestUnexpectedResult;
+        }
+    };
+    var shared = Shared{ .server = &server };
+    const thread = try std.Thread.spawn(.{}, Shared.run, .{&shared});
+    var joined = false;
+    defer if (!joined) thread.join();
+
+    try std.Io.sleep(io, .fromMilliseconds(60), .awake);
+    const client = try server.address().connect(io, .{ .mode = .stream });
+    defer client.close(io);
+    try writeAll(io, client, "GET / HTTP/1.1\r\n");
+    try shared.finished.waitTimeout(io, .{ .duration = .{
+        .raw = .fromMilliseconds(70),
+        .clock = .awake,
+    } });
+    thread.join();
+    joined = true;
+    try std.testing.expectEqual(error.Timeout, shared.err.?);
+}
+
 test "WebSocket accepted HTTP connection timeout bounds Upgrade" {
     const allocator = std.testing.allocator;
     var threaded = std.Io.Threaded.init(allocator, .{
@@ -551,6 +624,39 @@ test "WSS server caller timeout bounds TLS and HTTP upgrade" {
     thread.join();
     joined = true;
     try std.testing.expectEqual(error.Timeout, shared.err.?);
+}
+
+test "WSS listener accept deadline expires without a client" {
+    const allocator = std.testing.allocator;
+    var threaded = std.Io.Threaded.init(allocator, .{});
+    defer threaded.deinit();
+    const io = threaded.io();
+    var certificate_der: [tls_testing.certificate_der_len]u8 = undefined;
+    try std.base64.standard.Decoder.decode(
+        &certificate_der,
+        tls_testing.certificate_base64,
+    );
+    const key_pair = try tls_testing.serverKeyPair();
+    var server = try runtime.TlsServer.listen(
+        allocator,
+        io,
+        .{ .ip4 = .loopback(0) },
+        .{ .identity = .{
+            .certificate_chain = &.{&certificate_der},
+            .signer = .{ .ecdsa_p256_sha256 = .{
+                .key_pair = key_pair,
+            } },
+        } },
+    );
+    defer server.deinit();
+
+    try std.testing.expectError(
+        error.Timeout,
+        server.receiveUpgradeRequestWithTimeout(
+            .{},
+            .fromMilliseconds(20),
+        ),
+    );
 }
 
 test "WSS accepted stream timeout bounds TLS handshake" {

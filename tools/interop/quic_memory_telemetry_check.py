@@ -56,6 +56,7 @@ def main() -> None:
     parser.add_argument("--body-bytes", type=int)
     parser.add_argument("--warmup", type=int)
     parser.add_argument("--iterations", type=int)
+    parser.add_argument("--quic-version", type=int)
     parser.add_argument("--client-log", required=True, type=Path)
     parser.add_argument("--server-log", required=True, type=Path)
     parser.add_argument("--client-rss", required=True, type=Path)
@@ -69,7 +70,8 @@ def main() -> None:
     if (
         expected is None
         or args.protocol not in ("quic-stream", "http3")
-        or args.streams not in (1, 4)
+        or args.streams not in (1, 4, 16)
+        or args.quic_version not in (None, 1, 2)
     ):
         raise SystemExit("invalid memory comparison configuration")
     if args.protocol == "http3" and (
@@ -80,7 +82,6 @@ def main() -> None:
         or args.warmup <= 0
         or args.iterations is None
         or args.iterations <= 0
-        or args.streams != 1
     ):
         raise SystemExit("invalid HTTP/3 memory comparison configuration")
 
@@ -106,6 +107,8 @@ def main() -> None:
             or integer(record, "body_bytes") != args.body_bytes
             or integer(record, "warmup") != args.warmup
             or integer(record, "iterations") != args.iterations
+            or (args.quic_version is not None and
+                integer(record, "quic_version") != args.quic_version)
         ):
             raise SystemExit(f"HTTP/3 memory shape mismatch in {log_path}: {record}")
         required = (
@@ -125,10 +128,12 @@ def main() -> None:
                 "implementation", "protocol", "mode", "role_pair",
                 "endpoint_role", "sender_role", "streams",
                 "body_bytes", "complete",
+                "quic_version",
             }
         )
         shape = (
             f"mode={args.mode} body_bytes={args.body_bytes} "
+            f"quic_version={args.quic_version} "
             if args.protocol == "http3"
             else ""
         )

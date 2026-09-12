@@ -51,6 +51,34 @@ pub const Sent = struct {
     last_packet_number: u64,
 };
 
+/// Protection and socket progress for one Initial CRYPTO flight. Every packet
+/// in `protected_count` has consumed its packet number, including an unsent
+/// suffix after a partial batch syscall.
+pub const SendProgress = struct {
+    sent_count: usize,
+    protected_count: usize,
+    sent_bytes: usize,
+    protected_bytes: usize,
+    last_packet_number: u64,
+    send_error: ?quic.runtime.Error = null,
+};
+
+const PacketPlan = struct {
+    crypto_start: usize,
+    crypto_len: usize,
+    packet_number: u64,
+    crypto_offset: u64,
+    payload_len: usize,
+    packet_len: usize,
+};
+
+const PacketLayout = struct {
+    payload_len: usize,
+    packet_len: usize,
+};
+
+const stack_packet_capacity: usize = 64;
+
 pub const ReceiveOptions = struct {
     expected_packet_number: u64,
     max_crypto_buffer: usize,
@@ -59,6 +87,12 @@ pub const ReceiveOptions = struct {
     expected_crypto_len: ?usize = null,
     /// Minimum length for each standalone received datagram.
     min_datagram_size: usize = 0,
+    /// The caller passed only the first QUIC packet from a UDP datagram whose
+    /// complete length already satisfied `min_datagram_size`. This is needed
+    /// for peers that pad an Initial datagram with trailing bytes outside the
+    /// first packet's Length field. Continuation datagrams remain subject to
+    /// the normal minimum-size check.
+    first_datagram_size_validated: bool = false,
     max_datagrams: usize = 64,
     allow_zero_fixed_bit: bool = false,
     /// Convert an unauthenticated or invalid first candidate into a stable
@@ -95,6 +129,24 @@ pub fn send(
     keys: quic.protection.PacketProtectionKeys,
     options: SendOptions,
 ) Error!Sent {
+    const progress = try sendProgress(endpoint, to, keys, options);
+    if (progress.send_error) |err| return err;
+    std.debug.assert(progress.sent_count == progress.protected_count);
+    return .{
+        .packet_count = progress.protected_count,
+        .last_packet_number = progress.last_packet_number,
+    };
+}
+
+/// Protect and submit a complete Initial CRYPTO flight while preserving a
+/// socket-accepted prefix. Validation and protection finish before the first
+/// send, so errors in the error union imply zero socket progress.
+pub fn sendProgress(
+    endpoint: *quic.runtime.Endpoint,
+    to: net.IpAddress,
+    keys: quic.protection.PacketProtectionKeys,
+    options: SendOptions,
+) Error!SendProgress {
     if (options.initial.crypto_data.len == 0 or
         options.max_datagram_size == 0 or
         options.max_datagrams == 0 or
@@ -103,20 +155,23 @@ pub fn send(
     {
         return error.InvalidCryptoRange;
     }
+    try validateSealOptions(keys, options.initial);
 
-    // Protect the complete flight before the first socket write. This makes
-    // allocation/protection failure transactional and lets Endpoint submit
-    // the packet slice through its portable batch/sendmmsg path.
-    var packets: std.ArrayList([]u8) = .empty;
-    defer {
-        for (packets.items) |packet| endpoint.allocator.free(packet);
-        packets.deinit(endpoint.allocator);
-    }
-
+    // Finish packetization, packet-number validation, and every allocation
+    // before protecting the first packet. Once AEAD protection starts, no
+    // fallible allocator operation may strand a consumed nonce behind an
+    // ordinary error that a caller could retry with the same options.
+    var plan_stack: [stack_packet_capacity]PacketPlan = undefined;
+    var plan_heap: std.ArrayList(PacketPlan) = .empty;
+    defer plan_heap.deinit(endpoint.allocator);
+    const plans_use_stack = options.max_datagrams <= plan_stack.len;
+    var plan_count: usize = 0;
     var sent: usize = 0;
     var packet_number = options.initial.packet_number;
+    var storage_len: usize = 0;
+    var protected_bytes: usize = 0;
     while (sent < options.initial.crypto_data.len) {
-        if (packets.items.len == options.max_datagrams) {
+        if (plan_count == options.max_datagrams) {
             return error.CryptoBufferTooLarge;
         }
         if (packet_number > quic.protection.max_packet_number) {
@@ -136,23 +191,109 @@ pub fn send(
         packet_options.crypto_data =
             options.initial.crypto_data[sent .. sent + chunk_len];
         packet_options.max_crypto_frame_data_len = chunk_len;
-        const packet = try sealPacket(
-            endpoint.allocator,
-            keys,
-            packet_options,
-        );
-        errdefer endpoint.allocator.free(packet);
-        std.debug.assert(packet.len <= options.max_datagram_size);
-        try packets.append(endpoint.allocator, packet);
+        const layout = try packetLayout(packet_options);
+        if (layout.packet_len > options.max_datagram_size) {
+            return error.DatagramTooLarge;
+        }
+        if (layout.packet_len > endpoint.limits.max_datagram_size) {
+            return error.DatagramTooLarge;
+        }
+        storage_len = std.math.add(
+            usize,
+            storage_len,
+            std.math.add(
+                usize,
+                layout.payload_len,
+                layout.packet_len,
+            ) catch return error.InvalidFrameLength,
+        ) catch return error.InvalidFrameLength;
+        protected_bytes = std.math.add(
+            usize,
+            protected_bytes,
+            layout.packet_len,
+        ) catch return error.InvalidFrameLength;
+        const plan = PacketPlan{
+            .crypto_start = sent,
+            .crypto_len = chunk_len,
+            .packet_number = packet_number,
+            .crypto_offset = packet_options.crypto_offset,
+            .payload_len = layout.payload_len,
+            .packet_len = layout.packet_len,
+        };
+        if (plans_use_stack) {
+            plan_stack[plan_count] = plan;
+        } else {
+            try plan_heap.append(endpoint.allocator, plan);
+        }
+        plan_count += 1;
 
         sent += chunk_len;
         if (sent < options.initial.crypto_data.len) packet_number += 1;
     }
 
-    try endpoint.sendManyBytes(to, packets.items);
+    const plans: []const PacketPlan = if (plans_use_stack)
+        plan_stack[0..plan_count]
+    else
+        plan_heap.items;
+    const storage = try endpoint.allocator.alloc(u8, storage_len);
+    defer endpoint.allocator.free(storage);
+    var packet_stack: [stack_packet_capacity][]const u8 = undefined;
+    const packet_heap: ?[][]const u8 = if (plans.len > packet_stack.len)
+        try endpoint.allocator.alloc([]const u8, plans.len)
+    else
+        null;
+    defer if (packet_heap) |packets| endpoint.allocator.free(packets);
+    const packets: [][]const u8 = packet_heap orelse
+        packet_stack[0..plans.len];
+
+    var storage_offset: usize = 0;
+    for (plans, 0..) |plan, index| {
+        const item_storage_len = std.math.add(
+            usize,
+            plan.payload_len,
+            plan.packet_len,
+        ) catch return error.InvalidFrameLength;
+        const item_storage =
+            storage[storage_offset..][0..item_storage_len];
+        var packet_options = options.initial;
+        packet_options.packet_number = plan.packet_number;
+        packet_options.crypto_offset = plan.crypto_offset;
+        packet_options.crypto_data = options.initial.crypto_data[plan.crypto_start..][0..plan.crypto_len];
+        packet_options.max_crypto_frame_data_len = plan.crypto_len;
+        packets[index] = try sealPacketInto(
+            item_storage,
+            keys,
+            packet_options,
+            .{
+                .payload_len = plan.payload_len,
+                .packet_len = plan.packet_len,
+            },
+        );
+        storage_offset += item_storage_len;
+    }
+    std.debug.assert(storage_offset == storage.len);
+
+    const send_result = endpoint.sendManyBytesProgress(to, packets) catch |err| {
+        return .{
+            .sent_count = 0,
+            .protected_count = packets.len,
+            .sent_bytes = 0,
+            .protected_bytes = protected_bytes,
+            .last_packet_number = packet_number,
+            .send_error = err,
+        };
+    };
+    var sent_bytes: usize = 0;
+    for (packets[0..send_result.sent_count]) |packet| {
+        sent_bytes += packet.len;
+    }
     return .{
-        .packet_count = packets.items.len,
+        .sent_count = send_result.sent_count,
+        .protected_count = packets.len,
+        .sent_bytes = sent_bytes,
+        .protected_bytes = protected_bytes,
         .last_packet_number = packet_number,
+        .send_error = send_result.send_error,
     };
 }
 
@@ -412,6 +553,7 @@ pub fn openFrom(
             continue;
         }
         if (is_first_datagram and
+            !options.first_datagram_size_validated and
             datagram_bytes.len < options.min_datagram_size)
         {
             if (options.discard_invalid_first) {
@@ -434,7 +576,10 @@ pub fn openFrom(
             }
             return err;
         };
-        if (info.packet_type != .initial or info.len != datagram_bytes.len) {
+        if (info.packet_type != .initial or
+            (info.len != datagram_bytes.len and
+                !std.mem.allEqual(u8, datagram_bytes[info.len..], 0)))
+        {
             if (is_first_datagram) {
                 if (options.discard_invalid_first) {
                     return error.DiscardedInitialPacket;
@@ -446,7 +591,7 @@ pub fn openFrom(
         var packet = quic.protection.openInitialPacketWithFixedBitPolicy(
             endpoint.allocator,
             keys,
-            datagram_bytes,
+            datagram_bytes[0..info.len],
             next_expected,
             options.allow_zero_fixed_bit,
         ) catch |err| {
@@ -585,35 +730,142 @@ pub fn sealPacket(
     keys: quic.protection.PacketProtectionKeys,
     options: SendInitialOptions,
 ) Error![]u8 {
+    return sealPacketPrepared(
+        allocator,
+        keys,
+        options,
+        try packetLayout(options),
+    );
+}
+
+fn sealPacketInto(
+    storage: []u8,
+    keys: quic.protection.PacketProtectionKeys,
+    options: SendInitialOptions,
+    layout: PacketLayout,
+) Error![]u8 {
+    if (storage.len < layout.payload_len + layout.packet_len) {
+        return error.BufferTooShort;
+    }
+    const payload_storage = storage[0..layout.payload_len];
+    var payload = std.ArrayList(u8).initBuffer(payload_storage);
+    var no_extra_storage: [0]u8 = .{};
+    var no_extra_allocations = std.heap.FixedBufferAllocator.init(
+        &no_extra_storage,
+    );
+    try writePacketPayload(
+        &payload,
+        no_extra_allocations.allocator(),
+        options,
+        layout,
+    );
+    return quic.protection.sealInitialPacketInto(
+        storage[layout.payload_len..],
+        keys,
+        .{
+            .version = options.version,
+            .destination_connection_id = options.destination_connection_id,
+            .source_connection_id = options.source_connection_id,
+            .token = options.token,
+            .packet_number = options.packet_number,
+            .packet_number_len = options.packet_number_len,
+            .fixed_bit = options.fixed_bit,
+            .payload = payload.items,
+        },
+    );
+}
+
+fn sealPacketPrepared(
+    allocator: std.mem.Allocator,
+    keys: quic.protection.PacketProtectionKeys,
+    options: SendInitialOptions,
+    layout: PacketLayout,
+) Error![]u8 {
     var payload: std.ArrayList(u8) = .empty;
     defer payload.deinit(allocator);
+    try payload.ensureTotalCapacityPrecise(allocator, layout.payload_len);
+    try writePacketPayload(&payload, allocator, options, layout);
+    const packet = try quic.protection.sealInitialPacket(
+        allocator,
+        keys,
+        .{
+            .version = options.version,
+            .destination_connection_id = options.destination_connection_id,
+            .source_connection_id = options.source_connection_id,
+            .token = options.token,
+            .packet_number = options.packet_number,
+            .packet_number_len = options.packet_number_len,
+            .fixed_bit = options.fixed_bit,
+            .payload = payload.items,
+        },
+    );
+    std.debug.assert(packet.len == layout.packet_len);
+    return packet;
+}
+
+fn writePacketPayload(
+    payload: *std.ArrayList(u8),
+    allocator: std.mem.Allocator,
+    options: SendInitialOptions,
+    layout: PacketLayout,
+) Error!void {
     try quic.crypto_stream.writeCryptoFrames(
-        &payload,
+        payload,
         allocator,
         options.crypto_offset,
         options.crypto_data,
         options.max_crypto_frame_data_len,
     );
+    if (payload.items.len > layout.payload_len) {
+        return error.InvalidFrameLength;
+    }
+    try quic.appendPadding(
+        payload,
+        allocator,
+        layout.payload_len - payload.items.len,
+    );
+}
 
-    while (true) {
-        const packet = try quic.protection.sealInitialPacket(
-            allocator,
-            keys,
-            .{
-                .version = options.version,
-                .destination_connection_id = options.destination_connection_id,
-                .source_connection_id = options.source_connection_id,
-                .token = options.token,
-                .packet_number = options.packet_number,
-                .packet_number_len = options.packet_number_len,
-                .fixed_bit = options.fixed_bit,
-                .payload = payload.items,
-            },
-        );
-        if (packet.len >= options.min_datagram_size) return packet;
-        const missing = options.min_datagram_size - packet.len;
-        allocator.free(packet);
-        try quic.appendPadding(&payload, allocator, missing);
+fn packetLayout(options: SendInitialOptions) Error!PacketLayout {
+    var payload_len = try quic.crypto_stream.cryptoFramesWireLen(
+        options.crypto_offset,
+        options.crypto_data.len,
+        options.max_crypto_frame_data_len,
+    );
+    var packet_len = try protectedInitialPacketWireLen(options, payload_len);
+    while (packet_len < options.min_datagram_size) {
+        payload_len = std.math.add(
+            usize,
+            payload_len,
+            options.min_datagram_size - packet_len,
+        ) catch return error.InvalidFrameLength;
+        packet_len = try protectedInitialPacketWireLen(options, payload_len);
+    }
+    return .{
+        .payload_len = payload_len,
+        .packet_len = packet_len,
+    };
+}
+
+fn validateSealOptions(
+    keys: quic.protection.PacketProtectionKeys,
+    options: SendInitialOptions,
+) Error!void {
+    if (keys.suite != .aes_128_gcm_sha256) {
+        return error.InvalidCipherSuite;
+    }
+    if (options.version != quic.Version.version_1.wireValue() and
+        options.version != quic.Version.version_2.wireValue())
+    {
+        return error.UnsupportedVersion;
+    }
+    if (options.packet_number_len == 0 or options.packet_number_len > 4) {
+        return error.InvalidPacketNumberLength;
+    }
+    if (options.destination_connection_id.len > 20 or
+        options.source_connection_id.len > 20)
+    {
+        return error.InvalidInitialPacket;
     }
 }
 

@@ -295,8 +295,11 @@ fn runBenchmark(_: std.process.Init, args: []const []const u8) !void {
         .{
             .handshake = .{
                 .local_connection_id = &server_cid,
-                .version = .version_1,
-                .available_versions = &.{.version_1},
+                .version = config.version,
+                .available_versions = if (config.version == .version_2)
+                    &.{.version_2}
+                else
+                    &.{.version_1},
                 .local_transport_parameters = try config.transportParameters(),
                 .initial_one_rtt_config = try config.oneRttConfig(),
                 .identity = .{
@@ -317,9 +320,8 @@ fn runBenchmark(_: std.process.Init, args: []const []const u8) !void {
         role_pair,
         config,
     );
-    const payload = try allocator.alloc(u8, @intCast(config.body_bytes));
-    defer allocator.free(payload);
-    const expected_checksum = benchmark.fillPayload(payload);
+    var payloads = try benchmark.PayloadSet.init(allocator, config);
+    defer payloads.deinit(allocator);
     const read_buffer = try allocator.alloc(u8, config.effectiveChunk());
     defer allocator.free(read_buffer);
 
@@ -338,24 +340,191 @@ fn runBenchmark(_: std.process.Init, args: []const []const u8) !void {
             .status = 200,
             .headers = &.{.{ .name = "x-netz-bench-ready", .value = "ok" }},
         }, config.timeout());
-        const request = try receiveBenchmarkRequest(
+        const deadline = std.Io.Clock.Timestamp.fromNow(io, .{
+            .raw = config.timeout(),
+            .clock = .awake,
+        });
+        var stream_ids = [_]u62{std.math.maxInt(u62)} ** benchmark.max_streams;
+        try receiveBenchmarkRequests(
+            allocator,
+            &session,
+            config,
+            @intCast(round_index),
+            &payloads,
+            &stream_ids,
+            read_buffer,
+            deadline,
+        );
+        switch (config.mode) {
+            .upload => for (stream_ids[0..config.streams], 0..) |stream_id, index| {
+                try sendBenchmarkResponse(
+                    &session,
+                    config,
+                    stream_id,
+                    @intCast(round_index),
+                    index,
+                    payloads.checksums[index],
+                    &.{},
+                    deadline,
+                );
+            },
+            .download => {
+                var responses: [benchmark.max_streams]netz.http3.runtime.ResponseBody = undefined;
+                for (stream_ids[0..config.streams], 0..) |stream_id, index| {
+                    try startBenchmarkResponse(
+                        &session,
+                        config,
+                        stream_id,
+                        @intCast(round_index),
+                        index,
+                        payloads.checksums[index],
+                        payloads.streams[index].len,
+                        deadline,
+                    );
+                    responses[index] = .{
+                        .stream_id = stream_id,
+                        .data = payloads.streams[index],
+                    };
+                }
+                var committed_bytes = [_]usize{0} ** benchmark.max_streams;
+                try session.sendResponseBodiesPacedWithDeadline(
+                    responses[0..config.streams],
+                    committed_bytes[0..config.streams],
+                    deadline,
+                );
+                for (committed_bytes[0..config.streams], payloads.streams[0..config.streams]) |committed, payload| {
+                    if (committed != payload.len) {
+                        return error.IncompleteBenchmarkSend;
+                    }
+                }
+            },
+        }
+        try session.waitForRecoveryIdleWithDeadline(deadline);
+        if (round_index >= config.warmup) {
+            benchmark.printServerComplete(
+                "netz",
+                role_pair,
+                config,
+                @intCast(round_index - config.warmup + 1),
+                payloads.aggregate_checksum,
+            );
+        }
+        const close = try receiveBenchmarkRequest(
             allocator,
             &session,
             config,
             @intCast(round_index),
             read_buffer,
         );
-        if (request.close or request.ready) return error.InvalidRequest;
-        switch (config.mode) {
-            .upload => {
-                if (request.bytes != config.body_bytes or request.checksum != expected_checksum) {
-                    return error.InvalidRequest;
-                }
-                try sendBenchmarkResponse(&session, config, request.stream_id, request.round, expected_checksum, &.{});
-            },
-            .download => try sendBenchmarkResponse(&session, config, request.stream_id, request.round, expected_checksum, payload),
+        if (!close.close or close.ready or close.round != round_index) {
+            return error.InvalidRequest;
         }
-        try session.waitForRecoveryIdleWithTimeout(config.timeout());
+        try session.sendResponsePacedWithTimeout(close.stream_id, .{
+            .status = 200,
+            .headers = &.{.{ .name = "x-netz-bench-close", .value = "ok" }},
+        }, config.timeout());
+    }
+}
+
+const BenchmarkStreamState = struct {
+    stream_id: ?u62 = null,
+    head_seen: bool = false,
+    finished: bool = false,
+    bytes: usize = 0,
+    checksum: u64 = 0,
+};
+
+fn receiveBenchmarkRequests(
+    allocator: std.mem.Allocator,
+    session: *netz.http3.runtime.HandshakeServerSession,
+    config: benchmark.Config,
+    expected_round: u32,
+    payloads: *const benchmark.PayloadSet,
+    stream_ids: *[benchmark.max_streams]u62,
+    read_buffer: []u8,
+    deadline: std.Io.Clock.Timestamp,
+) !void {
+    var states = [_]BenchmarkStreamState{.{}} ** benchmark.max_streams;
+    var complete: usize = 0;
+    while (complete < config.streams) {
+        var event = try session.receiveRequestEventWithDeadline(deadline);
+        defer event.deinit(allocator);
+        switch (event) {
+            .reset => return error.InvalidRequest,
+            .message => |message| switch (message.value) {
+                .head => |head| switch (head) {
+                    .request => |request| {
+                        const index = try validateBenchmarkRequestHead(
+                            request,
+                            config,
+                            expected_round,
+                        );
+                        if (states[index].head_seen or
+                            benchmark.streamIndexForId(
+                                stream_ids[0..config.streams],
+                                message.stream_id,
+                            ) != null)
+                        {
+                            return error.InvalidRequest;
+                        }
+                        states[index].stream_id = message.stream_id;
+                        states[index].head_seen = true;
+                        stream_ids[index] = message.stream_id;
+                    },
+                    .response => return error.InvalidRequest,
+                },
+                .data_available => {
+                    const index = benchmark.streamIndexForId(
+                        stream_ids[0..config.streams],
+                        message.stream_id,
+                    ) orelse return error.InvalidRequest;
+                    const state = &states[index];
+                    if (!state.head_seen or state.finished or
+                        config.mode != .upload)
+                    {
+                        return error.InvalidRequest;
+                    }
+                    const count = try session.readRequestData(
+                        message.stream_id,
+                        read_buffer,
+                    );
+                    if (state.bytes + count > config.body_bytes) {
+                        return error.InvalidRequest;
+                    }
+                    try benchmark.verifyStreamPayload(
+                        read_buffer[0..count],
+                        index,
+                        state.bytes,
+                        &state.checksum,
+                    );
+                    state.bytes += count;
+                },
+                .finished => {
+                    const index = benchmark.streamIndexForId(
+                        stream_ids[0..config.streams],
+                        message.stream_id,
+                    ) orelse return error.InvalidRequest;
+                    const state = &states[index];
+                    const expected_bytes: usize = if (config.mode == .upload)
+                        @intCast(config.body_bytes)
+                    else
+                        0;
+                    const expected_checksum = if (config.mode == .upload)
+                        payloads.checksums[index]
+                    else
+                        0;
+                    if (!state.head_seen or state.finished or
+                        state.bytes != expected_bytes or
+                        state.checksum != expected_checksum)
+                    {
+                        return error.InvalidRequest;
+                    }
+                    state.finished = true;
+                    complete += 1;
+                },
+                .trailers, .push_promise => return error.InvalidRequest,
+            },
+        }
     }
 }
 
@@ -401,6 +570,15 @@ fn receiveBenchmarkRequest(
                                 request.content_length != null)
                             {
                                 return error.InvalidRequest;
+                            }
+                            if (result.close) {
+                                result.round = std.math.cast(
+                                    u32,
+                                    try benchmark.parseHeaderInt(
+                                        request.headers,
+                                        "x-netz-bench-round",
+                                    ),
+                                ) orelse return error.InvalidRequest;
                             }
                         } else {
                             const method = if (config.mode == .upload)
@@ -488,40 +666,110 @@ fn sendBenchmarkResponse(
     config: benchmark.Config,
     stream_id: u62,
     round: u32,
+    stream_index: usize,
     checksum: u64,
     body: []const u8,
+    deadline: std.Io.Clock.Timestamp,
+) !void {
+    try startBenchmarkResponse(
+        session,
+        config,
+        stream_id,
+        round,
+        stream_index,
+        checksum,
+        body.len,
+        deadline,
+    );
+    if (body.len == 0) return;
+    var offset: usize = 0;
+    while (offset < body.len) {
+        const end = @min(body.len, offset + config.effectiveChunk());
+        const chunk = [_]netz.http3.runtime.BodyChunk{.{
+            .stream_id = stream_id,
+            .data = body[offset..end],
+            .fin = end == body.len,
+        }};
+        var committed: usize = 0;
+        try session.sendResponseBodyBatchPacedWithDeadline(
+            &chunk,
+            &committed,
+            deadline,
+        );
+        if (committed != 1) return error.IncompleteBenchmarkSend;
+        offset = end;
+    }
+}
+
+fn startBenchmarkResponse(
+    session: *netz.http3.runtime.HandshakeServerSession,
+    config: benchmark.Config,
+    stream_id: u62,
+    round: u32,
+    stream_index: usize,
+    checksum: u64,
+    body_len: usize,
+    deadline: std.Io.Clock.Timestamp,
 ) !void {
     var round_buffer: [10]u8 = undefined;
+    var index_buffer: [5]u8 = undefined;
     var bytes_buffer: [20]u8 = undefined;
     var checksum_buffer: [20]u8 = undefined;
+    var streams_buffer: [5]u8 = undefined;
     const headers = [_]netz.http3.Qpack.HeaderField{
         .{ .name = "x-netz-bench-round", .value = try std.fmt.bufPrint(&round_buffer, "{d}", .{round}) },
+        .{ .name = "x-netz-bench-stream-index", .value = try std.fmt.bufPrint(&index_buffer, "{d}", .{stream_index}) },
+        .{ .name = "x-netz-bench-streams", .value = try std.fmt.bufPrint(&streams_buffer, "{d}", .{config.streams}) },
         .{ .name = "x-netz-bench-bytes", .value = try std.fmt.bufPrint(&bytes_buffer, "{d}", .{config.body_bytes}) },
         .{ .name = "x-netz-bench-checksum", .value = try std.fmt.bufPrint(&checksum_buffer, "{d}", .{checksum}) },
     };
-    if (body.len == 0) {
-        try session.sendResponsePacedWithTimeout(
+    if (body_len == 0) {
+        try session.sendResponsePacedWithDeadline(
             stream_id,
             .{ .status = 200, .headers = &headers },
-            config.timeout(),
+            deadline,
         );
         return;
     }
     try session.startResponse(
         stream_id,
         .{ .status = 200, .headers = &headers },
-        body.len,
+        body_len,
     );
-    var offset: usize = 0;
-    while (offset < body.len) {
-        const end = @min(body.len, offset + config.effectiveChunk());
-        try session.sendResponseBodyPaced(
-            stream_id,
-            body[offset..end],
-            end == body.len,
-        );
-        offset = end;
+}
+
+fn validateBenchmarkRequestHead(
+    request: netz.http3.DecodedRequestHead,
+    config: benchmark.Config,
+    expected_round: u32,
+) !usize {
+    const method = if (config.mode == .upload) "POST" else "GET";
+    const path = if (config.mode == .upload) "/benchmark/upload" else "/benchmark/download";
+    const index = std.math.cast(usize, try benchmark.parseHeaderInt(
+        request.headers,
+        "x-netz-bench-stream-index",
+    )) orelse return error.InvalidRequest;
+    if (index >= config.streams or !std.mem.eql(u8, request.method, method) or
+        !std.mem.eql(u8, request.path, path) or
+        !std.mem.eql(u8, request.scheme, "https") or request.authority == null or
+        !std.mem.eql(u8, request.authority.?, "localhost") or
+        !std.mem.eql(u8, benchmark.header(request.headers, "x-netz-bench-mode") orelse return error.InvalidRequest, config.mode.name()) or
+        try benchmark.parseHeaderInt(request.headers, "x-netz-bench-round") != expected_round or
+        try benchmark.parseHeaderInt(request.headers, "x-netz-bench-streams") != config.streams or
+        try benchmark.parseHeaderInt(request.headers, "x-netz-bench-bytes") != config.body_bytes or
+        try benchmark.parseHeaderInt(request.headers, "x-netz-bench-chunk") != config.chunk_bytes or
+        try benchmark.parseHeaderInt(request.headers, "x-netz-bench-window") != config.stream_window)
+    {
+        return error.InvalidRequest;
     }
+    if (config.mode == .upload) {
+        if (request.content_length != config.body_bytes) {
+            return error.InvalidRequest;
+        }
+    } else if (request.content_length != null) {
+        return error.InvalidRequest;
+    }
+    return index;
 }
 
 fn headerEquals(

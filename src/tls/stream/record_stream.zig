@@ -18,14 +18,18 @@ pub const Error = record_io.Error || tls_record.Error ||
     ConnectionClosed,
     InvalidTlsAlert,
     InvalidKeyUpdate,
+    InvalidNewSessionTicket,
     KeyUpdateLimitExceeded,
     KeyUpdateRequestPending,
     PeerTlsAlert,
     UnexpectedTlsContent,
+    WriteInProgress,
 };
 
 const handshake_type_key_update: u8 = 24;
+const handshake_type_new_session_ticket: u8 = 4;
 const key_update_message_len: usize = 5;
+const max_new_session_ticket_body_len: usize = 65_548;
 /// Bound consecutive post-handshake messages before application progress. A
 /// valid peer never needs an unbounded KeyUpdate burst, while each accepted
 /// request otherwise forces fresh HKDF and AEAD setup.
@@ -44,11 +48,18 @@ pub const Stream = struct {
     write_traffic_secret: vail.tls.secret.Secret,
     read_sequence: u64 = 0,
     write_sequence: u64 = 0,
-    buffered_plaintext: [record_io.max_plaintext_len]u8 = undefined,
+    record_reader: record_io.Reader = .{},
+    /// Shared ciphertext/plaintext storage. Plaintext is always drained before
+    /// another encrypted record is read, so one max-record buffer is enough
+    /// for both phases and keeps resumable reads from doubling connection size.
+    buffered_plaintext: [record_io.max_record_len]u8 = undefined,
     buffered_start: usize = 0,
     buffered_end: usize = 0,
     post_handshake: [key_update_message_len]u8 = undefined,
     post_handshake_len: usize = 0,
+    post_handshake_body_remaining: usize = 0,
+    accept_new_session_tickets: bool = false,
+    session_tickets_discarded: u64 = 0,
     consecutive_peer_key_updates: usize = 0,
     // These counters can be inspected by an application thread while its sole
     // reader processes a peer update, hence atomic loads/increments.
@@ -64,6 +75,13 @@ pub const Stream = struct {
     peer_eof_without_notify: bool = false,
     close_notify_sent: bool = false,
     failed: bool = false,
+    /// A timed application write may stop after only a ciphertext prefix has
+    /// reached the socket. Retain that exact record until a later retry;
+    /// regenerating it would reuse the consumed sequence-number nonce.
+    pending_write: [record_io.max_record_len]u8 = undefined,
+    pending_write_len: usize = 0,
+    pending_write_offset: usize = 0,
+    pending_plaintext_len: usize = 0,
 
     pub fn init(
         read_keys: tls_record.Keys,
@@ -86,7 +104,20 @@ pub const Stream = struct {
         self.write_traffic_secret.deinit();
         std.crypto.secureZero(u8, &self.buffered_plaintext);
         std.crypto.secureZero(u8, &self.post_handshake);
+        std.crypto.secureZero(u8, &self.pending_write);
         self.* = undefined;
+    }
+
+    /// Permit client-side TLS 1.3 NewSessionTicket messages. The established
+    /// stream does not currently expose a resumption cache, so authenticated
+    /// tickets are bounded, consumed, and deliberately discarded. Servers do
+    /// not enable this and therefore reject client-sent tickets.
+    pub fn allowNewSessionTickets(self: *Stream) void {
+        self.accept_new_session_tickets = true;
+    }
+
+    pub fn discardedSessionTicketCount(self: *const Stream) u64 {
+        return self.session_tickets_discarded;
     }
 
     pub fn read(
@@ -137,16 +168,19 @@ pub const Stream = struct {
             if (self.peer_eof_without_notify) return error.UnexpectedEof;
             if (self.failed) return error.ConnectionClosed;
 
-            var encoded: [record_io.max_record_len]u8 = undefined;
             const record_bytes = if (deadline) |value|
-                record_io.readRecordWithDeadline(
+                self.record_reader.readWithDeadline(
                     io,
                     stream,
-                    &encoded,
+                    &self.buffered_plaintext,
                     value,
                 )
             else
-                record_io.readRecord(io, stream, &encoded);
+                self.record_reader.read(
+                    io,
+                    stream,
+                    &self.buffered_plaintext,
+                );
             const authenticated_record = record_bytes catch |err| {
                 if (err == error.UnexpectedEof) {
                     self.peer_eof_without_notify = true;
@@ -155,6 +189,13 @@ pub const Stream = struct {
                 }
                 return err;
             };
+            // Once a complete record has left the socket, finish its state
+            // transition atomically with respect to task cancellation. A
+            // deferred cancellation is observed by the next transport read,
+            // whose incremental reader can safely preserve partial bytes.
+            const old_cancel_protection =
+                io.swapCancelProtection(.blocked);
+            defer _ = io.swapCancelProtection(old_cancel_protection);
             var opened_storage: [
                 record_io.max_plaintext_len + 1
             ]u8 = undefined;
@@ -233,6 +274,18 @@ pub const Stream = struct {
         return self.peer_close_notify_received;
     }
 
+    /// True only when no decrypted application bytes or terminal/write state
+    /// crosses an application boundary. A partial ciphertext or post-handshake
+    /// message is not classified as application data until authenticated.
+    pub fn isReusableBoundary(self: *const Stream) bool {
+        return self.buffered_start == self.buffered_end and
+            !self.peer_close_notify_received and
+            !self.peer_eof_without_notify and
+            !self.close_notify_sent and
+            !self.failed and
+            self.pending_write_len == 0;
+    }
+
     pub fn shouldSendCloseNotify(self: *const Stream) bool {
         return !self.close_notify_sent and !self.failed;
     }
@@ -274,10 +327,25 @@ pub const Stream = struct {
     ) Error!void {
         var offset: usize = 0;
         while (offset < bytes.len) {
-            const count = @min(
-                key_update_message_len - self.post_handshake_len,
-                bytes.len - offset,
-            );
+            if (self.post_handshake_body_remaining != 0) {
+                const count = @min(
+                    self.post_handshake_body_remaining,
+                    bytes.len - offset,
+                );
+                self.post_handshake_body_remaining -= count;
+                offset += count;
+                if (self.post_handshake_body_remaining == 0) {
+                    self.post_handshake_len = 0;
+                    self.session_tickets_discarded +|= 1;
+                }
+                continue;
+            }
+
+            const header_target: usize = if (self.post_handshake_len < 4)
+                4
+            else
+                key_update_message_len;
+            const count = @min(header_target - self.post_handshake_len, bytes.len - offset);
             @memcpy(
                 self.post_handshake[self.post_handshake_len..][0..count],
                 bytes[offset..][0..count],
@@ -285,16 +353,21 @@ pub const Stream = struct {
             self.post_handshake_len += count;
             offset += count;
 
-            if (self.post_handshake_len >= 4 and
-                (self.post_handshake[0] != handshake_type_key_update or
-                    !std.mem.eql(
-                        u8,
-                        self.post_handshake[1..4],
-                        &.{ 0, 0, 1 },
-                    )))
-            {
-                return error.InvalidKeyUpdate;
+            if (self.post_handshake_len < 4) continue;
+            const body_len = (@as(usize, self.post_handshake[1]) << 16) |
+                (@as(usize, self.post_handshake[2]) << 8) |
+                self.post_handshake[3];
+            if (self.post_handshake[0] == handshake_type_new_session_ticket) {
+                if (!self.accept_new_session_tickets or body_len < 14 or
+                    body_len > max_new_session_ticket_body_len)
+                {
+                    return error.InvalidNewSessionTicket;
+                }
+                self.post_handshake_body_remaining = body_len;
+                continue;
             }
+            if (self.post_handshake[0] != handshake_type_key_update or body_len != 1)
+                return error.InvalidKeyUpdate;
             if (self.post_handshake_len != key_update_message_len) continue;
 
             const request_peer_update = switch (self.post_handshake[4]) {
@@ -336,6 +409,7 @@ pub const Stream = struct {
         if (self.close_notify_sent or self.failed) {
             return error.ConnectionClosed;
         }
+        if (self.pending_write_len != 0) return error.WriteInProgress;
         try self.respondToPeerUpdateUnlocked(io, stream);
         var offset: usize = 0;
         while (offset < bytes.len) {
@@ -368,6 +442,7 @@ pub const Stream = struct {
         if (self.close_notify_sent or self.failed) {
             return error.ConnectionClosed;
         }
+        if (self.pending_write_len != 0) return error.WriteInProgress;
         try self.respondToPeerUpdateUnlocked(io, stream);
         var first_offset: usize = 0;
         var second_offset: usize = 0;
@@ -417,6 +492,7 @@ pub const Stream = struct {
         if (self.close_notify_sent or self.failed) {
             return error.ConnectionClosed;
         }
+        if (self.pending_write_len != 0) return error.WriteInProgress;
         try self.respondToPeerUpdateUnlocked(io, stream);
         var part_index: usize = 0;
         var part_offset: usize = 0;
@@ -452,6 +528,132 @@ pub const Stream = struct {
         }
     }
 
+    /// Write application plaintext under an absolute deadline. Progress is a
+    /// conservative TLS-record-aligned plaintext prefix: a record contributes
+    /// only after all of its ciphertext is accepted by the socket. A partial
+    /// ciphertext record remains connection-owned and is resumed before any
+    /// new plaintext is encrypted.
+    pub fn writeAllWithDeadline(
+        self: *Stream,
+        io: std.Io,
+        stream: net.Stream,
+        bytes: []const u8,
+        committed: *usize,
+        deadline: std.Io.Clock.Timestamp,
+    ) Error!void {
+        committed.* = 0;
+        self.write_mutex.lockUncancelable(io);
+        defer self.write_mutex.unlock(io);
+        if (self.close_notify_sent or self.failed) {
+            return error.ConnectionClosed;
+        }
+        if (self.pending_write_len != 0) {
+            try self.finishPendingWriteWithDeadline(
+                io,
+                stream,
+                committed,
+                deadline,
+            );
+        }
+        // A response requested while the previous record was partially sent
+        // must follow that record and precede any later application bytes.
+        // It is tiny and the just-completed record established writability.
+        try self.respondToPeerUpdateUnlocked(io, stream);
+        while (committed.* < bytes.len) {
+            const chunk_len = @min(
+                record_io.max_plaintext_len,
+                bytes.len - committed.*,
+            );
+            try self.beginPendingWrite(
+                tls_record.content_type_application_data,
+                bytes[committed.*..][0..chunk_len],
+            );
+            try self.finishPendingWriteWithDeadline(
+                io,
+                stream,
+                committed,
+                deadline,
+            );
+        }
+    }
+
+    /// Finish ciphertext retained by a previous bounded write without
+    /// encrypting another plaintext record. The returned count is the
+    /// plaintext prefix that becomes committed by completing that record.
+    pub fn finishPendingWrite(
+        self: *Stream,
+        io: std.Io,
+        stream: net.Stream,
+        committed: *usize,
+    ) Error!void {
+        committed.* = 0;
+        self.write_mutex.lockUncancelable(io);
+        defer self.write_mutex.unlock(io);
+        if (self.close_notify_sent or self.failed) {
+            return error.ConnectionClosed;
+        }
+        if (self.pending_write_len == 0) return;
+        record_io.writeAll(
+            io,
+            stream,
+            self.pending_write[self.pending_write_offset..self.pending_write_len],
+        ) catch |err| {
+            self.failed = true;
+            return err;
+        };
+        committed.* = self.pending_plaintext_len;
+        self.pending_write_len = 0;
+        self.pending_write_offset = 0;
+        self.pending_plaintext_len = 0;
+    }
+
+    fn beginPendingWrite(
+        self: *Stream,
+        content_type: u8,
+        plaintext: []const u8,
+    ) Error!void {
+        std.debug.assert(self.pending_write_len == 0);
+        const next_sequence = try record_io.nextSequence(
+            self.write_sequence,
+        );
+        const len = try self.write_keys.seal(
+            self.write_sequence,
+            content_type,
+            plaintext,
+            &self.pending_write,
+        );
+        self.write_sequence = next_sequence;
+        self.pending_write_len = len;
+        self.pending_write_offset = 0;
+        self.pending_plaintext_len = plaintext.len;
+    }
+
+    fn finishPendingWriteWithDeadline(
+        self: *Stream,
+        io: std.Io,
+        stream: net.Stream,
+        committed: *usize,
+        deadline: std.Io.Clock.Timestamp,
+    ) Error!void {
+        std.debug.assert(self.pending_write_len != 0);
+        record_io.writeAllWithDeadline(
+            io,
+            stream,
+            self.pending_write[0..self.pending_write_len],
+            &self.pending_write_offset,
+            deadline,
+        ) catch |err| {
+            if (err != error.Timeout and err != error.Canceled) {
+                self.failed = true;
+            }
+            return err;
+        };
+        committed.* += self.pending_plaintext_len;
+        self.pending_write_len = 0;
+        self.pending_write_offset = 0;
+        self.pending_plaintext_len = 0;
+    }
+
     pub fn sendCloseNotify(
         self: *Stream,
         io: std.Io,
@@ -461,6 +663,7 @@ pub const Stream = struct {
         defer self.write_mutex.unlock(io);
         if (self.close_notify_sent) return;
         if (self.failed) return error.ConnectionClosed;
+        if (self.pending_write_len != 0) return error.WriteInProgress;
         try self.respondToPeerUpdateUnlocked(io, stream);
         try self.writeRecord(
             io,
@@ -487,6 +690,7 @@ pub const Stream = struct {
         if (self.close_notify_sent or self.failed) {
             return error.ConnectionClosed;
         }
+        if (self.pending_write_len != 0) return error.WriteInProgress;
         if (request_peer_update and
             self.awaiting_peer_key_update.cmpxchgStrong(
                 false,
@@ -514,6 +718,7 @@ pub const Stream = struct {
         stream: net.Stream,
     ) Error!void {
         if (!self.peer_update_response_pending.load(.acquire)) return;
+        if (self.pending_write_len != 0) return error.WriteInProgress;
         try self.sendKeyUpdateUnlocked(io, stream, false);
         self.peer_update_response_pending.store(false, .release);
     }
@@ -692,6 +897,58 @@ test "TLS record stream exposes authenticated close notify as EOF" {
     );
 }
 
+test "TLS record stream finishes retained ciphertext without re-encrypting" {
+    var threaded = std.Io.Threaded.init(std.testing.allocator, .{});
+    defer threaded.deinit();
+    const io = threaded.io();
+    const streams = try testingNetworkStreams(io);
+    defer streams[0].close(io);
+    defer streams[1].close(io);
+
+    var sender = try testingRecordStream(0x22, 0x11);
+    defer sender.deinit();
+    var receiver = try testingRecordStream(0x11, 0x22);
+    defer receiver.deinit();
+    sender.beginPendingWrite(
+        tls_record.content_type_application_data,
+        "retained",
+    ) catch |err| return err;
+    sender.pending_write_offset = 3;
+    try record_io.writeAll(
+        io,
+        streams[0],
+        sender.pending_write[0..sender.pending_write_offset],
+    );
+
+    var committed: usize = 99;
+    try sender.finishPendingWrite(io, streams[0], &committed);
+    try std.testing.expectEqual(@as(usize, "retained".len), committed);
+    try std.testing.expectEqual(@as(usize, 0), sender.pending_write_len);
+    try std.testing.expectEqual(@as(u64, 1), sender.write_sequence);
+
+    var plaintext: [16]u8 = undefined;
+    const count = try receiver.read(io, streams[1], &plaintext);
+    try std.testing.expectEqualStrings("retained", plaintext[0..count]);
+}
+
+test "TLS record stream reusable boundary distinguishes plaintext from ciphertext" {
+    var records = try testingRecordStream(0x22, 0x11);
+    defer records.deinit();
+    try std.testing.expect(records.isReusableBoundary());
+
+    // Ciphertext and post-handshake fragments have not yet been authenticated
+    // as application data and must not be treated as an unsolicited response.
+    records.record_reader.encoded_len = 1;
+    records.post_handshake_len = 1;
+    try std.testing.expect(records.isReusableBoundary());
+
+    records.buffered_end = 1;
+    try std.testing.expect(!records.isReusableBoundary());
+    records.buffered_end = 0;
+    records.failed = true;
+    try std.testing.expect(!records.isReusableBoundary());
+}
+
 test "TLS record stream rejects fatal and malformed alerts" {
     const cases = [_]struct {
         alert: [2]u8,
@@ -849,6 +1106,105 @@ test "TLS record stream delivers authenticated data before later truncation" {
     );
 }
 
+test "TLS record stream resumes a partial record after read timeout" {
+    var threaded = std.Io.Threaded.init(std.testing.allocator, .{});
+    defer threaded.deinit();
+    const io = threaded.io();
+    const streams = try testingNetworkStreams(io);
+    defer streams[0].close(io);
+    defer streams[1].close(io);
+    var sender = try testingRecordStream(0x22, 0x11);
+    defer sender.deinit();
+    var receiver = try testingRecordStream(0x11, 0x22);
+    defer receiver.deinit();
+
+    var encoded: [record_io.max_record_len]u8 = undefined;
+    const len = try sender.write_keys.seal(
+        sender.write_sequence,
+        tls_record.content_type_application_data,
+        "resumed-record",
+        &encoded,
+    );
+    try record_io.writeAll(io, streams[0], encoded[0..1]);
+
+    var plaintext: [32]u8 = undefined;
+    try std.testing.expectError(
+        error.Timeout,
+        receiver.readWithDeadline(
+            io,
+            streams[1],
+            &plaintext,
+            .fromNow(io, .{
+                .raw = .fromMilliseconds(20),
+                .clock = .awake,
+            }),
+        ),
+    );
+    try std.testing.expectEqual(@as(usize, 1), receiver.record_reader.encoded_len);
+
+    try record_io.writeAll(io, streams[0], encoded[1..len]);
+    const count = try receiver.read(io, streams[1], &plaintext);
+    try std.testing.expectEqualStrings(
+        "resumed-record",
+        plaintext[0..count],
+    );
+    try std.testing.expectEqual(
+        @as(usize, 0),
+        receiver.record_reader.encoded_len,
+    );
+}
+
+test "TLS record stream resumes a partial record after task cancellation" {
+    var threaded = std.Io.Threaded.init(std.testing.allocator, .{
+        .async_limit = .unlimited,
+    });
+    defer threaded.deinit();
+    const io = threaded.io();
+    const streams = try testingNetworkStreams(io);
+    defer streams[0].close(io);
+    defer streams[1].close(io);
+    var sender = try testingRecordStream(0x22, 0x11);
+    defer sender.deinit();
+    var receiver = try testingRecordStream(0x11, 0x22);
+    defer receiver.deinit();
+
+    var encoded: [record_io.max_record_len]u8 = undefined;
+    const len = try sender.write_keys.seal(
+        sender.write_sequence,
+        tls_record.content_type_application_data,
+        "canceled-record",
+        &encoded,
+    );
+    try record_io.writeAll(io, streams[0], encoded[0..1]);
+
+    var plaintext: [32]u8 = undefined;
+    var read_future = try io.concurrent(
+        Stream.read,
+        .{ &receiver, io, streams[1], &plaintext },
+    );
+    try std.Io.sleep(
+        io,
+        .fromMilliseconds(20),
+        .awake,
+    );
+    try std.testing.expectError(error.Canceled, read_future.cancel(io));
+    try std.testing.expectEqual(
+        @as(usize, 1),
+        receiver.record_reader.encoded_len,
+    );
+
+    try record_io.writeAll(io, streams[0], encoded[1..len]);
+    const count = try receiver.read(io, streams[1], &plaintext);
+    try std.testing.expectEqualStrings(
+        "canceled-record",
+        plaintext[0..count],
+    );
+    try std.testing.expectEqual(
+        @as(usize, 0),
+        receiver.record_reader.encoded_len,
+    );
+}
+
 test "TLS record stream reassembles and bounds peer KeyUpdate messages" {
     const suite = vail.tls.cipher_suite.Suite.aes_256_gcm_sha384;
     var read_secret = try vail.tls.secret.Secret.init(
@@ -912,5 +1268,51 @@ test "TLS record stream rejects malformed KeyUpdate framing" {
             undefined,
             &.{ handshake_type_key_update, 0, 0, 2, 0 },
         ),
+    );
+}
+
+test "TLS record stream client discards bounded fragmented NewSessionTicket" {
+    const suite = vail.tls.cipher_suite.Suite.aes_128_gcm_sha256;
+    const bytes = [_]u8{0x64} ** 32;
+    var traffic_secret = try vail.tls.secret.Secret.init(suite.hash(), &bytes);
+    defer traffic_secret.deinit();
+    var records = Stream.init(
+        try tls_record.Keys.derive(suite, traffic_secret),
+        try tls_record.Keys.derive(suite, traffic_secret),
+        traffic_secret,
+        traffic_secret,
+    );
+    defer records.deinit();
+    records.allowNewSessionTickets();
+
+    // Minimal structurally sized ticket body split across record boundaries,
+    // immediately followed by a KeyUpdate in the same handshake fragment.
+    const ticket_and_update = [_]u8{
+        handshake_type_new_session_ticket, 0, 0, 14,
+        0, 0, 0, 1, // lifetime
+        0, 0, 0, 2, // age_add
+        0, // nonce length
+        0, 1, 0xaa, // one-byte ticket
+        0,                         0, // extensions
+        handshake_type_key_update, 0,
+        0,                         1,
+        0,
+    };
+    try records.consumePostHandshake(undefined, undefined, ticket_and_update[0..9]);
+    try std.testing.expectEqual(@as(u64, 0), records.discardedSessionTicketCount());
+    try records.consumePostHandshake(undefined, undefined, ticket_and_update[9..]);
+    try std.testing.expectEqual(@as(u64, 1), records.discardedSessionTicketCount());
+    try std.testing.expectEqual(@as(u64, 1), records.keyUpdateCounts().received);
+
+    var server_records = Stream.init(
+        try tls_record.Keys.derive(suite, traffic_secret),
+        try tls_record.Keys.derive(suite, traffic_secret),
+        traffic_secret,
+        traffic_secret,
+    );
+    defer server_records.deinit();
+    try std.testing.expectError(
+        error.InvalidNewSessionTicket,
+        server_records.consumePostHandshake(undefined, undefined, ticket_and_update[0..18]),
     );
 }

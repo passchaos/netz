@@ -59,6 +59,92 @@ const MultiplexedObservation = struct {
     }
 };
 
+const HandshakeReentrantObservation = struct {
+    client: *runtime.HandshakeClient,
+    observation: Observation = .{},
+    error_seen: ?anyerror = null,
+    cancellation_error_seen: ?anyerror = null,
+    stream_open_error_seen: ?anyerror = null,
+    unexpectedly_read: bool = false,
+
+    fn observe(
+        context_ptr: *anyopaque,
+        response: http3.InformationalResponseHead,
+    ) void {
+        const self: *@This() = @ptrCast(@alignCast(context_ptr));
+        Observation.observe(&self.observation, response);
+        if (self.error_seen != null or self.unexpectedly_read) return;
+        var nested = self.client.receiveResponse(0) catch |err| {
+            self.error_seen = err;
+            self.probeMutations();
+            return;
+        };
+        self.unexpectedly_read = true;
+        nested.deinit(self.client.allocator);
+        self.probeMutations();
+    }
+
+    fn probeMutations(self: *@This()) void {
+        self.client.cancelRequest(
+            0,
+            http3.ApplicationErrorCode.request_cancelled,
+        ) catch |err| {
+            self.cancellation_error_seen = err;
+        };
+        _ = self.client.openClientBidirectionalStreamWithTimeout(
+            .fromMilliseconds(1),
+        ) catch |err| {
+            self.stream_open_error_seen = err;
+            return;
+        };
+        self.unexpectedly_read = true;
+    }
+};
+
+const ProtectedReentrantObservation = struct {
+    client: *runtime.ProtectedClient,
+    target_stream_id: u62,
+    observation: MultiplexedObservation = .{},
+    error_seen: ?anyerror = null,
+    cancellation_error_seen: ?anyerror = null,
+    unexpectedly_read: bool = false,
+
+    fn observe(
+        context_ptr: *anyopaque,
+        stream_id: u62,
+        response: http3.InformationalResponseHead,
+    ) void {
+        const self: *@This() = @ptrCast(@alignCast(context_ptr));
+        MultiplexedObservation.observe(
+            &self.observation,
+            stream_id,
+            response,
+        );
+        if (self.error_seen != null or self.unexpectedly_read) return;
+        var nested = self.client.receiveResponse(
+            self.target_stream_id,
+        ) catch |err| {
+            self.error_seen = err;
+            self.probeCancellation();
+            return;
+        };
+        self.unexpectedly_read = true;
+        nested.deinit(self.client.quic_client.endpoint.allocator);
+        self.probeCancellation();
+    }
+
+    fn probeCancellation(self: *@This()) void {
+        self.client.cancelRequest(
+            self.target_stream_id,
+            http3.ApplicationErrorCode.request_cancelled,
+        ) catch |err| {
+            self.cancellation_error_seen = err;
+            return;
+        };
+        self.unexpectedly_read = true;
+    }
+};
+
 const PushObservation = struct {
     const Entry = struct {
         push_id: u64,
@@ -86,6 +172,52 @@ const PushObservation = struct {
             .status = response.status,
         };
         self.count += 1;
+    }
+};
+
+const ProtectedPushReentrantObservation = struct {
+    client: *runtime.ProtectedClient,
+    observation: PushObservation = .{},
+    error_seen: ?anyerror = null,
+    cancellation_error_seen: ?anyerror = null,
+    unexpectedly_read: bool = false,
+
+    fn observe(
+        context_ptr: *anyopaque,
+        push_id: u64,
+        request_stream_id: u62,
+        stream_id: u62,
+        response: http3.InformationalResponseHead,
+    ) void {
+        const self: *@This() = @ptrCast(@alignCast(context_ptr));
+        PushObservation.observe(
+            &self.observation,
+            push_id,
+            request_stream_id,
+            stream_id,
+            response,
+        );
+        if (self.error_seen != null or self.unexpectedly_read) return;
+        var nested = self.client.pollPushEvent() catch |err| {
+            self.error_seen = err;
+            self.probeCancellation(push_id);
+            return;
+        };
+        if (nested) |*event| {
+            event.deinit(self.client.quic_client.endpoint.allocator);
+        }
+        self.unexpectedly_read = true;
+        self.probeCancellation(push_id);
+    }
+
+    fn probeCancellation(self: *@This(), push_id: u64) void {
+        self.client.cancelPush(
+            push_id,
+        ) catch |err| {
+            self.cancellation_error_seen = err;
+            return;
+        };
+        self.unexpectedly_read = true;
     }
 };
 
@@ -201,11 +333,42 @@ test "HTTP/3 protected client observes and bounds informational responses" {
                         .{ .status = 102 },
                         .{ .status = 103 },
                     };
-                try self.server.sendResponseWithInformational(
+                const packet_number = self.server.next_packet_number;
+                const control_offset = self.server.control_send.next_offset;
+                const pending_sections =
+                    self.server.qpack_encode.pending_sections.items.len;
+                try std.testing.expectError(
+                    error.Timeout,
+                    self.server.sendResponseWithInformationalAndDeadline(
+                        request.from,
+                        request.stream_id,
+                        informational,
+                        .{ .status = 200, .body = "final" },
+                        .{ .clock = .real, .raw = .zero },
+                    ),
+                );
+                try std.testing.expectEqual(
+                    packet_number,
+                    self.server.next_packet_number,
+                );
+                try std.testing.expectEqual(
+                    control_offset,
+                    self.server.control_send.next_offset,
+                );
+                try std.testing.expectEqual(
+                    pending_sections,
+                    self.server.qpack_encode.pending_sections.items.len,
+                );
+                try std.testing.expectEqual(
+                    @as(usize, 1),
+                    self.server.request_lifecycle.count(),
+                );
+                try self.server.sendResponseWithInformationalAndTimeout(
                     request.from,
                     request.stream_id,
                     informational,
                     .{ .status = 200, .body = "final" },
+                    .fromSeconds(1),
                 );
             }
         }
@@ -343,10 +506,41 @@ test "HTTP/3 authenticated informational deadline variants validate and deliver"
             defer request.deinit(
                 session.established.connection.endpoint.allocator,
             );
-            try session.sendResponseWithInformational(
+            const packet_number =
+                session.established.connection.next_packet_number;
+            const control_offset = session.control_send.next_offset;
+            const pending_sections =
+                session.qpack_encode.pending_sections.items.len;
+            try std.testing.expectError(
+                error.Timeout,
+                session.sendResponseWithInformationalAndDeadline(
+                    request.stream_id,
+                    &.{.{ .status = 103 }},
+                    .{ .status = 200, .body = "late" },
+                    .{ .clock = .real, .raw = .zero },
+                ),
+            );
+            try std.testing.expectEqual(
+                packet_number,
+                session.established.connection.next_packet_number,
+            );
+            try std.testing.expectEqual(
+                control_offset,
+                session.control_send.next_offset,
+            );
+            try std.testing.expectEqual(
+                pending_sections,
+                session.qpack_encode.pending_sections.items.len,
+            );
+            try std.testing.expectEqual(
+                @as(usize, 1),
+                session.request_lifecycle.count(),
+            );
+            try session.sendResponseWithInformationalAndTimeout(
                 request.stream_id,
                 &.{.{ .status = 103 }},
                 .{ .status = 200, .body = "late" },
+                .fromSeconds(2),
             );
         }
     };
@@ -393,19 +587,37 @@ test "HTTP/3 authenticated informational deadline variants validate and deliver"
         client.request_lifecycle.outstanding.items.len,
     );
 
-    var observation: Observation = .{};
+    var reentrant = HandshakeReentrantObservation{ .client = &client };
     var response = try client.requestWithInformationalAndTimeout(
         .{ .method = "GET", .path = "/observed", .authority = "localhost" },
         .{
-            .context = &observation,
-            .on_response = Observation.observe,
+            .context = &reentrant,
+            .on_response = HandshakeReentrantObservation.observe,
         },
         .fromSeconds(1),
     );
     defer response.deinit(allocator);
-    try std.testing.expectEqual(@as(usize, 1), observation.count);
-    try std.testing.expectEqual(@as(u16, 103), observation.statuses[0]);
-    try std.testing.expect(!observation.saw_automatic_date);
+    try std.testing.expect(!reentrant.unexpectedly_read);
+    switch (reentrant.error_seen orelse return error.TestUnexpectedResult) {
+        error.ConcurrentRead => {},
+        else => return error.TestUnexpectedResult,
+    }
+    switch (reentrant.cancellation_error_seen orelse
+        return error.TestUnexpectedResult) {
+        error.ConcurrentRead => {},
+        else => return error.TestUnexpectedResult,
+    }
+    switch (reentrant.stream_open_error_seen orelse
+        return error.TestUnexpectedResult) {
+        error.ConcurrentRead => {},
+        else => return error.TestUnexpectedResult,
+    }
+    try std.testing.expectEqual(@as(usize, 1), reentrant.observation.count);
+    try std.testing.expectEqual(
+        @as(u16, 103),
+        reentrant.observation.statuses[0],
+    );
+    try std.testing.expect(!reentrant.observation.saw_automatic_date);
     try std.testing.expectEqualStrings("late", response.response.body);
     try std.testing.expect(
         findHeader(response.response.headers, "date") != null,
@@ -489,10 +701,13 @@ test "HTTP/3 protected receive-next correlates informational responses" {
         .{ .status = 200, .body = "first" },
     );
 
-    var observation: MultiplexedObservation = .{};
+    var reentrant = ProtectedReentrantObservation{
+        .client = &client,
+        .target_stream_id = first_id,
+    };
     const observer: runtime.MultiplexedInformationalObserver = .{
-        .context = &observation,
-        .on_response = MultiplexedObservation.observe,
+        .context = &reentrant,
+        .on_response = ProtectedReentrantObservation.observe,
     };
     var second_response =
         try client.receiveNextResponseWithInformational(observer);
@@ -510,8 +725,18 @@ test "HTTP/3 protected receive-next correlates informational responses" {
         "first",
         first_response.response.value.response.body,
     );
-    try std.testing.expectEqual(@as(usize, 4), observation.count);
-    for (observation.entries, 0..) |entry, index| {
+    try std.testing.expect(!reentrant.unexpectedly_read);
+    switch (reentrant.error_seen orelse return error.TestUnexpectedResult) {
+        error.ConcurrentRead => {},
+        else => return error.TestUnexpectedResult,
+    }
+    switch (reentrant.cancellation_error_seen orelse
+        return error.TestUnexpectedResult) {
+        error.ConcurrentRead => {},
+        else => return error.TestUnexpectedResult,
+    }
+    try std.testing.expectEqual(@as(usize, 4), reentrant.observation.count);
+    for (reentrant.observation.entries, 0..) |entry, index| {
         try std.testing.expectEqual(
             if (index < 2) second_id else first_id,
             entry.stream_id,
@@ -594,18 +819,28 @@ test "HTTP/3 protected aggregate push correlates informational responses" {
     defer parent.deinit(allocator);
     try std.testing.expectEqual(@as(u16, 204), parent.response.status);
 
-    var observation: PushObservation = .{};
+    var reentrant = ProtectedPushReentrantObservation{ .client = &client };
     var pushed = try client.receivePushWithInformational(.{
-        .context = &observation,
-        .on_response = PushObservation.observe,
+        .context = &reentrant,
+        .on_response = ProtectedPushReentrantObservation.observe,
     });
     defer pushed.deinit(allocator);
     try std.testing.expectEqual(@as(u64, 7), pushed.push_id);
     try std.testing.expectEqual(request_stream_id, pushed.request_stream_id);
     try std.testing.expectEqual(push_stream_id, pushed.stream_id);
     try std.testing.expectEqualStrings("asset", pushed.response.body);
-    try std.testing.expectEqual(@as(usize, 2), observation.count);
-    for (observation.entries, 0..) |entry, index| {
+    try std.testing.expect(!reentrant.unexpectedly_read);
+    switch (reentrant.error_seen orelse return error.TestUnexpectedResult) {
+        error.ConcurrentRead => {},
+        else => return error.TestUnexpectedResult,
+    }
+    switch (reentrant.cancellation_error_seen orelse
+        return error.TestUnexpectedResult) {
+        error.ConcurrentRead => {},
+        else => return error.TestUnexpectedResult,
+    }
+    try std.testing.expectEqual(@as(usize, 2), reentrant.observation.count);
+    for (reentrant.observation.entries, 0..) |entry, index| {
         try std.testing.expectEqual(@as(u64, 7), entry.push_id);
         try std.testing.expectEqual(request_stream_id, entry.request_stream_id);
         try std.testing.expectEqual(push_stream_id, entry.stream_id);

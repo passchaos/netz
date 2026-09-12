@@ -43,17 +43,30 @@ test "HTTP/3 protected client sends priority update for promised push" {
         },
     );
     defer client.deinit();
-    try server.peer_promised_push_ids.append(allocator, 2);
+    try server.promised_push_ids.prepareInsertValue(allocator, 2);
+    server.promised_push_ids.insertAssumeCapacity(2);
     try client.sendMaxPushId(2);
     try client.push_streams.registerPromise(2, 0);
     try std.testing.expectError(
         error.UnexpectedStream,
         client.sendPushPriorityUpdate(1, .{}),
     );
-    try client.sendPushPriorityUpdate(2, .{
+    const packet_number = client.next_packet_number;
+    const control_offset = client.control_send.next_offset;
+    try std.testing.expectError(
+        error.Timeout,
+        client.sendPushPriorityUpdateWithDeadline(
+            2,
+            .{ .urgency = 4 },
+            .{ .clock = .real, .raw = .zero },
+        ),
+    );
+    try std.testing.expectEqual(packet_number, client.next_packet_number);
+    try std.testing.expectEqual(control_offset, client.control_send.next_offset);
+    try client.sendPushPriorityUpdateWithTimeout(2, .{
         .urgency = 1,
         .incremental = true,
-    });
+    }, .fromSeconds(1));
     while (server.control.pushPriorityUpdate(2) == null) {
         var packet = try server.receive_packets.take(
             &server.quic_server.endpoint,
@@ -65,11 +78,14 @@ test "HTTP/3 protected client sends priority update for promised push" {
         defer packet.deinit(allocator);
         for (packet.frames) |frame| {
             if (frame != .stream) continue;
-            _ = try control_receive.applyControlStreamFrameForRole(
+            _ = try control_receive.applyControlStreamFrameForRoleWithPushes(
                 &server.control,
                 allocator,
                 frame.stream,
                 .server,
+                .{ .set = &server.promised_push_ids },
+                null,
+                null,
             );
         }
     }

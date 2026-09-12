@@ -669,9 +669,12 @@ test "WebSocket pending listener closes an accepted stream after deadline" {
     defer if (!joined) thread.join();
 
     try shared.waiting.wait(io);
-    try std.Io.sleep(io, .fromMilliseconds(60), .awake);
     const stream = try server.address().connect(io, .{ .mode = .stream });
     defer stream.close(io);
+    // Let accept win while leaving the HTTP Upgrade unread. The original
+    // deadline must close this already accepted stream. A connection created
+    // only after the deadline is intentionally left in the listener backlog.
+    try std.Io.sleep(io, .fromMilliseconds(60), .awake);
     var byte: [1]u8 = undefined;
     try std.testing.expectEqual(
         @as(usize, 0),

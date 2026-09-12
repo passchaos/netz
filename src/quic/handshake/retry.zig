@@ -39,6 +39,7 @@ pub const InitialResponseFilter = struct {
     version: quic.Version,
     original_destination_connection_id: []const u8,
     initial_source_connection_id: []const u8,
+    initial_keys: quic.protection.PacketProtectionKeys,
     retry_already_processed: bool,
     allow_zero_fixed_bit: bool = false,
 
@@ -50,13 +51,16 @@ pub const InitialResponseFilter = struct {
             bytes,
             self.allow_zero_fixed_bit,
         )) |info| {
-            return info.version == self.version.wireValue() and
+            if (info.version == self.version.wireValue() and
                 info.packet_type == .initial and
                 std.mem.eql(
                     u8,
                     info.destination_connection_id,
                     self.initial_source_connection_id,
-                );
+                ))
+            {
+                return self.initialContainsCryptoOffsetZero(bytes[0..info.len]);
+            }
         } else |_| {}
         if (self.retry_already_processed) return false;
         _ = quic.retry_flow.validateClientPacket(
@@ -69,6 +73,41 @@ pub const InitialResponseFilter = struct {
             bytes,
         ) catch return false;
         return true;
+    }
+
+    /// A peer can acknowledge a later fragment of a split ClientHello without
+    /// having received CRYPTO offset zero. Such an ACK-only Initial proves the
+    /// path is alive but cannot advance TLS; keeping it inside the PTO loop
+    /// causes the complete ClientHello flight to be retransmitted.
+    fn initialContainsCryptoOffsetZero(
+        self: *const InitialResponseFilter,
+        bytes: []const u8,
+    ) bool {
+        var packet = quic.protection.openInitialPacketWithFixedBitPolicy(
+            self.allocator,
+            self.initial_keys,
+            bytes,
+            0,
+            self.allow_zero_fixed_bit,
+        ) catch return false;
+        defer packet.deinit(self.allocator);
+
+        var offset: usize = 0;
+        while (offset < packet.payload.len) {
+            var parsed = quic.parseFrameOwned(
+                self.allocator,
+                packet.payload[offset..],
+            ) catch return false;
+            defer parsed.deinitOwned(self.allocator);
+            if (parsed.frame == .crypto and
+                parsed.frame.crypto.offset == 0 and
+                parsed.frame.crypto.data.len != 0)
+            {
+                return true;
+            }
+            offset += parsed.consumed;
+        }
+        return false;
     }
 };
 
@@ -220,4 +259,101 @@ test "integrated Retry policy defaults to the server connection ID" {
         server_scid,
         verified.packet.source_connection_id,
     );
+}
+
+test "client Initial response filter requires CRYPTO offset zero in v1 and v2" {
+    const allocator = std.testing.allocator;
+    const original_dcid = "original";
+    const client_scid = "client";
+    const server_scid = "server";
+
+    inline for (.{ quic.Version.version_1, quic.Version.version_2 }) |version| {
+        const server_keys = (try quic.protection.deriveInitialSecretsForVersion(
+            version.wireValue(),
+            original_dcid,
+        )).server;
+        var filter = InitialResponseFilter{
+            .allocator = allocator,
+            .version = version,
+            .original_destination_connection_id = original_dcid,
+            .initial_source_connection_id = client_scid,
+            .initial_keys = server_keys,
+            .retry_already_processed = false,
+        };
+
+        const ack_payload = [_]u8{
+            @intFromEnum(quic.FrameType.ack),
+            0,
+            0,
+            0,
+            0,
+        };
+        const ack_packet = try quic.protection.sealInitialPacket(
+            allocator,
+            server_keys,
+            .{
+                .version = version.wireValue(),
+                .destination_connection_id = client_scid,
+                .source_connection_id = server_scid,
+                .packet_number = 0,
+                .payload = &ack_payload,
+            },
+        );
+        defer allocator.free(ack_packet);
+        try std.testing.expect(!InitialResponseFilter.accept(
+            &filter,
+            ack_packet,
+        ));
+
+        var crypto_payload: std.ArrayList(u8) = .empty;
+        defer crypto_payload.deinit(allocator);
+        try quic.crypto_stream.writeCryptoFrames(
+            &crypto_payload,
+            allocator,
+            1,
+            "server-hello-suffix",
+            1024,
+        );
+        const suffix_packet = try quic.protection.sealInitialPacket(
+            allocator,
+            server_keys,
+            .{
+                .version = version.wireValue(),
+                .destination_connection_id = client_scid,
+                .source_connection_id = server_scid,
+                .packet_number = 1,
+                .payload = crypto_payload.items,
+            },
+        );
+        defer allocator.free(suffix_packet);
+        try std.testing.expect(!InitialResponseFilter.accept(
+            &filter,
+            suffix_packet,
+        ));
+
+        crypto_payload.clearRetainingCapacity();
+        try quic.crypto_stream.writeCryptoFrames(
+            &crypto_payload,
+            allocator,
+            0,
+            "server-hello",
+            1024,
+        );
+        const prefix_packet = try quic.protection.sealInitialPacket(
+            allocator,
+            server_keys,
+            .{
+                .version = version.wireValue(),
+                .destination_connection_id = client_scid,
+                .source_connection_id = server_scid,
+                .packet_number = 2,
+                .payload = crypto_payload.items,
+            },
+        );
+        defer allocator.free(prefix_packet);
+        try std.testing.expect(InitialResponseFilter.accept(
+            &filter,
+            prefix_packet,
+        ));
+    }
 }

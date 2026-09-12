@@ -1128,7 +1128,25 @@ test "WebSocket compressed binary parts reuse scratch without plaintext join" {
                 defer shared.server.http.allocator.free(decoded);
                 try std.testing.expectEqualStrings(expected, decoded);
             }
-            try connection.sendBinaryParts(first, second);
+            try connection.sendBinarySlices(&.{
+                first,
+                "",
+                second[0..17],
+                second[17..],
+            });
+            const bounded_parts = [_][]const u8{
+                first,
+                second[0..17],
+                &.{},
+                second[17..],
+            };
+            var progress: runtime.MessageWriteProgress = .{};
+            try connection.sendBinarySlicesWithTimeout(
+                &bounded_parts,
+                &progress,
+                .fromSeconds(2),
+            );
+            try std.testing.expect(progress.frame_committed);
         }
     };
     var shared = Shared{ .server = &server };
@@ -1148,7 +1166,7 @@ test "WebSocket compressed binary parts reuse scratch without plaintext join" {
         },
     });
     defer client.close();
-    try client.sendBinaryParts(first, second);
+    try client.sendBinarySlices(&.{ first, "", second[0..17], second[17..] });
     const compressed_ptr = client.compression_send.payload.allocatedSlice().ptr;
 
     // The first send warms both retained Vort stores. Failing the connection
@@ -1157,25 +1175,30 @@ test "WebSocket compressed binary parts reuse scratch without plaintext join" {
     var failing = std.testing.FailingAllocator.init(allocator, .{});
     client.allocator = failing.allocator();
     failing.fail_index = failing.alloc_index;
-    try client.sendBinaryParts(first, second);
+    try client.sendBinarySlices(&.{ first, second[0..17], "", second[17..] });
     try std.testing.expect(!failing.has_induced_failure);
     try std.testing.expectEqual(
         compressed_ptr,
         client.compression_send.payload.allocatedSlice().ptr,
     );
     client.allocator = allocator;
-    var response = try client.receiveFrame();
-    defer response.deinit(allocator);
-    try std.testing.expectEqual(websocket.Opcode.binary, response.header.opcode);
-    try std.testing.expect(response.header.fin);
-    try std.testing.expect(response.header.rsv1);
-    const decoded = try websocket.decompressMessage(
-        allocator,
-        response.payload,
-        expected.len,
-    );
-    defer allocator.free(decoded);
-    try std.testing.expectEqualStrings(expected, decoded);
+    for (0..2) |_| {
+        var response = try client.receiveFrame();
+        defer response.deinit(allocator);
+        try std.testing.expectEqual(
+            websocket.Opcode.binary,
+            response.header.opcode,
+        );
+        try std.testing.expect(response.header.fin);
+        try std.testing.expect(response.header.rsv1);
+        const decoded = try websocket.decompressMessage(
+            allocator,
+            response.payload,
+            expected.len,
+        );
+        defer allocator.free(decoded);
+        try std.testing.expectEqualStrings(expected, decoded);
+    }
 
     thread.join();
     joined = true;

@@ -5,6 +5,7 @@ const wire = @import("../../../internal/wire.zig");
 const runtime_error = @import("../error.zig");
 const stream_lifecycle = @import("../stream/lifecycle.zig");
 const qpack_state = @import("../qpack/state.zig");
+const exact_range_set = @import("../../../internal/exact_range_set.zig");
 
 const Error = runtime_error.Error;
 const ServerRequestLifecycle = stream_lifecycle.Server;
@@ -22,28 +23,42 @@ pub const MessageStreamDisposition = enum {
     ignore,
 };
 
-pub fn validateServerGoAwayStreamId(stream_id: u64) Error!void {
+pub fn validateServerGoAwayStreamId(stream_id: u64) http3.Error!void {
     // RFC 9114 requires a server GOAWAY identifier to be a client-initiated
     // bidirectional request stream ID.
     if ((stream_id & 0x3) != 0) return error.IdError;
 }
 
-pub fn validateClientGoAwayPushId(push_id: u64) Error!void {
+pub fn validateClientGoAwayPushId(push_id: u64) http3.Error!void {
     if (push_id > quic.varint.max_value) return error.IdError;
 }
 
+pub const ServerPushIdSet = exact_range_set.Set;
+
+pub const PromisedPushIds = union(enum) {
+    none,
+    slice: []const u64,
+    set: *const ServerPushIdSet,
+
+    pub fn contains(self: PromisedPushIds, push_id: u64) bool {
+        return switch (self) {
+            .none => false,
+            .slice => |ids| std.mem.indexOfScalar(u64, ids, push_id) != null,
+            .set => |ids| ids.contains(push_id),
+        };
+    }
+};
+
 pub fn validateNewServerPush(
     control: http3.ControlState,
-    sent_push_ids: []const u64,
+    promised_push_ids: ServerPushIdSet,
     push_id: u64,
 ) Error!void {
     if (control.peer_goaway_id) |goaway_id| {
         if (push_id >= goaway_id) return error.GoAwayReceived;
     }
     if (control.pushCancelled(push_id)) return error.RequestCancelled;
-    for (sent_push_ids) |existing| {
-        if (existing == push_id) return error.DuplicatePushId;
-    }
+    if (promised_push_ids.contains(push_id)) return error.DuplicatePushId;
 }
 
 pub fn rejectByLocalGoAway(
@@ -138,7 +153,7 @@ pub const ServerRequestIdValidator = union(enum) {
 
 const ServerControlFrameValidator = struct {
     request_ids: ServerRequestIdValidator,
-    promised_push_ids: ?[]const u64,
+    promised_push_ids: PromisedPushIds,
     request_lifecycle: ?*const ServerRequestLifecycle,
 
     fn validate(
@@ -149,6 +164,23 @@ const ServerControlFrameValidator = struct {
         const self: *const ServerControlFrameValidator =
             @ptrCast(@alignCast(context));
         switch (frame.frame_type) {
+            http3.FrameType.goaway => try validateClientGoAwayPushId(
+                try http3.parseGoAwayPayload(frame.payload),
+            ),
+            http3.FrameType.origin => return error.UnexpectedFrame,
+            http3.FrameType.cancel_push => {
+                const push_id = try http3.parseCancelPushPayload(
+                    frame.payload,
+                );
+                const within_limit = if (state.peer_max_push_id) |max_push_id|
+                    push_id <= max_push_id
+                else
+                    false;
+                if (!within_limit) return error.PushIdExceeded;
+                if (!self.promised_push_ids.contains(push_id)) {
+                    return error.IdError;
+                }
+            },
             http3.FrameType.priority_update_request => {
                 const update = try http3.parsePriorityUpdatePayload(
                     frame.payload,
@@ -175,17 +207,10 @@ const ServerControlFrameValidator = struct {
                     update.prioritized_element_id <= max_push_id
                 else
                     false;
-                var promised = self.promised_push_ids == null;
-                if (self.promised_push_ids) |push_ids| {
-                    promised = false;
-                    for (push_ids) |push_id| {
-                        if (push_id == update.prioritized_element_id) {
-                            promised = true;
-                            break;
-                        }
-                    }
-                }
-                if (!within_limit or !promised) return error.IdError;
+                if (!within_limit or
+                    !self.promised_push_ids.contains(
+                        update.prioritized_element_id,
+                    )) return error.IdError;
                 if (state.pushCancelled(update.prioritized_element_id)) {
                     return .ignore;
                 }
@@ -195,6 +220,27 @@ const ServerControlFrameValidator = struct {
                     }
                 }
             },
+            else => {},
+        }
+        return .apply;
+    }
+};
+
+const ClientControlFrameValidator = struct {
+    fn validate(
+        _: *const anyopaque,
+        _: http3.ControlState,
+        frame: http3.Frame,
+    ) http3.Error!http3.ControlState.FrameDisposition {
+        switch (frame.frame_type) {
+            http3.FrameType.goaway => try validateServerGoAwayStreamId(
+                try http3.parseGoAwayPayload(frame.payload),
+            ),
+            http3.FrameType.max_push_id,
+            http3.FrameType.cancel_push,
+            http3.FrameType.priority_update_request,
+            http3.FrameType.priority_update_push,
+            => return error.UnexpectedFrame,
             else => {},
         }
         return .apply;
@@ -222,7 +268,7 @@ pub fn applyControlStreamFrameForRole(control: *http3.ControlState, allocator: s
         allocator,
         stream,
         role,
-        null,
+        .none,
         if (role == .server)
             .{ .static_limit = quic.max_stream_count }
         else
@@ -236,7 +282,7 @@ pub fn applyControlStreamFrameForRoleWithPushes(
     allocator: std.mem.Allocator,
     stream: quic.StreamFrame,
     role: ControlStreamRole,
-    promised_push_ids: ?[]const u64,
+    promised_push_ids: PromisedPushIds,
     request_id_validator: ?ServerRequestIdValidator,
     request_lifecycle: ?*const ServerRequestLifecycle,
 ) Error!bool {
@@ -246,6 +292,7 @@ pub fn applyControlStreamFrameForRoleWithPushes(
         .promised_push_ids = promised_push_ids,
         .request_lifecycle = request_lifecycle,
     };
+    const client_validator = ClientControlFrameValidator{};
     // HTTP/3 control, QPACK, and push streams are unidirectional.  Request and
     // response STREAM frames are already validated by the message decoder, so
     // skip the expensive control-state clone/rollback path for the common
@@ -262,191 +309,21 @@ pub fn applyControlStreamFrameForRoleWithPushes(
     } else if (!isRegisteredCriticalStream(control.*, stream.stream_id)) {
         return false;
     }
-    if (role == .client and
-        try controlStreamContainsClientOnlyFrame(control.*, stream))
-    {
-        return error.UnexpectedFrame;
-    }
-    var previous = try control.clone(allocator);
-    var previous_owned = true;
-    defer if (previous_owned) previous.deinit(allocator);
-    const handled = applyControlStreamFrameValidated(
+    return applyControlStreamFrameValidated(
         control,
         allocator,
         stream,
-        if (role == .server) .{
-            .context = &server_validator,
-            .validate = ServerControlFrameValidator.validate,
-        } else null,
-    ) catch |err| {
-        control.deinit(allocator);
-        control.* = previous;
-        previous_owned = false;
-        return err;
-    };
-    if (handled and role == .client) {
-        if (control.peer_goaway_id != previous.peer_goaway_id) {
-            validateServerGoAwayStreamId(control.peer_goaway_id.?) catch |err| {
-                control.deinit(allocator);
-                control.* = previous;
-                previous_owned = false;
-                return err;
-            };
-        }
-        // MAX_PUSH_ID and PRIORITY_UPDATE are client-to-server control frames.
-        // A client receiving them from a server must treat the frame as
-        // unexpected; restore state so callers can recover or close cleanly.
-        if (control.peer_client_only_frame_generation !=
-            previous.peer_client_only_frame_generation or
-            control.priority_update_generation !=
-                previous.priority_update_generation)
-        {
-            control.deinit(allocator);
-            control.* = previous;
-            previous_owned = false;
-            return error.UnexpectedFrame;
-        }
-        // CANCEL_PUSH is also client-to-server only.
-        if (control.push_cancellation_generation !=
-            previous.push_cancellation_generation)
-        {
-            control.deinit(allocator);
-            control.* = previous;
-            previous_owned = false;
-            return error.UnexpectedFrame;
-        }
-    }
-    if (handled and role == .server and control.peer_goaway_id != previous.peer_goaway_id) {
-        validateClientGoAwayPushId(control.peer_goaway_id.?) catch |err| {
-            control.deinit(allocator);
-            control.* = previous;
-            previous_owned = false;
-            return err;
-        };
-    }
-    if (handled and role == .server and
-        control.peer_origin_generation != previous.peer_origin_generation)
-    {
-        // RFC 9412 defines ORIGIN only from servers to clients. Roll back the
-        // complete frame even when it arrived across several STREAM packets.
-        control.deinit(allocator);
-        control.* = previous;
-        previous_owned = false;
-        return error.UnexpectedFrame;
-    }
-    if (handled and role == .server and
-        control.push_cancellation_generation !=
-            previous.push_cancellation_generation)
-    {
-        const max_push_id = control.peer_max_push_id orelse {
-            control.deinit(allocator);
-            control.* = previous;
-            previous_owned = false;
-            return error.PushIdExceeded;
-        };
-        for (control.peer_cancelled_push_ids.items[previous.peer_cancelled_push_ids.items.len..]) |push_id| {
-            if (push_id > max_push_id) {
-                control.deinit(allocator);
-                control.* = previous;
-                previous_owned = false;
-                return error.PushIdExceeded;
-            }
-        }
-    }
-    if (handled and role == .server and
-        control.priority_update_generation !=
-            previous.priority_update_generation)
-    {
-        // Per-frame validation above covers every newly decoded update before
-        // it mutates state. Rechecking the bounded retained set protects state
-        // created by lower-level callers before this role-aware wrapper runs.
-        for (control.priorityUpdates()) |update| {
-            switch (update.frame_type) {
-                http3.FrameType.priority_update_request => {
-                    const validator = request_id_validator orelse {
-                        control.deinit(allocator);
-                        control.* = previous;
-                        previous_owned = false;
-                        return error.IdError;
-                    };
-                    if (!validator.accepts(
-                        update.payload.prioritized_element_id,
-                    )) {
-                        control.deinit(allocator);
-                        control.* = previous;
-                        previous_owned = false;
-                        return error.IdError;
-                    }
-                },
-                http3.FrameType.priority_update_push => {
-                    const within_limit = if (control.peer_max_push_id) |max_push_id|
-                        update.payload.prioritized_element_id <= max_push_id
-                    else
-                        false;
-                    var promised = promised_push_ids == null;
-                    if (promised_push_ids) |push_ids| {
-                        promised = false;
-                        for (push_ids) |push_id| {
-                            if (push_id == update.payload.prioritized_element_id) {
-                                promised = true;
-                                break;
-                            }
-                        }
-                    }
-                    if (!within_limit or !promised) {
-                        control.deinit(allocator);
-                        control.* = previous;
-                        previous_owned = false;
-                        return error.IdError;
-                    }
-                },
-                else => unreachable,
-            }
-        }
-    }
-    if (handled and role == .server and
-        control.push_cancellation_generation !=
-            previous.push_cancellation_generation)
-    {
-        for (control.peer_cancelled_push_ids.items[previous.peer_cancelled_push_ids.items.len..]) |push_id| {
-            control.retirePushPriority(allocator, push_id);
-        }
-    }
-    return handled;
-}
-
-fn controlStreamContainsClientOnlyFrame(
-    control: http3.ControlState,
-    stream: quic.StreamFrame,
-) Error!bool {
-    const payload = if (stream.offset == 0) blk: {
-        var cursor = wire.Cursor.init(stream.data);
-        const stream_type: http3.StreamType = @enumFromInt(
-            quic.varint.decode(&cursor) catch return false,
-        );
-        if (stream_type != .control) return false;
-        break :blk stream.data[cursor.pos..];
-    } else blk: {
-        if (control.peer_control_stream_id != stream.stream_id) return false;
-        break :blk stream.data;
-    };
-    var offset: usize = 0;
-    while (offset < payload.len) {
-        const frame = http3.Frame.parse(payload[offset..]) catch |err| switch (err) {
-            error.BufferTooShort => return false,
-            else => return err,
-        };
-        offset += frame.consumed;
-        switch (frame.frame_type) {
-            http3.FrameType.max_push_id,
-            http3.FrameType.cancel_push,
-            http3.FrameType.priority_update_request,
-            http3.FrameType.priority_update_push,
-            => return true,
-            else => {},
-        }
-    }
-    return false;
+        switch (role) {
+            .server => .{
+                .context = &server_validator,
+                .validate = ServerControlFrameValidator.validate,
+            },
+            .client => .{
+                .context = &client_validator,
+                .validate = ClientControlFrameValidator.validate,
+            },
+        },
+    );
 }
 
 pub fn peekUniStreamType(stream: quic.StreamFrame) ?http3.StreamType {
@@ -464,6 +341,8 @@ pub fn applyControlStreamFrameValidated(
     stream: quic.StreamFrame,
     validator: ?http3.ControlState.FrameValidator,
 ) Error!bool {
+    const previous_control_stream_id = control.peer_control_stream_id;
+    errdefer control.peer_control_stream_id = previous_control_stream_id;
     // HTTP/3 control and QPACK streams are unidirectional QUIC streams.  Offset
     // zero carries the stream type varint; subsequent frames on an already
     // registered critical stream contain only that stream's payload.

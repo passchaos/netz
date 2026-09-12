@@ -1,8 +1,8 @@
 const std = @import("std");
 const netz = @import("netz");
 
-const control_magic = "NZWTB1";
-const control_len: usize = 66;
+const control_magic = "NZWTB2";
+const control_len: usize = 82;
 const ping_magic = "NZPING";
 const ping_header_len: usize = 14;
 pub const max_datagram_size: usize = 1200;
@@ -46,6 +46,8 @@ pub const Config = struct {
     chunk_bytes: u32 = 16 * 1024,
     stream_window: u64 = 1024 * 1024,
     timeout_ms: u32 = 30_000,
+    netz_ack_every: u64 = 2,
+    netz_max_ack_delay_us: u64 = 25_000,
 
     pub fn parse(args: []const []const u8) !Config {
         var mode: ?Mode = null;
@@ -57,6 +59,8 @@ pub const Config = struct {
         var chunk_bytes: u32 = 16 * 1024;
         var stream_window: u64 = 1024 * 1024;
         var timeout_ms: u32 = 30_000;
+        var netz_ack_every: u64 = 2;
+        var netz_max_ack_delay_us: u64 = 25_000;
         for (args) |arg| {
             if (option(arg, "--mode=")) |value| {
                 mode = try Mode.parse(value);
@@ -76,6 +80,10 @@ pub const Config = struct {
                 stream_window = try parsePositive(u64, value);
             } else if (option(arg, "--timeout-ms=")) |value| {
                 timeout_ms = try parsePositive(u32, value);
+            } else if (option(arg, "--netz-ack-every=")) |value| {
+                netz_ack_every = try parsePositive(u64, value);
+            } else if (option(arg, "--netz-max-ack-delay-us=")) |value| {
+                netz_max_ack_delay_us = try parseNonNegative(u64, value);
             } else if (option(arg, "--direction=")) |value| {
                 if (!std.mem.eql(u8, value, "upload")) {
                     return error.InvalidArgument;
@@ -97,7 +105,9 @@ pub const Config = struct {
             .stream => 5,
             .datagram_pingpong => 5000,
         };
-        if (streams > 64 or chunk_bytes > bytes_per_stream) {
+        if (streams > 64 or chunk_bytes > bytes_per_stream or
+            netz_max_ack_delay_us > 25_000)
+        {
             return error.InvalidArgument;
         }
         if (selected == .datagram_pingpong and
@@ -122,6 +132,8 @@ pub const Config = struct {
             .chunk_bytes = chunk_bytes,
             .stream_window = stream_window,
             .timeout_ms = timeout_ms,
+            .netz_ack_every = netz_ack_every,
+            .netz_max_ack_delay_us = netz_max_ack_delay_us,
         };
     }
 
@@ -162,7 +174,7 @@ pub const Config = struct {
             .initial_max_stream_data_bidi_remote = self.stream_window,
             .initial_max_stream_data_uni = self.stream_window,
             .initial_max_streams_bidi = try self.streamLimit(),
-            .initial_max_streams_uni = 32,
+            .initial_max_streams_uni = try self.streamLimit(),
             .active_connection_id_limit = 4,
             .max_datagram_frame_size = max_datagram_size,
         };
@@ -176,6 +188,9 @@ pub const Config = struct {
             .stream_receive_window = self.stream_window,
             .max_stream_receive_window = self.stream_window,
             .max_datagram_size = max_datagram_size,
+            .local_ack_eliciting_threshold = self.netz_ack_every,
+            .local_max_ack_delay_us = self.netz_max_ack_delay_us,
+            .local_ack_reordering_threshold = 3,
         };
     }
 
@@ -197,7 +212,7 @@ pub const Config = struct {
             .local_settings = .{
                 .webtransport_initial_max_data = try self.connectionWindow(),
                 .webtransport_initial_max_streams_bidi = stream_limit,
-                .webtransport_initial_max_streams_uni = 32,
+                .webtransport_initial_max_streams_uni = stream_limit,
             },
             // This is a protocol-level whole-stream aggregation bound, not
             // the sliding QUIC receive window configured above. Incremental
@@ -222,6 +237,10 @@ fn parsePositive(comptime T: type, value: []const u8) !T {
         return error.InvalidArgument;
     if (parsed == 0) return error.InvalidArgument;
     return parsed;
+}
+
+fn parseNonNegative(comptime T: type, value: []const u8) !T {
+    return std.fmt.parseInt(T, value, 10) catch error.InvalidArgument;
 }
 
 const Kind = enum(u8) {
@@ -262,8 +281,10 @@ const Control = struct {
         std.mem.writeInt(u32, bytes[34..38], self.config.chunk_bytes, .big);
         std.mem.writeInt(u64, bytes[38..46], self.config.stream_window, .big);
         std.mem.writeInt(u32, bytes[46..50], self.config.timeout_ms, .big);
-        std.mem.writeInt(u64, bytes[50..58], self.received_bytes, .big);
-        std.mem.writeInt(u64, bytes[58..66], self.checksum, .big);
+        std.mem.writeInt(u64, bytes[50..58], self.config.netz_ack_every, .big);
+        std.mem.writeInt(u64, bytes[58..66], self.config.netz_max_ack_delay_us, .big);
+        std.mem.writeInt(u64, bytes[66..74], self.received_bytes, .big);
+        std.mem.writeInt(u64, bytes[74..82], self.checksum, .big);
         return bytes;
     }
 
@@ -290,56 +311,124 @@ const Control = struct {
                 .chunk_bytes = std.mem.readInt(u32, bytes[34..38], .big),
                 .stream_window = std.mem.readInt(u64, bytes[38..46], .big),
                 .timeout_ms = std.mem.readInt(u32, bytes[46..50], .big),
+                .netz_ack_every = std.mem.readInt(u64, bytes[50..58], .big),
+                .netz_max_ack_delay_us = std.mem.readInt(u64, bytes[58..66], .big),
             },
-            .received_bytes = std.mem.readInt(u64, bytes[50..58], .big),
-            .checksum = std.mem.readInt(u64, bytes[58..66], .big),
+            .received_bytes = std.mem.readInt(u64, bytes[66..74], .big),
+            .checksum = std.mem.readInt(u64, bytes[74..82], .big),
         };
     }
 };
 
-fn sendControl(session: anytype, control: Control) !void {
+pub const ControlChannel = struct {
+    stream_id: u62,
+};
+
+fn sendControl(
+    session: anytype,
+    channel: ControlChannel,
+    control: Control,
+) !void {
     const bytes = control.encode();
-    try session.sendDatagramWithTimeout(&bytes, control.config.timeout());
+    var committed: usize = 0;
+    try session.sendStreamWithTimeout(
+        channel.stream_id,
+        &bytes,
+        false,
+        &committed,
+        control.config.timeout(),
+    );
+    if (committed != bytes.len) return error.InvalidBenchmarkControl;
 }
 
 fn receiveControl(
-    allocator: std.mem.Allocator,
     session: anytype,
+    channel: ControlChannel,
     config: Config,
     kind: Kind,
 ) !Control {
-    var datagram = try session.receiveDatagramWithTimeout(config.timeout());
-    defer datagram.deinit(allocator);
-    const control = try Control.decode(datagram.datagram.payload);
+    var bytes: [control_len]u8 = undefined;
+    var received: usize = 0;
+    while (received < bytes.len) {
+        const event = try session.readStreamIdWithTimeout(
+            channel.stream_id,
+            bytes[received..],
+            config.timeout(),
+        );
+        if (event != .data or event.data.stream_id != channel.stream_id or
+            event.data.direction != .bidirectional or event.data.bytes == 0 or
+            event.data.fin)
+        {
+            return error.InvalidBenchmarkControl;
+        }
+        received += event.data.bytes;
+    }
+    const control = try Control.decode(&bytes);
     if (control.kind != kind or !std.meta.eql(control.config, config)) {
         return error.InvalidBenchmarkControl;
     }
     return control;
 }
 
-pub fn exchangeConfigClient(
-    allocator: std.mem.Allocator,
+pub fn openControlClient(
     session: anytype,
     config: Config,
-) !void {
-    try sendControl(session, .init(.config, config, 0));
-    const ack = try receiveControl(allocator, session, config, .config_ack);
+) !ControlChannel {
+    const channel: ControlChannel = .{
+        .stream_id = try session.openBidirectionalStreamWithTimeout(
+            config.timeout(),
+        ),
+    };
+    try sendControl(session, channel, .init(.config, config, 0));
+    const ack = try receiveControl(session, channel, config, .config_ack);
     if (ack.round != 0) return error.InvalidBenchmarkControl;
+    return channel;
 }
 
-pub fn exchangeConfigServer(
-    allocator: std.mem.Allocator,
+pub fn acceptControlServer(
     session: anytype,
     config: Config,
-) !void {
-    const request = try receiveControl(allocator, session, config, .config);
+) !ControlChannel {
+    var bytes: [control_len]u8 = undefined;
+    var received: usize = 0;
+    var stream_id: ?u62 = null;
+    while (received < bytes.len) {
+        const event = if (stream_id) |id|
+            try session.readStreamIdWithTimeout(
+                id,
+                bytes[received..],
+                config.timeout(),
+            )
+        else
+            try session.readStreamWithTimeout(
+                bytes[received..],
+                config.timeout(),
+            );
+        if (event != .data or event.data.direction != .bidirectional or
+            event.data.locally_initiated or event.data.bytes == 0 or
+            event.data.fin)
+        {
+            return error.InvalidBenchmarkControl;
+        }
+        if (stream_id) |id| {
+            if (event.data.stream_id != id) return error.InvalidBenchmarkControl;
+        } else {
+            stream_id = event.data.stream_id;
+        }
+        received += event.data.bytes;
+    }
+    const request = try Control.decode(&bytes);
+    if (request.kind != .config or !std.meta.eql(request.config, config)) {
+        return error.InvalidBenchmarkControl;
+    }
     if (request.round != 0) return error.InvalidBenchmarkControl;
-    try sendControl(session, .init(.config_ack, config, 0));
+    const channel: ControlChannel = .{ .stream_id = stream_id.? };
+    try sendControl(session, channel, .init(.config_ack, config, 0));
+    return channel;
 }
 
 pub fn validateDatagramLimit(session: anytype, config: Config) !usize {
     const limit = session.maxDatagramSize();
-    if (limit < control_len) return error.UnexpectedDatagramLimit;
     if (config.mode == .datagram_pingpong and config.payload_bytes > limit) {
         return error.UnexpectedDatagramLimit;
     }
@@ -360,6 +449,7 @@ pub fn printConfig(
             "payload_bytes={d} chunk_bytes={d} " ++
             "stream_window_requested={d} stream_window_effective={d} " ++
             "connection_window={d} max_datagram_size={d} quic_version=1 " ++
+            "netz_ack_every={d} netz_max_ack_delay_us={d} " ++
             "cipher=negotiated-unexposed cert_verify=false gso=false " ++
             "gro=false pacing=true\n",
         .{
@@ -377,6 +467,8 @@ pub fn printConfig(
             config.stream_window,
             try config.connectionWindow(),
             datagram_limit,
+            config.netz_ack_every,
+            config.netz_max_ack_delay_us,
         },
     );
 }
@@ -418,42 +510,47 @@ pub fn runClient(
     allocator: std.mem.Allocator,
     io: std.Io,
     session: anytype,
+    control: ControlChannel,
     config: Config,
 ) !void {
-    try exchangeConfigClient(allocator, session, config);
     switch (config.mode) {
-        .stream => try runStreamClient(allocator, io, session, config),
-        .datagram_pingpong => try runPingClient(allocator, io, session, config),
+        .stream => try runStreamClient(allocator, io, session, control, config),
+        .datagram_pingpong => try runPingClient(allocator, io, session, control, config),
     }
 }
 
 pub fn runServer(
     allocator: std.mem.Allocator,
     session: anytype,
+    control: ControlChannel,
     config: Config,
 ) !void {
-    try exchangeConfigServer(allocator, session, config);
     switch (config.mode) {
-        .stream => try runStreamServer(allocator, session, config),
-        .datagram_pingpong => try runPingServer(allocator, session, config),
+        .stream => try runStreamServer(allocator, session, control, config),
+        .datagram_pingpong => try runPingServer(allocator, session, control, config),
     }
 }
 
-pub fn sendCloseReady(session: anytype, config: Config) !void {
+pub fn sendCloseReady(
+    session: anytype,
+    control: ControlChannel,
+    config: Config,
+) !void {
     try sendControl(
         session,
+        control,
         .init(.close_ready, config, config.rounds()),
     );
 }
 
 pub fn receiveCloseAck(
-    allocator: std.mem.Allocator,
     session: anytype,
+    control: ControlChannel,
     config: Config,
 ) !void {
     const ack = try receiveControl(
-        allocator,
         session,
+        control,
         config,
         .close_ack,
     );
@@ -463,13 +560,13 @@ pub fn receiveCloseAck(
 }
 
 pub fn receiveCloseReady(
-    allocator: std.mem.Allocator,
     session: anytype,
+    control: ControlChannel,
     config: Config,
 ) !void {
     const ready = try receiveControl(
-        allocator,
         session,
+        control,
         config,
         .close_ready,
     );
@@ -478,11 +575,60 @@ pub fn receiveCloseReady(
     }
 }
 
-pub fn sendCloseAck(session: anytype, config: Config) !void {
+pub fn sendCloseAck(
+    session: anytype,
+    control: ControlChannel,
+    config: Config,
+) !void {
     try sendControl(
         session,
+        control,
         .init(.close_ack, config, config.rounds()),
     );
+}
+
+pub fn finishControlAndReceivePeerFin(
+    session: anytype,
+    control: ControlChannel,
+    config: Config,
+) !void {
+    try session.finishStreamWithTimeout(
+        control.stream_id,
+        config.timeout(),
+    );
+    try receiveControlFin(session, control, config);
+}
+
+pub fn receiveControlFinAndFinish(
+    session: anytype,
+    control: ControlChannel,
+    config: Config,
+) !void {
+    try receiveControlFin(session, control, config);
+    try session.finishStreamWithTimeout(
+        control.stream_id,
+        config.timeout(),
+    );
+}
+
+fn receiveControlFin(
+    session: anytype,
+    control: ControlChannel,
+    config: Config,
+) !void {
+    var empty: [1]u8 = undefined;
+    const event = try session.readStreamIdWithTimeout(
+        control.stream_id,
+        &empty,
+        config.timeout(),
+    );
+    if (event != .data or event.data.stream_id != control.stream_id or
+        event.data.direction != .bidirectional or event.data.bytes != 0 or
+        !event.data.fin)
+    {
+        return error.InvalidBenchmarkControl;
+    }
+    _ = try session.flushPendingAck();
 }
 
 fn buildStreamPayloads(
@@ -510,6 +656,7 @@ fn runStreamClient(
     allocator: std.mem.Allocator,
     io: std.Io,
     session: anytype,
+    control: ControlChannel,
     config: Config,
 ) !void {
     const payloads = try buildStreamPayloads(allocator, config);
@@ -531,11 +678,23 @@ fn runStreamClient(
                 config.timeout(),
             );
             const prelude = streamPrelude(round, @intCast(stream_index));
-            try session.sendStream(stream_id.*, &prelude, false);
+            var committed: usize = 0;
+            try session.sendStreamWithTimeout(
+                stream_id.*,
+                &prelude,
+                false,
+                &committed,
+                config.timeout(),
+            );
+            if (committed != prelude.len) return error.InvalidBenchmarkStream;
         }
-        try sendControl(session, .init(.round_ready, config, round));
-        const go = try receiveControl(allocator, session, config, .go);
+        try sendControl(session, control, .init(.round_ready, config, round));
+        const go = try receiveControl(session, control, config, .go);
         if (go.round != round) return error.InvalidBenchmarkControl;
+        const send_deadline = std.Io.Clock.Timestamp.fromNow(io, .{
+            .raw = config.timeout(),
+            .clock = .awake,
+        });
         const started = nowNs(io);
         var offset: usize = 0;
         while (offset < bytes_per_stream) {
@@ -545,17 +704,24 @@ fn runStreamClient(
             );
             for (stream_ids, 0..) |stream_id, stream_index| {
                 const payload = payloads.storage[stream_index * bytes_per_stream + offset ..][0 .. end - offset];
-                try session.sendStream(stream_id, payload, false);
+                var committed: usize = 0;
+                try session.sendStreamWithDeadline(
+                    stream_id,
+                    payload,
+                    false,
+                    &committed,
+                    send_deadline,
+                );
+                if (committed != payload.len) {
+                    return error.InvalidBenchmarkStream;
+                }
             }
             offset = end;
         }
-        for (stream_ids) |stream_id| try session.finishStream(stream_id);
-        const done = try receiveControl(
-            allocator,
-            session,
-            config,
-            .round_done,
-        );
+        for (stream_ids) |stream_id| {
+            try session.finishStreamWithDeadline(stream_id, send_deadline);
+        }
+        const done = try receiveControl(session, control, config, .round_done);
         const elapsed = nowNs(io) -| started;
         if (done.round != round or
             done.received_bytes != logical_bytes or
@@ -563,7 +729,7 @@ fn runStreamClient(
         {
             return error.InvalidBenchmarkResult;
         }
-        try sendControl(session, .init(.round_ack, config, round));
+        try sendControl(session, control, .init(.round_ack, config, round));
         var reverse_fin: u64 = 0;
         while (@popCount(reverse_fin) < stream_ids.len) {
             var empty: [1]u8 = undefined;
@@ -606,7 +772,8 @@ fn runStreamClient(
                     "benchmark_scope=same-application-shape warmup={d} " ++
                     "iterations={d} streams={d} bytes_per_stream={d} " ++
                     "payload_bytes={d} chunk_bytes={d} stream_window={d} " ++
-                    "timeout_ms={d} sample={d} " ++
+                    "timeout_ms={d} netz_ack_every={d} " ++
+                    "netz_max_ack_delay_us={d} sample={d} " ++
                     "elapsed_ns={d} logical_MiB_s={d:.3} " ++
                     "sent_bytes={d} received_bytes={d} " ++
                     "streams_finished={d} checksum={d} complete=true\n",
@@ -621,6 +788,8 @@ fn runStreamClient(
                     config.chunk_bytes,
                     config.stream_window,
                     config.timeout_ms,
+                    config.netz_ack_every,
+                    config.netz_max_ack_delay_us,
                     round - config.warmup + 1,
                     elapsed,
                     mib_s,
@@ -634,9 +803,10 @@ fn runStreamClient(
     }
     try sendControl(
         session,
+        control,
         .init(.benchmark_done, config, config.rounds()),
     );
-    const ack = try receiveControl(allocator, session, config, .benchmark_ack);
+    const ack = try receiveControl(session, control, config, .benchmark_ack);
     if (ack.round != config.rounds()) return error.InvalidBenchmarkControl;
 }
 
@@ -660,6 +830,7 @@ fn findStream(streams: []ReceiveStream, stream_id: u62) ?*ReceiveStream {
 fn runStreamServer(
     allocator: std.mem.Allocator,
     session: anytype,
+    control: ControlChannel,
     config: Config,
 ) !void {
     const streams = try allocator.alloc(ReceiveStream, config.streams);
@@ -675,12 +846,7 @@ fn runStreamServer(
             .stream_id = 0,
             .index = 0,
         };
-        const ready = try receiveControl(
-            allocator,
-            session,
-            config,
-            .round_ready,
-        );
+        const ready = try receiveControl(session, control, config, .round_ready);
         if (ready.round != round) return error.InvalidBenchmarkControl;
 
         var discovered: usize = 0;
@@ -726,7 +892,7 @@ fn runStreamServer(
                 return error.InvalidBenchmarkStream;
             }
         }
-        try sendControl(session, .init(.go, config, round));
+        try sendControl(session, control, .init(.go, config, round));
 
         var finished: usize = 0;
         while (finished < streams.len) {
@@ -761,25 +927,21 @@ fn runStreamServer(
             done.received_bytes +%= stream.received;
             done.checksum +%= stream.checksum;
         }
-        try sendControl(session, done);
-        const ack = try receiveControl(
-            allocator,
-            session,
-            config,
-            .round_ack,
-        );
+        try sendControl(session, control, done);
+        const ack = try receiveControl(session, control, config, .round_ack);
         if (ack.round != round) return error.InvalidBenchmarkControl;
-        for (streams) |stream| try session.finishStream(stream.stream_id);
+        for (streams) |stream| {
+            try session.finishStreamWithTimeout(
+                stream.stream_id,
+                config.timeout(),
+            );
+        }
     }
-    const done = try receiveControl(
-        allocator,
-        session,
-        config,
-        .benchmark_done,
-    );
+    const done = try receiveControl(session, control, config, .benchmark_done);
     if (done.round != config.rounds()) return error.InvalidBenchmarkControl;
     try sendControl(
         session,
+        control,
         .init(.benchmark_ack, config, config.rounds()),
     );
 }
@@ -814,10 +976,11 @@ fn runPingClient(
     allocator: std.mem.Allocator,
     io: std.Io,
     session: anytype,
+    control: ControlChannel,
     config: Config,
 ) !void {
-    try sendControl(session, .init(.round_ready, config, 0));
-    const go = try receiveControl(allocator, session, config, .go);
+    try sendControl(session, control, .init(.round_ready, config, 0));
+    const go = try receiveControl(session, control, config, .go);
     if (go.round != 0) return error.InvalidBenchmarkControl;
     const payload = try allocator.alloc(u8, config.payload_bytes);
     defer allocator.free(payload);
@@ -844,8 +1007,8 @@ fn runPingClient(
     var done = Control.init(.benchmark_done, config, config.rounds());
     done.received_bytes = @as(u64, config.rounds()) * config.payload_bytes;
     done.checksum = checksum;
-    try sendControl(session, done);
-    const ack = try receiveControl(allocator, session, config, .benchmark_ack);
+    try sendControl(session, control, done);
+    const ack = try receiveControl(session, control, config, .benchmark_ack);
     if (ack.round != config.rounds() or
         ack.received_bytes != done.received_bytes or
         ack.checksum != checksum)
@@ -863,7 +1026,8 @@ fn runPingClient(
             "benchmark_scope=same-application-shape warmup={d} " ++
             "iterations={d} streams={d} bytes_per_stream={d} " ++
             "payload_bytes={d} chunk_bytes={d} stream_window={d} " ++
-            "timeout_ms={d} " ++
+            "timeout_ms={d} netz_ack_every={d} " ++
+            "netz_max_ack_delay_us={d} " ++
             "p50_ns={d} p90_ns={d} p99_ns={d} p999_ns={d} " ++
             "mean_ns={d} min_ns={d} max_ns={d} sent_bytes={d} " ++
             "received_bytes={d} checksum={d} " ++
@@ -879,6 +1043,8 @@ fn runPingClient(
             config.chunk_bytes,
             config.stream_window,
             config.timeout_ms,
+            config.netz_ack_every,
+            config.netz_max_ack_delay_us,
             percentile(samples, 50, 100),
             percentile(samples, 90, 100),
             percentile(samples, 99, 100),
@@ -934,7 +1100,8 @@ pub fn printServerComplete(
             "endpoint_role=server connection_scope=persistent warmup={d} " ++
             "iterations={d} streams={d} bytes_per_stream={d} " ++
             "payload_bytes={d} chunk_bytes={d} stream_window={d} " ++
-            "timeout_ms={d} sent_bytes={d} " ++
+            "timeout_ms={d} netz_ack_every={d} " ++
+            "netz_max_ack_delay_us={d} sent_bytes={d} " ++
             "received_bytes={d} checksum={d} server_complete=true\n",
         .{
             config.mode.name(),
@@ -948,6 +1115,8 @@ pub fn printServerComplete(
             config.chunk_bytes,
             config.stream_window,
             config.timeout_ms,
+            config.netz_ack_every,
+            config.netz_max_ack_delay_us,
             bytes,
             bytes,
             checksum,
@@ -967,6 +1136,7 @@ pub fn printNetzMemory(
             "connection_scope=persistent warmup={d} iterations={d} " ++
             "streams={d} bytes_per_stream={d} payload_bytes={d} " ++
             "chunk_bytes={d} stream_window={d} timeout_ms={d} " ++
+            "netz_ack_every={d} netz_max_ack_delay_us={d} " ++
             "memory_scope=benchmark-run-after-argument-parse " ++
             "allocator_scope=netz-explicit alloc_count={d} free_count={d} " ++
             "resize_count={d} remap_count={d} total_allocated_bytes={d} " ++
@@ -984,6 +1154,8 @@ pub fn printNetzMemory(
             config.chunk_bytes,
             config.stream_window,
             config.timeout_ms,
+            config.netz_ack_every,
+            config.netz_max_ack_delay_us,
             snapshot.alloc_count,
             snapshot.free_count,
             snapshot.resize_count,
@@ -1007,6 +1179,7 @@ pub fn printNetzTraffic(
             "connection_scope=persistent warmup={d} iterations={d} " ++
             "streams={d} bytes_per_stream={d} payload_bytes={d} " ++
             "chunk_bytes={d} stream_window={d} timeout_ms={d} " ++
+            "netz_ack_every={d} netz_max_ack_delay_us={d} " ++
             "traffic_scope=connection socket_boundary=userspace-udp-payload " ++
             "traffic_source=netz-socket-counters " ++
             "udp_sent_datagrams={d} udp_sent_payload_bytes={d} " ++
@@ -1025,6 +1198,8 @@ pub fn printNetzTraffic(
             config.chunk_bytes,
             config.stream_window,
             config.timeout_ms,
+            config.netz_ack_every,
+            config.netz_max_ack_delay_us,
             traffic.sent_datagrams,
             traffic.sent_bytes,
             traffic.received_datagrams,
@@ -1036,16 +1211,12 @@ pub fn printNetzTraffic(
 fn runPingServer(
     allocator: std.mem.Allocator,
     session: anytype,
+    control: ControlChannel,
     config: Config,
 ) !void {
-    const ready = try receiveControl(
-        allocator,
-        session,
-        config,
-        .round_ready,
-    );
+    const ready = try receiveControl(session, control, config, .round_ready);
     if (ready.round != 0) return error.InvalidBenchmarkControl;
-    try sendControl(session, .init(.go, config, 0));
+    try sendControl(session, control, .init(.go, config, 0));
     var checksum: u64 = 0;
     for (0..config.rounds()) |sequence_index| {
         const sequence: u64 = @intCast(sequence_index);
@@ -1061,12 +1232,7 @@ fn runPingServer(
             config.timeout(),
         );
     }
-    const done = try receiveControl(
-        allocator,
-        session,
-        config,
-        .benchmark_done,
-    );
+    const done = try receiveControl(session, control, config, .benchmark_done);
     const expected_bytes = @as(u64, config.rounds()) * config.payload_bytes;
     if (done.round != config.rounds() or
         done.received_bytes != expected_bytes or done.checksum != checksum)
@@ -1076,7 +1242,7 @@ fn runPingServer(
     var ack = Control.init(.benchmark_ack, config, config.rounds());
     ack.received_bytes = expected_bytes;
     ack.checksum = checksum;
-    try sendControl(session, ack);
+    try sendControl(session, control, ack);
 }
 
 fn percentile(

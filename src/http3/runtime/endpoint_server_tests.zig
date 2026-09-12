@@ -1606,6 +1606,8 @@ test "HTTP/3 endpoint callback loop serves concurrent connections" {
         expected_body: []const u8,
         random: [32]u8,
         secret: [32]u8,
+        wait_before_request: bool = false,
+        second_request: *std.Io.Event,
         completed: *std.atomic.Value(usize),
         shutdown: *std.Io.Event,
         err: ?anyerror = null,
@@ -1613,6 +1615,7 @@ test "HTTP/3 endpoint callback loop serves concurrent connections" {
         fn run(self: *@This()) void {
             self.runFallible() catch |err| {
                 self.err = err;
+                self.second_request.set(self.io);
                 self.shutdown.set(self.io);
             };
         }
@@ -1641,6 +1644,9 @@ test "HTTP/3 endpoint callback loop serves concurrent connections" {
                 } },
             );
             defer client.deinit();
+            if (self.wait_before_request) {
+                try self.second_request.wait(self.io);
+            }
             var response = try client.request(.{
                 .method = "GET",
                 .path = self.path,
@@ -1652,12 +1658,29 @@ test "HTTP/3 endpoint callback loop serves concurrent connections" {
                 self.expected_body,
                 response.response.body,
             );
+            if (std.mem.eql(u8, self.path, "/one")) {
+                var found = false;
+                for (response.response.trailers) |trailer| {
+                    if (std.ascii.eqlIgnoreCase(
+                        trailer.name,
+                        "x-finished",
+                    )) {
+                        try std.testing.expectEqualStrings(
+                            "true",
+                            trailer.value,
+                        );
+                        found = true;
+                    }
+                }
+                try std.testing.expect(found);
+            }
             if (self.completed.fetchAdd(1, .acq_rel) + 1 == 2) {
                 self.shutdown.set(self.io);
             }
         }
     };
     var completed: std.atomic.Value(usize) = .init(0);
+    var second_request: std.Io.Event = .unset;
     var shutdown: std.Io.Event = .unset;
     var clients = [_]ClientTask{
         .{
@@ -1669,6 +1692,7 @@ test "HTTP/3 endpoint callback loop serves concurrent connections" {
             .expected_body = "response-one",
             .random = [_]u8{0xb3} ** 32,
             .secret = [_]u8{0xb4} ** 32,
+            .second_request = &second_request,
             .completed = &completed,
             .shutdown = &shutdown,
         },
@@ -1681,6 +1705,8 @@ test "HTTP/3 endpoint callback loop serves concurrent connections" {
             .expected_body = "response-two",
             .random = [_]u8{0xb5} ** 32,
             .secret = [_]u8{0xb6} ** 32,
+            .wait_before_request = true,
+            .second_request = &second_request,
             .completed = &completed,
             .shutdown = &shutdown,
         },
@@ -1689,6 +1715,7 @@ test "HTTP/3 endpoint callback loop serves concurrent connections" {
     const thread_b = try std.Thread.spawn(.{}, ClientTask.run, .{&clients[1]});
     var joined = false;
     defer if (!joined) {
+        second_request.set(io);
         if (endpoint_owned) {
             endpoint.deinit();
             endpoint_owned = false;
@@ -1699,6 +1726,9 @@ test "HTTP/3 endpoint callback loop serves concurrent connections" {
 
     const Context = struct {
         heads: usize = 0,
+        second_request: *std.Io.Event,
+        first_session: ?*runtime.HandshakeServerSession = null,
+        first_stream_id: ?u62 = null,
 
         fn handle(
             self: *@This(),
@@ -1718,24 +1748,104 @@ test "HTTP/3 endpoint callback loop serves concurrent connections" {
                                     "GET",
                                     head.method,
                                 );
-                                const body = if (std.mem.eql(
+                                try std.testing.expectError(
+                                    error.InvalidDispatcherState,
+                                    value.session.sendResponsePaced(
+                                        message.stream_id,
+                                        .{
+                                            .status = 204,
+                                            .request_method = head.method,
+                                        },
+                                    ),
+                                );
+                                const is_first = std.mem.eql(
                                     u8,
                                     head.path,
                                     "/one",
-                                ))
-                                    "response-one"
-                                else if (std.mem.eql(u8, head.path, "/two"))
-                                    "response-two"
-                                else
-                                    return error.TestUnexpectedResult;
-                                try value.session.sendResponsePaced(
-                                    message.stream_id,
-                                    .{
-                                        .status = 200,
-                                        .body = body,
-                                        .request_method = head.method,
-                                    },
                                 );
+                                if (!is_first and !std.mem.eql(
+                                    u8,
+                                    head.path,
+                                    "/two",
+                                )) {
+                                    return error.TestUnexpectedResult;
+                                }
+                                try std.testing.expect(
+                                    value.session.dispatcherBound(),
+                                );
+                                if (is_first) {
+                                    const now = std.Io.Clock.awake.now(
+                                        value.session.established.connection
+                                            .endpoint.io,
+                                    ).nanoseconds;
+                                    quic.one_rtt.testing.exhaustPacingAt(
+                                        &value.session.established.connection,
+                                        @intCast(now),
+                                    );
+                                    try std.testing.expectError(
+                                        error.PacingLimited,
+                                        value.session.tryStartResponse(
+                                            message.stream_id,
+                                            .{
+                                                .status = 200,
+                                                .request_method = head.method,
+                                            },
+                                            "response-one".len,
+                                            true,
+                                        ),
+                                    );
+                                    self.first_session = value.session;
+                                    self.first_stream_id = message.stream_id;
+                                    self.second_request.set(
+                                        value.session.established.connection
+                                            .endpoint.io,
+                                    );
+                                } else {
+                                    // B is served while A remains backpressured.
+                                    try value.session.trySendResponseLiteral(
+                                        message.stream_id,
+                                        .{
+                                            .status = 200,
+                                            .body = "response-two",
+                                            .request_method = head.method,
+                                        },
+                                    );
+                                    const first = self.first_session orelse
+                                        return error.TestUnexpectedResult;
+                                    const now = std.Io.Clock.awake.now(
+                                        first.established.connection.endpoint.io,
+                                    ).nanoseconds;
+                                    quic.one_rtt.testing.setPacingBudgetAt(
+                                        &first.established.connection,
+                                        first.established.connection
+                                            .currentSendDatagramSize(),
+                                        @intCast(now),
+                                    );
+                                    try first.tryStartResponse(
+                                        self.first_stream_id orelse
+                                            return error.TestUnexpectedResult,
+                                        .{
+                                            .status = 200,
+                                            .request_method = "GET",
+                                        },
+                                        "response-one".len,
+                                        true,
+                                    );
+                                    try first.trySendResponseBody(
+                                        self.first_stream_id.?,
+                                        "response-one",
+                                        false,
+                                    );
+                                    try first.tryFinishResponseTrailers(
+                                        self.first_stream_id.?,
+                                        &.{.{
+                                            .name = "x-finished",
+                                            .value = "true",
+                                        }},
+                                    );
+                                    self.first_session = null;
+                                    self.first_stream_id = null;
+                                }
                                 self.heads += 1;
                             },
                         },
@@ -1746,7 +1856,7 @@ test "HTTP/3 endpoint callback loop serves concurrent connections" {
             }
         }
     };
-    var context: Context = .{};
+    var context = Context{ .second_request = &second_request };
     try endpoint.serveUntil(
         Context,
         &context,
@@ -1769,6 +1879,7 @@ test "HTTP/3 endpoint callback loop serves concurrent connections" {
     joined = true;
     for (&clients) |*client| if (client.err) |err| return err;
     try std.testing.expectEqual(@as(usize, 2), context.heads);
+    try std.testing.expect(context.first_session == null);
     try std.testing.expectEqual(@as(usize, 2), completed.load(.acquire));
 }
 

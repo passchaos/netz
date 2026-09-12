@@ -88,6 +88,45 @@ test "HTTP/2 frame reader grows exactly beyond default read-ahead" {
     try std.testing.expect(reads > 1);
 }
 
+test "HTTP/2 frame reader retains only the latest envelope violation" {
+    const allocator = std.testing.allocator;
+    var encoded: std.ArrayList(u8) = .empty;
+    defer encoded.deinit(allocator);
+    try frame_wire.appendFrame(
+        &encoded,
+        allocator,
+        .settings,
+        0,
+        1,
+        &.{},
+    );
+
+    var offset: usize = 0;
+    var reads: usize = 0;
+    const source = SliceSource{
+        .bytes = encoded.items,
+        .offset = &offset,
+        .reads = &reads,
+    };
+    var reader: frame_io.Reader = .{};
+    defer reader.deinit(allocator);
+
+    try std.testing.expectError(
+        error.InvalidFrame,
+        reader.readFrom(allocator, source, 16 * 1024),
+    );
+    const violation = reader.takeEnvelopeViolation().?;
+    try std.testing.expectEqual(
+        http2.ErrorCode.protocol_error,
+        violation.error_code,
+    );
+    try std.testing.expectEqual(@as(?u31, null), violation.stream_id);
+    try std.testing.expectEqual(
+        @as(?frame_wire.EnvelopeViolation, null),
+        reader.takeEnvelopeViolation(),
+    );
+}
+
 const SliceSource = struct {
     bytes: []const u8,
     offset: *usize,

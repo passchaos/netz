@@ -51,3 +51,57 @@ test "QUIC closed stream set joins sparse ranges into its prefix" {
     try std.testing.expectEqual(@as(usize, 0), set.sparseRangeCount());
     for (0..4) |sequence| try std.testing.expect(set.contains(sequence));
 }
+
+test "QUIC closed stream set prepares only new sparse ranges" {
+    const allocator = std.testing.allocator;
+    var set: Set = .{};
+    defer set.deinit(allocator);
+
+    var no_alloc = std.testing.FailingAllocator.init(
+        allocator,
+        .{ .fail_index = 0 },
+    );
+    for (0..1024) |sequence| {
+        try set.prepareInsertValue(no_alloc.allocator(), sequence);
+        set.insertAssumeCapacity(sequence);
+    }
+    try std.testing.expect(!no_alloc.has_induced_failure);
+    try std.testing.expectEqual(@as(usize, 0), set.sparseRangeCount());
+
+    try std.testing.expectError(
+        error.OutOfMemory,
+        set.prepareInsertValue(no_alloc.allocator(), 1025),
+    );
+    try set.prepareInsertValue(allocator, 1025);
+    set.insertAssumeCapacity(1025);
+    try std.testing.expectEqual(@as(usize, 1), set.sparseRangeCount());
+
+    var no_more_alloc = std.testing.FailingAllocator.init(
+        allocator,
+        .{ .fail_index = 0 },
+    );
+    try set.prepareInsertValue(no_more_alloc.allocator(), 1025);
+    try set.prepareInsertValue(no_more_alloc.allocator(), 1024);
+    set.insertAssumeCapacity(1024);
+    try std.testing.expect(!no_more_alloc.has_induced_failure);
+    try std.testing.expectEqual(@as(usize, 0), set.sparseRangeCount());
+    try std.testing.expect(set.contains(1025));
+}
+
+test "QUIC closed stream set collapses many sparse ranges in one prefix pass" {
+    const allocator = std.testing.allocator;
+    var set: Set = .{};
+    defer set.deinit(allocator);
+    try set.prepareInsert(allocator, 128);
+
+    var value: u64 = 1;
+    while (value < 256) : (value += 2) set.insertAssumeCapacity(value);
+    try std.testing.expectEqual(@as(usize, 128), set.sparseRangeCount());
+    value = 0;
+    while (value < 256) : (value += 2) set.insertAssumeCapacity(value);
+
+    try std.testing.expectEqual(@as(usize, 1), set.rangeCount());
+    try std.testing.expectEqual(@as(usize, 0), set.sparseRangeCount());
+    for (0..256) |sequence| try std.testing.expect(set.contains(sequence));
+    try std.testing.expect(!set.contains(256));
+}

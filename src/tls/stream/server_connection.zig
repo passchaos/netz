@@ -216,6 +216,32 @@ pub const Connection = struct {
         );
     }
 
+    pub fn writeAllWithDeadline(
+        self: *Connection,
+        bytes: []const u8,
+        committed: *usize,
+        deadline: std.Io.Clock.Timestamp,
+    ) Error!void {
+        return self.records.writeAllWithDeadline(
+            self.io,
+            self.stream,
+            bytes,
+            committed,
+            deadline,
+        );
+    }
+
+    pub fn finishPendingWrite(
+        self: *Connection,
+        committed: *usize,
+    ) Error!void {
+        return self.records.finishPendingWrite(
+            self.io,
+            self.stream,
+            committed,
+        );
+    }
+
     /// Write a protocol header and borrowed payload without concatenating them
     /// in application memory. TLS record framing may still split at 16 KiB,
     /// while callers such as WebSocket preserve their two-slice API.

@@ -22,7 +22,48 @@ pub fn send(
     frames: []const quic.Frame,
     max_frames_per_packet: usize,
 ) quic.one_rtt.Error!void {
-    var backend = ConnectionBackend{ .connection = connection };
+    sendUntil(
+        allocator,
+        connection,
+        frames,
+        max_frames_per_packet,
+        null,
+    ) catch |err| switch (err) {
+        error.Timeout, error.ConcurrencyUnavailable => unreachable,
+        else => |other| return @errorCast(other),
+    };
+}
+
+/// Deadline-bounded stateful packetization. The timestamp is checked before
+/// every socket attempt and bounds pacing waits between packet batches.
+pub fn sendWithDeadline(
+    allocator: std.mem.Allocator,
+    connection: *quic.one_rtt.Connection,
+    frames: []const quic.Frame,
+    max_frames_per_packet: usize,
+    deadline: std.Io.Clock.Timestamp,
+) runtime_error.ReceiveTimeoutError!void {
+    _ = try deadline_policy.usableAwake(connection.endpoint.io, deadline);
+    return sendUntil(
+        allocator,
+        connection,
+        frames,
+        max_frames_per_packet,
+        deadline,
+    );
+}
+
+fn sendUntil(
+    allocator: std.mem.Allocator,
+    connection: *quic.one_rtt.Connection,
+    frames: []const quic.Frame,
+    max_frames_per_packet: usize,
+    deadline: ?std.Io.Clock.Timestamp,
+) runtime_error.ReceiveTimeoutError!void {
+    var backend = ConnectionBackend{
+        .connection = connection,
+        .deadline = deadline,
+    };
     sendWithBackend(
         allocator,
         &backend,
@@ -38,10 +79,17 @@ pub fn send(
             // subset of a multi-packet HEADERS/Push/trailer sequence became
             // visible. Fail the connection closed before its transaction
             // rollback could permit different bytes at the same stream offset.
-            connection.closeApplication(
-                http3.ApplicationErrorCode.internal_error,
-                "partial-http3-send",
-            ) catch {};
+            if (deadline != null) {
+                connection.failClosedApplication(
+                    http3.ApplicationErrorCode.internal_error,
+                    "partial-http3-send",
+                );
+            } else {
+                connection.closeApplication(
+                    http3.ApplicationErrorCode.internal_error,
+                    "partial-http3-send",
+                ) catch {};
+            }
         }
         return err;
     };
@@ -296,6 +344,7 @@ fn Packetizer(comptime Backend: type) type {
 const ConnectionBackend = struct {
     connection: *quic.one_rtt.Connection,
     visible_packet_sent: bool = false,
+    deadline: ?std.Io.Clock.Timestamp = null,
 
     fn maxDatagramSize(self: ConnectionBackend) usize {
         return self.connection.currentSendDatagramSize();
@@ -315,14 +364,25 @@ const ConnectionBackend = struct {
     fn sendPackets(
         self: *ConnectionBackend,
         packets: []const []const quic.Frame,
-    ) quic.one_rtt.Error!void {
+    ) runtime_error.ReceiveTimeoutError!void {
         var offset: usize = 0;
         while (offset < packets.len) {
+            if (self.deadline) |deadline| {
+                _ = try deadline_policy.usableAwake(
+                    self.connection.endpoint.io,
+                    deadline,
+                );
+            }
             const result = self.connection.sendManyProgress(
                 packets[offset..],
             ) catch |err| switch (err) {
                 error.PacingLimited => {
-                    try self.connection.waitForPacingAvailability();
+                    if (self.deadline) |deadline| {
+                        try self.connection
+                            .waitForPacingAvailabilityWithDeadline(deadline);
+                    } else {
+                        try self.connection.waitForPacingAvailability();
+                    }
                     continue;
                 },
                 else => return err,

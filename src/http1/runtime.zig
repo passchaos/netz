@@ -1,4 +1,5 @@
 const std = @import("std");
+const builtin = @import("builtin");
 const http1 = @import("mod.zig");
 const runtime_write = @import("runtime/write.zig");
 const body_writer = @import("runtime/body_writer.zig");
@@ -6,6 +7,7 @@ const body_reader = @import("runtime/body_reader.zig");
 const message_framing = @import("runtime/message/framing.zig");
 const stream_io = @import("../internal/stream_io.zig");
 const deadline_policy = @import("../internal/deadline.zig");
+const accept_deadline = @import("../internal/accept.zig");
 const http_date = @import("../internal/http_date.zig");
 const tcp_connect = @import("../internal/tcp_connect.zig");
 const socket_options = @import("../internal/socket_options.zig");
@@ -22,7 +24,7 @@ const responseHeadUsesCloseDelimitedBody =
     message_framing.responseHeadUsesCloseDelimitedBody;
 const informationalResponseToSkip = message_framing.informationalResponseToSkip;
 const requestShouldSendContinue = message_framing.requestShouldSendContinue;
-const RequestReadStage = enum { head, body };
+const RequestReadStage = enum { head, continue_write, body };
 
 pub const Error = http1.Error || tls_stream.Error || error{
     HeadersTooLarge,
@@ -39,11 +41,12 @@ pub const Error = http1.Error || tls_stream.Error || error{
     InvalidServeOptions,
     TooManyInformationalResponses,
     PostHandshakeTlsUnavailable,
+    WriteInProgress,
 } || net.IpAddress.ListenError || net.IpAddress.ConnectError ||
     net.UnixAddress.ListenError || net.UnixAddress.ConnectError ||
     net.HostName.ValidateError || net.HostName.ConnectError ||
     net.Server.AcceptError || net.Stream.Reader.Error ||
-    net.Stream.Writer.Error || tls.Client.InitError ||
+    net.Stream.Writer.Error || net.ShutdownError || tls.Client.InitError ||
     CertificateBundle.RescanError || std.Io.RandomSecureError ||
     std.Io.Reader.ShortError || std.Io.Writer.Error ||
     std.Thread.SpawnError;
@@ -51,6 +54,18 @@ pub const Error = http1.Error || tls_stream.Error || error{
 fn setTcpNoDelay(stream: net.Stream) Error!void {
     socket_options.setTcpNoDelay(stream) catch return error.SocketOptionFailed;
 }
+
+/// Select how an HTTP/1 connection submits one logical write to its transport.
+///
+/// `auto` preserves the runtime's size-based policy, `vectored` keeps caller
+/// bodies borrowed, and `flatten` copies all parts into connection-owned
+/// reusable storage before issuing the write. TLS transports retain one flush
+/// boundary under every policy.
+pub const WriteStrategy = enum {
+    auto,
+    vectored,
+    flatten,
+};
 
 pub const Limits = struct {
     max_head_bytes: usize = 64 * 1024,
@@ -89,6 +104,10 @@ pub const Limits = struct {
     /// every served response and retires after the current exchange; direct
     /// read/write APIs remain caller-controlled.
     keep_alive: bool = true,
+    /// Override the HTTP/1 write shape for complete messages, response
+    /// batches, and incremental body chunks. The default retains the existing
+    /// size-based behavior.
+    write_strategy: WriteStrategy = .auto,
 };
 
 pub const TlsCaBundle = struct {
@@ -559,6 +578,10 @@ pub const TlsClientConnection = struct {
     // this field scopes one application read without introducing shared timer
     // state or changing ordinary untimed reads.
     timed_read_deadline: ?std.Io.Clock.Timestamp = null,
+    /// Plaintext represented by the TLS ciphertext currently buffered in
+    /// `net_writer` after a bounded application write timed out.
+    pending_timed_plaintext_len: usize = 0,
+    write_closed: bool = false,
 
     pub fn init(
         allocator: std.mem.Allocator,
@@ -699,8 +722,10 @@ pub const TlsClientConnection = struct {
     }
 
     pub fn deinit(self: *TlsClientConnection) void {
-        self.client.end() catch {};
-        self.net_writer.interface.flush() catch {};
+        if (!self.write_closed) {
+            self.client.end() catch {};
+            self.net_writer.interface.flush() catch {};
+        }
         self.stream.close(self.io);
         const allocator = self.allocator;
         allocator.free(self.net_read_buf);
@@ -721,6 +746,16 @@ pub const TlsClientConnection = struct {
         @memcpy(buffer[0..count], available[0..count]);
         self.client.reader.toss(count);
         return count;
+    }
+
+    /// True only when the standard TLS wrapper retains no decrypted
+    /// application bytes and is still open for both directions. Ciphertext in
+    /// the network Reader remains for TLS to authenticate and classify.
+    pub fn isReusableBoundary(self: *const TlsClientConnection) bool {
+        return self.client.reader.bufferedLen() == 0 and
+            !self.client.eof() and
+            self.pending_timed_plaintext_len == 0 and
+            !self.write_closed;
     }
 
     /// Read decrypted application bytes under one absolute socket deadline.
@@ -768,6 +803,10 @@ pub const TlsClientConnection = struct {
     }
 
     pub fn writeAll(self: *TlsClientConnection, bytes: []const u8) Error!void {
+        if (self.write_closed) return error.ConnectionClosed;
+        if (self.pending_timed_plaintext_len != 0) {
+            return error.WriteInProgress;
+        }
         if (bytes.len == 0) return;
         try self.client.writer.writeAll(bytes);
         try self.client.writer.flush();
@@ -785,6 +824,10 @@ pub const TlsClientConnection = struct {
         header: []const u8,
         payload: []const u8,
     ) Error!void {
+        if (self.write_closed) return error.ConnectionClosed;
+        if (self.pending_timed_plaintext_len != 0) {
+            return error.WriteInProgress;
+        }
         if (header.len == 0 and payload.len == 0) return;
         if (header.len != 0) try self.client.writer.writeAll(header);
         if (payload.len != 0) try self.client.writer.writeAll(payload);
@@ -796,6 +839,10 @@ pub const TlsClientConnection = struct {
         self: *TlsClientConnection,
         parts: []const []const u8,
     ) Error!void {
+        if (self.write_closed) return error.ConnectionClosed;
+        if (self.pending_timed_plaintext_len != 0) {
+            return error.WriteInProgress;
+        }
         var has_bytes = false;
         for (parts) |part| {
             if (part.len == 0) continue;
@@ -806,7 +853,99 @@ pub const TlsClientConnection = struct {
         try self.client.writer.flush();
         try self.net_writer.interface.flush();
     }
+
+    /// Write plaintext under an absolute socket deadline. Progress advances
+    /// only after the complete TLS record carrying that plaintext has reached
+    /// the socket. On timeout the already-encrypted record remains buffered,
+    /// preserving the consumed TLS sequence number for a later retry.
+    pub fn writeAllWithDeadline(
+        self: *TlsClientConnection,
+        bytes: []const u8,
+        committed: *usize,
+        deadline: std.Io.Clock.Timestamp,
+    ) Error!void {
+        committed.* = 0;
+        if (self.write_closed) return error.ConnectionClosed;
+
+        if (self.pending_timed_plaintext_len != 0) {
+            try self.finishTimedRecord(committed, deadline);
+        }
+        while (committed.* < bytes.len) {
+            const chunk_len = @min(
+                tls.max_ciphertext_inner_record_len,
+                bytes.len - committed.*,
+            );
+            std.debug.assert(self.client.writer.buffered().len == 0);
+            std.debug.assert(self.net_writer.interface.buffered().len == 0);
+            try self.client.writer.writeAll(
+                bytes[committed.*..][0..chunk_len],
+            );
+            // This encrypts into the connection-owned network writer buffer;
+            // that buffer is one full TLS record and performs no socket I/O.
+            try self.client.writer.flush();
+            self.pending_timed_plaintext_len = chunk_len;
+            try self.finishTimedRecord(committed, deadline);
+        }
+    }
+
+    pub fn finishPendingTimedWrite(
+        self: *TlsClientConnection,
+        committed: *usize,
+    ) Error!void {
+        committed.* = 0;
+        if (self.write_closed) return error.ConnectionClosed;
+        if (self.pending_timed_plaintext_len == 0) return;
+        try self.net_writer.interface.flush();
+        committed.* = self.pending_timed_plaintext_len;
+        self.pending_timed_plaintext_len = 0;
+    }
+
+    fn finishTimedRecord(
+        self: *TlsClientConnection,
+        committed: *usize,
+        deadline: std.Io.Clock.Timestamp,
+    ) Error!void {
+        std.debug.assert(self.pending_timed_plaintext_len != 0);
+        while (self.net_writer.interface.buffered().len != 0) {
+            const count = try stream_io.writeSomeWithDeadline(
+                self.io,
+                self.stream,
+                self.net_writer.interface.buffered(),
+                deadline,
+            );
+            _ = self.net_writer.interface.consume(count);
+        }
+        committed.* += self.pending_timed_plaintext_len;
+        self.pending_timed_plaintext_len = 0;
+    }
+
+    pub fn closeWrite(self: *TlsClientConnection) Error!void {
+        if (self.write_closed) return error.ConnectionClosed;
+        if (self.pending_timed_plaintext_len != 0) {
+            return error.WriteInProgress;
+        }
+        // Once TLS shutdown starts, application writes cannot be retried even
+        // if flushing the alert or the socket half-close fails.
+        self.write_closed = true;
+        try self.client.end();
+        try self.net_writer.interface.flush();
+        try shutdownAfterTlsCloseNotify(self.io, self.stream);
+    }
 };
+
+/// Once an authenticated TLS close_notify has reached the transport, a peer
+/// that concurrently closes the socket can make shutdown(SHUT_WR) report
+/// ENOTCONN. The TLS write half is already terminal in that case, so preserve
+/// closeWrite's idempotent completion while propagating all other I/O errors.
+fn shutdownAfterTlsCloseNotify(
+    io: std.Io,
+    stream: net.Stream,
+) Error!void {
+    stream.shutdown(io, .send) catch |err| switch (err) {
+        error.SocketUnconnected => {},
+        else => return err,
+    };
+}
 
 const tls_client_reader_vtable: std.Io.Reader.VTable = .{
     .stream = tlsClientReaderStream,
@@ -1002,6 +1141,21 @@ const RuntimeTransport = union(enum) {
         };
     }
 
+    fn closeWrite(self: RuntimeTransport) Error!void {
+        return switch (self) {
+            .tcp => |tcp| tcp.stream.shutdown(tcp.io, .send),
+            .tls_client => |conn| conn.closeWrite(),
+            .tls_vail => |conn| {
+                try conn.sendCloseNotify();
+                try shutdownAfterTlsCloseNotify(conn.io, conn.stream);
+            },
+            .tls_server => |conn| {
+                try conn.sendCloseNotify();
+                try shutdownAfterTlsCloseNotify(conn.io, conn.stream);
+            },
+        };
+    }
+
     fn close(self: RuntimeTransport) void {
         switch (self) {
             .tcp => |tcp| tcp.stream.close(tcp.io),
@@ -1031,6 +1185,79 @@ fn mapHttpTimedReadError(err: stream_io.TimedReadError) Error {
 const WriteScratch = runtime_write.Scratch;
 const StreamingBodyWriter = body_writer.Writer(Error);
 const StreamingBodyReader = body_reader.Reader(Error);
+
+fn flattenWriteParts(
+    allocator: std.mem.Allocator,
+    scratch: *WriteScratch,
+    parts: []const []const u8,
+) Error![]const u8 {
+    var total: usize = 0;
+    for (parts) |part| {
+        total = std.math.add(usize, total, part.len) catch
+            return error.ContentLengthOverflow;
+    }
+    scratch.flattened.clearRetainingCapacity();
+    try scratch.flattened.ensureTotalCapacity(allocator, total);
+    for (parts) |part| scratch.flattened.appendSliceAssumeCapacity(part);
+    return scratch.flattened.items;
+}
+
+fn writeSlicesWithStrategy(
+    allocator: std.mem.Allocator,
+    transport: RuntimeTransport,
+    strategy: WriteStrategy,
+    parts: []const []const u8,
+    scratch: *WriteScratch,
+    transport_started: *bool,
+) Error!void {
+    switch (strategy) {
+        .auto, .vectored => {
+            transport_started.* = true;
+            try transport.writeAllSlices(parts);
+        },
+        .flatten => {
+            var only: ?[]const u8 = null;
+            for (parts) |part| {
+                if (part.len == 0) continue;
+                if (only != null) {
+                    only = null;
+                    break;
+                }
+                only = part;
+            }
+            if (only) |bytes| {
+                transport_started.* = true;
+                return transport.writeAll(bytes);
+            }
+            const bytes = try flattenWriteParts(allocator, scratch, parts);
+            transport_started.* = true;
+            try transport.writeAll(bytes);
+        },
+    }
+}
+
+fn writeMessagePartsWithStrategy(
+    allocator: std.mem.Allocator,
+    transport: RuntimeTransport,
+    strategy: WriteStrategy,
+    parts: runtime_write.MessageParts,
+    scratch: *WriteScratch,
+    transport_started: *bool,
+) Error!void {
+    if (strategy == .flatten) {
+        return writeSlicesWithStrategy(
+            allocator,
+            transport,
+            strategy,
+            &.{ parts.header, parts.body },
+            scratch,
+            transport_started,
+        );
+    }
+    transport_started.* = true;
+    try transport.writeAllParts(parts.header, parts.body);
+}
+
 pub const Server = struct {
     io: std.Io,
     listener: net.Server,
@@ -1057,6 +1284,29 @@ pub const Server = struct {
 
     pub fn accept(self: *Server) Error!Connection {
         const stream = try self.listener.accept(self.io);
+        return self.acceptStream(stream);
+    }
+
+    pub fn acceptWithTimeout(
+        self: *Server,
+        timeout: std.Io.Duration,
+    ) Error!Connection {
+        if (timeout.nanoseconds <= 0) return error.Timeout;
+        return self.acceptWithDeadline(.fromNow(
+            self.io,
+            .{ .raw = timeout, .clock = .awake },
+        ));
+    }
+
+    pub fn acceptWithDeadline(
+        self: *Server,
+        deadline: std.Io.Clock.Timestamp,
+    ) Error!Connection {
+        const stream = try accept_deadline.withDeadline(
+            &self.listener,
+            self.io,
+            deadline,
+        );
         return self.acceptStream(stream);
     }
 
@@ -1168,6 +1418,35 @@ pub const UnixServer = struct {
 
     pub fn accept(self: *UnixServer) Error!Connection {
         const stream = try self.listener.accept(self.io);
+        errdefer stream.close(self.io);
+        return .{
+            .io = self.io,
+            .allocator = self.allocator,
+            .stream = stream,
+            .limits = self.limits,
+        };
+    }
+
+    pub fn acceptWithTimeout(
+        self: *UnixServer,
+        timeout: std.Io.Duration,
+    ) Error!Connection {
+        if (timeout.nanoseconds <= 0) return error.Timeout;
+        return self.acceptWithDeadline(.fromNow(
+            self.io,
+            .{ .raw = timeout, .clock = .awake },
+        ));
+    }
+
+    pub fn acceptWithDeadline(
+        self: *UnixServer,
+        deadline: std.Io.Clock.Timestamp,
+    ) Error!Connection {
+        const stream = try accept_deadline.withDeadline(
+            &self.listener,
+            self.io,
+            deadline,
+        );
         errdefer stream.close(self.io);
         return .{
             .io = self.io,
@@ -1313,17 +1592,29 @@ pub const TlsServer = struct {
 
     pub fn accept(self: *TlsServer) Error!Connection {
         const stream = try self.listener.accept(self.io);
+        return self.acceptStream(stream);
+    }
+
+    /// Perform the TLS handshake on an already accepted stream. Ownership
+    /// transfers at entry, matching the deadline-bounded adoption helpers.
+    pub fn acceptStream(
+        self: *TlsServer,
+        stream: net.Stream,
+    ) Error!Connection {
         return self.acceptStreamMaybeBefore(stream, null);
     }
 
-    /// Accept TCP, then complete TLS under a caller-owned awake-clock deadline.
-    /// The listener accept itself remains unbounded.
+    /// Apply one caller-owned deadline to TCP accept and TLS setup.
     pub fn acceptWithDeadline(
         self: *TlsServer,
         deadline: std.Io.Clock.Timestamp,
     ) Error!Connection {
         _ = try deadline_policy.usableAwake(self.io, deadline);
-        const stream = try self.listener.accept(self.io);
+        const stream = try accept_deadline.withDeadline(
+            &self.listener,
+            self.io,
+            deadline,
+        );
         return self.acceptStreamMaybeBefore(stream, deadline);
     }
 
@@ -1332,11 +1623,16 @@ pub const TlsServer = struct {
         timeout: std.Io.Duration,
     ) Error!Connection {
         if (timeout.nanoseconds <= 0) return error.Timeout;
-        const stream = try self.listener.accept(self.io);
-        return self.acceptStreamMaybeBefore(
-            stream,
-            .fromNow(self.io, .{ .raw = timeout, .clock = .awake }),
+        const deadline = std.Io.Clock.Timestamp.fromNow(
+            self.io,
+            .{ .raw = timeout, .clock = .awake },
         );
+        const stream = try accept_deadline.withDeadline(
+            &self.listener,
+            self.io,
+            deadline,
+        );
+        return self.acceptStreamMaybeBefore(stream, deadline);
     }
 
     /// Perform the TLS handshake on an already accepted stream under one
@@ -1395,6 +1691,27 @@ pub const TlsServer = struct {
             .limits = self.limits,
             .tls_server_conn = tls_connection,
         };
+    }
+
+    pub fn serveOne(
+        self: *TlsServer,
+        context: anytype,
+        comptime handler: anytype,
+    ) Error!void {
+        var connection = try self.accept();
+        defer connection.close();
+        _ = try connection.serveOne(context, handler);
+    }
+
+    pub fn serveConnection(
+        self: *TlsServer,
+        context: anytype,
+        comptime handler: anytype,
+        max_requests: usize,
+    ) Error!usize {
+        var connection = try self.accept();
+        defer connection.close();
+        return connection.serve(context, handler, max_requests);
     }
 
     pub fn serveConcurrent(
@@ -2456,7 +2773,14 @@ pub const Client = struct {
     ) Error!void {
         const connection = self.tls_vail_conn orelse
             return error.PostHandshakeTlsUnavailable;
-        try connection.updateTrafficKeys(request_peer_update);
+        try self.writer_state.ensureAvailable();
+        connection.updateTrafficKeys(request_peer_update) catch |err| {
+            switch (err) {
+                error.WriteInProgress, error.KeyUpdateRequestPending => {},
+                else => self.writer_state.phase = .unusable,
+            }
+            return err;
+        };
     }
 
     pub fn keyUpdateCounts(
@@ -2468,7 +2792,51 @@ pub const Client = struct {
 
     pub fn isReusable(self: *const Client) bool {
         return self.writer_state.phase == .idle and
-            !self.writer_state.reading;
+            !self.writer_state.reading and
+            self.inbuf.items.len == 0;
+    }
+
+    /// Reject clients that retain unread HTTP or TLS input. Cleartext sockets
+    /// additionally probe the kernel queue for unsolicited bytes or EOF. TLS
+    /// records still in the kernel cannot be classified without advancing the
+    /// decryptor, so only already-buffered TLS state is inspected. Unsupported
+    /// native backends conservatively skip the cleartext socket probe.
+    pub fn isReusableForPool(self: *const Client) bool {
+        if (!self.isReusable()) return false;
+        if (self.tls_conn) |connection| {
+            return connection.isReusableBoundary();
+        }
+        if (self.tls_vail_conn) |connection| {
+            return connection.isReusableBoundary();
+        }
+        return probeIdleSocket(self.stream) == .clean;
+    }
+
+    /// Validate and encode before touching the transport. Once a complete
+    /// request write starts, any transport error is terminal: the peer may
+    /// have observed an arbitrary prefix and HTTP/1 has no stream reset with
+    /// which to restore the message boundary.
+    fn writeRequestFailClosed(
+        self: *Client,
+        options: RequestOptions,
+    ) Error!void {
+        const parts = try runtime_write.prepareRequest(
+            self.allocator,
+            options,
+            &self.write_scratch,
+        );
+        var transport_started = false;
+        writeMessagePartsWithStrategy(
+            self.allocator,
+            self.transport(),
+            self.limits.write_strategy,
+            parts,
+            &self.write_scratch,
+            &transport_started,
+        ) catch |err| {
+            if (transport_started) self.writer_state.phase = .unusable;
+            return err;
+        };
     }
 
     pub fn request(self: *Client, request_options: RequestOptions) Error!OwnedResponse {
@@ -2633,15 +3001,17 @@ pub const Client = struct {
         parse_options: http1.ParseOptions,
         informational: ?InformationalObserver,
     ) Error!OwnedResponse {
-        try self.writer_state.ensureAvailable();
+        const generation = try self.writer_state.begin();
+        _ = generation;
+        errdefer if (self.writer_state.phase == .writing) {
+            // Local request validation can fail before any byte reaches the
+            // transport. Preserve the caller's ability to correct and retry.
+            self.writer_state.phase = .idle;
+        };
         var options = request_options;
         if (options.host == null) options.host = self.default_host;
-        try writeRequestToTransportScratch(
-            self.allocator,
-            self.transport(),
-            options,
-            &self.write_scratch,
-        );
+        try self.writeRequestFailClosed(options);
+        self.writer_state.phase = .awaiting_peer;
         self.beginResponseHeadSequence();
         defer self.endResponseHeadSequence();
         const response = readResponseFromTransportBufferedForRequestObserved(
@@ -2658,11 +3028,11 @@ pub const Client = struct {
             self.writer_state.phase = .unusable;
             return err;
         };
-        if (!requestOptionsKeepAlive(options) or
-            !responseIsReusable(response.response))
-        {
-            self.writer_state.phase = .unusable;
-        }
+        self.writer_state.phase = if (requestOptionsKeepAlive(options) and
+            responseIsReusable(response.response))
+            .idle
+        else
+            .unusable;
         return response;
     }
 
@@ -2948,11 +3318,16 @@ pub const Client = struct {
             options,
             &self.write_scratch,
         );
-        self.transport().writeAllParts(
-            parts.header,
-            parts.body,
+        var transport_started = false;
+        writeMessagePartsWithStrategy(
+            self.allocator,
+            self.transport(),
+            self.limits.write_strategy,
+            parts,
+            &self.write_scratch,
+            &transport_started,
         ) catch |err| {
-            self.writer_state.phase = .unusable;
+            if (transport_started) self.writer_state.phase = .unusable;
             return err;
         };
         self.writer_state.phase = .awaiting_peer;
@@ -3343,7 +3718,7 @@ pub const Client = struct {
     pub fn openConnectTunnel(self: *Client, target: []const u8, headers: []const http1.Header) Error!Tunnel {
         try self.writer_state.ensureAvailable();
         try http1.validateConnectTarget(target);
-        try writeRequestToTransport(self.allocator, self.transport(), .{
+        try self.writeRequestFailClosed(.{
             .method = .CONNECT,
             .target = target,
             .host = target,
@@ -3366,6 +3741,10 @@ pub const Client = struct {
         if (response.response.status < 200 or response.response.status >= 300) return error.InvalidResponse;
         if (response.response.body.len != 0 or response.response.trailers.len != 0) return error.InvalidResponse;
         response.deinit(self.allocator);
+        // A successful CONNECT transfers exclusive ownership of the byte
+        // stream to Tunnel. The HTTP client must never issue another request
+        // or let a pool return this socket to its idle set.
+        self.writer_state.phase = .unusable;
         return .{
             .io = self.io,
             .allocator = self.allocator,
@@ -3406,7 +3785,7 @@ pub const Client = struct {
             .value = protocol,
         });
         upgrade_headers.appendSliceAssumeCapacity(headers);
-        try writeRequestToTransport(self.allocator, self.transport(), .{
+        try self.writeRequestFailClosed(.{
             .method = .GET,
             .target = target,
             .host = host orelse self.default_host,
@@ -3593,7 +3972,14 @@ pub const Connection = struct {
     ) Error!void {
         const connection = self.tls_server_conn orelse
             return error.PostHandshakeTlsUnavailable;
-        try connection.updateTrafficKeys(request_peer_update);
+        try self.writer_state.ensureAvailable();
+        connection.updateTrafficKeys(request_peer_update) catch |err| {
+            switch (err) {
+                error.WriteInProgress, error.KeyUpdateRequestPending => {},
+                else => self.writer_state.phase = .unusable,
+            }
+            return err;
+        };
     }
 
     pub fn keyUpdateCounts(
@@ -3635,6 +4021,7 @@ pub const Connection = struct {
         try self.writer_state.ensureReadable();
         try self.beginRequestHeadDeadline();
         defer self.request_head_deadline = null;
+        var stage: RequestReadStage = .head;
         return readRequestFromTransportBufferedWithStage(
             self.allocator,
             self.transport(),
@@ -3642,9 +4029,12 @@ pub const Connection = struct {
             options,
             &self.inbuf,
             self.request_head_deadline,
-            failure_stage,
+            &stage,
         ) catch |read_err| {
-            if (read_err == error.Timeout) self.writer_state.phase = .unusable;
+            if (failure_stage) |out| out.* = stage;
+            if (read_err == error.Timeout or stage == .continue_write) {
+                self.writer_state.phase = .unusable;
+            }
             return read_err;
         };
     }
@@ -3675,14 +4065,21 @@ pub const Connection = struct {
     ) Error!OwnedRequest {
         _ = try deadline_policy.usableAwake(self.io, deadline);
         try self.writer_state.ensureReadable();
-        return readRequestFromTransportBuffered(
+        var stage: RequestReadStage = .head;
+        return readRequestFromTransportBufferedWithStage(
             self.allocator,
             self.transport(),
             self.limits,
             options,
             &self.inbuf,
             deadline,
-        );
+            &stage,
+        ) catch |err| {
+            if (stage == .continue_write) {
+                self.writer_state.phase = .unusable;
+            }
+            return err;
+        };
     }
 
     /// Read a request while delivering body bytes without aggregation.
@@ -3934,13 +4331,38 @@ pub const Connection = struct {
 
     pub fn writeResponse(self: *Connection, response: ResponseOptions) Error!void {
         try self.writer_state.ensureAvailable();
-        try writeResponseToTransportScratch(
-            self.allocator,
-            self.transport(),
+        try self.writeResponseFailClosed(
             response,
             self.defaultResponseDate(),
+        );
+    }
+
+    /// Keep deterministic validation/allocation failures retryable, but retire
+    /// the connection after any transport write error because an unknown wire
+    /// prefix may already be visible to the peer.
+    fn writeResponseFailClosed(
+        self: *Connection,
+        response: ResponseOptions,
+        default_date: ?[]const u8,
+    ) Error!void {
+        const parts = try runtime_write.prepareServerResponse(
+            self.allocator,
+            response,
+            default_date,
             &self.write_scratch,
         );
+        var transport_started = false;
+        writeMessagePartsWithStrategy(
+            self.allocator,
+            self.transport(),
+            self.limits.write_strategy,
+            parts,
+            &self.write_scratch,
+            &transport_started,
+        ) catch |err| {
+            if (transport_started) self.writer_state.phase = .unusable;
+            return err;
+        };
     }
 
     /// Start a response whose body is supplied incrementally.
@@ -3995,13 +4417,42 @@ pub const Connection = struct {
         responses: []const ResponseOptions,
     ) Error!void {
         try self.writer_state.ensureAvailable();
-        try writeResponsesToTransportScratch(
+        const default_date = self.defaultResponseDate();
+        const strategy = responseBatchWriteStrategy(
+            self.limits.write_strategy,
+            responseBatchBodyBytes(responses),
+        );
+        if (strategy == .flatten) {
+            const bytes = try prepareResponsesCoalesced(
+                self.allocator,
+                responses,
+                default_date,
+                &self.write_scratch,
+            );
+            self.transport().writeAll(bytes) catch |err| {
+                self.writer_state.phase = .unusable;
+                return err;
+            };
+            return;
+        }
+        const parts = try runtime_write.prepareServerResponseParts(
             self.allocator,
-            self.transport(),
             responses,
-            self.defaultResponseDate(),
+            default_date,
             &self.write_scratch,
         );
+        var transport_started = false;
+        writeSlicesWithStrategy(
+            self.allocator,
+            self.transport(),
+            strategy,
+            parts,
+            &self.write_scratch,
+            &transport_started,
+        ) catch |err| {
+            if (transport_started) self.writer_state.phase = .unusable;
+            return err;
+        };
     }
 
     fn defaultResponseDate(self: *const Connection) ?[]const u8 {
@@ -4105,6 +4556,30 @@ pub const Connection = struct {
     ) Error!bool {
         const request_keep_alive = request.keepAlive();
         var response = try handler(context, request);
+        if (response.status >= 100 and
+            response.status < 200 and
+            response.status != 101)
+        {
+            // A serve handler can return only one response, so treating an
+            // informational head as complete would leave a conforming client
+            // waiting for the final response while this loop reads the next
+            // request. Keep low-level writeResponse available for callers that
+            // explicitly send one or more 1xx heads before their final head.
+            self.writeResponse(.{
+                .status = 500,
+                .reason = "Internal Server Error",
+                .headers = &.{.{
+                    .name = "Connection",
+                    .value = "close",
+                }},
+                .request_method = request.method,
+            }) catch |err| {
+                self.writer_state.phase = .unusable;
+                return err;
+            };
+            self.writer_state.phase = .unusable;
+            return error.InvalidResponse;
+        }
         var adjusted = try adjustResponseForServeLoop(
             self.allocator,
             request,
@@ -4116,6 +4591,18 @@ pub const Connection = struct {
         if (response.request_method == null) response.request_method = request.method;
         const response_keep_alive = responseOptionsKeepAlive(response);
         try self.writeResponse(response);
+        if (response.status == 101 or
+            (request.method == .CONNECT and
+                response.status >= 200 and response.status < 300))
+        {
+            // These final heads switch away from HTTP message framing. The
+            // callback-only serve API cannot hand the transport to the
+            // application, so stop before tunneled bytes can be parsed as a
+            // subsequent request. Explicit handoff uses acceptUpgrade or
+            // acceptConnectTunnel instead.
+            self.writer_state.phase = .unusable;
+            return false;
+        }
         if (self.graceful_shutdown_requested or !self.limits.keep_alive) {
             self.writer_state.phase = .unusable;
             return false;
@@ -4140,12 +4627,15 @@ pub const Connection = struct {
         try self.writer_state.ensureAvailable();
         if (request.method != .CONNECT or request.body.len != 0 or request.trailers.len != 0) return error.InvalidResponse;
         try http1.validateConnectTarget(request.target);
-        try writeResponseToTransport(self.allocator, self.transport(), .{
+        try self.writeResponseFailClosed(.{
             .status = 200,
             .reason = "Connection Established",
             .headers = response_headers,
             .request_method = .CONNECT,
-        });
+        }, null);
+        // The response switches this connection out of HTTP message framing.
+        // Keep the parent unusable while Tunnel owns the transport.
+        self.writer_state.phase = .unusable;
         return .{
             .io = self.io,
             .allocator = self.allocator,
@@ -4183,12 +4673,12 @@ pub const Connection = struct {
         defer merged.deinit(self.allocator);
         try merged.appendSlice(self.allocator, &headers);
         try merged.appendSlice(self.allocator, response_headers);
-        try writeResponseToTransport(self.allocator, self.transport(), .{
+        try self.writeResponseFailClosed(.{
             .status = 101,
             .reason = "Switching Protocols",
             .headers = merged.items,
             .request_method = request.method,
-        });
+        }, null);
         self.writer_state.phase = .unusable;
         return .{
             .io = self.io,
@@ -4220,6 +4710,7 @@ pub const Tunnel = struct {
     tls_vail_conn: ?*tls_stream.ClientConnection = null,
     tls_server_conn: ?*tls_stream.ServerConnection = null,
     inbuf: *std.ArrayList(u8),
+    write_closed: bool = false,
 
     fn transport(self: *Tunnel) RuntimeTransport {
         if (self.tls_vail_conn) |conn| return .{ .tls_vail = conn };
@@ -4229,7 +4720,53 @@ pub const Tunnel = struct {
     }
 
     pub fn write(self: *Tunnel, bytes: []const u8) Error!void {
-        try self.transport().writeAll(bytes);
+        if (self.write_closed) return error.ConnectionClosed;
+        self.transport().writeAll(bytes) catch |err| {
+            // A transport error can follow a socket-visible prefix. Retrying
+            // on the same byte stream would duplicate or corrupt the tunneled
+            // protocol, so retain read access but fail the write half closed.
+            self.write_closed = true;
+            return err;
+        };
+    }
+
+    /// Write two borrowed slices as one ordered tunnel byte sequence. TCP can
+    /// submit both ranges with vectored I/O; TLS retains one record-flush
+    /// boundary without requiring the caller to concatenate them.
+    pub fn writeParts(
+        self: *Tunnel,
+        first: []const u8,
+        second: []const u8,
+    ) Error!void {
+        if (self.write_closed) return error.ConnectionClosed;
+        self.transport().writeAllParts(first, second) catch |err| {
+            self.write_closed = true;
+            return err;
+        };
+    }
+
+    /// Write borrowed slices in order without first joining their contents.
+    /// The call consumes every slice before returning. A transport failure is
+    /// terminal because an unknown prefix may already be visible to the peer.
+    pub fn writeSlices(
+        self: *Tunnel,
+        slices: []const []const u8,
+    ) Error!void {
+        if (self.write_closed) return error.ConnectionClosed;
+        self.transport().writeAllSlices(slices) catch |err| {
+            self.write_closed = true;
+            return err;
+        };
+    }
+
+    /// Finish the tunnel's write half while preserving buffered and future
+    /// reads. TLS transports send close_notify before shutting down the
+    /// underlying socket write direction. The transition is fail-closed: once
+    /// shutdown begins, this tunnel never accepts application writes again.
+    pub fn closeWrite(self: *Tunnel) Error!void {
+        if (self.write_closed) return error.ConnectionClosed;
+        self.write_closed = true;
+        try self.transport().closeWrite();
     }
 
     pub fn read(self: *Tunnel, buffer: []u8) Error!usize {
@@ -4274,10 +4811,14 @@ pub const Tunnel = struct {
         self: *Tunnel,
         request_peer_update: bool,
     ) Error!void {
-        const connection = self.tls_vail_conn orelse
-            self.tls_server_conn orelse
-            return error.PostHandshakeTlsUnavailable;
-        try connection.updateTrafficKeys(request_peer_update);
+        if (self.write_closed) return error.ConnectionClosed;
+        if (self.tls_vail_conn) |connection| {
+            return connection.updateTrafficKeys(request_peer_update);
+        }
+        if (self.tls_server_conn) |connection| {
+            return connection.updateTrafficKeys(request_peer_update);
+        }
+        return error.PostHandshakeTlsUnavailable;
     }
 
     pub fn keyUpdateCounts(
@@ -4931,9 +5472,17 @@ pub const ResponseWriter = struct {
 fn clientWriteSlices(
     context: ?*anyopaque,
     parts: []const []const u8,
+    transport_started: *bool,
 ) Error!void {
     const client: *Client = @ptrCast(@alignCast(context.?));
-    try client.transport().writeAllSlices(parts);
+    try writeSlicesWithStrategy(
+        client.allocator,
+        client.transport(),
+        client.limits.write_strategy,
+        parts,
+        &client.write_scratch,
+        transport_started,
+    );
 }
 
 fn clientReadSome(
@@ -5094,9 +5643,17 @@ fn connectionMaybeWriteContinue(
 fn connectionWriteSlices(
     context: ?*anyopaque,
     parts: []const []const u8,
+    transport_started: *bool,
 ) Error!void {
     const connection: *Connection = @ptrCast(@alignCast(context.?));
-    try connection.transport().writeAllSlices(parts);
+    try writeSlicesWithStrategy(
+        connection.allocator,
+        connection.transport(),
+        connection.limits.write_strategy,
+        parts,
+        &connection.write_scratch,
+        transport_started,
+    );
 }
 
 fn responseIsReusable(response: http1.Response) bool {
@@ -5241,6 +5798,7 @@ pub fn readRequestFromStreamBufferedWithDeadline(
         false,
         deadline,
         deadline,
+        null,
     );
     errdefer allocator.free(bytes);
     var request = try http1.parseRequest(allocator, bytes, options);
@@ -5270,25 +5828,6 @@ pub fn readRequestFromStreamBufferedWithTimeout(
     );
 }
 
-fn readRequestFromTransportBuffered(
-    allocator: std.mem.Allocator,
-    transport: RuntimeTransport,
-    limits: Limits,
-    options: http1.ParseOptions,
-    inbuf: *std.ArrayList(u8),
-    head_deadline: ?std.Io.Clock.Timestamp,
-) Error!OwnedRequest {
-    return readRequestFromTransportBufferedWithStage(
-        allocator,
-        transport,
-        limits,
-        options,
-        inbuf,
-        head_deadline,
-        null,
-    );
-}
-
 fn readRequestFromTransportBufferedWithStage(
     allocator: std.mem.Allocator,
     transport: RuntimeTransport,
@@ -5311,6 +5850,7 @@ fn readRequestFromTransportBufferedWithStage(
         false,
         head_deadline,
         null,
+        failure_stage,
     ) catch |err| {
         if (failure_stage) |stage| {
             if (err == error.HeadersTooLarge) {
@@ -5650,6 +6190,7 @@ pub fn readResponseFromStreamBufferedObserved(
             options.allow_http_0_9_responses,
             response_head_deadline,
             null,
+            null,
         );
         errdefer allocator.free(bytes);
         var response = try parseResponseForRuntime(allocator, bytes, options, null);
@@ -5828,6 +6369,7 @@ pub fn readResponseFromStreamBufferedForRequestObserved(
             options.allow_http_0_9_responses,
             response_head_deadline,
             null,
+            null,
         );
         errdefer allocator.free(bytes);
         var response = try parseResponseForRuntime(allocator, bytes, options, request_method);
@@ -5985,6 +6527,19 @@ fn writeResponsesToTransportScratch(
 
 const response_batch_borrow_threshold: usize = 16 * 1024;
 
+fn responseBatchWriteStrategy(
+    configured: WriteStrategy,
+    body_bytes: usize,
+) WriteStrategy {
+    return switch (configured) {
+        .auto => if (body_bytes > response_batch_borrow_threshold)
+            .vectored
+        else
+            .flatten,
+        else => |explicit| explicit,
+    };
+}
+
 fn responseBatchBodyBytes(responses: []const ResponseOptions) usize {
     var total: usize = 0;
     for (responses) |response| total +|= response.body.len;
@@ -5998,6 +6553,20 @@ fn writeResponsesCoalesced(
     default_date: ?[]const u8,
     scratch: *WriteScratch,
 ) Error!void {
+    try transport.writeAll(try prepareResponsesCoalesced(
+        allocator,
+        responses,
+        default_date,
+        scratch,
+    ));
+}
+
+fn prepareResponsesCoalesced(
+    allocator: std.mem.Allocator,
+    responses: []const ResponseOptions,
+    default_date: ?[]const u8,
+    scratch: *WriteScratch,
+) Error![]const u8 {
     const parts = try runtime_write.prepareServerResponseParts(
         allocator,
         responses,
@@ -6009,7 +6578,7 @@ fn writeResponsesCoalesced(
     for (parts) |part| total +|= part.len;
     try scratch.encoded.ensureTotalCapacity(allocator, total);
     for (parts) |part| scratch.encoded.appendSliceAssumeCapacity(part);
-    try transport.writeAll(scratch.encoded.items);
+    return scratch.encoded.items;
 }
 
 const ServeLoopResponse = struct {
@@ -6422,6 +6991,7 @@ fn readOneResponseFromTransportBufferedForRequest(
         options.allow_http_0_9_responses,
         head_deadline,
         body_deadline,
+        null,
     );
     errdefer allocator.free(bytes);
     var response = try parseResponseForRuntime(
@@ -6447,6 +7017,7 @@ fn readMessageBytesBufferedWithContext(
     allow_http_0_9_response: bool,
     head_deadline: ?std.Io.Clock.Timestamp,
     body_deadline: ?std.Io.Clock.Timestamp,
+    request_stage: ?*RequestReadStage,
 ) Error![]u8 {
     var scratch: [4096]u8 = undefined;
     var head_end: ?usize = null;
@@ -6493,8 +7064,6 @@ fn readMessageBytesBufferedWithContext(
         }
         try inbuf.appendSlice(allocator, scratch[0..n]);
     }
-    try maybeWriteContinue(transport, inbuf.items[0..head_end.?], inbuf.items.len - (head_end.? + 4), auto_continue);
-
     var borrowed_headers_stack: [128]http1.Header = undefined;
     const borrowed_headers = if (options.max_headers <= borrowed_headers_stack.len)
         borrowed_headers_stack[0..options.max_headers]
@@ -6515,7 +7084,19 @@ fn readMessageBytesBufferedWithContext(
         break :response try response_head.messageLength();
     };
 
-    if (close_delimited_when_unknown and responseHeadUsesCloseDelimitedBody(inbuf.items[0..head_end.?], request_method)) {
+    const head = inbuf.items[0..head_end.?];
+    if (auto_continue and requestShouldSendContinue(head)) {
+        if (request_stage) |stage| stage.* = .continue_write;
+        try maybeWriteContinue(
+            transport,
+            head,
+            inbuf.items.len - (head_end.? + 4),
+            true,
+        );
+    }
+    if (request_stage) |stage| stage.* = .body;
+
+    if (close_delimited_when_unknown and responseHeadUsesCloseDelimitedBody(head, request_method)) {
         const body_start = head_end.? + 4;
         while (true) {
             const n = try readTransportUntil(
@@ -6600,6 +7181,7 @@ test "HTTP/1 buffered reader transfers exact message buffer ownership" {
         false,
         true,
         false,
+        null,
         null,
         null,
     );
@@ -6753,6 +7335,780 @@ test "HTTP/1 response batch validation is transactional" {
     );
     // The invalid batch never reaches the transport. Scratch content itself is
     // internal and may be reused/partially encoded for the next attempt.
+}
+
+test "HTTP/1 write strategy controls complete message transport shape" {
+    const Observer = struct {
+        bytes: [8192]u8 = undefined,
+        len: usize = 0,
+        calls: usize = 0,
+        max_non_empty_parts: usize = 0,
+
+        fn write(
+            context: ?*anyopaque,
+            _: net.Socket.Handle,
+            header: []const u8,
+            data: []const []const u8,
+            splat: usize,
+        ) net.Stream.Writer.Error!usize {
+            const self: *@This() = @ptrCast(@alignCast(context.?));
+            self.calls += 1;
+            var non_empty: usize = @intFromBool(header.len != 0);
+            var written = self.append(header);
+            if (data.len != 0) {
+                for (data[0 .. data.len - 1]) |bytes| {
+                    non_empty += @intFromBool(bytes.len != 0);
+                    written += self.append(bytes);
+                }
+                const pattern = data[data.len - 1];
+                non_empty += @intFromBool(pattern.len != 0 and splat != 0);
+                for (0..splat) |_| written += self.append(pattern);
+            }
+            self.max_non_empty_parts = @max(
+                self.max_non_empty_parts,
+                non_empty,
+            );
+            return written;
+        }
+
+        fn append(self: *@This(), bytes: []const u8) usize {
+            std.debug.assert(self.len + bytes.len <= self.bytes.len);
+            @memcpy(self.bytes[self.len..][0..bytes.len], bytes);
+            self.len += bytes.len;
+            return bytes.len;
+        }
+    };
+
+    const request_options = RequestOptions{
+        .method = .POST,
+        .target = "/shape",
+        .host = "example.test",
+        .body = "request-body",
+    };
+    var threaded = std.Io.Threaded.init(std.testing.allocator, .{});
+    defer threaded.deinit();
+
+    var vectored_request: Observer = .{};
+    var vectored_request_vtable = threaded.io().vtable.*;
+    vectored_request_vtable.netWrite = Observer.write;
+    var vectored_client = Client{
+        .io = .{
+            .userdata = &vectored_request,
+            .vtable = &vectored_request_vtable,
+        },
+        .allocator = std.testing.allocator,
+        .stream = undefined,
+        .limits = .{ .write_strategy = .vectored },
+    };
+    defer {
+        vectored_client.inbuf.deinit(std.testing.allocator);
+        vectored_client.write_scratch.deinit(std.testing.allocator);
+    }
+    try vectored_client.writeRequestFailClosed(request_options);
+    try std.testing.expectEqual(@as(usize, 1), vectored_request.calls);
+    try std.testing.expectEqual(@as(usize, 2), vectored_request.max_non_empty_parts);
+
+    var flat_request: Observer = .{};
+    var flat_request_vtable = threaded.io().vtable.*;
+    flat_request_vtable.netWrite = Observer.write;
+    var flat_client = Client{
+        .io = .{ .userdata = &flat_request, .vtable = &flat_request_vtable },
+        .allocator = std.testing.allocator,
+        .stream = undefined,
+        .limits = .{ .write_strategy = .flatten },
+    };
+    defer {
+        flat_client.inbuf.deinit(std.testing.allocator);
+        flat_client.write_scratch.deinit(std.testing.allocator);
+    }
+    try flat_client.writeRequestFailClosed(request_options);
+    try std.testing.expectEqual(@as(usize, 1), flat_request.calls);
+    try std.testing.expectEqual(@as(usize, 1), flat_request.max_non_empty_parts);
+    try std.testing.expectEqualStrings(
+        vectored_request.bytes[0..vectored_request.len],
+        flat_request.bytes[0..flat_request.len],
+    );
+
+    const response_options = ResponseOptions{ .body = "response-body" };
+    var vectored_response: Observer = .{};
+    var vectored_response_vtable = threaded.io().vtable.*;
+    vectored_response_vtable.netWrite = Observer.write;
+    var vectored_connection = Connection{
+        .io = .{
+            .userdata = &vectored_response,
+            .vtable = &vectored_response_vtable,
+        },
+        .allocator = std.testing.allocator,
+        .stream = undefined,
+        .limits = .{
+            .auto_date_header = false,
+            .write_strategy = .vectored,
+        },
+    };
+    defer {
+        vectored_connection.inbuf.deinit(std.testing.allocator);
+        vectored_connection.write_scratch.deinit(std.testing.allocator);
+    }
+    try vectored_connection.writeResponse(response_options);
+    try std.testing.expectEqual(@as(usize, 2), vectored_response.max_non_empty_parts);
+
+    var flat_response: Observer = .{};
+    var flat_response_vtable = threaded.io().vtable.*;
+    flat_response_vtable.netWrite = Observer.write;
+    var flat_connection = Connection{
+        .io = .{
+            .userdata = &flat_response,
+            .vtable = &flat_response_vtable,
+        },
+        .allocator = std.testing.allocator,
+        .stream = undefined,
+        .limits = .{
+            .auto_date_header = false,
+            .write_strategy = .flatten,
+        },
+    };
+    defer {
+        flat_connection.inbuf.deinit(std.testing.allocator);
+        flat_connection.write_scratch.deinit(std.testing.allocator);
+    }
+    try flat_connection.writeResponse(response_options);
+    try std.testing.expectEqual(@as(usize, 1), flat_response.max_non_empty_parts);
+    try std.testing.expectEqualStrings(
+        vectored_response.bytes[0..vectored_response.len],
+        flat_response.bytes[0..flat_response.len],
+    );
+}
+
+test "HTTP/1 flatten strategy applies to streaming chunks" {
+    const Observer = struct {
+        bytes: [1024]u8 = undefined,
+        len: usize = 0,
+        calls: usize = 0,
+        max_non_empty_parts: usize = 0,
+
+        fn write(
+            context: ?*anyopaque,
+            _: net.Socket.Handle,
+            header: []const u8,
+            data: []const []const u8,
+            _: usize,
+        ) net.Stream.Writer.Error!usize {
+            const self: *@This() = @ptrCast(@alignCast(context.?));
+            self.calls += 1;
+            var non_empty: usize = @intFromBool(header.len != 0);
+            var written = self.append(header);
+            if (data.len != 0) for (data[0 .. data.len - 1]) |bytes| {
+                non_empty += @intFromBool(bytes.len != 0);
+                written += self.append(bytes);
+            };
+            self.max_non_empty_parts = @max(
+                self.max_non_empty_parts,
+                non_empty,
+            );
+            return written;
+        }
+
+        fn append(self: *@This(), bytes: []const u8) usize {
+            @memcpy(self.bytes[self.len..][0..bytes.len], bytes);
+            self.len += bytes.len;
+            return bytes.len;
+        }
+    };
+
+    var threaded = std.Io.Threaded.init(std.testing.allocator, .{});
+    defer threaded.deinit();
+    var observer: Observer = .{};
+    var vtable = threaded.io().vtable.*;
+    vtable.netWrite = Observer.write;
+    var connection = Connection{
+        .io = .{ .userdata = &observer, .vtable = &vtable },
+        .allocator = std.testing.allocator,
+        .stream = undefined,
+        .limits = .{
+            .auto_date_header = false,
+            .write_strategy = .flatten,
+        },
+    };
+    defer {
+        connection.inbuf.deinit(std.testing.allocator);
+        connection.write_scratch.deinit(std.testing.allocator);
+    }
+    var writer = try connection.startResponse(.{ .body_length = null });
+    defer writer.deinit();
+    observer.len = 0;
+    observer.calls = 0;
+    observer.max_non_empty_parts = 0;
+    try writer.writeChunks(&.{ "a", "bc" });
+    try std.testing.expectEqual(@as(usize, 1), observer.calls);
+    try std.testing.expectEqual(@as(usize, 1), observer.max_non_empty_parts);
+    try std.testing.expectEqualStrings("1\r\na\r\n2\r\nbc\r\n", observer.bytes[0..observer.len]);
+    try writer.finish();
+}
+
+test "HTTP/1 response batch write strategy overrides the automatic threshold" {
+    try std.testing.expectEqual(
+        WriteStrategy.flatten,
+        responseBatchWriteStrategy(.auto, response_batch_borrow_threshold),
+    );
+    try std.testing.expectEqual(
+        WriteStrategy.vectored,
+        responseBatchWriteStrategy(
+            .auto,
+            response_batch_borrow_threshold + 1,
+        ),
+    );
+    try std.testing.expectEqual(
+        WriteStrategy.vectored,
+        responseBatchWriteStrategy(.vectored, 0),
+    );
+    try std.testing.expectEqual(
+        WriteStrategy.flatten,
+        responseBatchWriteStrategy(
+            .flatten,
+            response_batch_borrow_threshold + 1,
+        ),
+    );
+
+    const Observer = struct {
+        bytes: [2048]u8 = undefined,
+        len: usize = 0,
+        calls: usize = 0,
+        max_non_empty_parts: usize = 0,
+
+        fn write(
+            context: ?*anyopaque,
+            _: net.Socket.Handle,
+            header: []const u8,
+            data: []const []const u8,
+            _: usize,
+        ) net.Stream.Writer.Error!usize {
+            const self: *@This() = @ptrCast(@alignCast(context.?));
+            self.calls += 1;
+            var non_empty: usize = @intFromBool(header.len != 0);
+            var written = self.append(header);
+            if (data.len != 0) for (data[0 .. data.len - 1]) |bytes| {
+                non_empty += @intFromBool(bytes.len != 0);
+                written += self.append(bytes);
+            };
+            self.max_non_empty_parts = @max(
+                self.max_non_empty_parts,
+                non_empty,
+            );
+            return written;
+        }
+
+        fn append(self: *@This(), bytes: []const u8) usize {
+            std.debug.assert(self.len + bytes.len <= self.bytes.len);
+            @memcpy(self.bytes[self.len..][0..bytes.len], bytes);
+            self.len += bytes.len;
+            return bytes.len;
+        }
+    };
+
+    const responses = [_]ResponseOptions{
+        .{ .body = "one" },
+        .{ .status = 201, .reason = "Created", .body = "two" },
+    };
+    var threaded = std.Io.Threaded.init(std.testing.allocator, .{});
+    defer threaded.deinit();
+
+    const io = threaded.io();
+    var listener = try (net.IpAddress{ .ip4 = .loopback(0) }).listen(
+        io,
+        .{ .reuse_address = true },
+    );
+    defer listener.deinit(io);
+    const stream = try listener.socket.address.connect(io, .{ .mode = .stream });
+    var peer = try listener.accept(io);
+    defer peer.close(io);
+    var vectored = Connection{
+        .io = io,
+        .allocator = std.testing.allocator,
+        .stream = stream,
+        .limits = .{
+            .auto_date_header = false,
+            .write_strategy = .vectored,
+        },
+    };
+    defer vectored.close();
+    try vectored.writeResponses(&responses);
+
+    var flat_observer: Observer = .{};
+    var flat_vtable = threaded.io().vtable.*;
+    flat_vtable.netWrite = Observer.write;
+    var flat = Connection{
+        .io = .{ .userdata = &flat_observer, .vtable = &flat_vtable },
+        .allocator = std.testing.allocator,
+        .stream = undefined,
+        .limits = .{
+            .auto_date_header = false,
+            .write_strategy = .flatten,
+        },
+    };
+    defer {
+        flat.inbuf.deinit(std.testing.allocator);
+        flat.write_scratch.deinit(std.testing.allocator);
+    }
+    try flat.writeResponses(&responses);
+    try std.testing.expectEqual(@as(usize, 1), flat_observer.calls);
+    try std.testing.expectEqual(@as(usize, 1), flat_observer.max_non_empty_parts);
+    var vectored_bytes: [2048]u8 = undefined;
+    try readExactForTest(io, peer, vectored_bytes[0..flat_observer.len]);
+    try std.testing.expectEqualStrings(
+        flat_observer.bytes[0..flat_observer.len],
+        vectored_bytes[0..flat_observer.len],
+    );
+}
+
+test "HTTP/1 flatten allocation failure is retryable before transport" {
+    const Observer = struct {
+        calls: usize = 0,
+
+        fn write(
+            context: ?*anyopaque,
+            _: net.Socket.Handle,
+            header: []const u8,
+            data: []const []const u8,
+            _: usize,
+        ) net.Stream.Writer.Error!usize {
+            const self: *@This() = @ptrCast(@alignCast(context.?));
+            self.calls += 1;
+            var total = header.len;
+            if (data.len != 0) for (data[0 .. data.len - 1]) |bytes| {
+                total += bytes.len;
+            };
+            return total;
+        }
+    };
+
+    const allocator = std.testing.allocator;
+    var threaded = std.Io.Threaded.init(allocator, .{});
+    defer threaded.deinit();
+    var observer: Observer = .{};
+    var vtable = threaded.io().vtable.*;
+    vtable.netWrite = Observer.write;
+    var client = Client{
+        .io = .{ .userdata = &observer, .vtable = &vtable },
+        .allocator = allocator,
+        .stream = undefined,
+        .limits = .{ .write_strategy = .flatten },
+    };
+    defer {
+        client.inbuf.deinit(allocator);
+        client.write_scratch.deinit(allocator);
+    }
+    const options = RequestOptions{
+        .method = .POST,
+        .host = "example.test",
+        .body = "body",
+    };
+    _ = try runtime_write.prepareRequest(allocator, options, &client.write_scratch);
+    var failing = std.testing.FailingAllocator.init(allocator, .{
+        .fail_index = 0,
+    });
+    client.allocator = failing.allocator();
+    try std.testing.expectError(
+        error.OutOfMemory,
+        client.writeRequestFailClosed(options),
+    );
+    client.allocator = allocator;
+    try std.testing.expect(client.isReusable());
+    try std.testing.expectEqual(@as(usize, 0), observer.calls);
+}
+
+test "HTTP/1 aggregate write failures make connections unusable" {
+    const FailingWriter = struct {
+        calls: usize = 0,
+
+        fn write(
+            context: ?*anyopaque,
+            _: net.Socket.Handle,
+            header: []const u8,
+            _: []const []const u8,
+            _: usize,
+        ) net.Stream.Writer.Error!usize {
+            const self: *@This() = @ptrCast(@alignCast(context.?));
+            self.calls += 1;
+            if (self.calls == 1) return @min(header.len, 4);
+            return error.NetworkDown;
+        }
+    };
+
+    var threaded = std.Io.Threaded.init(std.testing.allocator, .{});
+    defer threaded.deinit();
+
+    var client_writer: FailingWriter = .{};
+    var client_vtable = threaded.io().vtable.*;
+    client_vtable.netWrite = FailingWriter.write;
+    var client = Client{
+        .io = .{ .userdata = &client_writer, .vtable = &client_vtable },
+        .allocator = std.testing.allocator,
+        .stream = undefined,
+    };
+    defer {
+        client.inbuf.deinit(std.testing.allocator);
+        client.write_scratch.deinit(std.testing.allocator);
+    }
+    try std.testing.expectError(
+        error.NetworkDown,
+        client.request(.{
+            .method = .POST,
+            .target = "/partial-request",
+            .host = "example.test",
+            .body = "body",
+        }),
+    );
+    try std.testing.expect(!client.isReusable());
+    const client_calls = client_writer.calls;
+    try std.testing.expectError(
+        error.ConnectionUnusable,
+        client.request(.{ .host = "example.test" }),
+    );
+    try std.testing.expectEqual(client_calls, client_writer.calls);
+
+    var response_writer: FailingWriter = .{};
+    var response_vtable = threaded.io().vtable.*;
+    response_vtable.netWrite = FailingWriter.write;
+    var connection = Connection{
+        .io = .{ .userdata = &response_writer, .vtable = &response_vtable },
+        .allocator = std.testing.allocator,
+        .stream = undefined,
+        .limits = .{ .auto_date_header = false },
+    };
+    defer {
+        connection.inbuf.deinit(std.testing.allocator);
+        connection.write_scratch.deinit(std.testing.allocator);
+    }
+    try std.testing.expectError(
+        error.NetworkDown,
+        connection.writeResponse(.{ .body = "body" }),
+    );
+    const response_calls = response_writer.calls;
+    try std.testing.expectError(
+        error.ConnectionUnusable,
+        connection.writeResponse(.{ .body = "must-not-write" }),
+    );
+    try std.testing.expectEqual(response_calls, response_writer.calls);
+
+    var batch_writer: FailingWriter = .{};
+    var batch_vtable = threaded.io().vtable.*;
+    batch_vtable.netWrite = FailingWriter.write;
+    var batch_connection = Connection{
+        .io = .{ .userdata = &batch_writer, .vtable = &batch_vtable },
+        .allocator = std.testing.allocator,
+        .stream = undefined,
+        .limits = .{ .auto_date_header = false },
+    };
+    defer {
+        batch_connection.inbuf.deinit(std.testing.allocator);
+        batch_connection.write_scratch.deinit(std.testing.allocator);
+    }
+    try std.testing.expectError(
+        error.NetworkDown,
+        batch_connection.writeResponses(&.{
+            .{ .body = "one" },
+            .{ .body = "two" },
+        }),
+    );
+    const batch_calls = batch_writer.calls;
+    try std.testing.expectError(
+        error.ConnectionUnusable,
+        batch_connection.writeResponses(&.{.{ .body = "must-not-write" }}),
+    );
+    try std.testing.expectEqual(batch_calls, batch_writer.calls);
+
+    var continue_writer: FailingWriter = .{};
+    var continue_vtable = threaded.io().vtable.*;
+    continue_vtable.netWrite = FailingWriter.write;
+    var continue_connection = Connection{
+        .io = .{ .userdata = &continue_writer, .vtable = &continue_vtable },
+        .allocator = std.testing.allocator,
+        .stream = undefined,
+        .limits = .{ .auto_date_header = false },
+    };
+    defer {
+        continue_connection.inbuf.deinit(std.testing.allocator);
+        continue_connection.write_scratch.deinit(std.testing.allocator);
+    }
+    try continue_connection.inbuf.appendSlice(
+        std.testing.allocator,
+        "POST /continue HTTP/1.1\r\n" ++
+            "Host: example.test\r\n" ++
+            "Content-Length: 1\r\n" ++
+            "Expect: 100-continue\r\n\r\nx",
+    );
+    try std.testing.expectError(
+        error.NetworkDown,
+        continue_connection.readRequest(.{}),
+    );
+    const continue_calls = continue_writer.calls;
+    try std.testing.expectError(
+        error.ConnectionUnusable,
+        continue_connection.readRequest(.{}),
+    );
+    try std.testing.expectEqual(continue_calls, continue_writer.calls);
+}
+
+test "HTTP/1 TLS key updates require an idle HTTP exchange" {
+    const fake_client: *tls_stream.ClientConnection = @ptrFromInt(4096);
+    var client = Client{
+        .io = undefined,
+        .allocator = std.testing.allocator,
+        .stream = undefined,
+        .tls_vail_conn = fake_client,
+    };
+    client.writer_state.phase = .writing;
+    try std.testing.expectError(
+        error.ConnectionBusy,
+        client.updateTrafficKeys(false),
+    );
+    client.writer_state.phase = .unusable;
+    try std.testing.expectError(
+        error.ConnectionUnusable,
+        client.updateTrafficKeys(false),
+    );
+
+    const fake_server: *tls_stream.ServerConnection = @ptrFromInt(4096);
+    var connection = Connection{
+        .io = undefined,
+        .allocator = std.testing.allocator,
+        .stream = undefined,
+        .tls_server_conn = fake_server,
+    };
+    connection.writer_state.phase = .awaiting_peer;
+    try std.testing.expectError(
+        error.ConnectionBusy,
+        connection.updateTrafficKeys(false),
+    );
+    connection.writer_state.phase = .unusable;
+    try std.testing.expectError(
+        error.ConnectionUnusable,
+        connection.updateTrafficKeys(false),
+    );
+}
+
+test "HTTP/1 large response batch write failure makes connection unusable" {
+    const allocator = std.testing.allocator;
+    var threaded = std.Io.Threaded.init(allocator, .{});
+    defer threaded.deinit();
+    const io = threaded.io();
+    var listener = try (net.IpAddress{ .ip4 = .loopback(0) }).listen(
+        io,
+        .{ .reuse_address = true },
+    );
+    defer listener.deinit(io);
+    const stream = try listener.socket.address.connect(
+        io,
+        .{ .mode = .stream },
+    );
+    var peer = try listener.accept(io);
+    const abortive: std.posix.linger = .{ .onoff = 1, .linger = 0 };
+    try std.posix.setsockopt(
+        peer.socket.handle,
+        std.posix.SOL.SOCKET,
+        std.posix.SO.LINGER,
+        std.mem.asBytes(&abortive),
+    );
+    peer.close(io);
+    var byte: [1]u8 = undefined;
+    var buffers = [_][]u8{&byte};
+    try std.testing.expectError(
+        error.ConnectionResetByPeer,
+        io.vtable.netRead(io.userdata, stream.socket.handle, &buffers),
+    );
+
+    var connection = Connection{
+        .io = io,
+        .allocator = allocator,
+        .stream = stream,
+        .limits = .{ .auto_date_header = false },
+    };
+    defer connection.close();
+    const large_body = "x" ** (response_batch_borrow_threshold + 1);
+    var failed = false;
+    connection.writeResponses(&.{.{ .body = large_body }}) catch |err| {
+        failed = true;
+        try std.testing.expect(err == error.SocketUnconnected or
+            err == error.ConnectionResetByPeer);
+    };
+    try std.testing.expect(failed);
+    try std.testing.expectError(
+        error.ConnectionUnusable,
+        connection.writeResponse(.{ .body = "must-not-write" }),
+    );
+}
+
+test "HTTP/1 aggregate 100 Continue partial write is terminal" {
+    const allocator = std.testing.allocator;
+    var threaded = std.Io.Threaded.init(allocator, .{
+        .async_limit = .unlimited,
+    });
+    defer threaded.deinit();
+    const io = threaded.io();
+    var server = try Server.listen(
+        allocator,
+        io,
+        .{ .ip4 = .loopback(0) },
+        .{ .auto_date_header = false },
+    );
+    defer server.deinit();
+
+    const FailingWriter = struct {
+        base_io: std.Io,
+        calls: usize = 0,
+
+        fn now(
+            context: ?*anyopaque,
+            clock: std.Io.Clock,
+        ) std.Io.Timestamp {
+            const self: *@This() = @ptrCast(@alignCast(context.?));
+            return self.base_io.vtable.now(self.base_io.userdata, clock);
+        }
+
+        fn write(
+            context: ?*anyopaque,
+            handle: net.Socket.Handle,
+            header: []const u8,
+            _: []const []const u8,
+            _: usize,
+        ) net.Stream.Writer.Error!usize {
+            const self: *@This() = @ptrCast(@alignCast(context.?));
+            self.calls += 1;
+            if (self.calls != 1) return error.NetworkDown;
+            return self.base_io.vtable.netWrite(
+                self.base_io.userdata,
+                handle,
+                header[0..@min(header.len, 4)],
+                &.{""},
+                0,
+            );
+        }
+    };
+
+    const Shared = struct {
+        server: *Server,
+        io: std.Io,
+        writer_calls: usize = 0,
+        err: ?anyerror = null,
+
+        fn run(self: *@This()) void {
+            self.runFallible() catch |err| {
+                self.err = err;
+            };
+        }
+
+        fn runFallible(self: *@This()) !void {
+            var connection = try self.server.accept();
+            defer connection.close();
+            var writer = FailingWriter{ .base_io = self.io };
+            var vtable = self.io.vtable.*;
+            vtable.netWrite = FailingWriter.write;
+            vtable.now = FailingWriter.now;
+            const deadline = std.Io.Clock.Timestamp.fromNow(self.io, .{
+                .raw = .fromSeconds(5),
+                .clock = .awake,
+            });
+            connection.io = .{ .userdata = &writer, .vtable = &vtable };
+
+            try std.testing.expectError(
+                error.NetworkDown,
+                connection.readRequestWithDeadline(.{}, deadline),
+            );
+            const calls = writer.calls;
+            try std.testing.expectError(
+                error.ConnectionUnusable,
+                connection.readRequest(.{}),
+            );
+            try std.testing.expectError(
+                error.ConnectionUnusable,
+                connection.writeResponse(.{ .body = "must-not-write" }),
+            );
+            try std.testing.expectEqual(calls, writer.calls);
+            self.writer_calls = writer.calls;
+            // Connection.close uses the ordinary vtable methods and therefore
+            // must receive the Threaded backend's original userdata.
+            connection.io = self.io;
+        }
+    };
+    var shared = Shared{ .server = &server, .io = io };
+    const thread = try std.Thread.spawn(.{}, Shared.run, .{&shared});
+    var joined = false;
+    defer if (!joined) thread.join();
+
+    const client = try server.address().connect(io, .{ .mode = .stream });
+    defer client.close(io);
+    try writeAllToStream(
+        io,
+        client,
+        "POST /continue HTTP/1.1\r\n" ++
+            "Host: example.test\r\n" ++
+            "Content-Length: 4\r\n" ++
+            "Expect: 100-continue\r\n\r\n",
+    );
+    var visible_prefix: [4]u8 = undefined;
+    try readExactForTest(io, client, &visible_prefix);
+    try std.testing.expectEqualStrings("HTTP", &visible_prefix);
+
+    thread.join();
+    joined = true;
+    if (shared.err) |err| return err;
+    try std.testing.expectEqual(@as(usize, 2), shared.writer_calls);
+}
+
+test "HTTP/1 aggregate write validation errors remain retryable" {
+    var client = Client{
+        .io = undefined,
+        .allocator = std.testing.allocator,
+        .stream = undefined,
+    };
+    defer {
+        client.inbuf.deinit(std.testing.allocator);
+        client.write_scratch.deinit(std.testing.allocator);
+    }
+    try std.testing.expectError(
+        error.InvalidContentLength,
+        client.request(.{
+            .method = .POST,
+            .host = "example.test",
+            .headers = &.{.{
+                .name = "Content-Length",
+                .value = "2",
+            }},
+            .body = "x",
+        }),
+    );
+    try std.testing.expect(client.isReusable());
+
+    var connection = Connection{
+        .io = undefined,
+        .allocator = std.testing.allocator,
+        .stream = undefined,
+        .limits = .{ .auto_date_header = false },
+    };
+    defer {
+        connection.inbuf.deinit(std.testing.allocator);
+        connection.write_scratch.deinit(std.testing.allocator);
+    }
+
+    try std.testing.expectError(
+        error.InvalidContentLength,
+        connection.writeResponse(.{ .status = 204, .body = "forbidden" }),
+    );
+    try std.testing.expectEqual(
+        body_writer.State.Phase.idle,
+        connection.writer_state.phase,
+    );
+    try std.testing.expectError(
+        error.InvalidContentLength,
+        connection.writeResponses(&.{
+            .{ .body = "ok" },
+            .{ .status = 204, .body = "forbidden" },
+        }),
+    );
+    try std.testing.expectEqual(
+        body_writer.State.Phase.idle,
+        connection.writer_state.phase,
+    );
 }
 
 test "HTTP/1 response batch borrows fixed bodies after validation" {
@@ -7014,10 +8370,24 @@ test "HTTP/1 runtime opens CONNECT tunnel" {
             try std.testing.expectEqualStrings("example.com:443", request.request.header("host").?);
 
             var tunnel = try connection.acceptConnectTunnel(request.request, &.{});
+            try std.testing.expectError(
+                error.ConnectionUnusable,
+                connection.readRequest(.{}),
+            );
+            try std.testing.expectError(
+                error.ConnectionUnusable,
+                connection.writeResponse(.{ .status = 204 }),
+            );
             var buf: [64]u8 = undefined;
             const n = try tunnel.read(&buf);
             try std.testing.expectEqualStrings("client tunnel bytes", buf[0..n]);
-            try tunnel.write("server tunnel bytes");
+            try std.testing.expectEqual(@as(usize, 0), try tunnel.read(&buf));
+            try tunnel.writeParts("server tunnel ", "bytes");
+            try tunnel.closeWrite();
+            try std.testing.expectError(
+                error.ConnectionClosed,
+                tunnel.write("late server bytes"),
+            );
         }
     };
 
@@ -7031,15 +8401,347 @@ test "HTTP/1 runtime opens CONNECT tunnel" {
     defer client.close();
 
     var tunnel = try client.openConnectTunnel("example.com:443", &.{});
-    try tunnel.write("client tunnel bytes");
+    try std.testing.expect(!client.isReusable());
+    try std.testing.expectError(
+        error.ConnectionUnusable,
+        client.request(.{
+            .method = .GET,
+            .target = "/after-connect",
+            .host = "example.com",
+        }),
+    );
+    try tunnel.writeSlices(&.{ "client ", "", "tunnel ", "bytes" });
+    try tunnel.closeWrite();
+    try std.testing.expectError(
+        error.ConnectionClosed,
+        tunnel.closeWrite(),
+    );
+    try std.testing.expectError(
+        error.ConnectionClosed,
+        tunnel.write("late client bytes"),
+    );
     var buf: [64]u8 = undefined;
     const n = try tunnel.read(&buf);
     try std.testing.expectEqualStrings("server tunnel bytes", buf[0..n]);
+    try std.testing.expectEqual(@as(usize, 0), try tunnel.read(&buf));
 
     thread.join();
     if (shared.err) |err| return err;
 
-    try std.testing.expectError(error.MalformedStartLine, client.openConnectTunnel("/not-authority", &.{}));
+    try std.testing.expectError(
+        error.ConnectionUnusable,
+        client.openConnectTunnel("/not-authority", &.{}),
+    );
+}
+
+test "HTTP/1 TLS tunnels close the write half and retain reads" {
+    const allocator = std.testing.allocator;
+    const tls_testing = @import("../tls/testing.zig");
+    var certificate_der: [tls_testing.certificate_der_len]u8 = undefined;
+    try std.base64.standard.Decoder.decode(
+        &certificate_der,
+        tls_testing.certificate_base64,
+    );
+    const key_pair = try tls_testing.serverKeyPair();
+    const public_key = key_pair.public_key.toUncompressedSec1();
+
+    inline for (.{ false, true }) |use_vail_client| {
+        var threaded = std.Io.Threaded.init(allocator, .{
+            .async_limit = .unlimited,
+        });
+        defer threaded.deinit();
+        const io = threaded.io();
+        var server = try TlsServer.listen(
+            allocator,
+            io,
+            .{ .ip4 = .loopback(0) },
+            .{ .identity = .{
+                .certificate_chain = &.{&certificate_der},
+                .signer = .{ .ecdsa_p256_sha256 = .{
+                    .key_pair = key_pair,
+                } },
+            } },
+        );
+        defer server.deinit();
+
+        const Shared = struct {
+            server: *TlsServer,
+            err: ?anyerror = null,
+
+            fn run(self: *@This()) void {
+                self.runFallible() catch |err| {
+                    self.err = err;
+                };
+            }
+
+            fn runFallible(self: *@This()) !void {
+                var connection = try self.server.accept();
+                defer connection.close();
+                var request = try connection.readRequest(.{});
+                defer request.deinit(allocator);
+                var tunnel = try connection.acceptConnectTunnel(
+                    request.request,
+                    &.{},
+                );
+                var received: [12]u8 = undefined;
+                var offset: usize = 0;
+                while (true) {
+                    const count = try tunnel.read(received[offset..]);
+                    if (count == 0) break;
+                    offset += count;
+                }
+                try std.testing.expectEqualStrings(
+                    "client bytes",
+                    received[0..offset],
+                );
+                try tunnel.writeParts("server ", "bytes");
+                try tunnel.closeWrite();
+                try std.testing.expectError(
+                    error.ConnectionClosed,
+                    tunnel.write("late server bytes"),
+                );
+                try std.testing.expectError(
+                    error.ConnectionClosed,
+                    tunnel.updateTrafficKeys(false),
+                );
+            }
+        };
+        var shared = Shared{ .server = &server };
+        const thread = try std.Thread.spawn(.{}, Shared.run, .{&shared});
+        var joined = false;
+        defer if (!joined) thread.join();
+
+        var ca: ?struct { CertificateBundle, std.Io.RwLock } = null;
+        defer if (ca) |*value| value[0].deinit(allocator);
+        var client = if (use_vail_client)
+            try Client.connectVailTlsHost(
+                allocator,
+                io,
+                "localhost",
+                server.address().ip4.port,
+                .{},
+                .{ .server_verifier = .{
+                    .pinned_ecdsa_p256_public_key = public_key,
+                } },
+            )
+        else client: {
+            ca = try localTestCaBundle(allocator, io);
+            break :client try Client.connectTlsHost(
+                allocator,
+                io,
+                "localhost",
+                server.address().ip4.port,
+                .{},
+                .{ .ca_bundle = .{
+                    .bundle = &ca.?[0],
+                    .lock = &ca.?[1],
+                } },
+            );
+        };
+        defer client.close();
+        var tunnel = try client.openConnectTunnel(
+            "example.com:443",
+            &.{},
+        );
+        try tunnel.writeSlices(&.{ "client", "", " ", "bytes" });
+        try tunnel.closeWrite();
+        try std.testing.expectError(
+            error.ConnectionClosed,
+            tunnel.closeWrite(),
+        );
+        try std.testing.expectError(
+            error.ConnectionClosed,
+            tunnel.write("late client bytes"),
+        );
+        try std.testing.expectError(
+            error.ConnectionClosed,
+            tunnel.updateTrafficKeys(false),
+        );
+        var received: [12]u8 = undefined;
+        var offset: usize = 0;
+        while (true) {
+            const count = try tunnel.read(received[offset..]);
+            if (count == 0) break;
+            offset += count;
+        }
+        try std.testing.expectEqualStrings(
+            "server bytes",
+            received[0..offset],
+        );
+
+        thread.join();
+        joined = true;
+        if (shared.err) |err| return err;
+    }
+}
+
+test "HTTP/1 tunnel write-half close failure is terminal" {
+    const PartialFailWriter = struct {
+        calls: usize = 0,
+
+        fn write(
+            context: ?*anyopaque,
+            _: net.Socket.Handle,
+            header: []const u8,
+            _: []const []const u8,
+            _: usize,
+        ) net.Stream.Writer.Error!usize {
+            const self: *@This() = @ptrCast(@alignCast(context.?));
+            self.calls += 1;
+            if (self.calls == 1) return @min(header.len, 4);
+            return error.NetworkDown;
+        }
+    };
+
+    const FailingIo = struct {
+        shutdown_calls: usize = 0,
+        write_calls: usize = 0,
+
+        fn shutdown(
+            context: ?*anyopaque,
+            _: net.Socket.Handle,
+            _: net.ShutdownHow,
+        ) net.ShutdownError!void {
+            const self: *@This() = @ptrCast(@alignCast(context.?));
+            self.shutdown_calls += 1;
+            return error.NetworkDown;
+        }
+
+        fn write(
+            context: ?*anyopaque,
+            _: net.Socket.Handle,
+            _: []const u8,
+            _: []const []const u8,
+            _: usize,
+        ) net.Stream.Writer.Error!usize {
+            const self: *@This() = @ptrCast(@alignCast(context.?));
+            self.write_calls += 1;
+            return error.NetworkDown;
+        }
+    };
+
+    var threaded = std.Io.Threaded.init(std.testing.allocator, .{});
+    defer threaded.deinit();
+
+    var write_failure: FailingIo = .{};
+    var write_failure_vtable = threaded.io().vtable.*;
+    write_failure_vtable.netWrite = FailingIo.write;
+    var write_failure_inbuf: std.ArrayList(u8) = .empty;
+    defer write_failure_inbuf.deinit(std.testing.allocator);
+    var write_failure_tunnel = Tunnel{
+        .io = .{
+            .userdata = &write_failure,
+            .vtable = &write_failure_vtable,
+        },
+        .allocator = std.testing.allocator,
+        .stream = undefined,
+        .inbuf = &write_failure_inbuf,
+    };
+    try std.testing.expectError(
+        error.NetworkDown,
+        write_failure_tunnel.write("first-write"),
+    );
+    try std.testing.expectError(
+        error.ConnectionClosed,
+        write_failure_tunnel.write("must-not-write"),
+    );
+    try std.testing.expectEqual(@as(usize, 1), write_failure.write_calls);
+
+    var partial: PartialFailWriter = .{};
+    var partial_vtable = threaded.io().vtable.*;
+    partial_vtable.netWrite = PartialFailWriter.write;
+    var partial_inbuf: std.ArrayList(u8) = .empty;
+    defer partial_inbuf.deinit(std.testing.allocator);
+    var partial_tunnel = Tunnel{
+        .io = .{ .userdata = &partial, .vtable = &partial_vtable },
+        .allocator = std.testing.allocator,
+        .stream = undefined,
+        .inbuf = &partial_inbuf,
+    };
+
+    try std.testing.expectError(
+        error.NetworkDown,
+        partial_tunnel.writeParts("head", "payload"),
+    );
+    try std.testing.expectEqual(@as(usize, 2), partial.calls);
+    try std.testing.expectError(
+        error.ConnectionClosed,
+        partial_tunnel.write("must-not-write"),
+    );
+    try std.testing.expectError(
+        error.ConnectionClosed,
+        partial_tunnel.writeParts("must", "not-write"),
+    );
+    try std.testing.expectError(
+        error.ConnectionClosed,
+        partial_tunnel.writeSlices(&.{ "must", "not", "write" }),
+    );
+    try std.testing.expectEqual(@as(usize, 2), partial.calls);
+
+    var failing: FailingIo = .{};
+    var vtable = threaded.io().vtable.*;
+    vtable.netShutdown = FailingIo.shutdown;
+    vtable.netWrite = FailingIo.write;
+    var inbuf: std.ArrayList(u8) = .empty;
+    defer inbuf.deinit(std.testing.allocator);
+    var tunnel = Tunnel{
+        .io = .{ .userdata = &failing, .vtable = &vtable },
+        .allocator = std.testing.allocator,
+        .stream = undefined,
+        .inbuf = &inbuf,
+    };
+
+    try std.testing.expectError(error.NetworkDown, tunnel.closeWrite());
+    try std.testing.expectEqual(@as(usize, 1), failing.shutdown_calls);
+    try std.testing.expectError(error.ConnectionClosed, tunnel.closeWrite());
+    try std.testing.expectError(
+        error.ConnectionClosed,
+        tunnel.write("must-not-write"),
+    );
+    try std.testing.expectError(
+        error.ConnectionClosed,
+        tunnel.updateTrafficKeys(false),
+    );
+    try std.testing.expectEqual(@as(usize, 1), failing.shutdown_calls);
+    try std.testing.expectEqual(@as(usize, 0), failing.write_calls);
+}
+
+test "HTTP/1 TLS post-close-notify shutdown treats disconnected peer as complete" {
+    const ShutdownIo = struct {
+        calls: usize = 0,
+        result: enum { disconnected, failed } = .disconnected,
+
+        fn shutdown(
+            context: ?*anyopaque,
+            _: net.Socket.Handle,
+            _: net.ShutdownHow,
+        ) net.ShutdownError!void {
+            const self: *@This() = @ptrCast(@alignCast(context.?));
+            self.calls += 1;
+            return switch (self.result) {
+                .disconnected => error.SocketUnconnected,
+                .failed => error.NetworkDown,
+            };
+        }
+    };
+
+    var threaded = std.Io.Threaded.init(std.testing.allocator, .{});
+    defer threaded.deinit();
+    var state: ShutdownIo = .{};
+    var vtable = threaded.io().vtable.*;
+    vtable.netShutdown = ShutdownIo.shutdown;
+    const io = std.Io{ .userdata = &state, .vtable = &vtable };
+    const stream: net.Stream = undefined;
+
+    try shutdownAfterTlsCloseNotify(io, stream);
+    try std.testing.expectEqual(@as(usize, 1), state.calls);
+
+    state.result = .failed;
+    try std.testing.expectError(
+        error.NetworkDown,
+        shutdownAfterTlsCloseNotify(io, stream),
+    );
+    try std.testing.expectEqual(@as(usize, 2), state.calls);
 }
 
 test "HTTP/1 tunnel deadline preserves buffered bytes and recovers after timeout" {
@@ -7189,6 +8891,7 @@ test "HTTP/1 runtime hands off generic Upgrade with buffered bytes" {
                 "client-preface",
                 &payload,
             );
+            try tunnel.closeWrite();
         }
     };
     var shared = Shared{ .server = &server };
@@ -7207,6 +8910,7 @@ test "HTTP/1 runtime hands off generic Upgrade with buffered bytes" {
             "Upgrade: netz-test\r\n\r\nclient-preface",
     );
     var tunnel = try client.finishUpgrade("netz-test");
+    try tunnel.closeWrite();
     var preface: [14]u8 = undefined;
     var read: usize = 0;
     while (read < preface.len) {
@@ -7215,6 +8919,7 @@ test "HTTP/1 runtime hands off generic Upgrade with buffered bytes" {
         read += count;
     }
     try std.testing.expectEqualStrings("server-preface", &preface);
+    try std.testing.expectEqual(@as(usize, 0), try tunnel.read(&preface));
 
     thread.join();
     if (shared.err) |err| return err;
@@ -7713,6 +9418,132 @@ test "HTTP/1 client observes informational response heads in order" {
     );
     try std.testing.expectEqual(@as(u16, 200), response.response.status);
     try std.testing.expectEqualStrings("final", response.response.body);
+}
+
+test "HTTP/1 aggregate request rejects informational callback reentry" {
+    const allocator = std.testing.allocator;
+    var threaded = std.Io.Threaded.init(allocator, .{});
+    defer threaded.deinit();
+    const io = threaded.io();
+
+    var server = try Server.listen(
+        allocator,
+        io,
+        .{ .ip4 = .loopback(0) },
+        .{ .max_head_bytes = 4096, .max_body_bytes = 4096 },
+    );
+    defer server.deinit();
+
+    const Shared = struct {
+        server: *Server,
+        err: ?anyerror = null,
+
+        fn run(shared: *@This()) void {
+            shared.runFallible() catch |err| {
+                shared.err = err;
+            };
+        }
+
+        fn runFallible(shared: *@This()) !void {
+            var connection = try shared.server.accept();
+            defer connection.close();
+            var first = try connection.readRequest(.{});
+            defer first.deinit(shared.server.allocator);
+            try std.testing.expectEqualStrings(
+                "/first",
+                first.request.target,
+            );
+            try writeAllToStream(
+                shared.server.io,
+                connection.stream,
+                "HTTP/1.1 103 Early Hints\r\n" ++
+                    "Link: </next>; rel=preload\r\n\r\n" ++
+                    "HTTP/1.1 200 OK\r\n" ++
+                    "Content-Length: 5\r\n\r\nfirst",
+            );
+
+            var second = try connection.readRequest(.{});
+            defer second.deinit(shared.server.allocator);
+            try std.testing.expectEqualStrings(
+                "/after",
+                second.request.target,
+            );
+            try writeAllToStream(
+                shared.server.io,
+                connection.stream,
+                "HTTP/1.1 200 OK\r\n" ++
+                    "Content-Length: 5\r\n" ++
+                    "Connection: close\r\n\r\nafter",
+            );
+        }
+    };
+
+    const Observer = struct {
+        client: *Client,
+        error_seen: ?anyerror = null,
+        unexpectedly_started: bool = false,
+
+        fn onResponse(
+            raw: *anyopaque,
+            head: InformationalResponseHead,
+        ) void {
+            const self: *@This() = @ptrCast(@alignCast(raw));
+            if (head.status != 103) @panic("unexpected interim status");
+            var nested = self.client.startRequest(.{
+                .method = .GET,
+                .target = "/nested",
+                .host = "localhost",
+                .body_length = 0,
+            }) catch |err| {
+                self.error_seen = err;
+                return;
+            };
+            self.unexpectedly_started = true;
+            nested.deinit();
+        }
+    };
+
+    var shared = Shared{ .server = &server };
+    const thread = try std.Thread.spawn(.{}, Shared.run, .{&shared});
+    var joined = false;
+    defer if (!joined) thread.join();
+    var client = try Client.connect(
+        allocator,
+        io,
+        server.address(),
+        .{ .max_head_bytes = 4096, .max_body_bytes = 4096 },
+    );
+    defer client.close();
+    var observer = Observer{ .client = &client };
+    var first = try client.requestWithInformational(
+        .{
+            .method = .GET,
+            .target = "/first",
+            .headers = &.{.{ .name = "Host", .value = "localhost" }},
+        },
+        .{ .context = &observer, .on_response = Observer.onResponse },
+    );
+    defer first.deinit(allocator);
+    try std.testing.expect(!observer.unexpectedly_started);
+    switch (observer.error_seen orelse
+        return error.TestUnexpectedResult) {
+        error.ConnectionBusy => {},
+        else => return error.TestUnexpectedResult,
+    }
+    try std.testing.expectEqualStrings("first", first.response.body);
+    try std.testing.expect(client.isReusable());
+
+    var second = try client.request(.{
+        .method = .GET,
+        .target = "/after",
+        .headers = &.{.{ .name = "Host", .value = "localhost" }},
+    });
+    defer second.deinit(allocator);
+    try std.testing.expectEqualStrings("after", second.response.body);
+
+    thread.join();
+    joined = true;
+    if (shared.err) |err| return err;
 }
 
 test "HTTP/1 client bounds informational response chains" {
@@ -9540,6 +11371,7 @@ test "HTTP/1 buffered aggregate chunk limit ignores pipeline suffix" {
         false,
         null,
         null,
+        null,
     );
     defer allocator.free(bytes);
     try std.testing.expectEqualStrings(first, bytes);
@@ -9720,6 +11552,97 @@ test "HTTP/1 non-buffered chunked reader accepts exact and zero body limits" {
     if (shared.err) |err| return err;
 }
 
+pub const IdleSocketState = enum { clean, data, eof, failed };
+
+pub fn probeIdleSocket(stream: net.Stream) IdleSocketState {
+    if (comptime builtin.os.tag == .windows or builtin.os.tag == .wasi) {
+        return .clean;
+    } else {
+        var byte: [1]u8 = undefined;
+        var iov: std.posix.iovec = .{
+            .base = &byte,
+            .len = byte.len,
+        };
+        var message: std.posix.msghdr = .{
+            .name = null,
+            .namelen = 0,
+            .iov = (&iov)[0..1],
+            .iovlen = 1,
+            .control = null,
+            .controllen = 0,
+            .flags = 0,
+        };
+        while (true) {
+            const rc = std.posix.system.recvmsg(
+                stream.socket.handle,
+                &message,
+                std.posix.MSG.PEEK | std.posix.MSG.DONTWAIT,
+            );
+            return switch (std.posix.errno(rc)) {
+                .SUCCESS => if (rc == 0) .eof else .data,
+                .AGAIN => .clean,
+                .INTR => continue,
+                else => .failed,
+            };
+        }
+    }
+}
+
+test "HTTP/1 native nonblocking peek distinguishes idle data and EOF" {
+    if (comptime builtin.os.tag == .windows or builtin.os.tag == .wasi) {
+        return error.SkipZigTest;
+    }
+    var threaded = std.Io.Threaded.init(std.testing.allocator, .{});
+    defer threaded.deinit();
+    const io = threaded.io();
+    var listener = try (net.IpAddress{ .ip4 = .loopback(0) }).listen(
+        io,
+        .{ .reuse_address = true },
+    );
+    defer listener.deinit(io);
+    const client = try listener.socket.address.connect(
+        io,
+        .{ .mode = .stream },
+    );
+    defer client.close(io);
+    const server = try listener.accept(io);
+    defer server.close(io);
+
+    try std.testing.expectEqual(IdleSocketState.clean, probeIdleSocket(client));
+
+    const write_parts = [_][]const u8{""};
+    _ = try io.vtable.netWrite(
+        io.userdata,
+        server.socket.handle,
+        "x",
+        &write_parts,
+        0,
+    );
+    var attempts: usize = 0;
+    while (probeIdleSocket(client) == .clean and attempts < 100) : (attempts += 1) {
+        try std.Io.sleep(io, .fromMilliseconds(1), .awake);
+    }
+    try std.testing.expectEqual(IdleSocketState.data, probeIdleSocket(client));
+    var read_byte: [1]u8 = undefined;
+    var read_parts = [_][]u8{&read_byte};
+    try std.testing.expectEqual(
+        @as(usize, 1),
+        try io.vtable.netRead(
+            io.userdata,
+            client.socket.handle,
+            &read_parts,
+        ),
+    );
+    try std.testing.expectEqual(@as(u8, 'x'), read_byte[0]);
+
+    try server.shutdown(io, .send);
+    attempts = 0;
+    while (probeIdleSocket(client) == .clean and attempts < 100) : (attempts += 1) {
+        try std.Io.sleep(io, .fromMilliseconds(1), .awake);
+    }
+    try std.testing.expectEqual(IdleSocketState.eof, probeIdleSocket(client));
+}
+
 test {
     _ = @import("runtime/message/tests/framing.zig");
     _ = @import("runtime/unix_tests.zig");
@@ -9733,5 +11656,6 @@ test {
     _ = @import("runtime/server_lifecycle_tests.zig");
     _ = @import("runtime/half_close_tests.zig");
     _ = @import("runtime/tls_close_tests.zig");
+    _ = @import("runtime/tls_server_api_tests.zig");
     _ = @import("runtime/date_tests.zig");
 }

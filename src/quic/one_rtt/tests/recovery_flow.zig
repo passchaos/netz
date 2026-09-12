@@ -344,6 +344,25 @@ test "QUIC stateful batch omits DATAGRAM bytes from mixed recovery payload" {
         @as(std.meta.Tag(quic.Frame), parsed.frame),
     );
     try std.testing.expectEqualStrings("reliable", parsed.frame.stream.data);
+
+    const single = [_]quic.Frame{
+        .{ .ping = {} },
+        .{ .datagram = .{
+            .data = "single-unreliable",
+            .length_present = true,
+        } },
+    };
+    try connection.sendAt(&single, 1_500);
+    const single_recovery = one_rtt.testing.recoveryPayloadForPacket(
+        &connection,
+        2,
+    ) orelse return error.TestUnexpectedResult;
+    const single_parsed = try quic.parseFrame(single_recovery);
+    try std.testing.expectEqual(single_recovery.len, single_parsed.consumed);
+    try std.testing.expectEqual(
+        quic.Frame.ping,
+        @as(std.meta.Tag(quic.Frame), single_parsed.frame),
+    );
 }
 
 test "QUIC imported 0-RTT DATAGRAM retains only a PING probe" {
@@ -471,6 +490,130 @@ test "QUIC imported 0-RTT copies preserve application packet numbers" {
 
     try connection.send(&.{.{ .ping = {} }});
     try std.testing.expectEqual(@as(u64, 4), connection.next_packet_number);
+}
+
+test "QUIC sparse 0-RTT import retires protected holes without tracking them" {
+    const allocator = std.testing.allocator;
+    var threaded = std.Io.Threaded.init(allocator, .{});
+    defer threaded.deinit();
+    const io = threaded.io();
+    var endpoint = try quic.runtime.Endpoint.bind(
+        allocator,
+        io,
+        .{ .ip4 = .loopback(0) },
+        .{ .max_datagram_size = 4096 },
+    );
+    defer endpoint.deinit();
+    const keys = quic.protection.deriveAes128Keys(
+        [_]u8{0xcf} ** quic.protection.secret_len,
+    );
+    var connection = try one_rtt.Connection.init(&endpoint, .{
+        .peer = endpoint.address(),
+        .receive_keys = keys,
+        .send_keys = keys,
+        .local_connection_id = "early-local",
+        .peer_connection_id = "early-peer",
+        .enable_pacing = false,
+    });
+    defer connection.deinit();
+
+    try connection.importSentEarlyDataPacketNumbers(
+        0,
+        4,
+        &.{ 1, 3 },
+        1234,
+        &.{.{ .stream = .{
+            .stream_id = 0,
+            .data = "early",
+            .fin = false,
+        } }},
+    );
+    try std.testing.expectEqual(@as(u64, 4), connection.next_packet_number);
+    try std.testing.expectEqual(@as(u64, 5), connection.send_flow.used);
+    try std.testing.expectEqual(
+        @as(usize, 2),
+        connection.stats().sent_packet_stats.tracked_packets,
+    );
+    try std.testing.expectEqual(
+        @as(?usize, 1234),
+        one_rtt.testing.lastSentPacketDatagramSize(&connection),
+    );
+    try std.testing.expect(
+        one_rtt.testing.recoveryPayloadForPacket(&connection, 0) == null,
+    );
+    try std.testing.expect(
+        one_rtt.testing.recoveryPayloadForPacket(&connection, 1) != null,
+    );
+    try std.testing.expect(
+        one_rtt.testing.recoveryPayloadForPacket(&connection, 2) == null,
+    );
+    try std.testing.expect(
+        one_rtt.testing.recoveryPayloadForPacket(&connection, 3) != null,
+    );
+    try std.testing.expectError(
+        error.InvalidAckFrame,
+        connection.sent.validateAckCoversSentPackets(.{
+            .largest_acknowledged = 2,
+            .ack_delay = 0,
+            .first_ack_range = 0,
+        }),
+    );
+
+    try connection.send(&.{.{ .ping = {} }});
+    try std.testing.expectEqual(@as(u64, 5), connection.next_packet_number);
+}
+
+test "QUIC sparse 0-RTT import rejects unordered or out-of-range packet numbers" {
+    const allocator = std.testing.allocator;
+    var threaded = std.Io.Threaded.init(allocator, .{});
+    defer threaded.deinit();
+    var endpoint = try quic.runtime.Endpoint.bind(
+        allocator,
+        threaded.io(),
+        .{ .ip4 = .loopback(0) },
+        .{ .max_datagram_size = 4096 },
+    );
+    defer endpoint.deinit();
+    const keys = quic.protection.deriveAes128Keys(
+        [_]u8{0xd0} ** quic.protection.secret_len,
+    );
+    var connection = try one_rtt.Connection.init(&endpoint, .{
+        .peer = endpoint.address(),
+        .receive_keys = keys,
+        .send_keys = keys,
+        .local_connection_id = "early-local",
+        .peer_connection_id = "early-peer",
+        .enable_pacing = false,
+    });
+    defer connection.deinit();
+    const frames = [_]quic.Frame{.{ .stream = .{
+        .stream_id = 0,
+        .data = "early",
+    } }};
+
+    try std.testing.expectError(
+        error.InvalidPacketNumber,
+        connection.importSentEarlyDataPacketNumbers(
+            0,
+            4,
+            &.{ 2, 1 },
+            null,
+            &frames,
+        ),
+    );
+    try std.testing.expectError(
+        error.InvalidPacketNumber,
+        connection.importSentEarlyDataPacketNumbers(
+            0,
+            4,
+            &.{4},
+            null,
+            &frames,
+        ),
+    );
+    try std.testing.expectEqual(@as(u64, 0), connection.next_packet_number);
+    try std.testing.expectEqual(@as(u64, 0), connection.send_flow.used);
+    try std.testing.expectEqual(@as(usize, 0), connection.pendingRecoveryCount());
 }
 
 test "QUIC rejected 0-RTT copies advance packet numbers without stream state" {
@@ -729,6 +872,182 @@ test "QUIC bounded DATAGRAM send waits for ACK congestion credit" {
     try std.testing.expectEqual(before.datagrams_sent + 1, client.datagramsSent());
 }
 
+test "QUIC DATAGRAM batch validates all input and commits socket prefix" {
+    const allocator = std.testing.allocator;
+    var threaded = std.Io.Threaded.init(allocator, .{});
+    defer threaded.deinit();
+    const io = threaded.io();
+
+    var server_endpoint = try quic.runtime.Endpoint.bind(
+        allocator,
+        io,
+        .{ .ip4 = .loopback(0) },
+        .{ .max_datagram_size = 1400 },
+    );
+    defer server_endpoint.deinit();
+    var client_endpoint = try quic.runtime.Endpoint.bind(
+        allocator,
+        io,
+        .{ .ip4 = .loopback(0) },
+        .{ .max_datagram_size = 1400, .enable_gso_send = false },
+    );
+    defer client_endpoint.deinit();
+
+    const client_cid = [_]u8{ 0x7a, 0x7b, 0x7c, 0x7d };
+    const server_cid = [_]u8{ 0x7e, 0x7f, 0x80, 0x81 };
+    const keys = quic.protection.deriveAes128Keys(
+        [_]u8{0xe4} ** quic.protection.secret_len,
+    );
+    var client = try one_rtt.Connection.init(&client_endpoint, .{
+        .peer = server_endpoint.address(),
+        .receive_keys = keys,
+        .send_keys = keys,
+        .local_connection_id = &client_cid,
+        .peer_connection_id = &server_cid,
+        .peer_max_datagram_frame_size = 1200,
+        .enable_pacing = false,
+    });
+    defer client.deinit();
+    var server = try one_rtt.Connection.init(&server_endpoint, .{
+        .peer = client_endpoint.address(),
+        .receive_keys = keys,
+        .send_keys = keys,
+        .local_connection_id = &server_cid,
+        .peer_connection_id = &client_cid,
+        .local_endpoint = .server,
+        .local_max_datagram_frame_size = 1200,
+        .enable_pacing = false,
+    });
+    defer server.deinit();
+
+    const maximum = client.maxDatagramPayloadSize() orelse
+        return error.TestUnexpectedResult;
+    const oversized = try allocator.alloc(u8, maximum + 1);
+    defer allocator.free(oversized);
+    var committed: usize = 99;
+    try std.testing.expectError(
+        error.DatagramTooLarge,
+        client.sendDatagramsWithDeadline(
+            &.{ "valid", oversized },
+            &committed,
+            .fromNow(io, .{ .raw = .fromSeconds(1), .clock = .awake }),
+        ),
+    );
+    try std.testing.expectEqual(@as(usize, 0), committed);
+    try std.testing.expectEqual(@as(u64, 0), client.next_packet_number);
+    try std.testing.expectEqual(@as(u64, 0), client.datagramsSent());
+
+    var partial_send = ObservedBatchSend{
+        .delegate = client.endpoint.io,
+        .fail_after_prefix = 1,
+    };
+    var partial_vtable = client.endpoint.io.vtable.*;
+    partial_vtable.netSend = ObservedBatchSend.netSend;
+    client.endpoint.io = .{
+        .userdata = &partial_send,
+        .vtable = &partial_vtable,
+    };
+    defer client.endpoint.io = partial_send.delegate;
+
+    const payloads = [_][]const u8{ "one", "two", "three" };
+    try std.testing.expectError(
+        error.NetworkDown,
+        client.sendDatagramsWithDeadline(
+            &payloads,
+            &committed,
+            .fromNow(io, .{ .raw = .fromSeconds(1), .clock = .awake }),
+        ),
+    );
+    try std.testing.expectEqual(@as(usize, 1), committed);
+    try std.testing.expectEqual(@as(usize, 1), partial_send.calls);
+    try std.testing.expectEqual(@as(usize, 3), partial_send.last_message_count);
+    try std.testing.expectEqual(@as(u64, 3), client.next_packet_number);
+    try std.testing.expectEqual(@as(u64, 1), client.datagramsSent());
+
+    client.endpoint.io = partial_send.delegate;
+    try client.sendDatagramsWithTimeout(
+        payloads[committed..],
+        &committed,
+        .fromSeconds(1),
+    );
+    try std.testing.expectEqual(@as(usize, 2), committed);
+    try std.testing.expectEqual(@as(u64, 5), client.next_packet_number);
+    try std.testing.expectEqual(@as(u64, 3), client.datagramsSent());
+
+    for (payloads, 0..) |expected, index| {
+        var packet = try server.receivePacket();
+        defer packet.deinit(allocator);
+        try std.testing.expectEqual(
+            quic.Frame.datagram,
+            @as(std.meta.Tag(quic.Frame), packet.frames[0]),
+        );
+        try std.testing.expectEqualStrings(
+            expected,
+            packet.frames[0].datagram.data,
+        );
+        try std.testing.expectEqual(
+            @as(u64, if (index == 0) 0 else index + 2),
+            packet.packet.packet_number,
+        );
+    }
+}
+
+test "QUIC DATAGRAM batch continues across transport batch windows" {
+    const allocator = std.testing.allocator;
+    var threaded = std.Io.Threaded.init(allocator, .{});
+    defer threaded.deinit();
+    const io = threaded.io();
+    var receiver_endpoint = try quic.runtime.Endpoint.bind(
+        allocator,
+        io,
+        .{ .ip4 = .loopback(0) },
+        .{ .max_datagram_size = 1400 },
+    );
+    defer receiver_endpoint.deinit();
+    var sender_endpoint = try quic.runtime.Endpoint.bind(
+        allocator,
+        io,
+        .{ .ip4 = .loopback(0) },
+        .{ .max_datagram_size = 1400, .enable_gso_send = false },
+    );
+    defer sender_endpoint.deinit();
+    const keys = quic.protection.deriveAes128Keys(
+        [_]u8{0xe5} ** quic.protection.secret_len,
+    );
+    var sender = try one_rtt.Connection.init(&sender_endpoint, .{
+        .peer = receiver_endpoint.address(),
+        .receive_keys = keys,
+        .send_keys = keys,
+        .local_connection_id = "batch-window-local",
+        .peer_connection_id = "batch-window-peer",
+        .peer_max_datagram_frame_size = 1200,
+        .enable_pacing = false,
+    });
+    defer sender.deinit();
+
+    var payload_storage: [one_rtt.max_batch_packets + 3][1]u8 = undefined;
+    var payloads: [payload_storage.len][]const u8 = undefined;
+    for (&payload_storage, &payloads, 0..) |*storage, *payload, index| {
+        storage[0] = @intCast(index);
+        payload.* = storage;
+    }
+    var committed: usize = 99;
+    try sender.sendDatagramsWithTimeout(
+        &payloads,
+        &committed,
+        .fromSeconds(1),
+    );
+    try std.testing.expectEqual(payloads.len, committed);
+    try std.testing.expectEqual(
+        @as(u64, payloads.len),
+        sender.datagramsSent(),
+    );
+    try std.testing.expectEqual(
+        @as(u64, payloads.len),
+        sender.next_packet_number,
+    );
+}
+
 test "QUIC 1-RTT single send builds frames in recovery ownership" {
     const allocator = std.testing.allocator;
     var threaded = std.Io.Threaded.init(allocator, .{});
@@ -861,7 +1180,7 @@ test "QUIC 1-RTT PTO batch commits a socket-sent prefix before returning error" 
 
     try std.testing.expectError(error.NetworkDown, client.retransmitPtoProbesAt(20_000_000, 2));
     try std.testing.expectEqual(@as(usize, 1), partial_send.calls);
-    try std.testing.expectEqual(@as(u64, 3), client.next_packet_number);
+    try std.testing.expectEqual(@as(u64, 4), client.next_packet_number);
     try std.testing.expectEqual(@as(u8, 1), client.ptoBackoffCount());
     try std.testing.expectEqual(bytes_in_flight_before + 1, client.bytesInFlight());
     try std.testing.expectEqual(@as(usize, 2), client.recovery.pending.items[0].packetCount());
@@ -876,6 +1195,116 @@ test "QUIC 1-RTT PTO batch commits a socket-sent prefix before returning error" 
     try std.testing.expectEqual(@as(u64, 0), original0.packet.packet_number);
     try std.testing.expectEqual(@as(u64, 1), original1.packet.packet_number);
     try std.testing.expectEqual(@as(u64, 2), probe0.packet.packet_number);
+
+    client.endpoint.io = partial_send.delegate;
+    try std.testing.expectEqual(
+        @as(usize, 2),
+        try client.retransmitPtoProbesAt(30_000_000, 2),
+    );
+    try std.testing.expectEqual(@as(u64, 6), client.next_packet_number);
+    var retry0 = try server.receivePacket();
+    defer retry0.deinit(allocator);
+    var retry1 = try server.receivePacket();
+    defer retry1.deinit(allocator);
+    try std.testing.expectEqual(@as(u64, 4), retry0.packet.packet_number);
+    try std.testing.expectEqual(@as(u64, 5), retry1.packet.packet_number);
+}
+
+test "QUIC 1-RTT PTO batch retires sealed nonces after zero socket progress" {
+    const allocator = std.testing.allocator;
+    var threaded = std.Io.Threaded.init(allocator, .{});
+    defer threaded.deinit();
+    const io = threaded.io();
+
+    var receiver = try quic.runtime.Endpoint.bind(
+        allocator,
+        io,
+        .{ .ip4 = .loopback(0) },
+        .{ .max_datagram_size = 4096 },
+    );
+    defer receiver.deinit();
+    var sender = try quic.runtime.Endpoint.bind(
+        allocator,
+        io,
+        .{ .ip4 = .loopback(0) },
+        .{ .max_datagram_size = 4096, .enable_gso_send = false },
+    );
+    defer sender.deinit();
+    const keys = quic.protection.deriveAes128Keys(
+        [_]u8{0xea} ** quic.protection.secret_len,
+    );
+    var client = try one_rtt.Connection.init(&sender, .{
+        .peer = receiver.address(),
+        .receive_keys = keys,
+        .send_keys = keys,
+        .local_connection_id = "client",
+        .peer_connection_id = "server",
+        .enable_pacing = false,
+    });
+    defer client.deinit();
+
+    const ping = [_]quic.Frame{.{ .ping = {} }};
+    try client.sendAt(&ping, 10_000_000);
+    try client.sendAt(&ping, 10_000_000);
+    const bytes_in_flight_before = client.bytesInFlight();
+    var failed = ObservedBatchSend{
+        .delegate = sender.io,
+        .fail_after_prefix = 0,
+    };
+    var failed_vtable = sender.io.vtable.*;
+    failed_vtable.netSend = ObservedBatchSend.netSend;
+    sender.io = .{ .userdata = &failed, .vtable = &failed_vtable };
+    defer sender.io = failed.delegate;
+
+    try std.testing.expectError(
+        error.NetworkDown,
+        client.retransmitPtoProbesAt(20_000_000, 2),
+    );
+    try std.testing.expectEqual(@as(u64, 4), client.next_packet_number);
+    try std.testing.expectEqual(@as(u8, 0), client.ptoBackoffCount());
+    try std.testing.expectEqual(bytes_in_flight_before, client.bytesInFlight());
+    try std.testing.expectEqual(
+        @as(usize, 1),
+        client.recovery.pending.items[0].packetCount(),
+    );
+    try std.testing.expectEqual(
+        @as(usize, 1),
+        client.recovery.pending.items[1].packetCount(),
+    );
+
+    sender.io = failed.delegate;
+    try std.testing.expectEqual(
+        @as(usize, 2),
+        try client.retransmitPtoProbesAt(30_000_000, 2),
+    );
+    try std.testing.expectEqual(@as(u64, 6), client.next_packet_number);
+
+    var original0 = try receiver.receiveBytes();
+    defer original0.deinit(allocator);
+    var original1 = try receiver.receiveBytes();
+    defer original1.deinit(allocator);
+    var probe0 = try receiver.receiveBytes();
+    defer probe0.deinit(allocator);
+    var probe1 = try receiver.receiveBytes();
+    defer probe1.deinit(allocator);
+    var opened0 = try quic.protection.openShortPacket(
+        allocator,
+        keys,
+        probe0.bytes,
+        "server".len,
+        4,
+    );
+    defer opened0.deinit(allocator);
+    var opened1 = try quic.protection.openShortPacket(
+        allocator,
+        keys,
+        probe1.bytes,
+        "server".len,
+        5,
+    );
+    defer opened1.deinit(allocator);
+    try std.testing.expectEqual(@as(u64, 4), opened0.packet_number);
+    try std.testing.expectEqual(@as(u64, 5), opened1.packet_number);
 }
 
 test "QUIC 1-RTT PTO retransmits unacked response stream packets after partial ACK" {
@@ -1713,6 +2142,186 @@ test "QUIC 1-RTT ACK-driven recovery defers transactionally when paced" {
         try client.retransmitPacketThresholdLosses(8),
     );
     try std.testing.expectEqual(next_packet_number + 2, client.next_packet_number);
+}
+
+test "QUIC held-packet flush failure cannot roll back visible successor" {
+    const allocator = std.testing.allocator;
+    var threaded = std.Io.Threaded.init(allocator, .{});
+    defer threaded.deinit();
+    const io = threaded.io();
+
+    var held_once = false;
+    const HoldFirst = struct {
+        fn hold(context: *anyopaque, _: []const u8) bool {
+            const held: *bool = @ptrCast(@alignCast(context));
+            if (held.*) return false;
+            held.* = true;
+            return true;
+        }
+    };
+    var server_endpoint = try quic.runtime.Endpoint.bind(
+        allocator,
+        io,
+        .{ .ip4 = .loopback(0) },
+        .{ .max_datagram_size = 4096 },
+    );
+    defer server_endpoint.deinit();
+    var client_endpoint = try quic.runtime.Endpoint.bind(
+        allocator,
+        io,
+        .{ .ip4 = .loopback(0) },
+        .{
+            .max_datagram_size = 4096,
+            .enable_gso_send = false,
+            .send_interceptor = .{
+                .context = &held_once,
+                .should_hold = HoldFirst.hold,
+            },
+        },
+    );
+    defer client_endpoint.deinit();
+
+    const FailSecondSocketSend = struct {
+        delegate: std.Io,
+        calls: usize = 0,
+
+        fn netSend(
+            userdata: ?*anyopaque,
+            socket_handle: net.Socket.Handle,
+            messages: []net.OutgoingMessage,
+            flags: net.SendFlags,
+        ) struct { ?net.Socket.SendError, usize } {
+            const self: *@This() = @ptrCast(@alignCast(userdata.?));
+            self.calls += 1;
+            if (self.calls == 2) return .{ error.NetworkDown, 0 };
+            return self.delegate.vtable.netSend(
+                self.delegate.userdata,
+                socket_handle,
+                messages,
+                flags,
+            );
+        }
+    };
+    var failing = FailSecondSocketSend{ .delegate = client_endpoint.io };
+    var vtable = failing.delegate.vtable.*;
+    vtable.netSend = FailSecondSocketSend.netSend;
+    client_endpoint.io = .{ .userdata = &failing, .vtable = &vtable };
+    defer client_endpoint.io = failing.delegate;
+
+    const keys = quic.protection.deriveAes128Keys(
+        [_]u8{0xca} ** quic.protection.secret_len,
+    );
+    var client = try one_rtt.Connection.init(&client_endpoint, .{
+        .peer = server_endpoint.address(),
+        .receive_keys = keys,
+        .send_keys = keys,
+        .local_connection_id = "client",
+        .peer_connection_id = "server",
+        .enable_pacing = false,
+        .tls_handshake_complete = true,
+    });
+    defer client.deinit();
+
+    try client.send(&.{.{ .ping = {} }});
+    try client.send(&.{.{ .ping = {} }});
+    try std.testing.expectEqual(@as(usize, 2), failing.calls);
+    try std.testing.expectEqual(@as(u64, 2), client.next_packet_number);
+    try std.testing.expectEqual(@as(usize, 2), client.pendingRecoveryCount());
+
+    var received = try server_endpoint.receiveBytes();
+    defer received.deinit(allocator);
+    var opened = try quic.protection.openShortPacket(
+        allocator,
+        keys,
+        received.bytes,
+        "server".len,
+        0,
+    );
+    defer opened.deinit(allocator);
+    try std.testing.expectEqual(@as(u64, 1), opened.packet_number);
+}
+
+test "QUIC single packet socket failure skips sealed nonce only" {
+    const allocator = std.testing.allocator;
+    var threaded = std.Io.Threaded.init(allocator, .{});
+    defer threaded.deinit();
+    const io = threaded.io();
+
+    var server_endpoint = try quic.runtime.Endpoint.bind(
+        allocator,
+        io,
+        .{ .ip4 = .loopback(0) },
+        .{ .max_datagram_size = 4096 },
+    );
+    defer server_endpoint.deinit();
+    var client_endpoint = try quic.runtime.Endpoint.bind(
+        allocator,
+        io,
+        .{ .ip4 = .loopback(0) },
+        .{ .max_datagram_size = 4096, .enable_gso_send = false },
+    );
+    defer client_endpoint.deinit();
+    const keys = quic.protection.deriveAes128Keys(
+        [_]u8{0xcb} ** quic.protection.secret_len,
+    );
+    var client = try one_rtt.Connection.init(&client_endpoint, .{
+        .peer = server_endpoint.address(),
+        .receive_keys = keys,
+        .send_keys = keys,
+        .local_connection_id = "client",
+        .peer_connection_id = "server",
+        .enable_pacing = false,
+        .tls_handshake_complete = true,
+    });
+    defer client.deinit();
+
+    var failed = ObservedBatchSend{
+        .delegate = client_endpoint.io,
+        .fail_after_prefix = 0,
+    };
+    var vtable = failed.delegate.vtable.*;
+    vtable.netSend = ObservedBatchSend.netSend;
+    client_endpoint.io = .{ .userdata = &failed, .vtable = &vtable };
+    defer client_endpoint.io = failed.delegate;
+
+    try std.testing.expectError(
+        error.NetworkDown,
+        client.send(&.{.{ .stream = .{
+            .stream_id = 0,
+            .data = "failed",
+        } }}),
+    );
+    try std.testing.expectEqual(@as(u64, 1), client.next_packet_number);
+    try std.testing.expectEqual(@as(u64, 1), client.encryptedPacketsWithCurrentKeys());
+    try std.testing.expectEqual(@as(u64, 0), client.send_flow.used);
+    try std.testing.expectEqual(
+        @as(u64, 0),
+        one_rtt.testing.sendStreamUsed(&client, 0).?,
+    );
+    try std.testing.expectEqual(
+        @as(u64, 0),
+        one_rtt.testing.sendStreamHighestSentEnd(&client, 0).?,
+    );
+    try std.testing.expectEqual(@as(usize, 0), client.pendingRecoveryCount());
+    try std.testing.expectEqual(@as(usize, 0), client.sent.packets.items.len);
+
+    client_endpoint.io = failed.delegate;
+    try client.send(&.{.{ .stream = .{
+        .stream_id = 0,
+        .data = "retry-safe",
+    } }});
+    try std.testing.expectEqual(@as(u64, 2), client.next_packet_number);
+    var received = try server_endpoint.receiveBytes();
+    defer received.deinit(allocator);
+    var opened = try quic.protection.openShortPacket(
+        allocator,
+        keys,
+        received.bytes,
+        "server".len,
+        0,
+    );
+    defer opened.deinit(allocator);
+    try std.testing.expectEqual(@as(u64, 1), opened.packet_number);
 }
 
 test "QUIC 1-RTT connection applies persistent congestion response" {
@@ -2610,6 +3219,20 @@ test "QUIC one-shot STREAM sends never wait for blocked notifications" {
         error.PacingLimited,
         connection.sendManyProgressAt(&packets, 1_000_000),
     );
+    try std.testing.expectError(
+        error.Timeout,
+        connection.waitForPacingAvailabilityWithDeadline(.{
+            .clock = .awake,
+            .raw = .fromNanoseconds(1_000_001),
+        }),
+    );
+    try std.testing.expectError(
+        error.Timeout,
+        connection.waitForPacingAvailabilityWithDeadline(.{
+            .clock = .real,
+            .raw = .fromNanoseconds(std.time.ns_per_s),
+        }),
+    );
     try std.testing.expectEqual(@as(usize, 0), fixed_io.sleep_calls);
     try std.testing.expectEqual(before.packets_sent, connection.stats().packets_sent);
     try std.testing.expectEqual(
@@ -2618,6 +3241,191 @@ test "QUIC one-shot STREAM sends never wait for blocked notifications" {
     );
     try std.testing.expect(connection.sendStreamStats(0) == null);
     try std.testing.expectEqual(@as(usize, 0), connection.pendingRecoveryCount());
+}
+
+test "QUIC bounded pacing wait rejects a later wake without sleeping" {
+    const FixedClockIo = struct {
+        delegate: std.Io,
+        now_ns: i96,
+        sleep_calls: usize = 0,
+
+        fn now(
+            userdata: ?*anyopaque,
+            _: std.Io.Clock,
+        ) std.Io.Timestamp {
+            const self: *@This() = @ptrCast(@alignCast(userdata));
+            return .fromNanoseconds(self.now_ns);
+        }
+
+        fn sleep(
+            userdata: ?*anyopaque,
+            timeout: std.Io.Timeout,
+        ) std.Io.Cancelable!void {
+            const self: *@This() = @ptrCast(@alignCast(userdata));
+            self.sleep_calls += 1;
+            self.now_ns = switch (timeout) {
+                .none => return error.Canceled,
+                .duration => |duration| self.now_ns + duration.raw.nanoseconds,
+                .deadline => |deadline| deadline.raw.nanoseconds,
+            };
+        }
+    };
+    const allocator = std.testing.allocator;
+    var threaded = std.Io.Threaded.init(allocator, .{});
+    defer threaded.deinit();
+    const io = threaded.io();
+    var peer_endpoint = try quic.runtime.Endpoint.bind(
+        allocator,
+        io,
+        .{ .ip4 = .loopback(0) },
+        .{ .max_datagram_size = 4096 },
+    );
+    defer peer_endpoint.deinit();
+    var endpoint = try quic.runtime.Endpoint.bind(
+        allocator,
+        io,
+        .{ .ip4 = .loopback(0) },
+        .{ .max_datagram_size = 4096 },
+    );
+    defer endpoint.deinit();
+    const keys = quic.protection.deriveAes128Keys(
+        [_]u8{0xac} ** quic.protection.secret_len,
+    );
+    var connection = try one_rtt.Connection.init(&endpoint, .{
+        .peer = peer_endpoint.address(),
+        .receive_keys = keys,
+        .send_keys = keys,
+        .local_connection_id = "pacing-wait-local",
+        .peer_connection_id = "pacing-wait-peer",
+        .max_datagram_size = 1200,
+        .pacing_max_burst_packets = 1,
+    });
+    defer connection.deinit();
+    var fixed_io = FixedClockIo{
+        .delegate = endpoint.io,
+        .now_ns = 1_000_000,
+    };
+    var fixed_vtable = endpoint.io.vtable.*;
+    fixed_vtable.now = FixedClockIo.now;
+    fixed_vtable.sleep = FixedClockIo.sleep;
+    endpoint.io = .{ .userdata = &fixed_io, .vtable = &fixed_vtable };
+    defer endpoint.io = fixed_io.delegate;
+    connection.rtt_stats.updateAt(
+        10 * std.time.ns_per_s,
+        0,
+        true,
+        0,
+    );
+    one_rtt.testing.exhaustPacingAt(
+        &connection,
+        1_000_000,
+    );
+    const frames = [_]quic.Frame{.{ .ping = {} }};
+    try std.testing.expectError(error.PacingLimited, connection.trySend(&frames));
+    const before = connection.stats();
+    try std.testing.expectError(
+        error.Timeout,
+        connection.waitForPacingAvailabilityWithDeadline(.{
+            .clock = .awake,
+            .raw = .fromNanoseconds(1_000_001),
+        }),
+    );
+    try std.testing.expectEqual(@as(usize, 0), fixed_io.sleep_calls);
+    try std.testing.expectEqual(before.packets_sent, connection.stats().packets_sent);
+    try connection.waitForPacingAvailabilityWithDeadline(.{
+        .clock = .awake,
+        .raw = .fromNanoseconds(60 * std.time.ns_per_s),
+    });
+    try std.testing.expectEqual(@as(usize, 1), fixed_io.sleep_calls);
+    try connection.trySend(&frames);
+    try std.testing.expectEqual(
+        before.packets_sent + 1,
+        connection.stats().packets_sent,
+    );
+}
+
+test "QUIC bounded receive does not outwait timer pacing" {
+    const FixedClockIo = struct {
+        delegate: std.Io,
+        now_ns: i96,
+        sleep_calls: usize = 0,
+
+        fn now(
+            userdata: ?*anyopaque,
+            _: std.Io.Clock,
+        ) std.Io.Timestamp {
+            const self: *@This() = @ptrCast(@alignCast(userdata));
+            return .fromNanoseconds(self.now_ns);
+        }
+
+        fn sleep(
+            userdata: ?*anyopaque,
+            _: std.Io.Timeout,
+        ) std.Io.Cancelable!void {
+            const self: *@This() = @ptrCast(@alignCast(userdata));
+            self.sleep_calls += 1;
+            return error.Canceled;
+        }
+    };
+    const allocator = std.testing.allocator;
+    var threaded = std.Io.Threaded.init(allocator, .{});
+    defer threaded.deinit();
+    const io = threaded.io();
+    var peer_endpoint = try quic.runtime.Endpoint.bind(
+        allocator,
+        io,
+        .{ .ip4 = .loopback(0) },
+        .{ .max_datagram_size = 4096 },
+    );
+    defer peer_endpoint.deinit();
+    var endpoint = try quic.runtime.Endpoint.bind(
+        allocator,
+        io,
+        .{ .ip4 = .loopback(0) },
+        .{ .max_datagram_size = 4096 },
+    );
+    defer endpoint.deinit();
+    const keys = quic.protection.deriveAes128Keys(
+        [_]u8{0xad} ** quic.protection.secret_len,
+    );
+    var connection = try one_rtt.Connection.init(&endpoint, .{
+        .peer = peer_endpoint.address(),
+        .receive_keys = keys,
+        .send_keys = keys,
+        .local_connection_id = "timer-pace-local",
+        .peer_connection_id = "timer-pace-peer",
+        .local_endpoint = .server,
+        .tls_handshake_complete = true,
+        .keep_alive_period_ms = 1,
+        .pacing_max_burst_packets = 1,
+    });
+    defer connection.deinit();
+    var fixed_io = FixedClockIo{
+        .delegate = endpoint.io,
+        .now_ns = 300 * std.time.ns_per_ms,
+    };
+    var fixed_vtable = endpoint.io.vtable.*;
+    fixed_vtable.now = FixedClockIo.now;
+    fixed_vtable.sleep = FixedClockIo.sleep;
+    endpoint.io = .{ .userdata = &fixed_io, .vtable = &fixed_vtable };
+    defer endpoint.io = fixed_io.delegate;
+
+    connection.markPeerActivity(0);
+    const keep_alive = connection.nextTimerDeadline() orelse
+        return error.TestUnexpectedResult;
+    try std.testing.expectEqual(one_rtt.TimerDeadlineKind.keep_alive, keep_alive.kind);
+    try std.testing.expectEqual(@as(u64, 300 * std.time.ns_per_ms), keep_alive.deadline_ns);
+    one_rtt.testing.exhaustPacingAt(&connection, keep_alive.deadline_ns);
+
+    try std.testing.expectError(
+        error.Timeout,
+        connection.servicePacketServicingTimersDeadline(.{
+            .clock = .awake,
+            .raw = .fromNanoseconds(keep_alive.deadline_ns + 1),
+        }),
+    );
+    try std.testing.expectEqual(@as(usize, 0), fixed_io.sleep_calls);
+    try std.testing.expect(!connection.keepAlivePingOutstanding());
 }
 
 test "QUIC batch stream-data blocked notification uses caller timestamp" {
@@ -2912,6 +3720,101 @@ test "QUIC 1-RTT connection releases completed peer stream credit once" {
     try std.testing.expectEqualStrings("second", second.frames[0].stream.data);
 }
 
+test "QUIC bounded STOP_SENDING validates deadline before commit" {
+    const allocator = std.testing.allocator;
+
+    var threaded = std.Io.Threaded.init(allocator, .{});
+    defer threaded.deinit();
+    const io = threaded.io();
+    var server_endpoint = try quic.runtime.Endpoint.bind(
+        allocator,
+        io,
+        .{ .ip4 = .loopback(0) },
+        .{ .max_datagram_size = 4096 },
+    );
+    defer server_endpoint.deinit();
+    var client_endpoint = try quic.runtime.Endpoint.bind(
+        allocator,
+        io,
+        .{ .ip4 = .loopback(0) },
+        .{ .max_datagram_size = 4096 },
+    );
+    defer client_endpoint.deinit();
+
+    const client_cid = [_]u8{ 0x91, 0x92, 0x93, 0x94 };
+    const server_cid = [_]u8{ 0xa1, 0xa2, 0xa3, 0xa4 };
+    const keys = quic.protection.deriveAes128Keys(
+        [_]u8{0xb4} ** quic.protection.secret_len,
+    );
+    var client = try one_rtt.Connection.init(&client_endpoint, .{
+        .peer = server_endpoint.address(),
+        .receive_keys = keys,
+        .send_keys = keys,
+        .local_connection_id = &client_cid,
+        .peer_connection_id = &server_cid,
+    });
+    defer client.deinit();
+    var server = try one_rtt.Connection.init(&server_endpoint, .{
+        .peer = client_endpoint.address(),
+        .receive_keys = keys,
+        .send_keys = keys,
+        .local_connection_id = &server_cid,
+        .peer_connection_id = &client_cid,
+        .local_endpoint = .server,
+    });
+    defer server.deinit();
+
+    try client.send(&.{.{ .stream = .{
+        .stream_id = 0,
+        .data = "payload",
+    } }});
+    var request = try server.receivePacket();
+    defer request.deinit(allocator);
+    try std.testing.expect(server.recvStreamStats(0).?.stop_sending_sent == null);
+    const before = server.stats();
+
+    try std.testing.expectError(
+        error.Timeout,
+        server.sendStopSendingWithDeadline(0, 77, .{
+            .raw = .zero,
+            .clock = .real,
+        }),
+    );
+    try std.testing.expectError(
+        error.Timeout,
+        server.sendStopSendingWithTimeout(0, 77, .zero),
+    );
+    try std.testing.expectEqual(
+        before.packets_sent,
+        server.stats().packets_sent,
+    );
+    try std.testing.expect(server.recvStreamStats(0).?.stop_sending_sent == null);
+
+    try server.sendStopSendingWithDeadline(
+        0,
+        77,
+        .fromNow(io, .{ .raw = .fromSeconds(1), .clock = .awake }),
+    );
+    try std.testing.expectEqual(
+        @as(u64, 77),
+        server.recvStreamStats(0).?.stop_sending_sent.?.application_error_code,
+    );
+    var cancellation = try client.receivePacketServicingTimersDeadline(
+        .fromNow(io, .{ .raw = .fromSeconds(1), .clock = .awake }),
+    );
+    defer cancellation.deinit(allocator);
+    var observed = false;
+    for (cancellation.frames) |frame| switch (frame) {
+        .stop_sending => |stop| {
+            try std.testing.expectEqual(@as(u64, 0), stop.stream_id);
+            try std.testing.expectEqual(@as(u64, 77), stop.application_error_code);
+            observed = true;
+        },
+        else => {},
+    };
+    try std.testing.expect(observed);
+}
+
 test "QUIC deferred peer stream credit retries from connection timer" {
     const allocator = std.testing.allocator;
 
@@ -3006,7 +3909,9 @@ test "QUIC deferred peer stream credit retries from connection timer" {
         .not_ect,
     );
     try std.testing.expectEqual(@as(usize, 1), failed_credit_send.calls);
-    try std.testing.expectEqual(@as(u64, 1), server.next_packet_number);
+    // Packet 1 was sealed before the socket rejected it. Its nonce is consumed
+    // even though recovery and sent-map state roll back with zero visibility.
+    try std.testing.expectEqual(@as(u64, 2), server.next_packet_number);
     try std.testing.expectEqual(@as(usize, 0), server.pendingRecoveryCount());
     try std.testing.expect(!server.peerStreamClosed(0));
     try std.testing.expectEqual(@as(u64, 1), server.recv_max_streams_bidi);
@@ -3026,7 +3931,7 @@ test "QUIC deferred peer stream credit retries from connection timer" {
         first_serviced.kind,
     );
     try std.testing.expectEqual(@as(usize, 2), failed_credit_send.calls);
-    try std.testing.expectEqual(@as(u64, 1), server.next_packet_number);
+    try std.testing.expectEqual(@as(u64, 3), server.next_packet_number);
     try std.testing.expectEqual(@as(usize, 0), server.pendingRecoveryCount());
     try std.testing.expect(!server.peerStreamClosed(0));
     const second_retry = server.nextTimerDeadline() orelse
@@ -3045,7 +3950,7 @@ test "QUIC deferred peer stream credit retries from connection timer" {
         serviced.kind,
     );
     try std.testing.expect(server.peerStreamClosed(0));
-    try std.testing.expectEqual(@as(u64, 2), server.next_packet_number);
+    try std.testing.expectEqual(@as(u64, 4), server.next_packet_number);
     try std.testing.expectEqual(@as(usize, 1), server.pendingRecoveryCount());
     try std.testing.expectEqual(@as(usize, 0), server.stats().active_receive_streams);
     try std.testing.expectEqual(@as(usize, 0), server.stats().active_send_streams);
@@ -3296,6 +4201,398 @@ test "QUIC committed receive credit batches streams fairly" {
     try std.testing.expectEqual(
         @as(u64, 0),
         second_credit.frames[0].max_stream_data.stream_id,
+    );
+}
+
+test "QUIC discarded stopped receive bytes restore only connection credit" {
+    const allocator = std.testing.allocator;
+    var threaded = std.Io.Threaded.init(allocator, .{});
+    defer threaded.deinit();
+    const io = threaded.io();
+    var receiver = try quic.runtime.Endpoint.bind(
+        allocator,
+        io,
+        .{ .ip4 = .loopback(0) },
+        .{ .max_datagram_size = 4096 },
+    );
+    defer receiver.deinit();
+    var sender = try quic.runtime.Endpoint.bind(
+        allocator,
+        io,
+        .{ .ip4 = .loopback(0) },
+        .{ .max_datagram_size = 4096 },
+    );
+    defer sender.deinit();
+    const keys = quic.protection.deriveAes128Keys(
+        [_]u8{0xc7} ** quic.protection.secret_len,
+    );
+    var connection = try one_rtt.Connection.init(&receiver, .{
+        .peer = sender.address(),
+        .receive_keys = keys,
+        .send_keys = keys,
+        .local_connection_id = "discard-server",
+        .peer_connection_id = "discard-client",
+        .initial_receive_max_data = 8,
+        .receive_window = 8,
+        .max_receive_window = 8,
+        .initial_receive_max_stream_data = 8,
+        .stream_receive_window = 8,
+        .max_stream_receive_window = 8,
+        .initial_receive_max_streams_bidi = 1,
+        .local_endpoint = .server,
+        .enable_pacing = false,
+    });
+    defer connection.deinit();
+
+    try one_rtt.testing.applyReceivedFrames(
+        &connection,
+        0,
+        &.{.{ .stream = .{ .stream_id = 0, .data = "123456" } }},
+        null,
+        .not_ect,
+    );
+    try connection.sendStopSending(0, 41);
+    var stop_datagram = try sender.receiveBytes();
+    defer stop_datagram.deinit(allocator);
+    var stop_packet = try one_rtt.openReceivedBytes(
+        &sender,
+        stop_datagram.from,
+        stop_datagram.bytes,
+        keys,
+        "discard-client".len,
+        0,
+        8,
+    );
+    defer stop_packet.deinit(allocator);
+    try std.testing.expectEqual(
+        @as(usize, 6),
+        try connection.discardStoppedReceived(0),
+    );
+    try std.testing.expectEqual(
+        @as(u64, 6),
+        connection.recvStreamStats(0).?.bytes_read,
+    );
+    try std.testing.expectEqual(
+        @as(u64, 8),
+        connection.recvStreamStats(0).?.receive_limit,
+    );
+    var credit_datagram = try sender.receiveBytes();
+    defer credit_datagram.deinit(allocator);
+    var credit = try one_rtt.openReceivedBytes(
+        &sender,
+        credit_datagram.from,
+        credit_datagram.bytes,
+        keys,
+        "discard-client".len,
+        stop_packet.packet.packet_number + 1,
+        8,
+    );
+    defer credit.deinit(allocator);
+    try std.testing.expectEqual(@as(usize, 1), credit.frames.len);
+    try std.testing.expect(credit.frames[0] == .max_data);
+    try std.testing.expectEqual(
+        @as(u64, 14),
+        credit.frames[0].max_data.maximum_data,
+    );
+}
+
+test "QUIC stopped reset settles final-size connection credit across gaps" {
+    const allocator = std.testing.allocator;
+    var threaded = std.Io.Threaded.init(allocator, .{});
+    defer threaded.deinit();
+    const io = threaded.io();
+    var receiver = try quic.runtime.Endpoint.bind(
+        allocator,
+        io,
+        .{ .ip4 = .loopback(0) },
+        .{ .max_datagram_size = 4096 },
+    );
+    defer receiver.deinit();
+    var sender = try quic.runtime.Endpoint.bind(
+        allocator,
+        io,
+        .{ .ip4 = .loopback(0) },
+        .{ .max_datagram_size = 4096 },
+    );
+    defer sender.deinit();
+    const keys = quic.protection.deriveAes128Keys(
+        [_]u8{0xc8} ** quic.protection.secret_len,
+    );
+    var connection = try one_rtt.Connection.init(&receiver, .{
+        .peer = sender.address(),
+        .receive_keys = keys,
+        .send_keys = keys,
+        .local_connection_id = "reset-discard-server",
+        .peer_connection_id = "reset-discard-client",
+        .initial_receive_max_data = 8,
+        .receive_window = 8,
+        .max_receive_window = 8,
+        .initial_receive_max_stream_data = 8,
+        .stream_receive_window = 8,
+        .max_stream_receive_window = 8,
+        .initial_receive_max_streams_bidi = 1,
+        .local_endpoint = .server,
+        .enable_pacing = false,
+    });
+    defer connection.deinit();
+
+    try one_rtt.testing.applyReceivedFrames(
+        &connection,
+        0,
+        &.{.{ .stream = .{ .stream_id = 0, .data = "12" } }},
+        null,
+        .not_ect,
+    );
+    try connection.sendStopSending(0, 42);
+    var stop_datagram = try sender.receiveBytes();
+    defer stop_datagram.deinit(allocator);
+    var stop_packet = try one_rtt.openReceivedBytes(
+        &sender,
+        stop_datagram.from,
+        stop_datagram.bytes,
+        keys,
+        "reset-discard-client".len,
+        0,
+        8,
+    );
+    defer stop_packet.deinit(allocator);
+
+    try one_rtt.testing.applyReceivedFrames(
+        &connection,
+        1,
+        &.{.{ .reset_stream = .{
+            .stream_id = 0,
+            .application_error_code = 42,
+            .final_size = 8,
+        } }},
+        null,
+        .not_ect,
+    );
+    try std.testing.expectEqual(
+        @as(usize, 2),
+        try connection.discardStoppedReceived(0),
+    );
+    const stats = connection.recvStreamStats(0).?;
+    try std.testing.expectEqual(@as(u64, 2), stats.bytes_read);
+    try std.testing.expectEqual(@as(?u64, 8), stats.final_size);
+    try std.testing.expect(stats.reset != null);
+    try std.testing.expectEqual(@as(u64, 8), stats.receive_limit);
+
+    var credit_datagram = try sender.receiveBytes();
+    defer credit_datagram.deinit(allocator);
+    var credit = try one_rtt.openReceivedBytes(
+        &sender,
+        credit_datagram.from,
+        credit_datagram.bytes,
+        keys,
+        "reset-discard-client".len,
+        stop_packet.packet.packet_number + 1,
+        8,
+    );
+    defer credit.deinit(allocator);
+    try std.testing.expectEqual(@as(usize, 1), credit.frames.len);
+    try std.testing.expect(credit.frames[0] == .max_data);
+    try std.testing.expectEqual(
+        @as(u64, 16),
+        credit.frames[0].max_data.maximum_data,
+    );
+}
+
+test "QUIC discarded reset restores only connection credit" {
+    const allocator = std.testing.allocator;
+    var threaded = std.Io.Threaded.init(allocator, .{});
+    defer threaded.deinit();
+    const io = threaded.io();
+    var receiver = try quic.runtime.Endpoint.bind(
+        allocator,
+        io,
+        .{ .ip4 = .loopback(0) },
+        .{ .max_datagram_size = 4096 },
+    );
+    defer receiver.deinit();
+    var sender = try quic.runtime.Endpoint.bind(
+        allocator,
+        io,
+        .{ .ip4 = .loopback(0) },
+        .{ .max_datagram_size = 4096 },
+    );
+    defer sender.deinit();
+    const keys = quic.protection.deriveAes128Keys(
+        [_]u8{0xc9} ** quic.protection.secret_len,
+    );
+    var connection = try one_rtt.Connection.init(&receiver, .{
+        .peer = sender.address(),
+        .receive_keys = keys,
+        .send_keys = keys,
+        .local_connection_id = "reset-only-server",
+        .peer_connection_id = "reset-only-client",
+        .initial_receive_max_data = 8,
+        .receive_window = 8,
+        .max_receive_window = 8,
+        .initial_receive_max_stream_data = 8,
+        .stream_receive_window = 8,
+        .max_stream_receive_window = 8,
+        .initial_receive_max_streams_bidi = 1,
+        .local_endpoint = .server,
+        .enable_pacing = false,
+    });
+    defer connection.deinit();
+
+    try one_rtt.testing.applyReceivedFrames(
+        &connection,
+        0,
+        &.{
+            .{ .stream = .{ .stream_id = 0, .data = "12" } },
+            .{ .reset_stream = .{
+                .stream_id = 0,
+                .application_error_code = 43,
+                .final_size = 8,
+            } },
+        },
+        null,
+        .not_ect,
+    );
+    try std.testing.expectError(
+        error.StreamStateError,
+        connection.discardStoppedReceived(0),
+    );
+    try std.testing.expectEqual(
+        @as(usize, 2),
+        try connection.discardResetReceived(0),
+    );
+    const stats = connection.recvStreamStats(0).?;
+    try std.testing.expectEqual(@as(u64, 2), stats.bytes_read);
+    try std.testing.expectEqual(@as(?u64, 8), stats.final_size);
+    try std.testing.expect(stats.reset != null);
+    try std.testing.expectEqual(@as(u64, 8), stats.receive_limit);
+
+    var credit_datagram = try sender.receiveBytes();
+    defer credit_datagram.deinit(allocator);
+    var credit = try one_rtt.openReceivedBytes(
+        &sender,
+        credit_datagram.from,
+        credit_datagram.bytes,
+        keys,
+        "reset-only-client".len,
+        0,
+        8,
+    );
+    defer credit.deinit(allocator);
+    try std.testing.expectEqual(@as(usize, 1), credit.frames.len);
+    try std.testing.expect(credit.frames[0] == .max_data);
+    try std.testing.expectEqual(
+        @as(u64, 16),
+        credit.frames[0].max_data.maximum_data,
+    );
+}
+
+test "QUIC stopped empty receive clears pending stream credit" {
+    const allocator = std.testing.allocator;
+    var threaded = std.Io.Threaded.init(allocator, .{});
+    defer threaded.deinit();
+    const io = threaded.io();
+    var receiver = try quic.runtime.Endpoint.bind(
+        allocator,
+        io,
+        .{ .ip4 = .loopback(0) },
+        .{ .max_datagram_size = 4096 },
+    );
+    defer receiver.deinit();
+    var sender = try quic.runtime.Endpoint.bind(
+        allocator,
+        io,
+        .{ .ip4 = .loopback(0) },
+        .{ .max_datagram_size = 4096 },
+    );
+    defer sender.deinit();
+    const keys = quic.protection.deriveAes128Keys(
+        [_]u8{0xca} ** quic.protection.secret_len,
+    );
+    var connection = try one_rtt.Connection.init(&receiver, .{
+        .peer = sender.address(),
+        .receive_keys = keys,
+        .send_keys = keys,
+        .local_connection_id = "stale-credit-server",
+        .peer_connection_id = "stale-credit-client",
+        .initial_receive_max_data = 8,
+        .receive_window = 8,
+        .max_receive_window = 8,
+        .initial_receive_max_stream_data = 8,
+        .stream_receive_window = 8,
+        .max_stream_receive_window = 8,
+        .initial_receive_max_streams_bidi = 1,
+        .local_endpoint = .server,
+        .enable_pacing = false,
+    });
+    defer connection.deinit();
+
+    try one_rtt.testing.applyReceivedFrames(
+        &connection,
+        0,
+        &.{.{ .stream = .{ .stream_id = 0, .data = "123456" } }},
+        null,
+        .not_ect,
+    );
+    try connection.sendStopSending(0, 44);
+    var stop_datagram = try sender.receiveBytes();
+    defer stop_datagram.deinit(allocator);
+    var stop_packet = try one_rtt.openReceivedBytes(
+        &sender,
+        stop_datagram.from,
+        stop_datagram.bytes,
+        keys,
+        "stale-credit-client".len,
+        0,
+        8,
+    );
+    defer stop_packet.deinit(allocator);
+
+    var failed = ObservedBatchSend{
+        .delegate = connection.endpoint.io,
+        .fail_after_prefix = 0,
+    };
+    var failed_vtable = connection.endpoint.io.vtable.*;
+    failed_vtable.netSend = ObservedBatchSend.netSend;
+    connection.endpoint.io = .{
+        .userdata = &failed,
+        .vtable = &failed_vtable,
+    };
+    defer connection.endpoint.io = failed.delegate;
+    try connection.commitReceivedThrough(0, 6);
+    try std.testing.expectEqual(
+        @as(usize, 0),
+        try connection.discardStoppedReceived(0),
+    );
+
+    connection.endpoint.io = failed.delegate;
+    const retry = connection.nextTimerDeadline() orelse
+        return error.TestUnexpectedResult;
+    try std.testing.expectEqual(
+        one_rtt.TimerDeadlineKind.receive_credit,
+        retry.kind,
+    );
+    _ = try connection.serviceNextTimerAt(retry.deadline_ns);
+    var credit_datagram = try sender.receiveBytes();
+    defer credit_datagram.deinit(allocator);
+    var credit = try one_rtt.openReceivedBytes(
+        &sender,
+        credit_datagram.from,
+        credit_datagram.bytes,
+        keys,
+        "stale-credit-client".len,
+        stop_packet.packet.packet_number + 1,
+        8,
+    );
+    defer credit.deinit(allocator);
+    try std.testing.expectEqual(@as(usize, 1), credit.frames.len);
+    try std.testing.expect(credit.frames[0] == .max_data);
+    try std.testing.expectEqual(
+        @as(u64, 14),
+        credit.frames[0].max_data.maximum_data,
+    );
+    try std.testing.expectEqual(
+        @as(u64, 14),
+        connection.recvStreamStats(0).?.receive_limit,
     );
 }
 
@@ -4930,6 +6227,108 @@ test "QUIC 1-RTT ACK_FREQUENCY gates automatic ACK emission" {
     try one_rtt.testing.applyReceivedFrames(&connection, 16, &.{.{ .ping = {} }}, null, .not_ect);
     try std.testing.expect(try connection.sendAckForPacketsIfNeeded(&.{testReceivedPacket(16, &.{.{ .ping = {} }})}));
     try std.testing.expectEqual(@as(u64, 4), connection.next_packet_number);
+}
+
+test "QUIC 1-RTT local ACK policy initializes cadence and rejects excessive delay" {
+    const allocator = std.testing.allocator;
+    var threaded = std.Io.Threaded.init(allocator, .{});
+    defer threaded.deinit();
+    const io = threaded.io();
+    var endpoint = try quic.runtime.Endpoint.bind(
+        allocator,
+        io,
+        .{ .ip4 = .loopback(0) },
+        .{},
+    );
+    defer endpoint.deinit();
+    const keys = quic.protection.deriveAes128Keys(
+        [_]u8{0xa2} ** quic.protection.secret_len,
+    );
+    var connection = try one_rtt.Connection.init(&endpoint, .{
+        .peer = endpoint.address(),
+        .receive_keys = keys,
+        .send_keys = keys,
+        .local_connection_id = "local",
+        .peer_connection_id = "peer",
+        .local_ack_eliciting_threshold = 2,
+        .local_max_ack_delay_us = 25_000,
+        .local_ack_reordering_threshold = 3,
+    });
+    defer connection.deinit();
+    try std.testing.expectEqual(@as(u64, 2), connection.ackFrequencyThreshold());
+    try std.testing.expectEqual(@as(u64, 25_000), connection.requestedMaxAckDelay());
+    try std.testing.expectEqual(@as(u64, 3), connection.ackReorderingThreshold());
+
+    const ping = [_]quic.Frame{.{ .ping = {} }};
+    try one_rtt.testing.applyReceivedFrames(&connection, 1, &ping, null, .not_ect);
+    try std.testing.expect(!try connection.sendAckForPacketsIfNeeded(
+        &.{testReceivedPacket(1, &ping)},
+    ));
+    const first_deadline = connection.ackDelayDeadline() orelse
+        return error.TestUnexpectedResult;
+    try std.testing.expect(try connection.flushPendingAck());
+    try std.testing.expectEqual(@as(?u64, null), connection.ackDelayDeadline());
+    try std.testing.expect(!try connection.flushPendingAck());
+    try one_rtt.testing.applyReceivedFrames(&connection, 2, &ping, null, .not_ect);
+    try std.testing.expect(!try connection.sendAckForPacketsIfNeeded(
+        &.{testReceivedPacket(2, &ping)},
+    ));
+    try one_rtt.testing.applyReceivedFrames(&connection, 3, &ping, null, .not_ect);
+    try std.testing.expect(try connection.sendAckForPacketsIfNeeded(
+        &.{testReceivedPacket(3, &ping)},
+    ));
+    try std.testing.expectEqual(@as(?u64, null), connection.ackDelayDeadline());
+
+    try one_rtt.testing.applyReceivedFrames(&connection, 4, &ping, null, .not_ect);
+    try std.testing.expect(!try connection.sendAckForPacketsIfNeeded(
+        &.{testReceivedPacket(4, &ping)},
+    ));
+    const second_deadline = connection.ackDelayDeadline() orelse
+        return error.TestUnexpectedResult;
+    try std.testing.expect(second_deadline >= first_deadline);
+    try connection.serviceAckDelayTimerAt(second_deadline);
+    try std.testing.expectEqual(@as(?u64, null), connection.ackDelayDeadline());
+
+    try one_rtt.testing.applyReceivedFrames(&connection, 10, &ping, null, .not_ect);
+    try std.testing.expect(!try connection.sendAckForPacketsIfNeeded(
+        &.{testReceivedPacket(10, &ping)},
+    ));
+    try one_rtt.testing.applyReceivedFrames(&connection, 6, &ping, null, .not_ect);
+    try std.testing.expect(try connection.sendAckForPacketsIfNeeded(
+        &.{testReceivedPacket(6, &ping)},
+    ));
+
+    try std.testing.expectError(
+        error.InvalidTransportParameter,
+        one_rtt.Connection.init(&endpoint, .{
+            .peer = endpoint.address(),
+            .receive_keys = keys,
+            .send_keys = keys,
+            .local_connection_id = "invalid-local",
+            .peer_connection_id = "invalid-peer",
+            .local_max_ack_delay_us = (@as(u64, 1) << 14) * 1000,
+        }),
+    );
+    var zero_delay = try one_rtt.Connection.init(&endpoint, .{
+        .peer = endpoint.address(),
+        .receive_keys = keys,
+        .send_keys = keys,
+        .local_connection_id = "zero-delay-local",
+        .peer_connection_id = "zero-delay-peer",
+        .local_ack_eliciting_threshold = 2,
+    });
+    defer zero_delay.deinit();
+    try one_rtt.testing.applyReceivedFrames(
+        &zero_delay,
+        1,
+        &ping,
+        null,
+        .not_ect,
+    );
+    try std.testing.expect(try zero_delay.sendAckForPacketsIfNeeded(
+        &.{testReceivedPacket(1, &ping)},
+    ));
+    try std.testing.expectEqual(@as(?u64, null), zero_delay.ackDelayDeadline());
 }
 
 fn testReceivedPacket(packet_number: u64, frames: []const quic.Frame) one_rtt.ReceivedPacket {

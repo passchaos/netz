@@ -7,6 +7,7 @@
 //! 1024-byte UTF-8 reason.
 
 const std = @import("std");
+const deadline_policy = @import("../../internal/deadline.zig");
 const webtransport = @import("../mod.zig");
 const http3 = @import("../../http3/mod.zig");
 const quic = @import("../../quic/mod.zig");
@@ -69,8 +70,14 @@ pub const Control = struct {
     session_id: webtransport.SessionId,
     state: webtransport.SessionState,
     local_drain_sent: bool = false,
+    local_drain_started: bool = false,
+    local_close_started: bool = false,
     peer_drain_reported: bool = false,
     local_close_sent: bool = false,
+    /// The CONNECT send direction became permanently unusable while a local
+    /// CLOSE capsule was pending. The capsule must never be replayed, but
+    /// associated stream cleanup may still be retried.
+    local_close_failed: bool = false,
     terminal_reported: bool = false,
 
     h3_stage: H3Stage = .frame_type,
@@ -94,13 +101,29 @@ pub const Control = struct {
     }
 
     pub fn ensureOpen(self: Control) Error!void {
-        if (!self.state.established or self.state.closed) {
+        if (!self.state.established or self.state.closed or
+            self.local_drain_started or self.local_close_started)
+        {
             return error.InvalidSessionState;
         }
     }
 
-    pub fn recordLocalDrain(self: *Control) Error!void {
+    pub fn beginLocalClose(self: *Control) Error!void {
         try self.ensureOpen();
+        self.local_close_started = true;
+    }
+
+    pub fn beginLocalDrain(self: *Control) Error!void {
+        try self.ensureOpen();
+        self.local_drain_started = true;
+    }
+
+    pub fn recordLocalDrain(self: *Control) Error!void {
+        if (self.local_drain_started) {
+            self.local_drain_started = false;
+        } else {
+            try self.ensureOpen();
+        }
         if (self.local_drain_sent) return;
         self.local_drain_sent = true;
         self.state.drain();
@@ -110,9 +133,27 @@ pub const Control = struct {
         self: *Control,
         code: u32,
     ) Error!void {
-        try self.ensureOpen();
+        if (self.local_close_started) {
+            self.local_close_started = false;
+            self.local_close_sent = true;
+            if (!self.state.closed) self.state.close(code);
+            return;
+        }
+        if (!self.state.established or self.state.closed) {
+            return error.InvalidSessionState;
+        }
         self.local_close_sent = true;
         self.state.close(code);
+    }
+
+    pub fn recordLocalCloseFailure(
+        self: *Control,
+        code: u32,
+    ) void {
+        self.local_drain_started = false;
+        self.local_close_started = false;
+        self.local_close_failed = true;
+        if (!self.state.closed) self.state.close(code);
     }
 
     /// Block until the next peer drain/close/reset event.
@@ -473,8 +514,62 @@ pub fn terminateStreams(
                 webtransport.ApplicationErrorCode.session_gone,
             );
         }
+        try requestAfterSessionTerminal(connection, stream);
     }
     try terminateBufferedStreams(connection, registry);
+}
+
+/// Terminate every associated stream under one caller-owned absolute
+/// awake-clock deadline. Per-stream terminal state is committed only after
+/// the corresponding transport frame reaches the socket, so a timeout can be
+/// resumed without submitting an already completed RESET_STREAM or
+/// STOP_SENDING again.
+pub fn terminateStreamsWithDeadline(
+    connection: *quic.one_rtt.Connection,
+    registry: *webtransport.StreamRegistry,
+    deadline: std.Io.Clock.Timestamp,
+) (Error || quic.runtime.ReceiveTimeoutError)!void {
+    _ = try deadline_policy.usableAwake(connection.endpoint.io, deadline);
+    for (registry.registered()) |*stream| {
+        const has_send_side = stream.direction == .bidirectional or
+            stream.locally_initiated;
+        if (has_send_side and
+            !stream.local_fin and
+            stream.send_reset == null and
+            stream.stopped == null)
+        {
+            try connection.resetStreamWithDeadline(
+                stream.stream_id,
+                webtransport.ApplicationErrorCode.session_gone,
+                deadline,
+            );
+            stream.send_reset = .fromHttp3(
+                webtransport.ApplicationErrorCode.session_gone,
+            );
+        }
+        const has_receive_side = stream.direction == .bidirectional or
+            !stream.locally_initiated;
+        if (has_receive_side and
+            !stream.peer_fin and
+            stream.receive_reset == null and
+            stream.stop_sent == null)
+        {
+            try connection.sendStopSendingWithDeadline(
+                stream.stream_id,
+                webtransport.ApplicationErrorCode.session_gone,
+                deadline,
+            );
+            stream.stop_sent = .fromHttp3(
+                webtransport.ApplicationErrorCode.session_gone,
+            );
+        }
+        try requestAfterSessionTerminal(connection, stream);
+    }
+    try terminateBufferedStreamsWithDeadline(
+        connection,
+        registry,
+        deadline,
+    );
 }
 
 pub const TerminateProgress = enum { complete, submitted };
@@ -501,7 +596,6 @@ pub fn terminateStreamsOnce(
             stream.send_reset = .fromHttp3(
                 webtransport.ApplicationErrorCode.session_gone,
             );
-            try association.requestAfterSendTerminal(connection, stream);
             return .submitted;
         }
         const has_receive_side = stream.direction == .bidirectional or
@@ -518,10 +612,29 @@ pub fn terminateStreamsOnce(
             stream.stop_sent = .fromHttp3(
                 webtransport.ApplicationErrorCode.session_gone,
             );
+            try requestAfterSessionTerminal(connection, stream);
             return .submitted;
         }
+        try requestAfterSessionTerminal(connection, stream);
     }
     return terminateBufferedStreamsOnce(connection, registry);
+}
+
+fn requestAfterSessionTerminal(
+    connection: *quic.one_rtt.Connection,
+    stream: *const webtransport.StreamState,
+) Error!void {
+    const send_terminal = stream.direction == .unidirectional and
+        !stream.locally_initiated or
+        stream.local_fin or stream.send_reset != null or
+        stream.stopped != null;
+    const receive_terminal = stream.direction == .unidirectional and
+        stream.locally_initiated or
+        stream.peer_fin or stream.receive_reset != null or
+        stream.stop_sent != null;
+    if (send_terminal and receive_terminal) {
+        _ = try association.requestTransportRetirement(connection, stream);
+    }
 }
 
 /// Terminate peer streams whose complete association prefix reached QUIC before
@@ -532,10 +645,27 @@ fn terminateBufferedStreams(
     connection: *quic.one_rtt.Connection,
     registry: *webtransport.StreamRegistry,
 ) Error!void {
+    while ((terminateBufferedStreamsInternal(
+        connection,
+        registry,
+        false,
+        null,
+    ) catch |err| switch (err) {
+        error.Timeout, error.ConcurrencyUnavailable => unreachable,
+        else => |other| return @errorCast(other),
+    }) == .submitted) {}
+}
+
+fn terminateBufferedStreamsWithDeadline(
+    connection: *quic.one_rtt.Connection,
+    registry: *webtransport.StreamRegistry,
+    deadline: std.Io.Clock.Timestamp,
+) (Error || quic.runtime.ReceiveTimeoutError)!void {
     while (try terminateBufferedStreamsInternal(
         connection,
         registry,
         false,
+        deadline,
     ) == .submitted) {}
 }
 
@@ -543,14 +673,29 @@ fn terminateBufferedStreamsOnce(
     connection: *quic.one_rtt.Connection,
     registry: *webtransport.StreamRegistry,
 ) Error!TerminateProgress {
-    return terminateBufferedStreamsInternal(connection, registry, true);
+    return terminateBufferedStreamsInternal(
+        connection,
+        registry,
+        true,
+        null,
+    ) catch |err| switch (err) {
+        error.Timeout, error.ConcurrencyUnavailable => unreachable,
+        else => |other| return @errorCast(other),
+    };
 }
 
 fn terminateBufferedStreamsInternal(
     connection: *quic.one_rtt.Connection,
     registry: *webtransport.StreamRegistry,
     single_attempt: bool,
-) Error!TerminateProgress {
+    deadline: ?std.Io.Clock.Timestamp,
+) (Error || quic.runtime.ReceiveTimeoutError)!TerminateProgress {
+    if (deadline) |absolute| {
+        _ = try deadline_policy.usableAwake(
+            connection.endpoint.io,
+            absolute,
+        );
+    }
     var stream_ids: [256]u62 = undefined;
     var after: ?u62 = null;
     while (true) {
@@ -572,7 +717,13 @@ fn terminateBufferedStreamsInternal(
             if (direction == .bidirectional and
                 bufferedSendNeedsReset(connection, stream_id))
             {
-                if (single_attempt) {
+                if (deadline) |absolute| {
+                    try connection.resetStreamWithDeadline(
+                        stream_id,
+                        webtransport.ApplicationErrorCode.session_gone,
+                        absolute,
+                    );
+                } else if (single_attempt) {
                     try connection.tryResetStream(
                         stream_id,
                         webtransport.ApplicationErrorCode.session_gone,
@@ -586,7 +737,13 @@ fn terminateBufferedStreamsInternal(
                 return .submitted;
             }
             if (bufferedReceiveNeedsStop(connection, stream_id)) {
-                if (single_attempt) {
+                if (deadline) |absolute| {
+                    try connection.sendStopSendingWithDeadline(
+                        stream_id,
+                        webtransport.ApplicationErrorCode.session_gone,
+                        absolute,
+                    );
+                } else if (single_attempt) {
                     try connection.trySendStopSending(
                         stream_id,
                         webtransport.ApplicationErrorCode.session_gone,

@@ -356,6 +356,145 @@ test "HTTP/3 dev runtime serves concurrent clients end to end" {
     try std.testing.expectEqual(@as(usize, 2), result.successCount());
 }
 
+test "HTTP/3 dev concurrent handler converts informational status and isolates its error" {
+    const allocator = std.testing.allocator;
+
+    var threaded = std.Io.Threaded.init(allocator, .{
+        .async_limit = .unlimited,
+    });
+    defer threaded.deinit();
+    const io = threaded.io();
+
+    var server = try runtime.Server.bind(
+        allocator,
+        io,
+        .{ .ip4 = .loopback(0) },
+        .{ .quic = .{
+            .max_datagram_size = 4096,
+            .max_frames_per_datagram = 8,
+        } },
+    );
+    defer server.deinit();
+
+    const Context = struct {
+        fn handle(
+            _: *@This(),
+            request: runtime.OwnedRequest,
+        ) runtime.Error!http3.Response {
+            if (std.mem.eql(u8, request.request.path, "/invalid-final")) {
+                return .{ .status = 103 };
+            }
+            return .{ .status = 204 };
+        }
+    };
+    const Shared = struct {
+        server: *runtime.Server,
+        context: Context = .{},
+        result: ?runtime.ConcurrentServeResult = null,
+        err: ?anyerror = null,
+
+        fn run(shared: *@This()) void {
+            shared.result = shared.server.serveConcurrent(
+                Context,
+                &shared.context,
+                Context.handle,
+                2,
+            ) catch |err| {
+                shared.err = err;
+                return;
+            };
+        }
+    };
+    var shared = Shared{ .server = &server };
+    const server_thread = try std.Thread.spawn(.{}, Shared.run, .{&shared});
+
+    const ClientTask = struct {
+        allocator: std.mem.Allocator,
+        io: std.Io,
+        address: net.IpAddress,
+        path: []const u8,
+        expected_status: u16,
+        err: ?anyerror = null,
+
+        fn run(task: *@This()) void {
+            task.runFallible() catch |err| {
+                task.err = err;
+            };
+        }
+
+        fn runFallible(task: *@This()) !void {
+            var client = try runtime.Client.connect(
+                task.allocator,
+                task.io,
+                .{ .ip4 = .loopback(0) },
+                task.address,
+                .{ .quic = .{
+                    .max_datagram_size = 4096,
+                    .max_frames_per_datagram = 8,
+                } },
+            );
+            defer client.deinit();
+            var response = try client.request(.{
+                .method = "GET",
+                .path = task.path,
+                .authority = "localhost",
+            });
+            defer response.deinit(task.allocator);
+            try std.testing.expectEqual(
+                task.expected_status,
+                response.response.status,
+            );
+            try std.testing.expectEqualStrings("", response.response.body);
+        }
+    };
+    var clients = [_]ClientTask{
+        .{
+            .allocator = allocator,
+            .io = io,
+            .address = server.address(),
+            .path = "/invalid-final",
+            .expected_status = 500,
+        },
+        .{
+            .allocator = allocator,
+            .io = io,
+            .address = server.address(),
+            .path = "/sibling",
+            .expected_status = 204,
+        },
+    };
+    const invalid_client = try std.Thread.spawn(.{}, ClientTask.run, .{&clients[0]});
+    const sibling_client = try std.Thread.spawn(.{}, ClientTask.run, .{&clients[1]});
+
+    invalid_client.join();
+    sibling_client.join();
+    server_thread.join();
+    defer if (shared.result) |*result| result.deinit();
+
+    if (clients[0].err) |err| return err;
+    if (clients[1].err) |err| return err;
+    if (shared.err) |err| return err;
+    const result = shared.result.?;
+    try std.testing.expectEqual(@as(usize, 2), result.receivedCount());
+    try std.testing.expectEqual(@as(usize, 1), result.successCount());
+    var saw_invalid = false;
+    var saw_sibling = false;
+    for (result.requests, result.errors) |request, request_error| {
+        const owned = request.?;
+        if (std.mem.eql(u8, owned.request.path, "/invalid-final")) {
+            try std.testing.expectEqual(error.InvalidStatus, request_error.?);
+            saw_invalid = true;
+        } else if (std.mem.eql(u8, owned.request.path, "/sibling")) {
+            try std.testing.expect(request_error == null);
+            saw_sibling = true;
+        } else {
+            return error.TestUnexpectedResult;
+        }
+    }
+    try std.testing.expect(saw_invalid);
+    try std.testing.expect(saw_sibling);
+}
+
 test "HTTP/3 dev runtime correlates handler failure with owned request" {
     const allocator = std.testing.allocator;
     var threaded = std.Io.Threaded.init(allocator, .{

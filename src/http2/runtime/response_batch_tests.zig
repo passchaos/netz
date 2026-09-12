@@ -101,9 +101,10 @@ test "HTTP/2 response body batch streams interleaved DATA" {
         }
     };
     var context: Context = .{};
-    try client.requestBatchStreamingInto(
+    try client.requestBatchStreamingIntoWithTimeout(
         &requests,
         &responses,
+        .fromSeconds(2),
         &context,
         Context.consume,
     );
@@ -129,6 +130,363 @@ test "HTTP/2 response body batch streams interleaved DATA" {
             );
         }
     }
+
+    thread.join();
+    if (shared.err) |err| return err;
+}
+
+test "HTTP/2 body request streaming response batch deadline is not renewed" {
+    const allocator = std.testing.allocator;
+    var threaded = std.Io.Threaded.init(allocator, .{
+        .async_limit = .unlimited,
+    });
+    defer threaded.deinit();
+    const io = threaded.io();
+    var server = try Server.listen(
+        allocator,
+        io,
+        .{ .ip4 = .loopback(0) },
+        .{ .max_frame_payload = 4096, .max_body_bytes = 4096 },
+    );
+    defer server.deinit();
+
+    const Shared = struct {
+        server: *Server,
+        reset_stream_id: ?u31 = null,
+        err: ?anyerror = null,
+
+        fn run(self: *@This()) void {
+            self.runFallible() catch |err| {
+                self.err = err;
+            };
+        }
+
+        fn runFallible(self: *@This()) !void {
+            var connection = try self.server.accept();
+            defer connection.close();
+            var requests: [2]runtime.StreamingRequest = undefined;
+            try connection.readRequestBatchStreamingIntoWithTimeout(
+                &requests,
+                .fromSeconds(1),
+                {},
+                struct {
+                    fn consume(_: void, _: u31, _: []const u8) !void {}
+                }.consume,
+            );
+            defer for (&requests) |*request| {
+                request.deinit(self.server.allocator);
+            };
+
+            try std.Io.sleep(
+                self.server.io,
+                .fromMilliseconds(150),
+                .awake,
+            );
+            try connection.writeResponse(requests[0].stream_id, .{
+                .body = "first",
+            });
+            try std.Io.sleep(
+                self.server.io,
+                .fromMilliseconds(350),
+                .awake,
+            );
+            try connection.writeResponse(requests[1].stream_id, .{
+                .body = "late",
+            });
+            var reset = try connection.readResetStreamWithTimeout(
+                .fromSeconds(1),
+            );
+            defer reset.deinit(self.server.allocator);
+            self.reset_stream_id = reset.reset.stream_id;
+            try std.testing.expectEqual(
+                http2.ErrorCode.cancel,
+                reset.reset.error_code,
+            );
+        }
+    };
+
+    var shared = Shared{ .server = &server };
+    const thread = try std.Thread.spawn(.{}, Shared.run, .{&shared});
+    var joined = false;
+    defer if (!joined) thread.join();
+
+    var client = try Client.connect(
+        allocator,
+        io,
+        server.address(),
+        .{ .max_frame_payload = 4096, .max_body_bytes = 4096 },
+    );
+    defer client.close();
+    const requests = [_]RequestOptions{
+        .{
+            .method = "POST",
+            .path = "/first",
+            .authority = "localhost",
+            .body = "one",
+        },
+        .{
+            .method = "POST",
+            .path = "/second",
+            .authority = "localhost",
+            .body = "two",
+        },
+    };
+    var responses: [requests.len]StreamingResponse = undefined;
+    var body_bytes: [requests.len]usize = @splat(0);
+    try std.testing.expectError(
+        error.Timeout,
+        client.requestBodyBatchStreamingIntoWithTimeout(
+            &requests,
+            3,
+            &responses,
+            .fromMilliseconds(400),
+            &body_bytes,
+            struct {
+                fn consume(
+                    bytes: *[requests.len]usize,
+                    index: usize,
+                    data: []const u8,
+                ) !void {
+                    bytes[index] += data.len;
+                }
+            }.consume,
+        ),
+    );
+    try std.testing.expectEqualSlices(usize, &.{ 5, 0 }, &body_bytes);
+    try std.testing.expect(!client.isReusable());
+    try std.testing.expectEqual(@as(usize, 0), client.activeLocalStreamCount());
+
+    thread.join();
+    joined = true;
+    if (shared.err) |err| return err;
+    try std.testing.expectEqual(@as(?u31, 3), shared.reset_stream_id);
+}
+
+test "HTTP/2 streaming response batch deadline covers continuation" {
+    const allocator = std.testing.allocator;
+    var threaded = std.Io.Threaded.init(allocator, .{
+        .async_limit = .unlimited,
+    });
+    defer threaded.deinit();
+    const io = threaded.io();
+    var server = try Server.listen(
+        allocator,
+        io,
+        .{ .ip4 = .loopback(0) },
+        .{ .max_frame_payload = 4096 },
+    );
+    defer server.deinit();
+
+    const Shared = struct {
+        server: *Server,
+        err: ?anyerror = null,
+
+        fn run(self: *@This()) void {
+            self.runFallible() catch |err| {
+                self.err = err;
+            };
+        }
+
+        fn runFallible(self: *@This()) !void {
+            var connection = try self.server.accept();
+            defer connection.close();
+            var request = try connection.readRequest();
+            defer request.deinit(self.server.allocator);
+
+            var block: std.ArrayList(u8) = .empty;
+            defer block.deinit(self.server.allocator);
+            try http2.Hpack.encodeLiteralBlock(
+                &block,
+                self.server.allocator,
+                &.{.{ .name = ":status", .value = "204" }},
+            );
+            try runtime.testing.writeRawFrame(
+                &connection,
+                .headers,
+                0x1, // END_STREAM without END_HEADERS.
+                request.stream_id,
+                block.items[0..1],
+            );
+            var reset = try connection.readResetStreamWithTimeout(
+                .fromSeconds(1),
+            );
+            defer reset.deinit(self.server.allocator);
+            try std.testing.expectEqual(request.stream_id, reset.reset.stream_id);
+            try std.testing.expectEqual(
+                http2.ErrorCode.cancel,
+                reset.reset.error_code,
+            );
+        }
+    };
+
+    var shared = Shared{ .server = &server };
+    const thread = try std.Thread.spawn(.{}, Shared.run, .{&shared});
+    var joined = false;
+    defer if (!joined) thread.join();
+
+    var client = try Client.connect(allocator, io, server.address(), .{});
+    defer client.close();
+    const requests = [_]RequestOptions{.{
+        .path = "/partial-head",
+        .authority = "localhost",
+    }};
+    var responses: [requests.len]StreamingResponse = undefined;
+    try std.testing.expectError(
+        error.Timeout,
+        client.requestBatchStreamingIntoWithTimeout(
+            &requests,
+            &responses,
+            .fromMilliseconds(20),
+            {},
+            struct {
+                fn consume(_: void, _: usize, _: []const u8) !void {}
+            }.consume,
+        ),
+    );
+    try std.testing.expect(!client.isReusable());
+    try std.testing.expectEqual(@as(usize, 0), client.activeLocalStreamCount());
+
+    thread.join();
+    joined = true;
+    if (shared.err) |err| return err;
+}
+
+test "HTTP/2 request body batch streams interleaved responses" {
+    const allocator = std.testing.allocator;
+    const request_body = "request-batch-" ** 256;
+    const response_body = "response-batch-" ** 512;
+    const parallel = 3;
+    const total_request_bytes = request_body.len * parallel;
+    const total_response_bytes = response_body.len * parallel;
+    const limits: Limits = .{
+        .max_body_bytes = @max(request_body.len, response_body.len),
+        .initial_window_size = @max(
+            @max(total_request_bytes, total_response_bytes),
+            65_535,
+        ),
+        .initial_connection_window_size = @max(
+            @max(total_request_bytes, total_response_bytes),
+            65_535,
+        ),
+    };
+    var threaded = std.Io.Threaded.init(allocator, .{});
+    defer threaded.deinit();
+    const io = threaded.io();
+    var server = try Server.listen(
+        allocator,
+        io,
+        .{ .ip4 = .loopback(0) },
+        limits,
+    );
+    defer server.deinit();
+
+    const Shared = struct {
+        server: *Server,
+        request_bytes: [parallel]usize = @splat(0),
+        err: ?anyerror = null,
+
+        fn run(self: *@This()) void {
+            self.runFallible() catch |err| {
+                self.err = err;
+            };
+        }
+
+        fn consume(
+            self: *@This(),
+            stream_id: u31,
+            data: []const u8,
+        ) !void {
+            const index: usize = (stream_id - 1) / 2;
+            self.request_bytes[index] += data.len;
+        }
+
+        fn runFallible(self: *@This()) !void {
+            var connection = try self.server.accept();
+            defer connection.close();
+            var requests: [parallel]runtime.StreamingRequest = undefined;
+            try connection.readRequestBatchStreamingIntoWithTimeout(
+                &requests,
+                .fromSeconds(2),
+                self,
+                consume,
+            );
+            defer for (&requests) |*request| {
+                request.deinit(self.server.allocator);
+            };
+            for (requests, self.request_bytes) |request, bytes| {
+                try std.testing.expectEqual(request_body.len, request.body_bytes);
+                try std.testing.expectEqual(request_body.len, bytes);
+            }
+            var stream_ids: [parallel]u31 = undefined;
+            var responses: [parallel]ResponseOptions = undefined;
+            for (&stream_ids, &responses, 0..) |*stream_id, *response, index| {
+                const reverse = parallel - 1 - index;
+                stream_id.* = requests[reverse].stream_id;
+                response.* = .{ .body = response_body };
+            }
+            try connection.writeResponseBodyBatch(
+                &stream_ids,
+                &responses,
+                4096,
+            );
+        }
+    };
+
+    var shared = Shared{ .server = &server };
+    const thread = try std.Thread.spawn(.{}, Shared.run, .{&shared});
+
+    var client = try Client.connect(
+        allocator,
+        io,
+        server.address(),
+        limits,
+    );
+    defer client.close();
+    const requests = [_]RequestOptions{
+        .{
+            .method = "POST",
+            .path = "/one",
+            .authority = "localhost",
+            .body = request_body,
+        },
+        .{
+            .method = "POST",
+            .path = "/two",
+            .authority = "localhost",
+            .body = request_body,
+        },
+        .{
+            .method = "POST",
+            .path = "/three",
+            .authority = "localhost",
+            .body = request_body,
+        },
+    };
+    var responses: [parallel]StreamingResponse = undefined;
+    var response_bytes: [parallel]usize = @splat(0);
+    try client.requestBodyBatchStreamingIntoWithTimeout(
+        &requests,
+        1024,
+        &responses,
+        .fromSeconds(2),
+        &response_bytes,
+        struct {
+            fn consume(
+                bytes: *[parallel]usize,
+                index: usize,
+                data: []const u8,
+            ) !void {
+                bytes[index] += data.len;
+            }
+        }.consume,
+    );
+    defer for (&responses) |*response| response.deinit(allocator);
+    for (responses, response_bytes) |response, bytes| {
+        try std.testing.expectEqual(@as(u16, 200), response.status);
+        try std.testing.expectEqual(response_body.len, response.body_bytes);
+        try std.testing.expectEqual(response_body.len, bytes);
+    }
+    try std.testing.expect(client.isReusable());
 
     thread.join();
     if (shared.err) |err| return err;
@@ -1088,6 +1446,119 @@ test "HTTP/2 streaming response batch callback failure cancels every stream" {
         @as(usize, 0),
         client.active_local_streams.items.len,
     );
+
+    thread.join();
+    if (shared.err) |err| return err;
+}
+
+test "HTTP/2 bounded body request streaming response callback Timeout remains reusable" {
+    const allocator = std.testing.allocator;
+    var threaded = std.Io.Threaded.init(allocator, .{});
+    defer threaded.deinit();
+    const io = threaded.io();
+    var server = try Server.listen(
+        allocator,
+        io,
+        .{ .ip4 = .loopback(0) },
+        .{ .max_frame_payload = 4096, .max_body_bytes = 4096 },
+    );
+    defer server.deinit();
+
+    const Shared = struct {
+        server: *Server,
+        err: ?anyerror = null,
+
+        fn run(self: *@This()) void {
+            self.runFallible() catch |err| {
+                self.err = err;
+            };
+        }
+
+        fn runFallible(self: *@This()) !void {
+            var connection = try self.server.accept();
+            defer connection.close();
+            var rejected = try connection.readRequest();
+            defer rejected.deinit(self.server.allocator);
+            try std.testing.expectEqualStrings("body", rejected.body);
+            try runtime.testing.writeHeaders(
+                &connection,
+                rejected.stream_id,
+                &.{
+                    .{ .name = ":status", .value = "200" },
+                    .{ .name = "content-length", .value = "12" },
+                },
+                false,
+            );
+            try runtime.testing.writeData(
+                &connection,
+                rejected.stream_id,
+                "first",
+                false,
+            );
+            var reset = try connection.readResetStreamWithTimeout(
+                .fromSeconds(1),
+            );
+            defer reset.deinit(self.server.allocator);
+            try std.testing.expectEqual(rejected.stream_id, reset.reset.stream_id);
+            try std.testing.expectEqual(
+                http2.ErrorCode.cancel,
+                reset.reset.error_code,
+            );
+
+            var next = try connection.readRequest();
+            defer next.deinit(self.server.allocator);
+            try std.testing.expectEqual(@as(u31, 3), next.stream_id);
+            try connection.writeResponse(next.stream_id, .{ .status = 204 });
+        }
+    };
+
+    var shared = Shared{ .server = &server };
+    const thread = try std.Thread.spawn(.{}, Shared.run, .{&shared});
+
+    var client = try Client.connect(
+        allocator,
+        io,
+        server.address(),
+        .{ .max_frame_payload = 4096, .max_body_bytes = 4096 },
+    );
+    defer client.close();
+    const requests = [_]RequestOptions{.{
+        .method = "POST",
+        .path = "/callback-timeout",
+        .authority = "localhost",
+        .body = "body",
+    }};
+    var responses: [requests.len]StreamingResponse = undefined;
+    var callback_calls: usize = 0;
+    try std.testing.expectError(
+        error.Timeout,
+        client.requestBodyBatchStreamingIntoWithTimeout(
+            &requests,
+            4,
+            &responses,
+            .fromSeconds(2),
+            &callback_calls,
+            struct {
+                fn consume(
+                    calls: *usize,
+                    _: usize,
+                    _: []const u8,
+                ) !void {
+                    calls.* += 1;
+                    return error.Timeout;
+                }
+            }.consume,
+        ),
+    );
+    try std.testing.expectEqual(@as(usize, 1), callback_calls);
+    try std.testing.expect(client.isReusable());
+
+    var next = try client.request(.{
+        .path = "/after-callback-timeout",
+        .authority = "localhost",
+    });
+    defer next.deinit(allocator);
+    try std.testing.expectEqual(@as(u16, 204), next.status);
 
     thread.join();
     if (shared.err) |err| return err;

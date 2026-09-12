@@ -9,6 +9,10 @@ pub const Error = error{
 } || std.mem.Allocator.Error;
 
 pub const default_max_challenge_transmissions: u8 = 3;
+/// Bound peer PATH_CHALLENGEs awaiting a PATH_RESPONSE. A peer can send many
+/// unique challenge values while congestion or amplification limits prevent
+/// replies; retaining every value would make connection memory unbounded.
+pub const default_max_pending_responses: usize = 8;
 
 pub const Challenge = struct {
     data: [8]u8,
@@ -42,18 +46,30 @@ fn Fifo(comptime T: type) type {
         }
 
         fn append(self: *Self, allocator: std.mem.Allocator, value: T) std.mem.Allocator.Error!void {
-            self.compactIfEmpty();
-            try self.items.append(allocator, value);
+            try self.ensureUnusedCapacity(allocator, 1);
+            self.items.appendAssumeCapacity(value);
         }
 
         fn appendSlice(self: *Self, allocator: std.mem.Allocator, values: []const T) std.mem.Allocator.Error!void {
-            self.compactIfEmpty();
-            try self.items.ensureUnusedCapacity(allocator, values.len);
+            try self.ensureUnusedCapacity(allocator, values.len);
             self.items.appendSliceAssumeCapacity(values);
         }
 
         fn ensureUnusedCapacity(self: *Self, allocator: std.mem.Allocator, additional_count: usize) std.mem.Allocator.Error!void {
             self.compactIfEmpty();
+            if (self.head != 0 and
+                self.items.items.len + additional_count > self.items.capacity and
+                self.len() + additional_count <= self.items.capacity)
+            {
+                const remaining = self.len();
+                std.mem.copyForwards(
+                    T,
+                    self.items.items[0..remaining],
+                    self.items.items[self.head..],
+                );
+                self.items.items.len = remaining;
+                self.head = 0;
+            }
             try self.items.ensureUnusedCapacity(allocator, additional_count);
         }
 
@@ -92,10 +108,12 @@ fn Fifo(comptime T: type) type {
 
 pub const State = struct {
     allocator: std.mem.Allocator,
+    max_pending_responses: usize = default_max_pending_responses,
     pending_responses: Fifo([8]u8) = .{},
     pending_challenges: Fifo(Challenge) = .{},
     outstanding_challenges: std.ArrayList(Challenge) = .empty,
     failed_challenge_count: usize = 0,
+    dropped_challenge_count: u64 = 0,
     /// PATH_CHALLENGE/PATH_RESPONSE payloads are only 8 bytes, so keep value
     /// indexes for duplicate suppression and response matching. The FIFO lists
     /// still define send order, while these maps keep packet receive paths from
@@ -110,6 +128,16 @@ pub const State = struct {
         return .{ .allocator = allocator };
     }
 
+    pub fn initWithMaxPendingResponses(
+        allocator: std.mem.Allocator,
+        max_pending_responses: usize,
+    ) State {
+        return .{
+            .allocator = allocator,
+            .max_pending_responses = max_pending_responses,
+        };
+    }
+
     pub fn deinit(self: *State) void {
         self.pending_responses.deinit(self.allocator);
         self.pending_challenges.deinit(self.allocator);
@@ -121,7 +149,10 @@ pub const State = struct {
     }
 
     pub fn clone(self: *const State, allocator: std.mem.Allocator) Error!State {
-        var out = State.init(allocator);
+        var out = State.initWithMaxPendingResponses(
+            allocator,
+            self.max_pending_responses,
+        );
         errdefer out.deinit();
         const pending_responses = self.pending_responses.activeConst();
         try out.pending_responses.ensureUnusedCapacity(allocator, pending_responses.len);
@@ -132,6 +163,7 @@ pub const State = struct {
         try out.outstanding_challenges.ensureUnusedCapacity(allocator, self.outstanding_challenges.items.len);
         out.outstanding_challenges.appendSliceAssumeCapacity(self.outstanding_challenges.items);
         out.failed_challenge_count = self.failed_challenge_count;
+        out.dropped_challenge_count = self.dropped_challenge_count;
         try out.rebuildIndexes();
         out.max_challenge_transmissions = self.max_challenge_transmissions;
         return out;
@@ -172,6 +204,9 @@ pub const State = struct {
             for (self.pending_challenges[0..self.pending_challenge_len]) |queued| {
                 if (std.mem.eql(u8, &queued, &data)) return;
             }
+            if (self.state.pendingResponseCount() +
+                self.pending_challenge_len >=
+                self.state.max_pending_responses) return;
             if (self.pending_challenge_len == self.pending_challenges.len) {
                 return error.OutOfMemory;
             }
@@ -246,11 +281,16 @@ pub const State = struct {
     }
 
     pub fn receiveChallenge(self: *State, data: [8]u8) Error!bool {
+        if (self.pending_response_index.contains(data)) return false;
+        if (self.pendingResponseCount() >= self.max_pending_responses) {
+            self.dropped_challenge_count +|= 1;
+            return false;
+        }
         const slot = try self.pending_response_index.getOrPut(
             self.allocator,
             data,
         );
-        if (slot.found_existing) return false;
+        std.debug.assert(!slot.found_existing);
         errdefer _ = self.pending_response_index.remove(data);
 
         try self.pending_responses.ensureUnusedCapacity(self.allocator, 1);
@@ -391,6 +431,10 @@ pub const State = struct {
 
     pub fn failedChallengeCount(self: *const State) usize {
         return self.failed_challenge_count;
+    }
+
+    pub fn droppedChallengeCount(self: *const State) u64 {
+        return self.dropped_challenge_count;
     }
 
     pub fn hasChallengeForPathEpoch(
@@ -711,6 +755,61 @@ test "QUIC path validation pending queues pop FIFO without shifting" {
     try std.testing.expectEqual(@as(usize, 2), cloned.pendingChallengeCount());
     try std.testing.expectEqualSlices(u8, &b, &(try cloned.nextChallengeFrame()).path_challenge.data);
     try std.testing.expectEqualSlices(u8, &c, &(try cloned.nextChallengeFrame()).path_challenge.data);
+}
+
+test "QUIC path validation bounds pending peer responses" {
+    const allocator = std.testing.allocator;
+    var state = State.initWithMaxPendingResponses(allocator, 2);
+    defer state.deinit();
+
+    const a = [_]u8{ 'a', 0, 0, 0, 0, 0, 0, 1 };
+    const b = [_]u8{ 'b', 0, 0, 0, 0, 0, 0, 2 };
+    const c = [_]u8{ 'c', 0, 0, 0, 0, 0, 0, 3 };
+    try std.testing.expect(try state.receiveChallenge(a));
+    try std.testing.expect(try state.receiveChallenge(b));
+    try std.testing.expect(!try state.receiveChallenge(a));
+    try std.testing.expect(!try state.receiveChallenge(c));
+    try std.testing.expectEqual(@as(usize, 2), state.pendingResponseCount());
+    try std.testing.expectEqual(@as(u64, 1), state.droppedChallengeCount());
+
+    const first = try state.nextResponseFrame();
+    try std.testing.expectEqualSlices(u8, &a, &first.path_response.data);
+    try std.testing.expect(try state.receiveChallenge(c));
+    try std.testing.expectEqual(@as(usize, 2), state.pendingResponseCount());
+    try std.testing.expectEqualSlices(
+        u8,
+        &b,
+        &(try state.nextResponseFrame()).path_response.data,
+    );
+    try std.testing.expectEqualSlices(
+        u8,
+        &c,
+        &(try state.nextResponseFrame()).path_response.data,
+    );
+}
+
+test "QUIC path receive preflight caps unique challenges per packet" {
+    const allocator = std.testing.allocator;
+    var state = State.initWithMaxPendingResponses(allocator, 2);
+    defer state.deinit();
+
+    const a = [_]u8{ 'a', 0, 0, 0, 0, 0, 0, 1 };
+    const b = [_]u8{ 'b', 0, 0, 0, 0, 0, 0, 2 };
+    const c = [_]u8{ 'c', 0, 0, 0, 0, 0, 0, 3 };
+    try std.testing.expect(try state.receiveChallenge(a));
+    var challenges: [3][8]u8 = undefined;
+    var responses: [1][8]u8 = undefined;
+    var preflight = State.ReceivePreflight.init(
+        &state,
+        &challenges,
+        &responses,
+    );
+    try preflight.receiveChallenge(a);
+    try preflight.receiveChallenge(b);
+    try preflight.receiveChallenge(c);
+    try std.testing.expectEqual(@as(usize, 1), preflight.pending_challenge_len);
+    try std.testing.expectEqualSlices(u8, &b, &preflight.pending_challenges[0]);
+    try preflight.prepare();
 }
 
 test "QUIC path receive preflight avoids allocation without path frames" {

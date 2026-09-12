@@ -81,14 +81,48 @@ test "HTTP/3 protected runtime exchanges request and response over QUIC 1-RTT" {
                 @as(?u64, client_qpack_decoder_stream_id),
                 server_ptr.control.peer_qpack_decoder_stream_id,
             );
-            try server_ptr.sendResponse(request.from, request.stream_id, .{
-                .status = 200,
-                .headers = &.{.{
-                    .name = "content-type",
-                    .value = "text/plain",
-                }},
-                .body = "pong",
-            });
+            const packet_number = server_ptr.next_packet_number;
+            const control_offset = server_ptr.control_send.next_offset;
+            const pending_sections =
+                server_ptr.qpack_encode.pending_sections.items.len;
+            try std.testing.expectError(
+                error.Timeout,
+                server_ptr.sendResponseWithDeadline(
+                    request.from,
+                    request.stream_id,
+                    .{ .status = 204 },
+                    .{ .clock = .real, .raw = .zero },
+                ),
+            );
+            try std.testing.expectEqual(
+                packet_number,
+                server_ptr.next_packet_number,
+            );
+            try std.testing.expectEqual(
+                control_offset,
+                server_ptr.control_send.next_offset,
+            );
+            try std.testing.expectEqual(
+                pending_sections,
+                server_ptr.qpack_encode.pending_sections.items.len,
+            );
+            try std.testing.expectEqual(
+                @as(usize, 1),
+                server_ptr.request_lifecycle.count(),
+            );
+            try server_ptr.sendResponseWithTimeout(
+                request.from,
+                request.stream_id,
+                .{
+                    .status = 200,
+                    .headers = &.{.{
+                        .name = "content-type",
+                        .value = "text/plain",
+                    }},
+                    .body = "pong",
+                },
+                .fromSeconds(1),
+            );
             try std.testing.expect(server_ptr.control.settings.sent);
         }
     };

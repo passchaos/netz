@@ -6,6 +6,38 @@ const control_sender = @import("../../control/send.zig");
 
 const server_control_stream_id: u62 = 3;
 
+const DeadlineAfterSendIo = struct {
+    delegate: std.Io,
+    now_ns: i96,
+    send_calls: usize = 0,
+
+    fn now(
+        userdata: ?*anyopaque,
+        _: std.Io.Clock,
+    ) std.Io.Timestamp {
+        const self: *@This() = @ptrCast(@alignCast(userdata.?));
+        return .fromNanoseconds(self.now_ns);
+    }
+
+    fn netSend(
+        userdata: ?*anyopaque,
+        socket_handle: std.Io.net.Socket.Handle,
+        messages: []std.Io.net.OutgoingMessage,
+        flags: std.Io.net.SendFlags,
+    ) struct { ?std.Io.net.Socket.SendError, usize } {
+        const self: *@This() = @ptrCast(@alignCast(userdata.?));
+        self.send_calls += 1;
+        const result = self.delegate.vtable.netSend(
+            self.delegate.userdata,
+            socket_handle,
+            messages,
+            flags,
+        );
+        if (result[1] != 0) self.now_ns += std.time.ns_per_s;
+        return result;
+    }
+};
+
 test "HTTP/3 protected response deadlines preserve aggregate and streaming progress" {
     const allocator = std.testing.allocator;
     var threaded = std.Io.Threaded.init(allocator, .{
@@ -130,11 +162,64 @@ test "HTTP/3 protected response deadlines preserve aggregate and streaming progr
     );
     defer client.deinit();
 
+    try std.testing.expectError(
+        error.Timeout,
+        client.requestWithDeadline(
+            .{
+                .method = "GET",
+                .path = "/invalid-send-deadline",
+                .authority = "localhost",
+            },
+            .{ .clock = .real, .raw = .zero },
+        ),
+    );
+    try std.testing.expectEqual(@as(u62, 0), client.next_stream_id);
+    try std.testing.expectEqual(@as(u64, 0), client.next_packet_number);
+    try std.testing.expectEqual(@as(usize, 0), client.request_lifecycle.count());
+
+    {
+        var timed_io = DeadlineAfterSendIo{
+            .delegate = client.quic_client.endpoint.io,
+            .now_ns = 1_000_000,
+        };
+        var timed_vtable = client.quic_client.endpoint.io.vtable.*;
+        timed_vtable.now = DeadlineAfterSendIo.now;
+        timed_vtable.netSend = DeadlineAfterSendIo.netSend;
+        client.quic_client.endpoint.io = .{
+            .userdata = &timed_io,
+            .vtable = &timed_vtable,
+        };
+        defer client.quic_client.endpoint.io = timed_io.delegate;
+        try std.testing.expectError(
+            error.Timeout,
+            client.requestWithDeadline(
+                .{
+                    .method = "GET",
+                    .path = "/send-timeout",
+                    .authority = "localhost",
+                },
+                .{
+                    .clock = .awake,
+                    .raw = .fromNanoseconds(timed_io.now_ns + 1),
+                },
+            ),
+        );
+        try std.testing.expectEqual(@as(usize, 1), timed_io.send_calls);
+        try std.testing.expect(client.control.settings.sent);
+        try std.testing.expectEqual(@as(u62, 0), client.next_stream_id);
+        try std.testing.expectEqual(@as(usize, 0), client.request_lifecycle.count());
+        try std.testing.expectEqual(
+            @as(usize, 0),
+            client.qpack_encode.pending_sections.items.len,
+        );
+    }
+
     const direct_id = try client.sendRequest(.{
         .method = "GET",
         .path = "/direct-deadline",
         .authority = "localhost",
     });
+    try std.testing.expectEqual(@as(u62, 0), direct_id);
     try shared.direct_head_sent.wait(io);
     try std.testing.expectError(
         error.Timeout,

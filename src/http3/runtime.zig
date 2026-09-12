@@ -79,6 +79,40 @@ const webtransport_bidi_stream_type =
 pub const InformationalResponseHead = http3.InformationalResponseHead;
 pub const InformationalObserver = http3.InformationalObserver;
 
+/// High-level handlers return one final response. Convert an accidental 1xx
+/// into a terminal 500 while preserving the explicit informational APIs.
+fn normalizeHandlerResponse(
+    response: *http3.Response,
+    request_method: []const u8,
+    extended_connect: bool,
+) bool {
+    const invalid_final = response.status >= 100 and response.status < 200;
+    if (invalid_final) response.* = .{ .status = 500 };
+    if (response.request_method == null) response.request_method = request_method;
+    response.extended_connect = extended_connect;
+    return invalid_final;
+}
+
+fn serveConnectionShutdownError(err: anyerror) Error {
+    return switch (err) {
+        error.Timeout => error.RecoveryDrainTimeout,
+        error.ConcurrencyUnavailable => error.RecoveryDrainUnavailable,
+        else => |other| @errorCast(other),
+    };
+}
+
+fn finishServedConnectionWithDeadline(
+    session: *HandshakeServerSession,
+    deadline: std.Io.Clock.Timestamp,
+) Error!void {
+    session.initiateShutdownWithDeadline(deadline) catch |err|
+        return serveConnectionShutdownError(err);
+    session.completeShutdownWithDeadline(deadline) catch |err|
+        return serveConnectionShutdownError(err);
+    session.waitForRecoveryIdleWithDeadline(deadline) catch |err|
+        return serveConnectionShutdownError(err);
+}
+
 /// Reports a callback-scoped informational response together with the request
 /// stream selected by `receiveNextResponseWithInformational`. The header
 /// fields borrow decoder storage and must not be retained after the callback.
@@ -112,6 +146,47 @@ const MultiplexedInformationalContext = struct {
     }
 };
 
+const InformationalCallbackGuard = struct {
+    observer: http3.InformationalObserver,
+    callback_reader_active: *bool,
+
+    fn notify(
+        context: *anyopaque,
+        response: InformationalResponseHead,
+    ) void {
+        const self: *@This() = @ptrCast(@alignCast(context));
+        std.debug.assert(!self.callback_reader_active.*);
+        self.callback_reader_active.* = true;
+        defer self.callback_reader_active.* = false;
+        self.observer.on_response(self.observer.context, response);
+    }
+};
+
+const PushInformationalCallbackGuard = struct {
+    observer: PushInformationalObserver,
+    callback_reader_active: *bool,
+
+    fn notify(
+        context: *anyopaque,
+        push_id: u64,
+        request_stream_id: u62,
+        stream_id: u62,
+        response: InformationalResponseHead,
+    ) void {
+        const self: *@This() = @ptrCast(@alignCast(context));
+        std.debug.assert(!self.callback_reader_active.*);
+        self.callback_reader_active.* = true;
+        defer self.callback_reader_active.* = false;
+        self.observer.on_response(
+            self.observer.context,
+            push_id,
+            request_stream_id,
+            stream_id,
+            response,
+        );
+    }
+};
+
 pub const Error = runtime_error.Error;
 pub const HandshakeWorkerError = runtime_error.HandshakeWorkerError;
 pub const HandshakeAdmissionError = runtime_error.HandshakeAdmissionError;
@@ -138,6 +213,8 @@ const StreamingResponseSet = streaming_set.Set;
 const PushStreamSet = push_state.Set;
 const ControlStreamRole = control_receive.ControlStreamRole;
 const ServerRequestIdValidator = control_receive.ServerRequestIdValidator;
+const ServerPushIdSet = control_receive.ServerPushIdSet;
+const PromisedPushIds = control_receive.PromisedPushIds;
 const MessageStreamDisposition = control_receive.MessageStreamDisposition;
 const validateServerGoAwayStreamId = control_receive.validateServerGoAwayStreamId;
 const validateClientGoAwayPushId = control_receive.validateClientGoAwayPushId;
@@ -162,64 +239,137 @@ const ControlFrameKind = control_sender.ControlFrameKind;
 const PushControlFrameKind = control_sender.PushControlFrameKind;
 const controlFramesInto = control_sender.controlFramesInto;
 const sendConnectionControlFrame = control_sender.sendConnectionControlFrame;
+const sendConnectionControlFrameWithDeadline =
+    control_sender.sendConnectionControlFrameWithDeadline;
+const trySendConnectionControlFrame =
+    control_sender.trySendConnectionControlFrame;
 const sendConnectionPushControl = control_sender.sendConnectionPushControl;
+const sendConnectionPushControlWithDeadline =
+    control_sender.sendConnectionPushControlWithDeadline;
+const trySendConnectionPushControl =
+    control_sender.trySendConnectionPushControl;
 const sendConnectionPriorityUpdate = control_sender.sendConnectionPriorityUpdate;
 const sendConnectionPriorityUpdateRaw =
     control_sender.sendConnectionPriorityUpdateRaw;
+const sendConnectionPriorityUpdateRawWithDeadline =
+    control_sender.sendConnectionPriorityUpdateRawWithDeadline;
+const trySendConnectionPriorityUpdateRaw =
+    control_sender.trySendConnectionPriorityUpdateRaw;
 const sendProtectedControlFrame = control_sender.sendProtectedControlFrame;
+const sendProtectedControlFrameWithDeadline =
+    control_sender.sendProtectedControlFrameWithDeadline;
 const sendProtectedPushControl = control_sender.sendProtectedPushControl;
+const sendProtectedPushControlWithDeadline =
+    control_sender.sendProtectedPushControlWithDeadline;
 const sendProtectedPriorityUpdate = control_sender.sendProtectedPriorityUpdate;
 const sendProtectedPriorityUpdateRaw =
     control_sender.sendProtectedPriorityUpdateRaw;
+const sendProtectedPriorityUpdateRawWithDeadline =
+    control_sender.sendProtectedPriorityUpdateRawWithDeadline;
 const sendConnectionSettings = control_sender.sendConnectionSettings;
+const sendConnectionSettingsWithDeadline =
+    control_sender.sendConnectionSettingsWithDeadline;
 const trySendConnectionSettings = control_sender.trySendConnectionSettings;
 const sendConnectionQpackEncoderInstructions =
     control_sender.sendConnectionQpackEncoderInstructions;
 const sendConnectionQpackFeedback = control_sender.sendConnectionQpackFeedback;
+const sendConnectionQpackFeedbackWithDeadline =
+    control_sender.sendConnectionQpackFeedbackWithDeadline;
 const trySendConnectionQpackFeedback =
     control_sender.trySendConnectionQpackFeedback;
 const cancelConnectionRequest = control_sender.cancelConnectionRequest;
 const sendProtectedSettings = control_sender.sendProtectedSettings;
+const sendProtectedSettingsWithDeadline =
+    control_sender.sendProtectedSettingsWithDeadline;
 const sendProtectedQpackEncoderInstructions =
     control_sender.sendProtectedQpackEncoderInstructions;
 const sendProtectedQpackFeedback = control_sender.sendProtectedQpackFeedback;
+const sendProtectedQpackFeedbackWithDeadline =
+    control_sender.sendProtectedQpackFeedbackWithDeadline;
 const sendProtectedRequestCancellation =
     control_sender.sendProtectedRequestCancellation;
 const writeDataFrame = body_sender.writeDataFrame;
+const BodyPartCursor = body_sender.BodyPartCursor;
+const max_paced_body_part_descriptors =
+    body_sender.max_paced_body_part_descriptors;
 const pacedBodyChunkLimit = body_sender.pacedBodyChunkLimit;
 const responseBodySendCapacity = body_sender.responseBodySendCapacity;
 const pacedProtectedBodyChunkLimit = body_sender.pacedProtectedBodyChunkLimit;
 const sendConnectionBodyChunk = body_sender.sendConnectionBodyChunk;
+const sendConnectionBodyChunkWithDeadline =
+    body_sender.sendConnectionBodyChunkWithDeadline;
+const sendConnectionBodyParts = body_sender.sendConnectionBodyParts;
 const trySendConnectionBodyParts = body_sender.trySendConnectionBodyParts;
 const trySendConnectionBodyChunk = body_sender.trySendConnectionBodyChunk;
 const sendConnectionBodyBatchPaced = body_sender.sendConnectionBodyBatchPaced;
+const sendConnectionBodyBatchPacedWithDeadline =
+    body_sender.sendConnectionBodyBatchPacedWithDeadline;
 const sendConnectionBodyBatchPacedProgress =
     body_sender.sendConnectionBodyBatchPacedProgress;
 const sendProtectedBodyBatchPaced = body_sender.sendProtectedBodyBatchPaced;
+const sendProtectedBodyBatchPacedWithDeadline =
+    body_sender.sendProtectedBodyBatchPacedWithDeadline;
 const sendProtectedBodyBatchProgress =
     body_sender.sendProtectedBodyBatchProgress;
 const sendProtectedBodyChunk = body_sender.sendProtectedBodyChunk;
+const sendProtectedBodyChunkWithDeadline =
+    body_sender.sendProtectedBodyChunkWithDeadline;
 const sendConnectionMessage = message_sender.sendConnectionMessage;
+const sendConnectionMessageWithDeadline =
+    message_sender.sendConnectionMessageWithDeadline;
+const prepareConnectionMessage = message_sender.prepareConnectionMessage;
+const sendPreparedConnectionMessageUntil =
+    message_sender.sendPreparedConnectionMessageUntil;
 const trySendConnectionRequestLiteral =
     message_sender.trySendConnectionRequestLiteral;
 const trySendConnectionStreamingRequestHeadLiteral =
     message_sender.trySendConnectionStreamingRequestHeadLiteral;
 const sendConnectionResponseSequence =
     message_sender.sendConnectionResponseSequence;
-const trySendConnectionResponseHeadLiteral =
-    message_sender.trySendConnectionResponseHeadLiteral;
+const sendConnectionResponseSequenceWithDeadline =
+    message_sender.sendConnectionResponseSequenceWithDeadline;
+const trySendConnectionResponseLiteral =
+    message_sender.trySendConnectionResponseLiteral;
+const trySendConnectionStreamingResponseHeadLiteral =
+    message_sender.trySendConnectionStreamingResponseHeadLiteral;
 const sendProtectedMessage = message_sender.sendProtectedMessage;
+const sendProtectedMessageWithDeadline =
+    message_sender.sendProtectedMessageWithDeadline;
+const sendPreparedProtectedMessageUntil =
+    message_sender.sendPreparedProtectedMessageUntil;
 const sendProtectedResponseSequence =
     message_sender.sendProtectedResponseSequence;
+const sendProtectedResponseSequenceWithDeadline =
+    message_sender.sendProtectedResponseSequenceWithDeadline;
 const encodePushMessages = message_sender.encodePushMessages;
 const sendConnectionPush = message_sender.sendConnectionPush;
+const sendConnectionPushWithDeadline =
+    message_sender.sendConnectionPushWithDeadline;
+const sendConnectionPushStreamingHeads =
+    message_sender.sendConnectionPushStreamingHeads;
+const sendConnectionPushStreamingHeadsWithDeadline =
+    message_sender.sendConnectionPushStreamingHeadsWithDeadline;
 const sendProtectedPush = message_sender.sendProtectedPush;
+const sendProtectedPushWithDeadline =
+    message_sender.sendProtectedPushWithDeadline;
+const sendProtectedPushStreamingHeads =
+    message_sender.sendProtectedPushStreamingHeads;
+const sendProtectedPushStreamingHeadsWithDeadline =
+    message_sender.sendProtectedPushStreamingHeadsWithDeadline;
 const sendConnectionStreamingHead = message_sender.sendConnectionStreamingHead;
+const sendConnectionStreamingHeadWithDeadline =
+    message_sender.sendConnectionStreamingHeadWithDeadline;
 const sendProtectedStreamingHead = message_sender.sendProtectedStreamingHead;
+const sendProtectedStreamingHeadWithDeadline =
+    message_sender.sendProtectedStreamingHeadWithDeadline;
 const sendConnectionTrailers = message_sender.sendConnectionTrailers;
+const sendConnectionTrailersWithDeadline =
+    message_sender.sendConnectionTrailersWithDeadline;
 const trySendConnectionTrailersLiteral =
     message_sender.trySendConnectionTrailersLiteral;
 const sendProtectedTrailers = message_sender.sendProtectedTrailers;
+const sendProtectedTrailersWithDeadline =
+    message_sender.sendProtectedTrailersWithDeadline;
 const RequestStreamReset = request_routing.RequestStreamReset;
 const requestResetError = request_routing.requestResetError;
 const serverRequestReceived = request_routing.serverRequestReceived;
@@ -312,6 +462,7 @@ const routeConnectDatagramsFromPacket = connect_datagram_routing.routePacket;
 const client_control_stream_id: u62 = 2;
 const client_qpack_encoder_stream_id: u62 = 6;
 const client_qpack_decoder_stream_id: u62 = 10;
+const first_client_extension_uni_stream_id: u62 = 14;
 const server_control_stream_id: u62 = 3;
 const server_qpack_encoder_stream_id: u62 = 7;
 const server_qpack_decoder_stream_id: u62 = 11;
@@ -327,6 +478,7 @@ const sendRuntimeStreamingHeadAtOffset = development_send.streamingHeadAtOffset;
 const sendRuntimeResponsePrefix = development_send.responsePrefix;
 const sendRuntimeRequestCancellation = development_send.requestCancellation;
 const sendRuntimeBodyChunk = development_send.bodyChunk;
+const sendRuntimeBodyChunkWithDeadline = development_send.bodyChunkWithDeadline;
 const appendRuntimeStreamMessageFrames =
     development_send.appendStreamMessageFrames;
 const receiveRuntimeStreamBytes = development_receive.streamBytes;
@@ -437,6 +589,10 @@ pub const Server = struct {
     /// because response and nonblocking poll APIs may inspect it concurrently.
     streaming_mode: bool = false,
     response_send_mutex: std.Io.Mutex = .init,
+    /// Aggregate development responses do not retain per-stream send cursors.
+    /// After any UDP submission attempt fails, replaying from offset zero could
+    /// corrupt a response already visible to the peer, so retire this API.
+    aggregate_response_unusable: std.atomic.Value(bool) = .init(false),
 
     pub fn bind(allocator: std.mem.Allocator, io: std.Io, bind_address: net.IpAddress, limits: Limits) Error!Server {
         var quic_server = try quic.runtime.Server.bind(
@@ -1210,10 +1366,98 @@ pub const Server = struct {
         data: []const u8,
         fin: bool,
     ) Error!void {
-        self.peer_state_mutex.lockUncancelable(
-            self.quic_server.endpoint.io,
+        return self.sendDevelopmentStreamUntil(
+            to,
+            session_id,
+            stream_id,
+            data,
+            fin,
+            null,
+            null,
+        ) catch |err| switch (err) {
+            error.Timeout, error.ConcurrencyUnavailable => unreachable,
+            else => |other| return @errorCast(other),
+        };
+    }
+
+    pub fn sendDevelopmentStreamWithTimeout(
+        self: *Server,
+        to: net.IpAddress,
+        session_id: u62,
+        stream_id: u62,
+        data: []const u8,
+        fin: bool,
+        progress: *DevelopmentBodyWriteProgress,
+        timeout: std.Io.Duration,
+    ) ReceiveTimeoutError!void {
+        progress.* = .{};
+        if (timeout.nanoseconds <= 0) return error.Timeout;
+        return self.sendDevelopmentStreamWithDeadline(
+            to,
+            session_id,
+            stream_id,
+            data,
+            fin,
+            progress,
+            .fromNow(self.quic_server.endpoint.io, .{
+                .raw = timeout,
+                .clock = .awake,
+            }),
         );
+    }
+
+    pub fn sendDevelopmentStreamWithDeadline(
+        self: *Server,
+        to: net.IpAddress,
+        session_id: u62,
+        stream_id: u62,
+        data: []const u8,
+        fin: bool,
+        progress: *DevelopmentBodyWriteProgress,
+        deadline: std.Io.Clock.Timestamp,
+    ) ReceiveTimeoutError!void {
+        progress.* = .{};
+        _ = try deadline_policy.usableAwake(
+            self.quic_server.endpoint.io,
+            deadline,
+        );
+        return self.sendDevelopmentStreamUntil(
+            to,
+            session_id,
+            stream_id,
+            data,
+            fin,
+            progress,
+            deadline,
+        );
+    }
+
+    fn sendDevelopmentStreamUntil(
+        self: *Server,
+        to: net.IpAddress,
+        session_id: u62,
+        stream_id: u62,
+        data: []const u8,
+        fin: bool,
+        progress: ?*DevelopmentBodyWriteProgress,
+        deadline: ?std.Io.Clock.Timestamp,
+    ) ReceiveTimeoutError!void {
+        if (deadline != null) {
+            if (!self.peer_state_mutex.tryLock()) {
+                return error.ConcurrencyUnavailable;
+            }
+        } else {
+            self.peer_state_mutex.lockUncancelable(
+                self.quic_server.endpoint.io,
+            );
+        }
         defer self.peer_state_mutex.unlock(self.quic_server.endpoint.io);
+        if (deadline) |absolute| {
+            _ = try deadline_policy.usableAwake(
+                self.quic_server.endpoint.io,
+                absolute,
+            );
+        }
         var send_entry = self.development_stream_sends.findEntry(
             to,
             stream_id,
@@ -1251,16 +1495,22 @@ pub const Server = struct {
             self.limits.max_stream_frame_data,
             fin,
         ) catch |err| return err;
-        send_packetizer.sendEndpoint(
+        send_packetizer.sendEndpointUntil(
             self.quic_server.endpoint.allocator,
             &self.quic_server.endpoint,
             to,
             frames.items,
             1,
             &send_attempted,
+            deadline,
         ) catch |err| {
+            if (progress) |value| value.send_attempted = send_attempted;
             if (send_attempted) entry.unusable = true;
             return err;
+        };
+        if (progress) |value| value.* = .{
+            .send_attempted = send_attempted,
+            .completed = true,
         };
     }
 
@@ -1274,10 +1524,84 @@ pub const Server = struct {
         fin: bool,
         send_attempted: *bool,
     ) Error!void {
-        self.peer_state_mutex.lockUncancelable(
+        return self.sendDevelopmentStreamPartsUntil(
+            to,
+            session_id,
+            stream_id,
+            prefix,
+            payload,
+            fin,
+            send_attempted,
+            null,
+        ) catch |err| switch (err) {
+            error.Timeout, error.ConcurrencyUnavailable => unreachable,
+            else => |other| return @errorCast(other),
+        };
+    }
+
+    pub fn sendDevelopmentStreamPartsWithDeadline(
+        self: *Server,
+        to: net.IpAddress,
+        session_id: u62,
+        stream_id: u62,
+        prefix: []const u8,
+        payload: []const u8,
+        fin: bool,
+        progress: *DevelopmentBodyWriteProgress,
+        deadline: std.Io.Clock.Timestamp,
+    ) ReceiveTimeoutError!void {
+        progress.* = .{};
+        _ = try deadline_policy.usableAwake(
             self.quic_server.endpoint.io,
+            deadline,
         );
+        var send_attempted = false;
+        self.sendDevelopmentStreamPartsUntil(
+            to,
+            session_id,
+            stream_id,
+            prefix,
+            payload,
+            fin,
+            &send_attempted,
+            deadline,
+        ) catch |err| {
+            progress.send_attempted = send_attempted;
+            return err;
+        };
+        progress.* = .{
+            .send_attempted = send_attempted,
+            .completed = true,
+        };
+    }
+
+    fn sendDevelopmentStreamPartsUntil(
+        self: *Server,
+        to: net.IpAddress,
+        session_id: u62,
+        stream_id: u62,
+        prefix: []const u8,
+        payload: []const u8,
+        fin: bool,
+        send_attempted: *bool,
+        deadline: ?std.Io.Clock.Timestamp,
+    ) ReceiveTimeoutError!void {
+        if (deadline != null) {
+            if (!self.peer_state_mutex.tryLock()) {
+                return error.ConcurrencyUnavailable;
+            }
+        } else {
+            self.peer_state_mutex.lockUncancelable(
+                self.quic_server.endpoint.io,
+            );
+        }
         defer self.peer_state_mutex.unlock(self.quic_server.endpoint.io);
+        if (deadline) |absolute| {
+            _ = try deadline_policy.usableAwake(
+                self.quic_server.endpoint.io,
+                absolute,
+            );
+        }
         const entry = self.development_stream_sends.findEntry(
             to,
             stream_id,
@@ -1306,13 +1630,14 @@ pub const Server = struct {
             self.limits.max_stream_frame_data,
             fin,
         );
-        send_packetizer.sendEndpoint(
+        send_packetizer.sendEndpointUntil(
             self.quic_server.endpoint.allocator,
             &self.quic_server.endpoint,
             to,
             frames.items,
             1,
             send_attempted,
+            deadline,
         ) catch |err| {
             if (send_attempted.*) entry.unusable = true;
             return err;
@@ -1433,7 +1758,9 @@ pub const Server = struct {
     /// The same `context` may be entered concurrently. Applications that
     /// mutate it must provide their own synchronization. The `OwnedRequest`
     /// passed by value is borrowed from the result: the handler must not
-    /// deinitialize it or retain slices after the result is deinitialized.
+    /// deinitialize it or retain slices after the result is deinitialized. A
+    /// handler-returned 1xx is replaced with a final 500 and its result slot is
+    /// set to InvalidStatus after the response is sent.
     pub fn serveConcurrent(
         self: *Server,
         comptime HandlerContext: type,
@@ -1481,6 +1808,9 @@ pub const Server = struct {
         informational: []const http3.InformationalResponse,
         response: http3.Response,
     ) Error!void {
+        if (self.aggregate_response_unusable.load(.acquire)) {
+            return error.ConnectionUnusable;
+        }
         var encoded: std.ArrayList(u8) = .empty;
         defer encoded.deinit(self.quic_server.endpoint.allocator);
         var response_headers_stack: [server_response.header_stack_capacity]http3.Qpack.HeaderField =
@@ -1509,7 +1839,23 @@ pub const Server = struct {
             self.quic_server.endpoint.io,
         );
         defer self.response_send_mutex.unlock(self.quic_server.endpoint.io);
-        try sendRuntimeStreamMessage(&self.quic_server.endpoint, to, stream_id, encoded.items, self.limits.max_stream_frame_data);
+        if (self.aggregate_response_unusable.load(.acquire)) {
+            return error.ConnectionUnusable;
+        }
+        var send_attempted = false;
+        sendRuntimeStreamMessage(
+            &self.quic_server.endpoint,
+            to,
+            stream_id,
+            encoded.items,
+            self.limits.max_stream_frame_data,
+            &send_attempted,
+        ) catch |err| {
+            if (send_attempted) {
+                self.aggregate_response_unusable.store(true, .release);
+            }
+            return err;
+        };
     }
 
     /// Emit one informational response on an admitted streaming request. The
@@ -1671,6 +2017,88 @@ pub const Server = struct {
         peer.commitResponseBody(stream_id, fin);
     }
 
+    pub fn sendResponseBodyWithTimeout(
+        self: *Server,
+        to: net.IpAddress,
+        stream_id: u62,
+        data: []const u8,
+        fin: bool,
+        progress: *DevelopmentBodyWriteProgress,
+        timeout: std.Io.Duration,
+    ) ReceiveTimeoutError!void {
+        progress.* = .{};
+        if (timeout.nanoseconds <= 0) return error.Timeout;
+        return self.sendResponseBodyWithDeadline(
+            to,
+            stream_id,
+            data,
+            fin,
+            progress,
+            .fromNow(self.quic_server.endpoint.io, .{
+                .raw = timeout,
+                .clock = .awake,
+            }),
+        );
+    }
+
+    /// Deadline-bounded development response DATA. A timeout before the first
+    /// UDP submission rolls back stream state. Once any packet submission is
+    /// attempted, a later failure marks the peer send direction unusable
+    /// because this transport cannot recover an exact socket-visible prefix.
+    pub fn sendResponseBodyWithDeadline(
+        self: *Server,
+        to: net.IpAddress,
+        stream_id: u62,
+        data: []const u8,
+        fin: bool,
+        progress: *DevelopmentBodyWriteProgress,
+        deadline: std.Io.Clock.Timestamp,
+    ) ReceiveTimeoutError!void {
+        progress.* = .{};
+        _ = try deadline_policy.usableAwake(
+            self.quic_server.endpoint.io,
+            deadline,
+        );
+        if (!self.peer_state_mutex.tryLock()) {
+            return error.ConcurrencyUnavailable;
+        }
+        defer self.peer_state_mutex.unlock(self.quic_server.endpoint.io);
+        _ = try deadline_policy.usableAwake(
+            self.quic_server.endpoint.io,
+            deadline,
+        );
+        const peer = self.streaming_peers.find(to) orelse
+            return error.UnexpectedStream;
+        const outbound_bodies = try peer.prepareResponseBody(stream_id);
+        if (!self.response_send_mutex.tryLock()) {
+            return error.ConcurrencyUnavailable;
+        }
+        defer self.response_send_mutex.unlock(self.quic_server.endpoint.io);
+        _ = try deadline_policy.usableAwake(
+            self.quic_server.endpoint.io,
+            deadline,
+        );
+        var send_attempted = false;
+        sendRuntimeBodyChunkWithDeadline(
+            &self.quic_server.endpoint,
+            to,
+            outbound_bodies,
+            stream_id,
+            data,
+            fin,
+            self.limits.max_stream_frame_data,
+            &send_attempted,
+            deadline,
+        ) catch |err| {
+            progress.send_attempted = send_attempted;
+            if (send_attempted) peer.markSendFailed();
+            return err;
+        };
+        progress.send_attempted = send_attempted;
+        progress.completed = true;
+        peer.commitResponseBody(stream_id, fin);
+    }
+
     /// Abort both directions of a development request stream. If no response
     /// has started, the local final size is zero; otherwise the retained send
     /// state supplies the exact offset required by RESET_STREAM. Cleanup is
@@ -1761,12 +2189,11 @@ fn ServeRequestTask(comptime HandlerContext: type) type {
                 task.err.* = err;
                 return;
             };
-            if (response.request_method == null) {
-                response.request_method = request.request.method;
-                response.extended_connect = requestHasProtocol(
-                    request.request.headers,
-                );
-            }
+            const invalid_final = normalizeHandlerResponse(
+                &response,
+                request.request.method,
+                requestHasProtocol(request.request.headers),
+            );
             task.server.sendResponse(
                 request.from,
                 request.stream_id,
@@ -1775,7 +2202,7 @@ fn ServeRequestTask(comptime HandlerContext: type) type {
                 task.err.* = err;
                 return;
             };
-            task.err.* = null;
+            task.err.* = if (invalid_final) error.InvalidStatus else null;
         }
     };
 }
@@ -1785,6 +2212,9 @@ pub const Client = struct {
     limits: Limits = .{},
     next_stream_id: u62 = 0,
     response_receive_mutex: std.Io.Mutex = .init,
+    /// Aggregate 1xx callbacks run while this client owns its receive mutex.
+    /// Reject same-client recursive reads before they can self-deadlock.
+    callback_reader_active: bool = false,
     response_streams: ResponseStreamSet,
     streaming_responses: StreamingResponseSet,
     development_streams: DevelopmentStreamSet,
@@ -1963,6 +2393,19 @@ pub const Client = struct {
         informational: ?http3.InformationalObserver,
         deadline: ?std.Io.Clock.Timestamp,
     ) ReceiveTimeoutError!OwnedResponse {
+        if (self.callback_reader_active) return error.ConcurrentRead;
+        if (deadline != null) {
+            if (!self.response_receive_mutex.tryLock()) {
+                return error.ConcurrencyUnavailable;
+            }
+        } else {
+            self.response_receive_mutex.lockUncancelable(
+                self.quic_client.endpoint.io,
+            );
+        }
+        defer self.response_receive_mutex.unlock(
+            self.quic_client.endpoint.io,
+        );
         if (self.request_unusable) return error.ConnectionUnusable;
         if (self.streaming_mode) return error.UnexpectedStream;
 
@@ -2021,12 +2464,20 @@ pub const Client = struct {
         );
         errdefer assembled.deinit(self.quic_client.endpoint.allocator);
         try http3.validateResponsePushPromises(.{}, assembled.bytes);
+        var guarded_informational: ?InformationalCallbackGuard =
+            if (informational) |observer| .{
+                .observer = observer,
+                .callback_reader_active = &self.callback_reader_active,
+            } else null;
         var response = try http3.decodeResponseWithOptions(
             self.quic_client.endpoint.allocator,
             assembled.bytes,
             .{
                 .max_informational_responses = self.limits.max_informational_responses,
-                .informational = informational,
+                .informational = if (guarded_informational) |*guard| .{
+                    .context = guard,
+                    .on_response = InformationalCallbackGuard.notify,
+                } else null,
                 .request_method = request_options.method,
                 .extended_connect = requestHasProtocol(
                     request_options.headers,
@@ -2135,6 +2586,68 @@ pub const Client = struct {
         };
     }
 
+    pub fn sendRequestBodyWithTimeout(
+        self: *Client,
+        stream_id: u62,
+        data: []const u8,
+        fin: bool,
+        progress: *DevelopmentBodyWriteProgress,
+        timeout: std.Io.Duration,
+    ) ReceiveTimeoutError!void {
+        progress.* = .{};
+        if (timeout.nanoseconds <= 0) return error.Timeout;
+        return self.sendRequestBodyWithDeadline(
+            stream_id,
+            data,
+            fin,
+            progress,
+            .fromNow(self.quic_client.endpoint.io, .{
+                .raw = timeout,
+                .clock = .awake,
+            }),
+        );
+    }
+
+    /// Deadline-bounded development request DATA with fail-close semantics
+    /// after the first UDP submission attempt. Zero-progress timeout leaves
+    /// the body offset and request direction retryable.
+    pub fn sendRequestBodyWithDeadline(
+        self: *Client,
+        stream_id: u62,
+        data: []const u8,
+        fin: bool,
+        progress: *DevelopmentBodyWriteProgress,
+        deadline: std.Io.Clock.Timestamp,
+    ) ReceiveTimeoutError!void {
+        progress.* = .{};
+        _ = try deadline_policy.usableAwake(
+            self.quic_client.endpoint.io,
+            deadline,
+        );
+        if (self.request_unusable) return error.ConnectionUnusable;
+        const entry = self.outbound_bodies.find(stream_id) orelse
+            return error.UnexpectedStream;
+        if (entry.send.fin_sent) return error.UnexpectedStream;
+        var send_attempted = false;
+        sendRuntimeBodyChunkWithDeadline(
+            &self.quic_client.endpoint,
+            self.quic_client.peer,
+            &self.outbound_bodies,
+            stream_id,
+            data,
+            fin,
+            self.limits.max_stream_frame_data,
+            &send_attempted,
+            deadline,
+        ) catch |err| {
+            progress.send_attempted = send_attempted;
+            if (send_attempted) self.request_unusable = true;
+            return err;
+        };
+        progress.send_attempted = send_attempted;
+        progress.completed = true;
+    }
+
     /// Reserve a client-initiated raw extension stream while sharing the
     /// bidirectional ID cursor with ordinary HTTP/3 requests. Unidirectional
     /// IDs begin after the three conventional HTTP/3 critical streams.
@@ -2198,6 +2711,82 @@ pub const Client = struct {
         data: []const u8,
         fin: bool,
     ) Error!void {
+        return self.sendDevelopmentStreamUntil(
+            session_id,
+            stream_id,
+            data,
+            fin,
+            null,
+            null,
+        ) catch |err| switch (err) {
+            error.Timeout, error.ConcurrencyUnavailable => unreachable,
+            else => |other| return @errorCast(other),
+        };
+    }
+
+    pub fn sendDevelopmentStreamWithTimeout(
+        self: *Client,
+        session_id: u62,
+        stream_id: u62,
+        data: []const u8,
+        fin: bool,
+        progress: *DevelopmentBodyWriteProgress,
+        timeout: std.Io.Duration,
+    ) ReceiveTimeoutError!void {
+        progress.* = .{};
+        if (timeout.nanoseconds <= 0) return error.Timeout;
+        return self.sendDevelopmentStreamWithDeadline(
+            session_id,
+            stream_id,
+            data,
+            fin,
+            progress,
+            .fromNow(self.quic_client.endpoint.io, .{
+                .raw = timeout,
+                .clock = .awake,
+            }),
+        );
+    }
+
+    pub fn sendDevelopmentStreamWithDeadline(
+        self: *Client,
+        session_id: u62,
+        stream_id: u62,
+        data: []const u8,
+        fin: bool,
+        progress: *DevelopmentBodyWriteProgress,
+        deadline: std.Io.Clock.Timestamp,
+    ) ReceiveTimeoutError!void {
+        progress.* = .{};
+        _ = try deadline_policy.usableAwake(
+            self.quic_client.endpoint.io,
+            deadline,
+        );
+        return self.sendDevelopmentStreamUntil(
+            session_id,
+            stream_id,
+            data,
+            fin,
+            progress,
+            deadline,
+        );
+    }
+
+    fn sendDevelopmentStreamUntil(
+        self: *Client,
+        session_id: u62,
+        stream_id: u62,
+        data: []const u8,
+        fin: bool,
+        progress: ?*DevelopmentBodyWriteProgress,
+        deadline: ?std.Io.Clock.Timestamp,
+    ) ReceiveTimeoutError!void {
+        if (deadline) |absolute| {
+            _ = try deadline_policy.usableAwake(
+                self.quic_client.endpoint.io,
+                absolute,
+            );
+        }
         var send_entry = self.development_stream_sends.findEntry(stream_id);
         var opened_reverse = false;
         if (send_entry == null and (stream_id & 0x03) == 0x01) {
@@ -2228,16 +2817,22 @@ pub const Client = struct {
             self.limits.max_stream_frame_data,
             fin,
         ) catch |err| return err;
-        send_packetizer.sendEndpoint(
+        send_packetizer.sendEndpointUntil(
             self.quic_client.endpoint.allocator,
             &self.quic_client.endpoint,
             self.quic_client.peer,
             frames.items,
             1,
             &send_attempted,
+            deadline,
         ) catch |err| {
+            if (progress) |value| value.send_attempted = send_attempted;
             if (send_attempted) entry.unusable = true;
             return err;
+        };
+        if (progress) |value| value.* = .{
+            .send_attempted = send_attempted,
+            .completed = true,
         };
     }
 
@@ -2250,6 +2845,70 @@ pub const Client = struct {
         fin: bool,
         send_attempted: *bool,
     ) Error!void {
+        return self.sendDevelopmentStreamPartsUntil(
+            session_id,
+            stream_id,
+            prefix,
+            payload,
+            fin,
+            send_attempted,
+            null,
+        ) catch |err| switch (err) {
+            error.Timeout, error.ConcurrencyUnavailable => unreachable,
+            else => |other| return @errorCast(other),
+        };
+    }
+
+    pub fn sendDevelopmentStreamPartsWithDeadline(
+        self: *Client,
+        session_id: u62,
+        stream_id: u62,
+        prefix: []const u8,
+        payload: []const u8,
+        fin: bool,
+        progress: *DevelopmentBodyWriteProgress,
+        deadline: std.Io.Clock.Timestamp,
+    ) ReceiveTimeoutError!void {
+        progress.* = .{};
+        _ = try deadline_policy.usableAwake(
+            self.quic_client.endpoint.io,
+            deadline,
+        );
+        var send_attempted = false;
+        self.sendDevelopmentStreamPartsUntil(
+            session_id,
+            stream_id,
+            prefix,
+            payload,
+            fin,
+            &send_attempted,
+            deadline,
+        ) catch |err| {
+            progress.send_attempted = send_attempted;
+            return err;
+        };
+        progress.* = .{
+            .send_attempted = send_attempted,
+            .completed = true,
+        };
+    }
+
+    fn sendDevelopmentStreamPartsUntil(
+        self: *Client,
+        session_id: u62,
+        stream_id: u62,
+        prefix: []const u8,
+        payload: []const u8,
+        fin: bool,
+        send_attempted: *bool,
+        deadline: ?std.Io.Clock.Timestamp,
+    ) ReceiveTimeoutError!void {
+        if (deadline) |absolute| {
+            _ = try deadline_policy.usableAwake(
+                self.quic_client.endpoint.io,
+                absolute,
+            );
+        }
         const entry = self.development_stream_sends.findEntry(stream_id) orelse
             return error.UnexpectedStream;
         if (entry.unusable) return error.ConnectionUnusable;
@@ -2276,13 +2935,14 @@ pub const Client = struct {
             self.limits.max_stream_frame_data,
             fin,
         );
-        send_packetizer.sendEndpoint(
+        send_packetizer.sendEndpointUntil(
             self.quic_client.endpoint.allocator,
             &self.quic_client.endpoint,
             self.quic_client.peer,
             frames.items,
             1,
             send_attempted,
+            deadline,
         ) catch |err| {
             if (send_attempted.*) entry.unusable = true;
             return err;
@@ -2293,6 +2953,7 @@ pub const Client = struct {
         self: *Client,
         match: DevelopmentStreamMatch,
     ) Error!?DevelopmentStream {
+        if (self.callback_reader_active) return error.ConcurrentRead;
         self.response_receive_mutex.lockUncancelable(
             self.quic_client.endpoint.io,
         );
@@ -2320,6 +2981,14 @@ pub const Client = struct {
         self: *Client,
         match: DevelopmentStreamMatch,
     ) void {
+        if (self.callback_reader_active) {
+            self.development_streams.removeMatching(
+                self.quic_client.peer,
+                match,
+            );
+            self.development_stream_sends.removeSession(match.session_id);
+            return;
+        }
         self.response_receive_mutex.lockUncancelable(
             self.quic_client.endpoint.io,
         );
@@ -2334,6 +3003,11 @@ pub const Client = struct {
     }
 
     pub fn clearDevelopmentStreams(self: *Client) void {
+        if (self.callback_reader_active) {
+            self.development_streams.clear();
+            self.development_stream_sends.clear();
+            return;
+        }
         self.response_receive_mutex.lockUncancelable(
             self.quic_client.endpoint.io,
         );
@@ -2376,6 +3050,7 @@ pub const Client = struct {
         match: DevelopmentStreamMatch,
         deadline: ?std.Io.Clock.Timestamp,
     ) ReceiveTimeoutError!DevelopmentStream {
+        if (self.callback_reader_active) return error.ConcurrentRead;
         if (deadline != null) {
             if (!self.response_receive_mutex.tryLock()) {
                 return error.ConcurrencyUnavailable;
@@ -2446,6 +3121,7 @@ pub const Client = struct {
         stream_id: u62,
         deadline: ?std.Io.Clock.Timestamp,
     ) ReceiveTimeoutError!?StreamingEvent {
+        if (self.callback_reader_active) return error.ConcurrentRead;
         if (!self.streaming_mode or
             !self.request_lifecycle.contains(stream_id))
         {
@@ -2480,6 +3156,7 @@ pub const Client = struct {
         self: *Client,
         stream_id: u62,
     ) Error!?StreamingEvent {
+        if (self.callback_reader_active) return error.ConcurrentRead;
         self.response_receive_mutex.lockUncancelable(
             self.quic_client.endpoint.io,
         );
@@ -2527,9 +3204,8 @@ pub const Client = struct {
 
     /// Return one retained raw QUIC datagram without reading UDP.
     pub fn pollDatagram(self: *Client) ?quic.runtime.OwnedDatagram {
-        self.response_receive_mutex.lockUncancelable(
-            self.quic_client.endpoint.io,
-        );
+        if (self.callback_reader_active or
+            !self.response_receive_mutex.tryLock()) return null;
         defer self.response_receive_mutex.unlock(self.quic_client.endpoint.io);
         return self.runtime_datagrams.pop();
     }
@@ -2567,6 +3243,7 @@ pub const Client = struct {
         self: *Client,
         deadline: ?std.Io.Clock.Timestamp,
     ) ReceiveTimeoutError!quic.runtime.OwnedDatagram {
+        if (self.callback_reader_active) return error.ConcurrentRead;
         if (deadline != null) {
             if (!self.response_receive_mutex.tryLock()) {
                 return error.ConcurrencyUnavailable;
@@ -2595,6 +3272,7 @@ pub const Client = struct {
         stream_id: u62,
         out: []u8,
     ) Error!usize {
+        if (self.callback_reader_active) return error.ConcurrentRead;
         self.response_receive_mutex.lockUncancelable(
             self.quic_client.endpoint.io,
         );
@@ -2607,6 +3285,7 @@ pub const Client = struct {
     }
 
     pub fn skipResponseData(self: *Client, stream_id: u62) Error!usize {
+        if (self.callback_reader_active) return error.ConcurrentRead;
         self.response_receive_mutex.lockUncancelable(
             self.quic_client.endpoint.io,
         );
@@ -2623,6 +3302,7 @@ pub const Client = struct {
         stream_id: u62,
         application_error_code: u64,
     ) Error!void {
+        if (self.callback_reader_active) return error.ConcurrentRead;
         self.response_receive_mutex.lockUncancelable(
             self.quic_client.endpoint.io,
         );
@@ -2654,6 +3334,7 @@ pub const Client = struct {
     /// request whose request direction the adapter no longer intends to use.
     /// No cancellation frame is emitted.
     pub fn finishRequest(self: *Client, stream_id: u62) Error!void {
+        if (self.callback_reader_active) return error.ConcurrentRead;
         self.response_receive_mutex.lockUncancelable(
             self.quic_client.endpoint.io,
         );
@@ -2718,7 +3399,7 @@ pub const Client = struct {
                     );
                     continue;
                 },
-                else => return err,
+                else => |other| return other,
             };
             if (disposition == .ignore) {
                 // HTTP/3 critical/push streams use fixed IDs below 15. The
@@ -2851,9 +3532,235 @@ pub const HandshakeSessionOptions = struct {
         quic.one_rtt.max_batch_packets,
 };
 
+/// One complete HTTP/3 request prepared for a QUIC 0-RTT ClientOffer.
+///
+/// The field section intentionally uses literal/static QPACK only: dynamic
+/// table state is connection-local and does not exist before the new HTTP/3
+/// session is constructed. The encoded bytes and frame slice are owned by
+/// this value and must outlive the QUIC handshake that borrows `offer.frames`.
+pub const PreparedEarlyRequest = struct {
+    allocator: std.mem.Allocator,
+    stream_id: u62,
+    method: []u8,
+    extended_connect: bool,
+    local_settings: http3.Settings,
+    remembered_peer_settings: http3.Settings,
+    control_bytes: []u8,
+    encoder_prefix: []u8,
+    decoder_prefix: []u8,
+    request_bytes: []u8,
+    frames: [4]quic.Frame,
+
+    pub fn init(
+        allocator: std.mem.Allocator,
+        request: http3.Request,
+        local_settings: http3.Settings,
+        remembered_peer_settings: http3.Settings,
+    ) Error!PreparedEarlyRequest {
+        const stream_id: u62 = 0;
+        var control_bytes: std.ArrayList(u8) = .empty;
+        defer control_bytes.deinit(allocator);
+        try http3.writeControlStreamPrefix(&control_bytes, allocator);
+        try http3.writeSettingsFrame(
+            &control_bytes,
+            allocator,
+            local_settings,
+        );
+        var encoder_prefix: std.ArrayList(u8) = .empty;
+        defer encoder_prefix.deinit(allocator);
+        try http3.writeQpackEncoderStreamPrefix(&encoder_prefix, allocator);
+        var decoder_prefix: std.ArrayList(u8) = .empty;
+        defer decoder_prefix.deinit(allocator);
+        try http3.writeQpackDecoderStreamPrefix(&decoder_prefix, allocator);
+        var request_bytes: std.ArrayList(u8) = .empty;
+        defer request_bytes.deinit(allocator);
+        try request.writeWithSettings(
+            &request_bytes,
+            allocator,
+            remembered_peer_settings,
+        );
+        const owned_control = try control_bytes.toOwnedSlice(allocator);
+        errdefer allocator.free(owned_control);
+        const owned_encoder = try encoder_prefix.toOwnedSlice(allocator);
+        errdefer allocator.free(owned_encoder);
+        const owned_decoder = try decoder_prefix.toOwnedSlice(allocator);
+        errdefer allocator.free(owned_decoder);
+        const owned_request = try request_bytes.toOwnedSlice(allocator);
+        errdefer allocator.free(owned_request);
+        const method = try allocator.dupe(u8, request.method);
+        errdefer allocator.free(method);
+        return .{
+            .allocator = allocator,
+            .stream_id = stream_id,
+            .method = method,
+            .extended_connect = requestHasProtocol(request.headers),
+            .local_settings = local_settings,
+            .remembered_peer_settings = remembered_peer_settings,
+            .control_bytes = owned_control,
+            .encoder_prefix = owned_encoder,
+            .decoder_prefix = owned_decoder,
+            .request_bytes = owned_request,
+            .frames = .{
+                .{ .stream = .{
+                    .stream_id = client_control_stream_id,
+                    .data = owned_control,
+                } },
+                .{ .stream = .{
+                    .stream_id = client_qpack_encoder_stream_id,
+                    .data = owned_encoder,
+                } },
+                .{ .stream = .{
+                    .stream_id = client_qpack_decoder_stream_id,
+                    .data = owned_decoder,
+                } },
+                .{ .stream = .{
+                    .stream_id = stream_id,
+                    .data = owned_request,
+                    .fin = true,
+                } },
+            },
+        };
+    }
+
+    pub fn deinit(self: *PreparedEarlyRequest) void {
+        self.allocator.free(self.method);
+        self.allocator.free(self.request_bytes);
+        self.allocator.free(self.decoder_prefix);
+        self.allocator.free(self.encoder_prefix);
+        self.allocator.free(self.control_bytes);
+        self.* = undefined;
+    }
+
+    pub fn offer(
+        self: *const PreparedEarlyRequest,
+        cache: *quic.resumption.Cache,
+        lease: *quic.resumption.EarlyDataLease,
+    ) quic.zero_rtt.handshake.ClientOffer {
+        return .{
+            .cache = cache,
+            .lease = lease,
+            .frames = &self.frames,
+        };
+    }
+
+    fn validateTransportLimits(
+        self: PreparedEarlyRequest,
+        limits: Limits,
+        options: HandshakeClientOptions,
+        lease: *const quic.resumption.EarlyDataLease,
+    ) Error!void {
+        const remembered = lease.session.transport_parameters;
+        if (remembered.initial_max_streams_bidi < 1 or
+            remembered.initial_max_streams_uni < 3)
+        {
+            return error.StreamLimitExceeded;
+        }
+        const request_len = std.math.cast(
+            u64,
+            self.request_bytes.len,
+        ) orelse return error.InvalidStreamRange;
+        if (request_len > remembered.initial_max_stream_data_bidi_remote) {
+            return error.FlowControlBlocked;
+        }
+        const uni_limit = remembered.initial_max_stream_data_uni;
+        if (self.control_bytes.len > uni_limit or
+            self.encoder_prefix.len > uni_limit or
+            self.decoder_prefix.len > uni_limit)
+        {
+            return error.FlowControlBlocked;
+        }
+        var stream_bytes = request_len;
+        stream_bytes = std.math.add(
+            u64,
+            stream_bytes,
+            self.control_bytes.len,
+        ) catch return error.InvalidStreamRange;
+        stream_bytes = std.math.add(
+            u64,
+            stream_bytes,
+            self.encoder_prefix.len,
+        ) catch return error.InvalidStreamRange;
+        stream_bytes = std.math.add(
+            u64,
+            stream_bytes,
+            self.decoder_prefix.len,
+        ) catch return error.InvalidStreamRange;
+        if (stream_bytes > remembered.initial_max_data) {
+            return error.FlowControlBlocked;
+        }
+        var payload_len: usize = 0;
+        for (self.frames) |frame| {
+            payload_len = std.math.add(
+                usize,
+                payload_len,
+                try frame.wireLen(),
+            ) catch return error.InvalidFrameLength;
+        }
+        const packet_len = try quic.protection.protectedLongPacketCapacity(
+            options.handshake.original_destination_connection_id.len,
+            options.handshake.local_connection_id.len,
+            0,
+            false,
+            4,
+            payload_len,
+        );
+        if (packet_len > limits.quic.max_datagram_size) {
+            return error.DatagramTooLarge;
+        }
+    }
+};
+
+pub const EarlyRequestDisposition = enum { accepted, rejected };
+
+pub const EarlyHandshakeClient = struct {
+    client: HandshakeClient,
+    disposition: EarlyRequestDisposition,
+};
+
 pub const BodyChunk = body_batch.Chunk;
 pub const ResponseBody = body_batch.ResponseBody;
 pub const BodyBatchProgress = body_sender.ConnectionBodyBatchProgress;
+pub const BodyWriteProgress = struct {
+    /// Application DATA bytes committed at the UDP socket boundary.
+    committed_bytes: usize = 0,
+    /// True only when the requested FIN was socket-visible.
+    fin_committed: bool = false,
+};
+
+pub const DevelopmentBodyWriteProgress = struct {
+    /// True once at least one UDP submission was attempted. Development QUIC
+    /// has no packet-number/recovery state to determine the visible prefix, so
+    /// an error after this point fail-closes the corresponding send direction.
+    send_attempted: bool = false,
+    /// True only when the complete DATA contribution was sent successfully.
+    completed: bool = false,
+};
+
+fn bodyPartsLength(parts: []const []const u8) Error!usize {
+    var total: usize = 0;
+    for (parts) |part| {
+        total = std.math.add(usize, total, part.len) catch
+            return error.InvalidContentLength;
+    }
+    return total;
+}
+
+fn validateBodyWrite(
+    bodies: *OutboundBodySet,
+    stream_id: u62,
+    data_len: usize,
+    fin: bool,
+) Error!void {
+    const entry = bodies.find(stream_id) orelse return error.UnexpectedStream;
+    var staged = entry.*;
+    try bodies.prepareChunkForEntry(&staged, data_len, fin);
+}
+
+fn bodyPartChunkLength(parts: []const []const u8) usize {
+    var total: usize = 0;
+    for (parts) |part| total += part.len;
+    return total;
+}
 
 /// Narrow white-box surface for runtime tests kept in focused modules.
 pub const testing = struct {
@@ -2880,15 +3787,59 @@ pub const testing = struct {
     ) usize {
         return client.qpack_encode.pending_sections.items.len;
     }
+
+    pub fn clientControlSendOffset(
+        client: *const HandshakeClient,
+    ) u64 {
+        return client.control_send.next_offset;
+    }
+
+    pub fn clientLocalGoAwayId(
+        client: *const HandshakeClient,
+    ) ?u64 {
+        return client.control.local_goaway_id;
+    }
+
+    pub fn clientLocalMaxPushId(
+        client: *const HandshakeClient,
+    ) ?u64 {
+        return client.control.local_max_push_id;
+    }
+
+    pub fn clientHasPushPromise(
+        client: *const HandshakeClient,
+        push_id: u64,
+    ) bool {
+        return client.push_streams.hasPromise(push_id);
+    }
+
+    pub fn clientPushPromiseCount(
+        client: *const HandshakeClient,
+    ) usize {
+        return client.push_streams.promiseCount();
+    }
+
+    pub fn serverControlSendOffset(
+        server: *const HandshakeServerSession,
+    ) u64 {
+        return server.control_send.next_offset;
+    }
+
+    pub fn serverHasSentOriginSet(
+        server: *const HandshakeServerSession,
+    ) bool {
+        return server.control.hasSentOriginSet();
+    }
 };
 
 pub const HandshakeServerOptions = struct {
     handshake: quic.handshake.ServerOptions,
     session: HandshakeSessionOptions = .{},
     /// Maximum time `serveConnection` keeps the sole connection pump alive
-    /// after the final response/GOAWAY until reliable QUIC recovery is empty.
-    /// This protects short-lived convenience servers from losing a dropped
-    /// tail DATA/FIN packet when their session storage is destroyed.
+    /// after the final response. One absolute budget covers both GOAWAY phases
+    /// and the wait for reliable QUIC recovery to become empty. This protects
+    /// short-lived convenience servers from losing a dropped tail DATA/FIN
+    /// packet without allowing graceful shutdown itself to block forever.
     serve_connection_recovery_drain_timeout: std.Io.Duration =
         .fromSeconds(5),
 };
@@ -3321,6 +4272,9 @@ pub const HandshakeSupervisor = struct {
         // error path can ask the caller to discard that completion.
         completion.result = .{ .failure = error.HandshakeReceiveFailed };
         errdefer session.deinit();
+        // From this point the endpoint dispatcher is the sole UDP receive
+        // owner. Blocking session helpers must not race it for sibling
+        // datagrams; callback code uses the explicit one-attempt APIs.
         try self.server.promoteAdmission(
             self.dispatcher,
             completion.admission,
@@ -4518,6 +5472,7 @@ pub const HandshakeServer = struct {
         session: *HandshakeServerSession,
     ) HandshakeAdmissionError!void {
         _ = self;
+        try session.bindDispatcher();
         try dispatcher.promotePendingHandshake(
             admission.handle,
             connection_handle,
@@ -4530,7 +5485,9 @@ pub const HandshakeServer = struct {
     /// `max_requests` HTTP/3 requests on it. The handler runs serially because
     /// a `HandshakeServerSession` owns one mutable QUIC/QPACK state machine;
     /// multiplexed applications that need independent scheduling can retain
-    /// the lower-level request-event APIs.
+    /// the lower-level request-event APIs. After the final response, one
+    /// absolute recovery-drain deadline covers both GOAWAY phases and the
+    /// reliable-send drain.
     pub fn serveConnection(
         self: *HandshakeServer,
         comptime HandlerContext: type,
@@ -4543,20 +5500,21 @@ pub const HandshakeServer = struct {
     ) Error!usize {
         var session = try self.accept();
         defer session.deinit();
-        const served = try session.serve(
+        const served = try session.serveRequests(
             HandlerContext,
             context,
             handler,
             max_requests,
         );
         if (served != 0) {
-            session.waitForRecoveryIdleWithTimeout(
-                self.serve_connection_recovery_drain_timeout,
-            ) catch |err| switch (err) {
-                error.Timeout => return error.RecoveryDrainTimeout,
-                error.ConcurrencyUnavailable => return error.RecoveryDrainUnavailable,
-                else => |other| return @errorCast(other),
-            };
+            const deadline = std.Io.Clock.Timestamp.fromNow(
+                session.connectionIo(),
+                .{
+                    .raw = self.serve_connection_recovery_drain_timeout,
+                    .clock = .awake,
+                },
+            );
+            try finishServedConnectionWithDeadline(&session, deadline);
         }
         return served;
     }
@@ -4564,6 +5522,8 @@ pub const HandshakeServer = struct {
 
 pub const HandshakeServerSession = struct {
     established: quic.handshake.EstablishedConnection,
+    /// True while an endpoint dispatcher is the sole UDP receive owner.
+    dispatcher_bound: bool = false,
     options: HandshakeSessionOptions,
     control: http3.ControlState = .{},
     control_send: quic.stream_state.SendState = quic.stream_state.SendState.init(server_control_stream_id),
@@ -4582,9 +5542,12 @@ pub const HandshakeServerSession = struct {
     stream_send_scratch: StreamMessageSendScratch = .{},
     push_send_scratch: PushSendScratch = .{},
     critical_stream_send_scratch: CriticalStreamSendScratch = .{},
-    sent_push_ids: std.ArrayList(u64) = .empty,
-    peer_promised_push_ids: std.ArrayList(u64) = .empty,
+    promised_push_ids: ServerPushIdSet = .{},
     next_push_stream_id: u62 = first_server_push_stream_id,
+    /// The QUIC handshake can authenticate and retain 0-RTT STREAM bytes
+    /// before this HTTP/3 session exists. Route that snapshot exactly once
+    /// before the first application request poll.
+    preexisting_streams_routed: bool = false,
 
     pub fn initEstablished(
         established: quic.handshake.EstablishedConnection,
@@ -4637,6 +5600,15 @@ pub const HandshakeServerSession = struct {
         };
     }
 
+    pub fn bindDispatcher(self: *HandshakeServerSession) Error!void {
+        if (self.dispatcher_bound) return error.InvalidDispatcherState;
+        self.dispatcher_bound = true;
+    }
+
+    pub fn dispatcherBound(self: *const HandshakeServerSession) bool {
+        return self.dispatcher_bound;
+    }
+
     pub fn initPreconfigured(
         endpoint: *quic.runtime.Endpoint,
         peer: net.IpAddress,
@@ -4681,6 +5653,7 @@ pub const HandshakeServerSession = struct {
     pub fn openServerUnidirectionalStream(
         self: *HandshakeServerSession,
     ) Error!u62 {
+        if (self.dispatcher_bound) return error.InvalidDispatcherState;
         const expected = self.next_push_stream_id;
         _ = std.math.add(u62, expected, 4) catch
             return error.StreamCreationError;
@@ -4720,6 +5693,7 @@ pub const HandshakeServerSession = struct {
         self: *HandshakeServerSession,
         timeout: std.Io.Duration,
     ) ReceiveTimeoutError!u62 {
+        if (self.dispatcher_bound) return error.InvalidDispatcherState;
         if (timeout.nanoseconds <= 0) return error.Timeout;
         return self.openServerUnidirectionalStreamWithDeadline(.fromNow(
             self.connectionIo(),
@@ -4731,6 +5705,7 @@ pub const HandshakeServerSession = struct {
         self: *HandshakeServerSession,
         deadline: std.Io.Clock.Timestamp,
     ) ReceiveTimeoutError!u62 {
+        if (self.dispatcher_bound) return error.InvalidDispatcherState;
         const expected = self.next_push_stream_id;
         _ = std.math.add(u62, expected, 4) catch
             return error.StreamCreationError;
@@ -4753,6 +5728,7 @@ pub const HandshakeServerSession = struct {
     /// invoke the same idempotent helper automatically, while protocol
     /// adapters can use this to avoid a peer-settings/request deadlock.
     pub fn ensureSettingsSent(self: *HandshakeServerSession) Error!void {
+        if (self.dispatcher_bound) return error.InvalidDispatcherState;
         try sendConnectionSettings(
             &self.established.connection,
             &self.critical_stream_send_scratch,
@@ -4778,10 +5754,7 @@ pub const HandshakeServerSession = struct {
             self.established.connection.endpoint.allocator,
         );
         self.outbound_bodies.deinit();
-        self.sent_push_ids.deinit(
-            self.established.connection.endpoint.allocator,
-        );
-        self.peer_promised_push_ids.deinit(
+        self.promised_push_ids.deinit(
             self.established.connection.endpoint.allocator,
         );
         self.receive_packets.deinit();
@@ -4843,7 +5816,86 @@ pub const HandshakeServerSession = struct {
         return self.established.keyUpdateAwaitingAck();
     }
 
+    fn routePreexistingRequestStreams(
+        self: *HandshakeServerSession,
+        streaming: bool,
+    ) Error!?RequestStreamReset {
+        if (self.preexisting_streams_routed) return null;
+        self.preexisting_streams_routed = true;
+        if (self.established.early_data_status != .accepted) {
+            return null;
+        }
+        var first_reset: ?RequestStreamReset = null;
+        var stream_ids: [16]u62 = undefined;
+        // SETTINGS and QPACK streams must be applied before request streams,
+        // independent of numeric stream ID or the order in the 0-RTT packet.
+        for ([_]bool{ true, false }) |route_unidirectional| {
+            var after: ?u62 = null;
+            while (true) {
+                const ids = self.established.connection
+                    .receivedStreamIdsAfterInto(after, &stream_ids);
+                if (ids.len == 0) break;
+                for (ids) |stream_id| {
+                    if (((stream_id & 0x02) != 0) != route_unidirectional) {
+                        continue;
+                    }
+                    const stats = self.established.connection
+                        .recvStreamStats(stream_id) orelse continue;
+                    const reset = stats.reset;
+                    const bytes = self.established.connection
+                        .retainedReceivedStream(stream_id) orelse &.{};
+                    const end = std.math.add(
+                        u64,
+                        stats.bytes_read,
+                        std.math.cast(u64, bytes.len) orelse
+                            return error.InvalidStreamRange,
+                    ) catch return error.InvalidStreamRange;
+                    const frames = if (reset) |info|
+                        [_]quic.Frame{.{ .reset_stream = .{
+                            .stream_id = stream_id,
+                            .application_error_code = info.application_error_code,
+                            .final_size = info.final_size,
+                        } }}
+                    else
+                        [_]quic.Frame{.{ .stream = .{
+                            .stream_id = stream_id,
+                            .offset = stats.bytes_read,
+                            .data = bytes,
+                            .fin = stats.final_size != null and
+                                stats.final_size.? == end,
+                        } }};
+                    if (reset == null and bytes.len == 0 and
+                        stats.final_size == null)
+                    {
+                        continue;
+                    }
+                    const routed_reset = try applyServerRequestPacketFrames(
+                        self.established.connection.peerAddress(),
+                        &frames,
+                        self.established.connection.endpoint.allocator,
+                        &self.control,
+                        &self.qpack_decode,
+                        &self.qpack_encode,
+                        self.options.local_settings.qpack_blocked_streams,
+                        &self.request_streams,
+                        if (streaming) &self.streaming_requests else null,
+                        &self.request_lifecycle,
+                        .{ .connection = &self.established.connection },
+                        .{ .set = &self.promised_push_ids },
+                        null,
+                        &self.connect_datagrams,
+                    );
+                    if (first_reset == null) first_reset = routed_reset;
+                }
+                after = ids[ids.len - 1];
+                if (ids.len != stream_ids.len) break;
+            }
+        }
+        return first_reset;
+    }
+
     pub fn receiveRequest(self: *HandshakeServerSession) Error!OwnedHandshakeRequest {
+        if (self.dispatcher_bound) return error.InvalidDispatcherState;
         return self.receiveRequestInternal(null) catch |err| switch (err) {
             error.Timeout, error.ConcurrencyUnavailable => unreachable,
             else => |other| return @errorCast(other),
@@ -4856,6 +5908,7 @@ pub const HandshakeServerSession = struct {
         self: *HandshakeServerSession,
         timeout: std.Io.Duration,
     ) ReceiveTimeoutError!OwnedHandshakeRequest {
+        if (self.dispatcher_bound) return error.InvalidDispatcherState;
         if (timeout.nanoseconds <= 0) return error.Timeout;
         return self.receiveRequestInternal(
             .fromNow(self.connectionIo(), .{ .raw = timeout, .clock = .awake }),
@@ -4868,6 +5921,7 @@ pub const HandshakeServerSession = struct {
         self: *HandshakeServerSession,
         deadline: std.Io.Clock.Timestamp,
     ) ReceiveTimeoutError!OwnedHandshakeRequest {
+        if (self.dispatcher_bound) return error.InvalidDispatcherState;
         _ = try deadline_policy.usableAwake(self.connectionIo(), deadline);
         return self.receiveRequestInternal(deadline);
     }
@@ -4876,6 +5930,16 @@ pub const HandshakeServerSession = struct {
         self: *HandshakeServerSession,
         deadline: ?std.Io.Clock.Timestamp,
     ) ReceiveTimeoutError!OwnedHandshakeRequest {
+        const preexisting_reset = self.routePreexistingRequestStreams(false) catch |err| {
+            closeConnectionForHttp3Error(
+                &self.established.connection,
+                err,
+            ) catch {};
+            return err;
+        };
+        if (preexisting_reset) |reset| {
+            return requestResetError(reset.application_error_code);
+        }
         if (self.streaming_requests.retainedCount() != 0) {
             return error.UnexpectedStream;
         }
@@ -4888,7 +5952,7 @@ pub const HandshakeServerSession = struct {
             &self.qpack_encode,
             &self.request_streams,
             &self.request_lifecycle,
-            self.peer_promised_push_ids.items,
+            .{ .set = &self.promised_push_ids },
             &self.connect_datagrams,
             deadline,
         ) catch |err| switch (err) {
@@ -4973,13 +6037,13 @@ pub const HandshakeServerSession = struct {
             self.established.connection.endpoint.allocator,
         );
         var response = try handler(context, request);
-        if (response.request_method == null) {
-            response.request_method = request.request.method;
-            response.extended_connect = requestHasProtocol(
-                request.request.headers,
-            );
-        }
+        const invalid_final = normalizeHandlerResponse(
+            &response,
+            request.request.method,
+            requestHasProtocol(request.request.headers),
+        );
         try self.sendResponsePaced(request.stream_id, response);
+        if (invalid_final) return error.InvalidStatus;
         return request.stream_id;
     }
 
@@ -4997,11 +6061,13 @@ pub const HandshakeServerSession = struct {
         ) Error!http3.Response,
         max_requests: usize,
     ) Error!usize {
-        if (max_requests == 0) return 0;
-        var served: usize = 0;
-        while (served < max_requests) : (served += 1) {
-            _ = try self.serveOne(HandlerContext, context, handler);
-        }
+        const served = try self.serveRequests(
+            HandlerContext,
+            context,
+            handler,
+            max_requests,
+        );
+        if (served == 0) return 0;
         // Announce graceful shutdown only after the bounded loop has accepted
         // its last request. Sending the maximum-ID GOAWAY up front is useful
         // for externally-triggered shutdown, but may legitimately cause a
@@ -5012,6 +6078,24 @@ pub const HandshakeServerSession = struct {
         return served;
     }
 
+    fn serveRequests(
+        self: *HandshakeServerSession,
+        comptime HandlerContext: type,
+        context: *HandlerContext,
+        comptime handler: *const fn (
+            *HandlerContext,
+            OwnedHandshakeRequest,
+        ) Error!http3.Response,
+        max_requests: usize,
+    ) Error!usize {
+        if (max_requests == 0) return 0;
+        var served: usize = 0;
+        while (served < max_requests) : (served += 1) {
+            _ = try self.serveOne(HandlerContext, context, handler);
+        }
+        return served;
+    }
+
     /// Poll one event from any multiplexed request stream without aggregating
     /// DATA payloads. The returned stream ID is then used with
     /// `readRequestData`, matching tquic's poll/recv_body split while retaining
@@ -5019,6 +6103,7 @@ pub const HandshakeServerSession = struct {
     pub fn receiveRequestEvent(
         self: *HandshakeServerSession,
     ) Error!StreamingRequestEvent {
+        if (self.dispatcher_bound) return error.InvalidDispatcherState;
         return self.receiveRequestEventInternal(null) catch |err| switch (err) {
             error.Timeout, error.ConcurrencyUnavailable => unreachable,
             else => |other| return @errorCast(other),
@@ -5031,6 +6116,7 @@ pub const HandshakeServerSession = struct {
         self: *HandshakeServerSession,
         timeout: std.Io.Duration,
     ) ReceiveTimeoutError!StreamingRequestEvent {
+        if (self.dispatcher_bound) return error.InvalidDispatcherState;
         if (timeout.nanoseconds <= 0) return error.Timeout;
         return self.receiveRequestEventInternal(
             .fromNow(self.connectionIo(), .{ .raw = timeout, .clock = .awake }),
@@ -5042,6 +6128,7 @@ pub const HandshakeServerSession = struct {
         self: *HandshakeServerSession,
         deadline: std.Io.Clock.Timestamp,
     ) ReceiveTimeoutError!StreamingRequestEvent {
+        if (self.dispatcher_bound) return error.InvalidDispatcherState;
         _ = try deadline_policy.usableAwake(self.connectionIo(), deadline);
         return self.receiveRequestEventInternal(deadline);
     }
@@ -5063,6 +6150,7 @@ pub const HandshakeServerSession = struct {
         self: *HandshakeServerSession,
         stream_id: u62,
     ) Error!StreamingRequestEvent {
+        if (self.dispatcher_bound) return error.InvalidDispatcherState;
         return self.receiveRequestEventForInternal(
             stream_id,
             null,
@@ -5077,6 +6165,7 @@ pub const HandshakeServerSession = struct {
         stream_id: u62,
         timeout: std.Io.Duration,
     ) ReceiveTimeoutError!StreamingRequestEvent {
+        if (self.dispatcher_bound) return error.InvalidDispatcherState;
         if (timeout.nanoseconds <= 0) return error.Timeout;
         return self.receiveRequestEventForInternal(
             stream_id,
@@ -5092,6 +6181,7 @@ pub const HandshakeServerSession = struct {
         stream_id: u62,
         deadline: std.Io.Clock.Timestamp,
     ) ReceiveTimeoutError!StreamingRequestEvent {
+        if (self.dispatcher_bound) return error.InvalidDispatcherState;
         _ = try deadline_policy.usableAwake(self.connectionIo(), deadline);
         return self.receiveRequestEventForInternal(stream_id, deadline);
     }
@@ -5115,6 +6205,7 @@ pub const HandshakeServerSession = struct {
     pub fn pollRequestEvent(
         self: *HandshakeServerSession,
     ) Error!?StreamingRequestEvent {
+        if (self.dispatcher_bound) return error.InvalidDispatcherState;
         return self.pollRequestEventMatchingInternal(null, false);
     }
 
@@ -5132,6 +6223,7 @@ pub const HandshakeServerSession = struct {
         self: *HandshakeServerSession,
         stream_id: u62,
     ) Error!?StreamingRequestEvent {
+        if (self.dispatcher_bound) return error.InvalidDispatcherState;
         return self.pollRequestEventMatchingInternal(stream_id, false);
     }
 
@@ -5151,13 +6243,20 @@ pub const HandshakeServerSession = struct {
         target_stream_id: ?u62,
         single_attempt: bool,
     ) Error!?StreamingRequestEvent {
+        _ = self.routePreexistingRequestStreams(true) catch |err| {
+            closeConnectionForHttp3Error(
+                &self.established.connection,
+                err,
+            ) catch {};
+            return err;
+        };
         if (single_attempt) {
             self.flushRequestPacketFeedbackOnce() catch |err| switch (err) {
                 error.PacingLimited,
                 error.CongestionLimited,
                 error.FlowControlBlocked,
                 => return null,
-                else => return err,
+                else => |other| return other,
             };
             if (!try self.releaseStreamingRequestCapacityOnce()) return null;
         } else {
@@ -5343,6 +6442,7 @@ pub const HandshakeServerSession = struct {
         stream_id: u62,
         out: []u8,
     ) Error!usize {
+        if (self.dispatcher_bound) return error.InvalidDispatcherState;
         const entry = self.streaming_requests.find(stream_id) orelse
             return error.UnexpectedStream;
         try releaseStreamingReaderCapacity(
@@ -5355,6 +6455,29 @@ pub const HandshakeServerSession = struct {
             &entry.reader,
         );
         return read;
+    }
+
+    /// Copy currently available request DATA without waiting for receive-credit
+    /// pacing. `null` leaves the reader cursor unchanged until the dispatcher
+    /// services the connection's pending transport work.
+    pub fn readRequestDataOnce(
+        self: *HandshakeServerSession,
+        stream_id: u62,
+        out: []u8,
+    ) Error!?usize {
+        const entry = self.streaming_requests.find(stream_id) orelse
+            return error.UnexpectedStream;
+        releaseStreamingReaderCapacityOnce(
+            &self.established.connection,
+            &entry.reader,
+        ) catch |err| switch (err) {
+            error.PacingLimited,
+            error.CongestionLimited,
+            error.FlowControlBlocked,
+            => return null,
+            else => return err,
+        };
+        return try entry.reader.readData(out);
     }
 
     /// Return DATA bytes currently readable without receiving another packet.
@@ -5371,6 +6494,7 @@ pub const HandshakeServerSession = struct {
         self: *HandshakeServerSession,
         stream_id: u62,
     ) Error!usize {
+        if (self.dispatcher_bound) return error.InvalidDispatcherState;
         const entry = self.streaming_requests.find(stream_id) orelse
             return error.UnexpectedStream;
         try releaseStreamingReaderCapacity(
@@ -5385,6 +6509,27 @@ pub const HandshakeServerSession = struct {
         return skipped;
     }
 
+    /// Discard currently available request DATA without waiting for
+    /// receive-credit pacing.
+    pub fn skipRequestDataOnce(
+        self: *HandshakeServerSession,
+        stream_id: u62,
+    ) Error!?usize {
+        const entry = self.streaming_requests.find(stream_id) orelse
+            return error.UnexpectedStream;
+        releaseStreamingReaderCapacityOnce(
+            &self.established.connection,
+            &entry.reader,
+        ) catch |err| switch (err) {
+            error.PacingLimited,
+            error.CongestionLimited,
+            error.FlowControlBlocked,
+            => return null,
+            else => return err,
+        };
+        return try entry.reader.skipData();
+    }
+
     /// Detach an established Extended CONNECT receive stream from HTTP/3
     /// message parsing.
     ///
@@ -5396,6 +6541,24 @@ pub const HandshakeServerSession = struct {
     pub fn detachRequestStream(
         self: *HandshakeServerSession,
         stream_id: u62,
+    ) Error!void {
+        if (self.dispatcher_bound) return error.InvalidDispatcherState;
+        return self.detachRequestStreamInternal(stream_id, false);
+    }
+
+    /// Detach an Extended CONNECT request without waiting for receive-credit
+    /// pacing. Backpressure leaves the reader and association retryable.
+    pub fn detachRequestStreamOnce(
+        self: *HandshakeServerSession,
+        stream_id: u62,
+    ) Error!void {
+        return self.detachRequestStreamInternal(stream_id, true);
+    }
+
+    fn detachRequestStreamInternal(
+        self: *HandshakeServerSession,
+        stream_id: u62,
+        single_attempt: bool,
     ) Error!void {
         const entry = self.streaming_requests.find(stream_id) orelse
             return error.UnexpectedStream;
@@ -5412,10 +6575,16 @@ pub const HandshakeServerSession = struct {
         errdefer if (!already_registered) {
             self.connect_datagrams.unregister(stream_id);
         };
-        try releaseStreamingReaderCapacity(
-            &self.established.connection,
-            &entry.reader,
-        );
+        if (single_attempt)
+            try releaseStreamingReaderCapacityOnce(
+                &self.established.connection,
+                &entry.reader,
+            )
+        else
+            try releaseStreamingReaderCapacity(
+                &self.established.connection,
+                &entry.reader,
+            );
         var removed = self.streaming_requests.takeEntry(stream_id) orelse
             return error.UnexpectedStream;
         removed.deinit();
@@ -5496,6 +6665,7 @@ pub const HandshakeServerSession = struct {
         self: *HandshakeServerSession,
         detached_stream_id: u62,
     ) Error!void {
+        if (self.dispatcher_bound) return error.InvalidDispatcherState;
         if (!self.connect_datagrams.contains(detached_stream_id)) {
             return error.UnexpectedStream;
         }
@@ -5514,6 +6684,7 @@ pub const HandshakeServerSession = struct {
         detached_stream_id: u62,
         timeout: std.Io.Duration,
     ) (Error || quic.runtime.ReceiveTimeoutError)!void {
+        if (self.dispatcher_bound) return error.InvalidDispatcherState;
         if (timeout.nanoseconds <= 0) return error.Timeout;
         return self.receiveDetachedRequestProgressWithDeadline(
             detached_stream_id,
@@ -5529,6 +6700,7 @@ pub const HandshakeServerSession = struct {
         detached_stream_id: u62,
         deadline: std.Io.Clock.Timestamp,
     ) (Error || quic.runtime.ReceiveTimeoutError)!void {
+        if (self.dispatcher_bound) return error.InvalidDispatcherState;
         _ = try deadline_policy.usableAwake(self.connectionIo(), deadline);
         if (!self.connect_datagrams.contains(detached_stream_id)) {
             return error.UnexpectedStream;
@@ -5568,7 +6740,13 @@ pub const HandshakeServerSession = struct {
             .{ self, detached_stream_id },
             packetView(packet.*),
         );
-        try self.flushRequestPacketFeedback();
+        self.flushRequestPacketFeedbackOnce() catch |err| switch (err) {
+            error.PacingLimited,
+            error.CongestionLimited,
+            error.FlowControlBlocked,
+            => {},
+            else => return err,
+        };
     }
 
     /// True only after both peers enabled RFC 9297 and QUIC permits DATAGRAM
@@ -5609,9 +6787,55 @@ pub const HandshakeServerSession = struct {
         stream_id: u62,
         payload: []const u8,
     ) Error!void {
+        if (self.dispatcher_bound) return error.InvalidDispatcherState;
         try self.validateConnectDatagramSend(stream_id, payload);
         const encoded = try self.connect_datagrams.encode(stream_id, payload);
         try self.established.connection.sendDatagram(encoded);
+    }
+
+    pub fn sendConnectDatagrams(
+        self: *HandshakeServerSession,
+        stream_id: u62,
+        payloads: []const []const u8,
+        committed_count: *usize,
+    ) Error!void {
+        committed_count.* = 0;
+        if (self.dispatcher_bound) return error.InvalidDispatcherState;
+        for (payloads) |payload| {
+            try self.validateConnectDatagramSend(stream_id, payload);
+        }
+        const encoded = try self.connect_datagrams.encodeBatch(
+            stream_id,
+            payloads,
+        );
+        try self.established.connection.validateDatagrams(encoded.datagrams);
+        while (committed_count.* < encoded.datagrams.len) {
+            try self.validateConnectDatagramSend(
+                stream_id,
+                payloads[committed_count.*],
+            );
+            var batch_committed: usize = 0;
+            self.established.connection.trySendDatagrams(
+                encoded.datagrams[committed_count.*..],
+                &batch_committed,
+            ) catch |err| {
+                committed_count.* += batch_committed;
+                switch (err) {
+                    error.CongestionLimited => {
+                        try self.receiveDetachedRequestProgress(stream_id);
+                        continue;
+                    },
+                    error.PacingLimited => {
+                        try self.established.connection
+                            .waitForPacingAvailability();
+                        continue;
+                    },
+                    else => |other| return @errorCast(other),
+                }
+            };
+            if (batch_committed == 0) return error.Unexpected;
+            committed_count.* += batch_committed;
+        }
     }
 
     /// Submit one CONNECT DATAGRAM without sleeping or reading UDP.
@@ -5631,6 +6855,7 @@ pub const HandshakeServerSession = struct {
         payload: []const u8,
         timeout: std.Io.Duration,
     ) ReceiveTimeoutError!void {
+        if (self.dispatcher_bound) return error.InvalidDispatcherState;
         if (timeout.nanoseconds <= 0) return error.Timeout;
         return self.sendConnectDatagramWithDeadline(
             stream_id,
@@ -5648,6 +6873,7 @@ pub const HandshakeServerSession = struct {
         payload: []const u8,
         deadline: std.Io.Clock.Timestamp,
     ) ReceiveTimeoutError!void {
+        if (self.dispatcher_bound) return error.InvalidDispatcherState;
         _ = try deadline_policy.usableAwake(self.connectionIo(), deadline);
         try self.validateConnectDatagramSend(stream_id, payload);
         const encoded = try self.connect_datagrams.encode(stream_id, payload);
@@ -5671,6 +6897,102 @@ pub const HandshakeServerSession = struct {
             };
             return;
         }
+    }
+
+    pub fn sendConnectDatagramsWithTimeout(
+        self: *HandshakeServerSession,
+        stream_id: u62,
+        payloads: []const []const u8,
+        committed_count: *usize,
+        timeout: std.Io.Duration,
+    ) ReceiveTimeoutError!void {
+        committed_count.* = 0;
+        if (self.dispatcher_bound) return error.InvalidDispatcherState;
+        if (timeout.nanoseconds <= 0) return error.Timeout;
+        return self.sendConnectDatagramsWithDeadline(
+            stream_id,
+            payloads,
+            committed_count,
+            .fromNow(self.connectionIo(), .{
+                .raw = timeout,
+                .clock = .awake,
+            }),
+        );
+    }
+
+    /// Send an ordered batch of CONNECT DATAGRAMs under one deadline. All
+    /// payloads are validated and encoded before the first packet is emitted;
+    /// `committed_count` is the exact socket-visible input prefix.
+    pub fn sendConnectDatagramsWithDeadline(
+        self: *HandshakeServerSession,
+        stream_id: u62,
+        payloads: []const []const u8,
+        committed_count: *usize,
+        deadline: std.Io.Clock.Timestamp,
+    ) ReceiveTimeoutError!void {
+        committed_count.* = 0;
+        if (self.dispatcher_bound) return error.InvalidDispatcherState;
+        _ = try deadline_policy.usableAwake(self.connectionIo(), deadline);
+        for (payloads) |payload| {
+            try self.validateConnectDatagramSend(stream_id, payload);
+        }
+        const encoded = try self.connect_datagrams.encodeBatch(
+            stream_id,
+            payloads,
+        );
+        try self.established.connection.validateDatagrams(encoded.datagrams);
+        while (committed_count.* < encoded.datagrams.len) {
+            _ = try deadline_policy.usableAwake(self.connectionIo(), deadline);
+            try self.validateConnectDatagramSend(
+                stream_id,
+                payloads[committed_count.*],
+            );
+            var batch_committed: usize = 0;
+            self.established.connection.trySendDatagrams(
+                encoded.datagrams[committed_count.*..],
+                &batch_committed,
+            ) catch |err| {
+                committed_count.* += batch_committed;
+                switch (err) {
+                    error.CongestionLimited => {
+                        try self.receiveDetachedRequestProgressWithDeadline(
+                            stream_id,
+                            deadline,
+                        );
+                        continue;
+                    },
+                    error.PacingLimited => {
+                        try self.established.connection
+                            .waitForPacingAvailabilityWithDeadline(deadline);
+                        continue;
+                    },
+                    else => |other| return @errorCast(other),
+                }
+            };
+            if (batch_committed == 0) return error.Unexpected;
+            committed_count.* += batch_committed;
+        }
+    }
+
+    /// One socket-batch attempt for shared endpoint owners.
+    pub fn trySendConnectDatagrams(
+        self: *HandshakeServerSession,
+        stream_id: u62,
+        payloads: []const []const u8,
+        committed_count: *usize,
+    ) Error!void {
+        committed_count.* = 0;
+        for (payloads) |payload| {
+            try self.validateConnectDatagramSend(stream_id, payload);
+        }
+        const encoded = try self.connect_datagrams.encodeBatch(
+            stream_id,
+            payloads,
+        );
+        return self.established.connection.trySendDatagrams(
+            encoded.datagrams,
+            committed_count,
+        );
     }
 
     /// One deadline-bounded attempt for a shared endpoint owner. This method
@@ -5765,6 +7087,7 @@ pub const HandshakeServerSession = struct {
         self: *HandshakeServerSession,
         stream_id: u62,
     ) Error!OwnedConnectDatagram {
+        if (self.dispatcher_bound) return error.InvalidDispatcherState;
         return receiveConnectDatagramFromSession(self, stream_id, null) catch |err|
             switch (err) {
                 error.Timeout, error.ConcurrencyUnavailable => unreachable,
@@ -5777,6 +7100,7 @@ pub const HandshakeServerSession = struct {
         stream_id: u62,
         timeout: std.Io.Duration,
     ) ReceiveTimeoutError!OwnedConnectDatagram {
+        if (self.dispatcher_bound) return error.InvalidDispatcherState;
         if (timeout.nanoseconds <= 0) return error.Timeout;
         return receiveConnectDatagramFromSession(self, stream_id, .fromNow(
             self.connectionIo(),
@@ -5789,6 +7113,7 @@ pub const HandshakeServerSession = struct {
         stream_id: u62,
         deadline: std.Io.Clock.Timestamp,
     ) ReceiveTimeoutError!OwnedConnectDatagram {
+        if (self.dispatcher_bound) return error.InvalidDispatcherState;
         _ = try deadline_policy.usableAwake(self.connectionIo(), deadline);
         return receiveConnectDatagramFromSession(self, stream_id, deadline);
     }
@@ -5803,11 +7128,46 @@ pub const HandshakeServerSession = struct {
     }
 
     pub fn sendResponse(self: *HandshakeServerSession, stream_id: u62, response: http3.Response) Error!void {
+        if (self.dispatcher_bound) return error.InvalidDispatcherState;
         try self.sendResponseWithInformational(stream_id, &.{}, response);
     }
 
-    /// Submit a complete HEADERS-only response in one QUIC packet without
-    /// waiting for pacing or creating a dynamic QPACK dependency.
+    pub fn sendResponseWithTimeout(
+        self: *HandshakeServerSession,
+        stream_id: u62,
+        response: http3.Response,
+        timeout: std.Io.Duration,
+    ) ReceiveTimeoutError!void {
+        if (self.dispatcher_bound) return error.InvalidDispatcherState;
+        if (timeout.nanoseconds <= 0) return error.Timeout;
+        return self.sendResponseWithDeadline(
+            stream_id,
+            response,
+            .fromNow(self.connectionIo(), .{
+                .raw = timeout,
+                .clock = .awake,
+            }),
+        );
+    }
+
+    pub fn sendResponseWithDeadline(
+        self: *HandshakeServerSession,
+        stream_id: u62,
+        response: http3.Response,
+        deadline: std.Io.Clock.Timestamp,
+    ) ReceiveTimeoutError!void {
+        return self.sendResponseWithInformationalAndDeadline(
+            stream_id,
+            &.{},
+            response,
+            deadline,
+        );
+    }
+
+    /// Submit one complete static-QPACK response in one QUIC packet without
+    /// waiting for pacing or reading UDP. HEADERS, optional DATA/trailers, and
+    /// FIN commit transactionally, so an endpoint callback can retry after
+    /// pacing, congestion, flow-control, or size rejection.
     pub fn trySendResponseLiteral(
         self: *HandshakeServerSession,
         stream_id: u62,
@@ -5829,7 +7189,7 @@ pub const HandshakeServerSession = struct {
         defer prepared.deinit(
             self.established.connection.endpoint.allocator,
         );
-        _ = try trySendConnectionResponseHeadLiteral(
+        _ = try trySendConnectionResponseLiteral(
             &self.established.connection,
             &self.stream_send_scratch,
             stream_id,
@@ -5841,6 +7201,53 @@ pub const HandshakeServerSession = struct {
         finishServerRequest(&self.control, &self.request_lifecycle, stream_id);
     }
 
+    /// Submit one static-QPACK response head without waiting for pacing or
+    /// reading UDP. The encoded head must fit in one QUIC packet. A successful
+    /// call retains body state for `trySendResponseBody` or
+    /// `tryFinishResponseTrailers`; a failed call leaves it retryable.
+    pub fn tryStartResponse(
+        self: *HandshakeServerSession,
+        stream_id: u62,
+        response: http3.Response,
+        body_length: ?usize,
+        trailers_pending: bool,
+    ) Error!void {
+        try self.requireEndpointCriticalStreamsReady();
+        var response_headers_stack: [server_response.header_stack_capacity]http3.Qpack.HeaderField =
+            undefined;
+        var prepared = try server_response.prepare(
+            self.established.connection.endpoint.allocator,
+            response,
+            server_response.automaticDate(
+                self.options.auto_date_header,
+                self.established.connection.endpoint.io,
+                response,
+            ),
+            &response_headers_stack,
+        );
+        defer prepared.deinit(
+            self.established.connection.endpoint.allocator,
+        );
+        const retained = try trySendConnectionStreamingResponseHeadLiteral(
+            &self.established.connection,
+            &self.stream_send_scratch,
+            &self.outbound_bodies,
+            stream_id,
+            prepared.value,
+            body_length,
+            trailers_pending,
+            self.options,
+            self.control.settings.peer,
+        );
+        if (!retained) {
+            finishServerRequest(
+                &self.control,
+                &self.request_lifecycle,
+                stream_id,
+            );
+        }
+    }
+
     /// Blocking aggregate-response helper for convenience serving loops. It
     /// sends the response body in bounded chunks and pumps ACK and MAX_*
     /// packets whenever body or trailer transmission exhausts peer credit.
@@ -5849,6 +7256,7 @@ pub const HandshakeServerSession = struct {
         stream_id: u62,
         response: http3.Response,
     ) Error!void {
+        if (self.dispatcher_bound) return error.InvalidDispatcherState;
         return self.sendResponsePacedUntil(
             stream_id,
             response,
@@ -5865,6 +7273,7 @@ pub const HandshakeServerSession = struct {
         response: http3.Response,
         timeout: std.Io.Duration,
     ) ReceiveTimeoutError!void {
+        if (self.dispatcher_bound) return error.InvalidDispatcherState;
         if (timeout.nanoseconds <= 0) return error.Timeout;
         return self.sendResponsePacedWithDeadline(
             stream_id,
@@ -5882,6 +7291,7 @@ pub const HandshakeServerSession = struct {
         response: http3.Response,
         deadline: std.Io.Clock.Timestamp,
     ) ReceiveTimeoutError!void {
+        if (self.dispatcher_bound) return error.InvalidDispatcherState;
         _ = try deadline_policy.usableAwake(self.connectionIo(), deadline);
         return self.sendResponsePacedUntil(stream_id, response, deadline);
     }
@@ -5899,16 +7309,34 @@ pub const HandshakeServerSession = struct {
                 absolute,
             );
         }
-        try self.startResponseInternal(
-            stream_id,
-            .{
-                .status = response.status,
-                .headers = response.headers,
-                .request_method = response.request_method,
-                .extended_connect = response.extended_connect,
-            },
-            response.body.len,
-            response.trailers.len != 0,
+        while (true) {
+            self.startResponseInternalUntil(
+                stream_id,
+                .{
+                    .status = response.status,
+                    .headers = response.headers,
+                    .request_method = response.request_method,
+                    .extended_connect = response.extended_connect,
+                },
+                response.body.len,
+                response.trailers.len != 0,
+                deadline,
+            ) catch |err| switch (err) {
+                error.FlowControlBlocked, error.CongestionLimited => {
+                    if (self.established.connection.closed()) return err;
+                    try self.receiveRequestPacketUntil(deadline);
+                    continue;
+                },
+                else => |other| return other,
+            };
+            break;
+        }
+        // The aggregate API exposes no committed-byte cursor. Once HEADERS is
+        // visible, a later DATA/trailer failure cannot be retried from the
+        // original Response without duplicating the head or body prefix.
+        errdefer self.established.connection.failClosedApplication(
+            http3.ApplicationErrorCode.internal_error,
+            "partial-http3-response",
         );
         if (!response.suppressesBody() and response.body.len != 0) {
             try self.sendResponseBodyPacedUntil(
@@ -5927,35 +7355,117 @@ pub const HandshakeServerSession = struct {
         }
     }
 
-    pub fn sendResponseWithPush(
+    /// Send a parent response and one promised response while advancing both
+    /// bodies under QUIC flow-control and congestion backpressure. Unlike the
+    /// atomic compatibility helper below, this path never requires the whole
+    /// pushed body to fit the peer's current connection or stream credit.
+    pub fn sendResponseWithPushPaced(
         self: *HandshakeServerSession,
         request_stream_id: u62,
         response: http3.Response,
         push: ServerPush,
     ) Error!u62 {
-        const push_stream_id = self.next_push_stream_id;
-        try sendConnectionSettings(
-            &self.established.connection,
-            &self.critical_stream_send_scratch,
-            &self.control,
-            &self.control_send,
-            &self.qpack_encoder_send,
-            &self.qpack_encoder_prefix_sent,
-            &self.qpack_decoder_send,
-            &self.qpack_decoder_prefix_sent,
-            self.options,
-            server_control_stream_id,
+        return self.sendResponseWithPushPacedUntil(
+            request_stream_id,
+            response,
+            push,
+            null,
+        ) catch |err| switch (err) {
+            error.Timeout, error.ConcurrencyUnavailable => unreachable,
+            else => |other| return @errorCast(other),
+        };
+    }
+
+    pub fn sendResponseWithPushPacedAndTimeout(
+        self: *HandshakeServerSession,
+        request_stream_id: u62,
+        response: http3.Response,
+        push: ServerPush,
+        timeout: std.Io.Duration,
+    ) ReceiveTimeoutError!u62 {
+        if (self.dispatcher_bound) return error.InvalidDispatcherState;
+        if (timeout.nanoseconds <= 0) return error.Timeout;
+        return self.sendResponseWithPushPacedAndDeadline(
+            request_stream_id,
+            response,
+            push,
+            .fromNow(self.connectionIo(), .{
+                .raw = timeout,
+                .clock = .awake,
+            }),
         );
+    }
+
+    /// Deadline-bounded aggregate server push. Once either response head is
+    /// visible, non-cancellation failures close the connection because this
+    /// convenience API does not expose separate parent/push byte cursors.
+    pub fn sendResponseWithPushPacedAndDeadline(
+        self: *HandshakeServerSession,
+        request_stream_id: u62,
+        response: http3.Response,
+        push: ServerPush,
+        deadline: std.Io.Clock.Timestamp,
+    ) ReceiveTimeoutError!u62 {
+        if (self.dispatcher_bound) return error.InvalidDispatcherState;
+        _ = try deadline_policy.usableAwake(self.connectionIo(), deadline);
+        return self.sendResponseWithPushPacedUntil(
+            request_stream_id,
+            response,
+            push,
+            deadline,
+        );
+    }
+
+    fn sendResponseWithPushPacedUntil(
+        self: *HandshakeServerSession,
+        request_stream_id: u62,
+        response: http3.Response,
+        push: ServerPush,
+        deadline: ?std.Io.Clock.Timestamp,
+    ) ReceiveTimeoutError!u62 {
+        if (self.dispatcher_bound) return error.InvalidDispatcherState;
+        if (deadline) |absolute| {
+            _ = try deadline_policy.usableAwake(self.connectionIo(), absolute);
+        }
+        const push_stream_id = self.next_push_stream_id;
+        if (deadline) |absolute| {
+            try sendConnectionSettingsWithDeadline(
+                &self.established.connection,
+                &self.critical_stream_send_scratch,
+                &self.control,
+                &self.control_send,
+                &self.qpack_encoder_send,
+                &self.qpack_encoder_prefix_sent,
+                &self.qpack_decoder_send,
+                &self.qpack_decoder_prefix_sent,
+                self.options,
+                server_control_stream_id,
+                absolute,
+            );
+        } else {
+            try sendConnectionSettings(
+                &self.established.connection,
+                &self.critical_stream_send_scratch,
+                &self.control,
+                &self.control_send,
+                &self.qpack_encoder_send,
+                &self.qpack_encoder_prefix_sent,
+                &self.qpack_decoder_send,
+                &self.qpack_decoder_prefix_sent,
+                self.options,
+                server_control_stream_id,
+            );
+        }
         const max_push_id = self.control.peer_max_push_id orelse
             return error.PushIdExceeded;
         if (push.push_id > max_push_id) return error.PushIdExceeded;
-        try self.peer_promised_push_ids.ensureUnusedCapacity(
-            self.established.connection.endpoint.allocator,
-            1,
-        );
         try validateNewServerPush(
             self.control,
-            self.sent_push_ids.items,
+            self.promised_push_ids,
+            push.push_id,
+        );
+        try self.promised_push_ids.prepareInsertValue(
+            self.established.connection.endpoint.allocator,
             push.push_id,
         );
         const next_push_stream_id = std.math.add(
@@ -5963,10 +7473,7 @@ pub const HandshakeServerSession = struct {
             push_stream_id,
             4,
         ) catch return error.StreamCreationError;
-        try self.sent_push_ids.ensureUnusedCapacity(
-            self.established.connection.endpoint.allocator,
-            1,
-        );
+
         const automatic_date = if (self.options.auto_date_header and
             (server_response.headerValue(response.headers, "date") == null or
                 server_response.headerValue(push.response.headers, "date") == null))
@@ -6000,24 +7507,508 @@ pub const HandshakeServerSession = struct {
         );
         var prepared_push = push;
         prepared_push.response = prepared_push_response.value;
-        try sendConnectionPush(
-            &self.established.connection,
-            &self.push_send_scratch,
-            &self.critical_stream_send_scratch,
-            self.options,
-            self.control.settings.peer,
-            request_stream_id,
-            prepared_response.value,
-            push_stream_id,
-            prepared_push,
-            &self.qpack_encode,
-            &self.qpack_encoder_send,
-            &self.qpack_encoder_prefix_sent,
+
+        var heads_committed = false;
+        var clean_push_cancellation = false;
+        errdefer if (heads_committed and
+            !clean_push_cancellation)
+        {
+            self.established.connection.failClosedApplication(
+                http3.ApplicationErrorCode.internal_error,
+                "partial-http3-push",
+            );
+        };
+        while (true) {
+            if (deadline) |absolute| {
+                sendConnectionPushStreamingHeadsWithDeadline(
+                    &self.established.connection,
+                    &self.push_send_scratch,
+                    &self.critical_stream_send_scratch,
+                    self.options,
+                    self.control.settings.peer,
+                    request_stream_id,
+                    prepared_response.value,
+                    push_stream_id,
+                    prepared_push,
+                    &self.qpack_encode,
+                    &self.qpack_encoder_send,
+                    &self.qpack_encoder_prefix_sent,
+                    &self.outbound_bodies,
+                    absolute,
+                ) catch |err| switch (err) {
+                    error.FlowControlBlocked, error.CongestionLimited => {
+                        if (self.established.connection.closed()) {
+                            return error.ConnectionClosed;
+                        }
+                        try self.receiveRequestPacketUntil(deadline);
+                        continue;
+                    },
+                    else => |other| return @errorCast(other),
+                };
+            } else {
+                sendConnectionPushStreamingHeads(
+                    &self.established.connection,
+                    &self.push_send_scratch,
+                    &self.critical_stream_send_scratch,
+                    self.options,
+                    self.control.settings.peer,
+                    request_stream_id,
+                    prepared_response.value,
+                    push_stream_id,
+                    prepared_push,
+                    &self.qpack_encode,
+                    &self.qpack_encoder_send,
+                    &self.qpack_encoder_prefix_sent,
+                    &self.outbound_bodies,
+                ) catch |err| switch (err) {
+                    error.FlowControlBlocked, error.CongestionLimited => {
+                        if (self.established.connection.closed()) {
+                            return error.ConnectionClosed;
+                        }
+                        try self.receiveRequestPacketUntil(deadline);
+                        continue;
+                    },
+                    else => |other| return @errorCast(other),
+                };
+            }
+            break;
+        }
+        heads_committed = true;
+        self.promised_push_ids.insertAssumeCapacity(push.push_id);
+        self.next_push_stream_id = next_push_stream_id;
+
+        var push_cancelled = false;
+        if (self.outbound_bodies.find(push_stream_id) != null) {
+            if (prepared_push.response.body.len != 0) {
+                push_cancelled = try self.sendPushBodyPacedUntil(
+                    push.push_id,
+                    push_stream_id,
+                    prepared_push.response.body,
+                    prepared_push.response.trailers.len == 0,
+                    deadline,
+                );
+            }
+            if (!push_cancelled and prepared_push.response.trailers.len != 0) {
+                push_cancelled = try self.finishPushTrailersPacedUntil(
+                    push.push_id,
+                    push_stream_id,
+                    prepared_push.response.trailers,
+                    deadline,
+                );
+            }
+        } else {
+            _ = try self.established.connection
+                .requestCompletedLocalStreamRelease(push_stream_id);
+        }
+        if (self.outbound_bodies.find(request_stream_id) != null) {
+            if (prepared_response.value.body.len != 0) {
+                try self.sendResponseBodyPacedUntil(
+                    request_stream_id,
+                    prepared_response.value.body,
+                    prepared_response.value.trailers.len == 0,
+                    deadline,
+                );
+            }
+            if (prepared_response.value.trailers.len != 0) {
+                try self.finishResponseTrailersPacedUntil(
+                    request_stream_id,
+                    prepared_response.value.trailers,
+                    deadline,
+                );
+            }
+        } else {
+            finishServerRequest(
+                &self.control,
+                &self.request_lifecycle,
+                request_stream_id,
+            );
+        }
+        self.control.retirePushPriority(
+            self.established.connection.endpoint.allocator,
+            push.push_id,
         );
+        if (push_cancelled) {
+            clean_push_cancellation = true;
+            return error.RequestCancelled;
+        }
+        return push_stream_id;
+    }
+
+    fn sendPushBodyPacedUntil(
+        self: *HandshakeServerSession,
+        push_id: u64,
+        push_stream_id: u62,
+        data: []const u8,
+        fin: bool,
+        deadline: ?std.Io.Clock.Timestamp,
+    ) ReceiveTimeoutError!bool {
+        const chunk_limit = pacedBodyChunkLimit(self.options);
+        var offset: usize = 0;
+        while (offset < data.len) {
+            const end = @min(data.len, offset + chunk_limit);
+            while (true) {
+                if (self.control.pushCancelled(push_id) or
+                    self.established.connection.streamStopped(
+                        push_stream_id,
+                    ) != null)
+                {
+                    try self.finishCancelledPacedPush(
+                        push_id,
+                        push_stream_id,
+                        deadline,
+                    );
+                    return true;
+                }
+                if (deadline) |absolute| {
+                    sendConnectionBodyChunkWithDeadline(
+                        &self.established.connection,
+                        &self.outbound_bodies,
+                        push_stream_id,
+                        data[offset..end],
+                        fin and end == data.len,
+                        self.options,
+                        absolute,
+                    ) catch |err| switch (err) {
+                        error.FlowControlBlocked, error.CongestionLimited => {
+                            try self.receiveRequestPacketUntil(deadline);
+                            continue;
+                        },
+                        error.StreamStopped => {
+                            try self.finishCancelledPacedPush(
+                                push_id,
+                                push_stream_id,
+                                deadline,
+                            );
+                            return true;
+                        },
+                        else => |other| return @errorCast(other),
+                    };
+                } else {
+                    sendConnectionBodyChunk(
+                        &self.established.connection,
+                        &self.outbound_bodies,
+                        push_stream_id,
+                        data[offset..end],
+                        fin and end == data.len,
+                        self.options,
+                    ) catch |err| switch (err) {
+                        error.FlowControlBlocked, error.CongestionLimited => {
+                            try self.receiveRequestPacketUntil(deadline);
+                            continue;
+                        },
+                        error.StreamStopped => {
+                            try self.finishCancelledPacedPush(
+                                push_id,
+                                push_stream_id,
+                                deadline,
+                            );
+                            return true;
+                        },
+                        else => |other| return @errorCast(other),
+                    };
+                }
+                break;
+            }
+            offset = end;
+        }
+        if (fin) {
+            _ = try self.established.connection
+                .requestCompletedLocalStreamRelease(push_stream_id);
+        }
+        return false;
+    }
+
+    fn finishPushTrailersPacedUntil(
+        self: *HandshakeServerSession,
+        push_id: u64,
+        push_stream_id: u62,
+        trailers: []const http3.Qpack.HeaderField,
+        deadline: ?std.Io.Clock.Timestamp,
+    ) ReceiveTimeoutError!bool {
+        while (true) {
+            if (self.control.pushCancelled(push_id) or
+                self.established.connection.streamStopped(push_stream_id) != null)
+            {
+                try self.finishCancelledPacedPush(
+                    push_id,
+                    push_stream_id,
+                    deadline,
+                );
+                return true;
+            }
+            if (deadline) |absolute| {
+                sendConnectionTrailersWithDeadline(
+                    &self.established.connection,
+                    &self.outbound_bodies,
+                    &self.stream_send_scratch,
+                    &self.critical_stream_send_scratch,
+                    push_stream_id,
+                    trailers,
+                    self.control.settings.peer,
+                    &self.qpack_encode,
+                    &self.qpack_encoder_send,
+                    &self.qpack_encoder_prefix_sent,
+                    self.options,
+                    absolute,
+                ) catch |err| switch (err) {
+                    error.FlowControlBlocked, error.CongestionLimited => {
+                        try self.receiveRequestPacketUntil(deadline);
+                        continue;
+                    },
+                    error.StreamStopped => {
+                        try self.finishCancelledPacedPush(
+                            push_id,
+                            push_stream_id,
+                            deadline,
+                        );
+                        return true;
+                    },
+                    else => |other| return @errorCast(other),
+                };
+            } else {
+                sendConnectionTrailers(
+                    &self.established.connection,
+                    &self.outbound_bodies,
+                    &self.stream_send_scratch,
+                    &self.critical_stream_send_scratch,
+                    push_stream_id,
+                    trailers,
+                    self.control.settings.peer,
+                    &self.qpack_encode,
+                    &self.qpack_encoder_send,
+                    &self.qpack_encoder_prefix_sent,
+                    self.options,
+                ) catch |err| switch (err) {
+                    error.FlowControlBlocked, error.CongestionLimited => {
+                        try self.receiveRequestPacketUntil(deadline);
+                        continue;
+                    },
+                    error.StreamStopped => {
+                        try self.finishCancelledPacedPush(
+                            push_id,
+                            push_stream_id,
+                            deadline,
+                        );
+                        return true;
+                    },
+                    else => |other| return @errorCast(other),
+                };
+            }
+            _ = try self.established.connection
+                .requestCompletedLocalStreamRelease(push_stream_id);
+            return false;
+        }
+    }
+
+    fn finishCancelledPacedPush(
+        self: *HandshakeServerSession,
+        push_id: u64,
+        push_stream_id: u62,
+        deadline: ?std.Io.Clock.Timestamp,
+    ) ReceiveTimeoutError!void {
+        const application_error_code =
+            if (self.established.connection.streamStopped(push_stream_id)) |stopped|
+                stopped.application_error_code
+            else
+                http3.ApplicationErrorCode.request_cancelled;
+        if (deadline) |absolute| {
+            try self.established.connection.resetStreamWithDeadline(
+                push_stream_id,
+                application_error_code,
+                absolute,
+            );
+        } else {
+            try self.established.connection.resetStream(
+                push_stream_id,
+                application_error_code,
+            );
+        }
+        self.qpack_encode.abandonStream(push_stream_id);
+        _ = self.outbound_bodies.finish(push_stream_id);
         _ = try self.established.connection
             .requestCompletedLocalStreamRelease(push_stream_id);
-        self.sent_push_ids.appendAssumeCapacity(push.push_id);
-        self.peer_promised_push_ids.appendAssumeCapacity(push.push_id);
+        self.control.retirePushPriority(
+            self.established.connection.endpoint.allocator,
+            push_id,
+        );
+    }
+
+    pub fn sendResponseWithPush(
+        self: *HandshakeServerSession,
+        request_stream_id: u62,
+        response: http3.Response,
+        push: ServerPush,
+    ) Error!u62 {
+        return self.sendResponseWithPushUntil(
+            request_stream_id,
+            response,
+            push,
+            null,
+        ) catch |err| switch (err) {
+            error.Timeout, error.ConcurrencyUnavailable => unreachable,
+            else => |other| return @errorCast(other),
+        };
+    }
+
+    pub fn sendResponseWithPushAndTimeout(
+        self: *HandshakeServerSession,
+        request_stream_id: u62,
+        response: http3.Response,
+        push: ServerPush,
+        timeout: std.Io.Duration,
+    ) ReceiveTimeoutError!u62 {
+        if (self.dispatcher_bound) return error.InvalidDispatcherState;
+        if (timeout.nanoseconds <= 0) return error.Timeout;
+        return self.sendResponseWithPushAndDeadline(
+            request_stream_id,
+            response,
+            push,
+            .fromNow(self.connectionIo(), .{
+                .raw = timeout,
+                .clock = .awake,
+            }),
+        );
+    }
+
+    pub fn sendResponseWithPushAndDeadline(
+        self: *HandshakeServerSession,
+        request_stream_id: u62,
+        response: http3.Response,
+        push: ServerPush,
+        deadline: std.Io.Clock.Timestamp,
+    ) ReceiveTimeoutError!u62 {
+        if (self.dispatcher_bound) return error.InvalidDispatcherState;
+        _ = try deadline_policy.usableAwake(self.connectionIo(), deadline);
+        return self.sendResponseWithPushUntil(
+            request_stream_id,
+            response,
+            push,
+            deadline,
+        );
+    }
+
+    fn sendResponseWithPushUntil(
+        self: *HandshakeServerSession,
+        request_stream_id: u62,
+        response: http3.Response,
+        push: ServerPush,
+        deadline: ?std.Io.Clock.Timestamp,
+    ) ReceiveTimeoutError!u62 {
+        if (self.dispatcher_bound) return error.InvalidDispatcherState;
+        const push_stream_id = self.next_push_stream_id;
+        if (deadline) |absolute| {
+            try sendConnectionSettingsWithDeadline(
+                &self.established.connection,
+                &self.critical_stream_send_scratch,
+                &self.control,
+                &self.control_send,
+                &self.qpack_encoder_send,
+                &self.qpack_encoder_prefix_sent,
+                &self.qpack_decoder_send,
+                &self.qpack_decoder_prefix_sent,
+                self.options,
+                server_control_stream_id,
+                absolute,
+            );
+        } else {
+            try sendConnectionSettings(
+                &self.established.connection,
+                &self.critical_stream_send_scratch,
+                &self.control,
+                &self.control_send,
+                &self.qpack_encoder_send,
+                &self.qpack_encoder_prefix_sent,
+                &self.qpack_decoder_send,
+                &self.qpack_decoder_prefix_sent,
+                self.options,
+                server_control_stream_id,
+            );
+        }
+        const max_push_id = self.control.peer_max_push_id orelse
+            return error.PushIdExceeded;
+        if (push.push_id > max_push_id) return error.PushIdExceeded;
+        try validateNewServerPush(
+            self.control,
+            self.promised_push_ids,
+            push.push_id,
+        );
+        try self.promised_push_ids.prepareInsertValue(
+            self.established.connection.endpoint.allocator,
+            push.push_id,
+        );
+        const next_push_stream_id = std.math.add(
+            u62,
+            push_stream_id,
+            4,
+        ) catch return error.StreamCreationError;
+        const automatic_date = if (self.options.auto_date_header and
+            (server_response.headerValue(response.headers, "date") == null or
+                server_response.headerValue(push.response.headers, "date") == null))
+            server_response.cachedDate(
+                true,
+                self.established.connection.endpoint.io,
+            )
+        else
+            null;
+        var response_headers_stack: [server_response.header_stack_capacity]http3.Qpack.HeaderField =
+            undefined;
+        var prepared_response = try server_response.prepare(
+            self.established.connection.endpoint.allocator,
+            response,
+            automatic_date,
+            &response_headers_stack,
+        );
+        defer prepared_response.deinit(
+            self.established.connection.endpoint.allocator,
+        );
+        var push_headers_stack: [server_response.header_stack_capacity]http3.Qpack.HeaderField =
+            undefined;
+        var prepared_push_response = try server_response.prepare(
+            self.established.connection.endpoint.allocator,
+            push.response,
+            automatic_date,
+            &push_headers_stack,
+        );
+        defer prepared_push_response.deinit(
+            self.established.connection.endpoint.allocator,
+        );
+        var prepared_push = push;
+        prepared_push.response = prepared_push_response.value;
+        if (deadline) |absolute| {
+            try sendConnectionPushWithDeadline(
+                &self.established.connection,
+                &self.push_send_scratch,
+                &self.critical_stream_send_scratch,
+                self.options,
+                self.control.settings.peer,
+                request_stream_id,
+                prepared_response.value,
+                push_stream_id,
+                prepared_push,
+                &self.qpack_encode,
+                &self.qpack_encoder_send,
+                &self.qpack_encoder_prefix_sent,
+                absolute,
+            );
+        } else {
+            try sendConnectionPush(
+                &self.established.connection,
+                &self.push_send_scratch,
+                &self.critical_stream_send_scratch,
+                self.options,
+                self.control.settings.peer,
+                request_stream_id,
+                prepared_response.value,
+                push_stream_id,
+                prepared_push,
+                &self.qpack_encode,
+                &self.qpack_encoder_send,
+                &self.qpack_encoder_prefix_sent,
+            );
+        }
+        _ = try self.established.connection
+            .requestCompletedLocalStreamRelease(push_stream_id);
+        self.promised_push_ids.insertAssumeCapacity(push.push_id);
         self.next_push_stream_id = next_push_stream_id;
         finishServerRequest(&self.control, &self.request_lifecycle, request_stream_id);
         self.control.retirePushPriority(
@@ -6033,33 +8024,105 @@ pub const HandshakeServerSession = struct {
         response: http3.Response,
         body_length: ?usize,
     ) Error!void {
-        return self.startResponseInternal(
+        if (self.dispatcher_bound) return error.InvalidDispatcherState;
+        return self.startResponseInternalUntil(
             stream_id,
             response,
             body_length,
             false,
+            null,
+        ) catch |err| switch (err) {
+            error.Timeout, error.ConcurrencyUnavailable => unreachable,
+            else => |other| return @errorCast(other),
+        };
+    }
+
+    pub fn startResponseWithTimeout(
+        self: *HandshakeServerSession,
+        stream_id: u62,
+        response: http3.Response,
+        body_length: ?usize,
+        timeout: std.Io.Duration,
+    ) ReceiveTimeoutError!void {
+        if (self.dispatcher_bound) return error.InvalidDispatcherState;
+        if (timeout.nanoseconds <= 0) return error.Timeout;
+        return self.startResponseWithDeadline(
+            stream_id,
+            response,
+            body_length,
+            .fromNow(self.connectionIo(), .{
+                .raw = timeout,
+                .clock = .awake,
+            }),
         );
     }
 
-    fn startResponseInternal(
+    /// Send a streaming response head under one absolute deadline. The same
+    /// budget covers SETTINGS/QPACK progress, pacing, and flow-control waits.
+    pub fn startResponseWithDeadline(
+        self: *HandshakeServerSession,
+        stream_id: u62,
+        response: http3.Response,
+        body_length: ?usize,
+        deadline: std.Io.Clock.Timestamp,
+    ) ReceiveTimeoutError!void {
+        if (self.dispatcher_bound) return error.InvalidDispatcherState;
+        _ = try deadline_policy.usableAwake(self.connectionIo(), deadline);
+        while (true) {
+            self.startResponseInternalUntil(
+                stream_id,
+                response,
+                body_length,
+                false,
+                deadline,
+            ) catch |err| switch (err) {
+                error.FlowControlBlocked, error.CongestionLimited => {
+                    if (self.established.connection.closed()) return err;
+                    try self.receiveRequestPacketUntil(deadline);
+                    continue;
+                },
+                else => |other| return other,
+            };
+            return;
+        }
+    }
+
+    fn startResponseInternalUntil(
         self: *HandshakeServerSession,
         stream_id: u62,
         response: http3.Response,
         body_length: ?usize,
         trailers_pending: bool,
-    ) Error!void {
-        try sendConnectionSettings(
-            &self.established.connection,
-            &self.critical_stream_send_scratch,
-            &self.control,
-            &self.control_send,
-            &self.qpack_encoder_send,
-            &self.qpack_encoder_prefix_sent,
-            &self.qpack_decoder_send,
-            &self.qpack_decoder_prefix_sent,
-            self.options,
-            server_control_stream_id,
-        );
+        deadline: ?std.Io.Clock.Timestamp,
+    ) ReceiveTimeoutError!void {
+        if (deadline) |absolute| {
+            try sendConnectionSettingsWithDeadline(
+                &self.established.connection,
+                &self.critical_stream_send_scratch,
+                &self.control,
+                &self.control_send,
+                &self.qpack_encoder_send,
+                &self.qpack_encoder_prefix_sent,
+                &self.qpack_decoder_send,
+                &self.qpack_decoder_prefix_sent,
+                self.options,
+                server_control_stream_id,
+                absolute,
+            );
+        } else {
+            try sendConnectionSettings(
+                &self.established.connection,
+                &self.critical_stream_send_scratch,
+                &self.control,
+                &self.control_send,
+                &self.qpack_encoder_send,
+                &self.qpack_encoder_prefix_sent,
+                &self.qpack_decoder_send,
+                &self.qpack_decoder_prefix_sent,
+                self.options,
+                server_control_stream_id,
+            );
+        }
         self.stream_send_scratch.reset();
         var response_headers_stack: [server_response.header_stack_capacity]http3.Qpack.HeaderField =
             undefined;
@@ -6085,20 +8148,38 @@ pub const HandshakeServerSession = struct {
             &self.qpack_encode,
         );
         errdefer self.qpack_encode.abandonStream(stream_id);
-        try sendConnectionStreamingHead(
-            &self.established.connection,
-            &self.stream_send_scratch,
-            &self.critical_stream_send_scratch,
-            stream_id,
-            streaming.expected_length,
-            streaming.body_allowed,
-            trailers_pending,
-            self.options,
-            &self.qpack_encode,
-            &self.qpack_encoder_send,
-            &self.qpack_encoder_prefix_sent,
-            &self.outbound_bodies,
-        );
+        if (deadline) |absolute| {
+            try sendConnectionStreamingHeadWithDeadline(
+                &self.established.connection,
+                &self.stream_send_scratch,
+                &self.critical_stream_send_scratch,
+                stream_id,
+                streaming.expected_length,
+                streaming.body_allowed,
+                trailers_pending,
+                self.options,
+                &self.qpack_encode,
+                &self.qpack_encoder_send,
+                &self.qpack_encoder_prefix_sent,
+                &self.outbound_bodies,
+                absolute,
+            );
+        } else {
+            try sendConnectionStreamingHead(
+                &self.established.connection,
+                &self.stream_send_scratch,
+                &self.critical_stream_send_scratch,
+                stream_id,
+                streaming.expected_length,
+                streaming.body_allowed,
+                trailers_pending,
+                self.options,
+                &self.qpack_encode,
+                &self.qpack_encoder_send,
+                &self.qpack_encoder_prefix_sent,
+                &self.outbound_bodies,
+            );
+        }
         if (!streaming.body_allowed or
             (!trailers_pending and streaming.expected_length == 0))
         {
@@ -6132,7 +8213,7 @@ pub const HandshakeServerSession = struct {
             return error.InvalidContentLength;
         }
         try self.outbound_bodies.reserveOpen(stream_id);
-        const next_offset = try trySendConnectionResponseHeadLiteral(
+        const next_offset = try trySendConnectionResponseLiteral(
             &self.established.connection,
             &self.stream_send_scratch,
             stream_id,
@@ -6167,6 +8248,7 @@ pub const HandshakeServerSession = struct {
         data: []const u8,
         fin: bool,
     ) Error!void {
+        if (self.dispatcher_bound) return error.InvalidDispatcherState;
         if (try self.finishPeerResponseCancellation(stream_id)) |cancel| {
             return responseResetError(cancel.application_error_code);
         }
@@ -6209,6 +8291,35 @@ pub const HandshakeServerSession = struct {
         }
     }
 
+    /// Submit several borrowed response slices as one DATA contribution and
+    /// one QUIC packet without waiting or reading the shared endpoint socket.
+    /// Failure is transactional for HTTP/3 body and QUIC stream state.
+    pub fn trySendResponseBodyParts(
+        self: *HandshakeServerSession,
+        stream_id: u62,
+        parts: []const []const u8,
+        fin: bool,
+    ) Error!void {
+        if (try self.finishPeerResponseCancellationOnce(stream_id)) |cancel| {
+            return responseResetError(cancel.application_error_code);
+        }
+        try trySendConnectionBodyParts(
+            &self.established.connection,
+            &self.outbound_bodies,
+            stream_id,
+            parts,
+            fin,
+            self.options,
+        );
+        if (fin) {
+            finishServerRequest(
+                &self.control,
+                &self.request_lifecycle,
+                stream_id,
+            );
+        }
+    }
+
     /// Send response DATA while driving the receive side when QUIC
     /// backpressure says the peer must first ACK or extend flow-control
     /// credit.
@@ -6225,6 +8336,7 @@ pub const HandshakeServerSession = struct {
         data: []const u8,
         fin: bool,
     ) Error!void {
+        if (self.dispatcher_bound) return error.InvalidDispatcherState;
         return self.sendResponseBodyPacedUntil(
             stream_id,
             data,
@@ -6234,6 +8346,85 @@ pub const HandshakeServerSession = struct {
             error.Timeout, error.ConcurrencyUnavailable => unreachable,
             else => |other| return @errorCast(other),
         };
+    }
+
+    pub fn sendResponseBodyPacedWithTimeout(
+        self: *HandshakeServerSession,
+        stream_id: u62,
+        data: []const u8,
+        fin: bool,
+        progress: *BodyWriteProgress,
+        timeout: std.Io.Duration,
+    ) ReceiveTimeoutError!void {
+        progress.* = .{};
+        if (self.dispatcher_bound) return error.InvalidDispatcherState;
+        if (timeout.nanoseconds <= 0) return error.Timeout;
+        return self.sendResponseBodyPacedWithDeadline(
+            stream_id,
+            data,
+            fin,
+            progress,
+            .fromNow(self.connectionIo(), .{
+                .raw = timeout,
+                .clock = .awake,
+            }),
+        );
+    }
+
+    /// Send one response DATA sequence under one absolute deadline. Progress
+    /// reports the exact socket-visible application prefix and FIN state, so a
+    /// caller can continue only the unsent suffix after a timeout.
+    pub fn sendResponseBodyPacedWithDeadline(
+        self: *HandshakeServerSession,
+        stream_id: u62,
+        data: []const u8,
+        fin: bool,
+        progress: *BodyWriteProgress,
+        deadline: std.Io.Clock.Timestamp,
+    ) ReceiveTimeoutError!void {
+        progress.* = .{};
+        if (self.dispatcher_bound) return error.InvalidDispatcherState;
+        _ = try deadline_policy.usableAwake(self.connectionIo(), deadline);
+        if (data.len == 0) {
+            var committed_chunks: usize = 0;
+            self.sendResponseBodyBatchPacedWithDeadline(
+                &.{.{ .stream_id = stream_id, .data = data, .fin = fin }},
+                &committed_chunks,
+                deadline,
+            ) catch |err| {
+                progress.fin_committed = committed_chunks == 1 and fin;
+                return err;
+            };
+            progress.fin_committed = fin;
+            return;
+        }
+        const chunk_limit = pacedBodyChunkLimit(self.options);
+        while (progress.committed_bytes < data.len) {
+            const end = @min(
+                data.len,
+                progress.committed_bytes + chunk_limit,
+            );
+            const last = end == data.len;
+            var committed_chunks: usize = 0;
+            self.sendResponseBodyBatchPacedWithDeadline(
+                &.{.{
+                    .stream_id = stream_id,
+                    .data = data[progress.committed_bytes..end],
+                    .fin = fin and last,
+                }},
+                &committed_chunks,
+                deadline,
+            ) catch |err| {
+                if (committed_chunks == 1) {
+                    progress.committed_bytes = end;
+                    progress.fin_committed = fin and last;
+                }
+                return err;
+            };
+            std.debug.assert(committed_chunks == 1);
+            progress.committed_bytes = end;
+            progress.fin_committed = fin and last;
+        }
     }
 
     fn sendResponseBodyPacedUntil(
@@ -6266,16 +8457,83 @@ pub const HandshakeServerSession = struct {
         }
     }
 
-    /// Send one logical Extended CONNECT byte sequence as consecutive HTTP/3
-    /// DATA contributions. This avoids joining a small protocol header and a
-    /// borrowed payload in the adapter while retaining the normal paced send
-    /// behavior and one final FIN decision.
+    /// Send one logical Extended CONNECT byte sequence as packet-sized HTTP/3
+    /// DATA contributions. Each contribution spans caller-slice boundaries
+    /// when capacity permits, avoiding both a plaintext join and one transport
+    /// submission per application slice. The cursor advances only after a
+    /// successful send, retaining the normal paced retry behavior.
     pub fn sendResponseBodyPartsPaced(
         self: *HandshakeServerSession,
         stream_id: u62,
         parts: []const []const u8,
         fin: bool,
     ) Error!void {
+        if (self.dispatcher_bound) return error.InvalidDispatcherState;
+        if (self.options.max_frames_per_packet >= 2 and
+            self.options.max_stream_frame_data != 0)
+        {
+            var cursor = BodyPartCursor{ .parts = parts };
+            if (cursor.done()) {
+                return self.sendResponseBodyPaced(stream_id, &.{}, fin);
+            }
+            var chunk_storage: [max_paced_body_part_descriptors][]const u8 = undefined;
+            const chunk_limit = pacedBodyChunkLimit(self.options);
+            var response_finished_by_fallback = false;
+            while (!cursor.done()) {
+                var attempt_limit = chunk_limit;
+                while (true) {
+                    var staged = cursor;
+                    const chunk = staged.next(
+                        &chunk_storage,
+                        attempt_limit,
+                        self.options.max_stream_frame_data,
+                    );
+                    const last = staged.done();
+                    if (try self.finishPeerResponseCancellation(stream_id)) |cancel| {
+                        return responseResetError(cancel.application_error_code);
+                    }
+                    sendConnectionBodyParts(
+                        &self.established.connection,
+                        &self.outbound_bodies,
+                        stream_id,
+                        chunk,
+                        fin and last,
+                        self.options,
+                    ) catch |err| switch (err) {
+                        error.FlowControlBlocked, error.CongestionLimited => {
+                            try self.receiveRequestPacket();
+                            continue;
+                        },
+                        error.DatagramTooLarge => {
+                            if (attempt_limit == 1) {
+                                try self.sendResponseBodyPaced(
+                                    stream_id,
+                                    chunk[0],
+                                    fin and last,
+                                );
+                                response_finished_by_fallback = fin and last;
+                                cursor = staged;
+                                break;
+                            }
+                            attempt_limit = @max(@as(usize, 1), attempt_limit / 2);
+                            continue;
+                        },
+                        else => return err,
+                    };
+                    cursor = staged;
+                    break;
+                }
+            }
+            if (fin and !response_finished_by_fallback) {
+                finishServerRequest(
+                    &self.control,
+                    &self.request_lifecycle,
+                    stream_id,
+                );
+            }
+            return;
+        }
+
         var non_empty: usize = 0;
         for (parts) |part| non_empty += @intFromBool(part.len != 0);
         if (non_empty == 0) {
@@ -6294,6 +8552,141 @@ pub const HandshakeServerSession = struct {
         }
     }
 
+    pub fn sendResponseBodyPartsPacedWithTimeout(
+        self: *HandshakeServerSession,
+        stream_id: u62,
+        parts: []const []const u8,
+        fin: bool,
+        progress: *BodyWriteProgress,
+        timeout: std.Io.Duration,
+    ) ReceiveTimeoutError!void {
+        progress.* = .{};
+        if (self.dispatcher_bound) return error.InvalidDispatcherState;
+        if (timeout.nanoseconds <= 0) return error.Timeout;
+        return self.sendResponseBodyPartsPacedWithDeadline(
+            stream_id,
+            parts,
+            fin,
+            progress,
+            .fromNow(self.connectionIo(), .{
+                .raw = timeout,
+                .clock = .awake,
+            }),
+        );
+    }
+
+    /// Send borrowed response slices under one absolute deadline without
+    /// joining them. Progress is the exact socket-visible byte prefix across
+    /// all slices, allowing the caller to retry only the remaining suffix.
+    pub fn sendResponseBodyPartsPacedWithDeadline(
+        self: *HandshakeServerSession,
+        stream_id: u62,
+        parts: []const []const u8,
+        fin: bool,
+        progress: *BodyWriteProgress,
+        deadline: std.Io.Clock.Timestamp,
+    ) ReceiveTimeoutError!void {
+        progress.* = .{};
+        if (self.dispatcher_bound) return error.InvalidDispatcherState;
+        _ = try deadline_policy.usableAwake(self.connectionIo(), deadline);
+        const total_len = try bodyPartsLength(parts);
+        try validateBodyWrite(&self.outbound_bodies, stream_id, total_len, fin);
+        if (total_len == 0) {
+            return self.sendResponseBodyPacedWithDeadline(
+                stream_id,
+                &.{},
+                fin,
+                progress,
+                deadline,
+            );
+        }
+
+        if (self.options.max_frames_per_packet < 2 or
+            self.options.max_stream_frame_data == 0)
+        {
+            var non_empty: usize = 0;
+            for (parts) |part| non_empty += @intFromBool(part.len != 0);
+            var sent: usize = 0;
+            for (parts) |part| {
+                if (part.len == 0) continue;
+                sent += 1;
+                var part_progress: BodyWriteProgress = .{};
+                self.sendResponseBodyPacedWithDeadline(
+                    stream_id,
+                    part,
+                    fin and sent == non_empty,
+                    &part_progress,
+                    deadline,
+                ) catch |err| {
+                    progress.committed_bytes += part_progress.committed_bytes;
+                    progress.fin_committed = part_progress.fin_committed;
+                    return err;
+                };
+                progress.committed_bytes += part_progress.committed_bytes;
+                progress.fin_committed = part_progress.fin_committed;
+            }
+            return;
+        }
+
+        var cursor = BodyPartCursor{ .parts = parts };
+        var chunk_storage: [max_paced_body_part_descriptors][]const u8 = undefined;
+        const chunk_limit = pacedBodyChunkLimit(self.options);
+        while (!cursor.done()) {
+            var attempt_limit = chunk_limit;
+            while (true) {
+                _ = try deadline_policy.usableAwake(
+                    self.connectionIo(),
+                    deadline,
+                );
+                var staged = cursor;
+                const chunk = staged.next(
+                    &chunk_storage,
+                    attempt_limit,
+                    self.options.max_stream_frame_data,
+                );
+                const last = staged.done();
+                if (try self.finishPeerResponseCancellation(stream_id)) |cancel| {
+                    return responseResetError(cancel.application_error_code);
+                }
+                trySendConnectionBodyParts(
+                    &self.established.connection,
+                    &self.outbound_bodies,
+                    stream_id,
+                    chunk,
+                    fin and last,
+                    self.options,
+                ) catch |err| switch (err) {
+                    error.FlowControlBlocked, error.CongestionLimited => {
+                        try self.receiveRequestPacketUntil(deadline);
+                        continue;
+                    },
+                    error.PacingLimited => {
+                        try self.established.connection
+                            .waitForPacingAvailabilityWithDeadline(deadline);
+                        continue;
+                    },
+                    error.DatagramTooLarge => {
+                        if (attempt_limit == 1) return err;
+                        attempt_limit = @max(@as(usize, 1), attempt_limit / 2);
+                        continue;
+                    },
+                    else => return err,
+                };
+                progress.committed_bytes += bodyPartChunkLength(chunk);
+                progress.fin_committed = fin and last;
+                cursor = staged;
+                break;
+            }
+        }
+        if (fin) {
+            finishServerRequest(
+                &self.control,
+                &self.request_lifecycle,
+                stream_id,
+            );
+        }
+    }
+
     /// Batched counterpart to `sendResponseBodyPaced` for concurrent response
     /// streams. Each contribution becomes one QUIC packet and the socket-visible
     /// prefix commits atomically into the corresponding body stream states.
@@ -6301,6 +8694,7 @@ pub const HandshakeServerSession = struct {
         self: *HandshakeServerSession,
         chunks: []const BodyChunk,
     ) Error!void {
+        if (self.dispatcher_bound) return error.InvalidDispatcherState;
         try sendConnectionBodyBatchPaced(
             &self.established.connection,
             &self.outbound_bodies,
@@ -6309,6 +8703,50 @@ pub const HandshakeServerSession = struct {
             self,
             HandshakeServerSession.receiveBatchProgressForSend,
             HandshakeServerSession.finishBatchResponseStream,
+        );
+    }
+
+    pub fn sendResponseBodyBatchPacedWithTimeout(
+        self: *HandshakeServerSession,
+        chunks: []const BodyChunk,
+        committed_chunks: *usize,
+        timeout: std.Io.Duration,
+    ) ReceiveTimeoutError!void {
+        committed_chunks.* = 0;
+        if (self.dispatcher_bound) return error.InvalidDispatcherState;
+        if (timeout.nanoseconds <= 0) return error.Timeout;
+        return self.sendResponseBodyBatchPacedWithDeadline(
+            chunks,
+            committed_chunks,
+            .fromNow(self.connectionIo(), .{
+                .raw = timeout,
+                .clock = .awake,
+            }),
+        );
+    }
+
+    /// Send one DATA contribution per response stream under one caller-owned
+    /// deadline. `committed_chunks` is the exact socket-visible input prefix
+    /// and remains valid on timeout or a socket error.
+    pub fn sendResponseBodyBatchPacedWithDeadline(
+        self: *HandshakeServerSession,
+        chunks: []const BodyChunk,
+        committed_chunks: *usize,
+        deadline: std.Io.Clock.Timestamp,
+    ) ReceiveTimeoutError!void {
+        committed_chunks.* = 0;
+        if (self.dispatcher_bound) return error.InvalidDispatcherState;
+        _ = try deadline_policy.usableAwake(self.connectionIo(), deadline);
+        return sendConnectionBodyBatchPacedWithDeadline(
+            &self.established.connection,
+            &self.outbound_bodies,
+            chunks,
+            self.options,
+            self,
+            HandshakeServerSession.receiveBatchProgressForSendUntil,
+            HandshakeServerSession.finishBatchResponseStream,
+            committed_chunks,
+            deadline,
         );
     }
 
@@ -6325,6 +8763,64 @@ pub const HandshakeServerSession = struct {
         self: *HandshakeServerSession,
         responses: []const ResponseBody,
     ) Error!void {
+        if (self.dispatcher_bound) return error.InvalidDispatcherState;
+        return self.sendResponseBodiesPacedUntil(
+            responses,
+            null,
+            null,
+        ) catch |err| switch (err) {
+            error.Timeout, error.ConcurrencyUnavailable => unreachable,
+            else => |other| return @errorCast(other),
+        };
+    }
+
+    pub fn sendResponseBodiesPacedWithTimeout(
+        self: *HandshakeServerSession,
+        responses: []const ResponseBody,
+        committed_bytes: []usize,
+        timeout: std.Io.Duration,
+    ) ReceiveTimeoutError!void {
+        if (self.dispatcher_bound) return error.InvalidDispatcherState;
+        if (committed_bytes.len < responses.len) return error.BufferTooShort;
+        @memset(committed_bytes[0..responses.len], 0);
+        if (timeout.nanoseconds <= 0) return error.Timeout;
+        return self.sendResponseBodiesPacedWithDeadline(
+            responses,
+            committed_bytes,
+            .fromNow(self.connectionIo(), .{
+                .raw = timeout,
+                .clock = .awake,
+            }),
+        );
+    }
+
+    /// Priority-schedule complete response bodies under one absolute deadline.
+    /// Each `committed_bytes[index]` value is updated only after the
+    /// corresponding DATA packet is accepted by the socket and remains valid
+    /// on every error return.
+    pub fn sendResponseBodiesPacedWithDeadline(
+        self: *HandshakeServerSession,
+        responses: []const ResponseBody,
+        committed_bytes: []usize,
+        deadline: std.Io.Clock.Timestamp,
+    ) ReceiveTimeoutError!void {
+        if (self.dispatcher_bound) return error.InvalidDispatcherState;
+        if (committed_bytes.len < responses.len) return error.BufferTooShort;
+        @memset(committed_bytes[0..responses.len], 0);
+        _ = try deadline_policy.usableAwake(self.connectionIo(), deadline);
+        return self.sendResponseBodiesPacedUntil(
+            responses,
+            committed_bytes,
+            deadline,
+        );
+    }
+
+    fn sendResponseBodiesPacedUntil(
+        self: *HandshakeServerSession,
+        responses: []const ResponseBody,
+        committed_bytes: ?[]usize,
+        deadline: ?std.Io.Clock.Timestamp,
+    ) ReceiveTimeoutError!void {
         if (responses.len == 0) return;
         const allocator =
             self.established.connection.endpoint.allocator;
@@ -6336,9 +8832,14 @@ pub const HandshakeServerSession = struct {
         const candidates = workspace.candidates();
 
         for (responses, 0..) |response, index| {
-            if (self.outbound_bodies.find(response.stream_id) == null) {
+            const body = self.outbound_bodies.find(response.stream_id) orelse
                 return error.UnexpectedStream;
-            }
+            var staged = body.*;
+            try self.outbound_bodies.prepareChunkForEntry(
+                &staged,
+                response.data.len,
+                true,
+            );
             if (!workspace.registerResponse(index, response.stream_id)) {
                 return error.UnexpectedStream;
             }
@@ -6363,12 +8864,18 @@ pub const HandshakeServerSession = struct {
         var next_stream: usize = 0;
         var delay_budget = response_scheduler.DelayBudget{};
         while (remaining_responses != 0) {
+            if (deadline) |absolute| {
+                _ = try deadline_policy.usableAwake(
+                    self.connectionIo(),
+                    absolute,
+                );
+            }
             const selection = self.refreshResponseCandidates(
                 responses,
                 candidates,
                 chunk_limit,
             ) orelse {
-                try self.receiveRequestPacket();
+                try self.receiveRequestPacketUntil(deadline);
                 continue;
             };
 
@@ -6380,7 +8887,7 @@ pub const HandshakeServerSession = struct {
                 max_batch_packets,
             );
             if (workspace.chunks().len == 0) {
-                try self.receiveRequestPacket();
+                try self.receiveRequestPacketUntil(deadline);
                 continue;
             }
 
@@ -6393,21 +8900,33 @@ pub const HandshakeServerSession = struct {
                 HandshakeServerSession.finishBatchResponseStream,
             ) catch |err| switch (err) {
                 error.FlowControlBlocked, error.CongestionLimited => {
-                    try self.receiveRequestPacket();
+                    try self.receiveRequestPacketUntil(deadline);
                     continue;
                 },
                 error.PacingLimited => {
-                    try self.established.connection
-                        .waitForPacingAvailability();
+                    if (deadline) |absolute| {
+                        try self.established.connection
+                            .waitForPacingAvailabilityWithDeadline(absolute);
+                    } else {
+                        try self.established.connection
+                            .waitForPacingAvailability();
+                    }
                     continue;
                 },
                 else => return err,
             };
+            if (committed_bytes) |counts| {
+                for (workspace.chunks()[0..progress.sent_count], 0..) |chunk, batch_index| {
+                    const response_index = workspace.responseIndex(batch_index);
+                    counts[response_index] += chunk.data.len;
+                }
+            }
             const commit = workspace.commitSentPrefix(progress.sent_count);
             remaining_responses -= commit.completed_responses;
             delay_budget.record(commit.body_bytes, progress.sent_count);
             if (progress.send_error) |err| return err;
-            if (self.options.response_scheduler_batch_delay_ns != 0 and
+            if (remaining_responses != 0 and
+                self.options.response_scheduler_batch_delay_ns != 0 and
                 delay_budget.due(
                     self.options.response_scheduler_batch_delay_bytes,
                     self.options.response_scheduler_batch_delay_packets,
@@ -6417,10 +8936,10 @@ pub const HandshakeServerSession = struct {
                     i64,
                     self.options.response_scheduler_batch_delay_ns,
                 ) orelse std.math.maxInt(i64);
-                try std.Io.sleep(
-                    self.established.connection.endpoint.io,
-                    .fromNanoseconds(delay_ns),
-                    .awake,
+                try sleepResponseSchedulerDelayUntil(
+                    self.connectionIo(),
+                    delay_ns,
+                    deadline,
                 );
                 delay_budget.reset();
             }
@@ -6492,6 +9011,13 @@ pub const HandshakeServerSession = struct {
         try self.receiveRequestPacket();
     }
 
+    fn receiveBatchProgressForSendUntil(
+        self: *HandshakeServerSession,
+        deadline: std.Io.Clock.Timestamp,
+    ) ReceiveTimeoutError!void {
+        try self.receiveRequestPacketUntil(deadline);
+    }
+
     fn finishBatchResponseStream(
         self: *HandshakeServerSession,
         stream_id: u62,
@@ -6524,12 +9050,38 @@ pub const HandshakeServerSession = struct {
         deadline: ?std.Io.Clock.Timestamp,
     ) ReceiveTimeoutError!void {
         while (true) {
+            if (deadline) |absolute| {
+                if (try self.finishPeerResponseCancellation(stream_id)) |cancel| {
+                    return responseResetError(cancel.application_error_code);
+                }
+                sendConnectionBodyChunkWithDeadline(
+                    &self.established.connection,
+                    &self.outbound_bodies,
+                    stream_id,
+                    data,
+                    fin,
+                    self.options,
+                    absolute,
+                ) catch |err| switch (err) {
+                    error.FlowControlBlocked, error.CongestionLimited => {
+                        try self.receiveRequestPacketUntil(deadline);
+                        continue;
+                    },
+                    else => |other| return other,
+                };
+                if (fin) finishServerRequest(
+                    &self.control,
+                    &self.request_lifecycle,
+                    stream_id,
+                );
+                return;
+            }
             self.sendResponseBody(stream_id, data, fin) catch |err| switch (err) {
                 error.FlowControlBlocked, error.CongestionLimited => {
                     try self.receiveRequestPacketUntil(deadline);
                     continue;
                 },
-                else => return err,
+                else => |other| return other,
             };
             return;
         }
@@ -6540,6 +9092,7 @@ pub const HandshakeServerSession = struct {
         stream_id: u62,
         trailers: []const http3.Qpack.HeaderField,
     ) Error!void {
+        if (self.dispatcher_bound) return error.InvalidDispatcherState;
         if (try self.finishPeerResponseCancellation(stream_id)) |cancel| {
             return responseResetError(cancel.application_error_code);
         }
@@ -6559,6 +9112,29 @@ pub const HandshakeServerSession = struct {
         finishServerRequest(&self.control, &self.request_lifecycle, stream_id);
     }
 
+    /// Submit response trailers without waiting for pacing or reading UDP.
+    /// Static QPACK encoding and stream state commit only after the one-packet
+    /// send succeeds, so an endpoint loop may retry after dispatcher progress.
+    pub fn tryFinishResponseTrailers(
+        self: *HandshakeServerSession,
+        stream_id: u62,
+        trailers: []const http3.Qpack.HeaderField,
+    ) Error!void {
+        if (try self.finishPeerResponseCancellationOnce(stream_id)) |cancel| {
+            return responseResetError(cancel.application_error_code);
+        }
+        try trySendConnectionTrailersLiteral(
+            &self.established.connection,
+            &self.outbound_bodies,
+            &self.stream_send_scratch,
+            stream_id,
+            trailers,
+            self.control.settings.peer,
+            self.options,
+        );
+        finishServerRequest(&self.control, &self.request_lifecycle, stream_id);
+    }
+
     /// Wait until the peer cancels the response direction of `stream_id`.
     ///
     /// The request itself can already be complete: closing an unread response
@@ -6569,14 +9145,65 @@ pub const HandshakeServerSession = struct {
         self: *HandshakeServerSession,
         stream_id: u62,
     ) Error!PeerResponseCancellation {
+        return self.receivePeerResponseCancellationUntil(
+            stream_id,
+            null,
+        ) catch |err| switch (err) {
+            error.Timeout, error.ConcurrencyUnavailable => unreachable,
+            else => |other| return @errorCast(other),
+        };
+    }
+
+    pub fn receivePeerResponseCancellationWithTimeout(
+        self: *HandshakeServerSession,
+        stream_id: u62,
+        timeout: std.Io.Duration,
+    ) ReceiveTimeoutError!PeerResponseCancellation {
+        if (self.dispatcher_bound) return error.InvalidDispatcherState;
+        if (timeout.nanoseconds <= 0) return error.Timeout;
+        return self.receivePeerResponseCancellationWithDeadline(
+            stream_id,
+            .fromNow(self.connectionIo(), .{
+                .raw = timeout,
+                .clock = .awake,
+            }),
+        );
+    }
+
+    /// Wait for peer STOP_SENDING under one absolute deadline. Cancellation
+    /// delivery registers stream retirement without waiting for a paced
+    /// MAX_STREAMS update; the connection timer completes that retry.
+    pub fn receivePeerResponseCancellationWithDeadline(
+        self: *HandshakeServerSession,
+        stream_id: u62,
+        deadline: std.Io.Clock.Timestamp,
+    ) ReceiveTimeoutError!PeerResponseCancellation {
+        if (self.dispatcher_bound) return error.InvalidDispatcherState;
+        _ = try deadline_policy.usableAwake(self.connectionIo(), deadline);
+        return self.receivePeerResponseCancellationUntil(
+            stream_id,
+            deadline,
+        );
+    }
+
+    fn receivePeerResponseCancellationUntil(
+        self: *HandshakeServerSession,
+        stream_id: u62,
+        deadline: ?std.Io.Clock.Timestamp,
+    ) ReceiveTimeoutError!PeerResponseCancellation {
+        if (self.dispatcher_bound) return error.InvalidDispatcherState;
         if (!self.request_lifecycle.contains(stream_id)) {
             return error.UnexpectedStream;
         }
         while (true) {
-            if (try self.finishPeerResponseCancellation(stream_id)) |cancel| {
+            const cancellation = if (deadline != null)
+                try self.finishPeerResponseCancellationOnce(stream_id)
+            else
+                try self.finishPeerResponseCancellation(stream_id);
+            if (cancellation) |cancel| {
                 return cancel;
             }
-            try self.receiveRequestPacket();
+            try self.receiveRequestPacketUntil(deadline);
         }
     }
 
@@ -6633,6 +9260,7 @@ pub const HandshakeServerSession = struct {
         stream_id: u62,
         trailers: []const http3.Qpack.HeaderField,
     ) Error!void {
+        if (self.dispatcher_bound) return error.InvalidDispatcherState;
         return self.finishResponseTrailersPacedUntil(
             stream_id,
             trailers,
@@ -6643,6 +9271,42 @@ pub const HandshakeServerSession = struct {
         };
     }
 
+    pub fn finishResponseTrailersPacedWithTimeout(
+        self: *HandshakeServerSession,
+        stream_id: u62,
+        trailers: []const http3.Qpack.HeaderField,
+        timeout: std.Io.Duration,
+    ) ReceiveTimeoutError!void {
+        if (self.dispatcher_bound) return error.InvalidDispatcherState;
+        if (timeout.nanoseconds <= 0) return error.Timeout;
+        return self.finishResponseTrailersPacedWithDeadline(
+            stream_id,
+            trailers,
+            .fromNow(self.connectionIo(), .{
+                .raw = timeout,
+                .clock = .awake,
+            }),
+        );
+    }
+
+    /// Finish a streaming response with trailers under one absolute deadline.
+    /// A timeout before any packet is visible is retryable; a timeout after a
+    /// multi-packet QPACK/trailer prefix uses the packetizer's fail-closed rule.
+    pub fn finishResponseTrailersPacedWithDeadline(
+        self: *HandshakeServerSession,
+        stream_id: u62,
+        trailers: []const http3.Qpack.HeaderField,
+        deadline: std.Io.Clock.Timestamp,
+    ) ReceiveTimeoutError!void {
+        if (self.dispatcher_bound) return error.InvalidDispatcherState;
+        _ = try deadline_policy.usableAwake(self.connectionIo(), deadline);
+        return self.finishResponseTrailersPacedUntil(
+            stream_id,
+            trailers,
+            deadline,
+        );
+    }
+
     fn finishResponseTrailersPacedUntil(
         self: *HandshakeServerSession,
         stream_id: u62,
@@ -6650,12 +9314,43 @@ pub const HandshakeServerSession = struct {
         deadline: ?std.Io.Clock.Timestamp,
     ) ReceiveTimeoutError!void {
         while (true) {
+            if (deadline) |absolute| {
+                if (try self.finishPeerResponseCancellation(stream_id)) |cancel| {
+                    return responseResetError(cancel.application_error_code);
+                }
+                sendConnectionTrailersWithDeadline(
+                    &self.established.connection,
+                    &self.outbound_bodies,
+                    &self.stream_send_scratch,
+                    &self.critical_stream_send_scratch,
+                    stream_id,
+                    trailers,
+                    self.control.settings.peer,
+                    &self.qpack_encode,
+                    &self.qpack_encoder_send,
+                    &self.qpack_encoder_prefix_sent,
+                    self.options,
+                    absolute,
+                ) catch |err| switch (err) {
+                    error.FlowControlBlocked, error.CongestionLimited => {
+                        try self.receiveRequestPacketUntil(deadline);
+                        continue;
+                    },
+                    else => |other| return other,
+                };
+                finishServerRequest(
+                    &self.control,
+                    &self.request_lifecycle,
+                    stream_id,
+                );
+                return;
+            }
             self.finishResponseTrailers(stream_id, trailers) catch |err| switch (err) {
                 error.FlowControlBlocked, error.CongestionLimited => {
                     try self.receiveRequestPacketUntil(deadline);
                     continue;
                 },
-                else => return err,
+                else => |other| return other,
             };
             return;
         }
@@ -6667,18 +9362,90 @@ pub const HandshakeServerSession = struct {
         informational: []const http3.InformationalResponse,
         response: http3.Response,
     ) Error!void {
-        try sendConnectionSettings(
-            &self.established.connection,
-            &self.critical_stream_send_scratch,
-            &self.control,
-            &self.control_send,
-            &self.qpack_encoder_send,
-            &self.qpack_encoder_prefix_sent,
-            &self.qpack_decoder_send,
-            &self.qpack_decoder_prefix_sent,
-            self.options,
-            server_control_stream_id,
+        return self.sendResponseWithInformationalUntil(
+            stream_id,
+            informational,
+            response,
+            null,
+        ) catch |err| switch (err) {
+            error.Timeout, error.ConcurrencyUnavailable => unreachable,
+            else => |other| return @errorCast(other),
+        };
+    }
+
+    pub fn sendResponseWithInformationalAndTimeout(
+        self: *HandshakeServerSession,
+        stream_id: u62,
+        informational: []const http3.InformationalResponse,
+        response: http3.Response,
+        timeout: std.Io.Duration,
+    ) ReceiveTimeoutError!void {
+        if (self.dispatcher_bound) return error.InvalidDispatcherState;
+        if (timeout.nanoseconds <= 0) return error.Timeout;
+        return self.sendResponseWithInformationalAndDeadline(
+            stream_id,
+            informational,
+            response,
+            .fromNow(self.connectionIo(), .{
+                .raw = timeout,
+                .clock = .awake,
+            }),
         );
+    }
+
+    pub fn sendResponseWithInformationalAndDeadline(
+        self: *HandshakeServerSession,
+        stream_id: u62,
+        informational: []const http3.InformationalResponse,
+        response: http3.Response,
+        deadline: std.Io.Clock.Timestamp,
+    ) ReceiveTimeoutError!void {
+        if (self.dispatcher_bound) return error.InvalidDispatcherState;
+        _ = try deadline_policy.usableAwake(self.connectionIo(), deadline);
+        return self.sendResponseWithInformationalUntil(
+            stream_id,
+            informational,
+            response,
+            deadline,
+        );
+    }
+
+    fn sendResponseWithInformationalUntil(
+        self: *HandshakeServerSession,
+        stream_id: u62,
+        informational: []const http3.InformationalResponse,
+        response: http3.Response,
+        deadline: ?std.Io.Clock.Timestamp,
+    ) ReceiveTimeoutError!void {
+        if (self.dispatcher_bound) return error.InvalidDispatcherState;
+        if (deadline) |absolute| {
+            try sendConnectionSettingsWithDeadline(
+                &self.established.connection,
+                &self.critical_stream_send_scratch,
+                &self.control,
+                &self.control_send,
+                &self.qpack_encoder_send,
+                &self.qpack_encoder_prefix_sent,
+                &self.qpack_decoder_send,
+                &self.qpack_decoder_prefix_sent,
+                self.options,
+                server_control_stream_id,
+                absolute,
+            );
+        } else {
+            try sendConnectionSettings(
+                &self.established.connection,
+                &self.critical_stream_send_scratch,
+                &self.control,
+                &self.control_send,
+                &self.qpack_encoder_send,
+                &self.qpack_encoder_prefix_sent,
+                &self.qpack_decoder_send,
+                &self.qpack_decoder_prefix_sent,
+                self.options,
+                server_control_stream_id,
+            );
+        }
         var response_headers_stack: [server_response.header_stack_capacity]http3.Qpack.HeaderField =
             undefined;
         var prepared = try server_response.prepare(
@@ -6694,23 +9461,41 @@ pub const HandshakeServerSession = struct {
         defer prepared.deinit(
             self.established.connection.endpoint.allocator,
         );
-        try sendConnectionResponseSequence(
-            &self.established.connection,
-            &self.stream_send_scratch,
-            &self.critical_stream_send_scratch,
-            stream_id,
-            informational,
-            prepared.value,
-            self.options,
-            self.control.settings.peer,
-            &self.qpack_encode,
-            &self.qpack_encoder_send,
-            &self.qpack_encoder_prefix_sent,
-        );
+        if (deadline) |absolute| {
+            try sendConnectionResponseSequenceWithDeadline(
+                &self.established.connection,
+                &self.stream_send_scratch,
+                &self.critical_stream_send_scratch,
+                stream_id,
+                informational,
+                prepared.value,
+                self.options,
+                self.control.settings.peer,
+                &self.qpack_encode,
+                &self.qpack_encoder_send,
+                &self.qpack_encoder_prefix_sent,
+                absolute,
+            );
+        } else {
+            try sendConnectionResponseSequence(
+                &self.established.connection,
+                &self.stream_send_scratch,
+                &self.critical_stream_send_scratch,
+                stream_id,
+                informational,
+                prepared.value,
+                self.options,
+                self.control.settings.peer,
+                &self.qpack_encode,
+                &self.qpack_encoder_send,
+                &self.qpack_encoder_prefix_sent,
+            );
+        }
         finishServerRequest(&self.control, &self.request_lifecycle, stream_id);
     }
 
     pub fn sendGoAway(self: *HandshakeServerSession, stream_id: u64) Error!void {
+        if (self.dispatcher_bound) return error.InvalidDispatcherState;
         try validateServerGoAwayStreamId(stream_id);
         try sendConnectionSettings(
             &self.established.connection,
@@ -6727,13 +9512,28 @@ pub const HandshakeServerSession = struct {
         try sendConnectionControlFrame(&self.established.connection, &self.control, &self.control_send, self.options, .goaway, stream_id);
     }
 
-    /// Advertise RFC 9412 origins on the server control stream. Clients must
-    /// still validate certificate authority before coalescing requests.
-    pub fn sendOrigins(
+    pub fn sendGoAwayWithTimeout(
         self: *HandshakeServerSession,
-        origins: []const []const u8,
-    ) Error!void {
-        try sendConnectionSettings(
+        stream_id: u64,
+        timeout: std.Io.Duration,
+    ) ReceiveTimeoutError!void {
+        if (self.dispatcher_bound) return error.InvalidDispatcherState;
+        if (timeout.nanoseconds <= 0) return error.Timeout;
+        return self.sendGoAwayWithDeadline(stream_id, .fromNow(
+            self.connectionIo(),
+            .{ .raw = timeout, .clock = .awake },
+        ));
+    }
+
+    pub fn sendGoAwayWithDeadline(
+        self: *HandshakeServerSession,
+        stream_id: u64,
+        deadline: std.Io.Clock.Timestamp,
+    ) ReceiveTimeoutError!void {
+        if (self.dispatcher_bound) return error.InvalidDispatcherState;
+        _ = try deadline_policy.usableAwake(self.connectionIo(), deadline);
+        try validateServerGoAwayStreamId(stream_id);
+        try sendConnectionSettingsWithDeadline(
             &self.established.connection,
             &self.critical_stream_send_scratch,
             &self.control,
@@ -6744,7 +9544,109 @@ pub const HandshakeServerSession = struct {
             &self.qpack_decoder_prefix_sent,
             self.options,
             server_control_stream_id,
+            deadline,
         );
+        try sendConnectionControlFrameWithDeadline(
+            &self.established.connection,
+            &self.control,
+            &self.control_send,
+            self.options,
+            .goaway,
+            stream_id,
+            deadline,
+        );
+    }
+
+    /// Submit GOAWAY once without waiting for pacing or reading UDP. Promoted
+    /// endpoint sessions retry after dispatcher progress.
+    pub fn trySendGoAway(
+        self: *HandshakeServerSession,
+        stream_id: u64,
+    ) Error!void {
+        try validateServerGoAwayStreamId(stream_id);
+        try self.requireEndpointCriticalStreamsReady();
+        try trySendConnectionControlFrame(
+            &self.established.connection,
+            &self.control,
+            &self.control_send,
+            self.options,
+            .goaway,
+            stream_id,
+        );
+    }
+
+    /// Advertise RFC 9412 origins on the server control stream. Clients must
+    /// still validate certificate authority before coalescing requests.
+    pub fn sendOrigins(
+        self: *HandshakeServerSession,
+        origins: []const []const u8,
+    ) Error!void {
+        return self.sendOriginsUntil(origins, null) catch |err| switch (err) {
+            error.Timeout, error.ConcurrencyUnavailable => unreachable,
+            else => |other| return @errorCast(other),
+        };
+    }
+
+    pub fn sendOriginsWithTimeout(
+        self: *HandshakeServerSession,
+        origins: []const []const u8,
+        timeout: std.Io.Duration,
+    ) ReceiveTimeoutError!void {
+        if (self.dispatcher_bound) return error.InvalidDispatcherState;
+        if (timeout.nanoseconds <= 0) return error.Timeout;
+        return self.sendOriginsWithDeadline(
+            origins,
+            .fromNow(self.connectionIo(), .{
+                .raw = timeout,
+                .clock = .awake,
+            }),
+        );
+    }
+
+    pub fn sendOriginsWithDeadline(
+        self: *HandshakeServerSession,
+        origins: []const []const u8,
+        deadline: std.Io.Clock.Timestamp,
+    ) ReceiveTimeoutError!void {
+        if (self.dispatcher_bound) return error.InvalidDispatcherState;
+        _ = try deadline_policy.usableAwake(self.connectionIo(), deadline);
+        return self.sendOriginsUntil(origins, deadline);
+    }
+
+    fn sendOriginsUntil(
+        self: *HandshakeServerSession,
+        origins: []const []const u8,
+        deadline: ?std.Io.Clock.Timestamp,
+    ) ReceiveTimeoutError!void {
+        if (self.dispatcher_bound) return error.InvalidDispatcherState;
+        if (deadline) |absolute| {
+            try sendConnectionSettingsWithDeadline(
+                &self.established.connection,
+                &self.critical_stream_send_scratch,
+                &self.control,
+                &self.control_send,
+                &self.qpack_encoder_send,
+                &self.qpack_encoder_prefix_sent,
+                &self.qpack_decoder_send,
+                &self.qpack_decoder_prefix_sent,
+                self.options,
+                server_control_stream_id,
+                absolute,
+            );
+        } else {
+            try sendConnectionSettings(
+                &self.established.connection,
+                &self.critical_stream_send_scratch,
+                &self.control,
+                &self.control_send,
+                &self.qpack_encoder_send,
+                &self.qpack_encoder_prefix_sent,
+                &self.qpack_decoder_send,
+                &self.qpack_decoder_prefix_sent,
+                self.options,
+                server_control_stream_id,
+            );
+        }
         const previous_sent = self.control.local_origin_set_sent;
         errdefer self.control.local_origin_set_sent = previous_sent;
         self.critical_stream_send_scratch.reset();
@@ -6762,20 +9664,105 @@ pub const HandshakeServerSession = struct {
             self.options.max_stream_frame_data,
             false,
         );
-        try sendConnectionFrames(
-            &self.established.connection,
+        if (deadline) |absolute| {
+            try sendConnectionFramesWithDeadline(
+                &self.established.connection,
+                self.critical_stream_send_scratch.frames.items,
+                self.options.max_frames_per_packet,
+                absolute,
+            );
+        } else {
+            try sendConnectionFrames(
+                &self.established.connection,
+                self.critical_stream_send_scratch.frames.items,
+                self.options.max_frames_per_packet,
+            );
+        }
+    }
+
+    /// Submit one complete RFC 9412 ORIGIN frame without waiting for pacing
+    /// or reading UDP. The advertisement marker and control-stream offset are
+    /// committed only after the packet reaches the socket.
+    pub fn trySendOrigins(
+        self: *HandshakeServerSession,
+        origins: []const []const u8,
+    ) Error!void {
+        try self.requireEndpointCriticalStreamsReady();
+        const previous_sent = self.control.local_origin_set_sent;
+        errdefer self.control.local_origin_set_sent = previous_sent;
+        self.critical_stream_send_scratch.reset();
+        try self.control.writeOrigins(
+            &self.critical_stream_send_scratch.payload,
+            self.established.connection.endpoint.allocator,
+            origins,
+        );
+        const previous_send = self.control_send;
+        errdefer self.control_send = previous_send;
+        try self.control_send.appendFrames(
+            &self.critical_stream_send_scratch.frames,
+            self.established.connection.endpoint.allocator,
+            self.critical_stream_send_scratch.payload.items,
+            self.options.max_stream_frame_data,
+            false,
+        );
+        if (self.critical_stream_send_scratch.frames.items.len >
+            @max(@as(usize, 1), self.options.max_frames_per_packet) or
+            try self.established.connection.packetLenForFramesAtOffset(
+                0,
+                self.critical_stream_send_scratch.frames.items,
+            ) > self.established.connection.currentSendDatagramSize())
+        {
+            return error.DatagramTooLarge;
+        }
+        try self.established.connection.trySend(
             self.critical_stream_send_scratch.frames.items,
-            self.options.max_frames_per_packet,
         );
     }
 
     pub fn initiateShutdown(self: *HandshakeServerSession) Error!void {
+        if (self.dispatcher_bound) return error.InvalidDispatcherState;
         if (self.request_lifecycle.state() != .active) return;
         try self.sendGoAway(@as(u64, quic.varint.max_value) & ~@as(u64, 0x3));
         self.request_lifecycle.markInitialGoAwaySent();
     }
 
+    pub fn initiateShutdownWithTimeout(
+        self: *HandshakeServerSession,
+        timeout: std.Io.Duration,
+    ) ReceiveTimeoutError!void {
+        if (timeout.nanoseconds <= 0) return error.Timeout;
+        return self.initiateShutdownWithDeadline(.fromNow(
+            self.connectionIo(),
+            .{ .raw = timeout, .clock = .awake },
+        ));
+    }
+
+    pub fn initiateShutdownWithDeadline(
+        self: *HandshakeServerSession,
+        deadline: std.Io.Clock.Timestamp,
+    ) ReceiveTimeoutError!void {
+        if (self.dispatcher_bound) return error.InvalidDispatcherState;
+        _ = try deadline_policy.usableAwake(self.connectionIo(), deadline);
+        if (self.request_lifecycle.state() != .active) return;
+        try self.sendGoAwayWithDeadline(
+            @as(u64, quic.varint.max_value) & ~@as(u64, 0x3),
+            deadline,
+        );
+        self.request_lifecycle.markInitialGoAwaySent();
+    }
+
+    pub fn tryInitiateShutdown(
+        self: *HandshakeServerSession,
+    ) Error!void {
+        if (self.request_lifecycle.state() != .active) return;
+        try self.trySendGoAway(
+            @as(u64, quic.varint.max_value) & ~@as(u64, 0x3),
+        );
+        self.request_lifecycle.markInitialGoAwaySent();
+    }
+
     pub fn completeShutdown(self: *HandshakeServerSession) Error!void {
+        if (self.dispatcher_bound) return error.InvalidDispatcherState;
         if (self.request_lifecycle.state() != .initial_goaway) return;
         if (!self.request_streams.isEmpty() or
             self.streaming_requests.retainedCount() != 0)
@@ -6783,6 +9770,49 @@ pub const HandshakeServerSession = struct {
             return error.RequestIncomplete;
         }
         try self.sendGoAway(try self.request_lifecycle.finalGoAwayId());
+        self.request_lifecycle.markFinalGoAwaySent();
+    }
+
+    pub fn completeShutdownWithTimeout(
+        self: *HandshakeServerSession,
+        timeout: std.Io.Duration,
+    ) ReceiveTimeoutError!void {
+        if (timeout.nanoseconds <= 0) return error.Timeout;
+        return self.completeShutdownWithDeadline(.fromNow(
+            self.connectionIo(),
+            .{ .raw = timeout, .clock = .awake },
+        ));
+    }
+
+    pub fn completeShutdownWithDeadline(
+        self: *HandshakeServerSession,
+        deadline: std.Io.Clock.Timestamp,
+    ) ReceiveTimeoutError!void {
+        if (self.dispatcher_bound) return error.InvalidDispatcherState;
+        _ = try deadline_policy.usableAwake(self.connectionIo(), deadline);
+        if (self.request_lifecycle.state() != .initial_goaway) return;
+        if (!self.request_streams.isEmpty() or
+            self.streaming_requests.retainedCount() != 0)
+        {
+            return error.RequestIncomplete;
+        }
+        try self.sendGoAwayWithDeadline(
+            try self.request_lifecycle.finalGoAwayId(),
+            deadline,
+        );
+        self.request_lifecycle.markFinalGoAwaySent();
+    }
+
+    pub fn tryCompleteShutdown(
+        self: *HandshakeServerSession,
+    ) Error!void {
+        if (self.request_lifecycle.state() != .initial_goaway) return;
+        if (!self.request_streams.isEmpty() or
+            self.streaming_requests.retainedCount() != 0)
+        {
+            return error.RequestIncomplete;
+        }
+        try self.trySendGoAway(try self.request_lifecycle.finalGoAwayId());
         self.request_lifecycle.markFinalGoAwaySent();
     }
 
@@ -6800,6 +9830,7 @@ pub const HandshakeServerSession = struct {
         stream_id: u62,
         application_error_code: u64,
     ) Error!void {
+        if (self.dispatcher_bound) return error.InvalidDispatcherState;
         return self.cancelRequestInternal(
             stream_id,
             application_error_code,
@@ -6849,6 +9880,10 @@ pub const HandshakeServerSession = struct {
             finishServerRequest(&self.control, &self.request_lifecycle, stream_id);
             _ = self.outbound_bodies.finish(stream_id);
         }
+        errdefer self.established.connection.failClosedApplication(
+            http3.ApplicationErrorCode.internal_error,
+            "request-cancellation-failed",
+        );
         try cancelConnectionRequest(
             &self.established.connection,
             &self.critical_stream_send_scratch,
@@ -6905,6 +9940,7 @@ pub const HandshakeServerSession = struct {
         self: *HandshakeServerSession,
         stream_id: u62,
     ) Error!void {
+        if (self.dispatcher_bound) return error.InvalidDispatcherState;
         try self.cancelRequest(
             stream_id,
             http3.ApplicationErrorCode.request_rejected,
@@ -6919,6 +9955,7 @@ pub const HandshakeServerSession = struct {
         self: *HandshakeServerSession,
         stream_id: u62,
     ) Error!void {
+        if (self.dispatcher_bound) return error.InvalidDispatcherState;
         const exists = self.request_lifecycle.contains(stream_id) or
             self.request_streams.contains(stream_id) or
             self.streaming_requests.contains(stream_id) or
@@ -7001,7 +10038,11 @@ pub const HandshakeServerSession = struct {
         // Encoder-stream inserts and reset cancellations both queue decoder
         // instructions. Flush them at the packet boundary so a peer does not
         // remain artificially blocked until another HEADERS event appears.
-        try self.flushRequestPacketFeedback();
+        if (deadline) |absolute| {
+            try self.flushRequestPacketFeedbackWithDeadline(absolute);
+        } else {
+            try self.flushRequestPacketFeedback();
+        }
     }
 
     fn flushRequestPacketFeedback(self: *HandshakeServerSession) Error!void {
@@ -7010,9 +10051,26 @@ pub const HandshakeServerSession = struct {
         }
     }
 
+    fn flushRequestPacketFeedbackWithDeadline(
+        self: *HandshakeServerSession,
+        deadline: std.Io.Clock.Timestamp,
+    ) ReceiveTimeoutError!void {
+        if (self.qpack_decode.pendingDecoderInstructions().len == 0) return;
+        try sendConnectionQpackFeedbackWithDeadline(
+            &self.established.connection,
+            &self.critical_stream_send_scratch,
+            &self.qpack_decode,
+            &self.qpack_decoder_send,
+            &self.qpack_decoder_prefix_sent,
+            self.options,
+            deadline,
+        );
+    }
+
     /// Process one transport packet for control-stream progress without
     /// requiring a complete application request to become ready.
     pub fn pollControl(self: *HandshakeServerSession) Error!void {
+        if (self.dispatcher_bound) return error.InvalidDispatcherState;
         try self.receiveRequestPacket();
     }
 
@@ -7020,6 +10078,7 @@ pub const HandshakeServerSession = struct {
         self: *HandshakeServerSession,
         timeout: std.Io.Duration,
     ) ReceiveTimeoutError!void {
+        if (self.dispatcher_bound) return error.InvalidDispatcherState;
         if (timeout.nanoseconds <= 0) return error.Timeout;
         return self.receiveRequestPacketUntil(.fromNow(
             self.connectionIo(),
@@ -7031,6 +10090,7 @@ pub const HandshakeServerSession = struct {
         self: *HandshakeServerSession,
         deadline: std.Io.Clock.Timestamp,
     ) ReceiveTimeoutError!void {
+        if (self.dispatcher_bound) return error.InvalidDispatcherState;
         _ = try deadline_policy.usableAwake(self.connectionIo(), deadline);
         return self.receiveRequestPacketUntil(deadline);
     }
@@ -7048,6 +10108,7 @@ pub const HandshakeServerSession = struct {
         self: *HandshakeServerSession,
         timeout: std.Io.Duration,
     ) ReceiveTimeoutError!void {
+        if (self.dispatcher_bound) return error.InvalidDispatcherState;
         if (timeout.nanoseconds <= 0) return error.Timeout;
         return self.waitForRecoveryIdleWithDeadline(.fromNow(
             self.connectionIo(),
@@ -7059,6 +10120,7 @@ pub const HandshakeServerSession = struct {
         self: *HandshakeServerSession,
         deadline: std.Io.Clock.Timestamp,
     ) ReceiveTimeoutError!void {
+        if (self.dispatcher_bound) return error.InvalidDispatcherState;
         _ = try deadline_policy.usableAwake(self.connectionIo(), deadline);
         while (self.established.connection.pendingDeliveryRecovery()) {
             try self.receiveRequestPacketUntil(deadline);
@@ -7171,6 +10233,71 @@ pub const HandshakeServerSession = struct {
     }
 };
 
+fn sleepResponseSchedulerDelayUntil(
+    io: std.Io,
+    delay_ns: i64,
+    deadline: ?std.Io.Clock.Timestamp,
+) ReceiveTimeoutError!void {
+    const delay = std.Io.Duration.fromNanoseconds(delay_ns);
+    if (deadline) |absolute| {
+        const remaining = (try deadline_policy.usableAwake(io, absolute))
+            .durationFromNow(io).raw;
+        if (delay.nanoseconds >= remaining.nanoseconds) {
+            try std.Io.sleep(io, remaining, .awake);
+            return error.Timeout;
+        }
+    }
+    try std.Io.sleep(io, delay, .awake);
+}
+
+test "HTTP/3 response scheduler delay respects caller deadline" {
+    const FixedIo = struct {
+        now_ns: i96 = 1_000_000,
+        sleep_calls: usize = 0,
+        slept_ns: i96 = 0,
+
+        fn now(
+            userdata: ?*anyopaque,
+            _: std.Io.Clock,
+        ) std.Io.Timestamp {
+            const self: *@This() = @ptrCast(@alignCast(userdata));
+            return .fromNanoseconds(self.now_ns);
+        }
+
+        fn sleep(
+            userdata: ?*anyopaque,
+            timeout: std.Io.Timeout,
+        ) std.Io.Cancelable!void {
+            const self: *@This() = @ptrCast(@alignCast(userdata));
+            self.sleep_calls += 1;
+            const target = switch (timeout) {
+                .none => return error.Canceled,
+                .duration => |duration| self.now_ns + duration.raw.nanoseconds,
+                .deadline => |deadline| deadline.raw.nanoseconds,
+            };
+            self.slept_ns += target - self.now_ns;
+            self.now_ns = target;
+        }
+    };
+    var fixed: FixedIo = .{};
+    var vtable = std.Io.Threaded.init(std.testing.allocator, .{});
+    defer vtable.deinit();
+    var io_vtable = vtable.io().vtable.*;
+    io_vtable.now = FixedIo.now;
+    io_vtable.sleep = FixedIo.sleep;
+    const io = std.Io{ .userdata = &fixed, .vtable = &io_vtable };
+    const deadline = std.Io.Clock.Timestamp.fromNow(io, .{
+        .raw = .fromMilliseconds(10),
+        .clock = .awake,
+    });
+    try std.testing.expectError(
+        error.Timeout,
+        sleepResponseSchedulerDelayUntil(io, std.time.ns_per_s, deadline),
+    );
+    try std.testing.expectEqual(@as(usize, 1), fixed.sleep_calls);
+    try std.testing.expectEqual(@as(i96, 10 * std.time.ns_per_ms), fixed.slept_ns);
+}
+
 pub const HandshakeClient = struct {
     endpoint: *quic.runtime.Endpoint,
     owns_endpoint: bool,
@@ -7178,6 +10305,9 @@ pub const HandshakeClient = struct {
     /// Socket-reading convenience methods fail closed in this mode; callers
     /// inject routed packets and use the `*Once` polling surface instead.
     dispatcher_bound: bool = false,
+    /// Aggregate informational callbacks borrow decoded field storage and
+    /// must not recursively advance this connection's receive state.
+    callback_reader_active: bool = false,
     /// A best-effort dispatcher-side cleanup can retire HTTP/3 bookkeeping
     /// without successfully emitting every QUIC terminal frame. Such a
     /// connection must be discarded rather than returned to an idle pool.
@@ -7270,6 +10400,7 @@ pub const HandshakeClient = struct {
         self: *HandshakeClient,
         timeout: std.Io.Duration,
     ) ReceiveTimeoutError!u62 {
+        if (self.callback_reader_active) return error.ConcurrentRead;
         if (self.dispatcher_bound) return error.InvalidDispatcherState;
         if (timeout.nanoseconds <= 0) return error.Timeout;
         return self.openClientBidirectionalStreamWithDeadline(.fromNow(
@@ -7282,6 +10413,7 @@ pub const HandshakeClient = struct {
         self: *HandshakeClient,
         deadline: std.Io.Clock.Timestamp,
     ) ReceiveTimeoutError!u62 {
+        if (self.callback_reader_active) return error.ConcurrentRead;
         if (self.dispatcher_bound) return error.InvalidDispatcherState;
         const expected = self.next_stream_id;
         _ = std.math.add(u62, expected, 4) catch
@@ -7298,6 +10430,40 @@ pub const HandshakeClient = struct {
         return stream_id;
     }
 
+    fn requestStreamSendRetryable(
+        self: *const HandshakeClient,
+        stream_id: u62,
+        next_stream_id: u62,
+    ) bool {
+        if (self.established.connection.closed() or
+            self.established.connection.closing() or
+            self.established.connection.draining() or
+            self.established.connection.nextLocalBidirectionalStreamId() !=
+                next_stream_id)
+        {
+            return false;
+        }
+        const stats = self.established.connection.sendStreamStats(stream_id) orelse
+            return true;
+        return stats.highest_sent_offset == 0 and
+            stats.final_size == null and
+            stats.stopped == null and
+            stats.reset == null;
+    }
+
+    fn retireReservedRequestStreamId(
+        self: *HandshakeClient,
+        stream_id: u62,
+    ) void {
+        if (self.next_stream_id != stream_id) return;
+        const next_stream_id = std.math.add(u62, stream_id, 4) catch return;
+        if (self.established.connection.nextLocalBidirectionalStreamId() ==
+            next_stream_id)
+        {
+            self.next_stream_id = next_stream_id;
+        }
+    }
+
     pub fn connect(allocator: std.mem.Allocator, io: std.Io, local_address: net.IpAddress, server: net.IpAddress, limits: Limits, options: HandshakeClientOptions) Error!HandshakeClient {
         return connectBefore(
             allocator,
@@ -7307,7 +10473,54 @@ pub const HandshakeClient = struct {
             limits,
             options,
             try connectDeadline(io, options.connect_timeout),
+            null,
         );
+    }
+
+    /// Establish a connection with one complete typed HTTP/3 request in the
+    /// QUIC 0-RTT flight. The returned disposition is explicit so applications
+    /// decide whether a rejected request is safe to replay under 1-RTT.
+    pub fn connectWithEarlyRequest(
+        allocator: std.mem.Allocator,
+        io: std.Io,
+        local_address: net.IpAddress,
+        server: net.IpAddress,
+        limits: Limits,
+        options: HandshakeClientOptions,
+        early_request: *const PreparedEarlyRequest,
+        cache: *quic.resumption.Cache,
+        lease: *quic.resumption.EarlyDataLease,
+    ) Error!EarlyHandshakeClient {
+        if (options.handshake.early_data != null) {
+            return error.InvalidEarlyDataLease;
+        }
+        if (options.session.max_concurrent_request_streams == 0) {
+            return error.ExcessiveLoad;
+        }
+        if (!std.meta.eql(
+            early_request.local_settings,
+            options.session.local_settings,
+        )) {
+            return error.InvalidSetting;
+        }
+        try early_request.validateTransportLimits(limits, options, lease);
+        var early_options = options;
+        early_options.handshake.early_data = early_request.offer(cache, lease);
+        var client = try connectBefore(
+            allocator,
+            io,
+            local_address,
+            server,
+            limits,
+            early_options,
+            try connectDeadline(io, early_options.connect_timeout),
+            early_request,
+        );
+        errdefer client.deinit();
+        const disposition = try client.adoptEarlyRequest(
+            early_request,
+        );
+        return .{ .client = client, .disposition = disposition };
     }
 
     pub fn connectWithDeadline(
@@ -7331,6 +10544,7 @@ pub const HandshakeClient = struct {
                 deadline,
                 options.connect_timeout,
             ),
+            null,
         );
     }
 
@@ -7363,6 +10577,7 @@ pub const HandshakeClient = struct {
         limits: Limits,
         options: HandshakeClientOptions,
         deadline: ?std.Io.Clock.Timestamp,
+        accepted_early_request: ?*const PreparedEarlyRequest,
     ) Error!HandshakeClient {
         try validateHandshakeSessionOptions(options.session);
         try validateBlockedStreamLimit(
@@ -7390,6 +10605,7 @@ pub const HandshakeClient = struct {
             server,
             established,
             options.session,
+            accepted_early_request,
         );
     }
 
@@ -7488,6 +10704,7 @@ pub const HandshakeClient = struct {
             server,
             established,
             options.session,
+            null,
         );
     }
 
@@ -7517,6 +10734,7 @@ pub const HandshakeClient = struct {
             peer,
             established,
             options,
+            null,
         );
     }
 
@@ -7530,6 +10748,7 @@ pub const HandshakeClient = struct {
         peer: net.IpAddress,
         established: quic.handshake.EstablishedConnection,
         options: HandshakeSessionOptions,
+        accepted_early_request: ?*const PreparedEarlyRequest,
     ) Error!HandshakeClient {
         return initEstablishedWithEndpointOwnership(
             allocator,
@@ -7538,6 +10757,7 @@ pub const HandshakeClient = struct {
             peer,
             established,
             options,
+            accepted_early_request,
         );
     }
 
@@ -7548,6 +10768,7 @@ pub const HandshakeClient = struct {
         peer: net.IpAddress,
         established: quic.handshake.EstablishedConnection,
         options: HandshakeSessionOptions,
+        accepted_early_request: ?*const PreparedEarlyRequest,
     ) Error!HandshakeClient {
         try validateHandshakeSessionOptions(options);
         if (!http3.isHttp3Alpn(established.alpn)) return error.InvalidAlpn;
@@ -7555,7 +10776,30 @@ pub const HandshakeClient = struct {
             usize,
             options.local_settings.qpack_max_table_capacity,
         ) orelse return error.InvalidSetting;
-        return .{
+        const transport_next_stream_id = std.math.cast(
+            u62,
+            established.connection.nextLocalBidirectionalStreamId(),
+        ) orelse return error.StreamCreationError;
+        const typed_early_data = established.early_data_status == .accepted and
+            established.early_data_sent_packet_count != 0 and
+            accepted_early_request != null;
+        const expected_bidi_stream_id: u62 = if (typed_early_data) 4 else 0;
+        if (transport_next_stream_id != expected_bidi_stream_id) {
+            return error.UnexpectedEarlyData;
+        }
+        const transport_next_uni_stream_id =
+            established.connection.nextLocalUnidirectionalStreamId();
+        const expected_uni_stream_id: u64 = if (typed_early_data)
+            first_client_extension_uni_stream_id
+        else
+            client_control_stream_id;
+        if (transport_next_uni_stream_id != expected_uni_stream_id) {
+            // Accepted typed early data reserves exactly the three mandatory
+            // HTTP/3 critical streams. Other preexisting unidirectional state
+            // cannot be reconstructed safely by this fresh session.
+            return error.StreamCreationError;
+        }
+        var client = HandshakeClient{
             .endpoint = endpoint,
             .owns_endpoint = owns_endpoint,
             .peer = peer,
@@ -7607,7 +10851,14 @@ pub const HandshakeClient = struct {
                 allocator,
                 options.max_concurrent_request_streams,
             ),
+            .next_stream_id = transport_next_stream_id,
         };
+        if (transport_next_stream_id != 0) {
+            client.request_lifecycle.markAllocated(
+                transport_next_stream_id - 4,
+            );
+        }
+        return client;
     }
 
     pub fn initPreconfigured(
@@ -7646,6 +10897,7 @@ pub const HandshakeClient = struct {
             peer,
             established,
             options,
+            null,
         );
     }
 
@@ -8125,6 +11377,101 @@ pub const HandshakeClient = struct {
         return self.established.keyUpdateAwaitingAck();
     }
 
+    pub fn earlyDataStatus(
+        self: HandshakeClient,
+    ) quic.zero_rtt.handshake.Status {
+        return self.established.early_data_status;
+    }
+
+    fn adoptAcceptedEarlyCriticalStreams(
+        self: *HandshakeClient,
+        early_request: *const PreparedEarlyRequest,
+    ) Error!void {
+        const expected = [_]struct {
+            stream_id: u62,
+            bytes: []const u8,
+        }{
+            .{
+                .stream_id = client_control_stream_id,
+                .bytes = early_request.control_bytes,
+            },
+            .{
+                .stream_id = client_qpack_encoder_stream_id,
+                .bytes = early_request.encoder_prefix,
+            },
+            .{
+                .stream_id = client_qpack_decoder_stream_id,
+                .bytes = early_request.decoder_prefix,
+            },
+        };
+        for (expected) |stream| {
+            const stats = self.established.connection
+                .sendStreamStats(stream.stream_id) orelse
+                return error.UnexpectedStream;
+            if (stats.highest_sent_offset != stream.bytes.len or
+                stats.final_size != null or stats.reset != null or
+                stats.stopped != null)
+            {
+                return error.UnexpectedStream;
+            }
+        }
+        self.control.settings.markSent(self.options.local_settings);
+        self.control.early_data_peer_settings =
+            early_request.remembered_peer_settings;
+        self.control_send.next_offset = early_request.control_bytes.len;
+        self.qpack_encoder_send.next_offset = early_request.encoder_prefix.len;
+        self.qpack_encoder_prefix_sent = true;
+        self.qpack_decoder_send.next_offset = early_request.decoder_prefix.len;
+        self.qpack_decoder_prefix_sent = true;
+    }
+
+    /// Adopt one complete literal/static-QPACK request sent through the raw
+    /// QUIC 0-RTT offer. The transport has already imported accepted STREAM
+    /// bytes; this restores the HTTP method/CONNECT semantics needed to route
+    /// its eventual response. Rejected early data must instead be replayed as
+    /// a normal 1-RTT request.
+    pub fn adoptEarlyRequest(
+        self: *HandshakeClient,
+        early_request: *const PreparedEarlyRequest,
+    ) Error!EarlyRequestDisposition {
+        if (self.established.early_data_status == .rejected) {
+            return .rejected;
+        }
+        if (self.established.early_data_status != .accepted) {
+            return error.UnexpectedEarlyData;
+        }
+        if (self.established.early_data_sent_packet_count == 0) {
+            return .rejected;
+        }
+        if (!std.meta.eql(
+            early_request.local_settings,
+            self.options.local_settings,
+        )) {
+            return error.InvalidSetting;
+        }
+        const stream_id = early_request.stream_id;
+        if (stream_id >= self.next_stream_id or
+            self.request_lifecycle.contains(stream_id))
+        {
+            return error.UnexpectedStream;
+        }
+        const stats = self.established.connection.sendStreamStats(stream_id) orelse
+            return error.UnexpectedStream;
+        if (stats.highest_sent_offset != early_request.request_bytes.len or
+            stats.final_size != stats.highest_sent_offset or
+            stats.reset != null or stats.stopped != null)
+        {
+            return error.UnexpectedStream;
+        }
+        try self.adoptAcceptedEarlyCriticalStreams(early_request);
+        try self.request_lifecycle.open(
+            stream_id,
+            early_request.method,
+            early_request.extended_connect,
+        );
+        return .accepted;
+    }
+
     pub fn peerGoAwayId(self: HandshakeClient) ?u64 {
         return self.control.peer_goaway_id;
     }
@@ -8160,6 +11507,7 @@ pub const HandshakeClient = struct {
 
     pub fn request(self: *HandshakeClient, request_options: http3.Request) Error!OwnedHandshakeResponse {
         if (self.dispatcher_bound) return error.InvalidDispatcherState;
+        if (self.callback_reader_active) return error.ConcurrentRead;
         const stream_id = try self.sendRequest(request_options);
         return self.receiveResponse(stream_id);
     }
@@ -8173,8 +11521,12 @@ pub const HandshakeClient = struct {
         deadline: std.Io.Clock.Timestamp,
     ) ReceiveTimeoutError!OwnedHandshakeResponse {
         if (self.dispatcher_bound) return error.InvalidDispatcherState;
+        if (self.callback_reader_active) return error.ConcurrentRead;
         _ = try deadline_policy.usableAwake(self.connectionIo(), deadline);
-        const stream_id = try self.sendRequest(request_options);
+        const stream_id = try self.sendRequestUntil(
+            request_options,
+            deadline,
+        );
         return self.receiveResponseWithDeadline(stream_id, deadline);
     }
 
@@ -8200,6 +11552,7 @@ pub const HandshakeClient = struct {
         informational: ?http3.InformationalObserver,
     ) Error!OwnedHandshakeResponse {
         if (self.dispatcher_bound) return error.InvalidDispatcherState;
+        if (self.callback_reader_active) return error.ConcurrentRead;
         const stream_id = try self.sendRequest(request_options);
         return self.receiveResponseWithInformational(stream_id, informational);
     }
@@ -8228,8 +11581,12 @@ pub const HandshakeClient = struct {
         deadline: std.Io.Clock.Timestamp,
     ) ReceiveTimeoutError!OwnedHandshakeResponse {
         if (self.dispatcher_bound) return error.InvalidDispatcherState;
+        if (self.callback_reader_active) return error.ConcurrentRead;
         _ = try deadline_policy.usableAwake(self.connectionIo(), deadline);
-        const stream_id = try self.sendRequest(request_options);
+        const stream_id = try self.sendRequestUntil(
+            request_options,
+            deadline,
+        );
         return self.receiveResponseWithInformationalAndDeadline(
             stream_id,
             informational,
@@ -8241,42 +11598,157 @@ pub const HandshakeClient = struct {
         self: *HandshakeClient,
         request_options: http3.Request,
     ) Error!u62 {
+        return self.sendRequestUntil(request_options, null) catch |err| switch (err) {
+            error.Timeout, error.ConcurrencyUnavailable => unreachable,
+            else => |other| return @errorCast(other),
+        };
+    }
+
+    fn sendRequestUntil(
+        self: *HandshakeClient,
+        request_options: http3.Request,
+        deadline: ?std.Io.Clock.Timestamp,
+    ) ReceiveTimeoutError!u62 {
         if (self.dispatcher_bound) return error.InvalidDispatcherState;
+        if (self.callback_reader_active) return error.ConcurrentRead;
         const stream_id = self.next_stream_id;
+        const next_stream_id = std.math.add(u62, stream_id, 4) catch
+            return error.StreamCreationError;
         if (!self.control.acceptsRequestStream(stream_id)) return error.GoAwayReceived;
-        try self.request_lifecycle.open(
+        const lifecycle_exists = self.request_lifecycle.contains(stream_id);
+        const extended_connect = requestHasProtocol(request_options.headers);
+        if (!lifecycle_exists) {
+            try self.request_lifecycle.open(
+                stream_id,
+                request_options.method,
+                extended_connect,
+            );
+        } else if (!self.request_lifecycle.matchesRequest(
             stream_id,
             request_options.method,
-            requestHasProtocol(request_options.headers),
-        );
-        errdefer _ = self.request_lifecycle.finish(stream_id) catch false;
-        const reserved = try self.reserveClientBidirectionalStreamId();
-        std.debug.assert(reserved == stream_id);
-
-        try sendConnectionSettings(
-            &self.established.connection,
-            &self.critical_stream_send_scratch,
-            &self.control,
-            &self.control_send,
-            &self.qpack_encoder_send,
-            &self.qpack_encoder_prefix_sent,
-            &self.qpack_decoder_send,
-            &self.qpack_decoder_prefix_sent,
-            self.options,
-            client_control_stream_id,
-        );
-        try sendConnectionMessage(
-            &self.established.connection,
+            extended_connect,
+        )) {
+            return error.UnexpectedStream;
+        }
+        if (lifecycle_exists and
+            !self.requestStreamSendRetryable(stream_id, next_stream_id))
+        {
+            return error.UnexpectedStream;
+        }
+        var transport_reserved = lifecycle_exists;
+        var message_sent = false;
+        errdefer {
+            if (!message_sent) self.qpack_encode.abandonStream(stream_id);
+            if (transport_reserved and self.requestStreamSendRetryable(
+                stream_id,
+                next_stream_id,
+            )) {
+                self.next_stream_id = stream_id;
+            } else {
+                if (transport_reserved and self.established.connection
+                    .nextLocalBidirectionalStreamId() == next_stream_id)
+                {
+                    self.next_stream_id = next_stream_id;
+                }
+                _ = self.request_lifecycle.finish(stream_id) catch false;
+            }
+        }
+        try prepareConnectionMessage(
+            self.allocator,
             &self.stream_send_scratch,
-            &self.critical_stream_send_scratch,
             stream_id,
             request_options,
             self.options,
             self.control.settings.peer,
             &self.qpack_encode,
-            &self.qpack_encoder_send,
-            &self.qpack_encoder_prefix_sent,
         );
+        if (deadline) |absolute| {
+            while (true) {
+                sendConnectionSettingsWithDeadline(
+                    &self.established.connection,
+                    &self.critical_stream_send_scratch,
+                    &self.control,
+                    &self.control_send,
+                    &self.qpack_encoder_send,
+                    &self.qpack_encoder_prefix_sent,
+                    &self.qpack_decoder_send,
+                    &self.qpack_decoder_prefix_sent,
+                    self.options,
+                    client_control_stream_id,
+                    absolute,
+                ) catch |err| switch (err) {
+                    error.FlowControlBlocked, error.CongestionLimited => {
+                        if (self.established.connection.closed()) return err;
+                        try self.receiveResponseProgressForSendUntil(
+                            stream_id,
+                            absolute,
+                        );
+                        continue;
+                    },
+                    else => |other| return other,
+                };
+                break;
+            }
+        } else {
+            try sendConnectionSettings(
+                &self.established.connection,
+                &self.critical_stream_send_scratch,
+                &self.control,
+                &self.control_send,
+                &self.qpack_encoder_send,
+                &self.qpack_encoder_prefix_sent,
+                &self.qpack_decoder_send,
+                &self.qpack_decoder_prefix_sent,
+                self.options,
+                client_control_stream_id,
+            );
+        }
+        if (!lifecycle_exists) {
+            const transport_id = if (deadline) |absolute|
+                try self.openClientBidirectionalStreamWithDeadline(absolute)
+            else
+                try self.openClientBidirectionalStream();
+            std.debug.assert(transport_id == stream_id);
+            transport_reserved = true;
+        }
+        if (deadline) |absolute| {
+            while (true) {
+                sendPreparedConnectionMessageUntil(
+                    &self.established.connection,
+                    &self.stream_send_scratch,
+                    &self.critical_stream_send_scratch,
+                    &self.qpack_encode,
+                    &self.qpack_encoder_send,
+                    &self.qpack_encoder_prefix_sent,
+                    self.options,
+                    absolute,
+                ) catch |err| switch (err) {
+                    error.FlowControlBlocked, error.CongestionLimited => {
+                        if (self.established.connection.closed()) return err;
+                        try self.receiveResponseProgressForSendUntil(
+                            stream_id,
+                            absolute,
+                        );
+                        continue;
+                    },
+                    else => |other| return other,
+                };
+                break;
+            }
+        } else {
+            try sendPreparedConnectionMessageUntil(
+                &self.established.connection,
+                &self.stream_send_scratch,
+                &self.critical_stream_send_scratch,
+                &self.qpack_encode,
+                &self.qpack_encoder_send,
+                &self.qpack_encoder_prefix_sent,
+                self.options,
+                null,
+            );
+        }
+        message_sent = true;
+        self.next_stream_id = next_stream_id;
         return stream_id;
     }
 
@@ -8293,14 +11765,19 @@ pub const HandshakeClient = struct {
         if (!self.control.acceptsRequestStream(stream_id)) {
             return error.GoAwayReceived;
         }
+        const lifecycle_exists = self.request_lifecycle.contains(stream_id);
         const transport_next = self.established.connection
             .nextLocalBidirectionalStreamId();
-        const retrying_reserved_stream = transport_next == next_stream_id and
-            self.established.connection.sendStreamStats(stream_id) != null;
+        const retrying_reserved_stream =
+            transport_next == next_stream_id and lifecycle_exists;
         if (transport_next != stream_id and !retrying_reserved_stream) {
             return error.StreamCreationError;
         }
-        const lifecycle_exists = self.request_lifecycle.contains(stream_id);
+        if (retrying_reserved_stream and
+            !self.requestStreamSendRetryable(stream_id, next_stream_id))
+        {
+            return error.UnexpectedStream;
+        }
         const extended_connect = requestHasProtocol(request_options.headers);
         if (!lifecycle_exists) {
             try self.request_lifecycle.open(
@@ -8358,36 +11835,120 @@ pub const HandshakeClient = struct {
         );
     }
 
+    fn requireEndpointCriticalStreamsReady(
+        self: HandshakeClient,
+    ) Error!void {
+        if (!self.control.settings.sent or
+            !self.qpack_encoder_prefix_sent or
+            !self.qpack_decoder_prefix_sent)
+        {
+            return error.MissingSettings;
+        }
+    }
+
     pub fn startRequest(
         self: *HandshakeClient,
         request_options: http3.Request,
         body_length: ?usize,
     ) Error!u62 {
+        return self.startRequestUntil(
+            request_options,
+            body_length,
+            null,
+        ) catch |err| switch (err) {
+            error.Timeout, error.ConcurrencyUnavailable => unreachable,
+            else => |other| return @errorCast(other),
+        };
+    }
+
+    pub fn startRequestWithTimeout(
+        self: *HandshakeClient,
+        request_options: http3.Request,
+        body_length: ?usize,
+        timeout: std.Io.Duration,
+    ) ReceiveTimeoutError!u62 {
+        if (self.dispatcher_bound) return error.InvalidDispatcherState;
+        if (timeout.nanoseconds <= 0) return error.Timeout;
+        return self.startRequestWithDeadline(
+            request_options,
+            body_length,
+            .fromNow(self.connectionIo(), .{
+                .raw = timeout,
+                .clock = .awake,
+            }),
+        );
+    }
+
+    /// Send a streaming request head under one absolute deadline. Stream
+    /// admission, SETTINGS/QPACK progress, and HEADERS share the same budget.
+    pub fn startRequestWithDeadline(
+        self: *HandshakeClient,
+        request_options: http3.Request,
+        body_length: ?usize,
+        deadline: std.Io.Clock.Timestamp,
+    ) ReceiveTimeoutError!u62 {
+        if (self.dispatcher_bound) return error.InvalidDispatcherState;
+        _ = try deadline_policy.usableAwake(self.connectionIo(), deadline);
+        return self.startRequestUntil(
+            request_options,
+            body_length,
+            deadline,
+        );
+    }
+
+    fn startRequestUntil(
+        self: *HandshakeClient,
+        request_options: http3.Request,
+        body_length: ?usize,
+        deadline: ?std.Io.Clock.Timestamp,
+    ) ReceiveTimeoutError!u62 {
+        if (self.callback_reader_active) return error.ConcurrentRead;
         if (self.dispatcher_bound) return error.InvalidDispatcherState;
         const stream_id = self.next_stream_id;
+        const next_stream_id = std.math.add(u62, stream_id, 4) catch
+            return error.StreamCreationError;
         if (!self.control.acceptsRequestStream(stream_id)) {
             return error.GoAwayReceived;
         }
-        try self.request_lifecycle.open(
+        const lifecycle_exists = self.request_lifecycle.contains(stream_id);
+        const extended_connect = requestHasProtocol(request_options.headers);
+        if (!lifecycle_exists) {
+            try self.request_lifecycle.open(
+                stream_id,
+                request_options.method,
+                extended_connect,
+            );
+        } else if (!self.request_lifecycle.matchesRequest(
             stream_id,
             request_options.method,
-            requestHasProtocol(request_options.headers),
-        );
-        errdefer _ = self.request_lifecycle.finish(stream_id) catch false;
-        const reserved = try self.reserveClientBidirectionalStreamId();
-        std.debug.assert(reserved == stream_id);
-        try sendConnectionSettings(
-            &self.established.connection,
-            &self.critical_stream_send_scratch,
-            &self.control,
-            &self.control_send,
-            &self.qpack_encoder_send,
-            &self.qpack_encoder_prefix_sent,
-            &self.qpack_decoder_send,
-            &self.qpack_decoder_prefix_sent,
-            self.options,
-            client_control_stream_id,
-        );
+            extended_connect,
+        )) {
+            return error.UnexpectedStream;
+        }
+        if (lifecycle_exists and
+            !self.requestStreamSendRetryable(stream_id, next_stream_id))
+        {
+            return error.UnexpectedStream;
+        }
+        var transport_reserved = lifecycle_exists;
+        var head_sent = false;
+        errdefer {
+            if (!head_sent) self.qpack_encode.abandonStream(stream_id);
+            if (transport_reserved and self.requestStreamSendRetryable(
+                stream_id,
+                next_stream_id,
+            )) {
+                self.next_stream_id = stream_id;
+            } else {
+                if (transport_reserved and self.established.connection
+                    .nextLocalBidirectionalStreamId() == next_stream_id)
+                {
+                    self.next_stream_id = next_stream_id;
+                }
+                _ = self.request_lifecycle.finish(stream_id) catch false;
+                _ = self.outbound_bodies.finish(stream_id);
+            }
+        }
         self.stream_send_scratch.reset();
         const streaming = try request_options.writeStreamingHeadDynamic(
             &self.stream_send_scratch.encoded,
@@ -8397,21 +11958,102 @@ pub const HandshakeClient = struct {
             body_length,
             &self.qpack_encode,
         );
-        errdefer self.qpack_encode.abandonStream(stream_id);
-        try sendConnectionStreamingHead(
-            &self.established.connection,
-            &self.stream_send_scratch,
-            &self.critical_stream_send_scratch,
-            stream_id,
-            streaming.expected_length,
-            streaming.body_allowed,
-            false,
-            self.options,
-            &self.qpack_encode,
-            &self.qpack_encoder_send,
-            &self.qpack_encoder_prefix_sent,
-            &self.outbound_bodies,
-        );
+        if (deadline) |absolute| {
+            while (true) {
+                sendConnectionSettingsWithDeadline(
+                    &self.established.connection,
+                    &self.critical_stream_send_scratch,
+                    &self.control,
+                    &self.control_send,
+                    &self.qpack_encoder_send,
+                    &self.qpack_encoder_prefix_sent,
+                    &self.qpack_decoder_send,
+                    &self.qpack_decoder_prefix_sent,
+                    self.options,
+                    client_control_stream_id,
+                    absolute,
+                ) catch |err| switch (err) {
+                    error.FlowControlBlocked, error.CongestionLimited => {
+                        if (self.established.connection.closed()) return err;
+                        try self.receiveResponseProgressForSendUntil(
+                            stream_id,
+                            absolute,
+                        );
+                        continue;
+                    },
+                    else => |other| return other,
+                };
+                break;
+            }
+        } else {
+            try sendConnectionSettings(
+                &self.established.connection,
+                &self.critical_stream_send_scratch,
+                &self.control,
+                &self.control_send,
+                &self.qpack_encoder_send,
+                &self.qpack_encoder_prefix_sent,
+                &self.qpack_decoder_send,
+                &self.qpack_decoder_prefix_sent,
+                self.options,
+                client_control_stream_id,
+            );
+        }
+        if (!lifecycle_exists) {
+            const transport_id = if (deadline) |absolute|
+                try self.openClientBidirectionalStreamWithDeadline(absolute)
+            else
+                try self.openClientBidirectionalStream();
+            std.debug.assert(transport_id == stream_id);
+            transport_reserved = true;
+        }
+        if (deadline) |absolute| {
+            while (true) {
+                sendConnectionStreamingHeadWithDeadline(
+                    &self.established.connection,
+                    &self.stream_send_scratch,
+                    &self.critical_stream_send_scratch,
+                    stream_id,
+                    streaming.expected_length,
+                    streaming.body_allowed,
+                    false,
+                    self.options,
+                    &self.qpack_encode,
+                    &self.qpack_encoder_send,
+                    &self.qpack_encoder_prefix_sent,
+                    &self.outbound_bodies,
+                    absolute,
+                ) catch |err| switch (err) {
+                    error.FlowControlBlocked, error.CongestionLimited => {
+                        if (self.established.connection.closed()) return err;
+                        try self.receiveResponseProgressForSendUntil(
+                            stream_id,
+                            absolute,
+                        );
+                        continue;
+                    },
+                    else => |other| return other,
+                };
+                break;
+            }
+        } else {
+            try sendConnectionStreamingHead(
+                &self.established.connection,
+                &self.stream_send_scratch,
+                &self.critical_stream_send_scratch,
+                stream_id,
+                streaming.expected_length,
+                streaming.body_allowed,
+                false,
+                self.options,
+                &self.qpack_encode,
+                &self.qpack_encoder_send,
+                &self.qpack_encoder_prefix_sent,
+                &self.outbound_bodies,
+            );
+        }
+        head_sent = true;
+        self.next_stream_id = next_stream_id;
         return stream_id;
     }
 
@@ -8429,14 +12071,19 @@ pub const HandshakeClient = struct {
         if (!self.control.acceptsRequestStream(stream_id)) {
             return error.GoAwayReceived;
         }
+        const lifecycle_exists = self.request_lifecycle.contains(stream_id);
         const transport_next = self.established.connection
             .nextLocalBidirectionalStreamId();
-        const retrying_reserved_stream = transport_next == next_stream_id and
-            self.established.connection.sendStreamStats(stream_id) != null;
+        const retrying_reserved_stream =
+            transport_next == next_stream_id and lifecycle_exists;
         if (transport_next != stream_id and !retrying_reserved_stream) {
             return error.StreamCreationError;
         }
-        const lifecycle_exists = self.request_lifecycle.contains(stream_id);
+        if (retrying_reserved_stream and
+            !self.requestStreamSendRetryable(stream_id, next_stream_id))
+        {
+            return error.UnexpectedStream;
+        }
         const extended_connect = requestHasProtocol(request_options.headers);
         if (!lifecycle_exists) {
             try self.request_lifecycle.open(
@@ -8557,6 +12204,7 @@ pub const HandshakeClient = struct {
         fin: bool,
     ) Error!void {
         if (self.dispatcher_bound) return error.InvalidDispatcherState;
+        if (self.callback_reader_active) return error.ConcurrentRead;
         if (data.len == 0) {
             try self.sendRequestBodyPacedChunk(stream_id, data, fin);
             return;
@@ -8574,7 +12222,89 @@ pub const HandshakeClient = struct {
         }
     }
 
-    /// Client counterpart to `sendResponseBodyPartsPaced`.
+    pub fn sendRequestBodyPacedWithTimeout(
+        self: *HandshakeClient,
+        stream_id: u62,
+        data: []const u8,
+        fin: bool,
+        progress: *BodyWriteProgress,
+        timeout: std.Io.Duration,
+    ) ReceiveTimeoutError!void {
+        if (self.callback_reader_active) return error.ConcurrentRead;
+        progress.* = .{};
+        if (self.dispatcher_bound) return error.InvalidDispatcherState;
+        if (timeout.nanoseconds <= 0) return error.Timeout;
+        return self.sendRequestBodyPacedWithDeadline(
+            stream_id,
+            data,
+            fin,
+            progress,
+            .fromNow(self.connectionIo(), .{
+                .raw = timeout,
+                .clock = .awake,
+            }),
+        );
+    }
+
+    /// Send one request DATA sequence under one absolute deadline. Progress
+    /// reports the exact socket-visible application prefix and FIN state, so a
+    /// caller can continue only the unsent suffix after a timeout.
+    pub fn sendRequestBodyPacedWithDeadline(
+        self: *HandshakeClient,
+        stream_id: u62,
+        data: []const u8,
+        fin: bool,
+        progress: *BodyWriteProgress,
+        deadline: std.Io.Clock.Timestamp,
+    ) ReceiveTimeoutError!void {
+        if (self.callback_reader_active) return error.ConcurrentRead;
+        progress.* = .{};
+        if (self.dispatcher_bound) return error.InvalidDispatcherState;
+        _ = try deadline_policy.usableAwake(self.connectionIo(), deadline);
+        if (data.len == 0) {
+            var committed_chunks: usize = 0;
+            self.sendRequestBodyBatchPacedWithDeadline(
+                &.{.{ .stream_id = stream_id, .data = data, .fin = fin }},
+                &committed_chunks,
+                deadline,
+            ) catch |err| {
+                progress.fin_committed = committed_chunks == 1 and fin;
+                return err;
+            };
+            progress.fin_committed = fin;
+            return;
+        }
+        const chunk_limit = pacedBodyChunkLimit(self.options);
+        while (progress.committed_bytes < data.len) {
+            const end = @min(
+                data.len,
+                progress.committed_bytes + chunk_limit,
+            );
+            const last = end == data.len;
+            var committed_chunks: usize = 0;
+            self.sendRequestBodyBatchPacedWithDeadline(
+                &.{.{
+                    .stream_id = stream_id,
+                    .data = data[progress.committed_bytes..end],
+                    .fin = fin and last,
+                }},
+                &committed_chunks,
+                deadline,
+            ) catch |err| {
+                if (committed_chunks == 1) {
+                    progress.committed_bytes = end;
+                    progress.fin_committed = fin and last;
+                }
+                return err;
+            };
+            std.debug.assert(committed_chunks == 1);
+            progress.committed_bytes = end;
+            progress.fin_committed = fin and last;
+        }
+    }
+
+    /// Client counterpart to `sendResponseBodyPartsPaced`; packet-sized
+    /// contributions span application-slice boundaries without joining them.
     pub fn sendRequestBodyPartsPaced(
         self: *HandshakeClient,
         stream_id: u62,
@@ -8582,6 +12312,63 @@ pub const HandshakeClient = struct {
         fin: bool,
     ) Error!void {
         if (self.dispatcher_bound) return error.InvalidDispatcherState;
+        if (self.callback_reader_active) return error.ConcurrentRead;
+        if (!self.request_lifecycle.contains(stream_id)) {
+            return error.UnexpectedStream;
+        }
+        if (self.options.max_frames_per_packet >= 2 and
+            self.options.max_stream_frame_data != 0)
+        {
+            var cursor = BodyPartCursor{ .parts = parts };
+            if (cursor.done()) {
+                return self.sendRequestBodyPaced(stream_id, &.{}, fin);
+            }
+            var chunk_storage: [max_paced_body_part_descriptors][]const u8 = undefined;
+            const chunk_limit = pacedBodyChunkLimit(self.options);
+            while (!cursor.done()) {
+                var attempt_limit = chunk_limit;
+                while (true) {
+                    var staged = cursor;
+                    const chunk = staged.next(
+                        &chunk_storage,
+                        attempt_limit,
+                        self.options.max_stream_frame_data,
+                    );
+                    const last = staged.done();
+                    sendConnectionBodyParts(
+                        &self.established.connection,
+                        &self.outbound_bodies,
+                        stream_id,
+                        chunk,
+                        fin and last,
+                        self.options,
+                    ) catch |err| switch (err) {
+                        error.FlowControlBlocked, error.CongestionLimited => {
+                            try self.receiveResponseProgressForSend(stream_id);
+                            continue;
+                        },
+                        error.DatagramTooLarge => {
+                            if (attempt_limit == 1) {
+                                try self.sendRequestBodyPaced(
+                                    stream_id,
+                                    chunk[0],
+                                    fin and last,
+                                );
+                                cursor = staged;
+                                break;
+                            }
+                            attempt_limit = @max(@as(usize, 1), attempt_limit / 2);
+                            continue;
+                        },
+                        else => return err,
+                    };
+                    cursor = staged;
+                    break;
+                }
+            }
+            return;
+        }
+
         var non_empty: usize = 0;
         for (parts) |part| non_empty += @intFromBool(part.len != 0);
         if (non_empty == 0) {
@@ -8600,6 +12387,140 @@ pub const HandshakeClient = struct {
         }
     }
 
+    pub fn sendRequestBodyPartsPacedWithTimeout(
+        self: *HandshakeClient,
+        stream_id: u62,
+        parts: []const []const u8,
+        fin: bool,
+        progress: *BodyWriteProgress,
+        timeout: std.Io.Duration,
+    ) ReceiveTimeoutError!void {
+        if (self.callback_reader_active) return error.ConcurrentRead;
+        progress.* = .{};
+        if (self.dispatcher_bound) return error.InvalidDispatcherState;
+        if (timeout.nanoseconds <= 0) return error.Timeout;
+        return self.sendRequestBodyPartsPacedWithDeadline(
+            stream_id,
+            parts,
+            fin,
+            progress,
+            .fromNow(self.connectionIo(), .{
+                .raw = timeout,
+                .clock = .awake,
+            }),
+        );
+    }
+
+    /// Send borrowed request slices under one absolute deadline without
+    /// joining them. Progress is the exact socket-visible byte prefix across
+    /// all slices, allowing the caller to retry only the remaining suffix.
+    pub fn sendRequestBodyPartsPacedWithDeadline(
+        self: *HandshakeClient,
+        stream_id: u62,
+        parts: []const []const u8,
+        fin: bool,
+        progress: *BodyWriteProgress,
+        deadline: std.Io.Clock.Timestamp,
+    ) ReceiveTimeoutError!void {
+        if (self.callback_reader_active) return error.ConcurrentRead;
+        progress.* = .{};
+        if (self.dispatcher_bound) return error.InvalidDispatcherState;
+        _ = try deadline_policy.usableAwake(self.connectionIo(), deadline);
+        if (!self.request_lifecycle.contains(stream_id)) {
+            return error.UnexpectedStream;
+        }
+        const total_len = try bodyPartsLength(parts);
+        try validateBodyWrite(&self.outbound_bodies, stream_id, total_len, fin);
+        if (total_len == 0) {
+            return self.sendRequestBodyPacedWithDeadline(
+                stream_id,
+                &.{},
+                fin,
+                progress,
+                deadline,
+            );
+        }
+
+        if (self.options.max_frames_per_packet < 2 or
+            self.options.max_stream_frame_data == 0)
+        {
+            var non_empty: usize = 0;
+            for (parts) |part| non_empty += @intFromBool(part.len != 0);
+            var sent: usize = 0;
+            for (parts) |part| {
+                if (part.len == 0) continue;
+                sent += 1;
+                var part_progress: BodyWriteProgress = .{};
+                self.sendRequestBodyPacedWithDeadline(
+                    stream_id,
+                    part,
+                    fin and sent == non_empty,
+                    &part_progress,
+                    deadline,
+                ) catch |err| {
+                    progress.committed_bytes += part_progress.committed_bytes;
+                    progress.fin_committed = part_progress.fin_committed;
+                    return err;
+                };
+                progress.committed_bytes += part_progress.committed_bytes;
+                progress.fin_committed = part_progress.fin_committed;
+            }
+            return;
+        }
+
+        var cursor = BodyPartCursor{ .parts = parts };
+        var chunk_storage: [max_paced_body_part_descriptors][]const u8 = undefined;
+        const chunk_limit = pacedBodyChunkLimit(self.options);
+        while (!cursor.done()) {
+            var attempt_limit = chunk_limit;
+            while (true) {
+                _ = try deadline_policy.usableAwake(
+                    self.connectionIo(),
+                    deadline,
+                );
+                try self.failIfRequestResetForSend(stream_id);
+                var staged = cursor;
+                const chunk = staged.next(
+                    &chunk_storage,
+                    attempt_limit,
+                    self.options.max_stream_frame_data,
+                );
+                const last = staged.done();
+                trySendConnectionBodyParts(
+                    &self.established.connection,
+                    &self.outbound_bodies,
+                    stream_id,
+                    chunk,
+                    fin and last,
+                    self.options,
+                ) catch |err| switch (err) {
+                    error.FlowControlBlocked, error.CongestionLimited => {
+                        try self.receiveResponseProgressForSendUntil(
+                            stream_id,
+                            deadline,
+                        );
+                        continue;
+                    },
+                    error.PacingLimited => {
+                        try self.established.connection
+                            .waitForPacingAvailabilityWithDeadline(deadline);
+                        continue;
+                    },
+                    error.DatagramTooLarge => {
+                        if (attempt_limit == 1) return err;
+                        attempt_limit = @max(@as(usize, 1), attempt_limit / 2);
+                        continue;
+                    },
+                    else => return err,
+                };
+                progress.committed_bytes += bodyPartChunkLength(chunk);
+                progress.fin_committed = fin and last;
+                cursor = staged;
+                break;
+            }
+        }
+    }
+
     /// Send one DATA contribution per active request stream as a stateful QUIC
     /// packet batch.
     ///
@@ -8613,6 +12534,7 @@ pub const HandshakeClient = struct {
         chunks: []const BodyChunk,
     ) Error!void {
         if (self.dispatcher_bound) return error.InvalidDispatcherState;
+        if (self.callback_reader_active) return error.ConcurrentRead;
         for (chunks) |chunk| {
             if (!self.request_lifecycle.contains(chunk.stream_id)) {
                 return error.UnexpectedStream;
@@ -8626,6 +12548,56 @@ pub const HandshakeClient = struct {
             self,
             HandshakeClient.receiveBatchProgressForSend,
             HandshakeClient.finishBatchRequestStream,
+        );
+    }
+
+    pub fn sendRequestBodyBatchPacedWithTimeout(
+        self: *HandshakeClient,
+        chunks: []const BodyChunk,
+        committed_chunks: *usize,
+        timeout: std.Io.Duration,
+    ) ReceiveTimeoutError!void {
+        if (self.callback_reader_active) return error.ConcurrentRead;
+        committed_chunks.* = 0;
+        if (timeout.nanoseconds <= 0) return error.Timeout;
+        return self.sendRequestBodyBatchPacedWithDeadline(
+            chunks,
+            committed_chunks,
+            .fromNow(self.connectionIo(), .{
+                .raw = timeout,
+                .clock = .awake,
+            }),
+        );
+    }
+
+    /// Send one DATA contribution per request stream under one caller-owned
+    /// deadline. `committed_chunks` is the exact socket-visible input prefix
+    /// and remains valid on timeout or a socket error.
+    pub fn sendRequestBodyBatchPacedWithDeadline(
+        self: *HandshakeClient,
+        chunks: []const BodyChunk,
+        committed_chunks: *usize,
+        deadline: std.Io.Clock.Timestamp,
+    ) ReceiveTimeoutError!void {
+        if (self.callback_reader_active) return error.ConcurrentRead;
+        committed_chunks.* = 0;
+        if (self.dispatcher_bound) return error.InvalidDispatcherState;
+        _ = try deadline_policy.usableAwake(self.connectionIo(), deadline);
+        for (chunks) |chunk| {
+            if (!self.request_lifecycle.contains(chunk.stream_id)) {
+                return error.UnexpectedStream;
+            }
+        }
+        return sendConnectionBodyBatchPacedWithDeadline(
+            &self.established.connection,
+            &self.outbound_bodies,
+            chunks,
+            self.options,
+            self,
+            HandshakeClient.receiveBatchProgressForSendUntil,
+            HandshakeClient.finishBatchRequestStream,
+            committed_chunks,
+            deadline,
         );
     }
 
@@ -8653,6 +12625,7 @@ pub const HandshakeClient = struct {
     }
 
     fn receiveBatchProgressForSend(self: *HandshakeClient) Error!void {
+        if (self.callback_reader_active) return error.ConcurrentRead;
         if (self.request_lifecycle.isEmpty()) {
             return error.UnexpectedStream;
         }
@@ -8680,6 +12653,47 @@ pub const HandshakeClient = struct {
             self.sendQpackFeedback() catch {};
             return responseResetError(reset.application_error_code);
         }
+    }
+
+    fn receiveBatchProgressForSendUntil(
+        self: *HandshakeClient,
+        deadline: std.Io.Clock.Timestamp,
+    ) ReceiveTimeoutError!void {
+        if (self.callback_reader_active) return error.ConcurrentRead;
+        if (self.request_lifecycle.isEmpty()) {
+            return error.UnexpectedStream;
+        }
+        try self.failIfAnyRequestResetForBatchSend();
+        try receiveConnectionResponsePacketUntil(
+            &self.established.connection,
+            &self.receive_packets,
+            &self.control,
+            &self.qpack_decode,
+            &self.qpack_encode,
+            self.options.local_settings.qpack_blocked_streams,
+            &self.response_streams,
+            &self.streaming_responses,
+            &self.push_streams,
+            &self.request_lifecycle,
+            null,
+            &self.connect_datagrams,
+            deadline,
+        );
+        try self.failIfAnyRequestResetForBatchSend();
+    }
+
+    fn failIfAnyRequestResetForBatchSend(
+        self: *HandshakeClient,
+    ) Error!void {
+        const reset = self.response_streams.firstReset() orelse return;
+        if (!self.request_lifecycle.contains(reset.stream_id)) return;
+        try self.request_lifecycle.prepareFinish();
+        _ = self.response_streams.takeReset(reset.stream_id);
+        _ = self.request_lifecycle.finishAssumeCapacity(reset.stream_id);
+        _ = self.outbound_bodies.finish(reset.stream_id);
+        self.qpack_encode.abandonStream(reset.stream_id);
+        self.sendQpackFeedback() catch {};
+        return responseResetError(reset.application_error_code);
     }
 
     fn finishBatchRequestStream(
@@ -8763,7 +12777,90 @@ pub const HandshakeClient = struct {
         trailers: []const http3.Qpack.HeaderField,
     ) Error!void {
         if (self.dispatcher_bound) return error.InvalidDispatcherState;
+        return self.finishRequestTrailersPacedUntil(
+            stream_id,
+            trailers,
+            null,
+        ) catch |err| switch (err) {
+            error.Timeout, error.ConcurrencyUnavailable => unreachable,
+            else => |other| return @errorCast(other),
+        };
+    }
+
+    pub fn finishRequestTrailersPacedWithTimeout(
+        self: *HandshakeClient,
+        stream_id: u62,
+        trailers: []const http3.Qpack.HeaderField,
+        timeout: std.Io.Duration,
+    ) ReceiveTimeoutError!void {
+        if (self.dispatcher_bound) return error.InvalidDispatcherState;
+        if (timeout.nanoseconds <= 0) return error.Timeout;
+        return self.finishRequestTrailersPacedWithDeadline(
+            stream_id,
+            trailers,
+            .fromNow(self.connectionIo(), .{
+                .raw = timeout,
+                .clock = .awake,
+            }),
+        );
+    }
+
+    /// Finish a streaming request with trailers under one absolute deadline.
+    /// A timeout before any packet is visible is retryable; a timeout after a
+    /// multi-packet QPACK/trailer prefix uses the packetizer's fail-closed rule.
+    pub fn finishRequestTrailersPacedWithDeadline(
+        self: *HandshakeClient,
+        stream_id: u62,
+        trailers: []const http3.Qpack.HeaderField,
+        deadline: std.Io.Clock.Timestamp,
+    ) ReceiveTimeoutError!void {
+        if (self.dispatcher_bound) return error.InvalidDispatcherState;
+        _ = try deadline_policy.usableAwake(self.connectionIo(), deadline);
+        return self.finishRequestTrailersPacedUntil(
+            stream_id,
+            trailers,
+            deadline,
+        );
+    }
+
+    fn finishRequestTrailersPacedUntil(
+        self: *HandshakeClient,
+        stream_id: u62,
+        trailers: []const http3.Qpack.HeaderField,
+        deadline: ?std.Io.Clock.Timestamp,
+    ) ReceiveTimeoutError!void {
+        if (self.callback_reader_active) return error.ConcurrentRead;
         while (true) {
+            if (deadline) |absolute| {
+                if (!self.request_lifecycle.contains(stream_id)) {
+                    return error.UnexpectedStream;
+                }
+                try self.failIfRequestResetForSend(stream_id);
+                sendConnectionTrailersWithDeadline(
+                    &self.established.connection,
+                    &self.outbound_bodies,
+                    &self.stream_send_scratch,
+                    &self.critical_stream_send_scratch,
+                    stream_id,
+                    trailers,
+                    self.control.settings.peer,
+                    &self.qpack_encode,
+                    &self.qpack_encoder_send,
+                    &self.qpack_encoder_prefix_sent,
+                    self.options,
+                    absolute,
+                ) catch |err| switch (err) {
+                    error.FlowControlBlocked, error.CongestionLimited => {
+                        try self.receiveResponseProgressForSendUntil(
+                            stream_id,
+                            absolute,
+                        );
+                        continue;
+                    },
+                    else => |other| return other,
+                };
+                return;
+            }
             self.finishRequestTrailers(stream_id, trailers) catch |err| switch (err) {
                 error.FlowControlBlocked, error.CongestionLimited => {
                     try self.receiveResponseProgressForSend(stream_id);
@@ -8865,6 +12962,7 @@ pub const HandshakeClient = struct {
         informational: ?http3.InformationalObserver,
         deadline: ?std.Io.Clock.Timestamp,
     ) ReceiveTimeoutError!OwnedHandshakeResponse {
+        if (self.callback_reader_active) return error.ConcurrentRead;
         if (!self.request_lifecycle.contains(stream_id)) {
             return error.UnexpectedStream;
         }
@@ -8954,6 +13052,11 @@ pub const HandshakeClient = struct {
             ) catch {};
             return err;
         };
+        var guarded_informational: ?InformationalCallbackGuard =
+            if (informational) |observer| .{
+                .observer = observer,
+                .callback_reader_active = &self.callback_reader_active,
+            } else null;
         var response = http3.decodeResponseWithDynamicTableAndOptions(
             self.established.connection.endpoint.allocator,
             assembled.bytes,
@@ -8965,7 +13068,13 @@ pub const HandshakeClient = struct {
                 );
                 options.max_informational_responses =
                     self.options.max_informational_responses;
-                options.informational = informational;
+                options.informational = if (guarded_informational) |*guard|
+                    .{
+                        .context = guard,
+                        .on_response = InformationalCallbackGuard.notify,
+                    }
+                else
+                    null;
                 break :blk options;
             },
         ) catch |err| {
@@ -8987,7 +13096,10 @@ pub const HandshakeClient = struct {
         self.response_streams.remove(stream_id);
         _ = self.request_lifecycle.finishAssumeCapacity(stream_id);
         _ = self.outbound_bodies.finish(stream_id);
-        self.sendQpackFeedback() catch {};
+        if (deadline) |absolute|
+            self.sendQpackFeedbackWithDeadline(absolute) catch {}
+        else
+            self.sendQpackFeedback() catch {};
         return .{ .stream_bytes = assembled.bytes, .response = response };
     }
 
@@ -9076,6 +13188,7 @@ pub const HandshakeClient = struct {
         informational: ?MultiplexedInformationalObserver,
         deadline: ?std.Io.Clock.Timestamp,
     ) ReceiveTimeoutError!OwnedHandshakeResponseEvent {
+        if (self.callback_reader_active) return error.ConcurrentRead;
         if (self.request_lifecycle.isEmpty()) {
             return error.UnexpectedStream;
         }
@@ -9167,6 +13280,7 @@ pub const HandshakeClient = struct {
     /// buffered and available to `receiveResponse`.
     pub fn receiveProgress(self: *HandshakeClient) Error!void {
         if (self.dispatcher_bound) return error.InvalidDispatcherState;
+        if (self.callback_reader_active) return error.ConcurrentRead;
         receiveConnectionResponsePacketUntil(
             &self.established.connection,
             &self.receive_packets,
@@ -9225,6 +13339,7 @@ pub const HandshakeClient = struct {
         self: *HandshakeClient,
         deadline: ?std.Io.Clock.Timestamp,
     ) ReceiveTimeoutError!http3.Settings {
+        if (self.callback_reader_active) return error.ConcurrentRead;
         while (!self.control.settings.received) {
             try receiveConnectionResponsePacketUntil(
                 &self.established.connection,
@@ -9254,6 +13369,7 @@ pub const HandshakeClient = struct {
         self: *HandshakeClient,
         packet: *const quic.one_rtt.ReceivedPacket,
     ) Error!void {
+        if (self.callback_reader_active) return error.ConcurrentRead;
         try self.processResponsePacketPreserving(null, packet, true);
     }
 
@@ -9301,6 +13417,7 @@ pub const HandshakeClient = struct {
         stream_id: u62,
         single_attempt: bool,
     ) Error!?StreamingEvent {
+        if (self.callback_reader_active) return error.ConcurrentRead;
         if (!self.request_lifecycle.contains(stream_id)) {
             return error.UnexpectedStream;
         }
@@ -9472,6 +13589,7 @@ pub const HandshakeClient = struct {
         stream_id: u62,
         out: []u8,
     ) Error!usize {
+        if (self.callback_reader_active) return error.ConcurrentRead;
         if (self.dispatcher_bound) return error.InvalidDispatcherState;
         const entry = self.streaming_responses.find(stream_id) orelse
             return error.UnexpectedStream;
@@ -9506,6 +13624,7 @@ pub const HandshakeClient = struct {
         stream_id: u62,
         out: []u8,
     ) Error!?usize {
+        if (self.callback_reader_active) return error.ConcurrentRead;
         const entry = self.streaming_responses.find(stream_id) orelse
             return error.UnexpectedStream;
         releaseStreamingReaderCapacityOnce(
@@ -9529,6 +13648,7 @@ pub const HandshakeClient = struct {
         self: *HandshakeClient,
         stream_id: u62,
     ) Error!usize {
+        if (self.callback_reader_active) return error.ConcurrentRead;
         if (self.dispatcher_bound) return error.InvalidDispatcherState;
         const entry = self.streaming_responses.find(stream_id) orelse
             return error.UnexpectedStream;
@@ -9568,6 +13688,7 @@ pub const HandshakeClient = struct {
         stream_id: u62,
         single_attempt: bool,
     ) Error!void {
+        if (self.callback_reader_active) return error.ConcurrentRead;
         const entry = self.streaming_responses.find(stream_id) orelse
             return error.UnexpectedStream;
         if (!entry.reader.canDetachResponse()) {
@@ -9657,6 +13778,7 @@ pub const HandshakeClient = struct {
         detached_stream_id: u62,
         deadline: ?std.Io.Clock.Timestamp,
     ) ReceiveTimeoutError!void {
+        if (self.callback_reader_active) return error.ConcurrentRead;
         var context: ConnectionResponseReceiveContext = .{
             .connection = &self.established.connection,
             .control = &self.control,
@@ -9728,6 +13850,52 @@ pub const HandshakeClient = struct {
         try self.established.connection.sendDatagram(encoded);
     }
 
+    pub fn sendConnectDatagrams(
+        self: *HandshakeClient,
+        stream_id: u62,
+        payloads: []const []const u8,
+        committed_count: *usize,
+    ) Error!void {
+        if (self.callback_reader_active) return error.ConcurrentRead;
+        committed_count.* = 0;
+        if (self.dispatcher_bound) return error.InvalidDispatcherState;
+        for (payloads) |payload| {
+            try self.validateConnectDatagramSend(stream_id, payload);
+        }
+        const encoded = try self.connect_datagrams.encodeBatch(
+            stream_id,
+            payloads,
+        );
+        try self.established.connection.validateDatagrams(encoded.datagrams);
+        while (committed_count.* < encoded.datagrams.len) {
+            try self.validateConnectDatagramSend(
+                stream_id,
+                payloads[committed_count.*],
+            );
+            var batch_committed: usize = 0;
+            self.established.connection.trySendDatagrams(
+                encoded.datagrams[committed_count.*..],
+                &batch_committed,
+            ) catch |err| {
+                committed_count.* += batch_committed;
+                switch (err) {
+                    error.CongestionLimited => {
+                        try self.receiveDetachedResponseProgress(stream_id);
+                        continue;
+                    },
+                    error.PacingLimited => {
+                        try self.established.connection
+                            .waitForPacingAvailability();
+                        continue;
+                    },
+                    else => |other| return other,
+                }
+            };
+            if (batch_committed == 0) return error.Unexpected;
+            committed_count.* += batch_committed;
+        }
+    }
+
     /// Submit one CONNECT DATAGRAM without sleeping or reading UDP.
     pub fn trySendConnectDatagram(
         self: *HandshakeClient,
@@ -9763,6 +13931,7 @@ pub const HandshakeClient = struct {
         payload: []const u8,
         deadline: std.Io.Clock.Timestamp,
     ) ReceiveTimeoutError!void {
+        if (self.callback_reader_active) return error.ConcurrentRead;
         if (self.dispatcher_bound) return error.InvalidDispatcherState;
         _ = try deadline_policy.usableAwake(self.connectionIo(), deadline);
         try self.validateConnectDatagramSend(stream_id, payload);
@@ -9784,6 +13953,100 @@ pub const HandshakeClient = struct {
             };
             return;
         }
+    }
+
+    pub fn sendConnectDatagramsWithTimeout(
+        self: *HandshakeClient,
+        stream_id: u62,
+        payloads: []const []const u8,
+        committed_count: *usize,
+        timeout: std.Io.Duration,
+    ) ReceiveTimeoutError!void {
+        if (self.callback_reader_active) return error.ConcurrentRead;
+        committed_count.* = 0;
+        if (self.dispatcher_bound) return error.InvalidDispatcherState;
+        if (timeout.nanoseconds <= 0) return error.Timeout;
+        return self.sendConnectDatagramsWithDeadline(
+            stream_id,
+            payloads,
+            committed_count,
+            .fromNow(self.connectionIo(), .{
+                .raw = timeout,
+                .clock = .awake,
+            }),
+        );
+    }
+
+    pub fn sendConnectDatagramsWithDeadline(
+        self: *HandshakeClient,
+        stream_id: u62,
+        payloads: []const []const u8,
+        committed_count: *usize,
+        deadline: std.Io.Clock.Timestamp,
+    ) ReceiveTimeoutError!void {
+        if (self.callback_reader_active) return error.ConcurrentRead;
+        committed_count.* = 0;
+        if (self.dispatcher_bound) return error.InvalidDispatcherState;
+        _ = try deadline_policy.usableAwake(self.connectionIo(), deadline);
+        for (payloads) |payload| {
+            try self.validateConnectDatagramSend(stream_id, payload);
+        }
+        const encoded = try self.connect_datagrams.encodeBatch(
+            stream_id,
+            payloads,
+        );
+        try self.established.connection.validateDatagrams(encoded.datagrams);
+        while (committed_count.* < encoded.datagrams.len) {
+            _ = try deadline_policy.usableAwake(self.connectionIo(), deadline);
+            try self.validateConnectDatagramSend(
+                stream_id,
+                payloads[committed_count.*],
+            );
+            var batch_committed: usize = 0;
+            self.established.connection.trySendDatagrams(
+                encoded.datagrams[committed_count.*..],
+                &batch_committed,
+            ) catch |err| {
+                committed_count.* += batch_committed;
+                switch (err) {
+                    error.CongestionLimited => {
+                        try self.receiveDetachedResponseProgressWithDeadline(
+                            stream_id,
+                            deadline,
+                        );
+                        continue;
+                    },
+                    error.PacingLimited => {
+                        try self.established.connection
+                            .waitForPacingAvailabilityWithDeadline(deadline);
+                        continue;
+                    },
+                    else => |other| return other,
+                }
+            };
+            if (batch_committed == 0) return error.Unexpected;
+            committed_count.* += batch_committed;
+        }
+    }
+
+    pub fn trySendConnectDatagrams(
+        self: *HandshakeClient,
+        stream_id: u62,
+        payloads: []const []const u8,
+        committed_count: *usize,
+    ) Error!void {
+        committed_count.* = 0;
+        for (payloads) |payload| {
+            try self.validateConnectDatagramSend(stream_id, payload);
+        }
+        const encoded = try self.connect_datagrams.encodeBatch(
+            stream_id,
+            payloads,
+        );
+        return self.established.connection.trySendDatagrams(
+            encoded.datagrams,
+            committed_count,
+        );
     }
 
     /// One deadline-checked attempt for a shared endpoint owner. This method
@@ -9840,6 +14103,7 @@ pub const HandshakeClient = struct {
         self: *HandshakeClient,
         stream_id: u62,
     ) Error!?OwnedConnectDatagram {
+        if (self.callback_reader_active) return error.ConcurrentRead;
         try connect_datagram.validateStreamId(stream_id);
         if (!self.connect_datagrams.contains(stream_id)) {
             return error.UnexpectedStream;
@@ -9911,6 +14175,7 @@ pub const HandshakeClient = struct {
         self: *HandshakeClient,
         stream_id: u62,
     ) Error!void {
+        if (self.callback_reader_active) return error.ConcurrentRead;
         try connect_datagram.validateStreamId(stream_id);
         if (!self.connect_datagrams.contains(stream_id)) return error.UnexpectedStream;
         self.connect_datagrams.unregister(stream_id);
@@ -9923,6 +14188,7 @@ pub const HandshakeClient = struct {
         self: *HandshakeClient,
         stream_id: u62,
     ) void {
+        if (self.callback_reader_active) return;
         if (self.request_lifecycle.contains(stream_id)) {
             self.connect_datagrams.unregister(stream_id);
         }
@@ -9959,6 +14225,7 @@ pub const HandshakeClient = struct {
         detached_stream_id: u62,
         single_attempt: bool,
     ) Error!?http3.DecodedResponseHead {
+        if (self.callback_reader_active) return error.ConcurrentRead;
         if (!self.request_lifecycle.contains(detached_stream_id)) {
             return error.UnexpectedStream;
         }
@@ -10183,6 +14450,7 @@ pub const HandshakeClient = struct {
         detached_stream_id: u62,
         packet: *const quic.one_rtt.ReceivedPacket,
     ) Error!void {
+        if (self.callback_reader_active) return error.ConcurrentRead;
         if (!self.connect_datagrams.contains(detached_stream_id)) {
             return error.UnexpectedStream;
         }
@@ -10203,6 +14471,7 @@ pub const HandshakeClient = struct {
         stream_id: u62,
         packet: *const quic.one_rtt.ReceivedPacket,
     ) Error!void {
+        if (self.callback_reader_active) return error.ConcurrentRead;
         if (!self.request_lifecycle.contains(stream_id) or
             !self.request_lifecycle.responseDecodeOptions(stream_id)
                 .extended_connect)
@@ -10219,6 +14488,7 @@ pub const HandshakeClient = struct {
         self: *HandshakeClient,
         stream_id: u62,
     ) Error!void {
+        if (self.callback_reader_active) return error.ConcurrentRead;
         if (!self.request_lifecycle.contains(stream_id) or
             !self.request_lifecycle.responseDecodeOptions(stream_id)
                 .extended_connect)
@@ -10259,6 +14529,11 @@ pub const HandshakeClient = struct {
             .detached_streams = &self.connect_datagrams,
         };
         try visitConnectionResponsePacket(&context, packetView(packet.*));
+        if (single_attempt) {
+            _ = try self.applyPendingPushCancellationOnce();
+        } else {
+            try self.applyPendingPushCancellations();
+        }
         if (single_attempt) {
             self.flushResponsePacketFeedbackOnce() catch |err| switch (err) {
                 error.PacingLimited,
@@ -10327,6 +14602,7 @@ pub const HandshakeClient = struct {
     pub fn receivePushEvent(
         self: *HandshakeClient,
     ) Error!StreamingPushEvent {
+        if (self.callback_reader_active) return error.ConcurrentRead;
         if (self.dispatcher_bound) return error.InvalidDispatcherState;
         if (self.push_aggregate.active()) return error.UnexpectedStream;
         return self.receivePushEventMatching(null, null) catch |err| switch (err) {
@@ -10340,6 +14616,7 @@ pub const HandshakeClient = struct {
     pub fn pollPushEvent(
         self: *HandshakeClient,
     ) Error!?StreamingPushEvent {
+        if (self.callback_reader_active) return error.ConcurrentRead;
         if (self.dispatcher_bound) return error.InvalidDispatcherState;
         if (self.push_aggregate.active()) return error.UnexpectedStream;
         return self.pollPushEventMatching(null, false);
@@ -10351,6 +14628,7 @@ pub const HandshakeClient = struct {
     pub fn pollPushEventOnce(
         self: *HandshakeClient,
     ) Error!?StreamingPushEvent {
+        if (self.callback_reader_active) return error.ConcurrentRead;
         if (self.push_aggregate.active()) return error.UnexpectedStream;
         return self.pollPushEventMatching(null, true);
     }
@@ -10360,6 +14638,7 @@ pub const HandshakeClient = struct {
         self: *HandshakeClient,
         timeout: std.Io.Duration,
     ) ReceiveTimeoutError!StreamingPushEvent {
+        if (self.callback_reader_active) return error.ConcurrentRead;
         if (self.dispatcher_bound) return error.InvalidDispatcherState;
         if (timeout.nanoseconds <= 0) return error.Timeout;
         if (self.push_aggregate.active()) return error.UnexpectedStream;
@@ -10373,6 +14652,7 @@ pub const HandshakeClient = struct {
         self: *HandshakeClient,
         deadline: std.Io.Clock.Timestamp,
     ) ReceiveTimeoutError!StreamingPushEvent {
+        if (self.callback_reader_active) return error.ConcurrentRead;
         if (self.dispatcher_bound) return error.InvalidDispatcherState;
         _ = try deadline_policy.usableAwake(self.connectionIo(), deadline);
         if (self.push_aggregate.active()) return error.UnexpectedStream;
@@ -10384,6 +14664,7 @@ pub const HandshakeClient = struct {
         target_push_id: ?u64,
         deadline: ?std.Io.Clock.Timestamp,
     ) ReceiveTimeoutError!StreamingPushEvent {
+        if (self.callback_reader_active) return error.ConcurrentRead;
         while (true) {
             if (try self.pollPushEventMatching(
                 target_push_id,
@@ -10415,6 +14696,7 @@ pub const HandshakeClient = struct {
         target_push_id: ?u64,
         single_attempt: bool,
     ) Error!?StreamingPushEvent {
+        if (self.callback_reader_active) return error.ConcurrentRead;
         if (single_attempt) {
             self.flushResponsePacketFeedbackOnce() catch |err| switch (err) {
                 error.PacingLimited,
@@ -10566,6 +14848,9 @@ pub const HandshakeClient = struct {
     ) Error!bool {
         const stream_id = self.push_streams.firstCancelledStream() orelse
             return true;
+        const cancel_qpack =
+            self.control.settings.local.qpack_max_table_capacity != 0;
+        if (cancel_qpack) try self.qpack_decode.prepareStreamCancellation();
         self.established.connection.trySendStopSending(
             stream_id,
             http3.ApplicationErrorCode.request_cancelled,
@@ -10576,6 +14861,11 @@ pub const HandshakeClient = struct {
             => return false,
             else => return err,
         };
+        if (cancel_qpack) {
+            self.qpack_decode.recordStreamCancellationAssumeCapacity(
+                stream_id,
+            );
+        }
         std.debug.assert(
             self.push_streams.takeCancelledStream().? == stream_id,
         );
@@ -10585,11 +14875,45 @@ pub const HandshakeClient = struct {
     fn applyPendingPushCancellations(
         self: *HandshakeClient,
     ) Error!void {
+        return self.applyPendingPushCancellationsUntil(null) catch |err| switch (err) {
+            error.Timeout, error.ConcurrencyUnavailable => unreachable,
+            else => |other| return @errorCast(other),
+        };
+    }
+
+    fn applyPendingPushCancellationsWithDeadline(
+        self: *HandshakeClient,
+        deadline: std.Io.Clock.Timestamp,
+    ) ReceiveTimeoutError!void {
+        _ = try deadline_policy.usableAwake(self.connectionIo(), deadline);
+        return self.applyPendingPushCancellationsUntil(deadline);
+    }
+
+    fn applyPendingPushCancellationsUntil(
+        self: *HandshakeClient,
+        deadline: ?std.Io.Clock.Timestamp,
+    ) ReceiveTimeoutError!void {
         while (self.push_streams.firstCancelledStream()) |stream_id| {
-            try self.established.connection.sendStopSending(
-                stream_id,
-                http3.ApplicationErrorCode.request_cancelled,
-            );
+            const cancel_qpack =
+                self.control.settings.local.qpack_max_table_capacity != 0;
+            if (cancel_qpack) try self.qpack_decode.prepareStreamCancellation();
+            if (deadline) |absolute| {
+                try self.established.connection.sendStopSendingWithDeadline(
+                    stream_id,
+                    http3.ApplicationErrorCode.request_cancelled,
+                    absolute,
+                );
+            } else {
+                try self.established.connection.sendStopSending(
+                    stream_id,
+                    http3.ApplicationErrorCode.request_cancelled,
+                );
+            }
+            if (cancel_qpack) {
+                self.qpack_decode.recordStreamCancellationAssumeCapacity(
+                    stream_id,
+                );
+            }
             std.debug.assert(
                 self.push_streams.takeCancelledStream().? == stream_id,
             );
@@ -10601,6 +14925,7 @@ pub const HandshakeClient = struct {
         push_id: u64,
         out: []u8,
     ) Error!usize {
+        if (self.callback_reader_active) return error.ConcurrentRead;
         if (self.dispatcher_bound) return error.InvalidDispatcherState;
         const entry = self.push_streams.findByPushId(push_id) orelse
             return error.UnexpectedStream;
@@ -10618,6 +14943,7 @@ pub const HandshakeClient = struct {
         push_id: u64,
         out: []u8,
     ) Error!?usize {
+        if (self.callback_reader_active) return error.ConcurrentRead;
         const entry = self.push_streams.findByPushId(push_id) orelse
             return error.UnexpectedStream;
         const reader = if (entry.reader) |*value| value else return error.UnexpectedStream;
@@ -10638,6 +14964,7 @@ pub const HandshakeClient = struct {
         self: *HandshakeClient,
         push_id: u64,
     ) Error!usize {
+        if (self.callback_reader_active) return error.ConcurrentRead;
         if (self.dispatcher_bound) return error.InvalidDispatcherState;
         const entry = self.push_streams.findByPushId(push_id) orelse
             return error.UnexpectedStream;
@@ -10659,6 +14986,7 @@ pub const HandshakeClient = struct {
         self: *HandshakeClient,
         push_id: u64,
     ) Error!?usize {
+        if (self.callback_reader_active) return error.ConcurrentRead;
         const entry = self.push_streams.findByPushId(push_id) orelse
             return error.UnexpectedStream;
         const reader = if (entry.reader) |*value| value else return error.UnexpectedStream;
@@ -10772,11 +15100,20 @@ pub const HandshakeClient = struct {
         informational: ?PushInformationalObserver,
         deadline: ?std.Io.Clock.Timestamp,
     ) ReceiveTimeoutError!PushedResponse {
+        if (self.callback_reader_active) return error.ConcurrentRead;
+        var guarded_informational: ?PushInformationalCallbackGuard =
+            if (informational) |observer| .{
+                .observer = observer,
+                .callback_reader_active = &self.callback_reader_active,
+            } else null;
         return push_aggregate.receive(
             self,
             &self.push_aggregate,
             self.allocator,
-            informational,
+            if (guarded_informational) |*guard| .{
+                .context = guard,
+                .on_response = PushInformationalCallbackGuard.notify,
+            } else null,
             deadline,
             HandshakeClient.nextPushEventForAggregate,
             HandshakeClient.readPushDataForAggregate,
@@ -10817,6 +15154,7 @@ pub const HandshakeClient = struct {
     pub fn receiveNextResponseEvent(
         self: *HandshakeClient,
     ) Error!StreamingResponseEvent {
+        if (self.callback_reader_active) return error.ConcurrentRead;
         if (self.dispatcher_bound) return error.InvalidDispatcherState;
         if (self.request_lifecycle.isEmpty()) {
             return error.UnexpectedStream;
@@ -10850,6 +15188,7 @@ pub const HandshakeClient = struct {
         self: *HandshakeClient,
         single_attempt: bool,
     ) Error!?StreamingResponseEvent {
+        if (self.callback_reader_active) return error.ConcurrentRead;
         if (self.request_lifecycle.isEmpty()) {
             return null;
         }
@@ -10986,6 +15325,7 @@ pub const HandshakeClient = struct {
         self: *HandshakeClient,
         timeout: std.Io.Duration,
     ) ReceiveTimeoutError!StreamingResponseEvent {
+        if (self.callback_reader_active) return error.ConcurrentRead;
         if (self.dispatcher_bound) return error.InvalidDispatcherState;
         if (timeout.nanoseconds <= 0) return error.Timeout;
         if (self.request_lifecycle.isEmpty()) {
@@ -11000,6 +15340,7 @@ pub const HandshakeClient = struct {
         self: *HandshakeClient,
         deadline: std.Io.Clock.Timestamp,
     ) ReceiveTimeoutError!StreamingResponseEvent {
+        if (self.callback_reader_active) return error.ConcurrentRead;
         if (self.dispatcher_bound) return error.InvalidDispatcherState;
         _ = try deadline_policy.usableAwake(self.connectionIo(), deadline);
         if (self.request_lifecycle.isEmpty()) {
@@ -11012,6 +15353,7 @@ pub const HandshakeClient = struct {
         self: *HandshakeClient,
         deadline: ?std.Io.Clock.Timestamp,
     ) ReceiveTimeoutError!StreamingResponseEvent {
+        if (self.callback_reader_active) return error.ConcurrentRead;
         while (true) {
             if (try self.pollNextResponseEvent()) |event| return event;
             try self.releaseStreamingResponseCapacity();
@@ -11050,6 +15392,69 @@ pub const HandshakeClient = struct {
             client_control_stream_id,
         );
         try sendConnectionControlFrame(&self.established.connection, &self.control, &self.control_send, self.options, .goaway, stream_id);
+    }
+
+    pub fn sendGoAwayWithTimeout(
+        self: *HandshakeClient,
+        stream_id: u64,
+        timeout: std.Io.Duration,
+    ) ReceiveTimeoutError!void {
+        if (self.dispatcher_bound) return error.InvalidDispatcherState;
+        if (timeout.nanoseconds <= 0) return error.Timeout;
+        return self.sendGoAwayWithDeadline(stream_id, .fromNow(
+            self.connectionIo(),
+            .{ .raw = timeout, .clock = .awake },
+        ));
+    }
+
+    pub fn sendGoAwayWithDeadline(
+        self: *HandshakeClient,
+        stream_id: u64,
+        deadline: std.Io.Clock.Timestamp,
+    ) ReceiveTimeoutError!void {
+        if (self.dispatcher_bound) return error.InvalidDispatcherState;
+        _ = try deadline_policy.usableAwake(self.connectionIo(), deadline);
+        try validateClientGoAwayPushId(stream_id);
+        try sendConnectionSettingsWithDeadline(
+            &self.established.connection,
+            &self.critical_stream_send_scratch,
+            &self.control,
+            &self.control_send,
+            &self.qpack_encoder_send,
+            &self.qpack_encoder_prefix_sent,
+            &self.qpack_decoder_send,
+            &self.qpack_decoder_prefix_sent,
+            self.options,
+            client_control_stream_id,
+            deadline,
+        );
+        try sendConnectionControlFrameWithDeadline(
+            &self.established.connection,
+            &self.control,
+            &self.control_send,
+            self.options,
+            .goaway,
+            stream_id,
+            deadline,
+        );
+    }
+
+    /// Submit a client GOAWAY once without waiting for pacing or reading UDP.
+    /// The local GOAWAY ID and control-stream offset roll back on failure.
+    pub fn trySendGoAway(
+        self: *HandshakeClient,
+        stream_id: u64,
+    ) Error!void {
+        try validateClientGoAwayPushId(stream_id);
+        try self.requireEndpointCriticalStreamsReady();
+        try trySendConnectionControlFrame(
+            &self.established.connection,
+            &self.control,
+            &self.control_send,
+            self.options,
+            .goaway,
+            stream_id,
+        );
     }
 
     pub fn peerOrigins(self: HandshakeClient) []const http3.OriginKey {
@@ -11112,6 +15517,7 @@ pub const HandshakeClient = struct {
         deadline: std.Io.Clock.Timestamp,
     ) ReceiveTimeoutError!void {
         if (self.dispatcher_bound) return error.InvalidDispatcherState;
+        if (self.callback_reader_active) return error.ConcurrentRead;
         _ = try deadline_policy.usableAwake(self.connectionIo(), deadline);
         try receiveConnectionResponsePacketUntil(
             &self.established.connection,
@@ -11138,6 +15544,7 @@ pub const HandshakeClient = struct {
         self: *HandshakeClient,
         timeout: std.Io.Duration,
     ) ReceiveTimeoutError!void {
+        if (self.callback_reader_active) return error.ConcurrentRead;
         if (self.dispatcher_bound) return error.InvalidDispatcherState;
         if (timeout.nanoseconds <= 0) return error.Timeout;
         return self.waitForRecoveryIdleWithDeadline(.fromNow(
@@ -11150,6 +15557,7 @@ pub const HandshakeClient = struct {
         self: *HandshakeClient,
         deadline: std.Io.Clock.Timestamp,
     ) ReceiveTimeoutError!void {
+        if (self.callback_reader_active) return error.ConcurrentRead;
         if (self.dispatcher_bound) return error.InvalidDispatcherState;
         _ = try deadline_policy.usableAwake(self.connectionIo(), deadline);
         while (self.established.connection.pendingRecoveryCount() != 0) {
@@ -11162,52 +15570,240 @@ pub const HandshakeClient = struct {
         self: *HandshakeClient,
         push_id: u64,
     ) Error!void {
+        return self.sendMaxPushIdUntil(push_id, null) catch |err| switch (err) {
+            error.Timeout, error.ConcurrencyUnavailable => unreachable,
+            else => |other| return @errorCast(other),
+        };
+    }
+
+    pub fn sendMaxPushIdWithTimeout(
+        self: *HandshakeClient,
+        push_id: u64,
+        timeout: std.Io.Duration,
+    ) ReceiveTimeoutError!void {
+        if (self.dispatcher_bound) return error.InvalidDispatcherState;
+        if (timeout.nanoseconds <= 0) return error.Timeout;
+        return self.sendMaxPushIdWithDeadline(push_id, .fromNow(
+            self.connectionIo(),
+            .{ .raw = timeout, .clock = .awake },
+        ));
+    }
+
+    pub fn sendMaxPushIdWithDeadline(
+        self: *HandshakeClient,
+        push_id: u64,
+        deadline: std.Io.Clock.Timestamp,
+    ) ReceiveTimeoutError!void {
+        if (self.dispatcher_bound) return error.InvalidDispatcherState;
+        _ = try deadline_policy.usableAwake(self.connectionIo(), deadline);
+        return self.sendMaxPushIdUntil(push_id, deadline);
+    }
+
+    fn sendMaxPushIdUntil(
+        self: *HandshakeClient,
+        push_id: u64,
+        deadline: ?std.Io.Clock.Timestamp,
+    ) ReceiveTimeoutError!void {
         if (self.dispatcher_bound) return error.InvalidDispatcherState;
         try self.push_streams.reservePromisesThrough(push_id);
-        const previous_max_push_id = self.control.local_max_push_id;
-        try sendConnectionSettings(
-            &self.established.connection,
-            &self.critical_stream_send_scratch,
-            &self.control,
-            &self.control_send,
-            &self.qpack_encoder_send,
-            &self.qpack_encoder_prefix_sent,
-            &self.qpack_decoder_send,
-            &self.qpack_decoder_prefix_sent,
-            self.options,
-            client_control_stream_id,
-        );
-        sendConnectionPushControl(
+        if (deadline) |absolute| {
+            try sendConnectionSettingsWithDeadline(
+                &self.established.connection,
+                &self.critical_stream_send_scratch,
+                &self.control,
+                &self.control_send,
+                &self.qpack_encoder_send,
+                &self.qpack_encoder_prefix_sent,
+                &self.qpack_decoder_send,
+                &self.qpack_decoder_prefix_sent,
+                self.options,
+                client_control_stream_id,
+                absolute,
+            );
+            try sendConnectionPushControlWithDeadline(
+                &self.established.connection,
+                &self.control,
+                &self.control_send,
+                self.options,
+                .max_push_id,
+                push_id,
+                absolute,
+            );
+        } else {
+            try sendConnectionSettings(
+                &self.established.connection,
+                &self.critical_stream_send_scratch,
+                &self.control,
+                &self.control_send,
+                &self.qpack_encoder_send,
+                &self.qpack_encoder_prefix_sent,
+                &self.qpack_decoder_send,
+                &self.qpack_decoder_prefix_sent,
+                self.options,
+                client_control_stream_id,
+            );
+            try sendConnectionPushControl(
+                &self.established.connection,
+                &self.control,
+                &self.control_send,
+                self.options,
+                .max_push_id,
+                push_id,
+            );
+        }
+    }
+
+    /// Submit MAX_PUSH_ID once without waiting for transport progress.
+    pub fn trySendMaxPushId(
+        self: *HandshakeClient,
+        push_id: u64,
+    ) Error!void {
+        try self.push_streams.reservePromisesThrough(push_id);
+        try self.requireEndpointCriticalStreamsReady();
+        try trySendConnectionPushControl(
             &self.established.connection,
             &self.control,
             &self.control_send,
             self.options,
             .max_push_id,
             push_id,
-        ) catch |err| {
-            self.control.local_max_push_id = previous_max_push_id;
-            return err;
-        };
+        );
     }
 
     pub fn cancelPush(
         self: *HandshakeClient,
         push_id: u64,
     ) Error!void {
+        return self.cancelPushUntil(push_id, null) catch |err| switch (err) {
+            error.Timeout, error.ConcurrencyUnavailable => unreachable,
+            else => |other| return @errorCast(other),
+        };
+    }
+
+    pub fn cancelPushWithTimeout(
+        self: *HandshakeClient,
+        push_id: u64,
+        timeout: std.Io.Duration,
+    ) ReceiveTimeoutError!void {
         if (self.dispatcher_bound) return error.InvalidDispatcherState;
-        try sendConnectionSettings(
-            &self.established.connection,
-            &self.critical_stream_send_scratch,
-            &self.control,
-            &self.control_send,
-            &self.qpack_encoder_send,
-            &self.qpack_encoder_prefix_sent,
-            &self.qpack_decoder_send,
-            &self.qpack_decoder_prefix_sent,
-            self.options,
-            client_control_stream_id,
-        );
-        try sendConnectionPushControl(
+        if (timeout.nanoseconds <= 0) return error.Timeout;
+        return self.cancelPushWithDeadline(push_id, .fromNow(
+            self.connectionIo(),
+            .{ .raw = timeout, .clock = .awake },
+        ));
+    }
+
+    pub fn cancelPushWithDeadline(
+        self: *HandshakeClient,
+        push_id: u64,
+        deadline: std.Io.Clock.Timestamp,
+    ) ReceiveTimeoutError!void {
+        if (self.dispatcher_bound) return error.InvalidDispatcherState;
+        _ = try deadline_policy.usableAwake(self.connectionIo(), deadline);
+        return self.cancelPushUntil(push_id, deadline);
+    }
+
+    fn cancelPushUntil(
+        self: *HandshakeClient,
+        push_id: u64,
+        deadline: ?std.Io.Clock.Timestamp,
+    ) ReceiveTimeoutError!void {
+        if (self.callback_reader_active) return error.ConcurrentRead;
+        if (self.dispatcher_bound) return error.InvalidDispatcherState;
+        const max_push_id = self.control.local_max_push_id orelse
+            return error.PushIdExceeded;
+        if (push_id > max_push_id) return error.PushIdExceeded;
+        if (self.push_streams.isCancelledPush(push_id)) {
+            if (deadline) |absolute| {
+                try self.applyPendingPushCancellationsWithDeadline(absolute);
+                return self.sendQpackFeedbackWithDeadline(absolute);
+            }
+            try self.applyPendingPushCancellations();
+            return self.sendQpackFeedback();
+        }
+        if (self.push_streams.pendingLocalCancellation(push_id)) {
+            if (deadline) |absolute| {
+                try self.applyPendingPushCancellationsWithDeadline(absolute);
+                return self.sendQpackFeedbackWithDeadline(absolute);
+            }
+            try self.applyPendingPushCancellations();
+            return self.sendQpackFeedback();
+        }
+        const push_stream_id = self.push_streams.streamIdForPush(push_id);
+        try self.push_streams.preparePeerCancellation(push_id);
+        if (deadline) |absolute| {
+            try sendConnectionSettingsWithDeadline(
+                &self.established.connection,
+                &self.critical_stream_send_scratch,
+                &self.control,
+                &self.control_send,
+                &self.qpack_encoder_send,
+                &self.qpack_encoder_prefix_sent,
+                &self.qpack_decoder_send,
+                &self.qpack_decoder_prefix_sent,
+                self.options,
+                client_control_stream_id,
+                absolute,
+            );
+            try sendConnectionPushControlWithDeadline(
+                &self.established.connection,
+                &self.control,
+                &self.control_send,
+                self.options,
+                .cancel_push,
+                push_id,
+                absolute,
+            );
+        } else {
+            try sendConnectionSettings(
+                &self.established.connection,
+                &self.critical_stream_send_scratch,
+                &self.control,
+                &self.control_send,
+                &self.qpack_encoder_send,
+                &self.qpack_encoder_prefix_sent,
+                &self.qpack_decoder_send,
+                &self.qpack_decoder_prefix_sent,
+                self.options,
+                client_control_stream_id,
+            );
+            try sendConnectionPushControl(
+                &self.established.connection,
+                &self.control,
+                &self.control_send,
+                self.options,
+                .cancel_push,
+                push_id,
+            );
+        }
+        if (push_stream_id) |stream_id| {
+            self.qpack_decode.discardPeerUniStream(stream_id);
+        }
+        self.push_streams.observePeerCancellation(push_id) catch unreachable;
+        defer if (self.push_aggregate.push_id == push_id) {
+            self.push_aggregate.deinit(self.allocator);
+        };
+        if (deadline) |absolute| {
+            try self.applyPendingPushCancellationsWithDeadline(absolute);
+            try self.sendQpackFeedbackWithDeadline(absolute);
+        } else {
+            try self.applyPendingPushCancellations();
+            try self.sendQpackFeedback();
+        }
+    }
+
+    /// Submit CANCEL_PUSH once without waiting for pacing or reading UDP. All
+    /// fallible push-state capacity is reserved before the frame reaches the
+    /// socket; a failed send leaves the promise and control cursor unchanged.
+    pub fn tryCancelPush(
+        self: *HandshakeClient,
+        push_id: u64,
+    ) Error!void {
+        if (self.callback_reader_active) return error.ConcurrentRead;
+        const push_stream_id = self.push_streams.streamIdForPush(push_id);
+        try self.push_streams.preparePeerCancellation(push_id);
+        try self.requireEndpointCriticalStreamsReady();
+        try trySendConnectionPushControl(
             &self.established.connection,
             &self.control,
             &self.control_send,
@@ -11215,11 +15811,15 @@ pub const HandshakeClient = struct {
             .cancel_push,
             push_id,
         );
-        try self.push_streams.observePeerCancellation(push_id);
+        if (push_stream_id) |stream_id| {
+            self.qpack_decode.discardPeerUniStream(stream_id);
+        }
+        self.push_streams.observePeerCancellation(push_id) catch unreachable;
         defer if (self.push_aggregate.push_id == push_id) {
             self.push_aggregate.deinit(self.allocator);
         };
-        try self.applyPendingPushCancellations();
+        // An active push stream is queued for STOP_SENDING and serviced by a
+        // later poll turn. Keep this method to one socket submission.
     }
 
     pub fn cancelRequest(
@@ -11227,6 +15827,7 @@ pub const HandshakeClient = struct {
         stream_id: u62,
         application_error_code: u64,
     ) Error!void {
+        if (self.callback_reader_active) return error.ConcurrentRead;
         if (self.dispatcher_bound) return error.InvalidDispatcherState;
         return self.cancelRequestInternal(
             stream_id,
@@ -11241,6 +15842,7 @@ pub const HandshakeClient = struct {
         stream_id: u62,
         application_error_code: u64,
     ) Error!void {
+        if (self.callback_reader_active) return error.ConcurrentRead;
         return self.cancelRequestInternalOnce(
             stream_id,
             application_error_code,
@@ -11275,7 +15877,12 @@ pub const HandshakeClient = struct {
             self.streaming_responses.remove(stream_id);
             _ = self.request_lifecycle.finish(stream_id) catch false;
             _ = self.outbound_bodies.finish(stream_id);
+            self.retireReservedRequestStreamId(stream_id);
         }
+        errdefer self.established.connection.failClosedApplication(
+            http3.ApplicationErrorCode.internal_error,
+            "request-cancellation-failed",
+        );
         try cancelConnectionRequest(
             &self.established.connection,
             &self.critical_stream_send_scratch,
@@ -11330,6 +15937,7 @@ pub const HandshakeClient = struct {
         self.streaming_responses.remove(stream_id);
         _ = self.request_lifecycle.finish(stream_id) catch false;
         _ = self.outbound_bodies.finish(stream_id);
+        self.retireReservedRequestStreamId(stream_id);
         _ = try self.established.connection
             .requestCompletedLocalStreamRelease(stream_id);
     }
@@ -11342,6 +15950,7 @@ pub const HandshakeClient = struct {
         self: *HandshakeClient,
         stream_id: u62,
     ) void {
+        if (self.callback_reader_active) return;
         if (self.dispatcher_bound) {
             self.abandonExtendedConnectOnce(stream_id);
             return;
@@ -11366,7 +15975,12 @@ pub const HandshakeClient = struct {
             stream_id,
             http3.ApplicationErrorCode.request_cancelled,
             cancel_qpack,
-        ) catch {};
+        ) catch {
+            self.established.connection.failClosedApplication(
+                http3.ApplicationErrorCode.internal_error,
+                "request-cancellation-failed",
+            );
+        };
         _ = self.established.connection
             .requestCompletedLocalStreamRelease(stream_id) catch false;
         self.connect_datagrams.unregister(stream_id);
@@ -11375,6 +15989,7 @@ pub const HandshakeClient = struct {
         self.streaming_responses.remove(stream_id);
         _ = self.request_lifecycle.finish(stream_id) catch false;
         _ = self.outbound_bodies.finish(stream_id);
+        self.retireReservedRequestStreamId(stream_id);
     }
 
     /// Best-effort Extended CONNECT cleanup for a dispatcher-owned endpoint.
@@ -11385,6 +16000,7 @@ pub const HandshakeClient = struct {
         self: *HandshakeClient,
         stream_id: u62,
     ) void {
+        if (self.callback_reader_active) return;
         var cancel_qpack = self.response_streams
             .requiresQpackCancellation(
             stream_id,
@@ -11426,6 +16042,7 @@ pub const HandshakeClient = struct {
         self.streaming_responses.remove(stream_id);
         _ = self.request_lifecycle.finish(stream_id) catch false;
         _ = self.outbound_bodies.finish(stream_id);
+        self.retireReservedRequestStreamId(stream_id);
     }
 
     pub fn sendPriorityUpdate(
@@ -11433,27 +16050,115 @@ pub const HandshakeClient = struct {
         stream_id: u62,
         priority: http3.Priority,
     ) Error!void {
+        return self.sendPriorityUpdateUntil(
+            stream_id,
+            priority,
+            null,
+        ) catch |err| switch (err) {
+            error.Timeout, error.ConcurrencyUnavailable => unreachable,
+            else => |other| return @errorCast(other),
+        };
+    }
+
+    pub fn sendPriorityUpdateWithTimeout(
+        self: *HandshakeClient,
+        stream_id: u62,
+        priority: http3.Priority,
+        timeout: std.Io.Duration,
+    ) ReceiveTimeoutError!void {
+        if (self.dispatcher_bound) return error.InvalidDispatcherState;
+        if (timeout.nanoseconds <= 0) return error.Timeout;
+        return self.sendPriorityUpdateWithDeadline(
+            stream_id,
+            priority,
+            .fromNow(self.connectionIo(), .{
+                .raw = timeout,
+                .clock = .awake,
+            }),
+        );
+    }
+
+    pub fn sendPriorityUpdateWithDeadline(
+        self: *HandshakeClient,
+        stream_id: u62,
+        priority: http3.Priority,
+        deadline: std.Io.Clock.Timestamp,
+    ) ReceiveTimeoutError!void {
+        if (self.dispatcher_bound) return error.InvalidDispatcherState;
+        _ = try deadline_policy.usableAwake(self.connectionIo(), deadline);
+        return self.sendPriorityUpdateUntil(stream_id, priority, deadline);
+    }
+
+    fn sendPriorityUpdateUntil(
+        self: *HandshakeClient,
+        stream_id: u62,
+        priority: http3.Priority,
+        deadline: ?std.Io.Clock.Timestamp,
+    ) ReceiveTimeoutError!void {
         if (self.dispatcher_bound) return error.InvalidDispatcherState;
         // PRIORITY_UPDATE can precede the request itself, which is essential
         // for this synchronous request API: `next_stream_id` is the one request
         // stream that may be prioritized before request() opens it.
         if (stream_id > self.next_stream_id) return error.UnexpectedFrame;
-        try sendConnectionSettings(
+        if (deadline) |absolute| {
+            try sendConnectionSettingsWithDeadline(
+                &self.established.connection,
+                &self.critical_stream_send_scratch,
+                &self.control,
+                &self.control_send,
+                &self.qpack_encoder_send,
+                &self.qpack_encoder_prefix_sent,
+                &self.qpack_decoder_send,
+                &self.qpack_decoder_prefix_sent,
+                self.options,
+                client_control_stream_id,
+                absolute,
+            );
+            try sendConnectionPriorityUpdateRawWithDeadline(
+                &self.established.connection,
+                &self.control_send,
+                self.options,
+                http3.FrameType.priority_update_request,
+                stream_id,
+                priority,
+                absolute,
+            );
+        } else {
+            try sendConnectionSettings(
+                &self.established.connection,
+                &self.critical_stream_send_scratch,
+                &self.control,
+                &self.control_send,
+                &self.qpack_encoder_send,
+                &self.qpack_encoder_prefix_sent,
+                &self.qpack_decoder_send,
+                &self.qpack_decoder_prefix_sent,
+                self.options,
+                client_control_stream_id,
+            );
+            try sendConnectionPriorityUpdate(
+                &self.established.connection,
+                &self.control_send,
+                self.options,
+                stream_id,
+                priority,
+            );
+        }
+    }
+
+    /// Submit one request PRIORITY_UPDATE without waiting for pacing.
+    pub fn trySendPriorityUpdate(
+        self: *HandshakeClient,
+        stream_id: u62,
+        priority: http3.Priority,
+    ) Error!void {
+        if (stream_id > self.next_stream_id) return error.UnexpectedFrame;
+        try self.requireEndpointCriticalStreamsReady();
+        try trySendConnectionPriorityUpdateRaw(
             &self.established.connection,
-            &self.critical_stream_send_scratch,
-            &self.control,
-            &self.control_send,
-            &self.qpack_encoder_send,
-            &self.qpack_encoder_prefix_sent,
-            &self.qpack_decoder_send,
-            &self.qpack_decoder_prefix_sent,
-            self.options,
-            client_control_stream_id,
-        );
-        try sendConnectionPriorityUpdate(
-            &self.established.connection,
             &self.control_send,
             self.options,
+            http3.FrameType.priority_update_request,
             stream_id,
             priority,
         );
@@ -11464,23 +16169,113 @@ pub const HandshakeClient = struct {
         push_id: u64,
         priority: http3.Priority,
     ) Error!void {
+        return self.sendPushPriorityUpdateUntil(
+            push_id,
+            priority,
+            null,
+        ) catch |err| switch (err) {
+            error.Timeout, error.ConcurrencyUnavailable => unreachable,
+            else => |other| return @errorCast(other),
+        };
+    }
+
+    pub fn sendPushPriorityUpdateWithTimeout(
+        self: *HandshakeClient,
+        push_id: u64,
+        priority: http3.Priority,
+        timeout: std.Io.Duration,
+    ) ReceiveTimeoutError!void {
+        if (self.dispatcher_bound) return error.InvalidDispatcherState;
+        if (timeout.nanoseconds <= 0) return error.Timeout;
+        return self.sendPushPriorityUpdateWithDeadline(
+            push_id,
+            priority,
+            .fromNow(self.connectionIo(), .{
+                .raw = timeout,
+                .clock = .awake,
+            }),
+        );
+    }
+
+    pub fn sendPushPriorityUpdateWithDeadline(
+        self: *HandshakeClient,
+        push_id: u64,
+        priority: http3.Priority,
+        deadline: std.Io.Clock.Timestamp,
+    ) ReceiveTimeoutError!void {
+        if (self.dispatcher_bound) return error.InvalidDispatcherState;
+        _ = try deadline_policy.usableAwake(self.connectionIo(), deadline);
+        return self.sendPushPriorityUpdateUntil(push_id, priority, deadline);
+    }
+
+    fn sendPushPriorityUpdateUntil(
+        self: *HandshakeClient,
+        push_id: u64,
+        priority: http3.Priority,
+        deadline: ?std.Io.Clock.Timestamp,
+    ) ReceiveTimeoutError!void {
         if (self.dispatcher_bound) return error.InvalidDispatcherState;
         if (!self.push_streams.hasPromise(push_id)) {
             return error.UnexpectedStream;
         }
-        try sendConnectionSettings(
-            &self.established.connection,
-            &self.critical_stream_send_scratch,
-            &self.control,
-            &self.control_send,
-            &self.qpack_encoder_send,
-            &self.qpack_encoder_prefix_sent,
-            &self.qpack_decoder_send,
-            &self.qpack_decoder_prefix_sent,
-            self.options,
-            client_control_stream_id,
-        );
-        try sendConnectionPriorityUpdateRaw(
+        if (deadline) |absolute| {
+            try sendConnectionSettingsWithDeadline(
+                &self.established.connection,
+                &self.critical_stream_send_scratch,
+                &self.control,
+                &self.control_send,
+                &self.qpack_encoder_send,
+                &self.qpack_encoder_prefix_sent,
+                &self.qpack_decoder_send,
+                &self.qpack_decoder_prefix_sent,
+                self.options,
+                client_control_stream_id,
+                absolute,
+            );
+            try sendConnectionPriorityUpdateRawWithDeadline(
+                &self.established.connection,
+                &self.control_send,
+                self.options,
+                http3.FrameType.priority_update_push,
+                push_id,
+                priority,
+                absolute,
+            );
+        } else {
+            try sendConnectionSettings(
+                &self.established.connection,
+                &self.critical_stream_send_scratch,
+                &self.control,
+                &self.control_send,
+                &self.qpack_encoder_send,
+                &self.qpack_encoder_prefix_sent,
+                &self.qpack_decoder_send,
+                &self.qpack_decoder_prefix_sent,
+                self.options,
+                client_control_stream_id,
+            );
+            try sendConnectionPriorityUpdateRaw(
+                &self.established.connection,
+                &self.control_send,
+                self.options,
+                http3.FrameType.priority_update_push,
+                push_id,
+                priority,
+            );
+        }
+    }
+
+    /// Submit one push PRIORITY_UPDATE without waiting for pacing.
+    pub fn trySendPushPriorityUpdate(
+        self: *HandshakeClient,
+        push_id: u64,
+        priority: http3.Priority,
+    ) Error!void {
+        if (!self.push_streams.hasPromise(push_id)) {
+            return error.UnexpectedStream;
+        }
+        try self.requireEndpointCriticalStreamsReady();
+        try trySendConnectionPriorityUpdateRaw(
             &self.established.connection,
             &self.control_send,
             self.options,
@@ -11501,10 +16296,26 @@ pub const HandshakeClient = struct {
         );
     }
 
+    fn sendQpackFeedbackWithDeadline(
+        self: *HandshakeClient,
+        deadline: std.Io.Clock.Timestamp,
+    ) ReceiveTimeoutError!void {
+        try sendConnectionQpackFeedbackWithDeadline(
+            &self.established.connection,
+            &self.critical_stream_send_scratch,
+            &self.qpack_decode,
+            &self.qpack_decoder_send,
+            &self.qpack_decoder_prefix_sent,
+            self.options,
+            deadline,
+        );
+    }
+
     fn receiveResponseProgressForSend(
         self: *HandshakeClient,
         stream_id: u62,
     ) Error!void {
+        if (self.callback_reader_active) return error.ConcurrentRead;
         try self.failIfRequestResetForSend(stream_id);
         try receiveConnectionResponsePacket(
             &self.established.connection,
@@ -11519,6 +16330,31 @@ pub const HandshakeClient = struct {
             &self.request_lifecycle,
             null,
             &self.connect_datagrams,
+        );
+        try self.failIfRequestResetForSend(stream_id);
+    }
+
+    fn receiveResponseProgressForSendUntil(
+        self: *HandshakeClient,
+        stream_id: u62,
+        deadline: std.Io.Clock.Timestamp,
+    ) ReceiveTimeoutError!void {
+        if (self.callback_reader_active) return error.ConcurrentRead;
+        try self.failIfRequestResetForSend(stream_id);
+        try receiveConnectionResponsePacketUntil(
+            &self.established.connection,
+            &self.receive_packets,
+            &self.control,
+            &self.qpack_decode,
+            &self.qpack_encode,
+            self.options.local_settings.qpack_blocked_streams,
+            &self.response_streams,
+            &self.streaming_responses,
+            &self.push_streams,
+            &self.request_lifecycle,
+            null,
+            &self.connect_datagrams,
+            deadline,
         );
         try self.failIfRequestResetForSend(stream_id);
     }
@@ -11752,8 +16588,7 @@ pub const ProtectedServer = struct {
     outbound_bodies: OutboundBodySet,
     stream_send_scratch: StreamMessageSendScratch = .{},
     push_send_scratch: PushSendScratch = .{},
-    sent_push_ids: std.ArrayList(u64) = .empty,
-    peer_promised_push_ids: std.ArrayList(u64) = .empty,
+    promised_push_ids: ServerPushIdSet = .{},
     next_push_stream_id: u62 = first_server_push_stream_id,
     next_packet_number: u64 = 0,
     expected_packet_number: u64 = 0,
@@ -11811,8 +16646,7 @@ pub const ProtectedServer = struct {
             self.quic_server.endpoint.allocator,
         );
         self.outbound_bodies.deinit();
-        self.sent_push_ids.deinit(self.quic_server.endpoint.allocator);
-        self.peer_promised_push_ids.deinit(
+        self.promised_push_ids.deinit(
             self.quic_server.endpoint.allocator,
         );
         self.receive_packets.deinit();
@@ -12240,6 +17074,41 @@ pub const ProtectedServer = struct {
         try self.sendResponseWithInformational(to, stream_id, &.{}, response);
     }
 
+    pub fn sendResponseWithTimeout(
+        self: *ProtectedServer,
+        to: net.IpAddress,
+        stream_id: u62,
+        response: http3.Response,
+        timeout: std.Io.Duration,
+    ) ReceiveTimeoutError!void {
+        if (timeout.nanoseconds <= 0) return error.Timeout;
+        return self.sendResponseWithDeadline(
+            to,
+            stream_id,
+            response,
+            .fromNow(self.quic_server.endpoint.io, .{
+                .raw = timeout,
+                .clock = .awake,
+            }),
+        );
+    }
+
+    pub fn sendResponseWithDeadline(
+        self: *ProtectedServer,
+        to: net.IpAddress,
+        stream_id: u62,
+        response: http3.Response,
+        deadline: std.Io.Clock.Timestamp,
+    ) ReceiveTimeoutError!void {
+        return self.sendResponseWithInformationalAndDeadline(
+            to,
+            stream_id,
+            &.{},
+            response,
+            deadline,
+        );
+    }
+
     pub fn sendResponseWithPush(
         self: *ProtectedServer,
         to: net.IpAddress,
@@ -12247,42 +17116,144 @@ pub const ProtectedServer = struct {
         response: http3.Response,
         push: ServerPush,
     ) Error!u62 {
-        const push_stream_id = self.next_push_stream_id;
-        try sendProtectedSettings(
-            &self.quic_server.endpoint,
+        return self.sendResponseWithPushUntil(
             to,
-            self.config,
-            &self.control,
-            &self.control_send,
-            &self.qpack_encoder_send,
-            &self.qpack_encoder_prefix_sent,
-            &self.qpack_decoder_send,
-            &self.qpack_decoder_prefix_sent,
-            &self.next_packet_number,
-            &self.protected_send,
-            server_control_stream_id,
+            request_stream_id,
+            response,
+            push,
+            null,
+        ) catch |err| switch (err) {
+            error.Timeout, error.ConcurrencyUnavailable => unreachable,
+            else => |other| return @errorCast(other),
+        };
+    }
+
+    /// Flow-control-aware aggregate push for the lightweight protected
+    /// runtime. The parent and push heads are submitted first, then both
+    /// response bodies advance in bounded DATA contributions.
+    pub fn sendResponseWithPushPaced(
+        self: *ProtectedServer,
+        to: net.IpAddress,
+        request_stream_id: u62,
+        response: http3.Response,
+        push: ServerPush,
+    ) Error!u62 {
+        return self.sendResponseWithPushPacedUntil(
+            to,
+            request_stream_id,
+            response,
+            push,
+            null,
+        ) catch |err| switch (err) {
+            error.Timeout, error.ConcurrencyUnavailable => unreachable,
+            else => |other| return @errorCast(other),
+        };
+    }
+
+    pub fn sendResponseWithPushPacedAndTimeout(
+        self: *ProtectedServer,
+        to: net.IpAddress,
+        request_stream_id: u62,
+        response: http3.Response,
+        push: ServerPush,
+        timeout: std.Io.Duration,
+    ) ReceiveTimeoutError!u62 {
+        if (timeout.nanoseconds <= 0) return error.Timeout;
+        return self.sendResponseWithPushPacedAndDeadline(
+            to,
+            request_stream_id,
+            response,
+            push,
+            .fromNow(self.quic_server.endpoint.io, .{
+                .raw = timeout,
+                .clock = .awake,
+            }),
         );
+    }
+
+    pub fn sendResponseWithPushPacedAndDeadline(
+        self: *ProtectedServer,
+        to: net.IpAddress,
+        request_stream_id: u62,
+        response: http3.Response,
+        push: ServerPush,
+        deadline: std.Io.Clock.Timestamp,
+    ) ReceiveTimeoutError!u62 {
+        _ = try deadline_policy.usableAwake(
+            self.quic_server.endpoint.io,
+            deadline,
+        );
+        return self.sendResponseWithPushPacedUntil(
+            to,
+            request_stream_id,
+            response,
+            push,
+            deadline,
+        );
+    }
+
+    fn sendResponseWithPushPacedUntil(
+        self: *ProtectedServer,
+        to: net.IpAddress,
+        request_stream_id: u62,
+        response: http3.Response,
+        push: ServerPush,
+        deadline: ?std.Io.Clock.Timestamp,
+    ) ReceiveTimeoutError!u62 {
+        if (deadline) |absolute| {
+            _ = try deadline_policy.usableAwake(
+                self.quic_server.endpoint.io,
+                absolute,
+            );
+            try sendProtectedSettingsWithDeadline(
+                &self.quic_server.endpoint,
+                to,
+                self.config,
+                &self.control,
+                &self.control_send,
+                &self.qpack_encoder_send,
+                &self.qpack_encoder_prefix_sent,
+                &self.qpack_decoder_send,
+                &self.qpack_decoder_prefix_sent,
+                &self.next_packet_number,
+                &self.protected_send,
+                server_control_stream_id,
+                absolute,
+            );
+        } else {
+            try sendProtectedSettings(
+                &self.quic_server.endpoint,
+                to,
+                self.config,
+                &self.control,
+                &self.control_send,
+                &self.qpack_encoder_send,
+                &self.qpack_encoder_prefix_sent,
+                &self.qpack_decoder_send,
+                &self.qpack_decoder_prefix_sent,
+                &self.next_packet_number,
+                &self.protected_send,
+                server_control_stream_id,
+            );
+        }
         const max_push_id = self.control.peer_max_push_id orelse
             return error.PushIdExceeded;
         if (push.push_id > max_push_id) return error.PushIdExceeded;
-        try self.peer_promised_push_ids.ensureUnusedCapacity(
-            self.quic_server.endpoint.allocator,
-            1,
-        );
         try validateNewServerPush(
             self.control,
-            self.sent_push_ids.items,
+            self.promised_push_ids,
             push.push_id,
         );
+        try self.promised_push_ids.prepareInsertValue(
+            self.quic_server.endpoint.allocator,
+            push.push_id,
+        );
+        const push_stream_id = self.next_push_stream_id;
         const next_push_stream_id = std.math.add(
             u62,
             push_stream_id,
             4,
         ) catch return error.StreamCreationError;
-        try self.sent_push_ids.ensureUnusedCapacity(
-            self.quic_server.endpoint.allocator,
-            1,
-        );
         const automatic_date = if (self.config.auto_date_header and
             (server_response.headerValue(response.headers, "date") == null or
                 server_response.headerValue(push.response.headers, "date") == null))
@@ -12311,24 +17282,483 @@ pub const ProtectedServer = struct {
         );
         var prepared_push = push;
         prepared_push.response = prepared_push_response.value;
-        try sendProtectedPush(
-            &self.quic_server.endpoint,
+
+        var heads_committed = false;
+        var clean_push_cancellation = false;
+        errdefer if (heads_committed and !clean_push_cancellation) {
+            self.protected_send.failClosed();
+        };
+        if (deadline) |absolute| {
+            try sendProtectedPushStreamingHeadsWithDeadline(
+                &self.quic_server.endpoint,
+                to,
+                self.config,
+                &self.push_send_scratch,
+                self.control.settings.peer,
+                request_stream_id,
+                prepared_response.value,
+                push_stream_id,
+                prepared_push,
+                &self.qpack_encode,
+                &self.qpack_encoder_send,
+                &self.qpack_encoder_prefix_sent,
+                &self.next_packet_number,
+                &self.protected_send,
+                &self.outbound_bodies,
+                absolute,
+            );
+        } else {
+            try sendProtectedPushStreamingHeads(
+                &self.quic_server.endpoint,
+                to,
+                self.config,
+                &self.push_send_scratch,
+                self.control.settings.peer,
+                request_stream_id,
+                prepared_response.value,
+                push_stream_id,
+                prepared_push,
+                &self.qpack_encode,
+                &self.qpack_encoder_send,
+                &self.qpack_encoder_prefix_sent,
+                &self.next_packet_number,
+                &self.protected_send,
+                &self.outbound_bodies,
+            );
+        }
+        heads_committed = true;
+        self.promised_push_ids.insertAssumeCapacity(push.push_id);
+        self.next_push_stream_id = next_push_stream_id;
+
+        const push_cancelled = try self.sendProtectedPushBodyAndTrailersUntil(
             to,
-            self.config,
-            &self.push_send_scratch,
-            self.control.settings.peer,
+            push_stream_id,
+            prepared_push.response,
+            push.push_id,
+            deadline,
+        );
+        _ = try self.sendProtectedPushBodyAndTrailersUntil(
+            to,
             request_stream_id,
             prepared_response.value,
-            push_stream_id,
-            prepared_push,
-            &self.qpack_encode,
-            &self.qpack_encoder_send,
-            &self.qpack_encoder_prefix_sent,
-            &self.next_packet_number,
-            &self.protected_send,
+            null,
+            deadline,
         );
-        self.sent_push_ids.appendAssumeCapacity(push.push_id);
-        self.peer_promised_push_ids.appendAssumeCapacity(push.push_id);
+        self.control.retirePushPriority(
+            self.quic_server.endpoint.allocator,
+            push.push_id,
+        );
+        if (push_cancelled) {
+            clean_push_cancellation = true;
+            return error.RequestCancelled;
+        }
+        return push_stream_id;
+    }
+
+    fn sendProtectedPushBodyAndTrailersUntil(
+        self: *ProtectedServer,
+        to: net.IpAddress,
+        stream_id: u62,
+        response: http3.Response,
+        push_id: ?u64,
+        deadline: ?std.Io.Clock.Timestamp,
+    ) ReceiveTimeoutError!bool {
+        if (self.outbound_bodies.find(stream_id) == null) {
+            if (push_id == null) {
+                finishServerRequest(
+                    &self.control,
+                    &self.request_lifecycle,
+                    stream_id,
+                );
+            }
+            return false;
+        }
+        if (push_id) |id| {
+            return self.sendProtectedPacedPushBodyAndTrailersUntil(
+                to,
+                id,
+                stream_id,
+                response,
+                deadline,
+            );
+        }
+        if (response.body.len != 0) {
+            if (deadline) |absolute| {
+                var progress: BodyWriteProgress = .{};
+                try self.sendResponseBodyPacedWithDeadline(
+                    to,
+                    stream_id,
+                    response.body,
+                    response.trailers.len == 0,
+                    &progress,
+                    absolute,
+                );
+            } else {
+                try self.sendResponseBodyPaced(
+                    to,
+                    stream_id,
+                    response.body,
+                    response.trailers.len == 0,
+                );
+            }
+        }
+        if (response.trailers.len != 0) {
+            if (deadline) |absolute| {
+                try self.finishResponseTrailersPacedWithDeadline(
+                    to,
+                    stream_id,
+                    response.trailers,
+                    absolute,
+                );
+            } else {
+                try self.finishResponseTrailersPaced(
+                    to,
+                    stream_id,
+                    response.trailers,
+                );
+            }
+        }
+        return false;
+    }
+
+    fn sendProtectedPacedPushBodyAndTrailersUntil(
+        self: *ProtectedServer,
+        to: net.IpAddress,
+        push_id: u64,
+        push_stream_id: u62,
+        response: http3.Response,
+        deadline: ?std.Io.Clock.Timestamp,
+    ) ReceiveTimeoutError!bool {
+        if (self.config.peer_stream_flow_window) |window| {
+            try self.outbound_bodies.enableFlowLimit(push_stream_id, window);
+        }
+        const chunk_limit = pacedProtectedBodyChunkLimit(self.config);
+        var offset: usize = 0;
+        while (offset < response.body.len) {
+            const end = @min(response.body.len, offset + chunk_limit);
+            while (true) {
+                if (self.control.pushCancelled(push_id)) {
+                    try self.finishProtectedCancelledPacedPush(
+                        to,
+                        push_id,
+                        push_stream_id,
+                        deadline,
+                    );
+                    return true;
+                }
+                if (deadline) |absolute| {
+                    sendProtectedBodyChunkWithDeadline(
+                        &self.quic_server.endpoint,
+                        to,
+                        self.config,
+                        &self.next_packet_number,
+                        &self.protected_send,
+                        &self.outbound_bodies,
+                        push_stream_id,
+                        response.body[offset..end],
+                        response.trailers.len == 0 and end == response.body.len,
+                        absolute,
+                    ) catch |err| switch (err) {
+                        error.FlowControlBlocked, error.CongestionLimited => {
+                            try self.receiveRequestPacketWithDeadline(absolute);
+                            continue;
+                        },
+                        else => |other| return @errorCast(other),
+                    };
+                } else {
+                    sendProtectedBodyChunk(
+                        &self.quic_server.endpoint,
+                        to,
+                        self.config,
+                        &self.next_packet_number,
+                        &self.protected_send,
+                        &self.outbound_bodies,
+                        push_stream_id,
+                        response.body[offset..end],
+                        response.trailers.len == 0 and end == response.body.len,
+                    ) catch |err| switch (err) {
+                        error.FlowControlBlocked, error.CongestionLimited => {
+                            _ = try self.receiveRequestPacketTimeout(100_000);
+                            continue;
+                        },
+                        else => |other| return @errorCast(other),
+                    };
+                }
+                break;
+            }
+            offset = end;
+        }
+        if (response.trailers.len == 0) return false;
+        while (true) {
+            if (self.control.pushCancelled(push_id)) {
+                try self.finishProtectedCancelledPacedPush(
+                    to,
+                    push_id,
+                    push_stream_id,
+                    deadline,
+                );
+                return true;
+            }
+            if (deadline) |absolute| {
+                sendProtectedTrailersWithDeadline(
+                    &self.quic_server.endpoint,
+                    to,
+                    self.config,
+                    &self.next_packet_number,
+                    &self.protected_send,
+                    &self.outbound_bodies,
+                    push_stream_id,
+                    response.trailers,
+                    self.control.settings.peer,
+                    &self.qpack_encode,
+                    &self.qpack_encoder_send,
+                    &self.qpack_encoder_prefix_sent,
+                    &self.stream_send_scratch,
+                    absolute,
+                ) catch |err| switch (err) {
+                    error.FlowControlBlocked, error.CongestionLimited => {
+                        try self.receiveRequestPacketWithDeadline(absolute);
+                        continue;
+                    },
+                    else => |other| return @errorCast(other),
+                };
+            } else {
+                sendProtectedTrailers(
+                    &self.quic_server.endpoint,
+                    to,
+                    self.config,
+                    &self.next_packet_number,
+                    &self.protected_send,
+                    &self.outbound_bodies,
+                    push_stream_id,
+                    response.trailers,
+                    self.control.settings.peer,
+                    &self.qpack_encode,
+                    &self.qpack_encoder_send,
+                    &self.qpack_encoder_prefix_sent,
+                    &self.stream_send_scratch,
+                ) catch |err| switch (err) {
+                    error.FlowControlBlocked, error.CongestionLimited => {
+                        _ = try self.receiveRequestPacketTimeout(100_000);
+                        continue;
+                    },
+                    else => |other| return @errorCast(other),
+                };
+            }
+            return false;
+        }
+    }
+
+    fn finishProtectedCancelledPacedPush(
+        self: *ProtectedServer,
+        to: net.IpAddress,
+        push_id: u64,
+        push_stream_id: u62,
+        deadline: ?std.Io.Clock.Timestamp,
+    ) ReceiveTimeoutError!void {
+        const entry = self.outbound_bodies.find(push_stream_id);
+        const final_size = if (entry) |body| body.send.next_offset else 0;
+        const frames = [_]quic.Frame{.{ .reset_stream = .{
+            .stream_id = push_stream_id,
+            .application_error_code = http3.ApplicationErrorCode.request_cancelled,
+            .final_size = final_size,
+        } }};
+        if (deadline) |absolute| {
+            try self.protected_send.sendFramesWithDeadline(
+                &self.quic_server.endpoint,
+                to,
+                self.config.send_keys,
+                self.config.peer_connection_id,
+                &self.next_packet_number,
+                &frames,
+                self.config.max_frames_per_packet,
+                absolute,
+            );
+        } else {
+            try sendProtectedFrames(
+                &self.quic_server.endpoint,
+                to,
+                self.config.send_keys,
+                self.config.peer_connection_id,
+                &self.next_packet_number,
+                &frames,
+                self.config.max_frames_per_packet,
+                &self.protected_send,
+            );
+        }
+        self.qpack_encode.abandonStream(push_stream_id);
+        _ = self.outbound_bodies.finish(push_stream_id);
+        self.control.retirePushPriority(
+            self.quic_server.endpoint.allocator,
+            push_id,
+        );
+    }
+
+    pub fn sendResponseWithPushAndTimeout(
+        self: *ProtectedServer,
+        to: net.IpAddress,
+        request_stream_id: u62,
+        response: http3.Response,
+        push: ServerPush,
+        timeout: std.Io.Duration,
+    ) ReceiveTimeoutError!u62 {
+        if (timeout.nanoseconds <= 0) return error.Timeout;
+        return self.sendResponseWithPushAndDeadline(
+            to,
+            request_stream_id,
+            response,
+            push,
+            .fromNow(self.quic_server.endpoint.io, .{
+                .raw = timeout,
+                .clock = .awake,
+            }),
+        );
+    }
+
+    pub fn sendResponseWithPushAndDeadline(
+        self: *ProtectedServer,
+        to: net.IpAddress,
+        request_stream_id: u62,
+        response: http3.Response,
+        push: ServerPush,
+        deadline: std.Io.Clock.Timestamp,
+    ) ReceiveTimeoutError!u62 {
+        _ = try deadline_policy.usableAwake(
+            self.quic_server.endpoint.io,
+            deadline,
+        );
+        return self.sendResponseWithPushUntil(
+            to,
+            request_stream_id,
+            response,
+            push,
+            deadline,
+        );
+    }
+
+    fn sendResponseWithPushUntil(
+        self: *ProtectedServer,
+        to: net.IpAddress,
+        request_stream_id: u62,
+        response: http3.Response,
+        push: ServerPush,
+        deadline: ?std.Io.Clock.Timestamp,
+    ) ReceiveTimeoutError!u62 {
+        const push_stream_id = self.next_push_stream_id;
+        if (deadline) |absolute| {
+            try sendProtectedSettingsWithDeadline(
+                &self.quic_server.endpoint,
+                to,
+                self.config,
+                &self.control,
+                &self.control_send,
+                &self.qpack_encoder_send,
+                &self.qpack_encoder_prefix_sent,
+                &self.qpack_decoder_send,
+                &self.qpack_decoder_prefix_sent,
+                &self.next_packet_number,
+                &self.protected_send,
+                server_control_stream_id,
+                absolute,
+            );
+        } else {
+            try sendProtectedSettings(
+                &self.quic_server.endpoint,
+                to,
+                self.config,
+                &self.control,
+                &self.control_send,
+                &self.qpack_encoder_send,
+                &self.qpack_encoder_prefix_sent,
+                &self.qpack_decoder_send,
+                &self.qpack_decoder_prefix_sent,
+                &self.next_packet_number,
+                &self.protected_send,
+                server_control_stream_id,
+            );
+        }
+        const max_push_id = self.control.peer_max_push_id orelse
+            return error.PushIdExceeded;
+        if (push.push_id > max_push_id) return error.PushIdExceeded;
+        try validateNewServerPush(
+            self.control,
+            self.promised_push_ids,
+            push.push_id,
+        );
+        try self.promised_push_ids.prepareInsertValue(
+            self.quic_server.endpoint.allocator,
+            push.push_id,
+        );
+        const next_push_stream_id = std.math.add(
+            u62,
+            push_stream_id,
+            4,
+        ) catch return error.StreamCreationError;
+        const automatic_date = if (self.config.auto_date_header and
+            (server_response.headerValue(response.headers, "date") == null or
+                server_response.headerValue(push.response.headers, "date") == null))
+            server_response.cachedDate(true, self.quic_server.endpoint.io)
+        else
+            null;
+        var response_headers_stack: [server_response.header_stack_capacity]http3.Qpack.HeaderField =
+            undefined;
+        var prepared_response = try server_response.prepare(
+            self.quic_server.endpoint.allocator,
+            response,
+            automatic_date,
+            &response_headers_stack,
+        );
+        defer prepared_response.deinit(self.quic_server.endpoint.allocator);
+        var push_headers_stack: [server_response.header_stack_capacity]http3.Qpack.HeaderField =
+            undefined;
+        var prepared_push_response = try server_response.prepare(
+            self.quic_server.endpoint.allocator,
+            push.response,
+            automatic_date,
+            &push_headers_stack,
+        );
+        defer prepared_push_response.deinit(
+            self.quic_server.endpoint.allocator,
+        );
+        var prepared_push = push;
+        prepared_push.response = prepared_push_response.value;
+        if (deadline) |absolute| {
+            try sendProtectedPushWithDeadline(
+                &self.quic_server.endpoint,
+                to,
+                self.config,
+                &self.push_send_scratch,
+                self.control.settings.peer,
+                request_stream_id,
+                prepared_response.value,
+                push_stream_id,
+                prepared_push,
+                &self.qpack_encode,
+                &self.qpack_encoder_send,
+                &self.qpack_encoder_prefix_sent,
+                &self.next_packet_number,
+                &self.protected_send,
+                absolute,
+            );
+        } else {
+            try sendProtectedPush(
+                &self.quic_server.endpoint,
+                to,
+                self.config,
+                &self.push_send_scratch,
+                self.control.settings.peer,
+                request_stream_id,
+                prepared_response.value,
+                push_stream_id,
+                prepared_push,
+                &self.qpack_encode,
+                &self.qpack_encoder_send,
+                &self.qpack_encoder_prefix_sent,
+                &self.next_packet_number,
+                &self.protected_send,
+            );
+        }
+        self.promised_push_ids.insertAssumeCapacity(push.push_id);
         self.next_push_stream_id = next_push_stream_id;
         finishServerRequest(&self.control, &self.request_lifecycle, request_stream_id);
         self.control.retirePushPriority(
@@ -12345,20 +17775,100 @@ pub const ProtectedServer = struct {
         response: http3.Response,
         body_length: ?usize,
     ) Error!void {
-        try sendProtectedSettings(
-            &self.quic_server.endpoint,
+        return self.startResponseUntil(
             to,
-            self.config,
-            &self.control,
-            &self.control_send,
-            &self.qpack_encoder_send,
-            &self.qpack_encoder_prefix_sent,
-            &self.qpack_decoder_send,
-            &self.qpack_decoder_prefix_sent,
-            &self.next_packet_number,
-            &self.protected_send,
-            server_control_stream_id,
+            stream_id,
+            response,
+            body_length,
+            null,
+        ) catch |err| switch (err) {
+            error.Timeout, error.ConcurrencyUnavailable => unreachable,
+            else => |other| return @errorCast(other),
+        };
+    }
+
+    pub fn startResponseWithTimeout(
+        self: *ProtectedServer,
+        to: net.IpAddress,
+        stream_id: u62,
+        response: http3.Response,
+        body_length: ?usize,
+        timeout: std.Io.Duration,
+    ) ReceiveTimeoutError!void {
+        if (timeout.nanoseconds <= 0) return error.Timeout;
+        return self.startResponseWithDeadline(
+            to,
+            stream_id,
+            response,
+            body_length,
+            .fromNow(self.quic_server.endpoint.io, .{
+                .raw = timeout,
+                .clock = .awake,
+            }),
         );
+    }
+
+    pub fn startResponseWithDeadline(
+        self: *ProtectedServer,
+        to: net.IpAddress,
+        stream_id: u62,
+        response: http3.Response,
+        body_length: ?usize,
+        deadline: std.Io.Clock.Timestamp,
+    ) ReceiveTimeoutError!void {
+        _ = try deadline_policy.usableAwake(
+            self.quic_server.endpoint.io,
+            deadline,
+        );
+        return self.startResponseUntil(
+            to,
+            stream_id,
+            response,
+            body_length,
+            deadline,
+        );
+    }
+
+    fn startResponseUntil(
+        self: *ProtectedServer,
+        to: net.IpAddress,
+        stream_id: u62,
+        response: http3.Response,
+        body_length: ?usize,
+        deadline: ?std.Io.Clock.Timestamp,
+    ) ReceiveTimeoutError!void {
+        if (deadline) |absolute| {
+            try sendProtectedSettingsWithDeadline(
+                &self.quic_server.endpoint,
+                to,
+                self.config,
+                &self.control,
+                &self.control_send,
+                &self.qpack_encoder_send,
+                &self.qpack_encoder_prefix_sent,
+                &self.qpack_decoder_send,
+                &self.qpack_decoder_prefix_sent,
+                &self.next_packet_number,
+                &self.protected_send,
+                server_control_stream_id,
+                absolute,
+            );
+        } else {
+            try sendProtectedSettings(
+                &self.quic_server.endpoint,
+                to,
+                self.config,
+                &self.control,
+                &self.control_send,
+                &self.qpack_encoder_send,
+                &self.qpack_encoder_prefix_sent,
+                &self.qpack_decoder_send,
+                &self.qpack_decoder_prefix_sent,
+                &self.next_packet_number,
+                &self.protected_send,
+                server_control_stream_id,
+            );
+        }
         self.stream_send_scratch.reset();
         var response_headers_stack: [server_response.header_stack_capacity]http3.Qpack.HeaderField =
             undefined;
@@ -12382,21 +17892,40 @@ pub const ProtectedServer = struct {
             &self.qpack_encode,
         );
         errdefer self.qpack_encode.abandonStream(stream_id);
-        try sendProtectedStreamingHead(
-            &self.quic_server.endpoint,
-            to,
-            self.config,
-            &self.stream_send_scratch,
-            stream_id,
-            streaming.expected_length,
-            streaming.body_allowed,
-            &self.qpack_encode,
-            &self.qpack_encoder_send,
-            &self.qpack_encoder_prefix_sent,
-            &self.next_packet_number,
-            &self.protected_send,
-            &self.outbound_bodies,
-        );
+        if (deadline) |absolute| {
+            try sendProtectedStreamingHeadWithDeadline(
+                &self.quic_server.endpoint,
+                to,
+                self.config,
+                &self.stream_send_scratch,
+                stream_id,
+                streaming.expected_length,
+                streaming.body_allowed,
+                &self.qpack_encode,
+                &self.qpack_encoder_send,
+                &self.qpack_encoder_prefix_sent,
+                &self.next_packet_number,
+                &self.protected_send,
+                &self.outbound_bodies,
+                absolute,
+            );
+        } else {
+            try sendProtectedStreamingHead(
+                &self.quic_server.endpoint,
+                to,
+                self.config,
+                &self.stream_send_scratch,
+                stream_id,
+                streaming.expected_length,
+                streaming.body_allowed,
+                &self.qpack_encode,
+                &self.qpack_encoder_send,
+                &self.qpack_encoder_prefix_sent,
+                &self.next_packet_number,
+                &self.protected_send,
+                &self.outbound_bodies,
+            );
+        }
         if (!streaming.body_allowed or
             streaming.expected_length == 0)
         {
@@ -12453,6 +17982,92 @@ pub const ProtectedServer = struct {
         }
     }
 
+    pub fn sendResponseBodyPacedWithTimeout(
+        self: *ProtectedServer,
+        to: net.IpAddress,
+        stream_id: u62,
+        data: []const u8,
+        fin: bool,
+        progress: *BodyWriteProgress,
+        timeout: std.Io.Duration,
+    ) ReceiveTimeoutError!void {
+        progress.* = .{};
+        if (timeout.nanoseconds <= 0) return error.Timeout;
+        return self.sendResponseBodyPacedWithDeadline(
+            to,
+            stream_id,
+            data,
+            fin,
+            progress,
+            .fromNow(self.quic_server.endpoint.io, .{
+                .raw = timeout,
+                .clock = .awake,
+            }),
+        );
+    }
+
+    pub fn sendResponseBodyPacedWithDeadline(
+        self: *ProtectedServer,
+        to: net.IpAddress,
+        stream_id: u62,
+        data: []const u8,
+        fin: bool,
+        progress: *BodyWriteProgress,
+        deadline: std.Io.Clock.Timestamp,
+    ) ReceiveTimeoutError!void {
+        progress.* = .{};
+        _ = try deadline_policy.usableAwake(
+            self.quic_server.endpoint.io,
+            deadline,
+        );
+        if (self.config.peer_stream_flow_window) |window| {
+            try self.outbound_bodies.enableFlowLimit(stream_id, window);
+        }
+        try validateBodyWrite(&self.outbound_bodies, stream_id, data.len, fin);
+        if (data.len == 0) {
+            var committed_chunks: usize = 0;
+            self.sendResponseBodyBatchPacedWithDeadline(
+                to,
+                &.{.{ .stream_id = stream_id, .data = data, .fin = fin }},
+                &committed_chunks,
+                deadline,
+            ) catch |err| {
+                progress.fin_committed = committed_chunks == 1 and fin;
+                return err;
+            };
+            progress.fin_committed = fin;
+            return;
+        }
+        const chunk_limit = pacedProtectedBodyChunkLimit(self.config);
+        while (progress.committed_bytes < data.len) {
+            const end = @min(
+                data.len,
+                progress.committed_bytes + chunk_limit,
+            );
+            const last = end == data.len;
+            var committed_chunks: usize = 0;
+            self.sendResponseBodyBatchPacedWithDeadline(
+                to,
+                &.{.{
+                    .stream_id = stream_id,
+                    .data = data[progress.committed_bytes..end],
+                    .fin = fin and last,
+                }},
+                &committed_chunks,
+                deadline,
+            ) catch |err| {
+                if (committed_chunks == 1) {
+                    progress.committed_bytes = end;
+                    progress.fin_committed = fin and last;
+                }
+                return err;
+            };
+            std.debug.assert(committed_chunks == 1);
+            progress.committed_bytes = end;
+            progress.fin_committed = fin and last;
+        }
+    }
+
     /// Send one logical response DATA sequence from borrowed slices without
     /// joining them in caller storage. Empty slices are ignored, and `fin` is
     /// attached only to the final non-empty contribution.
@@ -12482,6 +18097,80 @@ pub const ProtectedServer = struct {
         }
     }
 
+    pub fn sendResponseBodyPartsPacedWithTimeout(
+        self: *ProtectedServer,
+        to: net.IpAddress,
+        stream_id: u62,
+        parts: []const []const u8,
+        fin: bool,
+        progress: *BodyWriteProgress,
+        timeout: std.Io.Duration,
+    ) ReceiveTimeoutError!void {
+        progress.* = .{};
+        if (timeout.nanoseconds <= 0) return error.Timeout;
+        return self.sendResponseBodyPartsPacedWithDeadline(
+            to,
+            stream_id,
+            parts,
+            fin,
+            progress,
+            .fromNow(self.quic_server.endpoint.io, .{
+                .raw = timeout,
+                .clock = .awake,
+            }),
+        );
+    }
+
+    pub fn sendResponseBodyPartsPacedWithDeadline(
+        self: *ProtectedServer,
+        to: net.IpAddress,
+        stream_id: u62,
+        parts: []const []const u8,
+        fin: bool,
+        progress: *BodyWriteProgress,
+        deadline: std.Io.Clock.Timestamp,
+    ) ReceiveTimeoutError!void {
+        progress.* = .{};
+        _ = try deadline_policy.usableAwake(
+            self.quic_server.endpoint.io,
+            deadline,
+        );
+        const total_len = try bodyPartsLength(parts);
+        try validateBodyWrite(&self.outbound_bodies, stream_id, total_len, fin);
+        if (total_len == 0) {
+            return self.sendResponseBodyPacedWithDeadline(
+                to,
+                stream_id,
+                &.{},
+                fin,
+                progress,
+                deadline,
+            );
+        }
+        var non_empty: usize = 0;
+        for (parts) |part| non_empty += @intFromBool(part.len != 0);
+        var sent: usize = 0;
+        for (parts) |part| {
+            if (part.len == 0) continue;
+            sent += 1;
+            var part_progress: BodyWriteProgress = .{};
+            self.sendResponseBodyPacedWithDeadline(
+                to,
+                stream_id,
+                part,
+                fin and sent == non_empty,
+                &part_progress,
+                deadline,
+            ) catch |err| {
+                progress.committed_bytes += part_progress.committed_bytes;
+                progress.fin_committed = part_progress.fin_committed;
+                return err;
+            };
+            progress.committed_bytes += part_progress.committed_bytes;
+            progress.fin_committed = part_progress.fin_committed;
+        }
+    }
+
     /// Send one DATA contribution per response stream in socket batches. All
     /// streams must belong to `to`; a socket-visible prefix commits exactly
     /// the corresponding HTTP/3 offsets and FIN states.
@@ -12504,6 +18193,49 @@ pub const ProtectedServer = struct {
         );
     }
 
+    pub fn sendResponseBodyBatchPacedWithTimeout(
+        self: *ProtectedServer,
+        to: net.IpAddress,
+        chunks: []const BodyChunk,
+        committed_chunks: *usize,
+        timeout: std.Io.Duration,
+    ) ReceiveTimeoutError!void {
+        committed_chunks.* = 0;
+        if (timeout.nanoseconds <= 0) return error.Timeout;
+        return self.sendResponseBodyBatchPacedWithDeadline(
+            to,
+            chunks,
+            committed_chunks,
+            .fromNow(self.quic_server.endpoint.io, .{
+                .raw = timeout,
+                .clock = .awake,
+            }),
+        );
+    }
+
+    pub fn sendResponseBodyBatchPacedWithDeadline(
+        self: *ProtectedServer,
+        to: net.IpAddress,
+        chunks: []const BodyChunk,
+        committed_chunks: *usize,
+        deadline: std.Io.Clock.Timestamp,
+    ) ReceiveTimeoutError!void {
+        return sendProtectedBodyBatchPacedWithDeadline(
+            &self.quic_server.endpoint,
+            to,
+            self.config,
+            &self.next_packet_number,
+            &self.protected_send,
+            &self.outbound_bodies,
+            chunks,
+            self,
+            ProtectedServer.receiveBatchProgressForSendUntil,
+            ProtectedServer.finishBatchResponseStream,
+            committed_chunks,
+            deadline,
+        );
+    }
+
     /// Send complete response bodies according to RFC 9218 request priority.
     /// The lightweight runtime has no congestion controller, so eligibility
     /// is derived from the configured peer stream window and packet-size
@@ -12513,6 +18245,69 @@ pub const ProtectedServer = struct {
         to: net.IpAddress,
         responses: []const ResponseBody,
     ) Error!void {
+        return self.sendResponseBodiesPacedUntil(
+            to,
+            responses,
+            null,
+            null,
+        ) catch |err| switch (err) {
+            error.Timeout, error.ConcurrencyUnavailable => unreachable,
+            else => |other| return @errorCast(other),
+        };
+    }
+
+    pub fn sendResponseBodiesPacedWithTimeout(
+        self: *ProtectedServer,
+        to: net.IpAddress,
+        responses: []const ResponseBody,
+        committed_bytes: []usize,
+        timeout: std.Io.Duration,
+    ) ReceiveTimeoutError!void {
+        if (committed_bytes.len < responses.len) return error.BufferTooShort;
+        @memset(committed_bytes[0..responses.len], 0);
+        if (timeout.nanoseconds <= 0) return error.Timeout;
+        return self.sendResponseBodiesPacedWithDeadline(
+            to,
+            responses,
+            committed_bytes,
+            .fromNow(self.quic_server.endpoint.io, .{
+                .raw = timeout,
+                .clock = .awake,
+            }),
+        );
+    }
+
+    /// Priority-schedule protected response bodies under one absolute
+    /// deadline. Each count advances only for DATA accepted by the socket, so
+    /// callers can retry the exact unsent suffix of every unfinished stream.
+    pub fn sendResponseBodiesPacedWithDeadline(
+        self: *ProtectedServer,
+        to: net.IpAddress,
+        responses: []const ResponseBody,
+        committed_bytes: []usize,
+        deadline: std.Io.Clock.Timestamp,
+    ) ReceiveTimeoutError!void {
+        if (committed_bytes.len < responses.len) return error.BufferTooShort;
+        @memset(committed_bytes[0..responses.len], 0);
+        _ = try deadline_policy.usableAwake(
+            self.quic_server.endpoint.io,
+            deadline,
+        );
+        return self.sendResponseBodiesPacedUntil(
+            to,
+            responses,
+            committed_bytes,
+            deadline,
+        );
+    }
+
+    fn sendResponseBodiesPacedUntil(
+        self: *ProtectedServer,
+        to: net.IpAddress,
+        responses: []const ResponseBody,
+        committed_bytes: ?[]usize,
+        deadline: ?std.Io.Clock.Timestamp,
+    ) ReceiveTimeoutError!void {
         if (responses.len == 0) return;
         const allocator = self.quic_server.endpoint.allocator;
         var workspace: response_scheduler.Workspace(
@@ -12523,9 +18318,14 @@ pub const ProtectedServer = struct {
         const candidates = workspace.candidates();
 
         for (responses, 0..) |response, index| {
-            if (self.outbound_bodies.find(response.stream_id) == null) {
+            const body = self.outbound_bodies.find(response.stream_id) orelse
                 return error.UnexpectedStream;
-            }
+            var staged = body.*;
+            try self.outbound_bodies.prepareChunkForEntry(
+                &staged,
+                response.data.len,
+                true,
+            );
             if (!workspace.registerResponse(index, response.stream_id)) {
                 return error.UnexpectedStream;
             }
@@ -12540,12 +18340,22 @@ pub const ProtectedServer = struct {
         var remaining_responses = responses.len;
         var next_stream: usize = 0;
         while (remaining_responses != 0) {
+            if (deadline) |absolute| {
+                _ = try deadline_policy.usableAwake(
+                    self.quic_server.endpoint.io,
+                    absolute,
+                );
+            }
             const selection = self.refreshProtectedResponseCandidates(
                 responses,
                 candidates,
                 chunk_limit,
             ) orelse {
-                try self.receiveBatchProgressForSend();
+                if (deadline) |absolute| {
+                    try self.receiveBatchProgressForSendUntil(absolute);
+                } else {
+                    try self.receiveBatchProgressForSend();
+                }
                 continue;
             };
             workspace.stageSelected(
@@ -12556,26 +18366,58 @@ pub const ProtectedServer = struct {
                 max_batch_packets,
             );
             if (workspace.chunks().len == 0) {
-                try self.receiveBatchProgressForSend();
+                if (deadline) |absolute| {
+                    try self.receiveBatchProgressForSendUntil(absolute);
+                } else {
+                    try self.receiveBatchProgressForSend();
+                }
                 continue;
             }
-            const sent_count = sendProtectedBodyBatchProgress(
-                &self.quic_server.endpoint,
-                to,
-                self.config,
-                &self.next_packet_number,
-                &self.protected_send,
-                &self.outbound_bodies,
-                workspace.chunks(),
-                self,
-                ProtectedServer.finishBatchResponseStream,
-            ) catch |err| switch (err) {
-                error.FlowControlBlocked, error.CongestionLimited => {
-                    try self.receiveBatchProgressForSend();
-                    continue;
-                },
-                else => return err,
-            };
+            var sent_count: usize = 0;
+            if (deadline) |absolute| {
+                self.sendResponseBodyBatchPacedWithDeadline(
+                    to,
+                    workspace.chunks(),
+                    &sent_count,
+                    absolute,
+                ) catch |err| {
+                    if (committed_bytes) |counts| {
+                        for (workspace.chunks()[0..sent_count], 0..) |chunk, batch_index| {
+                            const response_index =
+                                workspace.responseIndex(batch_index);
+                            counts[response_index] += chunk.data.len;
+                        }
+                    }
+                    if (sent_count != 0) {
+                        _ = workspace.commitSentPrefix(sent_count);
+                    }
+                    return err;
+                };
+            } else {
+                sent_count = sendProtectedBodyBatchProgress(
+                    &self.quic_server.endpoint,
+                    to,
+                    self.config,
+                    &self.next_packet_number,
+                    &self.protected_send,
+                    &self.outbound_bodies,
+                    workspace.chunks(),
+                    self,
+                    ProtectedServer.finishBatchResponseStream,
+                ) catch |err| switch (err) {
+                    error.FlowControlBlocked, error.CongestionLimited => {
+                        try self.receiveBatchProgressForSend();
+                        continue;
+                    },
+                    else => return err,
+                };
+            }
+            if (committed_bytes) |counts| {
+                for (workspace.chunks()[0..sent_count], 0..) |chunk, batch_index| {
+                    const response_index = workspace.responseIndex(batch_index);
+                    counts[response_index] += chunk.data.len;
+                }
+            }
             const commit = workspace.commitSentPrefix(sent_count);
             remaining_responses -= commit.completed_responses;
             if (selection.exclusive_index == null) {
@@ -12648,6 +18490,13 @@ pub const ProtectedServer = struct {
         _ = try self.receiveRequestPacketTimeout(100_000);
     }
 
+    fn receiveBatchProgressForSendUntil(
+        self: *ProtectedServer,
+        deadline: std.Io.Clock.Timestamp,
+    ) ReceiveTimeoutError!void {
+        try self.receiveRequestPacketWithDeadline(deadline);
+    }
+
     fn finishBatchResponseStream(
         self: *ProtectedServer,
         stream_id: u62,
@@ -12717,6 +18566,72 @@ pub const ProtectedServer = struct {
         }
     }
 
+    pub fn finishResponseTrailersPacedWithTimeout(
+        self: *ProtectedServer,
+        to: net.IpAddress,
+        stream_id: u62,
+        trailers: []const http3.Qpack.HeaderField,
+        timeout: std.Io.Duration,
+    ) ReceiveTimeoutError!void {
+        if (timeout.nanoseconds <= 0) return error.Timeout;
+        return self.finishResponseTrailersPacedWithDeadline(
+            to,
+            stream_id,
+            trailers,
+            .fromNow(self.quic_server.endpoint.io, .{
+                .raw = timeout,
+                .clock = .awake,
+            }),
+        );
+    }
+
+    /// Finish a protected streaming response with trailers under one
+    /// absolute deadline. A timeout before a packet is socket-visible leaves
+    /// the body and QPACK section retryable; a visible prefix follows the
+    /// protected packetizer's fail-closed rule.
+    pub fn finishResponseTrailersPacedWithDeadline(
+        self: *ProtectedServer,
+        to: net.IpAddress,
+        stream_id: u62,
+        trailers: []const http3.Qpack.HeaderField,
+        deadline: std.Io.Clock.Timestamp,
+    ) ReceiveTimeoutError!void {
+        _ = try deadline_policy.usableAwake(
+            self.quic_server.endpoint.io,
+            deadline,
+        );
+        while (true) {
+            sendProtectedTrailersWithDeadline(
+                &self.quic_server.endpoint,
+                to,
+                self.config,
+                &self.next_packet_number,
+                &self.protected_send,
+                &self.outbound_bodies,
+                stream_id,
+                trailers,
+                self.control.settings.peer,
+                &self.qpack_encode,
+                &self.qpack_encoder_send,
+                &self.qpack_encoder_prefix_sent,
+                &self.stream_send_scratch,
+                deadline,
+            ) catch |err| switch (err) {
+                error.FlowControlBlocked, error.CongestionLimited => {
+                    try self.receiveRequestPacketWithDeadline(deadline);
+                    continue;
+                },
+                else => |other| return other,
+            };
+            finishServerRequest(
+                &self.control,
+                &self.request_lifecycle,
+                stream_id,
+            );
+            return;
+        }
+    }
+
     pub fn sendResponseWithInformational(
         self: *ProtectedServer,
         to: net.IpAddress,
@@ -12724,20 +18639,100 @@ pub const ProtectedServer = struct {
         informational: []const http3.InformationalResponse,
         response: http3.Response,
     ) Error!void {
-        try sendProtectedSettings(
-            &self.quic_server.endpoint,
+        return self.sendResponseWithInformationalUntil(
             to,
-            self.config,
-            &self.control,
-            &self.control_send,
-            &self.qpack_encoder_send,
-            &self.qpack_encoder_prefix_sent,
-            &self.qpack_decoder_send,
-            &self.qpack_decoder_prefix_sent,
-            &self.next_packet_number,
-            &self.protected_send,
-            server_control_stream_id,
+            stream_id,
+            informational,
+            response,
+            null,
+        ) catch |err| switch (err) {
+            error.Timeout, error.ConcurrencyUnavailable => unreachable,
+            else => |other| return @errorCast(other),
+        };
+    }
+
+    pub fn sendResponseWithInformationalAndTimeout(
+        self: *ProtectedServer,
+        to: net.IpAddress,
+        stream_id: u62,
+        informational: []const http3.InformationalResponse,
+        response: http3.Response,
+        timeout: std.Io.Duration,
+    ) ReceiveTimeoutError!void {
+        if (timeout.nanoseconds <= 0) return error.Timeout;
+        return self.sendResponseWithInformationalAndDeadline(
+            to,
+            stream_id,
+            informational,
+            response,
+            .fromNow(self.quic_server.endpoint.io, .{
+                .raw = timeout,
+                .clock = .awake,
+            }),
         );
+    }
+
+    pub fn sendResponseWithInformationalAndDeadline(
+        self: *ProtectedServer,
+        to: net.IpAddress,
+        stream_id: u62,
+        informational: []const http3.InformationalResponse,
+        response: http3.Response,
+        deadline: std.Io.Clock.Timestamp,
+    ) ReceiveTimeoutError!void {
+        _ = try deadline_policy.usableAwake(
+            self.quic_server.endpoint.io,
+            deadline,
+        );
+        return self.sendResponseWithInformationalUntil(
+            to,
+            stream_id,
+            informational,
+            response,
+            deadline,
+        );
+    }
+
+    fn sendResponseWithInformationalUntil(
+        self: *ProtectedServer,
+        to: net.IpAddress,
+        stream_id: u62,
+        informational: []const http3.InformationalResponse,
+        response: http3.Response,
+        deadline: ?std.Io.Clock.Timestamp,
+    ) ReceiveTimeoutError!void {
+        if (deadline) |absolute| {
+            try sendProtectedSettingsWithDeadline(
+                &self.quic_server.endpoint,
+                to,
+                self.config,
+                &self.control,
+                &self.control_send,
+                &self.qpack_encoder_send,
+                &self.qpack_encoder_prefix_sent,
+                &self.qpack_decoder_send,
+                &self.qpack_decoder_prefix_sent,
+                &self.next_packet_number,
+                &self.protected_send,
+                server_control_stream_id,
+                absolute,
+            );
+        } else {
+            try sendProtectedSettings(
+                &self.quic_server.endpoint,
+                to,
+                self.config,
+                &self.control,
+                &self.control_send,
+                &self.qpack_encoder_send,
+                &self.qpack_encoder_prefix_sent,
+                &self.qpack_decoder_send,
+                &self.qpack_decoder_prefix_sent,
+                &self.next_packet_number,
+                &self.protected_send,
+                server_control_stream_id,
+            );
+        }
         var response_headers_stack: [server_response.header_stack_capacity]http3.Qpack.HeaderField =
             undefined;
         var prepared = try server_response.prepare(
@@ -12751,41 +18746,138 @@ pub const ProtectedServer = struct {
             &response_headers_stack,
         );
         defer prepared.deinit(self.quic_server.endpoint.allocator);
-        try sendProtectedResponseSequence(
-            &self.quic_server.endpoint,
-            to,
-            self.config,
-            &self.stream_send_scratch,
-            stream_id,
-            informational,
-            prepared.value,
-            self.control.settings.peer,
-            &self.qpack_encode,
-            &self.qpack_encoder_send,
-            &self.qpack_encoder_prefix_sent,
-            &self.next_packet_number,
-            &self.protected_send,
-        );
+        if (deadline) |absolute| {
+            try sendProtectedResponseSequenceWithDeadline(
+                &self.quic_server.endpoint,
+                to,
+                self.config,
+                &self.stream_send_scratch,
+                stream_id,
+                informational,
+                prepared.value,
+                self.control.settings.peer,
+                &self.qpack_encode,
+                &self.qpack_encoder_send,
+                &self.qpack_encoder_prefix_sent,
+                &self.next_packet_number,
+                &self.protected_send,
+                absolute,
+            );
+        } else {
+            try sendProtectedResponseSequence(
+                &self.quic_server.endpoint,
+                to,
+                self.config,
+                &self.stream_send_scratch,
+                stream_id,
+                informational,
+                prepared.value,
+                self.control.settings.peer,
+                &self.qpack_encode,
+                &self.qpack_encoder_send,
+                &self.qpack_encoder_prefix_sent,
+                &self.next_packet_number,
+                &self.protected_send,
+            );
+        }
         finishServerRequest(&self.control, &self.request_lifecycle, stream_id);
     }
 
     pub fn sendGoAway(self: *ProtectedServer, to: net.IpAddress, stream_id: u64) Error!void {
-        try validateServerGoAwayStreamId(stream_id);
-        try sendProtectedSettings(
-            &self.quic_server.endpoint,
-            to,
-            self.config,
-            &self.control,
-            &self.control_send,
-            &self.qpack_encoder_send,
-            &self.qpack_encoder_prefix_sent,
-            &self.qpack_decoder_send,
-            &self.qpack_decoder_prefix_sent,
-            &self.next_packet_number,
-            &self.protected_send,
-            server_control_stream_id,
+        return self.sendGoAwayUntil(to, stream_id, null) catch |err| switch (err) {
+            error.Timeout, error.ConcurrencyUnavailable => unreachable,
+            else => |other| return @errorCast(other),
+        };
+    }
+
+    pub fn sendGoAwayWithTimeout(
+        self: *ProtectedServer,
+        to: net.IpAddress,
+        stream_id: u64,
+        timeout: std.Io.Duration,
+    ) ReceiveTimeoutError!void {
+        if (timeout.nanoseconds <= 0) return error.Timeout;
+        return self.sendGoAwayWithDeadline(to, stream_id, .fromNow(
+            self.quic_server.endpoint.io,
+            .{ .raw = timeout, .clock = .awake },
+        ));
+    }
+
+    pub fn sendGoAwayWithDeadline(
+        self: *ProtectedServer,
+        to: net.IpAddress,
+        stream_id: u64,
+        deadline: std.Io.Clock.Timestamp,
+    ) ReceiveTimeoutError!void {
+        _ = try deadline_policy.usableAwake(
+            self.quic_server.endpoint.io,
+            deadline,
         );
-        try sendProtectedControlFrame(&self.quic_server.endpoint, to, self.config, &self.control, &self.control_send, &self.next_packet_number, &self.protected_send, .goaway, stream_id);
+        return self.sendGoAwayUntil(to, stream_id, deadline);
+    }
+
+    fn sendGoAwayUntil(
+        self: *ProtectedServer,
+        to: net.IpAddress,
+        stream_id: u64,
+        deadline: ?std.Io.Clock.Timestamp,
+    ) ReceiveTimeoutError!void {
+        try validateServerGoAwayStreamId(stream_id);
+        if (deadline) |absolute| {
+            try sendProtectedSettingsWithDeadline(
+                &self.quic_server.endpoint,
+                to,
+                self.config,
+                &self.control,
+                &self.control_send,
+                &self.qpack_encoder_send,
+                &self.qpack_encoder_prefix_sent,
+                &self.qpack_decoder_send,
+                &self.qpack_decoder_prefix_sent,
+                &self.next_packet_number,
+                &self.protected_send,
+                server_control_stream_id,
+                absolute,
+            );
+            try sendProtectedControlFrameWithDeadline(
+                &self.quic_server.endpoint,
+                to,
+                self.config,
+                &self.control,
+                &self.control_send,
+                &self.next_packet_number,
+                &self.protected_send,
+                .goaway,
+                stream_id,
+                absolute,
+            );
+        } else {
+            try sendProtectedSettings(
+                &self.quic_server.endpoint,
+                to,
+                self.config,
+                &self.control,
+                &self.control_send,
+                &self.qpack_encoder_send,
+                &self.qpack_encoder_prefix_sent,
+                &self.qpack_decoder_send,
+                &self.qpack_decoder_prefix_sent,
+                &self.next_packet_number,
+                &self.protected_send,
+                server_control_stream_id,
+            );
+            try sendProtectedControlFrame(
+                &self.quic_server.endpoint,
+                to,
+                self.config,
+                &self.control,
+                &self.control_send,
+                &self.next_packet_number,
+                &self.protected_send,
+                .goaway,
+                stream_id,
+            );
+        }
     }
 
     pub fn sendOrigins(
@@ -12793,20 +18885,76 @@ pub const ProtectedServer = struct {
         to: net.IpAddress,
         origins: []const []const u8,
     ) Error!void {
-        try sendProtectedSettings(
-            &self.quic_server.endpoint,
-            to,
-            self.config,
-            &self.control,
-            &self.control_send,
-            &self.qpack_encoder_send,
-            &self.qpack_encoder_prefix_sent,
-            &self.qpack_decoder_send,
-            &self.qpack_decoder_prefix_sent,
-            &self.next_packet_number,
-            &self.protected_send,
-            server_control_stream_id,
+        return self.sendOriginsUntil(to, origins, null) catch |err| switch (err) {
+            error.Timeout, error.ConcurrencyUnavailable => unreachable,
+            else => |other| return @errorCast(other),
+        };
+    }
+
+    pub fn sendOriginsWithTimeout(
+        self: *ProtectedServer,
+        to: net.IpAddress,
+        origins: []const []const u8,
+        timeout: std.Io.Duration,
+    ) ReceiveTimeoutError!void {
+        if (timeout.nanoseconds <= 0) return error.Timeout;
+        return self.sendOriginsWithDeadline(to, origins, .fromNow(
+            self.quic_server.endpoint.io,
+            .{ .raw = timeout, .clock = .awake },
+        ));
+    }
+
+    pub fn sendOriginsWithDeadline(
+        self: *ProtectedServer,
+        to: net.IpAddress,
+        origins: []const []const u8,
+        deadline: std.Io.Clock.Timestamp,
+    ) ReceiveTimeoutError!void {
+        _ = try deadline_policy.usableAwake(
+            self.quic_server.endpoint.io,
+            deadline,
         );
+        return self.sendOriginsUntil(to, origins, deadline);
+    }
+
+    fn sendOriginsUntil(
+        self: *ProtectedServer,
+        to: net.IpAddress,
+        origins: []const []const u8,
+        deadline: ?std.Io.Clock.Timestamp,
+    ) ReceiveTimeoutError!void {
+        if (deadline) |absolute| {
+            try sendProtectedSettingsWithDeadline(
+                &self.quic_server.endpoint,
+                to,
+                self.config,
+                &self.control,
+                &self.control_send,
+                &self.qpack_encoder_send,
+                &self.qpack_encoder_prefix_sent,
+                &self.qpack_decoder_send,
+                &self.qpack_decoder_prefix_sent,
+                &self.next_packet_number,
+                &self.protected_send,
+                server_control_stream_id,
+                absolute,
+            );
+        } else {
+            try sendProtectedSettings(
+                &self.quic_server.endpoint,
+                to,
+                self.config,
+                &self.control,
+                &self.control_send,
+                &self.qpack_encoder_send,
+                &self.qpack_encoder_prefix_sent,
+                &self.qpack_decoder_send,
+                &self.qpack_decoder_prefix_sent,
+                &self.next_packet_number,
+                &self.protected_send,
+                server_control_stream_id,
+            );
+        }
         const previous_sent = self.control.local_origin_set_sent;
         errdefer self.control.local_origin_set_sent = previous_sent;
         self.protected_send.resetCriticalStreamScratch();
@@ -12824,16 +18972,29 @@ pub const ProtectedServer = struct {
             self.config.max_stream_frame_data,
             false,
         );
-        try sendProtectedFrames(
-            &self.quic_server.endpoint,
-            to,
-            self.config.send_keys,
-            self.config.peer_connection_id,
-            &self.next_packet_number,
-            self.protected_send.critical_stream_frames.items,
-            self.config.max_frames_per_packet,
-            &self.protected_send,
-        );
+        if (deadline) |absolute| {
+            try self.protected_send.sendFramesWithDeadline(
+                &self.quic_server.endpoint,
+                to,
+                self.config.send_keys,
+                self.config.peer_connection_id,
+                &self.next_packet_number,
+                self.protected_send.critical_stream_frames.items,
+                self.config.max_frames_per_packet,
+                absolute,
+            );
+        } else {
+            try sendProtectedFrames(
+                &self.quic_server.endpoint,
+                to,
+                self.config.send_keys,
+                self.config.peer_connection_id,
+                &self.next_packet_number,
+                self.protected_send.critical_stream_frames.items,
+                self.config.max_frames_per_packet,
+                &self.protected_send,
+            );
+        }
     }
 
     pub fn initiateShutdown(
@@ -12844,6 +19005,36 @@ pub const ProtectedServer = struct {
         try self.sendGoAway(
             to,
             @as(u64, quic.varint.max_value) & ~@as(u64, 0x3),
+        );
+        self.request_lifecycle.markInitialGoAwaySent();
+    }
+
+    pub fn initiateShutdownWithTimeout(
+        self: *ProtectedServer,
+        to: net.IpAddress,
+        timeout: std.Io.Duration,
+    ) ReceiveTimeoutError!void {
+        if (timeout.nanoseconds <= 0) return error.Timeout;
+        return self.initiateShutdownWithDeadline(to, .fromNow(
+            self.quic_server.endpoint.io,
+            .{ .raw = timeout, .clock = .awake },
+        ));
+    }
+
+    pub fn initiateShutdownWithDeadline(
+        self: *ProtectedServer,
+        to: net.IpAddress,
+        deadline: std.Io.Clock.Timestamp,
+    ) ReceiveTimeoutError!void {
+        _ = try deadline_policy.usableAwake(
+            self.quic_server.endpoint.io,
+            deadline,
+        );
+        if (self.request_lifecycle.state() != .active) return;
+        try self.sendGoAwayWithDeadline(
+            to,
+            @as(u64, quic.varint.max_value) & ~@as(u64, 0x3),
+            deadline,
         );
         self.request_lifecycle.markInitialGoAwaySent();
     }
@@ -12861,6 +19052,41 @@ pub const ProtectedServer = struct {
         try self.sendGoAway(
             to,
             try self.request_lifecycle.finalGoAwayId(),
+        );
+        self.request_lifecycle.markFinalGoAwaySent();
+    }
+
+    pub fn completeShutdownWithTimeout(
+        self: *ProtectedServer,
+        to: net.IpAddress,
+        timeout: std.Io.Duration,
+    ) ReceiveTimeoutError!void {
+        if (timeout.nanoseconds <= 0) return error.Timeout;
+        return self.completeShutdownWithDeadline(to, .fromNow(
+            self.quic_server.endpoint.io,
+            .{ .raw = timeout, .clock = .awake },
+        ));
+    }
+
+    pub fn completeShutdownWithDeadline(
+        self: *ProtectedServer,
+        to: net.IpAddress,
+        deadline: std.Io.Clock.Timestamp,
+    ) ReceiveTimeoutError!void {
+        _ = try deadline_policy.usableAwake(
+            self.quic_server.endpoint.io,
+            deadline,
+        );
+        if (self.request_lifecycle.state() != .initial_goaway) return;
+        if (!self.request_streams.isEmpty() or
+            self.streaming_requests.retainedCount() != 0)
+        {
+            return error.RequestIncomplete;
+        }
+        try self.sendGoAwayWithDeadline(
+            to,
+            try self.request_lifecycle.finalGoAwayId(),
+            deadline,
         );
         self.request_lifecycle.markFinalGoAwaySent();
     }
@@ -12922,7 +19148,7 @@ pub const ProtectedServer = struct {
         // even if the best-effort RESET/STOP or QPACK feedback cannot reach
         // the peer. A socket failure cannot make this request usable again.
         self.retireRequestState(stream_id);
-        try sendProtectedRequestCancellation(
+        sendProtectedRequestCancellation(
             &self.quic_server.endpoint,
             to,
             self.config,
@@ -12936,7 +19162,10 @@ pub const ProtectedServer = struct {
             local_final_size,
             send_reset,
             cancel_qpack,
-        );
+        ) catch |err| {
+            self.protected_send.failClosed();
+            return err;
+        };
     }
 
     pub fn rejectRequest(
@@ -13222,6 +19451,8 @@ pub const ProtectedClient = struct {
     next_stream_id: u62 = 0,
     next_packet_number: u64 = 0,
     expected_packet_number: u64 = 0,
+    /// Mirrors HandshakeClient's callback-scoped single receive owner.
+    callback_reader_active: bool = false,
 
     pub fn connect(allocator: std.mem.Allocator, io: std.Io, local_address: net.IpAddress, server: net.IpAddress, limits: Limits, config: ProtectedConfig) Error!ProtectedClient {
         try validateProtectedConfig(config);
@@ -13296,6 +19527,7 @@ pub const ProtectedClient = struct {
     }
 
     pub fn request(self: *ProtectedClient, request_options: http3.Request) Error!OwnedProtectedResponse {
+        if (self.callback_reader_active) return error.ConcurrentRead;
         const stream_id = try self.sendRequest(request_options);
         return self.receiveResponse(stream_id);
     }
@@ -13317,6 +19549,7 @@ pub const ProtectedClient = struct {
         request_options: http3.Request,
         deadline: std.Io.Clock.Timestamp,
     ) ReceiveTimeoutError!OwnedProtectedResponse {
+        if (self.callback_reader_active) return error.ConcurrentRead;
         return self.requestWithInformationalAndDeadline(
             request_options,
             null,
@@ -13344,6 +19577,7 @@ pub const ProtectedClient = struct {
         request_options: http3.Request,
         informational: ?http3.InformationalObserver,
     ) Error!OwnedProtectedResponse {
+        if (self.callback_reader_active) return error.ConcurrentRead;
         const stream_id = try self.sendRequest(request_options);
         return self.receiveResponseWithInformational(stream_id, informational);
     }
@@ -13371,11 +19605,15 @@ pub const ProtectedClient = struct {
         informational: ?http3.InformationalObserver,
         deadline: std.Io.Clock.Timestamp,
     ) ReceiveTimeoutError!OwnedProtectedResponse {
+        if (self.callback_reader_active) return error.ConcurrentRead;
         _ = try deadline_policy.usableAwake(
             self.quic_client.endpoint.io,
             deadline,
         );
-        const stream_id = try self.sendRequest(request_options);
+        const stream_id = try self.sendRequestWithDeadline(
+            request_options,
+            deadline,
+        );
         return self.receiveResponseWithInformationalAndDeadline(
             stream_id,
             informational,
@@ -13387,45 +19625,117 @@ pub const ProtectedClient = struct {
         self: *ProtectedClient,
         request_options: http3.Request,
     ) Error!u62 {
+        return self.sendRequestUntil(request_options, null) catch |err| switch (err) {
+            error.Timeout, error.ConcurrencyUnavailable => unreachable,
+            else => |other| return @errorCast(other),
+        };
+    }
+
+    pub fn sendRequestWithTimeout(
+        self: *ProtectedClient,
+        request_options: http3.Request,
+        timeout: std.Io.Duration,
+    ) ReceiveTimeoutError!u62 {
+        if (timeout.nanoseconds <= 0) return error.Timeout;
+        return self.sendRequestWithDeadline(request_options, .fromNow(
+            self.quic_client.endpoint.io,
+            .{ .raw = timeout, .clock = .awake },
+        ));
+    }
+
+    pub fn sendRequestWithDeadline(
+        self: *ProtectedClient,
+        request_options: http3.Request,
+        deadline: std.Io.Clock.Timestamp,
+    ) ReceiveTimeoutError!u62 {
+        _ = try deadline_policy.usableAwake(
+            self.quic_client.endpoint.io,
+            deadline,
+        );
+        return self.sendRequestUntil(request_options, deadline);
+    }
+
+    fn sendRequestUntil(
+        self: *ProtectedClient,
+        request_options: http3.Request,
+        deadline: ?std.Io.Clock.Timestamp,
+    ) ReceiveTimeoutError!u62 {
+        if (!self.protected_send.isUsable()) return error.ConnectionUnusable;
         const stream_id = self.next_stream_id;
+        const next_stream_id = std.math.add(u62, stream_id, 4) catch
+            return error.StreamCreationError;
         if (!self.control.acceptsRequestStream(stream_id)) return error.GoAwayReceived;
         try self.request_lifecycle.open(
             stream_id,
             request_options.method,
             requestHasProtocol(request_options.headers),
         );
-        errdefer _ = self.request_lifecycle.finish(stream_id) catch false;
-        self.next_stream_id += 4;
-        self.request_lifecycle.markAllocated(stream_id);
-
-        try sendProtectedSettings(
-            &self.quic_client.endpoint,
-            self.quic_client.peer,
+        var message_sent = false;
+        errdefer {
+            if (!message_sent) self.qpack_encode.abandonStream(stream_id);
+            _ = self.request_lifecycle.finish(stream_id) catch false;
+            if (!self.protected_send.isUsable()) {
+                self.next_stream_id = next_stream_id;
+                self.request_lifecycle.markAllocated(stream_id);
+            }
+        }
+        try prepareConnectionMessage(
+            self.quic_client.endpoint.allocator,
+            &self.stream_send_scratch,
+            stream_id,
+            request_options,
             self.config,
-            &self.control,
-            &self.control_send,
-            &self.qpack_encoder_send,
-            &self.qpack_encoder_prefix_sent,
-            &self.qpack_decoder_send,
-            &self.qpack_decoder_prefix_sent,
-            &self.next_packet_number,
-            &self.protected_send,
-            client_control_stream_id,
+            self.control.settings.peer,
+            &self.qpack_encode,
         );
-        try sendProtectedMessage(
+
+        if (deadline) |absolute| {
+            try sendProtectedSettingsWithDeadline(
+                &self.quic_client.endpoint,
+                self.quic_client.peer,
+                self.config,
+                &self.control,
+                &self.control_send,
+                &self.qpack_encoder_send,
+                &self.qpack_encoder_prefix_sent,
+                &self.qpack_decoder_send,
+                &self.qpack_decoder_prefix_sent,
+                &self.next_packet_number,
+                &self.protected_send,
+                client_control_stream_id,
+                absolute,
+            );
+        } else {
+            try sendProtectedSettings(
+                &self.quic_client.endpoint,
+                self.quic_client.peer,
+                self.config,
+                &self.control,
+                &self.control_send,
+                &self.qpack_encoder_send,
+                &self.qpack_encoder_prefix_sent,
+                &self.qpack_decoder_send,
+                &self.qpack_decoder_prefix_sent,
+                &self.next_packet_number,
+                &self.protected_send,
+                client_control_stream_id,
+            );
+        }
+        try sendPreparedProtectedMessageUntil(
             &self.quic_client.endpoint,
             self.quic_client.peer,
             self.config,
             &self.stream_send_scratch,
-            stream_id,
-            request_options,
-            self.control.settings.peer,
             &self.qpack_encode,
             &self.qpack_encoder_send,
             &self.qpack_encoder_prefix_sent,
             &self.next_packet_number,
             &self.protected_send,
+            deadline,
         );
+        message_sent = true;
+        self.next_stream_id = next_stream_id;
+        self.request_lifecycle.markAllocated(stream_id);
         return stream_id;
     }
 
@@ -13434,7 +19744,60 @@ pub const ProtectedClient = struct {
         request_options: http3.Request,
         body_length: ?usize,
     ) Error!u62 {
+        return self.startRequestUntil(
+            request_options,
+            body_length,
+            null,
+        ) catch |err| switch (err) {
+            error.Timeout, error.ConcurrencyUnavailable => unreachable,
+            else => |other| return @errorCast(other),
+        };
+    }
+
+    pub fn startRequestWithTimeout(
+        self: *ProtectedClient,
+        request_options: http3.Request,
+        body_length: ?usize,
+        timeout: std.Io.Duration,
+    ) ReceiveTimeoutError!u62 {
+        if (timeout.nanoseconds <= 0) return error.Timeout;
+        return self.startRequestWithDeadline(
+            request_options,
+            body_length,
+            .fromNow(self.quic_client.endpoint.io, .{
+                .raw = timeout,
+                .clock = .awake,
+            }),
+        );
+    }
+
+    pub fn startRequestWithDeadline(
+        self: *ProtectedClient,
+        request_options: http3.Request,
+        body_length: ?usize,
+        deadline: std.Io.Clock.Timestamp,
+    ) ReceiveTimeoutError!u62 {
+        _ = try deadline_policy.usableAwake(
+            self.quic_client.endpoint.io,
+            deadline,
+        );
+        return self.startRequestUntil(
+            request_options,
+            body_length,
+            deadline,
+        );
+    }
+
+    fn startRequestUntil(
+        self: *ProtectedClient,
+        request_options: http3.Request,
+        body_length: ?usize,
+        deadline: ?std.Io.Clock.Timestamp,
+    ) ReceiveTimeoutError!u62 {
+        if (!self.protected_send.isUsable()) return error.ConnectionUnusable;
         const stream_id = self.next_stream_id;
+        const next_stream_id = std.math.add(u62, stream_id, 4) catch
+            return error.StreamCreationError;
         if (!self.control.acceptsRequestStream(stream_id)) {
             return error.GoAwayReceived;
         }
@@ -13443,23 +19806,16 @@ pub const ProtectedClient = struct {
             request_options.method,
             requestHasProtocol(request_options.headers),
         );
-        errdefer _ = self.request_lifecycle.finish(stream_id) catch false;
-        self.next_stream_id += 4;
-        self.request_lifecycle.markAllocated(stream_id);
-        try sendProtectedSettings(
-            &self.quic_client.endpoint,
-            self.quic_client.peer,
-            self.config,
-            &self.control,
-            &self.control_send,
-            &self.qpack_encoder_send,
-            &self.qpack_encoder_prefix_sent,
-            &self.qpack_decoder_send,
-            &self.qpack_decoder_prefix_sent,
-            &self.next_packet_number,
-            &self.protected_send,
-            client_control_stream_id,
-        );
+        var head_sent = false;
+        errdefer {
+            if (!head_sent) self.qpack_encode.abandonStream(stream_id);
+            _ = self.request_lifecycle.finish(stream_id) catch false;
+            _ = self.outbound_bodies.finish(stream_id);
+            if (!self.protected_send.isUsable()) {
+                self.next_stream_id = next_stream_id;
+                self.request_lifecycle.markAllocated(stream_id);
+            }
+        }
         self.stream_send_scratch.reset();
         const streaming = try request_options.writeStreamingHeadDynamic(
             &self.stream_send_scratch.encoded,
@@ -13469,22 +19825,75 @@ pub const ProtectedClient = struct {
             body_length,
             &self.qpack_encode,
         );
-        errdefer self.qpack_encode.abandonStream(stream_id);
-        try sendProtectedStreamingHead(
-            &self.quic_client.endpoint,
-            self.quic_client.peer,
-            self.config,
-            &self.stream_send_scratch,
-            stream_id,
-            streaming.expected_length,
-            streaming.body_allowed,
-            &self.qpack_encode,
-            &self.qpack_encoder_send,
-            &self.qpack_encoder_prefix_sent,
-            &self.next_packet_number,
-            &self.protected_send,
-            &self.outbound_bodies,
-        );
+        if (deadline) |absolute| {
+            try sendProtectedSettingsWithDeadline(
+                &self.quic_client.endpoint,
+                self.quic_client.peer,
+                self.config,
+                &self.control,
+                &self.control_send,
+                &self.qpack_encoder_send,
+                &self.qpack_encoder_prefix_sent,
+                &self.qpack_decoder_send,
+                &self.qpack_decoder_prefix_sent,
+                &self.next_packet_number,
+                &self.protected_send,
+                client_control_stream_id,
+                absolute,
+            );
+        } else {
+            try sendProtectedSettings(
+                &self.quic_client.endpoint,
+                self.quic_client.peer,
+                self.config,
+                &self.control,
+                &self.control_send,
+                &self.qpack_encoder_send,
+                &self.qpack_encoder_prefix_sent,
+                &self.qpack_decoder_send,
+                &self.qpack_decoder_prefix_sent,
+                &self.next_packet_number,
+                &self.protected_send,
+                client_control_stream_id,
+            );
+        }
+        if (deadline) |absolute| {
+            try sendProtectedStreamingHeadWithDeadline(
+                &self.quic_client.endpoint,
+                self.quic_client.peer,
+                self.config,
+                &self.stream_send_scratch,
+                stream_id,
+                streaming.expected_length,
+                streaming.body_allowed,
+                &self.qpack_encode,
+                &self.qpack_encoder_send,
+                &self.qpack_encoder_prefix_sent,
+                &self.next_packet_number,
+                &self.protected_send,
+                &self.outbound_bodies,
+                absolute,
+            );
+        } else {
+            try sendProtectedStreamingHead(
+                &self.quic_client.endpoint,
+                self.quic_client.peer,
+                self.config,
+                &self.stream_send_scratch,
+                stream_id,
+                streaming.expected_length,
+                streaming.body_allowed,
+                &self.qpack_encode,
+                &self.qpack_encoder_send,
+                &self.qpack_encoder_prefix_sent,
+                &self.next_packet_number,
+                &self.protected_send,
+                &self.outbound_bodies,
+            );
+        }
+        head_sent = true;
+        self.next_stream_id = next_stream_id;
+        self.request_lifecycle.markAllocated(stream_id);
         return stream_id;
     }
 
@@ -13519,6 +19928,7 @@ pub const ProtectedClient = struct {
         data: []const u8,
         fin: bool,
     ) Error!void {
+        if (self.callback_reader_active) return error.ConcurrentRead;
         if (data.len == 0) {
             try self.sendRequestBodyPacedChunk(stream_id, data, fin);
             return;
@@ -13536,6 +19946,89 @@ pub const ProtectedClient = struct {
         }
     }
 
+    pub fn sendRequestBodyPacedWithTimeout(
+        self: *ProtectedClient,
+        stream_id: u62,
+        data: []const u8,
+        fin: bool,
+        progress: *BodyWriteProgress,
+        timeout: std.Io.Duration,
+    ) ReceiveTimeoutError!void {
+        if (self.callback_reader_active) return error.ConcurrentRead;
+        progress.* = .{};
+        if (timeout.nanoseconds <= 0) return error.Timeout;
+        return self.sendRequestBodyPacedWithDeadline(
+            stream_id,
+            data,
+            fin,
+            progress,
+            .fromNow(self.quic_client.endpoint.io, .{
+                .raw = timeout,
+                .clock = .awake,
+            }),
+        );
+    }
+
+    pub fn sendRequestBodyPacedWithDeadline(
+        self: *ProtectedClient,
+        stream_id: u62,
+        data: []const u8,
+        fin: bool,
+        progress: *BodyWriteProgress,
+        deadline: std.Io.Clock.Timestamp,
+    ) ReceiveTimeoutError!void {
+        if (self.callback_reader_active) return error.ConcurrentRead;
+        progress.* = .{};
+        _ = try deadline_policy.usableAwake(
+            self.quic_client.endpoint.io,
+            deadline,
+        );
+        if (!self.request_lifecycle.contains(stream_id)) {
+            return error.UnexpectedStream;
+        }
+        try validateBodyWrite(&self.outbound_bodies, stream_id, data.len, fin);
+        if (data.len == 0) {
+            var committed_chunks: usize = 0;
+            self.sendRequestBodyBatchPacedWithDeadline(
+                &.{.{ .stream_id = stream_id, .data = data, .fin = fin }},
+                &committed_chunks,
+                deadline,
+            ) catch |err| {
+                progress.fin_committed = committed_chunks == 1 and fin;
+                return err;
+            };
+            progress.fin_committed = fin;
+            return;
+        }
+        const chunk_limit = pacedProtectedBodyChunkLimit(self.config);
+        while (progress.committed_bytes < data.len) {
+            const end = @min(
+                data.len,
+                progress.committed_bytes + chunk_limit,
+            );
+            const last = end == data.len;
+            var committed_chunks: usize = 0;
+            self.sendRequestBodyBatchPacedWithDeadline(
+                &.{.{
+                    .stream_id = stream_id,
+                    .data = data[progress.committed_bytes..end],
+                    .fin = fin and last,
+                }},
+                &committed_chunks,
+                deadline,
+            ) catch |err| {
+                if (committed_chunks == 1) {
+                    progress.committed_bytes = end;
+                    progress.fin_committed = fin and last;
+                }
+                return err;
+            };
+            std.debug.assert(committed_chunks == 1);
+            progress.committed_bytes = end;
+            progress.fin_committed = fin and last;
+        }
+    }
+
     /// Client counterpart to `sendResponseBodyPartsPaced`; caller slices stay
     /// borrowed only for each synchronous protected send.
     pub fn sendRequestBodyPartsPaced(
@@ -13544,6 +20037,7 @@ pub const ProtectedClient = struct {
         parts: []const []const u8,
         fin: bool,
     ) Error!void {
+        if (self.callback_reader_active) return error.ConcurrentRead;
         var non_empty: usize = 0;
         for (parts) |part| non_empty += @intFromBool(part.len != 0);
         if (non_empty == 0) {
@@ -13562,6 +20056,80 @@ pub const ProtectedClient = struct {
         }
     }
 
+    pub fn sendRequestBodyPartsPacedWithTimeout(
+        self: *ProtectedClient,
+        stream_id: u62,
+        parts: []const []const u8,
+        fin: bool,
+        progress: *BodyWriteProgress,
+        timeout: std.Io.Duration,
+    ) ReceiveTimeoutError!void {
+        if (self.callback_reader_active) return error.ConcurrentRead;
+        progress.* = .{};
+        if (timeout.nanoseconds <= 0) return error.Timeout;
+        return self.sendRequestBodyPartsPacedWithDeadline(
+            stream_id,
+            parts,
+            fin,
+            progress,
+            .fromNow(self.quic_client.endpoint.io, .{
+                .raw = timeout,
+                .clock = .awake,
+            }),
+        );
+    }
+
+    pub fn sendRequestBodyPartsPacedWithDeadline(
+        self: *ProtectedClient,
+        stream_id: u62,
+        parts: []const []const u8,
+        fin: bool,
+        progress: *BodyWriteProgress,
+        deadline: std.Io.Clock.Timestamp,
+    ) ReceiveTimeoutError!void {
+        if (self.callback_reader_active) return error.ConcurrentRead;
+        progress.* = .{};
+        _ = try deadline_policy.usableAwake(
+            self.quic_client.endpoint.io,
+            deadline,
+        );
+        if (!self.request_lifecycle.contains(stream_id)) {
+            return error.UnexpectedStream;
+        }
+        const total_len = try bodyPartsLength(parts);
+        try validateBodyWrite(&self.outbound_bodies, stream_id, total_len, fin);
+        if (total_len == 0) {
+            return self.sendRequestBodyPacedWithDeadline(
+                stream_id,
+                &.{},
+                fin,
+                progress,
+                deadline,
+            );
+        }
+        var non_empty: usize = 0;
+        for (parts) |part| non_empty += @intFromBool(part.len != 0);
+        var sent: usize = 0;
+        for (parts) |part| {
+            if (part.len == 0) continue;
+            sent += 1;
+            var part_progress: BodyWriteProgress = .{};
+            self.sendRequestBodyPacedWithDeadline(
+                stream_id,
+                part,
+                fin and sent == non_empty,
+                &part_progress,
+                deadline,
+            ) catch |err| {
+                progress.committed_bytes += part_progress.committed_bytes;
+                progress.fin_committed = part_progress.fin_committed;
+                return err;
+            };
+            progress.committed_bytes += part_progress.committed_bytes;
+            progress.fin_committed = part_progress.fin_committed;
+        }
+    }
+
     /// Batch one DATA contribution per active request stream. The shared
     /// destination allows packet protection and the UDP send to be amortized
     /// while preserving stream state for any unsent suffix.
@@ -13569,6 +20137,7 @@ pub const ProtectedClient = struct {
         self: *ProtectedClient,
         chunks: []const BodyChunk,
     ) Error!void {
+        if (self.callback_reader_active) return error.ConcurrentRead;
         for (chunks) |chunk| {
             if (!self.request_lifecycle.contains(chunk.stream_id)) {
                 return error.UnexpectedStream;
@@ -13588,8 +20157,69 @@ pub const ProtectedClient = struct {
         );
     }
 
+    pub fn sendRequestBodyBatchPacedWithTimeout(
+        self: *ProtectedClient,
+        chunks: []const BodyChunk,
+        committed_chunks: *usize,
+        timeout: std.Io.Duration,
+    ) ReceiveTimeoutError!void {
+        if (self.callback_reader_active) return error.ConcurrentRead;
+        committed_chunks.* = 0;
+        if (timeout.nanoseconds <= 0) return error.Timeout;
+        return self.sendRequestBodyBatchPacedWithDeadline(
+            chunks,
+            committed_chunks,
+            .fromNow(self.quic_client.endpoint.io, .{
+                .raw = timeout,
+                .clock = .awake,
+            }),
+        );
+    }
+
+    pub fn sendRequestBodyBatchPacedWithDeadline(
+        self: *ProtectedClient,
+        chunks: []const BodyChunk,
+        committed_chunks: *usize,
+        deadline: std.Io.Clock.Timestamp,
+    ) ReceiveTimeoutError!void {
+        if (self.callback_reader_active) return error.ConcurrentRead;
+        committed_chunks.* = 0;
+        _ = try deadline_policy.usableAwake(
+            self.quic_client.endpoint.io,
+            deadline,
+        );
+        for (chunks) |chunk| {
+            if (!self.request_lifecycle.contains(chunk.stream_id)) {
+                return error.UnexpectedStream;
+            }
+        }
+        return sendProtectedBodyBatchPacedWithDeadline(
+            &self.quic_client.endpoint,
+            self.quic_client.peer,
+            self.config,
+            &self.next_packet_number,
+            &self.protected_send,
+            &self.outbound_bodies,
+            chunks,
+            self,
+            ProtectedClient.receiveBatchProgressForSendUntil,
+            ProtectedClient.finishBatchRequestStream,
+            committed_chunks,
+            deadline,
+        );
+    }
+
     fn receiveBatchProgressForSend(self: *ProtectedClient) Error!void {
+        if (self.callback_reader_active) return error.ConcurrentRead;
         try self.receiveResponsePacket();
+    }
+
+    fn receiveBatchProgressForSendUntil(
+        self: *ProtectedClient,
+        deadline: std.Io.Clock.Timestamp,
+    ) ReceiveTimeoutError!void {
+        if (self.callback_reader_active) return error.ConcurrentRead;
+        try self.receiveResponsePacketWithDeadline(deadline);
     }
 
     fn finishBatchRequestStream(
@@ -13649,6 +20279,7 @@ pub const ProtectedClient = struct {
         stream_id: u62,
         trailers: []const http3.Qpack.HeaderField,
     ) Error!void {
+        if (self.callback_reader_active) return error.ConcurrentRead;
         while (true) {
             self.finishRequestTrailers(stream_id, trailers) catch |err| switch (err) {
                 error.FlowControlBlocked, error.CongestionLimited => {
@@ -13656,6 +20287,64 @@ pub const ProtectedClient = struct {
                     continue;
                 },
                 else => return err,
+            };
+            return;
+        }
+    }
+
+    pub fn finishRequestTrailersPacedWithTimeout(
+        self: *ProtectedClient,
+        stream_id: u62,
+        trailers: []const http3.Qpack.HeaderField,
+        timeout: std.Io.Duration,
+    ) ReceiveTimeoutError!void {
+        if (timeout.nanoseconds <= 0) return error.Timeout;
+        return self.finishRequestTrailersPacedWithDeadline(
+            stream_id,
+            trailers,
+            .fromNow(self.quic_client.endpoint.io, .{
+                .raw = timeout,
+                .clock = .awake,
+            }),
+        );
+    }
+
+    pub fn finishRequestTrailersPacedWithDeadline(
+        self: *ProtectedClient,
+        stream_id: u62,
+        trailers: []const http3.Qpack.HeaderField,
+        deadline: std.Io.Clock.Timestamp,
+    ) ReceiveTimeoutError!void {
+        if (self.callback_reader_active) return error.ConcurrentRead;
+        _ = try deadline_policy.usableAwake(
+            self.quic_client.endpoint.io,
+            deadline,
+        );
+        if (!self.request_lifecycle.contains(stream_id)) {
+            return error.UnexpectedStream;
+        }
+        while (true) {
+            sendProtectedTrailersWithDeadline(
+                &self.quic_client.endpoint,
+                self.quic_client.peer,
+                self.config,
+                &self.next_packet_number,
+                &self.protected_send,
+                &self.outbound_bodies,
+                stream_id,
+                trailers,
+                self.control.settings.peer,
+                &self.qpack_encode,
+                &self.qpack_encoder_send,
+                &self.qpack_encoder_prefix_sent,
+                &self.stream_send_scratch,
+                deadline,
+            ) catch |err| switch (err) {
+                error.FlowControlBlocked, error.CongestionLimited => {
+                    try self.receiveResponsePacketWithDeadline(deadline);
+                    continue;
+                },
+                else => |other| return other,
             };
             return;
         }
@@ -13748,6 +20437,7 @@ pub const ProtectedClient = struct {
         informational: ?http3.InformationalObserver,
         deadline: ?std.Io.Clock.Timestamp,
     ) ReceiveTimeoutError!OwnedProtectedResponse {
+        if (self.callback_reader_active) return error.ConcurrentRead;
         if (!self.request_lifecycle.contains(stream_id)) {
             return error.UnexpectedStream;
         }
@@ -13825,6 +20515,11 @@ pub const ProtectedClient = struct {
             );
             return err;
         };
+        var guarded_informational: ?InformationalCallbackGuard =
+            if (informational) |observer| .{
+                .observer = observer,
+                .callback_reader_active = &self.callback_reader_active,
+            } else null;
         var response = http3.decodeResponseWithDynamicTableAndOptions(
             self.quic_client.endpoint.allocator,
             assembled.bytes,
@@ -13836,7 +20531,13 @@ pub const ProtectedClient = struct {
                 );
                 options.max_informational_responses =
                     self.config.max_informational_responses;
-                options.informational = informational;
+                options.informational = if (guarded_informational) |*guard|
+                    .{
+                        .context = guard,
+                        .on_response = InformationalCallbackGuard.notify,
+                    }
+                else
+                    null;
                 break :blk options;
             },
         ) catch |err| {
@@ -13938,6 +20639,7 @@ pub const ProtectedClient = struct {
         informational: ?MultiplexedInformationalObserver,
         deadline: ?std.Io.Clock.Timestamp,
     ) ReceiveTimeoutError!OwnedProtectedResponseEvent {
+        if (self.callback_reader_active) return error.ConcurrentRead;
         if (self.request_lifecycle.isEmpty()) {
             return error.UnexpectedStream;
         }
@@ -14029,6 +20731,7 @@ pub const ProtectedClient = struct {
         self: *ProtectedClient,
         stream_id: u62,
     ) Error!?StreamingEvent {
+        if (self.callback_reader_active) return error.ConcurrentRead;
         if (!self.request_lifecycle.contains(stream_id)) {
             return error.UnexpectedStream;
         }
@@ -14122,6 +20825,7 @@ pub const ProtectedClient = struct {
         stream_id: u62,
         deadline: ?std.Io.Clock.Timestamp,
     ) ReceiveTimeoutError!?StreamingEvent {
+        if (self.callback_reader_active) return error.ConcurrentRead;
         if (try self.pollResponseEvent(stream_id)) |event| return event;
         if (deadline) |absolute| {
             try self.receiveResponsePacketWithDeadline(absolute);
@@ -14139,6 +20843,7 @@ pub const ProtectedClient = struct {
     pub fn receiveNextResponseEvent(
         self: *ProtectedClient,
     ) Error!StreamingResponseEvent {
+        if (self.callback_reader_active) return error.ConcurrentRead;
         if (self.request_lifecycle.isEmpty()) {
             return error.UnexpectedStream;
         }
@@ -14155,6 +20860,7 @@ pub const ProtectedClient = struct {
     pub fn pollNextResponseEvent(
         self: *ProtectedClient,
     ) Error!?StreamingResponseEvent {
+        if (self.callback_reader_active) return error.ConcurrentRead;
         if (self.request_lifecycle.isEmpty()) return null;
 
         if (self.response_streams.firstReset()) |reset| {
@@ -14238,6 +20944,7 @@ pub const ProtectedClient = struct {
         self: *ProtectedClient,
         timeout: std.Io.Duration,
     ) ReceiveTimeoutError!StreamingResponseEvent {
+        if (self.callback_reader_active) return error.ConcurrentRead;
         if (timeout.nanoseconds <= 0) return error.Timeout;
         if (self.request_lifecycle.isEmpty()) {
             return error.UnexpectedStream;
@@ -14252,6 +20959,7 @@ pub const ProtectedClient = struct {
         self: *ProtectedClient,
         deadline: std.Io.Clock.Timestamp,
     ) ReceiveTimeoutError!StreamingResponseEvent {
+        if (self.callback_reader_active) return error.ConcurrentRead;
         _ = try deadline_policy.usableAwake(
             self.quic_client.endpoint.io,
             deadline,
@@ -14266,6 +20974,7 @@ pub const ProtectedClient = struct {
         self: *ProtectedClient,
         deadline: ?std.Io.Clock.Timestamp,
     ) ReceiveTimeoutError!StreamingResponseEvent {
+        if (self.callback_reader_active) return error.ConcurrentRead;
         while (true) {
             if (try self.pollNextResponseEvent()) |event| return event;
             if (deadline) |absolute| {
@@ -14281,6 +20990,7 @@ pub const ProtectedClient = struct {
         stream_id: u62,
         out: []u8,
     ) Error!usize {
+        if (self.callback_reader_active) return error.ConcurrentRead;
         const entry = self.streaming_responses.find(stream_id) orelse
             return error.UnexpectedStream;
         try sendProtectedReaderCapacity(
@@ -14309,6 +21019,7 @@ pub const ProtectedClient = struct {
         self: *ProtectedClient,
         stream_id: u62,
     ) Error!usize {
+        if (self.callback_reader_active) return error.ConcurrentRead;
         const entry = self.streaming_responses.find(stream_id) orelse
             return error.UnexpectedStream;
         const from = entry.from orelse self.quic_client.peer;
@@ -14335,6 +21046,7 @@ pub const ProtectedClient = struct {
     pub fn receivePushEvent(
         self: *ProtectedClient,
     ) Error!StreamingPushEvent {
+        if (self.callback_reader_active) return error.ConcurrentRead;
         if (self.push_aggregate.active()) return error.UnexpectedStream;
         return self.receivePushEventMatching(null);
     }
@@ -14344,6 +21056,7 @@ pub const ProtectedClient = struct {
     pub fn pollPushEvent(
         self: *ProtectedClient,
     ) Error!?StreamingPushEvent {
+        if (self.callback_reader_active) return error.ConcurrentRead;
         if (self.push_aggregate.active()) return error.UnexpectedStream;
         return self.pollPushEventMatching(null);
     }
@@ -14352,6 +21065,7 @@ pub const ProtectedClient = struct {
         self: *ProtectedClient,
         timeout: std.Io.Duration,
     ) ReceiveTimeoutError!StreamingPushEvent {
+        if (self.callback_reader_active) return error.ConcurrentRead;
         if (timeout.nanoseconds <= 0) return error.Timeout;
         if (self.push_aggregate.active()) return error.UnexpectedStream;
         return self.receivePushEventWithDeadline(.fromNow(
@@ -14364,6 +21078,7 @@ pub const ProtectedClient = struct {
         self: *ProtectedClient,
         deadline: std.Io.Clock.Timestamp,
     ) ReceiveTimeoutError!StreamingPushEvent {
+        if (self.callback_reader_active) return error.ConcurrentRead;
         _ = try deadline_policy.usableAwake(
             self.quic_client.endpoint.io,
             deadline,
@@ -14390,6 +21105,7 @@ pub const ProtectedClient = struct {
         target_push_id: ?u64,
         deadline: ?std.Io.Clock.Timestamp,
     ) ReceiveTimeoutError!StreamingPushEvent {
+        if (self.callback_reader_active) return error.ConcurrentRead;
         while (true) {
             if (try self.pollPushEventMatching(target_push_id)) |event| {
                 return event;
@@ -14406,6 +21122,7 @@ pub const ProtectedClient = struct {
         self: *ProtectedClient,
         target_push_id: ?u64,
     ) Error!?StreamingPushEvent {
+        if (self.callback_reader_active) return error.ConcurrentRead;
         // Consumption may have created receive-window credit. Emit it before
         // selecting the next event so nonblocking loops do not deadlock after
         // repeatedly reading DATA without another socket receive.
@@ -14423,6 +21140,9 @@ pub const ProtectedClient = struct {
             }
         }
         try self.applyPendingPushCancellations();
+        if (self.qpack_decode.pendingDecoderInstructions().len != 0) {
+            try self.sendQpackFeedback();
+        }
         try self.qpack_decode.prepareSectionAcknowledgments(1);
         const ready = self.push_streams.next(
             self.qpack_decode.table,
@@ -14494,21 +21214,63 @@ pub const ProtectedClient = struct {
     fn applyPendingPushCancellations(
         self: *ProtectedClient,
     ) Error!void {
+        return self.applyPendingPushCancellationsUntil(null) catch |err| switch (err) {
+            error.Timeout, error.ConcurrencyUnavailable => unreachable,
+            else => |other| return @errorCast(other),
+        };
+    }
+
+    fn applyPendingPushCancellationsWithDeadline(
+        self: *ProtectedClient,
+        deadline: std.Io.Clock.Timestamp,
+    ) ReceiveTimeoutError!void {
+        _ = try deadline_policy.usableAwake(
+            self.quic_client.endpoint.io,
+            deadline,
+        );
+        return self.applyPendingPushCancellationsUntil(deadline);
+    }
+
+    fn applyPendingPushCancellationsUntil(
+        self: *ProtectedClient,
+        deadline: ?std.Io.Clock.Timestamp,
+    ) ReceiveTimeoutError!void {
         while (self.push_streams.firstCancelledStream()) |stream_id| {
+            const cancel_qpack =
+                self.control.settings.local.qpack_max_table_capacity != 0;
+            if (cancel_qpack) try self.qpack_decode.prepareStreamCancellation();
             const frames = [_]quic.Frame{.{ .stop_sending = .{
                 .stream_id = stream_id,
                 .application_error_code = http3.ApplicationErrorCode.request_cancelled,
             } }};
-            try sendProtectedFrames(
-                &self.quic_client.endpoint,
-                self.quic_client.peer,
-                self.config.send_keys,
-                self.config.peer_connection_id,
-                &self.next_packet_number,
-                &frames,
-                self.config.max_frames_per_packet,
-                &self.protected_send,
-            );
+            if (deadline) |absolute| {
+                try self.protected_send.sendFramesWithDeadline(
+                    &self.quic_client.endpoint,
+                    self.quic_client.peer,
+                    self.config.send_keys,
+                    self.config.peer_connection_id,
+                    &self.next_packet_number,
+                    &frames,
+                    self.config.max_frames_per_packet,
+                    absolute,
+                );
+            } else {
+                try sendProtectedFrames(
+                    &self.quic_client.endpoint,
+                    self.quic_client.peer,
+                    self.config.send_keys,
+                    self.config.peer_connection_id,
+                    &self.next_packet_number,
+                    &frames,
+                    self.config.max_frames_per_packet,
+                    &self.protected_send,
+                );
+            }
+            if (cancel_qpack) {
+                self.qpack_decode.recordStreamCancellationAssumeCapacity(
+                    stream_id,
+                );
+            }
             std.debug.assert(
                 self.push_streams.takeCancelledStream().? == stream_id,
             );
@@ -14520,6 +21282,7 @@ pub const ProtectedClient = struct {
         push_id: u64,
         out: []u8,
     ) Error!usize {
+        if (self.callback_reader_active) return error.ConcurrentRead;
         return self.push_streams.readData(push_id, out);
     }
 
@@ -14529,6 +21292,7 @@ pub const ProtectedClient = struct {
         self: *ProtectedClient,
         push_id: u64,
     ) Error!usize {
+        if (self.callback_reader_active) return error.ConcurrentRead;
         const entry = self.push_streams.findByPushId(push_id) orelse
             return error.UnexpectedStream;
         const reader = if (entry.reader) |*value| value else return error.UnexpectedStream;
@@ -14631,11 +21395,20 @@ pub const ProtectedClient = struct {
         informational: ?PushInformationalObserver,
         deadline: ?std.Io.Clock.Timestamp,
     ) ReceiveTimeoutError!PushedResponse {
+        if (self.callback_reader_active) return error.ConcurrentRead;
+        var guarded_informational: ?PushInformationalCallbackGuard =
+            if (informational) |observer| .{
+                .observer = observer,
+                .callback_reader_active = &self.callback_reader_active,
+            } else null;
         return push_aggregate.receive(
             self,
             &self.push_aggregate,
             self.quic_client.endpoint.allocator,
-            informational,
+            if (guarded_informational) |*guard| .{
+                .context = guard,
+                .on_response = PushInformationalCallbackGuard.notify,
+            } else null,
             deadline,
             ProtectedClient.nextPushEventForAggregate,
             ProtectedClient.readPushDataForAggregate,
@@ -14680,22 +21453,97 @@ pub const ProtectedClient = struct {
     }
 
     pub fn sendGoAway(self: *ProtectedClient, stream_id: u64) Error!void {
-        try validateClientGoAwayPushId(stream_id);
-        try sendProtectedSettings(
-            &self.quic_client.endpoint,
-            self.quic_client.peer,
-            self.config,
-            &self.control,
-            &self.control_send,
-            &self.qpack_encoder_send,
-            &self.qpack_encoder_prefix_sent,
-            &self.qpack_decoder_send,
-            &self.qpack_decoder_prefix_sent,
-            &self.next_packet_number,
-            &self.protected_send,
-            client_control_stream_id,
+        return self.sendGoAwayUntil(stream_id, null) catch |err| switch (err) {
+            error.Timeout, error.ConcurrencyUnavailable => unreachable,
+            else => |other| return @errorCast(other),
+        };
+    }
+
+    pub fn sendGoAwayWithTimeout(
+        self: *ProtectedClient,
+        stream_id: u64,
+        timeout: std.Io.Duration,
+    ) ReceiveTimeoutError!void {
+        if (timeout.nanoseconds <= 0) return error.Timeout;
+        return self.sendGoAwayWithDeadline(stream_id, .fromNow(
+            self.quic_client.endpoint.io,
+            .{ .raw = timeout, .clock = .awake },
+        ));
+    }
+
+    pub fn sendGoAwayWithDeadline(
+        self: *ProtectedClient,
+        stream_id: u64,
+        deadline: std.Io.Clock.Timestamp,
+    ) ReceiveTimeoutError!void {
+        _ = try deadline_policy.usableAwake(
+            self.quic_client.endpoint.io,
+            deadline,
         );
-        try sendProtectedControlFrame(&self.quic_client.endpoint, self.quic_client.peer, self.config, &self.control, &self.control_send, &self.next_packet_number, &self.protected_send, .goaway, stream_id);
+        return self.sendGoAwayUntil(stream_id, deadline);
+    }
+
+    fn sendGoAwayUntil(
+        self: *ProtectedClient,
+        stream_id: u64,
+        deadline: ?std.Io.Clock.Timestamp,
+    ) ReceiveTimeoutError!void {
+        try validateClientGoAwayPushId(stream_id);
+        if (deadline) |absolute| {
+            try sendProtectedSettingsWithDeadline(
+                &self.quic_client.endpoint,
+                self.quic_client.peer,
+                self.config,
+                &self.control,
+                &self.control_send,
+                &self.qpack_encoder_send,
+                &self.qpack_encoder_prefix_sent,
+                &self.qpack_decoder_send,
+                &self.qpack_decoder_prefix_sent,
+                &self.next_packet_number,
+                &self.protected_send,
+                client_control_stream_id,
+                absolute,
+            );
+            try sendProtectedControlFrameWithDeadline(
+                &self.quic_client.endpoint,
+                self.quic_client.peer,
+                self.config,
+                &self.control,
+                &self.control_send,
+                &self.next_packet_number,
+                &self.protected_send,
+                .goaway,
+                stream_id,
+                absolute,
+            );
+        } else {
+            try sendProtectedSettings(
+                &self.quic_client.endpoint,
+                self.quic_client.peer,
+                self.config,
+                &self.control,
+                &self.control_send,
+                &self.qpack_encoder_send,
+                &self.qpack_encoder_prefix_sent,
+                &self.qpack_decoder_send,
+                &self.qpack_decoder_prefix_sent,
+                &self.next_packet_number,
+                &self.protected_send,
+                client_control_stream_id,
+            );
+            try sendProtectedControlFrame(
+                &self.quic_client.endpoint,
+                self.quic_client.peer,
+                self.config,
+                &self.control,
+                &self.control_send,
+                &self.next_packet_number,
+                &self.protected_send,
+                .goaway,
+                stream_id,
+            );
+        }
     }
 
     pub fn peerOrigins(self: ProtectedClient) []const http3.OriginKey {
@@ -14771,6 +21619,7 @@ pub const ProtectedClient = struct {
         self: *ProtectedClient,
         deadline: ?std.Io.Clock.Timestamp,
     ) ReceiveTimeoutError!http3.Settings {
+        if (self.callback_reader_active) return error.ConcurrentRead;
         while (!self.control.settings.received) {
             if (deadline) |absolute| {
                 try self.receiveResponsePacketWithDeadline(absolute);
@@ -14783,6 +21632,7 @@ pub const ProtectedClient = struct {
 
     /// Process one protected transport packet for control-stream progress.
     pub fn pollControl(self: *ProtectedClient) Error!void {
+        if (self.callback_reader_active) return error.ConcurrentRead;
         try self.receiveResponsePacket();
     }
 
@@ -14812,72 +21662,232 @@ pub const ProtectedClient = struct {
         self: *ProtectedClient,
         push_id: u64,
     ) Error!void {
-        try self.push_streams.reservePromisesThrough(push_id);
-        const previous_max_push_id = self.control.local_max_push_id;
-        try sendProtectedSettings(
-            &self.quic_client.endpoint,
-            self.quic_client.peer,
-            self.config,
-            &self.control,
-            &self.control_send,
-            &self.qpack_encoder_send,
-            &self.qpack_encoder_prefix_sent,
-            &self.qpack_decoder_send,
-            &self.qpack_decoder_prefix_sent,
-            &self.next_packet_number,
-            &self.protected_send,
-            client_control_stream_id,
-        );
-        sendProtectedPushControl(
-            &self.quic_client.endpoint,
-            self.quic_client.peer,
-            self.config,
-            &self.control,
-            &self.control_send,
-            &self.next_packet_number,
-            &self.protected_send,
-            .max_push_id,
-            push_id,
-        ) catch |err| {
-            self.control.local_max_push_id = previous_max_push_id;
-            return err;
+        return self.sendMaxPushIdUntil(push_id, null) catch |err| switch (err) {
+            error.Timeout, error.ConcurrencyUnavailable => unreachable,
+            else => |other| return @errorCast(other),
         };
+    }
+
+    pub fn sendMaxPushIdWithTimeout(
+        self: *ProtectedClient,
+        push_id: u64,
+        timeout: std.Io.Duration,
+    ) ReceiveTimeoutError!void {
+        if (timeout.nanoseconds <= 0) return error.Timeout;
+        return self.sendMaxPushIdWithDeadline(push_id, .fromNow(
+            self.quic_client.endpoint.io,
+            .{ .raw = timeout, .clock = .awake },
+        ));
+    }
+
+    pub fn sendMaxPushIdWithDeadline(
+        self: *ProtectedClient,
+        push_id: u64,
+        deadline: std.Io.Clock.Timestamp,
+    ) ReceiveTimeoutError!void {
+        _ = try deadline_policy.usableAwake(
+            self.quic_client.endpoint.io,
+            deadline,
+        );
+        return self.sendMaxPushIdUntil(push_id, deadline);
+    }
+
+    fn sendMaxPushIdUntil(
+        self: *ProtectedClient,
+        push_id: u64,
+        deadline: ?std.Io.Clock.Timestamp,
+    ) ReceiveTimeoutError!void {
+        try self.push_streams.reservePromisesThrough(push_id);
+        if (deadline) |absolute| {
+            try sendProtectedSettingsWithDeadline(
+                &self.quic_client.endpoint,
+                self.quic_client.peer,
+                self.config,
+                &self.control,
+                &self.control_send,
+                &self.qpack_encoder_send,
+                &self.qpack_encoder_prefix_sent,
+                &self.qpack_decoder_send,
+                &self.qpack_decoder_prefix_sent,
+                &self.next_packet_number,
+                &self.protected_send,
+                client_control_stream_id,
+                absolute,
+            );
+            try sendProtectedPushControlWithDeadline(
+                &self.quic_client.endpoint,
+                self.quic_client.peer,
+                self.config,
+                &self.control,
+                &self.control_send,
+                &self.next_packet_number,
+                &self.protected_send,
+                .max_push_id,
+                push_id,
+                absolute,
+            );
+        } else {
+            try sendProtectedSettings(
+                &self.quic_client.endpoint,
+                self.quic_client.peer,
+                self.config,
+                &self.control,
+                &self.control_send,
+                &self.qpack_encoder_send,
+                &self.qpack_encoder_prefix_sent,
+                &self.qpack_decoder_send,
+                &self.qpack_decoder_prefix_sent,
+                &self.next_packet_number,
+                &self.protected_send,
+                client_control_stream_id,
+            );
+            try sendProtectedPushControl(
+                &self.quic_client.endpoint,
+                self.quic_client.peer,
+                self.config,
+                &self.control,
+                &self.control_send,
+                &self.next_packet_number,
+                &self.protected_send,
+                .max_push_id,
+                push_id,
+            );
+        }
     }
 
     pub fn cancelPush(
         self: *ProtectedClient,
         push_id: u64,
     ) Error!void {
-        try sendProtectedSettings(
-            &self.quic_client.endpoint,
-            self.quic_client.peer,
-            self.config,
-            &self.control,
-            &self.control_send,
-            &self.qpack_encoder_send,
-            &self.qpack_encoder_prefix_sent,
-            &self.qpack_decoder_send,
-            &self.qpack_decoder_prefix_sent,
-            &self.next_packet_number,
-            &self.protected_send,
-            client_control_stream_id,
+        return self.cancelPushUntil(push_id, null) catch |err| switch (err) {
+            error.Timeout, error.ConcurrencyUnavailable => unreachable,
+            else => |other| return @errorCast(other),
+        };
+    }
+
+    pub fn cancelPushWithTimeout(
+        self: *ProtectedClient,
+        push_id: u64,
+        timeout: std.Io.Duration,
+    ) ReceiveTimeoutError!void {
+        if (timeout.nanoseconds <= 0) return error.Timeout;
+        return self.cancelPushWithDeadline(push_id, .fromNow(
+            self.quic_client.endpoint.io,
+            .{ .raw = timeout, .clock = .awake },
+        ));
+    }
+
+    pub fn cancelPushWithDeadline(
+        self: *ProtectedClient,
+        push_id: u64,
+        deadline: std.Io.Clock.Timestamp,
+    ) ReceiveTimeoutError!void {
+        _ = try deadline_policy.usableAwake(
+            self.quic_client.endpoint.io,
+            deadline,
         );
-        try sendProtectedPushControl(
-            &self.quic_client.endpoint,
-            self.quic_client.peer,
-            self.config,
-            &self.control,
-            &self.control_send,
-            &self.next_packet_number,
-            &self.protected_send,
-            .cancel_push,
-            push_id,
-        );
-        try self.push_streams.observePeerCancellation(push_id);
+        return self.cancelPushUntil(push_id, deadline);
+    }
+
+    fn cancelPushUntil(
+        self: *ProtectedClient,
+        push_id: u64,
+        deadline: ?std.Io.Clock.Timestamp,
+    ) ReceiveTimeoutError!void {
+        if (self.callback_reader_active) return error.ConcurrentRead;
+        const max_push_id = self.control.local_max_push_id orelse
+            return error.PushIdExceeded;
+        if (push_id > max_push_id) return error.PushIdExceeded;
+        if (self.push_streams.isCancelledPush(push_id)) {
+            if (deadline) |absolute| {
+                try self.applyPendingPushCancellationsWithDeadline(absolute);
+                return self.sendQpackFeedbackWithDeadline(absolute);
+            }
+            try self.applyPendingPushCancellations();
+            return self.sendQpackFeedback();
+        }
+        if (self.push_streams.pendingLocalCancellation(push_id)) {
+            if (deadline) |absolute| {
+                try self.applyPendingPushCancellationsWithDeadline(absolute);
+                return self.sendQpackFeedbackWithDeadline(absolute);
+            }
+            try self.applyPendingPushCancellations();
+            return self.sendQpackFeedback();
+        }
+        const push_stream_id = self.push_streams.streamIdForPush(push_id);
+        try self.push_streams.preparePeerCancellation(push_id);
+        if (deadline) |absolute| {
+            try sendProtectedSettingsWithDeadline(
+                &self.quic_client.endpoint,
+                self.quic_client.peer,
+                self.config,
+                &self.control,
+                &self.control_send,
+                &self.qpack_encoder_send,
+                &self.qpack_encoder_prefix_sent,
+                &self.qpack_decoder_send,
+                &self.qpack_decoder_prefix_sent,
+                &self.next_packet_number,
+                &self.protected_send,
+                client_control_stream_id,
+                absolute,
+            );
+            try sendProtectedPushControlWithDeadline(
+                &self.quic_client.endpoint,
+                self.quic_client.peer,
+                self.config,
+                &self.control,
+                &self.control_send,
+                &self.next_packet_number,
+                &self.protected_send,
+                .cancel_push,
+                push_id,
+                absolute,
+            );
+        } else {
+            try sendProtectedSettings(
+                &self.quic_client.endpoint,
+                self.quic_client.peer,
+                self.config,
+                &self.control,
+                &self.control_send,
+                &self.qpack_encoder_send,
+                &self.qpack_encoder_prefix_sent,
+                &self.qpack_decoder_send,
+                &self.qpack_decoder_prefix_sent,
+                &self.next_packet_number,
+                &self.protected_send,
+                client_control_stream_id,
+            );
+            try sendProtectedPushControl(
+                &self.quic_client.endpoint,
+                self.quic_client.peer,
+                self.config,
+                &self.control,
+                &self.control_send,
+                &self.next_packet_number,
+                &self.protected_send,
+                .cancel_push,
+                push_id,
+            );
+        }
+        if (push_stream_id) |stream_id| {
+            self.qpack_decode.discardPeerUniStream(stream_id);
+        }
+        self.push_streams.observePeerCancellation(push_id) catch unreachable;
         defer if (self.push_aggregate.push_id == push_id) {
             self.push_aggregate.deinit(self.quic_client.endpoint.allocator);
         };
-        try self.applyPendingPushCancellations();
+        if (deadline) |absolute| {
+            try self.applyPendingPushCancellationsWithDeadline(absolute);
+        } else {
+            try self.applyPendingPushCancellations();
+        }
+        if (deadline) |absolute| {
+            try self.sendQpackFeedbackWithDeadline(absolute);
+        } else {
+            try self.sendQpackFeedback();
+        }
     }
 
     pub fn cancelRequest(
@@ -14885,6 +21895,7 @@ pub const ProtectedClient = struct {
         stream_id: u62,
         application_error_code: u64,
     ) Error!void {
+        if (self.callback_reader_active) return error.ConcurrentRead;
         return self.cancelRequestInternal(
             stream_id,
             application_error_code,
@@ -14922,7 +21933,7 @@ pub const ProtectedClient = struct {
             _ = self.request_lifecycle.finish(stream_id) catch false;
             _ = self.outbound_bodies.finish(stream_id);
         }
-        try sendProtectedRequestCancellation(
+        sendProtectedRequestCancellation(
             &self.quic_client.endpoint,
             self.quic_client.peer,
             self.config,
@@ -14936,7 +21947,10 @@ pub const ProtectedClient = struct {
             local_final_size,
             send_reset,
             cancel_qpack,
-        );
+        ) catch |err| {
+            self.protected_send.failClosed();
+            return err;
+        };
     }
 
     pub fn sendPriorityUpdate(
@@ -14944,31 +21958,107 @@ pub const ProtectedClient = struct {
         stream_id: u62,
         priority: http3.Priority,
     ) Error!void {
-        if (stream_id > self.next_stream_id) return error.UnexpectedFrame;
-        try sendProtectedSettings(
-            &self.quic_client.endpoint,
-            self.quic_client.peer,
-            self.config,
-            &self.control,
-            &self.control_send,
-            &self.qpack_encoder_send,
-            &self.qpack_encoder_prefix_sent,
-            &self.qpack_decoder_send,
-            &self.qpack_decoder_prefix_sent,
-            &self.next_packet_number,
-            &self.protected_send,
-            client_control_stream_id,
-        );
-        try sendProtectedPriorityUpdate(
-            &self.quic_client.endpoint,
-            self.quic_client.peer,
-            self.config,
-            &self.control_send,
-            &self.next_packet_number,
-            &self.protected_send,
+        return self.sendPriorityUpdateUntil(
             stream_id,
             priority,
+            null,
+        ) catch |err| switch (err) {
+            error.Timeout, error.ConcurrencyUnavailable => unreachable,
+            else => |other| return @errorCast(other),
+        };
+    }
+
+    pub fn sendPriorityUpdateWithTimeout(
+        self: *ProtectedClient,
+        stream_id: u62,
+        priority: http3.Priority,
+        timeout: std.Io.Duration,
+    ) ReceiveTimeoutError!void {
+        if (timeout.nanoseconds <= 0) return error.Timeout;
+        return self.sendPriorityUpdateWithDeadline(
+            stream_id,
+            priority,
+            .fromNow(self.quic_client.endpoint.io, .{
+                .raw = timeout,
+                .clock = .awake,
+            }),
         );
+    }
+
+    pub fn sendPriorityUpdateWithDeadline(
+        self: *ProtectedClient,
+        stream_id: u62,
+        priority: http3.Priority,
+        deadline: std.Io.Clock.Timestamp,
+    ) ReceiveTimeoutError!void {
+        _ = try deadline_policy.usableAwake(
+            self.quic_client.endpoint.io,
+            deadline,
+        );
+        return self.sendPriorityUpdateUntil(stream_id, priority, deadline);
+    }
+
+    fn sendPriorityUpdateUntil(
+        self: *ProtectedClient,
+        stream_id: u62,
+        priority: http3.Priority,
+        deadline: ?std.Io.Clock.Timestamp,
+    ) ReceiveTimeoutError!void {
+        if (stream_id > self.next_stream_id) return error.UnexpectedFrame;
+        if (deadline) |absolute| {
+            try sendProtectedSettingsWithDeadline(
+                &self.quic_client.endpoint,
+                self.quic_client.peer,
+                self.config,
+                &self.control,
+                &self.control_send,
+                &self.qpack_encoder_send,
+                &self.qpack_encoder_prefix_sent,
+                &self.qpack_decoder_send,
+                &self.qpack_decoder_prefix_sent,
+                &self.next_packet_number,
+                &self.protected_send,
+                client_control_stream_id,
+                absolute,
+            );
+            try sendProtectedPriorityUpdateRawWithDeadline(
+                &self.quic_client.endpoint,
+                self.quic_client.peer,
+                self.config,
+                &self.control_send,
+                &self.next_packet_number,
+                &self.protected_send,
+                http3.FrameType.priority_update_request,
+                stream_id,
+                priority,
+                absolute,
+            );
+        } else {
+            try sendProtectedSettings(
+                &self.quic_client.endpoint,
+                self.quic_client.peer,
+                self.config,
+                &self.control,
+                &self.control_send,
+                &self.qpack_encoder_send,
+                &self.qpack_encoder_prefix_sent,
+                &self.qpack_decoder_send,
+                &self.qpack_decoder_prefix_sent,
+                &self.next_packet_number,
+                &self.protected_send,
+                client_control_stream_id,
+            );
+            try sendProtectedPriorityUpdate(
+                &self.quic_client.endpoint,
+                self.quic_client.peer,
+                self.config,
+                &self.control_send,
+                &self.next_packet_number,
+                &self.protected_send,
+                stream_id,
+                priority,
+            );
+        }
     }
 
     pub fn sendPushPriorityUpdate(
@@ -14976,34 +22066,114 @@ pub const ProtectedClient = struct {
         push_id: u64,
         priority: http3.Priority,
     ) Error!void {
+        return self.sendPushPriorityUpdateUntil(
+            push_id,
+            priority,
+            null,
+        ) catch |err| switch (err) {
+            error.Timeout, error.ConcurrencyUnavailable => unreachable,
+            else => |other| return @errorCast(other),
+        };
+    }
+
+    pub fn sendPushPriorityUpdateWithTimeout(
+        self: *ProtectedClient,
+        push_id: u64,
+        priority: http3.Priority,
+        timeout: std.Io.Duration,
+    ) ReceiveTimeoutError!void {
+        if (timeout.nanoseconds <= 0) return error.Timeout;
+        return self.sendPushPriorityUpdateWithDeadline(
+            push_id,
+            priority,
+            .fromNow(self.quic_client.endpoint.io, .{
+                .raw = timeout,
+                .clock = .awake,
+            }),
+        );
+    }
+
+    pub fn sendPushPriorityUpdateWithDeadline(
+        self: *ProtectedClient,
+        push_id: u64,
+        priority: http3.Priority,
+        deadline: std.Io.Clock.Timestamp,
+    ) ReceiveTimeoutError!void {
+        _ = try deadline_policy.usableAwake(
+            self.quic_client.endpoint.io,
+            deadline,
+        );
+        return self.sendPushPriorityUpdateUntil(
+            push_id,
+            priority,
+            deadline,
+        );
+    }
+
+    fn sendPushPriorityUpdateUntil(
+        self: *ProtectedClient,
+        push_id: u64,
+        priority: http3.Priority,
+        deadline: ?std.Io.Clock.Timestamp,
+    ) ReceiveTimeoutError!void {
         if (!self.push_streams.hasPromise(push_id)) {
             return error.UnexpectedStream;
         }
-        try sendProtectedSettings(
-            &self.quic_client.endpoint,
-            self.quic_client.peer,
-            self.config,
-            &self.control,
-            &self.control_send,
-            &self.qpack_encoder_send,
-            &self.qpack_encoder_prefix_sent,
-            &self.qpack_decoder_send,
-            &self.qpack_decoder_prefix_sent,
-            &self.next_packet_number,
-            &self.protected_send,
-            client_control_stream_id,
-        );
-        try sendProtectedPriorityUpdateRaw(
-            &self.quic_client.endpoint,
-            self.quic_client.peer,
-            self.config,
-            &self.control_send,
-            &self.next_packet_number,
-            &self.protected_send,
-            http3.FrameType.priority_update_push,
-            push_id,
-            priority,
-        );
+        if (deadline) |absolute| {
+            try sendProtectedSettingsWithDeadline(
+                &self.quic_client.endpoint,
+                self.quic_client.peer,
+                self.config,
+                &self.control,
+                &self.control_send,
+                &self.qpack_encoder_send,
+                &self.qpack_encoder_prefix_sent,
+                &self.qpack_decoder_send,
+                &self.qpack_decoder_prefix_sent,
+                &self.next_packet_number,
+                &self.protected_send,
+                client_control_stream_id,
+                absolute,
+            );
+            try sendProtectedPriorityUpdateRawWithDeadline(
+                &self.quic_client.endpoint,
+                self.quic_client.peer,
+                self.config,
+                &self.control_send,
+                &self.next_packet_number,
+                &self.protected_send,
+                http3.FrameType.priority_update_push,
+                push_id,
+                priority,
+                absolute,
+            );
+        } else {
+            try sendProtectedSettings(
+                &self.quic_client.endpoint,
+                self.quic_client.peer,
+                self.config,
+                &self.control,
+                &self.control_send,
+                &self.qpack_encoder_send,
+                &self.qpack_encoder_prefix_sent,
+                &self.qpack_decoder_send,
+                &self.qpack_decoder_prefix_sent,
+                &self.next_packet_number,
+                &self.protected_send,
+                client_control_stream_id,
+            );
+            try sendProtectedPriorityUpdateRaw(
+                &self.quic_client.endpoint,
+                self.quic_client.peer,
+                self.config,
+                &self.control_send,
+                &self.next_packet_number,
+                &self.protected_send,
+                http3.FrameType.priority_update_push,
+                push_id,
+                priority,
+            );
+        }
     }
 
     fn receiveStreamBytesUntil(
@@ -15011,6 +22181,7 @@ pub const ProtectedClient = struct {
         expected_stream_id: u62,
         deadline: ?std.Io.Clock.Timestamp,
     ) ReceiveTimeoutError!AssembledStream {
+        if (self.callback_reader_active) return error.ConcurrentRead;
         if (self.response_streams.takeReset(expected_stream_id)) |code| {
             return if (code == http3.ApplicationErrorCode.request_rejected)
                 error.RequestRejected
@@ -15066,6 +22237,7 @@ pub const ProtectedClient = struct {
         self: *ProtectedClient,
         deadline: ?std.Io.Clock.Timestamp,
     ) ReceiveTimeoutError!void {
+        if (self.callback_reader_active) return error.ConcurrentRead;
         var packet = if (deadline) |absolute|
             try self.receive_packets.takeWithDeadline(
                 &self.quic_client.endpoint,
@@ -15108,6 +22280,11 @@ pub const ProtectedClient = struct {
             packet.from,
             packet.frames,
         )) try self.sendQpackFeedback();
+        if (deadline) |absolute| {
+            try self.applyPendingPushCancellationsWithDeadline(absolute);
+        } else {
+            try self.applyPendingPushCancellations();
+        }
     }
 
     fn applyStreamingResponseEvent(
@@ -15205,6 +22382,23 @@ pub const ProtectedClient = struct {
             &self.qpack_decoder_prefix_sent,
             &self.next_packet_number,
             &self.protected_send,
+        );
+    }
+
+    fn sendQpackFeedbackWithDeadline(
+        self: *ProtectedClient,
+        deadline: std.Io.Clock.Timestamp,
+    ) ReceiveTimeoutError!void {
+        try sendProtectedQpackFeedbackWithDeadline(
+            &self.quic_client.endpoint,
+            self.quic_client.peer,
+            self.config,
+            &self.qpack_decode,
+            &self.qpack_decoder_send,
+            &self.qpack_decoder_prefix_sent,
+            &self.next_packet_number,
+            &self.protected_send,
+            deadline,
         );
     }
 };
@@ -15497,6 +22691,8 @@ fn applyResponseReaderSemantics(
 }
 
 const sendConnectionFrames = body_sender.sendConnectionFrames;
+const sendConnectionFramesWithDeadline =
+    body_sender.sendConnectionFramesWithDeadline;
 
 fn visitStreamingServerRequestPacket(
     session: *HandshakeServerSession,
@@ -15514,7 +22710,7 @@ fn visitStreamingServerRequestPacket(
         &session.streaming_requests,
         &session.request_lifecycle,
         .{ .connection = &session.established.connection },
-        session.peer_promised_push_ids.items,
+        .{ .set = &session.promised_push_ids },
         null,
         &session.connect_datagrams,
     ) catch |err| {
@@ -15549,7 +22745,7 @@ fn visitDetachedServerRequestPacket(
         &session.streaming_requests,
         &session.request_lifecycle,
         .{ .connection = &session.established.connection },
-        session.peer_promised_push_ids.items,
+        .{ .set = &session.promised_push_ids },
         detached_stream_id,
         &session.connect_datagrams,
     ) catch |err| {
@@ -15575,7 +22771,7 @@ const ConnectionRequestReceiveContext = struct {
     max_blocked_streams: u64,
     request_streams: *RequestStreamSet,
     request_lifecycle: *ServerRequestLifecycle,
-    peer_promised_push_ids: []const u64,
+    peer_promised_push_ids: PromisedPushIds,
     detached_streams: ?*connect_datagram.Registry = null,
     reset: ?RequestStreamReset = null,
 };
@@ -15622,7 +22818,7 @@ fn receiveConnectionRequestStreamBytes(
     qpack_encode: *QpackEncodeState,
     request_streams: *RequestStreamSet,
     request_lifecycle: *ServerRequestLifecycle,
-    peer_promised_push_ids: []const u64,
+    peer_promised_push_ids: PromisedPushIds,
 ) Error!AssembledStream {
     return receiveConnectionRequestStreamBytesUntil(
         connection,
@@ -15651,7 +22847,7 @@ fn receiveConnectionRequestStreamBytesUntil(
     qpack_encode: *QpackEncodeState,
     request_streams: *RequestStreamSet,
     request_lifecycle: *ServerRequestLifecycle,
-    peer_promised_push_ids: []const u64,
+    peer_promised_push_ids: PromisedPushIds,
     detached_streams: ?*connect_datagram.Registry,
     deadline: ?std.Io.Clock.Timestamp,
 ) ReceiveTimeoutError!AssembledStream {
@@ -15730,7 +22926,7 @@ fn applyProtectedServerRequestPacketFrames(
         streaming_requests,
         &server.request_lifecycle,
         .{ .static_limit = server.config.max_client_bidirectional_streams },
-        server.peer_promised_push_ids.items,
+        .{ .set = &server.promised_push_ids },
         null,
         null,
     ) catch |err| {
@@ -15920,6 +23116,25 @@ fn receiveConnectionResponsePacketUntil(
             &context,
             visitConnectionResponsePacket,
         );
+    }
+    if (push_streams) |pushes| {
+        while (pushes.firstCancelledStream()) |stream_id| {
+            if (deadline) |absolute| {
+                try connection.sendStopSendingWithDeadline(
+                    stream_id,
+                    http3.ApplicationErrorCode.request_cancelled,
+                    absolute,
+                );
+            } else {
+                try connection.sendStopSending(
+                    stream_id,
+                    http3.ApplicationErrorCode.request_cancelled,
+                );
+            }
+            std.debug.assert(
+                pushes.takeCancelledStream().? == stream_id,
+            );
+        }
     }
 }
 
@@ -16136,6 +23351,229 @@ test "HTTP/3 protected server rejects requests beyond local GOAWAY" {
     if (shared.err) |err| return err;
 }
 
+test "HTTP/3 protected request zero-progress failures preserve retry state" {
+    const allocator = std.testing.allocator;
+    var threaded = std.Io.Threaded.init(allocator, .{});
+    defer threaded.deinit();
+    const io = threaded.io();
+
+    const client_cid = [_]u8{ 0xa3, 0x21, 0x22, 0x23 };
+    const server_cid = [_]u8{ 0xa4, 0x21, 0x22, 0x23 };
+    const client_keys = quic.protection.deriveAes128Keys(
+        [_]u8{0xa5} ** quic.protection.secret_len,
+    );
+    const server_keys = quic.protection.deriveAes128Keys(
+        [_]u8{0xa6} ** quic.protection.secret_len,
+    );
+    const settings: http3.Settings = .{
+        .qpack_max_table_capacity = 256,
+        .qpack_blocked_streams = 1,
+    };
+    var server = try ProtectedServer.bind(
+        allocator,
+        io,
+        .{ .ip4 = .loopback(0) },
+        .{ .quic = .{
+            .max_datagram_size = 4096,
+            .max_frames_per_datagram = 8,
+        } },
+        .{
+            .receive_keys = client_keys,
+            .send_keys = server_keys,
+            .local_connection_id = &server_cid,
+            .peer_connection_id = &client_cid,
+            .local_settings = settings,
+        },
+    );
+    defer server.deinit();
+
+    const Shared = struct {
+        server: *ProtectedServer,
+        client_address: net.IpAddress,
+        err: ?anyerror = null,
+
+        fn run(self: *@This()) void {
+            self.runFallible() catch |err| {
+                self.err = err;
+            };
+        }
+
+        fn runFallible(self: *@This()) !void {
+            const expected_ids = [_]u62{ 0, 4 };
+            for (expected_ids) |expected_id| {
+                var request = try self.server.receiveRequestWithTimeout(
+                    .fromSeconds(2),
+                );
+                defer request.deinit(
+                    self.server.quic_server.endpoint.allocator,
+                );
+                try std.testing.expectEqual(expected_id, request.stream_id);
+                try self.server.sendResponse(
+                    self.client_address,
+                    request.stream_id,
+                    .{ .status = 204 },
+                );
+            }
+        }
+    };
+
+    var client = try ProtectedClient.connect(
+        allocator,
+        io,
+        .{ .ip4 = .loopback(0) },
+        server.address(),
+        .{ .quic = .{
+            .max_datagram_size = 4096,
+            .max_frames_per_datagram = 8,
+        } },
+        .{
+            .receive_keys = server_keys,
+            .send_keys = client_keys,
+            .local_connection_id = &client_cid,
+            .peer_connection_id = &server_cid,
+            .local_settings = .{ .qpack_max_table_capacity = 256 },
+        },
+    );
+    defer client.deinit();
+    var shared = Shared{
+        .server = &server,
+        .client_address = client.quic_client.address(),
+    };
+    const thread = try std.Thread.spawn(.{}, Shared.run, .{&shared});
+    var joined = false;
+    defer if (!joined) thread.join();
+
+    try std.testing.expectError(error.InvalidHeader, client.sendRequest(.{
+        .method = "GET",
+        .path = "/invalid-before-send",
+        .authority = "localhost",
+        .headers = &.{.{ .name = "Uppercase", .value = "invalid" }},
+    }));
+    try std.testing.expectEqual(@as(u62, 0), client.next_stream_id);
+    try std.testing.expectEqual(@as(u64, 0), client.next_packet_number);
+    try std.testing.expectEqual(@as(usize, 0), client.request_lifecycle.count());
+    try std.testing.expect(!client.control.settings.sent);
+
+    // Seed the peer limits without marking SETTINGS received: the protected
+    // server will send its real control stream with the first response.
+    client.control.settings.peer = settings;
+    try client.qpack_encode.configurePeerLimits(
+        settings.qpack_max_table_capacity,
+        settings.qpack_blocked_streams,
+    );
+    _ = try client.qpack_encode.insertField(
+        "x-protected-transaction",
+        "reused-value",
+    );
+    const inserted_before_request = client.qpack_encode.table.insert_count;
+
+    const FailOnCall = struct {
+        delegate: std.Io,
+        fail_on_call: usize,
+        calls: usize = 0,
+
+        fn netSend(
+            userdata: ?*anyopaque,
+            socket_handle: net.Socket.Handle,
+            messages: []net.OutgoingMessage,
+            flags: net.SendFlags,
+        ) struct { ?net.Socket.SendError, usize } {
+            const self: *@This() = @ptrCast(@alignCast(userdata.?));
+            self.calls += 1;
+            if (self.calls == self.fail_on_call) {
+                return .{ error.NetworkDown, 0 };
+            }
+            return self.delegate.vtable.netSend(
+                self.delegate.userdata,
+                socket_handle,
+                messages,
+                flags,
+            );
+        }
+    };
+    var failed = FailOnCall{
+        .delegate = client.quic_client.endpoint.io,
+        .fail_on_call = 3,
+    };
+    var failed_vtable = failed.delegate.vtable.*;
+    failed_vtable.netSend = FailOnCall.netSend;
+    client.quic_client.endpoint.io = .{
+        .userdata = &failed,
+        .vtable = &failed_vtable,
+    };
+    defer client.quic_client.endpoint.io = failed.delegate;
+
+    const request: http3.Request = .{
+        .method = "GET",
+        .path = "/protected-transaction",
+        .authority = "localhost",
+        .headers = &.{.{
+            .name = "x-protected-transaction",
+            .value = "reused-value",
+        }},
+    };
+    try std.testing.expectError(error.NetworkDown, client.sendRequest(request));
+    try std.testing.expectEqual(@as(usize, 3), failed.calls);
+    try std.testing.expect(client.protected_send.isUsable());
+    try std.testing.expectEqual(@as(u62, 0), client.next_stream_id);
+    try std.testing.expectEqual(@as(usize, 0), client.request_lifecycle.count());
+    try std.testing.expectEqual(
+        @as(usize, 0),
+        client.qpack_encode.pendingEncoderInstructions().len,
+    );
+    try std.testing.expectEqual(
+        @as(usize, 0),
+        client.qpack_encode.pending_sections.items.len,
+    );
+    try std.testing.expect(
+        client.qpack_encode.table.insert_count > inserted_before_request,
+    );
+
+    client.quic_client.endpoint.io = failed.delegate;
+    const aggregate_id = try client.sendRequest(request);
+    try std.testing.expectEqual(@as(u62, 0), aggregate_id);
+    var aggregate_response = try client.receiveResponseWithTimeout(
+        aggregate_id,
+        .fromSeconds(2),
+    );
+    defer aggregate_response.deinit(allocator);
+    try std.testing.expectEqual(@as(u16, 204), aggregate_response.response.status);
+
+    failed.calls = 0;
+    failed.fail_on_call = 1;
+    client.quic_client.endpoint.io = .{
+        .userdata = &failed,
+        .vtable = &failed_vtable,
+    };
+    try std.testing.expectError(
+        error.NetworkDown,
+        client.startRequest(request, 0),
+    );
+    try std.testing.expectEqual(@as(usize, 1), failed.calls);
+    try std.testing.expect(client.protected_send.isUsable());
+    try std.testing.expectEqual(@as(u62, 4), client.next_stream_id);
+    try std.testing.expectEqual(@as(usize, 0), client.request_lifecycle.count());
+    try std.testing.expect(client.outbound_bodies.find(4) == null);
+    try std.testing.expectEqual(
+        @as(usize, 0),
+        client.qpack_encode.pending_sections.items.len,
+    );
+
+    client.quic_client.endpoint.io = failed.delegate;
+    const streaming_id = try client.startRequest(request, 0);
+    try std.testing.expectEqual(@as(u62, 4), streaming_id);
+    var streaming_response = try client.receiveResponseWithTimeout(
+        streaming_id,
+        .fromSeconds(2),
+    );
+    defer streaming_response.deinit(allocator);
+    try std.testing.expectEqual(@as(u16, 204), streaming_response.response.status);
+
+    thread.join();
+    joined = true;
+    if (shared.err) |err| return err;
+}
+
 test "HTTP/3 protected runtime rejects server-initiated bidirectional message streams" {
     const allocator = std.testing.allocator;
 
@@ -16237,11 +23675,44 @@ test "HTTP/3 handshake runtime establishes QUIC and exchanges request response" 
             try std.testing.expectEqual(@as(?u64, client_control_stream_id), session.control.peer_control_stream_id);
             try std.testing.expectEqual(@as(?u64, client_qpack_encoder_stream_id), session.control.peer_qpack_encoder_stream_id);
             try std.testing.expectEqual(@as(?u64, client_qpack_decoder_stream_id), session.control.peer_qpack_decoder_stream_id);
-            try session.sendResponse(request.stream_id, .{
-                .status = 200,
-                .headers = &.{.{ .name = "content-type", .value = "text/plain" }},
-                .body = "handshake pong",
-            });
+            const packet_number =
+                session.established.connection.next_packet_number;
+            const control_offset = session.control_send.next_offset;
+            const pending_sections =
+                session.qpack_encode.pending_sections.items.len;
+            try std.testing.expectError(
+                error.Timeout,
+                session.sendResponseWithDeadline(
+                    request.stream_id,
+                    .{ .status = 204 },
+                    .{ .clock = .real, .raw = .zero },
+                ),
+            );
+            try std.testing.expectEqual(
+                packet_number,
+                session.established.connection.next_packet_number,
+            );
+            try std.testing.expectEqual(
+                control_offset,
+                session.control_send.next_offset,
+            );
+            try std.testing.expectEqual(
+                pending_sections,
+                session.qpack_encode.pending_sections.items.len,
+            );
+            try std.testing.expectEqual(
+                @as(usize, 1),
+                session.request_lifecycle.count(),
+            );
+            try session.sendResponseWithTimeout(
+                request.stream_id,
+                .{
+                    .status = 200,
+                    .headers = &.{.{ .name = "content-type", .value = "text/plain" }},
+                    .body = "handshake pong",
+                },
+                .fromSeconds(2),
+            );
             try std.testing.expect(session.control.settings.sent);
         }
     };
@@ -16283,6 +23754,580 @@ test "HTTP/3 handshake runtime establishes QUIC and exchanges request response" 
     try std.testing.expectEqual(@as(?u64, server_control_stream_id), client.control.peer_control_stream_id);
     try std.testing.expectEqual(@as(?u64, server_qpack_encoder_stream_id), client.control.peer_qpack_encoder_stream_id);
     try std.testing.expectEqual(@as(?u64, server_qpack_decoder_stream_id), client.control.peer_qpack_decoder_stream_id);
+}
+
+test "HTTP/3 aggregate deadlines bound request and response head sends" {
+    const allocator = std.testing.allocator;
+    var threaded = std.Io.Threaded.init(allocator, .{});
+    defer threaded.deinit();
+    const io = threaded.io();
+
+    const DeadlineSendIo = struct {
+        delegate: std.Io,
+        now_ns: i96 = 1_000_000,
+        send_calls: usize = 0,
+        sleep_calls: usize = 0,
+
+        fn now(
+            context: ?*anyopaque,
+            _: std.Io.Clock,
+        ) std.Io.Timestamp {
+            const self: *@This() = @ptrCast(@alignCast(context.?));
+            return .fromNanoseconds(self.now_ns);
+        }
+
+        fn sleep(
+            context: ?*anyopaque,
+            _: std.Io.Timeout,
+        ) std.Io.Cancelable!void {
+            const self: *@This() = @ptrCast(@alignCast(context.?));
+            self.sleep_calls += 1;
+            return error.Canceled;
+        }
+
+        fn netSend(
+            context: ?*anyopaque,
+            socket_handle: net.Socket.Handle,
+            messages: []net.OutgoingMessage,
+            flags: net.SendFlags,
+        ) struct { ?net.Socket.SendError, usize } {
+            const self: *@This() = @ptrCast(@alignCast(context.?));
+            self.send_calls += 1;
+            return self.delegate.vtable.netSend(
+                self.delegate.userdata,
+                socket_handle,
+                messages,
+                flags,
+            );
+        }
+    };
+
+    const original_dcid =
+        [_]u8{ 0x41, 0x42, 0x43, 0x44, 0x45, 0x46, 0x47, 0x48 };
+    const client_cid = [_]u8{ 0x49, 0x4a, 0x4b, 0x4c };
+    const server_cid = [_]u8{ 0x4d, 0x4e, 0x4f, 0x50 };
+    var server = try HandshakeServer.bind(
+        allocator,
+        io,
+        .{ .ip4 = .loopback(0) },
+        .{ .quic = .{
+            .max_datagram_size = 4096,
+            .max_frames_per_datagram = 8,
+        } },
+        .{ .handshake = .{
+            .local_connection_id = &server_cid,
+            .initial_one_rtt_config = .{
+                .max_datagram_size = 1400,
+                .pacing_max_burst_packets = 1,
+            },
+            .random = [_]u8{0x51} ** 32,
+            .x25519_secret_key = [_]u8{0x52} ** 32,
+        } },
+    );
+    defer server.deinit();
+
+    const Shared = struct {
+        server: *HandshakeServer,
+        io: std.Io,
+        body_done: std.Io.Event = .unset,
+        response_timeout: bool = false,
+        body_timeout: bool = false,
+        zero_send_calls: bool = false,
+        zero_sleep_calls: bool = false,
+        lifecycle_retained: bool = false,
+        connection_open: bool = false,
+        err: ?anyerror = null,
+
+        fn run(self: *@This()) void {
+            defer self.body_done.set(self.io);
+            self.runFallible() catch |err| {
+                self.err = err;
+            };
+        }
+
+        fn runFallible(self: *@This()) !void {
+            var session = try self.server.accept();
+            defer session.deinit();
+            var request = try session.receiveRequest();
+            defer request.deinit(
+                session.established.connection.endpoint.allocator,
+            );
+            try std.testing.expectEqual(@as(u62, 0), request.stream_id);
+            try std.testing.expectEqualStrings("/after-timeout", request.request.path);
+
+            const before_invalid_deadline =
+                session.established.connection.next_packet_number;
+            try std.testing.expectError(
+                error.Timeout,
+                session.sendResponsePacedWithDeadline(
+                    request.stream_id,
+                    .{ .status = 204 },
+                    .{ .clock = .real, .raw = .zero },
+                ),
+            );
+            try std.testing.expectEqual(
+                before_invalid_deadline,
+                session.established.connection.next_packet_number,
+            );
+            try std.testing.expectEqual(
+                @as(usize, 1),
+                session.request_lifecycle.count(),
+            );
+
+            try sendConnectionSettings(
+                &session.established.connection,
+                &session.critical_stream_send_scratch,
+                &session.control,
+                &session.control_send,
+                &session.qpack_encoder_send,
+                &session.qpack_encoder_prefix_sent,
+                &session.qpack_decoder_send,
+                &session.qpack_decoder_prefix_sent,
+                session.options,
+                server_control_stream_id,
+            );
+            var fixed = DeadlineSendIo{
+                .delegate = session.established.connection.endpoint.io,
+            };
+            var vtable = fixed.delegate.vtable.*;
+            vtable.now = DeadlineSendIo.now;
+            vtable.sleep = DeadlineSendIo.sleep;
+            vtable.netSend = DeadlineSendIo.netSend;
+            session.established.connection.endpoint.io = .{
+                .userdata = &fixed,
+                .vtable = &vtable,
+            };
+            quic.one_rtt.testing.exhaustPacingAt(
+                &session.established.connection,
+                @intCast(fixed.now_ns),
+            );
+            const packet_number =
+                session.established.connection.next_packet_number;
+            if (session.sendResponsePacedWithDeadline(
+                request.stream_id,
+                .{ .status = 204 },
+                .{
+                    .clock = .awake,
+                    .raw = .fromNanoseconds(fixed.now_ns + 1),
+                },
+            )) |_| {
+                return error.TestUnexpectedResult;
+            } else |err| {
+                if (err != error.Timeout) return err;
+                self.response_timeout = true;
+            }
+            self.zero_send_calls = fixed.send_calls == 0;
+            self.zero_sleep_calls = fixed.sleep_calls == 0;
+            self.lifecycle_retained =
+                session.request_lifecycle.count() == 1;
+            self.connection_open =
+                !session.established.connection.closed();
+            try std.testing.expectEqual(
+                packet_number,
+                session.established.connection.next_packet_number,
+            );
+            session.established.connection.endpoint.io = fixed.delegate;
+            try session.sendResponsePacedWithDeadline(
+                request.stream_id,
+                .{ .status = 204 },
+                .fromNow(
+                    session.connectionIo(),
+                    .{ .raw = .fromSeconds(2), .clock = .awake },
+                ),
+            );
+
+            var body_request = try session.receiveRequest();
+            defer body_request.deinit(
+                session.established.connection.endpoint.allocator,
+            );
+            try std.testing.expectEqual(@as(u62, 4), body_request.stream_id);
+            try std.testing.expectEqualStrings(
+                "/body-timeout",
+                body_request.request.path,
+            );
+            const now = std.Io.Clock.awake.now(
+                session.established.connection.endpoint.io,
+            ).nanoseconds;
+            fixed = .{
+                .delegate = session.established.connection.endpoint.io,
+                .now_ns = now,
+            };
+            vtable = fixed.delegate.vtable.*;
+            vtable.now = DeadlineSendIo.now;
+            vtable.sleep = DeadlineSendIo.sleep;
+            vtable.netSend = DeadlineSendIo.netSend;
+            session.established.connection.endpoint.io = .{
+                .userdata = &fixed,
+                .vtable = &vtable,
+            };
+            quic.one_rtt.testing.exhaustPacingAt(
+                &session.established.connection,
+                @intCast(fixed.now_ns),
+            );
+            fixed.now_ns += std.time.ns_per_s;
+            var body: [4096]u8 = .{0xa5} ** 4096;
+            if (session.sendResponsePacedWithDeadline(
+                body_request.stream_id,
+                .{ .status = 200, .body = &body },
+                .{
+                    .clock = .awake,
+                    .raw = .fromNanoseconds(fixed.now_ns + 1),
+                },
+            )) |_| {
+                return error.TestUnexpectedResult;
+            } else |err| {
+                if (err != error.Timeout) return err;
+                self.body_timeout = true;
+            }
+            try std.testing.expect(fixed.send_calls >= 1);
+            try std.testing.expect(session.established.connection.closed());
+            session.established.connection.endpoint.io = fixed.delegate;
+        }
+    };
+
+    var shared = Shared{ .server = &server, .io = io };
+    const thread = try std.Thread.spawn(.{}, Shared.run, .{&shared});
+    var joined = false;
+    defer if (!joined) thread.join();
+
+    var client = try HandshakeClient.connect(
+        allocator,
+        io,
+        .{ .ip4 = .loopback(0) },
+        server.address(),
+        .{ .quic = .{
+            .max_datagram_size = 4096,
+            .max_frames_per_datagram = 8,
+        } },
+        .{ .handshake = .{
+            .original_destination_connection_id = &original_dcid,
+            .local_connection_id = &client_cid,
+            .server_name = "localhost",
+            .initial_one_rtt_config = .{
+                .max_datagram_size = 1400,
+                .pacing_max_burst_packets = 1,
+            },
+            .random = [_]u8{0x53} ** 32,
+            .x25519_secret_key = [_]u8{0x54} ** 32,
+        } },
+    );
+    defer client.deinit();
+
+    try std.testing.expectError(
+        error.Timeout,
+        client.requestWithDeadline(
+            .{
+                .method = "GET",
+                .path = "/wrong-clock",
+                .authority = "localhost",
+            },
+            .{ .clock = .real, .raw = .zero },
+        ),
+    );
+    try std.testing.expectEqual(@as(u62, 0), client.next_stream_id);
+    try std.testing.expectEqual(@as(usize, 0), client.request_lifecycle.count());
+
+    try sendConnectionSettings(
+        &client.established.connection,
+        &client.critical_stream_send_scratch,
+        &client.control,
+        &client.control_send,
+        &client.qpack_encoder_send,
+        &client.qpack_encoder_prefix_sent,
+        &client.qpack_decoder_send,
+        &client.qpack_decoder_prefix_sent,
+        client.options,
+        client_control_stream_id,
+    );
+    var fixed = DeadlineSendIo{ .delegate = client.endpoint.io };
+    var vtable = fixed.delegate.vtable.*;
+    vtable.now = DeadlineSendIo.now;
+    vtable.sleep = DeadlineSendIo.sleep;
+    vtable.netSend = DeadlineSendIo.netSend;
+    client.endpoint.io = .{ .userdata = &fixed, .vtable = &vtable };
+    quic.one_rtt.testing.exhaustPacingAt(
+        &client.established.connection,
+        @intCast(fixed.now_ns),
+    );
+    const packet_number = client.established.connection.next_packet_number;
+    try std.testing.expectError(
+        error.Timeout,
+        client.requestWithInformationalAndDeadline(
+            .{
+                .method = "GET",
+                .path = "/must-not-send",
+                .authority = "localhost",
+            },
+            null,
+            .{
+                .clock = .awake,
+                .raw = .fromNanoseconds(fixed.now_ns + 1),
+            },
+        ),
+    );
+    try std.testing.expectEqual(@as(usize, 0), fixed.send_calls);
+    try std.testing.expectEqual(@as(usize, 0), fixed.sleep_calls);
+    try std.testing.expectEqual(packet_number, client.established.connection.next_packet_number);
+    try std.testing.expectEqual(@as(usize, 1), client.request_lifecycle.count());
+    try std.testing.expect(client.request_lifecycle.contains(0));
+    try std.testing.expectEqual(@as(u62, 0), client.next_stream_id);
+    try std.testing.expect(!client.established.connection.closed());
+    client.endpoint.io = fixed.delegate;
+
+    var response = try client.requestWithDeadline(
+        .{
+            .method = "GET",
+            .path = "/after-timeout",
+            .authority = "localhost",
+        },
+        .fromNow(io, .{ .raw = .fromSeconds(2), .clock = .awake }),
+    );
+    defer response.deinit(allocator);
+    try std.testing.expectEqual(@as(u16, 204), response.response.status);
+    _ = try client.sendRequest(.{
+        .method = "GET",
+        .path = "/body-timeout",
+        .authority = "localhost",
+    });
+    try shared.body_done.wait(io);
+
+    thread.join();
+    joined = true;
+    if (shared.err) |err| return err;
+    try std.testing.expect(shared.response_timeout);
+    try std.testing.expect(shared.body_timeout);
+    try std.testing.expect(shared.zero_send_calls);
+    try std.testing.expect(shared.zero_sleep_calls);
+    try std.testing.expect(shared.lifecycle_retained);
+    try std.testing.expect(shared.connection_open);
+}
+
+test "HTTP/3 streaming head deadlines validate before state mutation" {
+    const allocator = std.testing.allocator;
+    var threaded = std.Io.Threaded.init(allocator, .{});
+    defer threaded.deinit();
+    const io = threaded.io();
+
+    const original_dcid =
+        [_]u8{ 0x55, 0x56, 0x57, 0x58, 0x59, 0x5a, 0x5b, 0x5c };
+    const client_cid = [_]u8{ 0x5d, 0x5e, 0x5f, 0x60 };
+    const server_cid = [_]u8{ 0x61, 0x62, 0x63, 0x64 };
+    var server = try HandshakeServer.bind(
+        allocator,
+        io,
+        .{ .ip4 = .loopback(0) },
+        .{ .quic = .{
+            .max_datagram_size = 4096,
+            .max_frames_per_datagram = 8,
+        } },
+        .{ .handshake = .{
+            .local_connection_id = &server_cid,
+            .random = [_]u8{0x65} ** 32,
+            .x25519_secret_key = [_]u8{0x66} ** 32,
+        } },
+    );
+    defer server.deinit();
+
+    const Shared = struct {
+        server: *HandshakeServer,
+        checked: bool = false,
+        err: ?anyerror = null,
+
+        fn run(self: *@This()) void {
+            self.runFallible() catch |err| {
+                self.err = err;
+            };
+        }
+
+        fn runFallible(self: *@This()) !void {
+            var session = try self.server.accept();
+            defer session.deinit();
+            var request = try session.receiveRequest();
+            defer request.deinit(
+                session.established.connection.endpoint.allocator,
+            );
+            const packet_number =
+                session.established.connection.next_packet_number;
+            try std.testing.expectError(
+                error.Timeout,
+                session.startResponseWithDeadline(
+                    request.stream_id,
+                    .{ .status = 200 },
+                    4,
+                    .{ .clock = .real, .raw = .zero },
+                ),
+            );
+            try std.testing.expectEqual(
+                packet_number,
+                session.established.connection.next_packet_number,
+            );
+            try std.testing.expectEqual(
+                @as(usize, 1),
+                session.request_lifecycle.count(),
+            );
+            try session.startResponseWithDeadline(
+                request.stream_id,
+                .{ .status = 204 },
+                0,
+                .fromNow(
+                    session.connectionIo(),
+                    .{ .raw = .fromSeconds(2), .clock = .awake },
+                ),
+            );
+            self.checked = true;
+        }
+    };
+    var shared = Shared{ .server = &server };
+    const thread = try std.Thread.spawn(.{}, Shared.run, .{&shared});
+    var joined = false;
+    defer if (!joined) thread.join();
+
+    var client = try HandshakeClient.connect(
+        allocator,
+        io,
+        .{ .ip4 = .loopback(0) },
+        server.address(),
+        .{ .quic = .{
+            .max_datagram_size = 4096,
+            .max_frames_per_datagram = 8,
+        } },
+        .{ .handshake = .{
+            .original_destination_connection_id = &original_dcid,
+            .local_connection_id = &client_cid,
+            .server_name = "localhost",
+            .random = [_]u8{0x67} ** 32,
+            .x25519_secret_key = [_]u8{0x68} ** 32,
+        } },
+    );
+    defer client.deinit();
+
+    try std.testing.expectError(
+        error.Timeout,
+        client.startRequestWithDeadline(
+            .{
+                .method = "POST",
+                .path = "/wrong-clock",
+                .authority = "localhost",
+            },
+            4,
+            .{ .clock = .real, .raw = .zero },
+        ),
+    );
+    try std.testing.expectEqual(@as(u62, 0), client.next_stream_id);
+    try std.testing.expectEqual(@as(usize, 0), client.request_lifecycle.count());
+
+    const request_id = try client.startRequestWithDeadline(.{
+        .method = "GET",
+        .path = "/server-check",
+        .authority = "localhost",
+    }, 0, .fromNow(
+        client.connectionIo(),
+        .{ .raw = .fromSeconds(2), .clock = .awake },
+    ));
+    try std.testing.expectEqual(@as(u62, 0), request_id);
+    var response = try client.receiveResponse(request_id);
+    defer response.deinit(allocator);
+    try std.testing.expectEqual(@as(u16, 204), response.response.status);
+    thread.join();
+    joined = true;
+    if (shared.err) |err| return err;
+    try std.testing.expect(shared.checked);
+}
+
+test "HTTP/3 request deadline bounds bidirectional stream admission" {
+    const allocator = std.testing.allocator;
+    var threaded = std.Io.Threaded.init(allocator, .{});
+    defer threaded.deinit();
+    const io = threaded.io();
+
+    const original_dcid =
+        [_]u8{ 0x61, 0x62, 0x63, 0x64, 0x65, 0x66, 0x67, 0x68 };
+    const client_cid = [_]u8{ 0x69, 0x6a, 0x6b, 0x6c };
+    const server_cid = [_]u8{ 0x6d, 0x6e, 0x6f, 0x70 };
+    var server_transport = quic.practical_transport_parameters;
+    server_transport.initial_max_streams_bidi = 0;
+    var server = try HandshakeServer.bind(
+        allocator,
+        io,
+        .{ .ip4 = .loopback(0) },
+        .{ .quic = .{
+            .max_datagram_size = 4096,
+            .max_frames_per_datagram = 8,
+        } },
+        .{ .handshake = .{
+            .local_connection_id = &server_cid,
+            .local_transport_parameters = server_transport,
+            .random = [_]u8{0x71} ** 32,
+            .x25519_secret_key = [_]u8{0x72} ** 32,
+        } },
+    );
+    defer server.deinit();
+
+    const Shared = struct {
+        server: *HandshakeServer,
+        err: ?anyerror = null,
+
+        fn run(self: *@This()) void {
+            var session = self.server.accept() catch |err| {
+                self.err = err;
+                return;
+            };
+            defer session.deinit();
+            std.Io.sleep(
+                session.connectionIo(),
+                .fromMilliseconds(100),
+                .awake,
+            ) catch |err| {
+                self.err = err;
+            };
+        }
+    };
+    var shared = Shared{ .server = &server };
+    const thread = try std.Thread.spawn(.{}, Shared.run, .{&shared});
+    var joined = false;
+    defer if (!joined) thread.join();
+
+    var client = try HandshakeClient.connect(
+        allocator,
+        io,
+        .{ .ip4 = .loopback(0) },
+        server.address(),
+        .{ .quic = .{
+            .max_datagram_size = 4096,
+            .max_frames_per_datagram = 8,
+        } },
+        .{ .handshake = .{
+            .original_destination_connection_id = &original_dcid,
+            .local_connection_id = &client_cid,
+            .server_name = "localhost",
+            .random = [_]u8{0x73} ** 32,
+            .x25519_secret_key = [_]u8{0x74} ** 32,
+        } },
+    );
+    defer client.deinit();
+
+    try std.testing.expectError(
+        error.Timeout,
+        client.requestWithTimeout(
+            .{
+                .method = "GET",
+                .path = "/stream-credit-timeout",
+                .authority = "localhost",
+            },
+            .fromMilliseconds(20),
+        ),
+    );
+    try std.testing.expectEqual(@as(u62, 0), client.next_stream_id);
+    try std.testing.expectEqual(
+        @as(u64, 0),
+        client.established.connection.nextLocalBidirectionalStreamId(),
+    );
+    try std.testing.expectEqual(@as(usize, 0), client.request_lifecycle.count());
+    try std.testing.expect(!client.established.connection.closed());
+
+    thread.join();
+    joined = true;
+    if (shared.err) |err| return err;
 }
 
 test "HTTP/3 CONNECT datagrams round trip over a detached handshake stream" {
@@ -17744,6 +25789,124 @@ test "HTTP/3 handshake client cancellation reaches server" {
     if (shared.err) |err| return err;
 }
 
+test "HTTP/3 handshake server ORIGIN deadline is transactional" {
+    const allocator = std.testing.allocator;
+    var threaded = std.Io.Threaded.init(allocator, .{});
+    defer threaded.deinit();
+    const io = threaded.io();
+
+    const original_dcid =
+        [_]u8{ 0xa1, 0xa2, 0xa3, 0xa4, 0xa5, 0xa6, 0xa7, 0xa8 };
+    const client_cid = [_]u8{ 0xa9, 0xaa, 0xab, 0xac };
+    const server_cid = [_]u8{ 0xad, 0xae, 0xaf, 0xb0 };
+    var server = try HandshakeServer.bind(
+        allocator,
+        io,
+        .{ .ip4 = .loopback(0) },
+        .{ .quic = .{
+            .max_datagram_size = 4096,
+            .max_frames_per_datagram = 8,
+        } },
+        .{ .handshake = .{
+            .local_connection_id = &server_cid,
+            .random = [_]u8{0xb1} ** 32,
+            .x25519_secret_key = [_]u8{0xb2} ** 32,
+        } },
+    );
+    defer server.deinit();
+
+    const origin = "https://alt.example";
+    const Shared = struct {
+        server: *HandshakeServer,
+        io: std.Io,
+        sent: std.Io.Event = .unset,
+        observed: std.Io.Event = .unset,
+        checked: bool = false,
+        err: ?anyerror = null,
+
+        fn run(self: *@This()) void {
+            self.runFallible() catch |err| {
+                self.err = err;
+                self.sent.set(self.io);
+            };
+        }
+
+        fn runFallible(self: *@This()) !void {
+            var session = try self.server.accept();
+            defer session.deinit();
+            const packet_number =
+                session.established.connection.next_packet_number;
+            const control_offset = session.control_send.next_offset;
+            try std.testing.expect(!session.control.local_origin_set_sent);
+            try std.testing.expectError(
+                error.Timeout,
+                session.sendOriginsWithDeadline(
+                    &.{origin},
+                    .{ .clock = .real, .raw = .zero },
+                ),
+            );
+            try std.testing.expectEqual(
+                packet_number,
+                session.established.connection.next_packet_number,
+            );
+            try std.testing.expectEqual(
+                control_offset,
+                session.control_send.next_offset,
+            );
+            try std.testing.expect(!session.control.local_origin_set_sent);
+            try session.sendOriginsWithTimeout(
+                &.{origin},
+                .fromSeconds(2),
+            );
+            try std.testing.expect(session.control.local_origin_set_sent);
+            self.checked = true;
+            self.sent.set(self.io);
+            try self.observed.wait(self.io);
+        }
+    };
+
+    var shared = Shared{ .server = &server, .io = io };
+    const thread = try std.Thread.spawn(.{}, Shared.run, .{&shared});
+    var joined = false;
+    defer if (!joined) {
+        shared.observed.set(io);
+        thread.join();
+    };
+
+    var client = try HandshakeClient.connect(
+        allocator,
+        io,
+        .{ .ip4 = .loopback(0) },
+        server.address(),
+        .{ .quic = .{
+            .max_datagram_size = 4096,
+            .max_frames_per_datagram = 8,
+        } },
+        .{ .handshake = .{
+            .original_destination_connection_id = &original_dcid,
+            .local_connection_id = &client_cid,
+            .server_name = "localhost",
+            .random = [_]u8{0xb3} ** 32,
+            .x25519_secret_key = [_]u8{0xb4} ** 32,
+        } },
+    );
+    defer client.deinit();
+
+    try shared.sent.wait(io);
+    if (shared.err) |err| return err;
+    while (!client.peerOriginSetInitialized()) {
+        try client.pollControlWithTimeout(.fromSeconds(2));
+    }
+    try std.testing.expect(client.peerOriginKnown(
+        try http3.originFromSerialized(origin),
+    ));
+    shared.observed.set(io);
+    thread.join();
+    joined = true;
+    if (shared.err) |err| return err;
+    try std.testing.expect(shared.checked);
+}
+
 test "HTTP/3 handshake server performs two-phase graceful shutdown" {
     const allocator = std.testing.allocator;
     var threaded = std.Io.Threaded.init(allocator, .{});
@@ -17788,8 +25951,30 @@ test "HTTP/3 handshake server performs two-phase graceful shutdown" {
             defer request.deinit(
                 session.established.connection.endpoint.allocator,
             );
-            try session.initiateShutdown();
-            try session.completeShutdown();
+            const packet_number =
+                session.established.connection.next_packet_number;
+            const control_offset = session.control_send.next_offset;
+            try std.testing.expectError(
+                error.Timeout,
+                session.initiateShutdownWithDeadline(.{
+                    .clock = .real,
+                    .raw = .zero,
+                }),
+            );
+            try std.testing.expectEqual(
+                packet_number,
+                session.established.connection.next_packet_number,
+            );
+            try std.testing.expectEqual(
+                control_offset,
+                session.control_send.next_offset,
+            );
+            try std.testing.expectEqual(
+                stream_lifecycle.ShutdownState.active,
+                session.request_lifecycle.state(),
+            );
+            try session.initiateShutdownWithTimeout(.fromSeconds(2));
+            try session.completeShutdownWithTimeout(.fromSeconds(2));
             try std.testing.expectEqual(
                 @as(?u64, 4),
                 session.control.local_goaway_id,
@@ -17843,6 +26028,132 @@ test "HTTP/3 handshake server performs two-phase graceful shutdown" {
         .method = "GET",
         .path = "/after-graceful",
     }));
+}
+
+test "HTTP/3 serveConnection shutdown deadline covers GOAWAY send" {
+    const allocator = std.testing.allocator;
+    var threaded = std.Io.Threaded.init(allocator, .{});
+    defer threaded.deinit();
+    const io = threaded.io();
+
+    var endpoint = try quic.runtime.Endpoint.bind(
+        allocator,
+        io,
+        .{ .ip4 = .loopback(0) },
+        .{ .max_datagram_size = 4096 },
+    );
+    defer endpoint.deinit();
+    var peer_endpoint = try quic.runtime.Endpoint.bind(
+        allocator,
+        io,
+        .{ .ip4 = .loopback(0) },
+        .{ .max_datagram_size = 4096 },
+    );
+    defer peer_endpoint.deinit();
+    const keys = quic.protection.deriveAes128Keys(
+        [_]u8{0xd7} ** quic.protection.secret_len,
+    );
+    var session = try HandshakeServerSession.initPreconfigured(
+        &endpoint,
+        peer_endpoint.address(),
+        .{},
+        .{
+            .receive_keys = keys,
+            .send_keys = keys,
+            .local_connection_id = "shutdown-server",
+            .peer_connection_id = "shutdown-client",
+            .one_rtt = .{
+                .max_datagram_size = 1200,
+                .pacing_max_burst_packets = 1,
+            },
+        },
+    );
+    defer session.deinit();
+    try sendConnectionSettings(
+        &session.established.connection,
+        &session.critical_stream_send_scratch,
+        &session.control,
+        &session.control_send,
+        &session.qpack_encoder_send,
+        &session.qpack_encoder_prefix_sent,
+        &session.qpack_decoder_send,
+        &session.qpack_decoder_prefix_sent,
+        session.options,
+        server_control_stream_id,
+    );
+
+    const FixedIo = struct {
+        delegate: std.Io,
+        now_ns: i96 = 1_000_000,
+        send_calls: usize = 0,
+        sleep_calls: usize = 0,
+
+        fn now(
+            context: ?*anyopaque,
+            _: std.Io.Clock,
+        ) std.Io.Timestamp {
+            const self: *@This() = @ptrCast(@alignCast(context.?));
+            return .fromNanoseconds(self.now_ns);
+        }
+
+        fn sleep(
+            context: ?*anyopaque,
+            _: std.Io.Timeout,
+        ) std.Io.Cancelable!void {
+            const self: *@This() = @ptrCast(@alignCast(context.?));
+            self.sleep_calls += 1;
+            return error.Canceled;
+        }
+
+        fn netSend(
+            context: ?*anyopaque,
+            socket_handle: net.Socket.Handle,
+            messages: []net.OutgoingMessage,
+            flags: net.SendFlags,
+        ) struct { ?net.Socket.SendError, usize } {
+            const self: *@This() = @ptrCast(@alignCast(context.?));
+            self.send_calls += 1;
+            return self.delegate.vtable.netSend(
+                self.delegate.userdata,
+                socket_handle,
+                messages,
+                flags,
+            );
+        }
+    };
+    var fixed = FixedIo{ .delegate = endpoint.io };
+    var fixed_vtable = fixed.delegate.vtable.*;
+    fixed_vtable.now = FixedIo.now;
+    fixed_vtable.sleep = FixedIo.sleep;
+    fixed_vtable.netSend = FixedIo.netSend;
+    endpoint.io = .{ .userdata = &fixed, .vtable = &fixed_vtable };
+    defer endpoint.io = fixed.delegate;
+
+    quic.one_rtt.testing.exhaustPacingAt(
+        &session.established.connection,
+        @intCast(fixed.now_ns),
+    );
+    const packet_number = session.established.connection.next_packet_number;
+    const control_offset = session.control_send.next_offset;
+    try std.testing.expectError(
+        error.RecoveryDrainTimeout,
+        finishServedConnectionWithDeadline(&session, .{
+            .clock = .awake,
+            .raw = .fromNanoseconds(fixed.now_ns + 1),
+        }),
+    );
+    try std.testing.expectEqual(@as(usize, 0), fixed.send_calls);
+    try std.testing.expectEqual(@as(usize, 0), fixed.sleep_calls);
+    try std.testing.expectEqual(
+        packet_number,
+        session.established.connection.next_packet_number,
+    );
+    try std.testing.expectEqual(control_offset, session.control_send.next_offset);
+    try std.testing.expectEqual(@as(?u64, null), session.control.local_goaway_id);
+    try std.testing.expectEqual(
+        ShutdownState.active,
+        session.request_lifecycle.state(),
+    );
 }
 
 test "HTTP/3 handshake client sends priority update before request" {
@@ -17935,10 +26246,25 @@ test "HTTP/3 handshake client sends priority update before request" {
     );
     defer client.deinit();
 
-    try client.sendPriorityUpdate(0, .{
+    const packet_number = client.established.connection.next_packet_number;
+    const control_offset = client.control_send.next_offset;
+    try std.testing.expectError(
+        error.Timeout,
+        client.sendPriorityUpdateWithDeadline(
+            0,
+            .{ .urgency = 1 },
+            .{ .clock = .real, .raw = .zero },
+        ),
+    );
+    try std.testing.expectEqual(
+        packet_number,
+        client.established.connection.next_packet_number,
+    );
+    try std.testing.expectEqual(control_offset, client.control_send.next_offset);
+    try client.sendPriorityUpdateWithTimeout(0, .{
         .urgency = 2,
         .incremental = true,
-    });
+    }, .fromSeconds(2));
     const stream_id = try client.sendRequest(.{
         .method = "GET",
         .path = "/prioritized",
@@ -18010,11 +26336,14 @@ test "HTTP/3 handshake client advertises and cancels server push IDs" {
                 );
                 for (packet.frames) |frame| {
                     if (frame != .stream) continue;
-                    if (try applyControlStreamFrameForRole(
+                    if (try applyControlStreamFrameForRoleWithPushes(
                         &session.control,
                         session.established.connection.endpoint.allocator,
                         frame.stream,
                         .server,
+                        .{ .slice = &.{ 7, 3 } },
+                        null,
+                        null,
                     )) {
                         try configureQpackEncoderFromPeerSettings(
                             session.control,
@@ -18049,8 +26378,23 @@ test "HTTP/3 handshake client advertises and cancels server push IDs" {
     );
     defer client.deinit();
 
-    try client.sendMaxPushId(4);
-    try client.sendMaxPushId(8);
+    const packet_number = client.established.connection.next_packet_number;
+    const control_offset = client.control_send.next_offset;
+    try std.testing.expectError(
+        error.Timeout,
+        client.sendMaxPushIdWithDeadline(
+            4,
+            .{ .clock = .real, .raw = .zero },
+        ),
+    );
+    try std.testing.expectEqual(
+        packet_number,
+        client.established.connection.next_packet_number,
+    );
+    try std.testing.expectEqual(control_offset, client.control_send.next_offset);
+    try std.testing.expectEqual(@as(?u64, null), client.control.local_max_push_id);
+    try client.sendMaxPushIdWithTimeout(4, .fromSeconds(2));
+    try client.sendMaxPushIdWithTimeout(8, .fromSeconds(2));
     try std.testing.expectError(
         error.MaxPushIdReduced,
         client.sendMaxPushId(7),
@@ -18058,8 +26402,8 @@ test "HTTP/3 handshake client advertises and cancels server push IDs" {
     try std.testing.expectError(error.PushIdExceeded, client.cancelPush(9));
     try client.push_streams.registerPromise(7, 0);
     try client.push_streams.registerPromise(3, 0);
-    try client.cancelPush(7);
-    try client.cancelPush(3);
+    try client.cancelPushWithTimeout(7, .fromSeconds(2));
+    try client.cancelPushWithTimeout(3, .fromSeconds(2));
     thread.join();
     if (shared.err) |err| return err;
 }
@@ -18133,25 +26477,66 @@ test "HTTP/3 handshake client streams promised push response" {
             while (session.control.peer_max_push_id != 1) {
                 try session.receiveRequestPacket();
             }
-            const push_stream_id = try session.sendResponseWithPush(
+            const push = ServerPush{
+                .push_id = 1,
+                .request = .{
+                    .method = "GET",
+                    .path = "/handshake.css",
+                    .authority = "localhost",
+                },
+                .informational = &.{
+                    .{ .status = 103 },
+                    .{ .status = 102 },
+                },
+                .response = .{
+                    .status = 200,
+                    .body = "handshake-asset",
+                },
+            };
+            const packet_number =
+                session.established.connection.next_packet_number;
+            const control_offset = session.control_send.next_offset;
+            const next_push_stream_id = session.next_push_stream_id;
+            const pending_sections =
+                session.qpack_encode.pending_sections.items.len;
+            try std.testing.expectError(
+                error.Timeout,
+                session.sendResponseWithPushAndDeadline(
+                    request.stream_id,
+                    .{ .status = 204 },
+                    push,
+                    .{ .clock = .real, .raw = .zero },
+                ),
+            );
+            try std.testing.expectEqual(
+                packet_number,
+                session.established.connection.next_packet_number,
+            );
+            try std.testing.expectEqual(
+                control_offset,
+                session.control_send.next_offset,
+            );
+            try std.testing.expectEqual(
+                next_push_stream_id,
+                session.next_push_stream_id,
+            );
+            try std.testing.expectEqual(
+                @as(usize, 0),
+                session.promised_push_ids.rangeCount(),
+            );
+            try std.testing.expectEqual(
+                pending_sections,
+                session.qpack_encode.pending_sections.items.len,
+            );
+            try std.testing.expectEqual(
+                @as(usize, 1),
+                session.request_lifecycle.count(),
+            );
+            const push_stream_id = try session.sendResponseWithPushAndTimeout(
                 request.stream_id,
                 .{ .status = 204 },
-                .{
-                    .push_id = 1,
-                    .request = .{
-                        .method = "GET",
-                        .path = "/handshake.css",
-                        .authority = "localhost",
-                    },
-                    .informational = &.{
-                        .{ .status = 103 },
-                        .{ .status = 102 },
-                    },
-                    .response = .{
-                        .status = 200,
-                        .body = "handshake-asset",
-                    },
-                },
+                push,
+                .fromSeconds(2),
             );
             try std.testing.expectEqual(
                 first_server_push_stream_id,
@@ -18280,10 +26665,11 @@ test "HTTP/3 handshake client sends priority update for promised push" {
         fn runFallible(server_ptr: *HandshakeServer) !void {
             var session = try server_ptr.accept();
             defer session.deinit();
-            try session.peer_promised_push_ids.append(
+            try session.promised_push_ids.prepareInsertValue(
                 session.established.connection.endpoint.allocator,
                 1,
             );
+            session.promised_push_ids.insertAssumeCapacity(1);
             while (session.control.pushPriorityUpdate(1) == null) {
                 try session.receiveRequestPacket();
             }
@@ -18314,10 +26700,25 @@ test "HTTP/3 handshake client sends priority update for promised push" {
     defer client.deinit();
     try client.sendMaxPushId(1);
     try client.push_streams.registerPromise(1, 0);
-    try client.sendPushPriorityUpdate(1, .{
+    const packet_number = client.established.connection.next_packet_number;
+    const control_offset = client.control_send.next_offset;
+    try std.testing.expectError(
+        error.Timeout,
+        client.sendPushPriorityUpdateWithDeadline(
+            1,
+            .{ .urgency = 2 },
+            .{ .clock = .real, .raw = .zero },
+        ),
+    );
+    try std.testing.expectEqual(
+        packet_number,
+        client.established.connection.next_packet_number,
+    );
+    try std.testing.expectEqual(control_offset, client.control_send.next_offset);
+    try client.sendPushPriorityUpdateWithTimeout(1, .{
         .urgency = 4,
         .incremental = true,
-    });
+    }, .fromSeconds(2));
     thread.join();
     if (shared.err) |err| return err;
 }
@@ -19105,7 +27506,7 @@ test "HTTP/3 handshake client drains GRO response batch one packet at a time" {
                 .local_connection_id = &server_cid,
                 .initial_one_rtt_config = .{
                     .max_datagram_size = 1400,
-                    .enable_pacing = false,
+                    .enable_pacing = true,
                 },
                 .random = [_]u8{0xc7} ** 32,
                 .x25519_secret_key = [_]u8{0xc8} ** 32,
@@ -19368,7 +27769,7 @@ test "HTTP/3 handshake client batches request DATA across streams" {
                 .{ .status = 200 },
                 "second-response".len,
             );
-            try session.sendResponseBodyBatchPaced(&.{
+            const chunks = [_]BodyChunk{
                 .{
                     .stream_id = first_stream_id.?,
                     .data = "first-response",
@@ -19379,7 +27780,39 @@ test "HTTP/3 handshake client batches request DATA across streams" {
                     .data = "second-response",
                     .fin = true,
                 },
-            });
+            };
+            var committed: usize = 99;
+            try std.testing.expectError(
+                error.Timeout,
+                session.sendResponseBodyBatchPacedWithTimeout(
+                    &chunks,
+                    &committed,
+                    .zero,
+                ),
+            );
+            try std.testing.expectEqual(@as(usize, 0), committed);
+            committed = 99;
+            try std.testing.expectError(
+                error.Timeout,
+                session.sendResponseBodyBatchPacedWithDeadline(
+                    &chunks,
+                    &committed,
+                    .fromNow(
+                        session.connectionIo(),
+                        .{ .raw = .fromSeconds(1), .clock = .real },
+                    ),
+                ),
+            );
+            try std.testing.expectEqual(@as(usize, 0), committed);
+            try session.sendResponseBodyBatchPacedWithDeadline(
+                &chunks,
+                &committed,
+                .fromNow(
+                    session.connectionIo(),
+                    .{ .raw = .fromSeconds(2), .clock = .awake },
+                ),
+            );
+            try std.testing.expectEqual(@as(usize, 2), committed);
         }
     };
 
@@ -19401,7 +27834,7 @@ test "HTTP/3 handshake client batches request DATA across streams" {
                 .server_name = "localhost",
                 .initial_one_rtt_config = .{
                     .max_datagram_size = 1400,
-                    .enable_pacing = false,
+                    .enable_pacing = true,
                 },
                 .random = [_]u8{0xe3} ** 32,
                 .x25519_secret_key = [_]u8{0xe4} ** 32,
@@ -19420,6 +27853,40 @@ test "HTTP/3 handshake client batches request DATA across streams" {
         .path = "/batch-second",
         .authority = "localhost",
     }, "second-body".len);
+    const chunks = [_]BodyChunk{
+        .{ .stream_id = first, .data = "first-body", .fin = true },
+        .{ .stream_id = second, .data = "second-body", .fin = true },
+    };
+    const first_offset = client.outbound_bodies.find(first).?.send.next_offset;
+    const second_offset = client.outbound_bodies.find(second).?.send.next_offset;
+    var committed: usize = 99;
+    try std.testing.expectError(
+        error.Timeout,
+        client.sendRequestBodyBatchPacedWithTimeout(
+            &chunks,
+            &committed,
+            .zero,
+        ),
+    );
+    try std.testing.expectEqual(@as(usize, 0), committed);
+    try std.testing.expectEqual(
+        first_offset,
+        client.outbound_bodies.find(first).?.send.next_offset,
+    );
+    try std.testing.expectEqual(
+        second_offset,
+        client.outbound_bodies.find(second).?.send.next_offset,
+    );
+    committed = 99;
+    try std.testing.expectError(
+        error.Timeout,
+        client.sendRequestBodyBatchPacedWithDeadline(
+            &chunks,
+            &committed,
+            .fromNow(io, .{ .raw = .fromSeconds(1), .clock = .real }),
+        ),
+    );
+    try std.testing.expectEqual(@as(usize, 0), committed);
     try std.testing.expectError(
         error.UnexpectedStream,
         client.sendRequestBodyBatchPaced(&.{
@@ -19427,10 +27894,129 @@ test "HTTP/3 handshake client batches request DATA across streams" {
             .{ .stream_id = first, .data = "first-body", .fin = true },
         }),
     );
-    try client.sendRequestBodyBatchPaced(&.{
-        .{ .stream_id = first, .data = "first-body", .fin = true },
-        .{ .stream_id = second, .data = "second-body", .fin = true },
-    });
+    const FixedPacingIo = struct {
+        delegate: std.Io,
+        now_ns: i96,
+        sleep_calls: usize = 0,
+
+        fn now(
+            userdata: ?*anyopaque,
+            _: std.Io.Clock,
+        ) std.Io.Timestamp {
+            const self: *@This() = @ptrCast(@alignCast(userdata));
+            return .fromNanoseconds(self.now_ns);
+        }
+
+        fn sleep(
+            userdata: ?*anyopaque,
+            _: std.Io.Timeout,
+        ) std.Io.Cancelable!void {
+            const self: *@This() = @ptrCast(@alignCast(userdata));
+            self.sleep_calls += 1;
+            return error.Canceled;
+        }
+    };
+    var fixed_io = FixedPacingIo{
+        .delegate = client.endpoint.io,
+        .now_ns = 1_000_000,
+    };
+    var fixed_vtable = client.endpoint.io.vtable.*;
+    fixed_vtable.now = FixedPacingIo.now;
+    fixed_vtable.sleep = FixedPacingIo.sleep;
+    client.endpoint.io = .{
+        .userdata = &fixed_io,
+        .vtable = &fixed_vtable,
+    };
+    quic.one_rtt.testing.exhaustPacingAt(
+        &client.established.connection,
+        @intCast(fixed_io.now_ns),
+    );
+    committed = 99;
+    try std.testing.expectError(
+        error.Timeout,
+        client.sendRequestBodyBatchPacedWithDeadline(
+            &chunks,
+            &committed,
+            .fromNow(
+                client.connectionIo(),
+                .{ .raw = .fromNanoseconds(1), .clock = .awake },
+            ),
+        ),
+    );
+    try std.testing.expectEqual(@as(usize, 0), committed);
+    try std.testing.expectEqual(@as(usize, 0), fixed_io.sleep_calls);
+    const pacing = client.established.connection.nextTimerDeadline() orelse
+        return error.TestUnexpectedResult;
+    try std.testing.expectEqual(
+        quic.one_rtt.TimerDeadlineKind.pacing,
+        pacing.kind,
+    );
+    fixed_io.now_ns = @intCast(pacing.deadline_ns);
+    _ = (try client.established.connection.serviceNextTimerAt(
+        pacing.deadline_ns,
+    )) orelse return error.TestUnexpectedResult;
+    client.endpoint.io = fixed_io.delegate;
+    const PartialBatchSend = struct {
+        delegate: std.Io,
+        calls: usize = 0,
+
+        fn netSend(
+            userdata: ?*anyopaque,
+            socket_handle: net.Socket.Handle,
+            messages: []net.OutgoingMessage,
+            flags: net.SendFlags,
+        ) struct { ?net.Socket.SendError, usize } {
+            const self: *@This() = @ptrCast(@alignCast(userdata));
+            self.calls += 1;
+            const prefix_len = @min(@as(usize, 1), messages.len);
+            if (prefix_len != 0) {
+                const send_error, const sent_count = self.delegate.vtable.netSend(
+                    self.delegate.userdata,
+                    socket_handle,
+                    messages[0..prefix_len],
+                    flags,
+                );
+                if (send_error != null or sent_count != prefix_len) {
+                    return .{ send_error, sent_count };
+                }
+            }
+            return .{ error.NetworkDown, prefix_len };
+        }
+    };
+    var partial = PartialBatchSend{ .delegate = client.endpoint.io };
+    var partial_vtable = client.endpoint.io.vtable.*;
+    partial_vtable.netSend = PartialBatchSend.netSend;
+    client.endpoint.io = .{
+        .userdata = &partial,
+        .vtable = &partial_vtable,
+    };
+    defer client.endpoint.io = partial.delegate;
+    committed = 99;
+    try std.testing.expectError(
+        error.NetworkDown,
+        client.sendRequestBodyBatchPacedWithDeadline(
+            &chunks,
+            &committed,
+            .fromNow(
+                client.connectionIo(),
+                .{ .raw = .fromSeconds(2), .clock = .awake },
+            ),
+        ),
+    );
+    try std.testing.expectEqual(@as(usize, 1), committed);
+    try std.testing.expect(client.outbound_bodies.find(first) == null);
+    try std.testing.expectEqual(
+        second_offset,
+        client.outbound_bodies.find(second).?.send.next_offset,
+    );
+    client.endpoint.io = partial.delegate;
+    committed = 99;
+    try client.sendRequestBodyBatchPacedWithDeadline(
+        chunks[1..],
+        &committed,
+        .fromNow(io, .{ .raw = .fromSeconds(2), .clock = .awake }),
+    );
+    try std.testing.expectEqual(@as(usize, 1), committed);
     for (0..2) |_| {
         var event = try client.receiveNextResponse();
         defer event.deinit(allocator);
@@ -19456,16 +28042,486 @@ test "HTTP/3 handshake client batches request DATA across streams" {
 
 test "HTTP/3 detached progress timeout validates budget before state" {
     var server: HandshakeServerSession = undefined;
+    var committed_chunks: usize = 99;
+    try std.testing.expectError(
+        error.Timeout,
+        server.sendResponseBodyBatchPacedWithTimeout(
+            &.{},
+            &committed_chunks,
+            .zero,
+        ),
+    );
+    try std.testing.expectEqual(@as(usize, 0), committed_chunks);
+    var committed_bytes: [0]usize = .{};
+    try std.testing.expectError(
+        error.Timeout,
+        server.sendResponseBodiesPacedWithTimeout(
+            &.{},
+            &committed_bytes,
+            .zero,
+        ),
+    );
     try std.testing.expectError(
         error.Timeout,
         server.receiveDetachedRequestProgressWithTimeout(0, .zero),
     );
 
     var client: HandshakeClient = undefined;
+    committed_chunks = 99;
+    try std.testing.expectError(
+        error.Timeout,
+        client.sendRequestBodyBatchPacedWithTimeout(
+            &.{},
+            &committed_chunks,
+            .zero,
+        ),
+    );
+    try std.testing.expectEqual(@as(usize, 0), committed_chunks);
     try std.testing.expectError(
         error.Timeout,
         client.receiveDetachedResponseProgressWithTimeout(0, .zero),
     );
+}
+
+test "HTTP/3 handshake body parts deadline resumes exact slice prefix" {
+    const allocator = std.testing.allocator;
+    var threaded = std.Io.Threaded.init(allocator, .{});
+    defer threaded.deinit();
+    const io = threaded.io();
+
+    const DeadlineAfterSendIo = struct {
+        delegate: std.Io,
+        now_ns: i96,
+        send_calls: usize = 0,
+
+        fn now(
+            context: ?*anyopaque,
+            _: std.Io.Clock,
+        ) std.Io.Timestamp {
+            const self: *@This() = @ptrCast(@alignCast(context.?));
+            return .fromNanoseconds(self.now_ns);
+        }
+
+        fn netSend(
+            context: ?*anyopaque,
+            socket_handle: net.Socket.Handle,
+            messages: []net.OutgoingMessage,
+            flags: net.SendFlags,
+        ) struct { ?net.Socket.SendError, usize } {
+            const self: *@This() = @ptrCast(@alignCast(context.?));
+            self.send_calls += 1;
+            const send_error, const sent_count = self.delegate.vtable.netSend(
+                self.delegate.userdata,
+                socket_handle,
+                messages,
+                flags,
+            );
+            if (sent_count != 0) self.now_ns += std.time.ns_per_s;
+            return .{ send_error, sent_count };
+        }
+    };
+
+    const original_dcid =
+        [_]u8{ 0x81, 0x82, 0x83, 0x84, 0x85, 0x86, 0x87, 0x88 };
+    const client_cid = [_]u8{ 0x89, 0x8a, 0x8b, 0x8c };
+    const server_cid = [_]u8{ 0x8d, 0x8e, 0x8f, 0x90 };
+    const session_options: HandshakeSessionOptions = .{
+        .max_frames_per_packet = 8,
+        .max_stream_frame_data = 32,
+        .paced_body_chunk_bytes = 3,
+        .enable_data_prefix_fast_path = true,
+    };
+    var server = try HandshakeServer.bind(
+        allocator,
+        io,
+        .{ .ip4 = .loopback(0) },
+        .{ .quic = .{
+            .max_datagram_size = 4096,
+            .max_frames_per_datagram = 8,
+        } },
+        .{
+            .handshake = .{
+                .local_connection_id = &server_cid,
+                .initial_one_rtt_config = .{
+                    .max_datagram_size = 1400,
+                    .enable_pacing = false,
+                },
+                .random = [_]u8{0x91} ** 32,
+                .x25519_secret_key = [_]u8{0x92} ** 32,
+            },
+            .session = session_options,
+        },
+    );
+    defer server.deinit();
+
+    const Shared = struct {
+        server: *HandshakeServer,
+        err: ?anyerror = null,
+
+        fn run(self: *@This()) void {
+            self.runFallible() catch |err| {
+                self.err = err;
+            };
+        }
+
+        fn runFallible(self: *@This()) !void {
+            var session = try self.server.accept();
+            defer session.deinit();
+            var request = try session.receiveRequest();
+            defer request.deinit(
+                session.established.connection.endpoint.allocator,
+            );
+            try std.testing.expectEqualStrings(
+                "abcdefghi",
+                request.request.body,
+            );
+            try std.testing.expectEqualStrings(
+                "ok",
+                request.request.trailers[0].value,
+            );
+            try session.startResponse(
+                request.stream_id,
+                .{ .status = 200 },
+                "jklmnopqr".len,
+            );
+            const response_before =
+                session.outbound_bodies.find(request.stream_id).?.*;
+            var progress: BodyWriteProgress = .{
+                .committed_bytes = 99,
+                .fin_committed = true,
+            };
+            try std.testing.expectError(
+                error.Timeout,
+                session.sendResponseBodyPartsPacedWithDeadline(
+                    request.stream_id,
+                    &.{ "jk", "lmno", "pqr" },
+                    true,
+                    &progress,
+                    .{ .clock = .real, .raw = .zero },
+                ),
+            );
+            const response_after =
+                session.outbound_bodies.find(request.stream_id).?.*;
+            try std.testing.expectEqual(@as(usize, 0), progress.committed_bytes);
+            try std.testing.expect(!progress.fin_committed);
+            try std.testing.expectEqual(
+                response_before.written,
+                response_after.written,
+            );
+            try std.testing.expectEqual(
+                response_before.send.next_offset,
+                response_after.send.next_offset,
+            );
+            const response_packet_number =
+                session.established.connection.next_packet_number;
+            try std.testing.expectError(
+                error.InvalidContentLength,
+                session.sendResponseBodyPartsPacedWithDeadline(
+                    request.stream_id,
+                    &.{ "too-", "many-bytes" },
+                    true,
+                    &progress,
+                    .fromNow(
+                        session.connectionIo(),
+                        .{ .raw = .fromSeconds(2), .clock = .awake },
+                    ),
+                ),
+            );
+            try std.testing.expectEqual(@as(usize, 0), progress.committed_bytes);
+            try std.testing.expectEqual(
+                response_packet_number,
+                session.established.connection.next_packet_number,
+            );
+
+            var timed = DeadlineAfterSendIo{
+                .delegate = session.established.connection.endpoint.io,
+                .now_ns = std.Io.Clock.awake.now(
+                    session.established.connection.endpoint.io,
+                ).nanoseconds,
+            };
+            var timed_vtable = timed.delegate.vtable.*;
+            timed_vtable.now = DeadlineAfterSendIo.now;
+            timed_vtable.netSend = DeadlineAfterSendIo.netSend;
+            session.established.connection.endpoint.io = .{
+                .userdata = &timed,
+                .vtable = &timed_vtable,
+            };
+            defer session.established.connection.endpoint.io = timed.delegate;
+
+            try std.testing.expectError(
+                error.Timeout,
+                session.sendResponseBodyPartsPacedWithDeadline(
+                    request.stream_id,
+                    &.{ "jk", "lmno", "pqr" },
+                    true,
+                    &progress,
+                    .{
+                        .clock = .awake,
+                        .raw = .fromNanoseconds(timed.now_ns + 1),
+                    },
+                ),
+            );
+            try std.testing.expectEqual(@as(usize, 3), progress.committed_bytes);
+            try std.testing.expect(!progress.fin_committed);
+            try std.testing.expectEqual(@as(usize, 1), timed.send_calls);
+
+            session.established.connection.endpoint.io = timed.delegate;
+            try session.sendResponseBodyPartsPacedWithDeadline(
+                request.stream_id,
+                &.{ "mno", "pqr" },
+                false,
+                &progress,
+                .fromNow(
+                    session.connectionIo(),
+                    .{ .raw = .fromSeconds(2), .clock = .awake },
+                ),
+            );
+            try std.testing.expectEqual(@as(usize, 6), progress.committed_bytes);
+            try std.testing.expect(!progress.fin_committed);
+
+            const trailer_packet_number =
+                session.established.connection.next_packet_number;
+            try std.testing.expectError(
+                error.Timeout,
+                session.finishResponseTrailersPacedWithDeadline(
+                    request.stream_id,
+                    &.{.{ .name = "x-response-finish", .value = "ok" }},
+                    .{ .clock = .real, .raw = .zero },
+                ),
+            );
+            try std.testing.expectEqual(
+                trailer_packet_number,
+                session.established.connection.next_packet_number,
+            );
+            const trailer_now = std.Io.Clock.awake.now(
+                session.connectionIo(),
+            ).nanoseconds;
+            quic.one_rtt.testing.exhaustPacingAt(
+                &session.established.connection,
+                @intCast(trailer_now),
+            );
+            try std.testing.expectError(
+                error.Timeout,
+                session.finishResponseTrailersPacedWithDeadline(
+                    request.stream_id,
+                    &.{.{ .name = "x-response-finish", .value = "ok" }},
+                    .{
+                        .clock = .awake,
+                        .raw = .fromNanoseconds(trailer_now + 1),
+                    },
+                ),
+            );
+            try std.testing.expectEqual(
+                trailer_packet_number,
+                session.established.connection.next_packet_number,
+            );
+            try std.testing.expect(
+                session.outbound_bodies.find(request.stream_id) != null,
+            );
+            quic.one_rtt.testing.setPacingBudgetAt(
+                &session.established.connection,
+                session.established.connection.currentSendDatagramSize(),
+                @intCast(trailer_now),
+            );
+            try session.finishResponseTrailersPacedWithDeadline(
+                request.stream_id,
+                &.{.{ .name = "x-response-finish", .value = "ok" }},
+                .fromNow(
+                    session.connectionIo(),
+                    .{ .raw = .fromSeconds(2), .clock = .awake },
+                ),
+            );
+        }
+    };
+
+    var shared = Shared{ .server = &server };
+    const thread = try std.Thread.spawn(.{}, Shared.run, .{&shared});
+    var joined = false;
+    defer if (!joined) thread.join();
+
+    var client = try HandshakeClient.connect(
+        allocator,
+        io,
+        .{ .ip4 = .loopback(0) },
+        server.address(),
+        .{ .quic = .{
+            .max_datagram_size = 4096,
+            .max_frames_per_datagram = 8,
+        } },
+        .{
+            .handshake = .{
+                .original_destination_connection_id = &original_dcid,
+                .local_connection_id = &client_cid,
+                .server_name = "localhost",
+                .initial_one_rtt_config = .{
+                    .max_datagram_size = 1400,
+                    .enable_pacing = true,
+                },
+                .random = [_]u8{0x93} ** 32,
+                .x25519_secret_key = [_]u8{0x94} ** 32,
+            },
+            .session = session_options,
+        },
+    );
+    defer client.deinit();
+    const stream_id = try client.startRequest(
+        .{
+            .method = "POST",
+            .path = "/parts-deadline",
+            .authority = "localhost",
+        },
+        "abcdefghi".len,
+    );
+    const before = client.outbound_bodies.find(stream_id).?.*;
+    var progress: BodyWriteProgress = .{
+        .committed_bytes = 99,
+        .fin_committed = true,
+    };
+    try std.testing.expectError(
+        error.Timeout,
+        client.sendRequestBodyPartsPacedWithTimeout(
+            stream_id,
+            &.{ "ab", &.{}, "cdef", "ghi" },
+            true,
+            &progress,
+            .zero,
+        ),
+    );
+    try std.testing.expectEqual(@as(usize, 0), progress.committed_bytes);
+    try std.testing.expect(!progress.fin_committed);
+    try std.testing.expectError(
+        error.Timeout,
+        client.sendRequestBodyPartsPacedWithDeadline(
+            stream_id,
+            &.{ "ab", &.{}, "cdef", "ghi" },
+            true,
+            &progress,
+            .{ .clock = .real, .raw = .zero },
+        ),
+    );
+    const after = client.outbound_bodies.find(stream_id).?.*;
+    try std.testing.expectEqual(@as(usize, 0), progress.committed_bytes);
+    try std.testing.expect(!progress.fin_committed);
+    try std.testing.expectEqual(before.written, after.written);
+    try std.testing.expectEqual(before.send.next_offset, after.send.next_offset);
+    const request_packet_number = client.established.connection.next_packet_number;
+    try std.testing.expectError(
+        error.InvalidContentLength,
+        client.sendRequestBodyPartsPacedWithDeadline(
+            stream_id,
+            &.{ "too-", "many-bytes" },
+            true,
+            &progress,
+            .fromNow(io, .{ .raw = .fromSeconds(2), .clock = .awake }),
+        ),
+    );
+    try std.testing.expectEqual(@as(usize, 0), progress.committed_bytes);
+    try std.testing.expectEqual(
+        request_packet_number,
+        client.established.connection.next_packet_number,
+    );
+
+    var timed = DeadlineAfterSendIo{
+        .delegate = client.endpoint.io,
+        .now_ns = std.Io.Clock.awake.now(client.endpoint.io).nanoseconds,
+    };
+    var timed_vtable = timed.delegate.vtable.*;
+    timed_vtable.now = DeadlineAfterSendIo.now;
+    timed_vtable.netSend = DeadlineAfterSendIo.netSend;
+    client.endpoint.io = .{ .userdata = &timed, .vtable = &timed_vtable };
+    defer client.endpoint.io = timed.delegate;
+    try std.testing.expectError(
+        error.Timeout,
+        client.sendRequestBodyPartsPacedWithDeadline(
+            stream_id,
+            &.{ "ab", &.{}, "cdef", "ghi" },
+            true,
+            &progress,
+            .{
+                .clock = .awake,
+                .raw = .fromNanoseconds(timed.now_ns + 1),
+            },
+        ),
+    );
+    try std.testing.expectEqual(@as(usize, 3), progress.committed_bytes);
+    try std.testing.expect(!progress.fin_committed);
+    try std.testing.expectEqual(@as(usize, 1), timed.send_calls);
+
+    client.endpoint.io = timed.delegate;
+    try client.sendRequestBodyPartsPacedWithDeadline(
+        stream_id,
+        &.{ "def", "ghi" },
+        false,
+        &progress,
+        .fromNow(io, .{ .raw = .fromSeconds(2), .clock = .awake }),
+    );
+    try std.testing.expectEqual(@as(usize, 6), progress.committed_bytes);
+    try std.testing.expect(!progress.fin_committed);
+
+    try std.testing.expectError(
+        error.Timeout,
+        client.finishRequestTrailersPacedWithTimeout(
+            stream_id,
+            &.{.{ .name = "x-request-finish", .value = "ok" }},
+            .zero,
+        ),
+    );
+    const trailer_packet_number = client.established.connection.next_packet_number;
+    try std.testing.expectError(
+        error.Timeout,
+        client.finishRequestTrailersPacedWithDeadline(
+            stream_id,
+            &.{.{ .name = "x-request-finish", .value = "ok" }},
+            .{ .clock = .real, .raw = .zero },
+        ),
+    );
+    try std.testing.expectEqual(
+        trailer_packet_number,
+        client.established.connection.next_packet_number,
+    );
+    const trailer_now = std.Io.Clock.awake.now(io).nanoseconds;
+    quic.one_rtt.testing.exhaustPacingAt(
+        &client.established.connection,
+        @intCast(trailer_now),
+    );
+    try std.testing.expectError(
+        error.Timeout,
+        client.finishRequestTrailersPacedWithDeadline(
+            stream_id,
+            &.{.{ .name = "x-request-finish", .value = "ok" }},
+            .{
+                .clock = .awake,
+                .raw = .fromNanoseconds(trailer_now + 1),
+            },
+        ),
+    );
+    try std.testing.expectEqual(
+        trailer_packet_number,
+        client.established.connection.next_packet_number,
+    );
+    try std.testing.expect(client.outbound_bodies.find(stream_id) != null);
+    quic.one_rtt.testing.setPacingBudgetAt(
+        &client.established.connection,
+        client.established.connection.currentSendDatagramSize(),
+        @intCast(trailer_now),
+    );
+    try client.finishRequestTrailersPacedWithDeadline(
+        stream_id,
+        &.{.{ .name = "x-request-finish", .value = "ok" }},
+        .fromNow(io, .{ .raw = .fromSeconds(2), .clock = .awake }),
+    );
+
+    var response = try client.receiveResponse(stream_id);
+    defer response.deinit(allocator);
+    try std.testing.expectEqualStrings("jklmnopqr", response.response.body);
+    try std.testing.expectEqualStrings(
+        "ok",
+        response.response.trailers[0].value,
+    );
+
+    thread.join();
+    joined = true;
+    if (shared.err) |err| return err;
 }
 
 test "HTTP/3 handshake runtime streams request and response DATA chunks" {
@@ -20387,6 +29443,1239 @@ test "HTTP/3 handshake runtime reuses acknowledged dynamic QPACK entries" {
     );
 }
 
+test "HTTP/3 handshake request failures keep stream cursors and QPACK transactional" {
+    const allocator = std.testing.allocator;
+    var threaded = std.Io.Threaded.init(allocator, .{});
+    defer threaded.deinit();
+    const io = threaded.io();
+
+    const original_dcid =
+        [_]u8{ 0x31, 0x32, 0x33, 0x34, 0x35, 0x36, 0x37, 0x38 };
+    const client_cid = [_]u8{ 0x39, 0x3a, 0x3b, 0x3c };
+    const server_cid = [_]u8{ 0x3d, 0x3e, 0x3f, 0x40 };
+    const settings: http3.Settings = .{
+        .qpack_max_table_capacity = 256,
+        .qpack_blocked_streams = 1,
+    };
+    var server = try HandshakeServer.bind(
+        allocator,
+        io,
+        .{ .ip4 = .loopback(0) },
+        .{ .quic = .{
+            .max_datagram_size = 4096,
+            .max_frames_per_datagram = 8,
+        } },
+        .{
+            .handshake = .{
+                .local_connection_id = &server_cid,
+                .initial_one_rtt_config = .{ .enable_pacing = false },
+                .random = [_]u8{0x41} ** 32,
+                .x25519_secret_key = [_]u8{0x42} ** 32,
+            },
+            .session = .{ .local_settings = settings },
+        },
+    );
+    defer server.deinit();
+
+    const Shared = struct {
+        server: *HandshakeServer,
+        err: ?anyerror = null,
+
+        fn run(self: *@This()) void {
+            self.runFallible() catch |err| {
+                self.err = err;
+            };
+        }
+
+        fn runFallible(self: *@This()) !void {
+            var session = try self.server.accept();
+            defer session.deinit();
+            try sendConnectionSettings(
+                &session.established.connection,
+                &session.critical_stream_send_scratch,
+                &session.control,
+                &session.control_send,
+                &session.qpack_encoder_send,
+                &session.qpack_encoder_prefix_sent,
+                &session.qpack_decoder_send,
+                &session.qpack_decoder_prefix_sent,
+                session.options,
+                server_control_stream_id,
+            );
+            const expected_ids = [_]u62{ 0, 4 };
+            for (expected_ids) |expected_id| {
+                var request = try session.receiveRequestWithTimeout(
+                    .fromSeconds(2),
+                );
+                defer request.deinit(
+                    session.established.connection.endpoint.allocator,
+                );
+                try std.testing.expectEqual(expected_id, request.stream_id);
+                var header_value: ?[]const u8 = null;
+                for (request.request.headers) |header| {
+                    if (std.mem.eql(
+                        u8,
+                        header.name,
+                        "x-request-transaction",
+                    )) {
+                        header_value = header.value;
+                    }
+                }
+                try std.testing.expectEqualStrings(
+                    "reused-value",
+                    header_value orelse return error.TestUnexpectedResult,
+                );
+                try session.sendResponse(request.stream_id, .{
+                    .status = 204,
+                });
+            }
+        }
+    };
+    var shared = Shared{ .server = &server };
+    const thread = try std.Thread.spawn(.{}, Shared.run, .{&shared});
+    var joined = false;
+    defer if (!joined) thread.join();
+
+    var client = try HandshakeClient.connect(
+        allocator,
+        io,
+        .{ .ip4 = .loopback(0) },
+        server.address(),
+        .{ .quic = .{
+            .max_datagram_size = 4096,
+            .max_frames_per_datagram = 8,
+        } },
+        .{
+            .handshake = .{
+                .original_destination_connection_id = &original_dcid,
+                .local_connection_id = &client_cid,
+                .server_name = "localhost",
+                .initial_one_rtt_config = .{ .enable_pacing = false },
+                .random = [_]u8{0x43} ** 32,
+                .x25519_secret_key = [_]u8{0x44} ** 32,
+            },
+            .session = .{
+                .local_settings = .{ .qpack_max_table_capacity = 256 },
+            },
+        },
+    );
+    defer client.deinit();
+
+    _ = try client.receivePeerSettingsWithTimeout(.fromSeconds(2));
+    try std.testing.expectError(error.InvalidHeader, client.sendRequest(.{
+        .method = "GET",
+        .path = "/invalid-before-reserve",
+        .authority = "localhost",
+        .headers = &.{.{ .name = "Uppercase", .value = "invalid" }},
+    }));
+    try std.testing.expectEqual(@as(u62, 0), client.next_stream_id);
+    try std.testing.expectEqual(
+        @as(u64, 0),
+        client.established.connection.nextLocalBidirectionalStreamId(),
+    );
+    try std.testing.expectEqual(@as(usize, 0), client.request_lifecycle.count());
+    try std.testing.expect(!client.control.settings.sent);
+    try sendConnectionSettings(
+        &client.established.connection,
+        &client.critical_stream_send_scratch,
+        &client.control,
+        &client.control_send,
+        &client.qpack_encoder_send,
+        &client.qpack_encoder_prefix_sent,
+        &client.qpack_decoder_send,
+        &client.qpack_decoder_prefix_sent,
+        client.options,
+        client_control_stream_id,
+    );
+    try std.testing.expect(client.qpack_encoder_prefix_sent);
+    const qpack_offset = client.qpack_encoder_send.next_offset;
+    _ = try client.qpack_encode.insertField(
+        "x-request-transaction",
+        "reused-value",
+    );
+    try std.testing.expect(
+        client.qpack_encode.pendingEncoderInstructions().len != 0,
+    );
+    const inserted_before_request = client.qpack_encode.table.insert_count;
+
+    const FailSendIo = struct {
+        delegate: std.Io,
+        fail_on_call: usize,
+        calls: usize = 0,
+
+        fn netSend(
+            userdata: ?*anyopaque,
+            socket_handle: net.Socket.Handle,
+            messages: []net.OutgoingMessage,
+            flags: net.SendFlags,
+        ) struct { ?net.Socket.SendError, usize } {
+            const self: *@This() = @ptrCast(@alignCast(userdata.?));
+            self.calls += 1;
+            if (self.calls == self.fail_on_call) {
+                return .{ error.NetworkDown, 0 };
+            }
+            return self.delegate.vtable.netSend(
+                self.delegate.userdata,
+                socket_handle,
+                messages,
+                flags,
+            );
+        }
+    };
+    var failed = FailSendIo{
+        .delegate = client.endpoint.io,
+        .fail_on_call = 2,
+    };
+    var failed_vtable = failed.delegate.vtable.*;
+    failed_vtable.netSend = FailSendIo.netSend;
+    client.endpoint.io = .{ .userdata = &failed, .vtable = &failed_vtable };
+    defer client.endpoint.io = failed.delegate;
+
+    const request: http3.Request = .{
+        .method = "GET",
+        .path = "/request-transaction",
+        .authority = "localhost",
+        .headers = &.{.{
+            .name = "x-request-transaction",
+            .value = "reused-value",
+        }},
+    };
+    try std.testing.expectError(error.NetworkDown, client.sendRequest(request));
+    try std.testing.expectEqual(@as(usize, 2), failed.calls);
+    try std.testing.expectEqual(@as(u62, 0), client.next_stream_id);
+    try std.testing.expectEqual(
+        @as(u64, 4),
+        client.established.connection.nextLocalBidirectionalStreamId(),
+    );
+    try std.testing.expect(client.request_lifecycle.contains(0));
+    try std.testing.expectEqual(@as(usize, 1), client.request_lifecycle.count());
+    const aggregate_failed_stream = client.established.connection
+        .sendStreamStats(0) orelse return error.TestUnexpectedResult;
+    try std.testing.expectEqual(
+        @as(u64, 0),
+        aggregate_failed_stream.highest_sent_offset,
+    );
+    try std.testing.expectEqual(
+        @as(?u64, null),
+        aggregate_failed_stream.final_size,
+    );
+    try std.testing.expect(
+        client.qpack_encoder_send.next_offset > qpack_offset,
+    );
+    try std.testing.expectEqual(
+        @as(usize, 0),
+        client.qpack_encode.pendingEncoderInstructions().len,
+    );
+    try std.testing.expectEqual(
+        @as(usize, 0),
+        client.qpack_encode.pending_sections.items.len,
+    );
+    try std.testing.expect(
+        client.qpack_encode.table.insert_count > inserted_before_request,
+    );
+    try std.testing.expect(!client.established.connection.closed());
+
+    client.endpoint.io = failed.delegate;
+    const aggregate_id = try client.trySendRequest(request);
+    try std.testing.expectEqual(@as(u62, 0), aggregate_id);
+    var aggregate_response = try client.receiveResponseWithTimeout(
+        aggregate_id,
+        .fromSeconds(2),
+    );
+    defer aggregate_response.deinit(allocator);
+    try std.testing.expectEqual(@as(u16, 204), aggregate_response.response.status);
+    try std.testing.expectEqual(@as(usize, 0), client.qpack_encode.pendingEncoderInstructions().len);
+
+    failed.calls = 0;
+    failed.fail_on_call = 1;
+    client.endpoint.io = .{ .userdata = &failed, .vtable = &failed_vtable };
+    try std.testing.expectError(
+        error.NetworkDown,
+        client.startRequest(request, 0),
+    );
+    try std.testing.expectEqual(@as(usize, 1), failed.calls);
+    try std.testing.expectEqual(@as(u62, 4), client.next_stream_id);
+    try std.testing.expectEqual(
+        @as(u64, 8),
+        client.established.connection.nextLocalBidirectionalStreamId(),
+    );
+    try std.testing.expect(client.request_lifecycle.contains(4));
+    try std.testing.expectEqual(@as(usize, 1), client.request_lifecycle.count());
+    if (client.established.connection.sendStreamStats(4)) |failed_stream| {
+        try std.testing.expectEqual(
+            @as(u64, 0),
+            failed_stream.highest_sent_offset,
+        );
+        try std.testing.expectEqual(
+            @as(?u64, null),
+            failed_stream.final_size,
+        );
+    }
+    try std.testing.expect(client.outbound_bodies.find(4) == null);
+    try std.testing.expectEqual(
+        @as(usize, 0),
+        client.qpack_encode.pending_sections.items.len,
+    );
+    try std.testing.expect(!client.established.connection.closed());
+
+    client.endpoint.io = failed.delegate;
+    const streaming_id = try client.tryStartRequest(request, 0);
+    try std.testing.expectEqual(@as(u62, 4), streaming_id);
+    var streaming_response = try client.receiveResponseWithTimeout(
+        streaming_id,
+        .fromSeconds(2),
+    );
+    defer streaming_response.deinit(allocator);
+    try std.testing.expectEqual(@as(u16, 204), streaming_response.response.status);
+
+    thread.join();
+    joined = true;
+    if (shared.err) |err| return err;
+
+    failed.calls = 0;
+    client.endpoint.io = .{ .userdata = &failed, .vtable = &failed_vtable };
+    try std.testing.expectError(
+        error.NetworkDown,
+        client.startRequest(request, 0),
+    );
+    try std.testing.expectEqual(@as(u62, 8), client.next_stream_id);
+    try std.testing.expect(client.request_lifecycle.contains(8));
+    failed.calls = 0;
+    try std.testing.expectError(
+        error.NetworkDown,
+        client.cancelRequest(
+            8,
+            http3.ApplicationErrorCode.request_cancelled,
+        ),
+    );
+    try std.testing.expect(client.established.connection.closed());
+    try std.testing.expectEqual(@as(u62, 12), client.next_stream_id);
+    try std.testing.expectEqual(@as(usize, 0), client.request_lifecycle.count());
+}
+
+test "HTTP/3 established client rejects untyped early bidirectional stream" {
+    const allocator = std.testing.allocator;
+    var threaded = std.Io.Threaded.init(allocator, .{});
+    defer threaded.deinit();
+    const io = threaded.io();
+
+    var server_endpoint = try quic.runtime.Endpoint.bind(
+        allocator,
+        io,
+        .{ .ip4 = .loopback(0) },
+        .{ .max_datagram_size = 4096 },
+    );
+    defer server_endpoint.deinit();
+    var client_endpoint = try quic.runtime.Endpoint.bind(
+        allocator,
+        io,
+        .{ .ip4 = .loopback(0) },
+        .{ .max_datagram_size = 4096 },
+    );
+    defer client_endpoint.deinit();
+    const keys = quic.protection.deriveAes128Keys(
+        [_]u8{0x45} ** quic.protection.secret_len,
+    );
+    var established = try quic.handshake.establishPreconfigured(
+        &client_endpoint,
+        server_endpoint.address(),
+        .client,
+        .{
+            .receive_keys = keys,
+            .send_keys = keys,
+            .local_connection_id = "early-client",
+            .peer_connection_id = "early-server",
+        },
+    );
+    defer established.deinit();
+    try established.connection.importSentEarlyData(0, &.{.{ .stream = .{
+        .stream_id = 0,
+        .data = "early request",
+        .fin = true,
+    } }});
+    try std.testing.expectEqual(
+        @as(u64, 4),
+        established.connection.nextLocalBidirectionalStreamId(),
+    );
+
+    try std.testing.expectError(
+        error.UnexpectedEarlyData,
+        HandshakeClient.initEstablished(
+            &client_endpoint,
+            server_endpoint.address(),
+            established,
+            .{},
+        ),
+    );
+}
+
+test "HTTP/3 established client rejects unknown early unidirectional streams" {
+    const allocator = std.testing.allocator;
+    var threaded = std.Io.Threaded.init(allocator, .{});
+    defer threaded.deinit();
+    const io = threaded.io();
+
+    var server_endpoint = try quic.runtime.Endpoint.bind(
+        allocator,
+        io,
+        .{ .ip4 = .loopback(0) },
+        .{ .max_datagram_size = 4096 },
+    );
+    defer server_endpoint.deinit();
+    var client_endpoint = try quic.runtime.Endpoint.bind(
+        allocator,
+        io,
+        .{ .ip4 = .loopback(0) },
+        .{ .max_datagram_size = 4096 },
+    );
+    defer client_endpoint.deinit();
+    const keys = quic.protection.deriveAes128Keys(
+        [_]u8{0x46} ** quic.protection.secret_len,
+    );
+    var established = try quic.handshake.establishPreconfigured(
+        &client_endpoint,
+        server_endpoint.address(),
+        .client,
+        .{
+            .receive_keys = keys,
+            .send_keys = keys,
+            .local_connection_id = "early-uni-client",
+            .peer_connection_id = "early-uni-server",
+        },
+    );
+    defer established.deinit();
+    try established.connection.importSentEarlyData(0, &.{.{ .stream = .{
+        .stream_id = 2,
+        .data = "unknown early unidirectional bytes",
+    } }});
+    try std.testing.expectEqual(
+        @as(u64, 6),
+        established.connection.nextLocalUnidirectionalStreamId(),
+    );
+    try std.testing.expectError(
+        error.StreamCreationError,
+        HandshakeClient.initEstablished(
+            &client_endpoint,
+            server_endpoint.address(),
+            established,
+            .{},
+        ),
+    );
+}
+
+test "HTTP/3 handshake adopts accepted typed early request" {
+    const allocator = std.testing.allocator;
+    var threaded = std.Io.Threaded.init(allocator, .{});
+    defer threaded.deinit();
+    const io = threaded.io();
+
+    const ticket = "h3-early-request-ticket";
+    const psk = [_]u8{0x47} ** 32;
+    var cache = try quic.resumption.Cache.init(allocator, 1);
+    defer cache.deinit();
+    try cache.store(.{
+        .server_id = "localhost:443",
+        .alpn = "h3",
+        .ticket = ticket,
+        .psk = psk,
+        .issued_at_ms = 1000,
+        .lifetime_seconds = 3600,
+        .age_add = 17,
+        .max_early_data_size = quic.resumption.cache.quic_early_data_size,
+        .transport_parameters = .fromTransportParameters(
+            quic.practical_transport_parameters,
+        ),
+    });
+    var lease = (try cache.beginEarlyData(
+        "localhost:443",
+        "h3",
+        1500,
+    )).?;
+    defer lease.deinit();
+    const request_options: http3.Request = .{
+        .method = "HEAD",
+        .path = "/early-request",
+        .authority = "localhost",
+    };
+    var early = try PreparedEarlyRequest.init(
+        allocator,
+        request_options,
+        .{},
+        .{},
+    );
+    defer early.deinit();
+
+    var replay_filter = try quic.zero_rtt.ReplayFilter.init(
+        allocator,
+        io,
+        8,
+    );
+    defer replay_filter.deinit();
+    const original_dcid = [_]u8{ 0x48, 0x49, 0x4a, 0x4b, 0x4c, 0x4d, 0x4e, 0x4f };
+    const client_cid = [_]u8{ 0x50, 0x51, 0x52, 0x53 };
+    const server_cid = [_]u8{ 0x54, 0x55, 0x56, 0x57 };
+    var server = try HandshakeServer.bind(
+        allocator,
+        io,
+        .{ .ip4 = .loopback(0) },
+        .{ .quic = .{
+            .max_datagram_size = 4096,
+            .max_frames_per_datagram = 8,
+        } },
+        .{ .handshake = .{
+            .local_connection_id = &server_cid,
+            .random = [_]u8{0x58} ** 32,
+            .x25519_secret_key = [_]u8{0x59} ** 32,
+            .psk = .{
+                .identity = ticket,
+                .secret = psk,
+                .age_add = 17,
+                .issued_at_ms = 1000,
+                .lifetime_seconds = 3600,
+                .now_ms = 1500,
+            },
+            .early_data = .{
+                .accept = true,
+                .replay_filter = &replay_filter,
+                .replay_key = "typed-request-1",
+            },
+            .handshake_recovery = .{
+                .initial_pto_ms = 20,
+                .max_pto_ms = 20,
+                .max_retries = 3,
+                .should_drop = struct {
+                    fn first(attempt: u8) bool {
+                        return attempt == 0;
+                    }
+                }.first,
+            },
+        } },
+    );
+    defer server.deinit();
+
+    const Shared = struct {
+        server: *HandshakeServer,
+        err: ?anyerror = null,
+
+        fn run(self: *@This()) void {
+            self.runFallible() catch |err| {
+                self.err = err;
+            };
+        }
+
+        fn runFallible(self: *@This()) !void {
+            var session = try self.server.accept();
+            defer session.deinit();
+            try std.testing.expectEqual(
+                quic.zero_rtt.handshake.Status.accepted,
+                session.established.early_data_status,
+            );
+            var early_request = try session.receiveRequestWithTimeout(
+                .fromSeconds(2),
+            );
+            defer early_request.deinit(
+                session.established.connection.endpoint.allocator,
+            );
+            try std.testing.expectEqual(@as(u62, 0), early_request.stream_id);
+            try std.testing.expectEqualStrings(
+                "/early-request",
+                early_request.request.path,
+            );
+            try session.sendResponse(early_request.stream_id, .{
+                .status = 200,
+                .request_method = "HEAD",
+                .body = "suppressed-head-body",
+            });
+
+            var next_request = try session.receiveRequestWithTimeout(
+                .fromSeconds(2),
+            );
+            defer next_request.deinit(
+                session.established.connection.endpoint.allocator,
+            );
+            try std.testing.expectEqual(@as(u62, 4), next_request.stream_id);
+            try session.sendResponse(next_request.stream_id, .{ .status = 204 });
+        }
+    };
+    var shared = Shared{ .server = &server };
+    const thread = try std.Thread.spawn(.{}, Shared.run, .{&shared});
+    var joined = false;
+    defer if (!joined) thread.join();
+
+    const connected = try HandshakeClient.connectWithEarlyRequest(
+        allocator,
+        io,
+        .{ .ip4 = .loopback(0) },
+        server.address(),
+        .{ .quic = .{
+            .max_datagram_size = 4096,
+            .max_frames_per_datagram = 8,
+        } },
+        .{ .handshake = .{
+            .original_destination_connection_id = &original_dcid,
+            .local_connection_id = &client_cid,
+            .server_name = "localhost",
+            .random = [_]u8{0x5a} ** 32,
+            .x25519_secret_key = [_]u8{0x5b} ** 32,
+            .resumption_now_ms = 1500,
+            .resumption_server_id = "localhost:443",
+            .handshake_recovery = .{
+                .initial_pto_ms = 5,
+                .max_pto_ms = 10,
+                .max_retries = 5,
+            },
+        } },
+        &early,
+        &cache,
+        &lease,
+    );
+    var client = connected.client;
+    defer client.deinit();
+    try std.testing.expectEqual(
+        EarlyRequestDisposition.accepted,
+        connected.disposition,
+    );
+    try std.testing.expect(client.established.connection.next_packet_number > 1);
+    var early_response = try client.receiveResponseWithTimeout(
+        early.stream_id,
+        .fromSeconds(2),
+    );
+    defer early_response.deinit(allocator);
+    try std.testing.expectEqual(@as(u16, 200), early_response.response.status);
+    try std.testing.expectEqualStrings("", early_response.response.body);
+    const next_id = try client.sendRequest(.{
+        .method = "GET",
+        .path = "/after-early",
+        .authority = "localhost",
+    });
+    try std.testing.expectEqual(@as(u62, 4), next_id);
+    var next_response = try client.receiveResponseWithTimeout(
+        next_id,
+        .fromSeconds(2),
+    );
+    defer next_response.deinit(allocator);
+    try std.testing.expectEqual(@as(u16, 204), next_response.response.status);
+
+    thread.join();
+    joined = true;
+    if (shared.err) |err| return err;
+}
+
+test "HTTP/3 rejected typed early request remains explicit and replayable" {
+    const allocator = std.testing.allocator;
+    var threaded = std.Io.Threaded.init(allocator, .{});
+    defer threaded.deinit();
+    const io = threaded.io();
+
+    const ticket = "h3-rejected-early-request-ticket";
+    const psk = [_]u8{0x5c} ** 32;
+    var cache = try quic.resumption.Cache.init(allocator, 1);
+    defer cache.deinit();
+    try cache.store(.{
+        .server_id = "localhost:443",
+        .alpn = "h3",
+        .ticket = ticket,
+        .psk = psk,
+        .issued_at_ms = 1000,
+        .lifetime_seconds = 3600,
+        .age_add = 23,
+        .max_early_data_size = quic.resumption.cache.quic_early_data_size,
+        .transport_parameters = .fromTransportParameters(
+            quic.practical_transport_parameters,
+        ),
+    });
+    var lease = (try cache.beginEarlyData(
+        "localhost:443",
+        "h3",
+        1500,
+    )).?;
+    defer lease.deinit();
+    const request_options: http3.Request = .{
+        .method = "GET",
+        .path = "/replayed-after-rejection",
+        .authority = "localhost",
+    };
+    var early = try PreparedEarlyRequest.init(
+        allocator,
+        request_options,
+        .{},
+        .{},
+    );
+    defer early.deinit();
+
+    var replay_filter = try quic.zero_rtt.ReplayFilter.init(
+        allocator,
+        io,
+        8,
+    );
+    defer replay_filter.deinit();
+    const original_dcid = [_]u8{ 0x60, 0x61, 0x62, 0x63, 0x64, 0x65, 0x66, 0x67 };
+    const client_cid = [_]u8{ 0x68, 0x69, 0x6a, 0x6b };
+    const server_cid = [_]u8{ 0x6c, 0x6d, 0x6e, 0x6f };
+    var server = try HandshakeServer.bind(
+        allocator,
+        io,
+        .{ .ip4 = .loopback(0) },
+        .{ .quic = .{
+            .max_datagram_size = 4096,
+            .max_frames_per_datagram = 8,
+        } },
+        .{ .handshake = .{
+            .local_connection_id = &server_cid,
+            .random = [_]u8{0x70} ** 32,
+            .x25519_secret_key = [_]u8{0x71} ** 32,
+            .psk = .{
+                .identity = ticket,
+                .secret = psk,
+                .age_add = 23,
+                .issued_at_ms = 1000,
+                .lifetime_seconds = 3600,
+                .now_ms = 1500,
+            },
+            .cipher_suites = &.{.chacha20_poly1305_sha256},
+            .early_data = .{
+                .accept = true,
+                .replay_filter = &replay_filter,
+                .replay_key = "typed-request-rejected",
+            },
+        } },
+    );
+    defer server.deinit();
+
+    const Shared = struct {
+        server: *HandshakeServer,
+        err: ?anyerror = null,
+
+        fn run(self: *@This()) void {
+            self.runFallible() catch |err| {
+                self.err = err;
+            };
+        }
+
+        fn runFallible(self: *@This()) !void {
+            var session = try self.server.accept();
+            defer session.deinit();
+            try std.testing.expectEqual(
+                quic.zero_rtt.handshake.Status.rejected,
+                session.established.early_data_status,
+            );
+            var request = try session.receiveRequestWithTimeout(
+                .fromSeconds(2),
+            );
+            defer request.deinit(
+                session.established.connection.endpoint.allocator,
+            );
+            try std.testing.expectEqual(@as(u62, 0), request.stream_id);
+            try std.testing.expectEqualStrings(
+                "/replayed-after-rejection",
+                request.request.path,
+            );
+            try session.sendResponse(request.stream_id, .{ .status = 204 });
+        }
+    };
+    var shared = Shared{ .server = &server };
+    const thread = try std.Thread.spawn(.{}, Shared.run, .{&shared});
+    var joined = false;
+    defer if (!joined) thread.join();
+
+    const connected = try HandshakeClient.connectWithEarlyRequest(
+        allocator,
+        io,
+        .{ .ip4 = .loopback(0) },
+        server.address(),
+        .{ .quic = .{
+            .max_datagram_size = 4096,
+            .max_frames_per_datagram = 8,
+        } },
+        .{ .handshake = .{
+            .original_destination_connection_id = &original_dcid,
+            .local_connection_id = &client_cid,
+            .server_name = "localhost",
+            .random = [_]u8{0x72} ** 32,
+            .x25519_secret_key = [_]u8{0x73} ** 32,
+            .resumption_now_ms = 1500,
+            .resumption_server_id = "localhost:443",
+        } },
+        &early,
+        &cache,
+        &lease,
+    );
+    var client = connected.client;
+    defer client.deinit();
+    try std.testing.expectEqual(
+        EarlyRequestDisposition.rejected,
+        connected.disposition,
+    );
+    try std.testing.expectEqual(@as(u62, 0), client.next_stream_id);
+    try std.testing.expectEqual(@as(usize, 0), client.request_lifecycle.count());
+
+    var response = try client.requestWithTimeout(
+        request_options,
+        .fromSeconds(2),
+    );
+    defer response.deinit(allocator);
+    try std.testing.expectEqual(@as(u16, 204), response.response.status);
+
+    thread.join();
+    joined = true;
+    if (shared.err) |err| return err;
+}
+
+test "HTTP/3 typed early request remains replayable after Version Negotiation" {
+    const allocator = std.testing.allocator;
+    var threaded = std.Io.Threaded.init(allocator, .{});
+    defer threaded.deinit();
+    const io = threaded.io();
+
+    const ticket = "h3-vn-early-request-ticket";
+    const psk = [_]u8{0x76} ** 32;
+    var cache = try quic.resumption.Cache.init(allocator, 1);
+    defer cache.deinit();
+    try cache.store(.{
+        .server_id = "localhost:443",
+        .alpn = "h3",
+        .ticket = ticket,
+        .psk = psk,
+        .issued_at_ms = 1000,
+        .lifetime_seconds = 3600,
+        .age_add = 29,
+        .max_early_data_size = quic.resumption.cache.quic_early_data_size,
+        .transport_parameters = .fromTransportParameters(
+            quic.practical_transport_parameters,
+        ),
+    });
+    var lease = (try cache.beginEarlyData(
+        "localhost:443",
+        "h3",
+        1500,
+    )).?;
+    defer lease.deinit();
+    const request_options: http3.Request = .{
+        .method = "GET",
+        .path = "/replayed-after-vn",
+        .authority = "localhost",
+    };
+    var early = try PreparedEarlyRequest.init(
+        allocator,
+        request_options,
+        .{},
+        .{},
+    );
+    defer early.deinit();
+
+    const original_dcid = [_]u8{ 0x77, 0x78, 0x79, 0x7a, 0x7b, 0x7c, 0x7d, 0x7e };
+    const client_cid = [_]u8{ 0x7f, 0x80, 0x81, 0x82 };
+    const server_cid = [_]u8{ 0x83, 0x84, 0x85, 0x86 };
+    var server = try HandshakeServer.bind(
+        allocator,
+        io,
+        .{ .ip4 = .loopback(0) },
+        .{ .quic = .{
+            .max_datagram_size = 4096,
+            .max_frames_per_datagram = 8,
+        } },
+        .{ .handshake = .{
+            .version = .version_2,
+            .available_versions = &.{.version_2},
+            .local_connection_id = &server_cid,
+            .random = [_]u8{0x87} ** 32,
+            .x25519_secret_key = [_]u8{0x88} ** 32,
+            .key_exchange_groups = &.{.x25519},
+            .psk = .{
+                .identity = ticket,
+                .secret = psk,
+                .age_add = 29,
+                .issued_at_ms = 1000,
+                .lifetime_seconds = 3600,
+                .now_ms = 1500,
+            },
+        } },
+    );
+    defer server.deinit();
+
+    const Shared = struct {
+        server: *HandshakeServer,
+        err: ?anyerror = null,
+
+        fn run(self: *@This()) void {
+            self.runFallible() catch |err| {
+                self.err = err;
+            };
+        }
+
+        fn runFallible(self: *@This()) !void {
+            const endpoint = &self.server.quic_server.endpoint;
+            var first_initial = try endpoint.receiveBytes();
+            defer first_initial.deinit(endpoint.allocator);
+            const first_header = try quic.LongHeader.parse(first_initial.bytes);
+            try std.testing.expectEqual(
+                quic.Version.version_1.wireValue(),
+                first_header.version,
+            );
+            try std.testing.expectEqual(
+                quic.PacketType.initial,
+                first_header.packet_type,
+            );
+            var first_early = try endpoint.receiveBytes();
+            defer first_early.deinit(endpoint.allocator);
+            const early_info = try quic.protection
+                .peekProtectedLongPacketInfo(first_early.bytes);
+            try std.testing.expectEqual(
+                quic.Version.version_1.wireValue(),
+                early_info.version,
+            );
+            try std.testing.expectEqual(
+                quic.protection.ProtectedLongPacketType.zero_rtt,
+                early_info.packet_type,
+            );
+            var vn: std.ArrayList(u8) = .empty;
+            defer vn.deinit(endpoint.allocator);
+            try quic.writeVersionNegotiationPacket(
+                &vn,
+                endpoint.allocator,
+                .{
+                    .destination_connection_id = first_header.source_connection_id,
+                    .source_connection_id = first_header.destination_connection_id,
+                    .versions = &.{quic.Version.version_2.wireValue()},
+                },
+            );
+            try endpoint.sendBytes(first_initial.from, vn.items);
+
+            var session = try self.server.accept();
+            defer session.deinit();
+            try std.testing.expectEqual(
+                quic.zero_rtt.handshake.Status.not_offered,
+                session.established.early_data_status,
+            );
+            var request = try session.receiveRequestWithTimeout(
+                .fromSeconds(2),
+            );
+            defer request.deinit(
+                session.established.connection.endpoint.allocator,
+            );
+            try std.testing.expectEqual(@as(u62, 0), request.stream_id);
+            try std.testing.expectEqualStrings(
+                "/replayed-after-vn",
+                request.request.path,
+            );
+            try session.sendResponse(request.stream_id, .{ .status = 204 });
+        }
+    };
+    var shared = Shared{ .server = &server };
+    const thread = try std.Thread.spawn(.{}, Shared.run, .{&shared});
+    var joined = false;
+    defer if (!joined) thread.join();
+
+    const connected = try HandshakeClient.connectWithEarlyRequest(
+        allocator,
+        io,
+        .{ .ip4 = .loopback(0) },
+        server.address(),
+        .{ .quic = .{
+            .max_datagram_size = 4096,
+            .max_frames_per_datagram = 8,
+        } },
+        .{ .handshake = .{
+            .version = .version_1,
+            .available_versions = &.{ .version_2, .version_1 },
+            .original_destination_connection_id = &original_dcid,
+            .local_connection_id = &client_cid,
+            .server_name = "localhost",
+            .random = [_]u8{0x89} ** 32,
+            .x25519_secret_key = [_]u8{0x8a} ** 32,
+            .key_exchange_groups = &.{.x25519},
+            .resumption_now_ms = 1500,
+            .resumption_server_id = "localhost:443",
+        } },
+        &early,
+        &cache,
+        &lease,
+    );
+    var client = connected.client;
+    defer client.deinit();
+    try std.testing.expectEqual(
+        EarlyRequestDisposition.rejected,
+        connected.disposition,
+    );
+    try std.testing.expectEqual(
+        quic.zero_rtt.handshake.Status.rejected,
+        client.earlyDataStatus(),
+    );
+    try std.testing.expectEqual(@as(u62, 0), client.next_stream_id);
+    try std.testing.expectEqual(@as(u64, 0), client.established.connection.next_packet_number);
+
+    var response = try client.requestWithTimeout(
+        request_options,
+        .fromSeconds(2),
+    );
+    defer response.deinit(allocator);
+    try std.testing.expectEqual(@as(u16, 204), response.response.status);
+
+    thread.join();
+    joined = true;
+    if (shared.err) |err| return err;
+    try std.testing.expectEqual(.consumed, lease.state);
+}
+
+test "HTTP/3 typed early request rejects mismatched local settings before connect" {
+    const allocator = std.testing.allocator;
+    var threaded = std.Io.Threaded.init(allocator, .{});
+    defer threaded.deinit();
+    const io = threaded.io();
+
+    var cache = try quic.resumption.Cache.init(allocator, 1);
+    defer cache.deinit();
+    try cache.store(.{
+        .server_id = "localhost:443",
+        .alpn = "h3",
+        .ticket = "settings-mismatch-ticket",
+        .psk = [_]u8{0x74} ** 32,
+        .issued_at_ms = 1000,
+        .lifetime_seconds = 3600,
+        .age_add = 29,
+        .max_early_data_size = quic.resumption.cache.quic_early_data_size,
+        .transport_parameters = .fromTransportParameters(
+            quic.practical_transport_parameters,
+        ),
+    });
+    var lease = (try cache.beginEarlyData(
+        "localhost:443",
+        "h3",
+        1500,
+    )).?;
+    defer lease.deinit();
+    var early = try PreparedEarlyRequest.init(
+        allocator,
+        .{
+            .method = "GET",
+            .path = "/settings-mismatch",
+            .authority = "localhost",
+        },
+        .{ .h3_datagram = true },
+        .{},
+    );
+    defer early.deinit();
+
+    try std.testing.expectError(
+        error.InvalidSetting,
+        HandshakeClient.connectWithEarlyRequest(
+            allocator,
+            io,
+            .{ .ip4 = .loopback(0) },
+            .{ .ip4 = .loopback(443) },
+            .{},
+            .{ .handshake = .{
+                .original_destination_connection_id = "12345678",
+                .local_connection_id = "client",
+                .server_name = "localhost",
+                .resumption_now_ms = 1500,
+                .resumption_server_id = "localhost:443",
+            } },
+            &early,
+            &cache,
+            &lease,
+        ),
+    );
+    try std.testing.expectEqual(.active, lease.state);
+    try std.testing.expect(cache.ownsActiveLease(lease));
+    try std.testing.expectError(
+        error.ExcessiveLoad,
+        HandshakeClient.connectWithEarlyRequest(
+            allocator,
+            io,
+            .{ .ip4 = .loopback(0) },
+            .{ .ip4 = .loopback(443) },
+            .{},
+            .{
+                .handshake = .{
+                    .original_destination_connection_id = "12345678",
+                    .local_connection_id = "client",
+                    .server_name = "localhost",
+                    .resumption_now_ms = 1500,
+                    .resumption_server_id = "localhost:443",
+                },
+                .session = .{ .max_concurrent_request_streams = 0 },
+            },
+            &early,
+            &cache,
+            &lease,
+        ),
+    );
+    try std.testing.expectEqual(.active, lease.state);
+    try std.testing.expect(cache.ownsActiveLease(lease));
+
+    var tiny_limits = quic.practical_transport_parameters;
+    tiny_limits.initial_max_streams_uni = 2;
+    var limited_lease = lease;
+    limited_lease.session.transport_parameters =
+        .fromTransportParameters(tiny_limits);
+    try std.testing.expectError(
+        error.StreamLimitExceeded,
+        early.validateTransportLimits(.{}, .{ .handshake = .{
+            .original_destination_connection_id = "12345678",
+            .local_connection_id = "client",
+        } }, &limited_lease),
+    );
+}
+
+test "HTTP/3 accepted early request rejects reduced peer settings" {
+    const allocator = std.testing.allocator;
+    var threaded = std.Io.Threaded.init(allocator, .{});
+    defer threaded.deinit();
+    const io = threaded.io();
+
+    var remembered_transport = quic.practical_transport_parameters;
+    remembered_transport.max_datagram_frame_size = 1200;
+    const remembered_settings: http3.Settings = .{ .h3_datagram = true };
+    const ticket = "h3-reduced-settings-ticket";
+    const psk = [_]u8{0x75} ** 32;
+    var cache = try quic.resumption.Cache.init(allocator, 1);
+    defer cache.deinit();
+    try cache.store(.{
+        .server_id = "localhost:443",
+        .alpn = "h3",
+        .ticket = ticket,
+        .psk = psk,
+        .issued_at_ms = 1000,
+        .lifetime_seconds = 3600,
+        .age_add = 31,
+        .max_early_data_size = quic.resumption.cache.quic_early_data_size,
+        .transport_parameters = .fromTransportParameters(
+            remembered_transport,
+        ),
+    });
+    var lease = (try cache.beginEarlyData(
+        "localhost:443",
+        "h3",
+        1500,
+    )).?;
+    defer lease.deinit();
+    var early = try PreparedEarlyRequest.init(
+        allocator,
+        .{
+            .method = "GET",
+            .path = "/reduced-settings",
+            .authority = "localhost",
+        },
+        .{},
+        remembered_settings,
+    );
+    defer early.deinit();
+
+    var replay_filter = try quic.zero_rtt.ReplayFilter.init(
+        allocator,
+        io,
+        8,
+    );
+    defer replay_filter.deinit();
+    const original_dcid = [_]u8{ 0x76, 0x77, 0x78, 0x79, 0x7a, 0x7b, 0x7c, 0x7d };
+    const client_cid = [_]u8{ 0x7e, 0x7f, 0x80, 0x81 };
+    const server_cid = [_]u8{ 0x82, 0x83, 0x84, 0x85 };
+    var server_transport = quic.practical_transport_parameters;
+    server_transport.max_datagram_frame_size = 1200;
+    var server = try HandshakeServer.bind(
+        allocator,
+        io,
+        .{ .ip4 = .loopback(0) },
+        .{ .quic = .{
+            .max_datagram_size = 4096,
+            .max_frames_per_datagram = 8,
+        } },
+        .{ .handshake = .{
+            .local_connection_id = &server_cid,
+            .local_transport_parameters = server_transport,
+            .random = [_]u8{0x86} ** 32,
+            .x25519_secret_key = [_]u8{0x87} ** 32,
+            .psk = .{
+                .identity = ticket,
+                .secret = psk,
+                .age_add = 31,
+                .issued_at_ms = 1000,
+                .lifetime_seconds = 3600,
+                .now_ms = 1500,
+            },
+            .early_data = .{
+                .accept = true,
+                .replay_filter = &replay_filter,
+                .replay_key = "typed-request-settings-reduced",
+            },
+        } },
+    );
+    defer server.deinit();
+
+    const Shared = struct {
+        server: *HandshakeServer,
+        err: ?anyerror = null,
+
+        fn run(self: *@This()) void {
+            self.runFallible() catch |err| {
+                self.err = err;
+            };
+        }
+
+        fn runFallible(self: *@This()) !void {
+            var session = try self.server.accept();
+            defer session.deinit();
+            var request = try session.receiveRequestWithTimeout(
+                .fromSeconds(2),
+            );
+            defer request.deinit(
+                session.established.connection.endpoint.allocator,
+            );
+            try session.sendResponse(request.stream_id, .{ .status = 204 });
+        }
+    };
+    var shared = Shared{ .server = &server };
+    const thread = try std.Thread.spawn(.{}, Shared.run, .{&shared});
+    var joined = false;
+    defer if (!joined) thread.join();
+
+    const connected = try HandshakeClient.connectWithEarlyRequest(
+        allocator,
+        io,
+        .{ .ip4 = .loopback(0) },
+        server.address(),
+        .{ .quic = .{
+            .max_datagram_size = 4096,
+            .max_frames_per_datagram = 8,
+        } },
+        .{ .handshake = .{
+            .original_destination_connection_id = &original_dcid,
+            .local_connection_id = &client_cid,
+            .server_name = "localhost",
+            .local_transport_parameters = remembered_transport,
+            .random = [_]u8{0x88} ** 32,
+            .x25519_secret_key = [_]u8{0x89} ** 32,
+            .resumption_now_ms = 1500,
+            .resumption_server_id = "localhost:443",
+        } },
+        &early,
+        &cache,
+        &lease,
+    );
+    var client = connected.client;
+    defer client.deinit();
+    try std.testing.expectEqual(
+        EarlyRequestDisposition.accepted,
+        connected.disposition,
+    );
+    try std.testing.expectError(
+        error.InvalidSetting,
+        client.receiveResponseWithTimeout(
+            early.stream_id,
+            .fromSeconds(2),
+        ),
+    );
+    try std.testing.expect(
+        client.established.connection.closing() or
+            client.established.connection.closed(),
+    );
+
+    thread.join();
+    joined = true;
+    if (shared.err) |err| return err;
+}
+
 test "HTTP/3 handshake runtime decodes dynamic QPACK request and sends feedback" {
     const allocator = std.testing.allocator;
 
@@ -21006,6 +31295,129 @@ test "HTTP/3 dev client deadline validation does not send" {
     );
 }
 
+test "HTTP/3 development body deadline distinguishes retry from fail close" {
+    const allocator = std.testing.allocator;
+    var threaded = std.Io.Threaded.init(allocator, .{});
+    defer threaded.deinit();
+    const io = threaded.io();
+
+    var server = try Server.bind(
+        allocator,
+        io,
+        .{ .ip4 = .loopback(0) },
+        .{ .quic = .{ .max_datagram_size = 96 } },
+    );
+    defer server.deinit();
+    var client = try Client.connect(
+        allocator,
+        io,
+        .{ .ip4 = .loopback(0) },
+        server.address(),
+        .{
+            .quic = .{ .max_datagram_size = 96 },
+            .max_stream_frame_data = 32,
+        },
+    );
+    defer client.deinit();
+    const body = [_]u8{0xa5} ** 256;
+    const stream_id = try client.startRequest(.{
+        .method = "POST",
+        .path = "/bounded-body",
+        .authority = "localhost",
+    }, body.len);
+    const before = client.outbound_bodies.find(stream_id).?.*;
+    var progress: DevelopmentBodyWriteProgress = .{
+        .send_attempted = true,
+        .completed = true,
+    };
+    try std.testing.expectError(
+        error.Timeout,
+        client.sendRequestBodyWithDeadline(
+            stream_id,
+            &body,
+            true,
+            &progress,
+            .{ .clock = .real, .raw = .zero },
+        ),
+    );
+    const after_invalid = client.outbound_bodies.find(stream_id).?.*;
+    try std.testing.expect(!progress.send_attempted);
+    try std.testing.expect(!progress.completed);
+    try std.testing.expectEqual(before.written, after_invalid.written);
+    try std.testing.expectEqual(
+        before.send.next_offset,
+        after_invalid.send.next_offset,
+    );
+    try std.testing.expect(!client.request_unusable);
+
+    const DeadlineAfterSendIo = struct {
+        delegate: std.Io,
+        now_ns: i96,
+        send_calls: usize = 0,
+
+        fn now(
+            userdata: ?*anyopaque,
+            _: std.Io.Clock,
+        ) std.Io.Timestamp {
+            const self: *@This() = @ptrCast(@alignCast(userdata.?));
+            return .fromNanoseconds(self.now_ns);
+        }
+
+        fn netSend(
+            userdata: ?*anyopaque,
+            socket_handle: net.Socket.Handle,
+            messages: []net.OutgoingMessage,
+            flags: net.SendFlags,
+        ) struct { ?net.Socket.SendError, usize } {
+            const self: *@This() = @ptrCast(@alignCast(userdata.?));
+            self.send_calls += 1;
+            const result = self.delegate.vtable.netSend(
+                self.delegate.userdata,
+                socket_handle,
+                messages,
+                flags,
+            );
+            if (result[1] != 0) self.now_ns += std.time.ns_per_s;
+            return result;
+        }
+    };
+    var timed = DeadlineAfterSendIo{
+        .delegate = client.quic_client.endpoint.io,
+        .now_ns = std.Io.Clock.awake.now(
+            client.quic_client.endpoint.io,
+        ).nanoseconds,
+    };
+    var timed_vtable = timed.delegate.vtable.*;
+    timed_vtable.now = DeadlineAfterSendIo.now;
+    timed_vtable.netSend = DeadlineAfterSendIo.netSend;
+    client.quic_client.endpoint.io = .{
+        .userdata = &timed,
+        .vtable = &timed_vtable,
+    };
+    defer client.quic_client.endpoint.io = timed.delegate;
+    try std.testing.expectError(
+        error.Timeout,
+        client.sendRequestBodyWithDeadline(
+            stream_id,
+            &body,
+            true,
+            &progress,
+            .{
+                .clock = .awake,
+                .raw = .fromNanoseconds(timed.now_ns + 1),
+            },
+        ),
+    );
+    try std.testing.expect(progress.send_attempted);
+    try std.testing.expect(!progress.completed);
+    try std.testing.expectEqual(@as(usize, 1), timed.send_calls);
+    try std.testing.expect(client.request_unusable);
+    try std.testing.expectError(
+        error.ConnectionUnusable,
+        client.sendRequestBody(stream_id, "must-not-replay", false),
+    );
+}
+
 test "HTTP/3 dev client bounded requests deliver informational responses" {
     const allocator = std.testing.allocator;
     var threaded = std.Io.Threaded.init(allocator, .{});
@@ -21132,10 +31544,14 @@ test "HTTP/3 dev client bounded requests deliver informational responses" {
     );
 
     const Observation = struct {
+        client: *Client,
         count: usize = 0,
         status: u16 = 0,
         header_valid: bool = false,
         saw_date: bool = false,
+        error_seen: ?anyerror = null,
+        stream_error_seen: ?anyerror = null,
+        unexpectedly_read: bool = false,
 
         fn observe(
             context: *anyopaque,
@@ -21154,9 +31570,31 @@ test "HTTP/3 dev client bounded requests deliver informational responses" {
                     self.header_valid = true;
                 }
             }
+            var datagram = self.client.receiveDatagramWithTimeout(
+                .fromMilliseconds(1),
+            ) catch |err| {
+                self.error_seen = err;
+                self.probeDevelopmentStream();
+                return;
+            };
+            defer datagram.deinit(self.client.quic_client.endpoint.allocator);
+            self.unexpectedly_read = true;
+            self.probeDevelopmentStream();
+        }
+
+        fn probeDevelopmentStream(self: *@This()) void {
+            var stream = self.client.pollDevelopmentStream(.{
+                .session_id = 0,
+                .local_role = .client,
+            }) catch |err| {
+                self.stream_error_seen = err;
+                return;
+            } orelse return;
+            defer stream.deinit();
+            self.unexpectedly_read = true;
         }
     };
-    var observation: Observation = .{};
+    var observation = Observation{ .client = &client };
     var response = try client.requestWithInformationalAndDeadline(
         .{
             .method = "GET",
@@ -21171,6 +31609,17 @@ test "HTTP/3 dev client bounded requests deliver informational responses" {
     );
     defer response.deinit(allocator);
     try std.testing.expectEqual(@as(usize, 1), observation.count);
+    try std.testing.expect(!observation.unexpectedly_read);
+    switch (observation.error_seen orelse
+        return error.TestUnexpectedResult) {
+        error.ConcurrentRead => {},
+        else => return error.TestUnexpectedResult,
+    }
+    switch (observation.stream_error_seen orelse
+        return error.TestUnexpectedResult) {
+        error.ConcurrentRead => {},
+        else => return error.TestUnexpectedResult,
+    }
     try std.testing.expectEqual(@as(u16, 103), observation.status);
     try std.testing.expect(observation.header_valid);
     try std.testing.expect(!observation.saw_date);
@@ -21264,6 +31713,96 @@ test "HTTP/3 dev client fails closed after partial response timeout" {
         error.Timeout,
         server.receiveRequestWithTimeout(.fromMilliseconds(20)),
     );
+}
+
+test "HTTP/3 development server aggregate response fails closed after send attempt" {
+    const allocator = std.testing.allocator;
+    var threaded = std.Io.Threaded.init(allocator, .{});
+    defer threaded.deinit();
+    const io = threaded.io();
+
+    var receiver = try quic.runtime.Endpoint.bind(
+        allocator,
+        io,
+        .{ .ip4 = .loopback(0) },
+        .{ .max_datagram_size = 4096 },
+    );
+    defer receiver.deinit();
+    var server = try Server.bind(
+        allocator,
+        io,
+        .{ .ip4 = .loopback(0) },
+        .{
+            .quic = .{ .max_datagram_size = 4096 },
+            .max_stream_frame_data = 4,
+        },
+    );
+    defer server.deinit();
+
+    const PartialSend = struct {
+        delegate: std.Io,
+        calls: usize = 0,
+
+        fn netSend(
+            userdata: ?*anyopaque,
+            socket_handle: net.Socket.Handle,
+            messages: []net.OutgoingMessage,
+            flags: net.SendFlags,
+        ) struct { ?net.Socket.SendError, usize } {
+            const self: *@This() = @ptrCast(@alignCast(userdata.?));
+            self.calls += 1;
+            if (self.calls == 2) return .{ error.NetworkDown, 0 };
+            return self.delegate.vtable.netSend(
+                self.delegate.userdata,
+                socket_handle,
+                messages,
+                flags,
+            );
+        }
+    };
+
+    var partial = PartialSend{ .delegate = server.quic_server.endpoint.io };
+    var vtable = partial.delegate.vtable.*;
+    vtable.netSend = PartialSend.netSend;
+    server.quic_server.endpoint.io = .{
+        .userdata = &partial,
+        .vtable = &vtable,
+    };
+    defer server.quic_server.endpoint.io = partial.delegate;
+
+    const valid_frame_size = server.limits.max_stream_frame_data;
+    server.limits.max_stream_frame_data = 0;
+    try std.testing.expectError(
+        error.InvalidStreamRange,
+        server.sendResponse(receiver.address(), 0, .{
+            .status = 200,
+            .body = "preflight failure",
+        }),
+    );
+    try std.testing.expectEqual(@as(usize, 0), partial.calls);
+    try std.testing.expect(
+        !server.aggregate_response_unusable.load(.acquire),
+    );
+    server.limits.max_stream_frame_data = valid_frame_size;
+
+    try std.testing.expectError(
+        error.NetworkDown,
+        server.sendResponse(receiver.address(), 0, .{
+            .status = 200,
+            .body = "response split across several datagrams",
+        }),
+    );
+    try std.testing.expect(partial.calls >= 2);
+    try std.testing.expect(
+        server.aggregate_response_unusable.load(.acquire),
+    );
+
+    const calls = partial.calls;
+    try std.testing.expectError(
+        error.ConnectionUnusable,
+        server.sendResponse(receiver.address(), 4, .{ .status = 204 }),
+    );
+    try std.testing.expectEqual(calls, partial.calls);
 }
 
 test "HTTP/3 dev runtime enforces stream reassembly limit" {

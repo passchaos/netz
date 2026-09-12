@@ -203,11 +203,45 @@ pub fn routePacket(
             continue;
         }
         if ((frame.stream.stream_id & 0x02) != 0) {
+            if (state.push_streams) |pushes| {
+                if (pushes.isCancelledStream(frame.stream.stream_id)) {
+                    state.qpack_decode.discardPeerUniStream(
+                        frame.stream.stream_id,
+                    );
+                    if (state.connection) |connection| {
+                        const available = connection.retainedReceivedStream(
+                            frame.stream.stream_id,
+                        ) orelse return error.UnexpectedStream;
+                        const stats = connection.recvStreamStats(
+                            frame.stream.stream_id,
+                        ) orelse return error.UnexpectedStream;
+                        const consumed_end = std.math.add(
+                            u64,
+                            stats.bytes_read,
+                            std.math.cast(u64, available.len) orelse
+                                return error.InvalidStreamRange,
+                        ) catch return error.InvalidStreamRange;
+                        try connection.commitReceivedThrough(
+                            frame.stream.stream_id,
+                            consumed_end,
+                        );
+                        if (stats.final_size != null and
+                            stats.final_size.? == consumed_end)
+                        {
+                            _ = try connection.requestCompletedPeerStreamRelease(
+                                frame.stream.stream_id,
+                            );
+                        }
+                    }
+                    continue;
+                }
+            }
             const classified = try state.qpack_decode.classifyPeerUniFrame(
                 frame.stream,
             ) orelse continue;
             var transport_consumed_end: ?u64 = null;
             var mark_push_prefix_credited = false;
+            var discard_classified_stream = false;
             switch (classified.stream_type) {
                 .control => {
                     if (!try applyControlStreamFrameForRole(
@@ -220,9 +254,6 @@ pub fn routePacket(
                         pushes.removeByStreamId(
                             @intCast(classified.frame.stream_id),
                         );
-                        if (state.control.peer_cancelled_push_id) |push_id| {
-                            try pushes.observePeerCancellation(push_id);
-                        }
                     }
                     try configureQpackEncoderFromPeerSettings(
                         state.control.*,
@@ -261,6 +292,33 @@ pub fn routePacket(
                             classified.frame,
                             state.control.*,
                         )) return error.UnexpectedStream;
+                        if (pushes.isCancelledStream(
+                            classified.frame.stream_id,
+                        )) {
+                            transport_consumed_end = if (state.connection) |connection| blk: {
+                                const available = connection.retainedReceivedStream(
+                                    classified.frame.stream_id,
+                                ) orelse return error.UnexpectedStream;
+                                const stats = connection.recvStreamStats(
+                                    classified.frame.stream_id,
+                                ) orelse return error.UnexpectedStream;
+                                break :blk std.math.add(
+                                    u64,
+                                    stats.bytes_read,
+                                    std.math.cast(u64, available.len) orelse
+                                        return error.InvalidStreamRange,
+                                ) catch return error.InvalidStreamRange;
+                            } else std.math.add(
+                                u64,
+                                classified.frame.offset,
+                                std.math.cast(
+                                    u64,
+                                    classified.frame.data.len,
+                                ) orelse return error.InvalidStreamRange,
+                            ) catch return error.InvalidStreamRange;
+                            discard_classified_stream = true;
+                            break;
+                        }
                         if (!had_reader) {
                             if (pushes.readerForStream(
                                 @intCast(classified.frame.stream_id),
@@ -307,7 +365,13 @@ pub fn routePacket(
                     }
                 }
             }
-            state.qpack_decode.commitPeerUniFrame(classified.frame);
+            if (discard_classified_stream) {
+                state.qpack_decode.discardPeerUniStream(
+                    classified.frame.stream_id,
+                );
+            } else {
+                state.qpack_decode.commitPeerUniFrame(classified.frame);
+            }
             continue;
         }
         if ((try messageStreamDisposition(

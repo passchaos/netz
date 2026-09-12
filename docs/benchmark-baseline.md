@@ -23,6 +23,10 @@ Build mode: -Doptimize=ReleaseFast
 
 ```sh
 taskset -c 0 zig build bench-http1-pipeline -Doptimize=ReleaseFast
+taskset -c 0 zig build bench-http1-pipeline -Doptimize=ReleaseFast -- \
+  --write-strategy=vectored
+taskset -c 0 zig build bench-http1-pipeline -Doptimize=ReleaseFast -- \
+  --large-body --write-strategy=flatten
 taskset -c 0 zig build bench-http1-body -Doptimize=ReleaseFast -- --mode=fixed --warmup=20 --iterations=200
 taskset -c 0 zig build bench-http1-body -Doptimize=ReleaseFast -- --mode=chunked --warmup=20 --iterations=200
 taskset -c 0 zig build bench-http1-body -Doptimize=ReleaseFast -- --mode=chunked --chunk-bytes=1024 --warmup=10 --iterations=100
@@ -36,6 +40,7 @@ zig build bench-quic-one-rtt-send -Doptimize=ReleaseFast
 zig build bench-quic-one-rtt-send -Doptimize=ReleaseFast -- --stream-fragments=4
 zig build bench-quic-one-rtt-receive -Doptimize=ReleaseFast
 taskset -c 0 zig build bench-quic-one-rtt-receive -Doptimize=ReleaseFast -- --mode=visitor --frame=stream --warmup=200 --iterations=5000
+taskset -c 0 zig build bench-quic-one-rtt-receive -Doptimize=ReleaseFast -- --mode=visitor --frame=stream_gap --warmup=200 --iterations=5000
 zig build bench-quic-udp-batch -Doptimize=ReleaseFast
 taskset -c 0 zig build bench-mqtt-tls -Doptimize=ReleaseFast
 ```
@@ -94,6 +99,17 @@ header/body vectored writes and one transactional response-batch flush. This is
 a focused HTTP/1 pipeline result, not a whole-library superiority claim. The
 implementation audit and remaining HTTP/1/HTTP/2 evidence are in
 `docs/hyper_parity.md`.
+
+The pipeline runner now accepts
+`--write-strategy=auto|vectored|flatten` and reports the selected policy, so
+the same payload/checksum can compare the connection-level I/O shape without
+changing the benchmark. A 2026-09-09 unpinned smoke under unrelated host load
+completed all 32,000 requests with identical checksums. For 13-byte responses,
+auto/vectored/flatten measured 1374/1429/1342 ns/request; for sixteen 64-KiB
+responses per batch they measured 10661/10011/13941 ns/request. These single
+samples are functional and directional evidence only, not replacements for the
+isolated five-sample ranges above. They support retaining the existing auto
+choice: coalesce small pipelines and borrow large bodies through vectored I/O.
 
 The automatic-Date path was recaptured on 2026-09-04 with three CPU-0 runs:
 netz measured 0.733-0.750 us/request (11.73-12.00 us/batch), while Hyper
@@ -372,6 +388,29 @@ from 6,020 to 4,020 allocation calls and from 1,902,112 to 1,850,112 cumulative
 requested bytes. Its 23.533-us sample stays within the established range, so
 only the allocation/copy reduction is claimed.
 
+The h2c harness also contains an internal A/B for the combined body-bearing
+request and large-response case. Both modes send ten concurrent 1-MiB POST
+bodies and receive ten 1-MiB responses with identical frame scheduling; only
+the client response ownership policy changes:
+
+```sh
+taskset -c 0 zig build bench-http2-h2c -Doptimize=ReleaseFast -- \
+  --scenario=http2_parallel_x10_duplex_1mb_aggregate --stats
+taskset -c 0 zig build bench-http2-h2c -Doptimize=ReleaseFast -- \
+  --scenario=http2_parallel_x10_duplex_1mb_streaming --stats
+```
+
+Three alternating CPU-0 paired runs with exact 1-MiB bodies measured
+6.744-7.020 ms/batch for aggregation and 3.422-3.540 ms/batch for callback
+streaming, a 1.91-1.97x latency advantage for this workload. Aggregation made
+166 measured allocations totaling 52,488,942 bytes and peaked at 10,640,263
+live bytes in every run. Streaming
+made 116 allocations totaling 60,142 bytes and peaked at 155,557 live bytes.
+The exact-size report attributes the material difference to fifty eliminated
+1,048,576-byte response-body allocations (ten responses across five measured
+batches). This is an internal API-shape comparison rather than an external-
+library superiority claim.
+
 `strace` confirmed equal steady-state wire sizes: empty exchanges use 19-byte
 requests and 11-byte responses; POST exchanges use 43-byte requests and
 11-byte responses. The large POST gap is specifically Hyper's two-write
@@ -583,6 +622,25 @@ tests pin ACK/PADDING/close, unreliable DATAGRAM, path validation, STREAM byte
 totals and ACK watermark semantics. Three CPU-0 fixed-binary runs measured
 stateful sequential sends at 106.649-108.672 us/batch and batched sends at
 95.348-97.660 us/batch, preserving a 1.11x batch throughput advantage.
+Recovery payload emission now also consumes the classification result from
+that validation pass. When every encoded payload byte is retransmittable it
+writes all frames directly, while mixed STREAM/DATAGRAM and ACK payloads keep
+the selective path. The classifier itself now handles each frame tag with one
+switch instead of three. In the final 50,000-iteration CPU-0 profile of the
+four-STREAM-descriptor shape, the former standalone
+`frame_traits.classify` hotspot (9.26% before) disappeared from the reported
+hot list; the remaining aggregate `Traits.observe` entry accounted for 2.09%
+of sampled user cycles. A label-parsed rerun used the exact cached pre-change
+binary and a freshly built final binary, pinned both to CPU 0, performed 1,000
+warmups per invocation, and alternated execution order across five
+50,000-iteration pairs. It moved the sequential median from 114.635 to 111.895
+us/batch (2.4% lower, final faster in 5/5 pairs) and the batch median from
+101.473 to 98.525 us/batch (2.9% lower, final faster in 4/5 pairs). One baseline
+batch sample was a 116.687-us high tail and one final batch pair was 0.36%
+slower, so the medians are retained without an all-pairs claim. Direct batch
+and single-packet mixed-DATAGRAM tests verify that unreliable bytes are still
+absent from recovery. The benchmark accepts `--warmup=N` and `--iterations=N`
+so longer profiles do not require a source edit.
 The bounded QUIC DATAGRAM receive queue now lives in
 `one_rtt/datagram_queue.zig`. Its first successful admission reserves exactly
 the configured ring bound, so later enqueue/overwrite operations allocate
@@ -668,6 +726,22 @@ treated as code-layout/system noise rather than a claimed effect.
 The final all-mode STREAM run measured GRO 1138, allocating plain 1387,
 in-place service 1161, and borrowed visitor 1166 ns/packet over 270,000 packets
 per path.
+
+`--frame=stream_gap` keeps the same 54 packets, payload bytes, packet numbers,
+and stream offsets but swaps every adjacent datagram before submission. Each
+even-offset packet therefore fills a gap and must advance across the already
+buffered odd packet. `ReceivedBitmap.firstUnsetFrom` now skips complete machine
+words with `ctz(~word)` instead of testing every bit while retaining the same
+packed representation, sparse-tail handling, and conflict checks. Seven
+CPU-0, order-alternated 5,000-iteration fixed-binary pairs measured visitor
+median 2258 -> 1956 ns/packet (13.4% lower, 7/7 faster) and in-place service
+2266 -> 1968 ns/packet (13.2% lower, 7/7 faster). The ordinary ordered STREAM
+shape stayed within noise at 1204 -> 1203 ns visitor and 1218 -> 1216 ns
+service. A separate seven-pair real TLS/HTTP/3 four-stream upload run verified
+80 MiB and status total 4000 per process: mean latency moved 84.746 -> 72.527
+ms/iteration and median 82.492 -> 72.817 ms, with every candidate run faster.
+This is an internal reordered/gap-fill optimization result, not a cross-stack
+or equal-wire comparison.
 
 The receive benchmark now also exposes `--mode=gro_service`, which applies all
 segments from one kernel UDP_GRO receive synchronously through connection-owned
@@ -778,7 +852,9 @@ The same recovery drain now covers upload response tails, and both benchmark
 directions use one absolute 30-second response budget. A two-iteration CPU-0
 1 MiB upload smoke completed at 145.48-151.32 MiB/s (148.40 MiB/s mean).
 The single-connection `serveConnection` convenience API now applies the same
-bounded drain automatically using a configurable five-second default. The
+bounded shutdown automatically using a configurable five-second default. One
+absolute deadline covers both GOAWAY phases and the subsequent recovery drain,
+so pacing cannot make graceful shutdown outlive that budget. The
 multi-connection endpoint callback loop instead remains nonblocking and
 refreshes the selected dispatcher's aggregate timer after application sends,
 so its shared owner services the new PTO on a later loop turn. Focused tests
@@ -1230,22 +1306,23 @@ These are internal regression samples, not an equal-wire comparison with quicz.
 
 This is now a real-handshake, paced single-stream and 4-stream upload/download
 internal result with the same 16 MiB transfer size as the quicz reference
-benchmark family. The cross-process quic-go comparison below closes the former
-single-stream full-stack evidence gap; multi-stream external comparison and
-allocation evidence remain open.
+benchmark family. The cross-process quic-go comparison below covers the former
+single-stream full-stack gap and now includes an externally verified 4/16-stream
+shape. Capture-backed equal-wire comparison remains open.
 
 ### HTTP/3 versus quic-go, same application shape
 
 `bench-http3-quic-go` builds against quic-go v0.59.0 from the audited local
 fixture and runs both sender roles for upload and download. Client and server
 are pinned to separate CPUs. Every sample creates a fresh certificate-verified
-QUIC v1/H3 connection, completes an untimed `/benchmark/ready` request, then
-times one body through receiver-validated status, headers, EOF, bytes, and
-checksum. This prevents congestion, QPACK, and retired-stream history from one
-sample changing the next. Both sides use a fixed 1 MiB stream window, 8 MiB
-connection window, 1280-byte steady-state MTU, and 1152-byte effective
-application chunks. Netz explicitly disables GSO/GRO; quic-go reports its
-implementation defaults.
+QUIC v1 or forced-v2 H3 connection, completes an untimed `/benchmark/ready` request, then
+times 1, 4, or 16 request bodies through receiver-validated status, headers,
+EOF, bytes, and checksums. This prevents congestion, QPACK, and retired-stream
+history from one sample changing the next. Both sides use a fixed 1 MiB stream
+window by default; connection credit is that window times at least eight, and
+therefore grows to 16 MiB for the 16-stream shape. The steady-state MTU is 1280
+bytes and the effective application chunk is 1152 bytes. Netz explicitly
+disables GSO/GRO; quic-go reports its implementation defaults.
 
 ```sh
 zig build bench-http3-quic-go -Doptimize=ReleaseFast -- \
@@ -1255,6 +1332,12 @@ zig build bench-http3-quic-go -Doptimize=ReleaseFast -- \
 zig build bench-http3-quic-go -Doptimize=ReleaseFast -- \
   --mode=download --warmup=2 --iterations=5 --body-bytes=4194304 \
   --chunk-bytes=16384 --stream-window=1048576 --timeout-ms=30000
+
+NETZ_HTTP3_INTEROP_VERSION=2 \
+zig build bench-http3-quic-go -Doptimize=ReleaseFast -- \
+  --mode=upload --warmup=2 --iterations=5 --streams=4 \
+  --body-bytes=4194304 --chunk-bytes=16384 \
+  --stream-window=1048576 --timeout-ms=30000
 ```
 
 Sequential CPU-0/client, CPU-1/server samples on 2026-09-08 measured:
@@ -1272,6 +1355,56 @@ GSO/GRO behavior, ACK policy, and cipher confirmation are still required before
 claiming identical wire work. The important result is that a reproducible
 full-stack comparison now exists and fails closed on any header, byte, EOF, or
 checksum mismatch.
+
+The concurrent gate is reproducible with:
+
+```sh
+zig build bench-http3-quic-go-multistream -Doptimize=ReleaseFast --summary all
+```
+
+It runs QUIC v1 and v2 with 4 and 16 streams, upload and download, both role
+pairings, two warmups, and five measured samples. Set
+`NETZ_HTTP3_MULTISTREAM_VERSIONS=1` or `=2` to narrow the matrix. All request
+streams are created before transfer. For the pinned quic-go v0.59 peer, v2
+selects its historical RFC 9001 key-update label compatibility profile; the
+library default remains RFC 9369. Result, completion, and memory records include
+`quic_version`, and the verifier rejects missing or mismatched versions.
+The Zig upload client and download server use paced cross-stream body batches;
+the opposite receive paths consume whichever stream is ready. The Go client
+uses a goroutine start barrier and the Go server holds each round until every
+handler has entered. Stream indices are carried independently of QUIC stream
+ordering, payload bytes vary by index, and the verifier requires one unique
+client result plus one server-completion record per sample with all streams
+finished and independently validated. An explicit final request/response
+barrier precedes connection close.
+The DATA phase uses one caller-owned awake-clock deadline across every paced
+batch send, receive-progress wait, pacing wait, response receive, and recovery
+drain. The public bounded batch APIs report the exact socket-visible committed
+chunk prefix; the priority scheduler reports committed body bytes separately
+for every response, so timeout and partial socket errors never imply that an
+already-sent prefix is safe to replay. Authenticated aggregate request and
+paced-response deadline APIs now carry that same timestamp through QUIC stream
+admission, SETTINGS/QPACK instructions, HEADERS, body, trailers, and response
+receive. Their packetizer checks before every socket attempt and bounds pacing
+waits; a zero-packet timeout remains retryable, while a timeout after a
+socket-visible multi-packet prefix retires the connection without attempting
+an unbounded close write. Streaming head APIs retain their separate blocking
+contract, so this benchmark continues to label its measured batch-body scope
+explicitly.
+
+The complete post-barrier gate passed on 2026-09-09. Its 16-stream samples
+carried 262,144 bytes per stream, 4,194,304 aggregate bytes, and aggregate
+checksum 534,773,760:
+
+| Mode | netz sender MiB/s (range; mean; median) | quic-go sender MiB/s (range; mean; median) |
+|---|---:|---:|
+| upload | 147.124-179.582; 159.152; 159.188 | 106.246-108.165; 107.233; 107.506 |
+| download | 72.460-98.869; 83.197; 82.212 | 48.716-50.733; 49.870; 49.936 |
+
+Every 4- and 16-stream sample passed the independent dual-log verifier. These
+figures are `same-application-shape`, not equal-wire:
+kernel/interface capture and equalized GSO/GRO, ACK, packetization, cipher, and
+application scheduling remain prerequisites for a general throughput ratio.
 
 ### Same-host reference comparison against `~/Work/quicz`
 
@@ -1846,6 +1979,21 @@ Rejected experiments after validation:
   preflight, and sliding-window tests, but five alternating 16 MiB/four-stream
   samples fell from 196.47 to 178.38 MiB/s mean (-9.2%). The representation
   change and its tests were removed.
+- Keeping the packed bitmap but replacing its per-byte checks with one slice
+  comparison for the already-contiguous portion of a partially overlapping
+  STREAM frame also passed focused and QUIC-wide tests. Seven CPU-0,
+  order-alternated fixed-binary pairs of the five-iteration 16 MiB/four-stream
+  H3 upload moved median latency from 81.389 to 81.962 ms/iteration (+0.7%);
+  the candidate was faster in only 1/7 pairs and had two pronounced high-tail
+  samples. The fast path and its dedicated test were removed.
+- Passing the single-STREAM preflight result into frame application removed a
+  second overlap-validation scan while retaining fallible buffer/bitmap commit.
+  Focused conflict and transactional tests plus the full QUIC suite passed, and
+  profiling split the old `insertTracked` symbol into validation and commit.
+  The real H3 result was nevertheless neutral: seven CPU-0 order-alternated
+  pairs averaged 105.931 ms/iteration for baseline and 105.982 ms for the
+  candidate (+0.05%); the paired-ratio median was +0.21% latency and the
+  candidate won only 3/7 pairs. The token and commit split were removed.
 - Starting the read-only time-threshold deadline scan at the existing
   `first_unacknowledged_index` cursor was correct for sorted production packet
   metadata and retained the full-scan fallback for synthetic out-of-order
@@ -1998,6 +2146,129 @@ denies unprivileged `tcpdump`, passwordless elevation, and user/network
 namespaces. Future promotion still requires capture-backed IP/UDP accounting
 plus equalized GRO, ACK/pacing, packetization, and application scheduling.
 
+### Raw QUIC persistent echo and multi-connection aggregate versus quic-go
+
+`bench-quic-persistent-external` fills the persistent echo and process-level
+multi-connection gaps in the raw QUIC matrix. It uses the audited quic-go
+v0.59.0 fixture from `~/Work/quicz` commit
+`9a0c204a47a2b87adf52afedb4f7e4cce4687742`, pins client/server processes to
+separate CPUs, disables GSO on both peers, does not enable GRO, and performs a
+certificate-verified QUIC v1 handshake before timing. The runner exercises all
+four netz/quic-go client/server combinations in alternating order. Each result
+is accepted only after the peer has consumed and validated exact payload bytes,
+FIN, and checksum and the DONE/DONE_ACK exchange completes; a separate server
+record must independently agree.
+
+```sh
+zig build bench-quic-persistent-external -Doptimize=ReleaseFast -- \
+  --mode=echo --samples=5 --warmup=200 --iterations=5000 \
+  --payload-bytes=1024 --timeout-ms=30000
+zig build bench-quic-persistent-external -Doptimize=ReleaseFast -- \
+  --mode=aggregate --samples=5 --connections=4 --streams=1 \
+  --bytes-per-stream=1048576 --chunk-bytes=16384 \
+  --stream-window=1048576 --timeout-ms=60000
+```
+
+The 2026-09-10 echo run produced these medians of each run's P50, with 5,000
+measured 1-KiB round trips after 200 warmups:
+
+| Fixed server | netz client | quic-go client | netz latency advantage |
+|---|---:|---:|---:|
+| quic-go | 24.172 us | 25.851 us | 1.069x |
+| netz | 23.729 us | 24.361 us | 1.027x |
+
+Against the fixed quic-go server, median P99/P99.9 values were 29.346/37.456
+us for netz and 33.599/41.540 us for quic-go. Against the fixed netz server,
+they were 27.273/36.060 us for netz and 30.586/43.463 us for quic-go. Every run verified
+5,324,800 echoed bytes including warmup and checksum 678,912,000.
+
+The aggregate run used four simultaneous independent endpoint/connection
+workers in each process and one 1-MiB unidirectional stream per connection. A
+GO record was sent only after all four TLS/QUIC handshakes and control streams
+were ready. The timed interval includes per-connection payload/buffer
+construction, stream prelude/setup, all payload and FIN transmission,
+byte/checksum validation, and DONE/DONE_ACK completion. It is therefore a
+complete application-transfer cost rather than an isolated steady-state send
+loop. Five runs produced:
+
+| Fixed endpoint | Sender implementation | Median MiB/s | Range MiB/s | Netz / quic-go |
+|---|---|---:|---:|---:|
+| quic-go server | client: netz / quic-go | 152.580 / 111.179 | 140.160-162.861 / 110.880-111.999 | 1.372x |
+| netz server | client: netz / quic-go | 73.333 / 101.045 | 55.856-123.198 / 100.273-101.974 | 0.726x |
+| netz client | server: netz / quic-go | 66.736 / 100.897 | 51.345-109.791 / 98.920-101.474 | 0.661x |
+| quic-go client | server: netz / quic-go | 149.825 / 112.307 | 136.079-160.929 / 110.288-112.968 | 1.334x |
+
+All 40 aggregate result records and 40 independent server completion records
+verified 4,194,304 bytes and checksum 534,773,760. The mixed-role results show
+that a netz sender is faster in both mixed-role comparisons, while the netz/netz control
+is materially slower and more variable when eight endpoint workers share the
+two pinned process CPUs. This is useful evidence of both the sender fast path
+and a remaining same-process scheduling bottleneck, not a universal superiority
+claim. The topology uses one UDP socket per connection because raw QUIC does
+not yet expose the shared-socket connection owner used by HTTP/3.
+
+### Raw QUIC mixed FIN/reset recovery versus quic-go
+
+The separate process gate below exercises terminal stream churn instead of
+timing it:
+
+```sh
+zig build interop-quic-quic-go-churn -Doptimize=ReleaseFast
+```
+
+It runs 32- and 64-stream cases for both connection-role pairings, both
+client/server sender roles, and deterministic loss/reordering, with two runs
+per combination by default. Every unidirectional stream carries a 12-byte
+index prelude and an acknowledged 256-byte payload prefix. Every second stream
+then resets with code `0x4000 + index`; only after the receiver observes all
+exact codes do the remaining streams continue to 16 KiB and FIN. A
+bidirectional sibling opened before churn completes afterward, followed by
+control-stream FIN in both directions and an exact application close.
+
+All four actual sender endpoints use the same unprivileged UDP relay. The
+client tells it to fault the client-to-server or server-to-client path as
+appropriate, and each RESET and FIN phase deterministically incurs exactly one
+drop or one completed pair reorder. The independent verifier recomputes the
+payload checksum, FIN/reset counts, reset mask and error-code sum, requires both
+phase counters, and cross-checks the client's cumulative counters against the
+proxy. Netz additionally checks RESET final size when it is the receiver;
+quic-go v0.59 exposes the exact remote stream ID and error code but not the
+peer's final size through its public `StreamError`.
+
+The captured default 32-case two-run matrix completed every case. The 32-stream
+shape verified 16 FIN, 16 RESET, 266,240 application bytes, checksum
+33,945,600, mask `0x00000000aaaaaaaa`, and code sum 262,400. The 64-stream
+shape verified 32 FIN, 32 RESET, 532,480 bytes, checksum 67,891,200, mask
+`0xaaaaaaaaaaaaaaaa`, and code sum 525,312. Each case reported two drops or
+two completed reorder pairs—one in each terminal phase. This closes the former
+external raw-transfer loss/reorder and mixed-churn gap. It remains bounded
+loopback recovery evidence, not a throughput or equal-wire result.
+
+### Raw QUIC handshake fault recovery versus quic-go
+
+```sh
+zig build interop-quic-handshake-fault -Doptimize=ReleaseFast
+```
+
+The gate runs 16 authenticated cases: QUIC v1/v2, both netz/client and
+netz/server role pairings, both client- and server-outbound handshake
+directions, and either one forced first-datagram loss or one last-ciphertext-bit
+corruption. The unprivileged relay disarms after exactly one fault. Its strict
+verifier cross-checks direction, implementation scope, version, and counters,
+then requires both peer logs to prove certificate validation, `hq-interop`, two
+exact streams, 10 echoed bytes, and application close.
+
+The first real client-loss run exposed a gap hidden by same-library injection:
+netz split its post-quantum ClientHello across two 1200-byte Initial datagrams.
+After offset zero was lost, quic-go ACKed the surviving suffix; netz accepted
+that ACK-only Initial as handshake progress and stopped retransmitting the
+ClientHello. The response filter now authenticates candidate Initials and
+requires non-empty CRYPTO offset zero before leaving the PTO loop. Direct wire
+tests reject ACK-only and suffix-only Initials and accept the offset-zero form.
+All 16 external cases and the pre-existing complete quic-go lifecycle
+matrix pass after the fix. This is deterministic recovery evidence, not a
+performance or equal-wire result.
+
 The same harness accepts `--stats` for process and allocator memory evidence:
 
 ```sh
@@ -2068,6 +2339,89 @@ claim. Existing pagination tests continue to remove a stream between pages and
 require the remaining IDs in order, covering the unordered fallback.
 
 ### Raw QUIC TLS 1.3 handshake latency, rate, and memory
+
+The cross-process counterpart uses a long-running server and a fresh client
+UDP endpoint plus full handshake for every sample:
+
+```sh
+zig build bench-quic-handshake-external -Doptimize=ReleaseFast
+```
+
+Both processes are pinned to distinct CPUs. Each run performs 10 untimed warmup
+connections followed by 100 measured connections, repeated five times with
+reversed role-pair order on alternating runs. TLS is fixed to QUIC v1, X25519,
+TLS_AES_128_GCM_SHA256, and verified localhost certificates. Only the client
+`connect`/`Dial` call is timed; endpoint creation, a round-indexed 16-byte
+echo, application close, and teardown remain outside. Accordingly the reported
+rate is explicitly `connects_per_second_from_timed_sum`, not whole-process
+connection throughput. The strict verifier reconstructs every total and
+percentile from 100 sample records and requires a matching server completion
+record for all 110 connections, 3,520 echoed bytes, checksum 5,995, and peer
+close.
+
+The final 2026-09-09 CPU-0/client and CPU-1/server medians after the exact
+trust-anchor and P-256 verification optimizations were:
+
+| Complete role pair | P50 connect | P99 connect | Derived connects/s |
+|---|---:|---:|---:|
+| netz client + quic-go server | 0.609 ms | 1.009 ms | 1,608.2 |
+| quic-go client + quic-go server | 0.506 ms | 1.047 ms | 1,864.7 |
+| quic-go client + netz server | 0.656 ms | 1.090 ms | 1,478.7 |
+| netz client + netz server | 0.749 ms | 0.787 ms | 1,332.1 |
+
+These are complete role-pair results, not separable client/server costs. The
+same-server comparisons leave netz's client handshake path as a concrete
+remaining latency target: 1.20x the quic-go client P50 against the quic-go
+server and 1.14x against the netz server in this capture. The harness does not
+equalize executor implementation, syscall batching, certificate
+representation, or kernel wire shape, so it is a same-security-policy
+optimization baseline rather than an equal-wire or broad superiority claim.
+
+The benchmark's one-certificate chain configures that same certificate as its
+trust anchor. The former verifier still checked the anchor's self-signature
+after hostname validation, adding a second P-256 verification on top of TLS
+1.3 CertificateVerify. Trust-anchor signatures are not part of path
+validation: possession comes from the separately verified CertificateVerify,
+while configuring the anchor is the trust decision. The shared vail verifier
+recognizes an exact anchor and the cross-signed form of the same Subject and
+SubjectPublicKeyInfo, checks both validity intervals, and skips only the trust
+anchor's issuer signature. It continues to verify every leaf and intermediate
+signature; dedicated tests also reject a same-subject/different-key certificate
+and expired or not-yet-valid equivalent anchors.
+
+A same-build 3x500 A/B against the quic-go server measured the old path at
+1.171 ms P50 and 845.9 derived connects/s, versus 0.741 ms and 1,331.4/s after
+the change: 36.7% lower P50 and 57.4% higher rate from the timed sums. In the
+canonical 5x100 capture above, the old 1.191 ms baseline fell 36.2% to 0.759
+ms. A follow-up 2,000-connection `perf` sample measured 0.752 ms P50; the old
+`Certificate.Bundle.verify` P-256 path had accounted for about 33% of sampled
+cycles, while the optimized trust callback accounted for 0.51% and the
+mandatory TLS CertificateVerify became the dominant user-space path. This
+gain applies to exact-anchor deployments such as this benchmark, not to a
+normal leaf-to-CA chain where the leaf signature remains mandatory.
+
+The remaining TLS CertificateVerify profile then exposed a second independent
+cost: Zig's generic ECDSA verifier computed `u1*G` and `u2*Q` separately before
+adding the points even though P-256 provides a variable-time public
+double-scalar primitive for exactly that verification equation. Vail's P-256
+TLS verifier now uses `P256.mulDoubleBasePublic`; DER parsing, canonical/nonzero
+`r`/`s` checks, the TLS 1.3 role-specific context, transcript hashing, public
+key validation, and error mapping remain unchanged. Thirty-two deterministic
+key/signature cases are checked against the stdlib verifier, with wrong
+transcripts, zero and non-canonical scalar negatives, and a direct client-role
+context test. The P-384, Ed25519, RSA-PSS, and SM2 paths are untouched.
+
+A five-pair CPU-0 microbenchmark measured the stdlib P-256 verifier at
+433.560-438.650 us and the double-scalar path at 284.567-286.806 us per
+verification, a stable 34-35% reduction. The same-build external 3x500 result
+then moved from the exact-anchor path's 0.741 ms P50 and 1,331.4 derived
+connects/s to 0.598 ms and 1,644.6/s, another 19.2% lower P50 and 23.5% higher
+rate. The canonical 5x100 result in the table measured 0.609 ms and 1,608.2/s.
+Relative to the original 1.191 ms/833.7 baseline, the two changes together
+lowered P50 by 48.9% and raised the timed-sum rate by 92.9%. A final
+2,000-connection `perf` sample measured 0.608 ms P50 and showed
+`mulDoubleBasePublic` under the mandatory CertificateVerify path, with the
+eliminated trust-anchor self-verification still absent.
 
 Captured on 2026-08-19 using authenticated P-256 CertificateVerify, X25519,
 TLS_AES_128_GCM_SHA256, and fresh loopback QUIC endpoints for every sample:
@@ -2347,13 +2701,73 @@ the audited websocket.zig 0.16 outbound compression paths currently force
 `compressed = false`.
 
 The caller-buffer path copies and masks in one SIMD pass and preserves the
-caller's `[]const u8`. The header-only path is what unmasked server sends use:
-the runtime emits the stack-resident header and borrowed payload with one
-vectored TCP write, so frame preparation neither allocates nor copies the
-payload. WSS similarly writes both slices before one TLS/network flush;
-client sends mask fixed stack chunks without modifying caller memory. The
-HTTP/2 extended-CONNECT adapter retains a per-connection encoding buffer
-because its DATA writer currently accepts one contiguous byte stream.
+caller's `[]const u8`. Binary sends additionally accept arbitrary borrowed
+application slices while retaining one FIN-terminated WebSocket frame. The
+header-only path is what unmasked server sends use: HTTP/1 submits bounded
+header/payload vectors directly, and HTTP/2/HTTP/3 preserve the ordered slices
+through their tunnel/body writers without a payload-sized plaintext join. WSS
+coalesces slices into bounded TLS records; clients mask fixed stack chunks
+while carrying the mask phase across every slice. Negotiated compression also
+consumes the slice list as one logical message.
+
+### Native WebSocket caller join versus direct slices
+
+Captured on 2026-09-09 with the dedicated H1/H2/H3 self-echo gate:
+
+```sh
+zig build bench-websocket-slices-ab -Doptimize=ReleaseFast
+```
+
+The default gate pins the process to the smallest CPU in its allowed affinity
+set (CPU 0 for this run), alternates `contiguous` and `slices` execution order,
+and takes the median of five samples. Each sample performs 20 warmups followed
+by 1,000 measured round trips with one persistent connection, no compression,
+and one 4,096-byte FIN binary frame divided into eight application slices at
+both endpoints. `contiguous` joins those slices into a caller-owned
+preallocated buffer before immutable `sendBinary`; `slices` calls
+`sendBinarySlices` directly. Neither shape uses WebSocket continuation-frame
+fragmentation.
+
+| Transport | Caller-joined median/round trip | Direct-slices median/round trip | slices / contiguous |
+|---|---:|---:|---:|
+| HTTP/1 upgrade | 10.391 us | 10.476 us | 1.008 |
+| RFC 8441 over h2c | 11.029 us | 11.056 us | 1.002 |
+| RFC 9220 over H3 | 86.039 us | 87.952 us | 1.022 |
+
+Every input sample reported 8,192,000 logical bytes and checksum 255,000. The
+strict verifier also requires the exact protocol/transport, persistent
+self-role pair, shape, part count, warmup/iteration count, fixed payload
+schedule, disabled compression, and completion marker; it rejects missing or
+even sample sets. There is deliberately no performance threshold. On this
+host and workload direct slices were within 2.2% of caller joining across all
+three transports while avoiding the caller-side plaintext join. Before the
+transport-path optimization, the same gate measured ratios of 1.506, 1.017,
+and 1.382 respectively. H1 had routed the nine header/payload vectors through
+the generic eight-iovec `std.Io` path, requiring an extra write; it now uses
+the existing POSIX wide-iovec path. H3 had made every application slice a
+separate paced DATA contribution; its transactionally advanced cursor now
+groups borrowed ranges across slice boundaries up to the same packet-sized
+limit as contiguous sends. When descriptor boundaries would otherwise add a
+packet, only the minimum leading prefix is copied into bounded scratch. These
+are local end-to-end API-shape measurements,
+not an external implementation comparison or an equal-wire/kernel-capture
+claim. Different payload sizes, slice counts, kernel iovec behavior, and QUIC
+packetization can move the crossover.
+For a syscall-shape sanity check, `strace -f -c` over two warmups and 20
+measured round trips reported 46 `sendmsg` calls for both current H1 shapes;
+the pre-optimization direct-slices binary required 68. The analogous H3 trace
+reported 312 `sendmmsg` calls for contiguous and 294 for direct slices; the
+pre-optimization direct-slices binary required 584. These counts include
+handshake and teardown traffic and therefore support only the eliminated-extra-
+submission diagnosis, not a wire-byte or throughput claim.
+
+The runner accepts `NETZ_WEBSOCKET_SLICES_SAMPLES` (odd),
+`NETZ_WEBSOCKET_SLICES_WARMUP`, `NETZ_WEBSOCKET_SLICES_ITERATIONS`,
+`NETZ_WEBSOCKET_SLICES_PARTS` (2 through 64), and
+`NETZ_WEBSOCKET_SLICES_CPU` for reproducible follow-up sweeps.
+Separate 2-, 16-, and 64-part gates completed over all three transports with
+exact logical-byte/checksum validation. Their short single samples are retained
+as boundary-correctness evidence only, not as performance measurements.
 
 A direct same-input reference was compiled against
 `~/Work/websocket.zig/src/proto.zig` using its stack `writeFrameHeader`, a
@@ -2458,6 +2872,12 @@ Three four-connection CPU 0-7 runs measured 12.09-12.18 us aggregate/roundtrip
 and 641.52-645.95 logical MiB/s, versus the previous 45.96 us/169.98 MiB/s. A
 four-connection `--stats` sample made 7,151 allocations, allocated 48,068,236
 cumulative bytes, peaked at 1,240,114 live bytes, and verified checksum 111,600.
+The package-self-containment pass on 2026-09-10 replaced that external backend
+with a focused in-tree fixed-Huffman encoder using a reusable 4K-entry hash
+chain. A pinned 1,000-round 4-KiB run measured 22.296 us/roundtrip and 350.40
+logical MiB/s with checksum 255,000; a 200-round direct-slices run measured
+21.237 us/roundtrip. These samples preserve the 69-byte wire payload while
+removing the private sibling-repository dependency.
 
 `--compression --fragmented` sends the same 4 KiB client message as sixteen
 compressed WebSocket frames. Three CPU-14 runs measured 35.80-36.60
@@ -2772,6 +3192,18 @@ burst again attempted/sent/received all 1,000 with zero timeout and checksum
 3.32 logical MiB/s, so it is recorded as lifecycle evidence rather than a new
 performance baseline.
 
+The authenticated burst mode now accepts `--batch-size=N` (maximum 64) and
+uses the exact-prefix DATAGRAM batch sender. HTTP/3 pre-encodes all Quarter
+Stream ID prefixes into reusable registry-owned storage, while QUIC reports
+the socket-visible input prefix independently from packet numbers consumed by
+protection. Five alternating CPU-0 ReleaseFast pairs with 1,000 35-byte
+DATAGRAMs measured 2.81-3.37 MiB/s for batch size 1 and 3.49-4.10 MiB/s for
+batch size 16; median throughput rose from 2.91 to 3.76 MiB/s (1.29x), and API
+calls fell from 1,000 to 63. Every run received all 1,000 DATAGRAMs with
+checksum 3,549,000. The benchmark raises only its own bounded receive queue to
+the requested iteration count so this sender comparison does not conflate
+intentional production queue eviction with kernel/socket throughput.
+
 The multi-stream benchmark now scales connection credit with stream count and
 exposes stream-window/datagram/pacing controls. Four 4-MiB streams with 1-MiB
 stream windows and 8-KiB datagrams completed at 188-195 MiB/s aggregate across
@@ -2797,13 +3229,26 @@ repeatable without conflating certificate setup. Five consecutive runs of:
 ```sh
 zig build bench-webtransport-stream -Doptimize=ReleaseFast -- \
   --streams=16 --transfer-bytes=16384 --stream-window=65536 \
-  --reset-every=2 --reset-after-bytes=256 --loss-pct=5
+  --reset-every=2 --reset-after-bytes=256 --loss-pct=5 \
+  --send-timeout-ms=30000
 ```
 
 The benchmark now keeps a cancelable client receive future alive after its last
 FIN/reset so ACK, loss and PTO state continue progressing until the server has
 validated every terminal event. This removes the prior large-stream teardown
-deadlock. Five 64-stream runs considered 320 server datagrams and dropped the
+deadlock. Its send-all, fair `writeStreams`, and FIN paths share one absolute
+awake-clock deadline created immediately before the associated-stream workload;
+the default is 30 seconds and `--send-timeout-ms` overrides it. In single-stream
+`--send-all` mode, `--stream-slices=N` selects the zero-join scatter/gather
+sender. Slice descriptors are built before timing and the output includes the
+selected count, so `N=1` and `N=8` provide an equivalent-byte/checksum A/B
+shape. Five alternating CPU-0 ReleaseFast pairs with a 1-MiB payload and pacing
+disabled measured 288-305 MiB/s for one slice and 295-307 MiB/s for eight
+slices; medians were 304 and 299 MiB/s respectively (0.98x). Every run
+delivered 1,048,576 bytes with checksum 133,693,440 in 287 receive events. This
+small loopback sample demonstrates parity and no material vectored-path
+regression; it is not a cross-library throughput claim. Five 64-stream
+runs considered 320 server datagrams and dropped the
 same 21 every time. All 32 reset streams reported application code 42 after
 their 256-byte prefix, all 32 non-reset streams reached FIN, and every run
 verified 532,480 bytes and checksum 67,891,200. Elapsed time ranged
@@ -2811,6 +3256,26 @@ verified 532,480 bytes and checksum 67,891,200. Elapsed time ranged
 from the exact terminal/byte result. This is deterministic
 cancellation/recovery evidence, not an equal-wire wtransport throughput
 comparison.
+
+The internal harness terminal table was subsequently raised from 64 to a
+bounded 256 entries. Three 128-stream/64-KiB mixed FIN/reset runs under seeded
+5% server-direction loss each delivered 64 RESET_STREAM terminals, 64 FINs,
+4,210,688 bytes, checksum 536,862,720, and dropped exactly 96 of 1,540-1,545
+considered datagrams. Three matching all-FIN client-direction reorder runs
+delivered 8,388,608 bytes and checksum 1,069,547,520 while holding 522-524 of
+2,610-2,620 datagrams. The measured loopback rates ranged 98-134 MiB/s for the
+mixed loss shape and 25-28 MiB/s for reorder, but these remain scheduler- and
+fault-shape-sensitive correctness observations rather than comparative
+throughput claims. The external wtransport harness retains its 64-stream cap
+because its independently verified wire result carries a `u64` reset mask.
+Both benchmark peers now set `max_session_streams` from the requested shape;
+previously the newly enlarged terminal table could accept a value above 128
+while the runtime correctly rejected it at its independent default limit. At
+the bounded ceiling of 256 streams, one 16-KiB mixed loss run delivered 128
+RESET_STREAM terminals plus 128 FINs, 2,129,920 bytes/checksum 271,564,800, and
+dropped 84 of 1,280 considered datagrams. One all-FIN client-reorder run
+delivered 4,194,304 bytes/checksum 534,773,760 while holding 335 of 1,679
+datagrams. The parser still rejects 257 streams before network setup.
 
 `--reorder-every=N` now exercises the complementary non-loss case. The endpoint
 owns every selected datagram, sends the next packet first, then releases the
@@ -2836,6 +3301,38 @@ client datagrams, held 121-123, verified the same 2,097,152 bytes/checksum
 267,386,880, and completed in 12.37-13.07 ms (153-161 MiB/s). A held packet at
 the end of a batch is now explicitly flushed, preventing the emulator from
 turning an intended reorder into accidental loss.
+
+The external lifecycle gate extends that evidence across both roles with the
+independent audited `wtransport` implementation:
+
+```sh
+zig build interop-webtransport-wtransport-churn -Doptimize=ReleaseFast
+```
+
+It runs 32- and 64-stream cases twice in each sender direction under
+deterministic loss and pair reordering. Netz's outbound direction uses its
+seeded 5% endpoint interceptor; wtransport's outbound direction crosses an unprivileged
+loopback UDP relay that remains transparent for the handshake and is armed
+only around the RESET and FIN phases. Half the streams
+deliver an acknowledged 256-byte prefix and then RESET_STREAM with application
+code `0x4000 + index`; the other half continue to 16 KiB and FIN only after
+wtransport has reported every reset. A bidi sibling opened before cancellation
+then completes after that barrier. The independent verifier derives expected
+bytes, checksum, FIN/reset counts, reset bit mask, and application-code sum from
+the requested shape and also requires a real drop/hold count and peer close.
+For the proxy direction it checks that both RESET and FIN phases actually hit
+the selected fault and that the sender and proxy report identical counters.
+The proxy now uses one deterministic single-shot arm in each terminal phase,
+so every captured wtransport-sender case drops exactly two datagrams or
+completes exactly two reorder pairs overall, independent of the 32/64-stream
+size. Netz sends retain the seeded continuous endpoint schedule: the latest
+two-run matrix dropped 11/31 datagrams or held 49/100-101 for the 32/64-stream
+shapes.
+The 32-stream shape verifies 266,240 bytes/checksum 33,945,600, mask
+`0x00000000aaaaaaaa`, and code sum 262,400; the 64-stream shape verifies
+532,480/67,891,200, mask `0xaaaaaaaaaaaaaaaa`, and code sum 525,312. This is
+external recovery/lifecycle evidence for both client-outbound fault scopes,
+not a production-network or throughput comparison.
 
 ### WebTransport steady stream-batch staging
 
@@ -2888,29 +3385,36 @@ zig build bench-webtransport-wtransport -Doptimize=ReleaseFast -- \
 
 The runner selects two CPUs from its current affinity mask and pins the client
 and server separately. Each pair performs a real QUIC v1/TLS/HTTP/3 CONNECT,
-then validates one fixed big-endian configuration message before timing. Stream
-rounds open and associate every bidirectional stream before GO; the sender
-writes deterministic bytes in the configured application chunks and stops only
-after the receiver has checked every byte and FIN and returned DONE. After that
-timed boundary, the sender returns ROUND_ACK, then the receiver emits an empty
-reverse FIN and the sender verifies it before starting the next round. Reverse
-half work therefore cannot be coalesced into the timed DONE packet, and
-bidirectional stream lifecycle/credit is not leaked across warmups. The harness
-sets both QUIC MAX_STREAMS and netz's
+opens one dedicated bidirectional WebTransport control stream, and validates
+the fixed big-endian `CONFIG`/`CONFIG_ACK` exchange before timing. Stream
+rounds open and associate every data stream before `ROUND_READY`/`GO`; the
+sender writes deterministic bytes in the configured application chunks and
+stops its timer only after the receiver has checked every byte and FIN and
+returned checksum-bound `ROUND_DONE`. The sender then returns `ROUND_ACK`, the
+receiver emits an empty reverse FIN on every data stream, and the sender
+verifies those FINs before starting the next round. Reverse-half work therefore
+cannot be coalesced into the timed `ROUND_DONE` packet, and bidirectional stream
+lifecycle/credit is not leaked across warmups. The harness sets both QUIC
+MAX_STREAMS and netz's
 legacy WebTransport stream SETTINGS from the total configured workload rather
 than relying on the default 16-stream cap. DATAGRAM
 latency keeps exactly one request outstanding and stops each sample only after
 receiving and byte-checking its matching echo. Warmups follow the same path but
-are excluded from reported samples. A final checksum-bound acknowledgment is
-received before the client sends CLOSE_READY; the server must receive that
-application teardown marker and return CLOSE_ACK before the runner accepts the
-pair. No QUIC close frame is part of the measurement or its success condition,
-preventing a transport close from overtaking the result boundary. The server
-keeps the connection alive for a 100 ms post-measurement ACK flush grace.
-`--timeout-ms` bounds handshake, control, and receive
-operations. The current netz WebTransport STREAM write/finish API has no
-deadline variant, so the runner's independent 180-second process deadline is
-the outer bound for a blocked sender; the output does not claim otherwise.
+are excluded from reported samples. Stream mode closes the workload with
+`BENCHMARK_DONE`/`BENCHMARK_ACK`; DATAGRAM mode binds those messages to the
+aggregate byte count and checksum. The client then sends
+`CLOSE_READY`, receives `CLOSE_ACK`, finishes its control-stream send
+direction, and requires the server FIN; the server symmetrically requires the
+client FIN before finishing its direction. Netz flushes the pending transport
+ACK after observing the peer FIN. Thus success and traffic snapshots no longer
+depend on the former 100 ms sleep. No QUIC close frame is part of the
+measurement or its success condition, preventing a transport close from
+overtaking the result boundary. `--timeout-ms` bounds handshake, control, and
+receive operations. Each stream round also creates one absolute awake-clock
+send deadline after `GO`; every netz payload chunk and FIN reuses that timestamp.
+The Rust sender uses the equivalent Tokio instant for every `write_all` in the
+round. The runner's independent 180-second process deadline remains an outer
+watchdog rather than the stream sender's only bound.
 
 Output uses stable `key=value` lines and always records role pair, requested and
 effective stream windows, payload/chunk shape, certificate policy, GSO/GRO,
@@ -2922,8 +3426,9 @@ disables GRO; Quinn opportunistically enables it without a public wtransport
 switch, so the Rust output records `gro=implementation-default`. The current
 APIs also produce different maximum WebTransport DATAGRAM payloads (1170 for
 netz and 1161 for wtransport in the smoke run) and do not expose every ACK or
-packet coalescing knob. Packet captures and UDP datagram counts are still
-required before upgrading this evidence to a strict equal-wire comparison.
+packet coalescing knob. Userspace UDP accounting below quantifies the resulting
+shape, while kernel/interface capture is still required before upgrading this
+evidence to a strict equal-wire comparison.
 
 ReleaseFast smoke coverage has passed in both role directions for one and four
 streams at 64 KiB per stream and for ten measured 32-byte ping-pongs. The
@@ -2932,16 +3437,34 @@ four-stream rounds verified 262,144 logical bytes, four FINs, and checksum
 runs establish harness correctness only and are not retained as performance
 claims.
 
-The first full CPU-0/client, CPU-1/server run used 20 warmups plus five measured
-iterations. One 4-MiB stream measured 112.22-115.01 MiB/s with the wtransport
-client sender and 207.69-208.54 MiB/s with the netz client sender. Four 4-MiB
+The current CPU-0/client, CPU-1/server run uses 20 warmups plus five measured
+iterations and explicitly gives the netz endpoint the RFC 9000-style local ACK
+policy of one ACK per two ack-eliciting packets or 25 ms, while preserving an
+immediate ACK for reordering gaps of three packets. Five runs (25 samples per
+role pair) measured 141.489-145.081 MiB/s with the wtransport client sender and
+207.671-210.863 MiB/s with the netz client sender. Four 4-MiB
 streams measured 80.14-83.35 MiB/s and 194.44-195.46 MiB/s respectively; every
 sample verified 16,777,216 bytes, four FINs, and checksum 2,139,095,040. The
-final 200-warmup/5,000-sample 32-byte DATAGRAM ping-pong run measured
-wtransport-client p50/p90/p99/p99.9 at 31.932/35.980/38.803/43.953 us and
-netz-client at 32.125/36.024/38.434/45.025 us, with checksum 15,084,056 in
-both directions. These are same-application-shape cross-process samples, not
-equal-wire ratios or whole-library superiority claims.
+five 200-warmup/5,000-sample 32-byte DATAGRAM ping-pong runs measured
+wtransport-client p50/p90/p99/p99.9 ranges of 28.815-29.549 /
+32.002-33.843 / 34.706-36.471 / 38.404-42.725 us and netz-client ranges of
+29.632-29.804 / 33.207-33.807 / 34.536-35.829 / 37.897-39.480 us, with
+checksum 15,084,056 in both directions. These are same-application-shape
+cross-process samples, not equal-wire ratios or whole-library superiority
+claims.
+
+Five order-alternated A/B pairs isolate the ACK-policy change. Both arms used
+the same current benchmark code, workload, CPU assignment, and `--traffic`
+instrumentation; A passed `--netz-ack-every=1` and
+`--netz-max-ack-delay-us=0`, while B passed `--netz-ack-every=2` and
+`--netz-max-ack-delay-us=25000`. Pair order alternated A/B then B/A to reduce
+time-order bias. For wtransport-client + netz-server, median stream throughput
+rose from 113.135 to 142.935 MiB/s (26.3%) and complete-connection datagrams
+fell from 180,658-180,752 to 135,855-136,226 (about 24.8%). The opposite role
+pair's median remained effectively flat, 209.520 versus 209.068 MiB/s, as
+expected because wtransport remains its receiver. This is a benchmark-local
+policy selection through the public handshake configuration; the library
+default remains the conservative one-packet/zero-delay behavior.
 
 Both modes also accept `--stats`. Only this opt-in path enables the netz
 counting allocator, builds the Rust peer with its system-allocation wrapper,
@@ -2955,20 +3478,20 @@ recorded the following whole-process peak RSS:
 | Mode | Implementation | Endpoint role | Process peak RSS (KiB) |
 |---|---|---|---:|
 | 1 x 4 MiB stream upload | netz | client/sender | 10,240 |
-| 1 x 4 MiB stream upload | wtransport | client/sender | 11,264-11,312 |
+| 1 x 4 MiB stream upload | wtransport | client/sender | 11,520-11,776 |
 | 1 x 4 MiB stream upload | netz | server/receiver | 4,352 |
 | 1 x 4 MiB stream upload | wtransport | server/receiver | 6,144-6,400 |
 | 32-byte DATAGRAM ping-pong | netz | client | 3,840 |
 | 32-byte DATAGRAM ping-pong | wtransport | client | 6,144-6,400 |
 | 32-byte DATAGRAM ping-pong | netz | server | 3,840 |
-| 32-byte DATAGRAM ping-pong | wtransport | server | 5,888-6,144 |
+| 32-byte DATAGRAM ping-pong | wtransport | server | 6,144 |
 
 For the stream shape, netz client/server peak explicit live bytes were
-6,513,930-6,523,146 and 570,900-681,143; the wtransport client/server peak
-requested live bytes were 8,409,858-8,427,002 and 3,252,500-3,260,325. For
+6,522,634-6,523,146 and 570,488-871,368; the wtransport client/server peak
+requested live bytes were 8,456,194-8,518,298 and 3,252,091-3,253,272. For
 DATAGRAM ping-pong, the corresponding netz peaks were 95,067-95,092 and
-55,651-55,721, while wtransport reported 3,166,100-3,166,101 and
-3,154,071-3,154,140. All four netz runs in every repetition ended at zero
+55,651-55,721, while wtransport reported 3,166,100-3,166,168 and
+3,154,072-3,154,140. All four netz runs in every repetition ended at zero
 explicit live bytes after complete WebTransport/HTTP/3/QUIC/runtime teardown.
 Rust retains about 2.2 KiB of process-global requested allocations after the
 Tokio runtime is dropped; this is not treated as a leak. Whole-process maximum
@@ -2979,7 +3502,8 @@ retain the same `same-application-shape` boundary as the timing results.
 `--traffic` is a separate opt-in pass because netz's thread-safe endpoint
 counters add atomic work. It joins one complete-connection record from each
 endpoint after handshake, all warmup and measured work, the benchmark
-acknowledgment, and CLOSE_ACK/grace. Netz reports successful socket I/O;
+acknowledgment, `CLOSE_ACK`, and the bidirectional control-stream FIN exchange.
+Netz reports successful socket I/O;
 wtransport reports Quinn `ConnectionStats.udp_tx/udp_rx`. Both count UDP
 payload bytes without IP/UDP headers and logical datagrams under GSO/GRO, but
 this is userspace evidence rather than kernel/interface capture. Three default
@@ -2987,21 +3511,21 @@ runs recorded:
 
 | Mode / role pair | Total UDP payload bytes | Total logical UDP datagrams |
 |---|---:|---:|
-| stream, wtransport client + netz server | 112,093,715-112,114,364 | 180,705-180,728 |
-| stream, netz client + wtransport server | 108,989,778-109,108,480 | 115,105-117,800 |
-| DATAGRAM, wtransport client + netz server | 920,825-920,836 | 18,227 |
-| DATAGRAM, netz client + wtransport server | 920,357-920,359 | 18,229 |
+| stream, wtransport client + netz server | 110,476,141-110,567,252 | 135,893-135,972 |
+| stream, netz client + wtransport server | 108,986,418-109,001,281 | 114,967-115,318 |
+| DATAGRAM, wtransport client + netz server | 827,115-827,122 | 15,623 |
+| DATAGRAM, netz client + wtransport server | 826,649-826,651 | 15,625 |
 
 The stream connection transports 25 total 4-MiB application rounds (20
-warmups plus five measured). Its 3.0-3.1 MB total-payload and roughly
-63-66 thousand datagram differences show that ACK/control traffic and packet
+warmups plus five measured). Its 1.47-1.58 MB total-payload and roughly
+20.6-21.0 thousand datagram differences show that ACK/control traffic and packet
 scheduling are materially different even though the application shape matches.
 The DATAGRAM shapes are much closer but still not byte-identical. Endpoint
 observation deltas were non-negative; Quinn-client/netz-server stream runs had
-423-441 client tail datagrams (505,870-528,038 bytes) not yet observed when the
+664-739 client tail datagrams (794,934-885,638 bytes) not yet observed when the
 server snapshot was taken, while the reverse role pair differed by one final
-1200-byte client datagram and one 41-byte server datagram. These timing-boundary
-deltas are printed rather than hidden. `--traffic` and `--stats` must run
+1200-byte client datagram and zero to three server datagrams (0-101 bytes).
+These timing-boundary deltas are printed rather than hidden. `--traffic` and `--stats` must run
 separately, and neither changes the ordinary benchmark path.
 
 ## Reference context from `~/Work`
@@ -3020,9 +3544,11 @@ different benchmark definitions, but they define the comparison target shape:
 - quicz documentation also highlights platform effects: Linux GSO/GRO can
   dominate throughput comparisons and must be recorded separately.
 
-For netz, raw QUIC STREAM and DATAGRAM throughput have same-host reference
-runs, but only DATAGRAM currently retains a direct performance verdict. STREAM
-needs equivalent endpoint CPU placement after the single-CPU scheduling audit.
+For netz, raw QUIC STREAM and DATAGRAM throughput now have same-host,
+two-process references. Persistent 1-KiB echo and four-connection aggregate
+STREAM shapes also have direct quic-go controls, but remain
+`same-application-shape`; the aggregate matrix exposes a netz/netz worker
+scheduling bottleneck that must be addressed before a broad scaling claim.
 HTTP/3 remains separate because it includes H3 framing, QPACK, and session
 bookkeeping and has no equal-wire quicz reference.
 
@@ -3042,13 +3568,14 @@ benchmark pass and does not replace the isolated ranges above.
 
 ## Gaps before a completion audit can pass
 
-- Extend the same-host raw QUIC matrix to echo latency, handshake rate,
-  loss/reordering, stream churn, and multi-connection aggregate throughput.
+- Extend the new cross-process raw QUIC aggregate matrix into connection-count
+  scaling and a shared-socket event-loop shape. Persistent echo, four
+  independent connections, fresh handshakes, transfer loss/reordering, and
+  32/64-stream mixed FIN/reset churn are now covered in every relevant role
+  direction.
 - Capture the raw QUIC process matrix at the kernel/interface boundary on a
   host that permits pcap. The current complete-connection userspace UDP
   counters prove the existing shapes differ and therefore remain
   `same-application-shape`.
-- Add loss/reordering benchmark cases or interop-runner style scenarios for
-  handshake loss, transfer loss, and corruption.
 - Keep public HTTP/3 smoke (`https://robotics.bytedance.com/ --verify --head`)
   as a reachability gate, but do not treat it as a throughput benchmark.

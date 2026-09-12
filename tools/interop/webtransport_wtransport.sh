@@ -55,6 +55,8 @@ PY
   chunk_bytes=16384
   stream_window=1048576
   timeout_ms=30000
+  netz_ack_every=2
+  netz_max_ack_delay_us=25000
   for arg in "$@"; do
     if [[ $arg == --mode=* ]]; then
       requested_modes=("${arg#--mode=}")
@@ -71,6 +73,10 @@ PY
         --chunk-bytes=*) chunk_bytes=${arg#--chunk-bytes=} ;;
         --stream-window=*) stream_window=${arg#--stream-window=} ;;
         --timeout-ms=*) timeout_ms=${arg#--timeout-ms=} ;;
+        --netz-ack-every=*) netz_ack_every=${arg#--netz-ack-every=} ;;
+        --netz-max-ack-delay-us=*)
+          netz_max_ack_delay_us=${arg#--netz-max-ack-delay-us=}
+          ;;
       esac
     fi
   done
@@ -135,6 +141,8 @@ PY
         --bytes-per-stream="$bytes_per_stream" \
         --payload-bytes="$payload_bytes" --chunk-bytes="$chunk_bytes" \
         --stream-window="$stream_window" --timeout-ms="$timeout_ms" \
+        --netz-ack-every="$netz_ack_every" \
+        --netz-max-ack-delay-us="$netz_max_ack_delay_us" \
         --client-log="$2" --server-log="$3")
       if [[ -n ${4:-} ]]; then
         check_args+=(--client-rss="$4" --server-rss="$5")

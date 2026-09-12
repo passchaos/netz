@@ -21,13 +21,113 @@ pub const Error = net.Stream.Reader.Error ||
         SequenceOverflow,
         TruncatedRecord,
         UnexpectedEof,
-    } || stream_io.TimedReadError;
+    } || stream_io.TimedReadError || stream_io.TimedWriteError;
 
 const ExactReadResult = enum {
     complete,
     eof,
     truncated,
 };
+
+/// Incremental TLS-record reader whose ciphertext survives a timeout or task
+/// cancellation. A caller may therefore resume the same record without
+/// treating payload bytes as a new header. The returned slice remains valid
+/// until the next read.
+pub const Reader = struct {
+    encoded_len: usize = 0,
+    total_len: ?usize = null,
+
+    pub fn read(
+        self: *Reader,
+        io: std.Io,
+        stream: net.Stream,
+        buffer: []u8,
+    ) Error![]u8 {
+        return self.readInternal(io, stream, buffer, null);
+    }
+
+    pub fn readWithDeadline(
+        self: *Reader,
+        io: std.Io,
+        stream: net.Stream,
+        buffer: []u8,
+        deadline: std.Io.Clock.Timestamp,
+    ) Error![]u8 {
+        return self.readInternal(io, stream, buffer, deadline);
+    }
+
+    fn readInternal(
+        self: *Reader,
+        io: std.Io,
+        stream: net.Stream,
+        buffer: []u8,
+        deadline: ?std.Io.Clock.Timestamp,
+    ) Error![]u8 {
+        if (buffer.len < max_record_len) return error.RecordTooLarge;
+        while (self.encoded_len < vail.tls.record.header_len) {
+            const count = try readSome(
+                io,
+                stream,
+                buffer[self.encoded_len..vail.tls.record.header_len],
+                deadline,
+            );
+            if (count == 0) {
+                return if (self.encoded_len == 0)
+                    error.UnexpectedEof
+                else
+                    error.TruncatedRecord;
+            }
+            self.encoded_len += count;
+        }
+        if (self.total_len == null) {
+            const payload_len = std.mem.readInt(
+                u16,
+                buffer[3..5],
+                .big,
+            );
+            const total_len = vail.tls.record.header_len + payload_len;
+            if (total_len > buffer.len) return error.RecordTooLarge;
+            self.total_len = total_len;
+        }
+        const total_len = self.total_len.?;
+        while (self.encoded_len < total_len) {
+            const count = try readSome(
+                io,
+                stream,
+                buffer[self.encoded_len..total_len],
+                deadline,
+            );
+            if (count == 0) return error.TruncatedRecord;
+            self.encoded_len += count;
+        }
+        const record = buffer[0..total_len];
+        self.encoded_len = 0;
+        self.total_len = null;
+        return record;
+    }
+};
+
+fn readSome(
+    io: std.Io,
+    stream: net.Stream,
+    out: []u8,
+    deadline: ?std.Io.Clock.Timestamp,
+) Error!usize {
+    if (deadline) |absolute| {
+        return stream_io.readSomeWithDeadline(
+            io,
+            stream,
+            out,
+            absolute,
+        );
+    }
+    var buffers = [_][]u8{out};
+    return io.vtable.netRead(
+        io.userdata,
+        stream.socket.handle,
+        &buffers,
+    );
+}
 
 pub fn readRecord(
     io: std.Io,
@@ -107,6 +207,27 @@ pub fn writeAll(
         );
         if (count == 0) return error.ConnectionClosed;
         offset += count;
+    }
+}
+
+/// Resume a ciphertext record under one absolute deadline. `offset` is
+/// advanced only by bytes accepted by the socket, so an encrypted record can
+/// survive timeout/cancelation without being regenerated under the same TLS
+/// nonce.
+pub fn writeAllWithDeadline(
+    io: std.Io,
+    stream: net.Stream,
+    bytes: []const u8,
+    offset: *usize,
+    deadline: std.Io.Clock.Timestamp,
+) Error!void {
+    while (offset.* < bytes.len) {
+        offset.* += try stream_io.writeSomeWithDeadline(
+            io,
+            stream,
+            bytes[offset.*..],
+            deadline,
+        );
     }
 }
 

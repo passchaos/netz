@@ -5,15 +5,11 @@
     .minimum_zig_version = "0.16.0",
     .dependencies = .{
         .vail = .{ .path = "../vail" },
-        .vort = .{ .path = "../vort" },
         .zio = .{
             .url = "git+https://github.com/lalinsky/zio#v0.17.0",
             .hash = "zio-0.17.0-xHbVVI_jJQC3YbgU7JydwAV7MuASkOTd73YqBaKlFFUz",
         },
-        .pbz = .{
-            .path = "../pbz",
-            .lazy = true,
-        },
+        .pbz = .{ .path = "../pbz" },
     },
     .paths = .{
         "build.zig",
@@ -21,6 +17,9 @@
         "src",
         "test",
         "tools",
+        "examples",
+        "benchmarks",
+        "docs",
         "README.md",
         "LICENSE",
         ".gitignore",

@@ -1105,6 +1105,18 @@ pub const Broker = struct {
         return self.server.?.address();
     }
 
+    /// Wake every active client reader without racing slot ownership changes.
+    /// The serving task still owns and closes each connection after it exits.
+    pub fn shutdownActiveConnections(self: *Broker) void {
+        self.state_mutex.lockUncancelable(self.io);
+        defer self.state_mutex.unlock(self.io);
+        for (self.slots) |*slot| {
+            if (slot.connection) |*connection| {
+                connection.shutdown() catch {};
+            }
+        }
+    }
+
     /// Return a coherent, allocation-free snapshot suitable for metrics,
     /// health checks, and a future `$SYS` publisher.
     pub fn stats(self: *Broker) Stats {

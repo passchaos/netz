@@ -2,13 +2,14 @@ use anyhow::{bail, ensure, Context, Result};
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 use tokio::task::JoinSet;
-use tokio::time::timeout;
+use tokio::time::{timeout, timeout_at};
 use wtransport::config::{IpBindConfig, QuicTransportConfig};
 use wtransport::endpoint::ConnectOptions;
+use wtransport::stream::{RecvStream, SendStream};
 use wtransport::{ClientConfig, Connection, Endpoint, Identity, ServerConfig};
 
-const CONTROL_MAGIC: &[u8; 6] = b"NZWTB1";
-const CONTROL_LEN: usize = 66;
+const CONTROL_MAGIC: &[u8; 6] = b"NZWTB2";
+const CONTROL_LEN: usize = 82;
 const PING_MAGIC: &[u8; 6] = b"NZPING";
 const PING_HEADER_LEN: usize = 14;
 const MAX_DATAGRAM_SIZE: u16 = 1200;
@@ -62,6 +63,8 @@ pub(crate) struct Config {
     chunk_bytes: u32,
     stream_window: u64,
     timeout_ms: u32,
+    netz_ack_every: u64,
+    netz_max_ack_delay_us: u64,
 }
 
 impl Config {
@@ -75,6 +78,8 @@ impl Config {
         let mut chunk_bytes = 16 * 1024u32;
         let mut stream_window = 1024 * 1024u64;
         let mut timeout_ms = 30_000u32;
+        let mut netz_ack_every = 2u64;
+        let mut netz_max_ack_delay_us = 25_000u64;
         for arg in args {
             let (name, value) = arg
                 .split_once('=')
@@ -89,6 +94,10 @@ impl Config {
                 "--chunk-bytes" => chunk_bytes = parse_positive(value, name)?,
                 "--stream-window" => stream_window = parse_positive(value, name)?,
                 "--timeout-ms" => timeout_ms = parse_positive(value, name)?,
+                "--netz-ack-every" => netz_ack_every = parse_positive(value, name)?,
+                "--netz-max-ack-delay-us" => {
+                    netz_max_ack_delay_us = value.parse().context("invalid ACK delay")?
+                }
                 "--direction" => ensure!(value == "upload", "only --direction=upload is supported"),
                 "--verify-cert" => ensure!(
                     value == "false",
@@ -107,6 +116,10 @@ impl Config {
             Mode::DatagramPingPong => 5_000,
         });
         ensure!(streams <= 64, "--streams must not exceed 64");
+        ensure!(
+            netz_max_ack_delay_us <= 25_000,
+            "--netz-max-ack-delay-us must not exceed 25000"
+        );
         ensure!(
             chunk_bytes as u64 <= bytes_per_stream,
             "--chunk-bytes exceeds --bytes-per-stream"
@@ -140,6 +153,8 @@ impl Config {
             chunk_bytes,
             stream_window,
             timeout_ms,
+            netz_ack_every,
+            netz_max_ack_delay_us,
         })
     }
 
@@ -226,6 +241,11 @@ struct Control {
     checksum: u64,
 }
 
+struct ControlChannel {
+    send: SendStream,
+    recv: RecvStream,
+}
+
 impl Control {
     fn new(kind: Kind, config: &Config, round: u32) -> Self {
         Self {
@@ -252,8 +272,10 @@ impl Control {
         out[34..38].copy_from_slice(&self.config.chunk_bytes.to_be_bytes());
         out[38..46].copy_from_slice(&self.config.stream_window.to_be_bytes());
         out[46..50].copy_from_slice(&self.config.timeout_ms.to_be_bytes());
-        out[50..58].copy_from_slice(&self.received_bytes.to_be_bytes());
-        out[58..66].copy_from_slice(&self.checksum.to_be_bytes());
+        out[50..58].copy_from_slice(&self.config.netz_ack_every.to_be_bytes());
+        out[58..66].copy_from_slice(&self.config.netz_max_ack_delay_us.to_be_bytes());
+        out[66..74].copy_from_slice(&self.received_bytes.to_be_bytes());
+        out[74..82].copy_from_slice(&self.checksum.to_be_bytes());
         out
     }
 
@@ -281,14 +303,16 @@ impl Control {
             chunk_bytes: read_u32(bytes, 34),
             stream_window: read_u64(bytes, 38),
             timeout_ms: read_u32(bytes, 46),
+            netz_ack_every: read_u64(bytes, 50),
+            netz_max_ack_delay_us: read_u64(bytes, 58),
         };
         Ok(Self {
             kind: Kind::parse(bytes[6])?,
             mode,
             round: read_u32(bytes, 8),
             config,
-            received_bytes: read_u64(bytes, 50),
-            checksum: read_u64(bytes, 58),
+            received_bytes: read_u64(bytes, 66),
+            checksum: read_u64(bytes, 74),
         })
     }
 }
@@ -303,16 +327,26 @@ fn read_u64(bytes: &[u8], offset: usize) -> u64 {
     u64::from_be_bytes(bytes[offset..offset + 8].try_into().unwrap())
 }
 
-async fn send_control(connection: &Connection, control: &Control) -> Result<()> {
-    connection.send_datagram(control.encode())?;
+async fn send_control(channel: &mut ControlChannel, control: &Control) -> Result<()> {
+    timeout(
+        control.config.timeout(),
+        channel.send.write_all(&control.encode()),
+    )
+    .await
+    .with_context(|| format!("{:?} write timed out", control.kind))??;
     Ok(())
 }
 
-async fn receive_control(connection: &Connection, config: &Config, kind: Kind) -> Result<Control> {
-    let datagram = timeout(config.timeout(), connection.receive_datagram())
+async fn receive_control(
+    channel: &mut ControlChannel,
+    config: &Config,
+    kind: Kind,
+) -> Result<Control> {
+    let mut bytes = [0u8; CONTROL_LEN];
+    timeout(config.timeout(), channel.recv.read_exact(&mut bytes))
         .await
-        .with_context(|| format!("{kind:?} timed out"))??;
-    let control = Control::decode(&datagram)?;
+        .with_context(|| format!("{kind:?} read timed out"))??;
+    let control = Control::decode(&bytes)?;
     ensure!(
         control.kind == kind,
         "expected {kind:?}, received {:?}",
@@ -335,7 +369,7 @@ fn transport_config(config: &Config) -> Result<QuicTransportConfig> {
         .receive_window(connection_window)
         .send_window(config.connection_window()?)
         .max_concurrent_bidi_streams(stream_limit)
-        .max_concurrent_uni_streams(wtransport::quinn::VarInt::from_u32(32))
+        .max_concurrent_uni_streams(stream_limit)
         .initial_mtu(MAX_DATAGRAM_SIZE)
         .min_mtu(MAX_DATAGRAM_SIZE)
         .mtu_discovery_config(None)
@@ -371,11 +405,12 @@ pub async fn run_client(args: &[String], traffic: bool) -> Result<Config> {
         &config,
         &connection,
     );
-    exchange_config_client(&connection, &config).await?;
+    let mut control = open_control_client(&connection, &config).await?;
     match config.mode {
         Mode::Stream => {
             run_stream_client(
                 &connection,
+                &mut control,
                 &config,
                 "wtransport",
                 "wtransport-client+netz-server",
@@ -385,6 +420,7 @@ pub async fn run_client(args: &[String], traffic: bool) -> Result<Config> {
         Mode::DatagramPingPong => {
             run_ping_client(
                 &connection,
+                &mut control,
                 &config,
                 "wtransport",
                 "wtransport-client+netz-server",
@@ -393,15 +429,22 @@ pub async fn run_client(args: &[String], traffic: bool) -> Result<Config> {
         }
     }
     send_control(
-        &connection,
+        &mut control,
         &Control::new(Kind::CloseReady, &config, config.rounds()),
     )
     .await?;
-    let close_ack = receive_control(&connection, &config, Kind::CloseAck).await?;
+    let close_ack = receive_control(&mut control, &config, Kind::CloseAck).await?;
     ensure!(
         close_ack.round == config.rounds(),
         "CLOSE_ACK round mismatch"
     );
+    timeout(config.timeout(), control.send.finish())
+        .await
+        .context("control stream finish timed out")??;
+    let terminal = timeout(config.timeout(), control.recv.read(&mut [0u8; 1]))
+        .await
+        .context("control stream peer FIN timed out")??;
+    ensure!(terminal.is_none(), "unexpected data after CLOSE_ACK");
     if traffic {
         print_traffic(
             "wtransport",
@@ -411,6 +454,55 @@ pub async fn run_client(args: &[String], traffic: bool) -> Result<Config> {
             connection.quic_connection().stats(),
         );
     }
+    Ok(config)
+}
+
+pub async fn run_churn_client(
+    args: &[String],
+    fault: &str,
+    proxy_control_port: u16,
+) -> Result<Config> {
+    let (port, options) = parse_port(args)?;
+    ensure!(port != 0, "churn proxy port must be non-zero");
+    let config = Config::parse(options)?;
+    ensure!(config.mode == Mode::Stream, "churn requires stream mode");
+    let tls = wtransport::tls::client::build_default_tls_config(
+        Arc::new(wtransport::tls::rustls::RootCertStore::empty()),
+        Some(Arc::new(
+            wtransport::tls::client::NoServerVerification::new(),
+        )),
+    );
+    let client_config = ClientConfig::builder()
+        .with_bind_default()
+        .with_custom_tls_and_transport(tls, transport_config(&config)?)
+        .build();
+    let endpoint = Endpoint::client(client_config)?;
+    let options = ConnectOptions::builder(format!("https://127.0.0.1:{port}/benchmark"))
+        .add_header("user-agent", "wtransport-benchmark")
+        .build();
+    let connection = timeout(config.timeout(), endpoint.connect(options))
+        .await
+        .context("churn CONNECT timed out")??;
+    validate_datagram_limit(&connection, &config)?;
+    print_config(
+        "wtransport",
+        "wtransport-client+netz-server",
+        &config,
+        &connection,
+    );
+    let mut control = open_control_client(&connection, &config).await?;
+    crate::churn::run_client_connection(
+        &connection,
+        &mut control.send,
+        &mut control.recv,
+        config.streams,
+        config.bytes_per_stream,
+        config.timeout(),
+        fault,
+        proxy_control_port,
+    )
+    .await?;
+    endpoint.wait_idle().await;
     Ok(config)
 }
 
@@ -440,22 +532,28 @@ pub async fn run_server(args: &[String], traffic: bool) -> Result<Config> {
         &config,
         &connection,
     );
-    exchange_config_server(&connection, &config).await?;
+    let mut control = accept_control_server(&connection, &config).await?;
     match config.mode {
-        Mode::Stream => run_stream_server(&connection, &config).await?,
-        Mode::DatagramPingPong => run_ping_server(&connection, &config).await?,
+        Mode::Stream => run_stream_server(&connection, &mut control, &config).await?,
+        Mode::DatagramPingPong => run_ping_server(&connection, &mut control, &config).await?,
     }
-    let close_ready = receive_control(&connection, &config, Kind::CloseReady).await?;
+    let close_ready = receive_control(&mut control, &config, Kind::CloseReady).await?;
     ensure!(
         close_ready.round == config.rounds(),
         "CLOSE_READY round mismatch"
     );
     send_control(
-        &connection,
+        &mut control,
         &Control::new(Kind::CloseAck, &config, config.rounds()),
     )
     .await?;
-    tokio::time::sleep(Duration::from_millis(100)).await;
+    let terminal = timeout(config.timeout(), control.recv.read(&mut [0u8; 1]))
+        .await
+        .context("control stream peer FIN timed out")??;
+    ensure!(terminal.is_none(), "unexpected data after CLOSE_READY");
+    timeout(config.timeout(), control.send.finish())
+        .await
+        .context("control stream finish timed out")??;
     print_server_complete("wtransport", "netz-client+wtransport-server", &config);
     if traffic {
         print_traffic(
@@ -469,6 +567,49 @@ pub async fn run_server(args: &[String], traffic: bool) -> Result<Config> {
     Ok(config)
 }
 
+pub async fn run_churn_server(args: &[String], fault: &str) -> Result<Config> {
+    let (port, options) = parse_port(args)?;
+    let config = Config::parse(options)?;
+    ensure!(config.mode == Mode::Stream, "churn requires stream mode");
+    let identity = Identity::self_signed(["localhost", "127.0.0.1"])?;
+    let server_config = ServerConfig::builder()
+        .with_bind_config(IpBindConfig::LocalV4, port)
+        .with_custom_transport(identity, transport_config(&config)?)
+        .build();
+    let endpoint = Endpoint::server(server_config)?;
+    println!("WTRANSPORT_CHURN_PORT={}", endpoint.local_addr()?.port());
+    let request = timeout(config.timeout(), endpoint.accept())
+        .await
+        .context("churn incoming QUIC connection timed out")?
+        .await?;
+    ensure!(
+        request.path() == "/benchmark",
+        "unexpected churn CONNECT path"
+    );
+    let connection = request.accept().await?;
+    validate_datagram_limit(&connection, &config)?;
+    print_config(
+        "wtransport",
+        "netz-client+wtransport-server",
+        &config,
+        &connection,
+    );
+    let mut control = accept_control_server(&connection, &config).await?;
+    crate::churn::run_server_connection(
+        &connection,
+        &mut control.send,
+        &mut control.recv,
+        config.streams,
+        config.bytes_per_stream,
+        config.timeout(),
+        fault,
+    )
+    .await?;
+    connection.close(wtransport::VarInt::from_u32(0), b"churn complete");
+    endpoint.wait_idle().await;
+    Ok(config)
+}
+
 fn parse_port(args: &[String]) -> Result<(u16, &[String])> {
     let value = args.first().context("benchmark mode requires PORT")?;
     let port = value.parse::<u16>().context("invalid benchmark port")?;
@@ -479,10 +620,6 @@ fn validate_datagram_limit(connection: &Connection, config: &Config) -> Result<(
     let limit = connection
         .max_datagram_size()
         .context("peer did not negotiate DATAGRAM")?;
-    ensure!(
-        CONTROL_LEN <= limit,
-        "control datagram exceeds negotiated maximum"
-    );
     if config.mode == Mode::DatagramPingPong {
         ensure!(
             config.payload_bytes as usize <= limit,
@@ -494,7 +631,7 @@ fn validate_datagram_limit(connection: &Connection, config: &Config) -> Result<(
 
 fn print_config(implementation: &str, role_pair: &str, config: &Config, connection: &Connection) {
     println!(
-        "implementation={implementation} protocol=webtransport transport=h3 mode={} direction={} role_pair={role_pair} connection_scope=persistent benchmark_scope=same-application-shape warmup={} iterations={} streams={} bytes_per_stream={} payload_bytes={} chunk_bytes={} stream_window_requested={} stream_window_effective={} connection_window={} max_datagram_size={} quic_version=1 cipher=negotiated-unexposed cert_verify=false gso=false gro=implementation-default pacing=true",
+        "implementation={implementation} protocol=webtransport transport=h3 mode={} direction={} role_pair={role_pair} connection_scope=persistent benchmark_scope=same-application-shape warmup={} iterations={} streams={} bytes_per_stream={} payload_bytes={} chunk_bytes={} stream_window_requested={} stream_window_effective={} connection_window={} max_datagram_size={} quic_version=1 netz_ack_every={} netz_max_ack_delay_us={} cipher=negotiated-unexposed cert_verify=false gso=false gro=implementation-default pacing=true",
         config.mode.name(),
         config.mode.direction(),
         config.warmup,
@@ -507,20 +644,34 @@ fn print_config(implementation: &str, role_pair: &str, config: &Config, connecti
         config.stream_window,
         config.connection_window().unwrap(),
         connection.max_datagram_size().unwrap_or(0),
+        config.netz_ack_every,
+        config.netz_max_ack_delay_us,
     );
 }
 
-async fn exchange_config_client(connection: &Connection, config: &Config) -> Result<()> {
-    send_control(connection, &Control::new(Kind::Config, config, 0)).await?;
-    let ack = receive_control(connection, config, Kind::ConfigAck).await?;
+async fn open_control_client(connection: &Connection, config: &Config) -> Result<ControlChannel> {
+    let opening = timeout(config.timeout(), connection.open_bi())
+        .await
+        .context("control stream credit timed out")??;
+    let (send, recv) = timeout(config.timeout(), opening)
+        .await
+        .context("control stream association timed out")??;
+    let mut channel = ControlChannel { send, recv };
+    send_control(&mut channel, &Control::new(Kind::Config, config, 0)).await?;
+    let ack = receive_control(&mut channel, config, Kind::ConfigAck).await?;
     ensure!(ack.round == 0, "invalid CONFIG_ACK round");
-    Ok(())
+    Ok(channel)
 }
 
-async fn exchange_config_server(connection: &Connection, config: &Config) -> Result<()> {
-    let message = receive_control(connection, config, Kind::Config).await?;
+async fn accept_control_server(connection: &Connection, config: &Config) -> Result<ControlChannel> {
+    let (send, recv) = timeout(config.timeout(), connection.accept_bi())
+        .await
+        .context("control stream timed out")??;
+    let mut channel = ControlChannel { send, recv };
+    let message = receive_control(&mut channel, config, Kind::Config).await?;
     ensure!(message.round == 0, "invalid CONFIG round");
-    send_control(connection, &Control::new(Kind::ConfigAck, config, 0)).await
+    send_control(&mut channel, &Control::new(Kind::ConfigAck, config, 0)).await?;
+    Ok(channel)
 }
 
 fn stream_byte(offset: usize, stream_index: usize) -> u8 {
@@ -574,6 +725,7 @@ fn build_stream_payloads(config: &Config) -> Result<(Vec<Vec<u8>>, u64)> {
 
 async fn run_stream_client(
     connection: &Connection,
+    control: &mut ControlChannel,
     config: &Config,
     implementation: &str,
     role_pair: &str,
@@ -599,9 +751,10 @@ async fn run_stream_client(
             senders.push(sender);
             receivers.push(receiver);
         }
-        send_control(connection, &Control::new(Kind::RoundReady, config, round)).await?;
-        let go = receive_control(connection, config, Kind::Go).await?;
+        send_control(control, &Control::new(Kind::RoundReady, config, round)).await?;
+        let go = receive_control(control, config, Kind::Go).await?;
         ensure!(go.round == round, "GO round mismatch");
+        let send_deadline = tokio::time::Instant::now() + config.timeout();
         let started = Instant::now();
         let chunk = config.chunk_bytes as usize;
         let total = payloads[0].len();
@@ -609,8 +762,8 @@ async fn run_stream_client(
         while offset < total {
             let end = (offset + chunk).min(total);
             for (stream_index, sender) in senders.iter_mut().enumerate() {
-                timeout(
-                    config.timeout(),
+                timeout_at(
+                    send_deadline,
                     sender.write_all(&payloads[stream_index][offset..end]),
                 )
                 .await
@@ -621,7 +774,7 @@ async fn run_stream_client(
         for sender in &mut senders {
             sender.quic_stream_mut().finish()?;
         }
-        let done = receive_control(connection, config, Kind::RoundDone).await?;
+        let done = receive_control(control, config, Kind::RoundDone).await?;
         let elapsed = started.elapsed().as_nanos().min(u128::from(u64::MAX)) as u64;
         ensure!(done.round == round, "ROUND_DONE round mismatch");
         ensure!(
@@ -632,7 +785,7 @@ async fn run_stream_client(
             done.checksum == expected_checksum,
             "ROUND_DONE checksum mismatch"
         );
-        send_control(connection, &Control::new(Kind::RoundAck, config, round)).await?;
+        send_control(control, &Control::new(Kind::RoundAck, config, round)).await?;
         for mut receiver in receivers {
             let mut unexpected = [0u8; 1];
             let terminal = timeout(config.timeout(), receiver.read(&mut unexpected))
@@ -648,7 +801,7 @@ async fn run_stream_client(
                 logical_bytes as f64 * 1_000_000_000.0 / elapsed as f64 / (1024.0 * 1024.0)
             };
             println!(
-                "record=result implementation={implementation} protocol=webtransport transport=h3 mode={} direction={} role_pair={role_pair} endpoint_role=client connection_scope=persistent benchmark_scope=same-application-shape warmup={} iterations={} streams={} bytes_per_stream={} payload_bytes={} chunk_bytes={} stream_window={} timeout_ms={} sample={sample} elapsed_ns={elapsed} logical_MiB_s={mib_s:.3} sent_bytes={logical_bytes} received_bytes={} streams_finished={} checksum={} complete=true",
+                "record=result implementation={implementation} protocol=webtransport transport=h3 mode={} direction={} role_pair={role_pair} endpoint_role=client connection_scope=persistent benchmark_scope=same-application-shape warmup={} iterations={} streams={} bytes_per_stream={} payload_bytes={} chunk_bytes={} stream_window={} timeout_ms={} netz_ack_every={} netz_max_ack_delay_us={} sample={sample} elapsed_ns={elapsed} logical_MiB_s={mib_s:.3} sent_bytes={logical_bytes} received_bytes={} streams_finished={} checksum={} complete=true",
                 config.mode.name(),
                 config.mode.direction(),
                 config.warmup,
@@ -659,6 +812,8 @@ async fn run_stream_client(
                 config.chunk_bytes,
                 config.stream_window,
                 config.timeout_ms,
+                config.netz_ack_every,
+                config.netz_max_ack_delay_us,
                 done.received_bytes,
                 config.streams,
                 done.checksum,
@@ -666,18 +821,22 @@ async fn run_stream_client(
         }
     }
     send_control(
-        connection,
+        control,
         &Control::new(Kind::BenchmarkDone, config, config.rounds()),
     )
     .await?;
-    let ack = receive_control(connection, config, Kind::BenchmarkAck).await?;
+    let ack = receive_control(control, config, Kind::BenchmarkAck).await?;
     ensure!(ack.round == config.rounds(), "BENCHMARK_ACK round mismatch");
     Ok(())
 }
 
-async fn run_stream_server(connection: &Connection, config: &Config) -> Result<()> {
+async fn run_stream_server(
+    connection: &Connection,
+    control: &mut ControlChannel,
+    config: &Config,
+) -> Result<()> {
     for round in 0..config.rounds() {
-        let ready = receive_control(connection, config, Kind::RoundReady).await?;
+        let ready = receive_control(control, config, Kind::RoundReady).await?;
         ensure!(ready.round == round, "ROUND_READY round mismatch");
         let mut streams = Vec::with_capacity(config.streams as usize);
         let mut seen = 0u64;
@@ -731,7 +890,7 @@ async fn run_stream_server(connection: &Connection, config: &Config) -> Result<(
                 Ok::<_, anyhow::Error>((sender, received as u64, checksum))
             });
         }
-        send_control(connection, &Control::new(Kind::Go, config, round)).await?;
+        send_control(control, &Control::new(Kind::Go, config, round)).await?;
         let mut received = 0u64;
         let mut checksum = 0u64;
         let mut round_senders = Vec::with_capacity(config.streams as usize);
@@ -745,20 +904,20 @@ async fn run_stream_server(connection: &Connection, config: &Config) -> Result<(
         let mut done = Control::new(Kind::RoundDone, config, round);
         done.received_bytes = received;
         done.checksum = checksum;
-        send_control(connection, &done).await?;
-        let ack = receive_control(connection, config, Kind::RoundAck).await?;
+        send_control(control, &done).await?;
+        let ack = receive_control(control, config, Kind::RoundAck).await?;
         ensure!(ack.round == round, "ROUND_ACK round mismatch");
         for sender in &mut round_senders {
             sender.quic_stream_mut().finish()?;
         }
     }
-    let done = receive_control(connection, config, Kind::BenchmarkDone).await?;
+    let done = receive_control(control, config, Kind::BenchmarkDone).await?;
     ensure!(
         done.round == config.rounds(),
         "BENCHMARK_DONE round mismatch"
     );
     send_control(
-        connection,
+        control,
         &Control::new(Kind::BenchmarkAck, config, config.rounds()),
     )
     .await
@@ -792,12 +951,13 @@ fn add_checksum(checksum: &mut u64, bytes: &[u8]) {
 
 async fn run_ping_client(
     connection: &Connection,
+    control: &mut ControlChannel,
     config: &Config,
     implementation: &str,
     role_pair: &str,
 ) -> Result<()> {
-    send_control(connection, &Control::new(Kind::RoundReady, config, 0)).await?;
-    let go = receive_control(connection, config, Kind::Go).await?;
+    send_control(control, &Control::new(Kind::RoundReady, config, 0)).await?;
+    let go = receive_control(control, config, Kind::Go).await?;
     ensure!(go.round == 0, "GO round mismatch");
     let total = config.rounds();
     let mut payload = vec![0u8; config.payload_bytes as usize];
@@ -821,8 +981,8 @@ async fn run_ping_client(
     let mut done = Control::new(Kind::BenchmarkDone, config, total);
     done.received_bytes = u64::from(total) * u64::from(config.payload_bytes);
     done.checksum = checksum;
-    send_control(connection, &done).await?;
-    let ack = receive_control(connection, config, Kind::BenchmarkAck).await?;
+    send_control(control, &done).await?;
+    let ack = receive_control(control, config, Kind::BenchmarkAck).await?;
     ensure!(ack.round == total, "BENCHMARK_ACK round mismatch");
     ensure!(
         ack.received_bytes == done.received_bytes,
@@ -833,7 +993,7 @@ async fn run_ping_client(
     let sum: u128 = samples.iter().map(|value| u128::from(*value)).sum();
     let mean = (sum / samples.len() as u128) as u64;
     println!(
-        "record=result implementation={implementation} protocol=webtransport transport=h3 mode={} direction={} role_pair={role_pair} endpoint_role=client connection_scope=persistent benchmark_scope=same-application-shape warmup={} iterations={} streams={} bytes_per_stream={} payload_bytes={} chunk_bytes={} stream_window={} timeout_ms={} p50_ns={} p90_ns={} p99_ns={} p999_ns={} mean_ns={mean} min_ns={} max_ns={} sent_bytes={} received_bytes={} checksum={checksum} complete=true",
+        "record=result implementation={implementation} protocol=webtransport transport=h3 mode={} direction={} role_pair={role_pair} endpoint_role=client connection_scope=persistent benchmark_scope=same-application-shape warmup={} iterations={} streams={} bytes_per_stream={} payload_bytes={} chunk_bytes={} stream_window={} timeout_ms={} netz_ack_every={} netz_max_ack_delay_us={} p50_ns={} p90_ns={} p99_ns={} p999_ns={} mean_ns={mean} min_ns={} max_ns={} sent_bytes={} received_bytes={} checksum={checksum} complete=true",
         config.mode.name(),
         config.mode.direction(),
         config.warmup,
@@ -844,6 +1004,8 @@ async fn run_ping_client(
         config.chunk_bytes,
         config.stream_window,
         config.timeout_ms,
+        config.netz_ack_every,
+        config.netz_max_ack_delay_us,
         percentile(&samples, 50, 100),
         percentile(&samples, 90, 100),
         percentile(&samples, 99, 100),
@@ -856,10 +1018,14 @@ async fn run_ping_client(
     Ok(())
 }
 
-async fn run_ping_server(connection: &Connection, config: &Config) -> Result<()> {
-    let ready = receive_control(connection, config, Kind::RoundReady).await?;
+async fn run_ping_server(
+    connection: &Connection,
+    control: &mut ControlChannel,
+    config: &Config,
+) -> Result<()> {
+    let ready = receive_control(control, config, Kind::RoundReady).await?;
     ensure!(ready.round == 0, "ROUND_READY round mismatch");
-    send_control(connection, &Control::new(Kind::Go, config, 0)).await?;
+    send_control(control, &Control::new(Kind::Go, config, 0)).await?;
     let total = config.rounds();
     let mut checksum = 0u64;
     for sequence in 0..total {
@@ -874,7 +1040,7 @@ async fn run_ping_server(connection: &Connection, config: &Config) -> Result<()>
         add_checksum(&mut checksum, &datagram);
         connection.send_datagram(&*datagram)?;
     }
-    let done = receive_control(connection, config, Kind::BenchmarkDone).await?;
+    let done = receive_control(control, config, Kind::BenchmarkDone).await?;
     let expected_bytes = u64::from(total) * u64::from(config.payload_bytes);
     ensure!(done.round == total, "BENCHMARK_DONE round mismatch");
     ensure!(
@@ -888,7 +1054,7 @@ async fn run_ping_server(connection: &Connection, config: &Config) -> Result<()>
     let mut ack = Control::new(Kind::BenchmarkAck, config, total);
     ack.received_bytes = expected_bytes;
     ack.checksum = checksum;
-    send_control(connection, &ack).await
+    send_control(control, &ack).await
 }
 
 fn percentile(sorted: &[u64], numerator: usize, denominator: usize) -> u64 {
@@ -929,7 +1095,7 @@ fn print_server_complete(implementation: &str, role_pair: &str, config: &Config)
         ),
     };
     println!(
-        "record=server-complete implementation={implementation} protocol=webtransport transport=h3 mode={} direction={} role_pair={role_pair} endpoint_role=server connection_scope=persistent warmup={} iterations={} streams={} bytes_per_stream={} payload_bytes={} chunk_bytes={} stream_window={} timeout_ms={} sent_bytes={bytes} received_bytes={bytes} checksum={checksum} server_complete=true",
+        "record=server-complete implementation={implementation} protocol=webtransport transport=h3 mode={} direction={} role_pair={role_pair} endpoint_role=server connection_scope=persistent warmup={} iterations={} streams={} bytes_per_stream={} payload_bytes={} chunk_bytes={} stream_window={} timeout_ms={} netz_ack_every={} netz_max_ack_delay_us={} sent_bytes={bytes} received_bytes={bytes} checksum={checksum} server_complete=true",
         config.mode.name(),
         config.mode.direction(),
         config.warmup,
@@ -940,6 +1106,8 @@ fn print_server_complete(implementation: &str, role_pair: &str, config: &Config)
         config.chunk_bytes,
         config.stream_window,
         config.timeout_ms,
+        config.netz_ack_every,
+        config.netz_max_ack_delay_us,
     );
 }
 
@@ -951,7 +1119,7 @@ fn print_traffic(
     stats: wtransport::quinn::ConnectionStats,
 ) {
     println!(
-        "record=traffic implementation={implementation} protocol=webtransport transport=h3 mode={} direction={} role_pair={role_pair} endpoint_role={endpoint_role} connection_scope=persistent warmup={} iterations={} streams={} bytes_per_stream={} payload_bytes={} chunk_bytes={} stream_window={} timeout_ms={} traffic_scope=connection socket_boundary=userspace-udp-payload traffic_source=quinn-connection-stats udp_sent_datagrams={} udp_sent_payload_bytes={} udp_received_datagrams={} udp_received_payload_bytes={} logical_udp_segments=true complete=true",
+        "record=traffic implementation={implementation} protocol=webtransport transport=h3 mode={} direction={} role_pair={role_pair} endpoint_role={endpoint_role} connection_scope=persistent warmup={} iterations={} streams={} bytes_per_stream={} payload_bytes={} chunk_bytes={} stream_window={} timeout_ms={} netz_ack_every={} netz_max_ack_delay_us={} traffic_scope=connection socket_boundary=userspace-udp-payload traffic_source=quinn-connection-stats udp_sent_datagrams={} udp_sent_payload_bytes={} udp_received_datagrams={} udp_received_payload_bytes={} logical_udp_segments=true complete=true",
         config.mode.name(),
         config.mode.direction(),
         config.warmup,
@@ -962,6 +1130,8 @@ fn print_traffic(
         config.chunk_bytes,
         config.stream_window,
         config.timeout_ms,
+        config.netz_ack_every,
+        config.netz_max_ack_delay_us,
         stats.udp_tx.datagrams,
         stats.udp_tx.bytes,
         stats.udp_rx.datagrams,
@@ -981,7 +1151,7 @@ pub(crate) fn print_memory(
         ("netz-client+wtransport-server", "server")
     };
     println!(
-        "record=memory implementation=wtransport protocol=webtransport transport=h3 mode={} direction={} role_pair={role_pair} endpoint_role={endpoint_role} connection_scope=persistent warmup={} iterations={} streams={} bytes_per_stream={} payload_bytes={} chunk_bytes={} stream_window={} timeout_ms={} memory_scope=process-start-through-runtime-teardown allocator_scope=rust-system-requested alloc_count={} free_count={} realloc_count={} total_allocated_bytes={} total_freed_bytes={} live_bytes_end={} peak_live_bytes={} complete=true",
+        "record=memory implementation=wtransport protocol=webtransport transport=h3 mode={} direction={} role_pair={role_pair} endpoint_role={endpoint_role} connection_scope=persistent warmup={} iterations={} streams={} bytes_per_stream={} payload_bytes={} chunk_bytes={} stream_window={} timeout_ms={} netz_ack_every={} netz_max_ack_delay_us={} memory_scope=process-start-through-runtime-teardown allocator_scope=rust-system-requested alloc_count={} free_count={} realloc_count={} total_allocated_bytes={} total_freed_bytes={} live_bytes_end={} peak_live_bytes={} complete=true",
         config.mode.name(),
         config.mode.direction(),
         config.warmup,
@@ -992,6 +1162,8 @@ pub(crate) fn print_memory(
         config.chunk_bytes,
         config.stream_window,
         config.timeout_ms,
+        config.netz_ack_every,
+        config.netz_max_ack_delay_us,
         stats.alloc_count,
         stats.free_count,
         stats.realloc_count,
@@ -1018,6 +1190,8 @@ mod tests {
             "--chunk-bytes=4096".into(),
             "--stream-window=131072".into(),
             "--timeout-ms=9000".into(),
+            "--netz-ack-every=7".into(),
+            "--netz-max-ack-delay-us=1234".into(),
             "--verify-cert=false".into(),
         ])
         .unwrap();

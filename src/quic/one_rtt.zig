@@ -6,6 +6,7 @@ const frame_traits = @import("one_rtt/frame_traits.zig");
 const datagram_queue = @import("one_rtt/datagram_queue.zig");
 const handshake_status = @import("one_rtt/handshake_status.zig");
 const pto_jitter = @import("one_rtt/pto_jitter.zig");
+const deadline_policy = @import("../internal/deadline.zig");
 
 const net = std.Io.net;
 
@@ -77,8 +78,11 @@ pub const BatchSendResult = struct {
     protected_count: usize,
     /// Protected bytes corresponding to `sent_count`.
     sent_bytes: usize,
-    /// A sendmmsg-style backend can accept a prefix before failing.
-    send_error: ?net.Socket.SendError = null,
+    /// A sendmmsg-style backend can accept a prefix before failing. Errors
+    /// raised by an endpoint interceptor before socket progress are retained
+    /// here as well because packet protection has already consumed the whole
+    /// batch's nonces.
+    send_error: ?quic.runtime.Error = null,
 };
 
 pub const ConnectionBatchSendResult = struct {
@@ -224,6 +228,10 @@ pub const ConnectionConfig = struct {
     local_endpoint: EndpointRole = .client,
     max_ack_ranges: usize = 64,
     max_frames_per_packet: usize = 16,
+    /// Maximum unique peer PATH_CHALLENGEs retained while their responses are
+    /// blocked. Additional challenges are ignored as permitted by RFC 9000.
+    max_pending_path_responses: usize =
+        quic.path_validation.default_max_pending_responses,
     initial_send_max_data: u64 = std.math.maxInt(u62),
     initial_receive_max_data: u64 = std.math.maxInt(u62),
     receive_window: u64 = 64 * 1024,
@@ -278,6 +286,15 @@ pub const ConnectionConfig = struct {
     local_ack_delay_exponent: u64 = quic.default_ack_delay_exponent,
     peer_ack_delay_exponent: u64 = quic.default_ack_delay_exponent,
     peer_max_ack_delay_ms: u64 = quic.default_max_ack_delay_ms,
+    /// Number of ack-eliciting application packets that trigger an immediate
+    /// ACK. One preserves the conservative historical behavior.
+    local_ack_eliciting_threshold: u64 = 1,
+    /// Maximum local ACK delay in microseconds when the packet threshold has
+    /// not yet been reached. Zero disables delayed ACKs.
+    local_max_ack_delay_us: u64 = 0,
+    /// Packet-number gap that forces an immediate ACK; zero disables the
+    /// reordering trigger.
+    local_ack_reordering_threshold: u64 = quic.packet_space.default_packet_threshold,
     /// Automatic ECN marking policy for ordinary 1-RTT sends.
     ///
     /// Explicit `sendWithEcn*` calls keep their requested codepoint. This
@@ -488,6 +505,7 @@ pub const ConnectionStats = struct {
     local_key_update_count: u64,
     peer_key_update_count: u64,
     failed_path_validations: usize,
+    path_challenges_dropped: u64,
     sent_packet_stats: quic.packet_space.SentPacketStats,
     received_packet_stats: quic.packet_space.ReceivedPacketStats,
     recovery_queue_stats: quic.recovery.QueueStats,
@@ -653,6 +671,8 @@ const CandidatePathBudget = struct {
     peer: net.IpAddress,
     bytes_received: usize = 0,
     bytes_sent: usize = 0,
+    spin_bit_value: bool = false,
+    spin_largest_received_packet_number: ?u64 = null,
 };
 
 const ValidatedPeerPath = struct {
@@ -660,14 +680,23 @@ const ValidatedPeerPath = struct {
     connection_id: [quic.connection_id.max_connection_id_len]u8 =
         .{0} ** quic.connection_id.max_connection_id_len,
     connection_id_len: u8 = 0,
+    spin_bit_value: bool = false,
+    spin_largest_received_packet_number: ?u64 = null,
 
-    fn init(peer: net.IpAddress, connection_id: []const u8) ValidatedPeerPath {
+    fn init(
+        peer: net.IpAddress,
+        connection_id: []const u8,
+        spin_bit_value: bool,
+        spin_largest_received_packet_number: ?u64,
+    ) ValidatedPeerPath {
         std.debug.assert(
             connection_id.len <= quic.connection_id.max_connection_id_len,
         );
         var path: ValidatedPeerPath = .{
             .peer = peer,
             .connection_id_len = @intCast(connection_id.len),
+            .spin_bit_value = spin_bit_value,
+            .spin_largest_received_packet_number = spin_largest_received_packet_number,
         };
         @memcpy(path.connection_id[0..connection_id.len], connection_id);
         return path;
@@ -677,6 +706,23 @@ const ValidatedPeerPath = struct {
         return self.connection_id[0..self.connection_id_len];
     }
 };
+
+fn updateSpinState(
+    local_endpoint: ConnectionConfig.EndpointRole,
+    value: *bool,
+    largest_received_packet_number: *?u64,
+    packet_number: u64,
+    peer_spin_bit: bool,
+) void {
+    if (largest_received_packet_number.*) |largest| {
+        if (packet_number <= largest) return;
+    }
+    largest_received_packet_number.* = packet_number;
+    value.* = switch (local_endpoint) {
+        .client => !peer_spin_bit,
+        .server => peer_spin_bit,
+    };
+}
 
 const DatagramRecvQueue = datagram_queue.Queue;
 
@@ -782,6 +828,10 @@ fn isDiscardedLongHeaderPacket(bytes: []const u8) bool {
 pub const Connection = struct {
     endpoint: *quic.runtime.Endpoint,
     config: ConnectionConfig,
+    /// Stable backing for the currently selected peer CID. Peer-pool entries
+    /// live inline in `Connection`, so storing a slice into one of them would
+    /// become dangling whenever a connection/session is moved by value.
+    peer_connection_id_storage: []u8,
     /// One 1-RTT packet may share the UDP datagram that completes the TLS
     /// Handshake packet-number space. The blocking handshake must retain that
     /// suffix until the application runtime is installed; otherwise HTTP/3 can
@@ -850,6 +900,7 @@ pub const Connection = struct {
     next_local_bidi_stream_id: u64,
     next_local_uni_stream_id: u64,
     spin_bit_value: bool = false,
+    spin_largest_received_packet_number: ?u64 = null,
     fixed_bit_generator: fixed_bit.Generator = .{},
     last_activity_ms: ?u64 = null,
     last_peer_activity_ms: ?u64 = null,
@@ -941,6 +992,11 @@ pub const Connection = struct {
         {
             return error.InvalidTransportParameter;
         }
+        if (config.peer_connection_id.len >
+            quic.connection_id.max_connection_id_len)
+        {
+            return error.InvalidConnectionId;
+        }
         if (config.initial_send_max_streams_bidi > quic.max_stream_count or
             config.initial_send_max_streams_uni > quic.max_stream_count or
             config.initial_receive_max_streams_bidi > quic.max_stream_count or
@@ -948,10 +1004,29 @@ pub const Connection = struct {
         {
             return error.InvalidTransportParameter;
         }
+        if (config.local_max_ack_delay_us >= max_requested_ack_delay_us) {
+            return error.InvalidTransportParameter;
+        }
         const send_buffer_capacity = std.math.add(usize, config.max_datagram_size, max_short_packet_overhead) catch return error.OutOfMemory;
+        const peer_connection_id_storage = try endpoint.allocator.alloc(
+            u8,
+            quic.connection_id.max_connection_id_len,
+        );
+        var peer_connection_id_storage_owned = true;
+        errdefer if (peer_connection_id_storage_owned) {
+            endpoint.allocator.free(peer_connection_id_storage);
+        };
+        @memcpy(
+            peer_connection_id_storage[0..config.peer_connection_id.len],
+            config.peer_connection_id,
+        );
+        var stable_config = config;
+        stable_config.peer_connection_id =
+            peer_connection_id_storage[0..config.peer_connection_id.len];
         var connection = Connection{
             .endpoint = endpoint,
-            .config = config,
+            .config = stable_config,
+            .peer_connection_id_storage = peer_connection_id_storage,
             .received = .init(endpoint.allocator, config.max_ack_ranges),
             .sent = .init(endpoint.allocator),
             .recovery = .init(endpoint.allocator),
@@ -968,7 +1043,10 @@ pub const Connection = struct {
             .rtt_stats = .init(std.math.mul(u64, config.peer_max_ack_delay_ms, 1_000_000) catch quic.rtt.default_max_ack_delay_ns),
             .ecn_path = .init(config.automatic_ecn_policy),
             .pmtud = .init(.{ .enabled = config.enable_pmtud, .max_probe_size = config.pmtud_max_probe_size }),
-            .path_validation = .init(endpoint.allocator),
+            .path_validation = .initWithMaxPendingResponses(
+                endpoint.allocator,
+                config.max_pending_path_responses,
+            ),
             .send_flow = .init(config.initial_send_max_data),
             .recv_flow = try .initWithMaxWindow(
                 config.initial_receive_max_data,
@@ -999,7 +1077,11 @@ pub const Connection = struct {
                 .client => 2,
                 .server => 3,
             },
+            .ack_eliciting_threshold = config.local_ack_eliciting_threshold,
+            .requested_max_ack_delay = config.local_max_ack_delay_us,
+            .ack_reordering_threshold = config.local_ack_reordering_threshold,
         };
+        peer_connection_id_storage_owned = false;
         errdefer connection.deinit();
         connection.fixed_bit_generator = try .init(
             endpoint.io,
@@ -1030,6 +1112,8 @@ pub const Connection = struct {
         connection.last_validated_peer_path = .init(
             config.peer,
             config.peer_connection_id,
+            false,
+            null,
         );
         if (config.peer_stateless_reset_token) |token| {
             try connection.peer_connection_ids.setInitialStatelessResetToken(
@@ -1080,7 +1164,21 @@ pub const Connection = struct {
         self.receive_ack_range_buffer.deinit(self.endpoint.allocator);
         self.receive_frame_buffer.deinit(self.endpoint.allocator);
         self.fixed_bit_generator.deinit();
+        self.endpoint.allocator.free(self.peer_connection_id_storage);
         self.* = undefined;
+    }
+
+    fn setPeerConnectionId(
+        self: *Connection,
+        connection_id: []const u8,
+    ) void {
+        std.debug.assert(connection_id.len <= self.peer_connection_id_storage.len);
+        @memmove(
+            self.peer_connection_id_storage[0..connection_id.len],
+            connection_id,
+        );
+        self.config.peer_connection_id =
+            self.peer_connection_id_storage[0..connection_id.len];
     }
 
     pub fn takeQlogError(self: *Connection) ?anyerror {
@@ -1678,6 +1776,7 @@ pub const Connection = struct {
                     try writeRetransmittableFramesAssumeCapacity(
                         &payload_list,
                         packet.frames,
+                        packet.recovery_payload_len == packet.payload_len,
                     );
                     std.debug.assert(
                         payload_list.items.len ==
@@ -2140,6 +2239,165 @@ pub const Connection = struct {
         }
     }
 
+    pub fn sendDatagrams(
+        self: *Connection,
+        payloads: []const []const u8,
+        committed_count: *usize,
+    ) Error!void {
+        committed_count.* = 0;
+        try self.validateDatagrams(payloads);
+        while (committed_count.* < payloads.len) {
+            var batch_committed: usize = 0;
+            self.trySendDatagramsValidated(
+                payloads[committed_count.*..],
+                &batch_committed,
+            ) catch |err| {
+                committed_count.* += batch_committed;
+                switch (err) {
+                    error.CongestionLimited => {
+                        try self.servicePacketServicingTimers();
+                        continue;
+                    },
+                    error.PacingLimited => {
+                        try self.waitForPacingAvailability();
+                        continue;
+                    },
+                    else => |other| return other,
+                }
+            };
+            if (batch_committed == 0) return error.Unexpected;
+            committed_count.* += batch_committed;
+        }
+    }
+
+    /// Send an ordered batch of unreliable DATAGRAM payloads under one
+    /// absolute awake-clock deadline. Every payload is validated before the
+    /// first packet is emitted. `committed_count` reports only the prefix
+    /// accepted by the socket, even when encryption consumed more packet
+    /// numbers during a partial batch submission.
+    pub fn sendDatagramsWithTimeout(
+        self: *Connection,
+        payloads: []const []const u8,
+        committed_count: *usize,
+        timeout: std.Io.Duration,
+    ) (Error || quic.runtime.ReceiveTimeoutError)!void {
+        committed_count.* = 0;
+        if (timeout.nanoseconds <= 0) return error.Timeout;
+        return self.sendDatagramsWithDeadline(
+            payloads,
+            committed_count,
+            .fromNow(self.endpoint.io, .{
+                .raw = timeout,
+                .clock = .awake,
+            }),
+        );
+    }
+
+    pub fn sendDatagramsWithDeadline(
+        self: *Connection,
+        payloads: []const []const u8,
+        committed_count: *usize,
+        deadline: std.Io.Clock.Timestamp,
+    ) (Error || quic.runtime.ReceiveTimeoutError)!void {
+        committed_count.* = 0;
+        _ = try deadline_policy.usableAwake(self.endpoint.io, deadline);
+        try self.validateDatagrams(payloads);
+
+        while (committed_count.* < payloads.len) {
+            _ = try deadline_policy.usableAwake(self.endpoint.io, deadline);
+            var batch_committed: usize = 0;
+            self.trySendDatagramsValidated(
+                payloads[committed_count.*..],
+                &batch_committed,
+            ) catch |err| {
+                committed_count.* += batch_committed;
+                switch (err) {
+                    error.CongestionLimited => {
+                        try self.servicePacketServicingTimersDeadline(deadline);
+                        continue;
+                    },
+                    error.PacingLimited => {
+                        try self.waitForPacingAvailabilityWithDeadline(deadline);
+                        continue;
+                    },
+                    else => |other| return other,
+                }
+            };
+            if (batch_committed == 0) return error.Unexpected;
+            committed_count.* += batch_committed;
+        }
+    }
+
+    /// Submit at most one socket batch of unreliable DATAGRAM payloads. The
+    /// output count is the socket-visible input prefix, including when the
+    /// backend reports an error after accepting some datagrams.
+    pub fn trySendDatagrams(
+        self: *Connection,
+        payloads: []const []const u8,
+        committed_count: *usize,
+    ) Error!void {
+        committed_count.* = 0;
+        if (payloads.len == 0) return;
+        const batch_len = @min(max_batch_packets, payloads.len);
+        try self.validateDatagrams(payloads[0..batch_len]);
+        return self.trySendDatagramsValidated(payloads, committed_count);
+    }
+
+    pub fn validateDatagrams(
+        self: Connection,
+        payloads: []const []const u8,
+    ) Error!void {
+        if (payloads.len != 0) {
+            const last_packet_number = std.math.add(
+                u64,
+                self.next_packet_number,
+                payloads.len - 1,
+            ) catch return error.InvalidPacketNumber;
+            if (last_packet_number > quic.protection.max_packet_number) {
+                return error.InvalidPacketNumber;
+            }
+        }
+        for (payloads) |payload| try self.validateDatagramSend(payload);
+        // Include each future packet number in size validation before any
+        // socket submission. A partial socket send returns immediately; a
+        // suffix retry re-enters here with the resulting nonce gap.
+        var frames: [1]quic.Frame = undefined;
+        for (payloads, 0..) |payload, index| {
+            frames[0] = .{ .datagram = .{
+                .data = payload,
+                .length_present = true,
+            } };
+            if (try self.packetLenForFramesAtOffset(index, &frames) >
+                self.currentSendDatagramSize())
+            {
+                return error.DatagramTooLarge;
+            }
+        }
+    }
+
+    fn trySendDatagramsValidated(
+        self: *Connection,
+        payloads: []const []const u8,
+        committed_count: *usize,
+    ) Error!void {
+        committed_count.* = 0;
+        if (payloads.len == 0) return;
+        const batch_len = @min(max_batch_packets, payloads.len);
+        var frame_storage: [max_batch_packets][1]quic.Frame = undefined;
+        var packets: [max_batch_packets][]const quic.Frame = undefined;
+        for (payloads[0..batch_len], 0..) |payload, index| {
+            frame_storage[index][0] = .{ .datagram = .{
+                .data = payload,
+                .length_present = true,
+            } };
+            packets[index] = &frame_storage[index];
+        }
+        const result = try self.sendManyProgress(packets[0..batch_len]);
+        committed_count.* = result.sent_count;
+        self.datagrams_sent_count +|= result.sent_count;
+        if (result.send_error) |err| return err;
+    }
+
     /// Perform one DATAGRAM send attempt while bounding any pacing wait.
     /// Congestion exhaustion is returned to the caller without reading UDP so
     /// protocol adapters can drive their own packet router under the same
@@ -2300,6 +2558,7 @@ pub const Connection = struct {
             .local_key_update_count = self.send_key_phase.keyUpdateCount(),
             .peer_key_update_count = self.receive_key_phase.keyUpdateCount(),
             .failed_path_validations = self.failedPathValidationCount(),
+            .path_challenges_dropped = self.path_validation.droppedChallengeCount(),
             .sent_packet_stats = self.sent.stats(),
             .received_packet_stats = self.received.stats(),
             .recovery_queue_stats = self.recovery.stats(),
@@ -3016,6 +3275,28 @@ pub const Connection = struct {
         try self.waitForPacing(self.monotonicNowNs());
     }
 
+    /// Wait for the currently exposed pacing wake-up without exceeding a
+    /// caller-owned absolute awake-clock deadline.
+    pub fn waitForPacingAvailabilityWithDeadline(
+        self: *Connection,
+        deadline: std.Io.Clock.Timestamp,
+    ) (Error || quic.runtime.ReceiveTimeoutError)!void {
+        if (deadline.clock != .awake or
+            deadline.durationFromNow(self.endpoint.io).raw.nanoseconds <= 0)
+        {
+            return error.Timeout;
+        }
+        const now_ns = self.monotonicNowNs();
+        const pacing_deadline =
+            self.pacing_blocked_until_ns orelse return error.PacingLimited;
+        const caller_ns = std.math.cast(
+            u64,
+            deadline.raw.nanoseconds,
+        ) orelse std.math.maxInt(u64);
+        if (pacing_deadline >= caller_ns) return error.Timeout;
+        try self.waitForPacing(now_ns);
+    }
+
     pub fn sendAckFrequency(self: *Connection, ack_eliciting_threshold: u64, request_max_ack_delay: u64, reordering_threshold: u64) Error!u64 {
         if (!self.ackFrequencySendEnabled()) {
             return error.AckFrequencyDisabled;
@@ -3273,6 +3554,10 @@ pub const Connection = struct {
         var payload_len: usize = 0;
         var recovery_payload_len: usize = 0;
         var traits: frame_traits.Traits = validated_traits orelse .{};
+        const all_payload_bytes_retransmittable = if (validated_traits) |value|
+            value.allPayloadBytesRetransmittable()
+        else
+            false;
         for (frames) |frame| {
             const frame_len = try frame.wireLen();
             payload_len = std.math.add(
@@ -3280,15 +3565,20 @@ pub const Connection = struct {
                 payload_len,
                 frame_len,
             ) catch return error.InvalidFrameLength;
-            const current = frame_traits.classify(frame);
-            if (validated_traits == null) try traits.merge(current);
-            if (current.retransmittable) {
-                recovery_payload_len = std.math.add(
-                    usize,
-                    recovery_payload_len,
-                    frame_len,
-                ) catch return error.InvalidFrameLength;
+            if (!all_payload_bytes_retransmittable) {
+                const current = frame_traits.classify(frame);
+                if (validated_traits == null) try traits.merge(current);
+                if (current.retransmittable) {
+                    recovery_payload_len = std.math.add(
+                        usize,
+                        recovery_payload_len,
+                        frame_len,
+                    ) catch return error.InvalidFrameLength;
+                }
             }
+        }
+        if (all_payload_bytes_retransmittable) {
+            recovery_payload_len = payload_len;
         }
         const packet_number_len = quic.protection.packetNumberLenForPayload(
             self.next_packet_number,
@@ -3361,6 +3651,7 @@ pub const Connection = struct {
             try writeRetransmittableFramesAssumeCapacity(
                 &payload_list,
                 prepared.frames,
+                prepared.recovery_payload_len == prepared.payload_len,
             );
             std.debug.assert(
                 payload_list.items.len == prepared.recovery_payload_len,
@@ -3522,6 +3813,7 @@ pub const Connection = struct {
         self: *Connection,
         preserve_rtt: bool,
     ) void {
+        self.resetSpinBit();
         self.resetEcnForPath();
         if (!preserve_rtt) {
             self.rtt_stats = .init(std.math.mul(
@@ -3699,6 +3991,8 @@ pub const Connection = struct {
             self.last_validated_peer_path = .init(
                 self.config.peer,
                 self.config.peer_connection_id,
+                self.spin_bit_value,
+                self.spin_largest_received_packet_number,
             );
         }
     }
@@ -3708,6 +4002,8 @@ pub const Connection = struct {
         self.last_validated_peer_path = .init(
             self.config.peer,
             self.config.peer_connection_id,
+            self.spin_bit_value,
+            self.spin_largest_received_packet_number,
         );
     }
 
@@ -3918,6 +4214,11 @@ pub const Connection = struct {
             packet_options,
         );
         self.recordPacketEncrypted();
+        // AEAD sealing consumes the (key phase, packet number) nonce even when
+        // the UDP socket subsequently accepts no datagram. Callers roll back
+        // recovery, congestion, flow credit, and sent-map state on that error,
+        // but the packet number itself must never be reused for new plaintext.
+        errdefer self.next_packet_number = packet_number + 1;
         self.endpoint.sendBytesWithEcn(self.config.peer, packet, ecn) catch |err| switch (err) {
             error.EcnUnavailable => if (automatic_ecn and
                 self.handleAutomaticEcnUnavailable(ecn))
@@ -4424,6 +4725,9 @@ pub const Connection = struct {
 
     const PtoProbeBatchResult = struct {
         sent_count: usize,
+        /// Every sealed probe consumes its AEAD nonce, including a socket-
+        /// rejected suffix after a partial batch submission.
+        protected_count: usize,
         send_error: ?net.Socket.SendError = null,
     };
 
@@ -4508,7 +4812,10 @@ pub const Connection = struct {
             total_payload_len = std.math.add(usize, total_payload_len, candidate.payload.len) catch return error.InvalidPayloadLength;
             total_packet_len = std.math.add(usize, total_packet_len, packet_len) catch return error.InvalidPayloadLength;
         }
-        if (count == 0) return .{ .sent_count = 0 };
+        if (count == 0) return .{
+            .sent_count = 0,
+            .protected_count = 0,
+        };
 
         try self.reserveAntiAmplification(total_packet_len);
         errdefer self.releaseAntiAmplification(total_packet_len);
@@ -4553,6 +4860,10 @@ pub const Connection = struct {
 
         var datagrams: [max_batch_packets][]const u8 = undefined;
         var packet_offset: usize = 0;
+        var protected_count: usize = 0;
+        errdefer if (protected_count != 0) {
+            self.next_packet_number += protected_count;
+        };
         for (probes[0..count], 0..) |probe, i| {
             try self.prepareAeadForEncryption(
                 probe.packet_number,
@@ -4572,6 +4883,7 @@ pub const Connection = struct {
                 },
             );
             self.recordPacketEncrypted();
+            protected_count += 1;
             datagrams[i] = packet;
             std.debug.assert(packet.len == probe.packet_len);
             packet_offset += packet.len;
@@ -4583,7 +4895,9 @@ pub const Connection = struct {
         // All recovery and congestion entries are reserved before the socket
         // call so no allocation can fail after packets are visible on the
         // network. If only a prefix was accepted, retain exactly that prefix
-        // and transactionally discard the unsent suffix.
+        // and transactionally discard the unsent suffix. Protection has still
+        // consumed every nonce, so packet-number progress follows the complete
+        // sealed batch rather than only the socket-visible prefix.
         var sent_payload_len: usize = 0;
         var sent_packet_len: usize = 0;
         for (probes[0..send_result.sent_count]) |probe| {
@@ -4611,9 +4925,11 @@ pub const Connection = struct {
             _ = self.sent.forget(probe.packet_number);
         }
         self.pacing_blocked_until_ns = paced_blocked_until_ns;
-        self.next_packet_number += send_result.sent_count;
+        self.next_packet_number += protected_count;
+        protected_count = 0;
         return .{
             .sent_count = send_result.sent_count,
+            .protected_count = count,
             .send_error = send_result.send_error,
         };
     }
@@ -4859,16 +5175,17 @@ pub const Connection = struct {
     ) Error!bool {
         std.debug.assert(ack_eliciting_count != 0);
 
-        const immediate = self.immediate_ack_requested;
-        if (immediate) self.immediate_ack_requested = false;
-        errdefer if (immediate) {
+        const immediate_requested = self.immediate_ack_requested;
+        if (immediate_requested) self.immediate_ack_requested = false;
+        errdefer if (immediate_requested) {
             self.immediate_ack_requested = true;
         };
 
         self.ack_eliciting_since_last_ack +|= ack_eliciting_count;
         errdefer self.ack_eliciting_since_last_ack -|= ack_eliciting_count;
 
-        if (!immediate and
+        if (!immediate_requested and
+            self.requested_max_ack_delay != 0 and
             !reordered and
             self.ack_eliciting_since_last_ack < self.ack_eliciting_threshold)
         {
@@ -4890,6 +5207,17 @@ pub const Connection = struct {
 
     pub fn ackDelayDeadline(self: Connection) ?u64 {
         return self.ack_delay_deadline_ns;
+    }
+
+    /// Immediately emit the cumulative ACK selected by the local delayed-ACK
+    /// policy, if one is pending. Protocol shutdown paths use this before
+    /// releasing the endpoint so a final peer FIN is not left unacknowledged.
+    pub fn flushPendingAck(self: *Connection) Error!bool {
+        if (self.ack_eliciting_since_last_ack == 0) return false;
+        const now_ns = self.monotonicNowNs();
+        const start = self.ack_delay_start_ns orelse now_ns;
+        try self.sendAckForDelayNs(now_ns -| start);
+        return true;
     }
 
     pub fn serviceAckDelayTimerAt(self: *Connection, now_ns: u64) Error!void {
@@ -4914,6 +5242,70 @@ pub const Connection = struct {
 
     pub fn resetStream(self: *Connection, stream_id: u64, application_error_code: u64) Error!void {
         try self.resetStreamAt(stream_id, application_error_code, null);
+    }
+
+    /// Abort a send stream while waiting for congestion and pacing progress
+    /// for at most `timeout`. A timeout before socket submission leaves the
+    /// stream writable so the same reset can be retried safely.
+    pub fn resetStreamWithTimeout(
+        self: *Connection,
+        stream_id: u64,
+        application_error_code: u64,
+        timeout: std.Io.Duration,
+    ) (Error || quic.runtime.ReceiveTimeoutError)!void {
+        if (timeout.nanoseconds <= 0) return error.Timeout;
+        return self.resetStreamWithDeadline(
+            stream_id,
+            application_error_code,
+            .fromNow(self.endpoint.io, .{ .raw = timeout, .clock = .awake }),
+        );
+    }
+
+    /// Abort a send stream under one caller-owned absolute awake-clock
+    /// deadline. While congestion-blocked, ACK/loss/PTO state continues to be
+    /// serviced; pacing sleeps never outlive the same deadline.
+    pub fn resetStreamWithDeadline(
+        self: *Connection,
+        stream_id: u64,
+        application_error_code: u64,
+        deadline: std.Io.Clock.Timestamp,
+    ) (Error || quic.runtime.ReceiveTimeoutError)!void {
+        if (deadline.clock != .awake or
+            deadline.durationFromNow(self.endpoint.io).raw.nanoseconds <= 0)
+        {
+            return error.Timeout;
+        }
+        while (true) {
+            if (deadline.durationFromNow(self.endpoint.io).raw.nanoseconds <= 0) {
+                return error.Timeout;
+            }
+            self.resetStreamAt(
+                stream_id,
+                application_error_code,
+                self.monotonicNowNs(),
+            ) catch |err| switch (err) {
+                error.CongestionLimited => {
+                    self.servicePacketServicingTimersDeadline(deadline) catch |progress_err|
+                        switch (progress_err) {
+                            error.CongestionLimited => continue,
+                            error.PacingLimited => {
+                                try self.waitForPacingAvailabilityWithDeadline(
+                                    deadline,
+                                );
+                                continue;
+                            },
+                            else => |other| return other,
+                        };
+                    continue;
+                },
+                error.PacingLimited => {
+                    try self.waitForPacingAvailabilityWithDeadline(deadline);
+                    continue;
+                },
+                else => |other| return other,
+            };
+            return;
+        }
     }
 
     /// Attempt one RESET_STREAM send without sleeping for pacing. The stream
@@ -4951,6 +5343,69 @@ pub const Connection = struct {
         try self.sendStopSendingAt(stream_id, application_error_code, null);
     }
 
+    /// Cancel a peer send direction while waiting for congestion and pacing
+    /// progress for at most `timeout`. A timeout before socket submission
+    /// leaves the receive direction unchanged so the operation is retryable.
+    pub fn sendStopSendingWithTimeout(
+        self: *Connection,
+        stream_id: u64,
+        application_error_code: u64,
+        timeout: std.Io.Duration,
+    ) (Error || quic.runtime.ReceiveTimeoutError)!void {
+        if (timeout.nanoseconds <= 0) return error.Timeout;
+        return self.sendStopSendingWithDeadline(
+            stream_id,
+            application_error_code,
+            .fromNow(self.endpoint.io, .{ .raw = timeout, .clock = .awake }),
+        );
+    }
+
+    /// Cancel a peer send direction under one caller-owned absolute awake-clock
+    /// deadline. ACK/loss/PTO progress and pacing waits share that deadline.
+    pub fn sendStopSendingWithDeadline(
+        self: *Connection,
+        stream_id: u64,
+        application_error_code: u64,
+        deadline: std.Io.Clock.Timestamp,
+    ) (Error || quic.runtime.ReceiveTimeoutError)!void {
+        if (deadline.clock != .awake or
+            deadline.durationFromNow(self.endpoint.io).raw.nanoseconds <= 0)
+        {
+            return error.Timeout;
+        }
+        while (true) {
+            if (deadline.durationFromNow(self.endpoint.io).raw.nanoseconds <= 0) {
+                return error.Timeout;
+            }
+            self.sendStopSendingAt(
+                stream_id,
+                application_error_code,
+                self.monotonicNowNs(),
+            ) catch |err| switch (err) {
+                error.CongestionLimited => {
+                    self.servicePacketServicingTimersDeadline(deadline) catch |progress_err|
+                        switch (progress_err) {
+                            error.CongestionLimited => continue,
+                            error.PacingLimited => {
+                                try self.waitForPacingAvailabilityWithDeadline(
+                                    deadline,
+                                );
+                                continue;
+                            },
+                            else => |other| return other,
+                        };
+                    continue;
+                },
+                error.PacingLimited => {
+                    try self.waitForPacingAvailabilityWithDeadline(deadline);
+                    continue;
+                },
+                else => |other| return other,
+            };
+            return;
+        }
+    }
+
     /// Attempt one STOP_SENDING send without sleeping for pacing. The receive
     /// direction is marked stopped only after the packet reaches the socket.
     pub fn trySendStopSending(
@@ -4966,13 +5421,39 @@ pub const Connection = struct {
     }
 
     /// Atomically submit any still-needed RESET_STREAM and STOP_SENDING for
-    /// one bidirectional stream without waiting for pacing. State is committed
-    /// only after the combined packet reaches the socket, so an endpoint can
-    /// retry the same cancellation after transport progress.
+    /// one bidirectional stream. State is committed only after the combined
+    /// packet reaches the socket.
+    pub fn cancelStream(
+        self: *Connection,
+        stream_id: u64,
+        application_error_code: u64,
+    ) Error!void {
+        try self.cancelStreamAt(
+            stream_id,
+            application_error_code,
+            null,
+        );
+    }
+
+    /// One-attempt counterpart to `cancelStream`. It never sleeps for pacing,
+    /// so an endpoint can retry after its next transport-progress notification.
     pub fn tryCancelStream(
         self: *Connection,
         stream_id: u64,
         application_error_code: u64,
+    ) Error!void {
+        try self.cancelStreamAt(
+            stream_id,
+            application_error_code,
+            self.monotonicNowNs(),
+        );
+    }
+
+    fn cancelStreamAt(
+        self: *Connection,
+        stream_id: u64,
+        application_error_code: u64,
+        sent_time_ns: ?u64,
     ) Error!void {
         try self.validateNextPacketNumber();
         const send_stream = try self.sendStreamEntry(stream_id);
@@ -5013,11 +5494,14 @@ pub const Connection = struct {
             count += 1;
         }
         if (count == 0) return;
-        try self.sendTrackedFramesEcnAt(
-            frames[0..count],
-            .not_ect,
-            self.monotonicNowNs(),
-        );
+        if (sent_time_ns) |now_ns|
+            try self.sendTrackedFramesEcnAt(
+                frames[0..count],
+                .not_ect,
+                now_ns,
+            )
+        else
+            try self.sendTrackedFrames(frames[0..count]);
         if (needs_reset) {
             _ = self.recovery.abandonStreamData(stream_id);
             send_stream.reset_sent = reset_info;
@@ -6278,6 +6762,7 @@ pub const Connection = struct {
         out: []u8,
         deadline: std.Io.Clock.Timestamp,
     ) (Error || quic.runtime.ReceiveTimeoutError)!StreamRead {
+        _ = try deadline_policy.usableAwake(self.endpoint.io, deadline);
         while (true) {
             if (try self.pollStream(out)) |event| return event;
             try self.servicePacketServicingTimersDeadline(deadline);
@@ -6318,6 +6803,7 @@ pub const Connection = struct {
         out: []u8,
         deadline: std.Io.Clock.Timestamp,
     ) (Error || quic.runtime.ReceiveTimeoutError)!StreamRead {
+        _ = try deadline_policy.usableAwake(self.endpoint.io, deadline);
         while (true) {
             if (try self.pollStreamId(stream_id, out)) |event| return event;
             try self.servicePacketServicingTimersDeadline(deadline);
@@ -6459,10 +6945,11 @@ pub const Connection = struct {
         try self.beginPeerMigrationInternal(new_peer, challenge, false);
         self.peer_preferred_address_migration_active = true;
         self.peer_connection_ids = peer_connection_ids;
-        self.config.peer_connection_id =
+        self.setPeerConnectionId(
             self.peer_connection_ids.activeConnectionId(
                 preferred.connection_id,
-            ).?;
+            ).?,
+        );
     }
 
     pub fn beginPeerMigration(self: *Connection, new_peer: net.IpAddress, challenge: [8]u8) Error!void {
@@ -6501,6 +6988,11 @@ pub const Connection = struct {
         else
             0;
         self.resetRecoveryForPath(false);
+        if (candidate) |state| {
+            self.spin_bit_value = state.spin_bit_value;
+            self.spin_largest_received_packet_number =
+                state.spin_largest_received_packet_number;
+        }
         self.path_validation.abandonPendingChallengesExceptPathEpoch(
             self.pmtu_path_epoch,
         );
@@ -6675,13 +7167,16 @@ pub const Connection = struct {
         if (self.peer_connection_ids.selectForPath(
             restored.connectionId(),
         )) |connection_id| {
-            self.config.peer_connection_id = connection_id;
+            self.setPeerConnectionId(connection_id);
         }
         self.peer_address_validated = true;
         self.peer_address_bytes_received = 0;
         self.peer_address_bytes_sent = 0;
         self.path_validation_retry_deadline_ns = null;
         self.resetRecoveryForPath(false);
+        self.spin_bit_value = restored.spin_bit_value;
+        self.spin_largest_received_packet_number =
+            restored.spin_largest_received_packet_number;
         self.path_validation.abandonAllChallenges();
     }
 
@@ -6735,7 +7230,11 @@ pub const Connection = struct {
         return count;
     }
 
-    fn sendToPeer(self: *Connection, peer: net.IpAddress, frames: []const quic.Frame) Error!void {
+    fn sendToPeer(
+        self: *Connection,
+        peer: net.IpAddress,
+        frames: []const quic.Frame,
+    ) Error!void {
         const previous = self.config.peer;
         self.config.peer = peer;
         defer self.config.peer = previous;
@@ -6769,8 +7268,18 @@ pub const Connection = struct {
         }
         if (peer.eql(&self.last_validated_peer_path.peer)) {
             const previous_peer = self.config.peer;
-            const previous_peer_connection_id =
-                self.config.peer_connection_id;
+            var previous_peer_connection_id: [
+                quic.connection_id.max_connection_id_len
+            ]u8 = undefined;
+            const previous_peer_connection_id_len =
+                self.config.peer_connection_id.len;
+            @memcpy(
+                previous_peer_connection_id[0..previous_peer_connection_id_len],
+                self.config.peer_connection_id,
+            );
+            const previous_spin_bit_value = self.spin_bit_value;
+            const previous_spin_largest_received_packet_number =
+                self.spin_largest_received_packet_number;
             const previous_validated = self.peer_address_validated;
             const previous_received = self.peer_address_bytes_received;
             const previous_sent = self.peer_address_bytes_sent;
@@ -6778,14 +7287,24 @@ pub const Connection = struct {
             if (self.peer_connection_ids.activeConnectionId(
                 self.last_validated_peer_path.connectionId(),
             )) |connection_id| {
-                self.config.peer_connection_id = connection_id;
+                self.setPeerConnectionId(connection_id);
             }
             self.peer_address_validated = true;
             self.peer_address_bytes_received = 0;
             self.peer_address_bytes_sent = 0;
+            self.spin_bit_value =
+                self.last_validated_peer_path.spin_bit_value;
+            self.spin_largest_received_packet_number =
+                self.last_validated_peer_path
+                    .spin_largest_received_packet_number;
             defer {
                 self.config.peer = previous_peer;
-                self.config.peer_connection_id = previous_peer_connection_id;
+                self.setPeerConnectionId(
+                    previous_peer_connection_id[0..previous_peer_connection_id_len],
+                );
+                self.spin_bit_value = previous_spin_bit_value;
+                self.spin_largest_received_packet_number =
+                    previous_spin_largest_received_packet_number;
                 self.peer_address_validated = previous_validated;
                 self.peer_address_bytes_received = previous_received;
                 self.peer_address_bytes_sent = previous_sent;
@@ -6802,8 +7321,17 @@ pub const Connection = struct {
         }
         if (self.config.local_endpoint != .server) {
             const previous_peer = self.config.peer;
+            const previous_spin_bit_value = self.spin_bit_value;
+            const previous_spin_largest_received_packet_number =
+                self.spin_largest_received_packet_number;
             self.config.peer = peer;
-            defer self.config.peer = previous_peer;
+            self.resetSpinBit();
+            defer {
+                self.config.peer = previous_peer;
+                self.spin_bit_value = previous_spin_bit_value;
+                self.spin_largest_received_packet_number =
+                    previous_spin_largest_received_packet_number;
+            }
             var padded: [9]quic.Frame = undefined;
             const send_frames = try self.padPathValidationFrames(
                 frames,
@@ -6817,6 +7345,9 @@ pub const Connection = struct {
         const index = self.findCandidatePathBudget(peer) orelse
             return error.AntiAmplificationLimited;
         const previous_peer = self.config.peer;
+        const previous_spin_bit_value = self.spin_bit_value;
+        const previous_spin_largest_received_packet_number =
+            self.spin_largest_received_packet_number;
         const previous_validated = self.peer_address_validated;
         const previous_received = self.peer_address_bytes_received;
         const previous_sent = self.peer_address_bytes_sent;
@@ -6826,12 +7357,25 @@ pub const Connection = struct {
             self.candidate_path_budgets[index].?.bytes_received;
         self.peer_address_bytes_sent =
             self.candidate_path_budgets[index].?.bytes_sent;
+        self.spin_bit_value =
+            self.candidate_path_budgets[index].?.spin_bit_value;
+        self.spin_largest_received_packet_number =
+            self.candidate_path_budgets[index].?
+                .spin_largest_received_packet_number;
         defer {
             self.candidate_path_budgets[index].?.bytes_received =
                 self.peer_address_bytes_received;
             self.candidate_path_budgets[index].?.bytes_sent =
                 self.peer_address_bytes_sent;
+            self.candidate_path_budgets[index].?.spin_bit_value =
+                self.spin_bit_value;
+            self.candidate_path_budgets[index].?
+                .spin_largest_received_packet_number =
+                self.spin_largest_received_packet_number;
             self.config.peer = previous_peer;
+            self.spin_bit_value = previous_spin_bit_value;
+            self.spin_largest_received_packet_number =
+                previous_spin_largest_received_packet_number;
             self.peer_address_validated = previous_validated;
             self.peer_address_bytes_received = previous_received;
             self.peer_address_bytes_sent = previous_sent;
@@ -6987,6 +7531,31 @@ pub const Connection = struct {
             .now_ms = now_ms,
             .pto_ms = pto_ms,
         });
+    }
+
+    /// Retire a connection locally without attempting another socket write.
+    /// Protocol adapters use this after a multi-packet logical write exposed a
+    /// prefix and then exhausted its caller-owned deadline. Retrying would
+    /// corrupt stream offsets, while sending CONNECTION_CLOSE here could itself
+    /// wait beyond that deadline. Allocation failure still leaves the
+    /// connection terminal through the idle-timeout sentinel.
+    pub fn failClosedApplication(
+        self: *Connection,
+        error_code: u64,
+        reason_phrase: []const u8,
+    ) void {
+        if (self.close_info != null or self.idle_timed_out) return;
+        self.setCloseInfo(.{
+            .application = true,
+            .error_code = error_code,
+            .reason_phrase = reason_phrase,
+            .state = .closing,
+        }) catch {
+            self.idle_timed_out = true;
+            return;
+        };
+        self.close_info.?.state = .closed;
+        self.close_info.?.response_deadline_ns = null;
     }
 
     pub fn closed(self: Connection) bool {
@@ -7316,7 +7885,8 @@ pub const Connection = struct {
 
     pub fn switchToNextPeerConnectionId(self: *Connection) bool {
         const entry = self.peer_connection_ids.consumeUnused() orelse return false;
-        self.config.peer_connection_id = entry.slice();
+        self.setPeerConnectionId(entry.slice());
+        self.resetSpinValueForConnectionId();
         self.rememberCurrentValidatedPeerPath();
         return true;
     }
@@ -7564,10 +8134,7 @@ pub const Connection = struct {
         deadline: std.Io.Clock.Timestamp,
     ) (Error || quic.runtime.ReceiveTimeoutError)!ReceivedPacket {
         return self.receivePacketServicingTimersUntil(
-            callerDeadlineFromTimeout(
-                self.endpoint.io,
-                .{ .deadline = deadline },
-            ),
+            try deadline_policy.usableAwake(self.endpoint.io, deadline),
         );
     }
 
@@ -7633,7 +8200,10 @@ pub const Connection = struct {
             }
             const timer = self.nextTimerDeadline();
             if (timer) |scheduled| if (now_ns >= scheduled.deadline_ns) {
-                if (try self.serviceNextTimerForBlockingReceive(now_ns)) {
+                if (try self.serviceNextTimerForBlockingReceive(
+                    now_ns,
+                    caller_deadline,
+                )) {
                     continue;
                 }
                 if (try self.receiveBytesAfterBlockedTimer(
@@ -7658,6 +8228,7 @@ pub const Connection = struct {
                     )) return error.Timeout;
                     if (!try self.serviceNextTimerForBlockingReceive(
                         timeout_ns,
+                        caller_deadline,
                     )) {
                         if (try self.receiveBytesAfterBlockedTimer(
                             timeout_ns,
@@ -7683,12 +8254,17 @@ pub const Connection = struct {
     fn serviceNextTimerForBlockingReceive(
         self: *Connection,
         now_ns: u64,
-    ) Error!bool {
+        caller_deadline: ?std.Io.Clock.Timestamp,
+    ) (Error || quic.runtime.ReceiveTimeoutError)!bool {
         _ = self.serviceNextTimerAt(now_ns) catch |err| switch (err) {
             error.CongestionLimited => return false,
             error.AntiAmplificationLimited => return false,
             error.PacingLimited => {
-                try self.waitForPacing(now_ns);
+                if (caller_deadline) |deadline| {
+                    try self.waitForPacingAvailabilityWithDeadline(deadline);
+                } else {
+                    try self.waitForPacing(now_ns);
+                }
                 return true;
             },
             else => |other| return other,
@@ -7816,26 +8392,75 @@ pub const Connection = struct {
         return self.importSentEarlyDataCopies(packet_number, 1, frames);
     }
 
-    /// Import every successfully transmitted copy of one 0-RTT flight. QUIC
-    /// shares a packet-number space between 0-RTT and 1-RTT, so all copies
-    /// remain ACK-valid and the first 1-RTT packet starts after the last one.
-    /// Stream offsets and flow-control bytes are committed only once.
+    fn earlyDataPacketNumber(
+        first_packet_number: u64,
+        sent_packet_numbers: ?[]const u64,
+        index: usize,
+    ) u64 {
+        if (sent_packet_numbers) |numbers| return numbers[index];
+        return first_packet_number + index;
+    }
+
+    /// Import a contiguous set of socket-sent 0-RTT copies. This compatibility
+    /// entry point has no protected-but-unsent holes.
     pub fn importSentEarlyDataCopies(
         self: *Connection,
         first_packet_number: u64,
         packet_count: u64,
         frames: []const quic.Frame,
     ) Error!void {
-        if (packet_count == 0) return error.InvalidPacketNumber;
+        return self.importSentEarlyDataPacketNumbers(
+            first_packet_number,
+            packet_count,
+            null,
+            null,
+            frames,
+        );
+    }
+
+    /// Import socket-sent 0-RTT copies while retiring the complete protected
+    /// packet-number interval. The optional number slice must be a strictly
+    /// increasing subset of that interval. Null denotes the full interval.
+    pub fn importSentEarlyDataPacketNumbers(
+        self: *Connection,
+        first_packet_number: u64,
+        protected_count: u64,
+        sent_packet_numbers: ?[]const u64,
+        sent_datagram_size: ?usize,
+        frames: []const quic.Frame,
+    ) Error!void {
+        if (protected_count == 0) return error.InvalidPacketNumber;
         const last_packet_number = std.math.add(
             u64,
             first_packet_number,
-            packet_count - 1,
+            protected_count - 1,
         ) catch return error.InvalidPacketNumber;
         if (last_packet_number > quic.protection.max_packet_number or
             first_packet_number != self.next_packet_number)
         {
             return error.InvalidPacketNumber;
+        }
+        const sent_count = if (sent_packet_numbers) |numbers|
+            numbers.len
+        else
+            std.math.cast(usize, protected_count) orelse
+                return error.InvalidPacketNumber;
+        if (sent_count == 0 or
+            @as(u64, @intCast(sent_count)) > protected_count)
+        {
+            return error.InvalidPacketNumber;
+        }
+        if (sent_packet_numbers) |numbers| {
+            var previous: ?u64 = null;
+            for (numbers) |packet_number| {
+                if (packet_number < first_packet_number or
+                    packet_number > last_packet_number or
+                    (previous != null and packet_number <= previous.?))
+                {
+                    return error.InvalidPacketNumber;
+                }
+                previous = packet_number;
+            }
         }
         var payload: std.ArrayList(u8) = .empty;
         defer payload.deinit(self.endpoint.allocator);
@@ -7903,37 +8528,57 @@ pub const Connection = struct {
         const is_in_flight = analyzed.in_flight;
         if (recovery_payload.items.len != 0) {
             _ = try self.recovery.trackSent(
-                first_packet_number,
+                earlyDataPacketNumber(
+                    first_packet_number,
+                    sent_packet_numbers,
+                    0,
+                ),
                 recovery_payload.items,
             );
         }
-        var tracked_recovery_packets: u64 = @intFromBool(
+        var tracked_recovery_packets: usize = @intFromBool(
             recovery_payload.items.len != 0,
         );
         errdefer while (tracked_recovery_packets != 0) {
             tracked_recovery_packets -= 1;
             _ = self.recovery.forgetPacketNumber(
-                first_packet_number + tracked_recovery_packets,
+                earlyDataPacketNumber(
+                    first_packet_number,
+                    sent_packet_numbers,
+                    tracked_recovery_packets,
+                ),
             );
         };
         if (recovery_payload.items.len != 0) {
             const candidate = self.recovery.packetNumberCandidate(
-                first_packet_number,
+                earlyDataPacketNumber(
+                    first_packet_number,
+                    sent_packet_numbers,
+                    0,
+                ),
             ) orelse unreachable;
-            var copy_index: u64 = 1;
-            while (copy_index < packet_count) : (copy_index += 1) {
+            var copy_index: usize = 1;
+            while (copy_index < sent_count) : (copy_index += 1) {
                 try self.recovery.recordRetransmission(
                     candidate.group_index,
-                    first_packet_number + copy_index,
+                    earlyDataPacketNumber(
+                        first_packet_number,
+                        sent_packet_numbers,
+                        copy_index,
+                    ),
                 );
                 tracked_recovery_packets += 1;
             }
         }
-        var tracked_sent_packets: u64 = 0;
+        var tracked_sent_packets: usize = 0;
         errdefer while (tracked_sent_packets != 0) {
             tracked_sent_packets -= 1;
             _ = self.sent.forget(
-                first_packet_number + tracked_sent_packets,
+                earlyDataPacketNumber(
+                    first_packet_number,
+                    sent_packet_numbers,
+                    tracked_sent_packets,
+                ),
             );
         };
         // Exact 0-RTT transmission times are not retained by the synchronous
@@ -7942,9 +8587,13 @@ pub const Connection = struct {
         // unacknowledged sibling copies on a finite recovery timer after any
         // one copy retires the shared payload group.
         const imported_sent_time_ns = self.monotonicNowNs();
-        var packet_index: u64 = 0;
-        while (packet_index < packet_count) : (packet_index += 1) {
-            const packet_number = first_packet_number + packet_index;
+        var packet_index: usize = 0;
+        while (packet_index < sent_count) : (packet_index += 1) {
+            const packet_number = earlyDataPacketNumber(
+                first_packet_number,
+                sent_packet_numbers,
+                packet_index,
+            );
             const packet_number_len = quic.protection.packetNumberLenForPayload(
                 packet_number,
                 self.sent.largestAcknowledged(),
@@ -7959,12 +8608,13 @@ pub const Connection = struct {
                 .key_phase = self.send_key_phase.currentKeyPhase(),
                 .payload = payload.items,
             });
+            const datagram_size = sent_datagram_size orelse packet_len;
             try self.sent.sentInFlightAtWithDatagramSizeAndPathEpoch(
                 packet_number,
                 is_ack_eliciting,
                 is_in_flight,
                 payload.items.len,
-                packet_len,
+                datagram_size,
                 .not_ect,
                 imported_sent_time_ns,
                 self.pmtu_path_epoch,
@@ -7972,14 +8622,10 @@ pub const Connection = struct {
             tracked_sent_packets += 1;
         }
         if (is_in_flight) {
-            const packet_count_usize = std.math.cast(
-                usize,
-                packet_count,
-            ) orelse return error.InvalidPacketNumber;
             const in_flight_bytes = std.math.mul(
                 usize,
                 payload.items.len,
-                packet_count_usize,
+                sent_count,
             ) catch return error.CongestionLimited;
             // These datagrams have already reached the socket during the
             // handshake. Account the complete flight even when PTO copies
@@ -7996,9 +8642,9 @@ pub const Connection = struct {
         tracked_sent_packets = 0;
     }
 
-    /// Advance the shared application-data packet-number space past 0-RTT
-    /// copies that reached the socket but were rejected by the server. Their
-    /// stream and recovery state is deliberately not imported.
+    /// Advance the shared application-data packet-number space past protected
+    /// 0-RTT copies that were rejected by the server. Their stream and recovery
+    /// state is deliberately not imported, including socket-rejected copies.
     pub fn discardSentEarlyDataCopies(
         self: *Connection,
         first_packet_number: u64,
@@ -8115,10 +8761,7 @@ pub const Connection = struct {
         deadline: std.Io.Clock.Timestamp,
     ) (Error || quic.runtime.ReceiveTimeoutError)!ReceivedPacketBatch {
         return self.receivePacketBatchServicingTimersUntil(
-            callerDeadlineFromTimeout(
-                self.endpoint.io,
-                .{ .deadline = deadline },
-            ),
+            try deadline_policy.usableAwake(self.endpoint.io, deadline),
         );
     }
 
@@ -8167,7 +8810,10 @@ pub const Connection = struct {
                 return error.Timeout;
             }
             if (timer) |scheduled| if (now_ns >= scheduled.deadline_ns) {
-                if (try self.serviceNextTimerForBlockingReceive(now_ns)) {
+                if (try self.serviceNextTimerForBlockingReceive(
+                    now_ns,
+                    caller_deadline,
+                )) {
                     continue;
                 }
                 if (try self.receiveDatagramBatchAfterBlockedTimer(
@@ -8191,6 +8837,7 @@ pub const Connection = struct {
                     )) return error.Timeout;
                     if (!try self.serviceNextTimerForBlockingReceive(
                         timeout_ns,
+                        caller_deadline,
                     )) {
                         if (try self.receiveDatagramBatchAfterBlockedTimer(
                             timeout_ns,
@@ -8310,10 +8957,7 @@ pub const Connection = struct {
         deadline: std.Io.Clock.Timestamp,
     ) (Error || quic.runtime.ReceiveTimeoutError)!usize {
         return self.servicePacketBatchServicingTimersUntil(
-            callerDeadlineFromTimeout(
-                self.endpoint.io,
-                .{ .deadline = deadline },
-            ),
+            try deadline_policy.usableAwake(self.endpoint.io, deadline),
         );
     }
 
@@ -8492,10 +9136,7 @@ pub const Connection = struct {
     ) (Error || quic.runtime.ReceiveTimeoutError ||
         callbackErrorSet(visitor))!void {
         return self.visitPacketServicingTimersUntil(
-            callerDeadlineFromTimeout(
-                self.endpoint.io,
-                .{ .deadline = deadline },
-            ),
+            try deadline_policy.usableAwake(self.endpoint.io, deadline),
             context,
             visitor,
         );
@@ -8614,7 +9255,10 @@ pub const Connection = struct {
             }
             const timer = self.nextTimerDeadline();
             if (timer) |scheduled| if (now_ns >= scheduled.deadline_ns) {
-                if (try self.serviceNextTimerForBlockingReceive(now_ns)) {
+                if (try self.serviceNextTimerForBlockingReceive(
+                    now_ns,
+                    caller_deadline,
+                )) {
                     continue;
                 }
                 if (try self.receiveBytesIntoAfterBlockedTimer(
@@ -8651,6 +9295,7 @@ pub const Connection = struct {
                         )) return error.Timeout;
                         if (!try self.serviceNextTimerForBlockingReceive(
                             timeout_ns,
+                            caller_deadline,
                         )) {
                             if (try self.receiveBytesIntoAfterBlockedTimer(
                                 storage,
@@ -8935,6 +9580,15 @@ pub const Connection = struct {
             frames,
         );
         defer peer_address_update.deinit();
+        var peer_connection_id_before: [
+            quic.connection_id.max_connection_id_len
+        ]u8 = undefined;
+        const peer_connection_id_before_len =
+            self.config.peer_connection_id.len;
+        @memcpy(
+            peer_connection_id_before[0..peer_connection_id_before_len],
+            self.config.peer_connection_id,
+        );
         try self.applyReceivedFramesForDestinationOrClose(
             packet.packet_number,
             frames,
@@ -8944,8 +9598,29 @@ pub const Connection = struct {
             from,
             packet.payload,
         );
-        self.updateSpinBitAfterReceive(packet.spin_bit);
+        const spin_connection_id_changed = !std.mem.eql(
+            u8,
+            peer_connection_id_before[0..peer_connection_id_before_len],
+            self.config.peer_connection_id,
+        );
         self.commitPeerAddressUpdate(&peer_address_update);
+        if (spin_connection_id_changed) {
+            self.resetSpinValueForConnectionId();
+            self.rememberCurrentValidatedPeerPath();
+            if (!self.config.peer.eql(&from)) {
+                self.updateSpinBitAfterReceive(
+                    from,
+                    packet.packet_number,
+                    packet.spin_bit,
+                );
+            }
+        } else {
+            self.updateSpinBitAfterReceive(
+                from,
+                packet.packet_number,
+                packet.spin_bit,
+            );
+        }
         self.observePacketReceived(
             now_ns,
             packet.packet_number,
@@ -9028,6 +9703,15 @@ pub const Connection = struct {
             packet.frames,
         );
         defer peer_address_update.deinit();
+        var peer_connection_id_before: [
+            quic.connection_id.max_connection_id_len
+        ]u8 = undefined;
+        const peer_connection_id_before_len =
+            self.config.peer_connection_id.len;
+        @memcpy(
+            peer_connection_id_before[0..peer_connection_id_before_len],
+            self.config.peer_connection_id,
+        );
         try self.applyReceivedFramesForDestinationOrClose(
             packet.packet.packet_number,
             packet.frames,
@@ -9037,11 +9721,32 @@ pub const Connection = struct {
             from,
             packet.packet.payload,
         );
-        self.updateSpinBitAfterReceive(packet.packet.spin_bit);
+        const spin_connection_id_changed = !std.mem.eql(
+            u8,
+            peer_connection_id_before[0..peer_connection_id_before_len],
+            self.config.peer_connection_id,
+        );
         if (packet.peer_initiated_key_update) {
             try self.acceptPeerKeyUpdate(packet.packet.key_phase, now_ns);
         }
         self.commitPeerAddressUpdate(&peer_address_update);
+        if (spin_connection_id_changed) {
+            self.resetSpinValueForConnectionId();
+            self.rememberCurrentValidatedPeerPath();
+            if (!self.config.peer.eql(&from)) {
+                self.updateSpinBitAfterReceive(
+                    from,
+                    packet.packet.packet_number,
+                    packet.packet.spin_bit,
+                );
+            }
+        } else {
+            self.updateSpinBitAfterReceive(
+                from,
+                packet.packet.packet_number,
+                packet.packet.spin_bit,
+            );
+        }
         self.observePacketReceived(
             now_ns,
             packet.packet.packet_number,
@@ -9159,6 +9864,15 @@ pub const Connection = struct {
             packet.frames,
         );
         defer peer_address_update.deinit();
+        var peer_connection_id_before: [
+            quic.connection_id.max_connection_id_len
+        ]u8 = undefined;
+        const peer_connection_id_before_len =
+            self.config.peer_connection_id.len;
+        @memcpy(
+            peer_connection_id_before[0..peer_connection_id_before_len],
+            self.config.peer_connection_id,
+        );
         try self.applyReceivedFramesForDestinationOrClose(
             packet.packet.packet_number,
             packet.frames,
@@ -9168,11 +9882,32 @@ pub const Connection = struct {
             routed.datagram.from,
             packet.packet.payload,
         );
-        self.updateSpinBitAfterReceive(packet.packet.spin_bit);
+        const spin_connection_id_changed = !std.mem.eql(
+            u8,
+            peer_connection_id_before[0..peer_connection_id_before_len],
+            self.config.peer_connection_id,
+        );
         if (packet.peer_initiated_key_update) {
             try self.acceptPeerKeyUpdate(packet.packet.key_phase, now_ns);
         }
         self.commitPeerAddressUpdate(&peer_address_update);
+        if (spin_connection_id_changed) {
+            self.resetSpinValueForConnectionId();
+            self.rememberCurrentValidatedPeerPath();
+            if (!self.config.peer.eql(&routed.datagram.from)) {
+                self.updateSpinBitAfterReceive(
+                    routed.datagram.from,
+                    packet.packet.packet_number,
+                    packet.packet.spin_bit,
+                );
+            }
+        } else {
+            self.updateSpinBitAfterReceive(
+                routed.datagram.from,
+                packet.packet.packet_number,
+                packet.packet.spin_bit,
+            );
+        }
         self.observePacketReceived(
             now_ns,
             packet.packet.packet_number,
@@ -9298,13 +10033,18 @@ pub const Connection = struct {
                 );
             },
             .nat_rebinding => |from| {
-                _ = self.takeCandidatePathBudget(from);
+                const candidate = self.takeCandidatePathBudget(from);
                 self.config.peer = from;
-                self.setPeerAddressValidated(true);
                 // A port-only NAT rebinding remains the same network path for
                 // RTT purposes while every tuple-local recovery signal starts
                 // a fresh epoch.
                 self.resetRecoveryForPath(true);
+                if (candidate) |state| {
+                    self.spin_bit_value = state.spin_bit_value;
+                    self.spin_largest_received_packet_number =
+                        state.spin_largest_received_packet_number;
+                }
+                self.setPeerAddressValidated(true);
             },
             .new_path => |*new_path| {
                 self.rememberCurrentValidatedPeerPath();
@@ -9325,6 +10065,11 @@ pub const Connection = struct {
                     new_path.datagram_len,
                 );
                 self.resetRecoveryForPath(false);
+                if (candidate) |state| {
+                    self.spin_bit_value = state.spin_bit_value;
+                    self.spin_largest_received_packet_number =
+                        state.spin_largest_received_packet_number;
+                }
                 self.path_validation.deinit();
                 self.path_validation = new_path.path_validation;
                 self.path_validation.abandonPendingChallengesExceptPathEpoch(
@@ -9411,16 +10156,22 @@ pub const Connection = struct {
             self.expected_packet_number = packet_number + 1;
         }
         const path_challenge_count = countPathChallenges(frames);
-        if (path_challenge_count != 0) {
+        const path_response_capacity = self.config.max_pending_path_responses -|
+            self.path_validation.pendingResponseCount();
+        const path_response_reserve = @min(
+            path_challenge_count,
+            path_response_capacity,
+        );
+        if (path_response_reserve != 0) {
             if (self.path_response_target_head != 0 and
-                self.path_response_targets.items.len + path_challenge_count >
+                self.path_response_targets.items.len + path_response_reserve >
                     self.path_response_targets.capacity)
             {
                 self.compactPathResponseTargets();
             }
             try self.path_response_targets.ensureUnusedCapacity(
                 self.endpoint.allocator,
-                path_challenge_count,
+                path_response_reserve,
             );
         }
         var current_path_validated = false;
@@ -9657,10 +10408,17 @@ pub const Connection = struct {
                         new_connection_id.stateless_reset_token,
                         self.config.active_connection_id_limit,
                     );
-                    self.config.peer_connection_id =
-                        self.peer_connection_ids.selectForPath(
-                            current_peer_connection_id[0..current_peer_connection_id_len],
-                        ) orelse return error.UnknownConnectionId;
+                    const selected = self.peer_connection_ids.selectForPath(
+                        current_peer_connection_id[0..current_peer_connection_id_len],
+                    ) orelse return error.UnknownConnectionId;
+                    self.setPeerConnectionId(selected);
+                    if (!std.mem.eql(
+                        u8,
+                        current_peer_connection_id[0..current_peer_connection_id_len],
+                        self.config.peer_connection_id,
+                    )) {
+                        self.resetSpinValueForConnectionId();
+                    }
                     self.rememberCurrentValidatedPeerPath();
                 },
                 .retire_connection_id => |retire| try self.local_connection_ids.retireExceptPacketDestination(retire.sequence_number, packet_destination_connection_id),
@@ -9828,11 +10586,16 @@ pub const Connection = struct {
         var stack_path_responses: [16][8]u8 = undefined;
         const path_challenge_count = countPathChallenges(frames);
         const path_response_count = countPathResponses(frames);
-        const path_challenges = if (path_challenge_count <=
+        const path_challenge_slots = @min(
+            path_challenge_count,
+            self.config.max_pending_path_responses -|
+                self.path_validation.pendingResponseCount(),
+        );
+        const path_challenges = if (path_challenge_slots <=
             stack_path_challenges.len)
-            stack_path_challenges[0..path_challenge_count]
+            stack_path_challenges[0..path_challenge_slots]
         else
-            try self.endpoint.allocator.alloc([8]u8, path_challenge_count);
+            try self.endpoint.allocator.alloc([8]u8, path_challenge_slots);
         defer if (path_challenges.ptr != stack_path_challenges[0..].ptr) {
             self.endpoint.allocator.free(path_challenges);
         };
@@ -10104,7 +10867,7 @@ pub const Connection = struct {
             stream_frames,
             stream.stream_id,
         );
-        try self.validateStreamFrameAgainstPreflight(
+        _ = try self.validateStreamFrameAgainstPreflight(
             stream,
             recv_stream,
             recv_data_total,
@@ -10280,14 +11043,64 @@ pub const Connection = struct {
 
     pub fn resetSpinBit(self: *Connection) void {
         self.spin_bit_value = false;
+        self.spin_largest_received_packet_number = null;
     }
 
-    fn updateSpinBitAfterReceive(self: *Connection, peer_spin_bit: bool) void {
+    fn resetSpinValueForConnectionId(self: *Connection) void {
+        self.spin_bit_value = false;
+    }
+
+    fn updateSpinBitAfterReceive(
+        self: *Connection,
+        from: net.IpAddress,
+        packet_number: u64,
+        peer_spin_bit: bool,
+    ) void {
         if (!self.config.enable_spin_bit) return;
-        self.spin_bit_value = switch (self.config.local_endpoint) {
-            .client => !peer_spin_bit,
-            .server => peer_spin_bit,
-        };
+        if (self.config.peer.eql(&from)) {
+            updateSpinState(
+                self.config.local_endpoint,
+                &self.spin_bit_value,
+                &self.spin_largest_received_packet_number,
+                packet_number,
+                peer_spin_bit,
+            );
+            if (self.peer_address_validated and
+                self.last_validated_peer_path.peer.eql(&from) and
+                std.mem.eql(
+                    u8,
+                    self.last_validated_peer_path.connectionId(),
+                    self.config.peer_connection_id,
+                ))
+            {
+                self.last_validated_peer_path.spin_bit_value =
+                    self.spin_bit_value;
+                self.last_validated_peer_path
+                    .spin_largest_received_packet_number =
+                    self.spin_largest_received_packet_number;
+            }
+            return;
+        }
+        if (self.last_validated_peer_path.peer.eql(&from)) {
+            updateSpinState(
+                self.config.local_endpoint,
+                &self.last_validated_peer_path.spin_bit_value,
+                &self.last_validated_peer_path
+                    .spin_largest_received_packet_number,
+                packet_number,
+                peer_spin_bit,
+            );
+            return;
+        }
+        const index = self.findCandidatePathBudget(from) orelse return;
+        const candidate = &self.candidate_path_budgets[index].?;
+        updateSpinState(
+            self.config.local_endpoint,
+            &candidate.spin_bit_value,
+            &candidate.spin_largest_received_packet_number,
+            packet_number,
+            peer_spin_bit,
+        );
     }
 
     fn receiveStreamsBlocked(self: *Connection, maximum_streams: u64, direction: StreamDirection) Error!void {
@@ -11061,6 +11874,72 @@ pub const Connection = struct {
         self.flushPendingReceiveCreditAt(now_ns) catch |err| {
             self.scheduleReceiveCreditRetry(err, now_ns);
         };
+    }
+
+    /// Discard a contiguous receive prefix after the application has sent
+    /// STOP_SENDING. Only connection-level credit is replenished: extending
+    /// this stream's MAX_STREAM_DATA would invite additional bytes that the
+    /// application has explicitly abandoned. A received RESET_STREAM charges
+    /// its complete final size to connection flow control even when gaps remain;
+    /// settle that stream-level charge here while retaining its reset metadata
+    /// for the protocol adapter to report. The return value is the number of
+    /// contiguous buffered bytes removed.
+    pub fn discardStoppedReceived(
+        self: *Connection,
+        stream_id: u64,
+    ) Error!usize {
+        const recv_stream = self.findRecvStreamEntry(stream_id) orelse
+            return error.StreamStateError;
+        if (recv_stream.stop_sending_sent == null) {
+            return error.StreamStateError;
+        }
+        return self.discardAbandonedReceived(recv_stream);
+    }
+
+    /// Release connection-level credit for a receive direction terminated by
+    /// RESET_STREAM while preserving the reset metadata for one application
+    /// notification. No MAX_STREAM_DATA is generated for a terminal stream.
+    pub fn discardResetReceived(
+        self: *Connection,
+        stream_id: u64,
+    ) Error!usize {
+        const recv_stream = self.findRecvStreamEntry(stream_id) orelse
+            return error.StreamStateError;
+        if (recv_stream.reset == null) return error.StreamStateError;
+        return self.discardAbandonedReceived(recv_stream);
+    }
+
+    fn discardAbandonedReceived(
+        self: *Connection,
+        recv_stream: *StreamRecvFlowEntry,
+    ) Error!usize {
+        const discarded = recv_stream.recv_state.available().len;
+        const outstanding_credit = recv_stream.flow.highest_received -|
+            recv_stream.flow.consumed;
+        if (recv_stream.pending_max_stream_data) {
+            recv_stream.pending_max_stream_data = false;
+            std.debug.assert(self.pending_receive_stream_credits != 0);
+            self.pending_receive_stream_credits -= 1;
+        }
+        if (discarded == 0 and outstanding_credit == 0) {
+            if (!self.hasPendingReceiveCredit()) self.clearReceiveCreditRetry();
+            return 0;
+        }
+        if (self.recv_flow.consume(outstanding_credit) != null) {
+            self.pending_max_data = true;
+        }
+        // The stream-level flow counter can advance across reassembly gaps
+        // because the caller has explicitly abandoned this receive direction.
+        // Keep the actual reassembly cursor contiguous for overlap and
+        // final-size validation of reordered packets.
+        recv_stream.flow.consumed = recv_stream.flow.highest_received;
+        try recv_stream.recv_state.consume(discarded);
+        const now_ns = self.monotonicNowNs();
+        self.flushPendingReceiveCreditAt(now_ns) catch |err| {
+            self.scheduleReceiveCreditRetry(err, now_ns);
+        };
+        if (!self.hasPendingReceiveCredit()) self.clearReceiveCreditRetry();
+        return discarded;
     }
 
     fn releaseReceivedCapacityAt(
@@ -11847,6 +12726,38 @@ fn sendFramesIntoSized(
     if (sizes.packet > endpoint.limits.max_datagram_size) {
         return error.DatagramTooLarge;
     }
+    const packet = try sealFramesIntoSized(
+        keys,
+        options,
+        sizes,
+        packet_storage,
+    );
+    try endpoint.sendBytes(to, packet);
+}
+
+/// Encode and protect one stateless 1-RTT packet without submitting it.
+///
+/// Callers that own packet-number state can use the successful return as the
+/// exact nonce-consumption boundary, retire the packet number, and only then
+/// attempt socket I/O.
+pub fn sealFramesInto(
+    keys: quic.protection.PacketProtectionKeys,
+    options: SendOptions,
+    packet_storage: []u8,
+) Error![]u8 {
+    const sizes = try framePacketStorageSizes(options);
+    return sealFramesIntoSized(keys, options, sizes, packet_storage);
+}
+
+fn sealFramesIntoSized(
+    keys: quic.protection.PacketProtectionKeys,
+    options: SendOptions,
+    sizes: FramePacketStorageSizes,
+    packet_storage: []u8,
+) Error![]u8 {
+    if (packet_storage.len < sizes.packet) {
+        return error.BufferTooShort;
+    }
 
     const payload_offset = 1 + options.destination_connection_id.len +
         @as(usize, options.packet_number_len);
@@ -11860,7 +12771,7 @@ fn sendFramesIntoSized(
         try frame.write(&encoded, fixed.allocator());
     }
     std.debug.assert(encoded.items.len == sizes.payload);
-    const packet = try quic.protection.sealShortPacketInPlace(
+    return quic.protection.sealShortPacketInPlace(
         packet_storage[0..sizes.packet],
         keys,
         .{
@@ -11873,7 +12784,6 @@ fn sendFramesIntoSized(
             .payload = encoded.items,
         },
     );
-    try endpoint.sendBytes(to, packet);
 }
 
 /// Encode, protect, and submit a batch of independent 1-RTT packets.
@@ -11905,10 +12815,10 @@ pub fn sendFramesBatchInto(
 
 /// Allocation-free batch protection and send with explicit socket progress.
 ///
-/// Unlike `sendFramesBatchInto`, network errors are returned in the result so
-/// stateful callers can consume packet numbers for a socket-visible prefix.
-/// Validation, sizing, and packet protection still finish before the first
-/// datagram is submitted.
+/// Unlike `sendFramesBatchInto`, endpoint send errors are returned in the
+/// result so stateful callers can consume every protected packet number even
+/// when the socket-visible prefix is empty. Validation, sizing, and packet
+/// protection still finish before the first datagram is submitted.
 pub fn sendFramesBatchIntoProgress(
     endpoint: *quic.runtime.Endpoint,
     to: net.IpAddress,
@@ -11984,10 +12894,17 @@ pub fn sendFramesBatchIntoProgress(
         packet_offset += packet.len;
     }
 
-    const send_result = try endpoint.sendManyBytesProgress(
+    const send_result = endpoint.sendManyBytesProgress(
         to,
         datagrams[0..options.packets.len],
-    );
+    ) catch |err| {
+        return .{
+            .sent_count = 0,
+            .protected_count = options.packets.len,
+            .sent_bytes = 0,
+            .send_error = err,
+        };
+    };
     var sent_bytes: usize = 0;
     for (packet_lengths[0..send_result.sent_count]) |packet_len| {
         sent_bytes += packet_len;
@@ -12064,7 +12981,15 @@ pub fn encodeFrames(allocator: std.mem.Allocator, frames: []const quic.Frame) Er
 fn writeRetransmittableFramesAssumeCapacity(
     list: *std.ArrayList(u8),
     frames: []const quic.Frame,
+    all_payload_bytes_retransmittable: bool,
 ) Error!void {
+    // Validation already classified the packet. Avoid repeating that branchy
+    // pass for the overwhelmingly common all-reliable payload; mixed packets
+    // still filter DATAGRAM and the other non-retransmittable frame classes.
+    if (all_payload_bytes_retransmittable) {
+        for (frames) |frame| try frame.writeAssumeCapacity(list);
+        return;
+    }
     for (frames) |frame| {
         if (frame_traits.classify(frame).retransmittable) {
             try frame.writeAssumeCapacity(list);
@@ -12297,6 +13222,25 @@ pub const testing = struct {
         return connection.pmtu_path_epoch;
     }
 
+    pub fn spinLargestReceivedPacketNumber(
+        connection: *const Connection,
+    ) ?u64 {
+        return connection.spin_largest_received_packet_number;
+    }
+
+    pub fn candidatePathSpinState(
+        connection: *const Connection,
+        peer: net.IpAddress,
+    ) ?struct { value: bool, largest_received_packet_number: ?u64 } {
+        const index = connection.findCandidatePathBudget(peer) orelse
+            return null;
+        const candidate = connection.candidate_path_budgets[index].?;
+        return .{
+            .value = candidate.spin_bit_value,
+            .largest_received_packet_number = candidate.spin_largest_received_packet_number,
+        };
+    }
+
     pub fn expectedPacketNumber(connection: *const Connection) u64 {
         return connection.expected_packet_number;
     }
@@ -12321,6 +13265,33 @@ pub const testing = struct {
         return count;
     }
 
+    pub fn pendingPathResponseTargetCount(
+        connection: *const Connection,
+    ) usize {
+        return connection.pathResponseTargetCount();
+    }
+
+    pub fn pendingPathResponseCapacity(
+        connection: *const Connection,
+    ) usize {
+        return connection.path_validation.pending_responses.items.capacity;
+    }
+
+    pub fn pathResponseTargetCapacity(
+        connection: *const Connection,
+    ) usize {
+        return connection.path_response_targets.capacity;
+    }
+
+    pub fn discardPendingPathResponses(
+        connection: *Connection,
+        count: usize,
+    ) void {
+        connection.path_validation.discardResponses(count);
+        connection.discardPathResponseTargets(count);
+        connection.updatePathResponseTimerAfterSend(null);
+    }
+
     pub fn candidatePathBudgetFor(
         connection: *const Connection,
         peer: net.IpAddress,
@@ -12341,6 +13312,15 @@ pub const testing = struct {
         return connection.sent.packets.items[
             connection.sent.packets.items.len - 1
         ].ecn;
+    }
+
+    pub fn lastSentPacketDatagramSize(
+        connection: *const Connection,
+    ) ?usize {
+        if (connection.sent.packets.items.len == 0) return null;
+        return connection.sent.packets.items[
+            connection.sent.packets.items.len - 1
+        ].datagram_size;
     }
 
     pub fn localCloseInfo(connection: *const Connection) ?LocalCloseInfo {
@@ -12383,12 +13363,34 @@ pub const testing = struct {
             connection.congestion.bytes_in_flight;
     }
 
+    pub fn acknowledgeAllInFlight(
+        connection: *Connection,
+    ) void {
+        connection.congestion.onAcked(connection.congestion.bytes_in_flight);
+    }
+
     pub fn exhaustPacingAt(
         connection: *Connection,
         now_ns: u64,
     ) void {
         connection.pacer.budget = 0;
         connection.pacer.last_sent_time_ns = now_ns;
+    }
+
+    pub fn setPacingBudgetAt(
+        connection: *Connection,
+        budget: usize,
+        now_ns: u64,
+    ) void {
+        connection.pacer.budget = budget;
+        connection.pacer.last_sent_time_ns = now_ns;
+        connection.pacing_blocked_until_ns = null;
+    }
+
+    pub fn pacingBlockedUntil(
+        connection: *const Connection,
+    ) ?u64 {
+        return connection.pacing_blocked_until_ns;
     }
 
     pub fn appendPendingAckForTest(
@@ -12482,6 +13484,26 @@ pub const testing = struct {
             null;
     }
 
+    pub fn localStreamReleaseRequested(
+        connection: *Connection,
+        stream_id: u64,
+    ) bool {
+        return if (connection.findSendStreamEntry(stream_id)) |entry|
+            entry.release_requested
+        else
+            false;
+    }
+
+    pub fn peerStreamReleaseRequested(
+        connection: *Connection,
+        stream_id: u64,
+    ) bool {
+        return if (connection.findRecvStreamEntry(stream_id)) |entry|
+            entry.stream_count_release_requested
+        else
+            false;
+    }
+
     pub fn sendStreamLimit(
         connection: *Connection,
         stream_id: u64,
@@ -12524,6 +13546,10 @@ pub const testing = struct {
 
     pub fn receiveDataTotal(connection: *const Connection) u64 {
         return connection.recv_data_total;
+    }
+
+    pub fn receiveDataConsumed(connection: *const Connection) u64 {
+        return connection.recv_flow.consumed;
     }
 
     pub fn trySendAndReleaseReceivedCapacityAt(

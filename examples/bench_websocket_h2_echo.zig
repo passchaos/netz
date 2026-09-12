@@ -1,14 +1,21 @@
 const std = @import("std");
 const netz = @import("netz");
+const send_shape = @import("support/websocket_send_shape.zig");
+const counting_allocator = @import("support/counting_allocator.zig");
+const CountingAllocator = counting_allocator.CountingAllocator;
 
 const payload_bytes: usize = 4096;
-const warmup_iterations: usize = 20;
-const iterations: usize = 200;
+const default_warmup_iterations: usize = 20;
+const default_iterations: usize = 200;
 const fragmented_slices: usize = 16;
 
 pub fn main(init: std.process.Init) !void {
-    const fragmented = try parseFragmented(init);
-    const allocator = std.heap.smp_allocator;
+    const options = try parseOptions(init);
+    var counting = CountingAllocator.init(std.heap.smp_allocator);
+    const allocator = if (options.stats)
+        counting.allocator()
+    else
+        std.heap.smp_allocator;
     var threaded = std.Io.Threaded.init(allocator, .{});
     defer threaded.deinit();
     const io = threaded.io();
@@ -27,22 +34,26 @@ pub fn main(init: std.process.Init) !void {
 
     const Shared = struct {
         server: *netz.http2.runtime.Server,
+        shape: send_shape.Shape,
+        parts: usize,
+        iterations: usize,
+        compression: bool,
         err: ?anyerror = null,
 
         fn run(self: *@This()) void {
-            runFallible(self.server) catch |err| {
+            self.runFallible() catch |err| {
                 self.err = err;
             };
         }
 
-        fn runFallible(server_ptr: *netz.http2.runtime.Server) !void {
-            var h2 = try server_ptr.accept();
+        fn runFallible(self: *@This()) !void {
+            var h2 = try self.server.accept();
             defer h2.close();
             var ws = try netz.websocket.runtime.H2Server.accept(
-                server_ptr.allocator,
+                self.server.allocator,
                 &h2,
                 .{
-                    .enable_permessage_deflate = true,
+                    .enable_permessage_deflate = self.compression,
                     .limits = .{
                         .max_head_bytes = 4096,
                         .max_frame_bytes = payload_bytes,
@@ -52,18 +63,31 @@ pub fn main(init: std.process.Init) !void {
             );
             defer ws.close();
             var storage: [payload_bytes]u8 align(64) = undefined;
-            for (0..warmup_iterations + iterations) |_| {
+            var joined: [payload_bytes]u8 align(64) = undefined;
+            for (0..self.iterations) |_| {
                 const message = try ws.receiveMessageInto(&storage);
                 if (message.opcode != .binary or
                     message.payload.len != payload_bytes)
                 {
                     return error.InvalidFrame;
                 }
-                try ws.sendBinary(message.payload);
+                try send_shape.sendBinary(
+                    &ws,
+                    message.payload,
+                    self.shape,
+                    self.parts,
+                    &joined,
+                );
             }
         }
     };
-    var shared = Shared{ .server = &server };
+    var shared = Shared{
+        .server = &server,
+        .shape = options.send_shape,
+        .parts = options.parts,
+        .iterations = options.warmup_iterations + options.iterations,
+        .compression = options.compression,
+    };
     const server_thread = try std.Thread.spawn(.{}, Shared.run, .{&shared});
 
     var h2 = try netz.http2.runtime.Client.connect(
@@ -82,7 +106,7 @@ pub fn main(init: std.process.Init) !void {
         .{
             .authority = "localhost",
             .path = "/h2-echo-bench",
-            .enable_permessage_deflate = true,
+            .enable_permessage_deflate = options.compression,
             .limits = .{
                 .max_head_bytes = 4096,
                 .max_frame_bytes = payload_bytes,
@@ -94,28 +118,50 @@ pub fn main(init: std.process.Init) !void {
 
     var payload: [payload_bytes]u8 align(64) = undefined;
     var response: [payload_bytes]u8 align(64) = undefined;
+    var joined: [payload_bytes]u8 align(64) = undefined;
     for (&payload, 0..) |*byte, index| byte.* = @truncate(index);
-    for (0..warmup_iterations) |_| {
-        _ = try exchange(&ws, &payload, &response, fragmented);
+    for (0..options.warmup_iterations) |_| {
+        _ = try exchange(
+            &ws,
+            &payload,
+            &response,
+            options.fragmented,
+            options.send_shape,
+            options.parts,
+            &joined,
+        );
     }
+    const allocations_before = counting.snapshot();
     const started = nowNs(io);
     var checksum: u64 = 0;
-    for (0..iterations) |_| {
-        checksum +%= try exchange(&ws, &payload, &response, fragmented);
+    for (0..options.iterations) |_| {
+        checksum +%= try exchange(
+            &ws,
+            &payload,
+            &response,
+            options.fragmented,
+            options.send_shape,
+            options.parts,
+            &joined,
+        );
     }
     const elapsed = nowNs(io) -| started;
+    const allocations_after = counting.snapshot();
 
     server_thread.join();
     if (shared.err) |err| return err;
     const roundtrips_per_second: u128 = if (elapsed == 0)
         0
     else
-        (@as(u128, iterations) * std.time.ns_per_s) / elapsed;
+        (@as(u128, options.iterations) * std.time.ns_per_s) / elapsed;
     std.debug.print(
         \\RFC 8441 WebSocket persistent echo benchmark
         \\  warmup iterations: {d}
         \\  measured iterations: {d}
         \\  payload bytes: {d}
+        \\  send shape: {s}
+        \\  application parts: {d}
+        \\  permessage-deflate: {}
         \\  fragmented send slices: {d}
         \\  ns/roundtrip: {d}
         \\  roundtrips/s: {d}
@@ -123,17 +169,47 @@ pub fn main(init: std.process.Init) !void {
         \\  checksum: {d}
         \\
     , .{
-        warmup_iterations,
-        iterations,
+        options.warmup_iterations,
+        options.iterations,
         payload_bytes,
-        if (fragmented) fragmented_slices else 1,
-        elapsed / iterations,
+        options.send_shape.label(),
+        options.parts,
+        options.compression,
+        if (options.fragmented) fragmented_slices else 1,
+        elapsed / options.iterations,
         roundtrips_per_second,
         @as(f64, @floatFromInt(
             roundtrips_per_second * payload_bytes * 2,
         )) / (1024.0 * 1024.0),
         checksum,
     });
+    std.debug.print(
+        "record=result implementation=netz protocol=websocket-h2 " ++
+            "transport=h2c mode=binary-echo role_pair=netz-self " ++
+            "connection_scope=persistent benchmark_scope={s} " ++
+            "connections=1 warmup={d} iterations={d} payload_bytes={d} " ++
+            "payload_schedule=fixed send_shape={s} parts={d} compression={} " ++
+            "logical_bytes={d} elapsed_ns={d} " ++
+            "checksum={d} complete=true\n",
+        .{
+            if (options.parts == 1)
+                "single-buffer-echo"
+            else
+                "caller-copy-vs-direct-slices",
+            options.warmup_iterations,
+            options.iterations,
+            payload_bytes,
+            options.send_shape.label(),
+            options.parts,
+            options.compression,
+            options.iterations * payload_bytes * 2,
+            elapsed,
+            checksum,
+        },
+    );
+    if (options.stats) {
+        printAllocationDelta(allocations_before, allocations_after);
+    }
 }
 
 fn exchange(
@@ -141,6 +217,9 @@ fn exchange(
     payload: *[payload_bytes]u8,
     response_storage: *[payload_bytes]u8,
     fragmented: bool,
+    shape: send_shape.Shape,
+    part_count: usize,
+    joined: *[payload_bytes]u8,
 ) !u64 {
     if (fragmented) {
         var fragments: [fragmented_slices][]const u8 = undefined;
@@ -151,7 +230,13 @@ fn exchange(
         }
         try ws.sendFragmented(.binary, &fragments);
     } else {
-        try ws.sendBinary(payload);
+        try send_shape.sendBinary(
+            ws,
+            payload,
+            shape,
+            part_count,
+            joined,
+        );
     }
     const response = try ws.receiveMessageInto(response_storage);
     if (response.opcode != .binary or response.payload.len != payload_bytes) {
@@ -163,22 +248,84 @@ fn exchange(
         @as(u64, response.payload[payload_bytes - 1]);
 }
 
-fn parseFragmented(init: std.process.Init) !bool {
+const Options = struct {
+    fragmented: bool = false,
+    send_shape: send_shape.Shape = .contiguous,
+    parts: usize = 1,
+    warmup_iterations: usize = default_warmup_iterations,
+    iterations: usize = default_iterations,
+    compression: bool = true,
+    stats: bool = false,
+};
+
+fn parseOptions(init: std.process.Init) !Options {
     var args = try std.process.Args.Iterator.initAllocator(
         init.minimal.args,
         std.heap.smp_allocator,
     );
     defer args.deinit();
     _ = args.next();
-    var fragmented = false;
+    var options: Options = .{};
     while (args.next()) |arg| {
         if (std.mem.eql(u8, arg, "--fragmented")) {
-            fragmented = true;
+            options.fragmented = true;
+        } else if (std.mem.eql(u8, arg, "--no-compression")) {
+            options.compression = false;
+        } else if (std.mem.eql(u8, arg, "--stats")) {
+            options.stats = true;
+        } else if (std.mem.startsWith(u8, arg, "--send-shape=")) {
+            options.send_shape = try send_shape.Shape.parse(
+                arg["--send-shape=".len..],
+            );
+        } else if (std.mem.startsWith(u8, arg, "--parts=")) {
+            options.parts = try std.fmt.parseInt(
+                usize,
+                arg["--parts=".len..],
+                10,
+            );
+        } else if (std.mem.startsWith(u8, arg, "--warmup=")) {
+            options.warmup_iterations = try std.fmt.parseInt(
+                usize,
+                arg["--warmup=".len..],
+                10,
+            );
+        } else if (std.mem.startsWith(u8, arg, "--iterations=")) {
+            options.iterations = try std.fmt.parseInt(
+                usize,
+                arg["--iterations=".len..],
+                10,
+            );
         } else {
             return error.InvalidArgument;
         }
     }
-    return fragmented;
+    try send_shape.validatePartCount(options.parts);
+    if (options.iterations == 0) return error.InvalidArgument;
+    if (options.fragmented and
+        (options.send_shape != .contiguous or options.parts != 1))
+    {
+        return error.InvalidArgument;
+    }
+    return options;
+}
+
+fn printAllocationDelta(
+    before: counting_allocator.Snapshot,
+    after: counting_allocator.Snapshot,
+) void {
+    std.debug.print(
+        "  measured allocator calls: {d}\n" ++
+            "  measured frees: {d}\n" ++
+            "  measured resize/remap: {d}/{d}\n" ++
+            "  measured allocated bytes: {d}\n",
+        .{
+            after.alloc_count - before.alloc_count,
+            after.free_count - before.free_count,
+            after.resize_count - before.resize_count,
+            after.remap_count - before.remap_count,
+            after.total_allocated - before.total_allocated,
+        },
+    );
 }
 
 fn nowNs(io: std.Io) u64 {

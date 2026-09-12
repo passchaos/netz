@@ -1,6 +1,7 @@
 const std = @import("std");
 const netz = @import("netz");
 const benchmark = @import("webtransport_wtransport_bench.zig");
+const churn = @import("webtransport_wtransport_churn_client.zig");
 const CountingAllocator = @import("benchmark_counting_allocator")
     .CountingAllocator;
 
@@ -79,6 +80,9 @@ fn receiveExpectedStream(
 
 pub fn main(init: std.process.Init) !void {
     const args = try init.minimal.args.toSlice(init.arena.allocator());
+    if (args.len >= 3 and std.mem.eql(u8, args[1], "churn-client")) {
+        return churn.run(init, args[2..]);
+    }
     if (args.len >= 3 and std.mem.eql(u8, args[1], "bench-client")) {
         return runBenchmark(init, args[2..]);
     }
@@ -379,9 +383,11 @@ fn runBenchmarkWithAllocator(
         config,
         datagram_limit,
     );
-    try benchmark.runClient(allocator, io, &client, config);
-    try benchmark.sendCloseReady(&client, config);
-    try benchmark.receiveCloseAck(allocator, &client, config);
+    const control = try benchmark.openControlClient(&client, config);
+    try benchmark.runClient(allocator, io, &client, control, config);
+    try benchmark.sendCloseReady(&client, control, config);
+    try benchmark.receiveCloseAck(&client, control, config);
+    try benchmark.finishControlAndReceivePeerFin(&client, control, config);
     if (traffic) {
         benchmark.printNetzTraffic(
             "netz-client+wtransport-server",

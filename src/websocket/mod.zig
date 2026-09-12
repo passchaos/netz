@@ -2,7 +2,7 @@ const std = @import("std");
 const builtin = @import("builtin");
 const wire = @import("../internal/wire.zig");
 const http1 = @import("../http1/mod.zig");
-const vort = @import("vort");
+const vort = @import("../internal/vort.zig");
 
 pub const runtime = @import("runtime.zig");
 
@@ -155,7 +155,7 @@ pub const ExtensionNegotiation = struct {
         errdefer value.deinit(allocator);
         try value.appendSlice(allocator, "permessage-deflate");
         // Both directions deliberately reset at message boundaries. This keeps
-        // the runtime's bounded per-message scratch model while Vort's explicit
+        // the runtime's bounded per-message scratch model while the explicit
         // LZ77 window lets the sender honor a smaller server_max_window_bits.
         try value.appendSlice(allocator, "; server_no_context_takeover; client_no_context_takeover");
         if (offer.server_max_window_bits) |bits| {
@@ -1437,10 +1437,9 @@ pub fn compressMessageVortIntoWindowWithEncoder(
 
 /// Encode discontiguous RFC 7692 input without joining caller plaintext.
 ///
-/// Vort feeds all non-empty slices into one non-final fixed-Huffman block and
-/// follows it with one sync-flush block. Adjacent slices share one zero-copy
-/// parse run; a bounded rolling dictionary preserves matches across separate
-/// runs while the WebSocket message stream remains continuous.
+/// The encoder feeds all non-empty slices into one non-final fixed-Huffman
+/// block followed by one sync-flush block. The bounded hash chain preserves
+/// matches across caller-slice boundaries without joining plaintext.
 pub fn compressMessageFragmentsVortInto(
     output: *std.ArrayList(u8),
     allocator: std.mem.Allocator,

@@ -21,6 +21,9 @@ zig build interop-quic-quic-go -Doptimize=ReleaseFast
 zig build interop-quic-s2n -Doptimize=ReleaseFast
 zig build run-http3-fetch -Doptimize=ReleaseFast -- --discover --verify --head https://robotics.bytedance.com/
 zig build run-http3-fetch -Doptimize=ReleaseFast -- --alt-svc='h3=":443"; ma=2592000' --verify --head https://robotics.bytedance.com/
+zig build run-http3-fetch -Doptimize=ReleaseFast -- --alt-svc='h3=":443"; ma=86400' --verify --expect-status=200 --min-body-bytes=100000 https://cloudflare-quic.com/
+zig build run-http3-fetch -Doptimize=ReleaseFast -- --alt-svc='h3=":8443"; ma=86400' --verify --expect-status=200 --min-body-bytes=400 https://quic.tech/
+zig build interop-http3-public -Doptimize=ReleaseFast
 zig build bench-http3-handshake-transfer -Doptimize=ReleaseFast -- --iterations=2 --body-bytes=1048576 --mode=upload --streams=2 --verbose
 zig build bench-http3-handshake-transfer -Doptimize=ReleaseFast -- --iterations=2 --body-bytes=1048576 --mode=download --streams=1 --verbose
 zig build bench-http3-handshake-transfer -Doptimize=ReleaseFast -- --iterations=2 --body-bytes=1048576 --mode=download --streams=4 --verbose
@@ -129,6 +132,16 @@ change, including QUIC v1/v2, forced Retry, flow control, resets, cancellation
 retransmission, key update, migration, NAT rebinding, and peer close. Those
 gates do not themselves send an unsupported-version trigger, so the dedicated
 real-UDP Version Negotiation test remains the direct evidence for this path.
+The server Initial receiver now separates the RFC 9000 minimum UDP-datagram
+size from the first long-header packet's encoded Length. After validating the
+complete 1200-byte datagram, it can pass a shorter Initial packet slice into
+CRYPTO reassembly and discard an all-zero trailing invalid-packet suffix;
+nonzero trailing bytes remain rejected, and every later standalone Initial
+datagram still has to meet the 1200-byte minimum. This closes an observed tquic
+wire-shape failure: its 294-byte Initial plus 906-byte zero suffix previously
+entered a silent retry loop. Focused one- and two-packet tests cover strict,
+validated-slice, reordered continuation, and nonzero-tail cases; the complete
+tquic normal/Retry request and GOAWAY matrix now passes in both directions.
 The integrated Retry response now follows the same model. Fixed-size address
 validation tokens are encoded into caller storage, ODCID/RSCID binding is fed
 to HMAC incrementally instead of materializing a concatenated binding, and the
@@ -175,7 +188,7 @@ probe-sized temporary list on every search step. Recovery still takes stable
 ownership before the socket write. A real UDP regression sends and retires one
 probe, then re-arms the same size under an allocator that rejects all new
 allocations; the second exact-size probe succeeds with stable scratch pointers.
-The full 1,610-test suite and both quic-go and s2n-quic transport matrices
+The full 2,958-test Netz suite and both quic-go and s2n-quic transport matrices
 remain green after the change.
 QUIC PMTU handling now also detects path MTU black holes from ordinary
 non-probe loss bursts instead of only explicit probe loss. The implementation
@@ -277,7 +290,7 @@ before scan fusion and 54.04 MiB/s after it; this noise-level result is treated
 only as a no-regression check. H3 now also reads connection flow, congestion,
 and PMTU once per refresh and uses QUIC's narrow per-stream credit query inside
 the loop; the same shape measured 54.23 MiB/s, again within noise. The full
-1,611-test suite and quic-go v1/v2 plus tquic normal/Retry/GOAWAY gates remain
+2,958-test Netz suite and quic-go v1/v2 plus tquic normal/Retry/GOAWAY gates remain
 green.
 Handshake-backed request, response, streaming-head, and trailer sends now keep
 one encoded-byte buffer and one borrowing STREAM-frame descriptor list per
@@ -297,15 +310,35 @@ message/frame scratch to complete request/response sequences, streaming heads,
 and trailers. Their paced streaming writers also accept borrowed body-part
 slices, avoiding caller-side concatenation while preserving one final FIN, and
 can batch one DATA contribution per stream through one protected UDP batch while
-committing only the socket-visible prefix. The lightweight server applies the
+committing only the socket-visible prefix. Request and response DATA, borrowed
+body-part, batch, and trailer writers expose relative-timeout and absolute-deadline
+variants. One awake-clock deadline is checked before every protected socket
+batch; zero progress remains retryable, while `BodyWriteProgress` and batch
+progress report the exact visible byte/chunk prefix so callers can resume only
+the unsent suffix. A visible multi-packet prefix followed by failure keeps the
+existing fail-closed protected-sender rule. Invalid-clock and already-expired
+calls leave packet number, body offset/length/FIN, lifecycle, and pending QPACK
+sections unchanged. End-to-end tests expire immediately after the first DATA
+packet in both directions, resume the precise suffix, finish with bounded
+trailers, and verify the peer receives the complete body and trailers exactly
+once; a lower-level test crosses the maximum protected packet-batch boundary.
+The lightweight server applies the
 same RFC 9218 urgency/incremental selection to complete response bodies, using
-the configured peer stream window as its sendability bound. Protected sends synchronously protect and submit the datagrams
+the configured peer stream window as its sendability bound. Its multi-response
+scheduler also exposes relative-timeout and absolute-deadline forms with one
+socket-visible committed-byte counter per input response. The complete input
+set is validated before sending; a deadline or socket error after a packet
+prefix updates both the public counters and internal scheduling cursor before
+returning, so callers can rebuild the next call from each exact suffix. A real
+protected-wire priority test covers zero-progress timeout, transactional length
+validation, first-packet expiry, suffix resumption, and complete peer-visible
+responses in priority order. Protected sends synchronously protect and submit the datagrams
 before returning, so these borrowing descriptors have the same bounded lifetime;
 Push remains separate because its promise and pushed-response encodings must be
 live together. Three dynamic-QPACK exchanges assert stable backing pointers on
 both endpoints, while streamed request/response tests reuse the same allocations
 from HEADERS through trailers and through a flow-control-blocked trailer retry.
-The full 1,589-test suite, quic-zig QPACK gate, quic-go v1/v2 matrix, tquic
+The full 2,958-test Netz suite, quic-zig QPACK gate, quic-go v1/v2 matrix, tquic
 normal/Retry and GOAWAY matrix, and native wtransport matrix remain green. A
 post-change CPU-0 cleartext regression measured 9.765 us/request over 1,000
 persistent requests; a five-run 1-MiB real-handshake upload measured 107.40
@@ -319,7 +352,7 @@ allocations that the former single-packet convenience path still performed. A
 fail-first test proves SETTINGS state/offset rollback, then switches both the
 HTTP/3 sender and UDP endpoint to an allocator that rejects allocation and
 successfully sends warmed SETTINGS, encoder instructions, decoder feedback, and
-a single packet without moving any scratch allocation. The 1,590-test suite,
+a single packet without moving any scratch allocation. The 2,958-test Netz suite,
 quic-zig QPACK gate, quic-go v1/v2 matrix, tquic normal/Retry/GOAWAY matrix, and
 native wtransport matrix remain green. Five CPU-0 cleartext samples measured
 9.554-9.710 us/request (9.647 us mean, 0.71% standard deviation), again an
@@ -333,7 +366,7 @@ prefix edge cases. Tests exercise both endpoints across multiple chunks, prove
 that the common path never allocates the full DATA payload, and retry a
 flow-control-blocked final chunk under an allocator that rejects every new
 allocation while checking stream offset, byte-count, FIN, packet-number, and
-scratch-pointer stability. The full 1,591-test suite plus quic-go v1/v2, tquic
+scratch-pointer stability. The full 2,958-test Netz suite plus quic-go v1/v2, tquic
 normal/Retry/GOAWAY, and native wtransport gates remain green. Five CPU-0
 cleartext samples measured 9.569-9.674 us/request (9.645 us mean, 0.40% standard
 deviation). A six-iteration real-handshake 1-MiB upload regression measured
@@ -341,13 +374,28 @@ deviation). A six-iteration real-handshake 1-MiB upload regression measured
 Server Push now owns a separate reusable pair of encoded buffers plus one frame
 descriptor list in both handshake and protected server sessions. Two buffers
 remain necessary because the parent PUSH_PROMISE/response and pushed response
-must coexist until their borrowing STREAM descriptors have been copied into
-transport-owned packet/recovery storage. A two-exchange protected test verifies the
+heads must coexist until their borrowing STREAM descriptors have been copied
+into transport-owned packet/recovery storage. The `sendResponseWithPushPaced*`
+family keeps DATA and trailers out of that head batch and advances the pushed
+stream first, followed by any parent body, in bounded contributions. This keeps
+a large parent from starving the advertised push and lets a 64 KiB pushed
+response complete through 16 KiB
+connection and unidirectional-stream windows as the client consumes data and
+returns credit. Its authenticated implementation checks `CANCEL_PUSH` and
+`STOP_SENDING` between chunks, sends the required RESET_STREAM, releases local
+stream/body state, and returns `RequestCancelled` without closing the
+connection. The client records cancelled push-stream ordinals compactly and
+credits/discards already in-flight bytes instead of recreating a bounded push
+reader after STOP_SENDING. One absolute deadline covers setup, heads, receive-side progress,
+DATA, and trailers; non-cancellation failure after visible heads is fail-closed
+because the aggregate API exposes no suffix cursor. The lightweight protected
+variant retains the same bounded framing and marks its send state unusable if a
+later aggregate step fails. A two-exchange protected test verifies the
 parent, pushed, and frame backing pointers remain stable while stream and push
 IDs advance. A fail-first full protected-send test forces the pushed-response
 buffer to grow after the parent acquired dynamic QPACK references and verifies
 pending sections, reference counts, encoder offset/prefix, and packet number all
-roll back. The 1,592-test suite plus quic-go v1/v2, tquic normal/Retry/GOAWAY,
+roll back. The 2,958-test Netz suite plus quic-go v1/v2, tquic normal/Retry/GOAWAY,
 and native wtransport matrices remain green. The unrelated cleartext benchmark
 was noisy at 9.764-10.753 us/request across the five stable follow-up samples
 (10.205 us mean, 4.17% standard deviation), so it is retained only as a
@@ -361,7 +409,7 @@ built frame. The dynamic-QPACK handshake test records stable critical-scratch
 capacity and backing pointers across steady-state instruction/feedback rounds;
 a direct connection test forces the initial SETTINGS allocation to fail and
 verifies settings state, all critical stream offsets, prefix flags, and packet
-number remain unchanged before a successful retry. The full 1,593-test suite,
+number remain unchanged before a successful retry. The full 2,958-test Netz suite,
 quic-zig QPACK gate, quic-go v1/v2 matrix, tquic normal/Retry/GOAWAY matrix, and
 native wtransport matrix remain green. Five CPU-0 real-handshake 1-MiB upload
 runs measured 104.96-109.62 MiB/s (108.17 MiB/s mean); this transfer-dominated
@@ -439,25 +487,178 @@ same parent connection after the opposite half closes.
 
 | Area from `~/Work/quicz` examples | netz status | Evidence | Remaining work |
 | --- | --- | --- | --- |
-| QUIC 1-RTT STREAM echo (`quic_echo_*`, `udp_one_rtt_loopback`) | Covered with latency evidence and an equal-CPU-layout quic-go throughput harness | `examples/quic_echo.zig`, `examples/bench_quic_handshake_stream.zig`, and `bench-quic-quic-go`; CPU-0-pinned netz P50/P99/P99.9 echo ranges were 10.44-10.57 / 15.22-15.53 / 31.89-47.02 us versus quicz 10.5-10.7 / 16.0-19.5 / 206.3-211.2 us. The cross-process harness pins client/server to separate CPUs, runs both sender roles on fresh certificate-verified connections, and requires exact FIN/bytes/checksum for 1 and 4 unidirectional streams. Five 4 MiB-per-stream samples measured netz at 172.74-228.77 MiB/s for one stream and 145.62-216.66 MiB/s for four, depending on endpoint role; quic-go measured 43.78-126.12 and 115.01-122.68 MiB/s. Complete-connection userspace socket accounting now joins both endpoint records per sample. Three matching 4 MiB samples measured 4.323-4.335 MB UDP payload for one-stream netz senders versus 4.449-4.454 MB for quic-go senders, and 17.275-17.498 MB versus 18.358-18.895 MB for four streams; quic-go sender shapes also used roughly twice as many UDP datagrams. An opt-in memory pass measured whole-process peak RSS at 9,248-9,336 KiB for one-stream netz senders versus 26,368-26,624 KiB for quic-go senders, and 27,440-27,608 versus 51,332-51,456 KiB for four-stream senders; receiver ranges were also retained separately. Netz explicit-allocation and Go runtime-heap counters are labeled as non-comparable runtime diagnostics. The quic-go correctness gate independently verifies client stream 2 and server stream 3 plus FIN, while `interop-quic-s2n` verifies two FIN-terminated bidirectional streams and peer close. | Socket-boundary evidence proves the current workloads are not equal-wire. Repeat with kernel/interface capture on a permitted host and equalize GRO, ACK/pacing, packetization, and application scheduling before a general STREAM ratio. |
-| QUIC TLS 1.3 handshake latency/rate (`quic_bench_hs`) | Covered with authenticated and quicz-aligned modes | `examples/bench_quic_handshake_stream.zig`, `--mode=handshake`; verified samples sustained 824.1-830.7 conn/s with P50 1172.1 us. `--skip-server-verification` retains Certificate/signing while matching quicz client policy; five CPU-0 runs measured P50 657.9-833.0 us and median 881.9 conn/s versus three quicz runs at P50 800.3-811.9 us and median 749.3 conn/s. Exact Initial sizing cut allocator calls from 167.0 to 92.0 per connection. Direct client/server and caller-supplied datagram-source paths expose relative-timeout and absolute-deadline variants; server variants also cover a pre-received Initial. One awake-clock timestamp covers Initial, fragmented Initial CRYPTO, Retry, Version Negotiation or optional standalone 0-RTT, and all active/passive TLS flights while retaining an earlier configured recovery deadline. Before address validation, server Initial/Handshake flights, PTO retransmissions, and protocol-error closes share an exact full-datagram 3x receive budget; valid Retry/NEW_TOKEN or an authenticated client Handshake packet removes that limit. A silent-client regression starts with one 1200-byte tokenless Initial and proves multiple PTO attempts never emit more than 3600 bytes. Every successfully transmitted 0-RTT PTO copy is imported into the shared application-data packet-number space after acceptance, shares one recovery payload group, and can be acknowledged independently; rejected or pre-Retry 0-RTT still advances the first 1-RTT packet number without retaining stream/flow state or becoming ACK-valid. Real-handshake loss tests require the first 1-RTT packet to follow the dynamically observed 0-RTT copy count. | Equalize worker scheduling and reduce p99 variance before a whole-surface handshake claim. |
+| QUIC 1-RTT STREAM echo (`quic_echo_*`, `udp_one_rtt_loopback`) | Covered with local and cross-process latency evidence plus an equal-CPU-layout quic-go throughput harness | `examples/quic_echo.zig`, `examples/bench_quic_handshake_stream.zig`, `bench-quic-quic-go`, and `bench-quic-persistent-external`; CPU-0-pinned local netz P50/P99/P99.9 echo ranges were 10.44-10.57 / 15.22-15.53 / 31.89-47.02 us versus quicz 10.5-10.7 / 16.0-19.5 / 206.3-211.2 us. The certificate-verified two-process persistent 1-KiB echo keeps one request outstanding: five final-schema runs gave netz-client median P50 24.172 us versus quic-go-client 25.851 us against a fixed quic-go server (1.069x), and 23.729 versus 24.361 us against a fixed netz server (1.027x). The fresh-connection throughput harness pins client/server separately, runs both sender roles, and requires exact FIN/bytes/checksum for 1 and 4 unidirectional streams. Complete-connection userspace socket accounting is also available. All external comparisons remain `same-application-shape`. | Socket-boundary evidence proves the current workloads are not equal-wire. Repeat with kernel/interface capture on a permitted host and equalize GRO, ACK/pacing, packetization, and application scheduling before a general STREAM ratio. |
+| QUIC TLS 1.3 handshake latency/rate (`quic_bench_hs`) | Covered with authenticated and quicz-aligned modes | `examples/bench_quic_handshake_stream.zig`, `--mode=handshake`; verified samples sustained 824.1-830.7 conn/s with P50 1172.1 us. `--skip-server-verification` retains Certificate/signing while matching quicz client policy; five CPU-0 runs measured P50 657.9-833.0 us and median 881.9 conn/s versus three quicz runs at P50 800.3-811.9 us and median 749.3 conn/s. Exact Initial sizing cut allocator calls from 167.0 to 92.0 per connection. Direct client/server and caller-supplied datagram-source paths expose relative-timeout and absolute-deadline variants; server variants also cover a pre-received Initial. One awake-clock timestamp covers Initial, fragmented Initial CRYPTO, Retry, Version Negotiation or optional standalone 0-RTT, and all active/passive TLS flights while retaining an earlier configured recovery deadline. Before address validation, server Initial/Handshake flights, PTO retransmissions, and protocol-error closes share an exact full-datagram 3x receive budget; valid Retry/NEW_TOKEN or an authenticated client Handshake packet removes that limit. A silent-client regression starts with one 1200-byte tokenless Initial and proves multiple PTO attempts never emit more than 3600 bytes. Every protected 0-RTT attempt consumes its one-shot ticket and packet number even if the UDP socket reports zero progress. Successfully transmitted PTO copies are imported into the shared application-data packet-number space after acceptance, share one recovery payload group, and can be acknowledged independently; rejected or pre-Retry 0-RTT still advances the first 1-RTT packet number without retaining stream/flow state or becoming ACK-valid. The typed HTTP/3 early-request helper emits SETTINGS plus both QPACK critical-stream prefixes with one complete literal/static-QPACK request, explicitly reports accepted versus rejected so replay remains an application decision, restores request response semantics and stream cursors after acceptance, routes server-side preloaded early streams before blocking reads, and rejects reduced remembered HTTP/3 SETTINGS. Real-handshake loss tests require the first 1-RTT packet to follow the dynamically observed 0-RTT copy count. | Equalize worker scheduling and reduce p99 variance before a whole-surface handshake claim. |
 | QUIC stream-open churn (`quic_bench_hs`) | Covered and faster for the reference reservation workload; on-wire peer-stream renewal and mixed FIN/reset churn are verified under clean, bidirectional-loss, and bidirectional-reorder schedules | `examples/bench_quic_handshake_stream.zig`, `--mode=stream-churn`; CPU-0-pinned netz sustained 680.2-778.0M streams/s versus quicz 48.1-52.0M streams/s, a 13.1-16.2x range. IDs, limit enforcement, both endpoint roles, zero timed-loop allocation, final ID and checksum are validated. `openStreamWith{Timeout,Deadline}` and the unidirectional counterparts wait for authenticated cumulative MAX_STREAMS while pumping packets and QUIC timers under one absolute awake-clock deadline; timeout and invalid-clock rejection leave the next ID untouched. The original open APIs remain immediate and return `StreamLimitExceeded`. `Connection.pollOpenStream`/`pollOpenUnidirectionalStream` and the handle-based dispatcher counterparts instead reserve only already-available credit: they never read the UDP socket, wait, emit STREAMS_BLOCKED, or advance a blocked cursor, and dispatcher calls refresh the centralized timer even on close errors. Tests route authenticated bidi and uni MAX_STREAMS through the sole dispatcher receive owner before polling succeeds. `--mode=lifecycle-churn` keeps a bounded concurrent credit set, alternates one-byte FIN/echo and RESET_STREAM with exact codes, and requires cumulative MAX_STREAMS before reusing each batch. Its two-endpoint receive wait uses the earliest timer from either connection and no fixed polling quantum. A 128-stream/16-credit smoke verified clean, seeded 5% loss in both directions (14/276 and 16/284 injected drops), and every-fifth-datagram bidirectional reordering (45/228 and 45/227 holds), including exact terminal counts, final stream ID, checksum, and injection counts. The production batch-release API emits one cumulative MAX_STREAMS packet for up to 64 completed streams instead of one packet each, but only after the local FIN or RESET_STREAM and preceding reliable stream data are acknowledged; an early application release request is retained and flushed by the ACK path. Released peer and local streams are removed from active send/receive maps, each stream-number space collapses sequential IDs into a watermark and sparse closures into merged ranges, late frames cannot recreate upper-protocol state, failed automatic credit sends retry from the aggregate connection timer, and ID-based pagination remains stable across swap removal. The quic-go process gate separately advertises one bidirectional stream and requires completed streams 0, 4, 8, and 12. | Add an equal quicz on-wire lifecycle harness before claiming a cross-stack throughput ratio. |
-| QUIC concurrent aggregate (`quic_bench_hs`) | Covered and faster for four independent connections | `examples/bench_quic_handshake_stream.zig`, `--mode=aggregate --connections=4 --transfer-bytes=67108864`; netz completed at 730.35-900.57 MiB/s versus quicz 503.23-533.10 MB/s, a conservative 1.37-1.79x range, while verifying 4 x 64 MiB at receiver completion. | Add connection-count scaling curves and shared-event-loop comparison before generalizing beyond the four-worker shape. |
+| QUIC concurrent aggregate (`quic_bench_hs`) | Covered for four independent connections, including an external quic-go process matrix | `examples/bench_quic_handshake_stream.zig`, `--mode=aggregate --connections=4 --transfer-bytes=67108864`, and `bench-quic-persistent-external --mode=aggregate`; the internal netz run completed at 730.35-900.57 MiB/s versus quicz 503.23-533.10 MB/s. The external five-run 4 x 1-MiB matrix pins client/server processes to separate CPUs, starts every connection through one GO barrier, and validates 40 client results plus 40 server completions. With a fixed quic-go peer, final-schema runs measured netz senders at 152.580 and 149.825 MiB/s medians versus quic-go's 111.179 and 112.307 MiB/s (1.372x/1.334x). The netz/netz control fell to 73.333/66.736 MiB/s in the other two fixed-endpoint comparisons, exposing same-process single-CPU worker contention rather than supporting a universal claim. | Add connection-count scaling and a shared-socket event-loop comparison; investigate netz/netz single-CPU worker contention. |
 | QUIC simulated loss (`quic_bench_hs`) | Covered and faster for all four reference scenarios | `examples/bench_quic_handshake_stream.zig`, `--mode=loss`; 1%/5% loopback and 1%/5% with 100 us RTT were conservatively 1.08-1.45x faster than quicz, with deterministic injected-drop counts, full 4 MiB receiver completion, transport loss counters and optional memory telemetry. | Add bidirectional loss, reordering and corruption cases before generalizing beyond the reference one-way loss model. |
 | QUIC DATAGRAM (`datagram_echo`, `quic_bench_datagram`) | Covered and faster than current quicz DATAGRAM sample | `examples/quic_datagram_echo.zig`, `examples/bench_quic_datagram.zig`, `examples/bench_webtransport_datagram.zig`, `zig build run-quic-datagram-echo`, `zig build bench-quic-datagram -Doptimize=ReleaseFast`. DATAGRAM packets remain ACK-eliciting and congestion-controlled but RFC 9221 payload bytes no longer enter the retransmission cache: pure-DATAGRAM PTO sends a fresh PING, and mixed packets retain only reliable frames. Explicit timeout/deadline send APIs wait for ACK credit without an unbounded queue; HTTP/3/WebTransport adapters preserve their packet routing while waiting. | Keep raw and WebTransport DATAGRAM benchmarks in the comparison matrix. |
 | Graceful/application close (`graceful_close`, close lifecycle) | Covered by local tests/examples and exact bidirectional quic-go process checks | `examples/quic_close.zig`, one_rtt lifecycle tests, `zig build run-quic-close`, and `zig build interop-quic-quic-go -Doptimize=ReleaseFast`; netz validates quic-go's peer application close code 57/reason `quic-go interop complete`, while quic-go validates netz code 58/reason `netz interop complete` | Add long-lived graceful shutdown/draining timing only if application shutdown workloads require it. |
 | Packet protection / initial keys / key update | Covered by modules, tests, and quic-go process interop | `src/quic/protection.zig`, `src/quic/zero_rtt`, `src/quic/one_rtt/tests/basic.zig`, `src/quic/one_rtt/tests/crypto_path.zig`, `zig build test`, and `zig build interop-quic-quic-go -Doptimize=ReleaseFast`; the external gate has netz initiate two ACK-gated 1-RTT key updates, verifies both local and peer update counters reach two and both phases return to zero, while quic-go decrypts and echoes one fresh stream in each generation. A connection-level test now sends and receives a FIN-terminated STREAM, advances Key Phase, and receives another STREAM for AES-128-GCM/SHA-256, AES-256-GCM/SHA-384, ChaCha20-Poly1305/SHA-256, and SM4-GCM/SM3. Netz delegates next-secret derivation to Vail's suite-aware QUIC implementation, closing the former SM3 key-update initialization trap. Authenticated and preconfigured `EstablishedConnection` values retain and expose their negotiated cipher suite/hash and forward key-update control, local/peer counts, and the ACK gate without requiring callers to reach into the packet engine. | Keep vector and external coverage current as TLS suites evolve. |
 | Loss recovery / PTO / retransmission | Partially covered and improved, with two-peer process evidence | Recovery tests cover timer-driven losses and bounded payload caching; recovery also validates then streams arbitrary ACK range counts without a decoded-range allocation, unlike the audited quicz allocating ACK decode. ACK_FREQUENCY capabilities are directional: only the endpoint that advertised `min_ack_delay` accepts the peer's requests, and only a peer advertisement enables local sends. New requests are transactionally rejected with PROTOCOL_VIOLATION when Requested Max Ack Delay is below that advertised minimum or at least 2^14 milliseconds; obsolete sequence numbers remain ignored, while zero Ack-Eliciting/Reordering Threshold values retain their specified meanings. Established 1-RTT connections optionally apply independently seeded, bounded PTO jitter (0–50%) using a stable per-arm epoch, so repeated scheduler reads cannot move an armed deadline; zero remains deterministic and consumes no entropy, and the separate pre-establishment handshake retransmission timer is unchanged. Receive preflight uses packet-local path/stream shadows instead of cloning heap-backed path-validation state per packet. A one-STREAM packet now keeps the same transactional `RecvState.Preflight` checks but skips the unrelated multi-stream, connection-ID, and path-validation shadows; seven CPU-0 order-alternated pairs reduced the visitor median from 1328 to 1308 ns/packet (1.5%) and service from 1336 to 1298 ns/packet (2.8%), with every pair faster, while five padding pairs moved only from 1397 to 1395 ns/packet (0.1%, noise-level). `RecvState` also packs received-byte presence into capacity-retaining machine words instead of one bool byte per buffered byte. Against the preflight-fast baseline, five visitor pairs reduced the median from 1324 to 1166 ns/packet (11.9%) and seven service pairs from 1328 to 1172 ns/packet (11.7%), with every pair faster; the STREAM profile's `memset` share fell from about 11.5% to 0.22%. Ordered non-overlapping STREAM frames also skip bytewise duplicate scans, while retransmission overlap retains strict conflict accounting. Recovery payloads keep four direct power-of-two blocks per class and use payload-intrusive O(1) overflow lists under the existing 1 MiB cap, allowing a dominant 4-KiB class to absorb ACK bursts without per-block metadata. The recovery queue no longer maintains two hash indexes on every send and rebuilds them on every ACK; its hot ordered scans stay contiguous, monotonic packet-number insertion is O(1), and rare direct lookups scan the bounded in-flight queue. ACK compaction scans entries by pointer, recycles matches in place, and copies only survivors that move; a clean twenty-pair A/B measured +8.6% mean/+14.4% median. Clean single-range ACKs with no retransmission copies now binary-search the monotonic original-packet queue and recycle one selected slice, while multi-range/retransmission/unsorted cases preserve the scan fallback; forty clean pairs improved mean throughput 4.1% and median pair ratio 2.2%, and three 5%-loss runs recovered every byte. Loss-timer queries reuse the cached latest ACK-eliciting packet when it is ordinary data and scan only when a PMTU probe owns that cache; the next five-pair CPU-0 A/B improved the same H3 workload another 7.5% mean/7.4% median and reduced timer self samples from 13.5% to 2.0%. ACK processing also compares monotonic acknowledged-ECT and validated ACK_ECN watermarks in O(1), preserving the result after packet-metadata compaction; the following captured five-pair A/B improved mean/median another 10.5%/13.7% and removed the prior 2.7% scan from the profile. Single-ACK packets now reuse their shape-bound transactional precheck summary during apply, avoiding a second metadata scan while multi-frame packets preserve independent validation; two clean order-balanced ten-pair sets measured +3.4% for both mean and median and reduced `precheckAckRanges` samples from 5.35% to 1.67%. Sent-packet metadata compaction now clears its best-effort exact index in O(1), rather than removing retired keys and rewriting every survivor; two clean twenty-pair sets measured +7.3% mean/+2.6% median and removed `refreshPacketIndexFrom` from the profile. Single-packet send preparation also folds wire length, recovery length, flight/ACK traits, HANDSHAKE_DONE detection, and largest-ACK observation into one frame pass; a clean twenty-pair A/B measured +10.6% mean and removed standalone `Frame.wireLen` from the top profile. The preceding five-pair steps improved it by 33.8% and 28.5%; 5% packet-loss runs remained throughput-neutral while recovering every byte. Thread-safe telemetry after the first step reduced median allocations 29.6%, exact 4-KiB allocations 49.6%, cumulative allocated bytes 22.0%, and peak live bytes 15.5%. The real-handshake raw STREAM gate reorders every fifth client datagram and verifies all 4 MiB; a corruption mode flips authenticated ciphertext in exactly 25/504 datagrams and recovers all data. The quic-go process gate independently drops four netz server datagrams during Initial flight and four after application STREAM data. Separate s2n-quic connections drop netz's first post-arm RESET_STREAM or STOP_SENDING datagram and require the exact cancellation code after recovery. | Add broader reordering/corruption distributions and long-run recovery benchmarks; aggressive non-default packet/body sizing still needs separate coverage. |
 | Flow control / stream reset / STOP_SENDING | Covered by implementation, tests, and two external QUIC peers, including cancellation loss | `src/quic/flow_control.zig`, `src/quic/stream.zig`, one_rtt tests, `zig build interop-quic-quic-go -Doptimize=ReleaseFast`, `zig build interop-quic-s2n -Doptimize=ReleaseFast`, and `zig build interop-http3-quic-go -Doptimize=ReleaseFast`; the raw external clients send RESET_STREAM error 41, separately observe STOP_SENDING error 42 and return RESET_STREAM error 42, and prove a concurrent stream 4 remains usable. Both external matrices transfer/echo 12 KiB through advertised 8 KiB connection and 2 KiB stream windows; the s2n-quic case also requires netz to observe actual flow-control blocking before credit advances. Receive-side connection `MAX_DATA` accounting follows RFC 9000's sum of each stream's highest received offset: sparse STREAM gaps consume credit, lower-offset gap fills and retransmissions do not consume it again, and RESET_STREAM charges only the remaining distance to its final size. Encrypted-packet regressions cover the single-STREAM fast path, mixed STREAM/RESET multi-frame preflight and rollback, and reordered data after reset. This closes a sparse-offset credit bypass still present in the audited quicz implementation, which counts newly stored payload bytes. `one_rtt.Connection.pollStream` exposes allocation-free, socket-free data/FIN/reset events for dispatcher loops, returns receive credit as bytes are copied, reports zero-length FIN plus RESET_STREAM exactly once, and rotates across ready streams so one busy stream cannot starve its siblings. `pollStreamId` provides targeted access without disturbing that fair cursor. An opt-in `enable_reset_partial_delivery` policy now drains the contiguous prefix buffered when RESET_STREAM arrives, including across small caller buffers and targeted polling, before reporting the reset exactly once. Later reordered STREAM data remains transport validation state and is never delivered after that reset boundary. The default remains reset-first and retains unread transport bytes only for reordered/duplicate validation. Handshake-created connections propagate the same policy. Matching blocking, relative-timeout, and absolute-deadline receive methods use the timer-aware packet service loop and retain partial stream state across timeout. Two additional s2n-quic client connections use netz's stable UDP send interceptor to drop exactly the first datagram after RESET_STREAM(41) or STOP_SENDING(42), then require the peer-visible exact code after recovery and sibling completion. The quic-go matrix additionally advances from stream 0 through 12 under an initial one-stream limit. The HTTP/3 gate drops the first H3_REQUEST_CANCELLED STOP_SENDING in each direction and requires retransmission, exact sender observation, and completion of a concurrent sibling under fixed flow-control windows. | Extend cancellation-loss coverage to reordered cancellation and longer mixed FIN/reset churn. |
-| Connection IDs / stateless reset / path validation / migration | Covered in modules/tests with external active-migration and NAT-rebinding gates | `src/quic/connection_id.zig`, `src/quic/stateless_reset.zig`, `src/quic/path_validation.zig`, lifecycle tests, and `zig build interop-quic-quic-go -Doptimize=ReleaseFast`; on accepted peer tuples, every ordinary owning, borrowed/timer-aware, batch, and routed 1-RTT receive path checks active peer reset tokens only after authentication fails, enters draining for three current PTOs, and excludes matching resets from the AEAD integrity counter. RFC 9000's endpoint-role asymmetry is enforced before decryption: clients silently discard unknown server tuples; servers retain authenticated client NAT rebinding/migration unless their own advertised `disable_active_migration` policy chooses RFC 9000's drop behavior for new client IPs. The peer's parameter remains distinct and only constrains local active migration. These drops do not change packet-number, stream, key-update, path, AEAD-failure, or telemetry state. CID routing itself no longer treats unauthenticated source addresses as connection errors, and the dispatcher consumes both established-path policy drops and pending-handshake peer mismatches. During preferred-address validation the selected preferred tuple and retained prior validated tuple remain usable, but a third tuple is still discarded. The integrated client handshake registers the server's initial-CID transport-parameter token, while an unnegotiated initial CID no longer treats its zero-filled storage as a token. Netz issues three additional CIDs, and quic-go migrates one connection from `127.0.0.1` through `127.0.0.2` to `127.0.0.3` on distinct source ports. Both candidate paths reject `Path.Switch` before validation, complete PATH_CHALLENGE/PATH_RESPONSE probing, switch, and carry streams 4 and 8. A second run drops the first PATH_RESPONSE on each candidate path, then requires netz's blocking receive timer to retransmit both PATH_CHALLENGEs before the same two migrations and echoes can finish. A separate connection swaps its UDP socket to a new `127.0.0.1` source port without `AddPath`, drops four post-rebinding datagrams, recovers the stream by PTO, and proves netz selected the new tuple while keeping it validated and queuing no path challenge. | Extend the verified two-hop shape to longer path-churn runs before generalizing beyond loopback. |
+| Connection IDs / stateless reset / path validation / migration | Covered in modules/tests with external active-migration and NAT-rebinding gates | `src/quic/connection_id.zig`, `src/quic/stateless_reset.zig`, `src/quic/path_validation.zig`, lifecycle tests, and `zig build interop-quic-quic-go -Doptimize=ReleaseFast`; on accepted peer tuples, every ordinary owning, borrowed/timer-aware, batch, and routed 1-RTT receive path checks active peer reset tokens only after authentication fails, enters draining for three current PTOs, and excludes matching resets from the AEAD integrity counter. RFC 9000's endpoint-role asymmetry is enforced before decryption: clients silently discard unknown server tuples; servers retain authenticated client NAT rebinding/migration unless their own advertised `disable_active_migration` policy chooses RFC 9000's drop behavior for new client IPs. The peer's parameter remains distinct and only constrains local active migration. These drops do not change packet-number, stream, key-update, path, AEAD-failure, or telemetry state. CID routing itself no longer treats unauthenticated source addresses as connection errors, and the dispatcher consumes both established-path policy drops and pending-handshake peer mismatches. Pending PATH_RESPONSE state is capped per connection (default 8, matching tquic's receive-side challenge cap): excess unique PATH_CHALLENGEs are ignored without rejecting the authenticated packet, FIFO/index/target-address storage stays aligned, and a dropped counter exposes sustained pressure. During preferred-address validation the selected preferred tuple and retained prior validated tuple remain usable, but a third tuple is still discarded. The integrated client handshake registers the server's initial-CID transport-parameter token, while an unnegotiated initial CID no longer treats its zero-filled storage as a token. Netz issues three additional CIDs, and quic-go migrates one connection from `127.0.0.1` through `127.0.0.2` to `127.0.0.3` on distinct source ports. Both candidate paths reject `Path.Switch` before validation, complete PATH_CHALLENGE/PATH_RESPONSE probing, switch, and carry streams 4 and 8. A second run drops the first PATH_RESPONSE on each candidate path, then requires netz's blocking receive timer to retransmit both PATH_CHALLENGEs before the same two migrations and echoes can finish. A separate connection swaps its UDP socket to a new `127.0.0.1` source port without `AddPath`, drops four post-rebinding datagrams, recovers the stream by PTO, and proves netz selected the new tuple while keeping it validated and queuing no path challenge. | Extend the verified two-hop shape to longer path-churn runs before generalizing beyond loopback. |
+| Latency spin bit | Covered as an opt-in direct and authenticated-handshake policy | `OneRttConfig.enable_spin_bit` reaches established connections while retaining the disabled default and independently suppressing one in sixteen handshake connections. The value and highest authenticated packet number are tracked separately for the current, retained validated, and bounded candidate paths. Reordered lower packet numbers cannot roll the signal backward; NAT rebinding and migration select the new path's state, failed validation restores the retained path's state, and changing the destination connection ID resets the selected path to zero. Real UDP tests inspect protected short-header bits after a handshake, reordering, manual CID selection, automatic `retire_prior_to` replacement, candidate traffic, NAT rebinding, and failed migration. | Keep passive-observation comparisons scoped to controlled paths; the spin signal is intentionally absent from the randomized disabled sample. |
 | Retry/token/address validation | Covered by implementation, local replay tests, and certificate-verified quic-go and s2n-quic process gates | `src/quic/retry_flow.zig`, `src/quic/address_validation_token.zig`, handshake/retry tests, `zig build interop-quic-quic-go -Doptimize=ReleaseFast`, and `zig build interop-quic-s2n -Doptimize=ReleaseFast`; a caller-sized `SharedReplayFilter` provides atomic, bounded process-local duplicate rejection after token authentication and binding checks for integrated Retry and NEW_TOKEN validation. Both independent servers force source-address validation, while netz verifies and follows the valid Retry, authenticates the server, completes two streams, and validates peer application close on the retried connection. The external gates do not exercise replay or expiry. | Add replay/expiry probes against an external peer before generalizing beyond a valid Retry exchange; use coordinated external state when replay protection must span processes or hosts. |
 | Congestion control (NewReno/CUBIC/HyStart++) | Covered and defaulted to CUBIC for 1-RTT | `src/quic/congestion.zig`, `src/quic/hystart.zig`, congestion tests; ACK processing samples utilization before removing bytes in flight, suppresses NewReno/CUBIC growth while app-limited, and excludes idle time from the CUBIC epoch. Negotiated idle timeout is clamped to RFC 9000's three-base-PTO minimum using the live RTT estimator and peer ACK delay | Keep comparing long-lived congestion traces under equal loss/RTT schedules. |
-| UDP batching / GSO / GRO | Covered through timer-aware QUIC/HTTP/3 paths | Batch/GRO APIs plus `servicePacket` and synchronous `visitPacket` apply current-key datagrams in connection-owned receive storage with retained frame scratch; their timer-servicing forms also accept caller deadlines without allowing earlier PTO/ACK/keep-alive work to extend the application budget. Raw parsed, owned-byte, caller-buffer, and GRO-batch endpoint receive APIs now accept relative durations or absolute deadlines, with matching helpers on the lightweight QUIC server/client wrappers and type-erased handshake datagram source. Relative convenience forms convert once to an awake-clock deadline. Version-Negotiation filtering and CID-routed receive expose the same bounded forms and preserve one absolute budget across any unsupported-version datagrams they answer and discard. The shared-socket endpoint dispatcher also exposes an explicit awake-clock deadline receive, rejects incompatible clock domains before comparing them with transport timers, and lets an earlier PTO/ACK/idle timer wake the same bounded call without renewing the caller budget. HTTP/3's request and raw-transport endpoint callback loops refresh the selected connection timer after the application or protocol-adapter handler returns, so a response/control send cannot leave a new PTO absent from the shared scheduler. Its routed-packet adapter refreshes again after HTTP/3 parsing on both success and error, because ACK, QPACK, stream-error, or connection-close work occurs after the dispatcher initially processes the QUIC packet. Its buffered request poll adapter likewise refreshes after every session poll, including null and error results, so receive-credit, QPACK feedback, completed-stream retirement, protocol-error control frames, or a failed automatic MAX_STREAMS send cannot leave a new retry deadline visible only inside the connection. Handshake-backed HTTP/3 and WebTransport non-GRO pumps no longer create discarded owned packet diagnostics or per-packet UDP buffers, while GRO keeps a lazy owning suffix for one-packet application routing. The captured 16 MiB/four-stream H3 step reduced allocation calls another 47.8-48.1%. Both ordinary and batched stateful sends now encode ACK-eliciting frames directly into stable recovery storage and let AEAD read from that buffer, eliminating the former second full plaintext copy through packet scratch; ACK-only packets retain their reusable transient/in-place path. Unit coverage checks stable ownership, canonical bytes, emitted-wire decryption, and partial-batch rollback. Stateless batch results distinguish protected from socket-sent packets so callers advance beyond every consumed AEAD nonce while committing application state only for the visible prefix; quic-go and s2n-quic loss/retransmission gates remain green. | Keep H3 GRO opt-in on this small-rmem host and retest on tuned systems. |
-| HTTP/3 request/response, Alt-Svc and RFC 9412 ORIGIN | Covered by bidirectional quic-go and tquic process interop plus public fetch against robotics.bytedance.com with discovery/manual Alt-Svc | `zig build interop-http3-quic-go -Doptimize=ReleaseFast` verifies certificate-checked POST headers, split body writes and trailers in both directions over QUIC v1 and forced RFC 9369 v2. In each direction and version the peers open the cancellation target and a sibling concurrently on one connection, negotiate fixed 8 KiB stream / 24 KiB connection receive windows, read 12 KiB from a declared 128 KiB response, deliberately drop the first H3_REQUEST_CANCELLED STOP_SENDING datagram, and require retransmission plus exact sender observation before releasing the sibling response. The sibling then completes with its body and trailers, and the quic-go client independently asserts one dial and at least two traced STOP_SENDING transmissions. The development client exposes timeout/deadline request and informational-response variants: the awake deadline is validated before stream commitment and rechecked before every UDP send and response receive (an individual UDP send syscall itself is not deadline-aware); because its response assembler is call-local, any post-send receive or parse failure makes that client fail closed rather than risking response/stream misassociation. The development server exposes timeout/deadline-bounded aggregate request receive under one unchanged awake-clock budget, retaining partial STREAM state for a later call, and one-call bounded `serveConcurrent`, with peer-aware request assembly, concurrent handler dispatch, serialized multi-datagram response writes, retained request metadata, and per-worker errors; a real two-client UDP test drives the complete public client/server path. The authenticated handshake server additionally exposes bounded `serveOne`/`serve`/`serveConnection` helpers: they retain full request ownership through the handler, use paced response-body/trailer sending, preserve a persistent connection across the configured request count, and finish with the two-phase GOAWAY sequence. Authenticated clients expose timeout/deadline-bounded per-stream, multiplexed whichever-ready, and server-push aggregate/streaming receive; authenticated servers expose the symmetric bounded aggregate and multiplexed streaming request receives. Authenticated clients can also be constructed on a caller-owned shared endpoint, accept dispatcher-routed packets through `processResponsePacket`, and nonblockingly drain per-stream, whichever-ready, and push events through `pollResponseEvent`, `pollNextResponseEvent`, and `pollPushEvent`. A two-origin one-socket regression routes interleaved responses by CID, verifies stream-zero state remains isolated per connection, then injects GOAWAY after the last response has finished to prove control progress does not require a dummy request or competing socket read. Detached Extended CONNECT progress pumps expose relative-timeout, absolute-deadline, and packet-injection forms in both directions, keeping protocol adapters on the same single-owner QUIC loop. In both directions, one absolute budget spans unrelated traffic, control/QPACK progress, GRO batches, and transport timers, while timeout leaves request/parser/decoder lifecycle state resumable rather than implicitly finishing or resetting the stream. Response writers and aggregate/incremental clients now retain request method context: HEAD advertises representation length without DATA, successful traditional CONNECT rejects HTTP body/trailer bytes and strips `Content-Length: 0`, while extended CONNECT retains DATA semantics. Clients also expose the peer GOAWAY ID and RFC 9114 retry classification: request streams at or above that ID are known unprocessed, while lower IDs remain potentially processed. Aggregate and head-only decoders expose ordered borrowed 1xx callbacks and enforce configurable limits; aggregate multiplexed reads attach the selected request-stream ID, aggregate pushed reads attach the push ID, parent request-stream ID, and push-stream ID, and servers can emit 1xx sequences on pushed responses. Authenticated and lightweight preconfigured-key per-stream, whichever-ready, and push aggregation expose callback-preserving timeout/deadline variants; one unchanged deadline covers all interim heads and the final response. Both clients retain incomplete response reassembly and partially consumed push head/body/trailer ownership so a later bounded aggregate call can resume after timeout, while rejecting mixed aggregate/incremental push consumption. The lightweight client also exposes socket-free per-stream, whichever-ready, and push polling plus timeout/deadline-bounded whichever-ready streaming response events, retaining active readers and partial frames across timeout; the lightweight server exposes matching socket-free request-event polling for externally owned loops and resumable timeout/deadline-bounded aggregate request receive. Lightweight request and response stream readers can also discard DATA without copying while returning receive-window credit. The lightweight client can explicitly await peer SETTINGS under one relative or absolute budget while retaining earlier response/push bytes, matching the authenticated capability-negotiation path. Incremental request and push streams enforce the same bound, and authenticated/lightweight push readers can discard DATA without a caller buffer while returning receive credit. This matches quic-go's bounded `Got1xxResponse` behavior while retaining a caller-configurable per-stream limit. RFC 9412 support adds server ORIGIN emission plus bounded, incrementally accumulated client Origin Sets, strict server-to-client direction checks, canonical scheme/host/default-port matching, empty-frame initialization, invalid-entry skipping, 421 removal hooks, and control frames split at every byte boundary. `pollControl` lets event loops consume authority updates without waiting for an application message, and all authenticated/lightweight client/server control pumps expose relative-timeout and absolute-deadline variants that preserve buffered application streams. Connection reuse queries deliberately remain certificate-agnostic and require the caller to perform authority validation. The audited local quicz, quic-go v0.59.0, and tquic H3 sources expose no ORIGIN frame implementation, so this feature currently has independent RFC wire vectors and a real protected-QUIC runtime exchange rather than a false external-peer claim. `zig build interop-http3-tquic -Doptimize=ReleaseFast` builds audited tquic `0169abde20c6`; the verified netz-client direction exercises GET, byte Range (206), and POST-body digest, then separately sends client GOAWAY while stream 0 is active, completes that accepted response, requires tquic's exact GOAWAY(0) acknowledgement, and rejects stream 4. The reverse direction verifies two ordinary requests, then separately requires tquic to observe netz's maximum-ID and final GOAWAY(4), finish accepted stream 0, and reject creation of stream 4. Every tquic scenario runs with and without forced Retry. `examples/http3_fetch.zig`, `run-http3-fetch --discover --verify --head`, `run-http3-fetch --alt-svc='h3=":443"; ma=2592000' --verify --head` cover a public endpoint | Keep live public-server coverage and add ORIGIN interop when an independently maintained peer exposes RFC 9412. |
-| HTTP/3 real-handshake upload benchmark | Covered and reliable at the tested default, with a dual-role quic-go reference | `examples/bench_http3_handshake_transfer.zig`; CPU-0-pinned 4-stream 64 MiB upload completed 5/5 iterations at 141.78 MiB/s mean and 2.76% stddev with ACK threshold 4 and adaptive DATA sizing; exact-size cross-stream body batching is also available but opt-in on this small-rmem host. DATA framing emits the small HTTP/3 prefix separately and borrows the complete application body in the common case, including multi-stream workloads. Short-lived download sessions explicitly drain reliable QUIC recovery before teardown, with one absolute client deadline; a deterministic test drops the final DATA/FIN once and requires PTO recovery, exact bytes, FIN, and empty recovery. Five CPU-0 1 MiB download iterations completed at 105.87-126.36 MiB/s (120.41 MiB/s mean, 6.18% stddev). The latest matched 16 MiB/four-stream A/B combines intrusive bounded recovery reuse with ordered STREAM preflight fast paths and raised mean throughput from 114.11 to 152.69 MiB/s (33.8%), while all 25 iterations per side verified exact bytes/status. Thread-safe telemetry reduced median allocation calls 29.6%, and peak live bytes 15.5%. `zig build bench-http3-quic-go -Doptimize=ReleaseFast` adds certificate-verified, two-CPU, fresh-connection-per-sample upload and download in both netz/quic-go role pairings. Its 4 MiB samples validate status, headers, EOF, exact bytes, and checksum after an untimed ready request; the recorded sender ranges are netz 169.75-175.54 MiB/s upload and 169.03-176.47 MiB/s download, versus quic-go 45.25-124.16 MiB/s and 50.55-73.21 MiB/s. An opt-in process-memory run measured netz sender RSS at 9,772-9,984 KiB versus quic-go sender RSS at 22,528-23,296 KiB, and netz receiver RSS at 7,936-10,240 KiB versus quic-go receiver RSS at 19,712-19,968 KiB; runtime allocation counters remain separately scoped. This is explicitly same-application-shape because GSO/GRO, ACK policy, cipher reporting, and packetization are not fully equalized. Direct tests cover prefix ownership, offsets/FIN, exact-prefix limits, cache size classes/full budget, fast adjacent frames, overlap conflicts, fallback and allocation rollback. | Add capture-backed equal-wire accounting and a multi-stream external shape before making a cross-stack ratio; then reduce the remaining packet-protection and event-loop cost. |
+| UDP batching / GSO / GRO | Covered through timer-aware QUIC/HTTP/3 paths | Batch/GRO APIs plus `servicePacket` and synchronous `visitPacket` apply current-key datagrams in connection-owned receive storage with retained frame scratch; their timer-servicing forms also accept caller deadlines without allowing earlier PTO/ACK/keep-alive work to extend the application budget. Explicit one-RTT packet, batch, state-only, visitor, and stream receive deadline entry points validate an unexpired awake-clock timestamp before consulting any preloaded datagram or buffered stream bytes, so invalid deadlines are side-effect free; relative-timeout forms still normalize their caller budget once. Raw parsed, owned-byte, caller-buffer, and GRO-batch endpoint receive APIs now accept relative durations or absolute deadlines, with matching helpers on the lightweight QUIC server/client wrappers and type-erased handshake datagram source. Relative convenience forms convert once to an awake-clock deadline. Version-Negotiation filtering and CID-routed receive expose the same bounded forms and preserve one absolute budget across any unsupported-version datagrams they answer and discard. The shared-socket endpoint dispatcher also exposes an explicit awake-clock deadline receive, rejects incompatible clock domains before comparing them with transport timers, and lets an earlier PTO/ACK/idle timer wake the same bounded call without renewing the caller budget. HTTP/3's request and raw-transport endpoint callback loops refresh the selected connection timer after the application or protocol-adapter handler returns, so a response/control send cannot leave a new PTO absent from the shared scheduler. Its routed-packet adapter refreshes again after HTTP/3 parsing on both success and error, because ACK, QPACK, stream-error, or connection-close work occurs after the dispatcher initially processes the QUIC packet. Its buffered request poll adapter likewise refreshes after every session poll, including null and error results, so receive-credit, QPACK feedback, completed-stream retirement, protocol-error control frames, or a failed automatic MAX_STREAMS send cannot leave a new retry deadline visible only inside the connection. Handshake-backed HTTP/3 and WebTransport non-GRO pumps no longer create discarded owned packet diagnostics or per-packet UDP buffers, while GRO keeps a lazy owning suffix for one-packet application routing. The captured 16 MiB/four-stream H3 step reduced allocation calls another 47.8-48.1%. Both ordinary and batched stateful sends now encode ACK-eliciting frames directly into stable recovery storage and let AEAD read from that buffer, eliminating the former second full plaintext copy through packet scratch; ACK-only packets retain their reusable transient/in-place path. Unit coverage checks stable ownership, canonical bytes, emitted-wire decryption, and partial-batch rollback. Stateless batch results distinguish protected from socket-sent packets so callers advance beyond every consumed AEAD nonce while committing application state only for the visible prefix; quic-go and s2n-quic loss/retransmission gates remain green. | Keep H3 GRO opt-in on this small-rmem host and retest on tuned systems. |
+| HTTP/3 request/response, Alt-Svc and RFC 9412 ORIGIN | Covered by bidirectional quic-go and tquic process interop plus verified public fetches against ByteDance, Cloudflare, and quiche deployments | `zig build interop-http3-quic-go -Doptimize=ReleaseFast` verifies certificate-checked POST headers, split body writes and trailers in both directions over QUIC v1 and forced RFC 9369 v2. In each direction and version the peers open the cancellation target and a sibling concurrently on one connection, negotiate fixed 8 KiB stream / 24 KiB connection receive windows, read 12 KiB from a declared 128 KiB response, deliberately drop the first H3_REQUEST_CANCELLED STOP_SENDING datagram, and require retransmission plus exact sender observation before releasing the sibling response. The sibling then completes with its body and trailers, and the quic-go client independently asserts one dial and at least two traced STOP_SENDING transmissions. The development client exposes timeout/deadline request and informational-response variants: the awake deadline is validated before stream commitment and rechecked before every UDP send and response receive (an individual UDP send syscall itself is not deadline-aware); because its response assembler is call-local, any post-send receive or parse failure makes that client fail closed rather than risking response/stream misassociation. The development server exposes timeout/deadline-bounded aggregate request receive under one unchanged awake-clock budget, retaining partial STREAM state for a later call, and one-call bounded `serveConcurrent`, with peer-aware request assembly, concurrent handler dispatch, serialized multi-datagram response writes, retained request metadata, and per-worker errors; a real two-client UDP test drives the complete public client/server path. The authenticated handshake server additionally exposes bounded `serveOne`/`serve`/`serveConnection` helpers: they retain full request ownership through the handler, use paced response-body/trailer sending, preserve a persistent connection across the configured request count, and finish with the two-phase GOAWAY sequence. Authenticated clients expose timeout/deadline-bounded per-stream, multiplexed whichever-ready, and server-push aggregate/streaming receive; authenticated servers expose the symmetric bounded aggregate and multiplexed streaming request receives. Authenticated clients can also be constructed on a caller-owned shared endpoint, accept dispatcher-routed packets through `processResponsePacket`, and nonblockingly drain per-stream, whichever-ready, and push events through `pollResponseEvent`, `pollNextResponseEvent`, and `pollPushEvent`. A two-origin one-socket regression routes interleaved responses by CID, verifies stream-zero state remains isolated per connection, then injects GOAWAY after the last response has finished to prove control progress does not require a dummy request or competing socket read. Detached Extended CONNECT progress pumps expose relative-timeout, absolute-deadline, and packet-injection forms in both directions, keeping protocol adapters on the same single-owner QUIC loop. In both directions, one absolute budget spans unrelated traffic, control/QPACK progress, GRO batches, and transport timers, while timeout leaves request/parser/decoder lifecycle state resumable rather than implicitly finishing or resetting the stream. Response writers and aggregate/incremental clients now retain request method context: HEAD advertises representation length without DATA, successful traditional CONNECT rejects HTTP body/trailer bytes and strips `Content-Length: 0`, while extended CONNECT retains DATA semantics. Clients also expose the peer GOAWAY ID and RFC 9114 retry classification: request streams at or above that ID are known unprocessed, while lower IDs remain potentially processed. Aggregate and head-only decoders expose ordered borrowed 1xx callbacks and enforce configurable limits; aggregate multiplexed reads attach the selected request-stream ID, aggregate pushed reads attach the push ID, parent request-stream ID, and push-stream ID, and servers can emit 1xx sequences on pushed responses. Authenticated and lightweight preconfigured-key per-stream, whichever-ready, and push aggregation expose callback-preserving timeout/deadline variants; one unchanged deadline covers all interim heads and the final response. Both clients retain incomplete response reassembly and partially consumed push head/body/trailer ownership so a later bounded aggregate call can resume after timeout, while rejecting mixed aggregate/incremental push consumption. The lightweight client also exposes socket-free per-stream, whichever-ready, and push polling plus timeout/deadline-bounded whichever-ready streaming response events, retaining active readers and partial frames across timeout; the lightweight server exposes matching socket-free request-event polling for externally owned loops and resumable timeout/deadline-bounded aggregate request receive. Lightweight request and response stream readers can also discard DATA without copying while returning receive-window credit. The lightweight client can explicitly await peer SETTINGS under one relative or absolute budget while retaining earlier response/push bytes, matching the authenticated capability-negotiation path. Incremental request and push streams enforce the same bound, and authenticated/lightweight push readers can discard DATA without a caller buffer while returning receive credit. This matches quic-go's bounded `Got1xxResponse` behavior while retaining a caller-configurable per-stream limit. RFC 9412 support adds server ORIGIN emission plus bounded, incrementally accumulated client Origin Sets, strict server-to-client direction checks, canonical scheme/host/default-port matching, empty-frame initialization, invalid-entry skipping, 421 removal hooks, and control frames split at every byte boundary. Authenticated server ORIGIN emission exposes relative-timeout and absolute-deadline variants; invalid-clock or expired calls leave packet number, control-stream offset, and the local advertisement marker unchanged, while one absolute budget covers SETTINGS and ORIGIN delivery. `pollControl` lets event loops consume authority updates without waiting for an application message, and all authenticated/lightweight client/server control pumps expose relative-timeout and absolute-deadline variants that preserve buffered application streams. Connection reuse queries deliberately remain certificate-agnostic and require the caller to perform authority validation. The audited local quicz, quic-go v0.59.0, and tquic H3 sources expose no ORIGIN frame implementation, so this feature currently has independent RFC wire vectors and a real protected-QUIC runtime exchange rather than a false external-peer claim. `zig build interop-http3-tquic -Doptimize=ReleaseFast` builds audited tquic `0169abde20c6`; the verified netz-client direction exercises GET, byte Range (206), and POST-body digest, then separately sends client GOAWAY while stream 0 is active, completes that accepted response, requires tquic's exact GOAWAY(0) acknowledgement, and rejects stream 4. The reverse direction verifies two ordinary requests, then separately requires tquic to observe netz's maximum-ID and final GOAWAY(4), finish accepted stream 0, and reject creation of stream 4. Every tquic scenario runs with and without forced Retry. `examples/http3_fetch.zig`, explicit status/body assertions, and Alt-Svc gates cover three independent public endpoints, including quiche on UDP/8443 | Keep live public-server coverage and add ORIGIN interop when an independently maintained peer exposes RFC 9412. |
+| HTTP/3 real-handshake upload benchmark | Covered and reliable at the tested default, with a dual-role quic-go reference | `examples/bench_http3_handshake_transfer.zig`; CPU-0-pinned 4-stream 64 MiB upload completed 5/5 iterations at 141.78 MiB/s mean and 2.76% stddev with ACK threshold 4 and adaptive DATA sizing; exact-size cross-stream body batching is also available but opt-in on this small-rmem host. DATA framing emits the small HTTP/3 prefix separately and borrows the complete application body in the common case, including multi-stream workloads. Short-lived download sessions explicitly drain reliable QUIC recovery before teardown, with one absolute client deadline; a deterministic test drops the final DATA/FIN once and requires PTO recovery, exact bytes, FIN, and empty recovery. Five CPU-0 1 MiB download iterations completed at 105.87-126.36 MiB/s (120.41 MiB/s mean, 6.18% stddev). The latest matched 16 MiB/four-stream A/B combines intrusive bounded recovery reuse with ordered STREAM preflight fast paths and raised mean throughput from 114.11 to 152.69 MiB/s (33.8%), while all 25 iterations per side verified exact bytes/status. Thread-safe telemetry reduced median allocation calls 29.6%, and peak live bytes 15.5%. `zig build bench-http3-quic-go -Doptimize=ReleaseFast` adds certificate-verified, two-CPU, fresh-connection-per-sample upload and download in both netz/quic-go role pairings. Its 4 MiB samples validate status, headers, EOF, exact bytes, and checksum after an untimed ready request; the recorded sender ranges are netz 169.75-175.54 MiB/s upload and 169.03-176.47 MiB/s download, versus quic-go 45.25-124.16 MiB/s and 50.55-73.21 MiB/s. `bench-http3-quic-go-multistream` extends the same process matrix to 4 and 16 concurrent streams over QUIC v1/v2; each upload/download and role pairing verifies every stream plus aggregate bytes/checksum. The Go fixture now serves a CA-signed non-CA server leaf, matching production TLS server-auth policy instead of relying on a CA certificate as an endpoint identity. An opt-in process-memory run measured netz sender RSS at 9,772-9,984 KiB versus quic-go sender RSS at 22,528-23,296 KiB, and netz receiver RSS at 7,936-10,240 KiB versus quic-go receiver RSS at 19,712-19,968 KiB; runtime allocation counters remain separately scoped. This is explicitly same-application-shape because GSO/GRO, ACK policy, cipher reporting, and packetization are not fully equalized. Direct tests cover prefix ownership, offsets/FIN, exact-prefix limits, cache size classes/full budget, fast adjacent frames, overlap conflicts, fallback and allocation rollback. | Add capture-backed equal-wire accounting before making a cross-stack ratio; then reduce the remaining packet-protection and event-loop cost. |
 | HTTP/3 real-handshake download and RFC 9218 response scheduling | Covered for current benchmark scale; feature coverage exceeds the local quicz H3 layer | `HandshakeServerSession.sendResponseBodiesPaced` schedules borrowed complete bodies by the request Priority field and live PRIORITY_UPDATE, serializes non-incremental responses by stream ID, round-robins incremental peers, bypasses flow-blocked urgent streams, and replans after socket-visible packet prefixes; real-handshake tests cover all four behaviors and the benchmark sends `Priority: u=3, i`. Retained request/push update state now has a configurable per-connection total bound, replacements remain valid at capacity, terminal request and cancelled-push state is retired, and server runtimes validate every update in a batched control fragment. Stateful server request completion also registers transport retirement, so aggregate and incremental FIN paths return MAX_STREAMS and reclaim copied request buffers after the response FIN/RESET is acknowledged; a one-stream-credit churn test advances through four request IDs without application release calls. Server push streams likewise register local uni retirement after send and peer uni retirement after FIN/reset consumption. Finished/cancelled push promises leave the active map and enter an exact compressed prefix+sparse-range history; RFC 9114 only recommends sequential Push IDs, so out-of-order IDs retain their holes rather than being collapsed unsafely. Request IDs must be client-initiated bidirectional IDs within the active QUIC receive limit; invalid IDs roll back the whole fragment and authenticated connections close with H3_ID_ERROR. `~/Work/quicz/src/h3` has no Priority field, PRIORITY_UPDATE, urgency, or incremental scheduler. The runtime now supports byte- or packet-cadence cooperative yielding; using a chunk-size-independent three-packet cadence raised five 64MiB/four-stream iterations from 11.35 MiB/s to a stable 44.15 MiB/s mean (3.47% stddev) while retaining full completion. After enabling borrowed DATA framing for multi-stream runs, a CPU-0 16 MiB/four-stream regression sample measured 45.72 MiB/s mean with 10.99% stddev. Packet construction now encodes ACK-eliciting frames directly into stable recovery allocations for both batch and ordinary sends, eliminating the previous encode-to-packet-buffer then full-payload copy into recovery; direct tests compare retained recovery bytes with canonical frame encoding and decrypt the emitted packets. The post-batch sample measured 49.37 MiB/s mean with 0.93% stddev, and the subsequent ordinary-path sample measured 49.91 MiB/s with 0.22% stddev. These are internal regression samples, not an equal-wire quicz comparison. | Continue apples-to-apples quicz throughput work before making a whole-stack performance claim; move same-process loopback pacing policy into a reusable event-loop benchmark harness. |
 | QPACK / Capsule / HTTP Datagrams / WebTransport | Covered by modules, stateful runtime APIs, benchmarks, real-handshake streams, lifecycle controls, native wtransport interop, and a real Chrome browser gate | QPACK dynamic entries use indexed lookup, FIFO head eviction and one contiguous string allocation versus quicz reverse scans, front insertion and two string allocations. Field-section prefixes use RFC 9204 prefix integers rather than QUIC varints; boundary tests cross encoded Required Insert Count 63 and Delta Base 127, while `interop-http3-qpack-quic-zig` independently decodes a speculative section after 64 inserts. Dynamic sections choose Required Insert Count as their minimal Base, and the dependency prepass excludes dynamic name matches shadowed by the selected static representation, preventing phantom blocking and Section Acknowledgments. The decoder independently derives the highest actual dynamic reference across all four relative/post-Base field forms and rejects both under-reported mandatory dependencies and non-minimal over-reported counts. Request, response and trailer paths decode both literal and dynamic QPACK sections directly into one allocation containing the field descriptors and shared name/value bytes, rather than first allocating per Huffman/dynamic field and copying again. Offset plans remain valid across scratch growth, all four relative/post-Base representation families retain exact dependency validation, and allocation-failure plus exact allocation-count tests cover both owning decoders. Pinned 32-field dynamic decode samples measured 751-762 ns/block across four stable runs with one 835-ns outlier, versus the preceding 835-857 ns range. Settings-aware decoders enforce the uncompressed `name + value + 32` field-section budget before Huffman output allocation or dynamic-entry copying, including static, literal and all dynamic representations. Handshake-backed HTTP/3 clients and servers expose RFC 9297 DATAGRAM send, poll, timeout/deadline receive, exact payload-budget, and explicit close APIs for detached Extended CONNECT streams. A bounded per-association demultiplexer retains interleaved streams independently, drains accepted payloads before stable stream-terminal errors, drops unknown/closed associations, maps malformed Quarter Stream IDs to H3_DATAGRAM_ERROR, and requires both HTTP/3 SETTINGS and directional QUIC DATAGRAM negotiation. WebTransport uses the same demultiplexer so sessions cannot steal one another's DATAGRAMs; server acceptance reserves its association before status 200, while dispatcher-driven clients expose stable-storage promotion helpers instead of publishing moved-from connection pointers. Stateful WebTransport adapters advertise their implemented one-session-per-HTTP/3-connection capacity even if a larger setting is supplied. While that session remains active, additional request streams are rejected in both directions with `H3_REQUEST_REJECTED`; endpoint mode retains a paced rejection for retry, preserves the sole UDP receive owner, and continues routing first-session traffic from the same packet. Terminal cleanup scans peer-initiated QUIC receive state for complete same-session association prefixes before sending WT_SESSION_GONE, so streams buffered before registry admission cannot survive session close; incomplete, ordinary HTTP/3, local, and other-session streams remain untouched. Capsule fallback remains an explicit codec-level choice. WebTransport adds transactional cross-stream batches and modern 0x41 association. Its external wtransport gate drops a mapped STOP_SENDING while a sibling stream is live and requires transport recovery plus sibling completion. The Chrome gate independently covers browser CONNECT, DATAGRAM, bidi/uni streams, mapped reset/stop, sibling reuse, drain, and close. | Expand browser coverage beyond Chromium; native wtransport and Chrome do not cover Firefox or Safari behavior. |
+
+Handshake-backed and lightweight protected HTTP/3 clients guard the
+connection-scoped receive owner while aggregate informational callbacks run.
+Recursive response, whichever-ready, push, control, and CONNECT-DATAGRAM reads
+return the recoverable local `ConcurrentRead` error before consuming buffered
+events, UDP, or QPACK state; this error is never mapped to an HTTP/3 connection
+close. State-destructive request/push cancellation is rejected under the same
+guard, while one-attempt send-only operations remain available. Real handshake,
+protected two-response, and protected pushed-response regressions preserve the
+outer aggregate and untouched sibling after rejected reentry.
+
+The authenticated single-connection convenience server now applies its
+configurable shutdown timeout as one absolute deadline after the final
+response. Both GOAWAY phases and the subsequent reliable-send recovery drain
+share that budget, so pacing cannot make `serveConnection` shutdown unbounded.
+A deterministic pacing test verifies that timeout leaves the packet number,
+control-stream offset, GOAWAY value, and shutdown phase unmodified.
+
+Public HTTP/3 coverage now also includes `cloudflare-quic.com`: a
+certificate-verified HEAD returned 200, and the executable's new
+`--expect-status=200 --min-body-bytes=100000` gate accepted a 125,959-byte GET.
+That deployment sends a cross-signed GTS Root R4 while this host trusts the
+self-signed form. The shared vail trust verifier now matches that anchor only
+by exact Subject and complete SubjectPublicKeyInfo, while retaining hostname,
+presented-chain signature, and terminal/anchor validity checks.
+An independent request to the quiche-backed `quic.tech:8443` endpoint also
+passed certificate verification, status 200, and a 462-byte response-body
+check, covering explicit Alt-Svc routing to a non-default UDP port.
+The optional `interop-http3-public` gate runs those checks together with a
+verified Meta H3 request that requires its current 302 unsupported-browser
+redirect. Each case has an outer timeout and any transport, trust, status, or
+minimum-body mismatch fails the build step.
+The default system/bundle verifier additionally enforces the RFC 5280 usage
+subset needed by TLS server authentication: leaf digitalSignature and
+serverAuth/anyExtendedKeyUsage when present, CA=true plus optional keyCertSign
+on every presented intermediate, pathLen, and rejection of unsupported critical
+extensions. Explicit public-key pins and custom trust callbacks remain
+application-defined policy.
+
+HTTP/3 high-level service handlers cannot accidentally leave a request stream
+with only an informational response. Development `serveConcurrent` and
+authenticated `serveOne` replace a handler-returned 100-199 response with a
+bodyless final 500, finish the stream, and report `InvalidStatus` in the
+corresponding call or result slot without failing healthy siblings. Explicit
+`sendResponseWithInformational` sequences and `InformationalResponse` retain
+their 1xx-before-final behavior.
+Both authenticated and lightweight preconfigured-key HTTP/3 servers expose
+timeout/deadline-bounded RFC 9412 ORIGIN emission. One unchanged awake-clock
+deadline covers mandatory SETTINGS and the ORIGIN frame; expiry before ORIGIN
+submission retains the settings progress but leaves the ORIGIN marker and
+control-stream offset retryable. If a multi-batch protected send has already
+made a prefix socket-visible, the lightweight sender becomes unusable instead
+of allowing packet-number or stream-offset reuse.
+Lightweight protected clients and servers likewise expose bounded GOAWAY, and
+protected servers expose bounded initial/final graceful-shutdown phases. The
+same deadline spans SETTINGS and GOAWAY; timeout cannot advance the local
+GOAWAY ID or shutdown state before the matching control bytes are committed.
+Authenticated and lightweight clients also expose bounded MAX_PUSH_ID and
+CANCEL_PUSH sends. The latter reserves all fallible retirement state before
+the control frame is visible; if its remaining STOP_SENDING work exceeds the
+same absolute budget, it stays queued and a retry resumes cleanup without
+emitting a duplicate CANCEL_PUSH.
+On receive, servers accept cancellation only for a Push ID they actually
+promised. An unpromised ID is rejected transactionally before it reaches the
+retained cancellation set and produces an `H3_ID_ERROR` connection close.
+Sent/promised Push IDs and received cancellation IDs use exact contiguous-prefix
+plus sparse-range sets rather than duplicate arrays and hash tables. Sequential
+IDs require no range allocation, membership is O(1) for the common prefix, and
+control-stream rollback clones only the outstanding sparse ranges.
+Incomplete control frames and complete unknown extensions avoid deep state
+snapshots, while role-specific validation happens per complete frame before
+mutation; this preserves SETTINGS-first and whole-chunk rollback semantics
+without parsing or cloning the same control input twice.
+Both client runtimes also provide timeout/deadline variants for request and
+push PRIORITY_UPDATE. Validation precedes mutation, and one absolute deadline
+spans critical-stream SETTINGS plus the priority frame without advancing the
+packet number or control-stream cursor on zero-progress expiry.
+Authenticated and lightweight servers also bound the complete server-push
+operation: SETTINGS, any QPACK encoder instructions, the parent-stream
+PUSH_PROMISE/final response, and the pushed response share one absolute
+deadline. A phase-boundary timeout preserves valid critical-stream progress
+but leaves push IDs, the next push-stream ID, request lifecycle, and pending
+QPACK sections uncommitted for retry; a socket-visible partial message makes
+the underlying connection unusable instead of permitting ambiguous replay.
+Their explicit informational-response senders likewise expose timeout/deadline
+variants spanning SETTINGS, QPACK instructions, every 1xx HEADERS block, and
+the final response. Invalid deadlines leave the request lifecycle and all send
+cursors untouched; partial socket-visible sequences retain the same fail-close
+rule as other aggregate HTTP/3 messages.
+The corresponding complete-response helpers on authenticated and lightweight
+servers expose the same bounded contract without requiring callers to use the
+informational API with an empty 1xx list.
+Lightweight protected clients and servers now match the authenticated streaming
+HEAD APIs with timeout/deadline variants. Invalid deadlines are rejected before
+request-stream allocation or response-body registration, and a valid deadline
+covers SETTINGS, QPACK instructions, and the request/response HEADERS send.
+The lightweight aggregate request deadline now covers request transmission as
+well as response receipt. If SETTINGS is committed before the budget expires,
+the unsent request lifecycle and QPACK section are discarded while its QUIC
+stream ID remains consumed, preventing later requests from reusing an
+ambiguously exposed stream number.
+The stateful HTTP/3 GRO receive cursor also validates an absolute deadline
+before sending a deferred ACK or advancing a retained packet batch. Wrong-clock
+and expired calls are therefore side-effect free, and a later valid call still
+observes the original packet.
+
+The external HTTP/3 throughput harness now runs 1, 4, or 16 concurrent
+request streams in either direction and supports forced QUIC v2 through
+`NETZ_HTTP3_INTEROP_VERSION=2`. The aggregate multi-stream gate covers both
+v1 and v2 by default. Its Go and Zig endpoints select the requested version,
+v2 uses the compatibility key-update profile required by the pinned quic-go
+v0.59 peer, and every config/result/server-completion/memory record carries
+`quic_version`. The strict checker rejects missing or mismatched versions, so
+a v2 command cannot silently report a successful v1 measurement.
 | TLS backend/process interop examples | Covered in both directions through standalone, certificate-verified quic-go and s2n-quic process gates | QUIC handshake tests, `examples/quic_handshake_echo.zig`, `zig build interop-quic-quic-go -Doptimize=ReleaseFast` (bidirectional/unidirectional streams, RESET_STREAM, STOP_SENDING, rolling limits, and Initial/application PTO recovery), `zig build interop-quic-s2n -Doptimize=ReleaseFast` (independent s2n-tls stack, ALPN, two streams with FIN, exact RESET_STREAM/STOP_SENDING exchanges and cancellation retransmission with a concurrent sibling, application close), HTTP/3 public fetch with `--verify` | Add broader public peers before making a full interoperability claim. |
+
+Authenticated aggregate HTTP/3 deadlines now cover the complete operation
+rather than only response receipt or the DATA phase. Client request admission,
+SETTINGS/QPACK instructions, request HEADERS/body/trailers, paced server
+response HEADERS/body/trailers, and response receive all reuse one absolute
+awake-clock timestamp. The stateful packetizer rechecks it before every socket
+attempt and bounds pacing waits. A zero-packet timeout leaves the connection
+retryable; once a multi-packet logical send has exposed a prefix, a later
+timeout retires the connection locally without risking an unbounded close send
+or replaying bytes at the same stream offset. A real handshake regression
+forces both request-HEADERS and response-HEADERS pacing timeouts, verifies zero
+socket calls and unchanged packet numbers, then successfully reuses the
+connection after pacing is released. A lower-level regression covers the
+partial-visible fail-closed branch. Authenticated incremental
+`startRequestWith{Timeout,Deadline}` and
+`startResponseWith{Timeout,Deadline}` now bound stream admission, SETTINGS,
+QPACK instructions, HEADERS packetization, pacing, and flow-control progress
+under one absolute deadline; invalid deadlines leave request IDs, packet
+numbers, and lifecycle state untouched. Their zero-copy borrowed
+body-parts writers now have matching timeout/deadline forms on authenticated
+clients and servers. They validate the complete logical length before sending,
+retain slice boundaries without joining, and report exact socket-visible bytes
+plus FIN state so callers can resume from the remaining suffix. A real TLS/QUIC
+test forces a three-byte cross-slice prefix to commit before timeout in each
+direction, resumes the remainder, and verifies one exact request and response.
+Authenticated servers likewise expose timeout/deadline variants for waiting
+on peer response cancellation. One absolute budget covers routed packets and
+transport timers; after STOP_SENDING is observed, stream retirement is
+registered for timer-driven retry instead of delaying cancellation delivery on
+a paced MAX_STREAMS update.
+Authenticated GOAWAY emission and both phases of graceful server shutdown also
+have timeout/deadline variants. SETTINGS setup and the GOAWAY control frame
+share one absolute budget, and a failed pre-send attempt rolls back the GOAWAY
+identifier, control-stream offset, and shutdown phase for an exact retry.
+Streaming request and response trailer writers now expose the same timeout and
+deadline forms: invalid or pre-send pacing deadlines retain QPACK/body state
+and packet numbers for retry, while a visible multi-packet prefix remains
+fail-closed because a field section cannot be safely replayed.
 
 The native wtransport interop now also exposes a two-CPU cross-process
 `bench-webtransport-wtransport` gate. It runs both implementation-role
@@ -654,8 +855,47 @@ their diagnostic errors. Authenticated CRYPTO/frame failures and
 Authenticated Handshake and accepted 0-RTT reserved-bit violations also emit a
 best-effort transport `CONNECTION_CLOSE(PROTOCOL_VIOLATION)` at the highest
 available encryption level before preserving `InvalidReservedBits` for the
-caller. The server flight tracks a fresh Handshake packet number across PTO
-retransmissions so this close path cannot reuse an AEAD nonce.
+caller. Initial and Handshake flight construction now validates the complete
+packet-number/MTU range and reserves all storage before its first in-place AEAD
+operation. Batch sends retain both protected and socket-sent counts: zero or
+partial socket progress leaves PN gaps and PTO retransmits under a fresh range,
+while server anti-amplification accounting keeps only the submitted prefix.
+Established 1-RTT PTO probe batches follow the same rule: only the socket-sent
+prefix remains in congestion, sent-packet, and recovery state, but every sealed
+probe advances the packet-number space so an unsent suffix can never reuse an
+AEAD nonce on the next timer firing.
+Lightweight WebTransport DATAGRAM sends use that same protection boundary for
+both stack-backed and allocating packet storage: a socket rejection after seal
+retires the packet number, while pre-seal validation, deadline, or allocation
+failure remains side-effect free. Stateless batch progress also reports
+post-seal endpoint-interceptor failures as values with the complete protected
+count, so HTTP/3 and WebTransport owners cannot lose nonce consumption when no
+datagram reached the socket. Held-packet interceptor state is published only
+after its owned copy succeeds, keeping allocation failure transactional.
+The server also prepares its Handshake packet before emitting Initial bytes and
+tracks the next unused Handshake packet number across every protected PTO copy,
+so neither allocation failure nor a socket-rejected suffix can reuse a nonce.
+The 0-RTT handoff separately records protected packet-number consumption and
+the sparse subset actually accepted by the UDP socket. The installed 1-RTT
+state advances past every protected nonce, while ACK validation, congestion,
+and recovery contain only real socket-sent copies with their exact long-header
+datagram size. An accepted server waits through same-path Initial PTO copies
+for the following standalone 0-RTT packet under one fixed handshake deadline.
+The symmetric rejection path applies the same filtering before discarding the
+standalone 0-RTT datagram, so a lost first early packet followed by PTO's
+Initial-then-0-RTT sequence still completes PSK resumption instead of treating
+the retransmitted Initial as malformed early data.
+If Version Negotiation restarts the connection, the original 0-RTT packet is
+never replayed under the replacement version and its old-key packet numbers do
+not advance the new application space; the client nevertheless retains an
+explicit rejected disposition so typed HTTP/3 leaves replay to the caller.
+Initial flight packet plans and datagram views now use stack storage for the
+default 64-packet bound, retaining a heap fallback for explicitly larger
+flights. In back-to-back 50-connection ReleaseFast runs with certificate
+verification and allocator telemetry, this removed exactly four allocations
+per connection (4501 to 4301 total); the observed P50 moved from 807.5 to
+801.9 microseconds, while the single-run throughput change remains too noisy
+for a general performance claim.
 Closing connections now respond to current-path datagrams through a dedicated
 timer rather than parsing application frames or retransmitting immediately.
 The first response requires one packet, subsequent thresholds double to 2, 4,
@@ -866,7 +1106,40 @@ real TLS/QUIC test exercises the full admission and promotion path on one UDP
 socket. The owning HTTP/3 endpoint also exposes a bounded `receiveOnce` and a
 cancellable `serveUntil` callback loop for connected, closed, and request
 events; callbacks borrow the stable session and request only for their
-synchronous invocation, preserving the single-owner transport invariant.
+synchronous invocation, preserving the single-owner transport invariant. A
+promoted session is now explicitly dispatcher-bound: blocking request receive,
+paced response, flow-control read, cancellation, and recovery-drain helpers
+reject before reading the shared UDP socket. Endpoint handlers instead have
+transactional one-attempt static-QPACK APIs for a complete one-packet response
+or for response head, DATA, and trailers separately, plus one-attempt request
+DATA read/skip helpers. A two-client regression first forces connection A's
+response to fail with `PacingLimited`, only then sends B's request, completes B,
+and finally resumes A's head/body/trailers. This proves transport backpressure
+on one connection no longer creates callback-level HOL or steals B's datagram;
+long-running application computation remains the caller's responsibility in
+this intentionally synchronous callback API. Dispatcher-owned servers also
+expose one-attempt `trySendGoAway`, `tryInitiateShutdown`, and
+`tryCompleteShutdown`: pacing failure rolls back the control-stream offset,
+local GOAWAY ID, packet number, and shutdown phase, while a retry emits the
+maximum-ID and final-ID GOAWAY sequence monotonically. A real protected-wire
+test parses both frames at the peer. Dispatcher-owned clients have the matching
+one-attempt control surface for GOAWAY, MAX_PUSH_ID, CANCEL_PUSH, and request
+or push PRIORITY_UPDATE. Each complete control frame must fit one packet;
+pacing, congestion, flow-control, frame-count, and MTU failures roll back the
+control-stream offset and mutable control/push state. A protected-wire test
+forces and retries every path before parsing the exact peer-visible frame.
+  Dispatcher-owned servers can likewise advertise a complete RFC 9412 ORIGIN
+  frame with `trySendOrigins`; the frame must fit one packet and failure rolls
+  back both the advertisement marker and control-stream offset.
+
+QUIC now keeps the selected peer connection ID in address-stable owned storage
+instead of borrowing an inline CID-pool entry. HTTP/3 and WebTransport sessions
+are intentionally moved by value during admission; without stable storage a
+later response could use bytes overwritten at the old address and be silently
+dropped by an external endpoint router. A move-after-CID-rotation regression
+verifies the exact destination CID on wire, and the bidirectional native
+wtransport gate validates CONNECT, DATAGRAM, streams, cancellation, reuse,
+drain, and close after the fix.
 
 1. **Large HTTP/3 download reliability**: local real-handshake download now
    covers 4MiB/16MiB/64MiB benchmark-scale responses in both single-stream and
@@ -885,7 +1158,14 @@ synchronous invocation, preserving the single-owner transport invariant.
    sequential packet submission.
 4. **Complete external interop matrix**: public H3 fetch is proven against
    `robotics.bytedance.com`, including `--discover`, manual `--alt-svc`, and
-   `--verify`. A separate local process gate builds quic-go v0.59.0 from the
+   `--verify`, and independently against `cloudflare-quic.com` with verified
+   HEAD plus a 125,959-byte GET response. The Cloudflare chain terminates in a
+   cross-signed GTS Root R4 while the system bundle contains its self-signed
+   form. Netz now recognizes that trust anchor only when Subject, public-key
+   algorithm, and public-key bytes all match; it still checks the presented
+   chain links, hostname, and both terminal/anchor validity periods. A focused
+   regression accepts the equivalent cross-signed identity but rejects the
+   same Subject with another key. A separate local process gate builds quic-go v0.59.0 from the
    audited `~/Work/quicz` fixture and checks HTTP/3 in both directions with
    verified TLS identities: each side validates POST method, query-bearing
    path, authority, custom headers, request body/trailer, status 201, response
@@ -917,9 +1197,9 @@ synchronous invocation, preserving the single-owner transport invariant.
    trust validation
    because that CLI exposes no CA option; the netz-client direction is
    certificate verified.
-   Broader public peer coverage is still not audited; recent
-   Cloudflare/Google/Facebook probes failed or timed out and are intentionally
-   not counted as coverage.
+   Google and Facebook public peers remain unverified and are not counted as
+   coverage; this host's Google DNS path currently resolves through a private
+   proxy address whose UDP/443 handshake times out.
    The synchronous handshake now preserves a first 1-RTT packet coalesced
    behind the peer's Handshake flight in both endpoint roles. The server-side
    path was required by Chrome's Handshake Finished plus HTTP/3 control stream;
@@ -1054,11 +1334,13 @@ synchronous invocation, preserving the single-owner transport invariant.
    before all CRYPTO ranges arrive; this limitation is not hidden as broader
    post-quantum interoperability.
 5. **Broader performance comparison against `~/Work/quicz`**: raw QUIC
-   STREAM now has an equivalent two-CPU, dual-role quic-go process harness,
+   STREAM now has equivalent two-CPU, dual-role quic-go process harnesses for
+   fresh transfer, persistent echo, and four-connection aggregate transfer,
    but still needs capture-backed equal-wire accounting. HTTP/3 likewise lacks
-   an equal-wire reference. DATAGRAM, loss simulation, four-
-   connection aggregate throughput, and stream reservation have direct faster
-   artifacts. Mixed FIN/reset lifecycle churn now has a bounded-credit on-wire
+   an equal-wire reference. DATAGRAM, loss simulation, and stream reservation
+   have direct faster artifacts. The external aggregate matrix also exposes a
+   netz/netz worker-scheduling deficit, so it is not a whole-stack superiority
+   claim. Mixed FIN/reset lifecycle churn now has a bounded-credit on-wire
    netz baseline, but no equal quicz harness yet. Echo latency now has a
    controlled artifact that is tied/faster across percentiles. Handshake
    latency/rate now has a verification-policy-aligned artifact, but the two
@@ -1080,8 +1362,10 @@ facility, not a replacement for authenticated handshake-backed HTTP/3.
 ## Next recommended work
 
 1. Extend the two-CPU raw QUIC process comparison with kernel/interface packet
-   capture, WebSocket/WebTransport allocation telemetry, lossy/reordered on-wire lifecycle churn, and
-   connection-count scaling. Complete-connection userspace UDP counters now
+   capture, WebSocket/WebTransport allocation telemetry, lossy/reordered on-wire lifecycle churn,
+   connection-count scaling, and a shared-socket event-loop aggregate.
+   Persistent echo and a four-independent-connection process matrix are now
+   covered. Complete-connection userspace UDP counters
    expose materially different wire shapes, but this host denies unprivileged
    capture. Equalize GRO, ACK/pacing, packetization, and application stream
    scheduling before promoting it from same-application-shape to equal-wire.
@@ -1095,14 +1379,34 @@ facility, not a replacement for authenticated handshake-backed HTTP/3.
    preflight now avoids unrelated general-packet shadows; seven paired runs
    reduced visitor/service median cost another 1.5%/2.8%. Packed receive-byte
    tracking then reduced those STREAM medians another 11.9%/11.7% and removed
-   the prior per-byte bitmap memset hotspot. Cross-suite connection tests cover AES-128, AES-256,
+   the prior per-byte bitmap memset hotspot. Gap closure now finds the next
+   absent receive bit by scanning packed machine words and using `ctz`, rather
+   than testing every byte position. A dedicated `stream_gap` benchmark swaps
+   adjacent packets without changing bytes, packet numbers, or stream offsets;
+   seven CPU-0 pairs reduced visitor/service medians by 13.4%/13.2%, with 7/7
+   wins in both modes, while the ordered STREAM shape remained noise-level. A
+   seven-pair real TLS/H3 four-stream upload check also improved in every pair,
+   from 82.492 to 72.817 ms median per 16-MiB iteration. Cross-suite connection tests cover AES-128, AES-256,
    ChaCha20, and SM4 through STREAM receive and key update, in addition to
    non-mutating fallback on a phase mismatch. A separate
    experiment caching single-stream batch accounting was rejected after its
    median regressed 1.3%; `bench-quic-one-rtt-send --stream-fragments=4` remains
    as an H3-shaped guard against retrying that unprofitable shape blindly.
+   Recovery encoding instead now reuses validation's packet-level knowledge to
+   skip a second per-frame retransmittability classification when every payload
+   byte is reliable; mixed DATAGRAM packets retain exact filtering. Frame
+   classification itself now uses one tag switch instead of three. In the
+   final long profile, the former standalone `frame_traits.classify` hotspot
+   (9.26% before) disappeared from the reported hot list, while aggregate
+   `Traits.observe` accounted for 2.09%. A label-parsed, CPU-0-pinned rerun of
+   five order-alternated 50,000-iteration fixed-binary pairs improved the
+   sequential median from 114.635 to 111.895 us/batch (2.4%, 5/5 pairs) and
+   the batch median from 101.473 to 98.525 us/batch (2.9%, 4/5 pairs). One
+   baseline batch sample reached 116.687 us and one final pair regressed 0.36%,
+   so this is a median fast-path result rather than an all-pairs claim.
    STREAM/DATA framing now borrows all body bytes in the common case, and both
    ordinary and batch sends encode directly into stable recovery storage
    instead of copying a second plaintext payload. Exact-size batching still
    needs a larger-rmem host to show a throughput benefit.
-4. Broaden public HTTP/3 interop beyond `robotics.bytedance.com`.
+4. Continue broadening public HTTP/3 interop beyond the independently verified
+   ByteDance, Cloudflare, and quiche deployments.

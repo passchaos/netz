@@ -4,9 +4,17 @@ const http2 = @import("../../mod.zig");
 const flag_end_stream: u8 = 0x1;
 const flag_end_headers: u8 = 0x4;
 
-pub fn validateEnvelope(frame: http2.Frame) error{InvalidFrame}!void {
+/// RFC wire error associated with a malformed frame envelope. A null
+/// `stream_id` denotes a connection error; the only stream-scoped envelope
+/// violation is a zero WINDOW_UPDATE increment on a non-zero stream.
+pub const EnvelopeViolation = struct {
+    error_code: http2.ErrorCode,
+    stream_id: ?u31 = null,
+};
+
+pub fn classifyEnvelope(frame: http2.Frame) ?EnvelopeViolation {
     if (frame.payload.len != @as(usize, frame.header.length)) {
-        return error.InvalidFrame;
+        return .{ .error_code = .frame_size_error };
     }
 
     const stream_id = frame.header.stream_id;
@@ -14,54 +22,92 @@ pub fn validateEnvelope(frame: http2.Frame) error{InvalidFrame}!void {
         .data,
         .headers,
         .continuation,
-        => if (stream_id == 0) return error.InvalidFrame,
+        => if (stream_id == 0) {
+            return .{ .error_code = .protocol_error };
+        },
 
         .priority => {
-            if (stream_id == 0 or frame.payload.len != 5) {
-                return error.InvalidFrame;
+            if (frame.payload.len != 5) {
+                return .{ .error_code = .frame_size_error };
+            }
+            if (stream_id == 0) {
+                return .{ .error_code = .protocol_error };
             }
         },
         .rst_stream => {
-            if (stream_id == 0 or frame.payload.len != 4) {
-                return error.InvalidFrame;
+            if (frame.payload.len != 4) {
+                return .{ .error_code = .frame_size_error };
+            }
+            if (stream_id == 0) {
+                return .{ .error_code = .protocol_error };
             }
         },
         .settings => {
-            if (stream_id != 0) return error.InvalidFrame;
             if ((frame.header.flags & 0x1) != 0) {
-                if (frame.payload.len != 0) return error.InvalidFrame;
+                if (frame.payload.len != 0) {
+                    return .{ .error_code = .frame_size_error };
+                }
             } else if (frame.payload.len % 6 != 0) {
-                return error.InvalidFrame;
+                return .{ .error_code = .frame_size_error };
+            }
+            if (stream_id != 0) {
+                return .{ .error_code = .protocol_error };
             }
         },
         .ping => {
-            if (stream_id != 0 or frame.payload.len != 8) {
-                return error.InvalidFrame;
+            if (frame.payload.len != 8) {
+                return .{ .error_code = .frame_size_error };
+            }
+            if (stream_id != 0) {
+                return .{ .error_code = .protocol_error };
             }
         },
         .goaway => {
-            if (stream_id != 0 or frame.payload.len < 8) {
-                return error.InvalidFrame;
+            if (frame.payload.len < 8) {
+                return .{ .error_code = .frame_size_error };
+            }
+            if (stream_id != 0) {
+                return .{ .error_code = .protocol_error };
             }
         },
         .priority_update => {
-            if (stream_id != 0 or frame.payload.len < 4) {
-                return error.InvalidFrame;
+            if (frame.payload.len < 4) {
+                return .{ .error_code = .frame_size_error };
+            }
+            if (stream_id != 0) {
+                return .{ .error_code = .protocol_error };
             }
         },
+        // RFC 8336 requires ORIGIN on a non-zero stream to be ignored, and
+        // ALTSVC has extension-specific stream semantics handled above the
+        // base HTTP/2 envelope layer.
         .altsvc, .origin => {},
         .window_update => {
-            if (frame.payload.len != 4) return error.InvalidFrame;
+            if (frame.payload.len != 4) {
+                return .{ .error_code = .frame_size_error };
+            }
             const increment = std.mem.readInt(
                 u32,
                 frame.payload[0..4],
                 .big,
             ) & 0x7fff_ffff;
-            if (increment == 0) return error.InvalidFrame;
+            if (increment == 0) {
+                return .{
+                    .error_code = .protocol_error,
+                    .stream_id = if (stream_id == 0) null else stream_id,
+                };
+            }
         },
-        .push_promise => if (stream_id == 0) return error.InvalidFrame,
+        .push_promise => if (stream_id == 0) {
+            return .{ .error_code = .protocol_error };
+        },
         _ => {},
     }
+    return null;
+}
+
+pub fn validateEnvelope(frame: http2.Frame) error{InvalidFrame}!void {
+    if (classifyEnvelope(frame) != null) return error.InvalidFrame;
 }
 
 pub fn clientInitiatedStreamId(stream_id: u31) bool {

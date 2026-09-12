@@ -1,11 +1,15 @@
 const std = @import("std");
 const netz = @import("netz");
 const benchmark = @import("quic_quic_go_bench.zig");
+const churn = @import("quic_quic_go_churn_client.zig");
 const CountingAllocator = @import("benchmark_counting_allocator")
     .CountingAllocator;
 
 pub fn main(init: std.process.Init) !void {
     const args = try init.minimal.args.toSlice(init.arena.allocator());
+    if (args.len >= 5 and std.mem.eql(u8, args[1], "churn-client")) {
+        return churn.run(init, args[2..]);
+    }
     if (args.len < 4 or !std.mem.eql(u8, args[1], "bench-client")) {
         return error.InvalidArgument;
     }

@@ -61,8 +61,18 @@ test "HTTP/3 handshake server observes response cancellation and reuses connecti
                 "partial",
                 false,
             );
+            try std.testing.expectError(
+                error.Timeout,
+                session.receivePeerResponseCancellationWithTimeout(
+                    canceled.stream_id,
+                    .fromMilliseconds(10),
+                ),
+            );
             const cancellation = try session
-                .receivePeerResponseCancellation(canceled.stream_id);
+                .receivePeerResponseCancellationWithTimeout(
+                canceled.stream_id,
+                .fromSeconds(2),
+            );
             try std.testing.expectEqual(
                 canceled.stream_id,
                 cancellation.stream_id,
@@ -125,6 +135,7 @@ test "HTTP/3 handshake server observes response cancellation and reuses connecti
         defer event.deinit(allocator);
         if (event == .head) break;
     }
+    try std.Io.sleep(io, .fromMilliseconds(50), .awake);
     try client.established.connection.sendStopSending(
         canceled_id,
         http3.ApplicationErrorCode.request_cancelled,

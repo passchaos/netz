@@ -2,6 +2,41 @@ const std = @import("std");
 const quic = @import("../mod.zig");
 const target = @import("flight.zig");
 
+const net = std.Io.net;
+
+const AcceptFirstFlightDatagram = struct {
+    delegate: std.Io,
+    partial_once: bool = true,
+
+    fn netSend(
+        userdata: ?*anyopaque,
+        socket_handle: net.Socket.Handle,
+        messages: []net.OutgoingMessage,
+        flags: net.SendFlags,
+    ) struct { ?net.Socket.SendError, usize } {
+        const self: *@This() = @ptrCast(@alignCast(userdata));
+        if (!self.partial_once or messages.len < 2) {
+            return self.delegate.vtable.netSend(
+                self.delegate.userdata,
+                socket_handle,
+                messages,
+                flags,
+            );
+        }
+        self.partial_once = false;
+        const send_error, const sent_count = self.delegate.vtable.netSend(
+            self.delegate.userdata,
+            socket_handle,
+            messages[0..1],
+            flags,
+        );
+        if (send_error != null or sent_count != 1) {
+            return .{ send_error orelse error.Unexpected, sent_count };
+        }
+        return .{ error.NetworkDown, 1 };
+    }
+};
+
 test "Initial CRYPTO flight stays within MTU and reassembles" {
     const allocator = std.testing.allocator;
 
@@ -146,6 +181,71 @@ test "Initial CRYPTO flight wire length matches emitted datagrams" {
     try std.testing.expectEqual(sent.packet_count, counter.datagrams);
 }
 
+test "Initial CRYPTO flight reports protected suffix after partial socket send" {
+    const allocator = std.testing.allocator;
+    var threaded = std.Io.Threaded.init(allocator, .{});
+    defer threaded.deinit();
+    const io = threaded.io();
+    var receiver = try quic.runtime.Endpoint.bind(
+        allocator,
+        io,
+        .{ .ip4 = .loopback(0) },
+        .{ .max_datagram_size = 1200 },
+    );
+    defer receiver.deinit();
+    var sender = try quic.runtime.Endpoint.bind(
+        allocator,
+        io,
+        .{ .ip4 = .loopback(0) },
+        .{ .max_datagram_size = 1200, .enable_gso_send = false },
+    );
+    defer sender.deinit();
+
+    var partial = AcceptFirstFlightDatagram{ .delegate = sender.io };
+    var partial_vtable = sender.io.vtable.*;
+    partial_vtable.netSend = AcceptFirstFlightDatagram.netSend;
+    sender.io = .{ .userdata = &partial, .vtable = &partial_vtable };
+    defer sender.io = partial.delegate;
+
+    const options = target.SendOptions{
+        .initial = .{
+            .destination_connection_id = "partial1",
+            .source_connection_id = "peer",
+            .packet_number = 70,
+            .crypto_data = "0123456789abcdef",
+            .max_crypto_frame_data_len = 8,
+        },
+        .max_datagram_size = 1200,
+        .max_datagrams = 4,
+    };
+    const progress = try target.sendProgress(
+        &sender,
+        receiver.address(),
+        quic.protection.deriveInitialSecrets("partial1").client,
+        options,
+    );
+    try std.testing.expectEqual(@as(usize, 1), progress.sent_count);
+    try std.testing.expectEqual(@as(usize, 2), progress.protected_count);
+    try std.testing.expectEqual(@as(u64, 71), progress.last_packet_number);
+    try std.testing.expectEqual(error.NetworkDown, progress.send_error.?);
+    try std.testing.expect(progress.sent_bytes < progress.protected_bytes);
+    try std.testing.expectEqual(
+        try target.wireLen(options),
+        progress.protected_bytes,
+    );
+
+    var received = try receiver.receiveBytes();
+    defer received.deinit(allocator);
+    var opened = try quic.protection.openInitialPacket(
+        allocator,
+        quic.protection.deriveInitialSecrets("partial1").client,
+        received.bytes,
+        70,
+    );
+    defer opened.deinit(allocator);
+    try std.testing.expectEqual(@as(u64, 70), opened.packet_number);
+}
+
 test "Initial CRYPTO flight rejects impossible budgets before send" {
     var threaded = std.Io.Threaded.init(std.testing.allocator, .{});
     defer threaded.deinit();
@@ -172,6 +272,67 @@ test "Initial CRYPTO flight rejects impossible budgets before send" {
                     .min_datagram_size = 1200,
                 },
                 .max_datagram_size = 1199,
+            },
+        ),
+    );
+}
+
+test "Initial CRYPTO flight validates endpoint MTU before protection" {
+    var threaded = std.Io.Threaded.init(std.testing.allocator, .{});
+    defer threaded.deinit();
+    var endpoint = try quic.runtime.Endpoint.bind(
+        std.testing.allocator,
+        threaded.io(),
+        .{ .ip4 = .loopback(0) },
+        .{ .max_datagram_size = 1000 },
+    );
+    defer endpoint.deinit();
+    try std.testing.expectError(
+        error.DatagramTooLarge,
+        target.sendProgress(
+            &endpoint,
+            endpoint.address(),
+            quic.protection.deriveInitialSecrets("small-mt1").client,
+            .{
+                .initial = .{
+                    .destination_connection_id = "small-mt1",
+                    .source_connection_id = "peer",
+                    .packet_number = 0,
+                    .crypto_data = "hello",
+                    .min_datagram_size = 1200,
+                },
+                .max_datagram_size = 1200,
+            },
+        ),
+    );
+}
+
+test "Initial CRYPTO flight validates complete packet-number range before protection" {
+    var threaded = std.Io.Threaded.init(std.testing.allocator, .{});
+    defer threaded.deinit();
+    var endpoint = try quic.runtime.Endpoint.bind(
+        std.testing.allocator,
+        threaded.io(),
+        .{ .ip4 = .loopback(0) },
+        .{ .max_datagram_size = 1200 },
+    );
+    defer endpoint.deinit();
+    try std.testing.expectError(
+        error.InvalidPacketNumber,
+        target.sendProgress(
+            &endpoint,
+            endpoint.address(),
+            quic.protection.deriveInitialSecrets("pn-edge1").client,
+            .{
+                .initial = .{
+                    .destination_connection_id = "pn-edge1",
+                    .source_connection_id = "peer",
+                    .packet_number = quic.protection.max_packet_number,
+                    .crypto_data = "two-packets",
+                    .max_crypto_frame_data_len = 4,
+                },
+                .max_datagram_size = 1200,
+                .max_datagrams = 4,
             },
         ),
     );
@@ -207,6 +368,58 @@ test "Initial CRYPTO flight rejects excessive packetization" {
             },
         ),
     );
+}
+
+test "Initial CRYPTO flight heap metadata fallback exceeds stack capacity" {
+    const allocator = std.testing.allocator;
+    var threaded = std.Io.Threaded.init(allocator, .{});
+    defer threaded.deinit();
+
+    const Counter = struct {
+        datagrams: usize = 0,
+
+        fn drop(context: *anyopaque, _: []const u8) bool {
+            const self: *@This() = @ptrCast(@alignCast(context));
+            self.datagrams += 1;
+            return true;
+        }
+    };
+    var counter = Counter{};
+    var endpoint = try quic.runtime.Endpoint.bind(
+        allocator,
+        threaded.io(),
+        .{ .ip4 = .loopback(0) },
+        .{
+            .max_datagram_size = 1200,
+            .send_interceptor = .{
+                .context = &counter,
+                .should_drop = Counter.drop,
+            },
+        },
+    );
+    defer endpoint.deinit();
+
+    const payload = [_]u8{0x6a} ** 65;
+    const progress = try target.sendProgress(
+        &endpoint,
+        endpoint.address(),
+        quic.protection.deriveInitialSecrets("stack-fb").client,
+        .{
+            .initial = .{
+                .destination_connection_id = "stack-fb",
+                .source_connection_id = "peer",
+                .packet_number = 100,
+                .crypto_data = &payload,
+                .max_crypto_frame_data_len = 1,
+            },
+            .max_datagram_size = 1200,
+            .max_datagrams = 65,
+        },
+    );
+    try std.testing.expectEqual(@as(usize, 65), progress.protected_count);
+    try std.testing.expectEqual(@as(usize, 65), progress.sent_count);
+    try std.testing.expectEqual(@as(usize, 65), counter.datagrams);
+    try std.testing.expectEqual(@as(u64, 164), progress.last_packet_number);
 }
 
 test "Initial CRYPTO packet sizing matches the MTU without speculative seals" {
@@ -300,7 +513,6 @@ test "Initial CRYPTO flight reassembles reordered packets" {
         .packet_number = 20,
         .crypto_offset = 0,
         .crypto_data = message[0..split],
-        .min_datagram_size = 1200,
     });
     defer allocator.free(first);
     const second = try target.sealPacket(allocator, keys, .{
@@ -309,9 +521,14 @@ test "Initial CRYPTO flight reassembles reordered packets" {
         .packet_number = 21,
         .crypto_offset = split,
         .crypto_data = message[split..],
-        .min_datagram_size = 1200,
     });
     defer allocator.free(second);
+    var first_datagram: [target.min_initial_udp_datagram_size]u8 = undefined;
+    @memcpy(first_datagram[0..first.len], first);
+    @memset(first_datagram[first.len..], 0);
+    var second_datagram: [target.min_initial_udp_datagram_size]u8 = undefined;
+    @memcpy(second_datagram[0..second.len], second);
+    @memset(second_datagram[second.len..], 0);
 
     const Shared = struct {
         endpoint: *quic.runtime.Endpoint,
@@ -339,8 +556,10 @@ test "Initial CRYPTO flight reassembles reordered packets" {
     };
     var shared = Shared{ .endpoint = &receiver, .keys = keys };
     const thread = try std.Thread.spawn(.{}, Shared.run, .{&shared});
-    try sender.sendBytes(receiver.address(), second);
-    try sender.sendBytes(receiver.address(), first);
+    // Match tquic's valid datagram shape: each Initial packet's Length field
+    // ends before an all-zero suffix that expands the UDP payload to 1200.
+    try sender.sendBytes(receiver.address(), &second_datagram);
+    try sender.sendBytes(receiver.address(), &first_datagram);
     thread.join();
     if (shared.err) |err| return err;
     try std.testing.expectEqualSlices(u8, &message, &shared.received);
@@ -543,6 +762,102 @@ test "Initial CRYPTO one-shot opener preserves authentication errors" {
                 .discard_invalid_first = true,
             },
         ),
+    );
+}
+
+test "Initial CRYPTO opener accepts a packet slice from validated padded datagram" {
+    const allocator = std.testing.allocator;
+    var threaded = std.Io.Threaded.init(allocator, .{});
+    defer threaded.deinit();
+    var endpoint = try quic.runtime.Endpoint.bind(
+        allocator,
+        threaded.io(),
+        .{ .ip4 = .loopback(0) },
+        .{ .max_datagram_size = 4096 },
+    );
+    defer endpoint.deinit();
+
+    const dcid = "padded01";
+    const keys = quic.protection.deriveInitialSecrets(dcid).client;
+    const handshake_message = [_]u8{ 1, 0, 0, 0 };
+    const packet = try target.sealPacket(allocator, keys, .{
+        .destination_connection_id = dcid,
+        .source_connection_id = "peer",
+        .packet_number = 0,
+        .crypto_data = &handshake_message,
+    });
+    defer allocator.free(packet);
+    try std.testing.expect(packet.len < target.min_initial_udp_datagram_size);
+    const datagram = try allocator.alloc(u8, target.min_initial_udp_datagram_size);
+    defer allocator.free(datagram);
+    @memcpy(datagram[0..packet.len], packet);
+    @memset(datagram[packet.len..], 0);
+
+    try std.testing.expectError(
+        error.InvalidInitialPacket,
+        target.open(
+            &endpoint,
+            endpoint.address(),
+            packet,
+            keys,
+            .{
+                .expected_packet_number = 0,
+                .max_crypto_buffer = 64,
+                .min_datagram_size = target.min_initial_udp_datagram_size,
+            },
+        ),
+    );
+
+    var from_datagram = try target.open(
+        &endpoint,
+        endpoint.address(),
+        datagram,
+        keys,
+        .{
+            .expected_packet_number = 0,
+            .max_crypto_buffer = 64,
+            .min_datagram_size = target.min_initial_udp_datagram_size,
+        },
+    );
+    defer from_datagram.deinit(allocator);
+    try std.testing.expectEqualSlices(
+        u8,
+        &handshake_message,
+        from_datagram.crypto_data,
+    );
+    datagram[datagram.len - 1] = 1;
+    try std.testing.expectError(
+        error.InvalidInitialPacket,
+        target.open(
+            &endpoint,
+            endpoint.address(),
+            datagram,
+            keys,
+            .{
+                .expected_packet_number = 0,
+                .max_crypto_buffer = 64,
+                .min_datagram_size = target.min_initial_udp_datagram_size,
+            },
+        ),
+    );
+
+    var received = try target.open(
+        &endpoint,
+        endpoint.address(),
+        packet,
+        keys,
+        .{
+            .expected_packet_number = 0,
+            .max_crypto_buffer = 64,
+            .min_datagram_size = target.min_initial_udp_datagram_size,
+            .first_datagram_size_validated = true,
+        },
+    );
+    defer received.deinit(allocator);
+    try std.testing.expectEqualSlices(
+        u8,
+        &handshake_message,
+        received.crypto_data,
     );
 }
 

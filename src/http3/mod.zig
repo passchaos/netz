@@ -1,6 +1,7 @@
 const std = @import("std");
 const wire = @import("../internal/wire.zig");
 const priority_field = @import("../internal/priority.zig");
+const exact_range_set = @import("../internal/exact_range_set.zig");
 const quic = @import("../quic/mod.zig");
 const header_fields = @import("codec/header_storage.zig");
 
@@ -886,6 +887,37 @@ pub const Settings = struct {
             return error.InvalidSetting;
         }
     }
+
+    /// Validate the server SETTINGS that govern an accepted 0-RTT request.
+    /// A server may increase remembered limits, but accepting early data and
+    /// then reducing a capability the client was permitted to use would make
+    /// already-sent HTTP/3 bytes invalid.
+    pub fn validateAfterEarlyDataAccepted(
+        remembered: Settings,
+        current: Settings,
+    ) Error!void {
+        if (current.qpack_max_table_capacity <
+            remembered.qpack_max_table_capacity or
+            current.max_field_section_size <
+                remembered.max_field_section_size or
+            current.qpack_blocked_streams < remembered.qpack_blocked_streams or
+            (remembered.enable_connect_protocol and
+                !current.enable_connect_protocol) or
+            (remembered.h3_datagram and !current.h3_datagram) or
+            (remembered.enable_webtransport and
+                !current.enable_webtransport) or
+            current.webtransport_max_sessions <
+                remembered.webtransport_max_sessions or
+            current.webtransport_initial_max_data <
+                remembered.webtransport_initial_max_data or
+            current.webtransport_initial_max_streams_uni <
+                remembered.webtransport_initial_max_streams_uni or
+            current.webtransport_initial_max_streams_bidi <
+                remembered.webtransport_initial_max_streams_bidi)
+        {
+            return error.InvalidSetting;
+        }
+    }
 };
 
 fn addFrameLen(a: usize, b: usize) Error!usize {
@@ -979,6 +1011,9 @@ pub const ControlState = struct {
     };
 
     settings: SettingsState = .{},
+    /// Server settings remembered by a client that sent 0-RTT. Consumed by
+    /// the first peer SETTINGS frame before any dependent response is routed.
+    early_data_peer_settings: ?Settings = null,
     peer_goaway_id: ?u64 = null,
     local_goaway_id: ?u64 = null,
     /// Server-advertised RFC 9412 Origin Set additions, in first-seen order.
@@ -997,10 +1032,9 @@ pub const ControlState = struct {
     /// leaves their value state unchanged. Runtime role checks compare this
     /// generation after buffered parsing, including split control frames.
     peer_client_only_frame_generation: u64 = 0,
-    /// Most recent peer CANCEL_PUSH identifier, retained for compatibility.
-    peer_cancelled_push_id: ?u64 = null,
-    /// Every distinct peer-cancelled push ID in receive order.
-    peer_cancelled_push_ids: std.ArrayList(u64) = .empty,
+    /// Exact lifetime cancellation history. Sequential IDs use only the
+    /// embedded prefix; sparse IDs are retained as merged ranges.
+    peer_cancelled_push_ids: exact_range_set.Set = .{},
     push_cancellation_generation: u64 = 0,
     peer_control_stream_id: ?u64 = null,
     /// Absolute QUIC stream offset through which peer control bytes have been
@@ -1028,7 +1062,6 @@ pub const ControlState = struct {
     peer_qpack_decoder_stream_id: ?u64 = null,
     peer_qpack_encoder_stream_consumed_offset: usize = 0,
     peer_qpack_decoder_stream_consumed_offset: usize = 0,
-    peer_cancelled_push_index: std.AutoHashMapUnmanaged(u64, void) = .empty,
 
     pub fn init(options: Options) Error!ControlState {
         if (options.max_priority_updates == 0) return error.InvalidSetting;
@@ -1047,7 +1080,6 @@ pub const ControlState = struct {
         self.priority_updates.deinit(allocator);
         self.priority_update_index.deinit(allocator);
         self.peer_cancelled_push_ids.deinit(allocator);
-        self.peer_cancelled_push_index.deinit(allocator);
         self.* = undefined;
     }
 
@@ -1055,6 +1087,20 @@ pub const ControlState = struct {
         self: ControlState,
         allocator: std.mem.Allocator,
     ) std.mem.Allocator.Error!ControlState {
+        return self.cloneWithControlBufferLen(
+            allocator,
+            self.peer_control_stream_buffer.items.len,
+        );
+    }
+
+    fn cloneWithControlBufferLen(
+        self: ControlState,
+        allocator: std.mem.Allocator,
+        control_buffer_len: usize,
+    ) std.mem.Allocator.Error!ControlState {
+        std.debug.assert(
+            control_buffer_len <= self.peer_control_stream_buffer.items.len,
+        );
         var copy = self;
         copy.latest_priority_update = null;
         copy.peer_origins = .empty;
@@ -1062,8 +1108,7 @@ pub const ControlState = struct {
         copy.peer_control_stream_buffer = .empty;
         copy.priority_updates = .empty;
         copy.priority_update_index = .empty;
-        copy.peer_cancelled_push_ids = .empty;
-        copy.peer_cancelled_push_index = .empty;
+        copy.peer_cancelled_push_ids = .{};
         errdefer copy.deinit(allocator);
         try copy.peer_origins.ensureTotalCapacity(
             allocator,
@@ -1083,23 +1128,10 @@ pub const ControlState = struct {
         }
         try copy.peer_control_stream_buffer.appendSlice(
             allocator,
-            self.peer_control_stream_buffer.items,
+            self.peer_control_stream_buffer.items[0..control_buffer_len],
         );
-        try copy.peer_cancelled_push_ids.ensureUnusedCapacity(
-            allocator,
-            self.peer_cancelled_push_ids.items.len,
-        );
-        copy.peer_cancelled_push_ids.appendSliceAssumeCapacity(
-            self.peer_cancelled_push_ids.items,
-        );
-        try copy.peer_cancelled_push_index.ensureUnusedCapacity(
-            allocator,
-            std.math.cast(u32, self.peer_cancelled_push_ids.items.len) orelse
-                return error.OutOfMemory,
-        );
-        for (copy.peer_cancelled_push_ids.items) |push_id| {
-            copy.peer_cancelled_push_index.putAssumeCapacity(push_id, {});
-        }
+        copy.peer_cancelled_push_ids =
+            try self.peer_cancelled_push_ids.clone(allocator);
         try copy.priority_updates.ensureTotalCapacity(
             allocator,
             self.priority_updates.items.len,
@@ -1273,18 +1305,23 @@ pub const ControlState = struct {
         {
             return error.ExcessiveLoad;
         }
-        // Reserve a rollback snapshot before append/application. A later frame
-        // can fail validation or allocation after earlier frames in this chunk
-        // mutated SETTINGS, priorities, or the Origin Set.
-        var previous = try self.clone(allocator);
-        var previous_owned = true;
-        defer if (previous_owned) previous.deinit(allocator);
-        errdefer {
-            self.deinit(allocator);
-            self.* = previous;
-            previous_owned = false;
-        }
+        const previous_buffer_len = self.peer_control_stream_buffer.items.len;
         try self.peer_control_stream_buffer.appendSlice(allocator, payload);
+        // Delay the deep snapshot until a complete frame can actually mutate
+        // state. Incomplete input and ignorable extension frames only touch
+        // the bounded byte buffer.
+        var previous: ?ControlState = null;
+        defer if (previous) |*value| value.deinit(allocator);
+        errdefer {
+            if (previous) |value| {
+                self.deinit(allocator);
+                self.* = value;
+                previous = null;
+            } else {
+                self.peer_control_stream_buffer.items.len =
+                    previous_buffer_len;
+            }
+        }
         var consumed: usize = 0;
         while (consumed < self.peer_control_stream_buffer.items.len) {
             const remaining = self.peer_control_stream_buffer.items[consumed..];
@@ -1302,11 +1339,31 @@ pub const ControlState = struct {
                 .payload = remaining[header.header_length..total],
                 .consumed = total,
             };
+            // A semantic validator may choose to ignore an obsolete advisory
+            // frame, but it must not bypass the control stream's mandatory
+            // SETTINGS-first ordering.
+            if (!self.settings.received and
+                frame.frame_type != FrameType.settings)
+            {
+                return error.MissingSettings;
+            }
             if (validator) |value| {
                 if (try value.validateFrame(self.*, frame) == .ignore) {
                     consumed += total;
                     continue;
                 }
+            }
+            if (self.settings.received and
+                !controlFrameMayMutateOrError(frame.frame_type))
+            {
+                consumed += total;
+                continue;
+            }
+            if (previous == null) {
+                previous = try self.cloneWithControlBufferLen(
+                    allocator,
+                    previous_buffer_len,
+                );
             }
             try self.applyFrame(allocator, frame);
             consumed += total;
@@ -1321,6 +1378,23 @@ pub const ControlState = struct {
             );
         }
         self.peer_control_stream_buffer.items.len = retained;
+    }
+
+    fn controlFrameMayMutateOrError(frame_type: u64) bool {
+        return switch (frame_type) {
+            FrameType.settings,
+            FrameType.goaway,
+            FrameType.max_push_id,
+            FrameType.cancel_push,
+            FrameType.origin,
+            FrameType.priority_update_request,
+            FrameType.priority_update_push,
+            FrameType.data,
+            FrameType.headers,
+            FrameType.push_promise,
+            => true,
+            else => false,
+        };
     }
 
     pub fn registerControlStream(self: *ControlState, stream_id: u64) Error!void {
@@ -1353,7 +1427,12 @@ pub const ControlState = struct {
                 if (self.settings.received) return error.DuplicateSettings;
                 const raw = try parseSettings(allocator, frame.payload);
                 defer allocator.free(raw);
-                self.settings.markReceived(Settings.fromList(raw));
+                const received = Settings.fromList(raw);
+                if (self.early_data_peer_settings) |remembered| {
+                    try remembered.validateAfterEarlyDataAccepted(received);
+                }
+                self.settings.markReceived(received);
+                self.early_data_peer_settings = null;
             },
             FrameType.goaway => {
                 const id = try parseGoAwayPayload(frame.payload);
@@ -1674,8 +1753,11 @@ pub const ControlState = struct {
     }
 
     pub fn pushCancelled(self: ControlState, push_id: u64) bool {
-        return self.peer_cancelled_push_index.count() != 0 and
-            self.peer_cancelled_push_index.contains(push_id);
+        return self.peer_cancelled_push_ids.contains(push_id);
+    }
+
+    pub fn cancelledPushRangeCount(self: ControlState) usize {
+        return self.peer_cancelled_push_ids.rangeCount();
     }
 
     fn storePushCancellation(
@@ -1683,24 +1765,21 @@ pub const ControlState = struct {
         allocator: std.mem.Allocator,
         push_id: u64,
     ) Error!void {
-        const slot = try self.peer_cancelled_push_index.getOrPut(
-            allocator,
-            push_id,
-        );
-        if (slot.found_existing) {
-            self.peer_cancelled_push_id = push_id;
+        if (self.peer_cancelled_push_ids.contains(push_id)) {
             return;
         }
-        errdefer _ = self.peer_cancelled_push_index.remove(push_id);
         const next_generation = std.math.add(
             u64,
             self.push_cancellation_generation,
             1,
         ) catch return error.InvalidFrame;
-        try self.peer_cancelled_push_ids.append(allocator, push_id);
-        slot.value_ptr.* = {};
-        self.peer_cancelled_push_id = push_id;
+        try self.peer_cancelled_push_ids.prepareInsertValue(
+            allocator,
+            push_id,
+        );
+        self.peer_cancelled_push_ids.insertAssumeCapacity(push_id);
         self.push_cancellation_generation = next_generation;
+        self.retirePushPriority(allocator, push_id);
     }
 
     fn storePriorityUpdate(
@@ -2968,6 +3047,102 @@ pub const Response = struct {
         );
         try queueIndexableFields(encoder, fields);
         try queueIndexableFields(encoder, self.trailers);
+    }
+
+    /// Encode only final response HEADERS with literal/static QPACK for an
+    /// event-loop-owned incremental response.
+    pub fn writeStreamingHead(
+        self: Response,
+        list: *std.ArrayList(u8),
+        allocator: std.mem.Allocator,
+        peer_settings: Settings,
+        body_length: ?usize,
+    ) Error!struct { expected_length: ?usize, body_allowed: bool } {
+        if (self.body.len != 0 or self.trailers.len != 0) {
+            return error.InvalidContentLength;
+        }
+        var fields_stack: [header_fields.stack_capacity]Qpack.HeaderField =
+            undefined;
+        const fields_buf = try header_fields.acquire(
+            allocator,
+            &fields_stack,
+            try responseHeaderFieldCapacity(self, 1),
+        );
+        defer header_fields.release(allocator, &fields_stack, fields_buf);
+        var status_buf: [3]u8 = undefined;
+        var fields = try self.headerFields(fields_buf, &status_buf);
+        const semantics = responseSemantics(self);
+        const body_forbidden = responseSuppressesBody(
+            self.status,
+            semantics,
+        );
+        if (body_forbidden) {
+            if (!semantics.head) {
+                if (body_length) |length| {
+                    if (length != 0) return error.InvalidContentLength;
+                }
+            }
+            try stripSuccessfulConnectContentLength(
+                &fields,
+                self.status,
+                semantics,
+            );
+            var content_length_buf: [32]u8 = undefined;
+            const declared_content_length = if ((semantics.head or
+                self.status == 304) and body_length != null)
+                try applyStreamingContentLength(
+                    fields_buf,
+                    &fields,
+                    body_length,
+                    &content_length_buf,
+                )
+            else
+                try contentLength(fields);
+            try validateResponseBodyForRequestSemanticsWithLength(
+                self.status,
+                semantics,
+                declared_content_length,
+                &.{},
+                &.{},
+            );
+            try validateContentLengthForRequestSemantics(
+                self.status,
+                semantics,
+                declared_content_length,
+                body_length orelse 0,
+            );
+            try validateHeaderBlock(fields, .response);
+            try validateFieldSectionSize(
+                fields,
+                peer_settings.max_field_section_size,
+            );
+            try validateResponseBodyForStatusWithLength(
+                self.status,
+                declared_content_length,
+                &.{},
+                &.{},
+            );
+            try writeHeadersFrame(list, allocator, fields);
+            return .{ .expected_length = 0, .body_allowed = false };
+        }
+        var content_length_buf: [32]u8 = undefined;
+        const effective_length = try applyStreamingContentLength(
+            fields_buf,
+            &fields,
+            body_length,
+            &content_length_buf,
+        );
+        try validateHeaderBlock(fields, .response);
+        try validateFieldSectionSize(
+            fields,
+            peer_settings.max_field_section_size,
+        );
+        try validateResponseBodyForStatus(self.status, fields, &.{}, &.{});
+        try writeHeadersFrame(list, allocator, fields);
+        return .{
+            .expected_length = effective_length,
+            .body_allowed = true,
+        };
     }
 
     /// Encode only final response HEADERS for incremental DATA transmission.
@@ -5451,6 +5626,64 @@ test "HTTP/3 control stream buffers a split ORIGIN frame" {
     }
 }
 
+test "HTTP/3 incomplete control frame avoids state snapshot allocation" {
+    const allocator = std.testing.allocator;
+    var control = ControlState{ .settings = .{ .received = true } };
+    defer control.deinit(allocator);
+
+    var priority: std.ArrayList(u8) = .empty;
+    defer priority.deinit(allocator);
+    try writePriorityUpdateFrame(
+        &priority,
+        allocator,
+        0,
+        .{ .urgency = 2 },
+    );
+    try control.applyFrame(allocator, try Frame.parse(priority.items));
+    try control.peer_control_stream_buffer.ensureTotalCapacity(allocator, 8);
+
+    // Unknown extension frame type 0x21, two-byte payload, one payload byte
+    // still missing. Existing priority state ensures the old eager snapshot
+    // path would have needed an allocation before noticing incompleteness.
+    const partial = [_]u8{ 0x21, 0x02, 0xaa };
+    var no_alloc = std.testing.FailingAllocator.init(
+        allocator,
+        .{ .fail_index = 0 },
+    );
+    try control.appendControlPayload(no_alloc.allocator(), &partial);
+    try std.testing.expect(!no_alloc.has_induced_failure);
+    try std.testing.expectEqualSlices(
+        u8,
+        &partial,
+        control.peer_control_stream_buffer.items,
+    );
+    try std.testing.expectEqual(
+        @as(u3, 2),
+        control.requestPriorityUpdate(0).?.priority().urgency,
+    );
+
+    try control.appendControlPayload(allocator, &.{0xbb});
+    try std.testing.expectEqual(
+        @as(usize, 0),
+        control.peer_control_stream_buffer.items.len,
+    );
+    try std.testing.expectEqual(
+        @as(u3, 2),
+        control.requestPriorityUpdate(0).?.priority().urgency,
+    );
+
+    const complete_extension = [_]u8{ 0x21, 0x01, 0xcc };
+    try control.appendControlPayload(
+        no_alloc.allocator(),
+        &complete_extension,
+    );
+    try std.testing.expect(!no_alloc.has_induced_failure);
+    try std.testing.expectEqual(
+        @as(usize, 0),
+        control.peer_control_stream_buffer.items.len,
+    );
+}
+
 test "HTTP/3 ORIGIN state enforces its connection memory bound" {
     const allocator = std.testing.allocator;
     var control = ControlState{};
@@ -6073,6 +6306,90 @@ test "HTTP/3 typed settings state tracks negotiation" {
     try std.testing.expectEqualSlices(u8, payload.items, parsed_frame.payload);
 }
 
+test "HTTP/3 accepted early data rejects reduced remembered settings" {
+    const remembered = Settings{
+        .qpack_max_table_capacity = 256,
+        .max_field_section_size = 4096,
+        .qpack_blocked_streams = 2,
+        .enable_connect_protocol = true,
+        .h3_datagram = true,
+        .enable_webtransport = true,
+        .webtransport_max_sessions = 4,
+        .webtransport_initial_max_data = 1024,
+        .webtransport_initial_max_streams_uni = 2,
+        .webtransport_initial_max_streams_bidi = 3,
+    };
+    try remembered.validateAfterEarlyDataAccepted(remembered);
+    var increased = remembered;
+    increased.qpack_max_table_capacity += 1;
+    increased.max_field_section_size += 1;
+    increased.qpack_blocked_streams += 1;
+    increased.webtransport_max_sessions += 1;
+    increased.webtransport_initial_max_data += 1;
+    increased.webtransport_initial_max_streams_uni += 1;
+    increased.webtransport_initial_max_streams_bidi += 1;
+    try remembered.validateAfterEarlyDataAccepted(increased);
+
+    inline for (.{
+        "qpack capacity",
+        "field section size",
+        "blocked streams",
+        "extended connect",
+        "datagrams",
+        "webtransport",
+        "webtransport sessions",
+        "webtransport data",
+        "webtransport uni streams",
+        "webtransport bidi streams",
+    }, 0..) |_, index| {
+        var reduced = remembered;
+        switch (index) {
+            0 => reduced.qpack_max_table_capacity -= 1,
+            1 => reduced.max_field_section_size -= 1,
+            2 => reduced.qpack_blocked_streams -= 1,
+            3 => reduced.enable_connect_protocol = false,
+            4 => reduced.h3_datagram = false,
+            5 => reduced.enable_webtransport = false,
+            6 => reduced.webtransport_max_sessions -= 1,
+            7 => reduced.webtransport_initial_max_data -= 1,
+            8 => reduced.webtransport_initial_max_streams_uni -= 1,
+            9 => reduced.webtransport_initial_max_streams_bidi -= 1,
+            else => unreachable,
+        }
+        try std.testing.expectError(
+            error.InvalidSetting,
+            remembered.validateAfterEarlyDataAccepted(reduced),
+        );
+    }
+
+    const allocator = std.testing.allocator;
+    var control = ControlState{
+        .early_data_peer_settings = remembered,
+    };
+    defer control.deinit(allocator);
+    var reduced_frame: std.ArrayList(u8) = .empty;
+    defer reduced_frame.deinit(allocator);
+    var reduced = remembered;
+    reduced.max_field_section_size -= 1;
+    try writeSettingsFrame(&reduced_frame, allocator, reduced);
+    try std.testing.expectError(
+        error.InvalidSetting,
+        control.applyFrame(allocator, try Frame.parse(reduced_frame.items)),
+    );
+    try std.testing.expect(!control.settings.received);
+    try std.testing.expect(control.early_data_peer_settings != null);
+
+    var accepted_frame: std.ArrayList(u8) = .empty;
+    defer accepted_frame.deinit(allocator);
+    try writeSettingsFrame(&accepted_frame, allocator, increased);
+    try control.applyFrame(
+        allocator,
+        try Frame.parse(accepted_frame.items),
+    );
+    try std.testing.expect(control.settings.received);
+    try std.testing.expect(control.early_data_peer_settings == null);
+}
+
 test "HTTP/3 control stream enforces SETTINGS first and GOAWAY monotonicity" {
     const allocator = std.testing.allocator;
 
@@ -6174,10 +6491,6 @@ test "HTTP/3 push control frames and state" {
     try std.testing.expectError(error.MaxPushIdReduced, peer_control.applyFrame(allocator, reduced_frame));
 
     try peer_control.applyFrame(allocator, cancel_frame);
-    try std.testing.expectEqual(
-        @as(?u64, 7),
-        peer_control.peer_cancelled_push_id,
-    );
     var second_cancel: std.ArrayList(u8) = .empty;
     defer second_cancel.deinit(allocator);
     try writeCancelPushFrame(&second_cancel, allocator, 3);
@@ -6191,7 +6504,7 @@ test "HTTP/3 push control frames and state" {
     try std.testing.expect(peer_control.pushCancelled(3));
     try std.testing.expectEqual(
         @as(usize, 2),
-        peer_control.peer_cancelled_push_ids.items.len,
+        peer_control.cancelledPushRangeCount(),
     );
 }
 
@@ -6418,7 +6731,7 @@ fn checkPushCancellationStateAllocationFailure(
     try std.testing.expect(control.pushCancelled(3));
     try std.testing.expectEqual(
         @as(usize, 2),
-        control.peer_cancelled_push_ids.items.len,
+        control.cancelledPushRangeCount(),
     );
     var cloned = try control.clone(allocator);
     defer cloned.deinit(allocator);
@@ -6432,6 +6745,48 @@ test "HTTP/3 per-ID push cancellation is allocation-failure safe" {
         checkPushCancellationStateAllocationFailure,
         .{},
     );
+}
+
+test "HTTP/3 sequential push cancellation history remains allocation-free" {
+    const allocator = std.testing.allocator;
+    var control = ControlState{ .settings = .{ .received = true } };
+    defer control.deinit(allocator);
+    var no_alloc = std.testing.FailingAllocator.init(
+        allocator,
+        .{ .fail_index = 0 },
+    );
+
+    for (0..64) |push_id| {
+        const payload = [_]u8{@intCast(push_id)};
+        try control.applyFrame(no_alloc.allocator(), .{
+            .frame_type = FrameType.cancel_push,
+            .payload = &payload,
+            .consumed = 0,
+        });
+    }
+    try std.testing.expect(!no_alloc.has_induced_failure);
+    try std.testing.expectEqual(@as(usize, 1), control.cancelledPushRangeCount());
+    try std.testing.expectEqual(@as(u64, 64), control.push_cancellation_generation);
+    for (0..64) |push_id| try std.testing.expect(
+        control.pushCancelled(push_id),
+    );
+
+    const generation = control.push_cancellation_generation;
+    try control.applyFrame(no_alloc.allocator(), .{
+        .frame_type = FrameType.cancel_push,
+        .payload = &.{31},
+        .consumed = 0,
+    });
+    try std.testing.expect(!no_alloc.has_induced_failure);
+    try std.testing.expectEqual(generation, control.push_cancellation_generation);
+
+    var cloned = try control.clone(no_alloc.allocator());
+    defer cloned.deinit(allocator);
+    try std.testing.expect(!no_alloc.has_induced_failure);
+    try std.testing.expectEqual(@as(usize, 1), cloned.cancelledPushRangeCount());
+    try std.testing.expect(cloned.pushCancelled(0));
+    try std.testing.expect(cloned.pushCancelled(63));
+    try std.testing.expect(!cloned.pushCancelled(64));
 }
 
 test "HTTP/3 rejects malformed structured frame payloads" {

@@ -50,8 +50,10 @@ on_exit() {
 trap on_exit EXIT
 
 (cd "$fixture_dir" && go build \
+  -mod=readonly \
   -o "$work/quic-go-raw-bench" \
-  "$repo_root/tools/interop/quic_quic_go_bench.go")
+  "$repo_root/tools/interop/quic_quic_go_bench.go" \
+  "$repo_root/tools/interop/quic_quic_go_churn.go")
 
 free_udp_port() {
   python3 - <<'PY'

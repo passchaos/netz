@@ -97,6 +97,7 @@ pub fn Writer(comptime RuntimeError: type) type {
         write_slices: *const fn (
             context: ?*anyopaque,
             parts: []const []const u8,
+            transport_started: *bool,
         ) RuntimeError!void,
         scratch: *runtime_write.Scratch,
         framing: runtime_write.streaming.Framing,
@@ -118,6 +119,7 @@ pub fn Writer(comptime RuntimeError: type) type {
             write_slices: *const fn (
                 context: ?*anyopaque,
                 parts: []const []const u8,
+                transport_started: *bool,
             ) RuntimeError!void,
             scratch: *runtime_write.Scratch,
             prepared: runtime_write.streaming.Head,
@@ -347,8 +349,13 @@ pub fn Writer(comptime RuntimeError: type) type {
             self: *Self,
             parts: []const []const u8,
         ) RuntimeError!void {
-            self.write_slices(self.context, parts) catch |err| {
-                self.fail();
+            var transport_started = false;
+            self.write_slices(
+                self.context,
+                parts,
+                &transport_started,
+            ) catch |err| {
+                if (transport_started) self.fail();
                 return err;
             };
         }

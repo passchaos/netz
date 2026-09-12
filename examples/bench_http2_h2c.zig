@@ -27,6 +27,8 @@ const ScenarioId = enum {
     http2_parallel_x10_empty,
     http2_parallel_x10_req_10kb_100_chunks_max_window,
     http2_parallel_x10_res_1mb,
+    http2_parallel_x10_duplex_1mb_aggregate,
+    http2_parallel_x10_duplex_1mb_streaming,
 };
 
 const Options = struct {
@@ -116,6 +118,22 @@ pub fn main(init: std.process.Init) !void {
                     .parallel = 10,
                     .warmups = 5,
                     .measured = 20,
+                },
+                .{
+                    .id = .http2_parallel_x10_duplex_1mb_aggregate,
+                    .request_body = response_body_1mb,
+                    .response_body = response_body_1mb,
+                    .parallel = 10,
+                    .warmups = 2,
+                    .measured = 5,
+                },
+                .{
+                    .id = .http2_parallel_x10_duplex_1mb_streaming,
+                    .request_body = response_body_1mb,
+                    .response_body = response_body_1mb,
+                    .parallel = 10,
+                    .warmups = 2,
+                    .measured = 5,
                 },
             };
             for (scenarios) |scenario| {
@@ -333,6 +351,35 @@ pub fn main(init: std.process.Init) !void {
             .warmups = 5,
             .measured = 20,
         },
+        .{
+            .id = .http2_parallel_x10_duplex_1mb_aggregate,
+            .request = .{
+                .method = "POST",
+                .path = "/hello",
+                .scheme = "http",
+                .authority = authority,
+                .body = response_body_1mb,
+            },
+            .response_body = response_body_1mb,
+            .parallel = 10,
+            .warmups = 2,
+            .measured = 5,
+        },
+        .{
+            .id = .http2_parallel_x10_duplex_1mb_streaming,
+            .request = .{
+                .method = "POST",
+                .path = "/hello",
+                .scheme = "http",
+                .authority = authority,
+                .body = response_body_1mb,
+            },
+            .response_body = response_body_1mb,
+            .streaming_response = true,
+            .parallel = 10,
+            .warmups = 2,
+            .measured = 5,
+        },
     };
     for (scenarios) |scenario| {
         if (options.scenario != null and
@@ -379,7 +426,7 @@ pub fn main(init: std.process.Init) !void {
 
         std.debug.print(
             \\HTTP/2 h2c runtime benchmark
-            \\  shape: Hyper {s}
+            \\  scenario: {s}
             \\  parallel requests: {d}
             \\  warmup iterations: {d}
             \\  iterations: {d}
@@ -495,20 +542,31 @@ fn exchangeScenario(
     if (streaming_response) {
         var responses: [10]netz.http2.runtime.StreamingResponse = undefined;
         var body_bytes = [_]usize{0} ** 10;
-        try client.requestBatchStreamingInto(
-            requests,
-            responses[0..requests.len],
-            &body_bytes,
-            struct {
-                fn consume(
-                    counts: *[10]usize,
-                    request_index: usize,
-                    data: []const u8,
-                ) !void {
-                    counts[request_index] += data.len;
-                }
-            }.consume,
-        );
+        const consume = struct {
+            fn consume(
+                counts: *[10]usize,
+                request_index: usize,
+                data: []const u8,
+            ) !void {
+                counts[request_index] += data.len;
+            }
+        }.consume;
+        if (requests[0].body.len == 0) {
+            try client.requestBatchStreamingInto(
+                requests,
+                responses[0..requests.len],
+                &body_bytes,
+                consume,
+            );
+        } else {
+            try client.requestBodyBatchStreamingInto(
+                requests,
+                parallel_chunk.len,
+                responses[0..requests.len],
+                &body_bytes,
+                consume,
+            );
+        }
         defer for (responses[0..requests.len]) |*response| {
             response.deinit(allocator);
         };

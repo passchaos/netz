@@ -253,6 +253,166 @@ test "QUIC early-data sender preserves lease when send validation fails" {
     try std.testing.expect(cache.ownsActiveLease(lease));
 }
 
+test "QUIC early-data sender retires a sealed nonce after socket failure" {
+    const allocator = std.testing.allocator;
+    var threaded = std.Io.Threaded.init(allocator, .{});
+    defer threaded.deinit();
+    const io = threaded.io();
+
+    var server = try quic.runtime.Server.bind(
+        allocator,
+        io,
+        .{ .ip4 = .loopback(0) },
+        .{ .max_datagram_size = 4096 },
+    );
+    defer server.deinit();
+    var client = try quic.runtime.Client.connect(
+        allocator,
+        io,
+        .{ .ip4 = .loopback(0) },
+        server.address(),
+        .{ .max_datagram_size = 4096 },
+    );
+    defer client.deinit();
+
+    var cache = try quic.resumption.Cache.init(allocator, 1);
+    defer cache.deinit();
+    try cache.store(earlyTicket());
+    var lease = (try cache.beginEarlyData("server", "h3", 1001)).?;
+    defer lease.deinit();
+    var sender = zero_rtt.EarlyDataSender{
+        .cache = &cache,
+        .lease = &lease,
+    };
+    const keys = quic.protection.deriveAes128Keys(
+        [_]u8{0x89} ** quic.protection.secret_len,
+    );
+    const FailSendIo = struct {
+        delegate: std.Io,
+        calls: usize = 0,
+
+        fn netSend(
+            userdata: ?*anyopaque,
+            _: std.Io.net.Socket.Handle,
+            _: []std.Io.net.OutgoingMessage,
+            _: std.Io.net.SendFlags,
+        ) struct { ?std.Io.net.Socket.SendError, usize } {
+            const self: *@This() = @ptrCast(@alignCast(userdata.?));
+            self.calls += 1;
+            return .{ error.NetworkDown, 0 };
+        }
+    };
+    var failed = FailSendIo{ .delegate = client.endpoint.io };
+    var failed_vtable = failed.delegate.vtable.*;
+    failed_vtable.netSend = FailSendIo.netSend;
+    client.endpoint.io = .{
+        .userdata = &failed,
+        .vtable = &failed_vtable,
+    };
+    defer client.endpoint.io = failed.delegate;
+
+    const first = [_]quic.Frame{.{ .stream = .{
+        .stream_id = 0,
+        .data = "first",
+    } }};
+    try std.testing.expectError(
+        error.NetworkDown,
+        sender.send(&client.endpoint, server.address(), keys, .{
+            .destination_connection_id = "server-cid",
+            .source_connection_id = "client-cid",
+            .frames = &first,
+        }),
+    );
+    try std.testing.expectEqual(@as(usize, 1), failed.calls);
+    try std.testing.expect(sender.offered);
+    try std.testing.expectEqual(@as(u64, 1), sender.packet_number);
+    try std.testing.expectEqual(.consumed, lease.state);
+    try std.testing.expect(
+        (try cache.beginEarlyData("server", "h3", 1002)) == null,
+    );
+
+    client.endpoint.io = failed.delegate;
+    const second = [_]quic.Frame{.{ .stream = .{
+        .stream_id = 0,
+        .data = "second",
+    } }};
+    try sender.send(&client.endpoint, server.address(), keys, .{
+        .destination_connection_id = "server-cid",
+        .source_connection_id = "client-cid",
+        .frames = &second,
+    });
+    try std.testing.expectEqual(@as(u64, 2), sender.packet_number);
+
+    var received = try server.endpoint.receiveBytes();
+    defer received.deinit(allocator);
+    var opened = try zero_rtt.openBytes(
+        &server.endpoint,
+        received.from,
+        received.bytes,
+        keys,
+        1,
+        8,
+    );
+    defer opened.deinit(allocator);
+    try std.testing.expectEqual(@as(u64, 1), opened.packet.packet_number);
+    try std.testing.expectEqualStrings(
+        "second",
+        opened.frames[0].stream.data,
+    );
+}
+
+test "QUIC 0-RTT progress reports a protected packet after zero socket progress" {
+    const allocator = std.testing.allocator;
+    var threaded = std.Io.Threaded.init(allocator, .{});
+    defer threaded.deinit();
+    var endpoint = try quic.runtime.Endpoint.bind(
+        allocator,
+        threaded.io(),
+        .{ .ip4 = .loopback(0) },
+        .{ .max_datagram_size = 4096 },
+    );
+    defer endpoint.deinit();
+
+    const RejectSendIo = struct {
+        delegate: std.Io,
+
+        fn netSend(
+            _: ?*anyopaque,
+            _: std.Io.net.Socket.Handle,
+            _: []std.Io.net.OutgoingMessage,
+            _: std.Io.net.SendFlags,
+        ) struct { ?std.Io.net.Socket.SendError, usize } {
+            return .{ error.NetworkDown, 0 };
+        }
+    };
+    var rejected = RejectSendIo{ .delegate = endpoint.io };
+    var rejecting_vtable = rejected.delegate.vtable.*;
+    rejecting_vtable.netSend = RejectSendIo.netSend;
+    endpoint.io = .{ .userdata = &rejected, .vtable = &rejecting_vtable };
+    defer endpoint.io = rejected.delegate;
+
+    const progress = try zero_rtt.sendFramesProgress(
+        &endpoint,
+        endpoint.address(),
+        quic.protection.deriveAes128Keys(
+            [_]u8{0x98} ** quic.protection.secret_len,
+        ),
+        .{
+            .destination_connection_id = "server-cid",
+            .source_connection_id = "client-cid",
+            .packet_number = 7,
+            .frames = &.{.{ .stream = .{
+                .stream_id = 0,
+                .data = "early",
+            } }},
+        },
+    );
+    try std.testing.expectEqual(@as(usize, 0), progress.sent_count);
+    try std.testing.expectEqual(@as(usize, 1), progress.protected_count);
+    try std.testing.expect(progress.packet_len != 0);
+    try std.testing.expectEqual(error.NetworkDown, progress.send_error.?);
+}
+
 fn earlyTicket() quic.resumption.Ticket {
     return .{
         .server_id = "server",

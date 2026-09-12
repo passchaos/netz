@@ -36,6 +36,81 @@ pub const OutgoingValidationError = websocket.Error || error{
     MessageTooLarge,
 };
 
+pub const MessageWriteProgress = struct {
+    /// Exact cumulative RFC 6455 frame-byte prefix committed by the transport.
+    /// This includes the WebSocket header before application payload.
+    committed_bytes: usize = 0,
+    total_bytes: usize = 0,
+    frame_committed: bool = false,
+};
+
+/// One automatic Pong or peer-Close echo whose encoded wire bytes must remain
+/// stable across a bounded receive timeout. `frame` is populated only when
+/// the receive API owes the caller the control frame after the reply commits.
+pub const PendingAutomaticControl = struct {
+    pub const Delivery = enum {
+        frame,
+        message,
+        ping_wait,
+        close_wait,
+    };
+
+    opcode: websocket.Opcode,
+    delivery: Delivery,
+    writes_reply: bool = true,
+    bytes: [websocket.max_frame_header_len + 125]u8 = undefined,
+    len: usize = 0,
+    committed: usize = 0,
+    fin_committed: bool = false,
+    frame: ?websocket.Frame = null,
+
+    pub fn complete(self: *const PendingAutomaticControl) bool {
+        return !self.writes_reply or
+            (self.committed == self.len and
+                (self.opcode != .close or self.fin_committed));
+    }
+
+    pub fn deinit(
+        self: *PendingAutomaticControl,
+        allocator: std.mem.Allocator,
+    ) void {
+        if (self.frame) |*frame| frame.deinit(allocator);
+        std.crypto.secureZero(u8, &self.bytes);
+        self.* = undefined;
+    }
+};
+
+/// Release every connection-owned outbound transaction after its transport has
+/// been aborted. Callers must hold their send mutex so a bounded writer cannot
+/// concurrently update a cursor or borrowed-payload descriptor.
+pub fn clearPendingOutboundLocked(connection: anytype) void {
+    if (connection.pending_message) |*pending| {
+        std.crypto.secureZero(u8, &pending.header);
+        if (pending.mask_key) |*mask| {
+            std.crypto.secureZero(u8, mask);
+        }
+    }
+    connection.pending_message = null;
+    if (connection.pending_ping) |*pending| {
+        std.crypto.secureZero(u8, &pending.bytes);
+        std.crypto.secureZero(u8, &pending.payload);
+    }
+    connection.pending_ping = null;
+    if (connection.pending_close) |*pending| {
+        std.crypto.secureZero(u8, &pending.bytes);
+        std.crypto.secureZero(u8, &pending.payload);
+    }
+    connection.pending_close = null;
+    if (connection.pending_auto_control) |*pending| {
+        pending.deinit(connection.allocator);
+    }
+    connection.pending_auto_control = null;
+    connection.compression_send.deinit(connection.allocator);
+    connection.compression_send = .{};
+    connection.application_write_pending.store(false, .release);
+    connection.automatic_write_pending.store(false, .release);
+}
+
 /// Validate one complete outbound application message before a transport
 /// acquires its send lock, allocates compressor scratch, or masks caller data.
 pub fn validateOutgoingMessage(
@@ -353,9 +428,52 @@ test "WebSocket outbound validation enforces frame and message limits" {
         @as(usize, 4),
         try validateOutgoingMessageParts(limits, &.{ "ab", "cd" }),
     );
+    try std.testing.expectEqual(
+        @as(usize, 4),
+        try validateOutgoingMessageParts(
+            limits,
+            &.{ "a", "", "bc", "d" },
+        ),
+    );
+    try std.testing.expectEqual(
+        @as(usize, 0),
+        try validateOutgoingMessageParts(limits, &.{}),
+    );
     try std.testing.expectError(
         error.MessageTooLarge,
         validateOutgoingMessageParts(limits, &.{ "abc", "de" }),
+    );
+    try std.testing.expectError(
+        error.MessageTooLarge,
+        validateOutgoingMessageParts(limits, &.{ "ab", "", "cde" }),
+    );
+    try std.testing.expectEqual(
+        @as(usize, 125),
+        try validateOutgoingMessageParts(
+            .{ .max_frame_bytes = 65_536, .max_message_bytes = 65_536 },
+            &.{ "a" ** 41, "b" ** 42, "c" ** 42 },
+        ),
+    );
+    try std.testing.expectEqual(
+        @as(usize, 126),
+        try validateOutgoingMessageParts(
+            .{ .max_frame_bytes = 65_536, .max_message_bytes = 65_536 },
+            &.{ "a" ** 41, "b" ** 42, "c" ** 43 },
+        ),
+    );
+    try std.testing.expectEqual(
+        @as(usize, 65_535),
+        try validateOutgoingMessageParts(
+            .{ .max_frame_bytes = 65_536, .max_message_bytes = 65_536 },
+            &.{ "a" ** 32_767, "", "b" ** 32_768 },
+        ),
+    );
+    try std.testing.expectEqual(
+        @as(usize, 65_536),
+        try validateOutgoingMessageParts(
+            .{ .max_frame_bytes = 65_536, .max_message_bytes = 65_536 },
+            &.{ "a" ** 32_767, "b" ** 32_769 },
+        ),
     );
 
     try std.testing.expectEqual(

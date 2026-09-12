@@ -2,11 +2,13 @@ const std = @import("std");
 const netz = @import("netz");
 
 const default_iterations: usize = 10_000;
+const max_batch_size: usize = netz.quic.one_rtt.max_batch_packets;
 
 const Config = struct {
     iterations: usize = default_iterations,
     send_timeout_ms: i64 = 1000,
     burst: bool = false,
+    batch_size: usize = 1,
 };
 
 pub fn main(init: std.process.Init) !void {
@@ -129,6 +131,12 @@ fn runBurstHandshake(allocator: std.mem.Allocator, config: Config) !void {
         [_]u8{ 0x57, 0x54, 0x44, 0x01, 0x57, 0x54, 0x44, 0x02 };
     const client_cid = [_]u8{ 0x57, 0x54, 0x44, 0x03 };
     const server_cid = [_]u8{ 0x57, 0x54, 0x44, 0x04 };
+    const payload_len = "webtransport bounded burst datagram".len;
+    const queued_bytes = std.math.mul(
+        usize,
+        config.iterations,
+        payload_len,
+    ) catch return error.InvalidArgument;
     var server = try netz.webtransport.runtime.HandshakeServer.bind(
         allocator,
         io,
@@ -137,11 +145,17 @@ fn runBurstHandshake(allocator: std.mem.Allocator, config: Config) !void {
             .max_datagram_size = 4096,
             .max_frames_per_datagram = 8,
         } } },
-        .{ .handshake = .{
-            .local_connection_id = &server_cid,
-            .random = [_]u8{0x45} ** 32,
-            .x25519_secret_key = [_]u8{0x46} ** 32,
-        } },
+        .{
+            .handshake = .{
+                .local_connection_id = &server_cid,
+                .random = [_]u8{0x45} ** 32,
+                .x25519_secret_key = [_]u8{0x46} ** 32,
+            },
+            .session = .{
+                .max_queued_connect_datagrams = config.iterations,
+                .max_queued_connect_datagram_bytes = queued_bytes,
+            },
+        },
     );
     defer server.deinit();
 
@@ -250,6 +264,8 @@ const BurstSendResult = struct {
     attempted: usize,
     sent: usize,
     timed_out: usize,
+    batch_size: usize,
+    send_calls: usize,
     payload_bytes: usize,
     elapsed_ns: u64,
     p50_ns: u64,
@@ -269,21 +285,44 @@ fn runBurstSends(
     const started = nowNs(io);
     var success_count: usize = 0;
     var timeout_count: usize = 0;
+    var send_calls: usize = 0;
     const timeout = std.Io.Duration.fromMilliseconds(
         config.send_timeout_ms,
     );
-    for (0..config.iterations) |_| {
+    const payloads = try allocator.alloc([]const u8, config.batch_size);
+    defer allocator.free(payloads);
+    @memset(payloads, payload);
+    while (success_count + timeout_count < config.iterations) {
+        const remaining = config.iterations - success_count - timeout_count;
+        const count = @min(config.batch_size, remaining);
         const send_started = nowNs(io);
-        client.sendDatagramWithTimeout(payload, timeout) catch |err|
+        var committed: usize = 0;
+        send_calls += 1;
+        client.sendDatagramsWithTimeout(
+            payloads[0..count],
+            &committed,
+            timeout,
+        ) catch |err|
             switch (err) {
                 error.Timeout => {
-                    timeout_count += 1;
+                    const elapsed = nowNs(io) -| send_started;
+                    if (committed != 0) {
+                        for (latencies[success_count..][0..committed]) |*latency| {
+                            latency.* = elapsed / committed;
+                        }
+                    }
+                    success_count += committed;
+                    timeout_count += count - committed;
+                    sent_count.store(success_count, .release);
                     continue;
                 },
                 else => return err,
             };
-        latencies[success_count] = nowNs(io) -| send_started;
-        success_count += 1;
+        const elapsed = nowNs(io) -| send_started;
+        for (latencies[success_count..][0..committed]) |*latency| {
+            latency.* = elapsed / committed;
+        }
+        success_count += committed;
         sent_count.store(success_count, .release);
     }
     const elapsed = nowNs(io) -| started;
@@ -294,6 +333,8 @@ fn runBurstSends(
         .attempted = config.iterations,
         .sent = success_count,
         .timed_out = timeout_count,
+        .batch_size = config.batch_size,
+        .send_calls = send_calls,
         .payload_bytes = payload.len,
         .elapsed_ns = elapsed,
         .p50_ns = percentile(samples, 50, 100),
@@ -309,6 +350,7 @@ fn printBurstResult(
     std.debug.print(
         "WebTransport real-handshake bounded DATAGRAM burst: attempted={d} " ++
             "sent={d} timed_out={d} received={d} payload_bytes={d} " ++
+            "batch_size={d} send_calls={d} " ++
             "logical_MiB/s={d:.2} send_p50_ns={d} send_p99_ns={d} " ++
             "checksum={d}\n",
         .{
@@ -317,6 +359,8 @@ fn printBurstResult(
             result.timed_out,
             received,
             result.payload_bytes,
+            result.batch_size,
+            result.send_calls,
             mibPerSecond(
                 result.sent * result.payload_bytes,
                 result.elapsed_ns,
@@ -339,6 +383,12 @@ fn parseArgs(init: std.process.Init, allocator: std.mem.Allocator) !Config {
     while (args.next()) |arg| {
         if (std.mem.eql(u8, arg, "--burst")) {
             config.burst = true;
+        } else if (std.mem.startsWith(u8, arg, "--batch-size=")) {
+            config.batch_size = try std.fmt.parseInt(
+                usize,
+                arg["--batch-size=".len..],
+                10,
+            );
         } else if (std.mem.startsWith(u8, arg, "--iterations=")) {
             config.iterations = try std.fmt.parseInt(
                 usize,
@@ -354,6 +404,12 @@ fn parseArgs(init: std.process.Init, allocator: std.mem.Allocator) !Config {
             );
             if (config.send_timeout_ms == 0) return error.InvalidArgument;
         } else return error.InvalidArgument;
+    }
+    if (config.batch_size == 0 or config.batch_size > max_batch_size) {
+        return error.InvalidArgument;
+    }
+    if (!config.burst and config.batch_size != 1) {
+        return error.InvalidArgument;
     }
     return config;
 }

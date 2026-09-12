@@ -347,7 +347,11 @@ test "WebTransport partial writes interleave streams and finish independently" {
     const client_cid = [_]u8{ 0x57, 0x54, 0x50, 0x03 };
     const server_cid = [_]u8{ 0x57, 0x54, 0x50, 0x04 };
     const first_payload = [_]u8{0xa5} ** (24 * 1024);
-    const second_payload = [_]u8{0x5a} ** (24 * 1024);
+    // Keep the sibling below its receive window: the server deliberately
+    // leaves it unread while draining `first`, so a larger sibling would
+    // correctly backpressure this single-threaded alternating sender before
+    // it could return to `first`. It still spans multiple packet-sized writes.
+    const second_payload = [_]u8{0x5a} ** (4 * 1024);
 
     var server = try runtime.HandshakeServer.bind(
         allocator,
@@ -392,30 +396,38 @@ test "WebTransport partial writes interleave streams and finish independently" {
             defer session.deinit();
             var buffer: [4096]u8 = undefined;
             var first_received: usize = 0;
-            var second_received: usize = 0;
             var first_fin = false;
-            var second_fin = false;
-            while (!first_fin or !second_fin) {
-                const event = try session.readStream(&buffer);
+            while (!first_fin) {
+                const event = try session.readStreamId(4, &buffer);
                 if (event != .data) return error.UnexpectedStreamEvent;
                 const data = event.data;
-                if (data.stream_id == 4) {
-                    try std.testing.expectEqualSlices(
-                        u8,
-                        shared.first[first_received..][0..data.bytes],
-                        buffer[0..data.bytes],
-                    );
-                    first_received += data.bytes;
-                    first_fin = data.fin;
-                } else if (data.stream_id == 8) {
-                    try std.testing.expectEqualSlices(
-                        u8,
-                        shared.second[second_received..][0..data.bytes],
-                        buffer[0..data.bytes],
-                    );
-                    second_received += data.bytes;
-                    second_fin = data.fin;
-                } else return error.UnexpectedStream;
+                try std.testing.expectEqual(@as(u62, 4), data.stream_id);
+                try std.testing.expectEqualSlices(
+                    u8,
+                    shared.first[first_received..][0..data.bytes],
+                    buffer[0..data.bytes],
+                );
+                first_received += data.bytes;
+                first_fin = data.fin;
+            }
+            var second_received: usize = 0;
+            var second_fin = false;
+            while (!second_fin) {
+                const event = try session.readStreamIdWithTimeout(
+                    8,
+                    &buffer,
+                    .fromSeconds(2),
+                );
+                if (event != .data) return error.UnexpectedStreamEvent;
+                const data = event.data;
+                try std.testing.expectEqual(@as(u62, 8), data.stream_id);
+                try std.testing.expectEqualSlices(
+                    u8,
+                    shared.second[second_received..][0..data.bytes],
+                    buffer[0..data.bytes],
+                );
+                second_received += data.bytes;
+                second_fin = data.fin;
             }
             try std.testing.expectEqual(shared.first.len, first_received);
             try std.testing.expectEqual(shared.second.len, second_received);

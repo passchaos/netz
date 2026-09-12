@@ -1,4 +1,5 @@
 const std = @import("std");
+const deadline_policy = @import("../../../internal/deadline.zig");
 const http3 = @import("../../mod.zig");
 const quic = @import("../../../quic/mod.zig");
 const runtime_error = @import("../error.zig");
@@ -17,7 +18,9 @@ pub fn streamMessage(
     stream_id: u62,
     bytes: []const u8,
     max_stream_frame_data: usize,
+    send_attempted: *bool,
 ) Error!void {
+    send_attempted.* = false;
     var frames: std.ArrayList(quic.Frame) = .empty;
     defer frames.deinit(endpoint.allocator);
     try appendStreamMessageFrames(
@@ -33,7 +36,7 @@ pub fn streamMessage(
         to,
         frames.items,
         1,
-        null,
+        send_attempted,
     );
 }
 
@@ -220,6 +223,61 @@ pub fn bodyChunk(
     max_stream_frame_data: usize,
     send_attempted_out: ?*bool,
 ) Error!void {
+    return bodyChunkUntil(
+        endpoint,
+        to,
+        bodies,
+        stream_id,
+        data,
+        fin,
+        max_stream_frame_data,
+        send_attempted_out,
+        null,
+    ) catch |err| switch (err) {
+        error.Timeout, error.ConcurrencyUnavailable => unreachable,
+        else => |other| return @errorCast(other),
+    };
+}
+
+pub fn bodyChunkWithDeadline(
+    endpoint: *quic.runtime.Endpoint,
+    to: net.IpAddress,
+    bodies: *outbound_body.Set,
+    stream_id: u62,
+    data: []const u8,
+    fin: bool,
+    max_stream_frame_data: usize,
+    send_attempted_out: ?*bool,
+    deadline: std.Io.Clock.Timestamp,
+) runtime_error.ReceiveTimeoutError!void {
+    _ = try deadline_policy.usableAwake(
+        endpoint.io,
+        deadline,
+    );
+    return bodyChunkUntil(
+        endpoint,
+        to,
+        bodies,
+        stream_id,
+        data,
+        fin,
+        max_stream_frame_data,
+        send_attempted_out,
+        deadline,
+    );
+}
+
+fn bodyChunkUntil(
+    endpoint: *quic.runtime.Endpoint,
+    to: net.IpAddress,
+    bodies: *outbound_body.Set,
+    stream_id: u62,
+    data: []const u8,
+    fin: bool,
+    max_stream_frame_data: usize,
+    send_attempted_out: ?*bool,
+    deadline: ?std.Io.Clock.Timestamp,
+) runtime_error.ReceiveTimeoutError!void {
     const entry = bodies.find(stream_id) orelse return error.UnexpectedStream;
     const previous = entry.*;
     var send_attempted = false;
@@ -241,13 +299,14 @@ pub fn bodyChunk(
         max_stream_frame_data,
         fin,
     );
-    packetizer.sendEndpoint(
+    packetizer.sendEndpointUntil(
         endpoint.allocator,
         endpoint,
         to,
         bodies.frame_scratch.items,
         1,
         &send_attempted,
+        deadline,
     ) catch |err| {
         if (send_attempted_out) |attempted| attempted.* = send_attempted;
         return err;

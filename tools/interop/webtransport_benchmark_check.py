@@ -78,6 +78,8 @@ def validate_shape(
     chunk_bytes: int,
     stream_window: int,
     timeout_ms: int,
+    netz_ack_every: int,
+    netz_max_ack_delay_us: int,
 ) -> None:
     direction = "upload" if mode == "stream-upload" else "roundtrip"
     expected = {
@@ -97,6 +99,8 @@ def validate_shape(
         "chunk_bytes": str(chunk_bytes),
         "stream_window": str(stream_window),
         "timeout_ms": str(timeout_ms),
+        "netz_ack_every": str(netz_ack_every),
+        "netz_max_ack_delay_us": str(netz_max_ack_delay_us),
     }
     for key, value in expected.items():
         if record.get(key) != value:
@@ -130,6 +134,8 @@ def validate_traffic(
     chunk_bytes: int,
     stream_window: int,
     timeout_ms: int,
+    netz_ack_every: int,
+    netz_max_ack_delay_us: int,
 ) -> None:
     validate_shape(
         record, role_pair=role_pair, implementation=implementation,
@@ -138,6 +144,8 @@ def validate_traffic(
         bytes_per_stream=bytes_per_stream, payload_bytes=payload_bytes,
         chunk_bytes=chunk_bytes, stream_window=stream_window,
         timeout_ms=timeout_ms,
+        netz_ack_every=netz_ack_every,
+        netz_max_ack_delay_us=netz_max_ack_delay_us,
     )
     expected_source = (
         "netz-socket-counters"
@@ -171,6 +179,8 @@ def main() -> None:
     parser.add_argument("--chunk-bytes", type=int, required=True)
     parser.add_argument("--stream-window", type=int, required=True)
     parser.add_argument("--timeout-ms", type=int, required=True)
+    parser.add_argument("--netz-ack-every", type=int, required=True)
+    parser.add_argument("--netz-max-ack-delay-us", type=int, required=True)
     parser.add_argument("--client-log", required=True, type=Path)
     parser.add_argument("--server-log", required=True, type=Path)
     parser.add_argument("--client-rss", type=Path)
@@ -192,6 +202,8 @@ def main() -> None:
         or args.chunk_bytes <= 0
         or args.stream_window <= 0
         or args.timeout_ms <= 0
+        or args.netz_ack_every <= 0
+        or not 0 <= args.netz_max_ack_delay_us <= 25_000
     ):
         raise SystemExit("invalid WebTransport validation configuration")
 
@@ -211,6 +223,8 @@ def main() -> None:
             bytes_per_stream=args.bytes_per_stream, payload_bytes=args.payload_bytes,
             chunk_bytes=args.chunk_bytes, stream_window=args.stream_window,
             timeout_ms=args.timeout_ms,
+            netz_ack_every=args.netz_ack_every,
+            netz_max_ack_delay_us=args.netz_max_ack_delay_us,
         )
         if result.get("benchmark_scope") != "same-application-shape" or result.get("complete") != "true":
             raise SystemExit(f"invalid result completion: {result}")
@@ -222,6 +236,8 @@ def main() -> None:
         bytes_per_stream=args.bytes_per_stream, payload_bytes=args.payload_bytes,
         chunk_bytes=args.chunk_bytes, stream_window=args.stream_window,
         timeout_ms=args.timeout_ms,
+        netz_ack_every=args.netz_ack_every,
+        netz_max_ack_delay_us=args.netz_max_ack_delay_us,
     )
     if server.get("server_complete") != "true":
         raise SystemExit(f"invalid server completion: {server}")
@@ -287,6 +303,8 @@ def main() -> None:
                 streams=args.streams, bytes_per_stream=args.bytes_per_stream,
                 payload_bytes=args.payload_bytes, chunk_bytes=args.chunk_bytes,
                 stream_window=args.stream_window, timeout_ms=args.timeout_ms,
+                netz_ack_every=args.netz_ack_every,
+                netz_max_ack_delay_us=args.netz_max_ack_delay_us,
             )
             joined[role] = traffic_record
         client = joined["client"]
@@ -346,6 +364,8 @@ def main() -> None:
             bytes_per_stream=args.bytes_per_stream, payload_bytes=args.payload_bytes,
             chunk_bytes=args.chunk_bytes, stream_window=args.stream_window,
             timeout_ms=args.timeout_ms,
+            netz_ack_every=args.netz_ack_every,
+            netz_max_ack_delay_us=args.netz_max_ack_delay_us,
         )
         expected_scope = "netz-explicit" if implementation == "netz" else "rust-system-requested"
         expected_memory_scope = (
@@ -371,6 +391,7 @@ def main() -> None:
             "connection_scope", "warmup", "iterations", "streams",
             "bytes_per_stream", "payload_bytes", "chunk_bytes",
             "stream_window", "timeout_ms", "complete",
+            "netz_ack_every", "netz_max_ack_delay_us",
         }
         detail = " ".join(
             f"{key}={value}" for key, value in memory.items() if key not in excluded

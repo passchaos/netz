@@ -3,10 +3,14 @@ const netz = @import("netz");
 
 const default_transfer_bytes: usize = 4 * 1024 * 1024;
 const default_streams: usize = 1;
-const max_streams: usize = 64;
+// Keep the deterministic benchmark bounded while allowing larger churn
+// distributions than the external u64-mask interoperability fixture.
+const max_streams: usize = 256;
 const read_buffer_bytes: usize = 16 * 1024;
 const default_stream_window: u64 = 64 * 1024;
 const default_one_rtt_datagram_size: usize = 4096;
+const default_send_timeout_ms: i64 = 30_000;
+const max_stream_slices: usize = 256;
 const cancellation_code: u32 = 42;
 
 const LossState = struct {
@@ -70,9 +74,24 @@ pub fn main(init: std.process.Init) !void {
     const payload = try allocator.alloc(u8, config.transfer_bytes);
     defer allocator.free(payload);
     for (payload, 0..) |*byte, index| byte.* = payloadByte(index);
+    const payload_slices = try allocator.alloc(
+        []const u8,
+        config.stream_slices,
+    );
+    defer allocator.free(payload_slices);
+    const slice_base = payload.len / payload_slices.len;
+    const slice_extra = payload.len % payload_slices.len;
+    var slice_offset: usize = 0;
+    for (payload_slices, 0..) |*part, index| {
+        const count = slice_base + @intFromBool(index < slice_extra);
+        part.* = payload[slice_offset..][0..count];
+        slice_offset += count;
+    }
+    std.debug.assert(slice_offset == payload.len);
     var loss_state = LossState{ .drop_pct = config.loss_pct };
     var reorder_state = ReorderState{ .every = config.reorder_every };
     var server_limits: netz.webtransport.runtime.Limits = .{
+        .max_session_streams = config.streams,
         .http3 = .{
             .quic = .{
                 .max_datagram_size = config.one_rtt_datagram_size,
@@ -224,6 +243,7 @@ pub fn main(init: std.process.Init) !void {
             .authority = "localhost",
             .path = "/wt-stream-bench",
             .limits = .{
+                .max_session_streams = config.streams,
                 .http3 = .{
                     .quic = .{
                         .max_datagram_size = config.one_rtt_datagram_size,
@@ -269,6 +289,10 @@ pub fn main(init: std.process.Init) !void {
     for (stream_ids) |*stream_id| {
         stream_id.* = try client.openBidirectionalStream();
     }
+    const send_deadline = std.Io.Clock.Timestamp.fromNow(io, .{
+        .raw = .fromMilliseconds(config.send_timeout_ms),
+        .clock = .awake,
+    });
     const started_ns = nowNs(io);
     var send_calls: usize = 0;
     var partial_writes: usize = 0;
@@ -280,18 +304,42 @@ pub fn main(init: std.process.Init) !void {
         payload.len,
     );
     if (config.send_all) {
-        try client.sendStream(stream_ids[0], payload, true);
+        var committed: usize = 0;
+        if (config.stream_slices == 1) {
+            try client.sendStreamWithDeadline(
+                stream_ids[0],
+                payload,
+                true,
+                &committed,
+                send_deadline,
+            );
+        } else {
+            try client.sendStreamSlicesWithDeadline(
+                stream_ids[0],
+                payload_slices,
+                true,
+                &committed,
+                send_deadline,
+            );
+        }
+        if (committed != payload.len) return error.IncompleteTransfer;
         send_calls = 1;
         offsets[0] = payload.len;
     } else {
         for (stream_ids, offsets, 0..) |stream_id, *offset, index| {
             if (!streamShouldReset(config, index)) continue;
             if (reset_prefix_bytes != 0) {
-                try client.sendStream(
+                var committed: usize = 0;
+                try client.sendStreamWithDeadline(
                     stream_id,
                     payload[0..reset_prefix_bytes],
                     false,
+                    &committed,
+                    send_deadline,
                 );
+                if (committed != reset_prefix_bytes) {
+                    return error.IncompleteTransfer;
+                }
                 send_calls += 1;
             }
             try client.resetStream(stream_id, cancellation_code);
@@ -312,7 +360,11 @@ pub fn main(init: std.process.Init) !void {
                     .data = payload[offset..],
                 };
             }
-            const result = try client.writeStreams(writes, counts);
+            const result = try client.writeStreamsWithDeadline(
+                writes,
+                counts,
+                send_deadline,
+            );
             send_calls += 1;
             if (result.send_error) |err| return err;
             if (result.progressed == 0) return error.IncompleteTransfer;
@@ -325,7 +377,10 @@ pub fn main(init: std.process.Init) !void {
         }
         for (stream_ids, 0..) |stream_id, index| {
             if (!streamShouldReset(config, index)) {
-                try client.finishStream(stream_id);
+                try client.finishStreamWithDeadline(
+                    stream_id,
+                    send_deadline,
+                );
             }
         }
     }
@@ -355,6 +410,7 @@ pub fn main(init: std.process.Init) !void {
     std.debug.print(
         \\WebTransport stream benchmark
         \\  send mode: {s}
+        \\  stream slices: {d}
         \\  streams: {d}
         \\  bytes per stream: {d}
         \\  total transfer bytes: {d}
@@ -371,6 +427,7 @@ pub fn main(init: std.process.Init) !void {
         \\  datagrams held: {d}
         \\  caller buffer: {d}
         \\  GRO receive enabled: {}
+        \\  send timeout ms: {d}
         \\  send API calls: {d}
         \\  caller-visible partial writes: {d}
         \\  read events: {d}
@@ -380,6 +437,7 @@ pub fn main(init: std.process.Init) !void {
         \\
     , .{
         if (config.send_all) "send-all" else "write-streams",
+        config.stream_slices,
         config.streams,
         payload.len,
         total_bytes,
@@ -396,6 +454,7 @@ pub fn main(init: std.process.Init) !void {
         reorder_state.held.load(.monotonic),
         read_buffer_bytes,
         config.enable_gro_receive,
+        config.send_timeout_ms,
         send_calls,
         partial_writes,
         shared.events,
@@ -412,7 +471,9 @@ const Config = struct {
     one_rtt_datagram_size: usize = default_one_rtt_datagram_size,
     enable_pacing: bool = true,
     enable_gro_receive: bool = false,
+    send_timeout_ms: i64 = default_send_timeout_ms,
     send_all: bool = false,
+    stream_slices: usize = 1,
     reset_every: usize = 0,
     reset_after_bytes: usize = 1024,
     loss_pct: u8 = 0,
@@ -456,6 +517,17 @@ fn parseArgs(
             config.enable_gro_receive = true;
         } else if (std.mem.eql(u8, arg, "--send-all")) {
             config.send_all = true;
+        } else if (std.mem.startsWith(u8, arg, "--stream-slices=")) {
+            config.stream_slices = try parsePositiveUsize(
+                arg["--stream-slices=".len..],
+            );
+        } else if (std.mem.startsWith(u8, arg, "--send-timeout-ms=")) {
+            config.send_timeout_ms = try std.fmt.parseInt(
+                i64,
+                arg["--send-timeout-ms=".len..],
+                10,
+            );
+            if (config.send_timeout_ms <= 0) return error.InvalidArgument;
         } else if (std.mem.startsWith(u8, arg, "--reset-every=")) {
             config.reset_every = try parsePositiveUsize(
                 arg["--reset-every=".len..],
@@ -487,12 +559,18 @@ fn parseArgs(
             ) orelse return error.InvalidArgument;
         } else return error.InvalidArgument;
     }
-    if (config.streams > max_streams or config.loss_pct > 100) {
+    if (config.streams > max_streams or
+        config.stream_slices > max_stream_slices or
+        config.loss_pct > 100)
+    {
         return error.InvalidArgument;
     }
     if (config.send_all and
         (config.streams != 1 or config.reset_every != 0))
     {
+        return error.InvalidArgument;
+    }
+    if (!config.send_all and config.stream_slices != 1) {
         return error.InvalidArgument;
     }
     return config;

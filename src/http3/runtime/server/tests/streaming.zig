@@ -2,6 +2,38 @@ const std = @import("std");
 const runtime = @import("../../../runtime.zig");
 const quic = @import("../../../../quic/mod.zig");
 
+const DeadlineAfterSendIo = struct {
+    delegate: std.Io,
+    now_ns: i96,
+    send_calls: usize = 0,
+
+    fn now(
+        userdata: ?*anyopaque,
+        _: std.Io.Clock,
+    ) std.Io.Timestamp {
+        const self: *@This() = @ptrCast(@alignCast(userdata.?));
+        return .fromNanoseconds(self.now_ns);
+    }
+
+    fn netSend(
+        userdata: ?*anyopaque,
+        socket_handle: std.Io.net.Socket.Handle,
+        messages: []std.Io.net.OutgoingMessage,
+        flags: std.Io.net.SendFlags,
+    ) struct { ?std.Io.net.Socket.SendError, usize } {
+        const self: *@This() = @ptrCast(@alignCast(userdata.?));
+        self.send_calls += 1;
+        const result = self.delegate.vtable.netSend(
+            self.delegate.userdata,
+            socket_handle,
+            messages,
+            flags,
+        );
+        if (result[1] != 0) self.now_ns += std.time.ns_per_s;
+        return result;
+    }
+};
+
 test "HTTP/3 protected runtime streams request and response DATA chunks" {
     const allocator = std.testing.allocator;
     var threaded = std.Io.Threaded.init(allocator, .{});
@@ -68,11 +100,46 @@ test "HTTP/3 protected runtime streams request and response DATA chunks" {
                 server_ptr.quic_server.endpoint.allocator,
                 32,
             );
-            try server_ptr.startResponse(
+            const packet_number = server_ptr.next_packet_number;
+            const control_offset = server_ptr.control_send.next_offset;
+            const pending_sections =
+                server_ptr.qpack_encode.pending_sections.items.len;
+            try std.testing.expectError(
+                error.Timeout,
+                server_ptr.startResponseWithDeadline(
+                    request.from,
+                    request.stream_id,
+                    .{ .status = 200 },
+                    "response-chunks".len,
+                    .{ .clock = .real, .raw = .zero },
+                ),
+            );
+            try std.testing.expectEqual(
+                packet_number,
+                server_ptr.next_packet_number,
+            );
+            try std.testing.expectEqual(
+                control_offset,
+                server_ptr.control_send.next_offset,
+            );
+            try std.testing.expectEqual(
+                pending_sections,
+                server_ptr.qpack_encode.pending_sections.items.len,
+            );
+            try std.testing.expectEqual(
+                @as(usize, 0),
+                server_ptr.outbound_bodies.count(),
+            );
+            try std.testing.expectEqual(
+                @as(usize, 1),
+                server_ptr.request_lifecycle.count(),
+            );
+            try server_ptr.startResponseWithTimeout(
                 request.from,
                 request.stream_id,
                 .{ .status = 200 },
                 "response-chunks".len,
+                .fromSeconds(1),
             );
             try server_ptr.outbound_bodies.frame_scratch.ensureTotalCapacity(
                 server_ptr.quic_server.endpoint.allocator,
@@ -90,12 +157,99 @@ test "HTTP/3 protected runtime streams request and response DATA chunks" {
                 server_ptr.outbound_bodies.frame_scratch.capacity;
             const body_frame_ptr = server_ptr.outbound_bodies.frame_scratch
                 .allocatedSlice().ptr;
-            try server_ptr.sendResponseBodyPartsPaced(
+            const response_body = "response-chunks";
+            const response_before = server_ptr.outbound_bodies.find(
+                request.stream_id,
+            ).?.*;
+            const body_packet_number = server_ptr.next_packet_number;
+            const body_pending_sections =
+                server_ptr.qpack_encode.pending_sections.items.len;
+            var body_progress: runtime.BodyWriteProgress = .{
+                .committed_bytes = 99,
+                .fin_committed = true,
+            };
+            try std.testing.expectError(
+                error.Timeout,
+                server_ptr.sendResponseBodyPacedWithDeadline(
+                    request.from,
+                    request.stream_id,
+                    response_body,
+                    false,
+                    &body_progress,
+                    .{ .clock = .real, .raw = .zero },
+                ),
+            );
+            const response_after_invalid = server_ptr.outbound_bodies.find(
+                request.stream_id,
+            ).?.*;
+            try std.testing.expectEqual(@as(usize, 0), body_progress.committed_bytes);
+            try std.testing.expect(!body_progress.fin_committed);
+            try std.testing.expectEqual(
+                body_packet_number,
+                server_ptr.next_packet_number,
+            );
+            try std.testing.expectEqual(
+                response_before.written,
+                response_after_invalid.written,
+            );
+            try std.testing.expectEqual(
+                response_before.send.next_offset,
+                response_after_invalid.send.next_offset,
+            );
+            try std.testing.expectEqual(
+                body_pending_sections,
+                server_ptr.qpack_encode.pending_sections.items.len,
+            );
+
+            {
+                var timed = DeadlineAfterSendIo{
+                    .delegate = server_ptr.quic_server.endpoint.io,
+                    .now_ns = std.Io.Clock.awake.now(
+                        server_ptr.quic_server.endpoint.io,
+                    ).nanoseconds,
+                };
+                var timed_vtable = timed.delegate.vtable.*;
+                timed_vtable.now = DeadlineAfterSendIo.now;
+                timed_vtable.netSend = DeadlineAfterSendIo.netSend;
+                server_ptr.quic_server.endpoint.io = .{
+                    .userdata = &timed,
+                    .vtable = &timed_vtable,
+                };
+                defer server_ptr.quic_server.endpoint.io = timed.delegate;
+                try std.testing.expectError(
+                    error.Timeout,
+                    server_ptr.sendResponseBodyPacedWithDeadline(
+                        request.from,
+                        request.stream_id,
+                        response_body,
+                        false,
+                        &body_progress,
+                        .{
+                            .clock = .awake,
+                            .raw = .fromNanoseconds(timed.now_ns + 1),
+                        },
+                    ),
+                );
+                try std.testing.expectEqual(
+                    @as(usize, 1),
+                    body_progress.committed_bytes,
+                );
+                try std.testing.expect(!body_progress.fin_committed);
+                try std.testing.expectEqual(@as(usize, 1), timed.send_calls);
+            }
+            try server_ptr.sendResponseBodyPacedWithTimeout(
                 request.from,
                 request.stream_id,
-                &.{ "response-", "", "chunks" },
+                response_body[body_progress.committed_bytes..],
                 false,
+                &body_progress,
+                .fromSeconds(1),
             );
+            try std.testing.expectEqual(
+                response_body.len - 1,
+                body_progress.committed_bytes,
+            );
+            try std.testing.expect(!body_progress.fin_committed);
             try std.testing.expectError(
                 error.InvalidContentLength,
                 server_ptr.sendResponseBody(
@@ -122,6 +276,41 @@ test "HTTP/3 protected runtime streams request and response DATA chunks" {
             const response_entry = server_ptr.outbound_bodies.find(
                 request.stream_id,
             ).?;
+            const trailer_before = response_entry.*;
+            const trailer_packet_number = server_ptr.next_packet_number;
+            const trailer_pending_sections =
+                server_ptr.qpack_encode.pending_sections.items.len;
+            try std.testing.expectError(
+                error.Timeout,
+                server_ptr.finishResponseTrailersPacedWithDeadline(
+                    request.from,
+                    request.stream_id,
+                    &.{.{
+                        .name = "x-response-checksum",
+                        .value = "ok",
+                    }},
+                    .{ .clock = .real, .raw = .zero },
+                ),
+            );
+            const trailer_after = server_ptr.outbound_bodies.find(
+                request.stream_id,
+            ).?.*;
+            try std.testing.expectEqual(
+                trailer_packet_number,
+                server_ptr.next_packet_number,
+            );
+            try std.testing.expectEqual(
+                trailer_before.written,
+                trailer_after.written,
+            );
+            try std.testing.expectEqual(
+                trailer_before.send.next_offset,
+                trailer_after.send.next_offset,
+            );
+            try std.testing.expectEqual(
+                trailer_pending_sections,
+                server_ptr.qpack_encode.pending_sections.items.len,
+            );
             response_entry.flow_limit = response_entry.send.next_offset;
             try std.testing.expectError(
                 error.FlowControlBlocked,
@@ -135,10 +324,11 @@ test "HTTP/3 protected runtime streams request and response DATA chunks" {
                 ),
             );
             response_entry.flow_limit = null;
-            try server_ptr.finishResponseTrailers(
+            try server_ptr.finishResponseTrailersPacedWithTimeout(
                 request.from,
                 request.stream_id,
                 &.{.{ .name = "x-response-checksum", .value = "ok" }},
+                .fromSeconds(1),
             );
             try std.testing.expectEqual(
                 head_encoded_capacity,
@@ -187,13 +377,38 @@ test "HTTP/3 protected runtime streams request and response DATA chunks" {
     try client.stream_send_scratch.encoded.ensureTotalCapacity(allocator, 256);
     try client.stream_send_scratch.frames.ensureTotalCapacity(allocator, 32);
     try client.outbound_bodies.frame_scratch.ensureTotalCapacity(allocator, 16);
-    const stream_id = try client.startRequest(
+    const packet_number = client.next_packet_number;
+    const control_offset = client.control_send.next_offset;
+    const pending_sections = client.qpack_encode.pending_sections.items.len;
+    try std.testing.expectError(
+        error.Timeout,
+        client.startRequestWithDeadline(
+            .{
+                .method = "POST",
+                .path = "/stream-body",
+                .authority = "localhost",
+            },
+            "request-chunks".len,
+            .{ .clock = .real, .raw = .zero },
+        ),
+    );
+    try std.testing.expectEqual(packet_number, client.next_packet_number);
+    try std.testing.expectEqual(control_offset, client.control_send.next_offset);
+    try std.testing.expectEqual(@as(u62, 0), client.next_stream_id);
+    try std.testing.expectEqual(@as(usize, 0), client.request_lifecycle.count());
+    try std.testing.expectEqual(@as(usize, 0), client.outbound_bodies.count());
+    try std.testing.expectEqual(
+        pending_sections,
+        client.qpack_encode.pending_sections.items.len,
+    );
+    const stream_id = try client.startRequestWithTimeout(
         .{
             .method = "POST",
             .path = "/stream-body",
             .authority = "localhost",
         },
         "request-chunks".len,
+        .fromSeconds(1),
     );
     const head_encoded_capacity = client.stream_send_scratch.encoded.capacity;
     const head_frame_capacity = client.stream_send_scratch.frames.capacity;
@@ -204,11 +419,88 @@ test "HTTP/3 protected runtime streams request and response DATA chunks" {
     const body_frame_capacity = client.outbound_bodies.frame_scratch.capacity;
     const body_frame_ptr = client.outbound_bodies.frame_scratch
         .allocatedSlice().ptr;
-    try client.sendRequestBodyPartsPaced(
-        stream_id,
-        &.{ "request-", "", "chunks" },
-        false,
+    const request_body = "request-chunks";
+    const request_before = client.outbound_bodies.find(stream_id).?.*;
+    const body_packet_number = client.next_packet_number;
+    const body_pending_sections = client.qpack_encode.pending_sections.items.len;
+    var body_progress: runtime.BodyWriteProgress = .{
+        .committed_bytes = 99,
+        .fin_committed = true,
+    };
+    try std.testing.expectError(
+        error.Timeout,
+        client.sendRequestBodyPartsPacedWithDeadline(
+            stream_id,
+            &.{ "request-", "", "chunks" },
+            false,
+            &body_progress,
+            .{ .clock = .real, .raw = .zero },
+        ),
     );
+    const request_after_invalid = client.outbound_bodies.find(stream_id).?.*;
+    try std.testing.expectEqual(@as(usize, 0), body_progress.committed_bytes);
+    try std.testing.expect(!body_progress.fin_committed);
+    try std.testing.expectEqual(body_packet_number, client.next_packet_number);
+    try std.testing.expectEqual(
+        request_before.written,
+        request_after_invalid.written,
+    );
+    try std.testing.expectEqual(
+        request_before.send.next_offset,
+        request_after_invalid.send.next_offset,
+    );
+    try std.testing.expectEqual(
+        body_pending_sections,
+        client.qpack_encode.pending_sections.items.len,
+    );
+
+    {
+        var timed = DeadlineAfterSendIo{
+            .delegate = client.quic_client.endpoint.io,
+            .now_ns = std.Io.Clock.awake.now(
+                client.quic_client.endpoint.io,
+            ).nanoseconds,
+        };
+        var timed_vtable = timed.delegate.vtable.*;
+        timed_vtable.now = DeadlineAfterSendIo.now;
+        timed_vtable.netSend = DeadlineAfterSendIo.netSend;
+        client.quic_client.endpoint.io = .{
+            .userdata = &timed,
+            .vtable = &timed_vtable,
+        };
+        defer client.quic_client.endpoint.io = timed.delegate;
+        try std.testing.expectError(
+            error.Timeout,
+            client.sendRequestBodyPartsPacedWithDeadline(
+                stream_id,
+                &.{ "request-", "", "chunks" },
+                false,
+                &body_progress,
+                .{
+                    .clock = .awake,
+                    .raw = .fromNanoseconds(timed.now_ns + 1),
+                },
+            ),
+        );
+        try std.testing.expectEqual(
+            @as(usize, 1),
+            body_progress.committed_bytes,
+        );
+        try std.testing.expect(!body_progress.fin_committed);
+        try std.testing.expectEqual(@as(usize, 1), timed.send_calls);
+    }
+    try client.sendRequestBodyPartsPacedWithTimeout(
+        stream_id,
+        &.{request_body[body_progress.committed_bytes..]},
+        false,
+        &body_progress,
+        .fromSeconds(1),
+    );
+    try std.testing.expectEqual(
+        request_body.len - 1,
+        body_progress.committed_bytes,
+    );
+    try std.testing.expect(!body_progress.fin_committed);
     try std.testing.expectError(
         error.InvalidContentLength,
         client.sendRequestBody(stream_id, "short", true),
@@ -226,6 +518,32 @@ test "HTTP/3 protected runtime streams request and response DATA chunks" {
         client.outbound_bodies.payload_scratch.capacity,
     );
     const request_entry = client.outbound_bodies.find(stream_id).?;
+    const trailer_before = request_entry.*;
+    const trailer_packet_number = client.next_packet_number;
+    const trailer_pending_sections =
+        client.qpack_encode.pending_sections.items.len;
+    try std.testing.expectError(
+        error.Timeout,
+        client.finishRequestTrailersPacedWithDeadline(
+            stream_id,
+            &.{.{ .name = "x-request-checksum", .value = "ok" }},
+            .{ .clock = .real, .raw = .zero },
+        ),
+    );
+    const trailer_after = client.outbound_bodies.find(stream_id).?.*;
+    try std.testing.expectEqual(
+        trailer_packet_number,
+        client.next_packet_number,
+    );
+    try std.testing.expectEqual(trailer_before.written, trailer_after.written);
+    try std.testing.expectEqual(
+        trailer_before.send.next_offset,
+        trailer_after.send.next_offset,
+    );
+    try std.testing.expectEqual(
+        trailer_pending_sections,
+        client.qpack_encode.pending_sections.items.len,
+    );
     request_entry.flow_limit = request_entry.send.next_offset;
     try std.testing.expectError(
         error.FlowControlBlocked,
@@ -235,9 +553,10 @@ test "HTTP/3 protected runtime streams request and response DATA chunks" {
         ),
     );
     request_entry.flow_limit = null;
-    try client.finishRequestTrailers(
+    try client.finishRequestTrailersPacedWithTimeout(
         stream_id,
         &.{.{ .name = "x-request-checksum", .value = "ok" }},
+        .fromSeconds(1),
     );
     try std.testing.expectEqual(
         head_encoded_capacity,

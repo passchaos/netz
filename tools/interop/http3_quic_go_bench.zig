@@ -3,6 +3,7 @@ const netz = @import("netz");
 
 pub const mtu: usize = 1280;
 pub const max_frames: usize = 256;
+pub const max_streams: usize = 16;
 
 pub const Mode = enum {
     upload,
@@ -21,6 +22,8 @@ pub const Mode = enum {
 
 pub const Config = struct {
     mode: Mode,
+    version: netz.quic.Version = .version_1,
+    streams: u16 = 1,
     warmup: u32 = 10,
     iterations: u32 = 5,
     body_bytes: u64 = 4 * 1024 * 1024,
@@ -31,6 +34,8 @@ pub const Config = struct {
     pub fn parse(args: []const []const u8) !Config {
         var mode: ?Mode = null;
         var config: Config = undefined;
+        config.version = .version_1;
+        config.streams = 1;
         config.warmup = 10;
         config.iterations = 5;
         config.body_bytes = 4 * 1024 * 1024;
@@ -40,6 +45,11 @@ pub const Config = struct {
         for (args) |arg| {
             if (option(arg, "--mode=")) |value| {
                 mode = try Mode.parse(value);
+            } else if (std.mem.eql(u8, arg, "--version=2")) {
+                if (config.version == .version_2) return error.InvalidArgument;
+                config.version = .version_2;
+            } else if (option(arg, "--streams=")) |value| {
+                config.streams = try parsePositive(u16, value);
             } else if (option(arg, "--warmup=")) |value| {
                 config.warmup = try parsePositive(u32, value);
             } else if (option(arg, "--iterations=")) |value| {
@@ -58,6 +68,11 @@ pub const Config = struct {
         }
         config.mode = mode orelse return error.InvalidArgument;
         const round_count = try config.rounds();
+        if (config.streams != 1 and config.streams != 4 and
+            config.streams != 16)
+        {
+            return error.InvalidArgument;
+        }
         if (round_count > 4096 or config.body_bytes > 1024 * 1024 * 1024 or
             config.chunk_bytes > 1024 * 1024 or
             config.stream_window > 1024 * 1024 * 1024 or
@@ -72,6 +87,7 @@ pub const Config = struct {
         }
         _ = std.math.cast(usize, config.body_bytes) orelse
             return error.InvalidArgument;
+        _ = try config.totalBytes();
         _ = try config.connectionWindow();
         return config;
     }
@@ -90,7 +106,12 @@ pub const Config = struct {
     }
 
     pub fn connectionWindow(self: Config) !u64 {
-        return std.math.mul(u64, self.stream_window, 8) catch
+        return std.math.mul(u64, self.stream_window, @max(self.streams, 8)) catch
+            error.InvalidArgument;
+    }
+
+    pub fn totalBytes(self: Config) !u64 {
+        return std.math.mul(u64, self.body_bytes, self.streams) catch
             error.InvalidArgument;
     }
 
@@ -104,7 +125,7 @@ pub const Config = struct {
             .initial_max_stream_data_bidi_local = self.stream_window,
             .initial_max_stream_data_bidi_remote = self.stream_window,
             .initial_max_stream_data_uni = self.stream_window,
-            .initial_max_streams_bidi = @as(u64, try self.rounds()) + 8,
+            .initial_max_streams_bidi = @as(u64, self.streams) + 8,
             .initial_max_streams_uni = 16,
             .active_connection_id_limit = 4,
         };
@@ -112,6 +133,13 @@ pub const Config = struct {
 
     pub fn oneRttConfig(self: Config) !netz.quic.handshake.OneRttConfig {
         return .{
+            // quic-go v0.59 predates RFC 9369's v2 `quicv2 ku` label and
+            // rotates after roughly 100 packets in this benchmark. Keep this
+            // compatibility choice local to the pinned external fixture.
+            .key_update_profile = if (self.version == .version_2)
+                .quic_go_v0_59
+            else
+                .rfc,
             .max_frames_per_packet = max_frames,
             .receive_window = try self.connectionWindow(),
             .max_receive_window = try self.connectionWindow(),
@@ -129,9 +157,41 @@ pub const Config = struct {
             .max_stream_frame_data = mtu,
             .paced_body_chunk_bytes = @intCast(self.effectiveChunk()),
             .enable_data_prefix_fast_path = true,
-            .max_concurrent_request_streams = std.math.cast(usize, @as(u64, try self.rounds()) + 8) orelse
+            .max_concurrent_request_streams = std.math.cast(usize, @as(u64, self.streams) + 8) orelse
                 return error.InvalidArgument,
         };
+    }
+};
+
+pub const PayloadSet = struct {
+    storage: []u8,
+    streams: [max_streams][]const u8 = .{&.{}} ** max_streams,
+    checksums: [max_streams]u64 = .{0} ** max_streams,
+    aggregate_checksum: u64 = 0,
+
+    pub fn init(
+        allocator: std.mem.Allocator,
+        config: Config,
+    ) !PayloadSet {
+        const body_bytes = std.math.cast(usize, config.body_bytes) orelse
+            return error.InvalidArgument;
+        const total = std.math.mul(usize, body_bytes, config.streams) catch
+            return error.InvalidArgument;
+        const storage = try allocator.alloc(u8, total);
+        errdefer allocator.free(storage);
+        var result = PayloadSet{ .storage = storage };
+        for (0..config.streams) |index| {
+            const bytes = storage[index * body_bytes ..][0..body_bytes];
+            result.checksums[index] = fillStreamPayload(bytes, index);
+            result.aggregate_checksum +%= result.checksums[index];
+            result.streams[index] = bytes;
+        }
+        return result;
+    }
+
+    pub fn deinit(self: *PayloadSet, allocator: std.mem.Allocator) void {
+        allocator.free(self.storage);
+        self.* = undefined;
     }
 };
 
@@ -148,25 +208,69 @@ fn parsePositive(comptime T: type, value: []const u8) !T {
 }
 
 pub fn payloadByte(offset: usize) u8 {
-    return @truncate(offset *% 131);
+    return streamPayloadByte(0, offset);
+}
+
+pub fn streamPayloadByte(stream_index: usize, offset: usize) u8 {
+    return @truncate(offset *% 131 +% stream_index *% 17);
 }
 
 pub fn fillPayload(bytes: []u8) u64 {
+    return fillStreamPayload(bytes, 0);
+}
+
+pub fn fillStreamPayload(bytes: []u8, stream_index: usize) u64 {
     var checksum: u64 = 0;
     for (bytes, 0..) |*byte, offset| {
-        byte.* = payloadByte(offset);
+        byte.* = streamPayloadByte(stream_index, offset);
         checksum +%= byte.*;
     }
     return checksum;
 }
 
 pub fn verifyPayload(bytes: []const u8, offset: usize, checksum: *u64) !void {
+    return verifyStreamPayload(bytes, 0, offset, checksum);
+}
+
+pub fn verifyStreamPayload(
+    bytes: []const u8,
+    stream_index: usize,
+    offset: usize,
+    checksum: *u64,
+) !void {
     for (bytes, 0..) |byte, index| {
-        if (byte != payloadByte(offset + index)) {
+        if (byte != streamPayloadByte(stream_index, offset + index)) {
             return error.InvalidBenchmarkPayload;
         }
         checksum.* +%= byte;
     }
+}
+
+pub fn streamChecksum(body_bytes: usize, stream_index: usize) u64 {
+    var checksum: u64 = 0;
+    for (0..body_bytes) |offset| {
+        checksum +%= streamPayloadByte(stream_index, offset);
+    }
+    return checksum;
+}
+
+pub fn aggregateChecksum(config: Config) u64 {
+    const body_bytes: usize = @intCast(config.body_bytes);
+    var checksum: u64 = 0;
+    for (0..config.streams) |stream_index| {
+        checksum +%= streamChecksum(body_bytes, stream_index);
+    }
+    return checksum;
+}
+
+pub fn streamIndexForId(
+    stream_ids: []const u62,
+    stream_id: u62,
+) ?usize {
+    for (stream_ids, 0..) |candidate, index| {
+        if (candidate == stream_id) return index;
+    }
+    return null;
 }
 
 pub fn header(
@@ -199,11 +303,11 @@ pub fn printConfig(implementation: []const u8, role_pair: []const u8, config: Co
     std.debug.print(
         "implementation={s} protocol=http3 mode={s} role_pair={s} " ++
             "connection_scope=fresh-per-sample " ++
-            "benchmark_scope=same-application-shape warmup={d} " ++
-            "iterations={d} streams=1 body_bytes={d} " ++
+            "benchmark_scope=same-application-shape body_deadline_scope=sample warmup={d} " ++
+            "iterations={d} streams={d} body_bytes={d} " ++
             "application_chunk_requested={d} application_chunk_effective={d} " ++
             "stream_window={d} connection_window={d} steady_state_mtu=1280 " ++
-            "quic_version=1 cipher=negotiated-unexposed cert_verify=true " ++
+            "quic_version={d} cipher=negotiated-unexposed cert_verify=true " ++
             "gso=false gro=false pacing=true\n",
         .{
             implementation,
@@ -211,11 +315,13 @@ pub fn printConfig(implementation: []const u8, role_pair: []const u8, config: Co
             role_pair,
             config.warmup,
             config.iterations,
+            config.streams,
             config.body_bytes,
             config.chunk_bytes,
             effective_chunk,
             config.stream_window,
             try config.connectionWindow(),
+            if (config.version == .version_2) @as(u8, 2) else 1,
         },
     );
 }
@@ -228,16 +334,82 @@ pub fn printSample(
     elapsed_ns: u64,
     checksum: u64,
 ) void {
-    const mib_s = if (elapsed_ns == 0) 0.0 else @as(f64, @floatFromInt(config.body_bytes)) *
+    const total_bytes = config.totalBytes() catch unreachable;
+    const mib_s = if (elapsed_ns == 0) 0.0 else @as(f64, @floatFromInt(total_bytes)) *
         @as(f64, @floatFromInt(std.time.ns_per_s)) /
         @as(f64, @floatFromInt(elapsed_ns)) / (1024.0 * 1024.0);
     std.debug.print(
-        "implementation={s} protocol=http3 mode={s} role_pair={s} " ++
+        "record=result implementation={s} protocol=http3 mode={s} role_pair={s} " ++
             "connection_scope=fresh-per-sample " ++
-            "benchmark_scope=same-application-shape sample={d} streams=1 " ++
-            "elapsed_ns={d} logical_MiB_s={d:.3} sent_bytes={d} " ++
-            "received_bytes={d} checksum={d} status=200 complete=true\n",
-        .{ implementation, config.mode.name(), role_pair, sample, elapsed_ns, mib_s, config.body_bytes, config.body_bytes, checksum },
+            "benchmark_scope=same-application-shape body_deadline_scope=sample sample={d} streams={d} " ++
+            "body_bytes={d} elapsed_ns={d} logical_MiB_s={d:.3} sent_bytes={d} " ++
+            "received_bytes={d} checksum={d} status=200 streams_finished={d} " ++
+            "per_stream_verified=true quic_version={d} complete=true\n",
+        .{ implementation, config.mode.name(), role_pair, sample, config.streams, config.body_bytes, elapsed_ns, mib_s, total_bytes, total_bytes, checksum, config.streams, if (config.version == .version_2) @as(u8, 2) else 1 },
+    );
+}
+
+pub fn printServerComplete(
+    implementation: []const u8,
+    role_pair: []const u8,
+    config: Config,
+    sample: u32,
+    checksum: u64,
+) void {
+    const total_bytes = config.totalBytes() catch unreachable;
+    const sent_bytes: u64 = if (config.mode == .download) total_bytes else 0;
+    const received_bytes: u64 = if (config.mode == .upload) total_bytes else 0;
+    std.debug.print(
+        "record=server-complete implementation={s} protocol=http3 mode={s} " ++
+            "role_pair={s} endpoint_role=server connection_scope=fresh-per-sample " ++
+            "body_deadline_scope=sample sample={d} streams={d} body_bytes={d} sent_bytes={d} " ++
+            "received_bytes={d} checksum={d} status=200 streams_finished={d} " ++
+            "per_stream_verified=true quic_version={d} complete=true\n",
+        .{
+            implementation, config.mode.name(), role_pair,                                           sample,
+            config.streams, config.body_bytes,  sent_bytes,                                          received_bytes,
+            checksum,       config.streams,     if (config.version == .version_2) @as(u8, 2) else 1,
+        },
+    );
+}
+
+test "HTTP/3 external benchmark multi-stream checksum is index-aware" {
+    const config: Config = .{
+        .mode = .upload,
+        .streams = 4,
+        .body_bytes = 1024,
+        .chunk_bytes = 1024,
+        .stream_window = 1024,
+    };
+    try std.testing.expectEqual(@as(u64, 4096), try config.totalBytes());
+    try std.testing.expectEqual(@as(u64, 8192), try config.connectionWindow());
+    var expected: u64 = 0;
+    for (0..4) |index| expected +%= streamChecksum(1024, index);
+    try std.testing.expectEqual(expected, aggregateChecksum(config));
+    try std.testing.expect(streamChecksum(1000, 0) != streamChecksum(1000, 1));
+}
+
+test "HTTP/3 external benchmark version selects peer compatibility" {
+    const v1 = try Config.parse(&.{ "--mode=upload", "--streams=4" });
+    try std.testing.expectEqual(netz.quic.Version.version_1, v1.version);
+    try std.testing.expectEqual(
+        netz.quic.protection.KeyPhaseState.UpdateProfile.rfc,
+        (try v1.oneRttConfig()).key_update_profile,
+    );
+
+    const v2 = try Config.parse(&.{
+        "--mode=download",
+        "--streams=16",
+        "--version=2",
+    });
+    try std.testing.expectEqual(netz.quic.Version.version_2, v2.version);
+    try std.testing.expectEqual(
+        netz.quic.protection.KeyPhaseState.UpdateProfile.quic_go_v0_59,
+        (try v2.oneRttConfig()).key_update_profile,
+    );
+    try std.testing.expectError(
+        error.InvalidArgument,
+        Config.parse(&.{ "--mode=upload", "--version=2", "--version=2" }),
     );
 }
 
@@ -249,9 +421,10 @@ pub fn printNetzMemory(
 ) void {
     std.debug.print(
         "implementation=netz protocol=http3 mode={s} role_pair={s} " ++
-            "endpoint_role={s} sender_role={s} streams=1 body_bytes={d} " ++
+            "endpoint_role={s} sender_role={s} streams={d} body_bytes={d} " ++
             "warmup={d} iterations={d} " ++
             "memory_scope=benchmark-run-after-argument-parse " ++
+            "quic_version={d} " ++
             "allocator_scope=netz-explicit alloc_count={d} free_count={d} " ++
             "resize_count={d} remap_count={d} total_allocated_bytes={d} " ++
             "live_bytes={d} peak_live_bytes={d} complete=true\n",
@@ -260,9 +433,11 @@ pub fn printNetzMemory(
             role_pair,
             endpoint_role,
             if (config.mode == .upload) "client" else "server",
+            config.streams,
             config.body_bytes,
             config.warmup,
             config.iterations,
+            if (config.version == .version_2) @as(u8, 2) else 1,
             snapshot.alloc_count,
             snapshot.free_count,
             snapshot.resize_count,

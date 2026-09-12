@@ -1,4 +1,5 @@
 const std = @import("std");
+const deadline_policy = @import("../../../internal/deadline.zig");
 const http3 = @import("../../mod.zig");
 const quic = @import("../../../quic/mod.zig");
 const body_batch = @import("../body_batch.zig");
@@ -12,12 +13,70 @@ const Error = runtime_error.Error;
 const OutboundBodySet = outbound_body.Set;
 const ProtectedSendState = protected_send_module.State;
 const BodyChunk = body_batch.Chunk;
+pub const max_paced_body_part_descriptors: usize = 128;
+
+/// Cursor over borrowed body slices for one packet-sized HTTP/3 DATA
+/// contribution. It splits only descriptors, never payload bytes into owned
+/// storage, and advances a staged copy so callers can commit the cursor only
+/// after the packet becomes socket-visible.
+pub const BodyPartCursor = struct {
+    parts: []const []const u8,
+    part_index: usize = 0,
+    part_offset: usize = 0,
+
+    fn skipEmpty(self: *BodyPartCursor) void {
+        while (self.part_index < self.parts.len and
+            self.part_offset == self.parts[self.part_index].len)
+        {
+            self.part_index += 1;
+            self.part_offset = 0;
+        }
+    }
+
+    pub fn done(self: *BodyPartCursor) bool {
+        self.skipEmpty();
+        return self.part_index == self.parts.len;
+    }
+
+    /// Fill `output` with the next borrowed ranges. Each range is bounded by
+    /// `max_part_bytes`, while their aggregate is bounded by `max_bytes`.
+    pub fn next(
+        self: *BodyPartCursor,
+        output: [][]const u8,
+        max_bytes: usize,
+        max_part_bytes: usize,
+    ) []const []const u8 {
+        std.debug.assert(output.len != 0);
+        std.debug.assert(max_bytes != 0);
+        std.debug.assert(max_part_bytes != 0);
+        self.skipEmpty();
+        var count: usize = 0;
+        var bytes: usize = 0;
+        while (self.part_index < self.parts.len and
+            count < output.len and bytes < max_bytes)
+        {
+            const part = self.parts[self.part_index];
+            const len = @min(
+                @min(part.len - self.part_offset, max_bytes - bytes),
+                max_part_bytes,
+            );
+            std.debug.assert(len != 0);
+            output[count] = part[self.part_offset..][0..len];
+            count += 1;
+            bytes += len;
+            self.part_offset += len;
+            self.skipEmpty();
+        }
+        return output[0..count];
+    }
+};
 
 pub const ConnectionBodyBatchProgress = struct {
     /// Exact socket-visible prefix committed to HTTP/3 stream state.
     sent_count: usize,
-    /// A batch socket may accept a prefix and report an error together.
-    send_error: ?net.Socket.SendError = null,
+    /// The transport can fail after the whole batch is protected, including
+    /// in an endpoint interceptor before socket progress.
+    send_error: ?quic.runtime.Error = null,
 };
 
 pub fn sendConnectionFrames(
@@ -30,6 +89,21 @@ pub fn sendConnectionFrames(
         connection,
         frames,
         max_frames_per_packet,
+    );
+}
+
+pub fn sendConnectionFramesWithDeadline(
+    connection: *quic.one_rtt.Connection,
+    frames: []const quic.Frame,
+    max_frames_per_packet: usize,
+    deadline: std.Io.Clock.Timestamp,
+) runtime_error.ReceiveTimeoutError!void {
+    try send_packetizer.sendWithDeadline(
+        connection.endpoint.allocator,
+        connection,
+        frames,
+        max_frames_per_packet,
+        deadline,
     );
 }
 
@@ -129,6 +203,87 @@ pub fn pacedProtectedBodyChunkLimit(config: anytype) usize {
     return @max(@as(usize, 1), data_budget);
 }
 
+test "HTTP/3 paced body-part cursor groups across slice boundaries" {
+    var cursor = BodyPartCursor{
+        .parts = &.{ "ab", &.{}, "cdef", "ghi" },
+    };
+    var storage: [3][]const u8 = undefined;
+
+    const first = cursor.next(&storage, 5, 3);
+    try std.testing.expectEqual(@as(usize, 2), first.len);
+    try std.testing.expectEqualStrings("ab", first[0]);
+    try std.testing.expectEqualStrings("cde", first[1]);
+    try std.testing.expect(!cursor.done());
+
+    const second = cursor.next(&storage, 5, 3);
+    try std.testing.expectEqual(@as(usize, 2), second.len);
+    try std.testing.expectEqualStrings("f", second[0]);
+    try std.testing.expectEqualStrings("ghi", second[1]);
+    try std.testing.expect(cursor.done());
+}
+
+test "HTTP/3 paced body-part cursor preserves a retry snapshot" {
+    var cursor = BodyPartCursor{ .parts = &.{ "abc", "def" } };
+    var staged = cursor;
+    var first_storage: [2][]const u8 = undefined;
+    const first = staged.next(&first_storage, 4, 3);
+    try std.testing.expectEqual(@as(usize, 2), first.len);
+    try std.testing.expectEqualStrings("abc", first[0]);
+    try std.testing.expectEqualStrings("d", first[1]);
+    try std.testing.expect(!cursor.done());
+
+    cursor = staged;
+    var second_storage: [2][]const u8 = undefined;
+    const second = cursor.next(&second_storage, 4, 3);
+    try std.testing.expectEqual(@as(usize, 1), second.len);
+    try std.testing.expectEqualStrings("ef", second[0]);
+    try std.testing.expect(cursor.done());
+}
+
+test "HTTP/3 paced body-part cursor bounds descriptor batches" {
+    var cursor = BodyPartCursor{
+        .parts = &.{ "a", "", "b", "c", "d", "" },
+    };
+    var storage: [2][]const u8 = undefined;
+
+    const first = cursor.next(&storage, 64, 64);
+    try std.testing.expectEqual(@as(usize, 2), first.len);
+    try std.testing.expectEqualStrings("a", first[0]);
+    try std.testing.expectEqualStrings("b", first[1]);
+    try std.testing.expect(!cursor.done());
+
+    const second = cursor.next(&storage, 64, 64);
+    try std.testing.expectEqual(@as(usize, 2), second.len);
+    try std.testing.expectEqualStrings("c", second[0]);
+    try std.testing.expectEqualStrings("d", second[1]);
+    try std.testing.expect(cursor.done());
+}
+
+test "HTTP/3 paced body-part cursor accepts only empty parts" {
+    var cursor = BodyPartCursor{ .parts = &.{ &.{}, &.{}, &.{} } };
+    try std.testing.expect(cursor.done());
+}
+
+test "HTTP/3 paced body-part cursor collapses the eight-slice benchmark shape" {
+    var payload: [4096]u8 = undefined;
+    var input: [9][]const u8 = undefined;
+    input[0] = "head";
+    for (input[1..], 0..) |*part, index| {
+        part.* = payload[index * 512 ..][0..512];
+    }
+    var cursor = BodyPartCursor{ .parts = &input };
+    var storage: [7][]const u8 = undefined;
+    var contribution_count: usize = 0;
+    var byte_count: usize = 0;
+    while (!cursor.done()) {
+        const contribution = cursor.next(&storage, 3500, 3500);
+        contribution_count += 1;
+        for (contribution) |part| byte_count += part.len;
+    }
+    try std.testing.expectEqual(@as(usize, 2), contribution_count);
+    try std.testing.expectEqual(@as(usize, 4100), byte_count);
+}
+
 pub fn sendConnectionBodyChunk(
     connection: *quic.one_rtt.Connection,
     bodies: *OutboundBodySet,
@@ -137,6 +292,50 @@ pub fn sendConnectionBodyChunk(
     fin: bool,
     options: anytype,
 ) Error!void {
+    return sendConnectionBodyChunkUntil(
+        connection,
+        bodies,
+        stream_id,
+        data,
+        fin,
+        options,
+        null,
+    ) catch |err| switch (err) {
+        error.Timeout, error.ConcurrencyUnavailable => unreachable,
+        else => |other| return @errorCast(other),
+    };
+}
+
+pub fn sendConnectionBodyChunkWithDeadline(
+    connection: *quic.one_rtt.Connection,
+    bodies: *OutboundBodySet,
+    stream_id: u62,
+    data: []const u8,
+    fin: bool,
+    options: anytype,
+    deadline: std.Io.Clock.Timestamp,
+) runtime_error.ReceiveTimeoutError!void {
+    _ = try deadline_policy.usableAwake(connection.endpoint.io, deadline);
+    return sendConnectionBodyChunkUntil(
+        connection,
+        bodies,
+        stream_id,
+        data,
+        fin,
+        options,
+        deadline,
+    );
+}
+
+fn sendConnectionBodyChunkUntil(
+    connection: *quic.one_rtt.Connection,
+    bodies: *OutboundBodySet,
+    stream_id: u62,
+    data: []const u8,
+    fin: bool,
+    options: anytype,
+    deadline: ?std.Io.Clock.Timestamp,
+) runtime_error.ReceiveTimeoutError!void {
     const entry = bodies.find(stream_id) orelse return error.UnexpectedStream;
     const previous = entry.*;
     errdefer entry.* = previous;
@@ -155,11 +354,20 @@ pub fn sendConnectionBodyChunk(
             options.max_frames_per_packet,
         ))
     {
-        try sendConnectionFrames(
-            connection,
-            bodies.frame_scratch.items,
-            options.max_frames_per_packet,
-        );
+        if (deadline) |absolute| {
+            try sendConnectionFramesWithDeadline(
+                connection,
+                bodies.frame_scratch.items,
+                options.max_frames_per_packet,
+                absolute,
+            );
+        } else {
+            try sendConnectionFrames(
+                connection,
+                bodies.frame_scratch.items,
+                options.max_frames_per_packet,
+            );
+        }
         if (fin) _ = bodies.finish(stream_id);
         return;
     }
@@ -177,6 +385,67 @@ pub fn sendConnectionBodyChunk(
         options.max_stream_frame_data,
         fin,
     );
+    if (deadline) |absolute| {
+        try sendConnectionFramesWithDeadline(
+            connection,
+            bodies.frame_scratch.items,
+            options.max_frames_per_packet,
+            absolute,
+        );
+    } else {
+        try sendConnectionFrames(
+            connection,
+            bodies.frame_scratch.items,
+            options.max_frames_per_packet,
+        );
+    }
+    if (fin) _ = bodies.finish(stream_id);
+}
+
+/// Send one bounded HTTP/3 DATA contribution borrowed from several slices.
+/// Unlike the nonblocking one-packet helper below, this path may packetize the
+/// contribution across several QUIC datagrams and batch their socket submit.
+/// A partially visible transport error closes the QUIC connection before the
+/// caller can retry, matching `sendConnectionBodyChunk`'s fail-closed contract.
+pub fn sendConnectionBodyParts(
+    connection: *quic.one_rtt.Connection,
+    bodies: *OutboundBodySet,
+    stream_id: u62,
+    parts: []const []const u8,
+    fin: bool,
+    options: anytype,
+) Error!void {
+    var data_len: usize = 0;
+    for (parts) |part| {
+        data_len = std.math.add(usize, data_len, part.len) catch
+            return error.InvalidContentLength;
+    }
+    if (data_len == 0) {
+        return sendConnectionBodyChunk(
+            connection,
+            bodies,
+            stream_id,
+            &.{},
+            fin,
+            options,
+        );
+    }
+
+    const entry = bodies.find(stream_id) orelse return error.UnexpectedStream;
+    const previous = entry.*;
+    errdefer entry.* = previous;
+    try bodies.prepareChunkForEntry(entry, data_len, fin);
+    bodies.frame_scratch.clearRetainingCapacity();
+    if (!try body_batch.appendDataStreamPartFrames(
+        &entry.send,
+        &bodies.frame_scratch,
+        connection.endpoint.allocator,
+        &bodies.data_prefix_scratch,
+        parts,
+        fin,
+        options.max_stream_frame_data,
+        options.max_frames_per_packet,
+    )) return error.DatagramTooLarge;
     try sendConnectionFrames(
         connection,
         bodies.frame_scratch.items,
@@ -327,6 +596,75 @@ pub fn sendConnectionBodyBatchPaced(
     }
 }
 
+/// Deadline-bounded counterpart to `sendConnectionBodyBatchPaced`.
+///
+/// `committed_chunks` is reset before validation and then tracks the exact
+/// socket-visible prefix. It remains meaningful on timeout or a socket error;
+/// callers may retry only `chunks[committed_chunks.*..]`.
+pub fn sendConnectionBodyBatchPacedWithDeadline(
+    connection: *quic.one_rtt.Connection,
+    bodies: *OutboundBodySet,
+    chunks: []const BodyChunk,
+    options: anytype,
+    context: anytype,
+    comptime receive_progress: anytype,
+    comptime finish_stream: anytype,
+    committed_chunks: *usize,
+    deadline: std.Io.Clock.Timestamp,
+) runtime_error.ReceiveTimeoutError!void {
+    committed_chunks.* = 0;
+    _ = try deadline_policy.usableAwake(connection.endpoint.io, deadline);
+    try validateConnectionBodyBatch(bodies, chunks, options);
+    while (committed_chunks.* < chunks.len) {
+        _ = try deadline_policy.usableAwake(connection.endpoint.io, deadline);
+        const progress = sendConnectionBodyBatchPacedProgress(
+            connection,
+            bodies,
+            chunks[committed_chunks.*..],
+            options,
+            context,
+            finish_stream,
+        ) catch |err| switch (err) {
+            error.FlowControlBlocked, error.CongestionLimited => {
+                try receive_progress(context, deadline);
+                continue;
+            },
+            error.PacingLimited => {
+                try connection.waitForPacingAvailabilityWithDeadline(deadline);
+                continue;
+            },
+            else => return err,
+        };
+        committed_chunks.* += progress.sent_count;
+        if (progress.send_error) |err| return err;
+    }
+}
+
+fn validateConnectionBodyBatch(
+    bodies: *OutboundBodySet,
+    chunks: []const BodyChunk,
+    options: anytype,
+) Error!void {
+    for (chunks, 0..) |chunk, index| {
+        if (chunk.data.len > pacedBodyChunkLimit(options)) {
+            return error.DatagramTooLarge;
+        }
+        for (chunks[0..index]) |previous| {
+            if (previous.stream_id == chunk.stream_id) {
+                return error.UnexpectedStream;
+            }
+        }
+        const current = bodies.find(chunk.stream_id) orelse
+            return error.UnexpectedStream;
+        var staged = current.*;
+        try bodies.prepareChunkForEntry(
+            &staged,
+            chunk.data.len,
+            chunk.fin,
+        );
+    }
+}
+
 /// Send at most one transport-accepted prefix of `chunks`.
 ///
 /// Returning after each socket-visible prefix gives higher-level schedulers a
@@ -466,6 +804,7 @@ pub fn sendProtectedBodyBatchPaced(
     comptime receive_progress: anytype,
     comptime finish_stream: anytype,
 ) Error!void {
+    try validateProtectedBodyBatch(bodies, chunks, config);
     var sent: usize = 0;
     while (sent < chunks.len) {
         sent += sendProtectedBodyBatchProgress(
@@ -488,6 +827,73 @@ pub fn sendProtectedBodyBatchPaced(
     }
 }
 
+pub fn sendProtectedBodyBatchPacedWithDeadline(
+    endpoint: *quic.runtime.Endpoint,
+    to: net.IpAddress,
+    config: anytype,
+    next_packet_number: *u64,
+    protected_send: *ProtectedSendState,
+    bodies: *OutboundBodySet,
+    chunks: []const BodyChunk,
+    context: anytype,
+    comptime receive_progress: anytype,
+    comptime finish_stream: anytype,
+    committed_chunks: *usize,
+    deadline: std.Io.Clock.Timestamp,
+) runtime_error.ReceiveTimeoutError!void {
+    committed_chunks.* = 0;
+    _ = try deadline_policy.usableAwake(endpoint.io, deadline);
+    try validateProtectedBodyBatch(bodies, chunks, config);
+    while (committed_chunks.* < chunks.len) {
+        _ = try deadline_policy.usableAwake(endpoint.io, deadline);
+        const progress = sendProtectedBodyBatchProgressUntil(
+            endpoint,
+            to,
+            config,
+            next_packet_number,
+            protected_send,
+            bodies,
+            chunks[committed_chunks.*..],
+            context,
+            finish_stream,
+            deadline,
+        ) catch |err| switch (err) {
+            error.FlowControlBlocked, error.CongestionLimited => {
+                try receive_progress(context, deadline);
+                continue;
+            },
+            else => return err,
+        };
+        committed_chunks.* += progress.sent_count;
+        if (progress.send_error) |err| return err;
+    }
+}
+
+fn validateProtectedBodyBatch(
+    bodies: *OutboundBodySet,
+    chunks: []const BodyChunk,
+    config: anytype,
+) Error!void {
+    for (chunks, 0..) |chunk, index| {
+        if (chunk.data.len > pacedProtectedBodyChunkLimit(config)) {
+            return error.DatagramTooLarge;
+        }
+        for (chunks[0..index]) |previous| {
+            if (previous.stream_id == chunk.stream_id) {
+                return error.UnexpectedStream;
+            }
+        }
+        const current = bodies.find(chunk.stream_id) orelse
+            return error.UnexpectedStream;
+        var staged = current.*;
+        try bodies.prepareChunkForEntry(
+            &staged,
+            chunk.data.len,
+            chunk.fin,
+        );
+    }
+}
+
 pub fn sendProtectedBodyBatchProgress(
     endpoint: *quic.runtime.Endpoint,
     to: net.IpAddress,
@@ -499,7 +905,38 @@ pub fn sendProtectedBodyBatchProgress(
     context: anytype,
     comptime finish_stream: anytype,
 ) Error!usize {
-    if (chunks.len == 0) return 0;
+    const progress = sendProtectedBodyBatchProgressUntil(
+        endpoint,
+        to,
+        config,
+        next_packet_number,
+        protected_send,
+        bodies,
+        chunks,
+        context,
+        finish_stream,
+        null,
+    ) catch |err| switch (err) {
+        error.Timeout, error.ConcurrencyUnavailable => unreachable,
+        else => |other| return @errorCast(other),
+    };
+    if (progress.send_error) |err| return err;
+    return progress.sent_count;
+}
+
+fn sendProtectedBodyBatchProgressUntil(
+    endpoint: *quic.runtime.Endpoint,
+    to: net.IpAddress,
+    config: anytype,
+    next_packet_number: *u64,
+    protected_send: *ProtectedSendState,
+    bodies: *OutboundBodySet,
+    chunks: []const BodyChunk,
+    context: anytype,
+    comptime finish_stream: anytype,
+    deadline: ?std.Io.Clock.Timestamp,
+) runtime_error.ReceiveTimeoutError!ConnectionBodyBatchProgress {
+    if (chunks.len == 0) return .{ .sent_count = 0 };
     for (chunks, 0..) |chunk, i| {
         if (chunk.data.len > pacedProtectedBodyChunkLimit(config)) {
             return error.DatagramTooLarge;
@@ -577,14 +1014,25 @@ pub fn sendProtectedBodyBatchProgress(
     for (bodies.batch_scratch.frame_ranges.items[0..count], 0..) |range, i| {
         packets[i] = bodies.batch_scratch.frames.items[range.start .. range.start + range.len];
     }
-    const result = try protected_send.sendPacketBatchProgress(
-        endpoint,
-        to,
-        config.send_keys,
-        config.peer_connection_id,
-        next_packet_number,
-        packets[0..count],
-    );
+    const result = if (deadline) |absolute|
+        try protected_send.sendPacketBatchProgressWithDeadline(
+            endpoint,
+            to,
+            config.send_keys,
+            config.peer_connection_id,
+            next_packet_number,
+            packets[0..count],
+            absolute,
+        )
+    else
+        try protected_send.sendPacketBatchProgress(
+            endpoint,
+            to,
+            config.send_keys,
+            config.peer_connection_id,
+            next_packet_number,
+            packets[0..count],
+        );
     if (!batchProgressIsValid(
         result.sent_count,
         result.protected_count,
@@ -603,9 +1051,14 @@ pub fn sendProtectedBodyBatchProgress(
             finish_stream(context, committed.stream_id);
         }
     }
-    if (result.send_error) |err| return err;
-    if (result.sent_count == 0) return error.Unexpected;
-    return result.sent_count;
+    if (result.sent_count == 0) {
+        if (result.send_error) |err| return err;
+        return error.Unexpected;
+    }
+    return .{
+        .sent_count = result.sent_count,
+        .send_error = result.send_error,
+    };
 }
 
 pub fn sendProtectedBodyChunk(
@@ -619,6 +1072,62 @@ pub fn sendProtectedBodyChunk(
     data: []const u8,
     fin: bool,
 ) Error!void {
+    return sendProtectedBodyChunkUntil(
+        endpoint,
+        to,
+        config,
+        next_packet_number,
+        protected_send,
+        bodies,
+        stream_id,
+        data,
+        fin,
+        null,
+    ) catch |err| switch (err) {
+        error.Timeout, error.ConcurrencyUnavailable => unreachable,
+        else => |other| return @errorCast(other),
+    };
+}
+
+pub fn sendProtectedBodyChunkWithDeadline(
+    endpoint: *quic.runtime.Endpoint,
+    to: net.IpAddress,
+    config: anytype,
+    next_packet_number: *u64,
+    protected_send: *ProtectedSendState,
+    bodies: *OutboundBodySet,
+    stream_id: u62,
+    data: []const u8,
+    fin: bool,
+    deadline: std.Io.Clock.Timestamp,
+) runtime_error.ReceiveTimeoutError!void {
+    _ = try deadline_policy.usableAwake(endpoint.io, deadline);
+    return sendProtectedBodyChunkUntil(
+        endpoint,
+        to,
+        config,
+        next_packet_number,
+        protected_send,
+        bodies,
+        stream_id,
+        data,
+        fin,
+        deadline,
+    );
+}
+
+fn sendProtectedBodyChunkUntil(
+    endpoint: *quic.runtime.Endpoint,
+    to: net.IpAddress,
+    config: anytype,
+    next_packet_number: *u64,
+    protected_send: *ProtectedSendState,
+    bodies: *OutboundBodySet,
+    stream_id: u62,
+    data: []const u8,
+    fin: bool,
+    deadline: ?std.Io.Clock.Timestamp,
+) runtime_error.ReceiveTimeoutError!void {
     const entry = bodies.find(stream_id) orelse return error.UnexpectedStream;
     const previous = entry.*;
     errdefer entry.* = previous;
@@ -639,14 +1148,27 @@ pub fn sendProtectedBodyChunk(
                 return error.FlowControlBlocked;
             }
         }
-        try sendProtectedFrames(
-            endpoint,
-            to,
-            config,
-            next_packet_number,
-            bodies.frame_scratch.items,
-            protected_send,
-        );
+        if (deadline) |absolute| {
+            try protected_send.sendFramesWithDeadline(
+                endpoint,
+                to,
+                config.send_keys,
+                config.peer_connection_id,
+                next_packet_number,
+                bodies.frame_scratch.items,
+                config.max_frames_per_packet,
+                absolute,
+            );
+        } else {
+            try sendProtectedFrames(
+                endpoint,
+                to,
+                config,
+                next_packet_number,
+                bodies.frame_scratch.items,
+                protected_send,
+            );
+        }
         if (fin) _ = bodies.finish(stream_id);
         return;
     }
@@ -672,13 +1194,26 @@ pub fn sendProtectedBodyChunk(
         config.max_stream_frame_data,
         fin,
     );
-    try sendProtectedFrames(
-        endpoint,
-        to,
-        config,
-        next_packet_number,
-        bodies.frame_scratch.items,
-        protected_send,
-    );
+    if (deadline) |absolute| {
+        try protected_send.sendFramesWithDeadline(
+            endpoint,
+            to,
+            config.send_keys,
+            config.peer_connection_id,
+            next_packet_number,
+            bodies.frame_scratch.items,
+            config.max_frames_per_packet,
+            absolute,
+        );
+    } else {
+        try sendProtectedFrames(
+            endpoint,
+            to,
+            config,
+            next_packet_number,
+            bodies.frame_scratch.items,
+            protected_send,
+        );
+    }
     if (fin) _ = bodies.finish(stream_id);
 }

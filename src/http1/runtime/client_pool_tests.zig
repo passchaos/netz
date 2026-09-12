@@ -55,6 +55,26 @@ fn uriFor(
     );
 }
 
+fn writeRawAll(
+    io: std.Io,
+    stream: std.Io.net.Stream,
+    bytes: []const u8,
+) !void {
+    var offset: usize = 0;
+    while (offset < bytes.len) {
+        const parts = [_][]const u8{""};
+        const written = try io.vtable.netWrite(
+            io.userdata,
+            stream.socket.handle,
+            bytes[offset..],
+            &parts,
+            0,
+        );
+        if (written == 0) return error.SocketUnconnected;
+        offset += written;
+    }
+}
+
 test "HTTP/1 client pool reuses one persistent connection" {
     const allocator = std.testing.allocator;
     var threaded = std.Io.Threaded.init(allocator, .{
@@ -72,6 +92,7 @@ test "HTTP/1 client pool reuses one persistent connection" {
 
     const Shared = struct {
         server: *runtime.Server,
+        release: std.Io.Event = .unset,
         accepts: usize = 0,
         err: ?anyerror = null,
         fn run(self: *@This()) void {
@@ -95,12 +116,16 @@ test "HTTP/1 client pool reuses one persistent connection" {
                     .request_method = request.request.method,
                 });
             }
+            try self.release.wait(self.server.io);
         }
     };
     var shared = Shared{ .server = &server };
     const thread = try std.Thread.spawn(.{}, Shared.run, .{&shared});
     var joined = false;
-    defer if (!joined) thread.join();
+    defer if (!joined) {
+        shared.release.set(io);
+        thread.join();
+    };
     var pool = try pool_mod.Pool.init(allocator, io, .{});
     defer pool.deinit();
     const first_uri = try uriFor(allocator, server.address(), "/first");
@@ -113,6 +138,10 @@ test "HTTP/1 client pool reuses one persistent connection" {
     defer allocator.free(second_uri);
     var lease = try pool.acquireUri(first_uri);
     var first = try lease.client().request(.{ .target = "/first" });
+    try std.testing.expectEqual(
+        runtime.IdleSocketState.clean,
+        runtime.probeIdleSocket(lease.client().stream),
+    );
     lease.release();
     defer first.deinit(allocator);
     var second = try pool.requestUri(second_uri, .{});
@@ -121,10 +150,613 @@ test "HTTP/1 client pool reuses one persistent connection" {
     try std.testing.expectEqualStrings("two", second.response.body);
     try std.testing.expectEqual(@as(usize, 1), pool.idleCount());
 
+    shared.release.set(io);
     thread.join();
     joined = true;
     if (shared.err) |err| return err;
     try std.testing.expectEqual(@as(usize, 1), shared.accepts);
+}
+
+test "HTTP/1 client pool discards unsolicited read-ahead response" {
+    const allocator = std.testing.allocator;
+    var threaded = std.Io.Threaded.init(allocator, .{
+        .async_limit = .unlimited,
+    });
+    defer threaded.deinit();
+    const io = threaded.io();
+    var server = try runtime.Server.listen(
+        allocator,
+        io,
+        .{ .ip4 = .loopback(0) },
+        .{},
+    );
+    defer server.deinit();
+
+    const Shared = struct {
+        server: *runtime.Server,
+        accepts: usize = 0,
+        err: ?anyerror = null,
+
+        fn run(self: *@This()) void {
+            self.runFallible() catch |err| {
+                self.err = err;
+            };
+        }
+
+        fn runFallible(self: *@This()) !void {
+            {
+                var connection = try self.server.accept();
+                self.accepts += 1;
+                defer connection.close();
+                var request = try connection.readRequest(.{});
+                defer request.deinit(self.server.allocator);
+                try std.testing.expectEqualStrings(
+                    "/first",
+                    request.request.target,
+                );
+                try connection.writeResponses(&.{
+                    .{ .body = "one", .request_method = request.request.method },
+                    .{ .body = "ghost", .request_method = request.request.method },
+                });
+            }
+            {
+                var connection = try self.server.acceptWithTimeout(
+                    .fromSeconds(2),
+                );
+                self.accepts += 1;
+                defer connection.close();
+                var request = try connection.readRequest(.{});
+                defer request.deinit(self.server.allocator);
+                try std.testing.expectEqualStrings(
+                    "/second",
+                    request.request.target,
+                );
+                try connection.writeResponse(.{
+                    .body = "two",
+                    .request_method = request.request.method,
+                });
+            }
+        }
+    };
+
+    var shared = Shared{ .server = &server };
+    const thread = try std.Thread.spawn(.{}, Shared.run, .{&shared});
+    var joined = false;
+    defer if (!joined) thread.join();
+    var pool = try pool_mod.Pool.init(allocator, io, .{
+        .max_connections = 1,
+        .max_idle_connections = 1,
+        .max_idle_per_authority = 1,
+    });
+    defer pool.deinit();
+    const first_uri = try uriFor(allocator, server.address(), "/first");
+    defer allocator.free(first_uri);
+    const second_uri = try uriFor(allocator, server.address(), "/second");
+    defer allocator.free(second_uri);
+
+    var first = try pool.requestUriWithTimeout(
+        first_uri,
+        .{},
+        .fromSeconds(2),
+    );
+    defer first.deinit(allocator);
+    try std.testing.expectEqualStrings("one", first.response.body);
+    try std.testing.expectEqual(@as(usize, 0), pool.idleCount());
+    try std.testing.expectEqual(@as(usize, 0), pool.connectionCount());
+
+    var second = try pool.requestUriWithTimeout(
+        second_uri,
+        .{},
+        .fromSeconds(2),
+    );
+    defer second.deinit(allocator);
+    try std.testing.expectEqualStrings("two", second.response.body);
+
+    thread.join();
+    joined = true;
+    if (shared.err) |err| return err;
+    try std.testing.expectEqual(@as(usize, 2), shared.accepts);
+}
+
+test "HTTP/1 client pool discards kernel-queued unsolicited response" {
+    const allocator = std.testing.allocator;
+    var threaded = std.Io.Threaded.init(allocator, .{
+        .async_limit = .unlimited,
+    });
+    defer threaded.deinit();
+    const io = threaded.io();
+    var server = try runtime.Server.listen(
+        allocator,
+        io,
+        .{ .ip4 = .loopback(0) },
+        .{},
+    );
+    defer server.deinit();
+
+    const Shared = struct {
+        server: *runtime.Server,
+        first_consumed: std.Io.Event = .unset,
+        ghost_written: std.Io.Event = .unset,
+        accepts: usize = 0,
+        err: ?anyerror = null,
+
+        fn run(self: *@This()) void {
+            self.runFallible() catch |err| {
+                self.err = err;
+                self.ghost_written.set(self.server.io);
+            };
+        }
+
+        fn runFallible(self: *@This()) !void {
+            {
+                var connection = try self.server.accept();
+                self.accepts += 1;
+                defer connection.close();
+                var request = try connection.readRequest(.{});
+                defer request.deinit(self.server.allocator);
+                try connection.writeResponse(.{
+                    .body = "one",
+                    .request_method = request.request.method,
+                });
+                try self.first_consumed.wait(self.server.io);
+                try writeRawAll(
+                    self.server.io,
+                    connection.stream,
+                    "HTTP/1.1 200 OK\r\nContent-Length: 5\r\n\r\nghost",
+                );
+                self.ghost_written.set(self.server.io);
+            }
+            {
+                var connection = try self.server.acceptWithTimeout(
+                    .fromSeconds(2),
+                );
+                self.accepts += 1;
+                defer connection.close();
+                var request = try connection.readRequest(.{});
+                defer request.deinit(self.server.allocator);
+                try connection.writeResponse(.{
+                    .body = "two",
+                    .request_method = request.request.method,
+                });
+            }
+        }
+    };
+    var shared = Shared{ .server = &server };
+    const thread = try std.Thread.spawn(.{}, Shared.run, .{&shared});
+    var joined = false;
+    defer if (!joined) {
+        shared.first_consumed.set(io);
+        thread.join();
+    };
+
+    var pool = try pool_mod.Pool.init(allocator, io, .{
+        .max_connections = 1,
+        .max_idle_connections = 1,
+        .max_idle_per_authority = 1,
+    });
+    defer pool.deinit();
+    const first_uri = try uriFor(allocator, server.address(), "/first");
+    defer allocator.free(first_uri);
+    const second_uri = try uriFor(allocator, server.address(), "/second");
+    defer allocator.free(second_uri);
+
+    var lease = try pool.acquireUri(first_uri);
+    var first = try lease.client().request(.{ .target = "/first" });
+    defer first.deinit(allocator);
+    try std.testing.expectEqualStrings("one", first.response.body);
+    try std.testing.expectEqual(@as(usize, 0), lease.client().inbuf.items.len);
+    shared.first_consumed.set(io);
+    try shared.ghost_written.wait(io);
+    var attempts: usize = 0;
+    while (lease.client().isReusableForPool() and attempts < 100) : (attempts += 1) {
+        try std.Io.sleep(io, .fromMilliseconds(1), .awake);
+    }
+    try std.testing.expect(!lease.client().isReusableForPool());
+    lease.release();
+    try std.testing.expectEqual(@as(usize, 0), pool.connectionCount());
+
+    var second = try pool.requestUriWithTimeout(
+        second_uri,
+        .{},
+        .fromSeconds(2),
+    );
+    defer second.deinit(allocator);
+    try std.testing.expectEqualStrings("two", second.response.body);
+
+    thread.join();
+    joined = true;
+    if (shared.err) |err| return err;
+    try std.testing.expectEqual(@as(usize, 2), shared.accepts);
+}
+
+test "HTTP/1 client pool rechecks an idle socket before checkout" {
+    const allocator = std.testing.allocator;
+    var threaded = std.Io.Threaded.init(allocator, .{
+        .async_limit = .unlimited,
+    });
+    defer threaded.deinit();
+    const io = threaded.io();
+    var server = try runtime.Server.listen(
+        allocator,
+        io,
+        .{ .ip4 = .loopback(0) },
+        .{},
+    );
+    defer server.deinit();
+
+    const Shared = struct {
+        server: *runtime.Server,
+        lease_released: std.Io.Event = .unset,
+        ghost_written: std.Io.Event = .unset,
+        accepts: usize = 0,
+        err: ?anyerror = null,
+
+        fn run(self: *@This()) void {
+            self.runFallible() catch |err| {
+                self.err = err;
+                self.ghost_written.set(self.server.io);
+            };
+        }
+
+        fn runFallible(self: *@This()) !void {
+            {
+                var connection = try self.server.accept();
+                self.accepts += 1;
+                defer connection.close();
+                var request = try connection.readRequest(.{});
+                defer request.deinit(self.server.allocator);
+                try connection.writeResponse(.{ .body = "one" });
+                try self.lease_released.wait(self.server.io);
+                try writeRawAll(
+                    self.server.io,
+                    connection.stream,
+                    "HTTP/1.1 200 OK\r\nContent-Length: 5\r\n\r\nghost",
+                );
+                self.ghost_written.set(self.server.io);
+            }
+            {
+                var connection = try self.server.acceptWithTimeout(
+                    .fromSeconds(2),
+                );
+                self.accepts += 1;
+                defer connection.close();
+                var request = try connection.readRequest(.{});
+                defer request.deinit(self.server.allocator);
+                try std.testing.expectEqualStrings(
+                    "/second",
+                    request.request.target,
+                );
+                try connection.writeResponse(.{ .body = "two" });
+            }
+        }
+    };
+    var shared = Shared{ .server = &server };
+    const thread = try std.Thread.spawn(.{}, Shared.run, .{&shared});
+    var joined = false;
+    defer if (!joined) {
+        shared.lease_released.set(io);
+        thread.join();
+    };
+
+    var pool = try pool_mod.Pool.init(allocator, io, .{
+        .max_connections = 1,
+        .max_idle_connections = 1,
+        .max_idle_per_authority = 1,
+    });
+    defer pool.deinit();
+    const first_uri = try uriFor(allocator, server.address(), "/first");
+    defer allocator.free(first_uri);
+    const second_uri = try uriFor(allocator, server.address(), "/second");
+    defer allocator.free(second_uri);
+
+    var first = try pool.requestUri(first_uri, .{});
+    defer first.deinit(allocator);
+    try std.testing.expectEqualStrings("one", first.response.body);
+    try std.testing.expectEqual(@as(usize, 1), pool.idleCount());
+    shared.lease_released.set(io);
+    try shared.ghost_written.wait(io);
+
+    var second = try pool.requestUriWithTimeout(
+        second_uri,
+        .{},
+        .fromSeconds(2),
+    );
+    defer second.deinit(allocator);
+    try std.testing.expectEqualStrings("two", second.response.body);
+
+    thread.join();
+    joined = true;
+    if (shared.err) |err| return err;
+    try std.testing.expectEqual(@as(usize, 2), shared.accepts);
+}
+
+test "HTTP/1 client pool discards kernel-queued EOF" {
+    const allocator = std.testing.allocator;
+    var threaded = std.Io.Threaded.init(allocator, .{
+        .async_limit = .unlimited,
+    });
+    defer threaded.deinit();
+    const io = threaded.io();
+    var server = try runtime.Server.listen(
+        allocator,
+        io,
+        .{ .ip4 = .loopback(0) },
+        .{},
+    );
+    defer server.deinit();
+
+    const Shared = struct {
+        server: *runtime.Server,
+        first_consumed: std.Io.Event = .unset,
+        eof_sent: std.Io.Event = .unset,
+        accepts: usize = 0,
+        err: ?anyerror = null,
+
+        fn run(self: *@This()) void {
+            self.runFallible() catch |err| {
+                self.err = err;
+                self.eof_sent.set(self.server.io);
+            };
+        }
+
+        fn runFallible(self: *@This()) !void {
+            {
+                var connection = try self.server.accept();
+                self.accepts += 1;
+                defer connection.close();
+                var request = try connection.readRequest(.{});
+                defer request.deinit(self.server.allocator);
+                try connection.writeResponse(.{
+                    .body = "one",
+                    .request_method = request.request.method,
+                });
+                try self.first_consumed.wait(self.server.io);
+                try connection.stream.shutdown(self.server.io, .send);
+                self.eof_sent.set(self.server.io);
+            }
+            {
+                var connection = try self.server.acceptWithTimeout(
+                    .fromSeconds(2),
+                );
+                self.accepts += 1;
+                defer connection.close();
+                var request = try connection.readRequest(.{});
+                defer request.deinit(self.server.allocator);
+                try connection.writeResponse(.{
+                    .body = "two",
+                    .request_method = request.request.method,
+                });
+            }
+        }
+    };
+    var shared = Shared{ .server = &server };
+    const thread = try std.Thread.spawn(.{}, Shared.run, .{&shared});
+    var joined = false;
+    defer if (!joined) {
+        shared.first_consumed.set(io);
+        thread.join();
+    };
+
+    var pool = try pool_mod.Pool.init(allocator, io, .{
+        .max_connections = 1,
+        .max_idle_connections = 1,
+        .max_idle_per_authority = 1,
+    });
+    defer pool.deinit();
+    const first_uri = try uriFor(allocator, server.address(), "/first");
+    defer allocator.free(first_uri);
+    const second_uri = try uriFor(allocator, server.address(), "/second");
+    defer allocator.free(second_uri);
+
+    var lease = try pool.acquireUri(first_uri);
+    var first = try lease.client().request(.{ .target = "/first" });
+    defer first.deinit(allocator);
+    try std.testing.expectEqualStrings("one", first.response.body);
+    shared.first_consumed.set(io);
+    try shared.eof_sent.wait(io);
+    var attempts: usize = 0;
+    while (lease.client().isReusableForPool() and attempts < 100) : (attempts += 1) {
+        try std.Io.sleep(io, .fromMilliseconds(1), .awake);
+    }
+    try std.testing.expect(!lease.client().isReusableForPool());
+    lease.release();
+    try std.testing.expectEqual(@as(usize, 0), pool.connectionCount());
+
+    var second = try pool.requestUriWithTimeout(
+        second_uri,
+        .{},
+        .fromSeconds(2),
+    );
+    defer second.deinit(allocator);
+    try std.testing.expectEqualStrings("two", second.response.body);
+
+    thread.join();
+    joined = true;
+    if (shared.err) |err| return err;
+    try std.testing.expectEqual(@as(usize, 2), shared.accepts);
+}
+
+test "HTTP/1 client pool discards a CONNECT handoff" {
+    const allocator = std.testing.allocator;
+    var threaded = std.Io.Threaded.init(allocator, .{
+        .async_limit = .unlimited,
+    });
+    defer threaded.deinit();
+    const io = threaded.io();
+    var server = try runtime.Server.listen(
+        allocator,
+        io,
+        .{ .ip4 = .loopback(0) },
+        .{},
+    );
+    defer server.deinit();
+
+    const Shared = struct {
+        server: *runtime.Server,
+        err: ?anyerror = null,
+
+        fn run(self: *@This()) void {
+            self.runFallible() catch |err| {
+                self.err = err;
+            };
+        }
+
+        fn runFallible(self: *@This()) !void {
+            var connection = try self.server.accept();
+            defer connection.close();
+            var request = try connection.readRequest(.{});
+            defer request.deinit(self.server.allocator);
+            try std.testing.expectEqual(
+                @import("../mod.zig").Method.CONNECT,
+                request.request.method,
+            );
+            var tunnel = try connection.acceptConnectTunnel(
+                request.request,
+                &.{},
+            );
+            var buffer: [16]u8 = undefined;
+            const count = try tunnel.read(&buffer);
+            try std.testing.expectEqualStrings("pool tunnel", buffer[0..count]);
+            try tunnel.write("pool reply");
+        }
+    };
+    var shared = Shared{ .server = &server };
+    const thread = try std.Thread.spawn(.{}, Shared.run, .{&shared});
+    var joined = false;
+    defer if (!joined) thread.join();
+
+    var pool = try pool_mod.Pool.init(allocator, io, .{
+        .max_connections = 1,
+        .max_idle_connections = 1,
+        .max_idle_per_authority = 1,
+    });
+    defer pool.deinit();
+    const uri = try uriFor(allocator, server.address(), "/connect");
+    defer allocator.free(uri);
+    var lease = try pool.acquireUri(uri);
+    var tunnel = try lease.client().openConnectTunnel(
+        "example.com:443",
+        &.{},
+    );
+    try tunnel.write("pool tunnel");
+    var buffer: [16]u8 = undefined;
+    const count = try tunnel.read(&buffer);
+    try std.testing.expectEqualStrings("pool reply", buffer[0..count]);
+
+    thread.join();
+    joined = true;
+    if (shared.err) |err| return err;
+    lease.release();
+    try std.testing.expectEqual(@as(usize, 0), pool.idleCount());
+    try std.testing.expectEqual(@as(usize, 0), pool.connectionCount());
+}
+
+test "HTTP/1 client pool discards an aggregate partial-write failure" {
+    const allocator = std.testing.allocator;
+    var threaded = std.Io.Threaded.init(allocator, .{
+        .async_limit = .unlimited,
+    });
+    defer threaded.deinit();
+    const io = threaded.io();
+    var server = try runtime.Server.listen(
+        allocator,
+        io,
+        .{ .ip4 = .loopback(0) },
+        .{},
+    );
+    defer server.deinit();
+
+    const Shared = struct {
+        server: *runtime.Server,
+        received: [4]u8 = undefined,
+        received_len: usize = 0,
+        err: ?anyerror = null,
+
+        fn run(self: *@This()) void {
+            self.runFallible() catch |err| {
+                self.err = err;
+            };
+        }
+
+        fn runFallible(self: *@This()) !void {
+            var connection = try self.server.accept();
+            defer connection.close();
+            while (self.received_len < self.received.len) {
+                var buffers = [_][]u8{self.received[self.received_len..]};
+                const count = try self.server.io.vtable.netRead(
+                    self.server.io.userdata,
+                    connection.stream.socket.handle,
+                    &buffers,
+                );
+                if (count == 0) break;
+                self.received_len += count;
+            }
+        }
+    };
+    var shared = Shared{ .server = &server };
+    const thread = try std.Thread.spawn(.{}, Shared.run, .{&shared});
+    var joined = false;
+    defer if (!joined) thread.join();
+
+    var pool = try pool_mod.Pool.init(allocator, io, .{
+        .max_connections = 1,
+        .max_idle_connections = 1,
+        .max_idle_per_authority = 1,
+    });
+    defer pool.deinit();
+    const uri = try uriFor(allocator, server.address(), "/partial");
+    defer allocator.free(uri);
+    var lease = try pool.acquireUri(uri);
+
+    const FailingWriter = struct {
+        base_io: std.Io,
+        calls: usize = 0,
+
+        fn write(
+            context: ?*anyopaque,
+            handle: std.Io.net.Socket.Handle,
+            header: []const u8,
+            _: []const []const u8,
+            _: usize,
+        ) std.Io.net.Stream.Writer.Error!usize {
+            const self: *@This() = @ptrCast(@alignCast(context.?));
+            self.calls += 1;
+            if (self.calls != 1) return error.NetworkDown;
+            return self.base_io.vtable.netWrite(
+                self.base_io.userdata,
+                handle,
+                header[0..@min(header.len, 4)],
+                &.{""},
+                0,
+            );
+        }
+    };
+    var failing = FailingWriter{ .base_io = io };
+    var failing_vtable = io.vtable.*;
+    failing_vtable.netWrite = FailingWriter.write;
+    lease.client().io = .{
+        .userdata = &failing,
+        .vtable = &failing_vtable,
+    };
+    try std.testing.expectError(
+        error.NetworkDown,
+        lease.client().request(.{
+            .method = .POST,
+            .target = "/partial",
+            .body = "body",
+        }),
+    );
+    try std.testing.expect(!lease.client().isReusable());
+    lease.client().io = io;
+    lease.release();
+    try std.testing.expectEqual(@as(usize, 0), pool.idleCount());
+    try std.testing.expectEqual(@as(usize, 0), pool.connectionCount());
+
+    thread.join();
+    joined = true;
+    if (shared.err) |err| return err;
+    try std.testing.expectEqual(@as(usize, 4), shared.received_len);
+    try std.testing.expectEqualStrings("POST", &shared.received);
 }
 
 test "HTTP/1 client pool normalizes explicit default port keys" {
@@ -242,6 +874,7 @@ test "HTTP/1 client pool discards close in any Connection response field" {
     defer server.deinit();
     const Shared = struct {
         server: *runtime.Server,
+        release: std.Io.Event = .unset,
         err: ?anyerror = null,
         fn run(self: *@This()) void {
             self.runFallible() catch |err| {
@@ -310,6 +943,7 @@ test "HTTP/1 client pool reuses verified TLS connection" {
     defer server.deinit();
     const Shared = struct {
         server: *runtime.TlsServer,
+        release: std.Io.Event = .unset,
         accepts: usize = 0,
         err: ?anyerror = null,
         fn run(self: *@This()) void {
@@ -326,12 +960,16 @@ test "HTTP/1 client pool reuses verified TLS connection" {
                 defer request.deinit(allocator);
                 try connection.writeResponse(.{ .body = "secure" });
             }
+            try self.release.wait(self.server.io);
         }
     };
     var shared = Shared{ .server = &server };
     const thread = try std.Thread.spawn(.{}, Shared.run, .{&shared});
     var joined = false;
-    defer if (!joined) thread.join();
+    defer if (!joined) {
+        shared.release.set(io);
+        thread.join();
+    };
     var ca_bundle, var ca_lock = try localCaBundle(allocator, io);
     defer ca_bundle.deinit(allocator);
     var pool = try pool_mod.Pool.init(allocator, io, .{
@@ -361,10 +999,145 @@ test "HTTP/1 client pool reuses verified TLS connection" {
     try std.testing.expectEqualStrings("secure", second.response.body);
     try std.testing.expectEqual(@as(usize, 1), pool.idleCount());
 
+    shared.release.set(io);
     thread.join();
     joined = true;
     if (shared.err) |err| return err;
     try std.testing.expectEqual(@as(usize, 1), shared.accepts);
+}
+
+test "HTTP/1 client pool discards TLS-buffered unsolicited response" {
+    const allocator = std.testing.allocator;
+    var threaded = std.Io.Threaded.init(allocator, .{
+        .async_limit = .unlimited,
+    });
+    defer threaded.deinit();
+    const io = threaded.io();
+
+    const tls_testing = @import("../../tls/testing.zig");
+    var certificate_der: [tls_testing.certificate_der_len]u8 = undefined;
+    try std.base64.standard.Decoder.decode(
+        &certificate_der,
+        tls_testing.certificate_base64,
+    );
+    const key_pair = try tls_testing.serverKeyPair();
+    var server = try runtime.TlsServer.listen(
+        allocator,
+        io,
+        .{ .ip4 = .loopback(0) },
+        .{
+            .identity = .{
+                .certificate_chain = &.{&certificate_der},
+                .signer = .{ .ecdsa_p256_sha256 = .{ .key_pair = key_pair } },
+            },
+            .limits = .{ .auto_date_header = false },
+        },
+    );
+    defer server.deinit();
+
+    const Shared = struct {
+        server: *runtime.TlsServer,
+        accepts: usize = 0,
+        err: ?anyerror = null,
+
+        fn run(self: *@This()) void {
+            self.runFallible() catch |err| {
+                self.err = err;
+            };
+        }
+
+        fn runFallible(self: *@This()) !void {
+            {
+                var connection = try self.server.accept();
+                self.accepts += 1;
+                defer connection.close();
+                var request = try connection.readRequest(.{});
+                defer request.deinit(self.server.allocator);
+                try std.testing.expectEqualStrings(
+                    "/first",
+                    request.request.target,
+                );
+                // The first response is exactly one 4096-byte HTTP read. The
+                // following response therefore remains in the TLS plaintext
+                // buffer even though Client.inbuf is empty. writeResponses
+                // coalesces both messages into one TLS application record.
+                const first_body = [_]u8{'a'} ** 4055;
+                try connection.writeResponses(&.{
+                    .{ .body = &first_body, .request_method = request.request.method },
+                    .{ .body = "ghost", .request_method = request.request.method },
+                });
+            }
+            {
+                var connection = try self.server.acceptWithTimeout(
+                    .fromSeconds(2),
+                );
+                self.accepts += 1;
+                defer connection.close();
+                var request = try connection.readRequest(.{});
+                defer request.deinit(self.server.allocator);
+                try std.testing.expectEqualStrings(
+                    "/second",
+                    request.request.target,
+                );
+                try connection.writeResponse(.{
+                    .body = "two",
+                    .request_method = request.request.method,
+                });
+            }
+        }
+    };
+
+    var shared = Shared{ .server = &server };
+    const thread = try std.Thread.spawn(.{}, Shared.run, .{&shared});
+    var joined = false;
+    defer if (!joined) thread.join();
+    var ca_bundle, var ca_lock = try localCaBundle(allocator, io);
+    defer ca_bundle.deinit(allocator);
+    var pool = try pool_mod.Pool.init(allocator, io, .{
+        .max_connections = 1,
+        .max_idle_connections = 1,
+        .max_idle_per_authority = 1,
+        .tls = .{ .ca_bundle = .{
+            .bundle = &ca_bundle,
+            .lock = &ca_lock,
+        } },
+    });
+    defer pool.deinit();
+    const first_uri = try std.fmt.allocPrint(
+        allocator,
+        "https://localhost:{d}/first",
+        .{server.address().ip4.port},
+    );
+    defer allocator.free(first_uri);
+    const second_uri = try std.fmt.allocPrint(
+        allocator,
+        "https://localhost:{d}/second",
+        .{server.address().ip4.port},
+    );
+    defer allocator.free(second_uri);
+
+    var first = try pool.requestUriWithTimeout(
+        first_uri,
+        .{},
+        .fromSeconds(2),
+    );
+    defer first.deinit(allocator);
+    try std.testing.expectEqual(@as(usize, 4055), first.response.body.len);
+    try std.testing.expectEqual(@as(usize, 0), pool.idleCount());
+    try std.testing.expectEqual(@as(usize, 0), pool.connectionCount());
+
+    var second = try pool.requestUriWithTimeout(
+        second_uri,
+        .{},
+        .fromSeconds(2),
+    );
+    defer second.deinit(allocator);
+    try std.testing.expectEqualStrings("two", second.response.body);
+
+    thread.join();
+    joined = true;
+    if (shared.err) |err| return err;
+    try std.testing.expectEqual(@as(usize, 2), shared.accepts);
 }
 
 test "HTTP/1 client pool serves concurrent leases per authority" {
@@ -384,6 +1157,7 @@ test "HTTP/1 client pool serves concurrent leases per authority" {
     const request_count = 4;
     const Shared = struct {
         server: *runtime.Server,
+        release: *std.Io.Event,
         err: ?anyerror = null,
         fn run(self: *@This()) void {
             self.runFallible() catch |err| {
@@ -401,6 +1175,8 @@ test "HTTP/1 client pool serves concurrent leases per authority" {
                         connection_value: runtime.Connection,
                         result_ptr: *?anyerror,
                         allocator_value: std.mem.Allocator,
+                        self_release: *std.Io.Event,
+                        io_value: std.Io,
                     ) std.Io.Cancelable!void {
                         var connection = connection_value;
                         defer connection.close();
@@ -412,8 +1188,17 @@ test "HTTP/1 client pool serves concurrent leases per authority" {
                         connection.writeResponse(.{ .body = "parallel" }) catch |err| {
                             result_ptr.* = err;
                         };
+                        self_release.wait(io_value) catch |err| {
+                            result_ptr.* = err;
+                        };
                     }
-                }.serve, .{ accepted, result, self.server.allocator });
+                }.serve, .{
+                    accepted,
+                    result,
+                    self.server.allocator,
+                    self.release,
+                    self.server.io,
+                });
             }
             try group.await(self.server.io);
             for (errors) |err| if (err) |value| return value;
@@ -455,10 +1240,14 @@ test "HTTP/1 client pool serves concurrent leases per authority" {
             lease.release();
         }
     };
-    var shared = Shared{ .server = &server };
+    var release: std.Io.Event = .unset;
+    var shared = Shared{ .server = &server, .release = &release };
     const server_thread = try std.Thread.spawn(.{}, Shared.run, .{&shared});
     var joined = false;
-    defer if (!joined) server_thread.join();
+    defer if (!joined) {
+        release.set(io);
+        server_thread.join();
+    };
     var pool = try pool_mod.Pool.init(allocator, io, .{
         .max_connections = request_count,
         .max_idle_connections = request_count,
@@ -488,6 +1277,7 @@ test "HTTP/1 client pool serves concurrent leases per authority" {
         try pool.idleCountForUri(uri),
     );
 
+    release.set(io);
     server_thread.join();
     joined = true;
     if (shared.err) |err| return err;
@@ -685,6 +1475,7 @@ test "HTTP/1 client pool admits capacity waiters in FIFO order" {
     defer server.deinit();
     const Shared = struct {
         server: *runtime.Server,
+        release: std.Io.Event = .unset,
         err: ?anyerror = null,
         fn run(self: *@This()) void {
             for (0..3) |_| {
@@ -1083,6 +1874,7 @@ test "HTTP/1 client pool enforces per-authority idle limit" {
     const request_count = 3;
     const Shared = struct {
         server: *runtime.Server,
+        release: std.Io.Event = .unset,
         err: ?anyerror = null,
         fn run(self: *@This()) void {
             self.runFallible() catch |err| {
@@ -1100,6 +1892,8 @@ test "HTTP/1 client pool enforces per-authority idle limit" {
                         connection_value: runtime.Connection,
                         result_ptr: *?anyerror,
                         allocator_value: std.mem.Allocator,
+                        release: *std.Io.Event,
+                        io_value: std.Io,
                     ) std.Io.Cancelable!void {
                         var connection = connection_value;
                         defer connection.close();
@@ -1111,8 +1905,17 @@ test "HTTP/1 client pool enforces per-authority idle limit" {
                         connection.writeResponse(.{ .body = "bounded" }) catch |err| {
                             result_ptr.* = err;
                         };
+                        release.wait(io_value) catch |err| {
+                            result_ptr.* = err;
+                        };
                     }
-                }.serve, .{ accepted, result, self.server.allocator });
+                }.serve, .{
+                    accepted,
+                    result,
+                    self.server.allocator,
+                    &self.release,
+                    self.server.io,
+                });
             }
             try group.await(self.server.io);
             for (errors) |err| if (err) |value| return value;
@@ -1133,7 +1936,10 @@ test "HTTP/1 client pool enforces per-authority idle limit" {
     var shared = Shared{ .server = &server };
     const server_thread = try std.Thread.spawn(.{}, Shared.run, .{&shared});
     var joined = false;
-    defer if (!joined) server_thread.join();
+    defer if (!joined) {
+        shared.release.set(io);
+        server_thread.join();
+    };
     var pool = try pool_mod.Pool.init(allocator, io, .{
         .max_idle_connections = request_count,
         .max_idle_per_authority = 1,
@@ -1155,6 +1961,7 @@ test "HTTP/1 client pool enforces per-authority idle limit" {
         try pool.idleCountForUri(uri),
     );
 
+    shared.release.set(io);
     server_thread.join();
     joined = true;
     if (shared.err) |err| return err;
@@ -1230,6 +2037,7 @@ test "HTTP/1 client pool expires idle connections" {
     defer server.deinit();
     const Shared = struct {
         server: *runtime.Server,
+        release: std.Io.Event = .unset,
         err: ?anyerror = null,
         fn run(self: *@This()) void {
             self.runFallible() catch |err| {
@@ -1242,12 +2050,16 @@ test "HTTP/1 client pool expires idle connections" {
             var request = try connection.readRequest(.{});
             defer request.deinit(self.server.allocator);
             try connection.writeResponse(.{ .body = "idle" });
+            try self.release.wait(self.server.io);
         }
     };
     var shared = Shared{ .server = &server };
     const thread = try std.Thread.spawn(.{}, Shared.run, .{&shared});
     var joined = false;
-    defer if (!joined) thread.join();
+    defer if (!joined) {
+        shared.release.set(io);
+        thread.join();
+    };
     var pool = try pool_mod.Pool.init(allocator, io, .{
         .idle_timeout = .fromMilliseconds(20),
     });
@@ -1261,6 +2073,7 @@ test "HTTP/1 client pool expires idle connections" {
     try std.testing.expectEqual(@as(usize, 1), pool.pruneExpired());
     try std.testing.expectEqual(@as(usize, 0), pool.idleCount());
 
+    shared.release.set(io);
     thread.join();
     joined = true;
     if (shared.err) |err| return err;
@@ -1315,6 +2128,7 @@ test "HTTP/1 client pool replaces an idle authority at total capacity" {
     };
     const Once = struct {
         server: *runtime.Server,
+        release: *std.Io.Event,
         err: ?anyerror = null,
         fn run(self: *@This()) void {
             var connection = self.server.accept() catch |err| {
@@ -1330,16 +2144,26 @@ test "HTTP/1 client pool replaces an idle authority at total capacity" {
             connection.writeResponse(.{ .body = "ok" }) catch |err| {
                 self.err = err;
             };
+            self.release.wait(self.server.io) catch |err| {
+                self.err = err;
+            };
         }
     };
     var first_shared = Shared{ .server = &first_server };
-    var second_shared = Once{ .server = &second_server };
+    var second_release: std.Io.Event = .unset;
+    var second_shared = Once{
+        .server = &second_server,
+        .release = &second_release,
+    };
     const first_thread = try std.Thread.spawn(.{}, Shared.run, .{&first_shared});
     const second_thread = try std.Thread.spawn(.{}, Once.run, .{&second_shared});
     var first_joined = false;
     var second_joined = false;
     defer if (!first_joined) first_thread.join();
-    defer if (!second_joined) second_thread.join();
+    defer if (!second_joined) {
+        second_release.set(io);
+        second_thread.join();
+    };
     var pool = try pool_mod.Pool.init(allocator, io, .{
         .max_connections = 1,
         .max_idle_connections = 1,
@@ -1366,6 +2190,7 @@ test "HTTP/1 client pool replaces an idle authority at total capacity" {
         try pool.idleCountForUri(second_uri),
     );
 
+    second_release.set(io);
     first_thread.join();
     first_joined = true;
     second_thread.join();

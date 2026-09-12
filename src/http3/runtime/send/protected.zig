@@ -1,10 +1,12 @@
 const std = @import("std");
+const deadline_policy = @import("../../../internal/deadline.zig");
 const quic = @import("../../../quic/mod.zig");
 const runtime_error = @import("../error.zig");
 const packetizer = @import("packetizer.zig");
 
 const net = std.Io.net;
 const Error = runtime_error.Error;
+const ReceiveTimeoutError = runtime_error.ReceiveTimeoutError;
 
 /// Reusable protection scratch for the preconfigured-key HTTP/3 runtime.
 ///
@@ -48,6 +50,56 @@ pub const State = struct {
         frames: []const quic.Frame,
         max_frames_per_packet: usize,
     ) Error!void {
+        return self.sendFramesUntil(
+            endpoint,
+            to,
+            keys,
+            destination_connection_id,
+            next_packet_number,
+            frames,
+            max_frames_per_packet,
+            null,
+        ) catch |err| switch (err) {
+            error.Timeout, error.ConcurrencyUnavailable => unreachable,
+            else => |other| return @errorCast(other),
+        };
+    }
+
+    pub fn sendFramesWithDeadline(
+        self: *State,
+        endpoint: *quic.runtime.Endpoint,
+        to: net.IpAddress,
+        keys: quic.protection.PacketProtectionKeys,
+        destination_connection_id: []const u8,
+        next_packet_number: *u64,
+        frames: []const quic.Frame,
+        max_frames_per_packet: usize,
+        deadline: std.Io.Clock.Timestamp,
+    ) ReceiveTimeoutError!void {
+        _ = try deadline_policy.usableAwake(endpoint.io, deadline);
+        return self.sendFramesUntil(
+            endpoint,
+            to,
+            keys,
+            destination_connection_id,
+            next_packet_number,
+            frames,
+            max_frames_per_packet,
+            deadline,
+        );
+    }
+
+    fn sendFramesUntil(
+        self: *State,
+        endpoint: *quic.runtime.Endpoint,
+        to: net.IpAddress,
+        keys: quic.protection.PacketProtectionKeys,
+        destination_connection_id: []const u8,
+        next_packet_number: *u64,
+        frames: []const quic.Frame,
+        max_frames_per_packet: usize,
+        deadline: ?std.Io.Clock.Timestamp,
+    ) ReceiveTimeoutError!void {
         if (self.unusable) return error.ConnectionUnusable;
         var backend = Backend{
             .send = self,
@@ -56,6 +108,7 @@ pub const State = struct {
             .keys = keys,
             .destination_connection_id = destination_connection_id,
             .next_packet_number = next_packet_number,
+            .deadline = deadline,
         };
         packetizer.sendWithBackend(
             self.allocator,
@@ -80,7 +133,56 @@ pub const State = struct {
         next_packet_number: *u64,
         packets: []const []const quic.Frame,
     ) Error!quic.one_rtt.BatchSendResult {
+        return self.sendPacketBatchProgressUntil(
+            endpoint,
+            to,
+            keys,
+            destination_connection_id,
+            next_packet_number,
+            packets,
+            null,
+        ) catch |err| switch (err) {
+            error.Timeout, error.ConcurrencyUnavailable => unreachable,
+            else => |other| return @errorCast(other),
+        };
+    }
+
+    pub fn sendPacketBatchProgressWithDeadline(
+        self: *State,
+        endpoint: *quic.runtime.Endpoint,
+        to: net.IpAddress,
+        keys: quic.protection.PacketProtectionKeys,
+        destination_connection_id: []const u8,
+        next_packet_number: *u64,
+        packets: []const []const quic.Frame,
+        deadline: std.Io.Clock.Timestamp,
+    ) ReceiveTimeoutError!quic.one_rtt.BatchSendResult {
+        _ = try deadline_policy.usableAwake(endpoint.io, deadline);
+        return self.sendPacketBatchProgressUntil(
+            endpoint,
+            to,
+            keys,
+            destination_connection_id,
+            next_packet_number,
+            packets,
+            deadline,
+        );
+    }
+
+    fn sendPacketBatchProgressUntil(
+        self: *State,
+        endpoint: *quic.runtime.Endpoint,
+        to: net.IpAddress,
+        keys: quic.protection.PacketProtectionKeys,
+        destination_connection_id: []const u8,
+        next_packet_number: *u64,
+        packets: []const []const quic.Frame,
+        deadline: ?std.Io.Clock.Timestamp,
+    ) ReceiveTimeoutError!quic.one_rtt.BatchSendResult {
         if (self.unusable) return error.ConnectionUnusable;
+        if (deadline) |absolute| {
+            _ = try deadline_policy.usableAwake(endpoint.io, absolute);
+        }
         const options: quic.one_rtt.BatchSendOptions = .{
             .destination_connection_id = destination_connection_id,
             .first_packet_number = next_packet_number.*,
@@ -119,6 +221,12 @@ pub const State = struct {
     pub fn isUsable(self: State) bool {
         return !self.unusable;
     }
+
+    /// Retire a lightweight protected send path after a multi-packet logical
+    /// operation exposed a prefix that its aggregate API cannot resume.
+    pub fn failClosed(self: *State) void {
+        self.unusable = true;
+    }
 };
 
 const Backend = struct {
@@ -129,6 +237,7 @@ const Backend = struct {
     destination_connection_id: []const u8,
     next_packet_number: *u64,
     visible_packet_sent: bool = false,
+    deadline: ?std.Io.Clock.Timestamp = null,
 
     pub fn maxDatagramSize(self: Backend) usize {
         return self.endpoint.limits.max_datagram_size;
@@ -163,7 +272,10 @@ const Backend = struct {
     pub fn sendPackets(
         self: *Backend,
         packets: []const []const quic.Frame,
-    ) Error!void {
+    ) ReceiveTimeoutError!void {
+        if (self.deadline) |deadline| {
+            _ = try deadline_policy.usableAwake(self.endpoint.io, deadline);
+        }
         const result = try self.send.sendPacketBatchProgress(
             self.endpoint,
             self.to,

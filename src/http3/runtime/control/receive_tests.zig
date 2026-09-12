@@ -16,6 +16,44 @@ const applyControlStreamFrameForRoleWithPushes =
 const rejectCriticalStreamClosureFrame =
     receive.rejectCriticalStreamClosureFrame;
 
+test "HTTP/3 promised push ID set preserves sparse membership compactly" {
+    const allocator = std.testing.allocator;
+    var ids = receive.ServerPushIdSet{};
+    defer ids.deinit(allocator);
+
+    try ids.prepareInsert(allocator, 8);
+    for (0..1024) |push_id| {
+        ids.insertAssumeCapacity(@intCast(push_id));
+    }
+    try std.testing.expectEqual(@as(usize, 1), ids.rangeCount());
+    try std.testing.expectEqual(@as(usize, 0), ids.sparseRangeCount());
+    try std.testing.expect(ids.contains(0));
+    try std.testing.expect(ids.contains(1023));
+    try std.testing.expect(!ids.contains(1024));
+
+    ids.insertAssumeCapacity(2048);
+    ids.insertAssumeCapacity(2050);
+    ids.insertAssumeCapacity(2049);
+    ids.insertAssumeCapacity(2048);
+    try std.testing.expectEqual(@as(usize, 2), ids.rangeCount());
+    try std.testing.expectEqual(@as(usize, 1), ids.sparseRangeCount());
+    try std.testing.expect(ids.contains(2048));
+    try std.testing.expect(ids.contains(2049));
+    try std.testing.expect(ids.contains(2050));
+    try std.testing.expect(!ids.contains(2047));
+    try std.testing.expect(!ids.contains(2051));
+    try std.testing.expectError(
+        error.DuplicatePushId,
+        receive.validateNewServerPush(.{}, ids, 1023),
+    );
+    try receive.validateNewServerPush(.{}, ids, 1024);
+
+    const promised: receive.PromisedPushIds = .{ .set = &ids };
+    try std.testing.expect(promised.contains(1023));
+    try std.testing.expect(promised.contains(2049));
+    try std.testing.expect(!promised.contains(1024));
+}
+
 test "HTTP/3 GOAWAY validates role-specific identifiers" {
     try receive.validateServerGoAwayStreamId(0);
     try receive.validateServerGoAwayStreamId(4);
@@ -303,6 +341,109 @@ test "HTTP/3 client rejects server-only control frames" {
     );
 }
 
+test "HTTP/3 role-aware control extensions avoid state snapshots" {
+    const allocator = std.testing.allocator;
+    var control = http3.ControlState{
+        .settings = .{ .received = true },
+    };
+    defer control.deinit(allocator);
+
+    var priority: std.ArrayList(u8) = .empty;
+    defer priority.deinit(allocator);
+    try http3.writePriorityUpdateFrame(
+        &priority,
+        allocator,
+        0,
+        .{ .urgency = 3 },
+    );
+    try control.applyFrame(allocator, try http3.Frame.parse(priority.items));
+    try control.peer_control_stream_buffer.ensureTotalCapacity(allocator, 8);
+
+    var no_alloc = std.testing.FailingAllocator.init(
+        allocator,
+        .{ .fail_index = 0 },
+    );
+    try std.testing.expect(try applyControlStreamFrameForRole(
+        &control,
+        no_alloc.allocator(),
+        .{
+            .stream_id = server_control_stream_id,
+            .offset = 0,
+            // Control-stream prefix followed by one complete unknown
+            // extension frame with a one-byte payload.
+            .data = &.{ 0x00, 0x21, 0x01, 0xaa },
+        },
+        .client,
+    ));
+    try std.testing.expect(!no_alloc.has_induced_failure);
+    try std.testing.expectEqual(
+        @as(u3, 3),
+        control.requestPriorityUpdate(0).?.priority().urgency,
+    );
+    try std.testing.expectEqual(
+        @as(usize, 0),
+        control.peer_control_stream_buffer.items.len,
+    );
+    try std.testing.expectEqual(
+        @as(usize, 4),
+        control.peer_control_stream_consumed_offset,
+    );
+}
+
+test "HTTP/3 client rejects split server-only control frame transactionally" {
+    const allocator = std.testing.allocator;
+    var bytes: std.ArrayList(u8) = .empty;
+    defer bytes.deinit(allocator);
+    try http3.writeControlStreamPrefix(&bytes, allocator);
+    try http3.writeSettingsFrame(&bytes, allocator, .{});
+    try http3.writeMaxPushIdFrame(&bytes, allocator, 64);
+    const split = bytes.items.len - 1;
+
+    var control = http3.ControlState{};
+    defer control.deinit(allocator);
+    try std.testing.expect(try applyControlStreamFrameForRole(
+        &control,
+        allocator,
+        .{
+            .stream_id = server_control_stream_id,
+            .offset = 0,
+            .data = bytes.items[0..split],
+        },
+        .client,
+    ));
+    try std.testing.expect(control.settings.received);
+    try std.testing.expect(control.peer_max_push_id == null);
+    const retained = try allocator.dupe(
+        u8,
+        control.peer_control_stream_buffer.items,
+    );
+    defer allocator.free(retained);
+    try std.testing.expect(retained.len != 0);
+    try std.testing.expectEqual(split, control.peer_control_stream_consumed_offset);
+
+    try std.testing.expectError(
+        error.UnexpectedFrame,
+        applyControlStreamFrameForRole(
+            &control,
+            allocator,
+            .{
+                .stream_id = server_control_stream_id,
+                .offset = split,
+                .data = bytes.items[split..],
+            },
+            .client,
+        ),
+    );
+    try std.testing.expect(control.settings.received);
+    try std.testing.expect(control.peer_max_push_id == null);
+    try std.testing.expectEqualSlices(
+        u8,
+        retained,
+        control.peer_control_stream_buffer.items,
+    );
+    try std.testing.expectEqual(split, control.peer_control_stream_consumed_offset);
+}
+
 test "HTTP/3 server validates every batched priority update transactionally" {
     const allocator = std.testing.allocator;
 
@@ -336,7 +477,7 @@ test "HTTP/3 server validates every batched priority update transactionally" {
                 .data = request_bytes.items,
             },
             .server,
-            &.{},
+            .{ .slice = &.{} },
             .{ .static_limit = 2 },
             null,
         ),
@@ -378,7 +519,7 @@ test "HTTP/3 server validates every batched priority update transactionally" {
                 .data = push_bytes.items,
             },
             .server,
-            &.{1},
+            .{ .slice = &.{1} },
             .{ .static_limit = quic.max_stream_count },
             null,
         ),
@@ -431,12 +572,186 @@ test "HTTP/3 server validates every batched priority update transactionally" {
                 .data = retired_bytes.items,
             },
             .server,
-            &.{},
+            .{ .slice = &.{} },
             .{ .static_limit = 2 },
             null,
         ),
     );
     try std.testing.expect(!retired_control.settings.received);
+}
+
+test "HTTP/3 ignored priority update cannot precede SETTINGS" {
+    const allocator = std.testing.allocator;
+    var bytes: std.ArrayList(u8) = .empty;
+    defer bytes.deinit(allocator);
+    try http3.writeControlStreamPrefix(&bytes, allocator);
+    try http3.writePriorityUpdateFrame(
+        &bytes,
+        allocator,
+        0,
+        .{ .urgency = 7 },
+    );
+
+    var control = http3.ControlState{};
+    defer control.deinit(allocator);
+    control.retireRequestPriority(allocator, 0);
+    try std.testing.expectError(
+        error.MissingSettings,
+        applyControlStreamFrameForRoleWithPushes(
+            &control,
+            allocator,
+            .{
+                .stream_id = client_control_stream_id,
+                .offset = 0,
+                .data = bytes.items,
+            },
+            .server,
+            .{ .slice = &.{} },
+            .{ .static_limit = 1 },
+            null,
+        ),
+    );
+    try std.testing.expect(!control.settings.received);
+    try std.testing.expect(control.peer_control_stream_id == null);
+    try std.testing.expectEqual(
+        @as(usize, 0),
+        control.peer_control_stream_buffer.items.len,
+    );
+    try std.testing.expect(control.requestPriorityUpdate(0) == null);
+}
+
+test "HTTP/3 server rejects unpromised CANCEL_PUSH transactionally" {
+    const allocator = std.testing.allocator;
+
+    var invalid_bytes: std.ArrayList(u8) = .empty;
+    defer invalid_bytes.deinit(allocator);
+    try http3.writeControlStreamPrefix(&invalid_bytes, allocator);
+    try http3.writeSettingsFrame(&invalid_bytes, allocator, .{});
+    try http3.writeMaxPushIdFrame(&invalid_bytes, allocator, 8);
+    try http3.writeCancelPushFrame(&invalid_bytes, allocator, 3);
+
+    var invalid_control = http3.ControlState{};
+    defer invalid_control.deinit(allocator);
+    try std.testing.expectError(
+        error.IdError,
+        applyControlStreamFrameForRoleWithPushes(
+            &invalid_control,
+            allocator,
+            .{
+                .stream_id = client_control_stream_id,
+                .offset = 0,
+                .data = invalid_bytes.items,
+            },
+            .server,
+            .{ .slice = &.{7} },
+            .{ .static_limit = quic.max_stream_count },
+            null,
+        ),
+    );
+    try std.testing.expect(!invalid_control.settings.received);
+    try std.testing.expectEqual(
+        @as(?u64, null),
+        invalid_control.peer_max_push_id,
+    );
+    try std.testing.expectEqual(
+        @as(u64, 0),
+        invalid_control.push_cancellation_generation,
+    );
+    try std.testing.expectEqual(
+        @as(usize, 0),
+        invalid_control.cancelledPushRangeCount(),
+    );
+    try std.testing.expectEqual(
+        @as(usize, 0),
+        invalid_control.peer_control_stream_consumed_offset,
+    );
+
+    var missing_metadata_control = http3.ControlState{};
+    defer missing_metadata_control.deinit(allocator);
+    try std.testing.expectError(
+        error.IdError,
+        applyControlStreamFrameForRole(
+            &missing_metadata_control,
+            allocator,
+            .{
+                .stream_id = client_control_stream_id,
+                .offset = 0,
+                .data = invalid_bytes.items,
+            },
+            .server,
+        ),
+    );
+    try std.testing.expectEqual(
+        @as(usize, 0),
+        missing_metadata_control.cancelledPushRangeCount(),
+    );
+
+    var batched_bytes: std.ArrayList(u8) = .empty;
+    defer batched_bytes.deinit(allocator);
+    try http3.writeControlStreamPrefix(&batched_bytes, allocator);
+    try http3.writeSettingsFrame(&batched_bytes, allocator, .{});
+    try http3.writeMaxPushIdFrame(&batched_bytes, allocator, 8);
+    try http3.writeCancelPushFrame(&batched_bytes, allocator, 7);
+    try http3.writeCancelPushFrame(&batched_bytes, allocator, 3);
+
+    var batched_control = http3.ControlState{};
+    defer batched_control.deinit(allocator);
+    try std.testing.expectError(
+        error.IdError,
+        applyControlStreamFrameForRoleWithPushes(
+            &batched_control,
+            allocator,
+            .{
+                .stream_id = client_control_stream_id,
+                .offset = 0,
+                .data = batched_bytes.items,
+            },
+            .server,
+            .{ .slice = &.{7} },
+            .{ .static_limit = quic.max_stream_count },
+            null,
+        ),
+    );
+    try std.testing.expect(!batched_control.settings.received);
+    try std.testing.expectEqual(
+        @as(u64, 0),
+        batched_control.push_cancellation_generation,
+    );
+    try std.testing.expectEqual(
+        @as(usize, 0),
+        batched_control.cancelledPushRangeCount(),
+    );
+    try std.testing.expectEqual(
+        @as(usize, 0),
+        batched_control.peer_control_stream_consumed_offset,
+    );
+
+    var valid_bytes: std.ArrayList(u8) = .empty;
+    defer valid_bytes.deinit(allocator);
+    try http3.writeControlStreamPrefix(&valid_bytes, allocator);
+    try http3.writeSettingsFrame(&valid_bytes, allocator, .{});
+    try http3.writeMaxPushIdFrame(&valid_bytes, allocator, 8);
+    try http3.writeCancelPushFrame(&valid_bytes, allocator, 7);
+    var valid_control = http3.ControlState{};
+    defer valid_control.deinit(allocator);
+    try std.testing.expect(try applyControlStreamFrameForRoleWithPushes(
+        &valid_control,
+        allocator,
+        .{
+            .stream_id = client_control_stream_id,
+            .offset = 0,
+            .data = valid_bytes.items,
+        },
+        .server,
+        .{ .slice = &.{7} },
+        .{ .static_limit = quic.max_stream_count },
+        null,
+    ));
+    try std.testing.expect(valid_control.pushCancelled(7));
+    try std.testing.expectEqual(
+        @as(u64, 1),
+        valid_control.push_cancellation_generation,
+    );
 }
 
 test "HTTP/3 runtime rejects closed critical streams" {

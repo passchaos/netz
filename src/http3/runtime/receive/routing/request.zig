@@ -135,7 +135,7 @@ pub fn applyServerRequestPacketFrames(
     streaming_requests: ?*StreamingRequestSet,
     request_lifecycle: *ServerRequestLifecycle,
     request_id_validator: ServerRequestIdValidator,
-    peer_promised_push_ids: []const u64,
+    peer_promised_push_ids: control_receive.PromisedPushIds,
     detached_stream_id: ?u62,
     detached_streams: ?*connect_datagram.Registry,
 ) Error!?RequestStreamReset {

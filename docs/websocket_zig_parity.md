@@ -15,7 +15,7 @@ superiority.
 | permessage-deflate | Negotiated and exercised by HTTP/1 and H2 runtimes with no-context-takeover, actual LZ77/Huffman compression and expansion fallback | Negotiation/decompression exists, but audited 0.16 client/server send compression code is disabled |
 | Fragmentation / aggregate limits | Strict assembler and runtime message limits, UTF-8 validation after fragmented text assembly | Fragment assembly and configurable message/buffer limits |
 | Receive/send ownership | `parseFrameInto`, `receiveMessageInto`, and its absolute-deadline variant use caller storage, including permessage-deflate output with reusable connection scratch on HTTP/1 and RFC 8441; HTTP/1, RFC 8441, and HTTP/3 clients expose `sendBinaryInPlace` for the reference's mutable post-send contract while safe `[]const u8` sends remain available | Reader returns borrowed payloads and allocates/pools compressed output; client send APIs require mutable payloads and leave them masked |
-| Close / Ping / Pong | Typed close parsing/writing, close-state guards, automatic Pong and Close replies, deadline-bounded typed peer-Close reads, plus deadline-bounded active Ping/Pong round trips that preserve interleaved application frames for both HTTP/1 Upgrade and RFC 8441. Partial Close frames remain resumable after timeout | Handler callbacks and automatic default control replies |
+| Close / Ping / Pong | Typed close parsing/writing, close-state guards, automatic Pong and Close replies, deadline-bounded typed peer-Close reads, plus deadline-bounded active Ping/Pong round trips that preserve interleaved application frames for HTTP/1 Upgrade, RFC 8441, and RFC 9220. Partial receive data and partially sent explicit or automatic control replies remain resumable after timeout without changing their mask, replaying a committed prefix, or losing a peer Ping/Close event | Handler callbacks and automatic default control replies |
 | Concurrent sends | Serialized by per-connection `std.Io.Mutex`; writers recheck Close state after acquiring it, and HTTP/1, RFC 8441, plus RFC 9220 runtime tests exercise concurrent sends (the H2/H3 cases share one compressed encoder) | Documented thread-safe connection writes |
 | TCP/TLS latency policy | TCP_NODELAY defaults on for ordinary accepted and client TCP/WSS sockets; WSS header + first payload bytes fill one TLS record/network write; configurable in runtime limits/connect options | Server enables NODELAY, audited client leaves Nagle enabled unless the embedding application changes the socket |
 | I/O abstraction | HTTP/1, HTTP/2, and HTTP/3 adapters consume only `std.Io`; backend selection stays outside the protocol API | Custom epoll/kqueue/Windows server backends |
@@ -99,9 +99,11 @@ may then call `acceptWithHeaders` to add validated response fields or `reject`
 with a final 3xx-5xx response and body; convenience 403, 404, and 429 helpers
 cover common policy outcomes. Rejections always add `Connection: close`, and
 both outcomes prevent applications from overriding WebSocket negotiation or
-HTTP body-framing fields. The original absolute handshake deadline remains in
-force across the application decision instead of being renewed before the
-response write. A pending value owns the transport until one outcome succeeds;
+HTTP body-framing fields. TCP, Unix, and WSS timeout/deadline entry points apply
+one absolute budget to listener accept and the complete HTTP/TLS Upgrade; a
+timeout/accept race closes any late accepted socket. The original deadline also
+remains in force across the application decision instead of being renewed
+before the response write. A pending value owns the transport until one outcome succeeds;
 validation or write failures leave that ownership with the caller so `deinit`
 can close it deterministically. Existing `accept*` entry points remain
 compatible wrappers that receive and immediately accept. End-to-end TCP, Unix,
@@ -347,20 +349,24 @@ so payload size no longer drives heap allocation.
 
 The same command also measures one 4 KiB repeated telemetry-like message
 through no-context-takeover compression. Complete and discontiguous messages
-now use project-local vort fixed-DEFLATE sync-flush encoders, whose small-input
-hash paths avoid clearing Zig flate's roughly 224 KiB compressor state per
-message. The chunked encoder keeps plaintext discontiguous while a bounded
-16 KiB rolling dictionary preserves matches across caller slices.
+now use a package-local focused fixed-DEFLATE sync-flush encoder. Its reusable
+4K-entry hash chain avoids clearing Zig flate's roughly 224 KiB compressor
+state per message and removes the former external Vort package dependency. The
+chunked encoder keeps plaintext discontiguous while a bounded 16 KiB rolling
+dictionary preserves matches across caller slices. A 2026-09-10 CPU-0 run of
+the persistent 4-KiB compressed echo measured 22.296 us/roundtrip, versus the
+previous 29.44-31.14 us range.
 
 ```text
-permessage-deflate: 5.55-5.88 us/message, 4096 -> 69 wire bytes
-16-slice streaming: 5.77-6.10 us/message, 4096 -> 69 wire bytes, no join
+permessage-deflate: 3.860 us/message, 4096 -> 69 wire bytes
+16-slice streaming: 7.587 us/message, 4096 -> 69 wire bytes, no join
 ```
 
-These are three CPU-14-pinned `ReleaseFast` runs on 2026-08-20. Compared with
-the original standard-library encoder baseline, the fragmented path is
-8.4-8.9x faster. Adjacent slice coalescing, rolling history and one shared
-fixed block also reduce the first vort chunked path's 463-byte payload to the
+These are CPU-0-pinned `ReleaseFast` regression samples from 2026-09-10. The
+package-local encoder remains in the same small-microsecond class as the
+preceding external-backend range of 5.55-6.10 us/message while retaining the
+same 69-byte wire output. Adjacent slice coalescing, rolling history and one
+shared fixed block also reduce the first chunked path's 463-byte payload to the
 same 69 bytes as the complete-message path. This remains an
 internal encoder baseline and compression-ratio example, not a cross-library
 speed ratio: the audited websocket.zig 0.16 send paths currently hard-code
@@ -414,7 +420,7 @@ now stage their pseudo-headers and ordinary headers in 16-entry stack buffers,
 matching the ordinary HTTP/2 request/response path. Larger application header
 sets retain an exact heap fallback. A fail-first unit test proves the full
 common stack capacity does not allocate and that the first overflow reports OOM
-cleanly before a successful fallback allocation. The 1,595-test suite and the
+cleanly before a successful fallback allocation. The 2,958-test Netz suite and the
 external Hyper RFC 8441 fragmented-text/Ping/Pong/bounded-Close gate remain
 green, as does the broader bidirectional Hyper h2c/TLS gate. Five CPU-0 4-KiB
 RFC 8441 echo runs measured 31.105-31.955 us/roundtrip (31.507 us mean, 0.94%
@@ -432,35 +438,52 @@ frame scratch. Client frames still require
 masking, but now stream through the same bounded 16-KiB stack scratch used by
 HTTP/1 WebSocket instead of retaining the complete masked frame. The
 constrained-window regression verifies zero retained frame scratch in both
-directions and uses the two-part API so HTTP/2 DATA framing crosses both the
-WebSocket header/payload and application-slice joins. A separate negotiated
-permessage-deflate test verifies the two borrowed slices are compressed as one
+directions and uses the arbitrary-slice API so HTTP/2 DATA framing crosses both
+the WebSocket header/payload and application-slice joins. A separate negotiated
+permessage-deflate test verifies multiple borrowed slices are compressed as one
 binary message in both directions and still do not grow frame scratch.
-Five CPU-0 4-KiB regression samples after adding H2 two-part writes measured
+Five CPU-0 4-KiB regression samples after adding H2 borrowed-slice writes measured
 30.987-32.321 us/roundtrip (31.394 us mean, 31.072 us median, 1.63% relative
 standard deviation, 241.71-252.11 logical MiB/s). The range
 overlaps the earlier samples, so it is recorded as no demonstrated steady-state
 speedup; the proven improvement is eliminating payload-sized retained scratch
-on both directions of the ordinary single-frame path. The full 1,604-test suite
+on both directions of the ordinary single-frame path. The full 2,958-test Netz suite
 and the bidirectional Hyper RFC 8441 gate remain green.
 
 The first compressed frame is copied once from the transport/caller frame
 buffer into retained compressed scratch. This is intentional: Zig's raw
 inflater may overwrite output before consuming aliased input. A regression test
 checks that scratch holds the exact wire payload before caller-buffer inflate.
-Uncompressed binary messages also accept two borrowed application slices. The
-server submits header plus both slices without concatenation, using
-scatter/gather where the transport supports it; the client masks both through
-bounded stack chunks while carrying the RFC 6455 mask offset across the slice
-boundary. The receiver still observes one binary frame, which lets
-MQTT-over-WebSocket avoid concatenating its encoded packet prefix and application
-payload without changing message boundaries. Header-length parity tests cover
-the 125/126/65535 transitions and a bidirectional runtime test covers continuous
-masking across the join. When permessage-deflate is negotiated, the same API
-feeds both borrowed slices directly to the retained Vort encoder rather than
-allocating and copying a contiguous plaintext message. A fail-after-warmup
-runtime test verifies that repeated compressed two-part sends do not allocate
-through the connection allocator.
+Uncompressed binary messages accept an arbitrary caller-owned slice list. The
+server submits the header and slices without concatenating payload bytes, using
+bounded scatter/gather where the transport supports it; the client masks
+through bounded stack chunks while carrying one RFC 6455 mask offset across
+every slice. Empty slices are accepted, and the receiver still observes one
+FIN-terminated binary frame rather than WebSocket continuation frames. This
+lets MQTT-over-WebSocket encode packet prefixes and application payloads
+without a plaintext join. Runtime and codec tests cover the 125/126 and
+65535/65536 frame-length transitions. When permessage-deflate is negotiated,
+the same API feeds all borrowed slices directly to the retained encoder.
+A fail-after-warmup runtime test verifies that repeated compressed multi-slice
+sends do not allocate through the connection allocator. The original
+`sendBinaryParts` remains as a two-slice compatibility wrapper across HTTP/1,
+RFC 8441, and RFC 9220.
+
+The native `bench-websocket-slices-ab` gate compares that arbitrary-slice API
+with an explicit caller-side join over all three transports. Its default
+workload uses one persistent connection, 20 warmups, 1,000 measured 4-KiB
+round trips, eight application slices, no compression, one WebSocket frame,
+one pinned CPU, alternating shape order, and five-sample medians. The strict
+verifier requires matching workload fields, logical bytes, checksums, and
+completion for every sample. The first 2026-09-09 CPU-0 run exposed
+direct-slices/caller-joined median ratios of 1.506 (HTTP/1), 1.017 (RFC 8441),
+and 1.382 (RFC 9220). H1 now uses the existing POSIX wide-iovec writer so its
+frame header plus eight payload slices fit one submission, while H3 groups
+borrowed ranges across application-slice boundaries into packet-sized DATA
+contributions. The final-code five-sample run measured 1.008, 1.002, and 1.022. Every
+sample verified 8,192,000 logical bytes and checksum 255,000. The gate
+deliberately has no speed threshold, and these self-echo results are neither an
+external-library comparison nor equal-wire evidence.
 
 Netz uses `sendBinaryInPlace` and `receiveMessageInto`; the former deliberately
 leaves caller storage masked, matching websocket.zig's mutable-input contract,
@@ -468,7 +491,7 @@ while the latter assembles fragments and handles control frames without a
 message allocation. With permessage-deflate, the decompressed message lands
 directly in the caller buffer. TCP and RFC 8441 connections retain bounded
 compressed-wire scratch plus a reusable receive DEFLATE history window. Both
-complete and fragmented sends use vort's native raw fixed-block sync flush;
+complete and fragmented sends use the package-local raw fixed-block sync flush;
 the fragmented form feeds per-slice token plans into one block without joining
 plaintext and carries up to 16 KiB of prior plaintext as match history. Both
 paths remove the RFC 7692 suffix and set RSV1 only when the wire payload is
@@ -478,8 +501,8 @@ No-context-takeover resets codec state for every message
 while retaining wire buffers. RFC 8441 caller-buffer receive now writes each
 uncompressed frame directly into application storage and each compressed
 continuation directly into codec scratch; it no longer allocates every frame
-or retains a second whole-message buffer. Vort's current hash parser allocates temporary
-match state per compressed send; receive-side codec storage is allocation-free
+or retains a second whole-message buffer. The focused encoder retains its hash
+chain per connection; receive-side codec storage is allocation-free
 after first-use warmup. The H2 adapter retains tunnel/frame and codec scratch
 but avoids separate application-message and decompressed-message allocations.
 Buffered regressions prove both an uncompressed fragmented message with an
@@ -498,7 +521,7 @@ Tests cover a zlib-generated dynamic-DEFLATE fixture, fragmented compressed
 text with interleaved PING, send/receive scratch reuse under failing allocators,
 actual wire shrink plus RSV1, expansion fallback without RSV1, output overflow,
 and H2 compressed caller storage in both directions.
-The authenticated HTTP/3 adapter now uses the same chunked-input Vort encoder
+The authenticated HTTP/3 adapter now uses the same chunked-input encoder
 and incremental UTF-8 validation. It retains only compressed output, preserves
 the caller's fragment count on the wire, and no longer allocates a joined
 plaintext message before sending RFC 9220 DATA.
@@ -512,7 +535,7 @@ WebSocket fragmentation and Ping/Pong handling, so upper-layer inactivity
 budgets cannot be extended by transport control traffic.
 One earlier four-connection `--stats` run made 7,151 allocations, allocated
 48,068,236 cumulative bytes and peaked at 1,240,114 live bytes while verifying
-checksum 111,600. Vort's fixed-sync-flush encoder now writes directly into the
+checksum 111,600. The fixed-sync-flush encoder now writes directly into the
 connection-owned output list and resets retained arena-backed token/hash/history
 workspace between no-context-takeover messages. A 2026-08-23 one-connection,
 220-exchange rerun reduced allocator calls from 1,791 to 33 and cumulative
@@ -732,6 +755,51 @@ frames. Partial wire frames, the owning message assembler, caller-buffer offsets
 compression mode, and incremental UTF-8 validation remain resumable after a
 timeout; caller-buffer retries must present the same storage so already written
 bytes cannot be silently lost.
+
+Bounded receives on HTTP/1, RFC 8441, and RFC 9220 also carry that same
+deadline through automatic Pong and peer-Close echo writes. Each connection
+retains a separately encoded automatic control frame, its stable client mask,
+and the exact transport-visible cursor. A retry completes only the unsent
+suffix before reading again. Frame-oriented APIs additionally retain and return
+the already parsed peer Ping or Close exactly once, while message-oriented APIs
+resume the hidden reply and continue assembling the application message; this
+includes RFC 9220's caller-buffer receive path, whose automatic-control resume
+now runs before its unrelated-writer guard. All
+other writers return `WriteInProgress` while this transaction is pending.
+If a bounded application/Ping/Close writer already owns a partial wire prefix
+when the peer control frame is parsed, the automatic reply queues behind that
+specific transaction instead of discarding the peer event. Only the original
+same-payload or same-descriptor retry may complete the earlier frame; new
+writers remain blocked. The next matching receive then emits the queued reply,
+preserving one total byte-stream order across concurrent reader/writer tasks.
+Applications that intentionally send Pong outside the automatic receive path
+also have `sendPongWithTimeout` and `sendPongWithDeadline` on HTTP/1, RFC 8441,
+and RFC 9220. They report the same complete-frame `MessageWriteProgress`, keep
+one client mask across retries, reject a different payload while partial, and
+resume only the unsent transport-visible suffix.
+The same transports expose send-only `sendPingWith*`, `sendCloseWith*`, and
+nullable `sendCloseFrameWith*` forms for event loops that own peer-response
+polling. Unlike `pingWith*` and `closeWith*`, these methods stop once the local
+control frame commits. H2/H3 Close completion includes the request-stream FIN;
+all variants retain exact control bytes and mask state across timeout.
+Bounded fragmented sends are exposed as `sendFragmentedWithTimeout` and
+`sendFragmentedWithDeadline` on all three transports. Their O(1) pending state
+retains the caller's descriptor-array identity, current fragment index, current
+frame header/mask and cumulative wire cursor; it never copies the whole
+fragment list. A timeout can therefore occur inside any header or payload and
+resume only that suffix. Each later fragment receives its own client mask,
+compressed messages retain the connection-owned compressed scratch and RSV1
+only on their first frame, and compression expansion falls back to the original
+fragment payloads. A different descriptor array returns `WriteInProgress`
+without advancing transport state.
+The mutable client fast path likewise exposes
+`sendBinaryInPlaceWithTimeout` and `sendBinaryInPlaceWithDeadline` on HTTP/1,
+RFC 8441, and RFC 9220. Deadline and role/extension validation run before the
+caller buffer changes. The first accepted attempt generates one mask, applies
+it in place once, and retains the header plus exact transport cursor; retries
+with the same mutable slice send the already-masked suffix directly. A
+different slice is rejected without re-masking or advancing output. The buffer
+remains masked after success, preserving the original in-place API contract.
 Ping and Close progress also expose timeout and absolute-deadline continuation
 forms on both transports. A caller can handle an interleaved application frame
 and resume with either its original total deadline or a new bounded wait
@@ -781,10 +849,88 @@ application frames with ownership and resume without retransmitting the control
 frame; peer Close code/reason metadata remains owned until event deinit. Strict
 passive Close receives likewise expose untimed, timeout, and absolute-deadline
 forms, while `sendCloseFrame(null)` supports a valid metadata-free Close.
-RFC 9220 also matches the HTTP/1 and RFC 8441 borrowed binary-parts send API:
+RFC 9220 active Close now carries that deadline through outbound HTTP/3 DATA
+submission as well as the peer wait. If flow control or pacing expires after a
+packet-sized prefix, the connection retains the one encoded frame and its
+client mask plus the exact committed byte offset; `continueClose*` sends only
+the remaining suffix. Other application/control sends are rejected once this
+Close starts, and FIN is considered sent only after its packet reaches the
+socket. A real-handshake, five-byte STREAM-fragment regression forces a partial
+Close timeout and verifies one exact code/reason after continuation.
+Calling `closeWith*` again while that frame is pending must supply the same
+code/reason; a mismatch returns `WriteInProgress` before another QUIC packet or
+HTTP/3 DATA contribution is emitted.
+RFC 9220 binary scatter/gather sends now expose matching
+`sendBinarySlicesWithTimeout` and `sendBinarySlicesWithDeadline` entry points.
+They retain one frame header and client mask, track the exact socket-visible
+RFC 6455 byte prefix across HTTP/3 DATA chunks, and rebuild only a bounded
+16-KiB wire segment from the borrowed application slices on each retry. The
+caller keeps the same slice descriptor array and its payload bytes stable until
+completion; an equivalent but different descriptor array is rejected with
+`WriteInProgress` before another send. A real TLS/QUIC regression crosses empty
+and non-empty slice boundaries, resumes after a partial timeout, verifies one
+complete masked frame at the server, and also exercises the unmasked server
+direction.
+HTTP/1 Upgrade/WSS and RFC 8441 expose the same bounded scatter/gather API and
+retry contract. They preserve one header, one client mask, and a cumulative
+wire cursor while rebuilding only a bounded output chunk from the original
+slices. TCP/TLS and HTTP/2 DATA flow-control progress therefore resume without
+joining the application payload or duplicating a frame prefix; mismatched
+descriptor arrays are rejected before further output. Tests force partial TCP
+writes and a five-byte HTTP/2 connection/stream window, then verify exact
+masked client frames and unmasked server responses, including compressed
+multi-slice messages.
+RFC 8441 now applies the same rule at the HTTP/2 DATA boundary. A bounded Close
+stores its encoded bytes and one client mask, records only complete DATA bursts,
+and lets `continueClose*` finish the exact suffix plus END_STREAM before waiting
+for the peer. A real CONNECT regression exhausts both HTTP/2 send windows after
+five bytes, rejects application sends during the partial Close, restores credit,
+and verifies one exact masked Close code/reason at the server. Re-entering
+`closeWith*` with different metadata is rejected without consuming restored
+flow-control credit or changing the committed cursor.
+Both multiplexed transports now publish `close_sent` only after the complete
+Close frame and request-stream FIN are committed. Until then, ordinary frame
+and message receives, data/control sends, and connection KeyUpdate return
+`WriteInProgress`; this mirrors HTTP/1's transport-safe pending state rather
+than reporting a completed close prematurely.
+Bounded RFC 8441 Ping uses the same one-mask, exact-offset discipline without
+closing the write half. A partially submitted Ping returns `WriteInProgress`
+for different retry/continuation payloads and unrelated frame sends; either
+the original `pingWith*` entry point or `continuePing*` completes the matching
+suffix, then restores ordinary application writes after the Pong arrives.
+RFC 9220 Ping now has the same property across paced HTTP/3 DATA submission. A
+fixed-clock real-handshake regression times out after a packet-visible prefix,
+retains one mask and cursor, rejects a mismatched retry or application
+write, and leaves receive state untouched until that Ping is continued; it then
+completes the exact suffix and receives the matching Pong.
+RFC 9220 also matches the HTTP/1 and RFC 8441 arbitrary-slice binary send API:
 server frames retain scatter/gather input through HTTP/3 DATA framing, clients
 apply one continuous mask through bounded scratch, and negotiated compression
 consumes the slices without allocating a joined plaintext message.
+Single-frame HTTP/1 Upgrade/WSS, RFC 8441, and RFC 9220 text and binary sends
+additionally expose timeout and absolute-deadline forms.
+`MessageWriteProgress` reports the
+cumulative RFC 6455 frame-byte prefix; a retry keeps the same caller payload,
+mask, header, and compression scratch, so neither the WebSocket prefix nor
+application bytes are replayed. Unmasked servers retain borrowed payload
+slices, while clients rebuild only the current masked suffix in fixed 16-KiB
+scratch. Cleartext HTTP/1 progress is the exact socket-accepted prefix. TLS
+progress is deliberately record-aligned: both standard-library and vail TLS
+retain partial ciphertext in connection-owned storage and count its plaintext
+only after the complete record reaches the socket, preventing nonce reuse or
+duplicate WebSocket bytes across a retry. Real H2 flow-control and H3 pacing
+regressions parse the resumed wire bytes as one exact masked frame; HTTP/1
+chunk-boundary tests independently fix the one-mask suffix reconstruction
+contract.
+HTTP/1 bounded Ping and Close use the same retained-frame transport path. A
+timeout keeps the encoded header, client mask, payload, and committed cursor;
+the matching `continuePing*` or `closeWith*`/`continueClose*` call writes only
+the suffix. Different Ping payloads or Close code/reason values, application
+sends, receives, and TLS KeyUpdate return `WriteInProgress` while a control
+frame is incomplete. `close_sent` becomes visible only after the entire Close
+frame is transport-committed. Real TCP and standard-WSS regressions split both
+control frames across transport writes and parse exactly one reconstructed
+masked frame at the peer.
 Its caller-buffer receive APIs likewise assemble uncompressed messages directly
 into application storage, reuse connection-owned compressed input/inflater
 scratch, and preserve partial-frame plus completed-fragment progress across
@@ -816,6 +962,26 @@ validation matrix, transport-specific pre-I/O tests, and a real TCP exact-limit
 exchange cover these boundaries. The audited Tungstenite configuration applies
 its similarly named frame/message limits only to incoming data; netz deliberately
 uses one symmetric resource policy for both directions.
+Protocol-level receive failures now terminate the receive half consistently on
+HTTP/1/WSS, RFC 8441, and RFC 9220. When no older outbound transaction owns the
+wire, the adapter emits the mapped Close; retained input, fragmented-message,
+caller-buffer cursor, and decompression storage are released in either case,
+and later receive calls return `ConnectionClosed` instead of reparsing the same
+hostile frame prefix. New application/Ping/Pong writes also fail closed. If an
+existing outbound transaction or an error-Close write prevents safe framing,
+the TCP transport or only the affected Extended CONNECT stream is aborted and
+its pending send storage is released. Timeout and HTTP/2 early-response conditions remain
+resumable and retain their existing state. RFC 9220 owned-message completion
+uses the same single-owner decompression finalizer as HTTP/1 and RFC 8441, with
+an allocator-backed regression for compressed text that inflates to invalid
+UTF-8. RFC 8441 retained DATA frames are released through the parent HTTP/2
+connection allocator that created them, including zero-length DATA, ordinary
+consumption, fatal receive cleanup, and connection teardown; a split-allocator
+regression guards this ownership boundary.
+HTTP/1 WSS additionally rejects TLS KeyUpdate after protocol failure or either
+Close direction becomes terminal. RFC 8441 and RFC 9220 keep their connection-
+level KeyUpdate APIs available because healthy multiplexed siblings may still
+share the parent H2/H3 transport.
 HTTP/1, RFC 8441, and HTTP/3 writers also validate connection Close state after
 acquiring their send mutex, so a sender queued behind Close cannot append a
 data or control frame after the closing handshake has begun. Ping and Close
@@ -898,7 +1064,7 @@ applying TCP-only socket options.
    close-behavior counts were `OK=514` and `INFORMATIONAL=3`. The 54
    compression cases previously reported as `UNIMPLEMENTED` now complete as
    `OK`: the server echoes `server_max_window_bits=9` when offered and bounds
-   every emitted Vort LZ77 distance to that negotiated 512-byte window. The
+   every emitted LZ77 distance to that negotiated 512-byte window. The
    four fail-fast UTF-8 cases previously reported as `NON-STRICT` are also now
    `OK`: invalid text is rejected as soon as the decisive byte arrives, even
    before the current frame or a fragmented message has completed. The

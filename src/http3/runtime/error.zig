@@ -21,6 +21,7 @@ pub const Error = http3.Error || quic.runtime.Error ||
     InvalidAlpn,
     DatagramsNotNegotiated,
     InvalidDispatcherState,
+    ConcurrentRead,
 };
 
 /// Failures produced by a handshake worker after admission has transferred
@@ -165,6 +166,7 @@ test "HTTP/3 runtime errors map only peer protocol failures to close codes" {
     try std.testing.expect(protocolClose(error.InvalidPriorityUpdate) == null);
     try std.testing.expect(protocolClose(error.InvalidHeader) == null);
     try std.testing.expect(protocolClose(error.RequestIncomplete) == null);
+    try std.testing.expect(protocolClose(error.ConcurrentRead) == null);
 }
 
 test "HTTP/3 runtime maps malformed messages only to stream errors" {
