@@ -1385,6 +1385,12 @@ facility, not a replacement for authenticated handshake-backed HTTP/3.
    adjacent packets without changing bytes, packet numbers, or stream offsets;
    seven CPU-0 pairs reduced visitor/service medians by 13.4%/13.2%, with 7/7
    wins in both modes, while the ordered STREAM shape remained noise-level. A
+   subsequent bitmap-range precheck skips the preflight and commit byte loops
+   when an allocated-buffer intersection contains no received bytes, while
+   preserving byte-exact conflict checks for real retransmission overlap. Five
+   more CPU-0 pairs reduced the current gap-fill visitor/service medians from
+   2734/2751 to 1970/1983 ns per packet (27.9% each, 5/5 wins); ordered controls
+   remained within 0.5%. A
    seven-pair real TLS/H3 four-stream upload check also improved in every pair,
    from 82.492 to 72.817 ms median per 16-MiB iteration. Cross-suite connection tests cover AES-128, AES-256,
    ChaCha20, and SM4 through STREAM receive and key update, in addition to

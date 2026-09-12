@@ -743,6 +743,19 @@ ms/iteration and median 82.492 -> 72.817 ms, with every candidate run faster.
 This is an internal reordered/gap-fill optimization result, not a cross-stack
 or equal-wire comparison.
 
+A follow-up avoids treating every byte inside the allocated receive buffer as
+an actual overlap. Before either transactional preflight or committed insert
+performs byte-wise duplicate/conflict validation, the packed bitmap now checks
+the intersection a machine word at a time. Filling an entirely absent gap can
+therefore account the range directly while genuine partial/full retransmissions
+retain exact byte comparison and conflict rejection. Five CPU-0, order-
+alternated 5,000-iteration fixed-binary pairs measured visitor median
+2734 -> 1970 ns/packet and in-place service median 2751 -> 1983 ns/packet
+(27.9% lower for both, 5/5 faster). The ordinary ordered STREAM controls moved
+1813 -> 1816 ns/packet for visitor and 1844 -> 1837 ns/packet for service,
+within 0.5% in both cases. These absolute values reflect the host load during
+this run and are used only for paired before/after evidence.
+
 The receive benchmark now also exposes `--mode=gro_service`, which applies all
 segments from one kernel UDP_GRO receive synchronously through connection-owned
 storage instead of allocating an owning datagram and `ReceivedPacket` array.

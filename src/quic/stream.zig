@@ -129,6 +129,34 @@ const ReceivedBitmap = struct {
             std.debug.assert(index < self.bit_len);
             return (self.words[wordIndex(index)] & bitMask(index)) != 0;
         }
+
+        fn anySetInRange(
+            self: View,
+            range: std.bit_set.Range,
+        ) bool {
+            std.debug.assert(range.start <= range.end);
+            std.debug.assert(range.end <= self.bit_len);
+            if (range.start == range.end) return false;
+
+            const first_word = wordIndex(range.start);
+            const last_word = wordIndex(range.end - 1);
+            const start_bit: Shift = @truncate(range.start);
+            const start_mask = @as(Word, std.math.maxInt(Word)) << start_bit;
+            const end_bit: Shift = @truncate(range.end);
+            const end_mask = if (end_bit == 0)
+                std.math.maxInt(Word)
+            else
+                (@as(Word, 1) << end_bit) - 1;
+
+            if (first_word == last_word) {
+                return (self.words[first_word] & start_mask & end_mask) != 0;
+            }
+            if ((self.words[first_word] & start_mask) != 0) return true;
+            for (self.words[first_word + 1 .. last_word]) |word| {
+                if (word != 0) return true;
+            }
+            return (self.words[last_word] & end_mask) != 0;
+        }
     };
 
     fn deinit(self: *ReceivedBitmap, allocator: std.mem.Allocator) void {
@@ -191,6 +219,13 @@ const ReceivedBitmap = struct {
 
     fn isSet(self: ReceivedBitmap, index: usize) bool {
         return self.view().isSet(index);
+    }
+
+    fn anySetInRange(
+        self: ReceivedBitmap,
+        range: std.bit_set.Range,
+    ) bool {
+        return self.view().anySetInRange(range);
     }
 
     fn setRangeValue(
@@ -396,15 +431,22 @@ pub const RecvState = struct {
             newly_received = data.len;
         } else {
             const overlap_end = @min(relative_end, old_len);
-            var relative = relative_offset;
-            while (relative < overlap_end) : (relative += 1) {
-                if (self.received.isSet(relative)) {
-                    const data_index = relative - relative_offset;
-                    if (self.buffer.items[relative] != data[data_index]) {
-                        return error.ConflictingStreamData;
+            if (!self.received.anySetInRange(.{
+                .start = relative_offset,
+                .end = overlap_end,
+            })) {
+                newly_received = overlap_end - relative_offset;
+            } else {
+                var relative = relative_offset;
+                while (relative < overlap_end) : (relative += 1) {
+                    if (self.received.isSet(relative)) {
+                        const data_index = relative - relative_offset;
+                        if (self.buffer.items[relative] != data[data_index]) {
+                            return error.ConflictingStreamData;
+                        }
+                    } else {
+                        newly_received += 1;
                     }
-                } else {
-                    newly_received += 1;
                 }
             }
             if (relative_end > old_len) newly_received += relative_end - old_len;
@@ -701,7 +743,15 @@ pub const RecvState = struct {
                 return error.StreamBufferTooLarge;
             }
 
-            const overlaps_buffer = relative_offset < self.buffer.len;
+            const buffer_overlap_end = @min(
+                relative_end,
+                self.received.bit_len,
+            );
+            const overlaps_received = relative_offset < buffer_overlap_end and
+                self.received.anySetInRange(.{
+                    .start = relative_offset,
+                    .end = buffer_overlap_end,
+                });
             var overlaps_pending = false;
             for (self.pending.items()) |prior| {
                 if (prior.stream_id != self.stream_id) continue;
@@ -729,7 +779,7 @@ pub const RecvState = struct {
             var newly_received: u64 = @intCast(
                 absolute_end - retained_offset,
             );
-            if (overlaps_buffer or overlaps_pending) {
+            if (overlaps_received or overlaps_pending) {
                 newly_received = 0;
                 var absolute = retained_offset;
                 while (absolute < absolute_end) : (absolute += 1) {
@@ -801,12 +851,17 @@ test "QUIC receive bitmap matches byte model across range and prefix operations"
     @memset(model[3..127], true);
     bitmap.setRangeValue(.{ .start = 17, .end = 73 }, false);
     @memset(model[17..73], false);
+    try std.testing.expect(bitmap.anySetInRange(.{ .start = 3, .end = 17 }));
+    try std.testing.expect(!bitmap.anySetInRange(.{ .start = 17, .end = 73 }));
+    try std.testing.expect(bitmap.anySetInRange(.{ .start = 72, .end = 128 }));
+    try std.testing.expect(!bitmap.anySetInRange(.{ .start = 130, .end = 130 }));
     for (model[0..130], 0..) |expected, index| {
         try std.testing.expectEqual(expected, bitmap.isSet(index));
     }
 
     try bitmap.resize(allocator, 191, true);
     @memset(model[130..191], true);
+    try std.testing.expect(bitmap.anySetInRange(.{ .start = 127, .end = 191 }));
     for (model[0..191], 0..) |expected, index| {
         try std.testing.expectEqual(expected, bitmap.isSet(index));
     }
