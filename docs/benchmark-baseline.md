@@ -2405,10 +2405,10 @@ scheduler scales before changing its data structure. It covers ordinary
 non-earliest updates, an unchanged write to the cached earliest entry, moving
 that entry later, removing and rearming the earliest connection,
 earliestDeadline reads, and a bounded due scan whose only due entry is at the
-array tail. The one-connection ordinary-update case necessarily updates the
-sole (and therefore earliest) entry. The remove measurement includes both
-operations so every timed iteration starts with the same number of armed
-connections.
+array tail. At one connection, operations labelled non-earliest necessarily
+collapse to the sole (and therefore earliest) entry. The remove measurements
+include both operations so every timed iteration starts with the same number
+of armed connections.
 
 Three CPU-0 ReleaseFast runs on the 2026-09-13 Linux AArch64 host with two
 million fast-path iterations and at least 64 million examined entries per
@@ -2429,6 +2429,25 @@ fast path the next low-risk experiment. A heap is not yet justified: it would
 also add ordering work to the measured 12 ns ordinary-update path. The bounded
 due scan is intentionally linear because it provides a stable per-event-loop
 snapshot, but the benchmark keeps its independent scaling cost visible.
+
+The benchmark was then extended to distinguish three more scheduler changes.
+Three CPU-0 runs after the exact-update fast path measured:
+
+| Connections | Advance current earliest | Non-earliest becomes earliest | Remove + rearm non-earliest |
+|---:|---:|---:|---:|
+| 1 | 9.30-9.44 ns | 9.35-9.50 ns | 23.73-23.90 ns |
+| 16 | 32.56-32.71 ns | 9.37-9.48 ns | 24.37-24.47 ns |
+| 128 | 338.50-360.39 ns | 10.02-10.34 ns | 36.54-36.79 ns |
+| 1024 | 3108.29-3109.39 ns | 10.00-10.08 ns | 24.52-24.85 ns |
+
+This exposes a second unnecessary scan: moving the already-earliest timer
+earlier cannot invalidate its position. In contrast, a non-earliest timer can
+become earliest and a non-earliest timer can be removed in constant time. The
+audited Quinn driver similarly avoids resetting an unchanged runtime timer;
+tquic uses a double-ended priority queue for its multi-connection endpoint.
+The local measurements do not justify adopting that queue wholesale because
+it would impose logarithmic maintenance on the two fast cases above. They do
+justify separately eliminating the current-earliest advance scan.
 
 The selected follow-up keeps the array/index design and returns immediately
 when an existing connection's timer kind and deadline are both unchanged.

@@ -18,11 +18,11 @@ pub fn main(init: std.process.Init) !void {
         \\  fast-path iterations: {d}
         \\  bounded due capacity: 32 (one due entry at array tail)
         \\  times are integer hundredths of a nanosecond per operation
-        \\  remove earliest measures one remove + rearm cycle
+        \\  remove measurements include one remove + rearm cycle
         \\
     , .{iterations});
     std.debug.print(
-        \\connections  non-earliest update  repeated earliest  postpone earliest  remove earliest  earliestDeadline  bounded due
+        \\connections  non-earliest update  repeated earliest  advance earliest  new earliest  postpone earliest  remove non-earliest  remove earliest  earliestDeadline  bounded due
         \\
     , .{});
 
@@ -43,11 +43,29 @@ pub fn main(init: std.process.Init) !void {
             connection_count,
             scan_iterations,
         );
+        const advanced_earliest = try benchmarkAdvancedEarliest(
+            allocator,
+            io,
+            connection_count,
+            iterations,
+        );
+        const new_earliest = try benchmarkNewEarliest(
+            allocator,
+            io,
+            connection_count,
+            iterations,
+        );
         const postponed_earliest = try benchmarkPostponedEarliest(
             allocator,
             io,
             connection_count,
             scan_iterations,
+        );
+        const removed_non_earliest = try benchmarkRemovedNonEarliest(
+            allocator,
+            io,
+            connection_count,
+            iterations,
         );
         const removed_earliest = try benchmarkRemovedEarliest(
             allocator,
@@ -71,12 +89,63 @@ pub fn main(init: std.process.Init) !void {
         std.debug.print("{d: >11}", .{connection_count});
         printHundredths(non_earliest);
         printHundredths(repeated_earliest);
+        printHundredths(advanced_earliest);
+        printHundredths(new_earliest);
         printHundredths(postponed_earliest);
+        printHundredths(removed_non_earliest);
         printHundredths(removed_earliest);
         printHundredths(earliest_deadline);
         printHundredths(bounded_due);
         std.debug.print("  (scan iterations: {d})\n", .{scan_iterations});
     }
+}
+
+fn benchmarkAdvancedEarliest(
+    allocator: std.mem.Allocator,
+    io: std.Io,
+    connection_count: usize,
+    iterations: usize,
+) !u64 {
+    var timers = netz.quic.endpoint_timers.EndpointTimers.init(allocator);
+    defer timers.deinit();
+    try timers.ensureCapacity(connection_count);
+    for (0..connection_count) |connection_id| {
+        try timers.update(connection_id, timer(std.math.maxInt(u64)));
+    }
+
+    const started = nowNs(io);
+    for (0..iterations) |iteration| {
+        try timers.update(0, timer(std.math.maxInt(u64) - iteration - 1));
+    }
+    const elapsed = nowNs(io) -| started;
+    std.mem.doNotOptimizeAway(timers.earliestDeadline());
+    return hundredthsPerOperation(elapsed, iterations);
+}
+
+fn benchmarkNewEarliest(
+    allocator: std.mem.Allocator,
+    io: std.Io,
+    connection_count: usize,
+    iterations: usize,
+) !u64 {
+    var timers = netz.quic.endpoint_timers.EndpointTimers.init(allocator);
+    defer timers.deinit();
+    try timers.ensureCapacity(connection_count);
+    for (0..connection_count) |connection_id| {
+        try timers.update(connection_id, timer(std.math.maxInt(u64)));
+    }
+
+    const started = nowNs(io);
+    for (0..iterations) |iteration| {
+        const connection_id = (iteration + 1) % connection_count;
+        try timers.update(
+            connection_id,
+            timer(std.math.maxInt(u64) - iteration - 1),
+        );
+    }
+    const elapsed = nowNs(io) -| started;
+    std.mem.doNotOptimizeAway(timers.earliestDeadline());
+    return hundredthsPerOperation(elapsed, iterations);
 }
 
 fn benchmarkNonEarliestUpdate(
@@ -162,6 +231,28 @@ fn benchmarkRemovedEarliest(
     return hundredthsPerOperation(elapsed, iterations);
 }
 
+fn benchmarkRemovedNonEarliest(
+    allocator: std.mem.Allocator,
+    io: std.Io,
+    connection_count: usize,
+    iterations: usize,
+) !u64 {
+    var timers = try initializedTimers(allocator, connection_count);
+    defer timers.deinit();
+    const connection_id = connection_count - 1;
+
+    const started = nowNs(io);
+    for (0..iterations) |_| {
+        if (!timers.disarmConnection(connection_id)) {
+            return error.InvalidBenchmarkResult;
+        }
+        try timers.update(connection_id, timer(connection_count));
+    }
+    const elapsed = nowNs(io) -| started;
+    std.mem.doNotOptimizeAway(timers.earliestDeadline());
+    return hundredthsPerOperation(elapsed, iterations);
+}
+
 fn benchmarkEarliestDeadline(
     allocator: std.mem.Allocator,
     io: std.Io,
@@ -228,7 +319,7 @@ fn initializedTimers(
     return timers;
 }
 
-fn timer(deadline: usize) netz.quic.one_rtt.TimerDeadline {
+fn timer(deadline: anytype) netz.quic.one_rtt.TimerDeadline {
     return .{
         .kind = .idle_timeout,
         .deadline_ns = @intCast(deadline),
