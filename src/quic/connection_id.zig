@@ -328,12 +328,17 @@ pub const LocalPool = struct {
     entries: [max_pool_size]Entry = .{Entry{}} ** max_pool_size,
     next_sequence_number: u64 = 0,
     retire_prior_to: u64 = 0,
+    /// Monotonic structural generation for endpoint CID-route mirrors. Only
+    /// successful active-set changes advance it; value-copy transaction
+    /// rollback restores it with the rest of the fixed-size pool.
+    active_revision: u64 = 0,
 
     pub fn registerInitial(self: *LocalPool, connection_id: []const u8, token: [16]u8) Error!void {
         if (connection_id.len == 0 or connection_id.len > max_connection_id_len) return error.InvalidConnectionId;
         self.entries[0] = .{ .sequence_number = 0, .connection_id_len = @intCast(connection_id.len), .stateless_reset_token = token, .stateless_reset_token_available = true, .occupied = true };
         @memcpy(self.entries[0].connection_id[0..connection_id.len], connection_id);
         self.next_sequence_number = 1;
+        self.advanceActiveRevision();
     }
 
     pub fn registerInitialWithStaticKey(
@@ -366,6 +371,7 @@ pub const LocalPool = struct {
             self.next_sequence_number += 1;
             entry.* = .{ .sequence_number = seq, .connection_id_len = @intCast(connection_id.len), .stateless_reset_token = token, .stateless_reset_token_available = true, .occupied = true };
             @memcpy(entry.connection_id[0..connection_id.len], connection_id);
+            self.advanceActiveRevision();
             return .{ .new_connection_id = .{
                 .sequence_number = seq,
                 .retire_prior_to = retire_prior_to,
@@ -485,6 +491,7 @@ pub const LocalPool = struct {
                     if (std.mem.eql(u8, entry.slice(), dcid)) return error.InvalidConnectionId;
                 }
                 entry.* = .{};
+                self.advanceActiveRevision();
                 return;
             }
         }
@@ -502,6 +509,17 @@ pub const LocalPool = struct {
             if (entry.occupied) n += 1;
         }
         return n;
+    }
+
+    pub fn activeRevision(self: *const LocalPool) u64 {
+        return self.active_revision;
+    }
+
+    fn advanceActiveRevision(self: *LocalPool) void {
+        // CID sequence numbers are QUIC varints and every issued ID can be
+        // retired at most once, so a connection cannot reach 2^64 structural
+        // changes and wrap this generation within the protocol's lifetime.
+        self.active_revision +%= 1;
     }
 
     pub const ActiveId = struct {
@@ -725,13 +743,19 @@ test "QUIC local CID pool rejects retiring packet DCID" {
 
 test "QUIC local CID pool accepts repeated retirement" {
     var pool = LocalPool{};
+    try std.testing.expectEqual(@as(u64, 0), pool.activeRevision());
     try pool.registerInitial("init-cid", [_]u8{0} ** 16);
+    try std.testing.expectEqual(@as(u64, 1), pool.activeRevision());
     _ = try pool.issue("new-cid", [_]u8{1} ** 16);
+    try std.testing.expectEqual(@as(u64, 2), pool.activeRevision());
 
     try pool.retire(0);
+    try std.testing.expectEqual(@as(u64, 3), pool.activeRevision());
     try pool.retire(0);
+    try std.testing.expectEqual(@as(u64, 3), pool.activeRevision());
     try std.testing.expectEqual(@as(usize, 1), pool.count());
     try std.testing.expectError(error.UnknownConnectionId, pool.retire(2));
+    try std.testing.expectEqual(@as(u64, 3), pool.activeRevision());
 }
 
 test "QUIC local CID pool issues and retires NEW_CONNECTION_ID frames" {
@@ -748,10 +772,12 @@ test "QUIC local CID pool issues and retires NEW_CONNECTION_ID frames" {
 test "QUIC local CID pool rejects sequence numbers outside varint range before mutation" {
     var pool = LocalPool{};
     pool.next_sequence_number = @as(u64, quic.varint.max_value) + 1;
+    const revision = pool.activeRevision();
 
     try std.testing.expectError(error.ConnectionIdSequenceLimit, pool.issue("new-cid", [_]u8{3} ** 16));
     try std.testing.expectEqual(@as(u64, quic.varint.max_value) + 1, pool.next_sequence_number);
     try std.testing.expectEqual(@as(usize, 0), pool.count());
+    try std.testing.expectEqual(revision, pool.activeRevision());
 }
 
 test "QUIC local CID pool issues replacement with retire_prior_to" {
@@ -773,6 +799,7 @@ test "QUIC local CID pool rejects invalid retire_prior_to before mutation" {
     try std.testing.expectError(error.RetirePriorToTooLarge, pool.issue("new-cid", [_]u8{3} ** 16));
     try std.testing.expectEqual(@as(u64, 1), pool.next_sequence_number);
     try std.testing.expectEqual(@as(usize, 1), pool.count());
+    try std.testing.expectEqual(@as(u64, 1), pool.activeRevision());
 }
 
 test "QUIC local CID pool rejects duplicate IDs and reset tokens before mutation" {
@@ -791,6 +818,7 @@ test "QUIC local CID pool rejects duplicate IDs and reset tokens before mutation
     try std.testing.expectError(error.DuplicateConnectionId, pool.issue("init-cid", [_]u8{1} ** 16));
     try std.testing.expectEqual(@as(u64, 2), pool.next_sequence_number);
     try std.testing.expectEqual(@as(usize, 2), pool.count());
+    try std.testing.expectEqual(@as(u64, 2), pool.activeRevision());
 }
 
 test "QUIC local CID pool derives stateless reset tokens from static key" {

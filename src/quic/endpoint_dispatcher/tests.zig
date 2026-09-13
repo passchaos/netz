@@ -972,12 +972,46 @@ test "QUIC endpoint dispatcher synchronizes local CID rotation" {
     defer dispatcher.deinit();
     try dispatcher.registerConnection(11, &connection);
     try std.testing.expectEqual(@as(usize, 1), dispatcher.routeCount());
+    const initial_revision = connection.localConnectionIdRevision();
+    try std.testing.expectEqual(
+        @as(?u64, initial_revision),
+        dispatcher.connections.getPtr(11).?.connection_id_revision,
+    );
+    try std.testing.expectEqual(
+        @as(usize, 1),
+        dispatcher.connections.getPtr(11).?.connection_id_sync_count,
+    );
+    // Drive an authenticated ordinary packet through the conditional path.
+    // It must not enumerate/rewrite the unchanged CID set.
+    try peer_connection.send(&.{.{ .ping = {} }});
+    var ordinary = try dispatcher.receive(
+        &.{quic.Version.version_1.wireValue()},
+    );
+    ordinary.deinit(allocator);
+    try std.testing.expectEqual(@as(usize, 1), dispatcher.routeCount());
+    try std.testing.expectEqual(
+        @as(?u64, initial_revision),
+        dispatcher.connections.getPtr(11).?.connection_id_revision,
+    );
+    try std.testing.expectEqual(
+        @as(usize, 1),
+        dispatcher.connections.getPtr(11).?.connection_id_sync_count,
+    );
 
     try dispatcher.sendNewConnectionIdRetiringPriorTo(
         11,
         "cid-one",
         [_]u8{1} ** 16,
         0,
+    );
+    try std.testing.expectEqual(initial_revision +% 1, connection.localConnectionIdRevision());
+    try std.testing.expectEqual(
+        @as(?u64, connection.localConnectionIdRevision()),
+        dispatcher.connections.getPtr(11).?.connection_id_revision,
+    );
+    try std.testing.expectEqual(
+        @as(usize, 2),
+        dispatcher.connections.getPtr(11).?.connection_id_sync_count,
     );
     try std.testing.expectEqual(@as(usize, 2), dispatcher.routeCount());
     try std.testing.expectEqual(
@@ -1003,6 +1037,34 @@ test "QUIC endpoint dispatcher synchronizes local CID rotation" {
     try std.testing.expectEqual(@as(usize, 1), dispatcher.routeCount());
     try std.testing.expect((try dispatcher.router.lookup("cid-zero")) == null);
     try std.testing.expect((try dispatcher.router.lookup("cid-one")) != null);
+    try std.testing.expectEqual(initial_revision +% 2, connection.localConnectionIdRevision());
+    try std.testing.expectEqual(
+        @as(?u64, connection.localConnectionIdRevision()),
+        dispatcher.connections.getPtr(11).?.connection_id_revision,
+    );
+    try std.testing.expectEqual(
+        @as(usize, 3),
+        dispatcher.connections.getPtr(11).?.connection_id_sync_count,
+    );
+
+    const migrated_peer = std.Io.net.IpAddress{ .ip4 = .loopback(6553) };
+    try connection.beginPeerMigration(
+        migrated_peer,
+        [_]u8{0x44} ** 8,
+    );
+    try std.testing.expectEqual(
+        initial_revision +% 2,
+        connection.localConnectionIdRevision(),
+    );
+    try dispatcher.syncConnectionIdsIfChanged(11);
+    try std.testing.expect(
+        (try dispatcher.router.lookup("cid-one")).?.peer_address.?
+            .eql(&migrated_peer),
+    );
+    try std.testing.expectEqual(
+        @as(usize, 4),
+        dispatcher.connections.getPtr(11).?.connection_id_sync_count,
+    );
 }
 
 test "QUIC endpoint dispatcher rejects cross-connection CID collisions transactionally" {
@@ -1117,6 +1179,9 @@ test "QUIC endpoint dispatcher leaves no CID route after send failure" {
     var dispatcher = Dispatcher.init(allocator, &endpoint);
     defer dispatcher.deinit();
     try dispatcher.registerConnection(1, &connection);
+    const revision_before = connection.localConnectionIdRevision();
+    const sync_count_before =
+        dispatcher.connections.getPtr(1).?.connection_id_sync_count;
 
     var failed_send = ObservedBatchSend{
         .delegate = endpoint.io,
@@ -1145,6 +1210,14 @@ test "QUIC endpoint dispatcher leaves no CID route after send failure" {
     );
     try std.testing.expectEqual(@as(usize, 1), dispatcher.routeCount());
     try std.testing.expect((try dispatcher.router.lookup("failed-cid")) == null);
+    try std.testing.expectEqual(
+        revision_before,
+        connection.localConnectionIdRevision(),
+    );
+    try std.testing.expectEqual(
+        sync_count_before,
+        dispatcher.connections.getPtr(1).?.connection_id_sync_count,
+    );
 }
 
 test "QUIC endpoint dispatcher preserves unknown Initials and discards late long headers" {
@@ -2503,11 +2576,21 @@ test "QUIC endpoint dispatcher atomically replaces connection storage" {
     var dispatcher = Dispatcher.init(allocator, &endpoint);
     defer dispatcher.deinit();
     try dispatcher.registerConnection(1, &connection);
+    const sync_count_before =
+        dispatcher.connections.getPtr(1).?.connection_id_sync_count;
 
     var moved = connection;
     connection_owned = false;
     defer moved.deinit();
     try dispatcher.replaceConnection(1, &moved);
+    try std.testing.expectEqual(
+        sync_count_before + 1,
+        dispatcher.connections.getPtr(1).?.connection_id_sync_count,
+    );
+    try std.testing.expectEqual(
+        @as(?u64, moved.localConnectionIdRevision()),
+        dispatcher.connections.getPtr(1).?.connection_id_revision,
+    );
 
     var peer = try one_rtt.Connection.init(&peer_endpoint, .{
         .peer = endpoint.address(),

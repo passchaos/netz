@@ -1254,6 +1254,10 @@ pub const Connection = struct {
         return try self.local_connection_ids.activeIdsInto(out);
     }
 
+    pub fn localConnectionIdRevision(self: *const Connection) u64 {
+        return self.local_connection_ids.activeRevision();
+    }
+
     pub fn send(self: *Connection, frames: []const quic.Frame) Error!void {
         try self.sendAutomaticallyWithLoop(frames);
     }

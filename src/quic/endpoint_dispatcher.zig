@@ -7,6 +7,7 @@
 //! to read a shared UDP socket and discard one another's packets.
 
 const std = @import("std");
+const builtin = @import("builtin");
 const deadline_policy = @import("../internal/deadline.zig");
 const quic = @import("mod.zig");
 const connection_router = @import("connection_router.zig");
@@ -37,6 +38,10 @@ pub const ReceiveError = Error || runtime.ReceiveTimeoutError;
 const ConnectionEntry = struct {
     connection: *one_rtt.Connection,
     connection_ids: std.ArrayList(connection_router.ConnectionIdKey) = .empty,
+    connection_id_revision: ?u64 = null,
+    route_metadata: ?connection_router.Route = null,
+    connection_id_sync_count: if (builtin.is_test) usize else void =
+        if (builtin.is_test) 0 else {},
 
     fn deinit(self: *ConnectionEntry, allocator: std.mem.Allocator) void {
         self.connection_ids.deinit(allocator);
@@ -393,6 +398,12 @@ pub const Dispatcher = struct {
             )) catch unreachable;
             slot.value_ptr.connection_ids.appendAssumeCapacity(key);
         }
+        slot.value_ptr.connection_id_revision =
+            connection.localConnectionIdRevision();
+        slot.value_ptr.route_metadata = connection.route(
+            connection_handle,
+            0,
+        );
         pending_inbox.drainApplicationInto(&self.buffered_datagrams);
         self.timers.armFromConnection(
             connection_handle,
@@ -477,8 +488,21 @@ pub const Dispatcher = struct {
                 return error.ConnectionIdMismatch;
             }
         }
-        try self.timers.armFromConnection(handle, connection);
+        const previous_connection = entry.connection;
         entry.connection = connection;
+        errdefer {
+            entry.connection = previous_connection;
+            self.syncConnectionIds(handle) catch {};
+            self.timers.armFromConnection(
+                handle,
+                previous_connection,
+            ) catch {};
+        }
+        // The replacement can carry updated peer/path metadata even when its
+        // CID set is identical. Rewrite every existing route before caching
+        // the new revision so later conditional syncs cannot mask stale data.
+        try self.syncConnectionIds(handle);
+        try self.timers.armFromConnection(handle, connection);
     }
 
     pub fn sendNewConnectionId(
@@ -570,6 +594,28 @@ pub const Dispatcher = struct {
             }
             _ = entry.connection_ids.swapRemove(index);
         }
+        entry.connection_id_revision =
+            entry.connection.localConnectionIdRevision();
+        entry.route_metadata = entry.connection.route(handle, 0);
+        if (comptime builtin.is_test) entry.connection_id_sync_count +|= 1;
+    }
+
+    /// Reconcile routes only when the local CID set or route metadata changed.
+    /// Event loops may call this after arbitrary connection work without
+    /// paying the full fixed-pool scan on ordinary STREAM/ACK packets.
+    pub fn syncConnectionIdsIfChanged(
+        self: *Dispatcher,
+        handle: ConnectionHandle,
+    ) Error!void {
+        const entry = self.connections.getPtr(handle) orelse
+            return error.UnknownConnectionHandle;
+        if (entry.connection_id_revision ==
+            entry.connection.localConnectionIdRevision() and
+            routeMetadataEqual(
+                entry.route_metadata,
+                entry.connection.route(handle, 0),
+            )) return;
+        try self.syncConnectionIds(handle);
     }
 
     fn ensureConnectionIdAvailable(
@@ -728,7 +774,7 @@ pub const Dispatcher = struct {
         _ = try entry.connection.retransmitPacketThresholdLosses(
             one_rtt.max_batch_packets,
         );
-        try self.syncConnectionIds(handle);
+        try self.syncConnectionIdsIfChanged(handle);
         try self.timers.armFromConnection(handle, entry.connection);
         return .{
             .connection_handle = handle,
@@ -751,7 +797,7 @@ pub const Dispatcher = struct {
                     .retransmitPacketThresholdLosses(
                     one_rtt.max_batch_packets,
                 );
-                try self.syncConnectionIds(handle);
+                try self.syncConnectionIdsIfChanged(handle);
                 try self.timers.armFromConnection(
                     handle,
                     entry.value_ptr.connection,
@@ -1226,7 +1272,9 @@ pub const Dispatcher = struct {
             // The transport commits frames before invoking the application
             // visitor. Preserve any resulting CID retirement even when the
             // callback rejects its upper-layer payload.
-            try self.syncConnectionIds(routed.route.connection_index);
+            try self.syncConnectionIdsIfChanged(
+                routed.route.connection_index,
+            );
             try self.timers.armFromConnection(
                 routed.route.connection_index,
                 entry.connection,
@@ -1242,7 +1290,7 @@ pub const Dispatcher = struct {
             );
             return .consumed;
         }
-        try self.syncConnectionIds(routed.route.connection_index);
+        try self.syncConnectionIdsIfChanged(routed.route.connection_index);
         try self.timers.armFromConnection(
             routed.route.connection_index,
             entry.connection,
@@ -1298,7 +1346,9 @@ pub const Dispatcher = struct {
                         .peer_initiated_key_update = packet.packet.peer_initiated_key_update,
                     },
                 }) catch |err| {
-                    try self.syncConnectionIds(packet.connection_handle);
+                    try self.syncConnectionIdsIfChanged(
+                        packet.connection_handle,
+                    );
                     try self.timers.armFromConnection(
                         packet.connection_handle,
                         self.connections.getPtr(packet.connection_handle).?
@@ -1306,7 +1356,7 @@ pub const Dispatcher = struct {
                     );
                     return err;
                 };
-                try self.syncConnectionIds(packet.connection_handle);
+                try self.syncConnectionIdsIfChanged(packet.connection_handle);
                 try self.timers.armFromConnection(
                     packet.connection_handle,
                     self.connections.getPtr(packet.connection_handle).?
@@ -1523,7 +1573,7 @@ pub const Dispatcher = struct {
         errdefer packet.deinit(self.allocator);
         routed_datagram.datagram.deinit(self.allocator);
         owns_datagram = false;
-        try self.syncConnectionIds(routed.route.connection_index);
+        try self.syncConnectionIdsIfChanged(routed.route.connection_index);
         // Match the blocking and visitor receive paths: ACK processing can
         // declare several older packets lost by the RFC 9002 packet threshold.
         _ = entry.connection.retransmitPacketThresholdLosses(
@@ -1604,6 +1654,19 @@ fn containsConnectionId(
         if (connection_router.Context.eql(.{}, key, candidate)) return true;
     }
     return false;
+}
+
+fn routeMetadataEqual(
+    cached: ?connection_router.Route,
+    current: connection_router.Route,
+) bool {
+    const previous = cached orelse return false;
+    return previous.connection_index == current.connection_index and
+        previous.sequence_number == current.sequence_number and
+        std.meta.eql(previous.peer_address, current.peer_address) and
+        previous.active_migration_disabled ==
+            current.active_migration_disabled and
+        previous.accept_zero_fixed_bit == current.accept_zero_fixed_bit;
 }
 
 fn containsActiveId(

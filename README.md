@@ -998,6 +998,7 @@ taskset -c 0 zig build bench-quic-one-rtt-receive -Doptimize=ReleaseFast -- --mo
 zig build bench-quic-ack-ranges -Doptimize=ReleaseFast
 zig build bench-quic-stream-window -Doptimize=ReleaseFast
 zig build bench-quic-stream-ids -Doptimize=ReleaseFast -- --iterations=2000000
+zig build bench-quic-endpoint-cid-sync -Doptimize=ReleaseFast -- --iterations=2000000
 ```
 
 The aggregate `bench` step runs the current protocol microbenchmarks:

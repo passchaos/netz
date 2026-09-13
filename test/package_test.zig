@@ -6765,8 +6765,16 @@ test "public modules are reachable" {
         "receiveManyVisitingWithDeadline",
     ));
     try std.testing.expect(@hasDecl(
+        netz.quic.endpoint_dispatcher.Dispatcher,
+        "syncConnectionIdsIfChanged",
+    ));
+    try std.testing.expect(@hasDecl(
         netz.quic.one_rtt.Connection,
         "visitRoutedDatagramAt",
+    ));
+    try std.testing.expect(@hasDecl(
+        netz.quic.one_rtt.Connection,
+        "localConnectionIdRevision",
     ));
     try std.testing.expect(@hasDecl(
         netz.quic.runtime,

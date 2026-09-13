@@ -2384,6 +2384,22 @@ smokes verified 8 MiB over eight connections at 92.107 MiB/s median and 16 MiB
 over sixteen connections at 78.435 MiB/s median, with exact byte, checksum,
 connection-completion, and DONE/DONE_ACK validation in every run.
 
+Endpoint CID mirroring now carries a monotonic revision on the fixed-size local
+CID pool. Initial registration, successful NEW_CONNECTION_ID issuance, and an
+actual RETIRE_CONNECTION_ID advance it; repeated retirement and failed
+transactional sends do not. The dispatcher caches that revision plus the route
+metadata which can change on migration. Ordinary STREAM/ACK packets therefore
+skip active-CID enumeration, collision probes, router replacement, and stale
+route scans with one revision/metadata comparison, while CID or path changes
+still complete a full synchronization before returning the packet.
+`bench-quic-endpoint-cid-sync` measures this isolated CPU cost with four active
+CIDs. Three CPU-0 ReleaseFast ABBA runs over two million calls measured forced
+synchronization at 627-637 ns/op and the unchanged-revision fast path at
+9 ns/op, or 66.01-66.92x relative call throughput. Direct tests also assert
+that a normal authenticated PING does not increment the full-sync counter,
+whereas issuance and retirement each increment it exactly once. This is a
+hot-path microbenchmark, not a whole-connection throughput ratio.
+
 ### Raw QUIC mixed FIN/reset recovery versus quic-go
 
 The separate process gate below exercises terminal stream churn instead of

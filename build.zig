@@ -1317,6 +1317,12 @@ pub fn build(b: *std.Build) void {
             .description = "Benchmark active QUIC receive-stream ID enumeration",
         },
         .{
+            .exe_name = "netz-bench-quic-endpoint-cid-sync",
+            .path = "examples/bench_quic_endpoint_cid_sync.zig",
+            .run_step = "bench-quic-endpoint-cid-sync",
+            .description = "Benchmark shared-endpoint CID route synchronization",
+        },
+        .{
             .exe_name = "netz-quic-close",
             .path = "examples/quic_close.zig",
             .run_step = "run-quic-close",
