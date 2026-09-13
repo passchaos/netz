@@ -258,6 +258,28 @@ pub const Server = struct {
         try self.dispatcher.refreshConnectionTimer(handle);
     }
 
+    /// Apply the connection's negotiated ACK policy after the application has
+    /// accepted a routed packet. Keeping this explicit lets callers finish
+    /// protocol-level transactional processing before acknowledging it.
+    pub fn acknowledgePacketIfNeeded(
+        self: *Server,
+        packet: *const quic.endpoint_dispatcher.RoutedPacket,
+    ) Error!bool {
+        const established = self.connection(packet.connection_handle) orelse
+            return error.UnknownConnectionHandle;
+        const sent = established.connection.sendAckForPacketIfNeeded(
+            packet.packet.packet.packet_number,
+            packet.packet.frames,
+        ) catch |err| {
+            self.dispatcher.refreshConnectionTimer(
+                packet.connection_handle,
+            ) catch {};
+            return err;
+        };
+        try self.dispatcher.refreshConnectionTimer(packet.connection_handle);
+        return sent;
+    }
+
     /// Attempt one nonblocking application send and keep the endpoint timer
     /// schedule synchronized on both success and transport backpressure.
     pub fn trySend(
@@ -405,7 +427,8 @@ pub const Server = struct {
     ) Error!?Event {
         if (self.pollCompletion()) |completion_value| {
             var completion = completion_value;
-            return self.finishCompletion(&completion);
+            const event = try self.finishCompletion(&completion);
+            return event;
         }
         _ = self.expireHandshakes(monotonicNowNs(self.endpoint.io));
         var endpoint_event = try self.dispatcher.receiveTimeout(

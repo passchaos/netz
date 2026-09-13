@@ -191,6 +191,88 @@ test "QUIC endpoint dispatcher owns CID routing across connections" {
     try std.testing.expect(!(try dispatcher.unregisterConnection(10)));
 }
 
+test "QUIC endpoint dispatcher immediately repairs packet-threshold loss" {
+    const allocator = std.testing.allocator;
+    var threaded = std.Io.Threaded.init(allocator, .{});
+    defer threaded.deinit();
+    const io = threaded.io();
+
+    var client_endpoint = try runtime.Endpoint.bind(
+        allocator,
+        io,
+        .{ .ip4 = .loopback(0) },
+        .{ .max_datagram_size = 4096 },
+    );
+    defer client_endpoint.deinit();
+    var server_endpoint = try runtime.Endpoint.bind(
+        allocator,
+        io,
+        .{ .ip4 = .loopback(0) },
+        .{ .max_datagram_size = 4096 },
+    );
+    defer server_endpoint.deinit();
+
+    const client_cid = "threshold-client";
+    const server_cid = "threshold-server";
+    const client_keys = quic.protection.deriveAes128Keys(
+        [_]u8{0xa1} ** quic.protection.secret_len,
+    );
+    const server_keys = quic.protection.deriveAes128Keys(
+        [_]u8{0xa2} ** quic.protection.secret_len,
+    );
+    var client = try one_rtt.Connection.init(&client_endpoint, .{
+        .peer = server_endpoint.address(),
+        .receive_keys = server_keys,
+        .send_keys = client_keys,
+        .local_connection_id = client_cid,
+        .peer_connection_id = server_cid,
+        .enable_pacing = false,
+    });
+    defer client.deinit();
+    var server = try one_rtt.Connection.init(&server_endpoint, .{
+        .peer = client_endpoint.address(),
+        .receive_keys = client_keys,
+        .send_keys = server_keys,
+        .local_connection_id = server_cid,
+        .peer_connection_id = client_cid,
+        .local_endpoint = .server,
+        .enable_pacing = false,
+    });
+    defer server.deinit();
+    var dispatcher = Dispatcher.init(allocator, &client_endpoint);
+    defer dispatcher.deinit();
+    try dispatcher.registerConnection(33, &client);
+
+    const ping = [_]quic.Frame{.{ .ping = {} }};
+    for (0..5) |_| try client.sendAt(&ping, 0);
+    for (0..4) |_| {
+        var dropped = try server_endpoint.receiveBytes();
+        dropped.deinit(allocator);
+    }
+    var fifth = try server.receivePacketAt(1);
+    defer fifth.deinit(allocator);
+    try std.testing.expectEqual(@as(u64, 4), fifth.packet.packet_number);
+    try server.sendAck(0);
+
+    const versions = [_]u32{quic.Version.version_1.wireValue()};
+    var ack = try dispatcher.receive(&versions);
+    defer ack.deinit(allocator);
+    try std.testing.expect(ack == .packet);
+    try std.testing.expectEqual(@as(ConnectionHandle, 33), ack.packet.connection_handle);
+    try std.testing.expectEqual(@as(u64, 4), ack.packet.packet.frames[0].ack.largest_acknowledged);
+
+    var first = try server.receivePacket();
+    defer first.deinit(allocator);
+    var second = try server.receivePacket();
+    defer second.deinit(allocator);
+    try std.testing.expectEqual(@as(u64, 5), first.packet.packet_number);
+    try std.testing.expectEqual(@as(u64, 6), second.packet.packet_number);
+    try std.testing.expectEqual(
+        @as(usize, 0),
+        try client.retransmitPacketThresholdLosses(8),
+    );
+}
+
 test "QUIC endpoint dispatcher polls stream credit without owning receive" {
     const allocator = std.testing.allocator;
     var threaded = std.Io.Threaded.init(allocator, .{});

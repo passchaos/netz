@@ -1011,6 +1011,20 @@ pub const Dispatcher = struct {
         routed_datagram.datagram.deinit(self.allocator);
         owns_datagram = false;
         try self.syncConnectionIds(routed.route.connection_index);
+        // Match the blocking and visitor receive paths: an ACK can declare
+        // several older packets lost by the RFC 9002 packet threshold. Repair
+        // those groups before returning to the application instead of waiting
+        // for a later PTO in shared-endpoint event loops. The helper stops
+        // cleanly at congestion or pacing backpressure.
+        _ = entry.connection.retransmitPacketThresholdLosses(
+            one_rtt.max_batch_packets,
+        ) catch |err| {
+            try self.timers.armFromConnection(
+                routed.route.connection_index,
+                entry.connection,
+            );
+            return err;
+        };
         try self.timers.armFromConnection(
             routed.route.connection_index,
             entry.connection,

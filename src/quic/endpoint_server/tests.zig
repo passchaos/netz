@@ -184,6 +184,7 @@ test "QUIC endpoint server routes two authenticated connections on one socket" {
             .handshake_failed => |failure| return failure.err,
             .unrouted => return error.TestUnexpectedResult,
             .packet => |packet| {
+                _ = try server.acknowledgePacketIfNeeded(&packet);
                 var request: [8]u8 = undefined;
                 const received = (try server.pollStreamId(
                     packet.connection_handle,

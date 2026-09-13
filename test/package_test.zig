@@ -6621,6 +6621,10 @@ test "public modules are reachable" {
         "trySend",
     ));
     try std.testing.expect(@hasDecl(
+        netz.quic.endpoint_server.Server,
+        "acknowledgePacketIfNeeded",
+    ));
+    try std.testing.expect(@hasDecl(
         netz.quic.endpoint_dispatcher,
         "Dispatcher",
     ));
