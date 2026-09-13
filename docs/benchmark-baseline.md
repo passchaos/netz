@@ -2372,6 +2372,18 @@ coverage rather than a directional throughput advantage. A separate four-
 connection/four-stream smoke verified 4 MiB, every FIN, checksum, and the
 DONE/DONE_ACK exchange in both directions.
 
+A same-connection transmit-batch candidate was also evaluated and removed. It
+staged up to four resumable STREAM packets per socket submission using the
+existing exact protected/socket-visible prefix result. Five order-alternated
+16-connection, 16-MiB server-sender pairs measured 86.307, 105.154, 95.560,
+95.648, and 88.004 MiB/s for the retained one-packet path (95.560 median),
+versus 81.025, 69.699, 99.228, 93.564, and 70.437 MiB/s for batches of four
+(81.025 median). Only one of five pairs favored batching, and its median was
+15.2% lower; a batch size of 32 also produced an intermittent tail timeout at
+16 connections. The current Threaded backend already uses `sendmmsg`, while
+QUIC pacing limits useful per-connection bursts, so the additional protection
+and staging work is not retained.
+
 The next shared-loop step follows Quinn's bounded receive-cycle design: one
 bounded receive operation drains already-ready UDP messages nonblocking, or
 waits for one when the socket starts empty, into a reusable caller buffer. The
