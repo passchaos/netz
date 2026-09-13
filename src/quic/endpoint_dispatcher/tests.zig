@@ -1889,6 +1889,10 @@ test "QUIC endpoint dispatcher drains a coalesced packet after promotion" {
     try connection.preloadReceivedDatagram(peer, buffered, .not_ect);
 
     try dispatcher.promotePendingHandshake(51, 52, &connection);
+    try std.testing.expectEqual(
+        @as(usize, 1),
+        dispatcher.pending_ready.?.handles.items.len,
+    );
     var event = try dispatcher.receive(
         &.{quic.Version.version_1.wireValue()},
     );
@@ -1902,9 +1906,243 @@ test "QUIC endpoint dispatcher drains a coalesced packet after promotion" {
         "coalesced",
         event.packet.packet.frames[0].stream.data,
     );
+    try std.testing.expectEqual(
+        @as(usize, 0),
+        dispatcher.pending_ready.?.handles.items.len,
+    );
     try std.testing.expect((try dispatcher.pollPendingPacket()) == null);
     try std.testing.expect((try dispatcher.pollConnectionPacket(52)) == null);
     try std.testing.expect(try dispatcher.unregisterConnection(52));
+}
+
+test "QUIC endpoint dispatcher ready index allocation failure is transactional" {
+    const allocator = std.testing.allocator;
+    var threaded = std.Io.Threaded.init(allocator, .{});
+    defer threaded.deinit();
+    const io = threaded.io();
+    var endpoint = try runtime.Endpoint.bind(
+        allocator,
+        io,
+        .{ .ip4 = .loopback(0) },
+        .{ .max_datagram_size = 4096 },
+    );
+    defer endpoint.deinit();
+    const keys = quic.protection.deriveAes128Keys(
+        [_]u8{0xf2} ** quic.protection.secret_len,
+    );
+    var connection = try one_rtt.Connection.init(&endpoint, .{
+        .peer = .{ .ip4 = .loopback(5557) },
+        .receive_keys = keys,
+        .send_keys = keys,
+        .local_connection_id = "oom-ready",
+        .peer_connection_id = "peer",
+        .local_endpoint = .server,
+        .enable_pacing = false,
+    });
+    defer connection.deinit();
+
+    var failing = std.testing.FailingAllocator.init(allocator, .{});
+    var dispatcher = Dispatcher.init(failing.allocator(), &endpoint);
+    defer dispatcher.deinit();
+    try dispatcher.timers.ensureCapacity(1);
+    try dispatcher.router.ensureCapacity(quic.connection_id.max_pool_size);
+    // Creating PendingReady succeeds, then its first queue reservation fails.
+    // The half-built index must not be published into the dispatcher.
+    failing.fail_index = failing.alloc_index + 1;
+    try std.testing.expectError(
+        error.OutOfMemory,
+        dispatcher.registerConnection(63, &connection),
+    );
+    try std.testing.expect(failing.has_induced_failure);
+    try std.testing.expect(dispatcher.pending_ready == null);
+    try std.testing.expectEqual(@as(usize, 0), dispatcher.connectionCount());
+    try std.testing.expectEqual(@as(usize, 0), dispatcher.routeCount());
+    try std.testing.expectEqual(@as(usize, 0), dispatcher.timers.count());
+
+    // A successful registration elsewhere proves the failed attempt did not
+    // leave the caller-owned connection's observer bound.
+    var verifier = Dispatcher.init(allocator, &endpoint);
+    defer verifier.deinit();
+    try verifier.registerConnection(64, &connection);
+    try std.testing.expect(try verifier.unregisterConnection(64));
+}
+
+test "QUIC endpoint dispatcher promotion preserves pending routes when ready index allocation fails" {
+    const allocator = std.testing.allocator;
+    var threaded = std.Io.Threaded.init(allocator, .{});
+    defer threaded.deinit();
+    const io = threaded.io();
+    var endpoint = try runtime.Endpoint.bind(
+        allocator,
+        io,
+        .{ .ip4 = .loopback(0) },
+        .{ .max_datagram_size = 4096 },
+    );
+    defer endpoint.deinit();
+    const peer = std.Io.net.IpAddress{ .ip4 = .loopback(5558) };
+    const keys = quic.protection.deriveAes128Keys(
+        [_]u8{0xf3} ** quic.protection.secret_len,
+    );
+    var inbox = try quic.handshake_inbox.Inbox.init(
+        allocator,
+        io,
+        &.{ "oom-admitted", "oom-promote" },
+        peer,
+        1,
+    );
+    defer inbox.deinit();
+    var connection = try one_rtt.Connection.init(&endpoint, .{
+        .peer = peer,
+        .receive_keys = keys,
+        .send_keys = keys,
+        .local_connection_id = "oom-promote",
+        .peer_connection_id = "peer",
+        .local_endpoint = .server,
+        .enable_pacing = false,
+    });
+    defer connection.deinit();
+
+    var failing = std.testing.FailingAllocator.init(allocator, .{});
+    var dispatcher = Dispatcher.init(failing.allocator(), &endpoint);
+    defer dispatcher.deinit();
+    try dispatcher.registerPendingHandshake(65, &inbox);
+    try dispatcher.timers.ensureCapacity(1);
+    try dispatcher.router.ensureCapacity(quic.connection_id.max_pool_size);
+    failing.fail_index = failing.alloc_index;
+    try std.testing.expectError(
+        error.OutOfMemory,
+        dispatcher.promotePendingHandshake(65, 66, &connection),
+    );
+    try std.testing.expect(failing.has_induced_failure);
+    try std.testing.expect(dispatcher.pending_ready == null);
+    try std.testing.expectEqual(@as(usize, 0), dispatcher.connectionCount());
+    try std.testing.expectEqual(@as(usize, 0), dispatcher.routeCount());
+    try std.testing.expectEqual(@as(usize, 0), dispatcher.timers.count());
+    try std.testing.expectEqual(@as(usize, 1), dispatcher.pendingHandshakeCount());
+    for (inbox.connectionIds()) |connection_id| {
+        const route = (try dispatcher.pending_router.lookup(
+            connection_id.slice(),
+        )) orelse return error.TestUnexpectedResult;
+        try std.testing.expectEqual(@as(usize, 65), route.connection_index);
+    }
+
+    var verifier = Dispatcher.init(allocator, &endpoint);
+    defer verifier.deinit();
+    try verifier.registerConnection(67, &connection);
+    try std.testing.expect(try verifier.unregisterConnection(67));
+    try std.testing.expect(try dispatcher.unregisterPendingHandshake(65));
+}
+
+test "QUIC endpoint dispatcher indexes pending packets for direct registrations" {
+    const allocator = std.testing.allocator;
+    var threaded = std.Io.Threaded.init(allocator, .{});
+    defer threaded.deinit();
+    const io = threaded.io();
+    var endpoint = try runtime.Endpoint.bind(
+        allocator,
+        io,
+        .{ .ip4 = .loopback(0) },
+        .{ .max_datagram_size = 4096 },
+    );
+    defer endpoint.deinit();
+    const peer = std.Io.net.IpAddress{ .ip4 = .loopback(5556) };
+    const keys = quic.protection.deriveAes128Keys(
+        [_]u8{0xf1} ** quic.protection.secret_len,
+    );
+    var connection = try one_rtt.Connection.init(&endpoint, .{
+        .peer = peer,
+        .receive_keys = keys,
+        .send_keys = keys,
+        .local_connection_id = "direct-pending",
+        .peer_connection_id = "peer",
+        .local_endpoint = .server,
+        .enable_pacing = false,
+    });
+    defer connection.deinit();
+    var dispatcher = Dispatcher.init(allocator, &endpoint);
+    var dispatcher_owned = true;
+    defer if (dispatcher_owned) dispatcher.deinit();
+    try dispatcher.registerConnection(61, &connection);
+    try std.testing.expectEqual(
+        @as(usize, 0),
+        dispatcher.pending_ready.?.handles.items.len,
+    );
+    var competing = Dispatcher.init(allocator, &endpoint);
+    defer competing.deinit();
+    try std.testing.expectError(
+        error.PendingDatagramObserverBound,
+        competing.registerConnection(62, &connection),
+    );
+    try std.testing.expectEqual(@as(usize, 0), competing.connectionCount());
+    var moved_dispatcher = dispatcher;
+    dispatcher_owned = false;
+    defer moved_dispatcher.deinit();
+
+    var payload: std.ArrayList(u8) = .empty;
+    defer payload.deinit(allocator);
+    try (quic.Frame{ .ping = {} }).write(&payload, allocator);
+    const buffered = try quic.protection.sealShortPacket(allocator, keys, .{
+        .destination_connection_id = "direct-pending",
+        .packet_number = 0,
+        .payload = payload.items,
+    });
+    defer allocator.free(buffered);
+    try connection.preloadReceivedDatagram(peer, buffered, .not_ect);
+    try std.testing.expectEqual(
+        @as(usize, 1),
+        moved_dispatcher.pending_ready.?.handles.items.len,
+    );
+    var consumed_directly = (try connection.receivePendingPacket()) orelse
+        return error.TestUnexpectedResult;
+    defer consumed_directly.deinit(allocator);
+    try std.testing.expectEqual(
+        @as(usize, 1),
+        moved_dispatcher.pending_ready.?.handles.items.len,
+    );
+
+    const reloaded = try quic.protection.sealShortPacket(allocator, keys, .{
+        .destination_connection_id = "direct-pending",
+        .packet_number = 1,
+        .payload = payload.items,
+    });
+    defer allocator.free(reloaded);
+    try connection.preloadReceivedDatagram(peer, reloaded, .not_ect);
+    try std.testing.expectEqual(
+        @as(usize, 1),
+        moved_dispatcher.pending_ready.?.handles.items.len,
+    );
+
+    var event = (try moved_dispatcher.pollPendingPacket()) orelse
+        return error.TestUnexpectedResult;
+    defer event.packet.deinit(allocator);
+    try std.testing.expectEqual(@as(usize, 61), event.connection_handle);
+    try std.testing.expect(event.packet.frames[0] == .ping);
+    try std.testing.expect((try moved_dispatcher.pollPendingPacket()) == null);
+    try std.testing.expectEqual(
+        @as(usize, 0),
+        moved_dispatcher.pending_ready.?.handles.items.len,
+    );
+    try std.testing.expect(try moved_dispatcher.unregisterConnection(61));
+
+    const after_unregister = try quic.protection.sealShortPacket(
+        allocator,
+        keys,
+        .{
+            .destination_connection_id = "direct-pending",
+            .packet_number = 2,
+            .payload = payload.items,
+        },
+    );
+    defer allocator.free(after_unregister);
+    try connection.preloadReceivedDatagram(
+        peer,
+        after_unregister,
+        .not_ect,
+    );
+    try std.testing.expectEqual(
+        @as(usize, 0),
+        moved_dispatcher.pending_ready.?.handles.items.len,
+    );
 }
 
 test "QUIC endpoint dispatcher bounds pending admission and generates CIDs" {
@@ -2603,6 +2841,29 @@ test "QUIC endpoint dispatcher atomically replaces connection storage" {
         dispatcher.connections.getPtr(1).?.connection_id_revision,
     );
 
+    var pending_payload: std.ArrayList(u8) = .empty;
+    defer pending_payload.deinit(allocator);
+    try (quic.Frame{ .ping = {} }).write(&pending_payload, allocator);
+    const pending = try quic.protection.sealShortPacket(allocator, keys, .{
+        .destination_connection_id = "replace-local",
+        .packet_number = 1,
+        .payload = pending_payload.items,
+    });
+    defer allocator.free(pending);
+    try moved.preloadReceivedDatagram(
+        peer_endpoint.address(),
+        pending,
+        .not_ect,
+    );
+    var pending_event = (try dispatcher.pollPendingPacket()) orelse
+        return error.TestUnexpectedResult;
+    defer pending_event.packet.deinit(allocator);
+    try std.testing.expectEqual(
+        @as(usize, 1),
+        pending_event.connection_handle,
+    );
+    try std.testing.expect(pending_event.packet.frames[0] == .ping);
+
     var peer = try one_rtt.Connection.init(&peer_endpoint, .{
         .peer = endpoint.address(),
         .receive_keys = keys,
@@ -2614,7 +2875,7 @@ test "QUIC endpoint dispatcher atomically replaces connection storage" {
     });
     defer peer.deinit();
     const frames = [_]quic.Frame{.{ .ping = {} }};
-    try peer.send(&frames);
+    try peer.sendAt(&frames, 1);
     var event = try dispatcher.receive(
         &.{quic.Version.version_1.wireValue()},
     );

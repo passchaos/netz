@@ -2,8 +2,6 @@ const std = @import("std");
 const netz = @import("netz");
 
 const default_iterations: usize = 2_000_000;
-const minimum_scan_iterations: usize = 20_000;
-const scan_connection_budget: usize = 64_000_000;
 const connection_counts = [_]usize{ 1, 16, 128, 1024 };
 
 pub fn main(init: std.process.Init) !void {
@@ -16,20 +14,16 @@ pub fn main(init: std.process.Init) !void {
     std.debug.print(
         \\QUIC endpoint pending-packet lookup benchmark
         \\  direct iterations: {d}
-        \\  all connections have empty pending-datagram slots
+        \\  dispatcher ready queue is empty
         \\  times are integer hundredths of a nanosecond per operation
         \\
     , .{iterations});
     std.debug.print(
-        \\connections  direct empty  endpoint empty scan  scan/direct
+        \\connections  direct empty  endpoint ready index  index/direct
         \\
     , .{});
 
     for (connection_counts) |connection_count| {
-        const scan_iterations = iterationsForScan(
-            iterations,
-            connection_count,
-        );
         var endpoint = try netz.quic.runtime.Endpoint.bind(
             allocator,
             io,
@@ -75,6 +69,7 @@ pub fn main(init: std.process.Init) !void {
 
         const direct_started = nowNs(io);
         for (0..iterations) |_| {
+            std.mem.doNotOptimizeAway(&dispatcher);
             if ((try dispatcher.pollConnectionPacket(1)) != null) {
                 return error.InvalidBenchmarkResult;
             }
@@ -82,18 +77,19 @@ pub fn main(init: std.process.Init) !void {
         const direct_elapsed = nowNs(io) -| direct_started;
 
         const scan_started = nowNs(io);
-        for (0..scan_iterations) |_| {
+        for (0..iterations) |_| {
+            std.mem.doNotOptimizeAway(&dispatcher);
             if ((try dispatcher.pollPendingPacket()) != null) {
                 return error.InvalidBenchmarkResult;
             }
         }
         const scan_elapsed = nowNs(io) -| scan_started;
         const direct = hundredthsPerOperation(direct_elapsed, iterations);
-        const scan = hundredthsPerOperation(scan_elapsed, scan_iterations);
+        const scan = hundredthsPerOperation(scan_elapsed, iterations);
         const ratio_x100 = if (direct == 0) 0 else scan * 100 / direct;
 
         std.debug.print(
-            "{d: >11}  {d: >7}.{d:0>2} ns  {d: >13}.{d:0>2} ns  {d}.{d:0>2}x  (scan iterations: {d})\n",
+            "{d: >11}  {d: >7}.{d:0>2} ns  {d: >13}.{d:0>2} ns  {d}.{d:0>2}x\n",
             .{
                 connection_count,
                 direct / 100,
@@ -102,15 +98,9 @@ pub fn main(init: std.process.Init) !void {
                 scan % 100,
                 ratio_x100 / 100,
                 ratio_x100 % 100,
-                scan_iterations,
             },
         );
     }
-}
-
-fn iterationsForScan(iterations: usize, connection_count: usize) usize {
-    const budgeted = scan_connection_budget / connection_count;
-    return @min(iterations, @max(minimum_scan_iterations, budgeted));
 }
 
 fn hundredthsPerOperation(elapsed_ns: u64, iterations: usize) u64 {
@@ -128,7 +118,7 @@ fn parseIterations(init: std.process.Init) !usize {
         args[1]["--iterations=".len..],
         10,
     );
-    if (value < minimum_scan_iterations or value > 10_000_000) {
+    if (value == 0 or value > 10_000_000) {
         return error.InvalidArgument;
     }
     return value;

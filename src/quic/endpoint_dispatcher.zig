@@ -32,6 +32,7 @@ pub const Error = runtime.Error || one_rtt.Error ||
     ConnectionIdMismatch,
     StaleConnectionRoute,
     PendingHandshakeLimitReached,
+    PendingDatagramObserverBound,
 };
 pub const ReceiveError = Error || runtime.ReceiveTimeoutError;
 
@@ -59,6 +60,74 @@ const PendingHandshakeEntry = struct {
     ) void {
         self.connection_ids.deinit(allocator);
         self.* = undefined;
+    }
+};
+
+const PendingReady = struct {
+    handles: std.ArrayList(ConnectionHandle) = .empty,
+    head: usize = 0,
+
+    fn deinit(self: *PendingReady, allocator: std.mem.Allocator) void {
+        self.handles.deinit(allocator);
+        self.* = undefined;
+    }
+
+    fn ensureCapacity(
+        self: *PendingReady,
+        allocator: std.mem.Allocator,
+        capacity: usize,
+    ) std.mem.Allocator.Error!void {
+        self.compact();
+        try self.handles.ensureTotalCapacity(allocator, capacity);
+    }
+
+    fn pushAssumeCapacity(context: *anyopaque, handle: usize) void {
+        const self: *PendingReady = @ptrCast(@alignCast(context));
+        // Direct connection users can consume the pending slot without going
+        // through the dispatcher and later preload another datagram. Keep the
+        // notification idempotent so that sequence still has one ready token.
+        if (containsConnectionHandle(self.handles.items[self.head..], handle)) {
+            return;
+        }
+        if (self.handles.items.len == self.handles.capacity) self.compact();
+        std.debug.assert(self.handles.items.len < self.handles.capacity);
+        self.handles.appendAssumeCapacity(handle);
+    }
+
+    fn pop(self: *PendingReady) ?ConnectionHandle {
+        if (self.head == self.handles.items.len) return null;
+        const handle = self.handles.items[self.head];
+        self.head += 1;
+        if (self.head == self.handles.items.len) {
+            self.handles.clearRetainingCapacity();
+            self.head = 0;
+        }
+        return handle;
+    }
+
+    fn remove(self: *PendingReady, handle: ConnectionHandle) void {
+        var index = self.head;
+        while (index < self.handles.items.len) : (index += 1) {
+            if (self.handles.items[index] != handle) continue;
+            _ = self.handles.orderedRemove(index);
+            if (self.head == self.handles.items.len) {
+                self.handles.clearRetainingCapacity();
+                self.head = 0;
+            }
+            return;
+        }
+    }
+
+    fn compact(self: *PendingReady) void {
+        if (self.head == 0) return;
+        const remaining = self.handles.items.len - self.head;
+        std.mem.copyForwards(
+            ConnectionHandle,
+            self.handles.items[0..remaining],
+            self.handles.items[self.head..],
+        );
+        self.handles.items.len = remaining;
+        self.head = 0;
     }
 };
 
@@ -199,6 +268,11 @@ pub const Dispatcher = struct {
     /// Owning FIFO for datagrams already read in a batch but deferred across
     /// a route-publishing event such as server Initial admission/promotion.
     buffered_datagrams: std.ArrayList(runtime.OwnedBytes) = .empty,
+    /// Registered connections can retain at most one preloaded application
+    /// datagram. Track ready handles directly so an idle endpoint does not
+    /// scan every connection. The indirection keeps observer pointers stable
+    /// when this dispatcher value moves.
+    pending_ready: ?*PendingReady = null,
 
     pub fn init(
         allocator: std.mem.Allocator,
@@ -217,8 +291,17 @@ pub const Dispatcher = struct {
     /// connections or the shared UDP endpoint. Connections must be unregistered
     /// before their storage moves or is destroyed.
     pub fn deinit(self: *Dispatcher) void {
-        var iterator = self.connections.valueIterator();
-        while (iterator.next()) |entry| entry.deinit(self.allocator);
+        const pending_ready = self.pending_ready;
+        var iterator = self.connections.iterator();
+        while (iterator.next()) |entry| {
+            if (pending_ready) |ready| {
+                _ = entry.value_ptr.connection.unbindPendingDatagramObserver(
+                    ready,
+                    entry.key_ptr.*,
+                );
+            }
+            entry.value_ptr.deinit(self.allocator);
+        }
         self.connections.deinit(self.allocator);
         var pending_iterator = self.pending_handshakes.valueIterator();
         while (pending_iterator.next()) |entry| {
@@ -230,6 +313,10 @@ pub const Dispatcher = struct {
             datagram.deinit(self.allocator);
         }
         self.buffered_datagrams.deinit(self.allocator);
+        if (pending_ready) |ready| {
+            ready.deinit(self.allocator);
+            self.allocator.destroy(ready);
+        }
         self.pending_router.deinit();
         self.router.deinit();
         self.timers.deinit();
@@ -334,6 +421,9 @@ pub const Dispatcher = struct {
                 }
             }
         }
+        if (self.connections.contains(connection_handle)) {
+            return error.DuplicateConnectionHandle;
+        }
 
         // Reserve every operation that can allocate before removing pending
         // routes. Once removal begins, the rest of promotion is infallible
@@ -350,11 +440,21 @@ pub const Dispatcher = struct {
             quic.connection_id.max_pool_size,
         ) catch return error.OutOfMemory;
         try self.router.ensureCapacity(route_capacity);
+        try self.buffered_datagrams.ensureUnusedCapacity(
+            self.allocator,
+            pending.inbox.applicationCount(),
+        );
+        const pending_ready = try self.ensurePendingReady(connection_capacity);
+        if (!connection.canBindPendingDatagramObserver(
+            pending_ready,
+            connection_handle,
+            PendingReady.pushAssumeCapacity,
+        )) return error.PendingDatagramObserverBound;
         const slot = try self.connections.getOrPut(
             self.allocator,
             connection_handle,
         );
-        if (slot.found_existing) return error.DuplicateConnectionHandle;
+        std.debug.assert(!slot.found_existing);
         slot.value_ptr.* = .{ .connection = connection };
         errdefer {
             var removed = self.connections.fetchRemove(
@@ -365,10 +465,6 @@ pub const Dispatcher = struct {
         try slot.value_ptr.connection_ids.ensureTotalCapacity(
             self.allocator,
             quic.connection_id.max_pool_size,
-        );
-        try self.buffered_datagrams.ensureUnusedCapacity(
-            self.allocator,
-            pending.inbox.applicationCount(),
         );
         // The connection entry is fully initialized but intentionally not yet
         // routable. No packet can observe it until all pending aliases have
@@ -404,6 +500,11 @@ pub const Dispatcher = struct {
             connection_handle,
             0,
         );
+        connection.bindPendingDatagramObserver(
+            pending_ready,
+            connection_handle,
+            PendingReady.pushAssumeCapacity,
+        ) catch unreachable;
         pending_inbox.drainApplicationInto(&self.buffered_datagrams);
         self.timers.armFromConnection(
             connection_handle,
@@ -426,6 +527,9 @@ pub const Dispatcher = struct {
                 return error.DuplicateConnectionId;
             }
         }
+        if (self.connections.contains(handle)) {
+            return error.DuplicateConnectionHandle;
+        }
         // Reserve the timer slot before publishing the connection. Packet
         // processing is stateful, so its later timer refresh must not discover
         // OOM after the packet has already committed transport state.
@@ -441,8 +545,14 @@ pub const Dispatcher = struct {
             quic.connection_id.max_pool_size,
         ) catch return error.OutOfMemory;
         try self.router.ensureCapacity(route_capacity);
+        const pending_ready = try self.ensurePendingReady(connection_capacity);
+        if (!connection.canBindPendingDatagramObserver(
+            pending_ready,
+            handle,
+            PendingReady.pushAssumeCapacity,
+        )) return error.PendingDatagramObserverBound;
         const slot = try self.connections.getOrPut(self.allocator, handle);
-        if (slot.found_existing) return error.DuplicateConnectionHandle;
+        std.debug.assert(!slot.found_existing);
         slot.value_ptr.* = .{ .connection = connection };
         errdefer {
             var removed = self.connections.fetchRemove(handle).?.value;
@@ -457,6 +567,11 @@ pub const Dispatcher = struct {
         );
         try self.syncConnectionIds(handle);
         try self.timers.armFromConnection(handle, connection);
+        connection.bindPendingDatagramObserver(
+            pending_ready,
+            handle,
+            PendingReady.pushAssumeCapacity,
+        ) catch unreachable;
     }
 
     /// Replace the storage address for an already registered connection.
@@ -475,6 +590,15 @@ pub const Dispatcher = struct {
         }
         const entry = self.connections.getPtr(handle) orelse
             return error.UnknownConnectionHandle;
+        const pending_ready = self.pending_ready orelse
+            return error.PendingDatagramObserverBound;
+        if (!connection.canBindPendingDatagramObserver(
+            pending_ready,
+            handle,
+            PendingReady.pushAssumeCapacity,
+        )) {
+            return error.PendingDatagramObserverBound;
+        }
         var active_storage: [quic.connection_id.max_pool_size]quic.connection_id.LocalPool.ActiveId = undefined;
         const active = try connection.localConnectionIdsInto(&active_storage);
         if (active.len != entry.connection_ids.items.len) {
@@ -503,6 +627,15 @@ pub const Dispatcher = struct {
         // the new revision so later conditional syncs cannot mask stale data.
         try self.syncConnectionIds(handle);
         try self.timers.armFromConnection(handle, connection);
+        std.debug.assert(previous_connection.unbindPendingDatagramObserver(
+            pending_ready,
+            handle,
+        ));
+        connection.bindPendingDatagramObserver(
+            pending_ready,
+            handle,
+            PendingReady.pushAssumeCapacity,
+        ) catch unreachable;
     }
 
     pub fn sendNewConnectionId(
@@ -644,6 +777,10 @@ pub const Dispatcher = struct {
             if (!try self.router.unregister(key.slice())) stale_route = true;
         }
         _ = self.timers.disarmConnection(handle);
+        if (self.pending_ready) |ready| {
+            ready.remove(handle);
+            _ = entry.connection.unbindPendingDatagramObserver(ready, handle);
+        }
         var removed = self.connections.fetchRemove(handle).?.value;
         defer removed.deinit(self.allocator);
         // Even a corrupted/misused dispatcher must remove every remaining
@@ -770,6 +907,7 @@ pub const Dispatcher = struct {
             return error.UnknownConnectionHandle;
         var packet = (try entry.connection.receivePendingPacket()) orelse
             return null;
+        if (self.pending_ready) |ready| ready.remove(handle);
         errdefer packet.deinit(self.allocator);
         _ = try entry.connection.retransmitPacketThresholdLosses(
             one_rtt.max_batch_packets,
@@ -787,29 +925,50 @@ pub const Dispatcher = struct {
     /// handshake. This is the endpoint-loop companion to `receive`: callers
     /// should drain it before blocking for another UDP datagram.
     pub fn pollPendingPacket(self: *Dispatcher) Error!?RoutedPacket {
-        var iterator = self.connections.iterator();
-        while (iterator.next()) |entry| {
-            if (try entry.value_ptr.connection.receivePendingPacket()) |packet| {
-                const handle = entry.key_ptr.*;
-                var owned = packet;
-                errdefer owned.deinit(self.allocator);
-                _ = try entry.value_ptr.connection
-                    .retransmitPacketThresholdLosses(
-                    one_rtt.max_batch_packets,
-                );
-                try self.syncConnectionIdsIfChanged(handle);
-                try self.timers.armFromConnection(
-                    handle,
-                    entry.value_ptr.connection,
-                );
-                return .{
-                    .connection_handle = handle,
-                    .connection_id_sequence = 0,
-                    .packet = owned,
-                };
+        const pending_ready = self.pending_ready orelse return null;
+        while (pending_ready.pop()) |handle| {
+            if (try self.pollConnectionPacketReady(handle)) |packet| {
+                return packet;
             }
         }
         return null;
+    }
+
+    fn ensurePendingReady(
+        self: *Dispatcher,
+        capacity: usize,
+    ) Error!*PendingReady {
+        if (self.pending_ready) |ready| {
+            try ready.ensureCapacity(self.allocator, capacity);
+            return ready;
+        }
+        const ready = try self.allocator.create(PendingReady);
+        ready.* = .{};
+        errdefer self.allocator.destroy(ready);
+        errdefer ready.deinit(self.allocator);
+        try ready.ensureCapacity(self.allocator, capacity);
+        self.pending_ready = ready;
+        return ready;
+    }
+
+    fn pollConnectionPacketReady(
+        self: *Dispatcher,
+        handle: ConnectionHandle,
+    ) Error!?RoutedPacket {
+        const entry = self.connections.getPtr(handle) orelse return null;
+        var packet = (try entry.connection.receivePendingPacket()) orelse
+            return null;
+        errdefer packet.deinit(self.allocator);
+        _ = try entry.connection.retransmitPacketThresholdLosses(
+            one_rtt.max_batch_packets,
+        );
+        try self.syncConnectionIdsIfChanged(handle);
+        try self.timers.armFromConnection(handle, entry.connection);
+        return .{
+            .connection_handle = handle,
+            .connection_id_sequence = 0,
+            .packet = packet,
+        };
     }
 
     /// Service at most one due connection timer. Returning null means there is
@@ -1676,6 +1835,16 @@ fn containsConnectionId(
 ) bool {
     for (registered) |key| {
         if (connection_router.Context.eql(.{}, key, candidate)) return true;
+    }
+    return false;
+}
+
+fn containsConnectionHandle(
+    handles: []const ConnectionHandle,
+    handle: ConnectionHandle,
+) bool {
+    for (handles) |candidate| {
+        if (candidate == handle) return true;
     }
     return false;
 }

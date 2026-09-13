@@ -137,6 +137,13 @@ pub const ReceivedPacketView = struct {
     peer_initiated_key_update: bool = false,
 };
 
+const PendingDatagramObserver = struct {
+    context: *anyopaque,
+    connection_handle: usize,
+    notify: *const fn (*anyopaque, usize) void,
+};
+pub const PendingDatagramObserverError = error{PendingDatagramObserverBound};
+
 fn callbackErrorSet(comptime callback: anytype) type {
     const callback_type = switch (@typeInfo(@TypeOf(callback))) {
         .@"fn" => @TypeOf(callback),
@@ -838,6 +845,7 @@ pub const Connection = struct {
     /// suffix until the application runtime is installed; otherwise HTTP/3 can
     /// lose the peer's control stream and first request permanently.
     pending_received_datagram: ?quic.runtime.OwnedBytes = null,
+    pending_datagram_observer: ?PendingDatagramObserver = null,
     next_packet_number: u64 = 0,
     expected_packet_number: u64 = 0,
     received: quic.packet_space.ReceivedPacketTracker,
@@ -8180,6 +8188,55 @@ pub const Connection = struct {
             .bytes = try self.endpoint.allocator.dupe(u8, bytes),
             .ecn = ecn,
         };
+        if (self.pending_datagram_observer) |observer| {
+            observer.notify(observer.context, observer.connection_handle);
+        }
+    }
+
+    pub fn canBindPendingDatagramObserver(
+        self: Connection,
+        context: *anyopaque,
+        connection_handle: usize,
+        notify: *const fn (*anyopaque, usize) void,
+    ) bool {
+        const observer = self.pending_datagram_observer orelse return true;
+        return observer.context == context and
+            observer.connection_handle == connection_handle and
+            observer.notify == notify;
+    }
+
+    pub fn bindPendingDatagramObserver(
+        self: *Connection,
+        context: *anyopaque,
+        connection_handle: usize,
+        notify: *const fn (*anyopaque, usize) void,
+    ) PendingDatagramObserverError!void {
+        if (!self.canBindPendingDatagramObserver(
+            context,
+            connection_handle,
+            notify,
+        )) return error.PendingDatagramObserverBound;
+        if (self.pending_datagram_observer != null) return;
+        self.pending_datagram_observer = .{
+            .context = context,
+            .connection_handle = connection_handle,
+            .notify = notify,
+        };
+        if (self.pending_received_datagram != null) {
+            notify(context, connection_handle);
+        }
+    }
+
+    pub fn unbindPendingDatagramObserver(
+        self: *Connection,
+        context: *anyopaque,
+        connection_handle: usize,
+    ) bool {
+        const observer = self.pending_datagram_observer orelse return false;
+        if (observer.context != context or
+            observer.connection_handle != connection_handle) return false;
+        self.pending_datagram_observer = null;
+        return true;
     }
 
     fn takePendingReceivedDatagram(

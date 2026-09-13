@@ -2487,17 +2487,26 @@ is not treated as an independent throughput claim.
 
 The bench-quic-endpoint-pending executable measures the dispatcher's
 pre-socket check for application packets retained by a completed handshake.
-With all registered connections having empty pending-datagram slots, three
-CPU-0 ReleaseFast runs measured 71.60-76.33 ns at 16 connections,
-570.78-617.82 ns at 128, and 4822.24-5121.12 ns at 1,024. A direct known-handle
-empty check stayed at 6.19-8.16 ns across the same sizes. The endpoint-wide
-scan is therefore an independently measured O(connection count) cost before
-every receive batch. It is only 71.60-76.33 ns at the current 16-connection
-shared benchmark size, while an explicit ready index would need to preserve
-the public preloadReceivedDatagram API for connections registered outside
-handshake promotion. That lifecycle complexity is not justified at the current
-scale, so the index is deferred until a higher-cardinality end-to-end workload
-shows material impact rather than inferred from the 1,024-connection extreme.
+Its original full connection-table scan measured 71.60-76.33 ns at 16
+connections, 570.78-617.82 ns at 128, and 4822.24-5121.12 ns at 1,024, while a
+direct known-handle empty check stayed at 6.19-8.16 ns. Connections now notify
+a dispatcher-owned ready index when `preloadReceivedDatagram` changes their
+single pending slot from empty to occupied. Registration reserves the index
+capacity before binding the no-allocation callback; replacement transfers the
+binding, and unregister/deinit remove it before connection storage can move or
+expire. This preserves direct post-registration preload users as well as the
+usual handshake-promotion path without an O(connection count) fallback scan.
+Three CPU-0 ReleaseFast runs with the same anti-elision barrier measured empty
+index lookup at 0.88-0.96 ns for 1 connection, 0.76-0.79 ns for 16, 0.76 ns
+for 128, and 0.76-0.77 ns for 1,024. Matching parent-commit runs measured
+6.77-7.46, 70.29-76.24, 568.62-603.95, and 4794.96-5124.73 ns. The
+1,024-connection medians therefore fell from 4848.59 to 0.76 ns (about 6,380x).
+This is an isolated idle-dispatch cost result, not an end-to-end throughput
+claim. A post-change shared-server smoke transferred 16,777,216 bytes in each
+direction across sixteen connections with the exact 2,139,095,040 checksum and
+completion exchange. Its single upload/download samples were 81.016 and
+114.163 MiB/s, respectively, so they are retained as reliability evidence, not
+as an independent throughput result.
 
 The shared persistent benchmark now emits strictly checked receive-loop and
 socket counters so future work can distinguish configured batch width from
