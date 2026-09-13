@@ -2431,6 +2431,20 @@ the unbounded form used by lower-level event loops. Five order-interleaved
 ranges overlap, so the result supports removing duplicate per-batch work but
 is not treated as an independent throughput claim.
 
+The bench-quic-endpoint-pending executable measures the dispatcher's
+pre-socket check for application packets retained by a completed handshake.
+With all registered connections having empty pending-datagram slots, three
+CPU-0 ReleaseFast runs measured 71.60-76.33 ns at 16 connections,
+570.78-617.82 ns at 128, and 4822.24-5121.12 ns at 1,024. A direct known-handle
+empty check stayed at 6.19-8.16 ns across the same sizes. The endpoint-wide
+scan is therefore an independently measured O(connection count) cost before
+every receive batch. It is only 71.60-76.33 ns at the current 16-connection
+shared benchmark size, while an explicit ready index would need to preserve
+the public preloadReceivedDatagram API for connections registered outside
+handshake promotion. That lifecycle complexity is not justified at the current
+scale, so the index is deferred until a higher-cardinality end-to-end workload
+shows material impact rather than inferred from the 1,024-connection extreme.
+
 Endpoint CID mirroring now carries a monotonic revision on the fixed-size local
 CID pool. Initial registration, successful NEW_CONNECTION_ID issuance, and an
 actual RETIRE_CONNECTION_ID advance it; repeated retirement and failed

@@ -1329,6 +1329,12 @@ pub fn build(b: *std.Build) void {
             .description = "Benchmark shared-endpoint timer scheduler scaling",
         },
         .{
+            .exe_name = "netz-bench-quic-endpoint-pending",
+            .path = "examples/bench_quic_endpoint_pending.zig",
+            .run_step = "bench-quic-endpoint-pending",
+            .description = "Benchmark shared-endpoint pending packet lookup scaling",
+        },
+        .{
             .exe_name = "netz-quic-close",
             .path = "examples/quic_close.zig",
             .run_step = "run-quic-close",
