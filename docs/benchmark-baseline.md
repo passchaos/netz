@@ -2462,6 +2462,16 @@ by the per-socket batch size. This shows that batching
 captures bursts but the typical call is close to a singleton, so reducing
 per-call dispatcher work is higher leverage than increasing the batch width.
 
+The server and dispatcher now both expose batch visitor entry points taking an
+already-composed std.Io.Timeout. Public WithDeadline forms retain strict
+awake-clock and expiry validation, while the shared benchmark can compose its
+absolute budget once and pass it through every receive turn. Five
+order-interleaved 16-connection, 16-MiB comparisons against commit b0544f2c
+measured 68.192-78.576 MiB/s (69.963 median) with the server-level timeout path
+and 57.507-69.848 MiB/s (67.376 median) before it, a 3.8% median increase. The
+ranges overlap, so this supports removing a redundant per-call clock read but
+is not treated as an independent throughput claim.
+
 Endpoint CID mirroring now carries a monotonic revision on the fixed-size local
 CID pool. Initial registration, successful NEW_CONNECTION_ID issuance, and an
 actual RETIRE_CONNECTION_ID advance it; repeated retirement and failed

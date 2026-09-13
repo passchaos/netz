@@ -351,11 +351,11 @@ fn runSharedServer(config: Config) !void {
     var complete: usize = 0;
     while (complete < config.connections) {
         const traffic_before = socket_traffic.stats();
-        const event_count = try server.receiveManyVisitingWithDeadline(
+        const event_count = try server.receiveManyVisitingTimeout(
             &versions,
             receive_storage[0 .. @as(usize, config.shared_receive_batch) * 4096],
             receive_events[0..config.shared_receive_batch],
-            deadline,
+            .{ .deadline = deadline },
             {},
             discardSharedPacket,
         );

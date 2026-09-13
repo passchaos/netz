@@ -75,6 +75,17 @@ test "QUIC endpoint server idle batch receive preserves caller deadline" {
             Visitor.visit,
         ),
     );
+    try std.testing.expectError(
+        error.Timeout,
+        server.receiveManyVisitingTimeout(
+            &versions,
+            &storage,
+            &events,
+            .{ .duration = .{ .raw = .zero, .clock = .awake } },
+            {},
+            Visitor.visit,
+        ),
+    );
 }
 
 test "QUIC endpoint server routes two authenticated connections on one socket" {

@@ -6404,6 +6404,10 @@ test "public modules are reachable" {
         netz.quic.endpoint_dispatcher.Dispatcher,
         "receiveManyVisitingTimeout",
     ));
+    try std.testing.expect(@hasDecl(
+        netz.quic.endpoint_server.Server,
+        "receiveManyVisitingTimeout",
+    ));
     try std.testing.expect(@hasDecl(netz.quic.one_rtt.Connection, "closing"));
     try std.testing.expect(@hasDecl(netz.quic.one_rtt.Connection, "draining"));
     try std.testing.expect(@hasDecl(netz.quic.one_rtt.Connection, "checkCloseExpired"));

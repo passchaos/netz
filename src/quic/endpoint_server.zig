@@ -552,6 +552,30 @@ pub const Server = struct {
     /// The visitor runs synchronously for each established packet before any
     /// borrowed receive storage can be reused. Returned events contain only
     /// stable summaries or explicitly owned exceptional datagrams.
+    pub fn receiveManyVisitingTimeout(
+        self: *Server,
+        supported_versions: []const u32,
+        storage: []u8,
+        output: []VisitEvent,
+        timeout: std.Io.Timeout,
+        context: anytype,
+        comptime visitor: anytype,
+    ) (Error || callbackErrorSet(visitor))!usize {
+        if (output.len == 0 or
+            output.len > quic.runtime.max_receive_batch_messages)
+        {
+            return error.BufferTooShort;
+        }
+        return self.receiveManyVisitingUntil(
+            supported_versions,
+            storage,
+            output,
+            timeout.toTimestamp(self.endpoint.io),
+            context,
+            visitor,
+        );
+    }
+
     pub fn receiveManyVisitingWithDeadline(
         self: *Server,
         supported_versions: []const u32,
@@ -561,17 +585,30 @@ pub const Server = struct {
         context: anytype,
         comptime visitor: anytype,
     ) (Error || callbackErrorSet(visitor))!usize {
-        if (output.len == 0 or
-            output.len > quic.runtime.max_receive_batch_messages)
-        {
-            return error.BufferTooShort;
-        }
-        const absolute = try deadline_policy.usableAwake(
-            self.endpoint.io,
-            deadline,
+        return self.receiveManyVisitingTimeout(
+            supported_versions,
+            storage,
+            output,
+            .{ .deadline = try deadline_policy.usableAwake(
+                self.endpoint.io,
+                deadline,
+            ) },
+            context,
+            visitor,
         );
+    }
+
+    fn receiveManyVisitingUntil(
+        self: *Server,
+        supported_versions: []const u32,
+        storage: []u8,
+        output: []VisitEvent,
+        caller_deadline: ?std.Io.Clock.Timestamp,
+        context: anytype,
+        comptime visitor: anytype,
+    ) (Error || callbackErrorSet(visitor))!usize {
         while (true) {
-            const poll_deadline = if (self.hasActiveHandshakes()) deadline: {
+            const receive_timeout: std.Io.Timeout = if (self.hasActiveHandshakes()) deadline: {
                 if (self.pollCompletion()) |completion_value| {
                     var completion = completion_value;
                     output[0] = eventToVisit(try self.finishCompletion(
@@ -580,14 +617,18 @@ pub const Server = struct {
                     return 1;
                 }
                 _ = self.expireHandshakes(monotonicNowNs(self.endpoint.io));
-                break :deadline deadline_policy.earlier(
-                    absolute,
+                break :deadline .{ .deadline = earlierByRemaining(
+                    self.endpoint.io,
+                    caller_deadline,
                     .fromNow(self.endpoint.io, .{
                         .raw = self.options.handshake_poll_interval,
                         .clock = .awake,
                     }),
-                ).?;
-            } else absolute;
+                ) };
+            } else if (caller_deadline) |deadline|
+                .{ .deadline = deadline }
+            else
+                .none;
             const Adapter = struct {
                 server: *Server,
                 context: @TypeOf(context),
@@ -613,13 +654,15 @@ pub const Server = struct {
                 supported_versions,
                 storage,
                 dispatcher_events[0..output.len],
-                .{ .deadline = poll_deadline },
+                receive_timeout,
                 &adapter,
                 Adapter.visit,
             ) catch |err| switch (err) {
                 error.Timeout => {
-                    if (absolute.durationFromNow(self.endpoint.io)
-                        .raw.nanoseconds <= 0) return error.Timeout;
+                    if (caller_deadline) |deadline| {
+                        if (deadline.durationFromNow(self.endpoint.io)
+                            .raw.nanoseconds <= 0) return error.Timeout;
+                    }
                     continue;
                 },
                 else => |other| return other,
@@ -1065,6 +1108,19 @@ fn monotonicNowNs(io: std.Io) u64 {
     const now = std.Io.Clock.awake.now(io).nanoseconds;
     if (now <= 0) return 0;
     return std.math.cast(u64, now) orelse std.math.maxInt(u64);
+}
+
+fn earlierByRemaining(
+    io: std.Io,
+    first: ?std.Io.Clock.Timestamp,
+    second: std.Io.Clock.Timestamp,
+) std.Io.Clock.Timestamp {
+    const first_value = first orelse return second;
+    return if (first_value.durationFromNow(io).raw.nanoseconds <
+        second.durationFromNow(io).raw.nanoseconds)
+        first_value
+    else
+        second;
 }
 
 test "QUIC endpoint server skips handshake maintenance when idle" {
