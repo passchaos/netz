@@ -2459,6 +2459,20 @@ measured 3106.64-3107.64 ns, a non-earliest timer becoming earliest measured
 The remaining scans therefore stay visible and the array/index design retains
 its constant-time ordinary-update behavior.
 
+An indexed binary min-heap candidate was also implemented and tested, using
+the existing handle-to-slot map as its reverse index, then fully removed. At
+1,024 connections it reduced a true earliest postponement from about 3.11 us
+to 190.83 ns and earliest remove-plus-rearm from about 3.17 us to 224.35 ns.
+However, a non-earliest timer becoming earliest increased from about 10 ns to
+166.44 ns; at 16 connections the heap was slower for every measured
+order-changing update/removal. Two order-reversed real 16-connection shared
+server pairs were also inconclusive: heap versus array measured 85.467 versus
+88.502 MiB/s, then 103.706 versus 88.340 MiB/s. With no stable end-to-end gain
+and a clear cost in the ordinary small endpoint sizes, the tquic-style heap is
+not retained. These rejected results delimit when a future adaptive structure
+might become worthwhile instead of treating lower asymptotic complexity as a
+performance claim.
+
 The selected follow-up keeps the array/index design and returns immediately
 when an existing connection's timer kind and deadline are both unchanged.
 Three adjacent CPU-0 runs reduced the 1,024-connection unchanged-earliest case
