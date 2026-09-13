@@ -438,6 +438,10 @@ test "HTTP/3 endpoint server exposes bounded callback loop API" {
     try std.testing.expect(@hasDecl(runtime.EndpointServer, "receiveOnce"));
     try std.testing.expect(@hasDecl(
         runtime.EndpointServer,
+        "receiveManyOnce",
+    ));
+    try std.testing.expect(@hasDecl(
+        runtime.EndpointServer,
         "receiveWithDeadline",
     ));
     try std.testing.expect(@hasDecl(
@@ -455,6 +459,193 @@ test "HTTP/3 endpoint server exposes bounded callback loop API" {
     try std.testing.expect(@hasDecl(runtime.EndpointServer, "serveUntil"));
     try std.testing.expect(@hasDecl(runtime, "EndpointServeEvent"));
     try std.testing.expect(@hasDecl(runtime, "EndpointServeOptions"));
+}
+
+test "HTTP/3 endpoint batch receive retains requests beyond caller storage" {
+    const allocator = std.testing.allocator;
+    var threaded = std.Io.Threaded.init(allocator, .{});
+    defer threaded.deinit();
+    const io = threaded.io();
+    var server = try runtime.HandshakeServer.bind(
+        allocator,
+        io,
+        .{ .ip4 = .loopback(0) },
+        .{ .quic = .{ .max_datagram_size = 4096 } },
+        .{ .handshake = .{ .local_connection_id = "batch-root" } },
+    );
+    defer server.deinit();
+    var endpoint = try runtime.EndpointServer.init(&server, .{});
+    defer endpoint.deinit();
+    var peer_endpoint = try quic.runtime.Endpoint.bind(
+        allocator,
+        io,
+        .{ .ip4 = .loopback(0) },
+        .{ .max_datagram_size = 4096 },
+    );
+    defer peer_endpoint.deinit();
+
+    const client_keys = quic.protection.deriveAes128Keys(
+        [_]u8{0xa1} ** quic.protection.secret_len,
+    );
+    const server_keys = quic.protection.deriveAes128Keys(
+        [_]u8{0xa2} ** quic.protection.secret_len,
+    );
+    const client_cid = "batch-client";
+    const server_cid = "batch-server";
+    var peer = try quic.one_rtt.Connection.init(&peer_endpoint, .{
+        .peer = server.address(),
+        .receive_keys = server_keys,
+        .send_keys = client_keys,
+        .local_connection_id = client_cid,
+        .peer_connection_id = server_cid,
+        .enable_pacing = false,
+    });
+    defer peer.deinit();
+    const session = try allocator.create(runtime.HandshakeServerSession);
+    var session_owned = true;
+    defer if (session_owned) {
+        session.deinit();
+        allocator.destroy(session);
+    };
+    session.* = try runtime.HandshakeServerSession.initPreconfigured(
+        &server.quic_server.endpoint,
+        peer_endpoint.address(),
+        .{},
+        .{
+            .receive_keys = client_keys,
+            .send_keys = server_keys,
+            .local_connection_id = server_cid,
+            .peer_connection_id = client_cid,
+            .one_rtt = .{ .enable_pacing = false },
+        },
+    );
+    session.control.settings.markSent(.{});
+    session.control.settings.markReceived(.{});
+    session.qpack_encoder_prefix_sent = true;
+    session.qpack_decoder_prefix_sent = true;
+    try session.bindDispatcher();
+    const handle: quic.endpoint_dispatcher.ConnectionHandle = 91;
+    try endpoint.dispatcher.registerConnection(
+        handle,
+        &session.established.connection,
+    );
+    const slot = try endpoint.sessions.getOrPut(allocator, handle);
+    try std.testing.expect(!slot.found_existing);
+    slot.value_ptr.* = .{
+        .dispatcher = endpoint.dispatcher,
+        .allocator = allocator,
+        .handle = handle,
+        .session = session,
+    };
+    session_owned = false;
+
+    const versions = [_]u32{quic.Version.version_1.wireValue()};
+    var storage: [2 * 4096]u8 = undefined;
+    var events: [2]runtime.EndpointServerEvent = undefined;
+    var no_events: [0]runtime.EndpointServerEvent = .{};
+    try std.testing.expectError(
+        error.BufferTooShort,
+        endpoint.receiveManyOnce(
+            &versions,
+            &storage,
+            &no_events,
+            .{ .clock = .awake, .raw = .fromSeconds(1) },
+        ),
+    );
+    try std.testing.expectError(
+        error.InvalidHandshakeRecovery,
+        endpoint.receiveManyOnce(
+            &versions,
+            &storage,
+            &events,
+            .{ .clock = .awake, .raw = .zero },
+        ),
+    );
+    var too_many_events: [
+        quic.runtime.max_receive_batch_messages + 1
+    ]runtime.EndpointServerEvent = undefined;
+    try std.testing.expectError(
+        error.BufferTooShort,
+        endpoint.receiveManyOnce(
+            &versions,
+            &storage,
+            &too_many_events,
+            .{ .clock = .awake, .raw = .fromSeconds(1) },
+        ),
+    );
+    try std.testing.expectEqual(
+        @as(usize, 0),
+        try endpoint.receiveManyOnce(
+            &versions,
+            &storage,
+            &events,
+            .{ .clock = .awake, .raw = .fromMilliseconds(1) },
+        ),
+    );
+
+    var first: std.ArrayList(u8) = .empty;
+    defer first.deinit(allocator);
+    try (http3.Request{
+        .method = "GET",
+        .path = "/batch-one",
+        .authority = "localhost",
+    }).write(&first, allocator);
+    var second: std.ArrayList(u8) = .empty;
+    defer second.deinit(allocator);
+    try (http3.Request{
+        .method = "GET",
+        .path = "/batch-two",
+        .authority = "localhost",
+    }).write(&second, allocator);
+    try peer.send(&.{.{ .stream = .{
+        .stream_id = 0,
+        .data = first.items,
+        .fin = true,
+    } }});
+    try peer.send(&.{.{ .stream = .{
+        .stream_id = 4,
+        .data = second.items,
+        .fin = true,
+    } }});
+
+    const count = try endpoint.receiveManyOnce(
+        &versions,
+        &storage,
+        &events,
+        .{ .clock = .awake, .raw = .fromSeconds(1) },
+    );
+    defer for (events[0..count]) |*event| event.deinit(allocator);
+    try std.testing.expectEqual(@as(usize, 2), count);
+    @memset(&storage, 0xaa);
+
+    var saw_first = false;
+    var saw_second = false;
+    for (events[0..count]) |event| switch (event) {
+        .request => |request| {
+            try std.testing.expectEqual(handle, request.connection_handle);
+            switch (request.request) {
+                .reset => return error.TestUnexpectedResult,
+                .message => |message| switch (message.value) {
+                    .push_promise, .data_available, .trailers, .finished => return error.TestUnexpectedResult,
+                    .head => |head_value| switch (head_value) {
+                        .response => return error.TestUnexpectedResult,
+                        .request => |head| {
+                            try std.testing.expectEqualStrings("GET", head.method);
+                            if (std.mem.eql(u8, head.path, "/batch-one")) {
+                                saw_first = true;
+                            } else if (std.mem.eql(u8, head.path, "/batch-two")) {
+                                saw_second = true;
+                            } else {
+                                return error.TestUnexpectedResult;
+                            }
+                        },
+                    },
+                },
+            }
+        },
+        else => return error.TestUnexpectedResult,
+    };
+    try std.testing.expect(saw_first and saw_second);
 }
 
 test "HTTP/3 handshake server rejects a non-positive recovery drain budget" {
@@ -1340,24 +1531,30 @@ test "HTTP/3 endpoint server owns concurrent handshakes and requests" {
         quic.Version.version_2.wireValue(),
     };
     var connected: usize = 0;
+    var receive_storage: [2 * 4096]u8 = undefined;
+    var events: [2]runtime.EndpointServerEvent = undefined;
     while (connected < clients.len) {
-        var event = try endpoint_server.receive(
+        const count = try endpoint_server.receiveManyOnce(
             &versions,
+            &receive_storage,
+            &events,
             .{ .clock = .awake, .raw = .fromMilliseconds(5) },
         );
-        defer event.deinit(allocator);
-        switch (event) {
-            .connected => |handle| {
-                const promoted = endpoint_server.session(handle) orelse
-                    return error.TestUnexpectedResult;
-                try std.testing.expect(promoted.control.settings.sent);
-                try std.testing.expect(promoted.qpack_encoder_prefix_sent);
-                try std.testing.expect(promoted.qpack_decoder_prefix_sent);
-                connected += 1;
-            },
-            .closed => return error.TestUnexpectedResult,
-            .handshake_failed => |failure| return failure.err,
-            .request, .unrouted => return error.TestUnexpectedResult,
+        for (events[0..count]) |*event| {
+            defer event.deinit(allocator);
+            switch (event.*) {
+                .connected => |handle| {
+                    const promoted = endpoint_server.session(handle) orelse
+                        return error.TestUnexpectedResult;
+                    try std.testing.expect(promoted.control.settings.sent);
+                    try std.testing.expect(promoted.qpack_encoder_prefix_sent);
+                    try std.testing.expect(promoted.qpack_decoder_prefix_sent);
+                    connected += 1;
+                },
+                .closed => return error.TestUnexpectedResult,
+                .handshake_failed => |failure| return failure.err,
+                .request, .unrouted => return error.TestUnexpectedResult,
+            }
         }
     }
 

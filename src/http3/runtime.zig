@@ -5034,6 +5034,181 @@ pub const EndpointServer = struct {
         };
     }
 
+    /// Perform one bounded caller-buffer receive iteration. Established QUIC
+    /// packets are parsed and applied to their HTTP/3 sessions while `storage`
+    /// is borrowed; only stable lifecycle, request, and unrouted events escape
+    /// this call. A zero result means the poll interval elapsed without one.
+    pub fn receiveManyOnce(
+        self: *EndpointServer,
+        supported_versions: []const u32,
+        storage: []u8,
+        output: []EndpointServerEvent,
+        poll_interval: std.Io.Clock.Duration,
+    ) HandshakeAdmissionError!usize {
+        if (output.len == 0 or
+            output.len > quic.runtime.max_receive_batch_messages)
+        {
+            return error.BufferTooShort;
+        }
+        if (poll_interval.raw.nanoseconds <= 0) {
+            return error.InvalidHandshakeRecovery;
+        }
+        const deadline = std.Io.Clock.Timestamp.fromNow(
+            self.server.quic_server.endpoint.io,
+            poll_interval,
+        );
+        return self.receiveManyUntil(
+            supported_versions,
+            storage,
+            output,
+            deadline,
+        ) catch |err| switch (err) {
+            error.Timeout => 0,
+            else => |other| return other,
+        };
+    }
+
+    fn receiveManyUntil(
+        self: *EndpointServer,
+        supported_versions: []const u32,
+        storage: []u8,
+        output: []EndpointServerEvent,
+        deadline: std.Io.Clock.Timestamp,
+    ) HandshakeAdmissionError!usize {
+        while (true) {
+            var count: usize = 0;
+            errdefer for (output[0..count]) |*event| {
+                event.deinit(self.allocator);
+            };
+            if (try self.pollRequestAcrossSessions()) |request| {
+                output[0] = request;
+                return 1;
+            }
+
+            if (self.handshakes.pollCompleted()) |completion_value| {
+                var completion = completion_value;
+                const event = try self.finishTransportCompletion(&completion);
+                output[0] = switch (event) {
+                    .connected => |handle| .{ .connected = handle },
+                    .handshake_failed => |failure| .{
+                        .handshake_failed = failure,
+                    },
+                    .closed, .packet, .unrouted => unreachable,
+                };
+                return 1;
+            }
+
+            const now = std.Io.Clock.awake.now(
+                self.server.quic_server.endpoint.io,
+            ).nanoseconds;
+            _ = self.handshakes.expireAt(if (now <= 0)
+                0
+            else
+                std.math.cast(u64, now) orelse std.math.maxInt(u64));
+
+            const Adapter = struct {
+                server: *EndpointServer,
+
+                fn visit(
+                    adapter: *@This(),
+                    packet: quic.endpoint_dispatcher.RoutedPacketView,
+                ) HandshakeAdmissionError!void {
+                    const promoted = adapter.server.sessions.getPtr(
+                        packet.connection_handle,
+                    ) orelse return error.UnknownConnectionHandle;
+                    try promoted.session.processRequestPacketView(
+                        packet.packet,
+                    );
+                }
+            };
+            var adapter = Adapter{ .server = self };
+            var transport_events: [
+                quic.runtime.max_receive_batch_messages
+            ]quic.endpoint_dispatcher.VisitEvent = undefined;
+            const transport_count = try self.dispatcher
+                .receiveManyVisitingTimeout(
+                supported_versions,
+                storage,
+                transport_events[0..output.len],
+                .{ .deadline = deadline },
+                &adapter,
+                Adapter.visit,
+            );
+            defer for (transport_events[0..transport_count]) |*event| {
+                event.deinit(self.allocator);
+            };
+
+            for (transport_events[0..transport_count]) |*event| {
+                switch (event.*) {
+                    .new_initial => {
+                        var owned = takeEndpointVisitEvent(event);
+                        defer owned.deinit(self.allocator);
+                        _ = self.handshakes.admit(&owned) catch |err|
+                            switch (err) {
+                                error.PendingHandshakeLimitReached => {
+                                    const rejected = owned;
+                                    owned = .consumed;
+                                    output[count] = .{ .unrouted = rejected };
+                                    count += 1;
+                                },
+                                else => |other| return other,
+                            };
+                    },
+                    .packet => |packet| {
+                        const promoted = self.sessions.getPtr(
+                            packet.connection_handle,
+                        ) orelse return error.UnknownConnectionHandle;
+                        const request = (try pollSessionRequestEntry(
+                            {},
+                            packet.connection_handle,
+                            promoted,
+                        )) orelse continue;
+                        if (requestEventAlreadyReturned(
+                            output[0..count],
+                            packet.connection_handle,
+                            request,
+                        )) {
+                            var duplicate = request;
+                            duplicate.deinit(self.allocator);
+                            continue;
+                        }
+                        output[count] = .{ .request = .{
+                            .connection_handle = packet.connection_handle,
+                            .request = request,
+                        } };
+                        count += 1;
+                    },
+                    .timer => |timer| {
+                        const promoted = self.sessions.getPtr(
+                            timer.connection_handle,
+                        ) orelse return error.UnknownConnectionHandle;
+                        if (!promoted.session.established.connection.closed()) {
+                            continue;
+                        }
+                        output[count] = .{ .closed = .{
+                            .handle = timer.connection_handle,
+                            .timer = timer.timer,
+                        } };
+                        count += 1;
+                        if (!self.removeConnection(timer.connection_handle)) {
+                            return error.UnknownConnectionHandle;
+                        }
+                    },
+                    .unrouted => {
+                        const owned = takeEndpointVisitEvent(event);
+                        output[count] = .{ .unrouted = owned };
+                        count += 1;
+                    },
+                    .pending_handshake,
+                    .discarded_long_header,
+                    .consumed,
+                    => {},
+                }
+            }
+            if (count != 0) return count;
+        }
+    }
+
     /// Drive one transport iteration under an existing absolute budget.
     pub fn receiveTransportWithDeadline(
         self: *EndpointServer,
@@ -5160,6 +5335,48 @@ fn transportEventConnectionHandle(
         .packet => |packet| packet.connection_handle,
         .closed, .handshake_failed, .unrouted => null,
     };
+}
+
+fn takeEndpointVisitEvent(
+    event: *quic.endpoint_dispatcher.VisitEvent,
+) quic.endpoint_dispatcher.Event {
+    return switch (event.*) {
+        .new_initial => |initial| blk: {
+            event.* = .consumed;
+            break :blk .{ .new_initial = initial };
+        },
+        .unrouted => |unrouted| blk: {
+            event.* = .consumed;
+            break :blk .{ .unrouted = unrouted };
+        },
+        else => unreachable,
+    };
+}
+
+fn requestEventAlreadyReturned(
+    events: []const EndpointServerEvent,
+    handle: quic.endpoint_dispatcher.ConnectionHandle,
+    request: StreamingRequestEvent,
+) bool {
+    const stream_id = switch (request) {
+        .reset => return false,
+        .message => |message| switch (message.value) {
+            .data_available => message.stream_id,
+            .head, .push_promise, .trailers, .finished => return false,
+        },
+    };
+    for (events) |event| switch (event) {
+        .request => |previous| {
+            if (previous.connection_handle != handle) continue;
+            switch (previous.request) {
+                .reset => {},
+                .message => |message| if (message.stream_id == stream_id and
+                    message.value == .data_available) return true,
+            }
+        },
+        else => {},
+    };
+    return false;
 }
 
 pub const HandshakeClientOptions = struct {

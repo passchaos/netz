@@ -495,9 +495,11 @@ so this closes the bidirectional coverage gap without claiming a directional
 speed advantage. HTTP/3 handshake sessions now also accept authenticated
 `ReceivedPacketView` values directly, so a caller-buffer shared dispatcher can
 apply request frames without first allocating an owning packet. The owning
-compatibility entry point delegates to the same implementation; the built-in
-HTTP/3 endpoint remains on its existing single-packet receive loop until batch
-promotion/admission can be covered end to end.
+compatibility entry point delegates to the same implementation. The built-in
+HTTP/3 endpoint now exposes `receiveManyOnce`, which performs bounded UDP batch
+receive, applies borrowed packets within the caller-buffer lifetime, retains
+additional request events in session state, and returns only stable application
+or lifecycle events. Existing single-event receive APIs remain compatible.
 
 The sent-packet optimistic-ACK guard now has a validation-only ordered fast
 path: it streams the peer's ranges and proves exact coverage using binary
