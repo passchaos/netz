@@ -120,7 +120,7 @@ def verify(
     warmup: int, iterations: int, streams: int, bytes_per_stream: int,
     payload_bytes: int, sender: str, client_log: Path, server_log: Path,
     server_topology: str = "independent", shared_receive_batch: int = 32,
-    server_ack_every: int = 1, server_ack_delay_us: int = 0,
+    server_ack_every: int = 2, server_ack_delay_us: int = 25000,
 ) -> None:
     client_impl, server_impl = endpoint_implementations(role_pair)
     if (
@@ -144,7 +144,7 @@ def verify(
     ):
         raise ValueError("invalid shared server topology")
     if server_topology != "shared" and (
-        server_ack_every != 1 or server_ack_delay_us != 0
+        server_ack_every != 2 or server_ack_delay_us != 25000
     ):
         raise ValueError("custom server ACK policy requires shared topology")
 
@@ -288,8 +288,8 @@ def main() -> None:
         default="independent",
     )
     parser.add_argument("--shared-receive-batch", type=int, default=32)
-    parser.add_argument("--server-ack-every", type=int, default=1)
-    parser.add_argument("--server-ack-delay-us", type=int, default=0)
+    parser.add_argument("--server-ack-every", type=int, default=2)
+    parser.add_argument("--server-ack-delay-us", type=int, default=25000)
     parser.add_argument("--client-log", type=Path, required=True)
     parser.add_argument("--server-log", type=Path, required=True)
     args = parser.parse_args()

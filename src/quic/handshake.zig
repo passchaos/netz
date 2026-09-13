@@ -236,9 +236,10 @@ pub const OneRttConfig = struct {
     enable_reset_partial_delivery: bool = false,
     keep_alive_period_ms: u64 = 0,
     /// Local receive ACK cadence for handshake-established 1-RTT traffic.
-    /// One/zero/default-packet-threshold preserves historical behavior.
-    local_ack_eliciting_threshold: u64 = 1,
-    local_max_ack_delay_us: u64 = 0,
+    /// The default acknowledges every second ack-eliciting application packet
+    /// within 25 ms, matching RFC 9000's recommendation and mature peers.
+    local_ack_eliciting_threshold: u64 = 2,
+    local_max_ack_delay_us: u64 = 25_000,
     local_ack_reordering_threshold: u64 =
         quic.packet_space.default_packet_threshold,
 
@@ -4884,6 +4885,25 @@ fn ensureOfferedAlpn(offered: []const []const u8, selected: []const u8) Error!vo
 test "QUIC handshake one-RTT config propagates local ACK policy" {
     const keys = quic.protection.deriveAes128Keys(
         [_]u8{0xa1} ** quic.protection.secret_len,
+    );
+    const defaults = (OneRttConfig{}).apply(
+        .version_1,
+        .{ .ip4 = .loopback(443) },
+        keys,
+        keys,
+        "local",
+        "peer",
+        .client,
+        .{},
+        .{},
+    );
+    try std.testing.expectEqual(
+        @as(u64, 2),
+        defaults.local_ack_eliciting_threshold,
+    );
+    try std.testing.expectEqual(
+        @as(u64, 25_000),
+        defaults.local_max_ack_delay_us,
     );
     const applied = (OneRttConfig{
         .local_ack_eliciting_threshold = 2,

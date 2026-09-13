@@ -51,8 +51,8 @@ def positive(row: dict[str, str], key: str) -> int:
 
 def summarize(
     path: Path, mode: str, samples: int, topology: str = "independent",
-    shared_receive_batch: int = 32, server_ack_every: int = 1,
-    server_ack_delay_us: int = 0,
+    shared_receive_batch: int = 32, server_ack_every: int = 2,
+    server_ack_delay_us: int = 25000,
 ) -> list[str]:
     if samples <= 0 or samples % 2 == 0:
         raise ValueError("samples must be a positive odd number")
@@ -202,8 +202,8 @@ def main() -> None:
         default="independent",
     )
     parser.add_argument("--shared-receive-batch", type=int, default=32)
-    parser.add_argument("--server-ack-every", type=int, default=1)
-    parser.add_argument("--server-ack-delay-us", type=int, default=0)
+    parser.add_argument("--server-ack-every", type=int, default=2)
+    parser.add_argument("--server-ack-delay-us", type=int, default=25000)
     args = parser.parse_args()
     for line in summarize(
         args.log, args.mode, args.samples, args.server_topology,

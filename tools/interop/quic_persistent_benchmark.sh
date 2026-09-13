@@ -19,8 +19,8 @@ stream_window=${NETZ_QUIC_PERSISTENT_STREAM_WINDOW:-1048576}
 timeout_ms=${NETZ_QUIC_PERSISTENT_TIMEOUT_MS:-30000}
 server_topology=independent
 shared_receive_batch=${NETZ_QUIC_PERSISTENT_SHARED_RECEIVE_BATCH:-32}
-server_ack_every=${NETZ_QUIC_PERSISTENT_SERVER_ACK_EVERY:-1}
-server_ack_delay_us=${NETZ_QUIC_PERSISTENT_SERVER_ACK_DELAY_US:-0}
+server_ack_every=${NETZ_QUIC_PERSISTENT_SERVER_ACK_EVERY:-2}
+server_ack_delay_us=${NETZ_QUIC_PERSISTENT_SERVER_ACK_DELAY_US:-25000}
 for arg in "$@"; do
   case $arg in
     --mode=*) modes=${arg#--mode=} ;;
@@ -84,7 +84,7 @@ if (( server_ack_every < 1 || server_ack_every > 64 ||
   exit 2
 fi
 if [[ $server_topology != shared ]] &&
-   (( server_ack_every != 1 || server_ack_delay_us != 0 )); then
+   (( server_ack_every != 2 || server_ack_delay_us != 25000 )); then
   echo 'custom server ACK policy requires shared server topology' >&2
   exit 2
 fi

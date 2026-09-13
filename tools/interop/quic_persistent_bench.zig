@@ -26,8 +26,8 @@ const Config = struct {
     timeout_ms: u32 = 30_000,
     server_topology: ServerTopology = .independent,
     shared_receive_batch: u8 = 32,
-    server_ack_every: u8 = 1,
-    server_ack_delay_us: u32 = 0,
+    server_ack_every: u8 = 2,
+    server_ack_delay_us: u32 = 25_000,
 
     fn parse(args: []const []const u8) !Config {
         var mode: ?Mode = null;
@@ -115,7 +115,8 @@ const Config = struct {
                         "netz-client+netz-server",
                     ))) or
             (self.server_topology != .shared and
-                (self.server_ack_every != 1 or self.server_ack_delay_us != 0)))
+                (self.server_ack_every != 2 or
+                    self.server_ack_delay_us != 25_000)))
         {
             return error.InvalidArgument;
         }

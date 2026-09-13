@@ -2465,12 +2465,24 @@ per-call dispatcher work is higher leverage than increasing the batch width.
 The same shared harness can now isolate the server's local ACK cadence with
 the server-ack-every and server-ack-delay-us options; both values are recorded
 in the client result, server completion, and summary, and mixed-policy result
-sets are rejected. Defaults remain the historical immediate policy (1/0), and
-non-default values are limited to the shared netz/netz topology so cross-peer
-comparisons cannot silently change shape. In one verified four-connection,
-1-MiB total exploratory pair, 2 packets / 25 ms reduced server UDP sends from
-956 to 492 (48.5%) and measured 112.893 versus 77.455 MiB/s. This is a
-single-sample tuning signal, not a default-policy or superiority claim.
+sets are rejected. TLS-handshake-established connections and this benchmark
+now default to an ACK after every second ack-eliciting application packet or
+25 ms, whichever comes first. This matches the RFC 9000 recommendation and the
+default cadence used by the audited Quinn and tquic implementations. The
+low-level one-RTT ConnectionConfig deliberately retains its historical 1/0
+default for callers that do not drive transport timers. ACK-policy overrides
+remain limited to the shared netz/netz topology so cross-peer comparisons
+cannot silently change shape.
+
+Five verified 16-connection, 16-MiB samples measured 68.146-84.832 MiB/s
+(77.088 median) with the historical 1/0 policy and 70.167-88.472 MiB/s
+(77.220 median) with 2 packets / 25 ms. The throughput ranges overlap, so this
+does not establish a throughput improvement. The 2/25-ms policy did reduce
+server UDP sends from 14,780-14,787 to 7,456-7,460, approximately 49.6%, while
+all samples retained exact bytes, checksum, connection completion, and the
+DONE/DONE_ACK exchange. Default-path smoke runs without explicit ACK options
+also completed at 1, 4, and 16 connections and recorded the expected 2/25-ms
+policy; the 16-connection run sent 7,454 server datagrams at 76.832 MiB/s.
 
 Short-delay concurrency exposed a separate issue: 2 packets / 1 ms succeeds
 for one connection but originally timed out for four and sixteen connections.
@@ -2480,7 +2492,8 @@ ACK in closing state and surfaced ConnectionClosed from the shared loop. The
 selector now exposes only close-response and close-expiry work while closing,
 only close expiry while draining, and no timers once closed or idle-timed-out.
 The previously failing four- and sixteen-connection 2/1-ms runs now complete;
-the library default is still unchanged pending a full performance matrix.
+the timer-aware handshake default uses 2/25 ms, while the low-level one-RTT
+configuration remains 1/0 for timer-unaware callers.
 
 The server and dispatcher now both expose batch visitor entry points taking an
 already-composed std.Io.Timeout. Public WithDeadline forms retain strict

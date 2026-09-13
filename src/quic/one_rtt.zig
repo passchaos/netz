@@ -287,7 +287,8 @@ pub const ConnectionConfig = struct {
     peer_ack_delay_exponent: u64 = quic.default_ack_delay_exponent,
     peer_max_ack_delay_ms: u64 = quic.default_max_ack_delay_ms,
     /// Number of ack-eliciting application packets that trigger an immediate
-    /// ACK. One preserves the conservative historical behavior.
+    /// ACK. One preserves the low-level historical behavior for callers that
+    /// do not drive transport timers; handshake defaults use delayed ACKs.
     local_ack_eliciting_threshold: u64 = 1,
     /// Maximum local ACK delay in microseconds when the packet threshold has
     /// not yet been reached. Zero disables delayed ACKs.
