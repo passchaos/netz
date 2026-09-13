@@ -2430,6 +2430,16 @@ also add ordering work to the measured 12 ns ordinary-update path. The bounded
 due scan is intentionally linear because it provides a stable per-event-loop
 snapshot, but the benchmark keeps its independent scaling cost visible.
 
+The selected follow-up keeps the array/index design and returns immediately
+when an existing connection's timer kind and deadline are both unchanged.
+Three adjacent CPU-0 runs reduced the 1,024-connection unchanged-earliest case
+from 3165.51-3179.04 ns to 6.78-6.90 ns per update, a 459-469x latency
+reduction. The 1,024-connection ordinary non-earliest update measured
+8.78-8.99 ns; a genuinely postponed earliest timer remained
+3105.56-3114.79 ns and remove-plus-rearm remained 3170.05-3172.24 ns. Thus the
+optimization removes only the provable no-op scan without hiding the remaining
+linear operations or imposing heap maintenance on ordinary updates.
+
 ### Raw QUIC mixed FIN/reset recovery versus quic-go
 
 The separate process gate below exercises terminal stream churn instead of

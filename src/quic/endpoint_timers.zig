@@ -8,6 +8,7 @@
 //! its schedule entry without scanning all connections on every tick.
 
 const std = @import("std");
+const builtin = @import("builtin");
 const one_rtt = @import("one_rtt.zig");
 
 pub const Error = one_rtt.Error || std.mem.Allocator.Error;
@@ -27,6 +28,8 @@ pub const EndpointTimers = struct {
     /// must repair the moved connection's slot before future lookups.
     entry_index: std.AutoHashMapUnmanaged(u64, usize) = .empty,
     earliest_index: ?usize = null,
+    recompute_count: if (builtin.is_test) usize else void =
+        if (builtin.is_test) 0 else {},
 
     pub fn init(allocator: std.mem.Allocator) EndpointTimers {
         return .{ .allocator = allocator };
@@ -78,6 +81,8 @@ pub const EndpointTimers = struct {
             );
             if (slot.found_existing) {
                 const existing = slot.value_ptr.*;
+                const existing_timer = self.entries.items[existing].timer;
+                if (std.meta.eql(existing_timer, deadline)) return;
                 self.entries.items[existing] = entry;
                 self.refreshEarliestAfterUpdate(existing);
             } else {
@@ -239,6 +244,7 @@ pub const EndpointTimers = struct {
     }
 
     fn recomputeEarliest(self: *EndpointTimers) void {
+        if (comptime builtin.is_test) self.recompute_count +|= 1;
         if (self.entries.items.len == 0) {
             self.earliest_index = null;
             return;
@@ -335,6 +341,32 @@ test "QUIC endpoint timers retain cached earliest moved by swapRemove" {
     try std.testing.expectEqual(@as(?usize, 0), timers.earliest_index);
     try std.testing.expectEqual(@as(?usize, null), timers.entry_index.get(1));
     try std.testing.expectEqual(@as(?usize, 0), timers.entry_index.get(3));
+}
+
+test "QUIC endpoint timers skip exact timer update without rescanning" {
+    const allocator = std.testing.allocator;
+    var timers = EndpointTimers.init(allocator);
+    defer timers.deinit();
+
+    try timers.update(1, .{ .kind = .pto, .deadline_ns = 100 });
+    try timers.update(2, .{ .kind = .ack_delay, .deadline_ns = 200 });
+    const recomputes_before = timers.recompute_count;
+
+    try timers.update(1, .{ .kind = .pto, .deadline_ns = 100 });
+    try std.testing.expectEqual(recomputes_before, timers.recompute_count);
+    try std.testing.expectEqual(
+        one_rtt.TimerDeadlineKind.pto,
+        timers.earliestDeadline().?.timer.kind,
+    );
+
+    // Timer kind remains observable even when its ordering deadline is
+    // unchanged, so only an exact timer match may take the no-op path.
+    try timers.update(1, .{ .kind = .idle_timeout, .deadline_ns = 100 });
+    try std.testing.expectEqual(recomputes_before + 1, timers.recompute_count);
+    try std.testing.expectEqual(
+        one_rtt.TimerDeadlineKind.idle_timeout,
+        timers.earliestDeadline().?.timer.kind,
+    );
 }
 
 test "QUIC endpoint timers skip service for unarmed connections" {
