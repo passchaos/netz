@@ -352,6 +352,33 @@ pub const Server = struct {
         try self.dispatcher.refreshConnectionTimer(handle);
     }
 
+    /// Reserve one bidirectional stream without reading the shared socket.
+    /// Null means the endpoint loop must drive peer credit or other transport
+    /// progress before retrying.
+    pub fn pollOpenStream(
+        self: *Server,
+        handle: quic.endpoint_dispatcher.ConnectionHandle,
+    ) Error!?u64 {
+        return self.dispatcher.pollOpenStream(handle);
+    }
+
+    /// Reserve one unidirectional stream without reading the shared socket.
+    /// Null means the endpoint loop must drive peer credit or other transport
+    /// progress before retrying.
+    pub fn pollOpenUnidirectionalStream(
+        self: *Server,
+        handle: quic.endpoint_dispatcher.ConnectionHandle,
+    ) Error!?u64 {
+        return self.dispatcher.pollOpenUnidirectionalStream(handle);
+    }
+
+    pub fn pollOpenUniStream(
+        self: *Server,
+        handle: quic.endpoint_dispatcher.ConnectionHandle,
+    ) Error!?u64 {
+        return self.pollOpenUnidirectionalStream(handle);
+    }
+
     /// Poll one ready stream fairly without reading the shared socket. Any
     /// generated flow-control work is reflected in the aggregate timer heap.
     pub fn pollStream(

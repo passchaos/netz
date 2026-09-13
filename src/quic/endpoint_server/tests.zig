@@ -179,6 +179,10 @@ test "QUIC endpoint server routes two authenticated connections on one socket" {
                     .x25519_secret_key = secret,
                     .key_exchange_groups = &.{.x25519},
                     .cipher_suites = &.{.aes_128_gcm_sha256},
+                    .local_transport_parameters = .{
+                        .initial_max_streams_bidi = 1,
+                        .initial_max_streams_uni = 1,
+                    },
                     .initial_one_rtt_config = .{ .enable_pacing = false },
                     .handshake_recovery = .{
                         .initial_pto_ms = 20,
@@ -252,7 +256,17 @@ test "QUIC endpoint server routes two authenticated connections on one socket" {
         for (receive_events[0..event_count]) |*event| {
             defer event.deinit(allocator);
             switch (event.*) {
-                .connected, .timer => {},
+                .connected => |handle| {
+                    try std.testing.expectEqual(
+                        @as(?u64, 1),
+                        try server.pollOpenStream(handle),
+                    );
+                    try std.testing.expectEqual(
+                        @as(?u64, 3),
+                        try server.pollOpenUnidirectionalStream(handle),
+                    );
+                },
+                .timer => {},
                 .handshake_failed => |failure| return failure.err,
                 .unrouted => return error.TestUnexpectedResult,
                 .packet => |packet| {

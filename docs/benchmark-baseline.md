@@ -2355,6 +2355,23 @@ increase. Every arm independently verified 4,194,304 bytes, checksum
 ranges overlap and only three samples were collected, so this is a regression
 sample supporting the allocation-path change, not a general throughput claim.
 
+The persistent shared topology now covers both sender roles. Server-originated
+transfers use the same single socket owner and explicitly resumable state
+machine as uploads: unidirectional stream reservation and every prelude, data,
+FIN, and completion-control send are nonblocking, while routed packet and
+timer events resume connections held by pacing, congestion, or flow control.
+The endpoint server exposes the dispatcher's socket-free unidirectional stream
+poll so applications do not introduce a competing UDP receiver. Five verified
+16-connection, 16-MiB runs transferred 80 MiB in each direction. Client-sender
+samples measured 62.790-79.786 MiB/s (71.458 median), while server-sender
+samples measured 80.013-96.256 MiB/s (84.688 median). The server-sender runs
+handled 2,783-3,402 timer events and sent 14,755-14,842 datagrams, providing
+direct coverage of backpressure recovery across all connections. The ranges
+overlap, so these measurements establish bidirectional completion and scaling
+coverage rather than a directional throughput advantage. A separate four-
+connection/four-stream smoke verified 4 MiB, every FIN, checksum, and the
+DONE/DONE_ACK exchange in both directions.
+
 The next shared-loop step follows Quinn's bounded receive-cycle design: one
 bounded receive operation drains already-ready UDP messages nonblocking, or
 waits for one when the socket starts empty, into a reusable caller buffer. The

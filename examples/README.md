@@ -251,9 +251,10 @@ so individual 1-RTT features are easy to inspect:
   synchronized GO barrier for four parallel independent UDP connections and
   both sender roles. A strict dual-log verifier recomputes every checksum and
   requires the complete DONE/DONE_ACK exchange from all connections.
-  Aggregate mode also accepts `--server-topology=shared` for a netz/netz
-  client-upload run in which all server connections share one UDP socket and
-  one CID-routing/timer owner; the default remains one socket per connection.
+  Aggregate mode also accepts `--server-topology=shared` for netz/netz client-
+  and server-originated transfers in which all server connections share one UDP
+  socket and one CID-routing/timer owner; the default remains one socket per
+  connection.
 - `run-quic-datagram-echo` exercises RFC 9221 DATAGRAM send, receive queueing,
   and echo.
 - `interop-quic-handshake-fault` covers QUIC v1/v2, both netz/quic-go endpoint

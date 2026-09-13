@@ -79,29 +79,33 @@ class PersistentBenchmarkSummaryTest(unittest.TestCase):
             path = Path(directory, "results.log")
             lines = []
             for pair, value in (("netz-client+netz-server", 120.0),):
-                for run in range(1, 4):
-                    lines.append(
-                        "record=result protocol=quic-stream mode=aggregate "
-                        f"role_pair={pair} sender_role=client result_owner=client "
-                        f"implementation={'netz' if pair.startswith('netz-client') else 'quic-go'} "
-                        f"run={run} connections=4 streams=1 bytes_per_stream=1024 "
-                        "timing_scope=stream-setup-through-verified-completion "
-                        f"elapsed_ns=1000 logical_MiB_s={value:.3f} "
-                        "connection_scope=parallel-shared-server-endpoint "
-                        "endpoint_topology=shared-server-udp "
-                        "server_receive_batch=32 server_ack_every=2 "
-                        "server_ack_delay_us=25000 "
-                        "benchmark_scope=same-application-shape "
-                        "completion_exchange_verified=true complete=true"
-                    )
+                for sender in ("client", "server"):
+                    for run in range(1, 4):
+                        lines.append(
+                            "record=result protocol=quic-stream mode=aggregate "
+                            f"direction={'upload' if sender == 'client' else 'download'} "
+                            f"role_pair={pair} sender_role={sender} result_owner=client "
+                            f"implementation={'netz' if pair.startswith('netz-client') else 'quic-go'} "
+                            f"run={run} connections=4 streams=1 bytes_per_stream=1024 "
+                            "timing_scope=stream-setup-through-verified-completion "
+                            f"elapsed_ns=1000 logical_MiB_s={value:.3f} "
+                            "connection_scope=parallel-shared-server-endpoint "
+                            "endpoint_topology=shared-server-udp "
+                            "server_receive_batch=32 server_ack_every=2 "
+                            "server_ack_delay_us=25000 "
+                            "benchmark_scope=same-application-shape "
+                            "completion_exchange_verified=true complete=true"
+                        )
             lines.append(lines[0].replace(
                 "endpoint_topology=shared-server-udp",
                 "endpoint_topology=one-udp-socket-per-connection",
             ))
             path.write_text("\n".join(lines) + "\n", encoding="utf-8")
             output = SUMMARY.summarize(path, "aggregate", 3, "shared", 32)
-            self.assertEqual(len(output), 1)
+            self.assertEqual(len(output), 2)
             self.assertIn("median_logical_MiB_s=120.000", output[0])
+            self.assertIn("sender_role=client", output[0])
+            self.assertIn("sender_role=server", output[1])
             self.assertIn("server_receive_batch=32", output[0])
             self.assertIn("server_ack_every=2", output[0])
             self.assertIn("server_ack_delay_us=25000", output[0])

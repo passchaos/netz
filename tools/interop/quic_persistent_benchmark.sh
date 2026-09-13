@@ -269,9 +269,6 @@ for ((outer_run = 1; outer_run <= samples; outer_run += 1)); do
         sender_order=(server client)
       fi
       for sender_role in "${sender_order[@]}"; do
-        if [[ $server_topology == shared && $sender_role != client ]]; then
-          continue
-        fi
         run_pair aggregate "$role_pair" "$client_impl" "$server_impl" \
           "$sender_role" "$outer_run"
       done

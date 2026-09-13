@@ -90,7 +90,7 @@ def summarize(
         ("netz-client+netz-server",)
         if topology == "shared" else ROLE_PAIRS
     )
-    senders = ("client",) if mode == "echo" or topology == "shared" else ("client", "server")
+    senders = ("client",) if mode == "echo" else ("client", "server")
     grouped: dict[tuple[str, str], float] = {}
     output: list[str] = []
     for role_pair in role_pairs:

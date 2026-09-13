@@ -72,7 +72,7 @@ def echo_checksum(rounds: int, payload_bytes: int) -> int:
 
 def require_shape(
     row: dict[str, str], *, implementation: str, record_kind: str,
-    role_pair: str, mode: str, run: int, server_topology: str,
+    role_pair: str, mode: str, sender: str, run: int, server_topology: str,
     shared_receive_batch: int, server_ack_every: int,
     server_ack_delay_us: int,
 ) -> None:
@@ -81,7 +81,10 @@ def require_shape(
         "implementation": implementation,
         "protocol": "quic-stream",
         "mode": mode,
-        "direction": "roundtrip" if mode == "echo" else "upload",
+        "direction": (
+            "roundtrip" if mode == "echo" else
+            "upload" if sender == "client" else "download"
+        ),
         "role_pair": role_pair,
         "run": str(run),
         "connection_scope": (
@@ -139,8 +142,7 @@ def verify(
     if mode == "aggregate" and (warmup != 0 or iterations != 1):
         raise ValueError("invalid aggregate shape")
     if server_topology == "shared" and (
-        mode != "aggregate" or sender != "client"
-        or role_pair != "netz-client+netz-server"
+        mode != "aggregate" or role_pair != "netz-client+netz-server"
     ):
         raise ValueError("invalid shared server topology")
     if server_topology != "shared" and (
@@ -156,7 +158,7 @@ def verify(
     result_impl = client_impl if mode == "echo" or sender == "client" else server_impl
     require_shape(
         result, implementation=result_impl, record_kind="result",
-        role_pair=role_pair, mode=mode, run=run,
+        role_pair=role_pair, mode=mode, sender=sender, run=run,
         server_topology=server_topology,
         shared_receive_batch=shared_receive_batch,
         server_ack_every=server_ack_every,
@@ -164,7 +166,7 @@ def verify(
     )
     require_shape(
         server, implementation=server_impl, record_kind="server",
-        role_pair=role_pair, mode=mode, run=run,
+        role_pair=role_pair, mode=mode, sender=sender, run=run,
         server_topology=server_topology,
         shared_receive_batch=shared_receive_batch,
         server_ack_every=server_ack_every,

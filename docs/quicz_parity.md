@@ -485,6 +485,15 @@ same parent connection after the opposite half closes.
 
 ## Feature parity table
 
+The persistent shared-socket aggregate now exercises both sender roles through
+one server UDP owner. Server-originated transfers reserve unidirectional streams
+without reading the socket and resume every prelude, payload, FIN, and control
+send after pacing, congestion, or flow-control backpressure. Five verified
+16-connection, 16-MiB runs per direction completed at 71.458 MiB/s median for
+the client sender and 84.688 MiB/s for the server sender; their ranges overlap,
+so this closes the bidirectional coverage gap without claiming a directional
+speed advantage.
+
 The sent-packet optimistic-ACK guard now has a validation-only ordered fast
 path: it streams the peer's ranges and proves exact coverage using binary
 packet boundaries plus retired-prefix intersections, while unsorted metadata

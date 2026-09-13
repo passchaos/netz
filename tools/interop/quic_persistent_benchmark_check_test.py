@@ -150,6 +150,30 @@ class PersistentBenchmarkCheckTest(unittest.TestCase):
             for path in (client, server):
                 path.write_text(
                     path.read_text().replace(
+                        "sender_role=client", "sender_role=server",
+                    ).replace(
+                        "direction=upload", "direction=download",
+                    ),
+                    encoding="utf-8",
+                )
+            CHECK.verify(
+                mode="aggregate", role_pair="netz-client+netz-server",
+                run=1, connections=4, warmup=0, iterations=1, streams=4,
+                bytes_per_stream=256, payload_bytes=1024, sender="server",
+                server_topology="shared", client_log=client, server_log=server,
+            )
+            for path in (client, server):
+                path.write_text(
+                    path.read_text().replace(
+                        "sender_role=server", "sender_role=client",
+                    ).replace(
+                        "direction=download", "direction=upload",
+                    ),
+                    encoding="utf-8",
+                )
+            for path in (client, server):
+                path.write_text(
+                    path.read_text().replace(
                         "server_ack_every=2", "server_ack_every=1",
                     ).replace(
                         "server_ack_delay_us=25000", "server_ack_delay_us=0",
