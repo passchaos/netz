@@ -852,6 +852,27 @@ The audited quicz frame decoder allocates `AckRange[range_count]` for every ACK.
 Netz still owns ranges at its generic parser boundary, but its recovery queue no
 longer performs another allocation/copy.
 
+The receive transaction's earlier sent-packet validation-only pass now streams
+wire ACK ranges and proves each range's exact sent coverage with binary
+boundaries plus the compacted acknowledged prefix. It no longer materializes a
+decoded-range array or visits every retained packet merely to reject an
+optimistic ACK; the later apply pass still computes the unchanged ECN, path,
+RTT, congestion, and newly-acknowledged summaries. A fixed-binary, CPU-0, nine-
+pair order-alternated run reduced validation of one cumulative ACK over 4,096
+sent packets from 3,123-3,671 ns/op (3,142 median) to 24-25 ns/op (25 median),
+a 99.2% median reduction or 125.7x throughput improvement, with the candidate
+faster in 9/9 pairs. The benchmark's following recovery phase initially moved
+about 4% because the preceding validation workload became roughly 125x shorter;
+a seven-pair control that measured recovery first instead produced 4,765 ns/cycle
+candidate versus 4,827 ns/cycle baseline medians, and normalized disassembly of
+`Queue.applyAck` was identical. Tests cover allocation failure, generated sparse
+ACKs, never-sent holes, retired-prefix crossings, `u64` range width overflow, and
+the conservative unsorted-metadata fallback. Real TLS 1.3 1-MiB gates then held
+24/120 datagrams under every-fifth reordering with zero transport loss, and
+dropped 6/126 datagrams under seeded 5% loss with six reported transport losses;
+both verified every payload byte. These are internal ACK-validation and
+correctness results, not a cross-library throughput claim.
+
 ### QUIC UDP batch send / receive
 
 ```text

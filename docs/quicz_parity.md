@@ -485,6 +485,18 @@ same parent connection after the opposite half closes.
 
 ## Feature parity table
 
+The sent-packet optimistic-ACK guard now has a validation-only ordered fast
+path: it streams the peer's ranges and proves exact coverage using binary
+packet boundaries plus retired-prefix intersections, while unsorted metadata
+keeps the conservative full precheck. Nine fixed-binary CPU-0 pairs reduced a
+4,096-packet cumulative-ACK check from 3,142 to 25 ns/op median (125.7x), with
+allocation-failure, generated-hole, retired-prefix, overflow, and unsorted
+fallback tests. The later mutation pass remains authoritative for ECN, path,
+RTT, congestion, and newly-ACKed summaries. Fresh 1-MiB real-handshake gates
+also verified every byte under 24/120 reordered datagrams and 6/126 seeded
+drops. This is an internal validation result, not evidence of general or
+equal-wire superiority over quicz.
+
 | Area from `~/Work/quicz` examples | netz status | Evidence | Remaining work |
 | --- | --- | --- | --- |
 | QUIC 1-RTT STREAM echo (`quic_echo_*`, `udp_one_rtt_loopback`) | Covered with local and cross-process latency evidence plus an equal-CPU-layout quic-go throughput harness | `examples/quic_echo.zig`, `examples/bench_quic_handshake_stream.zig`, `bench-quic-quic-go`, and `bench-quic-persistent-external`; CPU-0-pinned local netz P50/P99/P99.9 echo ranges were 10.44-10.57 / 15.22-15.53 / 31.89-47.02 us versus quicz 10.5-10.7 / 16.0-19.5 / 206.3-211.2 us. The certificate-verified two-process persistent 1-KiB echo keeps one request outstanding: five final-schema runs gave netz-client median P50 24.172 us versus quic-go-client 25.851 us against a fixed quic-go server (1.069x), and 23.729 versus 24.361 us against a fixed netz server (1.027x). The fresh-connection throughput harness pins client/server separately, runs both sender roles, and requires exact FIN/bytes/checksum for 1 and 4 unidirectional streams. Complete-connection userspace socket accounting is also available. All external comparisons remain `same-application-shape`. | Socket-boundary evidence proves the current workloads are not equal-wire. Repeat with kernel/interface capture on a permitted host and equalize GRO, ACK/pacing, packetization, and application scheduling before a general STREAM ratio. |

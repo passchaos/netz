@@ -1107,7 +1107,64 @@ pub const SentPacketTracker = struct {
     /// mirrors mature stacks such as quicz/tquic and keeps malicious ACK ranges
     /// from advancing local state.
     pub fn validateAckCoversSentPackets(self: SentPacketTracker, ack: quic.AckFrame) Error!void {
+        if (self.packets.items.len == 0) return error.InvalidAckFrame;
+        if (self.packetsSortedAscending()) {
+            return self.validateAckCoversSortedSentPackets(ack);
+        }
         _ = try self.validateAckForApply(ack, null);
+    }
+
+    /// The validation-only call does not need the ECN/path/newly-acked summary
+    /// produced by `precheckAckRanges`. For ordered metadata, range cardinality
+    /// plus two binary searches proves every acknowledged number was sent,
+    /// including the compacted acknowledged prefix, without visiting each
+    /// packet record or materializing decoded ranges.
+    fn validateAckCoversSortedSentPackets(
+        self: SentPacketTracker,
+        ack: quic.AckFrame,
+    ) Error!void {
+        if (ack.largest_acknowledged < ack.first_ack_range) {
+            return error.InvalidAckFrame;
+        }
+
+        var range_start = ack.largest_acknowledged - ack.first_ack_range;
+        var range_end = ack.largest_acknowledged;
+        if (!self.sentCoverageMatchesRange(range_start, range_end)) {
+            return error.InvalidAckFrame;
+        }
+        for (ack.ranges) |range| {
+            const skipped = std.math.add(u64, range.gap, 2) catch
+                return error.InvalidAckFrame;
+            if (range_start < skipped) return error.InvalidAckFrame;
+            range_end = range_start - skipped;
+            if (range_end < range.ack_range_length) {
+                return error.InvalidAckFrame;
+            }
+            range_start = range_end - range.ack_range_length;
+            if (!self.sentCoverageMatchesRange(range_start, range_end)) {
+                return error.InvalidAckFrame;
+            }
+        }
+    }
+
+    fn sentCoverageMatchesRange(
+        self: SentPacketTracker,
+        range_start: u64,
+        range_end: u64,
+    ) bool {
+        const expected = std.math.add(
+            u64,
+            range_end - range_start,
+            1,
+        ) catch return false;
+        const start_index = self.lowerBoundPacketIndex(range_start);
+        const end_index = self.upperBoundPacketIndex(range_end);
+        const retained: u64 = @intCast(end_index - start_index);
+        const retired = self.retiredIntersectionLen(.{
+            .start = range_start,
+            .end = range_end,
+        });
+        return retained + retired == expected;
     }
 
     pub fn validateAckForApply(
@@ -2873,6 +2930,110 @@ test "QUIC sent packet tracker rejects ACKs before sent metadata" {
     try std.testing.expect(!no_alloc.has_induced_failure);
 }
 
+test "QUIC sent packet tracker validates large ACK sets without allocation" {
+    var failing = std.testing.FailingAllocator.init(
+        std.testing.allocator,
+        .{},
+    );
+    const allocator = failing.allocator();
+    var sent = SentPacketTracker.init(allocator);
+    defer sent.deinit();
+
+    for (0..81) |packet_number| {
+        try sent.sent(@intCast(packet_number), true, 1200);
+    }
+    const ranges = [_]quic.AckRange{.{
+        .gap = 0,
+        .ack_range_length = 0,
+    }} ** 40;
+    const ack = quic.AckFrame{
+        .largest_acknowledged = 80,
+        .ack_delay = 0,
+        .first_ack_range = 0,
+        .ranges = &ranges,
+    };
+
+    failing.fail_index = failing.alloc_index;
+    try sent.validateAckCoversSentPackets(ack);
+    try std.testing.expect(!failing.has_induced_failure);
+}
+
+test "QUIC sent packet tracker streaming validation rejects generated holes" {
+    const allocator = std.testing.allocator;
+    const packet_count = 101;
+
+    for (0..64) |seed| {
+        var sent = SentPacketTracker.init(allocator);
+        defer sent.deinit();
+        var received = ReceivedPacketTracker.init(allocator, packet_count);
+        defer received.deinit();
+
+        for (0..packet_count) |packet_number| {
+            const pn: u64 = @intCast(packet_number);
+            try sent.sent(pn, true, 1200);
+            const selector = (packet_number * 37 + seed * 17) % 11;
+            if (packet_number == packet_count - 1 or
+                selector < seed % 7 + 1)
+            {
+                try received.record(pn);
+            }
+        }
+
+        var range_storage: [packet_count]quic.AckRange = undefined;
+        const ack = try received.ackFrameInto(&range_storage, 0);
+        try sent.validateAckCoversSentPackets(ack);
+
+        // The largest packet is always present in the generated ACK. Removing
+        // it leaves metadata sorted but must make validation fail.
+        try std.testing.expect(sent.forget(packet_count - 1));
+        try std.testing.expectError(
+            error.InvalidAckFrame,
+            sent.validateAckCoversSentPackets(ack),
+        );
+    }
+}
+
+test "QUIC sent packet tracker streaming validation spans retired metadata" {
+    const allocator = std.testing.allocator;
+    var sent = SentPacketTracker.init(allocator);
+    defer sent.deinit();
+
+    const count = SentPacketTracker.compact_acknowledged_threshold + 44;
+    for (0..count) |packet_number| {
+        try sent.sent(@intCast(packet_number), true, 1200);
+    }
+    _ = try sent.applyAckDetailed(.{
+        .largest_acknowledged = SentPacketTracker.compact_acknowledged_threshold - 1,
+        .ack_delay = 0,
+        .first_ack_range = SentPacketTracker.compact_acknowledged_threshold - 1,
+    });
+    try std.testing.expectEqual(
+        @as(?u64, SentPacketTracker.compact_acknowledged_threshold - 1),
+        sent.retired_acknowledged_through,
+    );
+
+    const crossing = quic.AckFrame{
+        .largest_acknowledged = count - 1,
+        .ack_delay = 0,
+        .first_ack_range = 49,
+    };
+    try sent.validateAckCoversSentPackets(crossing);
+
+    try std.testing.expect(sent.forget(280));
+    try std.testing.expectError(
+        error.InvalidAckFrame,
+        sent.validateAckCoversSentPackets(crossing),
+    );
+    try std.testing.expectError(
+        error.InvalidAckFrame,
+        sent.validateAckCoversSentPackets(.{
+            .largest_acknowledged = std.math.maxInt(u64),
+            .ack_delay = 0,
+            .first_ack_range = std.math.maxInt(u64),
+        }),
+    );
+}
+
 test "QUIC sent packet tracker applies ACK ranges" {
     const allocator = std.testing.allocator;
     var sent = SentPacketTracker.init(allocator);
@@ -3158,6 +3319,15 @@ test "QUIC sent packet tracker falls back for unsorted packet metadata" {
         .ack_delay = 0,
         .first_ack_range = 2,
     };
+    try sent.validateAckCoversSentPackets(ack);
+    try std.testing.expectError(
+        error.InvalidAckFrame,
+        sent.validateAckCoversSentPackets(.{
+            .largest_acknowledged = 3,
+            .ack_delay = 0,
+            .first_ack_range = 3,
+        }),
+    );
     const result = try sent.applyAckDetailed(ack);
     try std.testing.expectEqual(@as(usize, 3), result.packets);
     try std.testing.expectEqual(@as(usize, 600), result.bytes);
