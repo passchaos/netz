@@ -6606,6 +6606,20 @@ test "public modules are reachable" {
     try std.testing.expect(@hasField(netz.quic.connection_router.Route, "active_migration_disabled"));
     try std.testing.expect(@hasDecl(netz.quic.connection_router.Router, "routeDatagramFrom"));
     try std.testing.expect(@hasDecl(netz.quic, "endpoint_dispatcher"));
+    try std.testing.expect(@hasDecl(netz.quic, "endpoint_server"));
+    try std.testing.expect(@hasDecl(netz.quic.endpoint_server, "Server"));
+    try std.testing.expect(@hasDecl(
+        netz.quic.endpoint_server.Server,
+        "receiveWithDeadline",
+    ));
+    try std.testing.expect(@hasDecl(
+        netz.quic.endpoint_server.Server,
+        "pollStreamId",
+    ));
+    try std.testing.expect(@hasDecl(
+        netz.quic.endpoint_server.Server,
+        "trySend",
+    ));
     try std.testing.expect(@hasDecl(
         netz.quic.endpoint_dispatcher,
         "Dispatcher",

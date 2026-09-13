@@ -19,6 +19,7 @@ pub const recovery = @import("recovery.zig");
 pub const connection_router = @import("connection_router.zig");
 pub const endpoint_timers = @import("endpoint_timers.zig");
 pub const endpoint_dispatcher = @import("endpoint_dispatcher.zig");
+pub const endpoint_server = @import("endpoint_server.zig");
 pub const handshake_inbox = @import("handshake_inbox.zig");
 pub const connection_id = @import("connection_id.zig");
 pub const stateless_reset = @import("stateless_reset.zig");
