@@ -982,12 +982,12 @@ pub const Dispatcher = struct {
     /// If processing fails after an earlier callback succeeded, transport and
     /// callback side effects remain committed, while every owning event built
     /// for this batch is released before the error is returned.
-    pub fn receiveManyVisitingWithDeadline(
+    pub fn receiveManyVisitingTimeout(
         self: *Dispatcher,
         supported_versions: []const u32,
         storage: []u8,
         output: []VisitEvent,
-        deadline: std.Io.Clock.Timestamp,
+        timeout: std.Io.Timeout,
         context: anytype,
         comptime visitor: anytype,
     ) (ReceiveError || callbackErrorSet(visitor))!usize {
@@ -1000,7 +1000,29 @@ pub const Dispatcher = struct {
             supported_versions,
             storage,
             output,
-            try deadline_policy.usableAwake(self.endpoint.io, deadline),
+            timeout.toTimestamp(self.endpoint.io),
+            context,
+            visitor,
+        );
+    }
+
+    pub fn receiveManyVisitingWithDeadline(
+        self: *Dispatcher,
+        supported_versions: []const u32,
+        storage: []u8,
+        output: []VisitEvent,
+        deadline: std.Io.Clock.Timestamp,
+        context: anytype,
+        comptime visitor: anytype,
+    ) (ReceiveError || callbackErrorSet(visitor))!usize {
+        return self.receiveManyVisitingTimeout(
+            supported_versions,
+            storage,
+            output,
+            .{ .deadline = try deadline_policy.usableAwake(
+                self.endpoint.io,
+                deadline,
+            ) },
             context,
             visitor,
         );
@@ -1011,7 +1033,7 @@ pub const Dispatcher = struct {
         supported_versions: []const u32,
         storage: []u8,
         output: []VisitEvent,
-        caller_deadline: std.Io.Clock.Timestamp,
+        caller_deadline: ?std.Io.Clock.Timestamp,
         context: anytype,
         comptime visitor: anytype,
     ) (ReceiveError || callbackErrorSet(visitor))!usize {
@@ -1050,8 +1072,10 @@ pub const Dispatcher = struct {
                 receive_timeout,
             ) catch |err| switch (err) {
                 error.Timeout => {
-                    if (caller_deadline.durationFromNow(self.endpoint.io)
-                        .raw.nanoseconds <= 0) return error.Timeout;
+                    if (caller_deadline) |deadline| {
+                        if (deadline.durationFromNow(self.endpoint.io)
+                            .raw.nanoseconds <= 0) return error.Timeout;
+                    }
                     continue;
                 },
                 else => |other| return other,

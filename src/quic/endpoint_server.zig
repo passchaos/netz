@@ -609,11 +609,11 @@ pub const Server = struct {
             var adapter = Adapter{ .server = self, .context = context };
             var dispatcher_events: [quic.runtime.max_receive_batch_messages]quic.endpoint_dispatcher.VisitEvent = undefined;
             const dispatcher_count = self.dispatcher
-                .receiveManyVisitingWithDeadline(
+                .receiveManyVisitingTimeout(
                 supported_versions,
                 storage,
                 dispatcher_events[0..output.len],
-                poll_deadline,
+                .{ .deadline = poll_deadline },
                 &adapter,
                 Adapter.visit,
             ) catch |err| switch (err) {
@@ -718,10 +718,10 @@ pub const Server = struct {
                 }
             };
             var adapter = Adapter{ .server = self, .context = context };
-            var event = self.dispatcher.receiveVisitingWithDeadline(
+            var event = self.dispatcher.receiveVisitingTimeout(
                 supported_versions,
                 storage,
-                poll_deadline,
+                .{ .deadline = poll_deadline },
                 &adapter,
                 Adapter.visit,
             ) catch |err| switch (err) {

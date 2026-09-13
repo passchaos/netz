@@ -2100,6 +2100,17 @@ test "QUIC endpoint dispatcher validates caller-owned deadlines" {
     var batch_events: [2]dispatcher_mod.VisitEvent = undefined;
     try std.testing.expectError(
         error.Timeout,
+        dispatcher.receiveManyVisitingTimeout(
+            versions,
+            &batch_storage,
+            &batch_events,
+            .{ .duration = .{ .clock = .awake, .raw = .zero } },
+            {},
+            Visitor.visit,
+        ),
+    );
+    try std.testing.expectError(
+        error.Timeout,
         dispatcher.receiveManyVisitingWithDeadline(
             versions,
             &batch_storage,

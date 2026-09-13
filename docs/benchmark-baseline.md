@@ -2419,6 +2419,18 @@ ranges overlap, so this is supporting regression evidence rather than a broad
 throughput claim; focused tests separately cover both zero and nonzero worker
 states and real concurrent handshakes.
 
+The batch dispatcher now also accepts an already-composed std.Io.Timeout. The
+server validates the public caller deadline once, applies any active handshake
+cap, and passes that absolute timestamp through without a second awake-clock
+validation/read in the dispatcher. Public deadline entry points still reject
+expired or cross-clock timestamps, and the timeout entry point also supports
+the unbounded form used by lower-level event loops. Five order-interleaved
+16-connection, 16-MiB comparisons against commit 8035e52b measured
+63.805-87.090 MiB/s (74.840 median) after this change and
+64.986-78.193 MiB/s (70.608 median) before it, a 6.0% median increase. The
+ranges overlap, so the result supports removing duplicate per-batch work but
+is not treated as an independent throughput claim.
+
 Endpoint CID mirroring now carries a monotonic revision on the fixed-size local
 CID pool. Initial registration, successful NEW_CONNECTION_ID issuance, and an
 actual RETIRE_CONNECTION_ID advance it; repeated retirement and failed
