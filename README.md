@@ -492,7 +492,9 @@ starts with deterministic parsers, serializers, preallocated fixed-width wire-in
   indexed single-lookup endpoint-level timer scheduler with exact-update and
   monotonic-earliest skips, empty-index and no-op service skips, plus
   unarmed-connection service short-circuits for
-  multi-connection loops, and
+  multi-connection loops, and a pointer-only handshake completion queue that
+  constructs established connections in their final stable allocation instead
+  of copying multi-kilobyte state through the shared endpoint, and
   peer-address validation hooks with RFC 9000 3x anti-amplification send
   budget enforcement for unvalidated server paths,
   1-RTT key-update derivation and key-phase state with ACK gating and retained

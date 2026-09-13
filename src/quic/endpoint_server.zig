@@ -93,6 +93,7 @@ const Admission = struct {
     dispatcher: *quic.endpoint_dispatcher.Dispatcher,
     handle: quic.endpoint_dispatcher.PendingHandshakeHandle,
     inbox: *quic.handshake_inbox.Inbox,
+    connection: *quic.handshake.EstablishedConnection,
     initial: quic.runtime.OwnedBytes,
     server_connection_id: [
         quic.endpoint_dispatcher.default_server_connection_id_len
@@ -100,6 +101,8 @@ const Admission = struct {
     deadline_ns: u64,
     registered: bool = true,
     initial_owned: bool = true,
+    connection_initialized: bool = false,
+    connection_owned: bool = true,
 
     fn source(self: *Admission) quic.runtime.DatagramSource {
         return self.inbox.datagramSource();
@@ -121,6 +124,15 @@ const Admission = struct {
         return self.initial;
     }
 
+    fn takeConnection(
+        self: *Admission,
+    ) *quic.handshake.EstablishedConnection {
+        std.debug.assert(self.connection_initialized);
+        std.debug.assert(self.connection_owned);
+        self.connection_owned = false;
+        return self.connection;
+    }
+
     fn deinit(self: *Admission) void {
         const allocator = self.inbox.allocator;
         if (self.registered) {
@@ -129,6 +141,10 @@ const Admission = struct {
             ) catch false;
         }
         if (self.initial_owned) self.initial.deinit(allocator);
+        if (self.connection_owned) {
+            if (self.connection_initialized) self.connection.deinit();
+            allocator.destroy(self.connection);
+        }
         self.inbox.deinit();
         allocator.destroy(self.inbox);
         self.* = undefined;
@@ -139,21 +155,25 @@ const Completion = struct {
     handle: quic.endpoint_dispatcher.ConnectionHandle,
     admission: *Admission,
     result: union(enum) {
-        connection: quic.handshake.EstablishedConnection,
+        success,
         failure: WorkerError,
     },
 
     fn deinit(self: *Completion) void {
         const allocator = self.admission.inbox.allocator;
-        switch (self.result) {
-            .connection => |*connection| connection.deinit(),
-            .failure => {},
-        }
         self.admission.deinit();
         allocator.destroy(self.admission);
         self.* = undefined;
     }
 };
+
+comptime {
+    // The bounded completion queue is sized by max_pending_handshakes. Keep
+    // established connection state behind its final stable pointer so every
+    // queue slot remains fixed-size metadata rather than a multi-kilobyte
+    // connection value.
+    std.debug.assert(@sizeOf(Completion) <= 4 * @sizeOf(usize));
+}
 
 const WorkerContext = struct {
     endpoint: *quic.runtime.Endpoint,
@@ -816,10 +836,20 @@ pub const Server = struct {
             self.allocator.destroy(inbox);
             return err;
         };
+        const connection_storage = self.allocator.create(
+            quic.handshake.EstablishedConnection,
+        ) catch |err| {
+            self.allocator.destroy(admission);
+            _ = self.dispatcher.unregisterPendingHandshake(handle) catch false;
+            inbox.deinit();
+            self.allocator.destroy(inbox);
+            return err;
+        };
         admission.* = .{
             .dispatcher = self.dispatcher,
             .handle = handle,
             .inbox = inbox,
+            .connection = connection_storage,
             .initial = event.takeNewInitial().?,
             .server_connection_id = undefined,
             .deadline_ns = handshakeDeadlineNs(
@@ -832,7 +862,10 @@ pub const Server = struct {
             &admission.server_connection_id,
             inbox.connectionIds()[1].slice(),
         );
-        errdefer admission.deinit();
+        errdefer {
+            admission.deinit();
+            self.allocator.destroy(admission);
+        }
         self.admissions_mutex.lockUncancelable(self.endpoint.io);
         self.admissions.put(
             self.allocator,
@@ -871,13 +904,9 @@ pub const Server = struct {
                     .err = err,
                 } };
             },
-            .connection => |established| {
+            .success => {
                 try self.connections.ensureUnusedCapacity(self.allocator, 1);
-                const owned = try self.allocator.create(
-                    quic.handshake.EstablishedConnection,
-                );
-                owned.* = established;
-                completion.result = .{ .failure = error.HandshakeReceiveFailed };
+                const owned = completion.admission.takeConnection();
                 errdefer {
                     owned.deinit();
                     self.allocator.destroy(owned);
@@ -972,14 +1001,17 @@ fn runWorker(
     var options = context.options;
     options.local_connection_id = &admission.server_connection_id;
     const result: @FieldType(Completion, "result") = blk: {
-        const established = quic.handshake.acceptFromInitialSourceWithDeadline(
+        admission.connection.* = quic.handshake.acceptFromInitialSourceWithDeadline(
             context.endpoint,
             admission.source(),
             admission.takeInitial(),
             options,
             admission.deadline(),
-        ) catch |err| break :blk .{ .failure = err };
-        break :blk .{ .connection = established };
+        ) catch |err| {
+            break :blk .{ .failure = err };
+        };
+        admission.connection_initialized = true;
+        break :blk .success;
     };
     context.completed.putOneUncancelable(context.io, .{
         .handle = admission.handle,

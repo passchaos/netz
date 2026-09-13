@@ -2384,6 +2384,28 @@ smokes verified 8 MiB over eight connections at 92.107 MiB/s median and 16 MiB
 over sixteen connections at 78.435 MiB/s median, with exact byte, checksum,
 connection-completion, and DONE/DONE_ACK validation in every run.
 
+Profiling the 16-connection shared server exposed another scaling cost in its
+handshake-completion channel. The queue previously stored the roughly 9-KiB
+EstablishedConnection inline, reserving about 1.1 MiB for the default 128
+pending handshakes and copying the value through worker, queue, poll, and final
+stable allocation. GDB samples during steady-state receive repeatedly stopped
+in a 9,064-byte completion temporary clear, and ReleaseFast disassembly showed
+about a 41.6-KiB stack frame for the batch receive wrapper. The endpoint owner
+now preallocates the final stable connection, the worker constructs directly
+into it, and the completion queue transfers only a success/failure tag through
+a record statically capped at four machine words. The receive wrapper stack
+fell to about 24.5 KiB, while the default completion queue's element storage
+is capped at 4 KiB. The final connection allocation count is unchanged.
+
+Five order-interleaved 16-connection, 16-MiB total uploads measured
+71.515-85.421 MiB/s (79.110 median) with the pointer queue and
+70.240-85.514 MiB/s (77.489 median) with the inline queue. The 2.1% higher
+candidate median and overlapping ranges do not establish a throughput gain;
+the change is retained for the approximately 280x bounded queue-memory
+reduction and smaller hot receive stack, not presented as a throughput win.
+Every run verified 16,777,216 bytes, checksum 2,139,095,040, all 16
+connections, and the completion exchange.
+
 Endpoint CID mirroring now carries a monotonic revision on the fixed-size local
 CID pool. Initial registration, successful NEW_CONNECTION_ID issuance, and an
 actual RETIRE_CONNECTION_ID advance it; repeated retirement and failed
