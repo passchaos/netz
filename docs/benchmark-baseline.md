@@ -2335,6 +2335,26 @@ smokes covered four connections with four 256-KiB streams each (4 MiB total)
 and eight connections with one 256-KiB stream each (2 MiB total), including
 exact FIN, byte, checksum, and DONE/DONE_ACK validation.
 
+The shared endpoint now also exposes caller-buffer `receiveVisiting*` APIs. For
+an established non-GRO connection on the current key phase, the dispatcher
+routes and decrypts in place, applies transport frames through retained frame
+scratch, and exposes borrowed packet/frame views only for the duration of the
+callback. Unknown-CID and handshake traffic keeps the owning path, and key
+updates keep the safe allocating fallback because an in-place failed-key trial
+cannot preserve ciphertext for another generation. The endpoint server adapter
+applies negotiated ACK policy after a successful callback. A failing-allocator
+real-UDP test covers warmed established packets, including a rotated one-byte
+CID; separate tests cover callback error propagation and the key-update
+fallback.
+
+A same-host, same-command three-sample A/B against commit `17109fda` measured
+the caller-buffer shared server at 64.455-79.452 MiB/s (69.691 median) versus
+the owning baseline at 51.322-64.565 MiB/s (64.454 median), an 8.1% median
+increase. Every arm independently verified 4,194,304 bytes, checksum
+534,773,760, four completed connections, and the completion exchange. The
+ranges overlap and only three samples were collected, so this is a regression
+sample supporting the allocation-path change, not a general throughput claim.
+
 ### Raw QUIC mixed FIN/reset recovery versus quic-go
 
 The separate process gate below exercises terminal stream churn instead of

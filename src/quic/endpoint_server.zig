@@ -56,6 +56,39 @@ pub const Event = union(enum) {
     }
 };
 
+pub const VisitEvent = union(enum) {
+    connected: quic.endpoint_dispatcher.ConnectionHandle,
+    packet: struct {
+        connection_handle: quic.endpoint_dispatcher.ConnectionHandle,
+        connection_id_sequence: u64,
+    },
+    timer: quic.endpoint_dispatcher.TimerEvent,
+    handshake_failed: HandshakeFailure,
+    unrouted: quic.endpoint_dispatcher.Event,
+
+    pub fn deinit(self: *VisitEvent, allocator: std.mem.Allocator) void {
+        switch (self.*) {
+            .unrouted => |*event| event.deinit(allocator),
+            .connected, .packet, .timer, .handshake_failed => {},
+        }
+        self.* = undefined;
+    }
+};
+
+fn callbackErrorSet(comptime callback: anytype) type {
+    const callback_type = switch (@typeInfo(@TypeOf(callback))) {
+        .@"fn" => @TypeOf(callback),
+        .pointer => |pointer| pointer.child,
+        else => @compileError("packet visitor must be a function"),
+    };
+    const return_type = @typeInfo(callback_type).@"fn".return_type orelse
+        @compileError("packet visitor must have an explicit return type");
+    return switch (@typeInfo(return_type)) {
+        .error_union => |error_union| error_union.error_set,
+        else => @compileError("packet visitor must return an error union"),
+    };
+}
+
 const Admission = struct {
     dispatcher: *quic.endpoint_dispatcher.Dispatcher,
     handle: quic.endpoint_dispatcher.PendingHandshakeHandle,
@@ -420,6 +453,158 @@ pub const Server = struct {
         }
     }
 
+    /// Receive and apply an established packet in caller-owned storage. The
+    /// borrowed packet/frame view is valid only during `visitor`; after a
+    /// successful callback the negotiated ACK policy is applied before the
+    /// aggregate timer is refreshed. Unknown and handshake datagrams retain
+    /// owning event variants because they can outlive this call.
+    pub fn receiveVisiting(
+        self: *Server,
+        supported_versions: []const u32,
+        storage: []u8,
+        context: anytype,
+        comptime visitor: anytype,
+    ) (Error || callbackErrorSet(visitor))!VisitEvent {
+        while (true) {
+            if (try self.receiveVisitingOnce(
+                supported_versions,
+                storage,
+                self.options.handshake_poll_interval,
+                context,
+                visitor,
+            )) |event| return event;
+        }
+    }
+
+    pub fn receiveVisitingOnce(
+        self: *Server,
+        supported_versions: []const u32,
+        storage: []u8,
+        poll_interval: std.Io.Duration,
+        context: anytype,
+        comptime visitor: anytype,
+    ) (Error || callbackErrorSet(visitor))!?VisitEvent {
+        if (poll_interval.nanoseconds <= 0) return error.Timeout;
+        const deadline = .fromNow(self.endpoint.io, .{
+            .raw = poll_interval,
+            .clock = .awake,
+        });
+        return self.receiveVisitingUntil(
+            supported_versions,
+            storage,
+            deadline,
+            context,
+            visitor,
+        ) catch |err| switch (err) {
+            error.Timeout => null,
+            else => |other| return other,
+        };
+    }
+
+    pub fn receiveVisitingWithDeadline(
+        self: *Server,
+        supported_versions: []const u32,
+        storage: []u8,
+        deadline: std.Io.Clock.Timestamp,
+        context: anytype,
+        comptime visitor: anytype,
+    ) (Error || callbackErrorSet(visitor))!VisitEvent {
+        const absolute = try deadline_policy.usableAwake(
+            self.endpoint.io,
+            deadline,
+        );
+        return self.receiveVisitingUntil(
+            supported_versions,
+            storage,
+            absolute,
+            context,
+            visitor,
+        );
+    }
+
+    fn receiveVisitingUntil(
+        self: *Server,
+        supported_versions: []const u32,
+        storage: []u8,
+        absolute: std.Io.Clock.Timestamp,
+        context: anytype,
+        comptime visitor: anytype,
+    ) (Error || callbackErrorSet(visitor))!VisitEvent {
+        while (true) {
+            if (self.pollCompletion()) |completion_value| {
+                var completion = completion_value;
+                const event = try self.finishCompletion(&completion);
+                return eventToVisit(event);
+            }
+            _ = self.expireHandshakes(monotonicNowNs(self.endpoint.io));
+            const poll_deadline = deadline_policy.earlier(
+                absolute,
+                .fromNow(self.endpoint.io, .{
+                    .raw = self.options.handshake_poll_interval,
+                    .clock = .awake,
+                }),
+            ).?;
+            const Adapter = struct {
+                server: *Server,
+                context: @TypeOf(context),
+
+                fn visit(
+                    adapter: *@This(),
+                    packet: quic.endpoint_dispatcher.RoutedPacketView,
+                ) (Error || callbackErrorSet(visitor))!void {
+                    try visitor(adapter.context, packet);
+                    const established = adapter.server.connection(
+                        packet.connection_handle,
+                    ) orelse return error.UnknownConnectionHandle;
+                    _ = try established.connection.sendAckForPacketIfNeeded(
+                        packet.packet.packet_number,
+                        packet.packet.frames,
+                    );
+                }
+            };
+            var adapter = Adapter{ .server = self, .context = context };
+            var event = self.dispatcher.receiveVisitingWithDeadline(
+                supported_versions,
+                storage,
+                poll_deadline,
+                &adapter,
+                Adapter.visit,
+            ) catch |err| switch (err) {
+                error.Timeout => {
+                    if (absolute.durationFromNow(self.endpoint.io)
+                        .raw.nanoseconds <= 0) return error.Timeout;
+                    continue;
+                },
+                else => |other| return other,
+            };
+            switch (event) {
+                .new_initial => {
+                    const owned = visitEventToEvent(&event);
+                    var admission = owned;
+                    defer admission.deinit(self.allocator);
+                    self.admit(&admission) catch |err| switch (err) {
+                        error.PendingHandshakeLimitReached => {
+                            const rejected = admission;
+                            admission = .consumed;
+                            return .{ .unrouted = rejected };
+                        },
+                        else => |other| return other,
+                    };
+                },
+                .packet => |packet| return .{ .packet = .{
+                    .connection_handle = packet.connection_handle,
+                    .connection_id_sequence = packet.connection_id_sequence,
+                } },
+                .timer => |timer| return .{ .timer = timer },
+                .unrouted => {
+                    const owned = visitEventToEvent(&event);
+                    return .{ .unrouted = owned };
+                },
+                .consumed, .pending_handshake, .discarded_long_header => {},
+            }
+        }
+    }
+
     fn receiveUntil(
         self: *Server,
         supported_versions: []const u32,
@@ -630,6 +815,30 @@ pub const Server = struct {
         return handle;
     }
 };
+
+fn eventToVisit(event: Event) VisitEvent {
+    return switch (event) {
+        .connected => |handle| .{ .connected = handle },
+        .packet => unreachable,
+        .timer => |timer| .{ .timer = timer },
+        .handshake_failed => |failure| .{ .handshake_failed = failure },
+        .unrouted => |unrouted| .{ .unrouted = unrouted },
+    };
+}
+
+fn visitEventToEvent(event: *quic.endpoint_dispatcher.VisitEvent) quic.endpoint_dispatcher.Event {
+    return switch (event.*) {
+        .new_initial => |initial| blk: {
+            event.* = .consumed;
+            break :blk .{ .new_initial = initial };
+        },
+        .unrouted => |unrouted| blk: {
+            event.* = .consumed;
+            break :blk .{ .unrouted = unrouted };
+        },
+        else => unreachable,
+    };
+}
 
 fn runWorker(
     context: *WorkerContext,

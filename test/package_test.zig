@@ -6614,6 +6614,18 @@ test "public modules are reachable" {
     ));
     try std.testing.expect(@hasDecl(
         netz.quic.endpoint_server.Server,
+        "receiveVisiting",
+    ));
+    try std.testing.expect(@hasDecl(
+        netz.quic.endpoint_server.Server,
+        "receiveVisitingOnce",
+    ));
+    try std.testing.expect(@hasDecl(
+        netz.quic.endpoint_server.Server,
+        "receiveVisitingWithDeadline",
+    ));
+    try std.testing.expect(@hasDecl(
+        netz.quic.endpoint_server.Server,
         "pollStreamId",
     ));
     try std.testing.expect(@hasDecl(
@@ -6731,6 +6743,26 @@ test "public modules are reachable" {
     try std.testing.expect(@hasDecl(
         netz.quic.endpoint_dispatcher.Dispatcher,
         "receiveWithDeadline",
+    ));
+    try std.testing.expect(@hasDecl(
+        netz.quic.endpoint_dispatcher.Dispatcher,
+        "receiveVisiting",
+    ));
+    try std.testing.expect(@hasDecl(
+        netz.quic.endpoint_dispatcher.Dispatcher,
+        "receiveVisitingTimeout",
+    ));
+    try std.testing.expect(@hasDecl(
+        netz.quic.endpoint_dispatcher.Dispatcher,
+        "receiveVisitingWithDeadline",
+    ));
+    try std.testing.expect(@hasDecl(
+        netz.quic.one_rtt.Connection,
+        "visitRoutedDatagramAt",
+    ));
+    try std.testing.expect(@hasDecl(
+        netz.quic.runtime,
+        "RoutedBytesView",
     ));
     try std.testing.expect(@hasDecl(
         netz.quic.one_rtt.Connection,

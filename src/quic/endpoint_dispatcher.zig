@@ -63,6 +63,53 @@ pub const RoutedPacket = struct {
     packet: one_rtt.ReceivedPacket,
 };
 
+pub const RoutedPacketView = struct {
+    connection_handle: ConnectionHandle,
+    connection_id_sequence: u64,
+    packet: one_rtt.ReceivedPacketView,
+};
+
+pub const VisitEvent = union(enum) {
+    consumed,
+    packet: struct {
+        connection_handle: ConnectionHandle,
+        connection_id_sequence: u64,
+    },
+    timer: TimerEvent,
+    discarded_long_header: ConnectionHandle,
+    pending_handshake: PendingHandshakeHandle,
+    new_initial: InitialDatagram,
+    unrouted: UnroutedDatagram,
+
+    pub fn deinit(self: *VisitEvent, allocator: std.mem.Allocator) void {
+        switch (self.*) {
+            .new_initial => |*event| event.datagram.deinit(allocator),
+            .unrouted => |*event| event.datagram.deinit(allocator),
+            .consumed,
+            .packet,
+            .timer,
+            .discarded_long_header,
+            .pending_handshake,
+            => {},
+        }
+        self.* = undefined;
+    }
+};
+
+fn callbackErrorSet(comptime callback: anytype) type {
+    const callback_type = switch (@typeInfo(@TypeOf(callback))) {
+        .@"fn" => @TypeOf(callback),
+        .pointer => |pointer| pointer.child,
+        else => @compileError("packet visitor must be a function"),
+    };
+    const return_type = @typeInfo(callback_type).@"fn".return_type orelse
+        @compileError("packet visitor must have an explicit return type");
+    return switch (@typeInfo(return_type)) {
+        .error_union => |error_union| error_union.error_set,
+        else => @compileError("packet visitor must return an error union"),
+    };
+}
+
 pub const TimerEvent = struct {
     connection_handle: ConnectionHandle,
     timer: one_rtt.TimerDeadline,
@@ -676,6 +723,9 @@ pub const Dispatcher = struct {
         var packet = (try entry.connection.receivePendingPacket()) orelse
             return null;
         errdefer packet.deinit(self.allocator);
+        _ = try entry.connection.retransmitPacketThresholdLosses(
+            one_rtt.max_batch_packets,
+        );
         try self.syncConnectionIds(handle);
         try self.timers.armFromConnection(handle, entry.connection);
         return .{
@@ -695,6 +745,10 @@ pub const Dispatcher = struct {
                 const handle = entry.key_ptr.*;
                 var owned = packet;
                 errdefer owned.deinit(self.allocator);
+                _ = try entry.value_ptr.connection
+                    .retransmitPacketThresholdLosses(
+                    one_rtt.max_batch_packets,
+                );
                 try self.syncConnectionIds(handle);
                 try self.timers.armFromConnection(
                     handle,
@@ -816,6 +870,311 @@ pub const Dispatcher = struct {
             supported_versions,
             try deadline_policy.usableAwake(self.endpoint.io, deadline),
         );
+    }
+
+    /// Allocation-free established-packet receive for non-GRO endpoint loops.
+    /// Packet/frame views are valid only during `visitor`. Handshake and
+    /// unrouted datagrams retain the owning `VisitEvent` variants required for
+    /// admission or diagnostics.
+    pub fn receiveVisiting(
+        self: *Dispatcher,
+        supported_versions: []const u32,
+        storage: []u8,
+        context: anytype,
+        comptime visitor: anytype,
+    ) (ReceiveError || callbackErrorSet(visitor))!VisitEvent {
+        return self.receiveVisitingUntil(
+            supported_versions,
+            storage,
+            null,
+            context,
+            visitor,
+        );
+    }
+
+    pub fn receiveVisitingTimeout(
+        self: *Dispatcher,
+        supported_versions: []const u32,
+        storage: []u8,
+        timeout: std.Io.Timeout,
+        context: anytype,
+        comptime visitor: anytype,
+    ) (ReceiveError || callbackErrorSet(visitor))!VisitEvent {
+        return self.receiveVisitingUntil(
+            supported_versions,
+            storage,
+            timeout.toTimestamp(self.endpoint.io),
+            context,
+            visitor,
+        );
+    }
+
+    pub fn receiveVisitingWithDeadline(
+        self: *Dispatcher,
+        supported_versions: []const u32,
+        storage: []u8,
+        deadline: std.Io.Clock.Timestamp,
+        context: anytype,
+        comptime visitor: anytype,
+    ) (ReceiveError || callbackErrorSet(visitor))!VisitEvent {
+        return self.receiveVisitingUntil(
+            supported_versions,
+            storage,
+            try deadline_policy.usableAwake(self.endpoint.io, deadline),
+            context,
+            visitor,
+        );
+    }
+
+    fn receiveVisitingUntil(
+        self: *Dispatcher,
+        supported_versions: []const u32,
+        storage: []u8,
+        caller_deadline: ?std.Io.Clock.Timestamp,
+        context: anytype,
+        comptime visitor: anytype,
+    ) (ReceiveError || callbackErrorSet(visitor))!VisitEvent {
+        while (true) {
+            if (self.promoted_datagrams.items.len != 0) {
+                // Promotion-only buffered packets are rare and already owned;
+                // preserve their existing path and lifetime guarantees.
+                return self.visitOwnedEvent(
+                    try self.dispatch(self.promoted_datagrams.orderedRemove(0)),
+                    context,
+                    visitor,
+                );
+            }
+            if (try self.pollPendingPacket()) |packet| {
+                return self.visitOwnedEvent(
+                    .{ .packet = packet },
+                    context,
+                    visitor,
+                );
+            }
+            if (try self.serviceDueTimer()) |timer| {
+                return .{ .timer = timer };
+            }
+            const receive_timeout = earliestReceiveTimeout(
+                self.endpoint.io,
+                self.timers.earliestDeadline(),
+                caller_deadline,
+            );
+            const datagram = if (receive_timeout == .none)
+                try self.endpoint.receiveBytesInto(storage)
+            else
+                self.endpoint.receiveBytesIntoTimeout(
+                    storage,
+                    receive_timeout,
+                ) catch |err| switch (err) {
+                    error.Timeout => {
+                        if (caller_deadline) |deadline| {
+                            if (deadline.durationFromNow(self.endpoint.io)
+                                .raw.nanoseconds <= 0) return error.Timeout;
+                        }
+                        continue;
+                    },
+                    // Blocking here would starve an active transport or
+                    // caller deadline on backends without timed net waits.
+                    error.ConcurrencyUnavailable => return error.ConcurrencyUnavailable,
+                    else => |other| return other,
+                };
+            if (try self.endpoint.sendVersionNegotiationIfUnsupported(
+                datagram.from,
+                datagram.bytes,
+                supported_versions,
+            )) continue;
+            const event = try self.dispatchVisiting(
+                datagram,
+                context,
+                visitor,
+            );
+            if (event == .discarded_long_header) continue;
+            return event;
+        }
+    }
+
+    fn dispatchVisiting(
+        self: *Dispatcher,
+        datagram: runtime.ReceivedBytesView,
+        context: anytype,
+        comptime visitor: anytype,
+    ) (Error || callbackErrorSet(visitor))!VisitEvent {
+        if (datagram.bytes.len != 0) {
+            const pending = self.pending_router.routeDatagramFrom(
+                datagram.from,
+                datagram.bytes,
+            ) catch |err| switch (err) {
+                error.InvalidPacket, error.InvalidConnectionId => null,
+                else => |other| return other,
+            };
+            if (pending) |_| {
+                return self.eventFromOwned(
+                    try self.copyView(datagram),
+                    context,
+                    visitor,
+                );
+            }
+        }
+        const routed = self.router.routeDatagramFrom(
+            datagram.from,
+            datagram.bytes,
+        ) catch |err| switch (err) {
+            error.InvalidPacket, error.InvalidConnectionId => return self.eventFromOwned(
+                try self.copyView(datagram),
+                context,
+                visitor,
+            ),
+            else => |other| return other,
+        } orelse return self.eventFromOwned(
+            try self.copyView(datagram),
+            context,
+            visitor,
+        );
+        const entry = self.connections.getPtr(
+            routed.route.connection_index,
+        ) orelse return error.StaleConnectionRoute;
+        if ((datagram.bytes[0] & 0x80) != 0) {
+            return .{ .discarded_long_header = routed.route.connection_index };
+        }
+        const Adapter = struct {
+            connection: *one_rtt.Connection,
+            context: @TypeOf(context),
+            handle: ConnectionHandle,
+            sequence: u64,
+            entered: bool = false,
+
+            fn visit(
+                adapter: *@This(),
+                packet: one_rtt.ReceivedPacketView,
+            ) (Error || callbackErrorSet(visitor))!void {
+                adapter.entered = true;
+                _ = try adapter.connection.retransmitPacketThresholdLosses(
+                    one_rtt.max_batch_packets,
+                );
+                try visitor(adapter.context, .{
+                    .connection_handle = adapter.handle,
+                    .connection_id_sequence = adapter.sequence,
+                    .packet = packet,
+                });
+            }
+        };
+        var adapter = Adapter{
+            .connection = entry.connection,
+            .context = context,
+            .handle = routed.route.connection_index,
+            .sequence = routed.route.sequence_number,
+        };
+        const processed = entry.connection.visitRoutedDatagramOrDropAfterCloseAt(.{
+            .datagram = datagram,
+            .route = routed.route,
+            .destination_connection_id = routed.destination_connection_id,
+        }, monotonicNowNs(self.endpoint.io), &adapter, Adapter.visit) catch |err| {
+            // The transport commits frames before invoking the application
+            // visitor. Preserve any resulting CID retirement even when the
+            // callback rejects its upper-layer payload.
+            try self.syncConnectionIds(routed.route.connection_index);
+            try self.timers.armFromConnection(
+                routed.route.connection_index,
+                entry.connection,
+            );
+            if (!adapter.entered and
+                isDiscardedShortPacketError(err)) return .consumed;
+            return err;
+        };
+        if (!processed) {
+            try self.timers.armFromConnection(
+                routed.route.connection_index,
+                entry.connection,
+            );
+            return .consumed;
+        }
+        try self.syncConnectionIds(routed.route.connection_index);
+        try self.timers.armFromConnection(
+            routed.route.connection_index,
+            entry.connection,
+        );
+        return .{ .packet = .{
+            .connection_handle = routed.route.connection_index,
+            .connection_id_sequence = routed.route.sequence_number,
+        } };
+    }
+
+    fn copyView(
+        self: *Dispatcher,
+        datagram: runtime.ReceivedBytesView,
+    ) Error!runtime.OwnedBytes {
+        return .{
+            .from = datagram.from,
+            .bytes = try self.allocator.dupe(u8, datagram.bytes),
+            .ecn = datagram.ecn,
+        };
+    }
+
+    fn eventFromOwned(
+        self: *Dispatcher,
+        datagram: runtime.OwnedBytes,
+        context: anytype,
+        comptime visitor: anytype,
+    ) (Error || callbackErrorSet(visitor))!VisitEvent {
+        return self.visitOwnedEvent(
+            try self.dispatch(datagram),
+            context,
+            visitor,
+        );
+    }
+
+    fn visitOwnedEvent(
+        self: *Dispatcher,
+        event_value: Event,
+        context: anytype,
+        comptime visitor: anytype,
+    ) (Error || callbackErrorSet(visitor))!VisitEvent {
+        var event = event_value;
+        defer event.deinit(self.allocator);
+        return switch (event) {
+            .consumed => .consumed,
+            .packet => |*packet| blk: {
+                visitor(context, .{
+                    .connection_handle = packet.connection_handle,
+                    .connection_id_sequence = packet.connection_id_sequence,
+                    .packet = .{
+                        .from = packet.packet.from,
+                        .packet_number = packet.packet.packet.packet_number,
+                        .frames = packet.packet.frames,
+                        .peer_initiated_key_update = packet.packet.peer_initiated_key_update,
+                    },
+                }) catch |err| {
+                    try self.syncConnectionIds(packet.connection_handle);
+                    try self.timers.armFromConnection(
+                        packet.connection_handle,
+                        self.connections.getPtr(packet.connection_handle).?
+                            .connection,
+                    );
+                    return err;
+                };
+                try self.syncConnectionIds(packet.connection_handle);
+                try self.timers.armFromConnection(
+                    packet.connection_handle,
+                    self.connections.getPtr(packet.connection_handle).?
+                        .connection,
+                );
+                break :blk .{ .packet = .{
+                    .connection_handle = packet.connection_handle,
+                    .connection_id_sequence = packet.connection_id_sequence,
+                } };
+            },
+            .timer => |timer| .{ .timer = timer },
+            .discarded_long_header => |handle| .{ .discarded_long_header = handle },
+            .pending_handshake => |handle| .{ .pending_handshake = handle },
+            .new_initial => |initial| blk: {
+                event = .consumed;
+                break :blk .{ .new_initial = initial };
+            },
+            .unrouted => |unrouted| blk: {
+                event = .consumed;
+                break :blk .{ .unrouted = unrouted };
+            },
+        };
     }
 
     fn receiveUntil(
@@ -1011,11 +1370,8 @@ pub const Dispatcher = struct {
         routed_datagram.datagram.deinit(self.allocator);
         owns_datagram = false;
         try self.syncConnectionIds(routed.route.connection_index);
-        // Match the blocking and visitor receive paths: an ACK can declare
-        // several older packets lost by the RFC 9002 packet threshold. Repair
-        // those groups before returning to the application instead of waiting
-        // for a later PTO in shared-endpoint event loops. The helper stops
-        // cleanly at congestion or pacing backpressure.
+        // Match the blocking and visitor receive paths: ACK processing can
+        // declare several older packets lost by the RFC 9002 packet threshold.
         _ = entry.connection.retransmitPacketThresholdLosses(
             one_rtt.max_batch_packets,
         ) catch |err| {
@@ -1078,6 +1434,12 @@ fn earliestReceiveTimeout(
         .{ .deadline = deadline }
     else
         .none;
+}
+
+fn monotonicNowNs(io: std.Io) u64 {
+    const timestamp = std.Io.Clock.awake.now(io).nanoseconds;
+    if (timestamp <= 0) return 0;
+    return std.math.cast(u64, timestamp) orelse std.math.maxInt(u64);
 }
 
 fn containsConnectionId(

@@ -9455,11 +9455,32 @@ pub const Connection = struct {
         context: anytype,
         comptime visitor: anytype,
     ) (Error || callbackErrorSet(visitor))!void {
+        return self.processReceivedBytesVisitingWithDestinationIdAt(
+            from,
+            bytes,
+            self.config.local_connection_id.len,
+            ecn,
+            now_ns,
+            context,
+            visitor,
+        );
+    }
+
+    fn processReceivedBytesVisitingWithDestinationIdAt(
+        self: *Connection,
+        from: net.IpAddress,
+        bytes: []u8,
+        destination_connection_id_len: usize,
+        ecn: quic.packet_space.EcnCodepoint,
+        now_ns: ?u64,
+        context: anytype,
+        comptime visitor: anytype,
+    ) (Error || callbackErrorSet(visitor))!void {
         const reset_candidate = quic.stateless_reset.tokenCandidate(bytes);
         const current = self.openCurrentShortPacketInPlaceForKeyPhase(
             self.receive_key_phase.currentKeyPhase(),
             bytes,
-            self.config.local_connection_id.len,
+            destination_connection_id_len,
             self.expected_packet_number,
             self.config.accept_zero_fixed_bit,
         ) catch |err| {
@@ -9483,9 +9504,10 @@ pub const Connection = struct {
             },
             .key_phase_mismatch => {},
         }
-        var packet = try self.processReceivedBytesAt(
+        var packet = try self.processReceivedBytesWithDestinationIdAt(
             from,
             bytes,
+            destination_connection_id_len,
             ecn,
             now_ns,
         );
@@ -9788,10 +9810,27 @@ pub const Connection = struct {
         ecn: quic.packet_space.EcnCodepoint,
         now_ns: ?u64,
     ) Error!ReceivedPacket {
-        var packet = try self.openReceivedBytesWithFrameClose(
+        return self.processReceivedBytesWithDestinationIdAt(
             from,
             bytes,
             self.config.local_connection_id.len,
+            ecn,
+            now_ns,
+        );
+    }
+
+    fn processReceivedBytesWithDestinationIdAt(
+        self: *Connection,
+        from: net.IpAddress,
+        bytes: []const u8,
+        destination_connection_id_len: usize,
+        ecn: quic.packet_space.EcnCodepoint,
+        now_ns: ?u64,
+    ) Error!ReceivedPacket {
+        var packet = try self.openReceivedBytesWithFrameClose(
+            from,
+            bytes,
+            destination_connection_id_len,
             now_ns,
         );
         errdefer packet.deinit(self.endpoint.allocator);
@@ -9918,6 +9957,29 @@ pub const Connection = struct {
         return try self.receiveRoutedDatagramAt(routed, now_ns);
     }
 
+    pub fn visitRoutedDatagramOrDropAfterCloseAt(
+        self: *Connection,
+        routed: quic.runtime.RoutedBytesView,
+        now_ns: ?u64,
+        context: anytype,
+        comptime visitor: anytype,
+    ) (Error || callbackErrorSet(visitor))!bool {
+        if (self.close_info != null or self.idle_timed_out) {
+            if (now_ns) |timestamp| {
+                if (self.config.peer.eql(&routed.datagram.from)) {
+                    self.noteCloseDatagramAt(timestamp);
+                }
+            }
+            return false;
+        }
+        return self.visitRoutedDatagramAt(
+            routed,
+            now_ns,
+            context,
+            visitor,
+        );
+    }
+
     pub const RoutedReceiveResult = union(enum) {
         packet: ReceivedPacket,
         stateless_reset: u64,
@@ -9945,6 +10007,35 @@ pub const Connection = struct {
             now_ns,
             routed.datagram.ecn,
         );
+    }
+
+    /// Process one caller-buffer datagram already matched to this connection.
+    /// The current-key path decrypts in place and reuses retained frame
+    /// storage; key updates retain the safe allocating fallback. `false` means
+    /// the authenticated peer-address policy discarded the datagram.
+    pub fn visitRoutedDatagramAt(
+        self: *Connection,
+        routed: quic.runtime.RoutedBytesView,
+        now_ns: ?u64,
+        context: anytype,
+        comptime visitor: anytype,
+    ) (Error || callbackErrorSet(visitor))!bool {
+        if (self.close_info != null or self.idle_timed_out) {
+            return error.ConnectionClosed;
+        }
+        if (self.shouldDiscardPeerAddressBeforeAuthentication(
+            routed.datagram.from,
+        )) return false;
+        try self.processReceivedBytesVisitingWithDestinationIdAt(
+            routed.datagram.from,
+            routed.datagram.bytes,
+            routed.destination_connection_id.len,
+            routed.datagram.ecn,
+            now_ns,
+            context,
+            visitor,
+        );
+        return true;
     }
 
     pub fn receiveRoutedDatagramWithEcnAt(self: *Connection, routed: quic.runtime.RoutedBytes, now_ns: ?u64, ecn: quic.packet_space.EcnCodepoint) Error!?ReceivedPacket {

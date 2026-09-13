@@ -273,6 +273,311 @@ test "QUIC endpoint dispatcher immediately repairs packet-threshold loss" {
     );
 }
 
+test "QUIC endpoint dispatcher visits warmed routed packets without allocation" {
+    const allocator = std.testing.allocator;
+    var threaded = std.Io.Threaded.init(allocator, .{});
+    defer threaded.deinit();
+    const io = threaded.io();
+
+    var failing = std.testing.FailingAllocator.init(allocator, .{});
+    var server_endpoint = try runtime.Endpoint.bind(
+        failing.allocator(),
+        io,
+        .{ .ip4 = .loopback(0) },
+        .{ .max_datagram_size = 4096 },
+    );
+    defer server_endpoint.deinit();
+    var client_endpoint = try runtime.Endpoint.bind(
+        allocator,
+        io,
+        .{ .ip4 = .loopback(0) },
+        .{ .max_datagram_size = 4096 },
+    );
+    defer client_endpoint.deinit();
+    const keys = quic.protection.deriveAes128Keys(
+        [_]u8{0xb3} ** quic.protection.secret_len,
+    );
+    var server = try one_rtt.Connection.init(&server_endpoint, .{
+        .peer = client_endpoint.address(),
+        .receive_keys = keys,
+        .send_keys = keys,
+        .local_connection_id = "visit-server",
+        .peer_connection_id = "visit-client",
+        .local_endpoint = .server,
+        .enable_pacing = false,
+        .peer_active_connection_id_limit = 3,
+    });
+    defer server.deinit();
+    var client = try one_rtt.Connection.init(&client_endpoint, .{
+        .peer = server_endpoint.address(),
+        .receive_keys = keys,
+        .send_keys = keys,
+        .local_connection_id = "visit-client",
+        .peer_connection_id = "visit-server",
+        .enable_pacing = false,
+    });
+    defer client.deinit();
+    var dispatcher = Dispatcher.init(failing.allocator(), &server_endpoint);
+    defer dispatcher.deinit();
+    try dispatcher.registerConnection(44, &server);
+
+    const Observed = struct {
+        expected_packet_number: u64,
+        expected_sequence: u64,
+        calls: usize = 0,
+
+        fn visit(
+            observed: *@This(),
+            packet: dispatcher_mod.RoutedPacketView,
+        ) !void {
+            try std.testing.expectEqual(
+                @as(ConnectionHandle, 44),
+                packet.connection_handle,
+            );
+            try std.testing.expectEqual(
+                observed.expected_sequence,
+                packet.connection_id_sequence,
+            );
+            try std.testing.expectEqual(
+                observed.expected_packet_number,
+                packet.packet.packet_number,
+            );
+            try std.testing.expectEqual(@as(usize, 1), packet.packet.frames.len);
+            try std.testing.expect(packet.packet.frames[0] == .stream);
+            observed.calls += 1;
+        }
+    };
+    var storage: [4096]u8 = undefined;
+    const deadline = std.Io.Clock.Timestamp.fromNow(io, .{
+        .raw = .fromSeconds(2),
+        .clock = .awake,
+    });
+    const versions = [_]u32{quic.Version.version_1.wireValue()};
+    for (0..2) |packet_number| {
+        const destination_connection_id: []const u8 = if (packet_number == 0)
+            "visit-server"
+        else
+            "v";
+        if (packet_number == 0) {
+            try client.send(&.{.{ .stream = .{
+                .stream_id = 0,
+                .offset = 0,
+                .data = "a",
+            } }});
+        } else {
+            try dispatcher.sendNewConnectionId(
+                44,
+                destination_connection_id,
+                [_]u8{0x91} ** 16,
+            );
+            var new_cid_packet = try client_endpoint.receiveBytes();
+            new_cid_packet.deinit(allocator);
+            try one_rtt.sendFrames(
+                &client_endpoint,
+                server_endpoint.address(),
+                keys,
+                .{
+                    .destination_connection_id = destination_connection_id,
+                    .packet_number = 1,
+                    .frames = &.{.{ .stream = .{
+                        .stream_id = 0,
+                        .offset = 1,
+                        .data = "b",
+                        .fin = true,
+                    } }},
+                },
+            );
+            failing.fail_index = failing.alloc_index;
+        }
+        var observed = Observed{
+            .expected_packet_number = packet_number,
+            .expected_sequence = packet_number,
+        };
+        var event = if (packet_number == 0)
+            try dispatcher.receiveVisiting(
+                &versions,
+                &storage,
+                &observed,
+                Observed.visit,
+            )
+        else
+            try dispatcher.receiveVisitingWithDeadline(
+                &versions,
+                &storage,
+                deadline,
+                &observed,
+                Observed.visit,
+            );
+        defer event.deinit(failing.allocator());
+        try std.testing.expect(event == .packet);
+        try std.testing.expectEqual(@as(usize, 1), observed.calls);
+    }
+    try std.testing.expectEqualStrings(
+        "ab",
+        server.availableReceivedStream(0).?,
+    );
+    try std.testing.expect(!failing.has_induced_failure);
+}
+
+test "QUIC endpoint dispatcher preserves visitor errors" {
+    const allocator = std.testing.allocator;
+    var threaded = std.Io.Threaded.init(allocator, .{});
+    defer threaded.deinit();
+    const io = threaded.io();
+    var server_endpoint = try runtime.Endpoint.bind(
+        allocator,
+        io,
+        .{ .ip4 = .loopback(0) },
+        .{ .max_datagram_size = 4096 },
+    );
+    defer server_endpoint.deinit();
+    var client_endpoint = try runtime.Endpoint.bind(
+        allocator,
+        io,
+        .{ .ip4 = .loopback(0) },
+        .{ .max_datagram_size = 4096 },
+    );
+    defer client_endpoint.deinit();
+    const keys = quic.protection.deriveAes128Keys(
+        [_]u8{0xb4} ** quic.protection.secret_len,
+    );
+    var server = try one_rtt.Connection.init(&server_endpoint, .{
+        .peer = client_endpoint.address(),
+        .receive_keys = keys,
+        .send_keys = keys,
+        .local_connection_id = "error-server",
+        .peer_connection_id = "error-client",
+        .local_endpoint = .server,
+        .enable_pacing = false,
+    });
+    defer server.deinit();
+    var dispatcher = Dispatcher.init(allocator, &server_endpoint);
+    defer dispatcher.deinit();
+    try dispatcher.registerConnection(55, &server);
+    try one_rtt.sendFrames(
+        &client_endpoint,
+        server_endpoint.address(),
+        keys,
+        .{
+            .destination_connection_id = "error-server",
+            .packet_number = 0,
+            .frames = &.{.{ .stream = .{
+                .stream_id = 0,
+                .data = "committed",
+                .fin = true,
+            } }},
+        },
+    );
+    const Visitor = struct {
+        fn visit(_: void, _: dispatcher_mod.RoutedPacketView) error{InvalidPacketNumber}!void {
+            return error.InvalidPacketNumber;
+        }
+    };
+    var storage: [4096]u8 = undefined;
+    try std.testing.expectError(
+        error.InvalidPacketNumber,
+        dispatcher.receiveVisitingWithDeadline(
+            &.{quic.Version.version_1.wireValue()},
+            &storage,
+            .fromNow(io, .{
+                .raw = .fromSeconds(1),
+                .clock = .awake,
+            }),
+            {},
+            Visitor.visit,
+        ),
+    );
+    try std.testing.expectEqualStrings(
+        "committed",
+        server.availableReceivedStream(0).?,
+    );
+}
+
+test "QUIC endpoint dispatcher visitor falls back for key updates" {
+    const allocator = std.testing.allocator;
+    var threaded = std.Io.Threaded.init(allocator, .{});
+    defer threaded.deinit();
+    const io = threaded.io();
+    var server_endpoint = try runtime.Endpoint.bind(
+        allocator,
+        io,
+        .{ .ip4 = .loopback(0) },
+        .{ .max_datagram_size = 4096 },
+    );
+    defer server_endpoint.deinit();
+    var client_endpoint = try runtime.Endpoint.bind(
+        allocator,
+        io,
+        .{ .ip4 = .loopback(0) },
+        .{ .max_datagram_size = 4096 },
+    );
+    defer client_endpoint.deinit();
+    const keys = quic.protection.deriveAes128Keys(
+        [_]u8{0xb5} ** quic.protection.secret_len,
+    );
+    var server = try one_rtt.Connection.init(&server_endpoint, .{
+        .peer = client_endpoint.address(),
+        .receive_keys = keys,
+        .send_keys = keys,
+        .local_connection_id = "update-server",
+        .peer_connection_id = "update-client",
+        .local_endpoint = .server,
+        .enable_pacing = false,
+    });
+    defer server.deinit();
+    var client = try one_rtt.Connection.init(&client_endpoint, .{
+        .peer = server_endpoint.address(),
+        .receive_keys = keys,
+        .send_keys = keys,
+        .local_connection_id = "update-client",
+        .peer_connection_id = "update-server",
+        .enable_pacing = false,
+    });
+    defer client.deinit();
+    var dispatcher = Dispatcher.init(allocator, &server_endpoint);
+    defer dispatcher.deinit();
+    try dispatcher.registerConnection(66, &server);
+
+    try client.initiateKeyUpdate();
+    try client.send(&.{.{ .stream = .{
+        .stream_id = 0,
+        .data = "updated",
+        .fin = true,
+    } }});
+    const Observed = struct {
+        called: bool = false,
+
+        fn visit(
+            observed: *@This(),
+            packet: dispatcher_mod.RoutedPacketView,
+        ) !void {
+            try std.testing.expect(packet.packet.peer_initiated_key_update);
+            try std.testing.expectEqualStrings(
+                "updated",
+                packet.packet.frames[0].stream.data,
+            );
+            observed.called = true;
+        }
+    };
+    var storage: [4096]u8 = undefined;
+    var observed: Observed = .{};
+    var event = try dispatcher.receiveVisitingWithDeadline(
+        &.{quic.Version.version_1.wireValue()},
+        &storage,
+        .fromNow(io, .{
+            .raw = .fromSeconds(1),
+            .clock = .awake,
+        }),
+        &observed,
+        Observed.visit,
+    );
+    defer event.deinit(allocator);
+    try std.testing.expect(event == .packet);
+    try std.testing.expect(observed.called);
+    try std.testing.expect(server.peerOneRttKeyPhase());
+    try std.testing.expectEqual(@as(u64, 1), server.peerOneRttKeyUpdateCount());
+}
+
 test "QUIC endpoint dispatcher polls stream credit without owning receive" {
     const allocator = std.testing.allocator;
     var threaded = std.Io.Threaded.init(allocator, .{});
@@ -1398,6 +1703,10 @@ test "QUIC endpoint dispatcher validates caller-owned deadlines" {
     var dispatcher = Dispatcher.init(allocator, &endpoint);
     defer dispatcher.deinit();
     const versions = &.{quic.Version.version_1.wireValue()};
+    const Visitor = struct {
+        fn visit(_: void, _: dispatcher_mod.RoutedPacketView) error{}!void {}
+    };
+    var storage: [4096]u8 = undefined;
 
     try std.testing.expectError(
         error.Timeout,
@@ -1413,6 +1722,29 @@ test "QUIC endpoint dispatcher validates caller-owned deadlines" {
             .raw = .zero,
         })),
     );
+    try std.testing.expectError(
+        error.Timeout,
+        dispatcher.receiveVisitingWithDeadline(
+            versions,
+            &storage,
+            .{ .clock = .real, .raw = .zero },
+            {},
+            Visitor.visit,
+        ),
+    );
+    try std.testing.expectError(
+        error.Timeout,
+        dispatcher.receiveVisitingWithDeadline(
+            versions,
+            &storage,
+            .fromNow(io, .{
+                .clock = .awake,
+                .raw = .zero,
+            }),
+            {},
+            Visitor.visit,
+        ),
+    );
     // The generic std.Io.Timeout API retains support for relative durations
     // on other clocks; internal awake transport timers compare remaining
     // durations instead of unrelated timestamp epochs.
@@ -1422,6 +1754,16 @@ test "QUIC endpoint dispatcher validates caller-owned deadlines" {
             .clock = .real,
             .raw = .fromMilliseconds(1),
         } },
+    ));
+    try std.testing.expectError(error.Timeout, dispatcher.receiveVisitingTimeout(
+        versions,
+        &storage,
+        .{ .duration = .{
+            .clock = .real,
+            .raw = .fromMilliseconds(1),
+        } },
+        {},
+        Visitor.visit,
     ));
 
     const started = std.Io.Clock.awake.now(io);

@@ -324,9 +324,16 @@ fn runSharedServer(config: Config) !void {
 
     const deadline = deadlineFromNow(io, config.timeout());
     const versions = [_]u32{quicVersionOne()};
+    var receive_storage: [4096]u8 = undefined;
     var complete: usize = 0;
     while (complete < config.connections) {
-        var event = try server.receiveWithDeadline(&versions, deadline);
+        var event = try server.receiveVisitingWithDeadline(
+            &versions,
+            &receive_storage,
+            deadline,
+            {},
+            discardSharedPacket,
+        );
         defer event.deinit(allocator);
         switch (event) {
             .connected => |handle| {
@@ -347,8 +354,7 @@ fn runSharedServer(config: Config) !void {
                     results,
                 ));
             },
-            .packet => |*packet| {
-                _ = try server.acknowledgePacketIfNeeded(packet);
+            .packet => |packet| {
                 const handle = packet.connection_handle;
                 if (handle == 0 or handle > states.len) {
                     return error.InvalidBenchmarkResult;
@@ -380,6 +386,11 @@ fn runSharedServer(config: Config) !void {
     }
     try printServerCompletion(config, results);
 }
+
+fn discardSharedPacket(
+    _: void,
+    _: netz.quic.endpoint_dispatcher.RoutedPacketView,
+) error{}!void {}
 
 fn driveSharedUntilBlocked(
     server: *netz.quic.endpoint_server.Server,

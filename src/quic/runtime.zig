@@ -2227,6 +2227,15 @@ pub const RoutedBytes = struct {
     }
 };
 
+/// Borrowed counterpart to `RoutedBytes` for single-owner event loops that
+/// receive into reusable caller storage. The destination CID points into the
+/// same mutable datagram and remains valid only until that storage is reused.
+pub const RoutedBytesView = struct {
+    datagram: ReceivedBytesView,
+    route: quic.connection_router.Route,
+    destination_connection_id: []const u8,
+};
+
 pub const OwnedDatagram = struct {
     from: net.IpAddress,
     bytes: []u8,

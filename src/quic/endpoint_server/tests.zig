@@ -176,15 +176,29 @@ test "QUIC endpoint server routes two authenticated connections on one socket" {
         .clock = .awake,
     });
     var replies: usize = 0;
+    var receive_storage: [4096]u8 = undefined;
+    const Visitor = struct {
+        fn visit(
+            _: void,
+            packet: quic.endpoint_dispatcher.RoutedPacketView,
+        ) !void {
+            try std.testing.expect(packet.packet.frames.len != 0);
+        }
+    };
     while (replies < clients.len) {
-        var event = try server.receiveWithDeadline(&versions, deadline);
+        var event = try server.receiveVisitingWithDeadline(
+            &versions,
+            &receive_storage,
+            deadline,
+            {},
+            Visitor.visit,
+        );
         defer event.deinit(allocator);
         switch (event) {
             .connected, .timer => {},
             .handshake_failed => |failure| return failure.err,
             .unrouted => return error.TestUnexpectedResult,
             .packet => |packet| {
-                _ = try server.acknowledgePacketIfNeeded(&packet);
                 var request: [8]u8 = undefined;
                 const received = (try server.pollStreamId(
                     packet.connection_handle,
