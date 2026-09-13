@@ -2974,6 +2974,26 @@ pub const Connection = struct {
     /// independently. This selector is read-only: callers still dispatch the
     /// typed helper matching `kind` when the deadline becomes due.
     pub fn nextTimerDeadline(self: *const Connection) ?TimerDeadline {
+        if (self.idle_timed_out) return null;
+        if (self.close_info) |close_info| {
+            if (close_info.state == .closed) return null;
+            var terminal: ?TimerDeadline = null;
+            if (close_info.expires_ms) |deadline| {
+                considerTimerDeadline(&terminal, .{
+                    .kind = .close,
+                    .deadline_ns = millisToNanos(deadline),
+                });
+            }
+            if (close_info.state == .closing) {
+                if (close_info.response_deadline_ns) |deadline| {
+                    considerTimerDeadline(&terminal, .{
+                        .kind = .close_response,
+                        .deadline_ns = deadline,
+                    });
+                }
+            }
+            return terminal;
+        }
         var next: ?TimerDeadline = null;
         if (self.path_response_retry_deadline_ns) |deadline| {
             considerTimerDeadline(&next, .{
@@ -3056,18 +3076,6 @@ pub const Connection = struct {
             considerTimerDeadline(&next, .{
                 .kind = .idle_timeout,
                 .deadline_ns = millisToNanos(deadline),
-            });
-        }
-        if (self.closeExpiryDeadlineMillis()) |deadline| {
-            considerTimerDeadline(&next, .{
-                .kind = .close,
-                .deadline_ns = millisToNanos(deadline),
-            });
-        }
-        if (self.closeResponseDeadline()) |deadline| {
-            considerTimerDeadline(&next, .{
-                .kind = .close_response,
-                .deadline_ns = deadline,
             });
         }
         if (self.oneRttKeyDiscardDeadline()) |deadline| {

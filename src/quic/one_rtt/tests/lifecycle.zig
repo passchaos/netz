@@ -819,8 +819,21 @@ test "QUIC 1-RTT default local close arms three-PTO expiry" {
         .local_connection_id = "default-close-local",
         .peer_connection_id = "default-close-peer",
         .enable_pacing = false,
+        .local_ack_eliciting_threshold = 2,
+        .local_max_ack_delay_us = 1_000,
     });
     defer connection.deinit();
+
+    const ping = [_]quic.Frame{.{ .ping = {} }};
+    try one_rtt.testing.applyReceivedFrames(
+        &connection,
+        0,
+        &ping,
+        null,
+        .not_ect,
+    );
+    try std.testing.expect(!try connection.sendAckForPacketIfNeeded(0, &ping));
+    try std.testing.expect(connection.ackDelayDeadline() != null);
 
     const before_ns = std.Io.Clock.awake.now(io).nanoseconds;
     try connection.closeApplication(73, "default close");
@@ -853,6 +866,7 @@ test "QUIC 1-RTT default local close arms three-PTO expiry" {
     try std.testing.expect(!connection.checkCloseExpired(expiry_ms - 1));
     try std.testing.expect(connection.checkCloseExpired(expiry_ms));
     try std.testing.expect(connection.closed());
+    try std.testing.expect(connection.nextTimerDeadline() == null);
 }
 
 test "QUIC 1-RTT default peer close arms three-PTO draining expiry" {
@@ -878,13 +892,26 @@ test "QUIC 1-RTT default peer close arms three-PTO draining expiry" {
         .local_connection_id = "peer-close-local",
         .peer_connection_id = "peer-close-peer",
         .enable_pacing = false,
+        .local_ack_eliciting_threshold = 2,
+        .local_max_ack_delay_us = 1_000,
     });
     defer connection.deinit();
+
+    const ping = [_]quic.Frame{.{ .ping = {} }};
+    try one_rtt.testing.applyReceivedFrames(
+        &connection,
+        0,
+        &ping,
+        null,
+        .not_ect,
+    );
+    try std.testing.expect(!try connection.sendAckForPacketIfNeeded(0, &ping));
+    try std.testing.expect(connection.ackDelayDeadline() != null);
 
     const before_ns = std.Io.Clock.awake.now(io).nanoseconds;
     try one_rtt.testing.applyReceivedFrames(
         &connection,
-        0,
+        1,
         &.{.{ .application_close = .{
             .error_code = 74,
             .reason_phrase = "peer close",

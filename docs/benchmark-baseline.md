@@ -2473,11 +2473,14 @@ comparisons cannot silently change shape. In one verified four-connection,
 single-sample tuning signal, not a default-policy or superiority claim.
 
 Short-delay concurrency exposed a separate issue: 2 packets / 1 ms succeeds
-for one connection but timed out for four and sixteen connections, with the
-peer eventually closing. The benchmark option is retained to make that
-correctness/performance investigation reproducible; the library default is not
-changed until the multi-connection timer interaction is fixed and a complete
-matrix passes.
+for one connection but originally timed out for four and sixteen connections.
+The endpoint timer selector allowed a stale ACK-delay deadline to outrank the
+close lifecycle after an application close; servicing it attempted a normal
+ACK in closing state and surfaced ConnectionClosed from the shared loop. The
+selector now exposes only close-response and close-expiry work while closing,
+only close expiry while draining, and no timers once closed or idle-timed-out.
+The previously failing four- and sixteen-connection 2/1-ms runs now complete;
+the library default is still unchanged pending a full performance matrix.
 
 The server and dispatcher now both expose batch visitor entry points taking an
 already-composed std.Io.Timeout. Public WithDeadline forms retain strict

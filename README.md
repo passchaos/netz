@@ -491,7 +491,8 @@ starts with deterministic parsers, serializers, preallocated fixed-width wire-in
   work with a due-timer service dispatcher for event-loop arming and an
   indexed single-lookup endpoint-level timer scheduler with exact-update and
   monotonic-earliest skips, empty-index and no-op service skips, plus
-  unarmed-connection service short-circuits for
+  terminal-state filtering that prevents stale ACK/recovery timers from
+  outranking close lifecycle work, and unarmed-connection service skips for
   multi-connection loops, and a pointer-only handshake completion queue that
   constructs established connections in their final stable allocation instead
   of copying multi-kilobyte state through the shared endpoint, with idle
