@@ -2347,6 +2347,14 @@ real-UDP test covers warmed established packets, including a rotated one-byte
 CID; separate tests cover callback error propagation and the key-update
 fallback.
 
+`HandshakeServerSession.processRequestPacketView` exposes the matching HTTP/3
+boundary: custom shared loops can apply an authenticated borrowed packet during
+the dispatcher callback without constructing an owning `ReceivedPacket`. The
+existing owning method delegates to this path, and a regression releases the
+source packet immediately after the call before polling the retained request.
+The built-in HTTP/3 `EndpointServer` still uses its single-packet owning receive
+loop; moving that owner itself to batch dispatch remains separate work.
+
 A same-host, same-command three-sample A/B against commit `17109fda` measured
 the caller-buffer shared server at 64.455-79.452 MiB/s (69.691 median) versus
 the owning baseline at 51.322-64.565 MiB/s (64.454 median), an 8.1% median

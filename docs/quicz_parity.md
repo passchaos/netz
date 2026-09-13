@@ -492,7 +492,12 @@ send after pacing, congestion, or flow-control backpressure. Five verified
 16-connection, 16-MiB runs per direction completed at 71.458 MiB/s median for
 the client sender and 84.688 MiB/s for the server sender; their ranges overlap,
 so this closes the bidirectional coverage gap without claiming a directional
-speed advantage.
+speed advantage. HTTP/3 handshake sessions now also accept authenticated
+`ReceivedPacketView` values directly, so a caller-buffer shared dispatcher can
+apply request frames without first allocating an owning packet. The owning
+compatibility entry point delegates to the same implementation; the built-in
+HTTP/3 endpoint remains on its existing single-packet receive loop until batch
+promotion/admission can be covered end to end.
 
 The sent-packet optimistic-ACK guard now has a validation-only ordered fast
 path: it streams the peer's ranges and proves exact coverage using binary

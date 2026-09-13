@@ -6414,19 +6414,29 @@ pub const HandshakeServerSession = struct {
         self: *HandshakeServerSession,
         packet: *const quic.one_rtt.ReceivedPacket,
     ) Error!void {
+        return self.processRequestPacketView(packetView(packet.*));
+    }
+
+    /// Apply an authenticated packet view from a caller-buffer dispatcher.
+    /// The frame payloads are borrowed only for this call; all HTTP/3 state
+    /// required afterward is retained by the session before returning.
+    pub fn processRequestPacketView(
+        self: *HandshakeServerSession,
+        packet: quic.one_rtt.ReceivedPacketView,
+    ) Error!void {
         if (self.receive_packets.ack_pending) {
             try self.established.connection.sendAck(0);
             self.receive_packets.ack_pending = false;
         }
         _ = self.established.connection.sendAckForPacketIfNeeded(
-            packet.packet.packet_number,
+            packet.packet_number,
             packet.frames,
         ) catch {
             self.receive_packets.ack_pending = true;
         };
         try visitStreamingServerRequestPacket(
             self,
-            packetView(packet.*),
+            packet,
         );
         self.flushRequestPacketFeedbackOnce() catch |err| switch (err) {
             error.PacingLimited,

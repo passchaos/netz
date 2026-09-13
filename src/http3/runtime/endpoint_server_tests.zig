@@ -109,8 +109,14 @@ test "HTTP/3 endpoint request polling defers paced feedback" {
         .data = request_bytes.items,
     } }});
     var request_packet = try session.established.connection.receivePacket();
-    defer request_packet.deinit(allocator);
-    try session.processRequestPacket(&request_packet);
+    errdefer request_packet.deinit(allocator);
+    try session.processRequestPacketView(.{
+        .from = request_packet.from,
+        .packet_number = request_packet.packet.packet_number,
+        .frames = request_packet.frames,
+        .peer_initiated_key_update = request_packet.peer_initiated_key_update,
+    });
+    request_packet.deinit(allocator);
     var head = (try session.pollRequestEvent()) orelse
         return error.TestUnexpectedResult;
     defer head.deinit(allocator);
