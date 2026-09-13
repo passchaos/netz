@@ -120,8 +120,8 @@ if [[ $server_topology == independent ]]; then
     "$repo_root/tools/interop/quic_quic_go_bench.go" \
     "$repo_root/tools/interop/quic_quic_go_churn.go")
 fi
-python3 -m unittest "$repo_root/tools/interop/quic_persistent_benchmark_check_test.py"
-python3 -m unittest "$repo_root/tools/interop/quic_persistent_benchmark_summary_test.py"
+python3 "$repo_root/tools/interop/quic_persistent_benchmark_check_test.py"
+python3 "$repo_root/tools/interop/quic_persistent_benchmark_summary_test.py"
 : >"$work/results.log"
 
 cat >"$work/netz-ca.pem" <<'EOF'
