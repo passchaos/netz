@@ -489,8 +489,9 @@ starts with deterministic parsers, serializers, preallocated fixed-width wire-in
   PTO-flooring, one-shot outstanding probes, and peer-activity reset, plus
   a single next-timer selector across loss/PTO/path-validation/keep-alive/idle/close/key-discard
   work with a due-timer service dispatcher for event-loop arming and an
-  indexed single-lookup endpoint-level timer scheduler with exact-update,
-  empty-index, and no-op service skips plus unarmed-connection service short-circuits for
+  indexed single-lookup endpoint-level timer scheduler with exact-update and
+  monotonic-earliest skips, empty-index and no-op service skips, plus
+  unarmed-connection service short-circuits for
   multi-connection loops, and
   peer-address validation hooks with RFC 9000 3x anti-amplification send
   budget enforcement for unvalidated server paths,

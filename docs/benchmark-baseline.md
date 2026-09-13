@@ -2449,6 +2449,16 @@ The local measurements do not justify adopting that queue wholesale because
 it would impose logarithmic maintenance on the two fast cases above. They do
 justify separately eliminating the current-earliest advance scan.
 
+That monotonic fast path now keeps the cached index when the current earliest
+timer's new deadline is equal or earlier, while still updating an observable
+timer-kind change. Three adjacent CPU-0 runs reduced the 1,024-connection
+advance-earliest case from 3108.29-3109.39 ns to 8.48-8.69 ns per update, a
+358-367x latency reduction. At the same size, a true postponement still
+measured 3106.64-3107.64 ns, a non-earliest timer becoming earliest measured
+10.00-10.16 ns, and non-earliest remove-plus-rearm measured 24.49-24.52 ns.
+The remaining scans therefore stay visible and the array/index design retains
+its constant-time ordinary-update behavior.
+
 The selected follow-up keeps the array/index design and returns immediately
 when an existing connection's timer kind and deadline are both unchanged.
 Three adjacent CPU-0 runs reduced the 1,024-connection unchanged-earliest case
