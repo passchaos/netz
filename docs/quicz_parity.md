@@ -1000,8 +1000,17 @@ before atomic dispatcher promotion, and idle reuse/global LRU eviction retain
 the configured connection cap. Only the pool's `receive*` methods own UDP
 receive; leases send through single-attempt helpers, expose stable connection
 handles for response correlation, and reject client methods that would start a
-competing receive loop. Leases provide one-attempt complete requests and
-streaming uploads (`tryStartRequest`, `trySendRequestBody`, and
+competing receive loop. `receiveManyOnce` adds a bounded caller-buffer receive
+turn for established pool connections: its dispatcher applies borrowed packet
+views synchronously, while returned response/push events own all header state
+needed after the receive storage is reused. The existing owning
+`processResponsePacket` entry point remains source-compatible.
+The batch suppresses repeated unconsumed DATA-ready notifications for one
+connection/stream without dropping later application state. A real two-origin
+TLS regression waits until both servers have submitted their responses,
+observes a multi-event receive, overwrites the caller buffer, and still
+validates both status lines and bodies. Leases provide one-attempt complete
+requests and streaming uploads (`tryStartRequest`, `trySendRequestBody`, and
 `trySendRequestBodyParts`, and `tryFinishRequestTrailers`), with literal/static
 QPACK request sections so a retry never commits encoder dependencies separately
 from the request packet. Their underlying QUIC one-shot sends also keep

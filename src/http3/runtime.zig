@@ -16732,6 +16732,49 @@ pub const HandshakeClient = struct {
             );
         }
     }
+
+    /// Apply an authenticated response packet view from a caller-buffer
+    /// dispatcher. Frame payloads are borrowed only for this call; response,
+    /// push, control, QPACK, and DATAGRAM state needed later is retained by
+    /// the client before returning.
+    pub fn processResponsePacketView(
+        self: *HandshakeClient,
+        packet: quic.one_rtt.ReceivedPacketView,
+    ) Error!void {
+        if (self.callback_reader_active) return error.ConcurrentRead;
+        if (self.receive_packets.ack_pending) {
+            try self.established.connection.sendAck(0);
+            self.receive_packets.ack_pending = false;
+        }
+        _ = self.established.connection.sendAckForPacketIfNeeded(
+            packet.packet_number,
+            packet.frames,
+        ) catch {
+            self.receive_packets.ack_pending = true;
+        };
+        var context: ConnectionResponseReceiveContext = .{
+            .connection = &self.established.connection,
+            .control = &self.control,
+            .qpack_decode = &self.qpack_decode,
+            .qpack_encode = &self.qpack_encode,
+            .max_blocked_streams = self.options.local_settings.qpack_blocked_streams,
+            .response_streams = &self.response_streams,
+            .streaming_responses = &self.streaming_responses,
+            .push_streams = &self.push_streams,
+            .request_lifecycle = &self.request_lifecycle,
+            .detached_stream_id = null,
+            .detached_streams = &self.connect_datagrams,
+        };
+        try visitConnectionResponsePacket(&context, packet);
+        _ = try self.applyPendingPushCancellationOnce();
+        self.flushResponsePacketFeedbackOnce() catch |err| switch (err) {
+            error.PacingLimited,
+            error.CongestionLimited,
+            error.FlowControlBlocked,
+            => {},
+            else => return err,
+        };
+    }
 };
 
 pub const HandshakeClientPool = handshake_client_pool.Pool(@This());

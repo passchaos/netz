@@ -1,5 +1,6 @@
 const std = @import("std");
 const runtime = @import("../runtime.zig");
+const quic = @import("../../quic/mod.zig");
 const tls_testing = @import("../../tls/testing.zig");
 
 test "HTTP/3 shared pool routes two origins through one endpoint" {
@@ -60,6 +61,7 @@ test "HTTP/3 shared pool routes two origins through one endpoint" {
         expected_path: []const u8,
         expected_body: []const u8 = &.{},
         body: []const u8,
+        responses_sent: *std.atomic.Value(usize),
         err: ?anyerror = null,
 
         fn run(self: *@This()) void {
@@ -101,22 +103,31 @@ test "HTTP/3 shared pool routes two origins through one endpoint" {
             }
             session.sendResponse(request.stream_id, .{
                 .status = 200,
+                .headers = &.{.{
+                    .name = "x-origin",
+                    .value = self.body,
+                }},
                 .body = self.body,
             }) catch |err| {
                 self.err = err;
+                return;
             };
+            _ = self.responses_sent.fetchAdd(1, .release);
         }
     };
+    var responses_sent = std.atomic.Value(usize).init(0);
     var worker_a = ServerWorker{
         .server = &server_a,
         .expected_path = "/a",
         .expected_body = "upload-a",
         .body = "origin-a",
+        .responses_sent = &responses_sent,
     };
     var worker_b = ServerWorker{
         .server = &server_b,
         .expected_path = "/b",
         .body = "origin-b",
+        .responses_sent = &responses_sent,
     };
     const thread_a = try std.Thread.spawn(.{}, ServerWorker.run, .{&worker_a});
     var joined_a = false;
@@ -147,6 +158,44 @@ test "HTTP/3 shared pool routes two origins through one endpoint" {
         }, .connect_timeout = .fromSeconds(3) },
     });
     defer pool.deinit();
+    var receive_storage: [8 * 4096]u8 = undefined;
+    var receive_events: [8]runtime.SharedHandshakeClientPool.Event = undefined;
+    var no_events: [0]runtime.SharedHandshakeClientPool.Event = .{};
+    try std.testing.expectError(
+        error.BufferTooShort,
+        pool.receiveManyOnce(
+            &receive_storage,
+            &no_events,
+            .fromSeconds(1),
+        ),
+    );
+    var too_many_events: [
+        quic.runtime.max_receive_batch_messages + 1
+    ]runtime.SharedHandshakeClientPool.Event = undefined;
+    try std.testing.expectError(
+        error.BufferTooShort,
+        pool.receiveManyOnce(
+            &receive_storage,
+            &too_many_events,
+            .fromSeconds(1),
+        ),
+    );
+    try std.testing.expectError(
+        error.InvalidPoolOptions,
+        pool.receiveManyOnce(
+            &receive_storage,
+            &receive_events,
+            .zero,
+        ),
+    );
+    try std.testing.expectEqual(
+        @as(usize, 0),
+        try pool.receiveManyOnce(
+            &receive_storage,
+            &receive_events,
+            .fromMilliseconds(1),
+        ),
+    );
     const uri_a = try std.fmt.allocPrint(
         allocator,
         "https://localhost:{d}/a",
@@ -208,6 +257,16 @@ test "HTTP/3 shared pool routes two origins through one endpoint" {
     });
     try std.testing.expectEqual(@as(u62, 0), stream_a);
     try std.testing.expectEqual(@as(u62, 0), stream_b);
+    const response_deadline = std.Io.Clock.Timestamp.fromNow(
+        io,
+        .{ .clock = .awake, .raw = .fromSeconds(2) },
+    );
+    while (responses_sent.load(.acquire) != 2) {
+        if (response_deadline.durationFromNow(io).raw.nanoseconds <= 0) {
+            return error.Timeout;
+        }
+        std.Thread.yield() catch {};
+    }
 
     var body_a: ["origin-a".len]u8 = undefined;
     var body_b: ["origin-b".len]u8 = undefined;
@@ -215,61 +274,82 @@ test "HTTP/3 shared pool routes two origins through one endpoint" {
     var body_b_len: usize = 0;
     var finished_a = false;
     var finished_b = false;
+    var max_batch_count: usize = 0;
     while (!finished_a or !finished_b) {
-        var event = try pool.receiveWithTimeout(.fromSeconds(2));
-        defer event.deinit(allocator);
-        switch (event) {
-            .response => |*response| {
-                const lease = if (response.connection_handle ==
-                    lease_a.connectionHandle())
-                    &lease_a
-                else if (response.connection_handle ==
-                    lease_b.connectionHandle())
-                    &lease_b
-                else
-                    return error.TestUnexpectedResult;
-                const output = if (lease == &lease_a)
-                    body_a[body_a_len..]
-                else
-                    body_b[body_b_len..];
-                const message = switch (response.response) {
-                    .message => |*value| value,
-                    .reset => return error.TestUnexpectedResult,
-                };
-                switch (message.value) {
-                    .head => |head| {
-                        if (head != .response) {
-                            return error.TestUnexpectedResult;
-                        }
-                        try std.testing.expectEqual(
-                            @as(u16, 200),
-                            head.response.status,
-                        );
-                    },
-                    .data_available => {
-                        const read = (try pool.readResponseDataOnce(
-                            response.connection_handle,
-                            message.stream_id,
-                            output,
-                        )) orelse 0;
-                        if (lease == &lease_a)
-                            body_a_len += read
-                        else
-                            body_b_len += read;
-                    },
-                    .finished => {
-                        if (lease == &lease_a)
-                            finished_a = true
-                        else
-                            finished_b = true;
-                    },
-                    .push_promise, .trailers => return error.TestUnexpectedResult,
-                }
-            },
-            .progress, .timer, .consumed => {},
-            .push, .closed, .unrouted => return error.TestUnexpectedResult,
+        const count = try pool.receiveManyOnce(
+            &receive_storage,
+            &receive_events,
+            .fromSeconds(2),
+        );
+        try std.testing.expect(count != 0);
+        max_batch_count = @max(max_batch_count, count);
+        @memset(&receive_storage, 0xaa);
+        for (receive_events[0..count]) |*event| {
+            defer event.deinit(allocator);
+            switch (event.*) {
+                .response => |*response| {
+                    const lease = if (response.connection_handle ==
+                        lease_a.connectionHandle())
+                        &lease_a
+                    else if (response.connection_handle ==
+                        lease_b.connectionHandle())
+                        &lease_b
+                    else
+                        return error.TestUnexpectedResult;
+                    const output = if (lease == &lease_a)
+                        body_a[body_a_len..]
+                    else
+                        body_b[body_b_len..];
+                    const message = switch (response.response) {
+                        .message => |*value| value,
+                        .reset => return error.TestUnexpectedResult,
+                    };
+                    switch (message.value) {
+                        .head => |head| {
+                            if (head != .response) {
+                                return error.TestUnexpectedResult;
+                            }
+                            try std.testing.expectEqual(
+                                @as(u16, 200),
+                                head.response.status,
+                            );
+                            try std.testing.expectEqualStrings(
+                                if (lease == &lease_a)
+                                    "origin-a"
+                                else
+                                    "origin-b",
+                                headerValue(
+                                    head.response.headers,
+                                    "x-origin",
+                                ) orelse return error.TestUnexpectedResult,
+                            );
+                        },
+                        .data_available => {
+                            const read = (try pool.readResponseDataOnce(
+                                response.connection_handle,
+                                message.stream_id,
+                                output,
+                            )) orelse 0;
+                            if (lease == &lease_a)
+                                body_a_len += read
+                            else
+                                body_b_len += read;
+                        },
+                        .finished => {
+                            if (lease == &lease_a)
+                                finished_a = true
+                            else
+                                finished_b = true;
+                        },
+                        .push_promise, .trailers => return error.TestUnexpectedResult,
+                    }
+                },
+                .progress, .timer, .consumed => {},
+                .push, .closed, .unrouted => return error.TestUnexpectedResult,
+            }
         }
     }
+    try std.testing.expect(max_batch_count > 1);
     try std.testing.expectEqualStrings("origin-a", body_a[0..body_a_len]);
     try std.testing.expectEqualStrings("origin-b", body_b[0..body_b_len]);
 
@@ -290,6 +370,13 @@ test "HTTP/3 shared pool routes two origins through one endpoint" {
     joined_b = true;
     if (worker_a.err) |err| return err;
     if (worker_b.err) |err| return err;
+}
+
+fn headerValue(headers: anytype, name: []const u8) ?[]const u8 {
+    for (headers) |header| {
+        if (std.ascii.eqlIgnoreCase(header.name, name)) return header.value;
+    }
+    return null;
 }
 
 test "HTTP/3 shared pool releases failed handshake capacity" {

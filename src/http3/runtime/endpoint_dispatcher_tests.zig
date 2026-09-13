@@ -789,7 +789,7 @@ test "HTTP/3 clients poll dispatcher-routed responses without socket races" {
     try std.testing.expectEqual(@as(?u64, 4), client_a.peerGoAwayId());
 }
 
-test "HTTP/3 any-response once poll preserves FIN across pacing" {
+test "HTTP/3 borrowed response packet preserves any-response FIN across pacing" {
     const allocator = std.testing.allocator;
     var threaded = std.Io.Threaded.init(allocator, .{});
     defer threaded.deinit();
@@ -882,9 +882,6 @@ test "HTTP/3 any-response once poll preserves FIN across pacing" {
         .data = response_bytes.items,
         .fin = true,
     } }});
-    var packet = try client.established.connection.receivePacket();
-    defer packet.deinit(allocator);
-
     var fixed_io = FixedClockIo{
         .delegate = client_endpoint.io,
         .now_ns = 1_000_000,
@@ -899,7 +896,17 @@ test "HTTP/3 any-response once poll preserves FIN across pacing" {
     };
     defer client_endpoint.io = fixed_io.delegate;
 
-    try client.processResponsePacket(&packet);
+    {
+        var packet = try client.established.connection.receivePacket();
+        defer packet.deinit(allocator);
+        try client.processResponsePacketView(.{
+            .from = packet.from,
+            .packet_number = packet.packet.packet_number,
+            .frames = packet.frames,
+            .peer_initiated_key_update = packet.peer_initiated_key_update,
+        });
+        @memset(packet.packet.payload, 0xaa);
+    }
     var head = (try client.pollNextResponseEventOnce()) orelse
         return error.TestUnexpectedResult;
     defer head.deinit(allocator);

@@ -2360,6 +2360,17 @@ batch, overwrites the caller buffer, and then validates both retained request
 heads; another admits and promotes two concurrent real TLS handshakes through
 the same API. The existing single-event receive APIs remain unchanged for
 compatibility.
+The shared authenticated client pool now exposes the symmetric bounded
+`receiveManyOnce` path. `HandshakeClient.processResponsePacketView` lets its
+dispatcher apply established response packets before caller receive storage is
+reused, while response and push stream state retains the data needed by later
+poll/read calls. The owning packet API remains source-compatible. A real
+two-origin TLS regression queues both responses, observes more than one event
+in a batch, overwrites the receive
+buffer, and then validates both response statuses and bodies. Empty and
+oversized event slices, non-positive poll intervals, and idle timeout are
+covered separately. This is a functionality and ownership result; no
+throughput ratio is claimed.
 
 A same-host, same-command three-sample A/B against commit `17109fda` measured
 the caller-buffer shared server at 64.455-79.452 MiB/s (69.691 median) versus

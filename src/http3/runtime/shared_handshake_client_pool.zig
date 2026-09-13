@@ -654,6 +654,121 @@ pub fn Pool(comptime Runtime: type) type {
             };
         }
 
+        /// Perform one bounded caller-buffer receive iteration. Established
+        /// QUIC packets are applied while `storage` is borrowed; response and
+        /// push events retain every field needed after this call. A zero
+        /// result means the poll interval elapsed without a reportable event.
+        pub fn receiveManyOnce(
+            self: *Self,
+            storage: []u8,
+            output: []Event,
+            poll_interval: std.Io.Duration,
+        ) !usize {
+            if (output.len == 0 or
+                output.len > quic.runtime.max_receive_batch_messages)
+            {
+                return error.BufferTooShort;
+            }
+            if (poll_interval.nanoseconds <= 0) {
+                return error.InvalidPoolOptions;
+            }
+            const deadline = std.Io.Clock.Timestamp.fromNow(
+                self.io,
+                .{ .raw = poll_interval, .clock = .awake },
+            );
+            return self.receiveManyUntil(
+                storage,
+                output,
+                deadline,
+            ) catch |err| switch (err) {
+                error.Timeout => 0,
+                else => |other| return other,
+            };
+        }
+
+        fn receiveManyUntil(
+            self: *Self,
+            storage: []u8,
+            output: []Event,
+            deadline: std.Io.Clock.Timestamp,
+        ) !usize {
+            while (true) {
+                var count: usize = 0;
+                errdefer for (output[0..count]) |*event| {
+                    event.deinit(self.allocator);
+                };
+                if (try self.pollBufferedEvent()) |event| {
+                    output[0] = event;
+                    return 1;
+                }
+
+                const Adapter = struct {
+                    pool: *Self,
+
+                    fn visit(
+                        adapter: *@This(),
+                        packet: quic.endpoint_dispatcher.RoutedPacketView,
+                    ) !void {
+                        try adapter.pool.processPacketView(packet);
+                    }
+                };
+                var adapter = Adapter{ .pool = self };
+                var transport_events: [
+                    quic.runtime.max_receive_batch_messages
+                ]quic.endpoint_dispatcher.VisitEvent = undefined;
+                const transport_count = try self.dispatcher
+                    .receiveManyVisitingTimeout(
+                    &supported_versions,
+                    storage,
+                    transport_events[0..output.len],
+                    .{ .deadline = deadline },
+                    &adapter,
+                    Adapter.visit,
+                );
+                defer for (transport_events[0..transport_count]) |*event| {
+                    event.deinit(self.allocator);
+                };
+
+                for (transport_events[0..transport_count]) |*event| {
+                    switch (event.*) {
+                        .packet => |packet| {
+                            const application_event =
+                                (try self.pollBufferedEvent()) orelse
+                                Event{ .progress = packet.connection_handle };
+                            if (eventAlreadyReturned(
+                                output[0..count],
+                                application_event,
+                            )) {
+                                var duplicate = application_event;
+                                duplicate.deinit(self.allocator);
+                                continue;
+                            }
+                            output[count] = application_event;
+                            count += 1;
+                        },
+                        .timer => |timer| {
+                            const stable = try self.eventFromTimer(timer);
+                            if (stable) |value| {
+                                output[count] = value;
+                                count += 1;
+                            }
+                        },
+                        .new_initial, .unrouted => {
+                            output[count] = .{
+                                .unrouted = takeVisitEvent(event),
+                            };
+                            count += 1;
+                        },
+                        .consumed,
+                        .pending_handshake,
+                        .discarded_long_header,
+                        => {},
+                    }
+                }
+                if (count != 0) return count;
+            }
+        }
+
         fn receiveUntil(
             self: *Self,
             deadline: ?std.Io.Clock.Timestamp,
@@ -751,6 +866,120 @@ pub fn Pool(comptime Runtime: type) type {
                 return error.UnknownConnectionHandle;
             defer self.refresh(packet.connection_handle) catch {};
             try entry.client.processResponsePacket(&packet.packet);
+        }
+
+        fn processPacketView(
+            self: *Self,
+            packet: quic.endpoint_dispatcher.RoutedPacketView,
+        ) !void {
+            const entry = self.entries.get(packet.connection_handle) orelse
+                return error.UnknownConnectionHandle;
+            try entry.client.processResponsePacketView(packet.packet);
+        }
+
+        fn eventFromTimer(
+            self: *Self,
+            timer: quic.endpoint_dispatcher.TimerEvent,
+        ) !?Event {
+            const entry = self.entries.get(
+                timer.connection_handle,
+            ) orelse return error.UnknownConnectionHandle;
+            if (!entry.client.established.connection.closed()) {
+                return .{ .timer = timer };
+            }
+            const handle = entry.handle;
+            if (!entry.leased) {
+                self.dropEntry(handle);
+                return null;
+            }
+            if (entry.registered) {
+                _ = try self.dispatcher.unregisterConnection(handle);
+                entry.registered = false;
+            }
+            entry.close_pending = null;
+            return .{ .closed = .{
+                .connection_handle = handle,
+                .timer = timer.timer,
+            } };
+        }
+
+        fn takeVisitEvent(
+            event: *quic.endpoint_dispatcher.VisitEvent,
+        ) quic.endpoint_dispatcher.Event {
+            return switch (event.*) {
+                .new_initial => |initial| blk: {
+                    event.* = .consumed;
+                    break :blk .{ .new_initial = initial };
+                },
+                .unrouted => |unrouted| blk: {
+                    event.* = .consumed;
+                    break :blk .{ .unrouted = unrouted };
+                },
+                else => unreachable,
+            };
+        }
+
+        fn eventAlreadyReturned(
+            events: []const Event,
+            candidate: Event,
+        ) bool {
+            return switch (candidate) {
+                .response => |response| responseEventAlreadyReturned(
+                    events,
+                    response,
+                ),
+                .push => |push| pushEventAlreadyReturned(events, push),
+                else => false,
+            };
+        }
+
+        fn responseEventAlreadyReturned(
+            events: []const Event,
+            candidate: ResponseEvent,
+        ) bool {
+            const stream_id = switch (candidate.response) {
+                .reset => return false,
+                .message => |message| switch (message.value) {
+                    .data_available => message.stream_id,
+                    .head, .push_promise, .trailers, .finished => return false,
+                },
+            };
+            for (events) |event| switch (event) {
+                .response => |previous| {
+                    if (previous.connection_handle !=
+                        candidate.connection_handle) continue;
+                    switch (previous.response) {
+                        .reset => {},
+                        .message => |message| if (message.stream_id ==
+                            stream_id and message.value == .data_available)
+                        {
+                            return true;
+                        },
+                    }
+                },
+                else => {},
+            };
+            return false;
+        }
+
+        fn pushEventAlreadyReturned(
+            events: []const Event,
+            candidate: PushEvent,
+        ) bool {
+            if (candidate.push.value != .data_available) return false;
+            for (events) |event| switch (event) {
+                .push => |previous| {
+                    if (previous.connection_handle ==
+                        candidate.connection_handle and
+                        previous.push.stream_id == candidate.push.stream_id and
+                        previous.push.value == .data_available)
+                    {
+                        return true;
+                    }
+                },
+                else => {},
+            };
+            return false;
         }
 
         fn pollBufferedEvent(self: *Self) !?Event {
