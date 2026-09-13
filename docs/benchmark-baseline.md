@@ -1747,6 +1747,21 @@ inclusive to 0.51%, while the selected-slice retirement/move accounted for
 about 1.32%. Three direct 5%-loss runs each dropped exactly 25/504 datagrams,
 reported 25 transport losses, and verified all 4 MiB.
 
+The same ordered, no-retransmission invariant now accelerates fragmented ACKs.
+After validating the complete descending ACK chain transactionally, recovery
+walks the ascending pending queue and the ACK ranges once from lowest to
+highest instead of testing every packet against every range. Out-of-order
+originals, forgotten originals, and groups with retransmission copies keep the
+general membership scan. A fixed-binary, CPU-0, seven-pair run of
+`bench-quic-ack-ranges` reduced the 128-packet/64-range recovery cycle from
+12,990-13,122 ns (13,050 median) to 4,837-4,982 ns (4,854 median), a 62.8%
+median reduction or 2.69x throughput improvement, with the candidate faster in
+7/7 pairs. Direct tests compare irregular-width/gap output and 64 generated
+sparse/dense ACK patterns against queues forced through the conservative path;
+a separate multi-range case proves retransmission copies still use that
+fallback. Existing tests retain allocation-free large-range, out-of-order, and
+transactional invalid-ACK coverage.
+
 Single-packet send preparation formerly walked the same frame slice separately
 for wire length, retransmittable length, ACK-eliciting/in-flight traits, pending
 HANDSHAKE_DONE detection, and the largest ACK carried. Those pure observations

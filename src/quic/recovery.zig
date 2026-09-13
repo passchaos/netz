@@ -543,10 +543,14 @@ pub const Queue = struct {
             }
             smallest = range_end - range.ack_range_length;
         }
-        return self.retainUnacknowledgedAck(ack);
+        return self.retainUnacknowledgedAck(ack, smallest);
     }
 
-    fn retainUnacknowledgedAck(self: *Queue, ack: quic.AckFrame) usize {
+    fn retainUnacknowledgedAck(
+        self: *Queue,
+        ack: quic.AckFrame,
+        smallest_acknowledged: u64,
+    ) usize {
         if (ack.ranges.len == 0 and
             self.retransmission_copies == 0 and
             self.originals_sorted_ascending)
@@ -556,11 +560,71 @@ pub const Queue = struct {
                 ack.largest_acknowledged,
             );
         }
+        if (self.retransmission_copies == 0 and
+            self.originals_sorted_ascending)
+        {
+            return self.retainOutsideSortedOriginalRanges(
+                ack,
+                smallest_acknowledged,
+            );
+        }
 
         var write_index: usize = 0;
         var removed: usize = 0;
         for (self.pending.items, 0..) |*entry, read_index| {
             if (entryAcked(entry, ack)) {
+                self.removeEntryStats(entry);
+                self.recycleEntry(entry);
+                removed += 1;
+                continue;
+            }
+            if (write_index != read_index) {
+                self.pending.items[write_index] = entry.*;
+                entry.* = undefined;
+            }
+            write_index += 1;
+        }
+        if (removed == 0) return 0;
+        self.pending.items.len = write_index;
+        if (write_index == 0) self.originals_sorted_ascending = true;
+        return removed;
+    }
+
+    /// Merge an ascending original-packet queue with ACK ranges that are
+    /// encoded from highest to lowest. Starting at the already-validated
+    /// lowest range lets both inputs advance once, avoiding the general
+    /// O(packets * ranges) membership scan.
+    fn retainOutsideSortedOriginalRanges(
+        self: *Queue,
+        ack: quic.AckFrame,
+        smallest_acknowledged: u64,
+    ) usize {
+        std.debug.assert(ack.ranges.len != 0);
+        std.debug.assert(self.retransmission_copies == 0);
+        std.debug.assert(self.originals_sorted_ascending);
+
+        var range_index = ack.ranges.len;
+        var range_start = smallest_acknowledged;
+        var range_end = range_start +
+            ack.ranges[ack.ranges.len - 1].ack_range_length;
+        var write_index: usize = 0;
+        var removed: usize = 0;
+
+        for (self.pending.items, 0..) |*entry, read_index| {
+            const packet_number = entry.original_packet_number.?;
+            while (packet_number > range_end and range_index != 0) {
+                const relation = ack.ranges[range_index - 1];
+                range_start = range_end + relation.gap + 2;
+                range_index -= 1;
+                range_end = if (range_index == 0)
+                    ack.largest_acknowledged
+                else
+                    range_start +
+                        ack.ranges[range_index - 1].ack_range_length;
+            }
+            const acknowledged = packet_number >= range_start and
+                packet_number <= range_end;
+            if (acknowledged) {
                 self.removeEntryStats(entry);
                 self.recycleEntry(entry);
                 removed += 1;
@@ -1317,6 +1381,124 @@ test "QUIC recovery queue applies large ACK range sets in one pass" {
             entry.newestPacketNumber(),
         );
     }
+}
+
+test "QUIC recovery sorted range merge matches conservative membership scan" {
+    const allocator = std.testing.allocator;
+    var merged = Queue.init(allocator);
+    defer merged.deinit();
+    var scanned = Queue.init(allocator);
+    defer scanned.deinit();
+
+    for (0..101) |packet_number| {
+        _ = try merged.trackSent(@intCast(packet_number), "payload");
+        _ = try scanned.trackSent(@intCast(packet_number), "payload");
+    }
+    // Force only the comparison queue through the general implementation.
+    scanned.originals_sorted_ascending = false;
+    const ranges = [_]quic.AckRange{
+        .{ .gap = 2, .ack_range_length = 4 }, // 77..81
+        .{ .gap = 0, .ack_range_length = 3 }, // 72..75
+        .{ .gap = 5, .ack_range_length = 7 }, // 58..65
+    };
+    const ack = quic.AckFrame{
+        .largest_acknowledged = 90,
+        .ack_delay = 0,
+        .first_ack_range = 5, // 85..90
+        .ranges = &ranges,
+    };
+
+    try std.testing.expectEqual(
+        try scanned.applyAck(ack),
+        try merged.applyAck(ack),
+    );
+    try std.testing.expectEqual(scanned.pendingCount(), merged.pendingCount());
+    try std.testing.expectEqual(scanned.stats().payload_bytes, merged.stats().payload_bytes);
+    for (scanned.pending.items, merged.pending.items) |expected, actual| {
+        try std.testing.expectEqual(
+            expected.original_packet_number,
+            actual.original_packet_number,
+        );
+    }
+}
+
+test "QUIC recovery sorted range merge matches generated ACK patterns" {
+    const allocator = std.testing.allocator;
+    const packet_count = 101;
+
+    for (0..64) |seed| {
+        var merged = Queue.init(allocator);
+        defer merged.deinit();
+        var scanned = Queue.init(allocator);
+        defer scanned.deinit();
+        var received = quic.packet_space.ReceivedPacketTracker.init(
+            allocator,
+            packet_count,
+        );
+        defer received.deinit();
+
+        for (0..packet_count) |packet_number| {
+            const pn: u64 = @intCast(packet_number);
+            _ = try merged.trackSent(pn, "payload");
+            _ = try scanned.trackSent(pn, "payload");
+            const selector = (packet_number * 37 + seed * 17) % 11;
+            if (packet_number == packet_count - 1 or
+                selector < seed % 7 + 1)
+            {
+                try received.record(pn);
+            }
+        }
+
+        var range_storage: [packet_count]quic.AckRange = undefined;
+        const ack = try received.ackFrameInto(&range_storage, 0);
+        scanned.originals_sorted_ascending = false;
+        try std.testing.expectEqual(
+            try scanned.applyAck(ack),
+            try merged.applyAck(ack),
+        );
+        try std.testing.expectEqual(
+            scanned.pendingCount(),
+            merged.pendingCount(),
+        );
+        try std.testing.expectEqual(scanned.stats(), merged.stats());
+        for (scanned.pending.items, merged.pending.items) |expected, actual| {
+            try std.testing.expectEqual(
+                expected.original_packet_number,
+                actual.original_packet_number,
+            );
+        }
+    }
+}
+
+test "QUIC recovery multi-range ACK falls back for retransmission copies" {
+    const allocator = std.testing.allocator;
+    var queue = Queue.init(allocator);
+    defer queue.deinit();
+
+    _ = try queue.trackSent(1, "one");
+    _ = try queue.trackSent(3, "three");
+    _ = try queue.trackSent(5, "five");
+    try queue.recordRetransmission(1, 8);
+    const ranges = [_]quic.AckRange{.{
+        .gap = 2,
+        .ack_range_length = 0,
+    }};
+    const ack = quic.AckFrame{
+        .largest_acknowledged = 8,
+        .ack_delay = 0,
+        .first_ack_range = 0,
+        .ranges = &ranges,
+    };
+
+    // Packet 8 acknowledges the retransmitted group originally sent as 3;
+    // the lower range independently acknowledges packet 4, which is absent.
+    try std.testing.expectEqual(@as(usize, 1), try queue.applyAck(ack));
+    try std.testing.expectEqual(@as(usize, 2), queue.pendingCount());
+    try std.testing.expect(queue.packetNumberCandidate(3) == null);
+    try std.testing.expect(queue.packetNumberCandidate(8) == null);
+    try std.testing.expect(queue.packetNumberCandidate(1) != null);
+    try std.testing.expect(queue.packetNumberCandidate(5) != null);
+    try std.testing.expectEqual(@as(usize, 0), queue.stats().retransmission_copies);
 }
 
 test "QUIC recovery applies large ACK range sets without allocation" {
