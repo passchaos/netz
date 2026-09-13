@@ -19,6 +19,8 @@ stream_window=${NETZ_QUIC_PERSISTENT_STREAM_WINDOW:-1048576}
 timeout_ms=${NETZ_QUIC_PERSISTENT_TIMEOUT_MS:-30000}
 server_topology=independent
 shared_receive_batch=${NETZ_QUIC_PERSISTENT_SHARED_RECEIVE_BATCH:-32}
+server_ack_every=${NETZ_QUIC_PERSISTENT_SERVER_ACK_EVERY:-1}
+server_ack_delay_us=${NETZ_QUIC_PERSISTENT_SERVER_ACK_DELAY_US:-0}
 for arg in "$@"; do
   case $arg in
     --mode=*) modes=${arg#--mode=} ;;
@@ -34,6 +36,8 @@ for arg in "$@"; do
     --timeout-ms=*) timeout_ms=${arg#--timeout-ms=} ;;
     --server-topology=*) server_topology=${arg#--server-topology=} ;;
     --shared-receive-batch=*) shared_receive_batch=${arg#--shared-receive-batch=} ;;
+    --server-ack-every=*) server_ack_every=${arg#--server-ack-every=} ;;
+    --server-ack-delay-us=*) server_ack_delay_us=${arg#--server-ack-delay-us=} ;;
     *) echo "unknown persistent benchmark option: $arg" >&2; exit 2 ;;
   esac
 done
@@ -72,6 +76,16 @@ if [[ $streams != 1 && $streams != 4 ]]; then
 fi
 if (( shared_receive_batch < 1 || shared_receive_batch > 64 )); then
   echo 'shared receive batch must be between 1 and 64' >&2
+  exit 2
+fi
+if (( server_ack_every < 1 || server_ack_every > 64 ||
+      server_ack_delay_us < 0 || server_ack_delay_us > 25000 )); then
+  echo 'server ACK policy must use ack-every 1..64 and delay 0..25000 us' >&2
+  exit 2
+fi
+if [[ $server_topology != shared ]] &&
+   (( server_ack_every != 1 || server_ack_delay_us != 0 )); then
+  echo 'custom server ACK policy requires shared server topology' >&2
   exit 2
 fi
 
@@ -169,12 +183,16 @@ run_pair() {
     common+=("--server-topology=$server_topology")
     if [[ $server_topology == shared ]]; then
       common+=("--shared-receive-batch=$shared_receive_batch")
+      common+=("--server-ack-every=$server_ack_every")
+      common+=("--server-ack-delay-us=$server_ack_delay_us")
     fi
   fi
   local go_common=()
   for argument in "${common[@]}"; do
     [[ $argument == --server-topology=* ||
-       $argument == --shared-receive-batch=* ]] ||
+       $argument == --shared-receive-batch=* ||
+       $argument == --server-ack-every=* ||
+       $argument == --server-ack-delay-us=* ]] ||
       go_common+=("-${argument#--}")
   done
 
@@ -212,6 +230,8 @@ run_pair() {
     "--bytes-per-stream=$aggregate_bytes" "--payload-bytes=$payload_bytes" \
     "--sender=$sender" "--server-topology=$server_topology" \
     "--shared-receive-batch=$shared_receive_batch" \
+    "--server-ack-every=$server_ack_every" \
+    "--server-ack-delay-us=$server_ack_delay_us" \
     "--client-log=$pair_dir/client.log" \
     "--server-log=$pair_dir/server.log"
   grep '^record=result ' "$pair_dir/client.log" >>"$work/results.log"
@@ -266,5 +286,7 @@ if [[ $modes == aggregate || $modes == both ]]; then
   python3 "$repo_root/tools/interop/quic_persistent_benchmark_summary.py" \
     --mode=aggregate "--samples=$samples" "--log=$work/results.log" \
     "--server-topology=$server_topology" \
-    "--shared-receive-batch=$shared_receive_batch"
+    "--shared-receive-batch=$shared_receive_batch" \
+    "--server-ack-every=$server_ack_every" \
+    "--server-ack-delay-us=$server_ack_delay_us"
 fi

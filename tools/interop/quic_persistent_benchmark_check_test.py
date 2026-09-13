@@ -127,7 +127,8 @@ class PersistentBenchmarkCheckTest(unittest.TestCase):
                         "endpoint_topology=one-udp-socket-per-connection",
                         "connection_scope=parallel-shared-server-endpoint "
                         "endpoint_topology=shared-server-udp "
-                        "server_receive_batch=32 server_receive_calls=4 "
+                        "server_receive_batch=32 server_ack_every=1 "
+                        "server_ack_delay_us=0 server_receive_calls=4 "
                         "server_receive_events=7 server_receive_max_events=3 "
                         "server_received_datagrams=8 "
                         "server_receive_max_datagrams=4 "
@@ -145,6 +146,52 @@ class PersistentBenchmarkCheckTest(unittest.TestCase):
                 run=1, connections=4, warmup=0, iterations=1, streams=4,
                 bytes_per_stream=256, payload_bytes=1024, sender="client",
                 server_topology="shared", client_log=client, server_log=server,
+            )
+            for path in (client, server):
+                path.write_text(
+                    path.read_text().replace(
+                        "server_ack_every=1", "server_ack_every=2",
+                    ).replace(
+                        "server_ack_delay_us=0", "server_ack_delay_us=1000",
+                    ),
+                    encoding="utf-8",
+                )
+            CHECK.verify(
+                mode="aggregate", role_pair="netz-client+netz-server",
+                run=1, connections=4, warmup=0, iterations=1, streams=4,
+                bytes_per_stream=256, payload_bytes=1024, sender="client",
+                server_topology="shared", server_ack_every=2,
+                server_ack_delay_us=1000, client_log=client,
+                server_log=server,
+            )
+            for path in (client, server):
+                path.write_text(
+                    path.read_text().replace(
+                        "server_ack_every=2", "server_ack_every=1",
+                    ).replace(
+                        "server_ack_delay_us=1000", "server_ack_delay_us=0",
+                    ),
+                    encoding="utf-8",
+                )
+            client.write_text(
+                client.read_text().replace(
+                    "server_ack_every=1", "server_ack_every=2",
+                ),
+                encoding="utf-8",
+            )
+            with self.assertRaisesRegex(ValueError, "server_ack_every"):
+                CHECK.verify(
+                    mode="aggregate", role_pair="netz-client+netz-server",
+                    run=1, connections=4, warmup=0, iterations=1, streams=4,
+                    bytes_per_stream=256, payload_bytes=1024, sender="client",
+                    server_topology="shared", client_log=client,
+                    server_log=server,
+                )
+            client.write_text(
+                client.read_text().replace(
+                    "server_ack_every=2", "server_ack_every=1",
+                ),
+                encoding="utf-8",
             )
             server.write_text(
                 server.read_text().replace(

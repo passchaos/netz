@@ -43,6 +43,11 @@ taskset -c 0 zig build bench-quic-endpoint-timers -Doptimize=ReleaseFast -- \
   --iterations=2000000
 taskset -c 0 zig build bench-quic-endpoint-pending -Doptimize=ReleaseFast -- \
   --iterations=2000000
+zig build bench-quic-persistent-external -Doptimize=ReleaseFast -- \
+  --mode=aggregate --samples=5 --connections=4 --streams=1 \
+  --bytes-per-stream=1048576 --server-topology=shared \
+  --shared-receive-batch=32 --server-ack-every=2 \
+  --server-ack-delay-us=25000
 zig build bench-websocket-frame -Doptimize=ReleaseFast
 zig build bench-websocket-receive-buffer -Doptimize=ReleaseFast
 zig build bench-websocket-h3-echo -Doptimize=ReleaseFast

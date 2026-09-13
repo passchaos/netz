@@ -51,7 +51,8 @@ def positive(row: dict[str, str], key: str) -> int:
 
 def summarize(
     path: Path, mode: str, samples: int, topology: str = "independent",
-    shared_receive_batch: int = 32,
+    shared_receive_batch: int = 32, server_ack_every: int = 1,
+    server_ack_delay_us: int = 0,
 ) -> list[str]:
     if samples <= 0 or samples % 2 == 0:
         raise ValueError("samples must be a positive odd number")
@@ -59,8 +60,12 @@ def summarize(
         raise ValueError("invalid server topology")
     if topology == "shared" and mode != "aggregate":
         raise ValueError("shared topology requires aggregate mode")
-    if shared_receive_batch < 1 or shared_receive_batch > 64:
-        raise ValueError("invalid shared receive batch")
+    if (
+        shared_receive_batch < 1 or shared_receive_batch > 64
+        or server_ack_every < 1 or server_ack_every > 64
+        or server_ack_delay_us < 0 or server_ack_delay_us > 25000
+    ):
+        raise ValueError("invalid shared receive or ACK configuration")
     source = rows(path, mode, topology)
     if not source:
         raise ValueError(f"no {mode} result records")
@@ -68,17 +73,19 @@ def summarize(
         ("warmup", "iterations", "connections", "streams", "payload_bytes")
         if mode == "echo"
         else ("connections", "streams", "bytes_per_stream", "timing_scope") +
-            (("server_receive_batch",) if topology == "shared" else ())
+            (("server_receive_batch", "server_ack_every", "server_ack_delay_us")
+             if topology == "shared" else ())
     )
     expected_shape = tuple(source[0].get(key) for key in shape_keys)
     if any(value is None for value in expected_shape) or any(
         tuple(row.get(key) for key in shape_keys) != expected_shape for row in source
     ):
         raise ValueError(f"mixed or incomplete {mode} benchmark shapes")
-    if topology == "shared" and expected_shape[-1] != str(
-        shared_receive_batch
+    if topology == "shared" and expected_shape[-3:] != (
+        str(shared_receive_batch), str(server_ack_every),
+        str(server_ack_delay_us),
     ):
-        raise ValueError("shared receive batch mismatch")
+        raise ValueError("shared receive or ACK policy mismatch")
     role_pairs = (
         ("netz-client+netz-server",)
         if topology == "shared" else ROLE_PAIRS
@@ -137,6 +144,8 @@ def summarize(
                 grouped[(role_pair, sender)] = median_throughput
                 batch_field = (
                     f"server_receive_batch={shared_receive_batch} "
+                    f"server_ack_every={server_ack_every} "
+                    f"server_ack_delay_us={server_ack_delay_us} "
                     if topology == "shared" else ""
                 )
                 output.append(
@@ -193,10 +202,14 @@ def main() -> None:
         default="independent",
     )
     parser.add_argument("--shared-receive-batch", type=int, default=32)
+    parser.add_argument("--server-ack-every", type=int, default=1)
+    parser.add_argument("--server-ack-delay-us", type=int, default=0)
     args = parser.parse_args()
     for line in summarize(
         args.log, args.mode, args.samples, args.server_topology,
         args.shared_receive_batch,
+        args.server_ack_every,
+        args.server_ack_delay_us,
     ):
         print(line)
 

@@ -26,6 +26,8 @@ const Config = struct {
     timeout_ms: u32 = 30_000,
     server_topology: ServerTopology = .independent,
     shared_receive_batch: u8 = 32,
+    server_ack_every: u8 = 1,
+    server_ack_delay_us: u32 = 0,
 
     fn parse(args: []const []const u8) !Config {
         var mode: ?Mode = null;
@@ -69,6 +71,10 @@ const Config = struct {
                 ) orelse return error.InvalidArgument;
             } else if (option(arg, "--shared-receive-batch=")) |value| {
                 result.shared_receive_batch = try parsePositive(u8, value);
+            } else if (option(arg, "--server-ack-every=")) |value| {
+                result.server_ack_every = try parsePositive(u8, value);
+            } else if (option(arg, "--server-ack-delay-us=")) |value| {
+                result.server_ack_delay_us = try parseNonNegative(u32, value);
             } else {
                 return error.InvalidArgument;
             }
@@ -94,6 +100,8 @@ const Config = struct {
             self.timeout_ms == 0 or self.timeout_ms > 10 * 60 * 1000 or
             self.shared_receive_batch >
                 netz.quic.runtime.max_receive_batch_messages or
+            self.server_ack_every > 64 or
+            self.server_ack_delay_us > 25_000 or
             (self.mode == .echo and
                 (self.connections != 1 or self.streams != 1 or
                     self.sender != .client)) or
@@ -105,7 +113,9 @@ const Config = struct {
                         u8,
                         self.role_pair,
                         "netz-client+netz-server",
-                    ))))
+                    ))) or
+            (self.server_topology != .shared and
+                (self.server_ack_every != 1 or self.server_ack_delay_us != 0)))
         {
             return error.InvalidArgument;
         }
@@ -150,6 +160,15 @@ const Config = struct {
         const per_connection = try self.wire().totalBytes();
         return std.math.mul(u64, per_connection, self.connections) catch
             error.InvalidArgument;
+    }
+
+    fn serverOneRttConfig(
+        self: Config,
+    ) !netz.quic.handshake.OneRttConfig {
+        var config = try self.wire().oneRttConfig();
+        config.local_ack_eliciting_threshold = self.server_ack_every;
+        config.local_max_ack_delay_us = self.server_ack_delay_us;
+        return config;
     }
 };
 
@@ -316,7 +335,7 @@ fn runSharedServer(config: Config) !void {
                 } },
             },
             .max_crypto_buffer = 64 * 1024,
-            .initial_one_rtt_config = try config.wire().oneRttConfig(),
+            .initial_one_rtt_config = try config.serverOneRttConfig(),
         },
         .{
             .max_pending_handshakes = config.connections,
@@ -809,7 +828,7 @@ const ServerWorker = struct {
                     } },
                 },
                 .max_crypto_buffer = 64 * 1024,
-                .initial_one_rtt_config = try self.config.wire().oneRttConfig(),
+                .initial_one_rtt_config = try self.config.serverOneRttConfig(),
             },
             self.config.timeout(),
         );
@@ -1459,16 +1478,18 @@ fn printClientResult(
             "timing_scope=stream-setup-through-verified-completion " ++
             "connections={d} streams={d} " ++
             "bytes_per_stream={d} transferred_bytes={d} checksum={d} " ++
-            "server_receive_batch={d} " ++
+            "server_receive_batch={d} server_ack_every={d} " ++
+            "server_ack_delay_us={d} " ++
             "elapsed_ns={d} logical_MiB_s={d:.3} sender_role={s} " ++
             "cert_verify=true quic_version=1 gso=false gro=false " ++
             "completion_exchange_verified=true complete=true\n",
         .{
-            implementation,          config.role_pair,           config.run,
-            connectionScope(config), endpointTopology(config),   config.connections,
-            config.streams,          config.bytes_per_stream,    bytes,
-            checksum,                serverReceiveBatch(config), elapsed_ns,
-            mib_s,                   @tagName(config.sender),
+            implementation,             config.role_pair,           config.run,
+            connectionScope(config),    endpointTopology(config),   config.connections,
+            config.streams,             config.bytes_per_stream,    bytes,
+            checksum,                   serverReceiveBatch(config), config.server_ack_every,
+            config.server_ack_delay_us, elapsed_ns,                 mib_s,
+            @tagName(config.sender),
         },
     );
 }
@@ -1515,7 +1536,8 @@ fn printServerCompletion(
             "benchmark_scope=same-application-shape warmup=0 iterations=1 " ++
             "connections={d} streams={d} bytes_per_stream={d} payload_bytes={d} " ++
             "transferred_bytes={d} checksum={d} sender_role={s} " ++
-            "server_receive_batch={d} " ++
+            "server_receive_batch={d} server_ack_every={d} " ++
+            "server_ack_delay_us={d} " ++
             "server_receive_calls={d} server_receive_events={d} " ++
             "server_receive_max_events={d} " ++
             "server_received_datagrams={d} " ++
@@ -1527,15 +1549,16 @@ fn printServerCompletion(
             "connections_complete={d} cert_verify=true quic_version=1 " ++
             "gso=false gro=false completion_exchange_verified=true complete=true\n",
         .{
-            serverImplementation(config.role_pair), config.role_pair,           config.run,
-            connectionScope(config),                endpointTopology(config),   config.connections,
-            config.streams,                         config.bytes_per_stream,    config.payload_bytes,
-            bytes,                                  checksum,                   @tagName(config.sender),
-            serverReceiveBatch(config),             receive.calls,              receive.events,
-            receive.max_events,                     receive.received_datagrams, receive.max_received_datagrams,
-            receive.connected_events,               receive.packet_events,      receive.timer_events,
-            traffic.sent_datagrams,                 traffic.sent_bytes,         traffic.received_datagrams,
-            traffic.received_bytes,                 config.connections,
+            serverImplementation(config.role_pair), config.role_pair,               config.run,
+            connectionScope(config),                endpointTopology(config),       config.connections,
+            config.streams,                         config.bytes_per_stream,        config.payload_bytes,
+            bytes,                                  checksum,                       @tagName(config.sender),
+            serverReceiveBatch(config),             config.server_ack_every,        config.server_ack_delay_us,
+            receive.calls,                          receive.events,                 receive.max_events,
+            receive.received_datagrams,             receive.max_received_datagrams, receive.connected_events,
+            receive.packet_events,                  receive.timer_events,           traffic.sent_datagrams,
+            traffic.sent_bytes,                     traffic.received_datagrams,     traffic.received_bytes,
+            config.connections,
         },
     );
 }
@@ -1618,6 +1641,16 @@ test "persistent QUIC benchmark config rejects ambiguous shapes" {
         endpointTopology(shared),
     );
     try std.testing.expectEqual(@as(u8, 32), shared.shared_receive_batch);
+    const delayed_ack = try Config.parse(&.{
+        "--mode=aggregate",           "--role-pair=netz-client+netz-server",
+        "--sender=client",            "--connections=4",
+        "--streams=1",                "--bytes-per-stream=65536",
+        "--warmup=0",                 "--iterations=1",
+        "--server-topology=shared",   "--server-ack-every=2",
+        "--server-ack-delay-us=1000",
+    });
+    try std.testing.expectEqual(@as(u8, 2), delayed_ack.server_ack_every);
+    try std.testing.expectEqual(@as(u32, 1000), delayed_ack.server_ack_delay_us);
     const single_receive = try Config.parse(&.{
         "--mode=aggregate",         "--role-pair=netz-client+netz-server",
         "--sender=client",          "--connections=4",
@@ -1642,6 +1675,26 @@ test "persistent QUIC benchmark config rejects ambiguous shapes" {
         "--streams=1",              "--bytes-per-stream=65536",
         "--warmup=0",               "--iterations=1",
         "--server-topology=shared",
+    }));
+    try std.testing.expectError(error.InvalidArgument, Config.parse(&.{
+        "--mode=aggregate",     "--role-pair=netz-client+netz-server",
+        "--connections=4",      "--streams=1",
+        "--bytes-per-stream=1", "--warmup=0",
+        "--iterations=1",       "--server-ack-every=2",
+    }));
+    try std.testing.expectError(error.InvalidArgument, Config.parse(&.{
+        "--mode=aggregate",         "--role-pair=netz-client+netz-server",
+        "--sender=client",          "--connections=4",
+        "--streams=1",              "--bytes-per-stream=1",
+        "--warmup=0",               "--iterations=1",
+        "--server-topology=shared", "--server-ack-every=65",
+    }));
+    try std.testing.expectError(error.InvalidArgument, Config.parse(&.{
+        "--mode=aggregate",         "--role-pair=netz-client+netz-server",
+        "--sender=client",          "--connections=4",
+        "--streams=1",              "--bytes-per-stream=1",
+        "--warmup=0",               "--iterations=1",
+        "--server-topology=shared", "--server-ack-delay-us=25001",
     }));
     try std.testing.expectError(error.InvalidArgument, Config.parse(&.{
         "--mode=echo",         "--role-pair=netz-client+netz-server",

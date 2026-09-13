@@ -89,7 +89,8 @@ class PersistentBenchmarkSummaryTest(unittest.TestCase):
                         f"elapsed_ns=1000 logical_MiB_s={value:.3f} "
                         "connection_scope=parallel-shared-server-endpoint "
                         "endpoint_topology=shared-server-udp "
-                        "server_receive_batch=32 "
+                        "server_receive_batch=32 server_ack_every=1 "
+                        "server_ack_delay_us=0 "
                         "benchmark_scope=same-application-shape "
                         "completion_exchange_verified=true complete=true"
                     )
@@ -102,6 +103,22 @@ class PersistentBenchmarkSummaryTest(unittest.TestCase):
             self.assertEqual(len(output), 1)
             self.assertIn("median_logical_MiB_s=120.000", output[0])
             self.assertIn("server_receive_batch=32", output[0])
+            self.assertIn("server_ack_every=1", output[0])
+            self.assertIn("server_ack_delay_us=0", output[0])
+            path.write_text(
+                path.read_text().replace(
+                    "server_ack_every=1", "server_ack_every=2", 1,
+                ),
+                encoding="utf-8",
+            )
+            with self.assertRaisesRegex(ValueError, "mixed|policy mismatch"):
+                SUMMARY.summarize(path, "aggregate", 3, "shared", 32, 1, 0)
+            path.write_text(
+                path.read_text().replace(
+                    "server_ack_every=2", "server_ack_every=1", 1,
+                ),
+                encoding="utf-8",
+            )
             path.write_text(
                 path.read_text().replace(
                     "server_receive_batch=32",

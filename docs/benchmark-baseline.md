@@ -2462,6 +2462,23 @@ by the per-socket batch size. This shows that batching
 captures bursts but the typical call is close to a singleton, so reducing
 per-call dispatcher work is higher leverage than increasing the batch width.
 
+The same shared harness can now isolate the server's local ACK cadence with
+the server-ack-every and server-ack-delay-us options; both values are recorded
+in the client result, server completion, and summary, and mixed-policy result
+sets are rejected. Defaults remain the historical immediate policy (1/0), and
+non-default values are limited to the shared netz/netz topology so cross-peer
+comparisons cannot silently change shape. In one verified four-connection,
+1-MiB total exploratory pair, 2 packets / 25 ms reduced server UDP sends from
+956 to 492 (48.5%) and measured 112.893 versus 77.455 MiB/s. This is a
+single-sample tuning signal, not a default-policy or superiority claim.
+
+Short-delay concurrency exposed a separate issue: 2 packets / 1 ms succeeds
+for one connection but timed out for four and sixteen connections, with the
+peer eventually closing. The benchmark option is retained to make that
+correctness/performance investigation reproducible; the library default is not
+changed until the multi-connection timer interaction is fixed and a complete
+matrix passes.
+
 The server and dispatcher now both expose batch visitor entry points taking an
 already-composed std.Io.Timeout. Public WithDeadline forms retain strict
 awake-clock and expiry validation, while the shared benchmark can compose its

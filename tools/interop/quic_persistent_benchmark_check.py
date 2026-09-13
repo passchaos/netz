@@ -73,7 +73,8 @@ def echo_checksum(rounds: int, payload_bytes: int) -> int:
 def require_shape(
     row: dict[str, str], *, implementation: str, record_kind: str,
     role_pair: str, mode: str, run: int, server_topology: str,
-    shared_receive_batch: int,
+    shared_receive_batch: int, server_ack_every: int,
+    server_ack_delay_us: int,
 ) -> None:
     shared = server_topology == "shared"
     expected = {
@@ -103,6 +104,8 @@ def require_shape(
     }
     if shared:
         expected["server_receive_batch"] = str(shared_receive_batch)
+        expected["server_ack_every"] = str(server_ack_every)
+        expected["server_ack_delay_us"] = str(server_ack_delay_us)
     for key, value in expected.items():
         if row.get(key) != value:
             raise ValueError(f"{record_kind} {key} mismatch: {row}")
@@ -117,6 +120,7 @@ def verify(
     warmup: int, iterations: int, streams: int, bytes_per_stream: int,
     payload_bytes: int, sender: str, client_log: Path, server_log: Path,
     server_topology: str = "independent", shared_receive_batch: int = 32,
+    server_ack_every: int = 1, server_ack_delay_us: int = 0,
 ) -> None:
     client_impl, server_impl = endpoint_implementations(role_pair)
     if (
@@ -126,6 +130,8 @@ def verify(
         or sender not in ("client", "server")
         or server_topology not in ("independent", "shared")
         or shared_receive_batch < 1 or shared_receive_batch > 64
+        or server_ack_every < 1 or server_ack_every > 64
+        or server_ack_delay_us < 0 or server_ack_delay_us > 25000
     ):
         raise ValueError("invalid verifier configuration")
     if mode == "echo" and (connections != 1 or streams != 1 or sender != "client"):
@@ -137,6 +143,10 @@ def verify(
         or role_pair != "netz-client+netz-server"
     ):
         raise ValueError("invalid shared server topology")
+    if server_topology != "shared" and (
+        server_ack_every != 1 or server_ack_delay_us != 0
+    ):
+        raise ValueError("custom server ACK policy requires shared topology")
 
     results = records(client_log, "result")
     completions = records(server_log, "server-complete")
@@ -149,12 +159,16 @@ def verify(
         role_pair=role_pair, mode=mode, run=run,
         server_topology=server_topology,
         shared_receive_batch=shared_receive_batch,
+        server_ack_every=server_ack_every,
+        server_ack_delay_us=server_ack_delay_us,
     )
     require_shape(
         server, implementation=server_impl, record_kind="server",
         role_pair=role_pair, mode=mode, run=run,
         server_topology=server_topology,
         shared_receive_batch=shared_receive_batch,
+        server_ack_every=server_ack_every,
+        server_ack_delay_us=server_ack_delay_us,
     )
     expected_common = {
         "connections": str(connections),
@@ -274,6 +288,8 @@ def main() -> None:
         default="independent",
     )
     parser.add_argument("--shared-receive-batch", type=int, default=32)
+    parser.add_argument("--server-ack-every", type=int, default=1)
+    parser.add_argument("--server-ack-delay-us", type=int, default=0)
     parser.add_argument("--client-log", type=Path, required=True)
     parser.add_argument("--server-log", type=Path, required=True)
     args = parser.parse_args()
