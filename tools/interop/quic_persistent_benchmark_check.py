@@ -167,6 +167,33 @@ def verify(
                 raise ValueError(f"{key} mismatch: {row}")
     if integer(server, "connections_complete") != connections:
         raise ValueError("incomplete server connection set")
+    if server_topology == "shared":
+        receive_calls = integer(server, "server_receive_calls", 1)
+        receive_events = integer(server, "server_receive_events", 1)
+        max_events = integer(server, "server_receive_max_events", 1)
+        received_datagrams = integer(server, "server_received_datagrams", 1)
+        max_received_datagrams = integer(
+            server, "server_receive_max_datagrams", 1,
+        )
+        connected_events = integer(server, "server_connected_events", 1)
+        packet_events = integer(server, "server_packet_events", 1)
+        timer_events = integer(server, "server_timer_events")
+        socket_received_datagrams = integer(
+            server, "server_socket_received_datagrams", 1,
+        )
+        integer(server, "server_socket_received_bytes", 1)
+        integer(server, "server_socket_sent_datagrams", 1)
+        integer(server, "server_socket_sent_bytes", 1)
+        if receive_events != connected_events + packet_events + timer_events:
+            raise ValueError("shared receive event count mismatch")
+        if connected_events != connections:
+            raise ValueError("shared connected event count mismatch")
+        if receive_events < receive_calls or max_events > shared_receive_batch:
+            raise ValueError("invalid shared receive call utilization")
+        if received_datagrams != socket_received_datagrams:
+            raise ValueError("shared received datagram count mismatch")
+        if max_received_datagrams > shared_receive_batch:
+            raise ValueError("invalid shared received datagram batch")
 
     if mode == "echo":
         rounds = warmup + iterations

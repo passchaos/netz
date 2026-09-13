@@ -2445,6 +2445,20 @@ handshake promotion. That lifecycle complexity is not justified at the current
 scale, so the index is deferred until a higher-cardinality end-to-end workload
 shows material impact rather than inferred from the 1,024-connection extreme.
 
+The shared persistent benchmark now emits strictly checked receive-loop and
+socket counters so future work can distinguish configured batch width from
+actual batching. One verified 16-connection, 16-MiB upload with a configured
+batch of 32 used 12,665 receive calls for 14,758 UDP datagrams, only 1.17
+datagrams per call on average, while still reaching a maximum of 23. It
+returned 14,743 events: 14,710 packets, 16 connections, and 17 timers. The
+endpoint sent 14,785 datagrams / 605,774 UDP payload bytes and received
+17,446,671 bytes. The checker requires event-class totals to match, one or more
+events per successful call, connected events to match the requested connection
+count, both observed maxima to fit the configured bound, and per-call received
+datagrams to equal the endpoint socket counter. This shows that batching
+captures bursts but the typical call is close to a singleton, so reducing
+per-call dispatcher work is higher leverage than increasing the batch width.
+
 Endpoint CID mirroring now carries a monotonic revision on the fixed-size local
 CID pool. Initial registration, successful NEW_CONNECTION_ID issuance, and an
 actual RETIRE_CONNECTION_ID advance it; repeated retirement and failed

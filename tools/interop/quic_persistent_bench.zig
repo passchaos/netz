@@ -237,7 +237,7 @@ fn runServer(config: Config) !void {
         threads[index] = try std.Thread.spawn(.{}, ServerWorker.run, .{&contexts[index]});
     }
     for (threads) |thread| thread.join();
-    try printServerCompletion(config, results);
+    try printServerCompletion(config, results, null, null);
 }
 
 const SharedStage = enum {
@@ -269,16 +269,30 @@ const SharedConnectionState = struct {
     completed_streams: usize = 0,
 };
 
+const SharedReceiveStats = struct {
+    calls: u64 = 0,
+    events: u64 = 0,
+    max_events: usize = 0,
+    received_datagrams: u64 = 0,
+    max_received_datagrams: u64 = 0,
+    connected_events: u64 = 0,
+    packet_events: u64 = 0,
+    timer_events: u64 = 0,
+};
+
 fn runSharedServer(config: Config) !void {
     const allocator = std.heap.c_allocator;
     var threaded = std.Io.Threaded.init(allocator, .{ .async_limit = .unlimited });
     defer threaded.deinit();
     const io = threaded.io();
+    var socket_traffic: netz.quic.runtime.SocketTrafficCounters = .{};
+    var limits = endpointLimits();
+    limits.socket_traffic_counters = &socket_traffic;
     var endpoint = try netz.quic.runtime.Endpoint.bind(
         allocator,
         io,
         .{ .ip4 = .loopback(0) },
-        endpointLimits(),
+        limits,
     );
     defer endpoint.deinit();
     var certificate_der: [netz.tls.testing.certificate_der_len]u8 = undefined;
@@ -333,8 +347,10 @@ fn runSharedServer(config: Config) !void {
         netz.quic.runtime.max_receive_batch_messages * 4096
     ]u8 = undefined;
     var receive_events: [netz.quic.runtime.max_receive_batch_messages]netz.quic.endpoint_server.VisitEvent = undefined;
+    var receive_stats: SharedReceiveStats = .{};
     var complete: usize = 0;
     while (complete < config.connections) {
+        const traffic_before = socket_traffic.stats();
         const event_count = try server.receiveManyVisitingWithDeadline(
             &versions,
             receive_storage[0 .. @as(usize, config.shared_receive_batch) * 4096],
@@ -343,10 +359,24 @@ fn runSharedServer(config: Config) !void {
             {},
             discardSharedPacket,
         );
+        const received_datagrams = socket_traffic.stats()
+            .since(traffic_before).received_datagrams;
+        receive_stats.calls += 1;
+        receive_stats.events += event_count;
+        receive_stats.max_events = @max(
+            receive_stats.max_events,
+            event_count,
+        );
+        receive_stats.received_datagrams += received_datagrams;
+        receive_stats.max_received_datagrams = @max(
+            receive_stats.max_received_datagrams,
+            received_datagrams,
+        );
         for (receive_events[0..event_count]) |*event| {
             defer event.deinit(allocator);
             switch (event.*) {
                 .connected => |handle| {
+                    receive_stats.connected_events += 1;
                     if (handle == 0 or handle > states.len) {
                         return error.InvalidBenchmarkResult;
                     }
@@ -367,6 +397,7 @@ fn runSharedServer(config: Config) !void {
                     ));
                 },
                 .packet => |packet| {
+                    receive_stats.packet_events += 1;
                     const handle = packet.connection_handle;
                     if (handle == 0 or handle > states.len) {
                         return error.InvalidBenchmarkResult;
@@ -380,6 +411,7 @@ fn runSharedServer(config: Config) !void {
                     ));
                 },
                 .timer => |timer| {
+                    receive_stats.timer_events += 1;
                     const handle = timer.connection_handle;
                     if (handle == 0 or handle > states.len) {
                         return error.InvalidBenchmarkResult;
@@ -397,7 +429,12 @@ fn runSharedServer(config: Config) !void {
             }
         }
     }
-    try printServerCompletion(config, results);
+    try printServerCompletion(
+        config,
+        results,
+        receive_stats,
+        socket_traffic.stats(),
+    );
 }
 
 fn discardSharedPacket(
@@ -1436,7 +1473,12 @@ fn printClientResult(
     );
 }
 
-fn printServerCompletion(config: Config, results: []const WorkerResult) !void {
+fn printServerCompletion(
+    config: Config,
+    results: []const WorkerResult,
+    shared_receive: ?SharedReceiveStats,
+    socket_traffic: ?netz.quic.runtime.SocketTrafficStats,
+) !void {
     for (results) |result| if (result.err) |err| return err;
     var bytes: u64 = 0;
     var checksum: u64 = 0;
@@ -1463,6 +1505,8 @@ fn printServerCompletion(config: Config, results: []const WorkerResult) !void {
         );
         return;
     }
+    const receive = shared_receive orelse SharedReceiveStats{};
+    const traffic = socket_traffic orelse netz.quic.runtime.SocketTrafficStats{};
     std.debug.print(
         "record=server-complete implementation={s} protocol=quic-stream " ++
             "mode=aggregate direction=upload role_pair={s} endpoint_role=server " ++
@@ -1472,14 +1516,26 @@ fn printServerCompletion(config: Config, results: []const WorkerResult) !void {
             "connections={d} streams={d} bytes_per_stream={d} payload_bytes={d} " ++
             "transferred_bytes={d} checksum={d} sender_role={s} " ++
             "server_receive_batch={d} " ++
+            "server_receive_calls={d} server_receive_events={d} " ++
+            "server_receive_max_events={d} " ++
+            "server_received_datagrams={d} " ++
+            "server_receive_max_datagrams={d} " ++
+            "server_connected_events={d} server_packet_events={d} " ++
+            "server_timer_events={d} server_socket_sent_datagrams={d} " ++
+            "server_socket_sent_bytes={d} server_socket_received_datagrams={d} " ++
+            "server_socket_received_bytes={d} " ++
             "connections_complete={d} cert_verify=true quic_version=1 " ++
             "gso=false gro=false completion_exchange_verified=true complete=true\n",
         .{
-            serverImplementation(config.role_pair), config.role_pair,         config.run,
-            connectionScope(config),                endpointTopology(config), config.connections,
-            config.streams,                         config.bytes_per_stream,  config.payload_bytes,
-            bytes,                                  checksum,                 @tagName(config.sender),
-            serverReceiveBatch(config),             config.connections,
+            serverImplementation(config.role_pair), config.role_pair,           config.run,
+            connectionScope(config),                endpointTopology(config),   config.connections,
+            config.streams,                         config.bytes_per_stream,    config.payload_bytes,
+            bytes,                                  checksum,                   @tagName(config.sender),
+            serverReceiveBatch(config),             receive.calls,              receive.events,
+            receive.max_events,                     receive.received_datagrams, receive.max_received_datagrams,
+            receive.connected_events,               receive.packet_events,      receive.timer_events,
+            traffic.sent_datagrams,                 traffic.sent_bytes,         traffic.received_datagrams,
+            traffic.received_bytes,                 config.connections,
         },
     );
 }

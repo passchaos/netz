@@ -127,7 +127,16 @@ class PersistentBenchmarkCheckTest(unittest.TestCase):
                         "endpoint_topology=one-udp-socket-per-connection",
                         "connection_scope=parallel-shared-server-endpoint "
                         "endpoint_topology=shared-server-udp "
-                        "server_receive_batch=32",
+                        "server_receive_batch=32 server_receive_calls=4 "
+                        "server_receive_events=7 server_receive_max_events=3 "
+                        "server_received_datagrams=8 "
+                        "server_receive_max_datagrams=4 "
+                        "server_connected_events=4 server_packet_events=3 "
+                        "server_timer_events=0 "
+                        "server_socket_sent_datagrams=4 "
+                        "server_socket_sent_bytes=4096 "
+                        "server_socket_received_datagrams=8 "
+                        "server_socket_received_bytes=8192",
                     ),
                     encoding="utf-8",
                 )
@@ -136,6 +145,28 @@ class PersistentBenchmarkCheckTest(unittest.TestCase):
                 run=1, connections=4, warmup=0, iterations=1, streams=4,
                 bytes_per_stream=256, payload_bytes=1024, sender="client",
                 server_topology="shared", client_log=client, server_log=server,
+            )
+            server.write_text(
+                server.read_text().replace(
+                    "server_receive_events=7",
+                    "server_receive_events=8",
+                ),
+                encoding="utf-8",
+            )
+            with self.assertRaisesRegex(ValueError, "event count"):
+                CHECK.verify(
+                    mode="aggregate", role_pair="netz-client+netz-server",
+                    run=1, connections=4, warmup=0, iterations=1, streams=4,
+                    bytes_per_stream=256, payload_bytes=1024, sender="client",
+                    server_topology="shared", client_log=client,
+                    server_log=server,
+                )
+            server.write_text(
+                server.read_text().replace(
+                    "server_receive_events=8",
+                    "server_receive_events=7",
+                ),
+                encoding="utf-8",
             )
             for path in (client, server):
                 path.write_text(
