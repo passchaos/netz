@@ -8,6 +8,7 @@
 //! operations before refreshing the connection timer.
 
 const std = @import("std");
+const builtin = @import("builtin");
 const deadline_policy = @import("../internal/deadline.zig");
 const quic = @import("mod.zig");
 
@@ -196,6 +197,8 @@ pub const Server = struct {
     workers: std.Io.Group = .init,
     worker_context: *WorkerContext,
     active_workers: std.atomic.Value(usize) = .init(0),
+    handshake_poll_count: if (builtin.is_test) usize else void =
+        if (builtin.is_test) 0 else {},
     completed_storage: []Completion,
     completed: *std.Io.Queue(Completion),
     admissions_mutex: std.Io.Mutex = .init,
@@ -452,13 +455,16 @@ pub const Server = struct {
             deadline,
         );
         while (true) {
-            const poll_deadline = deadline_policy.earlier(
-                absolute,
-                .fromNow(self.endpoint.io, .{
-                    .raw = self.options.handshake_poll_interval,
-                    .clock = .awake,
-                }),
-            ).?;
+            const poll_deadline = if (self.hasActiveHandshakes())
+                deadline_policy.earlier(
+                    absolute,
+                    .fromNow(self.endpoint.io, .{
+                        .raw = self.options.handshake_poll_interval,
+                        .clock = .awake,
+                    }),
+                ).?
+            else
+                absolute;
             if (self.receiveUntil(
                 supported_versions,
                 .{ .deadline = poll_deadline },
@@ -565,21 +571,23 @@ pub const Server = struct {
             deadline,
         );
         while (true) {
-            if (self.pollCompletion()) |completion_value| {
-                var completion = completion_value;
-                output[0] = eventToVisit(try self.finishCompletion(
-                    &completion,
-                ));
-                return 1;
-            }
-            _ = self.expireHandshakes(monotonicNowNs(self.endpoint.io));
-            const poll_deadline = deadline_policy.earlier(
-                absolute,
-                .fromNow(self.endpoint.io, .{
-                    .raw = self.options.handshake_poll_interval,
-                    .clock = .awake,
-                }),
-            ).?;
+            const poll_deadline = if (self.hasActiveHandshakes()) deadline: {
+                if (self.pollCompletion()) |completion_value| {
+                    var completion = completion_value;
+                    output[0] = eventToVisit(try self.finishCompletion(
+                        &completion,
+                    ));
+                    return 1;
+                }
+                _ = self.expireHandshakes(monotonicNowNs(self.endpoint.io));
+                break :deadline deadline_policy.earlier(
+                    absolute,
+                    .fromNow(self.endpoint.io, .{
+                        .raw = self.options.handshake_poll_interval,
+                        .clock = .awake,
+                    }),
+                ).?;
+            } else absolute;
             const Adapter = struct {
                 server: *Server,
                 context: @TypeOf(context),
@@ -676,19 +684,21 @@ pub const Server = struct {
         comptime visitor: anytype,
     ) (Error || callbackErrorSet(visitor))!VisitEvent {
         while (true) {
-            if (self.pollCompletion()) |completion_value| {
-                var completion = completion_value;
-                const event = try self.finishCompletion(&completion);
-                return eventToVisit(event);
-            }
-            _ = self.expireHandshakes(monotonicNowNs(self.endpoint.io));
-            const poll_deadline = deadline_policy.earlier(
-                absolute,
-                .fromNow(self.endpoint.io, .{
-                    .raw = self.options.handshake_poll_interval,
-                    .clock = .awake,
-                }),
-            ).?;
+            const poll_deadline = if (self.hasActiveHandshakes()) deadline: {
+                if (self.pollCompletion()) |completion_value| {
+                    var completion = completion_value;
+                    const event = try self.finishCompletion(&completion);
+                    return eventToVisit(event);
+                }
+                _ = self.expireHandshakes(monotonicNowNs(self.endpoint.io));
+                break :deadline deadline_policy.earlier(
+                    absolute,
+                    .fromNow(self.endpoint.io, .{
+                        .raw = self.options.handshake_poll_interval,
+                        .clock = .awake,
+                    }),
+                ).?;
+            } else absolute;
             const Adapter = struct {
                 server: *Server,
                 context: @TypeOf(context),
@@ -755,12 +765,14 @@ pub const Server = struct {
         supported_versions: []const u32,
         timeout: std.Io.Timeout,
     ) Error!?Event {
-        if (self.pollCompletion()) |completion_value| {
-            var completion = completion_value;
-            const event = try self.finishCompletion(&completion);
-            return event;
+        if (self.hasActiveHandshakes()) {
+            if (self.pollCompletion()) |completion_value| {
+                var completion = completion_value;
+                const event = try self.finishCompletion(&completion);
+                return event;
+            }
+            _ = self.expireHandshakes(monotonicNowNs(self.endpoint.io));
         }
-        _ = self.expireHandshakes(monotonicNowNs(self.endpoint.io));
         var endpoint_event = try self.dispatcher.receiveTimeout(
             supported_versions,
             timeout,
@@ -942,6 +954,12 @@ pub const Server = struct {
         return values[0];
     }
 
+    fn hasActiveHandshakes(self: *Server) bool {
+        if (self.active_workers.load(.acquire) == 0) return false;
+        if (comptime builtin.is_test) self.handshake_poll_count +|= 1;
+        return true;
+    }
+
     fn expireHandshakes(self: *Server, now_ns: u64) usize {
         var expired: [64]*Admission = undefined;
         var count: usize = 0;
@@ -1047,4 +1065,17 @@ fn monotonicNowNs(io: std.Io) u64 {
     const now = std.Io.Clock.awake.now(io).nanoseconds;
     if (now <= 0) return 0;
     return std.math.cast(u64, now) orelse std.math.maxInt(u64);
+}
+
+test "QUIC endpoint server skips handshake maintenance when idle" {
+    var server: Server = undefined;
+    server.active_workers = .init(0);
+    server.handshake_poll_count = 0;
+
+    try std.testing.expect(!server.hasActiveHandshakes());
+    try std.testing.expectEqual(@as(usize, 0), server.handshake_poll_count);
+
+    server.active_workers.store(1, .release);
+    try std.testing.expect(server.hasActiveHandshakes());
+    try std.testing.expectEqual(@as(usize, 1), server.handshake_poll_count);
 }

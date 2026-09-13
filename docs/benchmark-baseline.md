@@ -2406,6 +2406,19 @@ reduction and smaller hot receive stack, not presented as a throughput win.
 Every run verified 16,777,216 bytes, checksum 2,139,095,040, all 16
 connections, and the completion exchange.
 
+Once all handshake workers have been consumed, the server now uses the atomic
+active-worker count to bypass the empty completion queue, empty admission-map
+expiry scan, and 5-ms handshake-poll deadline cap. A newly admitted Initial
+increments the count before its worker can run, and a completed worker remains
+counted until its queue record is consumed, so zero cannot hide pending
+handshake work. Five order-interleaved comparisons against the pointer-queue
+baseline, again using 16 connections and 16 MiB total, measured
+62.892-83.443 MiB/s (68.005 median) with the idle-handshake fast path and
+61.822-80.120 MiB/s (62.878 median) without it, an 8.2% median increase. The
+ranges overlap, so this is supporting regression evidence rather than a broad
+throughput claim; focused tests separately cover both zero and nonzero worker
+states and real concurrent handshakes.
+
 Endpoint CID mirroring now carries a monotonic revision on the fixed-size local
 CID pool. Initial registration, successful NEW_CONNECTION_ID issuance, and an
 actual RETIRE_CONNECTION_ID advance it; repeated retirement and failed

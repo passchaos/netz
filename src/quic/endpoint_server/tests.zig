@@ -34,6 +34,49 @@ test "QUIC endpoint server rejects invalid admission limits" {
     );
 }
 
+test "QUIC endpoint server idle batch receive preserves caller deadline" {
+    const allocator = std.testing.allocator;
+    var threaded = std.Io.Threaded.init(allocator, .{});
+    defer threaded.deinit();
+    var endpoint = try quic.runtime.Endpoint.bind(
+        allocator,
+        threaded.io(),
+        .{ .ip4 = .loopback(0) },
+        .{ .max_datagram_size = 4096 },
+    );
+    defer endpoint.deinit();
+    var server = try endpoint_server.Server.init(
+        allocator,
+        &endpoint,
+        .{ .local_connection_id = &.{} },
+        .{ .max_pending_handshakes = 1 },
+    );
+    defer server.deinit();
+    const versions = [_]u32{quic.Version.version_1.wireValue()};
+    var storage: [4096]u8 = undefined;
+    var events: [1]endpoint_server.VisitEvent = undefined;
+    const Visitor = struct {
+        fn visit(
+            _: void,
+            _: quic.endpoint_dispatcher.RoutedPacketView,
+        ) error{}!void {}
+    };
+    try std.testing.expectError(
+        error.Timeout,
+        server.receiveManyVisitingWithDeadline(
+            &versions,
+            &storage,
+            &events,
+            .fromNow(threaded.io(), .{
+                .raw = .fromMilliseconds(1),
+                .clock = .awake,
+            }),
+            {},
+            Visitor.visit,
+        ),
+    );
+}
+
 test "QUIC endpoint server routes two authenticated connections on one socket" {
     const allocator = std.testing.allocator;
     var threaded = std.Io.Threaded.init(allocator, .{ .async_limit = .unlimited });
