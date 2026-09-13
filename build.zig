@@ -1323,6 +1323,12 @@ pub fn build(b: *std.Build) void {
             .description = "Benchmark shared-endpoint CID route synchronization",
         },
         .{
+            .exe_name = "netz-bench-quic-endpoint-timers",
+            .path = "examples/bench_quic_endpoint_timers.zig",
+            .run_step = "bench-quic-endpoint-timers",
+            .description = "Benchmark shared-endpoint timer scheduler scaling",
+        },
+        .{
             .exe_name = "netz-quic-close",
             .path = "examples/quic_close.zig",
             .run_step = "run-quic-close",

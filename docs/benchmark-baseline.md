@@ -2400,6 +2400,36 @@ that a normal authenticated PING does not increment the full-sync counter,
 whereas issuance and retirement each increment it exactly once. This is a
 hot-path microbenchmark, not a whole-connection throughput ratio.
 
+The bench-quic-endpoint-timers executable isolates how the endpoint timer
+scheduler scales before changing its data structure. It covers ordinary
+non-earliest updates, an unchanged write to the cached earliest entry, moving
+that entry later, removing and rearming the earliest connection,
+earliestDeadline reads, and a bounded due scan whose only due entry is at the
+array tail. The one-connection ordinary-update case necessarily updates the
+sole (and therefore earliest) entry. The remove measurement includes both
+operations so every timed iteration starts with the same number of armed
+connections.
+
+Three CPU-0 ReleaseFast runs on the 2026-09-13 Linux AArch64 host with two
+million fast-path iterations and at least 64 million examined entries per
+scan-sensitive case measured:
+
+| Connections | Non-earliest update | Unchanged earliest | Postpone earliest | Remove + rearm earliest | earliestDeadline | Bounded due scan |
+|---:|---:|---:|---:|---:|---:|---:|
+| 1 | 10.35-11.20 ns | 10.11-10.24 ns | 10.21-10.35 ns | 24.92-25.35 ns | 1.15-2.66 ns | 1.15-1.53 ns |
+| 16 | 11.93-11.95 ns | 55.80-62.65 ns | 41.11-42.29 ns | 64.06-65.47 ns | 1.15-2.34 ns | 7.32-7.70 ns |
+| 128 | 12.20-12.34 ns | 401.58-413.53 ns | 348.28-352.75 ns | 412.69-414.28 ns | 1.15-2.37 ns | 50.82-74.03 ns |
+| 1024 | 11.92-11.96 ns | 3165.51-3179.04 ns | 3106.69-3110.58 ns | 3175.62-3176.15 ns | 1.15-2.60 ns | 408.43-470.82 ns |
+
+The cached read and non-earliest update remain constant, while all three
+cached-earliest mutations expose the current full-array recomputation. Most
+notably, an identical timer write costs about 3.17 us at 1,024 connections even
+though it cannot change ordering. This evidence makes an exact no-op update
+fast path the next low-risk experiment. A heap is not yet justified: it would
+also add ordering work to the measured 12 ns ordinary-update path. The bounded
+due scan is intentionally linear because it provides a stable per-event-loop
+snapshot, but the benchmark keeps its independent scaling cost visible.
+
 ### Raw QUIC mixed FIN/reset recovery versus quic-go
 
 The separate process gate below exercises terminal stream churn instead of

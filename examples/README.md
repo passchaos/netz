@@ -39,6 +39,8 @@ taskset -c 0 zig build bench-quic-one-rtt-send -Doptimize=ReleaseFast -- \
   --stream-fragments=4 --warmup=200 --iterations=10000
 taskset -c 0 zig build bench-quic-endpoint-cid-sync -Doptimize=ReleaseFast -- \
   --iterations=2000000
+taskset -c 0 zig build bench-quic-endpoint-timers -Doptimize=ReleaseFast -- \
+  --iterations=2000000
 zig build bench-websocket-frame -Doptimize=ReleaseFast
 zig build bench-websocket-receive-buffer -Doptimize=ReleaseFast
 zig build bench-websocket-h3-echo -Doptimize=ReleaseFast
