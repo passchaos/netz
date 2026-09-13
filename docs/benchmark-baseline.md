@@ -2454,8 +2454,11 @@ returned 14,743 events: 14,710 packets, 16 connections, and 17 timers. The
 endpoint sent 14,785 datagrams / 605,774 UDP payload bytes and received
 17,446,671 bytes. The checker requires event-class totals to match, one or more
 events per successful call, connected events to match the requested connection
-count, both observed maxima to fit the configured bound, and per-call received
-datagrams to equal the endpoint socket counter. This shows that batching
+count, returned-event maxima to fit the configured bound, and accumulated
+received datagrams to equal the endpoint socket counter. A high-level call can
+read more than one socket batch when an entire batch is discarded or handed to
+pending handshake workers, so its datagram maximum is reported but not bounded
+by the per-socket batch size. This shows that batching
 captures bursts but the typical call is close to a singleton, so reducing
 per-call dispatcher work is higher leverage than increasing the batch width.
 

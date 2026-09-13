@@ -172,7 +172,7 @@ def verify(
         receive_events = integer(server, "server_receive_events", 1)
         max_events = integer(server, "server_receive_max_events", 1)
         received_datagrams = integer(server, "server_received_datagrams", 1)
-        max_received_datagrams = integer(
+        integer(
             server, "server_receive_max_datagrams", 1,
         )
         connected_events = integer(server, "server_connected_events", 1)
@@ -192,8 +192,6 @@ def verify(
             raise ValueError("invalid shared receive call utilization")
         if received_datagrams != socket_received_datagrams:
             raise ValueError("shared received datagram count mismatch")
-        if max_received_datagrams > shared_receive_batch:
-            raise ValueError("invalid shared received datagram batch")
 
     if mode == "echo":
         rounds = warmup + iterations
