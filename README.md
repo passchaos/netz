@@ -1107,6 +1107,11 @@ exact byte count, FIN, independently recomputed checksum, and matching server
 completion record. It deliberately reports `same-application-shape`: endpoint
 workers share one process CPU, but this is not a shared-socket QUIC listener or
 an equal-wire comparison.
+Pass `--server-topology=shared` to benchmark the netz/netz client-upload shape
+with one server UDP socket and the production endpoint dispatcher. That mode
+uses a bounded caller-buffer receive drain (32 messages by default, selectable
+with `--shared-receive-batch=1..64`) and records the selected batch size in
+every strictly verified result.
 
 `bench-http3-quic-go` runs certificate-verified HTTP/3 upload/download in both
 client/server role pairings, with a fresh connection and untimed ready request

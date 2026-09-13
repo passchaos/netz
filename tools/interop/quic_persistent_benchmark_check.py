@@ -73,6 +73,7 @@ def echo_checksum(rounds: int, payload_bytes: int) -> int:
 def require_shape(
     row: dict[str, str], *, implementation: str, record_kind: str,
     role_pair: str, mode: str, run: int, server_topology: str,
+    shared_receive_batch: int,
 ) -> None:
     shared = server_topology == "shared"
     expected = {
@@ -100,6 +101,8 @@ def require_shape(
         "completion_exchange_verified": "true",
         "complete": "true",
     }
+    if shared:
+        expected["server_receive_batch"] = str(shared_receive_batch)
     for key, value in expected.items():
         if row.get(key) != value:
             raise ValueError(f"{record_kind} {key} mismatch: {row}")
@@ -113,7 +116,7 @@ def verify(
     *, mode: str, role_pair: str, run: int, connections: int,
     warmup: int, iterations: int, streams: int, bytes_per_stream: int,
     payload_bytes: int, sender: str, client_log: Path, server_log: Path,
-    server_topology: str = "independent",
+    server_topology: str = "independent", shared_receive_batch: int = 32,
 ) -> None:
     client_impl, server_impl = endpoint_implementations(role_pair)
     if (
@@ -122,6 +125,7 @@ def verify(
         or bytes_per_stream <= 0 or payload_bytes <= 0
         or sender not in ("client", "server")
         or server_topology not in ("independent", "shared")
+        or shared_receive_batch < 1 or shared_receive_batch > 64
     ):
         raise ValueError("invalid verifier configuration")
     if mode == "echo" and (connections != 1 or streams != 1 or sender != "client"):
@@ -144,11 +148,13 @@ def verify(
         result, implementation=result_impl, record_kind="result",
         role_pair=role_pair, mode=mode, run=run,
         server_topology=server_topology,
+        shared_receive_batch=shared_receive_batch,
     )
     require_shape(
         server, implementation=server_impl, record_kind="server",
         role_pair=role_pair, mode=mode, run=run,
         server_topology=server_topology,
+        shared_receive_batch=shared_receive_batch,
     )
     expected_common = {
         "connections": str(connections),
@@ -242,6 +248,7 @@ def main() -> None:
         "--server-topology", choices=("independent", "shared"),
         default="independent",
     )
+    parser.add_argument("--shared-receive-batch", type=int, default=32)
     parser.add_argument("--client-log", type=Path, required=True)
     parser.add_argument("--server-log", type=Path, required=True)
     args = parser.parse_args()

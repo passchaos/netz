@@ -18,6 +18,7 @@ chunk_bytes=${NETZ_QUIC_PERSISTENT_CHUNK_BYTES:-16384}
 stream_window=${NETZ_QUIC_PERSISTENT_STREAM_WINDOW:-1048576}
 timeout_ms=${NETZ_QUIC_PERSISTENT_TIMEOUT_MS:-30000}
 server_topology=independent
+shared_receive_batch=${NETZ_QUIC_PERSISTENT_SHARED_RECEIVE_BATCH:-32}
 for arg in "$@"; do
   case $arg in
     --mode=*) modes=${arg#--mode=} ;;
@@ -32,6 +33,7 @@ for arg in "$@"; do
     --stream-window=*) stream_window=${arg#--stream-window=} ;;
     --timeout-ms=*) timeout_ms=${arg#--timeout-ms=} ;;
     --server-topology=*) server_topology=${arg#--server-topology=} ;;
+    --shared-receive-batch=*) shared_receive_batch=${arg#--shared-receive-batch=} ;;
     *) echo "unknown persistent benchmark option: $arg" >&2; exit 2 ;;
   esac
 done
@@ -66,6 +68,10 @@ if (( samples < 1 || samples % 2 == 0 || connections < 1 || connections > 16 ||
 fi
 if [[ $streams != 1 && $streams != 4 ]]; then
   echo 'persistent aggregate streams must be 1 or 4' >&2
+  exit 2
+fi
+if (( shared_receive_batch < 1 || shared_receive_batch > 64 )); then
+  echo 'shared receive batch must be between 1 and 64' >&2
   exit 2
 fi
 
@@ -161,10 +167,15 @@ run_pair() {
   )
   if [[ $server_impl == netz ]]; then
     common+=("--server-topology=$server_topology")
+    if [[ $server_topology == shared ]]; then
+      common+=("--shared-receive-batch=$shared_receive_batch")
+    fi
   fi
   local go_common=()
   for argument in "${common[@]}"; do
-    [[ $argument == --server-topology=* ]] || go_common+=("-${argument#--}")
+    [[ $argument == --server-topology=* ||
+       $argument == --shared-receive-batch=* ]] ||
+      go_common+=("-${argument#--}")
   done
 
   if [[ $server_impl == netz ]]; then
@@ -200,6 +211,7 @@ run_pair() {
     "--iterations=$iterations" "--streams=$mode_streams" \
     "--bytes-per-stream=$aggregate_bytes" "--payload-bytes=$payload_bytes" \
     "--sender=$sender" "--server-topology=$server_topology" \
+    "--shared-receive-batch=$shared_receive_batch" \
     "--client-log=$pair_dir/client.log" \
     "--server-log=$pair_dir/server.log"
   grep '^record=result ' "$pair_dir/client.log" >>"$work/results.log"
@@ -253,5 +265,6 @@ fi
 if [[ $modes == aggregate || $modes == both ]]; then
   python3 "$repo_root/tools/interop/quic_persistent_benchmark_summary.py" \
     --mode=aggregate "--samples=$samples" "--log=$work/results.log" \
-    "--server-topology=$server_topology"
+    "--server-topology=$server_topology" \
+    "--shared-receive-batch=$shared_receive_batch"
 fi

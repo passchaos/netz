@@ -6626,6 +6626,10 @@ test "public modules are reachable" {
     ));
     try std.testing.expect(@hasDecl(
         netz.quic.endpoint_server.Server,
+        "receiveManyVisitingWithDeadline",
+    ));
+    try std.testing.expect(@hasDecl(
+        netz.quic.endpoint_server.Server,
         "pollStreamId",
     ));
     try std.testing.expect(@hasDecl(
@@ -6755,6 +6759,10 @@ test "public modules are reachable" {
     try std.testing.expect(@hasDecl(
         netz.quic.endpoint_dispatcher.Dispatcher,
         "receiveVisitingWithDeadline",
+    ));
+    try std.testing.expect(@hasDecl(
+        netz.quic.endpoint_dispatcher.Dispatcher,
+        "receiveManyVisitingWithDeadline",
     ));
     try std.testing.expect(@hasDecl(
         netz.quic.one_rtt.Connection,

@@ -51,6 +51,7 @@ def positive(row: dict[str, str], key: str) -> int:
 
 def summarize(
     path: Path, mode: str, samples: int, topology: str = "independent",
+    shared_receive_batch: int = 32,
 ) -> list[str]:
     if samples <= 0 or samples % 2 == 0:
         raise ValueError("samples must be a positive odd number")
@@ -58,19 +59,26 @@ def summarize(
         raise ValueError("invalid server topology")
     if topology == "shared" and mode != "aggregate":
         raise ValueError("shared topology requires aggregate mode")
+    if shared_receive_batch < 1 or shared_receive_batch > 64:
+        raise ValueError("invalid shared receive batch")
     source = rows(path, mode, topology)
     if not source:
         raise ValueError(f"no {mode} result records")
     shape_keys = (
         ("warmup", "iterations", "connections", "streams", "payload_bytes")
         if mode == "echo"
-        else ("connections", "streams", "bytes_per_stream", "timing_scope")
+        else ("connections", "streams", "bytes_per_stream", "timing_scope") +
+            (("server_receive_batch",) if topology == "shared" else ())
     )
     expected_shape = tuple(source[0].get(key) for key in shape_keys)
     if any(value is None for value in expected_shape) or any(
         tuple(row.get(key) for key in shape_keys) != expected_shape for row in source
     ):
         raise ValueError(f"mixed or incomplete {mode} benchmark shapes")
+    if topology == "shared" and expected_shape[-1] != str(
+        shared_receive_batch
+    ):
+        raise ValueError("shared receive batch mismatch")
     role_pairs = (
         ("netz-client+netz-server",)
         if topology == "shared" else ROLE_PAIRS
@@ -127,13 +135,18 @@ def summarize(
                 median_elapsed = int(statistics.median(elapsed))
                 median_throughput = statistics.median(throughput)
                 grouped[(role_pair, sender)] = median_throughput
+                batch_field = (
+                    f"server_receive_batch={shared_receive_batch} "
+                    if topology == "shared" else ""
+                )
                 output.append(
                     "record=summary protocol=quic-stream mode=aggregate "
                     f"role_pair={role_pair} sender_role={sender} samples={samples} "
                     f"median_elapsed_ns={median_elapsed} "
                     f"median_logical_MiB_s={median_throughput:.3f} "
                     f"min_logical_MiB_s={min(throughput):.3f} "
-                    f"max_logical_MiB_s={max(throughput):.3f} complete=true"
+                    f"max_logical_MiB_s={max(throughput):.3f} "
+                    f"{batch_field}complete=true"
                 )
 
     comparisons = () if topology == "shared" else (
@@ -179,9 +192,11 @@ def main() -> None:
         "--server-topology", choices=("independent", "shared"),
         default="independent",
     )
+    parser.add_argument("--shared-receive-batch", type=int, default=32)
     args = parser.parse_args()
     for line in summarize(
         args.log, args.mode, args.samples, args.server_topology,
+        args.shared_receive_batch,
     ):
         print(line)
 

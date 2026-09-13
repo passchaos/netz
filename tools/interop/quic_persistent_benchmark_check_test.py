@@ -126,7 +126,8 @@ class PersistentBenchmarkCheckTest(unittest.TestCase):
                         "connection_scope=parallel-independent-endpoints "
                         "endpoint_topology=one-udp-socket-per-connection",
                         "connection_scope=parallel-shared-server-endpoint "
-                        "endpoint_topology=shared-server-udp",
+                        "endpoint_topology=shared-server-udp "
+                        "server_receive_batch=32",
                     ),
                     encoding="utf-8",
                 )
@@ -136,6 +137,30 @@ class PersistentBenchmarkCheckTest(unittest.TestCase):
                 bytes_per_stream=256, payload_bytes=1024, sender="client",
                 server_topology="shared", client_log=client, server_log=server,
             )
+            for path in (client, server):
+                path.write_text(
+                    path.read_text().replace(
+                        "server_receive_batch=32",
+                        "server_receive_batch=31",
+                    ),
+                    encoding="utf-8",
+                )
+            with self.assertRaisesRegex(ValueError, "server_receive_batch"):
+                CHECK.verify(
+                    mode="aggregate", role_pair="netz-client+netz-server",
+                    run=1, connections=4, warmup=0, iterations=1, streams=4,
+                    bytes_per_stream=256, payload_bytes=1024, sender="client",
+                    server_topology="shared", shared_receive_batch=32,
+                    client_log=client, server_log=server,
+                )
+            for path in (client, server):
+                path.write_text(
+                    path.read_text().replace(
+                        "server_receive_batch=31",
+                        "server_receive_batch=32",
+                    ),
+                    encoding="utf-8",
+                )
             with self.assertRaisesRegex(
                 ValueError,
                 "connection_scope mismatch|endpoint_topology mismatch",

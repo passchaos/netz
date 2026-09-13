@@ -419,6 +419,121 @@ test "QUIC endpoint dispatcher visits warmed routed packets without allocation" 
     try std.testing.expect(!failing.has_induced_failure);
 }
 
+test "QUIC endpoint dispatcher visits a ready datagram batch without allocation" {
+    const allocator = std.testing.allocator;
+    var threaded = std.Io.Threaded.init(allocator, .{
+        .async_limit = .unlimited,
+    });
+    defer threaded.deinit();
+    const io = threaded.io();
+
+    var failing = std.testing.FailingAllocator.init(allocator, .{});
+    var server_endpoint = try runtime.Endpoint.bind(
+        failing.allocator(),
+        io,
+        .{ .ip4 = .loopback(0) },
+        .{ .max_datagram_size = 4096 },
+    );
+    defer server_endpoint.deinit();
+    var client_endpoint = try runtime.Endpoint.bind(
+        allocator,
+        io,
+        .{ .ip4 = .loopback(0) },
+        .{ .max_datagram_size = 4096 },
+    );
+    defer client_endpoint.deinit();
+    const keys = quic.protection.deriveAes128Keys(
+        [_]u8{0xb6} ** quic.protection.secret_len,
+    );
+    var server = try one_rtt.Connection.init(&server_endpoint, .{
+        .peer = client_endpoint.address(),
+        .receive_keys = keys,
+        .send_keys = keys,
+        .local_connection_id = "batch-server",
+        .peer_connection_id = "batch-client",
+        .local_endpoint = .server,
+        .enable_pacing = false,
+    });
+    defer server.deinit();
+    var dispatcher = Dispatcher.init(failing.allocator(), &server_endpoint);
+    defer dispatcher.deinit();
+    try dispatcher.registerConnection(67, &server);
+
+    // Warm retained frame/range storage before failing every later dispatcher
+    // allocation. The following batch must remain caller-buffer-only.
+    try one_rtt.sendFrames(
+        &client_endpoint,
+        server_endpoint.address(),
+        keys,
+        .{
+            .destination_connection_id = "batch-server",
+            .packet_number = 0,
+            .frames = &.{.{ .ping = {} }},
+        },
+    );
+    const Visitor = struct {
+        fn visit(count: *usize, packet: dispatcher_mod.RoutedPacketView) !void {
+            try std.testing.expectEqual(
+                @as(ConnectionHandle, 67),
+                packet.connection_handle,
+            );
+            try std.testing.expectEqual(
+                @as(u64, count.*),
+                packet.packet.packet_number,
+            );
+            count.* += 1;
+        }
+    };
+    const versions = &.{quic.Version.version_1.wireValue()};
+    var warm_storage: [4096]u8 = undefined;
+    var count: usize = 0;
+    var warm = try dispatcher.receiveVisitingWithDeadline(
+        versions,
+        &warm_storage,
+        .fromNow(io, .{ .clock = .awake, .raw = .fromSeconds(1) }),
+        &count,
+        Visitor.visit,
+    );
+    warm.deinit(failing.allocator());
+
+    for (1..4) |packet_number| {
+        try one_rtt.sendFrames(
+            &client_endpoint,
+            server_endpoint.address(),
+            keys,
+            .{
+                .destination_connection_id = "batch-server",
+                .packet_number = packet_number,
+                .frames = &.{.{ .ping = {} }},
+            },
+        );
+    }
+    failing.fail_index = failing.alloc_index;
+    var storage: [3 * 4096]u8 = undefined;
+    var events: [3]dispatcher_mod.VisitEvent = undefined;
+    const event_count = try dispatcher.receiveManyVisitingWithDeadline(
+        versions,
+        &storage,
+        &events,
+        .fromNow(io, .{ .clock = .awake, .raw = .fromSeconds(1) }),
+        &count,
+        Visitor.visit,
+    );
+    defer for (events[0..event_count]) |*event| {
+        event.deinit(failing.allocator());
+    };
+    try std.testing.expectEqual(@as(usize, 3), event_count);
+    try std.testing.expectEqual(@as(usize, 4), count);
+    for (events[0..event_count]) |event| {
+        try std.testing.expect(event == .packet);
+        try std.testing.expectEqual(
+            @as(ConnectionHandle, 67),
+            event.packet.connection_handle,
+        );
+    }
+    try std.testing.expect(!failing.has_induced_failure);
+}
+
 test "QUIC endpoint dispatcher preserves visitor errors" {
     const allocator = std.testing.allocator;
     var threaded = std.Io.Threaded.init(allocator, .{});
@@ -491,6 +606,106 @@ test "QUIC endpoint dispatcher preserves visitor errors" {
         "committed",
         server.availableReceivedStream(0).?,
     );
+}
+
+test "QUIC endpoint dispatcher retains batch suffix after visitor error" {
+    const allocator = std.testing.allocator;
+    var threaded = std.Io.Threaded.init(allocator, .{
+        .async_limit = .unlimited,
+    });
+    defer threaded.deinit();
+    const io = threaded.io();
+    var server_endpoint = try runtime.Endpoint.bind(
+        allocator,
+        io,
+        .{ .ip4 = .loopback(0) },
+        .{ .max_datagram_size = 4096 },
+    );
+    defer server_endpoint.deinit();
+    var client_endpoint = try runtime.Endpoint.bind(
+        allocator,
+        io,
+        .{ .ip4 = .loopback(0) },
+        .{ .max_datagram_size = 4096 },
+    );
+    defer client_endpoint.deinit();
+    const keys = quic.protection.deriveAes128Keys(
+        [_]u8{0xb8} ** quic.protection.secret_len,
+    );
+    var server = try one_rtt.Connection.init(&server_endpoint, .{
+        .peer = client_endpoint.address(),
+        .receive_keys = keys,
+        .send_keys = keys,
+        .local_connection_id = "suffix-server",
+        .peer_connection_id = "suffix-client",
+        .local_endpoint = .server,
+        .enable_pacing = false,
+    });
+    defer server.deinit();
+    var dispatcher = Dispatcher.init(allocator, &server_endpoint);
+    defer dispatcher.deinit();
+    try dispatcher.registerConnection(68, &server);
+    for (0..2) |packet_number| {
+        try one_rtt.sendFrames(
+            &client_endpoint,
+            server_endpoint.address(),
+            keys,
+            .{
+                .destination_connection_id = "suffix-server",
+                .packet_number = packet_number,
+                .frames = &.{.{ .ping = {} }},
+            },
+        );
+    }
+
+    const Reject = struct {
+        fn visit(
+            _: void,
+            _: dispatcher_mod.RoutedPacketView,
+        ) error{Rejected}!void {
+            return error.Rejected;
+        }
+    };
+    var storage: [2 * 4096]u8 = undefined;
+    var events: [2]dispatcher_mod.VisitEvent = undefined;
+    try std.testing.expectError(
+        error.Rejected,
+        dispatcher.receiveManyVisitingWithDeadline(
+            &.{quic.Version.version_1.wireValue()},
+            &storage,
+            &events,
+            .fromNow(io, .{ .clock = .awake, .raw = .fromSeconds(1) }),
+            {},
+            Reject.visit,
+        ),
+    );
+    try std.testing.expectEqual(
+        @as(usize, 1),
+        dispatcher.buffered_datagrams.items.len,
+    );
+
+    const Observe = struct {
+        fn visit(
+            packet_number: *u64,
+            packet: dispatcher_mod.RoutedPacketView,
+        ) !void {
+            packet_number.* = packet.packet.packet_number;
+        }
+    };
+    var packet_number: u64 = std.math.maxInt(u64);
+    const count = try dispatcher.receiveManyVisitingWithDeadline(
+        &.{quic.Version.version_1.wireValue()},
+        &storage,
+        &events,
+        .fromNow(io, .{ .clock = .awake, .raw = .fromSeconds(1) }),
+        &packet_number,
+        Observe.visit,
+    );
+    defer for (events[0..count]) |*event| event.deinit(allocator);
+    try std.testing.expectEqual(@as(usize, 1), count);
+    try std.testing.expectEqual(@as(u64, 1), packet_number);
+    try std.testing.expect(events[0] == .packet);
+    try std.testing.expectEqual(@as(usize, 0), dispatcher.buffered_datagrams.items.len);
 }
 
 test "QUIC endpoint dispatcher visitor falls back for key updates" {
@@ -1160,6 +1375,107 @@ test "QUIC endpoint dispatcher admits only bounded unknown Initials" {
     );
 }
 
+test "QUIC endpoint dispatcher defers batched Initial suffix until admission" {
+    const allocator = std.testing.allocator;
+    var threaded = std.Io.Threaded.init(allocator, .{
+        .async_limit = .unlimited,
+    });
+    defer threaded.deinit();
+    const io = threaded.io();
+    var endpoint = try runtime.Endpoint.bind(
+        allocator,
+        io,
+        .{ .ip4 = .loopback(0) },
+        .{ .max_datagram_size = 4096 },
+    );
+    defer endpoint.deinit();
+    var peer = try runtime.Endpoint.bind(
+        allocator,
+        io,
+        .{ .ip4 = .loopback(0) },
+        .{ .max_datagram_size = 4096 },
+    );
+    defer peer.deinit();
+    var dispatcher = Dispatcher.init(allocator, &endpoint);
+    defer dispatcher.deinit();
+
+    const destination_connection_id = "batch-admission";
+    const initial_keys = try quic.protection.deriveInitialSecretsForVersion(
+        quic.Version.version_1.wireValue(),
+        destination_connection_id,
+    );
+    const initial_payload = [_]u8{0} ** 1160;
+    const initial = try quic.protection.sealInitialPacket(
+        allocator,
+        initial_keys.client,
+        .{
+            .destination_connection_id = destination_connection_id,
+            .source_connection_id = "peer",
+            .packet_number = 0,
+            .payload = &initial_payload,
+        },
+    );
+    defer allocator.free(initial);
+    try peer.sendBytes(endpoint.address(), initial);
+    try one_rtt.sendFrames(
+        &peer,
+        endpoint.address(),
+        quic.protection.deriveAes128Keys(
+            [_]u8{0xb7} ** quic.protection.secret_len,
+        ),
+        .{
+            .destination_connection_id = destination_connection_id,
+            .packet_number = 0,
+            .frames = &.{.{ .ping = {} }},
+        },
+    );
+
+    const Visitor = struct {
+        fn visit(_: void, _: dispatcher_mod.RoutedPacketView) error{}!void {}
+    };
+    const versions = &.{quic.Version.version_1.wireValue()};
+    var storage: [2 * 4096]u8 = undefined;
+    var events: [2]dispatcher_mod.VisitEvent = undefined;
+    const count = try dispatcher.receiveManyVisitingWithDeadline(
+        versions,
+        &storage,
+        &events,
+        .fromNow(io, .{ .clock = .awake, .raw = .fromSeconds(1) }),
+        {},
+        Visitor.visit,
+    );
+    try std.testing.expectEqual(@as(usize, 1), count);
+    try std.testing.expect(events[0] == .new_initial);
+    try std.testing.expectEqual(@as(usize, 1), dispatcher.buffered_datagrams.items.len);
+    events[0].deinit(allocator);
+
+    var inbox = try quic.handshake_inbox.Inbox.init(
+        allocator,
+        io,
+        &.{destination_connection_id},
+        peer.address(),
+        2,
+    );
+    defer inbox.deinit();
+    try dispatcher.registerPendingHandshake(91, &inbox);
+    const deferred = try dispatcher.receiveManyVisitingWithDeadline(
+        versions,
+        &storage,
+        &events,
+        .fromNow(io, .{ .clock = .awake, .raw = .fromSeconds(1) }),
+        {},
+        Visitor.visit,
+    );
+    try std.testing.expectEqual(@as(usize, 1), deferred);
+    try std.testing.expectEqual(
+        @as(dispatcher_mod.VisitEvent, .{ .pending_handshake = 91 }),
+        events[0],
+    );
+    events[0].deinit(allocator);
+    try std.testing.expectEqual(@as(usize, 1), inbox.applicationCount());
+    try std.testing.expect(try dispatcher.unregisterPendingHandshake(91));
+}
+
 test "QUIC endpoint dispatcher wakes deadline receive for transport timers" {
     const allocator = std.testing.allocator;
     var threaded = std.Io.Threaded.init(allocator, .{});
@@ -1707,6 +2023,33 @@ test "QUIC endpoint dispatcher validates caller-owned deadlines" {
         fn visit(_: void, _: dispatcher_mod.RoutedPacketView) error{}!void {}
     };
     var storage: [4096]u8 = undefined;
+    var batch_storage: [2 * 4096]u8 = undefined;
+    var batch_events: [2]dispatcher_mod.VisitEvent = undefined;
+    try std.testing.expectError(
+        error.Timeout,
+        dispatcher.receiveManyVisitingWithDeadline(
+            versions,
+            &batch_storage,
+            &batch_events,
+            .{ .clock = .real, .raw = .zero },
+            {},
+            Visitor.visit,
+        ),
+    );
+    try std.testing.expectError(
+        error.BufferTooShort,
+        dispatcher.receiveManyVisitingWithDeadline(
+            versions,
+            &storage,
+            &batch_events,
+            .fromNow(io, .{
+                .clock = .awake,
+                .raw = .fromSeconds(1),
+            }),
+            {},
+            Visitor.visit,
+        ),
+    );
 
     try std.testing.expectError(
         error.Timeout,

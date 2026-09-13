@@ -176,7 +176,8 @@ test "QUIC endpoint server routes two authenticated connections on one socket" {
         .clock = .awake,
     });
     var replies: usize = 0;
-    var receive_storage: [4096]u8 = undefined;
+    var receive_storage: [4 * 4096]u8 = undefined;
+    var receive_events: [4]endpoint_server.VisitEvent = undefined;
     const Visitor = struct {
         fn visit(
             _: void,
@@ -186,42 +187,48 @@ test "QUIC endpoint server routes two authenticated connections on one socket" {
         }
     };
     while (replies < clients.len) {
-        var event = try server.receiveVisitingWithDeadline(
+        const event_count = try server.receiveManyVisitingWithDeadline(
             &versions,
             &receive_storage,
+            &receive_events,
             deadline,
             {},
             Visitor.visit,
         );
-        defer event.deinit(allocator);
-        switch (event) {
-            .connected, .timer => {},
-            .handshake_failed => |failure| return failure.err,
-            .unrouted => return error.TestUnexpectedResult,
-            .packet => |packet| {
-                var request: [8]u8 = undefined;
-                const received = (try server.pollStreamId(
-                    packet.connection_handle,
-                    0,
-                    &request,
-                )) orelse continue;
-                const data = switch (received) {
-                    .reset => return error.TestUnexpectedResult,
-                    .data => |value| value,
-                };
-                if (!data.fin or data.bytes != request.len or
-                    !std.mem.eql(u8, request[0..7], "client-") or
-                    request[7] > 1)
-                {
-                    return error.TestUnexpectedResult;
-                }
-                try server.trySend(packet.connection_handle, &.{.{ .stream = .{
-                    .stream_id = 0,
-                    .data = &request,
-                    .fin = true,
-                } }});
-                replies += 1;
-            },
+        for (receive_events[0..event_count]) |*event| {
+            defer event.deinit(allocator);
+            switch (event.*) {
+                .connected, .timer => {},
+                .handshake_failed => |failure| return failure.err,
+                .unrouted => return error.TestUnexpectedResult,
+                .packet => |packet| {
+                    var request: [8]u8 = undefined;
+                    const received = (try server.pollStreamId(
+                        packet.connection_handle,
+                        0,
+                        &request,
+                    )) orelse continue;
+                    const data = switch (received) {
+                        .reset => return error.TestUnexpectedResult,
+                        .data => |value| value,
+                    };
+                    if (!data.fin or data.bytes != request.len or
+                        !std.mem.eql(u8, request[0..7], "client-") or
+                        request[7] > 1)
+                    {
+                        return error.TestUnexpectedResult;
+                    }
+                    try server.trySend(
+                        packet.connection_handle,
+                        &.{.{ .stream = .{
+                            .stream_id = 0,
+                            .data = &request,
+                            .fin = true,
+                        } }},
+                    );
+                    replies += 1;
+                },
+            }
         }
     }
 

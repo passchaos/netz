@@ -191,7 +191,9 @@ pub const Dispatcher = struct {
         PendingHandshakeHandle,
         PendingHandshakeEntry,
     ) = .empty,
-    promoted_datagrams: std.ArrayList(runtime.OwnedBytes) = .empty,
+    /// Owning FIFO for datagrams already read in a batch but deferred across
+    /// a route-publishing event such as server Initial admission/promotion.
+    buffered_datagrams: std.ArrayList(runtime.OwnedBytes) = .empty,
 
     pub fn init(
         allocator: std.mem.Allocator,
@@ -219,10 +221,10 @@ pub const Dispatcher = struct {
             entry.deinit(self.allocator);
         }
         self.pending_handshakes.deinit(self.allocator);
-        for (self.promoted_datagrams.items) |*datagram| {
+        for (self.buffered_datagrams.items) |*datagram| {
             datagram.deinit(self.allocator);
         }
-        self.promoted_datagrams.deinit(self.allocator);
+        self.buffered_datagrams.deinit(self.allocator);
         self.pending_router.deinit();
         self.router.deinit();
         self.timers.deinit();
@@ -359,7 +361,7 @@ pub const Dispatcher = struct {
             self.allocator,
             quic.connection_id.max_pool_size,
         );
-        try self.promoted_datagrams.ensureUnusedCapacity(
+        try self.buffered_datagrams.ensureUnusedCapacity(
             self.allocator,
             pending.inbox.applicationCount(),
         );
@@ -391,7 +393,7 @@ pub const Dispatcher = struct {
             )) catch unreachable;
             slot.value_ptr.connection_ids.appendAssumeCapacity(key);
         }
-        pending_inbox.drainApplicationInto(&self.promoted_datagrams);
+        pending_inbox.drainApplicationInto(&self.buffered_datagrams);
         self.timers.armFromConnection(
             connection_handle,
             connection,
@@ -926,6 +928,158 @@ pub const Dispatcher = struct {
         );
     }
 
+    /// Receive and dispatch a bounded batch of independent UDP datagrams.
+    /// Established packet contents are borrowed only during `visitor`; the
+    /// returned events contain stable routing summaries or own the exceptional
+    /// handshake/unrouted datagrams that must survive this call.
+    ///
+    /// If processing fails after an earlier callback succeeded, transport and
+    /// callback side effects remain committed, while every owning event built
+    /// for this batch is released before the error is returned.
+    pub fn receiveManyVisitingWithDeadline(
+        self: *Dispatcher,
+        supported_versions: []const u32,
+        storage: []u8,
+        output: []VisitEvent,
+        deadline: std.Io.Clock.Timestamp,
+        context: anytype,
+        comptime visitor: anytype,
+    ) (ReceiveError || callbackErrorSet(visitor))!usize {
+        if (output.len == 0 or
+            output.len > runtime.max_receive_batch_messages)
+        {
+            return error.BufferTooShort;
+        }
+        return self.receiveManyVisitingUntil(
+            supported_versions,
+            storage,
+            output,
+            try deadline_policy.usableAwake(self.endpoint.io, deadline),
+            context,
+            visitor,
+        );
+    }
+
+    fn receiveManyVisitingUntil(
+        self: *Dispatcher,
+        supported_versions: []const u32,
+        storage: []u8,
+        output: []VisitEvent,
+        caller_deadline: std.Io.Clock.Timestamp,
+        context: anytype,
+        comptime visitor: anytype,
+    ) (ReceiveError || callbackErrorSet(visitor))!usize {
+        while (true) {
+            if (self.buffered_datagrams.items.len != 0) {
+                output[0] = try self.visitOwnedEvent(
+                    try self.dispatch(self.buffered_datagrams.orderedRemove(0)),
+                    context,
+                    visitor,
+                );
+                if (output[0] == .discarded_long_header) continue;
+                return 1;
+            }
+            if (try self.pollPendingPacket()) |packet| {
+                output[0] = try self.visitOwnedEvent(
+                    .{ .packet = packet },
+                    context,
+                    visitor,
+                );
+                return 1;
+            }
+            if (try self.serviceDueTimer()) |timer| {
+                output[0] = .{ .timer = timer };
+                return 1;
+            }
+
+            const receive_timeout = earliestReceiveTimeout(
+                self.endpoint.io,
+                self.timers.earliestDeadline(),
+                caller_deadline,
+            );
+            var datagrams: [runtime.max_receive_batch_messages]runtime.ReceivedBytesView = undefined;
+            const datagram_count = self.endpoint.receiveManyBytesIntoTimeout(
+                storage,
+                datagrams[0..output.len],
+                receive_timeout,
+            ) catch |err| switch (err) {
+                error.Timeout => {
+                    if (caller_deadline.durationFromNow(self.endpoint.io)
+                        .raw.nanoseconds <= 0) return error.Timeout;
+                    continue;
+                },
+                else => |other| return other,
+            };
+
+            var count: usize = 0;
+            errdefer for (output[0..count]) |*event| {
+                event.deinit(self.allocator);
+            };
+            for (datagrams[0..datagram_count], 0..) |datagram, index| {
+                const version_negotiated = self.endpoint
+                    .sendVersionNegotiationIfUnsupported(
+                    datagram.from,
+                    datagram.bytes,
+                    supported_versions,
+                ) catch |err| {
+                    try self.bufferDatagramViews(
+                        datagrams[index + 1 .. datagram_count],
+                    );
+                    return err;
+                };
+                if (version_negotiated) continue;
+                const event = self.dispatchVisiting(
+                    datagram,
+                    context,
+                    visitor,
+                ) catch |err| {
+                    try self.bufferDatagramViews(
+                        datagrams[index + 1 .. datagram_count],
+                    );
+                    return err;
+                };
+                if (event == .discarded_long_header) continue;
+                output[count] = event;
+                count += 1;
+                if (event == .new_initial) {
+                    // Admission publishes the pending CID route above this
+                    // call. Preserve every already-received suffix until that
+                    // happens so retransmitted/fragmented Initials or eager
+                    // application packets cannot be misclassified as another
+                    // connection.
+                    try self.bufferDatagramViews(
+                        datagrams[index + 1 .. datagram_count],
+                    );
+                    break;
+                }
+            }
+            if (count != 0) return count;
+        }
+    }
+
+    fn bufferDatagramViews(
+        self: *Dispatcher,
+        datagrams: []const runtime.ReceivedBytesView,
+    ) Error!void {
+        if (datagrams.len == 0) return;
+        try self.buffered_datagrams.ensureUnusedCapacity(
+            self.allocator,
+            datagrams.len,
+        );
+        const original_len = self.buffered_datagrams.items.len;
+        errdefer {
+            for (self.buffered_datagrams.items[original_len..]) |*datagram| {
+                datagram.deinit(self.allocator);
+            }
+            self.buffered_datagrams.items.len = original_len;
+        }
+        for (datagrams) |datagram| {
+            self.buffered_datagrams.appendAssumeCapacity(
+                try self.copyView(datagram),
+            );
+        }
+    }
+
     fn receiveVisitingUntil(
         self: *Dispatcher,
         supported_versions: []const u32,
@@ -935,11 +1089,11 @@ pub const Dispatcher = struct {
         comptime visitor: anytype,
     ) (ReceiveError || callbackErrorSet(visitor))!VisitEvent {
         while (true) {
-            if (self.promoted_datagrams.items.len != 0) {
-                // Promotion-only buffered packets are rare and already owned;
-                // preserve their existing path and lifetime guarantees.
+            if (self.buffered_datagrams.items.len != 0) {
+                // Route-changing and error suffixes are rare and already
+                // owned; preserve their FIFO lifetime guarantees.
                 return self.visitOwnedEvent(
-                    try self.dispatch(self.promoted_datagrams.orderedRemove(0)),
+                    try self.dispatch(self.buffered_datagrams.orderedRemove(0)),
                     context,
                     visitor,
                 );
@@ -1183,8 +1337,8 @@ pub const Dispatcher = struct {
         caller_deadline: ?std.Io.Clock.Timestamp,
     ) ReceiveError!Event {
         while (true) {
-            if (self.promoted_datagrams.items.len != 0) {
-                const datagram = self.promoted_datagrams.orderedRemove(0);
+            if (self.buffered_datagrams.items.len != 0) {
+                const datagram = self.buffered_datagrams.orderedRemove(0);
                 return self.dispatch(datagram);
             }
             if (try self.pollPendingPacket()) |packet| {

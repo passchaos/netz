@@ -522,6 +522,131 @@ pub const Server = struct {
         );
     }
 
+    /// Bounded multi-datagram counterpart to `receiveVisitingWithDeadline`.
+    /// The visitor runs synchronously for each established packet before any
+    /// borrowed receive storage can be reused. Returned events contain only
+    /// stable summaries or explicitly owned exceptional datagrams.
+    pub fn receiveManyVisitingWithDeadline(
+        self: *Server,
+        supported_versions: []const u32,
+        storage: []u8,
+        output: []VisitEvent,
+        deadline: std.Io.Clock.Timestamp,
+        context: anytype,
+        comptime visitor: anytype,
+    ) (Error || callbackErrorSet(visitor))!usize {
+        if (output.len == 0 or
+            output.len > quic.runtime.max_receive_batch_messages)
+        {
+            return error.BufferTooShort;
+        }
+        const absolute = try deadline_policy.usableAwake(
+            self.endpoint.io,
+            deadline,
+        );
+        while (true) {
+            if (self.pollCompletion()) |completion_value| {
+                var completion = completion_value;
+                output[0] = eventToVisit(try self.finishCompletion(
+                    &completion,
+                ));
+                return 1;
+            }
+            _ = self.expireHandshakes(monotonicNowNs(self.endpoint.io));
+            const poll_deadline = deadline_policy.earlier(
+                absolute,
+                .fromNow(self.endpoint.io, .{
+                    .raw = self.options.handshake_poll_interval,
+                    .clock = .awake,
+                }),
+            ).?;
+            const Adapter = struct {
+                server: *Server,
+                context: @TypeOf(context),
+
+                fn visit(
+                    adapter: *@This(),
+                    packet: quic.endpoint_dispatcher.RoutedPacketView,
+                ) (Error || callbackErrorSet(visitor))!void {
+                    try visitor(adapter.context, packet);
+                    const established = adapter.server.connection(
+                        packet.connection_handle,
+                    ) orelse return error.UnknownConnectionHandle;
+                    _ = try established.connection.sendAckForPacketIfNeeded(
+                        packet.packet.packet_number,
+                        packet.packet.frames,
+                    );
+                }
+            };
+            var adapter = Adapter{ .server = self, .context = context };
+            var dispatcher_events: [quic.runtime.max_receive_batch_messages]quic.endpoint_dispatcher.VisitEvent = undefined;
+            const dispatcher_count = self.dispatcher
+                .receiveManyVisitingWithDeadline(
+                supported_versions,
+                storage,
+                dispatcher_events[0..output.len],
+                poll_deadline,
+                &adapter,
+                Adapter.visit,
+            ) catch |err| switch (err) {
+                error.Timeout => {
+                    if (absolute.durationFromNow(self.endpoint.io)
+                        .raw.nanoseconds <= 0) return error.Timeout;
+                    continue;
+                },
+                else => |other| return other,
+            };
+            defer for (dispatcher_events[0..dispatcher_count]) |*event| {
+                event.deinit(self.allocator);
+            };
+
+            var count: usize = 0;
+            errdefer for (output[0..count]) |*event| {
+                event.deinit(self.allocator);
+            };
+            for (dispatcher_events[0..dispatcher_count]) |*event| {
+                switch (event.*) {
+                    .new_initial => {
+                        const owned = visitEventToEvent(event);
+                        var admission = owned;
+                        defer admission.deinit(self.allocator);
+                        self.admit(&admission) catch |err| switch (err) {
+                            error.PendingHandshakeLimitReached => {
+                                const rejected = admission;
+                                admission = .consumed;
+                                output[count] = .{ .unrouted = rejected };
+                                count += 1;
+                            },
+                            else => |other| return other,
+                        };
+                    },
+                    .packet => |packet| {
+                        output[count] = .{ .packet = .{
+                            .connection_handle = packet.connection_handle,
+                            .connection_id_sequence = packet.connection_id_sequence,
+                        } };
+                        count += 1;
+                    },
+                    .timer => |timer| {
+                        output[count] = .{ .timer = timer };
+                        count += 1;
+                    },
+                    .unrouted => {
+                        output[count] = .{
+                            .unrouted = visitEventToEvent(event),
+                        };
+                        count += 1;
+                    },
+                    .consumed,
+                    .pending_handshake,
+                    .discarded_long_header,
+                    => {},
+                }
+            }
+            if (count != 0) return count;
+        }
+    }
+
     fn receiveVisitingUntil(
         self: *Server,
         supported_versions: []const u32,

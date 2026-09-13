@@ -2355,6 +2355,35 @@ increase. Every arm independently verified 4,194,304 bytes, checksum
 ranges overlap and only three samples were collected, so this is a regression
 sample supporting the allocation-path change, not a general throughput claim.
 
+The next shared-loop step follows Quinn's bounded receive-cycle design: one
+bounded receive operation drains already-ready UDP messages nonblocking, or
+waits for one when the socket starts empty, into a reusable caller buffer. The
+portable Zig Threaded backend still invokes
+`recvmsg` once per datagram (this is not a false `recvmmsg` claim), but the
+batch amortizes deadline setup, polling, dispatcher entry, and application-loop
+scheduling. Netz exposes the limit through
+`Endpoint.receiveManyBytesInto*`, `Dispatcher.receiveManyVisitingWithDeadline`,
+and `Server.receiveManyVisitingWithDeadline`; the benchmark defaults to the
+same 32-message Unix batch width used by the audited Quinn checkout. Existing
+GRO APIs remain separate because their segments share one source/control
+record. New Initials stop the batch and retain the already-read suffix until
+admission publishes its CID route; callback or protocol errors likewise retain
+the unprocessed suffix, preventing batch-only packet loss. Tests cover warmed
+zero-allocation established batches, callback-error recovery, Initial admission
+ordering, deadline validation, and the real two-client handshake server path.
+
+The benchmark now records and strictly verifies `server_receive_batch`, and
+rejects summaries that mix batch sizes. A same-binary five-sample comparison
+of the verified four-connection, 4 x 1-MiB upload measured batch 1 at
+66.467-80.259 MiB/s (70.990 median) and batch 32 at 51.544-97.483 MiB/s
+(86.325 median), a 21.6% median gain. The low batch-32 outlier is retained
+rather than discarded. Separate batch-16/32 exploration reached 94.287 and
+99.341 MiB/s medians in quieter samples, supporting 32 as the bounded default
+without treating those non-paired runs as the headline ratio. Batch-32 scaling
+smokes verified 8 MiB over eight connections at 92.107 MiB/s median and 16 MiB
+over sixteen connections at 78.435 MiB/s median, with exact byte, checksum,
+connection-completion, and DONE/DONE_ACK validation in every run.
+
 ### Raw QUIC mixed FIN/reset recovery versus quic-go
 
 The separate process gate below exercises terminal stream churn instead of

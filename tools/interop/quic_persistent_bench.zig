@@ -25,6 +25,7 @@ const Config = struct {
     stream_window: u64 = 1024 * 1024,
     timeout_ms: u32 = 30_000,
     server_topology: ServerTopology = .independent,
+    shared_receive_batch: u8 = 32,
 
     fn parse(args: []const []const u8) !Config {
         var mode: ?Mode = null;
@@ -66,6 +67,8 @@ const Config = struct {
                     ServerTopology,
                     value,
                 ) orelse return error.InvalidArgument;
+            } else if (option(arg, "--shared-receive-batch=")) |value| {
+                result.shared_receive_batch = try parsePositive(u8, value);
             } else {
                 return error.InvalidArgument;
             }
@@ -89,6 +92,8 @@ const Config = struct {
             self.stream_window == 0 or
             self.stream_window > 1024 * 1024 * 1024 or
             self.timeout_ms == 0 or self.timeout_ms > 10 * 60 * 1000 or
+            self.shared_receive_batch >
+                netz.quic.runtime.max_receive_batch_messages or
             (self.mode == .echo and
                 (self.connections != 1 or self.streams != 1 or
                     self.sender != .client)) or
@@ -324,64 +329,72 @@ fn runSharedServer(config: Config) !void {
 
     const deadline = deadlineFromNow(io, config.timeout());
     const versions = [_]u32{quicVersionOne()};
-    var receive_storage: [4096]u8 = undefined;
+    var receive_storage: [
+        netz.quic.runtime.max_receive_batch_messages * 4096
+    ]u8 = undefined;
+    var receive_events: [netz.quic.runtime.max_receive_batch_messages]netz.quic.endpoint_server.VisitEvent = undefined;
     var complete: usize = 0;
     while (complete < config.connections) {
-        var event = try server.receiveVisitingWithDeadline(
+        const event_count = try server.receiveManyVisitingWithDeadline(
             &versions,
-            &receive_storage,
+            receive_storage[0 .. @as(usize, config.shared_receive_batch) * 4096],
+            receive_events[0..config.shared_receive_batch],
             deadline,
             {},
             discardSharedPacket,
         );
-        defer event.deinit(allocator);
-        switch (event) {
-            .connected => |handle| {
-                if (handle == 0 or handle > states.len) {
-                    return error.InvalidBenchmarkResult;
-                }
-                const state = &states[handle - 1];
-                if (state.handle != null) return error.InvalidBenchmarkResult;
-                state.handle = handle;
-                const established = server.connection(handle) orelse
-                    return error.InvalidBenchmarkResult;
-                try validateHandshake(established.*, false);
-                complete += @intFromBool(try driveSharedUntilBlocked(
-                    &server,
-                    config,
-                    states,
-                    state,
-                    results,
-                ));
-            },
-            .packet => |packet| {
-                const handle = packet.connection_handle;
-                if (handle == 0 or handle > states.len) {
-                    return error.InvalidBenchmarkResult;
-                }
-                complete += @intFromBool(try driveSharedUntilBlocked(
-                    &server,
-                    config,
-                    states,
-                    &states[handle - 1],
-                    results,
-                ));
-            },
-            .timer => |timer| {
-                const handle = timer.connection_handle;
-                if (handle == 0 or handle > states.len) {
-                    return error.InvalidBenchmarkResult;
-                }
-                complete += @intFromBool(try driveSharedUntilBlocked(
-                    &server,
-                    config,
-                    states,
-                    &states[handle - 1],
-                    results,
-                ));
-            },
-            .handshake_failed => |failure| return failure.err,
-            .unrouted => return error.InvalidBenchmarkResult,
+        for (receive_events[0..event_count]) |*event| {
+            defer event.deinit(allocator);
+            switch (event.*) {
+                .connected => |handle| {
+                    if (handle == 0 or handle > states.len) {
+                        return error.InvalidBenchmarkResult;
+                    }
+                    const state = &states[handle - 1];
+                    if (state.handle != null) {
+                        return error.InvalidBenchmarkResult;
+                    }
+                    state.handle = handle;
+                    const established = server.connection(handle) orelse
+                        return error.InvalidBenchmarkResult;
+                    try validateHandshake(established.*, false);
+                    complete += @intFromBool(try driveSharedUntilBlocked(
+                        &server,
+                        config,
+                        states,
+                        state,
+                        results,
+                    ));
+                },
+                .packet => |packet| {
+                    const handle = packet.connection_handle;
+                    if (handle == 0 or handle > states.len) {
+                        return error.InvalidBenchmarkResult;
+                    }
+                    complete += @intFromBool(try driveSharedUntilBlocked(
+                        &server,
+                        config,
+                        states,
+                        &states[handle - 1],
+                        results,
+                    ));
+                },
+                .timer => |timer| {
+                    const handle = timer.connection_handle;
+                    if (handle == 0 or handle > states.len) {
+                        return error.InvalidBenchmarkResult;
+                    }
+                    complete += @intFromBool(try driveSharedUntilBlocked(
+                        &server,
+                        config,
+                        states,
+                        &states[handle - 1],
+                        results,
+                    ));
+                },
+                .handshake_failed => |failure| return failure.err,
+                .unrouted => return error.InvalidBenchmarkResult,
+            }
         }
     }
     try printServerCompletion(config, results);
@@ -1354,6 +1367,13 @@ fn connectionScope(config: Config) []const u8 {
         "parallel-independent-endpoints";
 }
 
+fn serverReceiveBatch(config: Config) usize {
+    return if (config.server_topology == .shared)
+        config.shared_receive_batch
+    else
+        1;
+}
+
 fn printClientResult(
     config: Config,
     latencies: []u64,
@@ -1402,15 +1422,16 @@ fn printClientResult(
             "timing_scope=stream-setup-through-verified-completion " ++
             "connections={d} streams={d} " ++
             "bytes_per_stream={d} transferred_bytes={d} checksum={d} " ++
+            "server_receive_batch={d} " ++
             "elapsed_ns={d} logical_MiB_s={d:.3} sender_role={s} " ++
             "cert_verify=true quic_version=1 gso=false gro=false " ++
             "completion_exchange_verified=true complete=true\n",
         .{
-            implementation,          config.role_pair,         config.run,
-            connectionScope(config), endpointTopology(config), config.connections,
-            config.streams,          config.bytes_per_stream,  bytes,
-            checksum,                elapsed_ns,               mib_s,
-            @tagName(config.sender),
+            implementation,          config.role_pair,           config.run,
+            connectionScope(config), endpointTopology(config),   config.connections,
+            config.streams,          config.bytes_per_stream,    bytes,
+            checksum,                serverReceiveBatch(config), elapsed_ns,
+            mib_s,                   @tagName(config.sender),
         },
     );
 }
@@ -1450,6 +1471,7 @@ fn printServerCompletion(config: Config, results: []const WorkerResult) !void {
             "benchmark_scope=same-application-shape warmup=0 iterations=1 " ++
             "connections={d} streams={d} bytes_per_stream={d} payload_bytes={d} " ++
             "transferred_bytes={d} checksum={d} sender_role={s} " ++
+            "server_receive_batch={d} " ++
             "connections_complete={d} cert_verify=true quic_version=1 " ++
             "gso=false gro=false completion_exchange_verified=true complete=true\n",
         .{
@@ -1457,7 +1479,7 @@ fn printServerCompletion(config: Config, results: []const WorkerResult) !void {
             connectionScope(config),                endpointTopology(config), config.connections,
             config.streams,                         config.bytes_per_stream,  config.payload_bytes,
             bytes,                                  checksum,                 @tagName(config.sender),
-            config.connections,
+            serverReceiveBatch(config),             config.connections,
         },
     );
 }
@@ -1539,6 +1561,25 @@ test "persistent QUIC benchmark config rejects ambiguous shapes" {
         "shared-server-udp",
         endpointTopology(shared),
     );
+    try std.testing.expectEqual(@as(u8, 32), shared.shared_receive_batch);
+    const single_receive = try Config.parse(&.{
+        "--mode=aggregate",         "--role-pair=netz-client+netz-server",
+        "--sender=client",          "--connections=4",
+        "--streams=1",              "--bytes-per-stream=65536",
+        "--warmup=0",               "--iterations=1",
+        "--server-topology=shared", "--shared-receive-batch=1",
+    });
+    try std.testing.expectEqual(
+        @as(u8, 1),
+        single_receive.shared_receive_batch,
+    );
+    try std.testing.expectError(error.InvalidArgument, Config.parse(&.{
+        "--mode=aggregate",         "--role-pair=netz-client+netz-server",
+        "--sender=client",          "--connections=4",
+        "--streams=1",              "--bytes-per-stream=65536",
+        "--warmup=0",               "--iterations=1",
+        "--server-topology=shared", "--shared-receive-batch=65",
+    }));
     try std.testing.expectError(error.InvalidArgument, Config.parse(&.{
         "--mode=aggregate",         "--role-pair=netz-client+quic-go-server",
         "--sender=client",          "--connections=4",

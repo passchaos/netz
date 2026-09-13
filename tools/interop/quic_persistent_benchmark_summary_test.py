@@ -89,6 +89,7 @@ class PersistentBenchmarkSummaryTest(unittest.TestCase):
                         f"elapsed_ns=1000 logical_MiB_s={value:.3f} "
                         "connection_scope=parallel-shared-server-endpoint "
                         "endpoint_topology=shared-server-udp "
+                        "server_receive_batch=32 "
                         "benchmark_scope=same-application-shape "
                         "completion_exchange_verified=true complete=true"
                     )
@@ -97,9 +98,20 @@ class PersistentBenchmarkSummaryTest(unittest.TestCase):
                 "endpoint_topology=one-udp-socket-per-connection",
             ))
             path.write_text("\n".join(lines) + "\n", encoding="utf-8")
-            output = SUMMARY.summarize(path, "aggregate", 3, "shared")
+            output = SUMMARY.summarize(path, "aggregate", 3, "shared", 32)
             self.assertEqual(len(output), 1)
             self.assertIn("median_logical_MiB_s=120.000", output[0])
+            self.assertIn("server_receive_batch=32", output[0])
+            path.write_text(
+                path.read_text().replace(
+                    "server_receive_batch=32",
+                    "server_receive_batch=31",
+                    1,
+                ),
+                encoding="utf-8",
+            )
+            with self.assertRaisesRegex(ValueError, "mixed|batch mismatch"):
+                SUMMARY.summarize(path, "aggregate", 3, "shared", 32)
 
 
 if __name__ == "__main__":
