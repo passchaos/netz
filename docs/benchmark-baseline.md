@@ -2549,6 +2549,20 @@ The previously failing four- and sixteen-connection 2/1-ms runs now complete;
 the timer-aware handshake default uses 2/25 ms, while the low-level one-RTT
 configuration remains 1/0 for timer-unaware callers.
 
+Delayed ACKs also exposed a short-lived HTTP/3 completion edge. A client could
+return the final response or push event with one ACK-eliciting STREAM/FIN still
+behind its 25-ms timer, then stop driving receive while the server waited for
+reliable-response recovery to drain. HTTP/3 packetization now opportunistically
+appends that cumulative ACK to the first response packet when its frame and MTU
+budgets permit; failure leaves the ACK pending and sends the application packet
+unchanged. Client aggregate, multiplexed, and push completion additionally make
+a nonblocking final ACK attempt before returning their terminal event. The
+previously timing-out 4-stream/1-MiB download completed 5/5 runs after the fix;
+throughput ranged from 45.84 to 48.33 MiB/s under visible host scheduling noise,
+so this is reliability evidence rather than a throughput claim. Focused tests
+cover STREAM-before-ACK wire ordering, frame-budget fallback, oversize rollback,
+and clearing the delayed-ACK deadline at response and push completion.
+
 The server and dispatcher now both expose batch visitor entry points taking an
 already-composed std.Io.Timeout. Public WithDeadline forms retain strict
 awake-clock and expiry validation, while the shared benchmark can compose its

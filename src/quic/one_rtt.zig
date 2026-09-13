@@ -5157,6 +5157,39 @@ pub const Connection = struct {
         self.ackDelaySent();
     }
 
+    /// One-attempt counterpart to `sendWithPendingAck` for endpoint-owned
+    /// packetizers. Pacing leaves the cumulative ACK pending so the exact
+    /// application frames can be retried after the next transport wake-up.
+    pub fn trySendWithPendingAck(
+        self: *Connection,
+        frames: []const quic.Frame,
+        ack_delay: u64,
+    ) Error!void {
+        var stack_ranges: [
+            quic.packet_space.ReceivedPacketTracker.stack_ack_range_capacity
+        ]quic.AckRange = undefined;
+        var heap_ranges: ?[]quic.AckRange = null;
+        defer if (heap_ranges) |ranges| self.endpoint.allocator.free(ranges);
+        const ack = try self.ackFrameForSend(
+            ack_delay,
+            &stack_ranges,
+            &heap_ranges,
+        );
+        var stack_frames: [pending_ack_frame_stack_capacity]quic.Frame =
+            undefined;
+        const combined = try appendPendingAck(
+            self.endpoint.allocator,
+            &stack_frames,
+            frames,
+            ack,
+        );
+        defer if (combined.ptr != stack_frames[0..].ptr) {
+            self.endpoint.allocator.free(combined);
+        };
+        try self.trySend(combined);
+        self.ackDelaySent();
+    }
+
     pub fn sendAckWithEcn(self: *Connection, ack_delay: u64, ecn_counts: quic.EcnCounts) Error!void {
         var stack_ranges: [quic.packet_space.ReceivedPacketTracker.stack_ack_range_capacity]quic.AckRange = undefined;
         var heap_ranges: ?[]quic.AckRange = null;
@@ -5302,6 +5335,17 @@ pub const Connection = struct {
         const now_ns = self.monotonicNowNs();
         const start = self.ack_delay_start_ns orelse now_ns;
         try self.sendAckForDelayNs(now_ns -| start);
+        return true;
+    }
+
+    /// Attempt to flush the delayed cumulative ACK without sleeping for
+    /// pacing. On failure the ACK counters and deadline remain intact.
+    pub fn tryFlushPendingAck(self: *Connection) Error!bool {
+        if (self.ack_eliciting_since_last_ack == 0) return false;
+        const now_ns = self.monotonicNowNs();
+        const start = self.ack_delay_start_ns orelse now_ns;
+        const delay = try self.encodedLocalAckDelayNanos(now_ns -| start);
+        try self.trySendWithPendingAck(&.{}, delay);
         return true;
     }
 

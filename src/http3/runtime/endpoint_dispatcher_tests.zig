@@ -846,6 +846,11 @@ test "HTTP/3 borrowed response packet preserves any-response FIN across pacing" 
         .{},
     );
     defer client.deinit();
+    client.established.connection.configureAckPolicy(
+        2,
+        25_000,
+        quic.packet_space.default_packet_threshold,
+    );
     var server = try quic.one_rtt.Connection.init(&server_endpoint, .{
         .peer = client_endpoint.address(),
         .receive_keys = client_keys,
@@ -907,6 +912,9 @@ test "HTTP/3 borrowed response packet preserves any-response FIN across pacing" 
         });
         @memset(packet.packet.payload, 0xaa);
     }
+    try std.testing.expect(
+        client.established.connection.ackDelayDeadline() != null,
+    );
     var head = (try client.pollNextResponseEventOnce()) orelse
         return error.TestUnexpectedResult;
     defer head.deinit(allocator);
@@ -944,6 +952,9 @@ test "HTTP/3 borrowed response packet preserves any-response FIN across pacing" 
     try std.testing.expect(finished.message.value == .finished);
     try std.testing.expectEqual(@as(usize, 0), client.streaming_responses.entryCount());
     try std.testing.expectEqual(@as(usize, 0), client.request_lifecycle.count());
+    try std.testing.expect(
+        client.established.connection.ackDelayDeadline() == null,
+    );
     try std.testing.expect((try client.pollNextResponseEventOnce()) == null);
     try std.testing.expectEqual(@as(usize, 0), fixed_io.sleep_calls);
 }
@@ -1005,6 +1016,11 @@ test "HTTP/3 push once poll preserves FIN across pacing" {
         .{},
     );
     defer client.deinit();
+    client.established.connection.configureAckPolicy(
+        2,
+        25_000,
+        quic.packet_space.default_packet_threshold,
+    );
     var server = try quic.one_rtt.Connection.init(&server_endpoint, .{
         .peer = client_endpoint.address(),
         .receive_keys = client_keys,
@@ -1067,6 +1083,9 @@ test "HTTP/3 push once poll preserves FIN across pacing" {
     defer client_endpoint.io = fixed_io.delegate;
 
     try client.processResponsePacket(&packet);
+    try std.testing.expect(
+        client.established.connection.ackDelayDeadline() != null,
+    );
     var head = (try client.pollPushEventOnce()) orelse
         return error.TestUnexpectedResult;
     defer head.deinit(allocator);
@@ -1106,6 +1125,9 @@ test "HTTP/3 push once poll preserves FIN across pacing" {
     try std.testing.expectEqual(push_stream_id, finished.stream_id);
     try std.testing.expect(finished.value == .finished);
     try std.testing.expectEqual(@as(usize, 0), client.push_streams.entryCount());
+    try std.testing.expect(
+        client.established.connection.ackDelayDeadline() == null,
+    );
     try std.testing.expect((try client.pollPushEventOnce()) == null);
     try std.testing.expectEqual(@as(usize, 0), fixed_io.sleep_calls);
 }

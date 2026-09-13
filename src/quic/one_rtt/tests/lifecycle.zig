@@ -1441,6 +1441,85 @@ test "QUIC 1-RTT response piggybacks pending ACK" {
     try std.testing.expectEqual(@as(usize, 0), client.pendingRecoveryCount());
 }
 
+test "QUIC 1-RTT one-attempt response preserves pending ACK on failure" {
+    const allocator = std.testing.allocator;
+    var threaded = std.Io.Threaded.init(allocator, .{});
+    defer threaded.deinit();
+    const io = threaded.io();
+
+    var server_endpoint = try quic.runtime.Endpoint.bind(
+        allocator,
+        io,
+        .{ .ip4 = .loopback(0) },
+        .{ .max_datagram_size = 4096 },
+    );
+    defer server_endpoint.deinit();
+    var client_endpoint = try quic.runtime.Endpoint.bind(
+        allocator,
+        io,
+        .{ .ip4 = .loopback(0) },
+        .{ .max_datagram_size = 4096 },
+    );
+    defer client_endpoint.deinit();
+
+    const keys = quic.protection.deriveAes128Keys(
+        [_]u8{0xd1} ** quic.protection.secret_len,
+    );
+    var connection = try one_rtt.Connection.init(&server_endpoint, .{
+        .peer = client_endpoint.address(),
+        .receive_keys = keys,
+        .send_keys = keys,
+        .local_connection_id = "ack-try-server",
+        .peer_connection_id = "ack-try-client",
+        .local_endpoint = .server,
+        .local_ack_eliciting_threshold = 2,
+        .local_max_ack_delay_us = 25_000,
+        .enable_pacing = false,
+    });
+    defer connection.deinit();
+    var peer = try one_rtt.Connection.init(&client_endpoint, .{
+        .peer = server_endpoint.address(),
+        .receive_keys = keys,
+        .send_keys = keys,
+        .local_connection_id = "ack-try-client",
+        .peer_connection_id = "ack-try-server",
+        .enable_pacing = false,
+    });
+    defer peer.deinit();
+
+    const ping = [_]quic.Frame{.{ .ping = {} }};
+    try peer.send(&ping);
+    var request = try connection.receivePacket();
+    defer request.deinit(allocator);
+    try std.testing.expect(!try connection.sendAckForPacketIfNeeded(
+        request.packet.packet_number,
+        request.frames,
+    ));
+    const deadline = connection.ackDelayDeadline() orelse
+        return error.TestUnexpectedResult;
+    const too_large = [_]u8{0xa5} ** 4096;
+    try std.testing.expectError(
+        error.DatagramTooLarge,
+        connection.trySendWithPendingAck(&.{.{ .stream = .{
+            .stream_id = 1,
+            .data = &too_large,
+        } }}, 0),
+    );
+    try std.testing.expectEqual(deadline, connection.ackDelayDeadline().?);
+
+    try connection.trySendWithPendingAck(&.{.{ .stream = .{
+        .stream_id = 1,
+        .data = "response",
+    } }}, 0);
+    try std.testing.expectEqual(@as(?u64, null), connection.ackDelayDeadline());
+
+    var packet = try peer.receivePacket();
+    defer packet.deinit(allocator);
+    try std.testing.expectEqual(@as(usize, 2), packet.frames.len);
+    try std.testing.expect(packet.frames[0] == .stream);
+    try std.testing.expect(packet.frames[1] == .ack);
+}
+
 test "QUIC 1-RTT opens local stream ids without eager state" {
     const allocator = std.testing.allocator;
     var threaded = std.Io.Threaded.init(allocator, .{});

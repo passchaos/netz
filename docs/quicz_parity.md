@@ -182,6 +182,16 @@ of that threshold and preserve application-frame-before-ACK ordering. Five
 CPU-0 5,000-round echo regressions measured p50 12.759-12.985 us, p99
 16.989-21.891 us, and p99.9 25.249-34.553 us. These noisier samples are
 recorded without replacing the earlier matched quicz comparison.
+HTTP/3 packetization now uses that primitive automatically for the first
+outbound application packet when a delayed ACK is pending and frame/MTU budgets
+allow it. If the combined packet is too large or temporarily blocked, the
+application packet follows its original path and the ACK remains scheduled.
+When a client returns its final aggregate, streaming, reset, or push event, it
+also makes a nonblocking ACK attempt so a short-lived peer can finish recovery
+without requiring another application receive call. A 4-stream/1-MiB download
+that timed out after the handshake ACK default changed to 2/25 ms completed
+5/5 times after this lifecycle fix. The wide throughput range is treated only
+as completion evidence.
 PMTU probe construction now uses the connection's pre-sized plaintext scratch
 for the canonical PING-plus-PADDING payload instead of allocating and freeing a
 probe-sized temporary list on every search step. Recovery still takes stable

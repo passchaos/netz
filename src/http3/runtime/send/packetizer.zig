@@ -62,6 +62,7 @@ fn sendUntil(
 ) runtime_error.ReceiveTimeoutError!void {
     var backend = ConnectionBackend{
         .connection = connection,
+        .frame_limit = @max(@as(usize, 1), max_frames_per_packet),
         .deadline = deadline,
     };
     sendWithBackend(
@@ -343,6 +344,7 @@ fn Packetizer(comptime Backend: type) type {
 
 const ConnectionBackend = struct {
     connection: *quic.one_rtt.Connection,
+    frame_limit: usize,
     visible_packet_sent: bool = false,
     deadline: ?std.Io.Clock.Timestamp = null,
 
@@ -372,6 +374,34 @@ const ConnectionBackend = struct {
                     self.connection.endpoint.io,
                     deadline,
                 );
+            }
+            const piggyback_extra_frames: usize = @as(usize, 1) +
+                @intFromBool(self.connection.handshakeDonePending());
+            if (offset == 0 and
+                packets[0].len <= self.frame_limit -| piggyback_extra_frames and
+                self.connection.ackDelayDeadline() != null)
+            {
+                self.connection.trySendWithPendingAck(
+                    packets[0],
+                    0,
+                ) catch |err| switch (err) {
+                    // The application packet was already sized without the
+                    // ACK. Preserve it and let the delayed-ACK timer send the
+                    // cumulative ACK separately when the combination does not
+                    // fit this path.
+                    error.OutOfMemory,
+                    error.DatagramTooLarge,
+                    error.AntiAmplificationLimited,
+                    error.CongestionLimited,
+                    error.PacingLimited,
+                    => {},
+                    else => return err,
+                };
+                if (self.connection.ackDelayDeadline() == null) {
+                    self.visible_packet_sent = true;
+                    offset += 1;
+                    continue;
+                }
             }
             const result = self.connection.sendManyProgress(
                 packets[offset..],
@@ -580,4 +610,85 @@ test "HTTP/3 packetizer completes planning before its first send" {
         checkPacketizerPlanningAllocationFailure,
         .{},
     );
+}
+
+test "HTTP/3 connection packetizer piggybacks delayed ACK when space permits" {
+    const allocator = std.testing.allocator;
+    var threaded = std.Io.Threaded.init(allocator, .{});
+    defer threaded.deinit();
+    const io = threaded.io();
+
+    var server_endpoint = try quic.runtime.Endpoint.bind(
+        allocator,
+        io,
+        .{ .ip4 = .loopback(0) },
+        .{ .max_datagram_size = 4096 },
+    );
+    defer server_endpoint.deinit();
+    var client_endpoint = try quic.runtime.Endpoint.bind(
+        allocator,
+        io,
+        .{ .ip4 = .loopback(0) },
+        .{ .max_datagram_size = 4096 },
+    );
+    defer client_endpoint.deinit();
+
+    const keys = quic.protection.deriveAes128Keys(
+        [_]u8{0xe1} ** quic.protection.secret_len,
+    );
+    var server = try quic.one_rtt.Connection.init(&server_endpoint, .{
+        .peer = client_endpoint.address(),
+        .receive_keys = keys,
+        .send_keys = keys,
+        .local_connection_id = "packetizer-ack-server",
+        .peer_connection_id = "packetizer-ack-client",
+        .local_endpoint = .server,
+        .local_ack_eliciting_threshold = 2,
+        .local_max_ack_delay_us = 25_000,
+        .enable_pacing = false,
+        .tls_handshake_complete = true,
+    });
+    defer server.deinit();
+    var client = try quic.one_rtt.Connection.init(&client_endpoint, .{
+        .peer = server_endpoint.address(),
+        .receive_keys = keys,
+        .send_keys = keys,
+        .local_connection_id = "packetizer-ack-client",
+        .peer_connection_id = "packetizer-ack-server",
+        .enable_pacing = false,
+        .tls_handshake_complete = true,
+    });
+    defer client.deinit();
+
+    try client.send(&.{.{ .ping = {} }});
+    var request = try server.receivePacket();
+    defer request.deinit(allocator);
+    try std.testing.expect(!try server.sendAckForPacketIfNeeded(
+        request.packet.packet_number,
+        request.frames,
+    ));
+    const deadline = server.ackDelayDeadline() orelse
+        return error.TestUnexpectedResult;
+
+    try send(allocator, &server, &.{.{ .stream = .{
+        .stream_id = 1,
+        .data = "first",
+    } }}, 1);
+    try std.testing.expectEqual(deadline, server.ackDelayDeadline().?);
+    var first = try client.receivePacket();
+    defer first.deinit(allocator);
+    try std.testing.expectEqual(@as(usize, 1), first.frames.len);
+    try std.testing.expect(first.frames[0] == .stream);
+
+    try send(allocator, &server, &.{.{ .stream = .{
+        .stream_id = 1,
+        .offset = "first".len,
+        .data = "second",
+    } }}, 2);
+    try std.testing.expectEqual(@as(?u64, null), server.ackDelayDeadline());
+    var second = try client.receivePacket();
+    defer second.deinit(allocator);
+    try std.testing.expectEqual(@as(usize, 2), second.frames.len);
+    try std.testing.expect(second.frames[0] == .stream);
+    try std.testing.expect(second.frames[1] == .ack);
 }

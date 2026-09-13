@@ -13219,6 +13219,7 @@ pub const HandshakeClient = struct {
                 _ = self.outbound_bodies.finish(stream_id);
                 self.qpack_encode.abandonStream(stream_id);
                 self.sendQpackFeedback() catch {};
+                self.flushFinalResponseAckIfIdle();
                 return err;
             },
             else => {
@@ -13327,6 +13328,7 @@ pub const HandshakeClient = struct {
             self.sendQpackFeedbackWithDeadline(absolute) catch {}
         else
             self.sendQpackFeedback() catch {};
+        self.flushFinalResponseAckIfIdle();
         return .{ .stream_bytes = assembled.bytes, .response = response };
     }
 
@@ -13430,6 +13432,7 @@ pub const HandshakeClient = struct {
                     _ = self.outbound_bodies.finish(reset.stream_id);
                     self.qpack_encode.abandonStream(reset.stream_id);
                     self.sendQpackFeedback() catch {};
+                    self.flushFinalResponseAckIfIdle();
                     return .{ .reset = .{
                         .stream_id = reset.stream_id,
                         .application_error_code = reset.application_error_code,
@@ -14965,6 +14968,7 @@ pub const HandshakeClient = struct {
                 _ = try self.established.connection
                     .requestCompletedPeerStreamRelease(ready.event.stream_id);
                 self.push_streams.removeFinished(ready.index);
+                self.flushTerminalReceiveAck();
                 return ready.event;
             }
         }
@@ -15066,6 +15070,7 @@ pub const HandshakeClient = struct {
             _ = try self.established.connection
                 .requestCompletedPeerStreamRelease(event.stream_id);
             self.push_streams.removeFinished(ready.index);
+            self.flushTerminalReceiveAck();
         }
         return event;
     }
@@ -16673,6 +16678,20 @@ pub const HandshakeClient = struct {
         _ = self.outbound_bodies.finish(stream_id);
         self.qpack_encode.abandonStream(stream_id);
         self.streaming_responses.remove(stream_id);
+        self.flushFinalResponseAckIfIdle();
+    }
+
+    fn flushFinalResponseAckIfIdle(self: *HandshakeClient) void {
+        if (!self.request_lifecycle.isEmpty()) return;
+        self.flushTerminalReceiveAck();
+    }
+
+    fn flushTerminalReceiveAck(self: *HandshakeClient) void {
+        // A caller may stop driving receive as soon as the terminal event is
+        // delivered. Do not leave its final STREAM/FIN behind the delayed ACK
+        // timer: a short-lived peer draining reliable bytes would otherwise
+        // retransmit until its application deadline.
+        _ = self.established.connection.tryFlushPendingAck() catch {};
     }
 
     fn failReceivedResponse(
