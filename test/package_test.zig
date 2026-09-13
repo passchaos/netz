@@ -6765,6 +6765,14 @@ test "public modules are reachable" {
         "RoutedBytesView",
     ));
     try std.testing.expect(@hasDecl(
+        netz.quic.runtime.Endpoint,
+        "receiveManyBytesIntoTimeout",
+    ));
+    try std.testing.expect(@hasDecl(
+        netz.quic.runtime.Endpoint,
+        "receiveManyBytesIntoWithDeadline",
+    ));
+    try std.testing.expect(@hasDecl(
         netz.quic.one_rtt.Connection,
         "receivePendingPacket",
     ));

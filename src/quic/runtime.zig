@@ -143,6 +143,11 @@ pub const SendManyBytesResult = struct {
 /// Caller storage required to preserve the largest possible UDP_GRO receive.
 pub const max_gro_receive_bytes: usize = std.math.maxInt(u16);
 
+/// Maximum number of independent UDP messages accepted by one caller-buffer
+/// receive. This matches the standard Threaded backend's bounded batch size
+/// and keeps all message/control descriptors on the stack.
+pub const max_receive_batch_messages: usize = 64;
+
 const HeldSend = struct {
     to: net.IpAddress,
     bytes: []u8,
@@ -945,6 +950,75 @@ pub const Endpoint = struct {
         );
     }
 
+    /// Wait for one UDP datagram and drain up to `out.len` already-ready
+    /// datagrams into caller storage. Each returned view remains valid until
+    /// `buffer` is reused. The buffer must reserve `max_datagram_size` bytes
+    /// per output slot so an oversized datagram cannot truncate a later slot.
+    ///
+    /// This API batches independent socket messages. GRO endpoints must use
+    /// `receiveBytesBatchIntoTimeout`, whose segments share one source and ECN
+    /// control record.
+    pub fn receiveManyBytesIntoTimeout(
+        self: *Endpoint,
+        buffer: []u8,
+        out: []ReceivedBytesView,
+        timeout: std.Io.Timeout,
+    ) ReceiveTimeoutError!usize {
+        try self.validateManyReceiveBuffers(buffer, out);
+        var messages: [max_receive_batch_messages]net.IncomingMessage =
+            undefined;
+        var controls: [max_receive_batch_messages][
+            receive_control_buffer_len
+        ]u8 align(@alignOf(EcnCmsgHdr)) = undefined;
+        for (messages[0..out.len], controls[0..out.len]) |*message, *control| {
+            @memset(control, 0);
+            message.* = .init;
+            message.control = control;
+        }
+
+        self.socket_receive_mutex.lockUncancelable(self.io);
+        defer self.socket_receive_mutex.unlock(self.io);
+        const receive_error, const count = self.socket.receiveManyTimeout(
+            self.io,
+            messages[0..out.len],
+            buffer,
+            .{},
+            timeout,
+        );
+        if (receive_error) |err| return err;
+        std.debug.assert(count != 0 and count <= out.len);
+        for (messages[0..count], out[0..count]) |incoming, *view| {
+            self.recordSocketReceived(incoming);
+            view.* = try self.finishKernelBytesInto(incoming);
+        }
+        return count;
+    }
+
+    pub fn receiveManyBytesIntoWithTimeout(
+        self: *Endpoint,
+        buffer: []u8,
+        out: []ReceivedBytesView,
+        timeout: std.Io.Duration,
+    ) ReceiveTimeoutError!usize {
+        if (timeout.nanoseconds <= 0) return error.Timeout;
+        return self.receiveManyBytesIntoWithDeadline(
+            buffer,
+            out,
+            .fromNow(self.io, .{ .clock = .awake, .raw = timeout }),
+        );
+    }
+
+    pub fn receiveManyBytesIntoWithDeadline(
+        self: *Endpoint,
+        buffer: []u8,
+        out: []ReceivedBytesView,
+        deadline: std.Io.Clock.Timestamp,
+    ) ReceiveTimeoutError!usize {
+        return self.receiveManyBytesIntoTimeout(buffer, out, .{
+            .deadline = try deadline_policy.usableAwake(self.io, deadline),
+        });
+    }
+
     /// Receive one datagram with a caller-supplied deadline.
     ///
     /// Pending GRO segments are consumed before arming a kernel timeout. This
@@ -1385,6 +1459,25 @@ pub const Endpoint = struct {
             max_gro_receive_bytes
         else
             self.limits.max_datagram_size;
+        if (buffer.len < required) return error.BufferTooShort;
+    }
+
+    fn validateManyReceiveBuffers(
+        self: Endpoint,
+        buffer: []u8,
+        out: []ReceivedBytesView,
+    ) Error!void {
+        if (self.gro_receive_enabled) {
+            return error.CallerBufferReceiveWithGro;
+        }
+        if (out.len == 0 or out.len > max_receive_batch_messages) {
+            return error.BufferTooShort;
+        }
+        const required = std.math.mul(
+            usize,
+            self.limits.max_datagram_size,
+            out.len,
+        ) catch return error.BufferTooShort;
         if (buffer.len < required) return error.BufferTooShort;
     }
 
@@ -3249,6 +3342,78 @@ test "QUIC UDP endpoint receives plain batch into caller storage" {
     try std.testing.expect(received.from.eql(&sender.address()));
 }
 
+test "QUIC UDP endpoint drains ready datagrams into caller storage" {
+    const allocator = std.testing.allocator;
+    var threaded = std.Io.Threaded.init(allocator, .{
+        .async_limit = .unlimited,
+    });
+    defer threaded.deinit();
+    const io = threaded.io();
+    var receiver = try Endpoint.bind(
+        allocator,
+        io,
+        .{ .ip4 = .loopback(0) },
+        .{ .max_datagram_size = 128 },
+    );
+    defer receiver.deinit();
+    var sender = try Endpoint.bind(
+        allocator,
+        io,
+        .{ .ip4 = .loopback(0) },
+        .{ .max_datagram_size = 128 },
+    );
+    defer sender.deinit();
+
+    const expected = [_][]const u8{ "one", "message-two", "third" };
+    for (expected) |bytes| try sender.sendBytes(receiver.address(), bytes);
+
+    var short_storage: [3 * 128 - 1]u8 = undefined;
+    var views: [3]ReceivedBytesView = undefined;
+    var no_views: [0]ReceivedBytesView = .{};
+    try std.testing.expectError(
+        error.BufferTooShort,
+        receiver.receiveManyBytesIntoWithDeadline(
+            &short_storage,
+            &no_views,
+            .fromNow(io, .{
+                .clock = .awake,
+                .raw = .fromSeconds(1),
+            }),
+        ),
+    );
+    try std.testing.expectError(
+        error.BufferTooShort,
+        receiver.receiveManyBytesIntoWithDeadline(
+            &short_storage,
+            &views,
+            .fromNow(io, .{
+                .clock = .awake,
+                .raw = .fromSeconds(1),
+            }),
+        ),
+    );
+
+    var storage: [3 * 128]u8 = undefined;
+    const count = try receiver.receiveManyBytesIntoWithDeadline(
+        &storage,
+        &views,
+        .fromNow(io, .{
+            .clock = .awake,
+            .raw = .fromSeconds(1),
+        }),
+    );
+    try std.testing.expectEqual(expected.len, count);
+    for (views[0..count], expected) |view, bytes| {
+        try std.testing.expectEqualStrings(bytes, view.bytes);
+        try std.testing.expect(view.from.eql(&sender.address()));
+        try std.testing.expect(
+            @intFromPtr(view.bytes.ptr) >= @intFromPtr(&storage) and
+                @intFromPtr(view.bytes.ptr) <
+                    @intFromPtr(&storage) + storage.len,
+        );
+    }
+}
+
 test "QUIC UDP endpoint receives GRO batch into caller storage" {
     if (!udpGroSupported()) return error.SkipZigTest;
 
@@ -3273,6 +3438,19 @@ test "QUIC UDP endpoint receives GRO batch into caller storage" {
     if (!receiver.groReceiveEnabled() or !sender.gsoSendEnabled()) {
         return error.SkipZigTest;
     }
+    var many_storage: [2 * 128]u8 = undefined;
+    var many_views: [2]ReceivedBytesView = undefined;
+    try std.testing.expectError(
+        error.CallerBufferReceiveWithGro,
+        receiver.receiveManyBytesIntoWithDeadline(
+            &many_storage,
+            &many_views,
+            .fromNow(io, .{
+                .clock = .awake,
+                .raw = .fromSeconds(1),
+            }),
+        ),
+    );
 
     const wire = "aaaabbbbcc";
     const datagrams = [_][]const u8{
