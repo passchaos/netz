@@ -8,6 +8,7 @@ const close_reason = "benchmark complete";
 const echo_prelude = "NZQPE1\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00";
 
 const Mode = enum { echo, aggregate };
+const ServerTopology = enum { independent, shared };
 
 const Config = struct {
     mode: Mode,
@@ -23,6 +24,7 @@ const Config = struct {
     chunk_bytes: u32 = 16 * 1024,
     stream_window: u64 = 1024 * 1024,
     timeout_ms: u32 = 30_000,
+    server_topology: ServerTopology = .independent,
 
     fn parse(args: []const []const u8) !Config {
         var mode: ?Mode = null;
@@ -59,6 +61,11 @@ const Config = struct {
                 result.stream_window = try parsePositive(u64, value);
             } else if (option(arg, "--timeout-ms=")) |value| {
                 result.timeout_ms = try parsePositive(u32, value);
+            } else if (option(arg, "--server-topology=")) |value| {
+                result.server_topology = std.meta.stringToEnum(
+                    ServerTopology,
+                    value,
+                ) orelse return error.InvalidArgument;
             } else {
                 return error.InvalidArgument;
             }
@@ -86,7 +93,14 @@ const Config = struct {
                 (self.connections != 1 or self.streams != 1 or
                     self.sender != .client)) or
             (self.mode == .aggregate and
-                (self.warmup != 0 or self.iterations != 1)))
+                (self.warmup != 0 or self.iterations != 1)) or
+            (self.server_topology == .shared and
+                (self.mode != .aggregate or self.sender != .client or
+                    !std.mem.eql(
+                        u8,
+                        self.role_pair,
+                        "netz-client+netz-server",
+                    ))))
         {
             return error.InvalidArgument;
         }
@@ -172,6 +186,9 @@ pub fn main(init: std.process.Init) !void {
 }
 
 fn runServer(config: Config) !void {
+    if (config.server_topology == .shared) {
+        return runSharedServer(config);
+    }
     const allocator = std.heap.c_allocator;
     var threaded = std.Io.Threaded.init(allocator, .{ .async_limit = .unlimited });
     defer threaded.deinit();
@@ -216,6 +233,425 @@ fn runServer(config: Config) !void {
     }
     for (threads) |thread| thread.join();
     try printServerCompletion(config, results);
+}
+
+const SharedStage = enum {
+    config,
+    config_ack,
+    start,
+    preludes,
+    ready,
+    payload,
+    done,
+    done_ack,
+    complete,
+};
+
+const SharedConnectionState = struct {
+    handle: ?netz.quic.endpoint_dispatcher.ConnectionHandle = null,
+    connection_index: ?u32 = null,
+    stage: SharedStage = .config,
+    control: [transfer.record_len]u8 = undefined,
+    control_len: usize = 0,
+    control_offset: u64 = 0,
+    discovered_stream_ids: [4]u64 = @splat(std.math.maxInt(u64)),
+    stream_ids: [4]u64 = @splat(std.math.maxInt(u64)),
+    preludes: [4][transfer.prelude_len]u8 = undefined,
+    prelude_lengths: [4]usize = @splat(0),
+    payload_offsets: [4]usize = @splat(0),
+    checksums: [4]u64 = @splat(0),
+    finished: [4]bool = @splat(false),
+    completed_streams: usize = 0,
+};
+
+fn runSharedServer(config: Config) !void {
+    const allocator = std.heap.c_allocator;
+    var threaded = std.Io.Threaded.init(allocator, .{ .async_limit = .unlimited });
+    defer threaded.deinit();
+    const io = threaded.io();
+    var endpoint = try netz.quic.runtime.Endpoint.bind(
+        allocator,
+        io,
+        .{ .ip4 = .loopback(0) },
+        endpointLimits(),
+    );
+    defer endpoint.deinit();
+    var certificate_der: [netz.tls.testing.certificate_der_len]u8 = undefined;
+    try std.base64.standard.Decoder.decode(
+        &certificate_der,
+        netz.tls.testing.certificate_base64,
+    );
+    var server = try netz.quic.endpoint_server.Server.init(
+        allocator,
+        &endpoint,
+        .{
+            .local_connection_id = &.{},
+            .version = .version_1,
+            .available_versions = &.{.version_1},
+            .alpn_protocol = alpn,
+            .local_transport_parameters = try config.wire().transportParameters(),
+            .identity = .{
+                .certificate_chain = &.{&certificate_der},
+                .signer = .{ .ecdsa_p256_sha256 = .{
+                    .key_pair = try netz.tls.testing.serverKeyPair(),
+                } },
+            },
+            .max_crypto_buffer = 64 * 1024,
+            .initial_one_rtt_config = try config.wire().oneRttConfig(),
+        },
+        .{
+            .max_pending_handshakes = config.connections,
+            .max_connections = config.connections,
+            .inbox_capacity = 32,
+            .handshake_timeout_ms = config.timeout_ms,
+        },
+    );
+    defer server.deinit();
+
+    std.debug.print("NETZ_QUIC_PERSISTENT_PORTS=", .{});
+    for (0..config.connections) |index| {
+        if (index != 0) std.debug.print(",", .{});
+        std.debug.print("{d}", .{server.address().ip4.port});
+    }
+    std.debug.print("\n", .{});
+
+    const states = try allocator.alloc(SharedConnectionState, config.connections);
+    defer allocator.free(states);
+    @memset(states, .{});
+    const results = try allocator.alloc(WorkerResult, config.connections);
+    defer allocator.free(results);
+    @memset(results, .{});
+
+    const deadline = deadlineFromNow(io, config.timeout());
+    const versions = [_]u32{quicVersionOne()};
+    var complete: usize = 0;
+    while (complete < config.connections) {
+        var event = try server.receiveWithDeadline(&versions, deadline);
+        defer event.deinit(allocator);
+        switch (event) {
+            .connected => |handle| {
+                if (handle == 0 or handle > states.len) {
+                    return error.InvalidBenchmarkResult;
+                }
+                const state = &states[handle - 1];
+                if (state.handle != null) return error.InvalidBenchmarkResult;
+                state.handle = handle;
+                const established = server.connection(handle) orelse
+                    return error.InvalidBenchmarkResult;
+                try validateHandshake(established.*, false);
+                complete += @intFromBool(try driveSharedUntilBlocked(
+                    &server,
+                    config,
+                    states,
+                    state,
+                    results,
+                ));
+            },
+            .packet => |*packet| {
+                _ = try server.acknowledgePacketIfNeeded(packet);
+                const handle = packet.connection_handle;
+                if (handle == 0 or handle > states.len) {
+                    return error.InvalidBenchmarkResult;
+                }
+                complete += @intFromBool(try driveSharedUntilBlocked(
+                    &server,
+                    config,
+                    states,
+                    &states[handle - 1],
+                    results,
+                ));
+            },
+            .timer => |timer| {
+                const handle = timer.connection_handle;
+                if (handle == 0 or handle > states.len) {
+                    return error.InvalidBenchmarkResult;
+                }
+                complete += @intFromBool(try driveSharedUntilBlocked(
+                    &server,
+                    config,
+                    states,
+                    &states[handle - 1],
+                    results,
+                ));
+            },
+            .handshake_failed => |failure| return failure.err,
+            .unrouted => return error.InvalidBenchmarkResult,
+        }
+    }
+    try printServerCompletion(config, results);
+}
+
+fn driveSharedUntilBlocked(
+    server: *netz.quic.endpoint_server.Server,
+    config: Config,
+    states: []SharedConnectionState,
+    state: *SharedConnectionState,
+    results: []WorkerResult,
+) !bool {
+    const was_complete = state.stage == .complete;
+    while (!was_complete and state.stage != .complete and
+        try driveSharedConnection(server, config, states, state, results))
+    {}
+    return !was_complete and state.stage == .complete;
+}
+
+fn quicVersionOne() u32 {
+    return netz.quic.Version.version_1.wireValue();
+}
+
+fn driveSharedConnection(
+    server: *netz.quic.endpoint_server.Server,
+    config: Config,
+    states: []SharedConnectionState,
+    state: *SharedConnectionState,
+    results: []WorkerResult,
+) !bool {
+    const handle = state.handle.?;
+    const wire = config.wire();
+    switch (state.stage) {
+        .config, .start, .done_ack => {
+            const event = (try server.pollStreamId(
+                handle,
+                0,
+                state.control[state.control_len..],
+            )) orelse return false;
+            const data = switch (event) {
+                .reset => return error.InvalidBenchmarkControl,
+                .data => |value| value,
+            };
+            if (data.stream_id != 0 or
+                state.control_len + data.bytes > state.control.len)
+            {
+                return error.InvalidBenchmarkControl;
+            }
+            state.control_len += data.bytes;
+            if (state.control_len != state.control.len) {
+                if (data.fin) return error.InvalidBenchmarkControl;
+                return true;
+            }
+            const expected_kind: transfer.Kind = switch (state.stage) {
+                .config => .config,
+                .start => .start,
+                .done_ack => .done_ack,
+                else => unreachable,
+            };
+            if (data.fin != (state.stage == .done_ack)) {
+                return error.InvalidBenchmarkControl;
+            }
+            const record = try transfer.Record.decode(&state.control);
+            if (state.stage == .config) {
+                if (record.round >= config.connections) {
+                    return error.InvalidBenchmarkControl;
+                }
+                for (states) |other| {
+                    if (other.handle != handle and
+                        other.connection_index == record.round)
+                    {
+                        return error.InvalidBenchmarkControl;
+                    }
+                }
+                state.connection_index = record.round;
+            }
+            const index = state.connection_index orelse
+                return error.InvalidBenchmarkControl;
+            try transfer.validateRecord(
+                record,
+                expected_kind,
+                .client,
+                index,
+                wire,
+            );
+            if (state.stage == .done_ack) {
+                const result = results[index];
+                if (record.received_bytes != result.bytes or
+                    record.checksum != result.checksum)
+                {
+                    return error.InvalidBenchmarkResult;
+                }
+                const connection = server.connection(handle) orelse
+                    return error.InvalidBenchmarkResult;
+                try connection.connection.closeApplication(
+                    close_code,
+                    close_reason,
+                );
+                try server.refreshConnectionTimer(handle);
+                state.stage = .complete;
+                return true;
+            }
+            state.control_len = 0;
+            state.stage = if (state.stage == .config) .config_ack else .preludes;
+            return true;
+        },
+        .config_ack, .ready, .done => {
+            const index = state.connection_index orelse
+                return error.InvalidBenchmarkControl;
+            var record = transfer.Record.init(
+                switch (state.stage) {
+                    .config_ack => .config_ack,
+                    .ready => .ready,
+                    .done => .done,
+                    else => unreachable,
+                },
+                .client,
+                index,
+                wire,
+            );
+            const fin = state.stage == .done;
+            if (fin) {
+                const result = results[index];
+                record.received_bytes = result.bytes;
+                record.checksum = result.checksum;
+            }
+            if (!try trySendSharedRecord(
+                server,
+                handle,
+                &state.control_offset,
+                record,
+                fin,
+            )) return false;
+            state.stage = switch (state.stage) {
+                .config_ack => .start,
+                .ready => .payload,
+                .done => .done_ack,
+                else => unreachable,
+            };
+            return true;
+        },
+        .preludes => {
+            var scratch: [transfer.prelude_len]u8 = undefined;
+            const event = (try server.pollStream(
+                handle,
+                &scratch,
+            )) orelse return false;
+            const data = switch (event) {
+                .reset => return error.InvalidBenchmarkPrelude,
+                .data => |value| value,
+            };
+            if (data.stream_id == 0 or data.fin) {
+                return error.InvalidBenchmarkPrelude;
+            }
+            var slot: ?usize = null;
+            for (0..config.streams) |index| {
+                if (state.discovered_stream_ids[index] == data.stream_id) {
+                    slot = index;
+                }
+            }
+            if (slot == null) {
+                for (0..config.streams) |index| {
+                    if (state.discovered_stream_ids[index] ==
+                        std.math.maxInt(u64))
+                    {
+                        state.discovered_stream_ids[index] = data.stream_id;
+                        slot = index;
+                        break;
+                    }
+                }
+            }
+            const found = slot orelse return error.InvalidBenchmarkPrelude;
+            if (state.prelude_lengths[found] + data.bytes >
+                transfer.prelude_len) return error.InvalidBenchmarkPrelude;
+            @memcpy(
+                state.preludes[found][state.prelude_lengths[found]..][0..data.bytes],
+                scratch[0..data.bytes],
+            );
+            state.prelude_lengths[found] += data.bytes;
+            if (state.prelude_lengths[found] == transfer.prelude_len) {
+                const index = try transfer.decodePrelude(
+                    &state.preludes[found],
+                    state.connection_index.?,
+                    config.streams,
+                );
+                if (state.stream_ids[index] != std.math.maxInt(u64)) {
+                    return error.InvalidBenchmarkPrelude;
+                }
+                const expected = @as(u64, 2) + @as(u64, index) * 4;
+                if (data.stream_id != expected) {
+                    return error.InvalidBenchmarkPrelude;
+                }
+                state.stream_ids[index] = data.stream_id;
+                var complete: usize = 0;
+                for (state.stream_ids[0..config.streams]) |stream_id| {
+                    complete += @intFromBool(stream_id != std.math.maxInt(u64));
+                }
+                if (complete == config.streams) state.stage = .ready;
+            }
+            return true;
+        },
+        .payload => {
+            var buffer: [transfer.mtu]u8 = undefined;
+            const event = (try server.pollStream(
+                handle,
+                buffer[0..wire.effectiveChunk()],
+            )) orelse return false;
+            const data = switch (event) {
+                .reset => return error.InvalidBenchmarkPayload,
+                .data => |value| value,
+            };
+            var stream_index: ?usize = null;
+            for (state.stream_ids[0..config.streams], 0..) |stream_id, index| {
+                if (stream_id == data.stream_id) stream_index = index;
+            }
+            const index = stream_index orelse
+                return error.InvalidBenchmarkPayload;
+            if (state.finished[index] or
+                state.payload_offsets[index] + data.bytes >
+                    config.bytes_per_stream)
+            {
+                return error.InvalidBenchmarkPayload;
+            }
+            state.checksums[index] +%= try transfer.verifyPayload(
+                buffer[0..data.bytes],
+                state.connection_index.?,
+                index,
+                state.payload_offsets[index],
+            );
+            state.payload_offsets[index] += data.bytes;
+            if (data.fin) {
+                if (state.payload_offsets[index] != config.bytes_per_stream) {
+                    return error.InvalidBenchmarkPayload;
+                }
+                state.finished[index] = true;
+                state.completed_streams += 1;
+            }
+            if (state.completed_streams == config.streams) {
+                var checksum: u64 = 0;
+                for (state.checksums[0..config.streams]) |value| {
+                    checksum +%= value;
+                }
+                results[state.connection_index.?] = .{
+                    .bytes = try wire.totalBytes(),
+                    .checksum = checksum,
+                };
+                state.stage = .done;
+            }
+            return true;
+        },
+        .complete => return false,
+    }
+}
+
+fn trySendSharedRecord(
+    server: *netz.quic.endpoint_server.Server,
+    handle: netz.quic.endpoint_dispatcher.ConnectionHandle,
+    offset: *u64,
+    record: transfer.Record,
+    fin: bool,
+) !bool {
+    const bytes = try record.encode();
+    server.trySend(handle, &.{.{ .stream = .{
+        .stream_id = 0,
+        .offset = offset.*,
+        .data = &bytes,
+        .fin = fin,
+    } }}) catch |err| switch (err) {
+        error.PacingLimited,
+        error.CongestionLimited,
+        error.FlowControlBlocked,
+        => return false,
+        else => return err,
+    };
+    offset.* += bytes.len;
+    return true;
 }
 
 fn runClient(config: Config, ports_text: []const u8, ca_path: []const u8) !void {
@@ -893,6 +1329,20 @@ fn deadlineFromNow(io: std.Io, timeout: std.Io.Duration) std.Io.Clock.Timestamp 
     return .fromNow(io, .{ .clock = .awake, .raw = timeout });
 }
 
+fn endpointTopology(config: Config) []const u8 {
+    return if (config.server_topology == .shared)
+        "shared-server-udp"
+    else
+        "one-udp-socket-per-connection";
+}
+
+fn connectionScope(config: Config) []const u8 {
+    return if (config.server_topology == .shared)
+        "parallel-shared-server-endpoint"
+    else
+        "parallel-independent-endpoints";
+}
+
 fn printClientResult(
     config: Config,
     latencies: []u64,
@@ -935,8 +1385,8 @@ fn printClientResult(
     std.debug.print(
         "record=result implementation={s} protocol=quic-stream mode=aggregate " ++
             "direction=upload role_pair={s} result_owner=client run={d} " ++
-            "connection_scope=parallel-independent-endpoints " ++
-            "endpoint_topology=one-udp-socket-per-connection " ++
+            "connection_scope={s} " ++
+            "endpoint_topology={s} " ++
             "benchmark_scope=same-application-shape " ++
             "timing_scope=stream-setup-through-verified-completion " ++
             "connections={d} streams={d} " ++
@@ -945,9 +1395,11 @@ fn printClientResult(
             "cert_verify=true quic_version=1 gso=false gro=false " ++
             "completion_exchange_verified=true complete=true\n",
         .{
-            implementation, config.role_pair,        config.run,              config.connections,
-            config.streams, config.bytes_per_stream, bytes,                   checksum,
-            elapsed_ns,     mib_s,                   @tagName(config.sender),
+            implementation,          config.role_pair,         config.run,
+            connectionScope(config), endpointTopology(config), config.connections,
+            config.streams,          config.bytes_per_stream,  bytes,
+            checksum,                elapsed_ns,               mib_s,
+            @tagName(config.sender),
         },
     );
 }
@@ -982,18 +1434,19 @@ fn printServerCompletion(config: Config, results: []const WorkerResult) !void {
     std.debug.print(
         "record=server-complete implementation={s} protocol=quic-stream " ++
             "mode=aggregate direction=upload role_pair={s} endpoint_role=server " ++
-            "run={d} connection_scope=parallel-independent-endpoints " ++
-            "endpoint_topology=one-udp-socket-per-connection " ++
+            "run={d} connection_scope={s} " ++
+            "endpoint_topology={s} " ++
             "benchmark_scope=same-application-shape warmup=0 iterations=1 " ++
             "connections={d} streams={d} bytes_per_stream={d} payload_bytes={d} " ++
             "transferred_bytes={d} checksum={d} sender_role={s} " ++
             "connections_complete={d} cert_verify=true quic_version=1 " ++
             "gso=false gro=false completion_exchange_verified=true complete=true\n",
         .{
-            serverImplementation(config.role_pair), config.role_pair,   config.run,
-            config.connections,                     config.streams,     config.bytes_per_stream,
-            config.payload_bytes,                   bytes,              checksum,
-            @tagName(config.sender),                config.connections,
+            serverImplementation(config.role_pair), config.role_pair,         config.run,
+            connectionScope(config),                endpointTopology(config), config.connections,
+            config.streams,                         config.bytes_per_stream,  config.payload_bytes,
+            bytes,                                  checksum,                 @tagName(config.sender),
+            config.connections,
         },
     );
 }
@@ -1063,6 +1516,25 @@ test "persistent QUIC benchmark config rejects ambiguous shapes" {
         "--iterations=1",
     });
     try std.testing.expectEqual(@as(u64, 1_048_576), try aggregate.aggregateBytes());
+    const shared = try Config.parse(&.{
+        "--mode=aggregate",         "--role-pair=netz-client+netz-server",
+        "--sender=client",          "--connections=4",
+        "--streams=1",              "--bytes-per-stream=65536",
+        "--warmup=0",               "--iterations=1",
+        "--server-topology=shared",
+    });
+    try std.testing.expectEqual(ServerTopology.shared, shared.server_topology);
+    try std.testing.expectEqualStrings(
+        "shared-server-udp",
+        endpointTopology(shared),
+    );
+    try std.testing.expectError(error.InvalidArgument, Config.parse(&.{
+        "--mode=aggregate",         "--role-pair=netz-client+quic-go-server",
+        "--sender=client",          "--connections=4",
+        "--streams=1",              "--bytes-per-stream=65536",
+        "--warmup=0",               "--iterations=1",
+        "--server-topology=shared",
+    }));
     try std.testing.expectError(error.InvalidArgument, Config.parse(&.{
         "--mode=echo",         "--role-pair=netz-client+netz-server",
         "--iterations=100001",

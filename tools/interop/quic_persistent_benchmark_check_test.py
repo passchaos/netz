@@ -111,6 +111,51 @@ class PersistentBenchmarkCheckTest(unittest.TestCase):
             with self.assertRaisesRegex(ValueError, "latency ordering"):
                 CHECK.verify(**kwargs)
 
+    def test_accepts_shared_server_and_rejects_topology_alias(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            client, server = self.write_pair(directory)
+            for path in (client, server):
+                path.write_text(
+                    path.read_text().replace(
+                        "role_pair=quic-go-client+netz-server",
+                        "role_pair=netz-client+netz-server",
+                    ).replace(
+                        "implementation=quic-go",
+                        "implementation=netz",
+                    ).replace(
+                        "connection_scope=parallel-independent-endpoints "
+                        "endpoint_topology=one-udp-socket-per-connection",
+                        "connection_scope=parallel-shared-server-endpoint "
+                        "endpoint_topology=shared-server-udp",
+                    ),
+                    encoding="utf-8",
+                )
+            CHECK.verify(
+                mode="aggregate", role_pair="netz-client+netz-server",
+                run=1, connections=4, warmup=0, iterations=1, streams=4,
+                bytes_per_stream=256, payload_bytes=1024, sender="client",
+                server_topology="shared", client_log=client, server_log=server,
+            )
+            with self.assertRaisesRegex(
+                ValueError,
+                "connection_scope mismatch|endpoint_topology mismatch",
+            ):
+                CHECK.verify(
+                    mode="aggregate",
+                    role_pair="netz-client+netz-server",
+                    run=1,
+                    connections=4,
+                    warmup=0,
+                    iterations=1,
+                    streams=4,
+                    bytes_per_stream=256,
+                    payload_bytes=1024,
+                    sender="client",
+                    server_topology="independent",
+                    client_log=client,
+                    server_log=server,
+                )
+
 
 if __name__ == "__main__":
     unittest.main()

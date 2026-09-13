@@ -5,14 +5,6 @@ netz_bench=${1:?netz persistent QUIC benchmark executable path}
 shift
 repo_root=$(cd "$(dirname "$0")/../.." && pwd)
 fixture_dir=${QUICZ_ROOT:-"$HOME/Work/quicz"}/examples/interop/go_echo_client
-if [[ ! -f $fixture_dir/go.mod ]]; then
-  echo "audited quic-go fixture not found under $fixture_dir" >&2
-  exit 127
-fi
-if ! command -v go >/dev/null 2>&1; then
-  echo 'go not found' >&2
-  exit 127
-fi
 
 modes=both
 samples=${NETZ_QUIC_PERSISTENT_SAMPLES:-5}
@@ -25,6 +17,7 @@ streams=${NETZ_QUIC_PERSISTENT_STREAMS:-1}
 chunk_bytes=${NETZ_QUIC_PERSISTENT_CHUNK_BYTES:-16384}
 stream_window=${NETZ_QUIC_PERSISTENT_STREAM_WINDOW:-1048576}
 timeout_ms=${NETZ_QUIC_PERSISTENT_TIMEOUT_MS:-30000}
+server_topology=independent
 for arg in "$@"; do
   case $arg in
     --mode=*) modes=${arg#--mode=} ;;
@@ -38,12 +31,31 @@ for arg in "$@"; do
     --chunk-bytes=*) chunk_bytes=${arg#--chunk-bytes=} ;;
     --stream-window=*) stream_window=${arg#--stream-window=} ;;
     --timeout-ms=*) timeout_ms=${arg#--timeout-ms=} ;;
+    --server-topology=*) server_topology=${arg#--server-topology=} ;;
     *) echo "unknown persistent benchmark option: $arg" >&2; exit 2 ;;
   esac
 done
 if [[ $modes != echo && $modes != aggregate && $modes != both ]]; then
   echo 'mode must be echo, aggregate, or both' >&2
   exit 2
+fi
+if [[ $server_topology != independent && $server_topology != shared ]]; then
+  echo 'server topology must be independent or shared' >&2
+  exit 2
+fi
+if [[ $server_topology == shared && $modes != aggregate ]]; then
+  echo 'shared server topology requires aggregate mode' >&2
+  exit 2
+fi
+if [[ $server_topology == independent ]]; then
+  if [[ ! -f $fixture_dir/go.mod ]]; then
+    echo "audited quic-go fixture not found under $fixture_dir" >&2
+    exit 127
+  fi
+  if ! command -v go >/dev/null 2>&1; then
+    echo 'go not found' >&2
+    exit 127
+  fi
 fi
 if (( samples < 1 || samples % 2 == 0 || connections < 1 || connections > 16 ||
       echo_warmup < 0 || echo_iterations < 1 || payload_bytes < 1 ||
@@ -98,14 +110,16 @@ on_exit() {
 }
 trap on_exit EXIT
 
-(cd "$fixture_dir" && go test -mod=readonly \
-  "$repo_root/tools/interop/quic_quic_go_bench.go" \
-  "$repo_root/tools/interop/quic_quic_go_churn.go" \
-  "$repo_root/tools/interop/quic_persistent_bench_test.go")
-(cd "$fixture_dir" && go build -mod=readonly \
-  -o "$work/quic-go-persistent-bench" \
-  "$repo_root/tools/interop/quic_quic_go_bench.go" \
-  "$repo_root/tools/interop/quic_quic_go_churn.go")
+if [[ $server_topology == independent ]]; then
+  (cd "$fixture_dir" && go test -mod=readonly \
+    "$repo_root/tools/interop/quic_quic_go_bench.go" \
+    "$repo_root/tools/interop/quic_quic_go_churn.go" \
+    "$repo_root/tools/interop/quic_persistent_bench_test.go")
+  (cd "$fixture_dir" && go build -mod=readonly \
+    -o "$work/quic-go-persistent-bench" \
+    "$repo_root/tools/interop/quic_quic_go_bench.go" \
+    "$repo_root/tools/interop/quic_quic_go_churn.go")
+fi
 python3 -m unittest "$repo_root/tools/interop/quic_persistent_benchmark_check_test.py"
 python3 -m unittest "$repo_root/tools/interop/quic_persistent_benchmark_summary_test.py"
 : >"$work/results.log"
@@ -145,8 +159,13 @@ run_pair() {
     "--chunk-bytes=$chunk_bytes" "--stream-window=$stream_window"
     "--timeout-ms=$timeout_ms"
   )
+  if [[ $server_impl == netz ]]; then
+    common+=("--server-topology=$server_topology")
+  fi
   local go_common=()
-  for argument in "${common[@]}"; do go_common+=("-${argument#--}"); done
+  for argument in "${common[@]}"; do
+    [[ $argument == --server-topology=* ]] || go_common+=("-${argument#--}")
+  done
 
   if [[ $server_impl == netz ]]; then
     timeout 300s taskset -c "$server_cpu" "$netz_bench" server \
@@ -180,7 +199,8 @@ run_pair() {
     "--connections=$mode_connections" "--warmup=$warmup" \
     "--iterations=$iterations" "--streams=$mode_streams" \
     "--bytes-per-stream=$aggregate_bytes" "--payload-bytes=$payload_bytes" \
-    "--sender=$sender" "--client-log=$pair_dir/client.log" \
+    "--sender=$sender" "--server-topology=$server_topology" \
+    "--client-log=$pair_dir/client.log" \
     "--server-log=$pair_dir/server.log"
   grep '^record=result ' "$pair_dir/client.log" >>"$work/results.log"
   cat "$pair_dir/client.log"
@@ -194,8 +214,17 @@ pairs=(
   'quic-go-client+netz-server:quic-go:netz'
   'netz-client+netz-server:netz:netz'
 )
+if [[ $server_topology == shared ]]; then
+  pairs=('netz-client+netz-server:netz:netz')
+fi
 for ((outer_run = 1; outer_run <= samples; outer_run += 1)); do
-  if (( outer_run % 2 == 1 )); then order=(0 1 2 3); else order=(3 2 1 0); fi
+  if [[ $server_topology == shared ]]; then
+    order=(0)
+  elif (( outer_run % 2 == 1 )); then
+    order=(0 1 2 3)
+  else
+    order=(3 2 1 0)
+  fi
   for index in "${order[@]}"; do
     IFS=: read -r role_pair client_impl server_impl <<<"${pairs[index]}"
     if [[ $modes == echo || $modes == both ]]; then
@@ -208,6 +237,9 @@ for ((outer_run = 1; outer_run <= samples; outer_run += 1)); do
         sender_order=(server client)
       fi
       for sender_role in "${sender_order[@]}"; do
+        if [[ $server_topology == shared && $sender_role != client ]]; then
+          continue
+        fi
         run_pair aggregate "$role_pair" "$client_impl" "$server_impl" \
           "$sender_role" "$outer_run"
       done
@@ -220,5 +252,6 @@ if [[ $modes == echo || $modes == both ]]; then
 fi
 if [[ $modes == aggregate || $modes == both ]]; then
   python3 "$repo_root/tools/interop/quic_persistent_benchmark_summary.py" \
-    --mode=aggregate "--samples=$samples" "--log=$work/results.log"
+    --mode=aggregate "--samples=$samples" "--log=$work/results.log" \
+    "--server-topology=$server_topology"
 fi

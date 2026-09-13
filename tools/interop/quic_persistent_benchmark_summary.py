@@ -24,13 +24,18 @@ ROLE_PAIRS = (
 )
 
 
-def rows(path: Path, mode: str) -> list[dict[str, str]]:
+def rows(path: Path, mode: str, topology: str) -> list[dict[str, str]]:
+    endpoint_topology = (
+        "shared-server-udp" if topology == "shared"
+        else "one-udp-socket-per-connection"
+    )
     return [
         row
         for line in path.read_text(encoding="utf-8").splitlines()
         if (row := fields(line)).get("record") == "result"
         and row.get("protocol") == "quic-stream"
         and row.get("mode") == mode
+        and (mode == "echo" or row.get("endpoint_topology") == endpoint_topology)
     ]
 
 
@@ -44,10 +49,16 @@ def positive(row: dict[str, str], key: str) -> int:
     return value
 
 
-def summarize(path: Path, mode: str, samples: int) -> list[str]:
+def summarize(
+    path: Path, mode: str, samples: int, topology: str = "independent",
+) -> list[str]:
     if samples <= 0 or samples % 2 == 0:
         raise ValueError("samples must be a positive odd number")
-    source = rows(path, mode)
+    if topology not in ("independent", "shared"):
+        raise ValueError("invalid server topology")
+    if topology == "shared" and mode != "aggregate":
+        raise ValueError("shared topology requires aggregate mode")
+    source = rows(path, mode, topology)
     if not source:
         raise ValueError(f"no {mode} result records")
     shape_keys = (
@@ -60,10 +71,14 @@ def summarize(path: Path, mode: str, samples: int) -> list[str]:
         tuple(row.get(key) for key in shape_keys) != expected_shape for row in source
     ):
         raise ValueError(f"mixed or incomplete {mode} benchmark shapes")
-    senders = ("client",) if mode == "echo" else ("client", "server")
+    role_pairs = (
+        ("netz-client+netz-server",)
+        if topology == "shared" else ROLE_PAIRS
+    )
+    senders = ("client",) if mode == "echo" or topology == "shared" else ("client", "server")
     grouped: dict[tuple[str, str], float] = {}
     output: list[str] = []
-    for role_pair in ROLE_PAIRS:
+    for role_pair in role_pairs:
         for sender in senders:
             group = [
                 row for row in source
@@ -121,7 +136,7 @@ def summarize(path: Path, mode: str, samples: int) -> list[str]:
                     f"max_logical_MiB_s={max(throughput):.3f} complete=true"
                 )
 
-    comparisons = (
+    comparisons = () if topology == "shared" else (
         ("fixed_server=quic-go", "client",
          "netz-client+quic-go-server", "quic-go-client+quic-go-server"),
         ("fixed_server=netz", "client",
@@ -160,8 +175,14 @@ def main() -> None:
     parser.add_argument("--mode", choices=("echo", "aggregate"), required=True)
     parser.add_argument("--samples", type=int, required=True)
     parser.add_argument("--log", type=Path, required=True)
+    parser.add_argument(
+        "--server-topology", choices=("independent", "shared"),
+        default="independent",
+    )
     args = parser.parse_args()
-    for line in summarize(args.log, args.mode, args.samples):
+    for line in summarize(
+        args.log, args.mode, args.samples, args.server_topology,
+    ):
         print(line)
 
 

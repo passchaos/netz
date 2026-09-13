@@ -63,6 +63,7 @@ class PersistentBenchmarkSummaryTest(unittest.TestCase):
                     f"implementation={'netz' if (sender == 'client' and pair.startswith('netz-client')) or (sender == 'server' and pair.endswith('netz-server')) else 'quic-go'} "
                     "run=1 connections=4 streams=1 bytes_per_stream=1024 "
                     "timing_scope=stream-setup-through-verified-completion "
+                    "endpoint_topology=one-udp-socket-per-connection "
                     f"elapsed_ns=1000 logical_MiB_s={value:.3f} "
                     "benchmark_scope=same-application-shape "
                     "completion_exchange_verified=true complete=true"
@@ -72,6 +73,33 @@ class PersistentBenchmarkSummaryTest(unittest.TestCase):
             self.assertEqual(len(output), 12)
             self.assertIn("median_logical_MiB_s_netz=150.000", output[-4])
             self.assertIn("netz_speedup=1.500", output[-4])
+
+    def test_shared_summary_separates_endpoint_topology(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            path = Path(directory, "results.log")
+            lines = []
+            for pair, value in (("netz-client+netz-server", 120.0),):
+                for run in range(1, 4):
+                    lines.append(
+                        "record=result protocol=quic-stream mode=aggregate "
+                        f"role_pair={pair} sender_role=client result_owner=client "
+                        f"implementation={'netz' if pair.startswith('netz-client') else 'quic-go'} "
+                        f"run={run} connections=4 streams=1 bytes_per_stream=1024 "
+                        "timing_scope=stream-setup-through-verified-completion "
+                        f"elapsed_ns=1000 logical_MiB_s={value:.3f} "
+                        "connection_scope=parallel-shared-server-endpoint "
+                        "endpoint_topology=shared-server-udp "
+                        "benchmark_scope=same-application-shape "
+                        "completion_exchange_verified=true complete=true"
+                    )
+            lines.append(lines[0].replace(
+                "endpoint_topology=shared-server-udp",
+                "endpoint_topology=one-udp-socket-per-connection",
+            ))
+            path.write_text("\n".join(lines) + "\n", encoding="utf-8")
+            output = SUMMARY.summarize(path, "aggregate", 3, "shared")
+            self.assertEqual(len(output), 1)
+            self.assertIn("median_logical_MiB_s=120.000", output[0])
 
 
 if __name__ == "__main__":

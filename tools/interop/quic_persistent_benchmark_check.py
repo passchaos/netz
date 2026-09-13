@@ -72,8 +72,9 @@ def echo_checksum(rounds: int, payload_bytes: int) -> int:
 
 def require_shape(
     row: dict[str, str], *, implementation: str, record_kind: str,
-    role_pair: str, mode: str, run: int,
+    role_pair: str, mode: str, run: int, server_topology: str,
 ) -> None:
+    shared = server_topology == "shared"
     expected = {
         "implementation": implementation,
         "protocol": "quic-stream",
@@ -82,10 +83,14 @@ def require_shape(
         "role_pair": role_pair,
         "run": str(run),
         "connection_scope": (
-            "persistent" if mode == "echo" else "parallel-independent-endpoints"
+            "persistent" if mode == "echo" else
+            "parallel-shared-server-endpoint" if shared else
+            "parallel-independent-endpoints"
         ),
         "endpoint_topology": (
-            "independent-udp" if mode == "echo" else "one-udp-socket-per-connection"
+            "independent-udp" if mode == "echo" else
+            "shared-server-udp" if shared else
+            "one-udp-socket-per-connection"
         ),
         "benchmark_scope": "same-application-shape",
         "cert_verify": "true",
@@ -108,6 +113,7 @@ def verify(
     *, mode: str, role_pair: str, run: int, connections: int,
     warmup: int, iterations: int, streams: int, bytes_per_stream: int,
     payload_bytes: int, sender: str, client_log: Path, server_log: Path,
+    server_topology: str = "independent",
 ) -> None:
     client_impl, server_impl = endpoint_implementations(role_pair)
     if (
@@ -115,12 +121,18 @@ def verify(
         or warmup < 0 or iterations <= 0 or streams not in (1, 4)
         or bytes_per_stream <= 0 or payload_bytes <= 0
         or sender not in ("client", "server")
+        or server_topology not in ("independent", "shared")
     ):
         raise ValueError("invalid verifier configuration")
     if mode == "echo" and (connections != 1 or streams != 1 or sender != "client"):
         raise ValueError("invalid echo shape")
     if mode == "aggregate" and (warmup != 0 or iterations != 1):
         raise ValueError("invalid aggregate shape")
+    if server_topology == "shared" and (
+        mode != "aggregate" or sender != "client"
+        or role_pair != "netz-client+netz-server"
+    ):
+        raise ValueError("invalid shared server topology")
 
     results = records(client_log, "result")
     completions = records(server_log, "server-complete")
@@ -131,10 +143,12 @@ def verify(
     require_shape(
         result, implementation=result_impl, record_kind="result",
         role_pair=role_pair, mode=mode, run=run,
+        server_topology=server_topology,
     )
     require_shape(
         server, implementation=server_impl, record_kind="server",
         role_pair=role_pair, mode=mode, run=run,
+        server_topology=server_topology,
     )
     expected_common = {
         "connections": str(connections),
@@ -224,6 +238,10 @@ def main() -> None:
     parser.add_argument("--bytes-per-stream", type=int, required=True)
     parser.add_argument("--payload-bytes", type=int, required=True)
     parser.add_argument("--sender", choices=("client", "server"), required=True)
+    parser.add_argument(
+        "--server-topology", choices=("independent", "shared"),
+        default="independent",
+    )
     parser.add_argument("--client-log", type=Path, required=True)
     parser.add_argument("--server-log", type=Path, required=True)
     args = parser.parse_args()

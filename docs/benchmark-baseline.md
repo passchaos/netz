@@ -2295,8 +2295,45 @@ that a netz sender is faster in both mixed-role comparisons, while the netz/netz
 is materially slower and more variable when eight endpoint workers share the
 two pinned process CPUs. This is useful evidence of both the sender fast path
 and a remaining same-process scheduling bottleneck, not a universal superiority
-claim. The topology uses one UDP socket per connection because raw QUIC does
-not yet expose the shared-socket connection owner used by HTTP/3.
+claim. This original topology uses one UDP socket per connection; the following
+shared-server extension isolates the alternative production ownership model.
+
+Raw QUIC now also exposes `quic.endpoint_server.Server`, a protocol-neutral
+single-owner loop for bounded concurrent TLS handshakes, CID routing, aggregate
+timers, socket-free stream polling/sending, and explicit post-application ACK
+policy. It follows the same bounded endpoint-work design as the audited Quinn
+driver, which caps receive/event work before yielding. The dispatcher now also
+drains ACK-driven packet-threshold retransmissions before returning a routed
+packet, matching netz's blocking and visitor receive paths instead of delaying
+repair until PTO. A direct two-client real-handshake test verifies distinct
+handles and echo payloads over one UDP socket; a focused dispatcher regression
+drops packet numbers 0-3, delivers an ACK for packet 4, and observes immediate
+retransmissions 5 and 6.
+
+The persistent aggregate harness accepts this production topology with:
+
+```sh
+zig build bench-quic-persistent-external -Doptimize=ReleaseFast -- \
+  --mode=aggregate --samples=3 --connections=4 --streams=1 \
+  --bytes-per-stream=1048576 --chunk-bytes=16384 \
+  --stream-window=1048576 --timeout-ms=60000 \
+  --server-topology=shared
+```
+
+The runner labels it `endpoint_topology=shared-server-udp`, rejects incompatible
+mode/role combinations, and keeps its result set separate from independent-UDP
+summaries. Five verified 4 x 1-MiB client-upload samples measured
+56.554-64.812 MiB/s (59.627 median), with exact 4,194,304-byte and
+534,773,760 checksum agreement on both sides. Seven manual order-alternated
+same-binary pairs measured 57.026-69.958 MiB/s (62.757 median) for the shared
+server versus 80.979-93.000 MiB/s (87.565 median) for four server sockets, or
+0.717x. This closes the missing executable shared-socket shape but deliberately
+records its remaining allocation/scheduling deficit rather than presenting it
+as a speedup. The audited quic-go fixture and Go toolchain were unavailable for
+this capture, so no new cross-library ratio is claimed. Separate verified
+smokes covered four connections with four 256-KiB streams each (4 MiB total)
+and eight connections with one 256-KiB stream each (2 MiB total), including
+exact FIN, byte, checksum, and DONE/DONE_ACK validation.
 
 ### Raw QUIC mixed FIN/reset recovery versus quic-go
 

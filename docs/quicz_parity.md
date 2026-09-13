@@ -1350,9 +1350,13 @@ drain, and close after the fix.
    fresh transfer, persistent echo, and four-connection aggregate transfer,
    but still needs capture-backed equal-wire accounting. HTTP/3 likewise lacks
    an equal-wire reference. DATAGRAM, loss simulation, and stream reservation
-   have direct faster artifacts. The external aggregate matrix also exposes a
-   netz/netz worker-scheduling deficit, so it is not a whole-stack superiority
-   claim. Mixed FIN/reset lifecycle churn now has a bounded-credit on-wire
+   have direct faster artifacts. Raw QUIC now exposes a protocol-neutral
+   shared-endpoint server owner and a verified four-connection benchmark over
+   one server UDP socket. Its initial same-binary result is 0.717x the four-
+   socket topology, exposing an owning-receive/scheduling deficit rather than
+   supporting a whole-stack superiority claim. The external aggregate matrix
+   also exposes a netz/netz worker-scheduling deficit. Mixed FIN/reset
+   lifecycle churn now has a bounded-credit on-wire
    netz baseline, but no equal quicz harness yet. Echo latency now has a
    controlled artifact that is tied/faster across percentiles. Handshake
    latency/rate now has a verification-policy-aligned artifact, but the two
@@ -1375,9 +1379,11 @@ facility, not a replacement for authenticated handshake-backed HTTP/3.
 
 1. Extend the two-CPU raw QUIC process comparison with kernel/interface packet
    capture, WebSocket/WebTransport allocation telemetry, lossy/reordered on-wire lifecycle churn,
-   connection-count scaling, and a shared-socket event-loop aggregate.
-   Persistent echo and a four-independent-connection process matrix are now
-   covered. Complete-connection userspace UDP counters
+   and broader connection-count scaling. Persistent echo, four independent
+   connections, and a four-connection shared-server-socket event loop are now
+   covered. Optimize the shared dispatcher's owning receive path; its initial
+   same-binary result is 0.717x the independent-server topology.
+   Complete-connection userspace UDP counters
    expose materially different wire shapes, but this host denies unprivileged
    capture. Equalize GRO, ACK/pacing, packetization, and application stream
    scheduling before promoting it from same-application-shape to equal-wire.
