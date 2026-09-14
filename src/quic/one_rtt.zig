@@ -1271,6 +1271,62 @@ pub const Connection = struct {
         try self.sendAutomaticallyWithLoop(frames);
     }
 
+    /// Send one application packet under a caller-owned relative timeout.
+    ///
+    /// Congestion and flow-control stalls keep processing peer packets and all
+    /// transport timers. Received application data remains queued in connection
+    /// state, while ACK policy is applied before the send is retried.
+    pub fn sendWithTimeout(
+        self: *Connection,
+        frames: []const quic.Frame,
+        timeout: std.Io.Duration,
+    ) (Error || quic.runtime.ReceiveTimeoutError)!void {
+        if (timeout.nanoseconds <= 0) return error.Timeout;
+        return self.sendWithDeadline(frames, .fromNow(
+            self.endpoint.io,
+            .{ .raw = timeout, .clock = .awake },
+        ));
+    }
+
+    /// Send one application packet under an absolute awake-clock deadline.
+    ///
+    /// Unlike `send`, this also waits for congestion and flow-control progress.
+    /// It uses the state-only receive path so packets consumed solely to unblock
+    /// the write are still acknowledged and their application state is retained.
+    pub fn sendWithDeadline(
+        self: *Connection,
+        frames: []const quic.Frame,
+        deadline: std.Io.Clock.Timestamp,
+    ) (Error || quic.runtime.ReceiveTimeoutError)!void {
+        _ = try deadline_policy.usableAwake(self.endpoint.io, deadline);
+        while (true) {
+            const now_ns = self.monotonicNowNs();
+            if (callerDeadlineExpired(deadline, now_ns)) return error.Timeout;
+            self.sendAutomaticallyAt(frames, now_ns) catch |err| switch (err) {
+                error.FlowControlBlocked, error.CongestionLimited => {
+                    self.servicePacketServicingTimersDeadline(deadline) catch |progress_err|
+                        switch (progress_err) {
+                            error.CongestionLimited => continue,
+                            error.PacingLimited => {
+                                try self.waitForPacingAvailabilityWithDeadline(
+                                    deadline,
+                                );
+                                continue;
+                            },
+                            else => |other| return other,
+                        };
+                    continue;
+                },
+                error.PacingLimited => {
+                    try self.waitForPacingAvailabilityWithDeadline(deadline);
+                    continue;
+                },
+                else => |other| return other,
+            };
+            return;
+        }
+    }
+
     /// Attempt one send using the current awake-clock timestamp without
     /// sleeping or reading the endpoint socket. Event-loop adapters use this
     /// to preserve a single UDP receive owner and retry after their dispatcher
@@ -4759,10 +4815,7 @@ pub const Connection = struct {
             // leave such orphaned groups timerless; arm an immediate PTO so the
             // blocking/runtime pump can emit a fresh probe and re-establish a
             // normal in-flight deadline.
-            return if (self.recovery.pendingCount() != 0)
-                self.monotonicNowNs()
-            else
-                null;
+            return if (self.recovery.pendingCount() != 0) 0 else null;
         };
         return std.math.add(u64, anchor, self.jitteredPtoPeriod()) catch
             std.math.maxInt(u64);

@@ -379,10 +379,6 @@ pub const PayloadSet = struct {
     }
 };
 
-fn deadlineReached(io: std.Io, deadline: std.Io.Clock.Timestamp) bool {
-    return deadline.durationFromNow(io).raw.nanoseconds <= 0;
-}
-
 pub fn sendBytes(
     connection: *netz.quic.one_rtt.Connection,
     stream_id: u64,
@@ -391,29 +387,12 @@ pub fn sendBytes(
     fin: bool,
     deadline: std.Io.Clock.Timestamp,
 ) !void {
-    while (true) {
-        if (deadlineReached(connection.endpoint.io, deadline)) {
-            return error.Timeout;
-        }
-        connection.send(&.{.{ .stream = .{
-            .stream_id = stream_id,
-            .offset = offset,
-            .data = bytes,
-            .fin = fin,
-        } }}) catch |err| switch (err) {
-            error.FlowControlBlocked, error.CongestionLimited => {
-                var packet = try connection.receivePacketServicingTimersDeadline(deadline);
-                packet.deinit(connection.endpoint.allocator);
-                continue;
-            },
-            error.PacingLimited => {
-                try connection.waitForPacingAvailability();
-                continue;
-            },
-            else => return err,
-        };
-        return;
-    }
+    try connection.sendWithDeadline(&.{.{ .stream = .{
+        .stream_id = stream_id,
+        .offset = offset,
+        .data = bytes,
+        .fin = fin,
+    } }}, deadline);
 }
 
 pub fn sendRecord(
@@ -628,7 +607,7 @@ pub fn drainDeliveryRecovery(
     deadline: std.Io.Clock.Timestamp,
 ) !void {
     while (connection.pendingDeliveryRecovery()) {
-        var packet = connection.receivePacketServicingTimersDeadline(deadline) catch |err|
+        connection.servicePacketServicingTimersDeadline(deadline) catch |err|
             switch (err) {
                 error.ConnectionClosed => {
                     try validateBenchmarkClose(connection);
@@ -636,7 +615,6 @@ pub fn drainDeliveryRecovery(
                 },
                 else => return err,
             };
-        packet.deinit(connection.endpoint.allocator);
     }
 }
 

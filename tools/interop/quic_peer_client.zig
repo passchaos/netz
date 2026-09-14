@@ -160,16 +160,13 @@ pub fn main(init: std.process.Init) !void {
             }
             try echoStream(
                 &established.connection,
-                allocator,
                 payload,
             );
             while (index != 0 and
                 established.connection.pendingOneRttKeyUpdateAckThreshold() !=
                     null)
             {
-                var packet = try established.connection
-                    .receivePacketServicingTimers();
-                packet.deinit(allocator);
+                try established.connection.servicePacketServicingTimers();
             }
         }
         if (established.connection.localOneRttKeyUpdateCount() != 2 or
@@ -194,9 +191,7 @@ pub fn main(init: std.process.Init) !void {
         var offsets = [_]usize{0} ** payloads.len;
         var complete = [_]bool{false} ** payloads.len;
         while (!std.mem.allEqual(bool, &complete, true)) {
-            var packet = try established.connection
-                .receivePacketServicingTimers();
-            defer packet.deinit(allocator);
+            try established.connection.servicePacketServicingTimers();
             inline for (stream_ids, payloads, 0..) |stream_id, payload, index| {
                 if (established.connection.availableReceivedStream(
                     stream_id,
@@ -332,7 +327,7 @@ fn exerciseCancellation(
     switch (scenario) {
         .reset => {
             while (connection.streamResetReceived(target_stream_id) == null) {
-                try receivePacket(connection, allocator);
+                try receivePacket(connection);
             }
             const reset = connection.streamResetReceived(target_stream_id).?;
             if (reset.application_error_code != 41 or reset.final_size != 0) {
@@ -341,7 +336,7 @@ fn exerciseCancellation(
         },
         .stop => {
             while (connection.streamStopped(target_stream_id) == null) {
-                try receivePacket(connection, allocator);
+                try receivePacket(connection);
             }
             if (connection.streamStopped(target_stream_id).?.application_error_code != 42) {
                 return error.UnexpectedStopSendingError;
@@ -382,11 +377,11 @@ fn exerciseFlowControl(
         } }}) catch |err| switch (err) {
             error.FlowControlBlocked => {
                 flow_blocked = true;
-                try receivePacket(connection, allocator);
+                try receivePacket(connection);
                 continue;
             },
             error.CongestionLimited => {
-                try receivePacket(connection, allocator);
+                try receivePacket(connection);
                 continue;
             },
             error.PacingLimited => {
@@ -408,7 +403,6 @@ fn exerciseFlowControl(
 
 fn echoStream(
     connection: *netz.quic.one_rtt.Connection,
-    allocator: std.mem.Allocator,
     payload: []const u8,
 ) !void {
     const stream_id = try connection.openStream();
@@ -442,22 +436,17 @@ fn echoStream(
         {
             return;
         }
-        var packet = try connection.receivePacketServicingTimers();
-        packet.deinit(allocator);
+        try connection.servicePacketServicingTimers();
     }
 }
 
-fn receivePacket(
-    connection: *netz.quic.one_rtt.Connection,
-    allocator: std.mem.Allocator,
-) !void {
-    var packet = try connection.receivePacketServicingTimers();
-    packet.deinit(allocator);
+fn receivePacket(connection: *netz.quic.one_rtt.Connection) !void {
+    try connection.servicePacketServicingTimers();
 }
 
 fn receiveExpectedStream(
     connection: *netz.quic.one_rtt.Connection,
-    allocator: std.mem.Allocator,
+    _: std.mem.Allocator,
     stream_id: u64,
     expected: []const u8,
 ) !void {
@@ -486,6 +475,6 @@ fn receiveExpectedStream(
         {
             return;
         }
-        try receivePacket(connection, allocator);
+        try receivePacket(connection);
     }
 }

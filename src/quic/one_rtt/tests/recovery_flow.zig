@@ -1466,6 +1466,53 @@ test "QUIC 1-RTT connection exposes PTO backoff deadlines and services timer" {
     try std.testing.expectEqual(@as(?one_rtt.LossDetectionTimerDeadline, null), client.lossDetectionTimerDeadline());
 }
 
+test "QUIC orphaned recovery group exposes a stable immediate PTO" {
+    const allocator = std.testing.allocator;
+    var threaded = std.Io.Threaded.init(allocator, .{});
+    defer threaded.deinit();
+    const io = threaded.io();
+    var sender = try quic.runtime.Endpoint.bind(
+        allocator,
+        io,
+        .{ .ip4 = .loopback(0) },
+        .{ .max_datagram_size = 4096 },
+    );
+    defer sender.deinit();
+    const keys = quic.protection.deriveAes128Keys(
+        [_]u8{0x93} ** quic.protection.secret_len,
+    );
+    var connection = try one_rtt.Connection.init(&sender, .{
+        .peer = sender.address(),
+        .receive_keys = keys,
+        .send_keys = keys,
+        .local_connection_id = "orphan-local",
+        .peer_connection_id = "orphan-peer",
+        .enable_pacing = false,
+    });
+    defer connection.deinit();
+
+    try connection.sendAt(&.{.{ .ping = {} }}, 1_000);
+    try std.testing.expectEqual(@as(usize, 1), connection.pendingRecoveryCount());
+    connection.sent.packets.items[0].lost = true;
+    try std.testing.expectEqual(@as(?u64, 0), connection.ptoDeadline());
+    try std.testing.expectEqual(@as(?u64, 0), connection.ptoDeadline());
+    const deadline = connection.lossDetectionTimerDeadline() orelse
+        return error.TestUnexpectedResult;
+    try std.testing.expectEqual(
+        one_rtt.LossDetectionTimerKind.pto,
+        deadline.kind,
+    );
+    try std.testing.expectEqual(@as(u64, 0), deadline.deadline_ns);
+    const serviced = (try connection.serviceLossDetectionTimer(1)) orelse
+        return error.TestUnexpectedResult;
+    try std.testing.expectEqual(one_rtt.LossDetectionTimerKind.pto, serviced.kind);
+    try std.testing.expectEqual(@as(u8, 1), connection.ptoBackoffCount());
+    try std.testing.expectEqual(
+        @as(usize, 2),
+        connection.stats().recovery_queue_stats.packet_number_copies,
+    );
+}
+
 test "QUIC 1-RTT jitter remains stable across PTO backoff and ACK rearm" {
     const allocator = std.testing.allocator;
     var threaded = std.Io.Threaded.init(allocator, .{});
@@ -2484,6 +2531,132 @@ test "QUIC 1-RTT connection emits DATA_BLOCKED and applies MAX_DATA" {
     var data = try server.receivePacket();
     defer data.deinit(allocator);
     try std.testing.expectEqualStrings("123456", data.frames[0].stream.data);
+}
+
+test "QUIC bounded send acknowledges flow-control progress packets" {
+    const allocator = std.testing.allocator;
+    var threaded = std.Io.Threaded.init(allocator, .{});
+    defer threaded.deinit();
+    const io = threaded.io();
+
+    var server_endpoint = try quic.runtime.Endpoint.bind(
+        allocator,
+        io,
+        .{ .ip4 = .loopback(0) },
+        .{ .max_datagram_size = 4096 },
+    );
+    defer server_endpoint.deinit();
+    var client_endpoint = try quic.runtime.Endpoint.bind(
+        allocator,
+        io,
+        .{ .ip4 = .loopback(0) },
+        .{ .max_datagram_size = 4096 },
+    );
+    defer client_endpoint.deinit();
+
+    const client_cid = [_]u8{ 0x19, 0x1a, 0x1b, 0x1c };
+    const server_cid = [_]u8{ 0x1d, 0x1e, 0x1f, 0x20 };
+    const client_keys = quic.protection.deriveAes128Keys(
+        [_]u8{0x83} ** quic.protection.secret_len,
+    );
+    const server_keys = quic.protection.deriveAes128Keys(
+        [_]u8{0x84} ** quic.protection.secret_len,
+    );
+    var client = try one_rtt.Connection.init(&client_endpoint, .{
+        .peer = server_endpoint.address(),
+        .receive_keys = server_keys,
+        .send_keys = client_keys,
+        .local_connection_id = &client_cid,
+        .peer_connection_id = &server_cid,
+        .initial_send_max_data = 5,
+        .initial_send_max_stream_data = 5,
+        .enable_pacing = false,
+    });
+    defer client.deinit();
+    var server = try one_rtt.Connection.init(&server_endpoint, .{
+        .peer = client_endpoint.address(),
+        .receive_keys = client_keys,
+        .send_keys = server_keys,
+        .local_connection_id = &server_cid,
+        .peer_connection_id = &client_cid,
+        .local_endpoint = .server,
+        .enable_pacing = false,
+    });
+    defer server.deinit();
+
+    const before_deadline_rejection = client.stats();
+    try std.testing.expectError(
+        error.Timeout,
+        client.sendWithTimeout(&.{.{ .stream = .{
+            .stream_id = 0,
+            .data = "123456",
+        } }}, .zero),
+    );
+    try std.testing.expectError(
+        error.Timeout,
+        client.sendWithDeadline(&.{.{ .stream = .{
+            .stream_id = 0,
+            .data = "123456",
+        } }}, .{ .clock = .real, .raw = .zero }),
+    );
+    try std.testing.expectEqual(
+        before_deadline_rejection.packets_sent,
+        client.stats().packets_sent,
+    );
+    try std.testing.expectEqual(
+        before_deadline_rejection.active_send_streams,
+        client.stats().active_send_streams,
+    );
+
+    try server.send(&.{
+        .{ .max_data = .{ .maximum_data = 10 } },
+        .{ .max_stream_data = .{
+            .stream_id = 0,
+            .maximum_stream_data = 10,
+        } },
+        .{ .stream = .{
+            .stream_id = 1,
+            .data = "queued",
+            .fin = true,
+        } },
+    });
+    try std.testing.expectEqual(@as(usize, 1), server.pendingRecoveryCount());
+
+    try client.sendWithDeadline(&.{.{ .stream = .{
+        .stream_id = 0,
+        .data = "123456",
+    } }}, .fromNow(io, .{
+        .raw = .fromSeconds(1),
+        .clock = .awake,
+    }));
+
+    var saw_blocked = false;
+    var saw_ack = false;
+    var saw_stream = false;
+    for (0..3) |_| {
+        var packet = try server.receivePacket();
+        defer packet.deinit(allocator);
+        for (packet.frames) |frame| switch (frame) {
+            .data_blocked => saw_blocked = true,
+            .ack => saw_ack = true,
+            .stream => |stream| {
+                try std.testing.expectEqual(@as(u64, 0), stream.stream_id);
+                try std.testing.expectEqualStrings("123456", stream.data);
+                saw_stream = true;
+            },
+            else => {},
+        };
+    }
+    try std.testing.expect(saw_blocked);
+    try std.testing.expect(saw_ack);
+    try std.testing.expect(saw_stream);
+    try std.testing.expectEqual(@as(usize, 0), server.pendingRecoveryCount());
+    var queued: ["queued".len]u8 = undefined;
+    const queued_event = (try client.pollStreamId(1, &queued)) orelse
+        return error.TestUnexpectedResult;
+    try std.testing.expect(queued_event == .data);
+    try std.testing.expectEqualStrings("queued", &queued);
+    try std.testing.expect(queued_event.data.fin);
 }
 
 test "QUIC 1-RTT connection handles stream-level flow control" {

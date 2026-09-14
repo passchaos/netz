@@ -122,7 +122,7 @@ fn runClient(
         const elapsed = nowNs(io) -| started;
         defer established.deinit();
         try validateHandshake(established, true);
-        try clientEchoAndClose(&established.connection, allocator, round, config);
+        try clientEchoAndClose(&established.connection, round, config);
         checksum +%= @intCast(round);
         if (round >= config.warmup) {
             latencies[measured_index] = elapsed;
@@ -181,7 +181,7 @@ fn runServer(port: u16, config: Config) !void {
         );
         defer established.deinit();
         try validateHandshake(established, false);
-        try serverEchoAndWaitClose(&established.connection, allocator, round, config);
+        try serverEchoAndWaitClose(&established.connection, round, config);
         checksum +%= @intCast(round);
     }
     std.debug.print(
@@ -211,7 +211,6 @@ fn validateHandshake(
 
 fn clientEchoAndClose(
     connection: *netz.quic.one_rtt.Connection,
-    allocator: std.mem.Allocator,
     round: usize,
     config: Config,
 ) !void {
@@ -224,18 +223,17 @@ fn clientEchoAndClose(
         .data = &marker,
         .fin = true,
     } }});
-    try receiveExactStream(connection, allocator, stream_id, &marker, config);
+    try receiveExactStream(connection, stream_id, &marker, config);
     try connection.closeApplication(close_code, close_reason);
 }
 
 fn serverEchoAndWaitClose(
     connection: *netz.quic.one_rtt.Connection,
-    allocator: std.mem.Allocator,
     round: usize,
     config: Config,
 ) !void {
     const marker = makeMarker(round);
-    try receiveExactStream(connection, allocator, 0, &marker, config);
+    try receiveExactStream(connection, 0, &marker, config);
     try connection.send(&.{.{ .stream = .{
         .stream_id = 0,
         .offset = 0,
@@ -247,12 +245,11 @@ fn serverEchoAndWaitClose(
         .{ .clock = .awake, .raw = config.timeout() },
     );
     while (connection.peerCloseInfo() == null) {
-        var packet = connection.receivePacketServicingTimersDeadline(deadline) catch |err|
+        connection.servicePacketServicingTimersDeadline(deadline) catch |err|
             switch (err) {
                 error.ConnectionClosed => break,
                 else => return err,
             };
-        packet.deinit(allocator);
     }
     const close = connection.peerCloseInfo() orelse return error.MissingPeerClose;
     if (close != .application or close.application.error_code != close_code or
@@ -264,7 +261,6 @@ fn serverEchoAndWaitClose(
 
 fn receiveExactStream(
     connection: *netz.quic.one_rtt.Connection,
-    allocator: std.mem.Allocator,
     stream_id: u64,
     expected: []const u8,
     config: Config,
@@ -288,8 +284,7 @@ fn receiveExactStream(
             }
         }
         if (received == expected.len and connection.receivedStreamComplete(stream_id)) break;
-        var packet = try connection.receivePacketServicingTimersDeadline(deadline);
-        packet.deinit(allocator);
+        try connection.servicePacketServicingTimersDeadline(deadline);
     }
 }
 

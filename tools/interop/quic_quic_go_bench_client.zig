@@ -331,12 +331,11 @@ fn waitForServerClose(
     deadline: std.Io.Clock.Timestamp,
 ) !void {
     while (connection.peerCloseInfo() == null) {
-        var packet = connection.receivePacketServicingTimersDeadline(deadline) catch |err|
+        connection.servicePacketServicingTimersDeadline(deadline) catch |err|
             switch (err) {
                 error.ConnectionClosed => break,
                 else => return err,
             };
-        packet.deinit(connection.endpoint.allocator);
     }
     try benchmark.validateBenchmarkClose(connection);
 }

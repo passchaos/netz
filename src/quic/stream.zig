@@ -398,22 +398,37 @@ pub const RecvState = struct {
             if (absolute_end > final_size) return error.FinalSizeMismatch;
             if (frame.fin and absolute_end != final_size) return error.FinalSizeMismatch;
         }
-        // Bytes below storage_offset were already delivered. QUIC permits
-        // retransmitting them; ignore that prefix without growing the window.
-        if (absolute_end <= self.storage_offset) {
+        // Bytes below read_offset were already delivered. Some of that prefix
+        // can remain in storage to amortize compaction, but it no longer counts
+        // against the live reassembly window and need not be conflict-checked.
+        if (absolute_end <= self.read_offset) {
             if (frame.fin and absolute_end < self.highest_received_end) {
                 return error.FinalSizeMismatch;
             }
             if (frame.fin) self.final_size = absolute_end;
             return 0;
         }
-        const retained_offset = @max(absolute_offset, self.storage_offset);
+        var retained_offset = @max(absolute_offset, self.read_offset);
         const skipped = retained_offset - absolute_offset;
         const data = frame.data[skipped..];
-        const relative_offset = retained_offset - self.storage_offset;
-        const relative_end = std.math.add(usize, relative_offset, data.len) catch
+        var relative_offset = retained_offset - self.storage_offset;
+        var relative_end = std.math.add(usize, relative_offset, data.len) catch
             return error.InvalidStreamRange;
-        if (relative_end > self.max_buffered) return error.StreamBufferTooLarge;
+        if (relative_end > self.max_buffered) {
+            const live_end = absolute_end - self.read_offset;
+            if (live_end > self.max_buffered) {
+                return error.StreamBufferTooLarge;
+            }
+            self.compactConsumedPrefixNow();
+            retained_offset = @max(absolute_offset, self.storage_offset);
+            relative_offset = retained_offset - self.storage_offset;
+            relative_end = std.math.add(
+                usize,
+                relative_offset,
+                absolute_end - retained_offset,
+            ) catch return error.InvalidStreamRange;
+            std.debug.assert(relative_end <= self.max_buffered);
+        }
 
         const old_len = self.received.len();
         if (relative_end <= old_len and absolute_end <= self.contiguous_end) {
@@ -561,6 +576,12 @@ pub const RecvState = struct {
         {
             return;
         }
+        self.compactConsumedPrefixNow();
+    }
+
+    fn compactConsumedPrefixNow(self: *RecvState) void {
+        const consumed = self.read_offset - self.storage_offset;
+        if (consumed == 0) return;
         const remaining = self.buffer.items.len - consumed;
         @memmove(
             self.buffer.items[0..remaining],
@@ -630,6 +651,7 @@ pub const RecvState = struct {
     pub const Preflight = struct {
         stream_id: u64,
         storage_offset: usize,
+        read_offset: usize,
         buffer: []const u8,
         received: ReceivedBitmap.View,
         final_size: ?usize,
@@ -645,6 +667,7 @@ pub const RecvState = struct {
             return .{
                 .stream_id = state.stream_id,
                 .storage_offset = state.storage_offset,
+                .read_offset = state.read_offset,
                 .buffer = state.buffer.items,
                 .received = state.received.view(),
                 .final_size = state.final_size,
@@ -665,6 +688,7 @@ pub const RecvState = struct {
             return .{
                 .stream_id = stream_id,
                 .storage_offset = 0,
+                .read_offset = 0,
                 .buffer = &.{},
                 .received = .{},
                 .final_size = null,
@@ -723,7 +747,7 @@ pub const RecvState = struct {
                     return error.FinalSizeMismatch;
                 }
             }
-            if (absolute_end <= self.storage_offset) {
+            if (absolute_end <= self.read_offset) {
                 if (frame.fin and
                     absolute_end < self.highest_received_end)
                 {
@@ -735,11 +759,11 @@ pub const RecvState = struct {
 
             const retained_offset = @max(
                 absolute_offset,
-                self.storage_offset,
+                self.read_offset,
             );
             const relative_offset = retained_offset - self.storage_offset;
             const relative_end = absolute_end - self.storage_offset;
-            if (relative_end > self.max_buffered) {
+            if (absolute_end - self.read_offset > self.max_buffered) {
                 return error.StreamBufferTooLarge;
             }
 
@@ -1168,6 +1192,70 @@ test "QUIC receive stream compacts non-word-aligned bitmap with sparse tail" {
     try std.testing.expectEqual(@as(u64, 74), recv.receivedByteCount());
     try recv.consume(34);
     try std.testing.expect(recv.complete());
+}
+
+test "QUIC receive stream compacts a retained consumed prefix at its window edge" {
+    const allocator = std.testing.allocator;
+
+    var direct = RecvState.init(allocator, 0, 16);
+    defer direct.deinit();
+    try direct.insert(.{
+        .stream_id = 0,
+        .offset = 0,
+        .data = "abcdefghijkl",
+    });
+    try direct.consume(5);
+    // Five bytes is below both compaction thresholds, so storage still starts
+    // at zero even though the application cursor has advanced. The new frame
+    // spans only fifteen unread bytes and must fit the sixteen-byte window.
+    try std.testing.expectEqual(@as(usize, 0), direct.storage_offset);
+    try std.testing.expectEqual(@as(usize, 5), direct.read_offset);
+    try std.testing.expectEqual(@as(u64, 0), try direct.insertTracked(.{
+        .stream_id = 0,
+        .offset = 3,
+        .data = "XXfgh",
+    }));
+    try direct.insert(.{
+        .stream_id = 0,
+        .offset = 12,
+        .data = "mnopqrst",
+    });
+    try std.testing.expectEqual(@as(usize, 5), direct.storage_offset);
+    try std.testing.expectEqualStrings("fghijklmnopqrst", direct.available());
+    try std.testing.expectError(error.StreamBufferTooLarge, direct.insert(.{
+        .stream_id = 0,
+        .offset = 20,
+        .data = "uv",
+    }));
+
+    var validated = RecvState.init(allocator, 4, 16);
+    defer validated.deinit();
+    try validated.insert(.{
+        .stream_id = 4,
+        .offset = 0,
+        .data = "abcdefghijkl",
+    });
+    try validated.consume(5);
+    var pending_storage: [2]quic.StreamFrame = undefined;
+    var pending = RecvState.PreflightFrames.init(allocator, &pending_storage);
+    defer pending.deinit();
+    var preflight = RecvState.Preflight.init(&validated, &pending);
+    defer preflight.deinit();
+    try std.testing.expectEqual(@as(u64, 8), try preflight.insertTracked(.{
+        .stream_id = 4,
+        .offset = 12,
+        .data = "mnopqrst",
+    }));
+    try std.testing.expectError(
+        error.StreamBufferTooLarge,
+        preflight.insertTracked(.{
+            .stream_id = 4,
+            .offset = 20,
+            .data = "uv",
+        }),
+    );
+    try std.testing.expectEqual(@as(usize, 0), validated.storage_offset);
+    try std.testing.expectEqualStrings("fghijkl", validated.available());
 }
 
 test "QUIC receive stream clips overlap at sliding window boundary" {

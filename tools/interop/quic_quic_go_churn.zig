@@ -294,10 +294,6 @@ pub fn dataStreamId(sender: Sender, stream_index: usize) u62 {
     return @intCast(@as(u64, if (sender == .client) 2 else 3) + stream_index * 4);
 }
 
-fn deadlineReached(connection: *netz.quic.one_rtt.Connection, deadline: std.Io.Clock.Timestamp) bool {
-    return deadline.durationFromNow(connection.endpoint.io).raw.nanoseconds <= 0;
-}
-
 pub fn sendBytes(
     connection: *netz.quic.one_rtt.Connection,
     stream_id: u64,
@@ -306,27 +302,12 @@ pub fn sendBytes(
     fin: bool,
     deadline: std.Io.Clock.Timestamp,
 ) !void {
-    while (true) {
-        if (deadlineReached(connection, deadline)) return error.Timeout;
-        connection.trySend(&.{.{ .stream = .{
-            .stream_id = stream_id,
-            .offset = offset,
-            .data = bytes,
-            .fin = fin,
-        } }}) catch |err| switch (err) {
-            error.FlowControlBlocked, error.CongestionLimited => {
-                var packet = try connection.receivePacketServicingTimersDeadline(deadline);
-                packet.deinit(connection.endpoint.allocator);
-                continue;
-            },
-            error.PacingLimited => {
-                try connection.waitForPacingAvailabilityWithDeadline(deadline);
-                continue;
-            },
-            else => return err,
-        };
-        return;
-    }
+    try connection.sendWithDeadline(&.{.{ .stream = .{
+        .stream_id = stream_id,
+        .offset = offset,
+        .data = bytes,
+        .fin = fin,
+    } }}, deadline);
 }
 
 pub fn sendExact(
@@ -588,12 +569,11 @@ pub fn waitForPeerClose(
     deadline: std.Io.Clock.Timestamp,
 ) !void {
     while (connection.peerCloseInfo() == null) {
-        var packet = connection.receivePacketServicingTimersDeadline(deadline) catch |err|
+        connection.servicePacketServicingTimersDeadline(deadline) catch |err|
             switch (err) {
                 error.ConnectionClosed => break,
                 else => return err,
             };
-        packet.deinit(connection.endpoint.allocator);
     }
     try validatePeerClose(connection);
 }

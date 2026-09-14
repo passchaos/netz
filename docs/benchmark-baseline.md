@@ -2508,6 +2508,36 @@ completion exchange. Its single upload/download samples were 81.016 and
 114.163 MiB/s, respectively, so they are retained as reliability evidence, not
 as an independent throughput result.
 
+Raw QUIC now also exposes `Connection.sendWithTimeout` and
+`Connection.sendWithDeadline` for bounded STREAM/control sends that may need
+peer flow-control or congestion progress. The helper keeps one absolute
+awake-clock budget, services connection timers, applies ACK policy to packets
+consumed only for progress, and leaves unrelated application data buffered.
+The persistent benchmark previously freed those progress packets without ACKing
+them. In multi-connection uploads, reliable MAX_DATA/MAX_STREAM_DATA packets
+could consequently remain in flight until the receiver's control-packet
+congestion window filled: pre-fix 2 x 16-MiB runs repeatedly left one transfer
+at 8,387,712 bytes, and a 16 x 9-MiB run completed only 15/16 connections with
+the last at the same offset. With the bounded send helper, the same 16 x 9-MiB
+shape completed upload and download with exact 150,994,944 bytes, checksum
+19,251,855,360, all sixteen connections, and the completion exchange. The
+single post-fix samples were 41.516 MiB/s upload and 75.123 MiB/s download, so
+this is reliability evidence across the initial 8-MiB connection window, not a
+comparative throughput claim. Interop utilities that intentionally consume
+packets only to advance transport state now use the state-only ACK-applying
+receive path for the same reason. Receive reassembly also now measures its
+bounded live window from the application read cursor, forcing compaction when
+a retained consumed prefix would otherwise make a valid in-window frame look
+oversized. Finally, an orphaned reliable recovery group whose sent copies are
+all marked lost exposes a stable immediate PTO instead of recomputing "now"
+on every scheduler query. With all three corrections, three consecutive
+16 x 9-MiB bidirectional runs completed exactly; upload measured
+51.206-51.988 MiB/s (51.973 median) and download 81.235-90.804 MiB/s
+(83.065 median). A further 16 x 16-MiB run completed 268,435,456 bytes per
+direction with checksum 34,225,520,640. These results remain
+same-application-shape reliability data rather than a cross-stack throughput
+claim.
+
 The shared persistent benchmark now emits strictly checked receive-loop and
 socket counters so future work can distinguish configured batch width from
 actual batching. One verified 16-connection, 16-MiB upload with a configured

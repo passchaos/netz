@@ -82,7 +82,7 @@ fn receiveExpectedStream(
 
 fn receiveExpectedPrefix(
     connection: *netz.quic.one_rtt.Connection,
-    allocator: std.mem.Allocator,
+    _: std.mem.Allocator,
     stream_id: u64,
     expected: []const u8,
 ) !void {
@@ -102,7 +102,7 @@ fn receiveExpectedPrefix(
                 return;
             }
         }
-        try receivePacket(connection, allocator);
+        try receivePacket(connection);
     }
 }
 
@@ -112,7 +112,7 @@ const ReceiveExpectedStreamOptions = struct {
 
 fn receiveExpectedStreamWithOptions(
     connection: *netz.quic.one_rtt.Connection,
-    allocator: std.mem.Allocator,
+    _: std.mem.Allocator,
     stream_id: u64,
     expected: []const u8,
     options: ReceiveExpectedStreamOptions,
@@ -145,8 +145,7 @@ fn receiveExpectedStreamWithOptions(
         {
             break;
         }
-        var packet = try connection.receivePacketServicingTimers();
-        defer packet.deinit(allocator);
+        try connection.servicePacketServicingTimers();
         if (options.service_path_responses) {
             // quic-go probes its candidate socket before switching application
             // traffic. PATH_RESPONSE must return to that probing source rather
@@ -171,7 +170,7 @@ fn sendEcho(
 
 fn sendStreamFully(
     connection: *netz.quic.one_rtt.Connection,
-    allocator: std.mem.Allocator,
+    _: std.mem.Allocator,
     stream_id: u64,
     payload: []const u8,
 ) !void {
@@ -189,7 +188,7 @@ fn sendStreamFully(
             .fin = end == payload.len,
         } }}) catch |err| switch (err) {
             error.FlowControlBlocked, error.CongestionLimited => {
-                try receivePacket(connection, allocator);
+                try receivePacket(connection);
                 continue;
             },
             error.PacingLimited => {
@@ -202,12 +201,8 @@ fn sendStreamFully(
     }
 }
 
-fn receivePacket(
-    connection: *netz.quic.one_rtt.Connection,
-    allocator: std.mem.Allocator,
-) !void {
-    var packet = try connection.receivePacketServicingTimers();
-    defer packet.deinit(allocator);
+fn receivePacket(connection: *netz.quic.one_rtt.Connection) !void {
+    try connection.servicePacketServicingTimers();
 }
 
 fn expectIpv4Address(
@@ -395,13 +390,13 @@ pub fn main(init: std.process.Init) !void {
                     timeout_ns,
                 );
                 while (!established.connection.peerAddressValidated()) {
-                    try receivePacket(&established.connection, allocator);
+                    try receivePacket(&established.connection);
                 }
                 path_challenge_retries += 1;
             } else {
                 try established.connection.sendPendingPathChallenge();
                 while (!established.connection.peerAddressValidated()) {
-                    try receivePacket(&established.connection, allocator);
+                    try receivePacket(&established.connection);
                 }
             }
             try sendEcho(
@@ -499,7 +494,7 @@ pub fn main(init: std.process.Init) !void {
         },
         .reset, .s2n_reset => {
             while (established.connection.streamResetReceived(0) == null) {
-                try receivePacket(&established.connection, allocator);
+                try receivePacket(&established.connection);
             }
             const reset = established.connection.streamResetReceived(0).?;
             if (reset.application_error_code != 41) {
@@ -543,7 +538,7 @@ pub fn main(init: std.process.Init) !void {
             if (mode == .s2n_stop_loss) cancellation_loss.arm();
             try established.connection.sendStopSending(0, 42);
             while (established.connection.streamResetReceived(0) == null) {
-                try receivePacket(&established.connection, allocator);
+                try receivePacket(&established.connection);
             }
             const reset = established.connection.streamResetReceived(0).?;
             if (reset.application_error_code != 42 or reset.final_size < 4) {
