@@ -1894,6 +1894,13 @@ fn earliestReceiveTimeout(
     } else null;
     if (timer_deadline) |timer| {
         if (caller_deadline) |caller| {
+            if (timer.clock == caller.clock) {
+                return .{ .deadline = if (timer.raw.nanoseconds <
+                    caller.raw.nanoseconds)
+                    timer
+                else
+                    caller };
+            }
             // Relative `std.Io.Timeout` callers may choose another clock.
             // Compare remaining durations rather than unrelated timestamp
             // epochs, while the explicit deadline API stays awake-only.
@@ -1909,6 +1916,79 @@ fn earliestReceiveTimeout(
         .{ .deadline = deadline }
     else
         .none;
+}
+
+test "QUIC endpoint receive timeout compares same-clock deadlines directly" {
+    const timer = endpoint_timers.EndpointTimerDeadline{
+        .connection_id = 7,
+        .timer = .{ .kind = .pto, .deadline_ns = 20 },
+    };
+    const earlier_timer = earliestReceiveTimeout(
+        undefined,
+        timer,
+        .{
+            .clock = .awake,
+            .raw = .fromNanoseconds(30),
+        },
+    );
+    try std.testing.expectEqual(
+        @as(i96, 20),
+        earlier_timer.deadline.raw.nanoseconds,
+    );
+
+    const earlier_caller = earliestReceiveTimeout(
+        undefined,
+        timer,
+        .{
+            .clock = .awake,
+            .raw = .fromNanoseconds(10),
+        },
+    );
+    try std.testing.expectEqual(
+        @as(i96, 10),
+        earlier_caller.deadline.raw.nanoseconds,
+    );
+}
+
+test "QUIC endpoint receive timeout compares cross-clock remaining time" {
+    const FixedClockIo = struct {
+        delegate: std.Io,
+        calls: usize = 0,
+
+        fn now(
+            userdata: ?*anyopaque,
+            clock: std.Io.Clock,
+        ) std.Io.Timestamp {
+            const self: *@This() = @ptrCast(@alignCast(userdata));
+            self.calls += 1;
+            return .fromNanoseconds(switch (clock) {
+                .awake => 100,
+                .real => 1_000,
+                else => 0,
+            });
+        }
+    };
+
+    var threaded = std.Io.Threaded.init(std.testing.allocator, .{});
+    defer threaded.deinit();
+    var fixed = FixedClockIo{ .delegate = threaded.io() };
+    var vtable = fixed.delegate.vtable.*;
+    vtable.now = FixedClockIo.now;
+    const io = std.Io{ .userdata = &fixed, .vtable = &vtable };
+    const timeout = earliestReceiveTimeout(
+        io,
+        .{
+            .connection_id = 7,
+            .timer = .{ .kind = .pto, .deadline_ns = 120 },
+        },
+        .{
+            .clock = .real,
+            .raw = .fromNanoseconds(1_010),
+        },
+    );
+    try std.testing.expectEqual(std.Io.Clock.real, timeout.deadline.clock);
+    try std.testing.expectEqual(@as(i96, 1_010), timeout.deadline.raw.nanoseconds);
+    try std.testing.expectEqual(@as(usize, 2), fixed.calls);
 }
 
 fn monotonicNowNs(io: std.Io) u64 {

@@ -1103,6 +1103,13 @@ ns/op at 16 connections and from 407.25-424.34 to 0.38-0.42 ns/op at 1,024;
 the one-due controls retained their linear snapshot cost. Five shared-server
 transfer pairs had overlapping ranges and 3/5 candidate wins in both sender
 directions, so they establish no regression rather than a throughput gain.
+When the caller and transport deadlines share the awake clock, receive-timeout
+composition now orders their absolute timestamps directly instead of reading
+that clock twice to compare remaining durations. Tests prove the same-clock
+branch makes no clock call and the generic cross-clock branch still makes both
+reads. Five shared-server pairs favored the candidate 4/5 times in both sender
+directions, but their throughput ranges overlapped, so this remains a fixed-work
+reduction rather than a throughput claim.
 Independent-message batch receive also leaves ancillary buffers uninitialized
 until the OS fills them, matching Quinn's Linux `MaybeUninit` receive storage and
 removing a fixed 2,304-byte stack write at the default 32-message width on this

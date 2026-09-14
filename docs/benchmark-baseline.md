@@ -2734,6 +2734,25 @@ regression evidence, not a throughput improvement claim. Every arm verified
 16,777,216 bytes, checksum 2,139,095,040, all 16 connections, and the
 completion exchange.
 
+Shared dispatcher receive timeout composition now compares absolute raw values
+when the transport timer and caller deadline use the same clock. The normal
+shared-server path uses the awake clock for both, so it no longer performs two
+`durationFromNow` clock reads on every socket-wait turn. A focused test passes
+an unusable `std.Io` and still selects both possible same-clock minima, proving
+that branch is clock-read-free. A separate fixed-clock test retains the generic
+cross-clock behavior, observes exactly two reads, and orders deadlines by
+remaining duration rather than incomparable epochs.
+
+Five fixed-binary, order-interleaved 16-connection, 16-MiB-total pairs against
+parent `f232a0b3` completed exactly in both sender directions. Client-sender
+throughput was 68.990-81.605 MiB/s (73.906 median) before and
+72.643-80.460 MiB/s (76.276 median) after, with 4/5 candidate wins.
+Server-sender throughput was 74.444-92.247 MiB/s (80.120 median) before and
+80.281-92.579 MiB/s (83.786 median) after, also with 4/5 candidate wins. The
+raw ranges overlap, so these results support removing fixed receive-turn work
+but do not establish a throughput gain. Every arm verified 16,777,216 bytes,
+checksum 2,139,095,040, all 16 connections, and the completion exchange.
+
 The shared dispatcher's caller-buffer batch now also returns a bounded snapshot
 of due timers instead of at most one timer per receive call. Each connection is
 visited once per snapshot, so an immediately rearmed connection cannot starve
