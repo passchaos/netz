@@ -653,6 +653,10 @@ test "QUIC endpoint server routes two authenticated connections on one socket" {
                         @as(?u64, 3),
                         try server.pollOpenUnidirectionalStream(handle),
                     );
+                    try std.testing.expectEqual(
+                        established.connection.streamSendCredit(3),
+                        try server.streamSendCredit(handle, 3),
+                    );
                 },
                 .timer => {},
                 .handshake_failed => |failure| return failure.err,

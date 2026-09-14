@@ -400,6 +400,39 @@ fn runSharedServer(config: Config) !void {
                         state.prepared_streams, state.next_send_stream, state.payload_offsets,
                     },
                 );
+                const handle = state.handle orelse continue;
+                const established = server.connection(handle) orelse continue;
+                const connection = &established.connection;
+                const stats = connection.stats();
+                const stream_id = state.stream_ids[0];
+                const stream_available = if (stream_id ==
+                    std.math.maxInt(u64))
+                    null
+                else
+                    connection.streamSendAvailable(stream_id);
+                std.debug.print(
+                    "shared_transport index={d} connection_send_available={d} " ++
+                        "stream_send_available={?} congestion_available={d} " ++
+                        "bytes_in_flight={d} congestion_window={d} " ++
+                        "packets_sent={d} packets_received={d} packets_lost={d} " ++
+                        "pending_recovery={d} pto_backoff={d} " ++
+                        "pacing_deadline={?} next_timer={any}\n",
+                    .{
+                        index,
+                        connection.connectionSendAvailable(),
+                        stream_available,
+                        stats.congestion_available,
+                        stats.bytes_in_flight,
+                        stats.congestion_window,
+                        stats.packets_sent,
+                        stats.packets_received,
+                        stats.packets_lost,
+                        stats.pending_recovery_count,
+                        stats.pto_backoff_count,
+                        connection.pendingPacingDeadline(),
+                        connection.nextTimerDeadline(),
+                    },
+                );
             }
             return err;
         };
@@ -931,15 +964,16 @@ fn driveSharedServerSender(
             );
             const payloads = if (state.payloads) |*value| value else return error.InvalidBenchmarkResult;
             const payload = payloads.streams[index];
-            if (!try trySendSharedBytes(
+            const sent = try trySendSharedPayloadPrefix(
                 server,
                 handle,
                 state.stream_ids[index],
                 transfer.prelude_len + offset,
                 payload[offset..end],
                 end == config.bytes_per_stream,
-            )) return false;
-            state.payload_offsets[index] = end;
+            );
+            if (sent == 0) return false;
+            state.payload_offsets[index] += sent;
             state.next_send_stream = (index + 1) % config.streams;
             return true;
         },
@@ -968,6 +1002,32 @@ fn trySendSharedBytes(
         else => return err,
     };
     return true;
+}
+
+fn trySendSharedPayloadPrefix(
+    server: *netz.quic.endpoint_server.Server,
+    handle: netz.quic.endpoint_dispatcher.ConnectionHandle,
+    stream_id: u64,
+    offset: u64,
+    bytes: []const u8,
+    fin: bool,
+) !usize {
+    if (bytes.len == 0) return 0;
+    const credit = try server.streamSendCredit(handle, stream_id);
+    const send_len = @min(bytes.len, credit.available());
+    // A zero-credit attempt lets QUIC emit DATA_BLOCKED or
+    // STREAM_DATA_BLOCKED when required. Positive credit is sent as an exact
+    // prefix so a short window tail can make progress transactionally.
+    const attempt = if (send_len == 0) bytes else bytes[0..send_len];
+    if (!try trySendSharedBytes(
+        server,
+        handle,
+        stream_id,
+        offset,
+        attempt,
+        fin and send_len == bytes.len,
+    )) return 0;
+    return attempt.len;
 }
 
 fn trySendSharedRecord(

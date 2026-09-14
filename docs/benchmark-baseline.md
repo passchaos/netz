@@ -2846,6 +2846,30 @@ server send plus timer refresh behind a dispatcher wrapper also failed to show
 a stable benefit and was removed. The existing per-packet application wake-up
 and direct server send path are therefore retained.
 
+The shared endpoint server now also exposes a socket-free `streamSendCredit`
+snapshot for nonblocking application loops. The persistent server-sender used
+to retry its full 1,152-byte payload chunk even when a stream window had a
+smaller positive tail. Because `trySend` is deliberately transactional, a
+1,024-byte advertised stream window left 1,008 bytes after the 16-byte prelude
+and the full chunk could never commit. The sender now submits the positive
+prefix allowed by connection, stream, congestion, and datagram credit; zero
+credit still performs the original attempt so QUIC can emit DATA_BLOCKED or
+STREAM_DATA_BLOCKED. Timeout diagnostics retain per-connection credit, cwnd,
+in-flight, recovery, pacing, and next-timer state for future failures.
+
+A fixed-binary real TLS/QUIC regression against parent `3ccbb9d3` used one
+shared-server connection, a 1,024-byte stream window, and a 65,536-byte
+server-originated payload. The parent timed out in `stage=payload` with offset
+zero; the candidate transferred all 65,536 bytes, verified checksum 8,355,840,
+and completed the DONE/DONE_ACK exchange. A 16-connection pressure run then
+transferred 64 MiB per connection (1,073,741,824 bytes total), checksum
+136,902,082,560, and all completion exchanges in about 195 seconds. Three
+order-interleaved 16-connection, 16-MiB-total pairs were noisy: server-sender
+candidate throughput was 82.035-105.988 MiB/s versus parent
+78.725-102.589 MiB/s with 2/3 wins, while client-sender was
+63.328-83.471 versus 70.786-100.162 MiB/s with 1/3 wins. All ranges overlap,
+so the retained claim is progress/reliability, not throughput improvement.
+
 ### Raw QUIC mixed FIN/reset recovery versus quic-go
 
 The separate process gate below exercises terminal stream churn instead of

@@ -367,6 +367,20 @@ pub const Server = struct {
         try self.dispatcher.refreshConnectionTimer(handle);
     }
 
+    /// Snapshot the immediately usable STREAM send credit without reading the
+    /// shared socket or mutating connection state. Nonblocking endpoint loops
+    /// can use this to submit a positive flow-control tail instead of retrying
+    /// a larger transactional frame until another packet happens to arrive.
+    pub fn streamSendCredit(
+        self: *Server,
+        handle: quic.endpoint_dispatcher.ConnectionHandle,
+        stream_id: u64,
+    ) Error!quic.one_rtt.SendCredit {
+        const established = self.connection(handle) orelse
+            return error.UnknownConnectionHandle;
+        return established.connection.streamSendCredit(stream_id);
+    }
+
     /// Apply the connection's negotiated ACK policy after the application has
     /// accepted a routed packet. Keeping this explicit lets callers finish
     /// protocol-level transactional processing before acknowledging it.

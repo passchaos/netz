@@ -1131,6 +1131,13 @@ throughput from 85.021 to 90.453 MiB/s with 5/5 pair wins, but the ranges
 overlap, so this remains supporting end-to-end evidence. An experiment that
 coalesced all packet/timer notifications per connection was removed after both
 sender-direction medians regressed despite reducing ready notifications.
+The shared server also exposes socket-free STREAM send credit so application
+loops can submit a positive flow-control tail without weakening transactional
+`trySend` semantics. A real 1,024-byte-window regression timed out at payload
+offset zero before the change and completed 65,536 bytes plus checksum and
+completion exchange after it. A 16-connection server-sender pressure run then
+completed 1 GiB total exactly. Standard-window throughput pairs were mixed with
+overlapping ranges, so this closes a progress gap rather than claiming speed.
 The dispatcher now also mirrors each connection's authoritative fixed-capacity
 local CID pool. Initial IDs are installed at registration, dispatcher-mediated
 NEW_CONNECTION_ID sends preflight endpoint-wide collisions before changing
