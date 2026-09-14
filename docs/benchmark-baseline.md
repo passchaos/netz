@@ -2484,6 +2484,32 @@ outcomes were unfavorable. Every arm verified 16,777,216 bytes, checksum
 candidate was fully removed; this evidence rules out another locally cheaper
 hash lookup as an end-to-end shared-owner improvement on its own.
 
+A follow-up attempted to remove the shared upload application copy by visiting
+the contiguous bytes already retained in each QUIC receive stream. The first
+callback-scoped version committed flow-control credit through the existing
+nonblocking retry path. Five fixed-binary, order-interleaved 16-connection,
+16-MiB-total upload pairs measured 53.732-62.595 MiB/s (59.810 median) for
+the retained copying path and 46.512-62.856 MiB/s (51.846 median) for the
+borrowed path. The candidate won 2/5 pairs and its median was 13.3% lower.
+Every arm verified 16,777,216 bytes, checksum 2,139,095,040, all sixteen
+connections, and the completion exchange. One exploratory candidate smoke
+also received 27,166 datagrams versus the previously recorded 14,758 for this
+shape, but later packet counts varied; that observation is retained only as a
+warning that receive-credit timing can change wire work, not as a causal ratio.
+
+A narrower correction used exactly the old transactional
+releaseReceivedCapacity path after the borrowed callback, preserving the
+ordinary MAX_DATA/MAX_STREAM_DATA send timing. Four-connection smoke then
+matched the retained path at 1,112 received upload datagrams. Two fixed-binary
+16-connection ABBA pairs nevertheless favored the retained upload path both
+times: parent measured 46.340/66.429 MiB/s and candidate measured
+42.949/54.673 MiB/s. The untouched server-sender control split 1/2, confirming
+substantial host variance but providing no evidence for an upload gain. Both
+borrowed APIs, their tests, and the benchmark integration were fully removed;
+the transport retains its existing explicit availableReceivedStream plus
+releaseReceivedCapacity primitives for callers whose ownership model already
+makes that tradeoff worthwhile.
+
 The next shared-loop step follows Quinn's bounded receive-cycle design: one
 bounded receive operation drains already-ready UDP messages nonblocking, or
 waits for one when the socket starts empty, into a reusable caller buffer. The
