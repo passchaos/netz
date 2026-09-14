@@ -6439,7 +6439,26 @@ test "QUIC 1-RTT local ACK policy initializes cadence and rejects excessive dela
     ));
     const first_deadline = connection.ackDelayDeadline() orelse
         return error.TestUnexpectedResult;
-    try std.testing.expect(try connection.flushPendingAck());
+    try std.testing.expectError(
+        error.Timeout,
+        connection.flushPendingAckWithDeadline(.{
+            .clock = .awake,
+            .raw = .zero,
+        }),
+    );
+    try std.testing.expectEqual(first_deadline, connection.ackDelayDeadline().?);
+    try std.testing.expectError(
+        error.Timeout,
+        connection.flushPendingAckWithDeadline(.{
+            .clock = .real,
+            .raw = .fromNanoseconds(std.time.ns_per_s),
+        }),
+    );
+    try std.testing.expectEqual(first_deadline, connection.ackDelayDeadline().?);
+    try std.testing.expect(try connection.flushPendingAckWithDeadline(.fromNow(
+        io,
+        .{ .raw = .fromSeconds(1), .clock = .awake },
+    )));
     try std.testing.expectEqual(@as(?u64, null), connection.ackDelayDeadline());
     try std.testing.expect(!try connection.flushPendingAck());
     try one_rtt.testing.applyReceivedFrames(&connection, 2, &ping, null, .not_ect);

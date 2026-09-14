@@ -4619,6 +4619,17 @@ fn connectAttemptEstablishedBefore(
     if (!h3.control.settings.peer.enable_connect_protocol) {
         return error.ExtendedConnectDisabled;
     }
+    if (response.status >= 200 and response.status < 300) {
+        // Successful Extended CONNECT transfers receive-loop ownership from
+        // the HTTP/3 handshake adapter to the WebSocket session while the
+        // stream remains open. Flush the response HEAD's delayed ACK before
+        // that handoff so a short-lived server recovery drain can complete.
+        if (deadline) |absolute|
+            _ = try h3.established.connection
+                .flushPendingAckWithDeadline(absolute)
+        else
+            _ = try h3.established.connection.flushPendingAck();
+    }
     var body: []u8 = &.{};
     var trailers: []http3.Qpack.HeaderField = &.{};
     var stream_complete = false;

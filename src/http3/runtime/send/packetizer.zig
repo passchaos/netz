@@ -640,23 +640,21 @@ test "HTTP/3 connection packetizer piggybacks delayed ACK when space permits" {
         .peer = client_endpoint.address(),
         .receive_keys = keys,
         .send_keys = keys,
-        .local_connection_id = "packetizer-ack-server",
-        .peer_connection_id = "packetizer-ack-client",
+        .local_connection_id = "packet-ack-server",
+        .peer_connection_id = "packet-ack-client",
         .local_endpoint = .server,
         .local_ack_eliciting_threshold = 2,
         .local_max_ack_delay_us = 25_000,
         .enable_pacing = false,
-        .tls_handshake_complete = true,
     });
     defer server.deinit();
     var client = try quic.one_rtt.Connection.init(&client_endpoint, .{
         .peer = server_endpoint.address(),
         .receive_keys = keys,
         .send_keys = keys,
-        .local_connection_id = "packetizer-ack-client",
-        .peer_connection_id = "packetizer-ack-server",
+        .local_connection_id = "packet-ack-client",
+        .peer_connection_id = "packet-ack-server",
         .enable_pacing = false,
-        .tls_handshake_complete = true,
     });
     defer client.deinit();
 

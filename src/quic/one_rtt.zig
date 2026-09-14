@@ -5400,6 +5400,27 @@ pub const Connection = struct {
         return true;
     }
 
+    /// Flush a pending cumulative ACK before an absolute awake-clock deadline.
+    /// Ownership-transfer boundaries use this when the current protocol layer
+    /// will stop driving receive timers after returning to its caller.
+    pub fn flushPendingAckWithDeadline(
+        self: *Connection,
+        deadline: std.Io.Clock.Timestamp,
+    ) (Error || quic.runtime.ReceiveTimeoutError)!bool {
+        _ = try deadline_policy.usableAwake(self.endpoint.io, deadline);
+        if (self.ack_eliciting_since_last_ack == 0) return false;
+        while (true) {
+            _ = self.tryFlushPendingAck() catch |err| switch (err) {
+                error.PacingLimited => {
+                    try self.waitForPacingAvailabilityWithDeadline(deadline);
+                    continue;
+                },
+                else => |other| return other,
+            };
+            return true;
+        }
+    }
+
     /// Attempt to flush the delayed cumulative ACK without sleeping for
     /// pacing. On failure the ACK counters and deadline remain intact.
     pub fn tryFlushPendingAck(self: *Connection) Error!bool {

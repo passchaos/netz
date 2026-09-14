@@ -826,7 +826,13 @@ HTTP/3 adapter applies the same validation before pumping QUIC.
 The authenticated HTTP/3 adapter now also applies this contract to RFC 9220
 session establishment itself. Client connect APIs preserve one absolute
 awake-clock timestamp across QUIC/TLS, peer SETTINGS, Extended CONNECT, and
-the response head; server accept APIs preserve it across the first QUIC
+the response head. Before a successful response transfers receive-loop
+ownership to the WebSocket session, the client now flushes that HEAD's pending
+delayed ACK under the same absolute deadline. This lets a short-lived server
+finish its reliable response drain even though a successful CONNECT stream
+remains open; a 1200-byte-MTU regression with 80 request and 80 response fields
+failed consistently before the fix and completed in three consecutive focused
+runs afterward. Server accept APIs preserve the deadline across the first QUIC
 Initial, TLS, peer SETTINGS/request processing, and the 200 response. Existing
 HTTP/3 sessions expose matching bounded adapter entry points. A cross-phase
 regression completes QUIC/TLS, withholds CONNECT past the original deadline,

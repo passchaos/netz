@@ -191,7 +191,12 @@ also makes a nonblocking ACK attempt so a short-lived peer can finish recovery
 without requiring another application receive call. A 4-stream/1-MiB download
 that timed out after the handshake ACK default changed to 2/25 ms completed
 5/5 times after this lifecycle fix. The wide throughput range is treated only
-as completion evidence.
+as completion evidence. A successful Extended CONNECT response is not a
+terminal stream event, so its WebSocket adapter now performs a separate bounded
+ACK flush before transferring receive-loop ownership out of HTTP/3. The same
+absolute handshake deadline covers any pacing wait. The 1200-byte-MTU
+80-request/80-response-field regression failed consistently without this
+handoff and completed in three consecutive focused runs after it.
 PMTU probe construction now uses the connection's pre-sized plaintext scratch
 for the canonical PING-plus-PADDING payload instead of allocating and freeing a
 probe-sized temporary list on every search step. Recovery still takes stable
