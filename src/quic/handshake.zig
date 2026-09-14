@@ -242,6 +242,10 @@ pub const OneRttConfig = struct {
     local_max_ack_delay_us: u64 = 25_000,
     local_ack_reordering_threshold: u64 =
         quic.packet_space.default_packet_threshold,
+    /// Stable endpoint secret used to derive reset tokens for every locally
+    /// issued connection ID. Servers also bind the Initial Source Connection
+    /// ID transport-parameter token to this key during the handshake.
+    local_stateless_reset_key: ?[quic.stateless_reset.static_key_len]u8 = null,
 
     fn apply(
         self: OneRttConfig,
@@ -325,6 +329,7 @@ pub const OneRttConfig = struct {
             .enable_ack_frequency = local_transport_parameters.min_ack_delay != null or peer_transport_parameters.min_ack_delay != null,
             .local_min_ack_delay = local_transport_parameters.min_ack_delay,
             .peer_min_ack_delay = peer_transport_parameters.min_ack_delay,
+            .local_stateless_reset_key = self.local_stateless_reset_key,
             .peer_stateless_reset_token = peer_transport_parameters.stateless_reset_token,
             .tls_handshake_complete = true,
         };
@@ -4505,6 +4510,12 @@ fn serverTransportParameters(
 ) Error![]const u8 {
     if (options.transport_parameters.len != 0) {
         local_transport_parameters.* = try quic.parseTransportParametersTyped(allocator, options.transport_parameters, .server);
+        try applyServerStatelessResetToken(
+            local_transport_parameters,
+            options.local_connection_id,
+            options.initial_one_rtt_config.local_stateless_reset_key,
+            false,
+        );
         try validateServerTransportParameters(local_transport_parameters.*, options.local_connection_id, original_destination_connection_id, retry_source_connection_id, options.version, options.available_versions, false);
         return options.transport_parameters;
     }
@@ -4514,10 +4525,53 @@ fn serverTransportParameters(
     if (retry_source_connection_id.len != 0) {
         local_transport_parameters.retry_source_connection_id = retry_source_connection_id;
     }
+    try applyServerStatelessResetToken(
+        local_transport_parameters,
+        options.local_connection_id,
+        options.initial_one_rtt_config.local_stateless_reset_key,
+        true,
+    );
     try validateServerTransportParameters(local_transport_parameters.*, options.local_connection_id, original_destination_connection_id, retry_source_connection_id, options.version, options.available_versions, false);
     try quic.encodeTransportParametersForSource(encoded, allocator, local_transport_parameters.*, .server);
     try appendVersionInformationIfAbsent(encoded, allocator, local_transport_parameters.*, options.version, options.available_versions);
     return encoded.items;
+}
+
+fn applyServerStatelessResetToken(
+    params: *quic.TransportParameters,
+    local_connection_id: []const u8,
+    static_key: ?[quic.stateless_reset.static_key_len]u8,
+    can_insert: bool,
+) Error!void {
+    const key = static_key orelse return;
+    const expected = quic.stateless_reset.tokenForConnectionId(
+        key,
+        local_connection_id,
+    );
+    if (params.stateless_reset_token) |configured| {
+        if (!std.mem.eql(u8, &configured, &expected)) {
+            return error.InvalidTransportParameter;
+        }
+    } else if (can_insert) {
+        params.stateless_reset_token = expected;
+    } else {
+        // A raw extension cannot be safely amended without changing the bytes
+        // supplied by its caller. Require it to carry the derived token.
+        return error.InvalidTransportParameter;
+    }
+    if (params.preferred_address) |*preferred| {
+        const preferred_token = quic.stateless_reset.tokenForConnectionId(
+            key,
+            preferred.connection_id,
+        );
+        if (can_insert) {
+            preferred.stateless_reset_token = preferred_token;
+        } else if (!std.mem.eql(
+            u8,
+            &preferred.stateless_reset_token,
+            &preferred_token,
+        )) return error.InvalidTransportParameter;
+    }
 }
 
 fn appendVersionInformationIfAbsent(
@@ -4938,6 +4992,131 @@ test "QUIC handshake one-RTT config propagates local ACK policy" {
         .{},
     );
     try std.testing.expectEqual(@as(u64, 10_000), clamped.local_max_ack_delay_us);
+}
+
+test "QUIC server transport parameters bind reset token to local CID" {
+    const allocator = std.testing.allocator;
+    const key = [_]u8{0x81} ** quic.stateless_reset.static_key_len;
+    const cid = "server-reset-cid";
+    const expected = quic.stateless_reset.tokenForConnectionId(key, cid);
+    var local = quic.practical_transport_parameters;
+    var encoded: std.ArrayList(u8) = .empty;
+    defer encoded.deinit(allocator);
+    const bytes = try serverTransportParameters(allocator, .{
+        .local_connection_id = cid,
+        .initial_one_rtt_config = .{
+            .local_stateless_reset_key = key,
+        },
+    }, "original", &.{}, &local, &encoded);
+    try std.testing.expectEqualSlices(
+        u8,
+        &expected,
+        &local.stateless_reset_token.?,
+    );
+    const parsed = try quic.parseTransportParametersTyped(
+        allocator,
+        bytes,
+        .server,
+    );
+    try std.testing.expectEqualSlices(
+        u8,
+        &expected,
+        &parsed.stateless_reset_token.?,
+    );
+
+    var preferred_local = quic.practical_transport_parameters;
+    preferred_local.preferred_address = .{
+        .ipv4_address = .{ 127, 0, 0, 1 },
+        .ipv4_port = 4433,
+        .connection_id = "preferred-reset-cid",
+    };
+    var preferred_encoded: std.ArrayList(u8) = .empty;
+    defer preferred_encoded.deinit(allocator);
+    _ = try serverTransportParameters(allocator, .{
+        .local_connection_id = cid,
+        .local_transport_parameters = preferred_local,
+        .initial_one_rtt_config = .{
+            .local_stateless_reset_key = key,
+        },
+    }, "original", &.{}, &preferred_local, &preferred_encoded);
+    try std.testing.expectEqualSlices(
+        u8,
+        &quic.stateless_reset.tokenForConnectionId(
+            key,
+            "preferred-reset-cid",
+        ),
+        &preferred_local.preferred_address.?.stateless_reset_token,
+    );
+
+    const keys = quic.protection.deriveAes128Keys(
+        [_]u8{0x82} ** quic.protection.secret_len,
+    );
+    const applied = (OneRttConfig{
+        .local_stateless_reset_key = key,
+    }).apply(
+        .version_1,
+        .{ .ip4 = .loopback(443) },
+        keys,
+        keys,
+        cid,
+        "peer",
+        .server,
+        local,
+        .{},
+    );
+    try std.testing.expectEqual(
+        @as(?[quic.stateless_reset.static_key_len]u8, key),
+        applied.local_stateless_reset_key,
+    );
+
+    var raw_params = quic.practical_transport_parameters;
+    raw_params.original_destination_connection_id = "original";
+    raw_params.initial_source_connection_id = cid;
+    raw_params.stateless_reset_token = expected;
+    var raw: std.ArrayList(u8) = .empty;
+    defer raw.deinit(allocator);
+    try quic.encodeTransportParametersForSource(
+        &raw,
+        allocator,
+        raw_params,
+        .server,
+    );
+    var parsed_raw: quic.TransportParameters = undefined;
+    var unused_encoded: std.ArrayList(u8) = .empty;
+    defer unused_encoded.deinit(allocator);
+    const returned_raw = try serverTransportParameters(allocator, .{
+        .local_connection_id = cid,
+        .transport_parameters = raw.items,
+        .initial_one_rtt_config = .{
+            .local_stateless_reset_key = key,
+        },
+    }, "original", &.{}, &parsed_raw, &unused_encoded);
+    try std.testing.expectEqualSlices(u8, raw.items, returned_raw);
+    try std.testing.expectEqualSlices(
+        u8,
+        &expected,
+        &parsed_raw.stateless_reset_token.?,
+    );
+
+    raw_params.stateless_reset_token = [_]u8{0xff} **
+        quic.stateless_reset.token_len;
+    raw.clearRetainingCapacity();
+    try quic.encodeTransportParametersForSource(
+        &raw,
+        allocator,
+        raw_params,
+        .server,
+    );
+    try std.testing.expectError(
+        error.InvalidTransportParameter,
+        serverTransportParameters(allocator, .{
+            .local_connection_id = cid,
+            .transport_parameters = raw.items,
+            .initial_one_rtt_config = .{
+                .local_stateless_reset_key = key,
+            },
+        }, "original", &.{}, &parsed_raw, &unused_encoded),
+    );
 }
 
 test "QUIC handshake one-RTT config propagates spin-bit policy" {

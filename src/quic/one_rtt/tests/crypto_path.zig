@@ -4925,6 +4925,13 @@ test "QUIC 1-RTT derives local CID stateless reset tokens from config key" {
         &quic.stateless_reset.tokenForConnectionId(reset_key, &server_cid),
         &server.local_connection_ids.entries[0].stateless_reset_token,
     );
+    try std.testing.expectError(
+        error.InvalidResetToken,
+        server.sendNewConnectionId(
+            "wrong-token-cid",
+            [_]u8{0xa5} ** quic.stateless_reset.token_len,
+        ),
+    );
 
     try server.sendNewConnectionIdWithDerivedToken("derived-cid");
     var packet = try client.receivePacket();

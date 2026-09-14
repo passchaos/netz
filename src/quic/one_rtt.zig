@@ -45,6 +45,7 @@ pub const Error = quic.runtime.Error || quic.protection.Error || quic.packet_spa
     InvalidPostHandshakeCrypto,
     InvalidPtoJitter,
     PathValidationLimit,
+    InvalidResetToken,
 };
 
 pub const SendOptions = struct {
@@ -7907,6 +7908,10 @@ pub const Connection = struct {
     }
 
     pub fn sendNewConnectionId(self: *Connection, connection_id: []const u8, stateless_reset_token: [16]u8) Error!void {
+        try self.validateLocalStatelessResetToken(
+            connection_id,
+            stateless_reset_token,
+        );
         try self.validateLocalConnectionIdIssueLimit(0);
         try self.validateNextPacketNumber();
         const pool_before = self.local_connection_ids;
@@ -7922,6 +7927,10 @@ pub const Connection = struct {
         stateless_reset_token: [16]u8,
         retire_prior_to: u64,
     ) Error!void {
+        try self.validateLocalStatelessResetToken(
+            connection_id,
+            stateless_reset_token,
+        );
         try self.validateLocalConnectionIdIssueLimit(retire_prior_to);
         try self.validateNextPacketNumber();
         const pool_before = self.local_connection_ids;
@@ -7929,6 +7938,21 @@ pub const Connection = struct {
         const frame = try self.local_connection_ids.issueWithRetirePriorTo(connection_id, stateless_reset_token, retire_prior_to);
         const frames = [_]quic.Frame{frame};
         try self.send(&frames);
+    }
+
+    fn validateLocalStatelessResetToken(
+        self: *const Connection,
+        connection_id: []const u8,
+        token: [quic.stateless_reset.token_len]u8,
+    ) Error!void {
+        const key = self.config.local_stateless_reset_key orelse return;
+        const expected = quic.stateless_reset.tokenForConnectionId(
+            key,
+            connection_id,
+        );
+        if (!std.mem.eql(u8, &token, &expected)) {
+            return error.InvalidResetToken;
+        }
     }
 
     pub fn sendNewConnectionIdWithDerivedToken(self: *Connection, connection_id: []const u8) Error!void {

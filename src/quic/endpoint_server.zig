@@ -27,6 +27,13 @@ pub const Options = struct {
     handshake_timeout_ms: u32 = 0,
     /// Bound how long a socket wait may hide a completed handshake worker.
     handshake_poll_interval: std.Io.Duration = .fromMilliseconds(5),
+    /// Stable endpoint secret for server connection-ID reset tokens. Null
+    /// preserves the historical behavior of returning unknown short-header
+    /// datagrams to the application without sending a stateless reset.
+    stateless_reset_key: ?[quic.stateless_reset.static_key_len]u8 = null,
+    /// Endpoint-wide minimum interval between automatic reset responses.
+    /// Quinn uses the same 20 ms default to bound reflection work.
+    stateless_reset_min_interval: std.Io.Duration = .fromMilliseconds(20),
 };
 
 pub const WorkerError = quic.handshake.AcceptTimeoutError;
@@ -192,6 +199,7 @@ pub const Server = struct {
     dispatcher: *quic.endpoint_dispatcher.Dispatcher,
     options: Options,
     handshake_options: quic.handshake.ServerOptions,
+    last_stateless_reset_ns: ?u64 = null,
     next_handle: quic.endpoint_dispatcher.ConnectionHandle = 1,
     next_handle_mutex: std.Io.Mutex = .init,
     workers: std.Io.Group = .init,
@@ -219,8 +227,44 @@ pub const Server = struct {
     ) Error!Server {
         if (options.max_pending_handshakes == 0 or
             options.inbox_capacity == 0 or
-            options.handshake_poll_interval.nanoseconds <= 0)
+            options.handshake_poll_interval.nanoseconds <= 0 or
+            options.stateless_reset_min_interval.nanoseconds < 0)
         {
+            return error.InvalidOptions;
+        }
+        var effective_handshake_options = handshake_options;
+        if (options.stateless_reset_key) |key| {
+            if (handshake_options.transport_parameters.len != 0 or
+                handshake_options.local_transport_parameters
+                    .stateless_reset_token != null)
+            {
+                // The shared server chooses a fresh CID for every admission.
+                // Raw or pre-filled Initial tokens cannot be proven to match
+                // that not-yet-generated value, so fail before any worker runs.
+                return error.InvalidOptions;
+            }
+            if (handshake_options.initial_one_rtt_config
+                .local_stateless_reset_key) |configured|
+            {
+                if (!std.mem.eql(u8, &configured, &key)) {
+                    return error.InvalidOptions;
+                }
+            }
+            if (handshake_options.local_transport_parameters
+                .preferred_address != null)
+            {
+                // Shared preferred-address routing is not implemented yet. Do
+                // not advertise a reset-bearing CID this endpoint cannot own.
+                return error.InvalidOptions;
+            }
+            effective_handshake_options.initial_one_rtt_config
+                .local_stateless_reset_key = key;
+        } else if (handshake_options.initial_one_rtt_config
+            .local_stateless_reset_key != null)
+        {
+            // Keep one authoritative endpoint-level opt-in. Advertising reset
+            // tokens without installing the matching unknown-CID policy would
+            // leave peers unable to use them after this process loses state.
             return error.InvalidOptions;
         }
         const completed_storage = try allocator.alloc(
@@ -244,14 +288,14 @@ pub const Server = struct {
             .endpoint = endpoint,
             .dispatcher = dispatcher,
             .options = options,
-            .handshake_options = handshake_options,
+            .handshake_options = effective_handshake_options,
             .worker_context = worker_context,
             .completed_storage = completed_storage,
             .completed = completed,
         };
         worker_context.* = .{
             .endpoint = endpoint,
-            .options = handshake_options,
+            .options = effective_handshake_options,
             .io = endpoint.io,
             .completed = completed,
         };
@@ -350,6 +394,27 @@ pub const Server = struct {
             return err;
         };
         try self.dispatcher.refreshConnectionTimer(handle);
+    }
+
+    /// Issue and route another local CID whose reset token is derived from the
+    /// same endpoint key used by automatic unknown-CID responses.
+    pub fn sendNewConnectionId(
+        self: *Server,
+        handle: quic.endpoint_dispatcher.ConnectionHandle,
+        connection_id: []const u8,
+    ) Error!void {
+        if (self.options.stateless_reset_key == null) {
+            return error.InvalidConnectionId;
+        }
+        if (connection_id.len != quic.endpoint_dispatcher
+            .default_server_connection_id_len)
+        {
+            return error.InvalidConnectionId;
+        }
+        try self.dispatcher.sendNewConnectionIdWithDerivedToken(
+            handle,
+            connection_id,
+        );
     }
 
     /// Reserve one bidirectional stream without reading the shared socket.
@@ -730,6 +795,7 @@ pub const Server = struct {
                         count += 1;
                     },
                     .unrouted => {
+                        if (try self.handleUnrouted(&event.unrouted)) continue;
                         output[count] = .{
                             .unrouted = visitEventToEvent(event),
                         };
@@ -822,6 +888,16 @@ pub const Server = struct {
                 } },
                 .timer => |timer| return .{ .timer = timer },
                 .unrouted => {
+                    const handled = self.handleUnrouted(
+                        &event.unrouted,
+                    ) catch |err| {
+                        event.deinit(self.allocator);
+                        return err;
+                    };
+                    if (handled) {
+                        event.deinit(self.allocator);
+                        continue;
+                    }
                     const owned = visitEventToEvent(&event);
                     return .{ .unrouted = owned };
                 },
@@ -867,6 +943,9 @@ pub const Server = struct {
             },
             .timer => |timer| return .{ .timer = timer },
             .unrouted => {
+                if (try self.handleUnrouted(&endpoint_event.unrouted)) {
+                    return null;
+                }
                 endpoint_owned = false;
                 return .{ .unrouted = endpoint_event };
             },
@@ -968,6 +1047,43 @@ pub const Server = struct {
             runWorker,
             .{ self.worker_context, admission },
         );
+    }
+
+    fn handleUnrouted(
+        self: *Server,
+        unrouted: *const quic.endpoint_dispatcher.UnroutedDatagram,
+    ) Error!bool {
+        const key = self.options.stateless_reset_key orelse return false;
+        if (unrouted.kind != .unknown_short_header) return false;
+
+        const bytes = unrouted.datagram.bytes;
+        const cid_len = quic.endpoint_dispatcher
+            .default_server_connection_id_len;
+        // A 1-RTT packet needs one header byte, the endpoint's fixed-length
+        // CID, at least one packet-number and payload byte, and a 16-byte AEAD
+        // tag. RFC 9000 requires undersized packets to be discarded.
+        if (bytes.len < cid_len + 19 or quic.stateless_reset.responseLen(
+            bytes,
+            self.endpoint.limits.max_datagram_size,
+        ) == null) return true;
+
+        const now_ns = monotonicNowNs(self.endpoint.io);
+        if (statelessResetRateLimited(
+            self.last_stateless_reset_ns,
+            now_ns,
+            statelessResetIntervalNs(
+                self.options.stateless_reset_min_interval,
+            ),
+        )) return true;
+
+        const sent = try self.endpoint.sendStatelessResetForConnectionId(
+            unrouted.datagram.from,
+            bytes,
+            key,
+            bytes[1 .. 1 + cid_len],
+        );
+        if (sent) self.last_stateless_reset_ns = now_ns;
+        return true;
     }
 
     fn finishCompletion(
@@ -1135,6 +1251,34 @@ fn monotonicNowNs(io: std.Io) u64 {
     const now = std.Io.Clock.awake.now(io).nanoseconds;
     if (now <= 0) return 0;
     return std.math.cast(u64, now) orelse std.math.maxInt(u64);
+}
+
+fn statelessResetIntervalNs(interval: std.Io.Duration) u64 {
+    if (interval.nanoseconds <= 0) return 0;
+    return std.math.cast(u64, interval.nanoseconds) orelse
+        std.math.maxInt(u64);
+}
+
+fn statelessResetRateLimited(
+    last_sent_ns: ?u64,
+    now_ns: u64,
+    min_interval_ns: u64,
+) bool {
+    if (min_interval_ns == 0) return false;
+    const last = last_sent_ns orelse return false;
+    return now_ns -| last < min_interval_ns;
+}
+
+test "QUIC endpoint server stateless reset rate limit is stable" {
+    try std.testing.expect(!statelessResetRateLimited(null, 10, 20));
+    try std.testing.expect(statelessResetRateLimited(10, 29, 20));
+    try std.testing.expect(!statelessResetRateLimited(10, 30, 20));
+    try std.testing.expect(statelessResetRateLimited(30, 10, 20));
+    try std.testing.expect(!statelessResetRateLimited(30, 30, 0));
+    try std.testing.expectEqual(
+        @as(u64, 20_000_000),
+        statelessResetIntervalNs(.fromMilliseconds(20)),
+    );
 }
 
 fn earlierByRemaining(
