@@ -21,6 +21,7 @@ server_topology=independent
 shared_receive_batch=${NETZ_QUIC_PERSISTENT_SHARED_RECEIVE_BATCH:-32}
 server_ack_every=${NETZ_QUIC_PERSISTENT_SERVER_ACK_EVERY:-2}
 server_ack_delay_us=${NETZ_QUIC_PERSISTENT_SERVER_ACK_DELAY_US:-25000}
+netz_only=false
 for arg in "$@"; do
   case $arg in
     --mode=*) modes=${arg#--mode=} ;;
@@ -38,6 +39,7 @@ for arg in "$@"; do
     --shared-receive-batch=*) shared_receive_batch=${arg#--shared-receive-batch=} ;;
     --server-ack-every=*) server_ack_every=${arg#--server-ack-every=} ;;
     --server-ack-delay-us=*) server_ack_delay_us=${arg#--server-ack-delay-us=} ;;
+    --netz-only) netz_only=true ;;
     *) echo "unknown persistent benchmark option: $arg" >&2; exit 2 ;;
   esac
 done
@@ -53,7 +55,7 @@ if [[ $server_topology == shared && $modes != aggregate ]]; then
   echo 'shared server topology requires aggregate mode' >&2
   exit 2
 fi
-if [[ $server_topology == independent ]]; then
+if [[ $server_topology == independent && $netz_only != true ]]; then
   if [[ ! -f $fixture_dir/go.mod ]]; then
     echo "audited quic-go fixture not found under $fixture_dir" >&2
     exit 127
@@ -130,7 +132,7 @@ on_exit() {
 }
 trap on_exit EXIT
 
-if [[ $server_topology == independent ]]; then
+if [[ $server_topology == independent && $netz_only != true ]]; then
   (cd "$fixture_dir" && go test -mod=readonly \
     "$repo_root/tools/interop/quic_quic_go_bench.go" \
     "$repo_root/tools/interop/quic_quic_go_churn.go" \
@@ -246,11 +248,11 @@ pairs=(
   'quic-go-client+netz-server:quic-go:netz'
   'netz-client+netz-server:netz:netz'
 )
-if [[ $server_topology == shared ]]; then
+if [[ $server_topology == shared || $netz_only == true ]]; then
   pairs=('netz-client+netz-server:netz:netz')
 fi
 for ((outer_run = 1; outer_run <= samples; outer_run += 1)); do
-  if [[ $server_topology == shared ]]; then
+  if [[ $server_topology == shared || $netz_only == true ]]; then
     order=(0)
   elif (( outer_run % 2 == 1 )); then
     order=(0 1 2 3)
@@ -276,14 +278,20 @@ for ((outer_run = 1; outer_run <= samples; outer_run += 1)); do
   done
 done
 if [[ $modes == echo || $modes == both ]]; then
+  summary_args=(--mode=echo "--samples=$samples" "--log=$work/results.log")
+  [[ $netz_only == true ]] && summary_args+=(--netz-only)
   python3 "$repo_root/tools/interop/quic_persistent_benchmark_summary.py" \
-    --mode=echo "--samples=$samples" "--log=$work/results.log"
+    "${summary_args[@]}"
 fi
 if [[ $modes == aggregate || $modes == both ]]; then
-  python3 "$repo_root/tools/interop/quic_persistent_benchmark_summary.py" \
-    --mode=aggregate "--samples=$samples" "--log=$work/results.log" \
-    "--server-topology=$server_topology" \
-    "--shared-receive-batch=$shared_receive_batch" \
-    "--server-ack-every=$server_ack_every" \
+  summary_args=(
+    --mode=aggregate "--samples=$samples" "--log=$work/results.log"
+    "--server-topology=$server_topology"
+    "--shared-receive-batch=$shared_receive_batch"
+    "--server-ack-every=$server_ack_every"
     "--server-ack-delay-us=$server_ack_delay_us"
+  )
+  [[ $netz_only == true ]] && summary_args+=(--netz-only)
+  python3 "$repo_root/tools/interop/quic_persistent_benchmark_summary.py" \
+    "${summary_args[@]}"
 fi

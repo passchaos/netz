@@ -52,7 +52,7 @@ def positive(row: dict[str, str], key: str) -> int:
 def summarize(
     path: Path, mode: str, samples: int, topology: str = "independent",
     shared_receive_batch: int = 32, server_ack_every: int = 2,
-    server_ack_delay_us: int = 25000,
+    server_ack_delay_us: int = 25000, netz_only: bool = False,
 ) -> list[str]:
     if samples <= 0 or samples % 2 == 0:
         raise ValueError("samples must be a positive odd number")
@@ -88,7 +88,7 @@ def summarize(
         raise ValueError("shared receive or ACK policy mismatch")
     role_pairs = (
         ("netz-client+netz-server",)
-        if topology == "shared" else ROLE_PAIRS
+        if topology == "shared" or netz_only else ROLE_PAIRS
     )
     senders = ("client",) if mode == "echo" else ("client", "server")
     grouped: dict[tuple[str, str], float] = {}
@@ -158,7 +158,7 @@ def summarize(
                     f"{batch_field}complete=true"
                 )
 
-    comparisons = () if topology == "shared" else (
+    comparisons = () if topology == "shared" or netz_only else (
         ("fixed_server=quic-go", "client",
          "netz-client+quic-go-server", "quic-go-client+quic-go-server"),
         ("fixed_server=netz", "client",
@@ -204,12 +204,14 @@ def main() -> None:
     parser.add_argument("--shared-receive-batch", type=int, default=32)
     parser.add_argument("--server-ack-every", type=int, default=2)
     parser.add_argument("--server-ack-delay-us", type=int, default=25000)
+    parser.add_argument("--netz-only", action="store_true")
     args = parser.parse_args()
     for line in summarize(
         args.log, args.mode, args.samples, args.server_topology,
         args.shared_receive_batch,
         args.server_ack_every,
         args.server_ack_delay_us,
+        args.netz_only,
     ):
         print(line)
 

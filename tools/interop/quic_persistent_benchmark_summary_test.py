@@ -134,6 +134,34 @@ class PersistentBenchmarkSummaryTest(unittest.TestCase):
             with self.assertRaisesRegex(ValueError, "mixed|batch mismatch"):
                 SUMMARY.summarize(path, "aggregate", 3, "shared", 32)
 
+    def test_netz_only_independent_summary_needs_no_go_rows(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            path = Path(directory, "results.log")
+            lines = []
+            for sender, values in (
+                ("client", (90.0, 100.0, 95.0)),
+                ("server", (80.0, 85.0, 82.0)),
+            ):
+                for run, value in enumerate(values, 1):
+                    lines.append(
+                        "record=result implementation=netz protocol=quic-stream "
+                        "mode=aggregate role_pair=netz-client+netz-server "
+                        f"sender_role={sender} result_owner=client run={run} "
+                        "connections=4 streams=1 bytes_per_stream=1024 "
+                        "timing_scope=stream-setup-through-verified-completion "
+                        "endpoint_topology=one-udp-socket-per-connection "
+                        f"elapsed_ns=1000 logical_MiB_s={value:.3f} "
+                        "benchmark_scope=same-application-shape "
+                        "completion_exchange_verified=true complete=true"
+                    )
+            path.write_text("\n".join(lines) + "\n", encoding="utf-8")
+            output = SUMMARY.summarize(
+                path, "aggregate", 3, netz_only=True,
+            )
+            self.assertEqual(len(output), 2)
+            self.assertIn("median_logical_MiB_s=95.000", output[0])
+            self.assertIn("median_logical_MiB_s=82.000", output[1])
+
 
 if __name__ == "__main__":
     unittest.main()

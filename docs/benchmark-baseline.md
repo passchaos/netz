@@ -2736,6 +2736,41 @@ as bounded scheduling/call-amortization evidence, not a throughput improvement.
 Every arm verified 16,777,216 bytes, checksum 2,139,095,040, all 16
 connections, and the completion exchange.
 
+The caller-buffer independent-message receive path no longer zeroes every
+ancillary-data slot before calling the I/O backend. The kernel/backend writes
+the received control-message prefix and returns its exact length; unused suffixes
+and unused batch slots are never parsed. This follows Quinn's Linux receive path,
+which uses `MaybeUninit` ancillary storage, while preserving initialized message
+descriptors. At the default batch width this removes an unconditional 2,304-byte
+stack write per receive call on this Linux AArch64 ABI (4,608 bytes at the public
+maximum of 64). A real four-datagram UDP regression receives ECT(0), ECT(1),
+CE, and then Not-ECT in one batch, proving that control metadata neither crosses
+slots nor leaks into a later unmarked datagram.
+
+Five fixed-binary, order-interleaved 4 x 16-MiB comparisons against parent
+`bcb678e7` were directionally mixed. Client-sender throughput was
+32.023-42.752 MiB/s (36.655 median) before and 34.380-39.088 MiB/s
+(35.953 median) after; the candidate won 2/5 pairs. Server-sender throughput was
+39.733-48.835 MiB/s (46.162 median) before and 41.839-55.302 MiB/s
+(48.243 median) after; the candidate won 4/5 pairs. Both ranges overlap, so no
+throughput improvement is claimed; the change is retained for the definite
+elimination of unused initialization and its direct ECN correctness coverage.
+Every run verified 67,108,864 bytes, checksum 8,556,380,160, four completed
+connections, and the completion exchange.
+
+The persistent benchmark runner now accepts `--netz-only`, which runs the
+netz/netz pair in independent topology without requiring Go or an external
+fixture; its strict summary still requires both sender roles and every requested
+sample. On the same final binary, three 4 x 1-MiB shared samples measured
+85.365-102.847 MiB/s (96.750 median) for the client sender and
+67.411-85.390 MiB/s (75.982 median) for the server sender. Three independent
+samples measured 88.226-102.534 MiB/s (94.295 median) and
+52.909-92.712 MiB/s (87.691 median), respectively. The resulting median ratios
+are 1.026x and 0.867x, but both pairs have heavily overlapping ranges and the
+topologies were not order-interleaved, so this supersedes the stale 0.717x
+observation only as a current noisy baseline, not as evidence that the shared
+topology has conclusively reached parity.
+
 ### Raw QUIC mixed FIN/reset recovery versus quic-go
 
 The separate process gate below exercises terminal stream churn instead of

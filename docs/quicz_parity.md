@@ -1096,6 +1096,18 @@ wake-up without aborting the rest of the snapshot. At 16 connections this reduce
 the timer-heavy server-sender receive-call median from 3,266 to 1,088 against the
 immediate parent, while throughput ranges overlapped; this is scheduling
 amortization evidence rather than a throughput claim.
+Independent-message batch receive also leaves ancillary buffers uninitialized
+until the OS fills them, matching Quinn's Linux `MaybeUninit` receive storage and
+removing a fixed 2,304-byte stack write at the default 32-message width on this
+Linux AArch64 ABI. A real ECT(0)/ECT(1)/CE/Not-ECT batch verifies exact
+per-message metadata. Five paired long transfers had overlapping ranges and
+mixed direction results, so this is a fixed-work reduction rather than a
+throughput claim. A new `--netz-only` runner mode makes same-binary
+independent-topology measurements reproducible without a Go fixture. Current
+three-sample shared/independent medians were 96.750/94.295 MiB/s for
+client-sender and 75.982/87.691 MiB/s for server-sender; wide overlaps mean the
+historical shared gap has narrowed in this observation but is not yet proven
+closed.
 The dispatcher now also mirrors each connection's authoritative fixed-capacity
 local CID pool. Initial IDs are installed at registration, dispatcher-mediated
 NEW_CONNECTION_ID sends preflight endpoint-wide collisions before changing
@@ -1451,8 +1463,11 @@ facility, not a replacement for authenticated handshake-backed HTTP/3.
    capture, WebSocket/WebTransport allocation telemetry, lossy/reordered on-wire lifecycle churn,
    and broader connection-count scaling. Persistent echo, four independent
    connections, and a four-connection shared-server-socket event loop are now
-   covered. Optimize the shared dispatcher's owning receive path; its initial
-   same-binary result is 0.717x the independent-server topology.
+   covered. Continue optimizing the shared dispatcher's owning receive path.
+   Its initial same-binary result was 0.717x the independent-server topology;
+   the latest three-sample observation had overlapping ranges and median ratios
+   of 1.026x for client-sender and 0.867x for server-sender, but was not
+   topology-order-interleaved and therefore does not establish parity.
    Complete-connection userspace UDP counters
    expose materially different wire shapes, but this host denies unprivileged
    capture. Equalize GRO, ACK/pacing, packetization, and application stream

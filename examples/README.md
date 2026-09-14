@@ -48,6 +48,9 @@ zig build bench-quic-persistent-external -Doptimize=ReleaseFast -- \
   --bytes-per-stream=1048576 --server-topology=shared \
   --shared-receive-batch=32 --server-ack-every=2 \
   --server-ack-delay-us=25000
+zig build bench-quic-persistent-external -Doptimize=ReleaseFast -- \
+  --netz-only --mode=aggregate --samples=3 --connections=4 --streams=1 \
+  --bytes-per-stream=1048576 --server-topology=independent
 zig build bench-websocket-frame -Doptimize=ReleaseFast
 zig build bench-websocket-receive-buffer -Doptimize=ReleaseFast
 zig build bench-websocket-h3-echo -Doptimize=ReleaseFast

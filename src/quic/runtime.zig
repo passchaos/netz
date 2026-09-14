@@ -971,8 +971,9 @@ pub const Endpoint = struct {
             receive_control_buffer_len
         ]u8 align(@alignOf(EcnCmsgHdr)) = undefined;
         for (messages[0..out.len], controls[0..out.len]) |*message, *control| {
-            @memset(control, 0);
             message.* = .init;
+            // recvmsg writes the ancillary prefix and returns its exact length.
+            // The unused suffix and unused batch slots are never inspected.
             message.control = control;
         }
 
@@ -3410,6 +3411,67 @@ test "QUIC UDP endpoint drains ready datagrams into caller storage" {
             @intFromPtr(view.bytes.ptr) >= @intFromPtr(&storage) and
                 @intFromPtr(view.bytes.ptr) <
                     @intFromPtr(&storage) + storage.len,
+        );
+    }
+}
+
+test "QUIC UDP endpoint batch preserves independent ECN control messages" {
+    if (!socketEcnSupported()) return error.SkipZigTest;
+
+    const allocator = std.testing.allocator;
+    var threaded = std.Io.Threaded.init(allocator, .{
+        .async_limit = .unlimited,
+    });
+    defer threaded.deinit();
+    const io = threaded.io();
+    var receiver = try Endpoint.bind(
+        allocator,
+        io,
+        .{ .ip4 = .loopback(0) },
+        .{ .max_datagram_size = 128 },
+    );
+    defer receiver.deinit();
+    var sender = try Endpoint.bind(
+        allocator,
+        io,
+        .{ .ip4 = .loopback(0) },
+        .{ .max_datagram_size = 128 },
+    );
+    defer sender.deinit();
+    if (!receiver.receive_ecn_enabled) return error.SkipZigTest;
+
+    const markings = [_]quic.packet_space.EcnCodepoint{
+        .ect0,
+        .ect1,
+        .ce,
+        .not_ect,
+    };
+    for (markings, 0..) |ecn, index| {
+        const payload = [_]u8{@intCast(index + 1)};
+        sender.sendBytesWithEcn(receiver.address(), &payload, ecn) catch |err|
+            switch (err) {
+                error.EcnUnavailable => return error.SkipZigTest,
+                else => return err,
+            };
+    }
+
+    var storage: [markings.len * 128]u8 = undefined;
+    var views: [markings.len]ReceivedBytesView = undefined;
+    const count = try receiver.receiveManyBytesIntoWithDeadline(
+        &storage,
+        &views,
+        .fromNow(io, .{
+            .clock = .awake,
+            .raw = .fromSeconds(1),
+        }),
+    );
+    try std.testing.expectEqual(markings.len, count);
+    for (views[0..count], markings, 0..) |view, expected_ecn, index| {
+        try std.testing.expectEqual(expected_ecn, view.ecn);
+        try std.testing.expectEqualSlices(
+            u8,
+            &.{@as(u8, @intCast(index + 1))},
+            view.bytes,
         );
     }
 }
