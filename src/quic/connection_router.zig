@@ -69,6 +69,20 @@ pub const Context = struct {
     }
 };
 
+const BorrowedContext = struct {
+    pub fn hash(_: BorrowedContext, key: []const u8) u64 {
+        return std.hash.Wyhash.hash(0, key);
+    }
+
+    pub fn eql(
+        _: BorrowedContext,
+        borrowed: []const u8,
+        stored: ConnectionIdKey,
+    ) bool {
+        return std.mem.eql(u8, borrowed, stored.slice());
+    }
+};
+
 pub const Router = struct {
     map: std.HashMap(ConnectionIdKey, Route, Context, 80),
     /// Number of registered CIDs per length. Short-header packets do not carry
@@ -117,25 +131,36 @@ pub const Router = struct {
         entry.value_ptr.* = route;
     }
 
-    pub fn lookup(self: Router, connection_id: []const u8) Error!?Route {
-        const key = try ConnectionIdKey.init(connection_id);
-        if (self.length_counts[key.len] == 0) return null;
-        return self.map.get(key);
+    pub fn lookup(self: *const Router, connection_id: []const u8) Error!?Route {
+        if (connection_id.len == 0 or
+            connection_id.len > max_connection_id_len)
+        {
+            return error.InvalidConnectionId;
+        }
+        if (self.length_counts[connection_id.len] == 0) return null;
+        return self.map.getAdapted(connection_id, BorrowedContext{});
     }
 
     pub fn unregister(self: *Router, connection_id: []const u8) Error!bool {
-        const key = try ConnectionIdKey.init(connection_id);
-        if (self.length_counts[key.len] == 0) return false;
-        const removed = self.map.remove(key);
-        if (removed) self.noteUnregisteredLength(key.len);
+        if (connection_id.len == 0 or
+            connection_id.len > max_connection_id_len)
+        {
+            return error.InvalidConnectionId;
+        }
+        if (self.length_counts[connection_id.len] == 0) return false;
+        const removed = self.map.removeAdapted(
+            connection_id,
+            BorrowedContext{},
+        );
+        if (removed) self.noteUnregisteredLength(@intCast(connection_id.len));
         return removed;
     }
 
-    pub fn routeDatagram(self: Router, packet: []const u8) Error!?RoutedDatagram {
+    pub fn routeDatagram(self: *const Router, packet: []const u8) Error!?RoutedDatagram {
         return try self.routeDatagramFrom(null, packet);
     }
 
-    pub fn routeDatagramFrom(self: Router, from: ?net.IpAddress, packet: []const u8) Error!?RoutedDatagram {
+    pub fn routeDatagramFrom(self: *const Router, from: ?net.IpAddress, packet: []const u8) Error!?RoutedDatagram {
         _ = from;
         if (packet.len == 0) return error.InvalidPacket;
         const long_header = (packet[0] & 0x80) != 0;
@@ -152,7 +177,7 @@ pub const Router = struct {
         return routed;
     }
 
-    fn routeLongHeaderDatagram(self: Router, packet: []const u8) Error!?RoutedDatagram {
+    fn routeLongHeaderDatagram(self: *const Router, packet: []const u8) Error!?RoutedDatagram {
         if (packet.len < 6) return error.InvalidPacket;
         const version = std.mem.readInt(u32, packet[1..5], .big);
         if (version == 0) return null;
@@ -164,12 +189,12 @@ pub const Router = struct {
         if (packet.len < dcid_end) return error.InvalidPacket;
         const dcid = packet[dcid_start..dcid_end];
         if (self.length_counts[dcid_len] == 0) return null;
-        const route = self.map.get(ConnectionIdKey.initAssumeValid(dcid)) orelse
+        const route = self.map.getAdapted(dcid, BorrowedContext{}) orelse
             return null;
         return .{ .route = route, .destination_connection_id = dcid };
     }
 
-    fn routeShortHeaderDatagram(self: Router, packet: []const u8) ?RoutedDatagram {
+    fn routeShortHeaderDatagram(self: *const Router, packet: []const u8) ?RoutedDatagram {
         if (packet.len <= 1) return null;
         var len = @min(
             @as(usize, self.longest_connection_id_len),
@@ -178,13 +203,16 @@ pub const Router = struct {
         while (len != 0) : (len -= 1) {
             if (self.length_counts[len] == 0) continue;
             const candidate = packet[1 .. 1 + len];
-            const route = self.map.get(ConnectionIdKey.initAssumeValid(candidate)) orelse continue;
+            const route = self.map.getAdapted(
+                candidate,
+                BorrowedContext{},
+            ) orelse continue;
             return .{ .route = route, .destination_connection_id = candidate };
         }
         return null;
     }
 
-    pub fn count(self: Router) usize {
+    pub fn count(self: *const Router) usize {
         return self.map.count();
     }
 

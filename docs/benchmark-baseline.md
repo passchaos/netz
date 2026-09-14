@@ -2771,6 +2771,39 @@ topologies were not order-interleaved, so this supersedes the stale 0.717x
 observation only as a current noisy baseline, not as evidence that the shared
 topology has conclusively reached parity.
 
+The endpoint CID router now uses `HashMap.getAdapted` with the borrowed CID
+slice from the datagram instead of zero-filling and copying it into a 20-byte
+fixed key for every lookup. Stored keys remain fixed-size and owned, and all
+registration, collision, mixed-length longest-prefix, removal, long-header, and
+greased fixed-bit semantics are unchanged. This follows the same parsed-CID-to-
+route separation used by the audited Quinn and tquic endpoint implementations.
+The new `bench-quic-connection-router` measures 64 registered 16-byte CIDs with
+ten million rotating hits and same-length misses. Five CPU-0 ReleaseFast ABBA
+runs reduced hit latency from 51.80-52.23 ns (51.98 median) to 28.38-29.02 ns
+(28.62 median), a 44.9% reduction with 5/5 wins. Miss latency fell from
+38.90-39.72 ns (39.56 median) to 11.86-13.14 ns (12.03 median), a 69.6%
+reduction with 5/5 wins.
+
+Five fixed-binary order-interleaved 16-connection, 16-MiB-total shared-server
+pairs against parent `d567941f` also completed exactly. Server-sender throughput
+was 73.684-87.131 MiB/s (85.021 median) before and 83.277-104.812 MiB/s
+(90.453 median) after; the candidate won all five pairs and the median paired
+ratio was 1.053x. Client-sender throughput was 62.231-82.841 MiB/s
+(73.173 median) before and 59.452-116.552 MiB/s (86.686 median) after, with
+3/5 wins. Both raw ranges overlap, so the isolated lookup result is the strong
+claim and the transfer result is supporting evidence, not a whole-topology
+throughput verdict. Every arm verified 16,777,216 bytes, checksum
+2,139,095,040, all 16 connections, and the completion exchange.
+
+Two adjacent scheduling experiments were rejected. Coalescing all packet/timer
+events for one connection into one end-of-batch application wake-up reduced the
+timer-heavy server-sender notification median by 45.8%, but reduced throughput
+from 82.749 to 79.553 MiB/s and won only 1/5 pairs; immediate ACK-driven send
+opportunities were more valuable than fewer callback invocations. Moving the
+server send plus timer refresh behind a dispatcher wrapper also failed to show
+a stable benefit and was removed. The existing per-packet application wake-up
+and direct server send path are therefore retained.
+
 ### Raw QUIC mixed FIN/reset recovery versus quic-go
 
 The separate process gate below exercises terminal stream churn instead of

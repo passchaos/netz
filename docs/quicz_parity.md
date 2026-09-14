@@ -1108,6 +1108,15 @@ three-sample shared/independent medians were 96.750/94.295 MiB/s for
 client-sender and 75.982/87.691 MiB/s for server-sender; wide overlaps mean the
 historical shared gap has narrowed in this observation but is not yet proven
 closed.
+The endpoint router now probes its stored fixed-size CID keys with borrowed
+datagram slices, avoiding a zero-fill and copy on every lookup. A dedicated
+64-route benchmark reduced 16-byte CID hit latency from 51.98 to 28.62 ns and
+same-length miss latency from 39.56 to 12.03 ns, with 5/5 wins in both cases.
+A five-pair 16-connection shared-server check also improved server-sender median
+throughput from 85.021 to 90.453 MiB/s with 5/5 pair wins, but the ranges
+overlap, so this remains supporting end-to-end evidence. An experiment that
+coalesced all packet/timer notifications per connection was removed after both
+sender-direction medians regressed despite reducing ready notifications.
 The dispatcher now also mirrors each connection's authoritative fixed-capacity
 local CID pool. Initial IDs are installed at registration, dispatcher-mediated
 NEW_CONNECTION_ID sends preflight endpoint-wide collisions before changing
