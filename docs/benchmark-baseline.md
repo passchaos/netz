@@ -1811,10 +1811,10 @@ median) to 3.08-3.11 ns (3.09 median), about 40.8x, with 7/7 wins.
 
 Five order-interleaved 16-connection, 16-MiB-total shared-server pairs against
 parent `bae40ca3` completed exactly in both sender directions. Client-sender
-throughput was 43.140-69.628 MiB/s (60.810 median) before and 56.649-62.927
+throughput was 56.412-69.628 MiB/s (62.744 median) before and 56.649-62.927
 MiB/s (60.822 median) after, with 2/5 candidate wins. Server-sender throughput
-was 73.391-93.500 MiB/s (80.275 median) before and 77.666-115.835 MiB/s (82.260
-median) after, with 4/5 candidate wins and a 2.5% median increase. Both raw
+was 73.391-93.500 MiB/s (80.275 median) before and 77.666-115.835 MiB/s
+(82.260 median) after, with 4/5 candidate wins and a 2.5% median increase. Both raw
 ranges overlap, so the server-sender result is supporting evidence rather than
 a general throughput claim; the isolated timer-query reduction is the strong
 performance result. Every arm verified 16,777,216 bytes, checksum 2,139,095,040,
