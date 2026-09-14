@@ -417,6 +417,31 @@ pub const Server = struct {
         );
     }
 
+    /// Atomically advertise a derived-token CID and ask the peer to retire
+    /// every lower sequence. Old routes remain valid until the peer confirms
+    /// each retirement with RETIRE_CONNECTION_ID.
+    pub fn sendNewConnectionIdRetiringPriorTo(
+        self: *Server,
+        handle: quic.endpoint_dispatcher.ConnectionHandle,
+        connection_id: []const u8,
+        retire_prior_to: u64,
+    ) Error!void {
+        if (self.options.stateless_reset_key == null) {
+            return error.InvalidConnectionId;
+        }
+        if (connection_id.len != quic.endpoint_dispatcher
+            .default_server_connection_id_len)
+        {
+            return error.InvalidConnectionId;
+        }
+        try self.dispatcher
+            .sendNewConnectionIdWithDerivedTokenRetiringPriorTo(
+            handle,
+            connection_id,
+            retire_prior_to,
+        );
+    }
+
     /// Reserve one bidirectional stream without reading the shared socket.
     /// Null means the endpoint loop must drive peer credit or other transport
     /// progress before retrying.

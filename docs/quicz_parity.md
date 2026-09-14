@@ -1062,7 +1062,10 @@ shared-server policy now consumes eligible unknown short packets itself when a
 static reset key is configured. Its single endpoint timestamp applies a default
 20 ms minimum response interval across all source addresses, and the same key
 derives the TLS transport-parameter token, Initial CID pool token, and later
-dispatcher-routed CID tokens. Disabled configuration preserves the typed
+dispatcher-routed CID tokens. The server can atomically advertise a replacement
+with a monotonic `retire_prior_to`; the new route is published immediately, the
+old route remains usable until the peer confirms `RETIRE_CONNECTION_ID`, and a
+failed send rolls back both the CID pool and route map. Disabled configuration preserves the typed
 `unrouted` event. Raw/pre-filled token conflicts and preferred-address config
 whose route cannot yet be owned by this shared server are rejected at init. A
 two-client test sends to one server UDP socket, verifies exact per-connection

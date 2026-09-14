@@ -948,6 +948,8 @@ test "QUIC endpoint dispatcher synchronizes local CID rotation" {
     const keys = quic.protection.deriveAes128Keys(
         [_]u8{0xe5} ** quic.protection.secret_len,
     );
+    const reset_key = [_]u8{0x5e} **
+        quic.stateless_reset.static_key_len;
     var connection = try one_rtt.Connection.init(&server_endpoint, .{
         .peer = peer_endpoint.address(),
         .receive_keys = keys,
@@ -957,6 +959,7 @@ test "QUIC endpoint dispatcher synchronizes local CID rotation" {
         .local_endpoint = .server,
         .enable_pacing = false,
         .peer_active_connection_id_limit = 3,
+        .local_stateless_reset_key = reset_key,
     });
     defer connection.deinit();
     var peer_connection = try one_rtt.Connection.init(&peer_endpoint, .{
@@ -998,11 +1001,10 @@ test "QUIC endpoint dispatcher synchronizes local CID rotation" {
         dispatcher.connections.getPtr(11).?.connection_id_sync_count,
     );
 
-    try dispatcher.sendNewConnectionIdRetiringPriorTo(
+    try dispatcher.sendNewConnectionIdWithDerivedTokenRetiringPriorTo(
         11,
         "cid-one",
-        [_]u8{1} ** 16,
-        0,
+        1,
     );
     try std.testing.expectEqual(initial_revision +% 1, connection.localConnectionIdRevision());
     try std.testing.expectEqual(
@@ -1021,11 +1023,30 @@ test "QUIC endpoint dispatcher synchronizes local CID rotation" {
 
     var new_cid = try peer_connection.receivePacket();
     defer new_cid.deinit(allocator);
-    try std.testing.expect(peer_connection.switchToNextPeerConnectionId());
-    const retire = [_]quic.Frame{.{ .retire_connection_id = .{
-        .sequence_number = 0,
-    } }};
-    try peer_connection.send(&retire);
+    try std.testing.expectEqual(
+        @as(u64, 1),
+        new_cid.frames[0].new_connection_id.retire_prior_to,
+    );
+    try std.testing.expectEqualSlices(
+        u8,
+        &quic.stateless_reset.tokenForConnectionId(reset_key, "cid-one"),
+        &new_cid.frames[0].new_connection_id.stateless_reset_token,
+    );
+    // Sending NEW_CONNECTION_ID does not immediately invalidate the old
+    // route. The peer first selects the replacement and confirms retirement.
+    try std.testing.expect((try dispatcher.router.lookup("cid-zero")) != null);
+    try std.testing.expectEqualStrings(
+        "cid-one",
+        peer_connection.config.peer_connection_id,
+    );
+    try std.testing.expectEqual(
+        @as(usize, 1),
+        peer_connection.pendingRetireConnectionIdCount(),
+    );
+    try std.testing.expectEqual(
+        @as(usize, 1),
+        try peer_connection.sendPendingRetireConnectionIds(),
+    );
     const versions = [_]u32{quic.Version.version_1.wireValue()};
     var retired = try dispatcher.receive(&versions);
     defer retired.deinit(allocator);
@@ -1174,6 +1195,8 @@ test "QUIC endpoint dispatcher leaves no CID route after send failure" {
         .local_endpoint = .server,
         .enable_pacing = false,
         .peer_active_connection_id_limit = 3,
+        .local_stateless_reset_key = [_]u8{0x6e} **
+            quic.stateless_reset.static_key_len,
     });
     defer connection.deinit();
     var dispatcher = Dispatcher.init(allocator, &endpoint);
@@ -1197,10 +1220,10 @@ test "QUIC endpoint dispatcher leaves no CID route after send failure" {
 
     try std.testing.expectError(
         error.NetworkDown,
-        dispatcher.sendNewConnectionId(
+        dispatcher.sendNewConnectionIdWithDerivedTokenRetiringPriorTo(
             1,
             "failed-cid",
-            [_]u8{3} ** 16,
+            1,
         ),
     );
     var active_storage: [quic.connection_id.max_pool_size]quic.connection_id.LocalPool.ActiveId = undefined;
@@ -1213,6 +1236,10 @@ test "QUIC endpoint dispatcher leaves no CID route after send failure" {
     try std.testing.expectEqual(
         revision_before,
         connection.localConnectionIdRevision(),
+    );
+    try std.testing.expectEqual(
+        @as(u64, 0),
+        connection.local_connection_ids.retire_prior_to,
     );
     try std.testing.expectEqual(
         sync_count_before,

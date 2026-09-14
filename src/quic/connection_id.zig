@@ -359,22 +359,27 @@ pub const LocalPool = struct {
         token: [16]u8,
         retire_prior_to: u64,
     ) Error!quic.Frame {
+        const effective_retire_prior_to = @max(
+            self.retire_prior_to,
+            retire_prior_to,
+        );
         if (connection_id.len == 0 or connection_id.len > max_connection_id_len) return error.InvalidConnectionId;
         // NEW_CONNECTION_ID sequence numbers are encoded as QUIC varints.
         // Reject exhaustion before looking for a slot or advancing the counter
         // so callers can observe and handle a stable pool state.
         if (self.next_sequence_number > quic.varint.max_value) return error.ConnectionIdSequenceLimit;
-        if (retire_prior_to > self.next_sequence_number) return error.RetirePriorToTooLarge;
+        if (effective_retire_prior_to > self.next_sequence_number) return error.RetirePriorToTooLarge;
         const slot = try self.availableIssueSlot(connection_id, token);
         if (slot) |entry| {
             const seq = self.next_sequence_number;
             self.next_sequence_number += 1;
+            self.retire_prior_to = effective_retire_prior_to;
             entry.* = .{ .sequence_number = seq, .connection_id_len = @intCast(connection_id.len), .stateless_reset_token = token, .stateless_reset_token_available = true, .occupied = true };
             @memcpy(entry.connection_id[0..connection_id.len], connection_id);
             self.advanceActiveRevision();
             return .{ .new_connection_id = .{
                 .sequence_number = seq,
-                .retire_prior_to = retire_prior_to,
+                .retire_prior_to = effective_retire_prior_to,
                 .connection_id = entry.slice(),
                 .stateless_reset_token = token,
             } };
@@ -413,6 +418,13 @@ pub const LocalPool = struct {
             if (entry.occupied and entry.sequence_number >= retire_prior_to) n += 1;
         }
         return n;
+    }
+
+    pub fn effectiveRetirePriorTo(
+        self: *const LocalPool,
+        requested: u64,
+    ) u64 {
+        return @max(self.retire_prior_to, requested);
     }
 
     pub fn issueWithStaticKey(
@@ -800,6 +812,35 @@ test "QUIC local CID pool rejects invalid retire_prior_to before mutation" {
     try std.testing.expectEqual(@as(u64, 1), pool.next_sequence_number);
     try std.testing.expectEqual(@as(usize, 1), pool.count());
     try std.testing.expectEqual(@as(u64, 1), pool.activeRevision());
+}
+
+test "QUIC local CID pool keeps retire_prior_to monotonic across issuance" {
+    var pool = LocalPool{};
+    try pool.registerInitial("init-cid", [_]u8{0} ** 16);
+
+    const replacement = try pool.issueWithRetirePriorTo(
+        "replacement",
+        [_]u8{1} ** 16,
+        1,
+    );
+    try std.testing.expectEqual(
+        @as(u64, 1),
+        replacement.new_connection_id.retire_prior_to,
+    );
+    const later = try pool.issue("later-cid", [_]u8{2} ** 16);
+    try std.testing.expectEqual(
+        @as(u64, 1),
+        later.new_connection_id.retire_prior_to,
+    );
+    const lower = try pool.issueWithRetirePriorTo(
+        "lower-request",
+        [_]u8{3} ** 16,
+        0,
+    );
+    try std.testing.expectEqual(
+        @as(u64, 1),
+        lower.new_connection_id.retire_prior_to,
+    );
 }
 
 test "QUIC local CID pool rejects duplicate IDs and reset tokens before mutation" {

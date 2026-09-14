@@ -668,6 +668,24 @@ pub const Dispatcher = struct {
         try self.timers.armFromConnection(handle, entry.connection);
     }
 
+    pub fn sendNewConnectionIdWithDerivedTokenRetiringPriorTo(
+        self: *Dispatcher,
+        handle: ConnectionHandle,
+        connection_id: []const u8,
+        retire_prior_to: u64,
+    ) Error!void {
+        const entry = self.connections.getPtr(handle) orelse
+            return error.UnknownConnectionHandle;
+        try self.ensureConnectionIdAvailable(handle, connection_id);
+        try entry.connection
+            .sendNewConnectionIdWithDerivedTokenRetiringPriorTo(
+            connection_id,
+            retire_prior_to,
+        );
+        try self.syncConnectionIds(handle);
+        try self.timers.armFromConnection(handle, entry.connection);
+    }
+
     pub fn sendNewConnectionIdRetiringPriorTo(
         self: *Dispatcher,
         handle: ConnectionHandle,

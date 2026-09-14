@@ -552,6 +552,10 @@ test "QUIC endpoint server routes two authenticated connections on one socket" {
                 @as(?u64, 1),
                 established.connection.detectStatelessReset(&reset_datagram),
             );
+            try std.testing.expectEqual(
+                @as(usize, 1),
+                try established.connection.sendPendingRetireConnectionIds(),
+            );
         }
     };
 
@@ -636,9 +640,10 @@ test "QUIC endpoint server routes two authenticated connections on one socket" {
                         quic.endpoint_dispatcher
                             .default_server_connection_id_len;
                     rotated_cid[0] +%= request[7];
-                    try server.sendNewConnectionId(
+                    try server.sendNewConnectionIdRetiringPriorTo(
                         packet.connection_handle,
                         &rotated_cid,
+                        1,
                     );
                     try server.trySend(
                         packet.connection_handle,
@@ -658,4 +663,10 @@ test "QUIC endpoint server routes two authenticated connections on one socket" {
     started = 0;
     for (clients) |client| if (client.err) |err| return err;
     try std.testing.expectEqual(@as(usize, 2), server.connectionCount());
+    while (server.dispatcher.routeCount() > clients.len) {
+        var event = try server.receiveWithDeadline(&versions, deadline);
+        defer event.deinit(allocator);
+        try std.testing.expect(event == .packet or event == .timer);
+    }
+    try std.testing.expectEqual(clients.len, server.dispatcher.routeCount());
 }

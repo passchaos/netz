@@ -7987,6 +7987,26 @@ pub const Connection = struct {
         try self.send(&frames);
     }
 
+    pub fn sendNewConnectionIdWithDerivedTokenRetiringPriorTo(
+        self: *Connection,
+        connection_id: []const u8,
+        retire_prior_to: u64,
+    ) Error!void {
+        const key = self.config.local_stateless_reset_key orelse return error.InvalidConnectionId;
+        try self.validateLocalConnectionIdIssueLimit(retire_prior_to);
+        try self.validateNextPacketNumber();
+        const pool_before = self.local_connection_ids;
+        errdefer self.local_connection_ids = pool_before;
+        const frame = try self.local_connection_ids
+            .issueWithStaticKeyRetirePriorTo(
+            connection_id,
+            key,
+            retire_prior_to,
+        );
+        const frames = [_]quic.Frame{frame};
+        try self.send(&frames);
+    }
+
     pub fn sendNewConnectionIdQuicLb(
         self: *Connection,
         config: quic.quic_lb.Config,
@@ -8063,7 +8083,9 @@ pub const Connection = struct {
         // the peer to drop lower-numbered local CIDs.  Count only IDs that
         // remain active after that instruction, matching RFC 9000's active ID
         // limit semantics and mature stacks such as quicz.
-        if (self.local_connection_ids.countAfterRetirePriorTo(retire_prior_to) >= self.config.peer_active_connection_id_limit) {
+        const effective = self.local_connection_ids
+            .effectiveRetirePriorTo(retire_prior_to);
+        if (self.local_connection_ids.countAfterRetirePriorTo(effective) >= self.config.peer_active_connection_id_limit) {
             return error.ActiveConnectionIdLimit;
         }
     }
