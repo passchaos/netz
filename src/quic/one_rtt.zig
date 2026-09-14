@@ -1268,6 +1268,17 @@ pub const Connection = struct {
         return self.local_connection_ids.activeRevision();
     }
 
+    pub fn localConnectionIdCount(self: *const Connection) usize {
+        return self.local_connection_ids.count();
+    }
+
+    pub fn localConnectionIdTarget(self: *const Connection) usize {
+        return @min(
+            self.config.peer_active_connection_id_limit,
+            quic.connection_id.max_pool_size,
+        );
+    }
+
     pub fn send(self: *Connection, frames: []const quic.Frame) Error!void {
         try self.sendAutomaticallyWithLoop(frames);
     }
@@ -7985,6 +7996,23 @@ pub const Connection = struct {
         const frame = try self.local_connection_ids.issueWithStaticKey(connection_id, key);
         const frames = [_]quic.Frame{frame};
         try self.send(&frames);
+    }
+
+    pub fn trySendNewConnectionIdWithDerivedToken(
+        self: *Connection,
+        connection_id: []const u8,
+    ) Error!void {
+        const key = self.config.local_stateless_reset_key orelse
+            return error.InvalidConnectionId;
+        try self.validateLocalConnectionIdIssueLimit(0);
+        try self.validateNextPacketNumber();
+        const pool_before = self.local_connection_ids;
+        errdefer self.local_connection_ids = pool_before;
+        const frame = try self.local_connection_ids.issueWithStaticKey(
+            connection_id,
+            key,
+        );
+        try self.trySend(&.{frame});
     }
 
     pub fn sendNewConnectionIdWithDerivedTokenRetiringPriorTo(

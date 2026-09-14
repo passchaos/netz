@@ -1220,10 +1220,9 @@ test "QUIC endpoint dispatcher leaves no CID route after send failure" {
 
     try std.testing.expectError(
         error.NetworkDown,
-        dispatcher.sendNewConnectionIdWithDerivedTokenRetiringPriorTo(
+        dispatcher.trySendNewConnectionIdWithDerivedToken(
             1,
             "failed-cid",
-            1,
         ),
     );
     var active_storage: [quic.connection_id.max_pool_size]quic.connection_id.LocalPool.ActiveId = undefined;
@@ -1236,10 +1235,6 @@ test "QUIC endpoint dispatcher leaves no CID route after send failure" {
     try std.testing.expectEqual(
         revision_before,
         connection.localConnectionIdRevision(),
-    );
-    try std.testing.expectEqual(
-        @as(u64, 0),
-        connection.local_connection_ids.retire_prior_to,
     );
     try std.testing.expectEqual(
         sync_count_before,

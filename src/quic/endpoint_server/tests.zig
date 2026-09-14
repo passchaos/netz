@@ -361,6 +361,10 @@ test "QUIC endpoint server idle batch receive preserves caller deadline" {
         .{ .max_pending_handshakes = 1 },
     );
     defer server.deinit();
+    try std.testing.expectEqual(
+        @as(usize, 0),
+        try server.replenishConnectionIds(999),
+    );
     const versions = [_]u32{quic.Version.version_1.wireValue()};
     var storage: [4096]u8 = undefined;
     var events: [1]endpoint_server.VisitEvent = undefined;
@@ -495,6 +499,7 @@ test "QUIC endpoint server routes two authenticated connections on one socket" {
                     .local_transport_parameters = .{
                         .initial_max_streams_bidi = 1,
                         .initial_max_streams_uni = 1,
+                        .active_connection_id_limit = 2,
                     },
                     .initial_one_rtt_config = .{ .enable_pacing = false },
                     .handshake_recovery = .{
@@ -535,9 +540,11 @@ test "QUIC endpoint server routes two authenticated connections on one socket" {
             try std.testing.expect(data.fin);
             try std.testing.expectEqual(payload.len, data.bytes);
             try std.testing.expectEqualSlices(u8, &payload, &response);
-            var rotated_cid = [_]u8{0xa0} **
-                quic.endpoint_dispatcher.default_server_connection_id_len;
-            rotated_cid[0] +%= self.index;
+            try std.testing.expect(
+                established.connection.switchToNextPeerConnectionId(),
+            );
+            const rotated_cid = established.connection.config
+                .peer_connection_id;
             var reset_datagram = [_]u8{0x40} **
                 quic.stateless_reset.min_datagram_len;
             const rotated_token = quic.stateless_reset.tokenForConnectionId(
@@ -555,6 +562,37 @@ test "QUIC endpoint server routes two authenticated connections on one socket" {
             try std.testing.expectEqual(
                 @as(usize, 1),
                 try established.connection.sendPendingRetireConnectionIds(),
+            );
+            const cid_deadline = std.Io.Clock.Timestamp.fromNow(self.io, .{
+                .raw = .fromSeconds(2),
+                .clock = .awake,
+            });
+            while (true) {
+                var packet = try established.connection
+                    .receivePacketServicingTimersDeadline(cid_deadline);
+                defer packet.deinit(self.allocator);
+                var found = false;
+                for (packet.frames) |frame| {
+                    if (frame != .new_connection_id or
+                        frame.new_connection_id.sequence_number != 2) continue;
+                    try std.testing.expectEqualSlices(
+                        u8,
+                        &quic.stateless_reset.tokenForConnectionId(
+                            self.stateless_reset_key,
+                            frame.new_connection_id.connection_id,
+                        ),
+                        &frame.new_connection_id.stateless_reset_token,
+                    );
+                    found = true;
+                }
+                _ = try established.connection.sendAckForPacketIfNeeded(
+                    packet.packet.packet_number,
+                    packet.frames,
+                );
+                if (found) break;
+            }
+            try std.testing.expect(
+                established.connection.switchToNextPeerConnectionId(),
             );
         }
     };
@@ -636,15 +674,6 @@ test "QUIC endpoint server routes two authenticated connections on one socket" {
                     {
                         return error.TestUnexpectedResult;
                     }
-                    var rotated_cid = [_]u8{0xa0} **
-                        quic.endpoint_dispatcher
-                            .default_server_connection_id_len;
-                    rotated_cid[0] +%= request[7];
-                    try server.sendNewConnectionIdRetiringPriorTo(
-                        packet.connection_handle,
-                        &rotated_cid,
-                        1,
-                    );
                     try server.trySend(
                         packet.connection_handle,
                         &.{.{ .stream = .{
@@ -658,15 +687,29 @@ test "QUIC endpoint server routes two authenticated connections on one socket" {
             }
         }
     }
+    var retirements: usize = 0;
+    while (retirements < clients.len) {
+        var event = try server.receiveWithDeadline(&versions, deadline);
+        defer event.deinit(allocator);
+        switch (event) {
+            .packet => |*packet| {
+                for (packet.packet.frames) |frame| {
+                    retirements += @intFromBool(
+                        frame == .retire_connection_id and
+                            frame.retire_connection_id.sequence_number == 0,
+                    );
+                }
+                _ = try server.acknowledgePacketIfNeeded(packet);
+            },
+            .timer => {},
+            .handshake_failed => |failure| return failure.err,
+            .connected, .unrouted => return error.TestUnexpectedResult,
+        }
+    }
 
     for (threads) |thread| thread.join();
     started = 0;
     for (clients) |client| if (client.err) |err| return err;
     try std.testing.expectEqual(@as(usize, 2), server.connectionCount());
-    while (server.dispatcher.routeCount() > clients.len) {
-        var event = try server.receiveWithDeadline(&versions, deadline);
-        defer event.deinit(allocator);
-        try std.testing.expect(event == .packet or event == .timer);
-    }
-    try std.testing.expectEqual(clients.len, server.dispatcher.routeCount());
+    try std.testing.expectEqual(clients.len * 2, server.dispatcher.routeCount());
 }

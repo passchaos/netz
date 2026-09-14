@@ -34,6 +34,10 @@ pub const Options = struct {
     /// Endpoint-wide minimum interval between automatic reset responses.
     /// Quinn uses the same 20 ms default to bound reflection work.
     stateless_reset_min_interval: std.Io.Duration = .fromMilliseconds(20),
+    /// Keep the local CID pool filled to the peer's advertised active limit
+    /// when a reset key is configured. One-shot sends retry on later endpoint
+    /// packet/timer turns rather than blocking the sole receive owner.
+    automatic_connection_id_replenishment: bool = true,
 };
 
 pub const WorkerError = quic.handshake.AcceptTimeoutError;
@@ -200,6 +204,7 @@ pub const Server = struct {
     options: Options,
     handshake_options: quic.handshake.ServerOptions,
     last_stateless_reset_ns: ?u64 = null,
+    connection_id_replenishment_failures: u64 = 0,
     next_handle: quic.endpoint_dispatcher.ConnectionHandle = 1,
     next_handle_mutex: std.Io.Mutex = .init,
     workers: std.Io.Group = .init,
@@ -344,6 +349,10 @@ pub const Server = struct {
         return self.active_workers.load(.acquire);
     }
 
+    pub fn connectionIdReplenishmentFailures(self: *const Server) u64 {
+        return self.connection_id_replenishment_failures;
+    }
+
     pub fn connection(
         self: *Server,
         handle: quic.endpoint_dispatcher.ConnectionHandle,
@@ -440,6 +449,47 @@ pub const Server = struct {
             connection_id,
             retire_prior_to,
         );
+    }
+
+    /// Best-effort nonblocking CID pool maintenance for externally scheduled
+    /// endpoint loops. Returns the number of newly advertised identifiers.
+    pub fn replenishConnectionIds(
+        self: *Server,
+        handle: quic.endpoint_dispatcher.ConnectionHandle,
+    ) Error!usize {
+        if (self.options.stateless_reset_key == null or
+            !self.options.automatic_connection_id_replenishment) return 0;
+        const established = self.connection(handle) orelse
+            return error.UnknownConnectionHandle;
+        var issued: usize = 0;
+        var attempts: usize = 0;
+        while (established.connection.localConnectionIdCount() <
+            established.connection.localConnectionIdTarget())
+        {
+            if (attempts == quic.connection_id.max_pool_size * 2) {
+                return error.DuplicateConnectionId;
+            }
+            attempts += 1;
+            var connection_id: [
+                quic.endpoint_dispatcher.default_server_connection_id_len
+            ]u8 = undefined;
+            try std.Io.randomSecure(self.endpoint.io, &connection_id);
+            self.dispatcher.trySendNewConnectionIdWithDerivedToken(
+                handle,
+                &connection_id,
+            ) catch |err| switch (err) {
+                error.DuplicateConnectionId => continue,
+                error.PacingLimited,
+                error.CongestionLimited,
+                error.AntiAmplificationLimited,
+                error.FlowControlBlocked,
+                error.ConnectionClosed,
+                => break,
+                else => |other| return other,
+            };
+            issued += 1;
+        }
+        return issued;
     }
 
     /// Reserve one bidirectional stream without reading the shared socket.
@@ -809,6 +859,7 @@ pub const Server = struct {
                         };
                     },
                     .packet => |packet| {
+                        self.maintainConnectionIds(packet.connection_handle);
                         output[count] = .{ .packet = .{
                             .connection_handle = packet.connection_handle,
                             .connection_id_sequence = packet.connection_id_sequence,
@@ -816,6 +867,7 @@ pub const Server = struct {
                         count += 1;
                     },
                     .timer => |timer| {
+                        self.maintainConnectionIds(timer.connection_handle);
                         output[count] = .{ .timer = timer };
                         count += 1;
                     },
@@ -907,11 +959,17 @@ pub const Server = struct {
                         else => |other| return other,
                     };
                 },
-                .packet => |packet| return .{ .packet = .{
-                    .connection_handle = packet.connection_handle,
-                    .connection_id_sequence = packet.connection_id_sequence,
-                } },
-                .timer => |timer| return .{ .timer = timer },
+                .packet => |packet| {
+                    self.maintainConnectionIds(packet.connection_handle);
+                    return .{ .packet = .{
+                        .connection_handle = packet.connection_handle,
+                        .connection_id_sequence = packet.connection_id_sequence,
+                    } };
+                },
+                .timer => |timer| {
+                    self.maintainConnectionIds(timer.connection_handle);
+                    return .{ .timer = timer };
+                },
                 .unrouted => {
                     const handled = self.handleUnrouted(
                         &event.unrouted,
@@ -962,11 +1020,15 @@ pub const Server = struct {
                 return null;
             },
             .packet => |packet| {
+                self.maintainConnectionIds(packet.connection_handle);
                 endpoint_event = .consumed;
                 endpoint_owned = false;
                 return .{ .packet = packet };
             },
-            .timer => |timer| return .{ .timer = timer },
+            .timer => |timer| {
+                self.maintainConnectionIds(timer.connection_handle);
+                return .{ .timer = timer };
+            },
             .unrouted => {
                 if (try self.handleUnrouted(&endpoint_event.unrouted)) {
                     return null;
@@ -1143,6 +1205,7 @@ pub const Server = struct {
                 completion.admission.deinit();
                 self.allocator.destroy(completion.admission);
                 self.connections.putAssumeCapacityNoClobber(handle, owned);
+                self.maintainConnectionIds(handle);
                 completion.* = undefined;
                 return .{ .connected = handle };
             },
@@ -1163,6 +1226,15 @@ pub const Server = struct {
         _ = self.admissions.remove(values[0].handle);
         self.admissions_mutex.unlock(self.endpoint.io);
         return values[0];
+    }
+
+    fn maintainConnectionIds(
+        self: *Server,
+        handle: quic.endpoint_dispatcher.ConnectionHandle,
+    ) void {
+        _ = self.replenishConnectionIds(handle) catch {
+            self.connection_id_replenishment_failures +|= 1;
+        };
     }
 
     fn hasActiveHandshakes(self: *Server) bool {
@@ -1330,4 +1402,20 @@ test "QUIC endpoint server skips handshake maintenance when idle" {
     server.active_workers.store(1, .release);
     try std.testing.expect(server.hasActiveHandshakes());
     try std.testing.expectEqual(@as(usize, 1), server.handshake_poll_count);
+}
+
+test "QUIC endpoint server records automatic CID maintenance failures" {
+    var server: Server = undefined;
+    server.options = .{
+        .stateless_reset_key = [_]u8{0x5a} **
+            quic.stateless_reset.static_key_len,
+    };
+    server.connections = .empty;
+    server.connection_id_replenishment_failures = 0;
+
+    server.maintainConnectionIds(99);
+    try std.testing.expectEqual(
+        @as(u64, 1),
+        server.connectionIdReplenishmentFailures(),
+    );
 }
