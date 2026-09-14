@@ -2711,6 +2711,31 @@ reduction. The 1,024-connection ordinary non-earliest update measured
 optimization removes only the provable no-op scan without hiding the remaining
 linear operations or imposing heap maintenance on ordinary updates.
 
+The shared dispatcher's caller-buffer batch now also returns a bounded snapshot
+of due timers instead of at most one timer per receive call. Each connection is
+visited once per snapshot, so an immediately rearmed connection cannot starve
+its peers or UDP receive. If PTO transmission is temporarily pacing-limited,
+the endpoint replaces the already-due loss entry with the connection's exact
+future pacing wake-up and continues through the snapshot; a 16-connection
+pressure run caught the prior error propagation after 10/16 downloads, while
+the corrected run completed all 16. Direct public-API tests cover a two-event
+capacity bound, a third timer left for the next call, UDP data remaining queued
+until due timers are serviced, and progress past a paced connection.
+
+Three fixed-binary, order-interleaved comparisons against parent `d605cd55`
+used the shared-server aggregate shape with 16 connections, one 1-MiB stream
+per connection, and receive batch 32. In the timer-heavy server-sender direction,
+the baseline used 2,800-3,368 receive calls (3,266 median) for 2,586-3,124 timer
+events, while the timer-batch candidate used 1,008-1,135 calls (1,088 median)
+for 2,797-3,372 timer events: a 66.7% median call-count reduction. Throughput
+was 77.996-85.504 MiB/s (80.651 median) before and 75.629-87.950 MiB/s
+(84.438 median) after. Client-sender throughput was 69.609-93.420 MiB/s
+(79.518 median) before and 63.189-79.369 MiB/s (73.885 median) after. Both
+throughput ranges overlap, and the upload median moved lower, so this is retained
+as bounded scheduling/call-amortization evidence, not a throughput improvement.
+Every arm verified 16,777,216 bytes, checksum 2,139,095,040, all 16
+connections, and the completion exchange.
+
 ### Raw QUIC mixed FIN/reset recovery versus quic-go
 
 The separate process gate below exercises terminal stream churn instead of

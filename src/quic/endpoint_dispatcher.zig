@@ -1087,11 +1087,29 @@ pub const Dispatcher = struct {
                 _ = self.timers.disarmConnection(handle);
                 return error.StaleConnectionRoute;
             };
-            const serviced = (try self.timers.serviceConnection(
+            const serviced = (self.timers.serviceConnection(
                 handle,
                 entry.connection,
                 now_ns,
-            )) orelse continue;
+            ) catch |err| switch (err) {
+                // PTO service can consume the current pacing budget before
+                // its next probe. The connection has already published the
+                // future pacing wake-up, so keep that schedule and let other
+                // due connections make progress in this bounded snapshot.
+                error.PacingLimited => {
+                    const pacing_deadline = entry.connection
+                        .pendingPacingDeadline() orelse return err;
+                    try self.timers.update(
+                        handle,
+                        .{
+                            .kind = .pacing,
+                            .deadline_ns = pacing_deadline,
+                        },
+                    );
+                    continue;
+                },
+                else => |other| return other,
+            }) orelse continue;
             output[count] = .{
                 .connection_handle = handle,
                 .timer = serviced.timer,
@@ -1276,9 +1294,17 @@ pub const Dispatcher = struct {
                 );
                 return 1;
             }
-            if (try self.serviceDueTimer()) |timer| {
-                output[0] = .{ .timer = timer };
-                return 1;
+            var timer_events: [runtime.max_receive_batch_messages]TimerEvent =
+                undefined;
+            const timer_count = try self.serviceDueTimersAt(
+                monotonicNowNs(self.endpoint.io),
+                timer_events[0..output.len],
+            );
+            if (timer_count != 0) {
+                for (timer_events[0..timer_count], 0..) |timer, index| {
+                    output[index] = .{ .timer = timer };
+                }
+                return timer_count;
             }
 
             const receive_timeout = earliestReceiveTimeout(

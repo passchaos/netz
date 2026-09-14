@@ -3318,6 +3318,13 @@ pub const Connection = struct {
         );
     }
 
+    /// Wake-up published by the most recent send attempt that pacing deferred.
+    /// Shared endpoint owners use this to replace an already-due loss timer
+    /// without sleeping or repeatedly servicing the same connection.
+    pub fn pendingPacingDeadline(self: Connection) ?u64 {
+        return self.pacing_blocked_until_ns;
+    }
+
     pub fn nextPacketPacingDeadlineAt(self: Connection, now_ns: u64, payload_len: usize) Error!?u64 {
         const packet_number_len = quic.protection.packetNumberLenForPayload(
             self.next_packet_number,

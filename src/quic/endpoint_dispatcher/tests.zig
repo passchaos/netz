@@ -1805,6 +1805,226 @@ test "QUIC endpoint dispatcher batches each due connection once" {
     try std.testing.expectEqual(one_rtt.TimerDeadlineKind.pto, events[1].timer.kind);
 }
 
+test "QUIC endpoint dispatcher public batch bounds due timers before receive" {
+    const allocator = std.testing.allocator;
+    var threaded = std.Io.Threaded.init(allocator, .{});
+    defer threaded.deinit();
+    const io = threaded.io();
+    var endpoint = try runtime.Endpoint.bind(
+        allocator,
+        io,
+        .{ .ip4 = .loopback(0) },
+        .{ .max_datagram_size = 4096 },
+    );
+    defer endpoint.deinit();
+    var peer = try runtime.Endpoint.bind(
+        allocator,
+        io,
+        .{ .ip4 = .loopback(0) },
+        .{ .max_datagram_size = 4096 },
+    );
+    defer peer.deinit();
+    const keys = quic.protection.deriveAes128Keys(
+        [_]u8{0xd4} ** quic.protection.secret_len,
+    );
+    var first = try one_rtt.Connection.init(&endpoint, .{
+        .peer = peer.address(),
+        .receive_keys = keys,
+        .send_keys = keys,
+        .local_connection_id = "timer-public-a",
+        .peer_connection_id = "peer-public-a",
+        .local_endpoint = .server,
+        .enable_pacing = false,
+    });
+    defer first.deinit();
+    var second = try one_rtt.Connection.init(&endpoint, .{
+        .peer = peer.address(),
+        .receive_keys = keys,
+        .send_keys = keys,
+        .local_connection_id = "timer-public-b",
+        .peer_connection_id = "peer-public-b",
+        .local_endpoint = .server,
+        .enable_pacing = false,
+    });
+    defer second.deinit();
+    var third = try one_rtt.Connection.init(&endpoint, .{
+        .peer = peer.address(),
+        .receive_keys = keys,
+        .send_keys = keys,
+        .local_connection_id = "timer-public-c",
+        .peer_connection_id = "peer-public-c",
+        .local_endpoint = .server,
+        .enable_pacing = false,
+    });
+    defer third.deinit();
+
+    var dispatcher = Dispatcher.init(allocator, &endpoint);
+    defer dispatcher.deinit();
+    try dispatcher.registerConnection(1, &first);
+    try dispatcher.registerConnection(2, &second);
+    try dispatcher.registerConnection(3, &third);
+    const ping = [_]quic.Frame{.{ .ping = {} }};
+    const packets = [_][]const quic.Frame{&ping};
+    for ([_]*one_rtt.Connection{ &first, &second, &third }) |connection| {
+        const sent = try connection.sendManyProgressAt(&packets, 1);
+        try std.testing.expectEqual(@as(usize, 1), sent.sent_count);
+        try std.testing.expectEqual(@as(usize, 1), sent.protected_count);
+        try std.testing.expect(sent.send_error == null);
+    }
+    try dispatcher.refreshConnectionTimer(1);
+    try dispatcher.refreshConnectionTimer(2);
+    try dispatcher.refreshConnectionTimer(3);
+
+    // Keep one valid datagram queued. Due timers must be returned before the
+    // dispatcher enters the UDP receive path, so this remains for a later
+    // call after all three timer handles have had a fair turn.
+    try one_rtt.sendFrames(&peer, endpoint.address(), keys, .{
+        .destination_connection_id = "timer-public-a",
+        .packet_number = 0,
+        .frames = &ping,
+    });
+
+    const Visitor = struct {
+        fn visit(calls: *usize, packet: dispatcher_mod.RoutedPacketView) !void {
+            calls.* += 1;
+            try std.testing.expectEqual(
+                @as(ConnectionHandle, 1),
+                packet.connection_handle,
+            );
+        }
+    };
+    const versions = &.{quic.Version.version_1.wireValue()};
+    const deadline = std.Io.Clock.Timestamp.fromNow(io, .{
+        .clock = .awake,
+        .raw = .fromSeconds(1),
+    });
+    var visitor_calls: usize = 0;
+    var storage: [2 * 4096]u8 = undefined;
+    var events: [2]dispatcher_mod.VisitEvent = undefined;
+    const first_count = try dispatcher.receiveManyVisitingWithDeadline(
+        versions,
+        &storage,
+        &events,
+        deadline,
+        &visitor_calls,
+        Visitor.visit,
+    );
+    try std.testing.expectEqual(@as(usize, 2), first_count);
+    try std.testing.expect(events[0] == .timer);
+    try std.testing.expect(events[1] == .timer);
+    try std.testing.expect(
+        events[0].timer.connection_handle !=
+            events[1].timer.connection_handle,
+    );
+    try std.testing.expectEqual(@as(usize, 0), visitor_calls);
+
+    var one_event: [1]dispatcher_mod.VisitEvent = undefined;
+    const second_count = try dispatcher.receiveManyVisitingWithDeadline(
+        versions,
+        storage[0..4096],
+        &one_event,
+        deadline,
+        &visitor_calls,
+        Visitor.visit,
+    );
+    try std.testing.expectEqual(@as(usize, 1), second_count);
+    try std.testing.expect(one_event[0] == .timer);
+    try std.testing.expect(
+        one_event[0].timer.connection_handle !=
+            events[0].timer.connection_handle,
+    );
+    try std.testing.expect(
+        one_event[0].timer.connection_handle !=
+            events[1].timer.connection_handle,
+    );
+    try std.testing.expectEqual(@as(usize, 0), visitor_calls);
+
+    const packet_count = try dispatcher.receiveManyVisitingWithDeadline(
+        versions,
+        storage[0..4096],
+        &one_event,
+        deadline,
+        &visitor_calls,
+        Visitor.visit,
+    );
+    defer for (one_event[0..packet_count]) |*event| event.deinit(allocator);
+    try std.testing.expectEqual(@as(usize, 1), packet_count);
+    try std.testing.expect(one_event[0] == .packet);
+    try std.testing.expectEqual(@as(usize, 1), visitor_calls);
+}
+
+test "QUIC endpoint dispatcher timer batch continues past paced connection" {
+    const allocator = std.testing.allocator;
+    var threaded = std.Io.Threaded.init(allocator, .{});
+    defer threaded.deinit();
+    const io = threaded.io();
+    var endpoint = try runtime.Endpoint.bind(
+        allocator,
+        io,
+        .{ .ip4 = .loopback(0) },
+        .{ .max_datagram_size = 4096 },
+    );
+    defer endpoint.deinit();
+    var peer = try runtime.Endpoint.bind(
+        allocator,
+        io,
+        .{ .ip4 = .loopback(0) },
+        .{ .max_datagram_size = 4096 },
+    );
+    defer peer.deinit();
+    const keys = quic.protection.deriveAes128Keys(
+        [_]u8{0xd5} ** quic.protection.secret_len,
+    );
+    var paced = try one_rtt.Connection.init(&endpoint, .{
+        .peer = peer.address(),
+        .receive_keys = keys,
+        .send_keys = keys,
+        .local_connection_id = "timer-paced",
+        .peer_connection_id = "peer-paced",
+        .local_endpoint = .server,
+    });
+    defer paced.deinit();
+    var ready = try one_rtt.Connection.init(&endpoint, .{
+        .peer = peer.address(),
+        .receive_keys = keys,
+        .send_keys = keys,
+        .local_connection_id = "timer-ready",
+        .peer_connection_id = "peer-ready",
+        .local_endpoint = .server,
+        .enable_pacing = false,
+    });
+    defer ready.deinit();
+
+    var dispatcher = Dispatcher.init(allocator, &endpoint);
+    defer dispatcher.deinit();
+    try dispatcher.registerConnection(1, &paced);
+    try dispatcher.registerConnection(2, &ready);
+    const ping = [_]quic.Frame{.{ .ping = {} }};
+    const packets = [_][]const quic.Frame{&ping};
+    for ([_]*one_rtt.Connection{ &paced, &ready }) |connection| {
+        const sent = try connection.sendManyProgressAt(&packets, 1);
+        try std.testing.expectEqual(@as(usize, 1), sent.sent_count);
+    }
+    try dispatcher.refreshConnectionTimer(1);
+    try dispatcher.refreshConnectionTimer(2);
+
+    const now_ns = dispatcher.nextTimerDeadline().?.timer.deadline_ns +
+        10 * std.time.ns_per_s;
+    one_rtt.testing.exhaustPacingAt(&paced, now_ns);
+    var events: [2]dispatcher_mod.TimerEvent = undefined;
+    const count = try dispatcher.serviceDueTimersAt(now_ns, &events);
+    try std.testing.expectEqual(@as(usize, 1), count);
+    try std.testing.expectEqual(@as(ConnectionHandle, 2), events[0].connection_handle);
+    try std.testing.expectEqual(one_rtt.TimerDeadlineKind.pto, events[0].timer.kind);
+    const paced_deadline = dispatcher.timers.deadlineForConnection(1) orelse
+        return error.TestUnexpectedResult;
+    try std.testing.expectEqual(
+        one_rtt.TimerDeadlineKind.pacing,
+        paced_deadline.timer.kind,
+    );
+    try std.testing.expect(paced_deadline.timer.deadline_ns > now_ns);
+}
+
 test "QUIC endpoint dispatcher negotiates versions before Initial admission" {
     const allocator = std.testing.allocator;
     var threaded = std.Io.Threaded.init(allocator, .{});

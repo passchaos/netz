@@ -1089,6 +1089,13 @@ route/timer before connection storage can be destroyed. Route-level migration
 blocking now permits same-IP port rebinding and rejects only address changes
 before authenticated connection processing, matching the transport's existing
 NAT-rebinding behavior.
+The caller-buffer batch receive path returns a bounded snapshot of timers due
+across different connections, with each connection serviced at most once before
+UDP receive gets another turn. A pacing-limited PTO keeps its exact future pacing
+wake-up without aborting the rest of the snapshot. At 16 connections this reduced
+the timer-heavy server-sender receive-call median from 3,266 to 1,088 against the
+immediate parent, while throughput ranges overlapped; this is scheduling
+amortization evidence rather than a throughput claim.
 The dispatcher now also mirrors each connection's authoritative fixed-capacity
 local CID pool. Initial IDs are installed at registration, dispatcher-mediated
 NEW_CONNECTION_ID sends preflight endpoint-wide collisions before changing
