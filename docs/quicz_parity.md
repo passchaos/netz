@@ -1138,6 +1138,11 @@ offset zero before the change and completed 65,536 bytes plus checksum and
 completion exchange after it. A 16-connection server-sender pressure run then
 completed 1 GiB total exactly. Standard-window throughput pairs were mixed with
 overlapping ranges, so this closes a progress gap rather than claiming speed.
+The shared blocking payload helper now applies the same credit-aware prefix
+rule, covering client-sender and independent-server paths. With a 1,024-byte
+stream window, parent `4fe04ace` timed out at client payload offset zero while
+the candidate completed both sender directions in shared and independent
+topologies. Standard 1-MiB-window throughput remained noisy and overlapping.
 The dispatcher now also mirrors each connection's authoritative fixed-capacity
 local CID pool. Initial IDs are installed at registration, dispatcher-mediated
 NEW_CONNECTION_ID sends preflight endpoint-wide collisions before changing

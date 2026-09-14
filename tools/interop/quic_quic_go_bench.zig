@@ -540,7 +540,22 @@ pub fn sendPayloads(
             const payload = payloads.streams[index];
             if (offsets[index] == payload.len) continue;
             remaining += 1;
-            const end = @min(payload.len, offsets[index] + config.effectiveChunk());
+            const chunk_end = @min(
+                payload.len,
+                offsets[index] + config.effectiveChunk(),
+            );
+            const available = connection.streamSendCredit(
+                stream_ids[index],
+            ).available();
+            // `sendWithDeadline` is transactional: it waits until the entire
+            // requested STREAM frame fits. Consume a positive window tail
+            // before asking for more credit; at zero, a one-byte request emits
+            // the appropriate BLOCKED signal and then waits for progress.
+            const count = @min(
+                chunk_end - offsets[index],
+                @max(@as(usize, 1), available),
+            );
+            const end = offsets[index] + count;
             try sendBytes(
                 connection,
                 stream_ids[index],

@@ -2869,6 +2869,21 @@ candidate throughput was 82.035-105.988 MiB/s versus parent
 78.725-102.589 MiB/s with 2/3 wins, while client-sender was
 63.328-83.471 versus 70.786-100.162 MiB/s with 1/3 wins. All ranges overlap,
 so the retained claim is progress/reliability, not throughput improvement.
+The shared `transfer.sendPayloads` helper had the same fixed-chunk assumption
+on the blocking client and independent server paths. It now consumes any
+positive `SendCredit.available()` prefix before blocking for more transport
+progress, while a zero-credit one-byte probe retains DATA_BLOCKED and
+STREAM_DATA_BLOCKED signaling. Against parent `4fe04ace`, the same one-
+connection, 1,024-byte-window, 65,536-byte shared run timed out during the
+client-sender payload at offset zero; the candidate completed both sender
+directions with exact bytes, checksum, and DONE/DONE_ACK. The candidate also
+completed both directions in the independent topology. Three fixed-binary,
+order-interleaved standard-window shared pairs were noisy: client-sender
+throughput was 70.175-82.803 MiB/s (75.876 median) before and
+64.423-86.394 MiB/s (77.895 median) after; server-sender was
+69.777-87.339 MiB/s (79.613 median) before and 75.609-91.790 MiB/s
+(82.877 median) after. The candidate won 2/3 pairs in both directions and all
+ranges overlap, so this remains a correctness/progress result.
 
 ### Raw QUIC mixed FIN/reset recovery versus quic-go
 
