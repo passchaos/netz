@@ -69,6 +69,8 @@ pub fn main(init: std.process.Init) !void {
     var bytes_total: usize = 0;
     var recovery_cache_hits: u64 = 0;
     var recovery_cache_misses: u64 = 0;
+    var recovery_cached_blocks: usize = 0;
+    var recovery_cached_bytes: usize = 0;
     for (0..config.iterations) |iteration| {
         const iteration_started = nowNs(io);
         const result = try runIteration(
@@ -90,6 +92,8 @@ pub fn main(init: std.process.Init) !void {
         bytes_total += result.bytes_total;
         recovery_cache_hits +|= result.recovery_cache_hits;
         recovery_cache_misses +|= result.recovery_cache_misses;
+        recovery_cached_blocks +|= result.recovery_cached_blocks;
+        recovery_cached_bytes +|= result.recovery_cached_bytes;
     }
     const elapsed = nowNs(io) -| started;
 
@@ -125,8 +129,15 @@ pub fn main(init: std.process.Init) !void {
         std.debug.print(
             "recovery payload cache\n" ++
                 "  hits: {d}\n" ++
-                "  misses: {d}\n",
-            .{ recovery_cache_hits, recovery_cache_misses },
+                "  misses: {d}\n" ++
+                "  cached blocks: {d}\n" ++
+                "  cached bytes: {d}\n",
+            .{
+                recovery_cache_hits,
+                recovery_cache_misses,
+                recovery_cached_blocks,
+                recovery_cached_bytes,
+            },
         );
         stats_allocator.snapshot().print();
     }
@@ -163,6 +174,8 @@ const IterationResult = struct {
     bytes_total: usize,
     recovery_cache_hits: u64 = 0,
     recovery_cache_misses: u64 = 0,
+    recovery_cached_blocks: usize = 0,
+    recovery_cached_bytes: usize = 0,
 };
 
 fn traceIteration(config: Config, iteration: usize, message: []const u8) void {
@@ -256,6 +269,8 @@ fn runIteration(
         ack_eliciting_threshold: u64,
         recovery_cache_hits: u64 = 0,
         recovery_cache_misses: u64 = 0,
+        recovery_cached_blocks: usize = 0,
+        recovery_cached_bytes: usize = 0,
         err: ?anyerror = null,
 
         fn run(shared: *@This()) void {
@@ -307,6 +322,10 @@ fn runIteration(
                 stats.recovery_queue_stats.payload_cache_hits;
             shared.recovery_cache_misses =
                 stats.recovery_queue_stats.payload_cache_misses;
+            shared.recovery_cached_blocks =
+                stats.recovery_queue_stats.cached_payload_blocks;
+            shared.recovery_cached_bytes =
+                stats.recovery_queue_stats.cached_payload_bytes;
         }
     };
 
@@ -390,6 +409,10 @@ fn runIteration(
         client_stats.recovery_queue_stats.payload_cache_hits;
     result.recovery_cache_misses +|=
         client_stats.recovery_queue_stats.payload_cache_misses;
+    result.recovery_cached_blocks +|=
+        client_stats.recovery_queue_stats.cached_payload_blocks;
+    result.recovery_cached_bytes +|=
+        client_stats.recovery_queue_stats.cached_payload_bytes;
     traceIteration(config, iteration, "transfer done");
 
     thread.join();
@@ -397,6 +420,8 @@ fn runIteration(
     if (shared.err) |err| return err;
     result.recovery_cache_hits +|= shared.recovery_cache_hits;
     result.recovery_cache_misses +|= shared.recovery_cache_misses;
+    result.recovery_cached_blocks +|= shared.recovery_cached_blocks;
+    result.recovery_cached_bytes +|= shared.recovery_cached_bytes;
     return result;
 }
 

@@ -1839,6 +1839,26 @@ removed; the retained implementation instead moves loss-time discovery into
 the existing ACK/loss pass, matching the recovery structure of the audited
 implementations.
 
+A subsequent recovery-payload ownership experiment grouped sustained 4-KiB
+blocks into 64-KiB chunks. One captured ordinary-cache run made 2,101
+allocation calls, including 1,761 exact 4-KiB allocations, with 3,871 cache
+hits, 1,775 misses, 266 idle blocks, and 1,045,025 idle bytes. The dynamic
+grouped candidate reduced the corresponding capture to 462 allocation calls,
+67 calls of at most 4 KiB, and 110 64-KiB calls; it recorded 5,515 cache hits,
+131 misses, 262 idle blocks, and 1,048,849 idle bytes. Peak explicit live bytes
+were effectively unchanged at 24,756,635 before and 24,784,283 after.
+
+That allocation-count reduction did not survive the fixed-binary HTTP/3 gate.
+In five order-interleaved pairs of three 16-MiB/four-stream uploads per arm, a
+fixed-capacity grouped version won 1/5 pairs and moved the median from 144.22
+to 140.73 MiB/s (-2.4%); its parent/candidate ranges were 129.63-160.21 and
+134.38-146.51 MiB/s. A dynamic-group version won 2/5 pairs and moved the
+median from 145.83 to 143.97 MiB/s (-1.3%); its parent/candidate ranges were
+119.76-149.09 and 140.57-146.80 MiB/s. Both grouped implementations were fully
+removed. The benchmark retains only opt-in cache block/byte telemetry so later
+work can distinguish a cache near its one-MiB idle limit from a first-activity
+high-water mark; no allocator or throughput improvement is claimed.
+
 Receive preflight no longer clones the heap-backed path-validation state for
 every authenticated packet, and its distinct-stream shadow starts in fixed
 packet-local storage. A same-command 16 MiB/four-stream upload A/B against
