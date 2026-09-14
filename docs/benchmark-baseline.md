@@ -1798,6 +1798,47 @@ threads and could undercount racing allocator calls. It now reuses the shared
 atomic counting allocator, reports exact sizes and recovery-cache hit/miss
 totals, and is the authoritative source for the numbers above.
 
+The connection loss timer now follows Quinn, quiche, and tquic by retaining
+the next RFC 9002 time-threshold loss deadline when ACK/loss state changes,
+rather than rescanning all retained sent-packet metadata every time an endpoint
+mirrors the connection timer. PMTU probe transitions, path resets, RTT updates,
+explicit acknowledgements, and both packet- and time-threshold loss paths
+refresh the cached value. A fixed-binary, CPU-0, seven-pair microbenchmark with
+256 sent records, 255 acknowledged records, and one in-range loss candidate
+reduced the complete
+`Connection.lossDetectionTimerDeadline` query from 125.12-126.58 ns (125.93
+median) to 3.08-3.11 ns (3.09 median), about 40.8x, with 7/7 wins.
+
+Five order-interleaved 16-connection, 16-MiB-total shared-server pairs against
+parent `bae40ca3` completed exactly in both sender directions. Client-sender
+throughput was 43.140-69.628 MiB/s (60.810 median) before and 56.649-62.927
+MiB/s (60.822 median) after, with 2/5 candidate wins. Server-sender throughput
+was 73.391-93.500 MiB/s (80.275 median) before and 77.666-115.835 MiB/s (82.260
+median) after, with 4/5 candidate wins and a 2.5% median increase. Both raw
+ranges overlap, so the server-sender result is supporting evidence rather than
+a general throughput claim; the isolated timer-query reduction is the strong
+performance result. Every arm verified 16,777,216 bytes, checksum 2,139,095,040,
+all 16 connections, and the completion exchange.
+
+The same fixed parent/candidate HTTP/3 binaries were then run in five
+order-interleaved pairs, each arm performing three real-handshake, four-stream,
+16-MiB uploads. Parent throughput was 125.96-134.84 MiB/s (130.87 median),
+while the cached-loss-time path measured 133.60-138.15 MiB/s (134.64 median),
+a 2.9% median increase with 5/5 candidate wins. Every arm verified 48 MiB and
+status total 2,400. This is same-host HTTP/3 regression evidence; it does not
+replace the equal-wire cross-stack gap.
+
+Two narrower alternatives were measured and removed. Merely starting the
+read-time sent-packet scan at the first unacknowledged index made the isolated
+query cheap, but a longer 16-connection, 64-MiB-per-arm shared run favored it
+in only 1/5 client-sender and 2/5 server-sender pairs; client-sender median
+fell from 41.898 to 32.231 MiB/s. Separately skipping endpoint-timer refresh
+after an empty socket-free stream poll lost all 5/5 client-sender pairs and
+moved its median from 65.424 to 55.055 MiB/s. Both experiments were fully
+removed; the retained implementation instead moves loss-time discovery into
+the existing ACK/loss pass, matching the recovery structure of the audited
+implementations.
+
 Receive preflight no longer clones the heap-backed path-validation state for
 every authenticated packet, and its distinct-stream shadow starts in fixed
 packet-local storage. A same-command 16 MiB/four-stream upload A/B against

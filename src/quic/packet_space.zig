@@ -804,6 +804,9 @@ pub const SentPacketTracker = struct {
         largest_nonprobe_sent_time_ns: ?u64 = null,
         largest_nonprobe_path_epoch: u32 = 0,
         largest_acknowledged_sent: ?u64 = null,
+        /// Earliest still-in-flight packet eligible for a later
+        /// time-threshold loss check after this detection pass.
+        next_loss_time_ns: ?u64 = null,
 
         fn observe(self: *AckResult, packet_number: u64, sent_time_ns: ?u64) void {
             if (self.largest_packet_number == null or packet_number > self.largest_packet_number.?) {
@@ -1577,7 +1580,14 @@ pub const SentPacketTracker = struct {
             if (packet.acknowledged or packet.lost or !packet.in_flight) continue;
             const sent_time = packet.sent_time_ns orelse continue;
             const lost_time = std.math.add(u64, sent_time, loss_delay_ns) catch std.math.maxInt(u64);
-            if (now_ns < lost_time) continue;
+            if (now_ns < lost_time) {
+                if (lost.next_loss_time_ns == null or
+                    lost_time < lost.next_loss_time_ns.?)
+                {
+                    lost.next_loss_time_ns = lost_time;
+                }
+                continue;
+            }
             packet.lost = true;
             packet.lost_generation = generation;
             cached_latest_lost = cached_latest_lost or
@@ -3846,10 +3856,12 @@ test "QUIC sent packet tracker detects time-threshold loss" {
 
     const early = sent.detectTimeThresholdLoss(249, 150, 2);
     try std.testing.expectEqual(@as(usize, 0), early.packets);
+    try std.testing.expectEqual(@as(?u64, 250), early.next_loss_time_ns);
 
     const lost = sent.detectTimeThresholdLoss(250, 150, 2);
     try std.testing.expectEqual(@as(usize, 1), lost.packets);
     try std.testing.expectEqual(@as(usize, 1200), lost.bytes);
+    try std.testing.expectEqual(@as(?u64, 330), lost.next_loss_time_ns);
     try std.testing.expect(sent.packets.items[0].lost);
     try std.testing.expect(!sent.packets.items[1].lost);
 
@@ -3861,6 +3873,7 @@ test "QUIC sent packet tracker detects time-threshold loss" {
     try std.testing.expectEqual(@as(?u64, 330), sent.timeThresholdLossDeadline(150, 2));
     const remaining = sent.detectTimeThresholdLoss(1_000, 150, 2);
     try std.testing.expectEqual(@as(usize, 2), remaining.packets);
+    try std.testing.expectEqual(@as(?u64, null), remaining.next_loss_time_ns);
     try std.testing.expectEqual(@as(?u64, null), sent.timeThresholdLossDeadline(150, 2));
 }
 

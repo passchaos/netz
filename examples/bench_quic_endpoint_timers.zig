@@ -6,12 +6,31 @@ const minimum_scan_iterations: usize = 20_000;
 const scan_entry_budget: usize = 64_000_000;
 const connection_counts = [_]usize{ 1, 16, 128, 1024 };
 
+const Options = struct {
+    iterations: usize = default_iterations,
+    loss_deadline_only: bool = false,
+};
+
 pub fn main(init: std.process.Init) !void {
-    const iterations = try parseIterations(init);
+    const options = try parseOptions(init);
+    const iterations = options.iterations;
     const allocator = std.heap.smp_allocator;
     var threaded = std.Io.Threaded.init(allocator, .{});
     defer threaded.deinit();
     const io = threaded.io();
+
+    if (options.loss_deadline_only) {
+        const loss_deadline = try benchmarkLossDeadline(
+            allocator,
+            io,
+            iterations,
+        );
+        std.debug.print(
+            "QUIC loss deadline benchmark: sent_packets=256 acknowledged_records=255 one_gap=true iterations={d} ns/query={d}.{d:0>2}\n",
+            .{ iterations, loss_deadline / 100, loss_deadline % 100 },
+        );
+        return;
+    }
 
     std.debug.print(
         \\QUIC endpoint timer scheduler scaling benchmark
@@ -105,6 +124,53 @@ pub fn main(init: std.process.Init) !void {
         printHundredths(bounded_due);
         std.debug.print("  (scan iterations: {d})\n", .{scan_iterations});
     }
+
+    const loss_deadline = try benchmarkLossDeadline(allocator, io, iterations);
+    std.debug.print(
+        "sent packets 256, acknowledged records 255, one gap: loss deadline {d}.{d:0>2} ns\n",
+        .{ loss_deadline / 100, loss_deadline % 100 },
+    );
+}
+
+fn benchmarkLossDeadline(
+    allocator: std.mem.Allocator,
+    io: std.Io,
+    iterations: usize,
+) !u64 {
+    var endpoint = try netz.quic.runtime.Endpoint.bind(
+        allocator,
+        io,
+        .{ .ip4 = .loopback(0) },
+        .{ .max_datagram_size = 4096 },
+    );
+    defer endpoint.deinit();
+    const keys = netz.quic.protection.deriveAes128Keys(
+        [_]u8{0x74} ** netz.quic.protection.secret_len,
+    );
+    var connection = try netz.quic.one_rtt.Connection.init(&endpoint, .{
+        .peer = endpoint.address(),
+        .receive_keys = keys,
+        .send_keys = keys,
+        .local_connection_id = "timer-local",
+        .peer_connection_id = "timer-peer",
+        .enable_pacing = false,
+    });
+    defer connection.deinit();
+    try netz.quic.one_rtt.testing.prepareLossDeadlineBenchmark(
+        &connection,
+        256,
+    );
+
+    var checksum: u64 = 0;
+    const started = nowNs(io);
+    for (0..iterations) |_| {
+        const deadline = connection.lossDetectionTimerDeadline() orelse
+            return error.InvalidBenchmarkResult;
+        checksum +%= deadline.deadline_ns;
+    }
+    const elapsed = nowNs(io) -| started;
+    std.mem.doNotOptimizeAway(checksum);
+    return hundredthsPerOperation(elapsed, iterations);
 }
 
 fn benchmarkAdvancedEarliest(
@@ -373,21 +439,28 @@ fn printHundredths(value: u64) void {
     std.debug.print("  {d: >7}.{d:0>2} ns", .{ value / 100, value % 100 });
 }
 
-fn parseIterations(init: std.process.Init) !usize {
+fn parseOptions(init: std.process.Init) !Options {
     const args = try init.minimal.args.toSlice(init.arena.allocator());
-    if (args.len == 1) return default_iterations;
-    if (args.len != 2 or !std.mem.startsWith(u8, args[1], "--iterations=")) {
+    var result: Options = .{};
+    for (args[1..]) |arg| {
+        if (std.mem.eql(u8, arg, "--loss-deadline-only")) {
+            result.loss_deadline_only = true;
+        } else if (std.mem.startsWith(u8, arg, "--iterations=")) {
+            result.iterations = try std.fmt.parseInt(
+                usize,
+                arg["--iterations=".len..],
+                10,
+            );
+        } else {
+            return error.InvalidArgument;
+        }
+    }
+    if (result.iterations < minimum_scan_iterations or
+        result.iterations > 10_000_000)
+    {
         return error.InvalidArgument;
     }
-    const value = try std.fmt.parseInt(
-        usize,
-        args[1]["--iterations=".len..],
-        10,
-    );
-    if (value < minimum_scan_iterations or value > 10_000_000) {
-        return error.InvalidArgument;
-    }
-    return value;
+    return result;
 }
 
 fn nowNs(io: std.Io) u64 {

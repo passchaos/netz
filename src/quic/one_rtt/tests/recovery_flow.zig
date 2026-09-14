@@ -1902,7 +1902,7 @@ test "QUIC 1-RTT loss detection timer reports earliest loss or PTO deadline" {
         1200,
         1200,
         .not_ect,
-        0,
+        180_000_000,
         one_rtt.testing.currentPathEpoch(&connection),
     );
     _ = try connection.recovery.trackSent(0, "zero");
@@ -1916,26 +1916,53 @@ test "QUIC 1-RTT loss detection timer reports earliest loss or PTO deadline" {
         one_rtt.testing.currentPathEpoch(&connection),
     );
     _ = try connection.recovery.trackSent(1, "one");
-    _ = connection.sent.markAcknowledged(1);
+    try one_rtt.testing.applyReceivedFrames(
+        &connection,
+        0,
+        &.{.{ .ack = .{
+            .largest_acknowledged = 1,
+            .ack_delay = 0,
+            .first_ack_range = 0,
+        } }},
+        250_000_000,
+        .not_ect,
+    );
 
     const loss_first = connection.lossDetectionTimerDeadline() orelse return error.TestUnexpectedResult;
     try std.testing.expectEqual(one_rtt.LossDetectionTimerKind.loss_time, loss_first.kind);
-    try std.testing.expectEqual(@as(u64, 112_500_000), loss_first.deadline_ns);
+    try std.testing.expectEqual(@as(u64, 285_468_750), loss_first.deadline_ns);
+    try std.testing.expectEqual(
+        @as(?u64, loss_first.deadline_ns),
+        one_rtt.testing.cachedLossTimeDeadline(&connection),
+    );
 
-    connection.sent.packets.items[0].lost = true;
+    // A newly sent packet is newer than the largest ACK and cannot alter the
+    // already-computed time-threshold candidate. Timer reads remain stable
+    // without rescanning the retained sent-packet history after each send.
     try connection.sent.sentAtWithDatagramSizeAndPathEpoch(
         2,
         true,
         1200,
         1200,
         .not_ect,
-        200_000_000,
+        300_000_000,
         one_rtt.testing.currentPathEpoch(&connection),
     );
     _ = try connection.recovery.trackSent(2, "two");
+    try std.testing.expectEqual(loss_first, connection.lossDetectionTimerDeadline().?);
+    try std.testing.expectEqual(
+        @as(?u64, loss_first.deadline_ns),
+        one_rtt.testing.cachedLossTimeDeadline(&connection),
+    );
+
+    try std.testing.expect(connection.markPacketAcknowledged(0));
+    try std.testing.expectEqual(
+        @as(?u64, null),
+        one_rtt.testing.cachedLossTimeDeadline(&connection),
+    );
     const pto_first = connection.lossDetectionTimerDeadline() orelse return error.TestUnexpectedResult;
     try std.testing.expectEqual(one_rtt.LossDetectionTimerKind.pto, pto_first.kind);
-    try std.testing.expectEqual(@as(u64, 525_000_000), pto_first.deadline_ns);
+    try std.testing.expectEqual(@as(u64, 618_750_000), pto_first.deadline_ns);
 }
 
 test "QUIC 1-RTT connection retransmits time-threshold losses" {

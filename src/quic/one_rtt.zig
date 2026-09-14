@@ -992,6 +992,11 @@ pub const Connection = struct {
     idle_timed_out: bool = false,
     keep_alive_ping_sent: bool = false,
     last_persistent_congestion_packet_number: ?u64 = null,
+    /// Earliest current-path packet eligible for RFC 9002 time-threshold loss.
+    /// ACK/loss and PMTU transitions refresh this once when recovery state
+    /// changes; read-only endpoint timer synchronization must not rescan the
+    /// complete retained sent-packet history after every application send.
+    loss_time_deadline_ns: ?u64 = null,
     pto_count: u8 = 0,
     pto_jitter_state: pto_jitter.State = .{},
     peer_address_validated: bool = true,
@@ -4642,6 +4647,7 @@ pub const Connection = struct {
         self.pmtud.resetForPath();
         self.pmtuProbeEpochBump();
         self.pmtuPathEpochBump();
+        self.loss_time_deadline_ns = null;
         self.congestion = .initWithOptions(
             self.currentSendDatagramSize(),
             self.config.congestion_algorithm,
@@ -4783,6 +4789,7 @@ pub const Connection = struct {
             self.pmtu_probe_epoch,
             probe_size,
         );
+        self.refreshLossTimeDeadline();
         self.applyCurrentPmtuToPath();
         return probe_size;
     }
@@ -5399,6 +5406,11 @@ pub const Connection = struct {
             self.pmtud.active_probe_epoch,
             self.pmtu_path_epoch,
         );
+        if (loss_delay_ns == self.rtt_stats.lossDelay()) {
+            self.loss_time_deadline_ns = lost.next_loss_time_ns;
+        } else {
+            self.refreshLossTimeDeadline();
+        }
         if (lost.bytes > 0 or lost.probe_bytes > 0) {
             const loss_generation = self.sent.currentLossGeneration();
             self.recordPacketsLost(lost.packets);
@@ -5466,6 +5478,12 @@ pub const Connection = struct {
             self.pmtud.active_probe_packet_number,
             self.pmtud.active_probe_epoch,
             self.pmtu_path_epoch,
+        );
+    }
+
+    fn refreshLossTimeDeadline(self: *Connection) void {
+        self.loss_time_deadline_ns = self.timeThresholdLossDeadline(
+            self.rtt_stats.lossDelay(),
         );
     }
 
@@ -5543,9 +5561,7 @@ pub const Connection = struct {
         if (!has_recoverable_data and !has_ack_eliciting_in_flight and
             !has_active_pmtu_probe) return null;
 
-        const loss_time = self.timeThresholdLossDeadline(
-            self.rtt_stats.lossDelay(),
-        );
+        const loss_time = self.loss_time_deadline_ns;
         // PMTU probes are intentionally absent from generic recovery, so only
         // arm PTO when there is retransmittable data. A lone probe is retired
         // by its time-threshold deadline and then re-armed by PMTU state.
@@ -5841,6 +5857,7 @@ pub const Connection = struct {
     }
 
     pub fn markPacketAcknowledged(self: *Connection, packet_number: u64) bool {
+        defer self.refreshLossTimeDeadline();
         const pto_anchor_before =
             self.sent.latestAckElicitingInFlightSentTimeForPathEpoch(
                 self.pmtu_path_epoch,
@@ -8553,6 +8570,19 @@ pub const Connection = struct {
     }
 
     pub fn updateRttFromAck(self: *Connection, ack: quic.AckFrame, now_ns: u64) Error!bool {
+        const updated = try self.updateRttFromAckWithoutLossRefresh(
+            ack,
+            now_ns,
+        );
+        if (updated) self.refreshLossTimeDeadline();
+        return updated;
+    }
+
+    fn updateRttFromAckWithoutLossRefresh(
+        self: *Connection,
+        ack: quic.AckFrame,
+        now_ns: u64,
+    ) Error!bool {
         const sample = try self.ackRttSample(ack, now_ns) orelse return false;
         self.rtt_stats.updateAt(
             sample.latest_rtt_ns,
@@ -11363,6 +11393,14 @@ pub const Connection = struct {
             triggering_frame_index.* = frame_index;
             switch (frame) {
                 .ack => {
+                    var loss_time_refreshed = false;
+                    defer if (!loss_time_refreshed) {
+                        // Calls without an explicit receive timestamp and
+                        // exceptional exits cannot publish the next loss time
+                        // from the detection pass below. Recompute only on
+                        // those uncommon paths.
+                        self.refreshLossTimeDeadline();
+                    };
                     const pto_anchor_before =
                         self.sent.latestAckElicitingInFlightSentTimeForPathEpoch(
                             self.pmtu_path_epoch,
@@ -11377,7 +11415,8 @@ pub const Connection = struct {
                         self.handshake_status.recoveryGroupId();
                     const plain_ack_current_path_failure =
                         self.precheckPlainAckCurrentPathFailure(frame.ack);
-                    if (now_ns) |now| _ = try self.updateRttFromAck(frame.ack, now);
+                    if (now_ns) |now| _ = try self
+                        .updateRttFromAckWithoutLossRefresh(frame.ack, now);
                     const acked = self.sent.applyAckDetailedForProbeValidated(
                         frame.ack,
                         self.pmtud.active_probe_packet_number,
@@ -11502,11 +11541,14 @@ pub const Connection = struct {
                         const timed_lost = self.sent.detectTimeThresholdLossForProbeAndPathEpoch(
                             now,
                             self.rtt_stats.lossDelay(),
-                            frame.ack.largest_acknowledged,
+                            self.sent.largestAcknowledged(),
                             self.pmtud.active_probe_packet_number,
                             self.pmtud.active_probe_epoch,
                             self.pmtu_path_epoch,
                         );
+                        self.loss_time_deadline_ns =
+                            timed_lost.next_loss_time_ns;
+                        loss_time_refreshed = true;
                         if (timed_lost.bytes > 0 or timed_lost.probe_bytes > 0) {
                             const loss_generation = self.sent.currentLossGeneration();
                             self.recordPacketsLost(timed_lost.packets);
@@ -14479,6 +14521,42 @@ fn parsePacketFramesForType(
 /// to normal transport callers while allowing the large conformance suite to
 /// live outside the production module.
 pub const testing = struct {
+    pub fn prepareLossDeadlineBenchmark(
+        connection: *Connection,
+        packet_count: usize,
+    ) Error!void {
+        if (packet_count < 3) return error.InvalidPacketNumber;
+        connection.rtt_stats.updateAt(100_000_000, 0, true, 0);
+        for (0..packet_count) |packet_number| {
+            try connection.sent.sentAtWithDatagramSizeAndPathEpoch(
+                @intCast(packet_number),
+                true,
+                1200,
+                1200,
+                .not_ect,
+                1_000 + packet_number,
+                connection.pmtu_path_epoch,
+            );
+        }
+        const ranges = [_]quic.AckRange{.{
+            .gap = 0,
+            .ack_range_length = @intCast(packet_count - 3),
+        }};
+        _ = try connection.sent.applyAckDetailed(.{
+            .largest_acknowledged = @intCast(packet_count - 1),
+            .ack_delay = 0,
+            .first_ack_range = 0,
+            .ranges = &ranges,
+        });
+        connection.refreshLossTimeDeadline();
+    }
+
+    pub fn cachedLossTimeDeadline(
+        connection: *const Connection,
+    ) ?u64 {
+        return connection.loss_time_deadline_ns;
+    }
+
     pub fn hasPreparedSendPacketProtection(
         connection: *const Connection,
     ) bool {
