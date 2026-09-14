@@ -713,3 +713,211 @@ test "QUIC endpoint server routes two authenticated connections on one socket" {
     try std.testing.expectEqual(@as(usize, 2), server.connectionCount());
     try std.testing.expectEqual(clients.len * 4, server.dispatcher.routeCount());
 }
+
+test "QUIC endpoint server resets a client after connection state loss" {
+    const allocator = std.testing.allocator;
+    var threaded = std.Io.Threaded.init(allocator, .{
+        .async_limit = .unlimited,
+    });
+    defer threaded.deinit();
+    const io = threaded.io();
+
+    var server_endpoint = try quic.runtime.Endpoint.bind(
+        allocator,
+        io,
+        .{ .ip4 = .loopback(0) },
+        .{ .max_datagram_size = 4096 },
+    );
+    defer server_endpoint.deinit();
+    const server_key = try quic.tls.testing.serverKeyPair();
+    const server_public = server_key.public_key.toUncompressedSec1();
+    const reset_key = [_]u8{0xa7} **
+        quic.stateless_reset.static_key_len;
+    var server = try endpoint_server.Server.init(
+        allocator,
+        &server_endpoint,
+        .{
+            .local_connection_id = &.{},
+            .alpn_protocol = "netz-reset-after-state-loss",
+            .random = [_]u8{0xa8} ** 32,
+            .x25519_secret_key = [_]u8{0xa9} ** 32,
+            .key_exchange_groups = &.{.x25519},
+            .cipher_suites = &.{.aes_128_gcm_sha256},
+            .identity = .{
+                .certificate_chain = &.{&server_public},
+                .signer = .{ .ecdsa_p256_sha256 = .{
+                    .key_pair = server_key,
+                } },
+            },
+            .initial_one_rtt_config = .{ .enable_pacing = false },
+            .handshake_recovery = .{
+                .initial_pto_ms = 20,
+                .max_pto_ms = 40,
+                .max_duration_ms = 2_000,
+            },
+        },
+        .{
+            .max_pending_handshakes = 1,
+            .max_connections = 1,
+            .handshake_timeout_ms = 2_000,
+            .stateless_reset_key = reset_key,
+            .automatic_connection_id_replenishment = false,
+        },
+    );
+    defer server.deinit();
+
+    const Shared = struct {
+        allocator: std.mem.Allocator,
+        io: std.Io,
+        server_address: std.Io.net.IpAddress,
+        public_key: [65]u8,
+        reset_key: [quic.stateless_reset.static_key_len]u8,
+        connected: std.Io.Event = .unset,
+        state_removed: std.Io.Event = .unset,
+        done: std.Io.Event = .unset,
+        err: ?anyerror = null,
+
+        fn run(self: *@This()) void {
+            self.runFallible() catch |err| {
+                self.err = err;
+                self.connected.set(self.io);
+            };
+            self.done.set(self.io);
+        }
+
+        fn runFallible(self: *@This()) !void {
+            var endpoint = try quic.runtime.Endpoint.bind(
+                self.allocator,
+                self.io,
+                .{ .ip4 = .loopback(0) },
+                .{ .max_datagram_size = 4096 },
+            );
+            defer endpoint.deinit();
+            var established = try quic.handshake.connectWithTimeout(
+                &endpoint,
+                self.server_address,
+                .{
+                    .original_destination_connection_id = "reset-old",
+                    .local_connection_id = "reset-client",
+                    .server_name = "localhost",
+                    .alpn_protocols = &.{"netz-reset-after-state-loss"},
+                    .server_auth = .{
+                        .pinned_ecdsa_p256_public_key = self.public_key,
+                    },
+                    .random = [_]u8{0xaa} ** 32,
+                    .x25519_secret_key = [_]u8{0xab} ** 32,
+                    .key_exchange_groups = &.{.x25519},
+                    .cipher_suites = &.{.aes_128_gcm_sha256},
+                    .initial_one_rtt_config = .{ .enable_pacing = false },
+                    .handshake_recovery = .{
+                        .initial_pto_ms = 20,
+                        .max_pto_ms = 40,
+                        .max_duration_ms = 2_000,
+                    },
+                },
+                .fromSeconds(2),
+            );
+            defer established.deinit();
+            const expected = quic.stateless_reset.tokenForConnectionId(
+                self.reset_key,
+                established.peer_connection_id,
+            );
+            try std.testing.expectEqual(
+                @as(?[quic.stateless_reset.token_len]u8, expected),
+                established.connection.config.peer_stateless_reset_token,
+            );
+            self.connected.set(self.io);
+            try self.state_removed.wait(self.io);
+
+            try established.connection.sendWithTimeout(
+                &.{.{ .ping = {} }},
+                .fromSeconds(1),
+            );
+            const deadline = std.Io.Clock.Timestamp.fromNow(self.io, .{
+                .raw = .fromSeconds(2),
+                .clock = .awake,
+            });
+            while (true) {
+                var packet = established.connection
+                    .receivePacketServicingTimersDeadline(deadline) catch |err|
+                    switch (err) {
+                        error.ConnectionClosed => break,
+                        else => return err,
+                    };
+                defer packet.deinit(self.allocator);
+                _ = try established.connection.sendAckForPacketIfNeeded(
+                    packet.packet.packet_number,
+                    packet.frames,
+                );
+            }
+            try std.testing.expect(established.connection.draining());
+            try std.testing.expect(
+                established.connection.closeExpiryDeadlineMillis() != null,
+            );
+            try std.testing.expectEqual(
+                @as(u64, 0),
+                established.connection.authenticationFailureCount(),
+            );
+        }
+    };
+
+    var shared = Shared{
+        .allocator = allocator,
+        .io = io,
+        .server_address = server.address(),
+        .public_key = server_public,
+        .reset_key = reset_key,
+    };
+    const client_thread = try std.Thread.spawn(.{}, Shared.run, .{&shared});
+    var joined = false;
+    defer if (!joined) {
+        shared.state_removed.set(io);
+        client_thread.join();
+    };
+
+    const versions = [_]u32{quic.Version.version_1.wireValue()};
+    const deadline = std.Io.Clock.Timestamp.fromNow(io, .{
+        .raw = .fromSeconds(3),
+        .clock = .awake,
+    });
+    var handle: ?quic.endpoint_dispatcher.ConnectionHandle = null;
+    while (handle == null) {
+        var event = try server.receiveWithDeadline(&versions, deadline);
+        defer event.deinit(allocator);
+        switch (event) {
+            .connected => |connected| handle = connected,
+            .timer, .packet => {},
+            .handshake_failed => |failure| return failure.err,
+            .unrouted => return error.TestUnexpectedResult,
+        }
+    }
+    try shared.connected.wait(io);
+    if (shared.err) |err| {
+        client_thread.join();
+        joined = true;
+        return err;
+    }
+    try std.testing.expectEqual(@as(usize, 1), server.connectionCount());
+    try std.testing.expectEqual(@as(usize, 1), server.dispatcher.routeCount());
+    try std.testing.expect(try server.removeConnection(handle.?));
+    try std.testing.expectEqual(@as(usize, 0), server.connectionCount());
+    try std.testing.expectEqual(@as(usize, 0), server.dispatcher.routeCount());
+    shared.state_removed.set(io);
+
+    while (!shared.done.isSet()) {
+        if (deadline.durationFromNow(io).raw.nanoseconds <= 0) {
+            return error.Timeout;
+        }
+        if (try server.receiveOnce(
+            &versions,
+            .{ .raw = .fromMilliseconds(20), .clock = .awake },
+        )) |event_value| {
+            var event = event_value;
+            defer event.deinit(allocator);
+            return error.TestUnexpectedResult;
+        }
+    }
+    client_thread.join();
+    joined = true;
+    if (shared.err) |err| return err;
+}
