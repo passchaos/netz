@@ -490,7 +490,7 @@ pub const Server = struct {
                 error.AntiAmplificationLimited,
                 error.FlowControlBlocked,
                 error.ConnectionClosed,
-                => break,
+                => return 0,
                 else => |other| return other,
             };
             return needed;
