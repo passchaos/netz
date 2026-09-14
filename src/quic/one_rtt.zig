@@ -8002,17 +8002,33 @@ pub const Connection = struct {
         self: *Connection,
         connection_id: []const u8,
     ) Error!void {
+        try self.trySendNewConnectionIdsWithDerivedTokens(&.{connection_id});
+    }
+
+    /// Derive, register, and advertise several local CIDs in one protected
+    /// packet. Pool mutation is all-or-nothing with the UDP send.
+    pub fn trySendNewConnectionIdsWithDerivedTokens(
+        self: *Connection,
+        connection_ids: []const []const u8,
+    ) Error!void {
+        if (connection_ids.len == 0) return error.MissingFrame;
+        if (connection_ids.len > quic.connection_id.max_pool_size) {
+            return error.ActiveConnectionIdLimit;
+        }
         const key = self.config.local_stateless_reset_key orelse
             return error.InvalidConnectionId;
-        try self.validateLocalConnectionIdIssueLimit(0);
         try self.validateNextPacketNumber();
         const pool_before = self.local_connection_ids;
         errdefer self.local_connection_ids = pool_before;
-        const frame = try self.local_connection_ids.issueWithStaticKey(
-            connection_id,
-            key,
-        );
-        try self.trySend(&.{frame});
+        var frames: [quic.connection_id.max_pool_size]quic.Frame = undefined;
+        for (connection_ids, 0..) |connection_id, index| {
+            try self.validateLocalConnectionIdIssueLimit(0);
+            frames[index] = try self.local_connection_ids.issueWithStaticKey(
+                connection_id,
+                key,
+            );
+        }
+        try self.trySend(frames[0..connection_ids.len]);
     }
 
     pub fn sendNewConnectionIdWithDerivedTokenRetiringPriorTo(

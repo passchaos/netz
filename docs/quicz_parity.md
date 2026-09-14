@@ -1068,9 +1068,11 @@ old route remains usable until the peer confirms `RETIRE_CONNECTION_ID`, and a
 failed send rolls back both the CID pool and route map. When the reset key is
 enabled, the shared server also fills each established local CID pool to the
 peer's advertised active limit (bounded by netz's eight-slot pool) and replaces
-retired IDs through nonblocking one-shot sends on later packet/timer turns. A
+retired IDs through nonblocking sends on later packet/timer turns. Each refill
+coalesces all missing NEW_CONNECTION_ID frames into one protected datagram, so
+the default four-CID target adds three routes with one UDP send. A
 real two-connection handshake switches away from seq=0, sends both retirement
-confirmations, observes derived-token seq=2 replacements, and finishes with two
+confirmations, observes derived-token seq=4 replacements, and finishes with four
 live routes per connection. Disabled configuration preserves the typed
 `unrouted` event. Raw/pre-filled token conflicts and preferred-address config
 whose route cannot yet be owned by this shared server are rejected at init. A

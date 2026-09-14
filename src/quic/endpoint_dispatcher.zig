@@ -673,11 +673,24 @@ pub const Dispatcher = struct {
         handle: ConnectionHandle,
         connection_id: []const u8,
     ) Error!void {
+        try self.trySendNewConnectionIdsWithDerivedTokens(
+            handle,
+            &.{connection_id},
+        );
+    }
+
+    pub fn trySendNewConnectionIdsWithDerivedTokens(
+        self: *Dispatcher,
+        handle: ConnectionHandle,
+        connection_ids: []const []const u8,
+    ) Error!void {
         const entry = self.connections.getPtr(handle) orelse
             return error.UnknownConnectionHandle;
-        try self.ensureConnectionIdAvailable(handle, connection_id);
-        entry.connection.trySendNewConnectionIdWithDerivedToken(
-            connection_id,
+        for (connection_ids) |connection_id| {
+            try self.ensureConnectionIdAvailable(handle, connection_id);
+        }
+        entry.connection.trySendNewConnectionIdsWithDerivedTokens(
+            connection_ids,
         ) catch |err| {
             self.timers.armFromConnection(handle, entry.connection) catch {};
             return err;

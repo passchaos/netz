@@ -499,7 +499,7 @@ test "QUIC endpoint server routes two authenticated connections on one socket" {
                     .local_transport_parameters = .{
                         .initial_max_streams_bidi = 1,
                         .initial_max_streams_uni = 1,
-                        .active_connection_id_limit = 2,
+                        .active_connection_id_limit = 4,
                     },
                     .initial_one_rtt_config = .{ .enable_pacing = false },
                     .handshake_recovery = .{
@@ -574,7 +574,7 @@ test "QUIC endpoint server routes two authenticated connections on one socket" {
                 var found = false;
                 for (packet.frames) |frame| {
                     if (frame != .new_connection_id or
-                        frame.new_connection_id.sequence_number != 2) continue;
+                        frame.new_connection_id.sequence_number != 4) continue;
                     try std.testing.expectEqualSlices(
                         u8,
                         &quic.stateless_reset.tokenForConnectionId(
@@ -711,5 +711,5 @@ test "QUIC endpoint server routes two authenticated connections on one socket" {
     started = 0;
     for (clients) |client| if (client.err) |err| return err;
     try std.testing.expectEqual(@as(usize, 2), server.connectionCount());
-    try std.testing.expectEqual(clients.len * 2, server.dispatcher.routeCount());
+    try std.testing.expectEqual(clients.len * 4, server.dispatcher.routeCount());
 }

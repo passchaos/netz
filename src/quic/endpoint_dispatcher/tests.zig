@@ -1220,9 +1220,9 @@ test "QUIC endpoint dispatcher leaves no CID route after send failure" {
 
     try std.testing.expectError(
         error.NetworkDown,
-        dispatcher.trySendNewConnectionIdWithDerivedToken(
+        dispatcher.trySendNewConnectionIdsWithDerivedTokens(
             1,
-            "failed-cid",
+            &.{ "failed-cid-a", "failed-cid-b" },
         ),
     );
     var active_storage: [quic.connection_id.max_pool_size]quic.connection_id.LocalPool.ActiveId = undefined;
@@ -1231,7 +1231,8 @@ test "QUIC endpoint dispatcher leaves no CID route after send failure" {
         (try connection.localConnectionIdsInto(&active_storage)).len,
     );
     try std.testing.expectEqual(@as(usize, 1), dispatcher.routeCount());
-    try std.testing.expect((try dispatcher.router.lookup("failed-cid")) == null);
+    try std.testing.expect((try dispatcher.router.lookup("failed-cid-a")) == null);
+    try std.testing.expect((try dispatcher.router.lookup("failed-cid-b")) == null);
     try std.testing.expectEqual(
         revision_before,
         connection.localConnectionIdRevision(),
@@ -1240,6 +1241,117 @@ test "QUIC endpoint dispatcher leaves no CID route after send failure" {
         sync_count_before,
         dispatcher.connections.getPtr(1).?.connection_id_sync_count,
     );
+}
+
+test "QUIC endpoint dispatcher batches derived CID replenishment" {
+    const allocator = std.testing.allocator;
+    var threaded = std.Io.Threaded.init(allocator, .{});
+    defer threaded.deinit();
+    const io = threaded.io();
+    var endpoint = try runtime.Endpoint.bind(
+        allocator,
+        io,
+        .{ .ip4 = .loopback(0) },
+        .{ .max_datagram_size = 4096 },
+    );
+    defer endpoint.deinit();
+    var peer_endpoint = try runtime.Endpoint.bind(
+        allocator,
+        io,
+        .{ .ip4 = .loopback(0) },
+        .{ .max_datagram_size = 4096 },
+    );
+    defer peer_endpoint.deinit();
+    const keys = quic.protection.deriveAes128Keys(
+        [_]u8{0xe8} ** quic.protection.secret_len,
+    );
+    const reset_key = [_]u8{0x7e} **
+        quic.stateless_reset.static_key_len;
+    const initial_cid = "batch-cid-init00";
+    const peer_cid = "batch-peer-id-00";
+    const new_cids = [_][]const u8{
+        "batch-cid-one-01",
+        "batch-cid-two-02",
+        "batch-cid-tre-03",
+    };
+    var connection = try one_rtt.Connection.init(&endpoint, .{
+        .peer = peer_endpoint.address(),
+        .receive_keys = keys,
+        .send_keys = keys,
+        .local_connection_id = initial_cid,
+        .peer_connection_id = peer_cid,
+        .local_endpoint = .server,
+        .enable_pacing = false,
+        .peer_active_connection_id_limit = 4,
+        .local_stateless_reset_key = reset_key,
+    });
+    defer connection.deinit();
+    var peer = try one_rtt.Connection.init(&peer_endpoint, .{
+        .peer = endpoint.address(),
+        .receive_keys = keys,
+        .send_keys = keys,
+        .local_connection_id = peer_cid,
+        .peer_connection_id = initial_cid,
+        .enable_pacing = false,
+        .active_connection_id_limit = 4,
+    });
+    defer peer.deinit();
+    var dispatcher = Dispatcher.init(allocator, &endpoint);
+    defer dispatcher.deinit();
+    try dispatcher.registerConnection(7, &connection);
+
+    var observed_send = ObservedBatchSend{ .delegate = endpoint.io };
+    var observed_vtable = endpoint.io.vtable.*;
+    observed_vtable.netSend = ObservedBatchSend.netSend;
+    endpoint.io = .{
+        .userdata = &observed_send,
+        .vtable = &observed_vtable,
+    };
+    defer endpoint.io = observed_send.delegate;
+
+    try std.testing.expectError(
+        error.DuplicateConnectionId,
+        dispatcher.trySendNewConnectionIdsWithDerivedTokens(
+            7,
+            &.{ "batch-duplicate0", "batch-duplicate0" },
+        ),
+    );
+    try std.testing.expectEqual(@as(usize, 0), observed_send.calls);
+    try std.testing.expectEqual(@as(usize, 1), dispatcher.routeCount());
+    try std.testing.expectEqual(
+        @as(usize, 1),
+        connection.localConnectionIdCount(),
+    );
+    try dispatcher.trySendNewConnectionIdsWithDerivedTokens(
+        7,
+        &new_cids,
+    );
+    try std.testing.expectEqual(@as(usize, 1), observed_send.calls);
+    try std.testing.expectEqual(@as(usize, 4), dispatcher.routeCount());
+    try std.testing.expectEqual(@as(usize, 4), connection.localConnectionIdCount());
+
+    var packet = try peer.receivePacket();
+    defer packet.deinit(allocator);
+    try std.testing.expectEqual(new_cids.len, packet.frames.len);
+    for (packet.frames, new_cids, 1..) |frame, connection_id, sequence| {
+        try std.testing.expect(frame == .new_connection_id);
+        try std.testing.expectEqual(
+            @as(u64, sequence),
+            frame.new_connection_id.sequence_number,
+        );
+        try std.testing.expectEqualStrings(
+            connection_id,
+            frame.new_connection_id.connection_id,
+        );
+        try std.testing.expectEqualSlices(
+            u8,
+            &quic.stateless_reset.tokenForConnectionId(
+                reset_key,
+                connection_id,
+            ),
+            &frame.new_connection_id.stateless_reset_token,
+        );
+    }
 }
 
 test "QUIC endpoint dispatcher preserves unknown Initials and discards late long headers" {

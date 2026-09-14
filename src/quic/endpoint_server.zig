@@ -461,22 +461,28 @@ pub const Server = struct {
             !self.options.automatic_connection_id_replenishment) return 0;
         const established = self.connection(handle) orelse
             return error.UnknownConnectionHandle;
-        var issued: usize = 0;
+        const current = established.connection.localConnectionIdCount();
+        const target = established.connection.localConnectionIdTarget();
+        if (current >= target) return 0;
+        const needed = target - current;
+        var connection_id_storage: [quic.connection_id.max_pool_size][
+            quic.endpoint_dispatcher.default_server_connection_id_len
+        ]u8 = undefined;
+        var connection_ids: [quic.connection_id.max_pool_size][]const u8 =
+            undefined;
         var attempts: usize = 0;
-        while (established.connection.localConnectionIdCount() <
-            established.connection.localConnectionIdTarget())
-        {
+        while (true) {
             if (attempts == quic.connection_id.max_pool_size * 2) {
                 return error.DuplicateConnectionId;
             }
             attempts += 1;
-            var connection_id: [
-                quic.endpoint_dispatcher.default_server_connection_id_len
-            ]u8 = undefined;
-            try std.Io.randomSecure(self.endpoint.io, &connection_id);
-            self.dispatcher.trySendNewConnectionIdWithDerivedToken(
+            for (connection_id_storage[0..needed], 0..) |*connection_id, index| {
+                try std.Io.randomSecure(self.endpoint.io, connection_id);
+                connection_ids[index] = connection_id;
+            }
+            self.dispatcher.trySendNewConnectionIdsWithDerivedTokens(
                 handle,
-                &connection_id,
+                connection_ids[0..needed],
             ) catch |err| switch (err) {
                 error.DuplicateConnectionId => continue,
                 error.PacingLimited,
@@ -487,9 +493,8 @@ pub const Server = struct {
                 => break,
                 else => |other| return other,
             };
-            issued += 1;
+            return needed;
         }
-        return issued;
     }
 
     /// Reserve one bidirectional stream without reading the shared socket.
