@@ -125,12 +125,19 @@ pub const EndpointTimers = struct {
     /// Snapshot due connection IDs into caller storage. Each connection is
     /// returned at most once even if servicing its timer immediately rearms
     /// another already-due deadline. The dispatcher uses this stable snapshot
-    /// to bound one event-loop turn without starving socket receive.
+    /// to bound one event-loop turn without starving socket receive. The
+    /// cached minimum rejects the common all-future case before the full
+    /// snapshot scan.
     pub fn dueConnectionIdsInto(
         self: *const EndpointTimers,
         now_ns: u64,
         output: []u64,
     ) usize {
+        if (output.len == 0) return 0;
+        const earliest = self.earliest_index orelse return 0;
+        std.debug.assert(earliest < self.entries.items.len);
+        if (self.entries.items[earliest].timer.deadline_ns > now_ns) return 0;
+
         var due_count: usize = 0;
         for (self.entries.items) |entry| {
             if (entry.timer.deadline_ns > now_ns) continue;
@@ -447,4 +454,27 @@ test "QUIC endpoint timers snapshot bounded due connections once" {
     const due = timers.dueConnectionIdsInto(60, &storage);
     try std.testing.expectEqual(@as(usize, 2), due);
     try std.testing.expect(storage[0] != storage[1]);
+}
+
+test "QUIC endpoint timers reject an all-future snapshot" {
+    const allocator = std.testing.allocator;
+    var timers = EndpointTimers.init(allocator);
+    defer timers.deinit();
+
+    try timers.update(10, .{ .kind = .pto, .deadline_ns = 50 });
+    try timers.update(20, .{ .kind = .ack_delay, .deadline_ns = 30 });
+    try timers.update(30, .{ .kind = .idle_timeout, .deadline_ns = 40 });
+    var storage: [3]u64 = @splat(std.math.maxInt(u64));
+    try std.testing.expectEqual(
+        @as(usize, 0),
+        timers.dueConnectionIdsInto(29, &storage),
+    );
+    try std.testing.expectEqual(
+        @as(u64, std.math.maxInt(u64)),
+        storage[0],
+    );
+    try std.testing.expectEqual(
+        @as(usize, 0),
+        timers.dueConnectionIdsInto(30, storage[0..0]),
+    );
 }

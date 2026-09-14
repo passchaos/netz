@@ -1096,6 +1096,13 @@ wake-up without aborting the rest of the snapshot. At 16 connections this reduce
 the timer-heavy server-sender receive-call median from 3,266 to 1,088 against the
 immediate parent, while throughput ranges overlapped; this is scheduling
 amortization evidence rather than a throughput claim.
+The same scheduler now rejects an all-future timer snapshot from its cached
+earliest deadline instead of scanning every connection on each receive turn.
+Five CPU-0 fixed-binary ABBA rounds reduced that query from 7.31-9.03 to 0.38
+ns/op at 16 connections and from 407.25-424.34 to 0.38-0.42 ns/op at 1,024;
+the one-due controls retained their linear snapshot cost. Five shared-server
+transfer pairs had overlapping ranges and 3/5 candidate wins in both sender
+directions, so they establish no regression rather than a throughput gain.
 Independent-message batch receive also leaves ancillary buffers uninitialized
 until the OS fills them, matching Quinn's Linux `MaybeUninit` receive storage and
 removing a fixed 2,304-byte stack write at the default 32-message width on this

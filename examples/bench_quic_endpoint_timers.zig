@@ -22,7 +22,7 @@ pub fn main(init: std.process.Init) !void {
         \\
     , .{iterations});
     std.debug.print(
-        \\connections  non-earliest update  repeated earliest  advance earliest  new earliest  postpone earliest  remove non-earliest  remove earliest  earliestDeadline  bounded due
+        \\connections  non-earliest update  repeated earliest  advance earliest  new earliest  postpone earliest  remove non-earliest  remove earliest  earliestDeadline  none due  bounded due
         \\
     , .{});
 
@@ -79,6 +79,12 @@ pub fn main(init: std.process.Init) !void {
             connection_count,
             iterations,
         );
+        const none_due = try benchmarkNoneDue(
+            allocator,
+            io,
+            connection_count,
+            scan_iterations,
+        );
         const bounded_due = try benchmarkBoundedDue(
             allocator,
             io,
@@ -95,6 +101,7 @@ pub fn main(init: std.process.Init) !void {
         printHundredths(removed_non_earliest);
         printHundredths(removed_earliest);
         printHundredths(earliest_deadline);
+        printHundredths(none_due);
         printHundredths(bounded_due);
         std.debug.print("  (scan iterations: {d})\n", .{scan_iterations});
     }
@@ -300,6 +307,33 @@ fn benchmarkBoundedDue(
         if (due != 1) return error.InvalidBenchmarkResult;
         checksum +%= due;
         std.mem.doNotOptimizeAway(output[0]);
+    }
+    const elapsed = nowNs(io) -| started;
+    std.mem.doNotOptimizeAway(checksum);
+    return hundredthsPerOperation(elapsed, iterations);
+}
+
+fn benchmarkNoneDue(
+    allocator: std.mem.Allocator,
+    io: std.Io,
+    connection_count: usize,
+    iterations: usize,
+) !u64 {
+    var timers = netz.quic.endpoint_timers.EndpointTimers.init(allocator);
+    defer timers.deinit();
+    try timers.ensureCapacity(connection_count);
+    for (0..connection_count) |connection_id| {
+        try timers.update(connection_id, timer(connection_id + 1));
+    }
+    var output: [32]u64 = undefined;
+    var checksum: usize = 0;
+
+    const started = nowNs(io);
+    for (0..iterations) |_| {
+        const due = timers.dueConnectionIdsInto(0, &output);
+        if (due != 0) return error.InvalidBenchmarkResult;
+        std.mem.doNotOptimizeAway(due);
+        checksum +%= due;
     }
     const elapsed = nowNs(io) -| started;
     std.mem.doNotOptimizeAway(checksum);

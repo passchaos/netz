@@ -2711,6 +2711,29 @@ reduction. The 1,024-connection ordinary non-earliest update measured
 optimization removes only the provable no-op scan without hiding the remaining
 linear operations or imposing heap maintenance on ordinary updates.
 
+The bounded due query now checks the cached earliest deadline before scanning
+the stable timer array. This preserves the bounded snapshot when any timer is
+due, while making the common all-future receive turn independent of connection
+count. Five CPU-0 ReleaseFast ABBA rounds against parent `1f3a5a97`, with two
+adjacent samples per arm, used two million iterations at 16 connections and
+62,500 at 1,024 connections. They reduced the 16-connection all-future query
+from 7.31-9.03 ns/op to 0.38 ns/op. At 1,024 connections it fell from
+407.25-424.34 ns/op to 0.38-0.42 ns/op. The
+one-due-at-array-tail control remained 7.69-9.24 versus 7.70-9.21 ns/op at 16
+connections and 408.67-410.45 versus 408.31-409.79 ns/op at 1,024, confirming
+that due snapshot work stays visible. This matches Quinn and tquic's endpoint
+designs, which consult the next deadline before processing timeout work.
+
+Five fixed-binary, order-interleaved 16-connection, 16-MiB-total shared-server
+pairs completed exactly in both sender directions. Client-sender throughput was
+69.545-81.820 MiB/s (71.618 median) before and 51.981-87.514 MiB/s (72.599
+median) after, with 3/5 pair wins. Server-sender throughput was 80.111-97.652
+MiB/s (82.052 median) before and 72.933-94.584 MiB/s (84.589 median) after,
+also with 3/5 wins. The wide overlapping ranges make this end-to-end no-
+regression evidence, not a throughput improvement claim. Every arm verified
+16,777,216 bytes, checksum 2,139,095,040, all 16 connections, and the
+completion exchange.
+
 The shared dispatcher's caller-buffer batch now also returns a bounded snapshot
 of due timers instead of at most one timer per receive call. Each connection is
 visited once per snapshot, so an immediately rearmed connection cannot starve
