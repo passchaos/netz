@@ -551,8 +551,25 @@ pub fn sendPayloads(
             // requested STREAM frame fits. Consume a positive window tail
             // before asking for more credit; at zero, a one-byte request emits
             // the appropriate BLOCKED signal and then waits for progress.
+            const chunk_len = chunk_end - offsets[index];
+            if (available < chunk_len) {
+                var committed: usize = 0;
+                try connection.sendStreamWithDeadline(
+                    stream_ids[index],
+                    prelude_len + offsets[index],
+                    payload[offsets[index]..chunk_end],
+                    chunk_end == payload.len,
+                    &committed,
+                    deadline,
+                );
+                if (committed != chunk_len) {
+                    return error.InvalidBenchmarkResult;
+                }
+                offsets[index] = chunk_end;
+                continue;
+            }
             const count = @min(
-                chunk_end - offsets[index],
+                chunk_len,
                 @max(@as(usize, 1), available),
             );
             const end = offsets[index] + count;

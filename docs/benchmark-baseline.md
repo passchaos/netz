@@ -2884,6 +2884,24 @@ throughput was 70.175-82.803 MiB/s (75.876 median) before and
 69.777-87.339 MiB/s (79.613 median) before and 75.609-91.790 MiB/s
 (82.877 median) after. The candidate won 2/3 pairs in both directions and all
 ranges overlap, so this remains a correctness/progress result.
+Raw `one_rtt.Connection` now exposes the reusable `sendStream`,
+`sendStreamWithTimeout`, and `sendStreamWithDeadline` forms behind that fix.
+They send one contiguous logical payload across exact MTU, connection, stream,
+congestion, and pacing boundaries; `committed_out` reports the socket-visible
+data prefix on every return, and FIN is emitted only with the last prefix.
+Direct tests force a five-byte window into 4/5/3-byte chunks, resume from a
+five-byte timeout prefix, validate empty FIN, and inject `NetworkDown` after a
+visible first packet before retrying the exact suffix of a 2,000-byte payload.
+The persistent benchmark invokes this helper only for short credit tails, so
+its ordinary full-chunk fast path is unchanged. Three paired standard-window
+reruns of the final benchmark path against parent `efcdd342` showed wide host
+scheduling noise even though both ReleaseFast executables had identical hot-
+function addresses and the benchmark source was identical. Client-sender
+throughput was 65.690-79.945 MiB/s before and 67.040-72.981 MiB/s after; the
+candidate won 1/3 pairs. Server-sender throughput was 69.517-86.863 MiB/s
+before and 78.616-92.544 MiB/s after; the candidate won 2/3 pairs. Both ranges
+overlap, so this is not treated as an API performance result; the direct
+progress and retry tests are the claim.
 
 ### Raw QUIC mixed FIN/reset recovery versus quic-go
 

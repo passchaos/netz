@@ -1339,6 +1339,236 @@ pub const Connection = struct {
         }
     }
 
+    /// Send one complete contiguous STREAM payload, splitting it across QUIC
+    /// packets and waiting for transport progress as necessary.
+    ///
+    /// `committed_out` is the exact data prefix accepted by the socket on
+    /// every return path. A caller can therefore retry `data[committed..]` at
+    /// `offset + committed` after a network error without duplicating bytes.
+    /// FIN is emitted only with the final payload prefix.
+    pub fn sendStream(
+        self: *Connection,
+        stream_id: u64,
+        offset: u64,
+        data: []const u8,
+        fin: bool,
+        committed_out: *usize,
+    ) Error!void {
+        return self.sendStreamUntil(
+            stream_id,
+            offset,
+            data,
+            fin,
+            committed_out,
+            null,
+        ) catch |err| switch (err) {
+            error.Timeout, error.ConcurrencyUnavailable => unreachable,
+            else => |other| return @errorCast(other),
+        };
+    }
+
+    pub fn sendStreamWithTimeout(
+        self: *Connection,
+        stream_id: u64,
+        offset: u64,
+        data: []const u8,
+        fin: bool,
+        committed_out: *usize,
+        timeout: std.Io.Duration,
+    ) (Error || quic.runtime.ReceiveTimeoutError)!void {
+        committed_out.* = 0;
+        if (timeout.nanoseconds <= 0) return error.Timeout;
+        return self.sendStreamWithDeadline(
+            stream_id,
+            offset,
+            data,
+            fin,
+            committed_out,
+            .fromNow(self.endpoint.io, .{
+                .raw = timeout,
+                .clock = .awake,
+            }),
+        );
+    }
+
+    /// Deadline-bounded form of `sendStream`. The deadline covers every
+    /// packet, pacing wait, and peer packet consumed for flow-control or
+    /// congestion progress.
+    pub fn sendStreamWithDeadline(
+        self: *Connection,
+        stream_id: u64,
+        offset: u64,
+        data: []const u8,
+        fin: bool,
+        committed_out: *usize,
+        deadline: std.Io.Clock.Timestamp,
+    ) (Error || quic.runtime.ReceiveTimeoutError)!void {
+        committed_out.* = 0;
+        _ = try deadline_policy.usableAwake(self.endpoint.io, deadline);
+        return self.sendStreamUntil(
+            stream_id,
+            offset,
+            data,
+            fin,
+            committed_out,
+            deadline,
+        );
+    }
+
+    fn sendStreamUntil(
+        self: *Connection,
+        stream_id: u64,
+        offset: u64,
+        data: []const u8,
+        fin: bool,
+        committed_out: *usize,
+        deadline: ?std.Io.Clock.Timestamp,
+    ) (Error || quic.runtime.ReceiveTimeoutError)!void {
+        committed_out.* = 0;
+        if (data.len == 0 and !fin) return;
+        const complete = quic.Frame{ .stream = .{
+            .stream_id = stream_id,
+            .offset = offset,
+            .data = data,
+            .fin = fin,
+        } };
+        _ = try complete.wireLen();
+        try self.validateStreamFrameForSendAt(
+            complete.stream,
+            self.monotonicNowNs(),
+        );
+
+        while (committed_out.* < data.len or
+            (data.len == 0 and fin))
+        {
+            const now_ns = self.monotonicNowNs();
+            if (callerDeadlineExpired(deadline, now_ns)) return error.Timeout;
+            const remaining = data[committed_out.*..];
+            const current_offset = std.math.add(
+                u64,
+                offset,
+                committed_out.*,
+            ) catch return error.InvalidFrameLength;
+            const credit = self.streamSendCredit(stream_id);
+            var count = @min(remaining.len, credit.available());
+            if (remaining.len != 0) {
+                if (count == 0) count = 1;
+                const congestion_available = self.congestionAvailable();
+                const full = quic.Frame{ .stream = .{
+                    .stream_id = stream_id,
+                    .offset = current_offset,
+                    .data = remaining[0..count],
+                    .fin = fin and count == remaining.len,
+                } };
+                if (!(try self.streamFrameFitsSendBudget(
+                    full,
+                    congestion_available,
+                ))) {
+                    var lower: usize = 1;
+                    var upper = count -| 1;
+                    while (lower < upper) {
+                        const middle = lower + (upper - lower + 1) / 2;
+                        const candidate = quic.Frame{ .stream = .{
+                            .stream_id = stream_id,
+                            .offset = current_offset,
+                            .data = remaining[0..middle],
+                            .fin = fin and middle == remaining.len,
+                        } };
+                        if (try self.streamFrameFitsSendBudget(
+                            candidate,
+                            congestion_available,
+                        )) {
+                            lower = middle;
+                        } else {
+                            upper = middle - 1;
+                        }
+                    }
+                    count = lower;
+                }
+            }
+            const frame = quic.Frame{ .stream = .{
+                .stream_id = stream_id,
+                .offset = current_offset,
+                .data = remaining[0..count],
+                .fin = fin and count == remaining.len,
+            } };
+
+            const frames = [_]quic.Frame{frame};
+            const packets = [_][]const quic.Frame{&frames};
+            const result = self.sendManyProgressAt(
+                &packets,
+                now_ns,
+            ) catch |err| switch (err) {
+                error.FlowControlBlocked, error.CongestionLimited => {
+                    if (deadline) |value| {
+                        self.servicePacketServicingTimersDeadline(value) catch |progress_err|
+                            switch (progress_err) {
+                                error.CongestionLimited => continue,
+                                error.PacingLimited => {
+                                    try self.waitForPacingAvailabilityWithDeadline(
+                                        value,
+                                    );
+                                    continue;
+                                },
+                                else => |other| return other,
+                            };
+                    } else {
+                        self.servicePacketServicingTimers() catch |progress_err|
+                            switch (progress_err) {
+                                error.CongestionLimited => continue,
+                                error.PacingLimited => {
+                                    try self.waitForPacing(now_ns);
+                                    continue;
+                                },
+                                else => |other| return other,
+                            };
+                    }
+                    continue;
+                },
+                error.PacingLimited => {
+                    if (deadline) |value| {
+                        try self.waitForPacingAvailabilityWithDeadline(value);
+                    } else {
+                        try self.waitForPacing(now_ns);
+                    }
+                    continue;
+                },
+                else => |other| return other,
+            };
+            if (result.sent_count > 1 or
+                result.sent_count > result.protected_count)
+            {
+                return error.Unexpected;
+            }
+            if (result.sent_count == 0) {
+                if (result.send_error) |err| return err;
+                return error.Unexpected;
+            }
+            if (data.len == 0) {
+                if (result.send_error) |err| return err;
+                return;
+            }
+            committed_out.* += count;
+            if (result.send_error) |err| return err;
+        }
+    }
+
+    fn streamFrameFitsSendBudget(
+        self: Connection,
+        frame: quic.Frame,
+        congestion_available: usize,
+    ) Error!bool {
+        if (try frame.wireLen() > congestion_available) return false;
+        const packet_len = self.packetLenForFramesAtOffset(
+            0,
+            @as(*const [1]quic.Frame, &frame),
+        ) catch |err| switch (err) {
+            error.DatagramTooLarge => return false,
+            else => |other| return other,
+        };
+        return packet_len <= self.currentSendDatagramSize();
+    }
+
     /// Attempt one send using the current awake-clock timestamp without
     /// sleeping or reading the endpoint socket. Event-loop adapters use this
     /// to preserve a single UDP receive owner and retry after their dispatcher

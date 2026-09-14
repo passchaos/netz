@@ -397,6 +397,11 @@ starts with deterministic parsers, serializers, preallocated fixed-width wire-in
   unidirectional IDs only when credit is already present, without reading the
   UDP socket, waiting, emitting STREAMS_BLOCKED, or advancing a blocked cursor;
   handle-based dispatcher variants keep the aggregate timer index synchronized;
+  complete contiguous STREAM writes can use `sendStream`,
+  `sendStreamWithTimeout`, or `sendStreamWithDeadline` to consume positive
+  connection/stream credit tails, split by exact packet size and congestion
+  budget, and report the exact socket-visible prefix through `committed_out`
+  on timeout or network error; FIN is committed only with the final prefix;
   stream credit is returned only after both directions are terminal, including
   acknowledgement of the local FIN/RESET, with early release requests flushed
   automatically by the ACK receive path. Released peer stream buffers and map

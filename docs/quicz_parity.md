@@ -1143,6 +1143,11 @@ rule, covering client-sender and independent-server paths. With a 1,024-byte
 stream window, parent `4fe04ace` timed out at client payload offset zero while
 the candidate completed both sender directions in shared and independent
 topologies. Standard 1-MiB-window throughput remained noisy and overlapping.
+The underlying raw connection now exposes deadline-bounded complete STREAM
+writes with exact committed-prefix reporting. Tests cover positive flow-credit
+tails, multi-packet MTU splitting, FIN, timeout continuation, and socket-visible
+partial failure followed by suffix retry, without weakening the existing
+single-packet transactional send APIs.
 The dispatcher now also mirrors each connection's authoritative fixed-capacity
 local CID pool. Initial IDs are installed at registration, dispatcher-mediated
 NEW_CONNECTION_ID sends preflight endpoint-wide collisions before changing
