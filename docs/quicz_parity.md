@@ -1148,6 +1148,15 @@ writes with exact committed-prefix reporting. Tests cover positive flow-credit
 tails, multi-packet MTU splitting, FIN, timeout continuation, and socket-visible
 partial failure followed by suffix retry, without weakening the existing
 single-packet transactional send APIs.
+Borrowed scatter/gather variants now extend that contract across slice
+boundaries without first joining application buffers. Their logical committed
+prefix remains exact after a socket-visible packet error; flow-credit timeout,
+MTU packetization, empty slices, overflow preflight, suffix retry, and final
+FIN placement have direct raw-connection coverage. Stateful STREAM sends now
+also charge flow control by new highest-offset increments, so sparse gaps are
+counted and overlap is not double-charged. Batch and 0-RTT preflight use a
+per-stream final-size shadow, and partial socket prefixes roll back only their
+unsent offset increments.
 The dispatcher now also mirrors each connection's authoritative fixed-capacity
 local CID pool. Initial IDs are installed at registration, dispatcher-mediated
 NEW_CONNECTION_ID sends preflight endpoint-wide collisions before changing

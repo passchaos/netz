@@ -2902,6 +2902,36 @@ candidate won 1/3 pairs. Server-sender throughput was 69.517-86.863 MiB/s
 before and 78.616-92.544 MiB/s after; the candidate won 2/3 pairs. Both ranges
 overlap, so this is not treated as an API performance result; the direct
 progress and retry tests are the claim.
+The same raw connection surface now has `sendStreamSlices`,
+`sendStreamSlicesWithTimeout`, and `sendStreamSlicesWithDeadline`. They stage
+adjacent borrowed slices as consecutive STREAM frames and fill each packet
+across slice boundaries without changing the connection's one-packet fairness
+policy; committed bytes are reported across the logical concatenation. Direct
+tests cover empty slices, a five-byte flow-credit prefix crossing a slice
+boundary, offset-overflow
+preflight with no packet or stream-state mutation, a socket-visible packet
+prefix followed by exact suffix retry, and FIN only on the final packet.
+This is a functionality/copy-avoidance result; no throughput claim is made.
+The shared stateful send preflight now also charges connection and stream flow
+control by each stream's new highest-offset increment rather than summing
+STREAM payload lengths. Sparse offsets therefore include their gap, while
+overlap and retransmission-shaped frames consume no duplicate credit. The same
+transactional accounting covers single sends, partial socket batch prefixes,
+and accepted 0-RTT imports; a per-batch shadow rejects conflicting FIN/final
+sizes before the first packet is sent. Direct tests cover sparse and overlapping
+frames, partial rollback, FIN-only stream materialization, same-packet and
+cross-packet final-size conflicts, 0-RTT multi-stream reserve failure, and
+0-RTT sparse/overlap accounting.
+
+Five CPU-0 fixed-binary order-interleaved pairs against parent `aa15da55` used
+the existing 32-packet raw send benchmark with 50,000 iterations per arm. For
+one STREAM descriptor per packet, parent batch cost was 3,219-3,574 ns/packet
+(3,499 median) and the corrected path was 3,407-3,574 ns/packet (3,530 median).
+With four descriptors per packet, parent was 3,611-3,688 ns/packet (3,655
+median) and the corrected path was 3,649-3,750 ns/packet (3,692 median). The
+candidate won 1/5 pairs in both shapes and both ranges overlap. This records an
+approximately 1% median validation cost for closing protocol correctness gaps;
+it is not treated as a performance improvement.
 
 ### Raw QUIC mixed FIN/reset recovery versus quic-go
 

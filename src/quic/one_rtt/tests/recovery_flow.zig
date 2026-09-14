@@ -205,6 +205,94 @@ test "QUIC 1-RTT stateful batch rolls back unsent suffix and skips nonces" {
     );
 }
 
+test "QUIC stateful sends charge only new highest stream offsets" {
+    const allocator = std.testing.allocator;
+    var threaded = std.Io.Threaded.init(allocator, .{});
+    defer threaded.deinit();
+    const io = threaded.io();
+
+    var sender_endpoint = try quic.runtime.Endpoint.bind(
+        allocator,
+        io,
+        .{ .ip4 = .loopback(0) },
+        .{ .max_datagram_size = 4096 },
+    );
+    defer sender_endpoint.deinit();
+    var peer_endpoint = try quic.runtime.Endpoint.bind(
+        allocator,
+        io,
+        .{ .ip4 = .loopback(0) },
+        .{ .max_datagram_size = 4096 },
+    );
+    defer peer_endpoint.deinit();
+    const keys = quic.protection.deriveAes128Keys(
+        [_]u8{0xca} ** quic.protection.secret_len,
+    );
+    var sender = try one_rtt.Connection.init(&sender_endpoint, .{
+        .peer = peer_endpoint.address(),
+        .receive_keys = keys,
+        .send_keys = keys,
+        .local_connection_id = "credit-client",
+        .peer_connection_id = "credit-server",
+        .initial_send_max_data = 10,
+        .initial_send_max_stream_data = 10,
+        .enable_pacing = false,
+    });
+    defer sender.deinit();
+
+    // A one-byte sparse write at offset five consumes the gap as six bytes of
+    // both stream and connection credit, not merely its one payload byte.
+    try sender.send(&.{.{ .stream = .{
+        .stream_id = 0,
+        .offset = 5,
+        .data = "x",
+    } }});
+    try std.testing.expectEqual(@as(u64, 6), sender.send_flow.used);
+    try std.testing.expectEqual(
+        @as(?u64, 6),
+        one_rtt.testing.sendStreamUsed(&sender, 0),
+    );
+    try std.testing.expectEqual(
+        @as(?u64, 6),
+        one_rtt.testing.sendStreamHighestSentEnd(&sender, 0),
+    );
+
+    // Fully overlapping retransmission-like application data consumes no new
+    // flow credit, while extending the prior maximum by two consumes two.
+    try sender.send(&.{.{ .stream = .{
+        .stream_id = 0,
+        .offset = 2,
+        .data = "abc",
+    } }});
+    try std.testing.expectEqual(@as(u64, 6), sender.send_flow.used);
+    try std.testing.expectEqual(
+        @as(?u64, 6),
+        one_rtt.testing.sendStreamUsed(&sender, 0),
+    );
+    try sender.send(&.{.{ .stream = .{
+        .stream_id = 0,
+        .offset = 4,
+        .data = "wxyz",
+    } }});
+    try std.testing.expectEqual(@as(u64, 8), sender.send_flow.used);
+    try std.testing.expectEqual(
+        @as(?u64, 8),
+        one_rtt.testing.sendStreamUsed(&sender, 0),
+    );
+
+    const packets_before = sender.stats().packets_sent;
+    try std.testing.expectError(
+        error.FlowControlBlocked,
+        sender.send(&.{.{ .stream = .{
+            .stream_id = 0,
+            .offset = 10,
+            .data = "z",
+        } }}),
+    );
+    try std.testing.expectEqual(packets_before + 1, sender.stats().packets_sent);
+    try std.testing.expectEqual(@as(u64, 8), sender.send_flow.used);
+}
+
 test "QUIC 1-RTT stateful batch keeps direct recovery payload bytes" {
     const allocator = std.testing.allocator;
     var threaded = std.Io.Threaded.init(allocator, .{});
@@ -490,6 +578,102 @@ test "QUIC imported 0-RTT copies preserve application packet numbers" {
 
     try connection.send(&.{.{ .ping = {} }});
     try std.testing.expectEqual(@as(u64, 4), connection.next_packet_number);
+}
+
+test "QUIC imported 0-RTT charges highest offsets transactionally" {
+    const allocator = std.testing.allocator;
+    var threaded = std.Io.Threaded.init(allocator, .{});
+    defer threaded.deinit();
+    const io = threaded.io();
+    var endpoint = try quic.runtime.Endpoint.bind(
+        allocator,
+        io,
+        .{ .ip4 = .loopback(0) },
+        .{ .max_datagram_size = 4096 },
+    );
+    defer endpoint.deinit();
+    const keys = quic.protection.deriveAes128Keys(
+        [_]u8{0xce} ** quic.protection.secret_len,
+    );
+    var connection = try one_rtt.Connection.init(&endpoint, .{
+        .peer = endpoint.address(),
+        .receive_keys = keys,
+        .send_keys = keys,
+        .local_connection_id = "early-local",
+        .peer_connection_id = "early-peer",
+        .initial_send_max_data = 16,
+        .initial_send_max_stream_data = 16,
+        .enable_pacing = false,
+    });
+    defer connection.deinit();
+
+    try connection.importSentEarlyData(0, &.{
+        .{ .stream = .{
+            .stream_id = 0,
+            .offset = 5,
+            .data = "x",
+        } },
+        .{ .stream = .{
+            .stream_id = 0,
+            .offset = 2,
+            .data = "abc",
+        } },
+    });
+    try std.testing.expectEqual(@as(u64, 6), connection.send_flow.used);
+    try std.testing.expectEqual(
+        @as(?u64, 6),
+        one_rtt.testing.sendStreamUsed(&connection, 0),
+    );
+
+    var blocked = try one_rtt.Connection.init(&endpoint, .{
+        .peer = endpoint.address(),
+        .receive_keys = keys,
+        .send_keys = keys,
+        .local_connection_id = "blocked-local",
+        .peer_connection_id = "blocked-peer",
+        .initial_send_max_data = 16,
+        .initial_send_max_stream_data = 4,
+        .enable_pacing = false,
+    });
+    defer blocked.deinit();
+    try std.testing.expectError(
+        error.FlowControlBlocked,
+        blocked.importSentEarlyData(0, &.{
+            .{ .stream = .{ .stream_id = 0, .data = "abc" } },
+            .{ .stream = .{ .stream_id = 4, .offset = 4, .data = "x" } },
+        }),
+    );
+    try std.testing.expectEqual(@as(u64, 0), blocked.send_flow.used);
+    try std.testing.expectEqual(
+        @as(?u64, 0),
+        one_rtt.testing.sendStreamUsed(&blocked, 0),
+    );
+    try std.testing.expectEqual(
+        @as(?u64, 0),
+        one_rtt.testing.sendStreamUsed(&blocked, 4),
+    );
+    try std.testing.expectEqual(@as(u64, 0), blocked.next_packet_number);
+
+    try std.testing.expectError(
+        error.FinalSizeMismatch,
+        blocked.importSentEarlyData(0, &.{
+            .{ .stream = .{
+                .stream_id = 8,
+                .data = "a",
+                .fin = true,
+            } },
+            .{ .stream = .{
+                .stream_id = 8,
+                .offset = 1,
+                .data = "b",
+            } },
+        }),
+    );
+    try std.testing.expectEqual(@as(u64, 0), blocked.next_packet_number);
+    try std.testing.expectEqual(
+        @as(?u64, null),
+        one_rtt.testing.sendStreamUsed(&blocked, 8),
+    );
 }
 
 test "QUIC sparse 0-RTT import retires protected holes without tracking them" {
@@ -2995,6 +3179,457 @@ test "QUIC bounded stream send reports socket-visible prefix" {
     try std.testing.expect(empty_fin == .data);
     try std.testing.expectEqual(@as(usize, 0), empty_fin.data.bytes);
     try std.testing.expect(empty_fin.data.fin);
+}
+
+test "QUIC bounded stream slices cross boundaries and resume exact suffix" {
+    const allocator = std.testing.allocator;
+    var threaded = std.Io.Threaded.init(allocator, .{});
+    defer threaded.deinit();
+    const io = threaded.io();
+
+    var sender_endpoint = try quic.runtime.Endpoint.bind(
+        allocator,
+        io,
+        .{ .ip4 = .loopback(0) },
+        .{ .max_datagram_size = 4096, .enable_gso_send = false },
+    );
+    defer sender_endpoint.deinit();
+    var receiver_endpoint = try quic.runtime.Endpoint.bind(
+        allocator,
+        io,
+        .{ .ip4 = .loopback(0) },
+        .{ .max_datagram_size = 4096 },
+    );
+    defer receiver_endpoint.deinit();
+
+    const client_cid = [_]u8{ 0x61, 0x62, 0x63, 0x64 };
+    const server_cid = [_]u8{ 0x65, 0x66, 0x67, 0x68 };
+    const keys = quic.protection.deriveAes128Keys(
+        [_]u8{0xa4} ** quic.protection.secret_len,
+    );
+    var client = try one_rtt.Connection.init(&sender_endpoint, .{
+        .peer = receiver_endpoint.address(),
+        .receive_keys = keys,
+        .send_keys = keys,
+        .local_connection_id = &client_cid,
+        .peer_connection_id = &server_cid,
+        .max_datagram_size = 512,
+        .max_frames_per_packet = 4,
+        .enable_pacing = false,
+    });
+    defer client.deinit();
+    var server = try one_rtt.Connection.init(&receiver_endpoint, .{
+        .peer = sender_endpoint.address(),
+        .receive_keys = keys,
+        .send_keys = keys,
+        .local_connection_id = &server_cid,
+        .peer_connection_id = &client_cid,
+        .local_endpoint = .server,
+        .max_frames_per_packet = 4,
+        .enable_pacing = false,
+    });
+    defer server.deinit();
+
+    var body: [2000]u8 = undefined;
+    for (&body, 0..) |*byte, index| byte.* = @truncate(index);
+    const parts = [_][]const u8{ "ab", &.{}, &body, "tail" };
+    const total_len = 2 + body.len + 4;
+    var expected: [total_len]u8 = undefined;
+    @memcpy(expected[0..2], "ab");
+    @memcpy(expected[2..][0..body.len], &body);
+    @memcpy(expected[2 + body.len ..], "tail");
+
+    var expired_committed: usize = 99;
+    try std.testing.expectError(
+        error.Timeout,
+        client.sendStreamSlicesWithTimeout(
+            4,
+            0,
+            &parts,
+            true,
+            &expired_committed,
+            .zero,
+        ),
+    );
+    try std.testing.expectEqual(@as(usize, 0), expired_committed);
+    try std.testing.expectEqual(
+        @as(?u64, null),
+        one_rtt.testing.sendStreamUsed(&client, 4),
+    );
+
+    var failed = ObservedBatchSend{
+        .delegate = client.endpoint.io,
+        .fail_after_prefix = 0,
+    };
+    var failed_vtable = client.endpoint.io.vtable.*;
+    failed_vtable.netSend = ObservedBatchSend.netSend;
+    client.endpoint.io = .{ .userdata = &failed, .vtable = &failed_vtable };
+    defer client.endpoint.io = failed.delegate;
+
+    var zero_committed: usize = 99;
+    try std.testing.expectError(
+        error.NetworkDown,
+        client.sendStreamSlicesWithDeadline(
+            4,
+            0,
+            &parts,
+            true,
+            &zero_committed,
+            .fromNow(io, .{ .raw = .fromSeconds(2), .clock = .awake }),
+        ),
+    );
+    try std.testing.expectEqual(@as(usize, 0), zero_committed);
+    try std.testing.expectEqual(
+        @as(?u64, 0),
+        one_rtt.testing.sendStreamUsed(&client, 4),
+    );
+    try std.testing.expectEqual(
+        @as(?u64, 0),
+        one_rtt.testing.sendStreamHighestSentEnd(&client, 4),
+    );
+    try std.testing.expectEqual(
+        @as(?u64, null),
+        one_rtt.testing.sendStreamFinalSize(&client, 4),
+    );
+
+    failed.fail_after_prefix = 1;
+    failed.calls = 0;
+    var committed: usize = 99;
+    try std.testing.expectError(
+        error.NetworkDown,
+        client.sendStreamSlicesWithDeadline(
+            0,
+            0,
+            &parts,
+            true,
+            &committed,
+            .fromNow(io, .{ .raw = .fromSeconds(2), .clock = .awake }),
+        ),
+    );
+    try std.testing.expect(committed > parts[0].len);
+    try std.testing.expect(committed < total_len);
+    try std.testing.expectEqual(@as(usize, 1), failed.calls);
+    try std.testing.expectEqual(@as(usize, 1), failed.last_message_count);
+    try std.testing.expectEqual(
+        @as(?u64, committed),
+        one_rtt.testing.sendStreamUsed(&client, 0),
+    );
+    try std.testing.expectEqual(
+        @as(?u64, null),
+        one_rtt.testing.sendStreamFinalSize(&client, 0),
+    );
+
+    var first = try server.receivePacket();
+    defer first.deinit(allocator);
+    try std.testing.expect(first.frames.len > 1);
+    try std.testing.expectEqualStrings("ab", first.frames[0].stream.data);
+
+    client.endpoint.io = failed.delegate;
+    var resumed: usize = 99;
+    const body_offset = committed - parts[0].len;
+    try client.sendStreamSlicesWithTimeout(
+        0,
+        committed,
+        &.{ body[body_offset..], "tail" },
+        true,
+        &resumed,
+        .fromSeconds(2),
+    );
+    try std.testing.expectEqual(total_len - committed, resumed);
+    try std.testing.expectEqual(
+        @as(?u64, total_len),
+        one_rtt.testing.sendStreamFinalSize(&client, 0),
+    );
+
+    var received: [total_len]u8 = undefined;
+    var received_len: usize = 0;
+    var finished = false;
+    const deadline = std.Io.Clock.Timestamp.fromNow(
+        io,
+        .{ .raw = .fromSeconds(2), .clock = .awake },
+    );
+    while (!finished) {
+        const event = try server.receiveStreamIdWithDeadline(
+            0,
+            received[received_len..],
+            deadline,
+        );
+        const data = switch (event) {
+            .reset => return error.TestUnexpectedResult,
+            .data => |value| value,
+        };
+        received_len += data.bytes;
+        finished = data.fin;
+    }
+    try std.testing.expectEqual(total_len, received_len);
+    try std.testing.expectEqualSlices(u8, &expected, &received);
+
+    var empty_fin_committed: usize = 99;
+    try client.sendStreamSlices(8, 0, &.{ &.{}, &.{} }, true, &empty_fin_committed);
+    try std.testing.expectEqual(@as(usize, 0), empty_fin_committed);
+    try std.testing.expectEqual(
+        @as(?u64, 0),
+        one_rtt.testing.sendStreamFinalSize(&client, 8),
+    );
+    var empty: [1]u8 = undefined;
+    const empty_fin = try server.receiveStreamIdWithDeadline(
+        8,
+        &empty,
+        deadline,
+    );
+    try std.testing.expect(empty_fin == .data);
+    try std.testing.expectEqual(@as(usize, 0), empty_fin.data.bytes);
+    try std.testing.expect(empty_fin.data.fin);
+
+    var tiny_parts: [34][]const u8 = undefined;
+    var tiny_storage: [32][1]u8 = undefined;
+    tiny_parts[0] = &.{};
+    for (&tiny_storage, 0..) |*part, index| {
+        part[0] = @intCast(index);
+        tiny_parts[index + 1] = part;
+    }
+    tiny_parts[tiny_parts.len - 1] = &.{};
+    var many_committed: usize = 99;
+    try client.sendStreamSlices(12, 0, &tiny_parts, true, &many_committed);
+    try std.testing.expectEqual(tiny_storage.len, many_committed);
+    var many_received: [tiny_storage.len]u8 = undefined;
+    var many_len: usize = 0;
+    var many_fin = false;
+    while (!many_fin) {
+        const event = try server.receiveStreamIdWithDeadline(
+            12,
+            many_received[many_len..],
+            deadline,
+        );
+        const data = switch (event) {
+            .reset => return error.TestUnexpectedResult,
+            .data => |value| value,
+        };
+        many_len += data.bytes;
+        many_fin = data.fin;
+    }
+    try std.testing.expectEqual(tiny_storage.len, many_len);
+    try std.testing.expectEqualSlices(
+        u8,
+        std.mem.asBytes(&tiny_storage),
+        &many_received,
+    );
+}
+
+test "QUIC bounded stream slices report credit-spanning timeout prefix" {
+    const allocator = std.testing.allocator;
+    var threaded = std.Io.Threaded.init(allocator, .{});
+    defer threaded.deinit();
+    const io = threaded.io();
+
+    var sender_endpoint = try quic.runtime.Endpoint.bind(
+        allocator,
+        io,
+        .{ .ip4 = .loopback(0) },
+        .{ .max_datagram_size = 4096 },
+    );
+    defer sender_endpoint.deinit();
+    var peer_endpoint = try quic.runtime.Endpoint.bind(
+        allocator,
+        io,
+        .{ .ip4 = .loopback(0) },
+        .{ .max_datagram_size = 4096 },
+    );
+    defer peer_endpoint.deinit();
+
+    const local_cid = [_]u8{ 0x71, 0x72, 0x73, 0x74 };
+    const peer_cid = [_]u8{ 0x75, 0x76, 0x77, 0x78 };
+    const keys = quic.protection.deriveAes128Keys(
+        [_]u8{0xa5} ** quic.protection.secret_len,
+    );
+    var sender = try one_rtt.Connection.init(&sender_endpoint, .{
+        .peer = peer_endpoint.address(),
+        .receive_keys = keys,
+        .send_keys = keys,
+        .local_connection_id = &local_cid,
+        .peer_connection_id = &peer_cid,
+        .initial_send_max_data = 5,
+        .initial_send_max_stream_data = 5,
+        .enable_pacing = false,
+    });
+    defer sender.deinit();
+
+    var committed: usize = 99;
+    try std.testing.expectError(
+        error.Timeout,
+        sender.sendStreamSlicesWithTimeout(
+            0,
+            0,
+            &.{ "ab", &.{}, "cdef" },
+            true,
+            &committed,
+            .fromMilliseconds(5),
+        ),
+    );
+    try std.testing.expectEqual(@as(usize, 5), committed);
+    try std.testing.expectEqual(
+        @as(?u64, 5),
+        one_rtt.testing.sendStreamHighestSentEnd(&sender, 0),
+    );
+    try std.testing.expectEqual(
+        @as(?u64, null),
+        one_rtt.testing.sendStreamFinalSize(&sender, 0),
+    );
+
+    const packets_before = sender.stats().packets_sent;
+    const overflow_offset = quic.varint.max_value - 1;
+    try std.testing.expectError(
+        error.InvalidFrameLength,
+        sender.sendStreamSlicesWithTimeout(
+            4,
+            overflow_offset,
+            &.{ "a", "bc" },
+            false,
+            &committed,
+            .fromSeconds(1),
+        ),
+    );
+    try std.testing.expectEqual(@as(usize, 0), committed);
+    try std.testing.expectEqual(packets_before, sender.stats().packets_sent);
+    try std.testing.expectEqual(
+        @as(?u64, null),
+        one_rtt.testing.sendStreamUsed(&sender, 4),
+    );
+
+    _ = try one_rtt.testing.clampSendStreamLimitToUsed(&sender, 4);
+    try one_rtt.testing.applyReceivedFrames(
+        &sender,
+        0,
+        &.{
+            .{ .max_data = .{ .maximum_data = 15 } },
+            .{ .max_stream_data = .{
+                .stream_id = 4,
+                .maximum_stream_data = 10,
+            } },
+        },
+        null,
+        .not_ect,
+    );
+    var sparse_committed: usize = 99;
+    try std.testing.expectError(
+        error.Timeout,
+        sender.sendStreamSlicesWithTimeout(
+            4,
+            5,
+            &.{ "ab", "cdefghij" },
+            false,
+            &sparse_committed,
+            .fromMilliseconds(5),
+        ),
+    );
+    // The five-byte gap plus five new payload bytes consume the entire
+    // ten-byte stream/connection window; the untouched suffix is retryable.
+    try std.testing.expectEqual(@as(usize, 5), sparse_committed);
+    try std.testing.expectEqual(
+        @as(?u64, 10),
+        one_rtt.testing.sendStreamUsed(&sender, 4),
+    );
+    try std.testing.expectEqual(
+        @as(?u64, 10),
+        one_rtt.testing.sendStreamHighestSentEnd(&sender, 4),
+    );
+}
+
+test "QUIC ordinary send preserves final size validation after credit planning" {
+    const allocator = std.testing.allocator;
+    var threaded = std.Io.Threaded.init(allocator, .{});
+    defer threaded.deinit();
+    const io = threaded.io();
+
+    var sender_endpoint = try quic.runtime.Endpoint.bind(
+        allocator,
+        io,
+        .{ .ip4 = .loopback(0) },
+        .{ .max_datagram_size = 4096 },
+    );
+    defer sender_endpoint.deinit();
+    var peer_endpoint = try quic.runtime.Endpoint.bind(
+        allocator,
+        io,
+        .{ .ip4 = .loopback(0) },
+        .{ .max_datagram_size = 4096 },
+    );
+    defer peer_endpoint.deinit();
+
+    const keys = quic.protection.deriveAes128Keys(
+        [_]u8{0xa6} ** quic.protection.secret_len,
+    );
+    var sender = try one_rtt.Connection.init(&sender_endpoint, .{
+        .peer = peer_endpoint.address(),
+        .receive_keys = keys,
+        .send_keys = keys,
+        .local_connection_id = "final-client",
+        .peer_connection_id = "final-server",
+        .enable_pacing = false,
+    });
+    defer sender.deinit();
+
+    try sender.send(&.{.{ .stream = .{
+        .stream_id = 0,
+        .data = "done",
+        .fin = true,
+    } }});
+    const packets_before = sender.stats().packets_sent;
+    try std.testing.expectError(
+        error.FinalSizeMismatch,
+        sender.send(&.{.{ .stream = .{
+            .stream_id = 0,
+            .offset = 4,
+            .data = "x",
+        } }}),
+    );
+    try std.testing.expectEqual(packets_before, sender.stats().packets_sent);
+    try std.testing.expectEqual(
+        @as(?u64, 4),
+        one_rtt.testing.sendStreamFinalSize(&sender, 0),
+    );
+
+    const same_packet = [_]quic.Frame{
+        .{ .stream = .{
+            .stream_id = 4,
+            .data = "a",
+            .fin = true,
+        } },
+        .{ .stream = .{
+            .stream_id = 4,
+            .offset = 1,
+            .data = "b",
+        } },
+    };
+    try std.testing.expectError(
+        error.FinalSizeMismatch,
+        sender.send(&same_packet),
+    );
+    try std.testing.expectEqual(packets_before, sender.stats().packets_sent);
+    try std.testing.expectEqual(
+        @as(?u64, null),
+        one_rtt.testing.sendStreamUsed(&sender, 4),
+    );
+
+    const first = [_]quic.Frame{.{ .stream = .{
+        .stream_id = 8,
+        .data = "a",
+        .fin = true,
+    } }};
+    const second = [_]quic.Frame{.{ .stream = .{
+        .stream_id = 8,
+        .offset = 1,
+        .data = "b",
+    } }};
+    try std.testing.expectError(
+        error.FinalSizeMismatch,
+        sender.sendMany(&.{ &first, &second }),
+    );
+    try std.testing.expectEqual(packets_before, sender.stats().packets_sent);
+    try std.testing.expectEqual(
+        @as(?u64, null),
+        one_rtt.testing.sendStreamUsed(&sender, 8),
+    );
 }
 
 test "QUIC 1-RTT connection handles stream-level flow control" {

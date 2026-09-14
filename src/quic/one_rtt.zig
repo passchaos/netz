@@ -13,6 +13,68 @@ const net = std.Io.net;
 /// ACK_FREQUENCY expresses Requested Max Ack Delay in microseconds, while the
 /// QUIC max_ack_delay limit is 2^14 milliseconds (exclusive).
 const max_requested_ack_delay_us: u64 = (@as(u64, 1) << 14) * 1000;
+const max_stream_slice_frames_per_packet: usize = 16;
+
+const StreamSliceCursor = struct {
+    parts: []const []const u8,
+    part_index: usize = 0,
+    part_offset: usize = 0,
+    committed: usize = 0,
+
+    fn skipEmpty(self: *StreamSliceCursor) void {
+        while (self.part_index < self.parts.len and
+            self.part_offset == self.parts[self.part_index].len)
+        {
+            self.part_index += 1;
+            self.part_offset = 0;
+        }
+    }
+
+    fn done(self: *StreamSliceCursor) bool {
+        self.skipEmpty();
+        return self.part_index == self.parts.len;
+    }
+
+    fn remaining(self: *StreamSliceCursor) []const u8 {
+        self.skipEmpty();
+        return self.parts[self.part_index][self.part_offset..];
+    }
+
+    fn advance(self: *StreamSliceCursor, count: usize) void {
+        std.debug.assert(count != 0);
+        std.debug.assert(count <= self.remaining().len);
+        self.part_offset += count;
+        self.committed += count;
+        self.skipEmpty();
+    }
+};
+
+fn streamSlicesLength(parts: []const []const u8) Error!usize {
+    var total: usize = 0;
+    for (parts) |part| {
+        total = std.math.add(usize, total, part.len) catch
+            return error.InvalidFrameLength;
+    }
+    return total;
+}
+
+fn framesWireLen(frames: []const quic.Frame) Error!usize {
+    var total: usize = 0;
+    for (frames) |frame| {
+        total = std.math.add(usize, total, try frame.wireLen()) catch
+            return error.InvalidFrameLength;
+    }
+    return total;
+}
+
+fn streamFrameEnd(stream: quic.StreamFrame) Error!u64 {
+    const data_len = std.math.cast(u64, stream.data.len) orelse
+        return error.InvalidFrameLength;
+    const end = std.math.add(u64, stream.offset, data_len) catch
+        return error.InvalidFrameLength;
+    if (end > quic.varint.max_value) return error.InvalidFrameLength;
+    return end;
+}
 
 fn validateRequestedMaxAckDelay(
     requested_us: u64,
@@ -426,6 +488,13 @@ pub const PeerStreamReleaseResult = struct {
 const ReservedStreamCredit = struct {
     stream_id: u64,
     bytes: u64,
+    committed_bytes: u64 = 0,
+};
+
+const SendStreamPreflightEntry = struct {
+    stream_id: u64,
+    highest_sent_end: u64,
+    final_size: ?u64,
 };
 
 const OutboundFrameTraits = frame_traits.Traits;
@@ -1415,6 +1484,294 @@ pub const Connection = struct {
         );
     }
 
+    /// Send one logical STREAM payload from borrowed slices without joining
+    /// them. Empty slices are ignored, and FIN accompanies only the final
+    /// byte. `committed_out` counts bytes in the logical concatenation.
+    pub fn sendStreamSlices(
+        self: *Connection,
+        stream_id: u64,
+        offset: u64,
+        parts: []const []const u8,
+        fin: bool,
+        committed_out: *usize,
+    ) Error!void {
+        return self.sendStreamSlicesUntil(
+            stream_id,
+            offset,
+            parts,
+            fin,
+            committed_out,
+            null,
+        ) catch |err| switch (err) {
+            error.Timeout, error.ConcurrencyUnavailable => unreachable,
+            else => |other| return @errorCast(other),
+        };
+    }
+
+    pub fn sendStreamSlicesWithTimeout(
+        self: *Connection,
+        stream_id: u64,
+        offset: u64,
+        parts: []const []const u8,
+        fin: bool,
+        committed_out: *usize,
+        timeout: std.Io.Duration,
+    ) (Error || quic.runtime.ReceiveTimeoutError)!void {
+        committed_out.* = 0;
+        if (timeout.nanoseconds <= 0) return error.Timeout;
+        return self.sendStreamSlicesWithDeadline(
+            stream_id,
+            offset,
+            parts,
+            fin,
+            committed_out,
+            .fromNow(self.endpoint.io, .{
+                .raw = timeout,
+                .clock = .awake,
+            }),
+        );
+    }
+
+    /// Deadline-bounded scatter/gather counterpart to `sendStream`. Packet
+    /// construction can cross slice boundaries, while errors report the exact
+    /// socket-visible prefix of the logical concatenation.
+    pub fn sendStreamSlicesWithDeadline(
+        self: *Connection,
+        stream_id: u64,
+        offset: u64,
+        parts: []const []const u8,
+        fin: bool,
+        committed_out: *usize,
+        deadline: std.Io.Clock.Timestamp,
+    ) (Error || quic.runtime.ReceiveTimeoutError)!void {
+        committed_out.* = 0;
+        _ = try deadline_policy.usableAwake(self.endpoint.io, deadline);
+        return self.sendStreamSlicesUntil(
+            stream_id,
+            offset,
+            parts,
+            fin,
+            committed_out,
+            deadline,
+        );
+    }
+
+    fn sendStreamSlicesUntil(
+        self: *Connection,
+        stream_id: u64,
+        offset: u64,
+        parts: []const []const u8,
+        fin: bool,
+        committed_out: *usize,
+        deadline: ?std.Io.Clock.Timestamp,
+    ) (Error || quic.runtime.ReceiveTimeoutError)!void {
+        committed_out.* = 0;
+        const total_len = try streamSlicesLength(parts);
+        if (total_len == 0) {
+            return self.sendStreamUntil(
+                stream_id,
+                offset,
+                &.{},
+                fin,
+                committed_out,
+                deadline,
+            );
+        }
+        try self.validateStreamRangeForSendAt(
+            stream_id,
+            offset,
+            total_len,
+            fin,
+            self.monotonicNowNs(),
+        );
+
+        var cursor = StreamSliceCursor{ .parts = parts };
+        while (!cursor.done()) {
+            const now_ns = self.monotonicNowNs();
+            if (callerDeadlineExpired(deadline, now_ns)) return error.Timeout;
+            const current_offset = std.math.add(
+                u64,
+                offset,
+                cursor.committed,
+            ) catch unreachable;
+            const flow_available = self.streamPayloadSendAvailable(
+                stream_id,
+                current_offset,
+                total_len - cursor.committed,
+            );
+            const congestion_available = self.congestionAvailable();
+            if (flow_available != 0 and congestion_available == 0) {
+                try self.receiveStreamSendProgressUntil(deadline, now_ns);
+                continue;
+            }
+            const target_bytes = if (flow_available == 0)
+                @as(usize, 1)
+            else
+                flow_available;
+            const flow_probe = flow_available == 0;
+
+            var frame_storage: [max_stream_slice_frames_per_packet]quic.Frame =
+                undefined;
+            var staged = cursor;
+            var staged_bytes: usize = 0;
+            var frame_count: usize = 0;
+            const frame_limit = @max(
+                @as(usize, 1),
+                @min(
+                    max_stream_slice_frames_per_packet,
+                    self.config.max_frames_per_packet,
+                ),
+            );
+            while (frame_count < frame_limit and
+                staged_bytes < target_bytes and !staged.done())
+            {
+                const part = staged.remaining();
+                const limit = @min(
+                    part.len,
+                    target_bytes - staged_bytes,
+                );
+                const frame_offset = std.math.add(
+                    u64,
+                    offset,
+                    staged.committed,
+                ) catch unreachable;
+                frame_storage[frame_count] = .{ .stream = .{
+                    .stream_id = stream_id,
+                    .offset = frame_offset,
+                    .data = part[0..limit],
+                } };
+                const candidate_frames = frame_storage[0 .. frame_count + 1];
+                const candidate_wire_len = try framesWireLen(
+                    candidate_frames,
+                );
+                var count = limit;
+                if (!((flow_probe or
+                    candidate_wire_len <= congestion_available) and
+                    try self.streamFramesFitDatagram(
+                        0,
+                        candidate_frames,
+                    )))
+                {
+                    var lower: usize = 0;
+                    var upper = limit - 1;
+                    while (lower < upper) {
+                        const middle = lower + (upper - lower + 1) / 2;
+                        frame_storage[frame_count] = .{ .stream = .{
+                            .stream_id = stream_id,
+                            .offset = frame_offset,
+                            .data = part[0..middle],
+                        } };
+                        const smaller_frames =
+                            frame_storage[0 .. frame_count + 1];
+                        const smaller_wire_len = try framesWireLen(
+                            smaller_frames,
+                        );
+                        const fits_congestion = flow_probe or
+                            smaller_wire_len <= congestion_available;
+                        if (fits_congestion and
+                            try self.streamFramesFitDatagram(
+                                0,
+                                smaller_frames,
+                            ))
+                        {
+                            lower = middle;
+                        } else {
+                            upper = middle - 1;
+                        }
+                    }
+                    count = lower;
+                }
+                if (count == 0) {
+                    if (frame_count == 0) {
+                        frame_storage[0] = .{ .stream = .{
+                            .stream_id = stream_id,
+                            .offset = frame_offset,
+                            .data = part[0..1],
+                        } };
+                        if (!(try self.streamFramesFitDatagram(
+                            0,
+                            frame_storage[0..1],
+                        ))) return error.DatagramTooLarge;
+                        if (!flow_probe) {
+                            try self.receiveStreamSendProgressUntil(
+                                deadline,
+                                now_ns,
+                            );
+                        }
+                    }
+                    break;
+                }
+                frame_storage[frame_count] = .{ .stream = .{
+                    .stream_id = stream_id,
+                    .offset = frame_offset,
+                    .data = part[0..count],
+                } };
+                staged_bytes += count;
+                staged.advance(count);
+                frame_count += 1;
+            }
+            if (frame_count == 0) continue;
+            if (fin and staged.done()) {
+                frame_storage[frame_count - 1].stream.fin = true;
+            }
+
+            const frames = frame_storage[0..frame_count];
+            const packets = [_][]const quic.Frame{frames};
+            const result = self.sendManyProgressAt(
+                &packets,
+                now_ns,
+            ) catch |err| switch (err) {
+                error.FlowControlBlocked, error.CongestionLimited => {
+                    try self.receiveStreamSendProgressUntil(deadline, now_ns);
+                    continue;
+                },
+                error.PacingLimited => {
+                    if (deadline) |value| {
+                        try self.waitForPacingAvailabilityWithDeadline(value);
+                    } else {
+                        try self.waitForPacing(now_ns);
+                    }
+                    continue;
+                },
+                else => |other| return other,
+            };
+            if (result.sent_count > 1 or
+                result.sent_count > result.protected_count)
+            {
+                return error.Unexpected;
+            }
+            if (result.sent_count == 0) {
+                if (result.send_error) |err| return err;
+                return error.Unexpected;
+            }
+            cursor = staged;
+            committed_out.* = cursor.committed;
+            if (result.send_error) |err| return err;
+        }
+    }
+
+    fn receiveStreamSendProgressUntil(
+        self: *Connection,
+        deadline: ?std.Io.Clock.Timestamp,
+        now_ns: u64,
+    ) (Error || quic.runtime.ReceiveTimeoutError)!void {
+        if (deadline) |value| {
+            self.servicePacketServicingTimersDeadline(value) catch |err|
+                switch (err) {
+                    error.CongestionLimited => return,
+                    error.PacingLimited => return self
+                        .waitForPacingAvailabilityWithDeadline(value),
+                    else => |other| return other,
+                };
+        } else {
+            self.servicePacketServicingTimers() catch |err| switch (err) {
+                error.CongestionLimited => return,
+                error.PacingLimited => return self.waitForPacing(now_ns),
+                else => |other| return other,
+            };
+        }
+    }
+
     fn sendStreamUntil(
         self: *Connection,
         stream_id: u64,
@@ -1449,8 +1806,11 @@ pub const Connection = struct {
                 offset,
                 committed_out.*,
             ) catch return error.InvalidFrameLength;
-            const credit = self.streamSendCredit(stream_id);
-            var count = @min(remaining.len, credit.available());
+            var count = self.streamPayloadSendAvailable(
+                stream_id,
+                current_offset,
+                remaining.len,
+            );
             if (remaining.len != 0) {
                 if (count == 0) count = 1;
                 const congestion_available = self.congestionAvailable();
@@ -1562,6 +1922,46 @@ pub const Connection = struct {
         const packet_len = self.packetLenForFramesAtOffset(
             0,
             @as(*const [1]quic.Frame, &frame),
+        ) catch |err| switch (err) {
+            error.DatagramTooLarge => return false,
+            else => |other| return other,
+        };
+        return packet_len <= self.currentSendDatagramSize();
+    }
+
+    fn streamPayloadSendAvailable(
+        self: *Connection,
+        stream_id: u64,
+        offset: u64,
+        remaining_len: usize,
+    ) usize {
+        const highest_sent_end = if (self.findSendStreamEntry(
+            stream_id,
+        )) |entry| entry.highest_sent_end else 0;
+        const increment_available = @min(
+            self.connectionSendAvailable(),
+            self.streamSendAvailable(stream_id),
+        );
+        const allowed_end = std.math.add(
+            u64,
+            highest_sent_end,
+            increment_available,
+        ) catch quic.varint.max_value;
+        if (offset >= allowed_end) return 0;
+        return @min(
+            remaining_len,
+            std.math.cast(usize, allowed_end - offset) orelse remaining_len,
+        );
+    }
+
+    fn streamFramesFitDatagram(
+        self: Connection,
+        packet_offset: usize,
+        frames: []const quic.Frame,
+    ) Error!bool {
+        const packet_len = self.packetLenForFramesAtOffset(
+            packet_offset,
+            frames,
         ) catch |err| switch (err) {
             error.DatagramTooLarge => return false,
             else => |other| return other,
@@ -1785,9 +2185,15 @@ pub const Connection = struct {
             ack_eliciting: bool,
             in_flight: bool,
             auto_ecn_eligible: bool,
-            stream_bytes: u64,
         };
         var preflight: [max_batch_packets]PacketPreflight = undefined;
+        var stream_validation_stack: [16]SendStreamPreflightEntry = undefined;
+        var stream_validation: std.ArrayList(SendStreamPreflightEntry) =
+            .initBuffer(&stream_validation_stack);
+        var stream_validation_allocated = false;
+        defer if (stream_validation_allocated) {
+            stream_validation.deinit(self.endpoint.allocator);
+        };
         // Stream-limit checks can emit STREAMS_BLOCKED through the ordinary
         // one-packet path, so perform all of them while batch scratch is empty.
         // While walking those frames, cache the packet traits and payload size
@@ -1808,9 +2214,11 @@ pub const Connection = struct {
                 );
                 try traits.merge(current_traits);
                 if (frame == .stream) {
-                    try self.validateStreamFrameForSendAt(
+                    try self.validateStreamFrameForBatchSendAt(
                         frame.stream,
                         now_ns,
+                        &stream_validation,
+                        &stream_validation_allocated,
                     );
                 }
                 const frame_len = try frame.wireLen();
@@ -1833,7 +2241,6 @@ pub const Connection = struct {
                 .ack_eliciting = traits.ack_eliciting,
                 .in_flight = traits.in_flight,
                 .auto_ecn_eligible = traits.autoEcnEligible(),
-                .stream_bytes = traits.stream_bytes,
             };
         }
 
@@ -1919,25 +2326,12 @@ pub const Connection = struct {
             }
 
             packet_streams.clearRetainingCapacity();
-            var packet_stream_bytes: u64 = 0;
-            for (frames) |frame| {
-                if (frame != .stream) continue;
-                const bytes = std.math.cast(
-                    u64,
-                    frame.stream.data.len,
-                ) orelse return error.InvalidFrameLength;
-                packet_stream_bytes = std.math.add(
-                    u64,
-                    packet_stream_bytes,
-                    bytes,
-                ) catch return error.InvalidFrameLength;
-                try addReservedStreamCredit(
-                    packet_streams,
-                    self.endpoint.allocator,
-                    frame.stream.stream_id,
-                    bytes,
-                );
-            }
+            const packet_stream_bytes = try self
+                .collectOutboundStreamCreditIncrements(
+                frames,
+                planned_streams.items,
+                packet_streams,
+            );
             if (packet_stream_bytes > send_flow_available -
                 @min(send_flow_available, total_stream_bytes))
             {
@@ -2203,6 +2597,25 @@ pub const Connection = struct {
         var sent_packet_len: usize = 0;
         var sent_in_flight: usize = 0;
         var sent_stream_bytes: u64 = 0;
+        for (planned_streams.items) |*credit| {
+            const entry = self.findSendStreamEntry(credit.stream_id) orelse
+                continue;
+            var sent_highest_end = entry.highest_sent_end;
+            for (prepared[0..send_result.sent_count]) |packet| {
+                for (packet.frames) |frame| {
+                    if (frame != .stream or
+                        frame.stream.stream_id != credit.stream_id) continue;
+                    sent_highest_end = @max(
+                        sent_highest_end,
+                        streamFrameEnd(frame.stream) catch unreachable,
+                    );
+                }
+            }
+            credit.committed_bytes = @min(
+                credit.bytes,
+                sent_highest_end -| entry.highest_sent_end,
+            );
+        }
         for (prepared[0..send_result.sent_count]) |packet| {
             self.noteOneRttPacketSent(
                 packet.packet_number,
@@ -2232,14 +2645,12 @@ pub const Connection = struct {
         congestion_reserved = false;
 
         self.send_flow.used -|= total_stream_bytes - sent_stream_bytes;
+        for (planned_streams.items) |credit| {
+            const entry = self.findSendStreamEntry(credit.stream_id) orelse
+                continue;
+            entry.flow.used -|= credit.bytes - credit.committed_bytes;
+        }
         for (prepared[send_result.sent_count..count]) |packet| {
-            for (packet.frames) |frame| {
-                if (frame != .stream or frame.stream.data.len == 0) continue;
-                const entry = self.findSendStreamEntry(
-                    frame.stream.stream_id,
-                ) orelse continue;
-                entry.flow.used -|= frame.stream.data.len;
-            }
             _ = self.recovery.forgetPacketNumber(packet.packet_number);
             _ = self.sent.forget(packet.packet_number);
         }
@@ -2446,33 +2857,84 @@ pub const Connection = struct {
     ) Error!u64 {
         std.debug.assert(credits.items.len == 0);
         errdefer credits.clearRetainingCapacity();
-
-        var stream_bytes: u64 = 0;
+        var validation_stack: [16]SendStreamPreflightEntry = undefined;
+        var validation: std.ArrayList(SendStreamPreflightEntry) =
+            .initBuffer(&validation_stack);
+        var validation_allocated = false;
+        defer if (validation_allocated) {
+            validation.deinit(self.endpoint.allocator);
+        };
         for (frames) |frame| {
             if (frame != .stream) continue;
-            try self.validateStreamFrameForSendAt(
+            try self.validateStreamFrameForBatchSendAt(
                 frame.stream,
                 sent_time_ns,
+                &validation,
+                &validation_allocated,
             );
-            const bytes = std.math.cast(
+        }
+
+        return self.collectOutboundStreamCreditIncrements(
+            frames,
+            &.{},
+            credits,
+        );
+    }
+
+    fn collectOutboundStreamCreditIncrements(
+        self: *Connection,
+        frames: []const quic.Frame,
+        prior: []const ReservedStreamCredit,
+        credits: *std.ArrayList(ReservedStreamCredit),
+    ) Error!u64 {
+        std.debug.assert(credits.items.len == 0);
+        errdefer credits.clearRetainingCapacity();
+
+        var connection_increment: u64 = 0;
+        for (frames) |frame| {
+            if (frame != .stream) continue;
+            const base_highest_end = if (self.findSendStreamEntry(
+                frame.stream.stream_id,
+            )) |entry| entry.highest_sent_end else 0;
+            const prior_increment = reservedStreamBytes(
+                prior,
+                frame.stream.stream_id,
+            );
+            const current_increment = reservedStreamBytes(
+                credits.items,
+                frame.stream.stream_id,
+            );
+            const planned_highest_end = std.math.add(
                 u64,
-                frame.stream.data.len,
-            ) orelse return error.InvalidFrameLength;
-            stream_bytes = std.math.add(u64, stream_bytes, bytes) catch
-                return error.InvalidFrameLength;
-            // Aggregate by stream before consulting flow-control state. HTTP/3
-            // writers can split one logical body into several STREAM frames in
-            // the same packet; checking each fragment against the same
-            // pre-reservation limit would otherwise let the packet exceed the
-            // stream's remaining credit.
+                base_highest_end,
+                std.math.add(
+                    u64,
+                    prior_increment,
+                    current_increment,
+                ) catch return error.InvalidFrameLength,
+            ) catch return error.InvalidFrameLength;
+            const end = try streamFrameEnd(frame.stream);
             try addReservedStreamCredit(
                 credits,
                 self.endpoint.allocator,
                 frame.stream.stream_id,
-                bytes,
+                0,
             );
+            if (end <= planned_highest_end) continue;
+            const increment = end - planned_highest_end;
+            try addReservedStreamCredit(
+                credits,
+                self.endpoint.allocator,
+                frame.stream.stream_id,
+                increment,
+            );
+            connection_increment = std.math.add(
+                u64,
+                connection_increment,
+                increment,
+            ) catch return error.InvalidFrameLength;
         }
-        return stream_bytes;
+        return connection_increment;
     }
 
     pub fn datagramSendEnabled(self: Connection) bool {
@@ -9051,20 +9513,41 @@ pub const Connection = struct {
         }
         var payload: std.ArrayList(u8) = .empty;
         defer payload.deinit(self.endpoint.allocator);
-        var stream_bytes: u64 = 0;
+        var validation_stack: [16]SendStreamPreflightEntry = undefined;
+        var validation: std.ArrayList(SendStreamPreflightEntry) =
+            .initBuffer(&validation_stack);
+        var validation_allocated = false;
+        defer if (validation_allocated) {
+            validation.deinit(self.endpoint.allocator);
+        };
+        if (frames.len == 0) return error.MissingFrame;
         for (frames) |frame| {
             try quic.validateFrameForPacketType(frame, .zero_rtt);
-            try frame.write(&payload, self.endpoint.allocator);
             if (frame != .stream) continue;
-            try self.validateStreamFrameForSendAt(frame.stream, null);
-            stream_bytes = std.math.add(
-                u64,
-                stream_bytes,
-                frame.stream.data.len,
-            ) catch return error.InvalidFrameLength;
+            try self.validateStreamFrameForBatchSendAt(
+                frame.stream,
+                null,
+                &validation,
+                &validation_allocated,
+            );
+        }
+        // Finish all frame validation and payload allocation before creating
+        // any send-stream state. A later conflicting FIN or OOM therefore
+        // cannot leave a partially materialized 0-RTT stream set.
+        for (frames) |frame| {
+            try frame.write(&payload, self.endpoint.allocator);
+        }
+        for (frames) |frame| {
+            if (frame != .stream) continue;
             _ = try self.sendStreamEntry(frame.stream.stream_id);
         }
-        if (frames.len == 0) return error.MissingFrame;
+        var reserved_streams: std.ArrayList(ReservedStreamCredit) = .empty;
+        defer reserved_streams.deinit(self.endpoint.allocator);
+        const stream_bytes = try self.collectOutboundStreamCreditIncrements(
+            frames,
+            &.{},
+            &reserved_streams,
+        );
 
         try self.send_flow.reserve(stream_bytes);
         var connection_reserved = true;
@@ -9072,25 +9555,18 @@ pub const Connection = struct {
             if (connection_reserved) self.send_flow.used -|= stream_bytes;
         }
 
-        var reserved_streams: std.ArrayList(ReservedStreamCredit) = .empty;
-        defer reserved_streams.deinit(self.endpoint.allocator);
-        errdefer for (reserved_streams.items) |reserved| {
+        var reserved_stream_count: usize = 0;
+        errdefer for (reserved_streams.items[0..reserved_stream_count]) |reserved| {
             const entry = self.findSendStreamEntry(reserved.stream_id) orelse
                 continue;
             entry.flow.used -|= reserved.bytes;
         };
-        for (frames) |frame| {
-            if (frame != .stream or frame.stream.data.len == 0) continue;
-            try reserved_streams.append(self.endpoint.allocator, .{
-                .stream_id = frame.stream.stream_id,
-                .bytes = 0,
-            });
+        for (reserved_streams.items) |reserved| {
             const entry = self.findSendStreamEntry(
-                frame.stream.stream_id,
+                reserved.stream_id,
             ) orelse unreachable;
-            try entry.flow.reserve(frame.stream.data.len);
-            reserved_streams.items[reserved_streams.items.len - 1].bytes =
-                frame.stream.data.len;
+            try entry.flow.reserve(reserved.bytes);
+            reserved_stream_count += 1;
         }
 
         const analyzed = try frame_traits.analyze(frames);
@@ -9224,6 +9700,7 @@ pub const Connection = struct {
         self.noteSentStreams(frames);
         self.next_packet_number = last_packet_number + 1;
         connection_reserved = false;
+        reserved_stream_count = 0;
         reserved_streams.clearRetainingCapacity();
         tracked_recovery_packets = 0;
         tracked_sent_packets = 0;
@@ -12804,22 +13281,45 @@ pub const Connection = struct {
         stream: quic.StreamFrame,
         sent_time_ns: ?u64,
     ) Error!void {
-        if (self.findSendStreamEntry(stream.stream_id)) |entry| {
+        return self.validateStreamRangeForSendAt(
+            stream.stream_id,
+            stream.offset,
+            stream.data.len,
+            stream.fin,
+            sent_time_ns,
+        );
+    }
+
+    fn validateStreamRangeForSendAt(
+        self: *Connection,
+        stream_id: u64,
+        offset: u64,
+        data_len: usize,
+        fin: bool,
+        sent_time_ns: ?u64,
+    ) Error!void {
+        _ = quic.varint.length(stream_id) catch
+            return error.InvalidFrameLength;
+        _ = quic.varint.length(offset) catch
+            return error.InvalidFrameLength;
+        const data_len_u64 = std.math.cast(u64, data_len) orelse
+            return error.InvalidFrameLength;
+        const end = std.math.add(u64, offset, data_len_u64) catch
+            return error.InvalidFrameLength;
+        if (end > quic.varint.max_value) return error.InvalidFrameLength;
+
+        if (self.findSendStreamEntry(stream_id)) |entry| {
             if (entry.stopped != null or entry.reset_sent != null) return error.StreamStopped;
-            const data_len = std.math.cast(u64, stream.data.len) orelse
-                return error.InvalidFrameLength;
-            const end = std.math.add(
-                u64,
-                stream.offset,
-                data_len,
-            ) catch return error.InvalidFrameLength;
+            if (fin and end < entry.highest_sent_end) {
+                return error.FinalSizeMismatch;
+            }
             if (entry.final_size) |final_size| {
                 if (end > final_size or
-                    (stream.fin and end != final_size))
+                    (fin and end != final_size))
                 {
                     return error.FinalSizeMismatch;
                 }
-                if (stream.data.len != 0 and
+                if (data_len != 0 and
                     end > entry.highest_sent_end)
                 {
                     return error.FinalSizeMismatch;
@@ -12827,14 +13327,14 @@ pub const Connection = struct {
             }
             return;
         }
-        if (self.isClosedStream(stream.stream_id)) {
+        if (self.isClosedStream(stream_id)) {
             return error.StreamStateError;
         }
-        if (!streamHasSendSide(self.config.local_endpoint, stream.stream_id)) return error.StreamStateError;
-        if (!streamInitiatedByLocal(self.config.local_endpoint, stream.stream_id)) return;
+        if (!streamHasSendSide(self.config.local_endpoint, stream_id)) return error.StreamStateError;
+        if (!streamInitiatedByLocal(self.config.local_endpoint, stream_id)) return;
 
-        const count = streamCountForId(stream.stream_id);
-        const direction = streamDirection(stream.stream_id);
+        const count = streamCountForId(stream_id);
+        const direction = streamDirection(stream_id);
         const limit = switch (direction) {
             .bidirectional => self.peer_max_streams_bidi,
             .unidirectional => self.peer_max_streams_uni,
@@ -12845,6 +13345,49 @@ pub const Connection = struct {
         else
             try self.sendStreamsBlocked(direction);
         return error.StreamLimitExceeded;
+    }
+
+    fn validateStreamFrameForBatchSendAt(
+        self: *Connection,
+        stream: quic.StreamFrame,
+        sent_time_ns: ?u64,
+        validation: *std.ArrayList(SendStreamPreflightEntry),
+        allocated: *bool,
+    ) Error!void {
+        try self.validateStreamFrameForSendAt(stream, sent_time_ns);
+        const end = try streamFrameEnd(stream);
+        var shadow: *SendStreamPreflightEntry = for (validation.items) |*item| {
+            if (item.stream_id == stream.stream_id) break item;
+        } else blk: {
+            const entry = self.findSendStreamEntry(stream.stream_id);
+            try appendSendStreamPreflightEntry(
+                validation,
+                allocated,
+                self.endpoint.allocator,
+                .{
+                    .stream_id = stream.stream_id,
+                    .highest_sent_end = if (entry) |value|
+                        value.highest_sent_end
+                    else
+                        0,
+                    .final_size = if (entry) |value| value.final_size else null,
+                },
+            );
+            break :blk &validation.items[validation.items.len - 1];
+        };
+        if (stream.fin and end < shadow.highest_sent_end) {
+            return error.FinalSizeMismatch;
+        }
+        if (shadow.final_size) |final_size| {
+            if (end > final_size or (stream.fin and end != final_size)) {
+                return error.FinalSizeMismatch;
+            }
+            if (stream.data.len != 0 and end > shadow.highest_sent_end) {
+                return error.FinalSizeMismatch;
+            }
+        }
+        shadow.highest_sent_end = @max(shadow.highest_sent_end, end);
+        if (stream.fin) shadow.final_size = end;
     }
 
     fn validateLocalStreamCount(self: *Connection, stream_id: u64) Error!void {
@@ -13745,6 +14288,28 @@ fn appendReservedStreamCredit(
         allocated.* = true;
     }
     try credits.append(allocator, credit);
+}
+
+fn appendSendStreamPreflightEntry(
+    entries: *std.ArrayList(SendStreamPreflightEntry),
+    allocated: *bool,
+    allocator: std.mem.Allocator,
+    entry: SendStreamPreflightEntry,
+) Error!void {
+    if (!allocated.*) {
+        if (entries.items.len < entries.capacity) {
+            entries.appendAssumeCapacity(entry);
+            return;
+        }
+        var grown = try std.ArrayList(SendStreamPreflightEntry).initCapacity(
+            allocator,
+            @max(@as(usize, 1), entries.capacity * 2),
+        );
+        grown.appendSliceAssumeCapacity(entries.items);
+        entries.* = grown;
+        allocated.* = true;
+    }
+    try entries.append(allocator, entry);
 }
 
 fn reservedStreamBytes(

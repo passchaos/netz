@@ -401,7 +401,10 @@ starts with deterministic parsers, serializers, preallocated fixed-width wire-in
   `sendStreamWithTimeout`, or `sendStreamWithDeadline` to consume positive
   connection/stream credit tails, split by exact packet size and congestion
   budget, and report the exact socket-visible prefix through `committed_out`
-  on timeout or network error; FIN is committed only with the final prefix;
+  on timeout or network error; the matching `sendStreamSlices*` forms packetize
+  borrowed scatter/gather payloads across slice and MTU boundaries without a
+  join allocation, filling each fair single-packet submission across adjacent
+  slices with the same logical-prefix and final-FIN contract;
   stream credit is returned only after both directions are terminal, including
   acknowledgement of the local FIN/RESET, with early release requests flushed
   automatically by the ACK receive path. Released peer stream buffers and map
