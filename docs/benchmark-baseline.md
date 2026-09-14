@@ -2470,6 +2470,20 @@ versus 81.025, 69.699, 99.228, 93.564, and 70.437 MiB/s for batches of four
 QUIC pacing limits useful per-connection bursts, so the additional protection
 and staging work is not retained.
 
+A narrower dispatcher candidate reused the already-resolved connection-table
+entry when checking whether authenticated packet processing changed local CID
+routes, instead of looking the same handle up again. Five fixed-binary,
+order-interleaved 16-connection, 16-MiB-total pairs against parent 857f6329
+did not support retaining it. Client-sender throughput was 54.146-60.556 MiB/s
+(57.195 median) before and 53.267-67.029 MiB/s (54.890 median) after, with 2/5
+candidate wins. Server-sender throughput was 84.686-112.349 MiB/s (93.718
+median) before and 69.022-113.377 MiB/s (85.711 median) after, with 1/5
+candidate wins. The ranges overlap, but both medians moved lower and the pair
+outcomes were unfavorable. Every arm verified 16,777,216 bytes, checksum
+2,139,095,040, all sixteen connections, and the completion exchange. The
+candidate was fully removed; this evidence rules out another locally cheaper
+hash lookup as an end-to-end shared-owner improvement on its own.
+
 The next shared-loop step follows Quinn's bounded receive-cycle design: one
 bounded receive operation drains already-ready UDP messages nonblocking, or
 waits for one when the socket starts empty, into a reusable caller buffer. The
