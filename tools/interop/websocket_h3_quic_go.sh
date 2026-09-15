@@ -82,6 +82,7 @@ PY
   warmup=20
   iterations=1000
   payload_bytes=4096
+  timeout_ms=30000
   go_args=()
   for arg in "$@"; do
     go_args+=("-${arg#--}")
@@ -90,11 +91,25 @@ PY
       --warmup=*) warmup=${arg#--warmup=} ;;
       --iterations=*) iterations=${arg#--iterations=} ;;
       --payload-bytes=*) payload_bytes=${arg#--payload-bytes=} ;;
+      --timeout-ms=*) timeout_ms=${arg#--timeout-ms=} ;;
     esac
   done
-  time_bin=${TIME_BIN:-/usr/bin/time}
-  if [[ $stats == true && ! -x $time_bin ]]; then
-    echo "GNU time not found at $time_bin" >&2
+  time_command=()
+  rss_source=gnu-time-maxrss
+  if [[ -n ${TIME_BIN:-} ]]; then
+    if [[ ! -x $TIME_BIN ]]; then
+      echo "time executable not found at $TIME_BIN" >&2
+      exit 127
+    fi
+    time_command=("$TIME_BIN")
+  elif [[ -x /usr/bin/time ]]; then
+    time_command=(/usr/bin/time)
+  elif command -v busybox >/dev/null 2>&1; then
+    time_command=("$(command -v busybox)" time)
+    rss_source=busybox-time-maxrss
+  fi
+  if [[ $stats == true && ${#time_command[@]} -eq 0 ]]; then
+    echo 'GNU or BusyBox time not found' >&2
     exit 127
   fi
 
@@ -115,9 +130,11 @@ PY
     local check_args=(python3 \
       "$repo_root/tools/interop/websocket_h3_benchmark_check.py" \
       --role-pair="$1" --warmup="$warmup" --iterations="$iterations" \
-      --payload-bytes="$payload_bytes" --client-log="$2" --server-log="$3")
+      --payload-bytes="$payload_bytes" --timeout-ms="$timeout_ms" \
+      --client-log="$2" --server-log="$3")
     if [[ -n ${4:-} ]]; then
-      check_args+=(--client-rss="$4" --server-rss="$5")
+      check_args+=(--client-rss="$4" --server-rss="$5" \
+        --rss-source="$rss_source")
     fi
     "${check_args[@]}"
   }
@@ -130,7 +147,7 @@ MIIBMDCB1qADAgECAgISNDAKBggqhkjOPQQDAjAUMRIwEAYDVQQDDAlsb2NhbGhvc3QwHhcNMjYwMTAx
 EOF
   port=$(free_udp_port)
   if [[ $stats == true ]]; then
-    timeout 180s "$time_bin" -f '%M' -o "$work/quic-go-bench-server.rss" \
+    timeout 180s "${time_command[@]}" -f '%M' -o "$work/quic-go-bench-server.rss" \
       taskset -c "$server_cpu" "$work/quic-go-rfc9220-peer" \
       -mode bench-server -addr "127.0.0.1:$port" \
       -ca-out "$work/quic-go-bench-ca.pem" "${go_args[@]}" \
@@ -146,7 +163,7 @@ EOF
     QUIC_GO_WEBSOCKET_H3_BENCH_ADDR >/dev/null
   sleep 0.05
   if [[ $stats == true ]]; then
-    timeout 180s "$time_bin" -f '%M' -o "$work/netz-bench-client.rss" \
+    timeout 180s "${time_command[@]}" -f '%M' -o "$work/netz-bench-client.rss" \
       taskset -c "$client_cpu" "$client" \
       bench-client "$port" "$work/quic-go-bench-ca.pem" "$@" \
       >"$work/netz-bench-client.log" 2>&1
@@ -170,7 +187,7 @@ EOF
 
   port=$(free_udp_port)
   if [[ $stats == true ]]; then
-    timeout 180s "$time_bin" -f '%M' -o "$work/netz-bench-server.rss" \
+    timeout 180s "${time_command[@]}" -f '%M' -o "$work/netz-bench-server.rss" \
       taskset -c "$server_cpu" "$server" bench-server "$port" "$@" \
       >"$work/netz-bench-server.log" 2>&1 &
   else
@@ -181,7 +198,7 @@ EOF
   wait_for_line "$server_pid" "$work/netz-bench-server.log" \
     NETZ_WEBSOCKET_H3_BENCH_PORT >/dev/null
   if [[ $stats == true ]]; then
-    timeout 180s "$time_bin" -f '%M' -o "$work/quic-go-bench-client.rss" \
+    timeout 180s "${time_command[@]}" -f '%M' -o "$work/quic-go-bench-client.rss" \
       taskset -c "$client_cpu" "$work/quic-go-rfc9220-peer" \
       -mode bench-client -addr "127.0.0.1:$port" -ca "$work/netz-ca.pem" \
       "${go_args[@]}" >"$work/quic-go-bench-client.log" 2>&1
@@ -243,11 +260,14 @@ grep -Fq \
   "netz RFC 9220 client interoperated with quic-go: version=$version extended_connect=true tls_verified=true origin=true subprotocol=netz-chat masked_fragmented_text=true permessage_deflate=no_context_takeover ping_pong=true close=1000/done" \
   "$work/netz-client.log"
 if [[ "$version" == 2 ]]; then
-  grep -Eq 'local_key_updates=[1-9][0-9]* peer_key_updates=[1-9][0-9]*$' \
+  grep -Eq 'local_key_updates=[1-9][0-9]* peer_key_updates=[1-9][0-9]* client_io=zio-std-io server_io=quic-go-netpoll$' \
+    "$work/netz-client.log"
+else
+  grep -Eq 'local_key_updates=[0-9]+ peer_key_updates=[0-9]+ client_io=zio-std-io server_io=quic-go-netpoll$' \
     "$work/netz-client.log"
 fi
 grep -Fq \
-  "quic-go RFC 9220 server interoperated with netz: version=$version extended_connect=true origin=true subprotocol=netz-chat masked_fragmented_text=true permessage_deflate=no_context_takeover ping_pong=true close=1000/done" \
+  "quic-go RFC 9220 server interoperated with netz: version=$version extended_connect=true origin=true subprotocol=netz-chat masked_fragmented_text=true permessage_deflate=no_context_takeover ping_pong=true close=1000/done client_io=zio-std-io server_io=quic-go-netpoll" \
   "$work/quic-go-server.log"
 cat "$work/netz-client.log"
 cat "$work/quic-go-server.log"
@@ -289,13 +309,16 @@ fi
 wait "$server_pid"
 server_pid=
 grep -Fq \
-  "quic-go RFC 9220 client interoperated with netz: version=$version extended_connect=true origin=true subprotocol=netz-chat masked_fragmented_text=true permessage_deflate=no_context_takeover ping_pong=true close=1000/done" \
+  "quic-go RFC 9220 client interoperated with netz: version=$version extended_connect=true origin=true subprotocol=netz-chat masked_fragmented_text=true permessage_deflate=no_context_takeover ping_pong=true close=1000/done client_io=quic-go-netpoll server_io=zio-std-io" \
   "$work/quic-go-client.log"
 grep -Fq \
   "netz RFC 9220 server interoperated with quic-go: version=$version extended_connect=true origin=true subprotocol=netz-chat masked_fragmented_text=true permessage_deflate=no_context_takeover ping_pong=true close=1000/done" \
   "$work/netz-server.log"
 if [[ "$version" == 2 ]]; then
-  grep -Eq 'local_key_updates=[1-9][0-9]* peer_key_updates=[1-9][0-9]*$' \
+  grep -Eq 'local_key_updates=[1-9][0-9]* peer_key_updates=[1-9][0-9]* client_io=quic-go-netpoll server_io=zio-std-io$' \
+    "$work/netz-server.log"
+else
+  grep -Eq 'local_key_updates=[0-9]+ peer_key_updates=[0-9]+ client_io=quic-go-netpoll server_io=zio-std-io$' \
     "$work/netz-server.log"
 fi
 cat "$work/quic-go-client.log"

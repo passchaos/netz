@@ -18,9 +18,9 @@ pub fn main(init: std.process.Init) !void {
     const version = try parseVersion(args[2..]);
 
     const allocator = std.heap.c_allocator;
-    var threaded = std.Io.Threaded.init(allocator, .{});
-    defer threaded.deinit();
-    const io = threaded.io();
+    var backend = try netz.runtime.Backend.init(allocator);
+    defer backend.deinit();
+    const io = backend.io();
     var certificate_der: [netz.tls.testing.certificate_der_len]u8 = undefined;
     try std.base64.standard.Decoder.decode(
         &certificate_der,
@@ -176,7 +176,7 @@ pub fn main(init: std.process.Init) !void {
     // response before this one-shot server destroys the QUIC connection.
     try std.Io.sleep(io, .fromMilliseconds(250), .awake);
     std.debug.print(
-        "netz RFC 9220 server interoperated with quic-go: version={d} extended_connect=true origin=true subprotocol=netz-chat masked_fragmented_text=true permessage_deflate=no_context_takeover ping_pong=true close=1000/done local_key_updates={d} peer_key_updates={d}\n",
+        "netz RFC 9220 server interoperated with quic-go: version={d} extended_connect=true origin=true subprotocol=netz-chat masked_fragmented_text=true permessage_deflate=no_context_takeover ping_pong=true close=1000/done local_key_updates={d} peer_key_updates={d} client_io=quic-go-netpoll server_io=zio-std-io\n",
         .{ versionNumber(version), local_key_updates, peer_key_updates },
     );
 }
@@ -216,9 +216,9 @@ fn runBenchmarkWithAllocator(
     port: u16,
     config: benchmark.Config,
 ) !void {
-    var threaded = std.Io.Threaded.init(allocator, .{ .async_limit = .unlimited });
-    defer threaded.deinit();
-    const io = threaded.io();
+    var backend = try netz.runtime.Backend.init(allocator);
+    defer backend.deinit();
+    const io = backend.io();
     var certificate_der: [netz.tls.testing.certificate_der_len]u8 = undefined;
     try std.base64.standard.Decoder.decode(
         &certificate_der,
@@ -279,7 +279,7 @@ fn runBenchmarkWithAllocator(
     pending_owned = false;
     defer connection.deinit();
     try connection.sendBinary("NZWSREADY");
-    benchmark.printConfig("quic-go-client+netz-server", config);
+    benchmark.printConfig("quic-go-client+netz-server", "server", config);
     const storage = try allocator.alloc(u8, config.payload_bytes);
     defer allocator.free(storage);
     var checksum: u64 = 0;

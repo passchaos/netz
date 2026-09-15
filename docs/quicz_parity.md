@@ -828,12 +828,20 @@ The RFC 9220 quic-go peer likewise exposes
 `bench-websocket-h3-quic-go`. It runs a certificate-verified persistent binary
 echo in both implementation-role pairings on separate CPUs, excludes handshake
 and warmup from timing, varies and validates all 4 KiB payloads at both peers,
-and requires a normal Close. Five 1,000-round samples measured
+and requires a normal Close. Both netz roles now run on zio behind `std.Io`;
+the strict schema binds every config, result, completion, and memory record to
+`zio-std-io` or `quic-go-netpoll`, validates the timeout and complete shape,
+and recomputes the reported timing metrics. Historical pre-zio five-run
+1,000-round samples measured
 101.80-103.39 us/roundtrip for netz-client + quic-go-server and
 102.25-103.34 us/roundtrip for quic-go-client + netz-server. The overlapping
-ranges are reported by role pair, not attributed to one library. This remains
-same-application-shape because GSO/GRO, ACK policy, packetization, and syscall
-counts have not been proven equal.
+ranges are reported by role pair, not attributed to one library. They are not
+current zio performance evidence. A zio migration smoke subsequently verified
+three 1-KiB echoes in both role pairs, exact checksum 391,680, and zero retained
+netz allocator bytes. It remains a functional gate rather than a performance
+comparison, and the whole harness remains same-application-shape because
+GSO/GRO, ACK policy, packetization, and syscall counts have not been proven
+equal.
 An opt-in three-run memory pass over the same workload measured whole-process
 peak RSS of 3,840/3,584 KiB for the netz client/server and 13,056/13,056 KiB
 for the quic-go server/client role pairings. Both netz explicit-allocation

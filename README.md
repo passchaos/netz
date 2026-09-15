@@ -1178,8 +1178,11 @@ measured interval and byte-exact validation at both peers. They are also
 labeled `same-application-shape`. Both runners accept `--stats` for
 whole-process RSS plus separately scoped runtime allocation telemetry. Their
 strict verifiers require distinct client-result and server-completion records
-and independently recompute every measured payload checksum; allocation
-counters are not compared across languages.
+and independently recompute every measured payload checksum. The H3 netz
+endpoints use zio behind `std.Io`; its config, result, completion, and memory
+records bind both endpoint runtimes and the timeout, and its verifier rejects
+legacy backend or mismatched timing records. Allocation counters are not
+compared across languages.
 `bench-webtransport-wtransport` provides the
 analogous stream upload and DATAGRAM ping-pong comparison described above. It
 also accepts `--stats` for four-process peak RSS and separately scoped netz

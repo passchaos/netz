@@ -233,6 +233,10 @@ mask key. Three CPU-0 runs of the same payload split into 16 WebSocket frames
 fell from 355.548-355.816 us/roundtrip to 52.230-54.194 us/roundtrip
 (144.16-150.39 MiB/s), a roughly 6.6-6.8x latency reduction. Larger fragment
 counts or wire payloads retain the bounded streaming fallback.
+The external quic-go RFC 9220 client/server and benchmark executables now use
+zio behind the `std.Io` protocol boundary. Their runner rejects success, shape,
+and memory records unless the netz endpoint is `zio-std-io` and the quic-go
+endpoint is `quic-go-netpoll`; older Threaded timing ranges remain historical.
 The RFC 9220 adapter also reserves the bounded receive-window tail before an
 HTTP/3 DATA read and lets the stream reader fill it directly. This removes the
 former 16 KiB stack staging buffer and its `scratch -> inbuf` copy while keeping

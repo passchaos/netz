@@ -184,18 +184,28 @@ pub fn nowNs(io: std.Io) u64 {
     return std.math.cast(u64, value) orelse std.math.maxInt(u64);
 }
 
-pub fn printConfig(role_pair: []const u8, config: Config) void {
+pub fn printConfig(
+    role_pair: []const u8,
+    endpoint_role: []const u8,
+    config: Config,
+) void {
     std.debug.print(
-        "protocol=websocket-h3 transport=h3 mode=binary-echo role_pair={s} " ++
+        "record=config implementation=netz protocol=websocket-h3 transport=h3 " ++
+            "mode=binary-echo role_pair={s} endpoint_role={s} " ++
+            "client_io={s} server_io={s} " ++
             "connection_scope=persistent benchmark_scope=same-application-shape " ++
             "warmup={d} iterations={d} payload_bytes={d} " ++
-            "stream_window=1048576 connection_window=8388608 " ++
+            "stream_window=1048576 connection_window=8388608 timeout_ms={d} " ++
             "steady_state_mtu=1280 quic_version=1 " ++
             "cipher=negotiated-unexposed cert_verify=true compression=false " ++
             "netz_gso=false netz_gro=false " ++
             "quic_go_gso=implementation-default " ++
             "quic_go_gro=implementation-default pacing=implementation-specific\n",
-        .{ role_pair, config.warmup, config.iterations, config.payload_bytes },
+        .{
+            role_pair,            endpoint_role,     clientIo(role_pair),
+            serverIo(role_pair),  config.warmup,     config.iterations,
+            config.payload_bytes, config.timeout_ms,
+        },
     );
 }
 
@@ -217,16 +227,20 @@ pub fn printResult(
     std.debug.print(
         "record=result implementation=netz protocol=websocket-h3 transport=h3 " ++
             "mode=binary-echo role_pair={s} endpoint_role=client " ++
+            "client_io={s} server_io={s} " ++
             "connection_scope=persistent benchmark_scope=same-application-shape " ++
-            "warmup={d} iterations={d} payload_bytes={d} " ++
+            "warmup={d} iterations={d} payload_bytes={d} timeout_ms={d} " ++
             "elapsed_ns={d} ns_per_roundtrip={d:.3} " ++
             "roundtrips_per_s={d:.3} logical_MiB_s={d:.3} " ++
             "sent_bytes={d} received_bytes={d} checksum={d} complete=true\n",
         .{
             role_pair,
+            clientIo(role_pair),
+            serverIo(role_pair),
             config.warmup,
             config.iterations,
             config.payload_bytes,
+            config.timeout_ms,
             elapsed_ns,
             @as(f64, @floatFromInt(elapsed_ns)) / @as(f64, @floatFromInt(config.iterations)),
             roundtrips_per_second,
@@ -247,14 +261,18 @@ pub fn printServerComplete(
     std.debug.print(
         "record=server-complete implementation=netz protocol=websocket-h3 " ++
             "transport=h3 mode=binary-echo role_pair={s} " ++
-            "endpoint_role=server connection_scope=persistent warmup={d} " ++
-            "iterations={d} payload_bytes={d} sent_bytes={d} " ++
+            "endpoint_role=server client_io={s} server_io={s} " ++
+            "connection_scope=persistent benchmark_scope=same-application-shape " ++
+            "warmup={d} iterations={d} payload_bytes={d} timeout_ms={d} sent_bytes={d} " ++
             "received_bytes={d} checksum={d} server_complete=true\n",
         .{
             role_pair,
+            clientIo(role_pair),
+            serverIo(role_pair),
             config.warmup,
             config.iterations,
             config.payload_bytes,
+            config.timeout_ms,
             bytes,
             bytes,
             checksum,
@@ -271,17 +289,21 @@ pub fn printNetzMemory(
     std.debug.print(
         "record=memory implementation=netz protocol=websocket-h3 transport=h3 " ++
             "mode=binary-echo role_pair={s} endpoint_role={s} " ++
-            "connection_scope=persistent warmup={d} iterations={d} " ++
-            "payload_bytes={d} memory_scope=benchmark-run-after-argument-parse " ++
+            "client_io={s} server_io={s} connection_scope=persistent " ++
+            "warmup={d} iterations={d} payload_bytes={d} timeout_ms={d} " ++
+            "memory_scope=benchmark-run-after-argument-parse " ++
             "allocator_scope=netz-explicit alloc_count={d} free_count={d} " ++
             "resize_count={d} remap_count={d} total_allocated_bytes={d} " ++
             "live_bytes={d} peak_live_bytes={d} complete=true\n",
         .{
             role_pair,
             endpoint_role,
+            clientIo(role_pair),
+            serverIo(role_pair),
             config.warmup,
             config.iterations,
             config.payload_bytes,
+            config.timeout_ms,
             snapshot.alloc_count,
             snapshot.free_count,
             snapshot.resize_count,
@@ -291,4 +313,18 @@ pub fn printNetzMemory(
             snapshot.peak_bytes,
         },
     );
+}
+
+pub fn clientIo(role_pair: []const u8) []const u8 {
+    return if (std.mem.startsWith(u8, role_pair, "netz-client"))
+        "zio-std-io"
+    else
+        "quic-go-netpoll";
+}
+
+pub fn serverIo(role_pair: []const u8) []const u8 {
+    return if (std.mem.endsWith(u8, role_pair, "netz-server"))
+        "zio-std-io"
+    else
+        "quic-go-netpoll";
 }

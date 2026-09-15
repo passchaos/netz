@@ -27,6 +27,7 @@ import (
 	"os"
 	"runtime"
 	"strconv"
+	"strings"
 	"time"
 
 	"github.com/quic-go/quic-go"
@@ -270,7 +271,7 @@ func runServer(address, caOut string, v2Only bool) {
 		log.Fatal("timed out stopping HTTP/3 server")
 	}
 	verifyVersion(<-negotiatedVersion, v2Only)
-	fmt.Printf("quic-go RFC 9220 server interoperated with netz: version=%d extended_connect=true origin=true subprotocol=%s masked_fragmented_text=true permessage_deflate=no_context_takeover ping_pong=true close=1000/%s\n", versionNumber(v2Only), protocol, closeReason)
+	fmt.Printf("quic-go RFC 9220 server interoperated with netz: version=%d extended_connect=true origin=true subprotocol=%s masked_fragmented_text=true permessage_deflate=no_context_takeover ping_pong=true close=1000/%s client_io=zio-std-io server_io=quic-go-netpoll\n", versionNumber(v2Only), protocol, closeReason)
 }
 
 func runBenchmarkServer(address, caOut string, config benchmarkConfig) {
@@ -299,7 +300,7 @@ func runBenchmarkServer(address, caOut string, config benchmarkConfig) {
 	errChan := make(chan error, 1)
 	go func() { errChan <- server.ListenAndServe() }()
 	fmt.Printf("QUIC_GO_WEBSOCKET_H3_BENCH_ADDR=%s\n", address)
-	printBenchmarkConfig("netz-client+quic-go-server", config)
+	printBenchmarkConfig("netz-client+quic-go-server", "server", config)
 	select {
 	case err := <-served:
 		if err != nil {
@@ -409,7 +410,7 @@ func runBenchmarkClient(address, caPath string, config benchmarkConfig) {
 		response.Header.Get("Sec-WebSocket-Extensions") != "" {
 		log.Fatalf("unexpected benchmark RFC 9220 response: status=%d headers=%v", response.StatusCode, response.Header)
 	}
-	printBenchmarkConfig("quic-go-client+netz-server", config)
+	printBenchmarkConfig("quic-go-client+netz-server", "client", config)
 	elapsed, checksum, err := runBenchmarkEchoClient(stream, config, true)
 	if err != nil {
 		log.Fatal(err)
@@ -687,7 +688,7 @@ func runClient(address, caPath string, v2Only bool) {
 		log.Fatal(err)
 	}
 	verifyVersion(connection.ConnectionState().Version, v2Only)
-	fmt.Printf("quic-go RFC 9220 client interoperated with netz: version=%d extended_connect=true origin=true subprotocol=%s masked_fragmented_text=true permessage_deflate=no_context_takeover ping_pong=true close=1000/%s\n", versionNumber(v2Only), protocol, closeReason)
+	fmt.Printf("quic-go RFC 9220 client interoperated with netz: version=%d extended_connect=true origin=true subprotocol=%s masked_fragmented_text=true permessage_deflate=no_context_takeover ping_pong=true close=1000/%s client_io=quic-go-netpoll server_io=zio-std-io\n", versionNumber(v2Only), protocol, closeReason)
 }
 
 func clientConversation(stream io.ReadWriter) error {
@@ -957,23 +958,37 @@ func verifyBenchmarkPayload(payload []byte, round uint32) (uint64, error) {
 	return checksum, nil
 }
 
-func printBenchmarkConfig(rolePair string, config benchmarkConfig) {
-	fmt.Printf("protocol=websocket-h3 transport=h3 mode=binary-echo role_pair=%s connection_scope=persistent benchmark_scope=same-application-shape warmup=%d iterations=%d payload_bytes=%d stream_window=1048576 connection_window=8388608 steady_state_mtu=1280 quic_version=1 cipher=negotiated-unexposed cert_verify=true compression=false netz_gso=false netz_gro=false quic_go_gso=implementation-default quic_go_gro=implementation-default pacing=implementation-specific\n", rolePair, config.warmup, config.iterations, config.payloadBytes)
+func printBenchmarkConfig(rolePair, endpointRole string, config benchmarkConfig) {
+	fmt.Printf("record=config implementation=quic-go protocol=websocket-h3 transport=h3 mode=binary-echo role_pair=%s endpoint_role=%s client_io=%s server_io=%s connection_scope=persistent benchmark_scope=same-application-shape warmup=%d iterations=%d payload_bytes=%d stream_window=1048576 connection_window=8388608 timeout_ms=%d steady_state_mtu=1280 quic_version=1 cipher=negotiated-unexposed cert_verify=true compression=false netz_gso=false netz_gro=false quic_go_gso=implementation-default quic_go_gro=implementation-default pacing=implementation-specific\n", rolePair, endpointRole, clientIO(rolePair), serverIO(rolePair), config.warmup, config.iterations, config.payloadBytes, config.timeout/time.Millisecond)
 }
 
 func printBenchmarkResult(rolePair string, config benchmarkConfig, elapsed time.Duration, checksum uint64) {
 	roundtripsPerSecond := float64(config.iterations) * 1e9 / float64(elapsed.Nanoseconds())
 	logicalMiBPerSecond := roundtripsPerSecond * float64(config.payloadBytes) * 2 / (1024 * 1024)
-	fmt.Printf("record=result implementation=quic-go protocol=websocket-h3 transport=h3 mode=binary-echo role_pair=%s endpoint_role=client connection_scope=persistent benchmark_scope=same-application-shape warmup=%d iterations=%d payload_bytes=%d elapsed_ns=%d ns_per_roundtrip=%.3f roundtrips_per_s=%.3f logical_MiB_s=%.3f sent_bytes=%d received_bytes=%d checksum=%d complete=true\n", rolePair, config.warmup, config.iterations, config.payloadBytes, elapsed.Nanoseconds(), float64(elapsed.Nanoseconds())/float64(config.iterations), roundtripsPerSecond, logicalMiBPerSecond, uint64(config.iterations)*uint64(config.payloadBytes), uint64(config.iterations)*uint64(config.payloadBytes), checksum)
+	fmt.Printf("record=result implementation=quic-go protocol=websocket-h3 transport=h3 mode=binary-echo role_pair=%s endpoint_role=client client_io=%s server_io=%s connection_scope=persistent benchmark_scope=same-application-shape warmup=%d iterations=%d payload_bytes=%d timeout_ms=%d elapsed_ns=%d ns_per_roundtrip=%.3f roundtrips_per_s=%.3f logical_MiB_s=%.3f sent_bytes=%d received_bytes=%d checksum=%d complete=true\n", rolePair, clientIO(rolePair), serverIO(rolePair), config.warmup, config.iterations, config.payloadBytes, config.timeout/time.Millisecond, elapsed.Nanoseconds(), float64(elapsed.Nanoseconds())/float64(config.iterations), roundtripsPerSecond, logicalMiBPerSecond, uint64(config.iterations)*uint64(config.payloadBytes), uint64(config.iterations)*uint64(config.payloadBytes), checksum)
 }
 
 func printBenchmarkServerComplete(implementation, rolePair string, config benchmarkConfig, checksum uint64) {
 	bytes := uint64(config.iterations) * uint64(config.payloadBytes)
-	fmt.Printf("record=server-complete implementation=%s protocol=websocket-h3 transport=h3 mode=binary-echo role_pair=%s endpoint_role=server connection_scope=persistent warmup=%d iterations=%d payload_bytes=%d sent_bytes=%d received_bytes=%d checksum=%d server_complete=true\n", implementation, rolePair, config.warmup, config.iterations, config.payloadBytes, bytes, bytes, checksum)
+	fmt.Printf("record=server-complete implementation=%s protocol=websocket-h3 transport=h3 mode=binary-echo role_pair=%s endpoint_role=server client_io=%s server_io=%s connection_scope=persistent benchmark_scope=same-application-shape warmup=%d iterations=%d payload_bytes=%d timeout_ms=%d sent_bytes=%d received_bytes=%d checksum=%d server_complete=true\n", implementation, rolePair, clientIO(rolePair), serverIO(rolePair), config.warmup, config.iterations, config.payloadBytes, config.timeout/time.Millisecond, bytes, bytes, checksum)
 }
 
 func printMemory(rolePair, endpointRole string, config benchmarkConfig, before, after memorySnapshot) {
-	fmt.Printf("record=memory implementation=quic-go protocol=websocket-h3 transport=h3 mode=binary-echo role_pair=%s endpoint_role=%s connection_scope=persistent warmup=%d iterations=%d payload_bytes=%d memory_scope=benchmark-run-after-argument-parse allocator_scope=go-runtime-heap alloc_count=%d free_count=%d total_allocated_bytes=%d heap_alloc_bytes_end=%d heap_sys_bytes_end=%d runtime_sys_bytes_end=%d gc_cycles=%d complete=true\n", rolePair, endpointRole, config.warmup, config.iterations, config.payloadBytes, after.mallocs-before.mallocs, after.frees-before.frees, after.totalAlloc-before.totalAlloc, after.heapAlloc, after.heapSys, after.sys, after.numGC-before.numGC)
+	fmt.Printf("record=memory implementation=quic-go protocol=websocket-h3 transport=h3 mode=binary-echo role_pair=%s endpoint_role=%s client_io=%s server_io=%s connection_scope=persistent warmup=%d iterations=%d payload_bytes=%d timeout_ms=%d memory_scope=benchmark-run-after-argument-parse allocator_scope=go-runtime-heap alloc_count=%d free_count=%d total_allocated_bytes=%d heap_alloc_bytes_end=%d heap_sys_bytes_end=%d runtime_sys_bytes_end=%d gc_cycles=%d complete=true\n", rolePair, endpointRole, clientIO(rolePair), serverIO(rolePair), config.warmup, config.iterations, config.payloadBytes, config.timeout/time.Millisecond, after.mallocs-before.mallocs, after.frees-before.frees, after.totalAlloc-before.totalAlloc, after.heapAlloc, after.heapSys, after.sys, after.numGC-before.numGC)
+}
+
+func clientIO(rolePair string) string {
+	if strings.HasPrefix(rolePair, "netz-client") {
+		return "zio-std-io"
+	}
+	return "quic-go-netpoll"
+}
+
+func serverIO(rolePair string) string {
+	if strings.HasSuffix(rolePair, "netz-server") {
+		return "zio-std-io"
+	}
+	return "quic-go-netpoll"
 }
 
 func validOpcode(opcode byte) bool {

@@ -20,9 +20,9 @@ pub fn main(init: std.process.Init) !void {
     const version = try parseVersion(args[3..]);
 
     const allocator = std.heap.c_allocator;
-    var threaded = std.Io.Threaded.init(allocator, .{});
-    defer threaded.deinit();
-    const io = threaded.io();
+    var backend = try netz.runtime.Backend.init(allocator);
+    defer backend.deinit();
+    const io = backend.io();
 
     const now = std.Io.Clock.real.now(io);
     var ca_bundle: std.crypto.Certificate.Bundle = .empty;
@@ -175,7 +175,7 @@ pub fn main(init: std.process.Init) !void {
     }
 
     std.debug.print(
-        "netz RFC 9220 client interoperated with quic-go: version={d} extended_connect=true tls_verified=true origin=true subprotocol=netz-chat masked_fragmented_text=true permessage_deflate=no_context_takeover ping_pong=true close=1000/done local_key_updates={d} peer_key_updates={d}\n",
+        "netz RFC 9220 client interoperated with quic-go: version={d} extended_connect=true tls_verified=true origin=true subprotocol=netz-chat masked_fragmented_text=true permessage_deflate=no_context_takeover ping_pong=true close=1000/done local_key_updates={d} peer_key_updates={d} client_io=zio-std-io server_io=quic-go-netpoll\n",
         .{ versionNumber(version), local_key_updates, peer_key_updates },
     );
 }
@@ -218,9 +218,9 @@ fn runBenchmarkWithAllocator(
     ca_path: []const u8,
     config: benchmark.Config,
 ) !void {
-    var threaded = std.Io.Threaded.init(allocator, .{ .async_limit = .unlimited });
-    defer threaded.deinit();
-    const io = threaded.io();
+    var backend = try netz.runtime.Backend.init(allocator);
+    defer backend.deinit();
+    const io = backend.io();
 
     const now = std.Io.Clock.real.now(io);
     var ca_bundle: std.crypto.Certificate.Bundle = .empty;
@@ -297,7 +297,7 @@ fn runBenchmarkWithAllocator(
     {
         return error.InvalidBenchmarkControl;
     }
-    benchmark.printConfig("netz-client+quic-go-server", config);
+    benchmark.printConfig("netz-client+quic-go-server", "client", config);
     const payload = try allocator.alloc(u8, config.payload_bytes);
     defer allocator.free(payload);
     const response_storage = try allocator.alloc(u8, config.payload_bytes);

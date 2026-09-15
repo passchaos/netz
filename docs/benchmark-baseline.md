@@ -4079,17 +4079,21 @@ against reintroducing the by-value copy.
 persistent binary-echo workload. Both processes are pinned to separate CPUs,
 use certificate-verified QUIC v1, a 1280-byte steady-state MTU, 1 MiB stream /
 8 MiB connection windows, no WebSocket compression, and one 4 KiB binary
-message outstanding at a time. The RFC 9220 handshake and 20 warmup echoes
-finish before one interval times 1,000 measured round trips. Payload contents
-change with the round, and both peers independently validate every byte; they
-also require a normal WebSocket Close after the timed loop.
+message outstanding at a time. The netz endpoints now run on zio behind
+`std.Io`. Config, result, server-completion, and memory records bind both
+endpoint runtimes and the timeout; the strict checker also verifies the full
+shape and recomputes all three timing-derived metrics. The RFC 9220 handshake
+and 20 warmup echoes finish before one interval times 1,000 measured round
+trips. Payload contents change with the round, and both peers independently
+validate every byte; they also require a normal WebSocket Close after the timed
+loop.
 
 ```sh
 zig build bench-websocket-h3-quic-go -Doptimize=ReleaseFast -- \
   --warmup=20 --iterations=1000 --payload-bytes=4096 --timeout-ms=30000
 ```
 
-Five sequential runs on CPU 0/client and CPU 1/server measured:
+Historical pre-zio runs on CPU 0/client and CPU 1/server measured:
 
 | Role pair | Latency | Logical payload throughput |
 |---|---:|---:|
@@ -4103,7 +4107,15 @@ it does not isolate either library's client or server cost. It is
 while quic-go uses implementation defaults, and ACK timing, packetization,
 cipher exposure, syscall counts, and UDP datagram counts/bytes have not been
 equalized. No cross-library speed ratio is inferred from the overlapping
-ranges.
+ranges. These measurements used the former `std.Io.Threaded` harness and are
+not current zio performance evidence.
+
+A 2026-09-15 ReleaseFast zio migration smoke ran three measured 1-KiB echoes
+after one warmup in both role pairings. Each pair verified 3,072 sent and
+received bytes plus checksum 391,680. With memory telemetry enabled, both netz
+roles ended at `live_bytes=0`, and whole-process RSS was labeled
+`busybox-time-maxrss`. This is a one-sample functional and evidence-pipeline
+gate, not a performance comparison.
 
 The same command accepts `--stats`. The runner then wraps all four processes
 with GNU time and requires a unique structured client result, server-completion
@@ -4122,7 +4134,7 @@ runs of the default workload recorded:
 Whole-process maximum RSS is the cross-language metric. The netz explicit
 allocator and Go runtime heap counters have different semantics and are not a
 cross-language allocation ratio. Both netz roles reached zero explicit live
-bytes after the HTTP/3, WebSocket, and threaded runtime teardown. The quic-go
+bytes after the HTTP/3, WebSocket, and former threaded runtime teardown. The quic-go
 server now waits for `ListenAndServe` to exit before its final heap snapshot.
 Default benchmark runs do not enable either runtime's allocation telemetry or
 GNU time. These observations retain the same `same-application-shape` boundary
