@@ -3329,6 +3329,58 @@ test "QUIC 1-RTT owns preferred address connection ID" {
     );
 }
 
+test "QUIC 1-RTT validates preferred endpoint ownership" {
+    const allocator = std.testing.allocator;
+    var threaded = std.Io.Threaded.init(allocator, .{});
+    defer threaded.deinit();
+    const io = threaded.io();
+    var primary = try quic.runtime.Endpoint.bind(
+        allocator,
+        io,
+        .{ .ip4 = .loopback(0) },
+        .{ .max_datagram_size = 4096 },
+    );
+    defer primary.deinit();
+    var preferred = try quic.runtime.Endpoint.bind(
+        allocator,
+        io,
+        .{ .ip4 = .loopback(0) },
+        .{ .max_datagram_size = 4096 },
+    );
+    defer preferred.deinit();
+    const keys = quic.protection.deriveAes128Keys(
+        [_]u8{0x6b} ** quic.protection.secret_len,
+    );
+    var server = try one_rtt.Connection.init(&primary, .{
+        .peer = primary.address(),
+        .receive_keys = keys,
+        .send_keys = keys,
+        .local_connection_id = "server",
+        .peer_connection_id = "client",
+        .local_endpoint = .server,
+    });
+    defer server.deinit();
+    try std.testing.expectError(
+        error.InvalidTransportParameter,
+        server.registerLocalPreferredEndpoint(&primary),
+    );
+    try server.registerLocalPreferredEndpoint(&preferred);
+    try std.testing.expectEqual(&primary, server.sendEndpoint());
+
+    var client = try one_rtt.Connection.init(&primary, .{
+        .peer = primary.address(),
+        .receive_keys = keys,
+        .send_keys = keys,
+        .local_connection_id = "client",
+        .peer_connection_id = "server",
+    });
+    defer client.deinit();
+    try std.testing.expectError(
+        error.InvalidTransportParameter,
+        client.registerLocalPreferredEndpoint(&preferred),
+    );
+}
+
 test "QUIC failed preferred-address validation restores last validated address and CID" {
     const allocator = std.testing.allocator;
     var threaded = std.Io.Threaded.init(allocator, .{});

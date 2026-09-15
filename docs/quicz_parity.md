@@ -498,22 +498,28 @@ immediately. A real h2c regression holds `SETTINGS_MAX_CONCURRENT_STREAMS` at
 one, proves a half-closed tunnel continues consuming that slot, then reuses the
 same parent connection after the opposite half closes.
 
-The shared raw-QUIC server now supports an endpoint-owned
-`preferred_address` when it is exactly the address of the server's existing
-UDP endpoint and an endpoint stateless-reset key is configured. Each admission
-generates distinct sequence-0 and preferred sequence-1 CIDs, derives both reset
-tokens from that key, and installs both pending routes before the handshake
-worker can expose application traffic. Established servers register sequence 1
-without emitting `NEW_CONNECTION_ID`; clients copy and register the advertised
-CID during connection construction, then select it for preferred-path
-validation. A real shared-server handshake routes `PATH_CHALLENGE` on sequence
-1 and completes `PATH_RESPONSE`, while the two-connection gate proves preferred
-CIDs and reset tokens are not reused. Typed and raw caller-supplied preferred
-parameters are rejected because their fixed CID cannot be shared safely. A
-different local address remains deliberately unsupported until the server owns
-multiple receive endpoints and can choose the correct source address for path
-validation and later traffic. This is protocol-correctness coverage, not a
-performance claim.
+The shared raw-QUIC server now supports endpoint-owned `preferred_address` on
+either its primary UDP endpoint or a caller-owned secondary endpoint. Each
+admission generates distinct sequence-0 and preferred sequence-1 CIDs, derives
+both reset tokens from the endpoint key, and installs both pending routes before
+the handshake worker can expose application traffic. The multi-endpoint owner
+races both sockets while keeping one dispatcher, CID map, connection state, and
+timer schedule; received datagrams retain their local endpoint provenance so
+PATH_RESPONSE is sent from the address that received PATH_CHALLENGE, and
+authenticated non-probing traffic commits later sends to that local endpoint.
+Established servers register sequence 1 without emitting `NEW_CONNECTION_ID`;
+clients copy and register the advertised CID during connection construction,
+then select it for preferred-path validation. Real shared-server handshakes
+cover both same-address CID rotation and migration to a distinct UDP port: the
+client observes PATH_RESPONSE and a subsequent PING from the advertised address,
+while the server routes the client's sequence-1 traffic. The two-connection
+gate proves preferred CIDs and reset tokens are not reused. Typed and raw
+caller-supplied preferred parameters are rejected because their fixed CID cannot
+be shared safely; secondary endpoints must share the server's I/O context and
+remain caller-owned for its lifetime. The current multi-endpoint visitor and
+batch surfaces intentionally use the owning one-datagram adapter; restoring
+zero-copy/batched processing across both sockets is a performance follow-up, not
+a protocol-correctness gap.
 
 ## Feature parity table
 

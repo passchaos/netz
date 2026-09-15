@@ -1188,6 +1188,7 @@ pub const Endpoint = struct {
         if (batch.segment_count == 1) {
             const result: OwnedBytes = .{
                 .from = batch.from,
+                .received_on = batch.received_on,
                 .bytes = batch.storage,
                 .ecn = batch.ecn,
                 .shared_buffer = batch.shared_buffer,
@@ -1210,6 +1211,7 @@ pub const Endpoint = struct {
         while (index < batch.segment_count) : (index += 1) {
             self.pending_received.appendAssumeCapacity(.{
                 .from = batch.from,
+                .received_on = batch.received_on,
                 .bytes = batch.datagramAtUnchecked(index),
                 .ecn = batch.ecn,
                 .shared_buffer = shared,
@@ -1217,6 +1219,7 @@ pub const Endpoint = struct {
         }
         return .{
             .from = batch.from,
+            .received_on = batch.received_on,
             .bytes = batch.datagramAtUnchecked(0),
             .ecn = batch.ecn,
             .shared_buffer = shared,
@@ -1353,6 +1356,7 @@ pub const Endpoint = struct {
         }
         return .{
             .from = incoming.from,
+            .received_on = self,
             .bytes = incoming.data,
             .ecn = if (self.receive_ecn_enabled) control.ecn else .not_ect,
         };
@@ -1398,6 +1402,7 @@ pub const Endpoint = struct {
         const storage = try self.allocator.realloc(buffer, view.storage.len);
         return .{
             .from = view.from,
+            .received_on = view.received_on,
             .storage = storage,
             .segment_size = view.segment_size,
             .segment_count = view.segment_count,
@@ -1421,6 +1426,7 @@ pub const Endpoint = struct {
             }
             return .{
                 .from = incoming.from,
+                .received_on = self,
                 .storage = incoming.data,
                 .segment_size = incoming.data.len,
                 .segment_count = 1,
@@ -1444,6 +1450,7 @@ pub const Endpoint = struct {
         }
         return .{
             .from = incoming.from,
+            .received_on = self,
             .storage = incoming.data,
             .segment_size = segment_size,
             .segment_count = segment_count,
@@ -1496,6 +1503,7 @@ pub const Endpoint = struct {
         @memcpy(buffer[0..pending.bytes.len], pending.bytes);
         const result: ReceivedBytesBatchView = .{
             .from = pending.from,
+            .received_on = pending.received_on,
             .storage = buffer[0..pending.bytes.len],
             .segment_size = pending.bytes.len,
             .segment_count = 1,
@@ -1575,6 +1583,7 @@ pub const Endpoint = struct {
                     const end = @min(start + segment_size, storage.len);
                     self.pending_received.appendAssumeCapacity(.{
                         .from = incoming.from,
+                        .received_on = self,
                         .bytes = storage[start..end],
                         .ecn = if (self.receive_ecn_enabled)
                             control.ecn
@@ -1585,6 +1594,7 @@ pub const Endpoint = struct {
                 }
                 return .{
                     .from = incoming.from,
+                    .received_on = self,
                     .bytes = storage[0..segment_size],
                     .ecn = if (self.receive_ecn_enabled)
                         control.ecn
@@ -1603,6 +1613,7 @@ pub const Endpoint = struct {
         );
         return .{
             .from = incoming.from,
+            .received_on = self,
             .bytes = bytes,
             .ecn = if (self.receive_ecn_enabled)
                 control.ecn
@@ -2148,6 +2159,9 @@ const SharedReceiveBuffer = struct {
 
 pub const OwnedBytesBatch = struct {
     from: net.IpAddress,
+    /// UDP endpoint that received this batch. Null is reserved for manually
+    /// constructed/test datagrams that have no socket provenance.
+    received_on: ?*Endpoint = null,
     storage: []u8,
     segment_size: usize,
     segment_count: usize,
@@ -2189,6 +2203,7 @@ pub const OwnedBytesBatch = struct {
 
 pub const ReceivedBytesBatchView = struct {
     from: net.IpAddress,
+    received_on: ?*Endpoint = null,
     storage: []u8,
     segment_size: usize,
     segment_count: usize,
@@ -2216,6 +2231,10 @@ pub const ReceivedBytesBatchView = struct {
 
 pub const OwnedBytes = struct {
     from: net.IpAddress,
+    /// Preserve the local half of the UDP four-tuple across CID routing.
+    /// Multi-endpoint QUIC owners use this to answer path validation from the
+    /// exact address that received the challenge.
+    received_on: ?*Endpoint = null,
     bytes: []u8,
     ecn: quic.packet_space.EcnCodepoint = .not_ect,
     shared_buffer: ?*SharedReceiveBuffer = null,
@@ -2295,6 +2314,7 @@ pub const DatagramSource = struct {
 
 pub const ReceivedBytesView = struct {
     from: net.IpAddress,
+    received_on: ?*Endpoint = null,
     bytes: []u8,
     ecn: quic.packet_space.EcnCodepoint = .not_ect,
 };
@@ -2302,6 +2322,7 @@ pub const ReceivedBytesView = struct {
 fn ownedBytesAsBatch(bytes: OwnedBytes) OwnedBytesBatch {
     return .{
         .from = bytes.from,
+        .received_on = bytes.received_on,
         .storage = bytes.bytes,
         .segment_size = bytes.bytes.len,
         .segment_count = 1,
@@ -2505,6 +2526,7 @@ test "QUIC raw endpoint deadline receives validate and deliver" {
         }),
     );
     try std.testing.expectEqualStrings("caller-buffer", view.bytes);
+    try std.testing.expectEqual(&receiver, view.received_on.?);
 
     try sender.sendBytes(receiver.address(), "owned");
     try std.testing.expectError(
@@ -2523,6 +2545,7 @@ test "QUIC raw endpoint deadline receives validate and deliver" {
     }));
     defer owned.deinit(allocator);
     try std.testing.expectEqualStrings("owned", owned.bytes);
+    try std.testing.expectEqual(&receiver, owned.received_on.?);
 
     try sender.sendBytes(receiver.address(), "batch");
     var batch = try receiver.receiveBytesBatchWithDeadline(.fromNow(io, .{
@@ -2535,6 +2558,7 @@ test "QUIC raw endpoint deadline receives validate and deliver" {
         "batch",
         batch.datagramAt(0).?,
     );
+    try std.testing.expectEqual(&receiver, batch.received_on.?);
 
     try sender.sendBytes(receiver.address(), "batch-into");
     try std.testing.expectError(
@@ -2559,6 +2583,7 @@ test "QUIC raw endpoint deadline receives validate and deliver" {
         "batch-into",
         batch_view.datagramAt(0).?,
     );
+    try std.testing.expectEqual(&receiver, batch_view.received_on.?);
 }
 
 test "QUIC UDP endpoint sends and receives frame datagrams" {
@@ -3341,6 +3366,7 @@ test "QUIC UDP endpoint receives plain batch into caller storage" {
         @intFromPtr(received.storage.ptr),
     );
     try std.testing.expect(received.from.eql(&sender.address()));
+    try std.testing.expectEqual(&receiver, received.received_on.?);
 }
 
 test "QUIC UDP endpoint drains ready datagrams into caller storage" {
@@ -3403,6 +3429,9 @@ test "QUIC UDP endpoint drains ready datagrams into caller storage" {
             .raw = .fromSeconds(1),
         }),
     );
+    for (views[0..count]) |view| {
+        try std.testing.expectEqual(&receiver, view.received_on.?);
+    }
     try std.testing.expectEqual(expected.len, count);
     for (views[0..count], expected) |view, bytes| {
         try std.testing.expectEqualStrings(bytes, view.bytes);

@@ -966,6 +966,26 @@ pub const Dispatcher = struct {
         return self.timers.earliestDeadline();
     }
 
+    /// Return already-buffered packet work or one due timer without reading
+    /// the bound socket. Multi-endpoint owners use this before racing their
+    /// sockets so the dispatcher remains the sole state mutation point.
+    pub fn poll(self: *Dispatcher) Error!?Event {
+        while (self.buffered_datagrams.items.len != 0) {
+            const event = try self.dispatch(
+                self.buffered_datagrams.orderedRemove(0),
+            );
+            if (event == .discarded_long_header) continue;
+            return event;
+        }
+        if (try self.pollPendingPacket()) |packet| {
+            return .{ .packet = packet };
+        }
+        if (try self.serviceDueTimer()) |timer| {
+            return .{ .timer = timer };
+        }
+        return null;
+    }
+
     /// Reserve one bidirectional stream when the registered connection has
     /// peer credit. This operation never reads the shared UDP socket, waits,
     /// or emits STREAMS_BLOCKED; `null` asks the endpoint loop to drive more
@@ -1620,6 +1640,7 @@ pub const Dispatcher = struct {
     ) Error!runtime.OwnedBytes {
         return .{
             .from = datagram.from,
+            .received_on = datagram.received_on,
             .bytes = try self.allocator.dupe(u8, datagram.bytes),
             .ecn = datagram.ecn,
         };

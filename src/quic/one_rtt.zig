@@ -775,8 +775,14 @@ const CandidatePathBudget = struct {
     spin_largest_received_packet_number: ?u64 = null,
 };
 
+const PathResponseTarget = struct {
+    peer: ?net.IpAddress = null,
+    endpoint: ?*quic.runtime.Endpoint = null,
+};
+
 const ValidatedPeerPath = struct {
     peer: net.IpAddress,
+    endpoint: *quic.runtime.Endpoint,
     connection_id: [quic.connection_id.max_connection_id_len]u8 =
         .{0} ** quic.connection_id.max_connection_id_len,
     connection_id_len: u8 = 0,
@@ -785,6 +791,7 @@ const ValidatedPeerPath = struct {
 
     fn init(
         peer: net.IpAddress,
+        endpoint: *quic.runtime.Endpoint,
         connection_id: []const u8,
         spin_bit_value: bool,
         spin_largest_received_packet_number: ?u64,
@@ -794,6 +801,7 @@ const ValidatedPeerPath = struct {
         );
         var path: ValidatedPeerPath = .{
             .peer = peer,
+            .endpoint = endpoint,
             .connection_id_len = @intCast(connection_id.len),
             .spin_bit_value = spin_bit_value,
             .spin_largest_received_packet_number = spin_largest_received_packet_number,
@@ -983,6 +991,11 @@ fn isDiscardedLongHeaderPacket(bytes: []const u8) bool {
 
 pub const Connection = struct {
     endpoint: *quic.runtime.Endpoint,
+    /// Socket used for the currently selected local path. Ownership and all
+    /// allocations remain with `endpoint`; a multi-endpoint owner may switch
+    /// only this send path after authenticating a packet received elsewhere.
+    send_endpoint: *quic.runtime.Endpoint,
+    preferred_endpoint: ?*quic.runtime.Endpoint = null,
     config: ConnectionConfig,
     /// Stable backing for the currently selected peer CID. Peer-pool entries
     /// live inline in `Connection`, so storing a slice into one of them would
@@ -1115,7 +1128,7 @@ pub const Connection = struct {
     candidate_path_budgets: [max_candidate_path_budgets]?CandidatePathBudget =
         .{null} ** max_candidate_path_budgets,
     candidate_path_eviction_cursor: usize = 0,
-    path_response_targets: std.ArrayList(?net.IpAddress) = .empty,
+    path_response_targets: std.ArrayList(PathResponseTarget) = .empty,
     path_response_target_head: usize = 0,
     ack_frequency_send_next_sequence: u64 = 0,
     ack_frequency_recv_next_sequence: u64 = 0,
@@ -1252,6 +1265,7 @@ pub const Connection = struct {
         };
         var connection = Connection{
             .endpoint = endpoint,
+            .send_endpoint = endpoint,
             .config = stable_config,
             .peer_connection_id_storage = peer_connection_id_storage,
             .received = .init(endpoint.allocator, config.max_ack_ranges),
@@ -1343,6 +1357,7 @@ pub const Connection = struct {
         );
         connection.last_validated_peer_path = .init(
             config.peer,
+            endpoint,
             config.peer_connection_id,
             false,
             null,
@@ -1504,6 +1519,25 @@ pub const Connection = struct {
             preferred.stateless_reset_token,
         );
         self.local_connection_ids = local_connection_ids;
+    }
+
+    /// Attach the caller-owned socket that serves the server's advertised
+    /// preferred address. Both endpoints must share the connection's I/O and
+    /// allocator because timers and packet buffers remain connection-owned.
+    pub fn registerLocalPreferredEndpoint(
+        self: *Connection,
+        endpoint: *quic.runtime.Endpoint,
+    ) Error!void {
+        if (self.config.local_endpoint != .server or
+            endpoint == self.endpoint or
+            endpoint.io.userdata != self.endpoint.io.userdata or
+            endpoint.io.vtable != self.endpoint.io.vtable or
+            endpoint.limits.max_datagram_size !=
+                self.endpoint.limits.max_datagram_size)
+        {
+            return error.InvalidTransportParameter;
+        }
+        self.preferred_endpoint = endpoint;
     }
 
     pub fn send(self: *Connection, frames: []const quic.Frame) Error!void {
@@ -2733,7 +2767,7 @@ pub const Connection = struct {
             packet_offset += sealed.len;
         }
 
-        const send_result = self.endpoint.sendManyBytesProgressWithEcn(
+        const send_result = self.send_endpoint.sendManyBytesProgressWithEcn(
             self.config.peer,
             datagrams[0..count],
             batch_ecn,
@@ -2744,7 +2778,7 @@ pub const Connection = struct {
                         self.sent.rewritePacketEcn(packet.packet_number, .not_ect),
                     );
                 }
-                break :blk try self.endpoint.sendManyBytesProgressWithEcn(
+                break :blk try self.send_endpoint.sendManyBytesProgressWithEcn(
                     self.config.peer,
                     datagrams[0..count],
                     .not_ect,
@@ -5040,6 +5074,12 @@ pub const Connection = struct {
         return self.config.peer;
     }
 
+    /// Return the UDP endpoint selected for current-path sends. The endpoint
+    /// remains caller-owned and must outlive the connection.
+    pub fn sendEndpoint(self: Connection) *quic.runtime.Endpoint {
+        return self.send_endpoint;
+    }
+
     pub fn setPeerAddressValidated(self: *Connection, validated: bool) void {
         self.peer_address_validated = validated;
         if (validated) {
@@ -5049,6 +5089,7 @@ pub const Connection = struct {
             self.path_validation_retry_deadline_ns = null;
             self.last_validated_peer_path = .init(
                 self.config.peer,
+                self.send_endpoint,
                 self.config.peer_connection_id,
                 self.spin_bit_value,
                 self.spin_largest_received_packet_number,
@@ -5056,10 +5097,45 @@ pub const Connection = struct {
         }
     }
 
+    fn validateReceiveEndpoint(self: *const Connection, received_on: ?*quic.runtime.Endpoint) Error!*quic.runtime.Endpoint {
+        const endpoint = received_on orelse self.endpoint;
+        if ((endpoint != self.endpoint and endpoint != self.preferred_endpoint) or
+            endpoint.io.userdata != self.endpoint.io.userdata or
+            endpoint.io.vtable != self.endpoint.io.vtable)
+        {
+            return error.InvalidPacket;
+        }
+        return endpoint;
+    }
+
+    fn commitReceiveEndpoint(
+        self: *Connection,
+        received_on: *quic.runtime.Endpoint,
+        frames: []const quic.Frame,
+    ) void {
+        if (received_on == self.send_endpoint or !hasNonProbingFrame(frames)) {
+            return;
+        }
+        if (received_on == self.endpoint or
+            received_on == self.preferred_endpoint)
+        {
+            // RFC 9000 commits a path change only after authenticated
+            // non-probing traffic. Probing packets retain an exact response
+            // endpoint separately without moving ordinary sends.
+            self.send_endpoint = received_on;
+            if (self.peer_address_validated and
+                self.last_validated_peer_path.peer.eql(&self.config.peer))
+            {
+                self.last_validated_peer_path.endpoint = received_on;
+            }
+        }
+    }
+
     fn rememberCurrentValidatedPeerPath(self: *Connection) void {
         if (!self.peer_address_validated) return;
         self.last_validated_peer_path = .init(
             self.config.peer,
+            self.send_endpoint,
             self.config.peer_connection_id,
             self.spin_bit_value,
             self.spin_largest_received_packet_number,
@@ -5144,7 +5220,7 @@ pub const Connection = struct {
         peer: net.IpAddress,
     ) bool {
         for (self.path_response_targets.items[self.path_response_target_head..]) |target| {
-            const candidate = target orelse continue;
+            const candidate = target.peer orelse continue;
             if (candidate.eql(&peer)) return true;
         }
         return false;
@@ -5319,14 +5395,14 @@ pub const Connection = struct {
         // recovery, congestion, flow credit, and sent-map state on that error,
         // but the packet number itself must never be reused for new plaintext.
         errdefer self.next_packet_number = packet_number + 1;
-        self.endpoint.sendBytesWithEcn(self.config.peer, packet, ecn) catch |err| switch (err) {
+        self.send_endpoint.sendBytesWithEcn(self.config.peer, packet, ecn) catch |err| switch (err) {
             error.EcnUnavailable => if (automatic_ecn and
                 self.handleAutomaticEcnUnavailable(ecn))
             blk: {
                 std.debug.assert(
                     self.sent.rewritePacketEcn(packet_number, .not_ect),
                 );
-                break :blk try self.endpoint.sendBytesWithEcn(
+                break :blk try self.send_endpoint.sendBytesWithEcn(
                     self.config.peer,
                     packet,
                     .not_ect,
@@ -6086,7 +6162,7 @@ pub const Connection = struct {
             packet_offset += packet.len;
         }
 
-        const send_result = try self.endpoint.sendManyBytesProgress(self.config.peer, datagrams[0..count]);
+        const send_result = try self.send_endpoint.sendManyBytesProgress(self.config.peer, datagrams[0..count]);
         std.debug.assert(send_result.sent_count <= count);
 
         // All recovery and congestion entries are reserved before the socket
@@ -8487,6 +8563,7 @@ pub const Connection = struct {
         const restored = self.last_validated_peer_path;
         self.peer_preferred_address_migration_active = false;
         self.config.peer = restored.peer;
+        self.send_endpoint = restored.endpoint;
         if (self.peer_connection_ids.selectForPath(
             restored.connectionId(),
         )) |connection_id| {
@@ -8522,8 +8599,13 @@ pub const Connection = struct {
         }
         const frame = frame_storage[0];
         const frames = [_]quic.Frame{frame};
-        const target = self.peekPathResponseTarget() orelse self.config.peer;
-        try self.sendPathValidationToPeerAt(target, &frames, sent_time_ns);
+        const target = self.peekPathResponseTarget() orelse PathResponseTarget{};
+        try self.sendPathValidationToPeerAt(
+            target.peer orelse self.config.peer,
+            target.endpoint orelse self.send_endpoint,
+            &frames,
+            sent_time_ns,
+        );
         self.path_validation.discardResponses(1);
         self.discardPathResponseTargets(1);
         self.updatePathResponseTimerAfterSend(sent_time_ns);
@@ -8553,32 +8635,14 @@ pub const Connection = struct {
         return count;
     }
 
-    fn sendToPeer(
-        self: *Connection,
-        peer: net.IpAddress,
-        frames: []const quic.Frame,
-    ) Error!void {
-        const previous = self.config.peer;
-        self.config.peer = peer;
-        defer self.config.peer = previous;
-        try self.send(frames);
-    }
-
-    fn sendPathValidationToPeer(
-        self: *Connection,
-        peer: net.IpAddress,
-        frames: []const quic.Frame,
-    ) Error!void {
-        return self.sendPathValidationToPeerAt(peer, frames, null);
-    }
-
     fn sendPathValidationToPeerAt(
         self: *Connection,
         peer: net.IpAddress,
+        endpoint: *quic.runtime.Endpoint,
         frames: []const quic.Frame,
         sent_time_ns: ?u64,
     ) Error!void {
-        if (peer.eql(&self.config.peer)) {
+        if (peer.eql(&self.config.peer) and endpoint == self.send_endpoint) {
             var padded: [9]quic.Frame = undefined;
             const send_frames = try self.padPathValidationFrames(
                 frames,
@@ -8591,6 +8655,7 @@ pub const Connection = struct {
         }
         if (peer.eql(&self.last_validated_peer_path.peer)) {
             const previous_peer = self.config.peer;
+            const previous_endpoint = self.send_endpoint;
             var previous_peer_connection_id: [
                 quic.connection_id.max_connection_id_len
             ]u8 = undefined;
@@ -8607,6 +8672,7 @@ pub const Connection = struct {
             const previous_received = self.peer_address_bytes_received;
             const previous_sent = self.peer_address_bytes_sent;
             self.config.peer = peer;
+            self.send_endpoint = endpoint;
             if (self.peer_connection_ids.activeConnectionId(
                 self.last_validated_peer_path.connectionId(),
             )) |connection_id| {
@@ -8622,6 +8688,7 @@ pub const Connection = struct {
                     .spin_largest_received_packet_number;
             defer {
                 self.config.peer = previous_peer;
+                self.send_endpoint = previous_endpoint;
                 self.setPeerConnectionId(
                     previous_peer_connection_id[0..previous_peer_connection_id_len],
                 );
@@ -8644,13 +8711,16 @@ pub const Connection = struct {
         }
         if (self.config.local_endpoint != .server) {
             const previous_peer = self.config.peer;
+            const previous_endpoint = self.send_endpoint;
             const previous_spin_bit_value = self.spin_bit_value;
             const previous_spin_largest_received_packet_number =
                 self.spin_largest_received_packet_number;
             self.config.peer = peer;
+            self.send_endpoint = endpoint;
             self.resetSpinBit();
             defer {
                 self.config.peer = previous_peer;
+                self.send_endpoint = previous_endpoint;
                 self.spin_bit_value = previous_spin_bit_value;
                 self.spin_largest_received_packet_number =
                     previous_spin_largest_received_packet_number;
@@ -8668,6 +8738,7 @@ pub const Connection = struct {
         const index = self.findCandidatePathBudget(peer) orelse
             return error.AntiAmplificationLimited;
         const previous_peer = self.config.peer;
+        const previous_endpoint = self.send_endpoint;
         const previous_spin_bit_value = self.spin_bit_value;
         const previous_spin_largest_received_packet_number =
             self.spin_largest_received_packet_number;
@@ -8675,6 +8746,7 @@ pub const Connection = struct {
         const previous_received = self.peer_address_bytes_received;
         const previous_sent = self.peer_address_bytes_sent;
         self.config.peer = peer;
+        self.send_endpoint = endpoint;
         self.peer_address_validated = false;
         self.peer_address_bytes_received =
             self.candidate_path_budgets[index].?.bytes_received;
@@ -8696,6 +8768,7 @@ pub const Connection = struct {
                 .spin_largest_received_packet_number =
                 self.spin_largest_received_packet_number;
             self.config.peer = previous_peer;
+            self.send_endpoint = previous_endpoint;
             self.spin_bit_value = previous_spin_bit_value;
             self.spin_largest_received_packet_number =
                 previous_spin_largest_received_packet_number;
@@ -8754,7 +8827,7 @@ pub const Connection = struct {
         return storage[0 .. frames.len + 1];
     }
 
-    fn peekPathResponseTarget(self: Connection) ?net.IpAddress {
+    fn peekPathResponseTarget(self: Connection) ?PathResponseTarget {
         if (self.pathResponseTargetCount() == 0) return null;
         return self.path_response_targets.items[self.path_response_target_head];
     }
@@ -8762,8 +8835,11 @@ pub const Connection = struct {
     fn pathResponseTargetsAllDefault(self: Connection, count: usize) bool {
         if (self.pathResponseTargetCount() < count) return false;
         for (self.path_response_targets.items[self.path_response_target_head..][0..count]) |target| {
-            if (target) |peer| {
+            if (target.peer) |peer| {
                 if (!peer.eql(&self.config.peer)) return false;
+            }
+            if (target.endpoint) |endpoint| {
+                if (endpoint != self.send_endpoint) return false;
             }
         }
         return true;
@@ -10169,6 +10245,7 @@ pub const Connection = struct {
             defer datagrams.deinit(self.endpoint.allocator);
             var view: quic.runtime.ReceivedBytesBatchView = .{
                 .from = datagrams.from,
+                .received_on = datagrams.received_on,
                 .storage = datagrams.storage,
                 .segment_size = datagrams.segment_size,
                 .segment_count = datagrams.segment_count,
@@ -10877,6 +10954,7 @@ pub const Connection = struct {
             self.config.local_connection_id.len,
             ecn,
             now_ns,
+            self.endpoint,
             context,
             visitor,
         );
@@ -10889,6 +10967,7 @@ pub const Connection = struct {
         destination_connection_id_len: usize,
         ecn: quic.packet_space.EcnCodepoint,
         now_ns: ?u64,
+        received_on: ?*quic.runtime.Endpoint,
         context: anytype,
         comptime visitor: anytype,
     ) (Error || callbackErrorSet(visitor))!void {
@@ -10914,6 +10993,7 @@ pub const Connection = struct {
                     ecn,
                     now_ns,
                     packet,
+                    received_on,
                     context,
                     visitor,
                 );
@@ -10926,6 +11006,7 @@ pub const Connection = struct {
             destination_connection_id_len,
             ecn,
             now_ns,
+            received_on,
         );
         defer packet.deinit(self.endpoint.allocator);
         try visitor(context, .{
@@ -11043,6 +11124,7 @@ pub const Connection = struct {
                         datagrams.ecn,
                         now_ns,
                         packet,
+                        datagrams.received_on,
                         context,
                         visitor,
                     );
@@ -11090,6 +11172,7 @@ pub const Connection = struct {
             ecn,
             now_ns,
             packet,
+            self.endpoint,
             {},
             discardPacketView,
         );
@@ -11102,6 +11185,7 @@ pub const Connection = struct {
         ecn: quic.packet_space.EcnCodepoint,
         now_ns: ?u64,
         packet: quic.protection.OpenedShortPacketView,
+        received_on_value: ?*quic.runtime.Endpoint,
         context: anytype,
         comptime visitor: anytype,
     ) (Error || callbackErrorSet(visitor))!void {
@@ -11125,6 +11209,9 @@ pub const Connection = struct {
             peer_connection_id_before[0..peer_connection_id_before_len],
             self.config.peer_connection_id,
         );
+        const received_on = try self.validateReceiveEndpoint(
+            received_on_value,
+        );
         try self.applyReceivedFramesForDestinationOrClose(
             packet.packet_number,
             frames,
@@ -11132,6 +11219,7 @@ pub const Connection = struct {
             ecn,
             packet.destination_connection_id,
             from,
+            received_on,
             packet.payload,
         );
         const spin_connection_id_changed = !std.mem.eql(
@@ -11232,6 +11320,7 @@ pub const Connection = struct {
             self.config.local_connection_id.len,
             ecn,
             now_ns,
+            self.endpoint,
         );
     }
 
@@ -11242,7 +11331,11 @@ pub const Connection = struct {
         destination_connection_id_len: usize,
         ecn: quic.packet_space.EcnCodepoint,
         now_ns: ?u64,
+        received_on_value: ?*quic.runtime.Endpoint,
     ) Error!ReceivedPacket {
+        const received_on = try self.validateReceiveEndpoint(
+            received_on_value,
+        );
         var packet = try self.openReceivedBytesWithFrameClose(
             from,
             bytes,
@@ -11272,6 +11365,7 @@ pub const Connection = struct {
             ecn,
             packet.packet.destination_connection_id,
             from,
+            received_on,
             packet.packet.payload,
         );
         const spin_connection_id_changed = !std.mem.eql(
@@ -11448,6 +11542,7 @@ pub const Connection = struct {
             routed.destination_connection_id.len,
             routed.datagram.ecn,
             now_ns,
+            routed.datagram.received_on,
             context,
             visitor,
         );
@@ -11459,6 +11554,9 @@ pub const Connection = struct {
         if (self.shouldDiscardPeerAddressBeforeAuthentication(routed.datagram.from)) {
             return null;
         }
+        const received_on = try self.validateReceiveEndpoint(
+            routed.datagram.received_on,
+        );
         var packet = try self.openReceivedBytesWithFrameClose(
             routed.datagram.from,
             routed.datagram.bytes,
@@ -11488,6 +11586,7 @@ pub const Connection = struct {
             ecn,
             packet.packet.destination_connection_id,
             routed.datagram.from,
+            received_on,
             packet.packet.payload,
         );
         const spin_connection_id_changed = !std.mem.eql(
@@ -11697,6 +11796,7 @@ pub const Connection = struct {
             ecn,
             null,
             null,
+            null,
             &triggering_frame_index,
         );
     }
@@ -11709,6 +11809,7 @@ pub const Connection = struct {
         ecn: quic.packet_space.EcnCodepoint,
         packet_destination_connection_id: ?[]const u8,
         path_response_peer: ?net.IpAddress,
+        receive_endpoint: ?*quic.runtime.Endpoint,
         packet_payload: ?[]const u8,
     ) Error!void {
         var triggering_frame_index: ?usize = null;
@@ -11719,6 +11820,7 @@ pub const Connection = struct {
             ecn,
             packet_destination_connection_id,
             path_response_peer,
+            receive_endpoint,
             &triggering_frame_index,
         ) catch |err| {
             const triggering_frame = if (triggering_frame_index) |index|
@@ -11751,6 +11853,7 @@ pub const Connection = struct {
         ecn: quic.packet_space.EcnCodepoint,
         packet_destination_connection_id: ?[]const u8,
         path_response_peer: ?net.IpAddress,
+        receive_endpoint: ?*quic.runtime.Endpoint,
         triggering_frame_index: *?usize,
     ) Error!void {
         if (!try self.received.wouldRecordFresh(packet_number)) return error.DuplicatePacket;
@@ -11760,6 +11863,9 @@ pub const Connection = struct {
             triggering_frame_index,
         );
         if (!try self.received.recordWithEcn(packet_number, ecn)) return error.DuplicatePacket;
+        if (receive_endpoint) |endpoint| {
+            self.commitReceiveEndpoint(endpoint, frames);
+        }
         if (packet_number >= self.expected_packet_number) {
             self.expected_packet_number = packet_number + 1;
         }
@@ -12051,7 +12157,10 @@ pub const Connection = struct {
                 .path_challenge => |path_challenge| {
                     if (try self.path_validation.receiveChallenge(path_challenge.data)) {
                         self.path_response_targets.appendAssumeCapacity(
-                            path_response_peer,
+                            .{
+                                .peer = path_response_peer,
+                                .endpoint = receive_endpoint,
+                            },
                         );
                         const response_now = now_ns orelse
                             self.monotonicNowNs();

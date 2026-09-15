@@ -39,10 +39,13 @@ pub const Options = struct {
     /// packet/timer turns rather than blocking the sole receive owner.
     automatic_connection_id_replenishment: bool = true,
     /// Advertise an endpoint-owned preferred address with a fresh per-
-    /// connection CID and derived reset token. This single-socket server can
-    /// currently select only its exact bound address; a distinct address
-    /// requires a multi-endpoint owner.
+    /// connection CID and derived reset token. Without `preferred_endpoint`,
+    /// this must exactly match the primary endpoint's bound address.
     preferred_address: ?std.Io.net.IpAddress = null,
+    /// Caller-owned UDP endpoint for a distinct preferred address. When set,
+    /// `preferred_address` must be null or exactly match this endpoint. The
+    /// server remains the sole receive owner for both sockets.
+    preferred_endpoint: ?*quic.runtime.Endpoint = null,
 };
 
 pub const WorkerError = quic.handshake.AcceptTimeoutError;
@@ -232,6 +235,7 @@ pub const Server = struct {
         quic.endpoint_dispatcher.ConnectionHandle,
         *quic.handshake.EstablishedConnection,
     ) = .empty,
+    pending_multi_endpoint_datagram: ?quic.runtime.OwnedBytes = null,
 
     pub fn init(
         allocator: std.mem.Allocator,
@@ -295,15 +299,33 @@ pub const Server = struct {
             // leave peers unable to use them after this process loses state.
             return error.InvalidOptions;
         }
-        if (options.preferred_address) |preferred| {
-            if (options.stateless_reset_key == null or
-                !preferred.eql(&endpoint.address()) or
-                !preferredAddressIsUsable(preferred))
+        const preferred_address = if (options.preferred_endpoint) |preferred_endpoint| blk: {
+            if (preferred_endpoint == endpoint or
+                preferred_endpoint.io.userdata != endpoint.io.userdata or
+                preferred_endpoint.io.vtable != endpoint.io.vtable or
+                preferred_endpoint.limits.max_datagram_size !=
+                    endpoint.limits.max_datagram_size)
             {
-                // A distinct preferred address needs a second receive owner
-                // and source-address-aware sends. This server currently owns
-                // one endpoint, so only a CID change on that exact address is
-                // safe to advertise.
+                return error.InvalidOptions;
+            }
+            if (preferred_endpoint.groReceiveEnabled()) {
+                // Multi-endpoint receive currently preserves one complete UDP
+                // datagram per wake; it must not split a GRO super-datagram.
+                return error.InvalidOptions;
+            }
+            if (options.preferred_address) |configured| {
+                if (!configured.eql(&preferred_endpoint.address())) {
+                    return error.InvalidOptions;
+                }
+            }
+            break :blk preferred_endpoint.address();
+        } else options.preferred_address;
+        if (preferred_address) |preferred| {
+            if (options.stateless_reset_key == null or
+                !preferredAddressIsUsable(preferred) or
+                (options.preferred_endpoint == null and
+                    !preferred.eql(&endpoint.address())))
+            {
                 return error.InvalidOptions;
             }
         }
@@ -323,11 +345,13 @@ pub const Server = struct {
         errdefer allocator.destroy(dispatcher);
         dispatcher.* = .init(allocator, endpoint);
         errdefer dispatcher.deinit();
+        var effective_options = options;
+        effective_options.preferred_address = preferred_address;
         const server = Server{
             .allocator = allocator,
             .endpoint = endpoint,
             .dispatcher = dispatcher,
-            .options = options,
+            .options = effective_options,
             .handshake_options = effective_handshake_options,
             .worker_context = worker_context,
             .completed_storage = completed_storage,
@@ -364,6 +388,9 @@ pub const Server = struct {
             self.allocator.destroy(entry.value_ptr.*);
         }
         self.connections.deinit(self.allocator);
+        if (self.pending_multi_endpoint_datagram) |*datagram| {
+            datagram.deinit((datagram.received_on orelse self.endpoint).allocator);
+        }
         self.dispatcher.deinit();
         self.allocator.destroy(self.dispatcher);
         self.allocator.destroy(self.worker_context);
@@ -828,6 +855,18 @@ pub const Server = struct {
         context: anytype,
         comptime visitor: anytype,
     ) (Error || callbackErrorSet(visitor))!usize {
+        if (self.options.preferred_endpoint != null) {
+            output[0] = try self.receiveVisitingMultiEndpoint(
+                supported_versions,
+                if (caller_deadline) |deadline|
+                    .{ .deadline = deadline }
+                else
+                    .none,
+                context,
+                visitor,
+            );
+            return 1;
+        }
         while (true) {
             const receive_timeout: std.Io.Timeout = if (self.hasActiveHandshakes()) deadline: {
                 if (self.pollCompletion()) |completion_value| {
@@ -950,6 +989,14 @@ pub const Server = struct {
         context: anytype,
         comptime visitor: anytype,
     ) (Error || callbackErrorSet(visitor))!VisitEvent {
+        if (self.options.preferred_endpoint != null) {
+            return self.receiveVisitingMultiEndpoint(
+                supported_versions,
+                .{ .deadline = absolute },
+                context,
+                visitor,
+            );
+        }
         while (true) {
             const poll_deadline = if (self.hasActiveHandshakes()) deadline: {
                 if (self.pollCompletion()) |completion_value| {
@@ -1043,12 +1090,59 @@ pub const Server = struct {
         }
     }
 
+    fn receiveVisitingMultiEndpoint(
+        self: *Server,
+        supported_versions: []const u32,
+        timeout: std.Io.Timeout,
+        context: anytype,
+        comptime visitor: anytype,
+    ) (Error || callbackErrorSet(visitor))!VisitEvent {
+        while (true) {
+            var event = (try self.receiveUntil(
+                supported_versions,
+                timeout,
+            )) orelse continue;
+            switch (event) {
+                .packet => |*packet| {
+                    const view = quic.endpoint_dispatcher.RoutedPacketView{
+                        .connection_handle = packet.connection_handle,
+                        .connection_id_sequence = packet.connection_id_sequence,
+                        .packet = .{
+                            .from = packet.packet.from,
+                            .packet_number = packet.packet.packet.packet_number,
+                            .frames = packet.packet.frames,
+                            .peer_initiated_key_update = packet.packet.peer_initiated_key_update,
+                        },
+                    };
+                    visitor(context, view) catch |err| {
+                        event.deinit(self.allocator);
+                        return err;
+                    };
+                    _ = self.acknowledgePacketIfNeeded(
+                        &event.packet,
+                    ) catch |err| {
+                        event.deinit(self.allocator);
+                        return err;
+                    };
+                    const result = VisitEvent{ .packet = .{
+                        .connection_handle = packet.connection_handle,
+                        .connection_id_sequence = packet.connection_id_sequence,
+                    } };
+                    event.deinit(self.allocator);
+                    return result;
+                },
+                else => return eventToVisit(event),
+            }
+        }
+    }
+
     fn receiveUntil(
         self: *Server,
         supported_versions: []const u32,
         timeout: std.Io.Timeout,
     ) Error!?Event {
-        if (self.hasActiveHandshakes()) {
+        const active_handshakes = self.hasActiveHandshakes();
+        if (active_handshakes) {
             if (self.pollCompletion()) |completion_value| {
                 var completion = completion_value;
                 const event = try self.finishCompletion(&completion);
@@ -1056,7 +1150,64 @@ pub const Server = struct {
             }
             _ = self.expireHandshakes(monotonicNowNs(self.endpoint.io));
         }
-        var endpoint_event = try self.dispatcher.receiveTimeout(
+        var endpoint_event = if (self.options.preferred_endpoint) |preferred| blk: {
+            if (try self.dispatcher.poll()) |event| break :blk event;
+            var datagram = receiveFromEitherEndpoint(
+                self,
+                preferred,
+                multiEndpointReceiveTimeout(
+                    self.endpoint.io,
+                    timeout,
+                    self.dispatcher.nextTimerDeadline(),
+                    if (active_handshakes)
+                        self.options.handshake_poll_interval
+                    else
+                        null,
+                ),
+            ) catch |err| switch (err) {
+                error.Timeout => return null,
+                else => |other| return other,
+            };
+            if (datagram.received_on != self.endpoint) {
+                const received_on = datagram.received_on.?;
+                const bytes = self.allocator.dupe(
+                    u8,
+                    datagram.bytes,
+                ) catch |err| {
+                    datagram.deinit(received_on.allocator);
+                    return err;
+                };
+                const from = datagram.from;
+                const ecn = datagram.ecn;
+                datagram.deinit(received_on.allocator);
+                datagram = .{
+                    .from = from,
+                    .received_on = received_on,
+                    .bytes = bytes,
+                    .ecn = ecn,
+                };
+            }
+            if (datagram.received_on != self.endpoint and
+                datagram.bytes.len != 0 and
+                (datagram.bytes[0] & 0x80) != 0)
+            {
+                // Handshake packet-number spaces remain owned by the primary
+                // endpoint. The advertised address becomes usable only after
+                // the client has authenticated its transport parameters.
+                datagram.deinit(self.allocator);
+                return null;
+            }
+            if (try datagram.received_on.?
+                .sendVersionNegotiationIfUnsupported(
+                datagram.from,
+                datagram.bytes,
+                supported_versions,
+            )) {
+                datagram.deinit(self.allocator);
+                return null;
+            }
+            break :blk try self.dispatcher.dispatch(datagram);
+        } else try self.dispatcher.receiveTimeout(
             supported_versions,
             timeout,
         );
@@ -1227,7 +1378,8 @@ pub const Server = struct {
             ),
         )) return true;
 
-        const sent = try self.endpoint.sendStatelessResetForConnectionId(
+        const endpoint = unrouted.datagram.received_on orelse self.endpoint;
+        const sent = try endpoint.sendStatelessResetForConnectionId(
             unrouted.datagram.from,
             bytes,
             key,
@@ -1265,6 +1417,11 @@ pub const Server = struct {
                     handle,
                     &owned.connection,
                 );
+                if (self.options.preferred_endpoint) |preferred_endpoint| {
+                    try owned.connection.registerLocalPreferredEndpoint(
+                        preferred_endpoint,
+                    );
+                }
                 completion.admission.registered = false;
                 completion.admission.deinit();
                 self.allocator.destroy(completion.admission);
@@ -1428,6 +1585,93 @@ fn preferredAddressIsUsable(address: std.Io.net.IpAddress) bool {
         .ip6 => |ip6| ip6.port != 0 and
             !std.mem.eql(u8, &ip6.bytes, &([_]u8{0} ** 16)),
     };
+}
+
+fn receiveFromEitherEndpoint(
+    server: *Server,
+    preferred: *quic.runtime.Endpoint,
+    timeout: std.Io.Timeout,
+) quic.runtime.ReceiveTimeoutError!quic.runtime.OwnedBytes {
+    if (server.pending_multi_endpoint_datagram) |datagram| {
+        server.pending_multi_endpoint_datagram = null;
+        return datagram;
+    }
+    const primary = server.endpoint;
+    const bounded = timeout.toDeadline(primary.io);
+    const ReceiveResult = quic.runtime.ReceiveTimeoutError!quic.runtime.OwnedBytes;
+    const Wake = union(enum) {
+        primary: ReceiveResult,
+        preferred: ReceiveResult,
+    };
+    var wake_storage: [2]Wake = undefined;
+    var select: std.Io.Select(Wake) = .init(primary.io, &wake_storage);
+    defer while (select.cancel()) |wake| switch (wake) {
+        .primary, .preferred => |result| if (result) |datagram| {
+            if (server.pending_multi_endpoint_datagram == null) {
+                server.pending_multi_endpoint_datagram = datagram;
+            } else {
+                var extra = datagram;
+                extra.deinit((extra.received_on orelse primary).allocator);
+            }
+        } else |_| {},
+    };
+    select.async(
+        .primary,
+        receiveEndpointDatagram,
+        .{ primary, bounded },
+    );
+    select.async(
+        .preferred,
+        receiveEndpointDatagram,
+        .{ preferred, bounded },
+    );
+    return switch (try select.await()) {
+        .primary => |result| try result,
+        .preferred => |result| try result,
+    };
+}
+
+fn receiveEndpointDatagram(
+    endpoint: *quic.runtime.Endpoint,
+    timeout: std.Io.Timeout,
+) quic.runtime.ReceiveTimeoutError!quic.runtime.OwnedBytes {
+    return endpoint.receiveBytesTimeout(timeout);
+}
+
+fn multiEndpointReceiveTimeout(
+    io: std.Io,
+    caller: std.Io.Timeout,
+    scheduled: ?quic.endpoint_timers.EndpointTimerDeadline,
+    handshake_poll_interval: ?std.Io.Duration,
+) std.Io.Timeout {
+    var remaining_ns: ?i96 = if (caller.toDurationFromNow(io)) |duration|
+        duration.raw.nanoseconds
+    else
+        null;
+    if (scheduled) |value| {
+        const timer = std.Io.Clock.Timestamp{
+            .clock = .awake,
+            .raw = .fromNanoseconds(
+                std.math.cast(i96, value.timer.deadline_ns) orelse
+                    std.math.maxInt(i96),
+            ),
+        };
+        const duration = timer.durationFromNow(io).raw.nanoseconds;
+        remaining_ns = if (remaining_ns) |current|
+            @min(current, duration)
+        else
+            duration;
+    }
+    if (handshake_poll_interval) |interval| {
+        remaining_ns = if (remaining_ns) |current|
+            @min(current, interval.nanoseconds)
+        else
+            interval.nanoseconds;
+    }
+    return if (remaining_ns) |nanoseconds| .{ .duration = .{
+        .clock = .awake,
+        .raw = .fromNanoseconds(@max(nanoseconds, 0)),
+    } } else .none;
 }
 
 fn handshakeDeadlineNs(
