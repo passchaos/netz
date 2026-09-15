@@ -6,6 +6,32 @@ possible instead of comparing unrelated codec microbenchmarks.
 
 ## HTTP/1 16-request pipeline
 
+The current netz HTTP/1 parser, pipeline, and streaming-body benchmarks obtain
+`std.Io` from zio and identify `zio-std-io` in their output. The two networked
+benchmarks use `std.Io.async` for the local server; allocator telemetry does not
+include the independently allocated zio runtime. The checked-in
+`bench-http1-hyper` gate builds the Cargo.lock-pinned Hyper fixtures once, runs
+fixed ReleaseFast binaries in an odd CPU-pinned ABBA-order sample set, and
+rejects incomplete workload, timing arithmetic, runtime identity, revision, or
+binary/lock hash evidence.
+
+On 2026-09-15, five CPU-0 samples on an NVIDIA Jetson AGX Thor (`aarch64`,
+Linux 6.8.12-1021-tegra) measured the zio-backed 16-request netz pipeline at
+749-799 ns/request (761 ns median) and the Hyper server with its upstream
+sync client at 842-854 ns/request (851 ns median), a 1.118x median advantage.
+The same gate measured 1-MiB bidirectional bodies as follows:
+
+```text
+fixed:   netz 722.152-747.392 us (740.191 median)
+         Hyper 768.572-783.444 us (779.315 median), netz 1.053x
+chunked: netz 724.570-754.458 us (748.436 median)
+         Hyper 951.686-967.723 us (953.148 median), netz 1.274x
+```
+
+These are named same-application-shape loopback workloads rather than a claim
+that netz is universally faster. The older x86 measurements below used the
+former `std.Io.Threaded` harness and remain historical evidence.
+
 Hyper's `benches/pipeline.rs::hello_world_16` sends sixteen identical
 bodyless requests on one TCP connection and enables `pipeline_flush(true)` for
 sixteen `"Hello, World!"` responses. Hyper automatically adds a 29-byte Date
@@ -48,7 +74,7 @@ netz bench-http1-pipeline:
   1.330-1.406 million requests/s
 ```
 
-Netz is about 1.11-1.22x faster in this captured workload.
+In this historical Threaded capture, netz was about 1.11-1.22x faster.
 
 A 2026-09-04 three-run CPU-0 recapture after switching the benchmark to the
 runtime-generated Date measured netz at 0.733-0.750 us/request
@@ -322,8 +348,9 @@ directly into their retained connection buffer. One transport read may span
 multiple size/data/CRLF records or reach the next pipelined message, while the
 parser still invokes the callback at each wire-chunk boundary and commits only
 the current message. This removes repeated exact-boundary reads without
-aggregating a whole body. Both modes demonstrate an advantage in these named
-loopback workloads; neither establishes whole-library superiority.
+aggregating a whole body. Both modes demonstrated an advantage in these
+historical Threaded loopback workloads; neither establishes current zio
+performance or whole-library superiority.
 
 The same gate also covers a finer streaming shape without changing either
 implementation: 1 MiB each direction as 1,024 x 1-KiB chunks, 10 warmups and

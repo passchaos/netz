@@ -44,9 +44,9 @@ pub fn main(init: std.process.Init) !void {
     );
     defer allocator.free(chunks);
 
-    var threaded = std.Io.Threaded.init(allocator, .{});
-    defer threaded.deinit();
-    const io = threaded.io();
+    var backend = try netz.runtime.Backend.init(std.heap.smp_allocator);
+    defer backend.deinit();
+    const io = backend.io();
     var server = try netz.http1.runtime.Server.listen(
         allocator,
         io,
@@ -63,6 +63,7 @@ pub fn main(init: std.process.Init) !void {
         options: Options,
         payload: []const u8,
         chunks: []const []const u8,
+        completed_exchanges: usize = 0,
         err: ?anyerror = null,
 
         fn run(shared: *@This()) void {
@@ -115,6 +116,7 @@ pub fn main(init: std.process.Init) !void {
                     try response.writeChunks(shared.chunks);
                 }
                 try response.finish();
+                shared.completed_exchanges += 1;
             }
         }
     };
@@ -124,7 +126,8 @@ pub fn main(init: std.process.Init) !void {
         .payload = payload,
         .chunks = chunks,
     };
-    const server_thread = try std.Thread.spawn(.{}, Shared.run, .{&shared});
+    var server_task = io.async(Shared.run, .{&shared});
+    defer server_task.cancel(io);
 
     var client = try netz.http1.runtime.Client.connect(
         allocator,
@@ -172,8 +175,13 @@ pub fn main(init: std.process.Init) !void {
     }
     const elapsed = nowNs(io) -| started;
 
-    server_thread.join();
+    server_task.await(io);
     if (shared.err) |err| return err;
+    if (shared.completed_exchanges !=
+        options.warmup_iterations + options.iterations)
+    {
+        return error.UnexpectedServerExchangeCount;
+    }
     const wire_body_bytes = @as(u64, options.body_bytes) * 2 *
         options.iterations;
     const mebibytes_per_second = if (elapsed == 0)
@@ -183,6 +191,7 @@ pub fn main(init: std.process.Init) !void {
             (elapsed * 1024 * 1024);
     std.debug.print(
         \\HTTP/1 streaming body benchmark
+        \\  io backend: zio-std-io
         \\  mode: {s}
         \\  body bytes/direction: {d}
         \\  chunk bytes: {d}
@@ -202,6 +211,42 @@ pub fn main(init: std.process.Init) !void {
         mebibytes_per_second,
         checksum,
     });
+    std.debug.print(
+        "record=config implementation=netz protocol=http1 transport=tcp " ++
+            "workload=streaming-body benchmark_scope=same-application-shape " ++
+            "client_io=zio-std-io server_io=zio-std-io " ++
+            "connection_scope=persistent mode={s} body_bytes={d} " ++
+            "chunk_bytes={d} warmup={d} iterations={d}\n",
+        .{
+            @tagName(options.mode),
+            options.body_bytes,
+            options.chunk_bytes,
+            options.warmup_iterations,
+            options.iterations,
+        },
+    );
+    std.debug.print(
+        "record=result implementation=netz protocol=http1 transport=tcp " ++
+            "workload=streaming-body benchmark_scope=same-application-shape " ++
+            "client_io=zio-std-io server_io=zio-std-io " ++
+            "connection_scope=persistent mode={s} body_bytes={d} " ++
+            "chunk_bytes={d} warmup={d} iterations={d} " ++
+            "measured_body_bytes={d} server_received_requests={d} " ++
+            "elapsed_ns={d} ns_per_roundtrip={d} " ++
+            "aggregate_MiB_s={d} complete=true\n",
+        .{
+            @tagName(options.mode),
+            options.body_bytes,
+            options.chunk_bytes,
+            options.warmup_iterations,
+            options.iterations,
+            wire_body_bytes,
+            options.warmup_iterations + options.iterations,
+            elapsed,
+            elapsed / options.iterations,
+            mebibytes_per_second,
+        },
+    );
     if (options.stats) counting.snapshot().print();
 }
 

@@ -2,8 +2,8 @@ const std = @import("std");
 const netz = @import("netz");
 
 const pipelined_requests: usize = 16;
-const warmup_iterations: usize = 200;
-const iterations: usize = 2_000;
+const default_warmup_iterations: usize = 200;
+const default_iterations: usize = 2_000;
 const request =
     "GET / HTTP/1.1\r\n" ++
     "Host: localhost\r\n" ++
@@ -33,9 +33,9 @@ pub fn main(init: std.process.Init) !void {
         "\r\n".len +
         "\r\n".len +
         response_body.len;
-    var threaded = std.Io.Threaded.init(allocator, .{});
-    defer threaded.deinit();
-    const io = threaded.io();
+    var backend = try netz.runtime.Backend.init(allocator);
+    defer backend.deinit();
+    const io = backend.io();
 
     var server = try netz.http1.runtime.Server.listen(
         allocator,
@@ -53,6 +53,8 @@ pub fn main(init: std.process.Init) !void {
         server: *netz.http1.runtime.Server,
         failed: *std.atomic.Value(bool),
         response_body: []const u8,
+        total_batches: usize,
+        served_requests: usize = 0,
         err: ?anyerror = null,
 
         fn run(shared: *@This()) void {
@@ -71,7 +73,7 @@ pub fn main(init: std.process.Init) !void {
             var heads: [pipelined_requests]netz.http1.RequestHead = undefined;
             var headers: [pipelined_requests * 8]netz.http1.Header = undefined;
             var bodies: [pipelined_requests][]const u8 = undefined;
-            for (0..warmup_iterations + iterations) |_| {
+            for (0..shared.total_batches) |_| {
                 const consumed = try connection.readRequestBatchInto(
                     &heads,
                     &headers,
@@ -91,6 +93,7 @@ pub fn main(init: std.process.Init) !void {
                 }
                 try connection.writeResponses(&responses);
                 try connection.consumeRequestBatch(consumed);
+                shared.served_requests += heads.len;
             }
         }
     };
@@ -100,8 +103,10 @@ pub fn main(init: std.process.Init) !void {
         .server = &server,
         .failed = &failed,
         .response_body = response_body,
+        .total_batches = config.warmup_iterations + config.iterations,
     };
-    const thread = try std.Thread.spawn(.{}, Shared.run, .{&shared});
+    var server_task = io.async(Shared.run, .{&shared});
+    defer server_task.cancel(io);
 
     var client = try server.address().connect(io, .{ .mode = .stream });
     defer client.close(io);
@@ -109,7 +114,7 @@ pub fn main(init: std.process.Init) !void {
     var receive_buffer: [8192]u8 = undefined;
     const response_bytes_per_iteration = response_bytes *
         pipelined_requests;
-    for (0..warmup_iterations) |_| {
+    for (0..config.warmup_iterations) |_| {
         _ = try exchangeBatch(
             io,
             client,
@@ -123,7 +128,7 @@ pub fn main(init: std.process.Init) !void {
 
     const started = nowNs(io);
     var checksum: u64 = 0;
-    for (0..iterations) |_| {
+    for (0..config.iterations) |_| {
         checksum +%= try exchangeBatch(
             io,
             client,
@@ -136,15 +141,21 @@ pub fn main(init: std.process.Init) !void {
     }
     const elapsed = nowNs(io) -| started;
 
-    thread.join();
+    server_task.await(io);
     if (shared.err) |err| return err;
-    const request_count = iterations * pipelined_requests;
+    const request_count = config.iterations * pipelined_requests;
+    const expected_served_requests =
+        (config.warmup_iterations + config.iterations) * pipelined_requests;
+    if (shared.served_requests != expected_served_requests) {
+        return error.UnexpectedServerRequestCount;
+    }
     const requests_per_second = if (elapsed == 0)
         0
     else
         (@as(u64, request_count) *| std.time.ns_per_s) / elapsed;
     std.debug.print(
         \\HTTP/1 pipeline runtime benchmark
+        \\  io backend: zio-std-io
         \\  pipeline depth: {d}
         \\  warmup iterations: {d}
         \\  iterations: {d}
@@ -157,8 +168,8 @@ pub fn main(init: std.process.Init) !void {
         \\
     , .{
         pipelined_requests,
-        warmup_iterations,
-        iterations,
+        config.warmup_iterations,
+        config.iterations,
         response_body_bytes,
         @tagName(config.write_strategy),
         request_count,
@@ -166,11 +177,50 @@ pub fn main(init: std.process.Init) !void {
         requests_per_second,
         checksum,
     });
+    std.debug.print(
+        "record=config implementation=netz protocol=http1 transport=tcp " ++
+            "workload=pipeline benchmark_scope=same-application-shape " ++
+            "client_io=zio-std-io server_io=zio-std-io " ++
+            "connection_scope=persistent pipeline_depth={d} warmup={d} " ++
+            "iterations={d} request_wire_bytes={d} " ++
+            "response_wire_bytes={d} pipeline_flush=true " ++
+            "write_strategy={s}\n",
+        .{
+            pipelined_requests,
+            config.warmup_iterations,
+            config.iterations,
+            request.len,
+            response_bytes,
+            @tagName(config.write_strategy),
+        },
+    );
+    std.debug.print(
+        "record=result implementation=netz protocol=http1 transport=tcp " ++
+            "workload=pipeline benchmark_scope=same-application-shape " ++
+            "client_io=zio-std-io server_io=zio-std-io " ++
+            "connection_scope=persistent pipeline_depth={d} warmup={d} " ++
+            "iterations={d} requests={d} received_bytes={d} " ++
+            "server_requests={d} elapsed_ns={d} ns_per_request={d} " ++
+            "requests_per_s={d} complete=true\n",
+        .{
+            pipelined_requests,
+            config.warmup_iterations,
+            config.iterations,
+            request_count,
+            checksum,
+            expected_served_requests,
+            elapsed,
+            elapsed / request_count,
+            requests_per_second,
+        },
+    );
 }
 
 const Config = struct {
     response_body_bytes: usize = default_response_body_bytes,
     write_strategy: netz.http1.runtime.WriteStrategy = .auto,
+    warmup_iterations: usize = default_warmup_iterations,
+    iterations: usize = default_iterations,
 };
 
 fn parseConfig(init: std.process.Init) !Config {
@@ -190,9 +240,23 @@ fn parseConfig(init: std.process.Init) !Config {
                 netz.http1.runtime.WriteStrategy,
                 arg["--write-strategy=".len..],
             ) orelse return error.InvalidArgument;
+        } else if (std.mem.startsWith(u8, arg, "--warmup=")) {
+            config.warmup_iterations = try std.fmt.parseInt(
+                usize,
+                arg["--warmup=".len..],
+                10,
+            );
+        } else if (std.mem.startsWith(u8, arg, "--iterations=")) {
+            config.iterations = try std.fmt.parseInt(
+                usize,
+                arg["--iterations=".len..],
+                10,
+            );
         } else return error.InvalidArgument;
     }
-    if (config.response_body_bytes == 0) return error.InvalidArgument;
+    if (config.response_body_bytes == 0 or config.iterations == 0) {
+        return error.InvalidArgument;
+    }
     return config;
 }
 

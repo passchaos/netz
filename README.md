@@ -1017,6 +1017,11 @@ comparison gaps are recorded in `docs/benchmark-baseline.md`:
 zig build bench -Doptimize=ReleaseFast
 zig build bench-http1-parse -Doptimize=ReleaseFast
 taskset -c 0 zig build bench-http1-pipeline -Doptimize=ReleaseFast
+taskset -c 0 zig build bench-http1-body -Doptimize=ReleaseFast -- \
+  --mode=fixed --warmup=20 --iterations=200
+# Run five CPU-pinned ABBA-order samples of the zio-backed pipeline plus fixed
+# and chunked bodies against the Cargo.lock-pinned Hyper fixture.
+zig build bench-http1-hyper -Doptimize=ReleaseFast
 zig build bench-http2-hpack -Doptimize=ReleaseFast
 taskset -c 0 zig build bench-http2-h2c -Doptimize=ReleaseFast
 zig build bench-http3-dev -Doptimize=ReleaseFast -- --iterations=1000
@@ -1058,6 +1063,13 @@ zig build bench-quic-endpoint-cid-sync -Doptimize=ReleaseFast -- --iterations=20
 zig build bench-quic-connection-router -Doptimize=ReleaseFast -- --iterations=10000000
 ```
 
+The built-in HTTP/1 parse, pipeline, and streaming-body benchmarks obtain
+`std.Io` from `netz.runtime.Backend` and report `io backend: zio-std-io`; the
+networked benchmarks schedule their local server through `std.Io.async`.
+The external Hyper gate verifies complete workload records, runtime identities,
+the pinned Hyper revision, fixed binary hashes, and odd ABBA-order samples
+before computing medians. Older HTTP/1 measurements remain labeled as Threaded
+evidence.
 The built-in HTTP/3 development, real-handshake transfer, QPACK, and Capsule
 benchmarks obtain `std.Io` from `netz.runtime.Backend` and report
 `io backend: zio-std-io`; the network benchmarks schedule their local peer

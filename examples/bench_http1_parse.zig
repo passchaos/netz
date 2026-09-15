@@ -27,9 +27,9 @@ pub fn main(init: std.process.Init) !void {
     const allocator = std.heap.smp_allocator;
     const options = try parseOptions(init, allocator);
 
-    var threaded = std.Io.Threaded.init(allocator, .{});
-    defer threaded.deinit();
-    const io = threaded.io();
+    var backend = try netz.runtime.Backend.init(allocator);
+    defer backend.deinit();
+    const io = backend.io();
 
     var headers: [32]netz.http1.Header = undefined;
     var borrowed_total: usize = 0;
@@ -81,7 +81,8 @@ pub fn main(init: std.process.Init) !void {
     }
 
     std.debug.print(
-        "HTTP/1 parse benchmark\n  iterations: {d}\n",
+        "HTTP/1 parse benchmark\n  io backend: zio-std-io\n" ++
+            "  iterations: {d}\n",
         .{options.iterations},
     );
     if (options.scenario == .all or options.scenario == .borrowed) {

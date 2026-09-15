@@ -1,6 +1,8 @@
+use std::cell::Cell;
 use std::convert::Infallible;
 use std::env;
 use std::pin::Pin;
+use std::rc::Rc;
 use std::sync::mpsc;
 use std::task::{Context, Poll};
 use std::thread;
@@ -28,7 +30,6 @@ const DEFAULT_BODY_BYTES: usize = 1024 * 1024;
 const DEFAULT_CHUNK_BYTES: usize = 16 * 1024;
 const DEFAULT_WARMUP: usize = 20;
 const DEFAULT_ITERATIONS: usize = 100;
-const RESPONSE_DATE: &str = "Mon, 17 Aug 2026 00:00:00 GMT";
 
 type Body = http_body_util::combinators::BoxBody<Bytes, Infallible>;
 
@@ -59,6 +60,8 @@ fn main() {
     let (address_tx, address_rx) = mpsc::channel();
     let server_payload = payload.clone();
     let server = thread::spawn(move || {
+        let server_received_requests = Rc::new(Cell::new(0usize));
+        let service_received_requests = server_received_requests.clone();
         let runtime = tokio::runtime::Builder::new_current_thread()
             .enable_all()
             .build()
@@ -72,6 +75,7 @@ fn main() {
             let service_options = options;
             let service = service_fn(move |request: Request<Incoming>| {
                 let response_payload = server_payload.clone();
+                let received_requests = service_received_requests.clone();
                 async move {
                     let received = consume_body(request.into_body()).await;
                     assert_eq!(received, service_options.body_bytes);
@@ -80,11 +84,8 @@ fn main() {
                         response_payload,
                         service_options.chunk_bytes,
                     );
-                    let response = Response::builder()
-                        .status(200)
-                        .header("date", RESPONSE_DATE)
-                        .body(body)
-                        .unwrap();
+                    let response = Response::builder().status(200).body(body).unwrap();
+                    received_requests.set(received_requests.get() + 1);
                     Ok::<_, Infallible>(response)
                 }
             });
@@ -93,6 +94,7 @@ fn main() {
                 .await
                 .expect("serve connection");
         });
+        server_received_requests.get()
     });
 
     let address = address_rx.recv().unwrap();
@@ -132,7 +134,9 @@ fn main() {
     let elapsed = started.elapsed();
     drop(sender);
     runtime.block_on(async { tokio::task::yield_now().await });
-    server.join().unwrap();
+    let completed_exchanges = server.join().unwrap();
+    let expected_completed_exchanges = options.warmup + options.iterations;
+    assert_eq!(completed_exchanges, expected_completed_exchanges,);
 
     let elapsed_ns = elapsed.as_nanos() as u64;
     let wire_body_bytes = (options.body_bytes as u64) * 2 * (options.iterations as u64);
@@ -142,6 +146,7 @@ fn main() {
         wire_body_bytes * 1_000_000_000 / (elapsed_ns * 1024 * 1024)
     };
     println!("Hyper HTTP/1 streaming body benchmark");
+    println!("  io backend: hyper-tokio");
     println!("  mode: {:?}", options.mode);
     println!("  body bytes/direction: {}", options.body_bytes);
     println!("  chunk bytes: {}", options.chunk_bytes);
@@ -153,6 +158,32 @@ fn main() {
     );
     println!("  aggregate body MiB/s: {}", mib_per_second);
     println!("  checksum: {}", checksum);
+    let mode = match options.mode {
+        Mode::Fixed => "fixed",
+        Mode::Chunked => "chunked",
+    };
+    println!(
+        "record=config implementation=hyper protocol=http1 transport=tcp \
+         workload=streaming-body benchmark_scope=same-application-shape \
+         client_io=hyper-tokio server_io=hyper-tokio connection_scope=persistent \
+         mode={mode} body_bytes={} chunk_bytes={} warmup={} iterations={}",
+        options.body_bytes, options.chunk_bytes, options.warmup, options.iterations,
+    );
+    println!(
+        "record=result implementation=hyper protocol=http1 transport=tcp \
+         workload=streaming-body benchmark_scope=same-application-shape \
+         client_io=hyper-tokio server_io=hyper-tokio connection_scope=persistent \
+         mode={mode} body_bytes={} chunk_bytes={} warmup={} iterations={} \
+         measured_body_bytes={wire_body_bytes} \
+         server_received_requests={expected_completed_exchanges} \
+         elapsed_ns={elapsed_ns} ns_per_roundtrip={} aggregate_MiB_s={mib_per_second} \
+         complete=true",
+        options.body_bytes,
+        options.chunk_bytes,
+        options.warmup,
+        options.iterations,
+        elapsed_ns / options.iterations as u64,
+    );
     if options.stats {
         #[cfg(feature = "allocation-stats")]
         COUNTING_ALLOCATOR.snapshot().print();

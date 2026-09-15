@@ -15,6 +15,10 @@ path = "src/main.rs"
 name = "netz-hyper-http1-interop"
 path = "src/bin/interop.rs"
 
+[[bin]]
+name = "netz-hyper-http1-pipeline"
+path = "src/bin/pipeline.rs"
+
 [dependencies]
 bytes = "1.2"
 futures-core = "0.3"

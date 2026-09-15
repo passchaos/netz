@@ -59,6 +59,51 @@ guard for the shared vail record stream, not a cross-library performance claim.
 
 ### HTTP/1 persistent 16-request pipeline
 
+The current HTTP/1 parse, pipeline, and streaming-body executables obtain
+`std.Io` from `netz.runtime.Backend` and print `io backend: zio-std-io`. The
+pipeline and body benchmarks schedule their local server through
+`std.Io.async`; the body's protocol counting allocator remains separate from
+the runtime allocator. `zig build bench-http1-hyper -Doptimize=ReleaseFast`
+builds the locked local Hyper fixture once, then runs fixed binaries on one CPU
+in an odd ABBA-order sample set. Its strict checker requires the complete
+workload, derived timing, endpoint runtime identities, fixed Hyper revision,
+Cargo.lock hash, and executable hashes before reporting medians.
+
+The 2026-09-15 five-sample run on an NVIDIA Jetson AGX Thor (`aarch64`, Linux
+6.8.12-1021-tegra, CPU 0, Zig 0.16.0, Rust 1.98.0, Hyper
+`084473f728f9d07b3be5845475aa2f62ed9ff579`) measured:
+
+```text
+16-request pipeline:
+  netz/zio:        749-799 ns/request, median 761 ns
+  Hyper/Tokio:     842-854 ns/request, median 851 ns
+  median speedup:  1.118x
+
+1-MiB fixed body in each direction:
+  netz/zio:        722.152-747.392 us/round-trip, median 740.191 us
+  Hyper/Tokio:     768.572-783.444 us/round-trip, median 779.315 us
+  median speedup:  1.053x
+
+1-MiB chunked body in each direction, 64 x 16 KiB:
+  netz/zio:        724.570-754.458 us/round-trip, median 748.436 us
+  Hyper/Tokio:     951.686-967.723 us/round-trip, median 953.148 us
+  median speedup:  1.274x
+```
+
+The pipeline netz/Hyper binary SHA-256 values were respectively
+`0a443139e7636c667406d60b6bd137617900582cc361fe0abab0f53e18a8390e` and
+`0b0e23887ff763c443087df4b34733aaeb2ca5adf0f72b0b1d0d90a26a937989`;
+the body binaries were
+`7e4f46e0ce2996878520f7c7a2e81c9c5818e99dabac1fa096c3cf47991a2c11` and
+`9dd31d895c446f17dba2f2c449113be37bcc95bfb1f2cd18e5a40c83f15af4f4`.
+The fixture lockfile hash was
+`db336fa1c2df67362ee6cc7209176e082e14b7ae428cbc32ebb0c552d4936b9d`.
+These are focused same-application-shape loopback results, not a whole-library
+superiority claim.
+
+The older results in the following historical subsection predate the zio
+migration and remain `std.Io.Threaded` evidence only.
+
 Captured on 2026-08-17. This benchmark mirrors
 `~/Work/hyper/benches/pipeline.rs::hello_world_16`: each iteration sends
 sixteen bodyless GET requests on one persistent loopback TCP connection and
@@ -96,7 +141,8 @@ Both ranges contain five CPU-0-pinned samples. The Hyper binary was built from
 revision `084473f728f9d07b3be5845475aa2f62ed9ff579` with
 `rustc 1.98.0-nightly (e7815e522 2026-06-04)`.
 
-Netz is about **1.11-1.22x faster** for this same-host, same-shape sample. The
+In that historical Threaded capture, netz was about **1.11-1.22x faster** for
+this same-host, same-shape sample. The
 runtime path uses caller-owned head/header/body output arrays, borrowed receive
 storage, one prefix compaction per pipeline, persistent write scratch,
 header/body vectored writes and one transactional response-batch flush. This is
@@ -192,8 +238,9 @@ chunked (five samples):
   hyper: 414.64-417.45 us/op, 4,790-4,823 aggregate MiB/s
 ```
 
-Netz is 1.07-1.09x faster in the fixed workload and 1.45-1.47x faster in the
-chunked workload. The reusable implementation changes are TCP_NODELAY, direct
+In that historical Threaded capture, netz was 1.07-1.09x faster in the fixed
+workload and 1.45-1.47x faster in the chunked workload. The reusable
+implementation changes are TCP_NODELAY, direct
 socket-to-callback fixed-body delivery, retained chunk/vector scratch, batched
 `writeChunks`, wide POSIX writev submission, and 64-KiB chunked read-ahead into
 the persistent connection buffer. Read-ahead can span several chunk boundaries

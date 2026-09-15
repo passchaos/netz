@@ -189,6 +189,10 @@ pub fn build(b: *std.Build) void {
         "python3",
         "tools/interop/websocket_h2_benchmark_check_test.py",
     });
+    const http1_hyper_benchmark_checker_tests = b.addSystemCommand(&.{
+        "python3",
+        "tools/interop/http1_hyper_benchmark_check_test.py",
+    });
     const webtransport_benchmark_checker_tests = b.addSystemCommand(&.{
         "python3",
         "tools/interop/webtransport_benchmark_check_test.py",
@@ -213,6 +217,7 @@ pub fn build(b: *std.Build) void {
     test_step.dependOn(&quic_handshake_benchmark_checker_tests.step);
     test_step.dependOn(&http3_benchmark_checker_tests.step);
     test_step.dependOn(&websocket_h2_benchmark_checker_tests.step);
+    test_step.dependOn(&http1_hyper_benchmark_checker_tests.step);
     test_step.dependOn(&websocket_h3_benchmark_checker_tests.step);
     test_step.dependOn(&webtransport_benchmark_checker_tests.step);
     test_step.dependOn(&webtransport_churn_checker_tests.step);
@@ -1496,6 +1501,8 @@ pub fn build(b: *std.Build) void {
     };
     const examples_step = b.step("examples", "Build all examples");
     const bench_step = b.step("bench", "Run all native protocol benchmarks");
+    var http1_pipeline_bench_exe: ?*std.Build.Step.Compile = null;
+    var http1_body_bench_exe: ?*std.Build.Step.Compile = null;
     for (example_specs) |spec| {
         const exe = b.addExecutable(.{
             .name = spec.exe_name,
@@ -1506,6 +1513,11 @@ pub fn build(b: *std.Build) void {
                 .imports = &.{.{ .name = "netz", .module = netz_mod }},
             }),
         });
+        if (std.mem.eql(u8, spec.run_step, "bench-http1-pipeline")) {
+            http1_pipeline_bench_exe = exe;
+        } else if (std.mem.eql(u8, spec.run_step, "bench-http1-body")) {
+            http1_body_bench_exe = exe;
+        }
         examples_step.dependOn(&exe.step);
 
         const run = b.addRunArtifact(exe);
@@ -1522,6 +1534,19 @@ pub fn build(b: *std.Build) void {
             bench_step.dependOn(&run.step);
         }
     }
+
+    const http1_hyper_bench = b.addSystemCommand(&.{
+        "tools/interop/http1_hyper_benchmark.sh",
+    });
+    http1_hyper_bench.addArtifactArg(http1_pipeline_bench_exe.?);
+    http1_hyper_bench.addArtifactArg(http1_body_bench_exe.?);
+    http1_hyper_bench.addArg(@tagName(optimize));
+    if (b.args) |args| http1_hyper_bench.addArgs(args);
+    const http1_hyper_bench_step = b.step(
+        "bench-http1-hyper",
+        "Compare zio-backed HTTP/1 pipeline and body workloads with Hyper",
+    );
+    http1_hyper_bench_step.dependOn(&http1_hyper_bench.step);
 
     const http3_public_fetch = b.addExecutable(.{
         .name = "netz-http3-public-fetch",
