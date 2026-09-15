@@ -149,7 +149,11 @@ pub const Reader = struct {
             .kind = .response,
             .push_promises_allowed = true,
             .max_informational_responses = max_informational_responses,
-            .credited_offset = receive.read_offset,
+            // Buffered response routing copies every contiguous byte into
+            // HTTP/3 ownership and commits that prefix to QUIC before the
+            // stream is promoted to an incremental reader.  The parser still
+            // starts at `read_offset`, so credit can legitimately lead it.
+            .credited_offset = receive.contiguous_end,
         };
     }
 
@@ -530,7 +534,10 @@ pub const Reader = struct {
         self.phase = .body;
         self.response_extended_connect = extended_connect;
         self.updateResponseBodyState(head);
-        self.credited_offset = self.receive.read_offset;
+        self.credited_offset = @max(
+            self.credited_offset,
+            self.receive.read_offset,
+        );
     }
 
     pub fn adoptDecodedResponseHeadFromReceive(
@@ -546,8 +553,7 @@ pub const Reader = struct {
     }
 
     pub fn uncreditedConsumed(self: Reader) usize {
-        std.debug.assert(self.receive.read_offset >= self.credited_offset);
-        return self.receive.read_offset - self.credited_offset;
+        return self.receive.read_offset -| self.credited_offset;
     }
 
     pub fn markCredited(self: *Reader, amount: usize) void {

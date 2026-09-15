@@ -255,6 +255,13 @@ test "HTTP/3 streaming response polling skips idle and stale cursors" {
         return error.TestUnexpectedResult;
     try std.testing.expectEqual(@as(u62, 0), first.entry.reader.streamId());
     try std.testing.expect(first.event == .head);
+    // Response routing already returned the copied contiguous prefix to QUIC.
+    // Promoting that buffer to an incremental reader must not release its
+    // parsed HEADERS bytes a second time.
+    try std.testing.expectEqual(
+        @as(usize, 0),
+        first.entry.reader.uncreditedConsumed(),
+    );
     first.event.deinit(allocator);
 
     var second = (try responses.nextResponse(&buffered, table, 0)) orelse
