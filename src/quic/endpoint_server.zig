@@ -38,6 +38,11 @@ pub const Options = struct {
     /// when a reset key is configured. One-shot sends retry on later endpoint
     /// packet/timer turns rather than blocking the sole receive owner.
     automatic_connection_id_replenishment: bool = true,
+    /// Advertise an endpoint-owned preferred address with a fresh per-
+    /// connection CID and derived reset token. This single-socket server can
+    /// currently select only its exact bound address; a distinct address
+    /// requires a multi-endpoint owner.
+    preferred_address: ?std.Io.net.IpAddress = null,
 };
 
 pub const WorkerError = quic.handshake.AcceptTimeoutError;
@@ -110,6 +115,10 @@ const Admission = struct {
     server_connection_id: [
         quic.endpoint_dispatcher.default_server_connection_id_len
     ]u8,
+    preferred_server_connection_id: [
+        quic.endpoint_dispatcher.default_server_connection_id_len
+    ]u8 = undefined,
+    preferred_address: ?std.Io.net.IpAddress = null,
     deadline_ns: u64,
     registered: bool = true,
     initial_owned: bool = true,
@@ -238,6 +247,27 @@ pub const Server = struct {
             return error.InvalidOptions;
         }
         var effective_handshake_options = handshake_options;
+        if (handshake_options.local_transport_parameters
+            .preferred_address != null)
+        {
+            // A fixed CID cannot be shared safely across accepted
+            // connections. Use Options.preferred_address so this owner can
+            // generate and route a unique sequence-1 CID for every admission.
+            return error.InvalidOptions;
+        }
+        if (handshake_options.transport_parameters.len != 0) {
+            const raw_transport_parameters =
+                try quic.parseTransportParametersTyped(
+                    endpoint.allocator,
+                    handshake_options.transport_parameters,
+                    .server,
+                ) catch return error.InvalidOptions;
+            if (raw_transport_parameters.preferred_address != null) {
+                // Raw bytes would preserve one caller-owned CID across every
+                // admission and hide it from pending-handshake routing.
+                return error.InvalidOptions;
+            }
+        }
         if (options.stateless_reset_key) |key| {
             if (handshake_options.transport_parameters.len != 0 or
                 handshake_options.local_transport_parameters
@@ -255,13 +285,6 @@ pub const Server = struct {
                     return error.InvalidOptions;
                 }
             }
-            if (handshake_options.local_transport_parameters
-                .preferred_address != null)
-            {
-                // Shared preferred-address routing is not implemented yet. Do
-                // not advertise a reset-bearing CID this endpoint cannot own.
-                return error.InvalidOptions;
-            }
             effective_handshake_options.initial_one_rtt_config
                 .local_stateless_reset_key = key;
         } else if (handshake_options.initial_one_rtt_config
@@ -271,6 +294,18 @@ pub const Server = struct {
             // tokens without installing the matching unknown-CID policy would
             // leave peers unable to use them after this process loses state.
             return error.InvalidOptions;
+        }
+        if (options.preferred_address) |preferred| {
+            if (options.stateless_reset_key == null or
+                !preferred.eql(&endpoint.address()) or
+                !preferredAddressIsUsable(preferred))
+            {
+                // A distinct preferred address needs a second receive owner
+                // and source-address-aware sends. This server currently owns
+                // one endpoint, so only a CID change on that exact address is
+                // safe to advertise.
+                return error.InvalidOptions;
+            }
         }
         const completed_storage = try allocator.alloc(
             Completion,
@@ -1091,11 +1126,14 @@ pub const Server = struct {
 
         const handle = self.reserveHandle();
         const initial = event.new_initial;
-        const inbox = try self.dispatcher.admitPendingHandshake(
+        const has_preferred_address = self.options.preferred_address != null;
+        const inbox = try self.dispatcher
+            .admitPendingHandshakeWithServerConnectionIds(
             handle,
             initial,
             self.options.max_pending_handshakes,
             self.options.inbox_capacity,
+            if (has_preferred_address) 2 else 1,
         );
         const admission = self.allocator.create(Admission) catch |err| {
             _ = self.dispatcher.unregisterPendingHandshake(handle) catch false;
@@ -1119,6 +1157,7 @@ pub const Server = struct {
             .connection = connection_storage,
             .initial = event.takeNewInitial().?,
             .server_connection_id = undefined,
+            .preferred_address = self.options.preferred_address,
             .deadline_ns = handshakeDeadlineNs(
                 self.endpoint.io,
                 self.options.handshake_timeout_ms,
@@ -1129,6 +1168,12 @@ pub const Server = struct {
             &admission.server_connection_id,
             inbox.connectionIds()[1].slice(),
         );
+        if (has_preferred_address) {
+            @memcpy(
+                &admission.preferred_server_connection_id,
+                inbox.connectionIds()[2].slice(),
+            );
+        }
         errdefer {
             admission.deinit();
             self.allocator.destroy(admission);
@@ -1320,6 +1365,19 @@ fn runWorker(
 ) std.Io.Cancelable!void {
     var options = context.options;
     options.local_connection_id = &admission.server_connection_id;
+    if (admission.preferred_address) |preferred_address| {
+        const key = options.initial_one_rtt_config
+            .local_stateless_reset_key orelse unreachable;
+        options.local_transport_parameters.preferred_address =
+            preferredAddressForEndpoint(
+                preferred_address,
+                &admission.preferred_server_connection_id,
+                quic.stateless_reset.tokenForConnectionId(
+                    key,
+                    &admission.preferred_server_connection_id,
+                ),
+            );
+    }
     const result: @FieldType(Completion, "result") = blk: {
         admission.connection.* = quic.handshake.acceptFromInitialSourceWithDeadline(
             context.endpoint,
@@ -1339,6 +1397,36 @@ fn runWorker(
         .result = result,
     }) catch |err| switch (err) {
         error.Closed => unreachable,
+    };
+}
+
+fn preferredAddressForEndpoint(
+    address: std.Io.net.IpAddress,
+    connection_id: []const u8,
+    token: [quic.stateless_reset.token_len]u8,
+) quic.PreferredAddress {
+    return switch (address) {
+        .ip4 => |ip4| .{
+            .ipv4_address = ip4.bytes,
+            .ipv4_port = ip4.port,
+            .connection_id = connection_id,
+            .stateless_reset_token = token,
+        },
+        .ip6 => |ip6| .{
+            .ipv6_address = ip6.bytes,
+            .ipv6_port = ip6.port,
+            .connection_id = connection_id,
+            .stateless_reset_token = token,
+        },
+    };
+}
+
+fn preferredAddressIsUsable(address: std.Io.net.IpAddress) bool {
+    return switch (address) {
+        .ip4 => |ip4| ip4.port != 0 and
+            !std.mem.eql(u8, &ip4.bytes, &([_]u8{0} ** 4)),
+        .ip6 => |ip6| ip6.port != 0 and
+            !std.mem.eql(u8, &ip6.bytes, &([_]u8{0} ** 16)),
     };
 }
 

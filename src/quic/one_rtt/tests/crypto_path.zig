@@ -3251,7 +3251,7 @@ test "QUIC 1-RTT preferred address migration selects address and CID" {
     );
     try std.testing.expectEqual(original_endpoint.address(), invalid_family.peerAddress());
     try std.testing.expectEqualSlices(u8, &peer_cid, invalid_family.config.peer_connection_id);
-    try std.testing.expectEqual(@as(usize, 1), invalid_family.peer_connection_ids.count());
+    try std.testing.expectEqual(@as(usize, 2), invalid_family.peer_connection_ids.count());
     try std.testing.expectEqual(@as(usize, 0), invalid_family.path_validation.pendingChallengeCount());
 
     var failing = std.testing.FailingAllocator.init(allocator, .{});
@@ -3264,7 +3264,7 @@ test "QUIC 1-RTT preferred address migration selects address and CID" {
     );
     try std.testing.expectEqual(original_endpoint.address(), invalid_family.peerAddress());
     try std.testing.expectEqualSlices(u8, &peer_cid, invalid_family.config.peer_connection_id);
-    try std.testing.expectEqual(@as(usize, 1), invalid_family.peer_connection_ids.count());
+    try std.testing.expectEqual(@as(usize, 2), invalid_family.peer_connection_ids.count());
     try std.testing.expectEqual(@as(usize, 0), invalid_family.path_validation.pendingChallengeCount());
 
     var missing = try one_rtt.Connection.init(&original_endpoint, .{
@@ -3276,6 +3276,57 @@ test "QUIC 1-RTT preferred address migration selects address and CID" {
     });
     defer missing.deinit();
     try std.testing.expectError(error.InvalidTransportParameter, missing.beginPeerPreferredAddressMigration(challenge, .ipv4));
+}
+
+test "QUIC 1-RTT owns preferred address connection ID" {
+    const allocator = std.testing.allocator;
+    var threaded = std.Io.Threaded.init(allocator, .{});
+    defer threaded.deinit();
+    var endpoint = try quic.runtime.Endpoint.bind(
+        allocator,
+        threaded.io(),
+        .{ .ip4 = .loopback(0) },
+        .{ .max_datagram_size = 4096 },
+    );
+    defer endpoint.deinit();
+    const keys = quic.protection.deriveAes128Keys(
+        [_]u8{0x64} ** quic.protection.secret_len,
+    );
+    var preferred_cid = [_]u8{ 0x65, 0x66, 0x67, 0x68 };
+    const expected_cid = preferred_cid;
+    const preferred = quic.PreferredAddress{
+        .ipv4_address = .{ 127, 0, 0, 1 },
+        .ipv4_port = 4433,
+        .connection_id = &preferred_cid,
+        .stateless_reset_token = [_]u8{0x69} ** 16,
+    };
+    var connection = try one_rtt.Connection.init(&endpoint, .{
+        .peer = endpoint.address(),
+        .receive_keys = keys,
+        .send_keys = keys,
+        .local_connection_id = "client",
+        .peer_connection_id = "server",
+        .peer_preferred_address = preferred,
+        .active_connection_id_limit = 2,
+    });
+    defer connection.deinit();
+    preferred_cid[0] = 0xff;
+
+    try std.testing.expectEqualSlices(
+        u8,
+        &expected_cid,
+        connection.peerPreferredAddress().?.connection_id,
+    );
+    try std.testing.expectEqual(@as(usize, 2), connection.peer_connection_ids.count());
+    try connection.beginPeerPreferredAddressMigration(
+        [_]u8{ 0x6a, 1, 2, 3, 4, 5, 6, 7 },
+        .ipv4,
+    );
+    try std.testing.expectEqualSlices(
+        u8,
+        &expected_cid,
+        connection.config.peer_connection_id,
+    );
 }
 
 test "QUIC failed preferred-address validation restores last validated address and CID" {

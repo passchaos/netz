@@ -498,6 +498,23 @@ immediately. A real h2c regression holds `SETTINGS_MAX_CONCURRENT_STREAMS` at
 one, proves a half-closed tunnel continues consuming that slot, then reuses the
 same parent connection after the opposite half closes.
 
+The shared raw-QUIC server now supports an endpoint-owned
+`preferred_address` when it is exactly the address of the server's existing
+UDP endpoint and an endpoint stateless-reset key is configured. Each admission
+generates distinct sequence-0 and preferred sequence-1 CIDs, derives both reset
+tokens from that key, and installs both pending routes before the handshake
+worker can expose application traffic. Established servers register sequence 1
+without emitting `NEW_CONNECTION_ID`; clients copy and register the advertised
+CID during connection construction, then select it for preferred-path
+validation. A real shared-server handshake routes `PATH_CHALLENGE` on sequence
+1 and completes `PATH_RESPONSE`, while the two-connection gate proves preferred
+CIDs and reset tokens are not reused. Typed and raw caller-supplied preferred
+parameters are rejected because their fixed CID cannot be shared safely. A
+different local address remains deliberately unsupported until the server owns
+multiple receive endpoints and can choose the correct source address for path
+validation and later traffic. This is protocol-correctness coverage, not a
+performance claim.
+
 ## Feature parity table
 
 The persistent shared-socket aggregate now exercises both sender roles through

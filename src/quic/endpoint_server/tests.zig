@@ -54,6 +54,23 @@ test "QUIC endpoint server rejects invalid admission limits" {
         error.InvalidOptions,
         endpoint_server.Server.init(allocator, &endpoint, .{
             .local_connection_id = &.{},
+        }, .{ .preferred_address = endpoint.address() }),
+    );
+    var other_address = endpoint.address();
+    other_address.setPort(other_address.getPort() +| 1);
+    try std.testing.expectError(
+        error.InvalidOptions,
+        endpoint_server.Server.init(allocator, &endpoint, .{
+            .local_connection_id = &.{},
+        }, .{
+            .stateless_reset_key = reset_key,
+            .preferred_address = other_address,
+        }),
+    );
+    try std.testing.expectError(
+        error.InvalidOptions,
+        endpoint_server.Server.init(allocator, &endpoint, .{
+            .local_connection_id = &.{},
             .local_transport_parameters = .{
                 .preferred_address = .{
                     .ipv4_address = .{ 127, 0, 0, 1 },
@@ -62,6 +79,28 @@ test "QUIC endpoint server rejects invalid admission limits" {
                 },
             },
         }, .{ .stateless_reset_key = reset_key }),
+    );
+
+    var raw_preferred_parameters: std.ArrayList(u8) = .empty;
+    defer raw_preferred_parameters.deinit(allocator);
+    try quic.encodeTransportParametersForSource(
+        &raw_preferred_parameters,
+        allocator,
+        .{
+            .preferred_address = .{
+                .ipv4_address = .{ 127, 0, 0, 1 },
+                .ipv4_port = 4433,
+                .connection_id = "raw-preferred-cid",
+            },
+        },
+        .server,
+    );
+    try std.testing.expectError(
+        error.InvalidOptions,
+        endpoint_server.Server.init(allocator, &endpoint, .{
+            .local_connection_id = &.{},
+            .transport_parameters = raw_preferred_parameters.items,
+        }, .{}),
     );
     try std.testing.expectError(
         error.InvalidOptions,
@@ -447,6 +486,7 @@ test "QUIC endpoint server routes two authenticated connections on one socket" {
             .inbox_capacity = 16,
             .handshake_timeout_ms = 2_000,
             .stateless_reset_key = stateless_reset_key,
+            .preferred_address = server_endpoint.address(),
         },
     );
     defer server.deinit();
@@ -457,6 +497,10 @@ test "QUIC endpoint server routes two authenticated connections on one socket" {
         peer: std.Io.net.IpAddress,
         stateless_reset_key: [quic.stateless_reset.static_key_len]u8,
         index: u8,
+        preferred_connection_id: [
+            quic.endpoint_dispatcher.default_server_connection_id_len
+        ]u8 = undefined,
+        preferred_reset_token: [quic.stateless_reset.token_len]u8 = undefined,
         err: ?anyerror = null,
 
         fn run(self: *@This()) void {
@@ -519,6 +563,22 @@ test "QUIC endpoint server routes two authenticated connections on one socket" {
             try std.testing.expectEqual(
                 @as(?[quic.stateless_reset.token_len]u8, expected_reset_token),
                 established.connection.config.peer_stateless_reset_token,
+            );
+            const preferred = established.connection.peerPreferredAddress() orelse
+                return error.TestUnexpectedResult;
+            try std.testing.expectEqual(
+                self.preferred_connection_id.len,
+                preferred.connection_id.len,
+            );
+            @memcpy(&self.preferred_connection_id, preferred.connection_id);
+            self.preferred_reset_token = preferred.stateless_reset_token;
+            try std.testing.expectEqualSlices(
+                u8,
+                &quic.stateless_reset.tokenForConnectionId(
+                    self.stateless_reset_key,
+                    preferred.connection_id,
+                ),
+                &self.preferred_reset_token,
             );
             const payload = [_]u8{ 'c', 'l', 'i', 'e', 'n', 't', '-', self.index };
             try established.connection.send(&.{.{ .stream = .{
@@ -714,8 +774,246 @@ test "QUIC endpoint server routes two authenticated connections on one socket" {
     for (threads) |thread| thread.join();
     started = 0;
     for (clients) |client| if (client.err) |err| return err;
+    try std.testing.expect(!std.mem.eql(
+        u8,
+        &clients[0].preferred_connection_id,
+        &clients[1].preferred_connection_id,
+    ));
+    try std.testing.expect(!std.mem.eql(
+        u8,
+        &clients[0].preferred_reset_token,
+        &clients[1].preferred_reset_token,
+    ));
     try std.testing.expectEqual(@as(usize, 2), server.connectionCount());
     try std.testing.expectEqual(clients.len * 4, server.dispatcher.routeCount());
+}
+
+test "QUIC endpoint server routes preferred address CID and path validation" {
+    const allocator = std.testing.allocator;
+    var threaded = std.Io.Threaded.init(allocator, .{
+        .async_limit = .unlimited,
+    });
+    defer threaded.deinit();
+    const io = threaded.io();
+
+    var server_endpoint = try quic.runtime.Endpoint.bind(
+        allocator,
+        io,
+        .{ .ip4 = .loopback(0) },
+        .{ .max_datagram_size = 4096 },
+    );
+    defer server_endpoint.deinit();
+    const server_key = try quic.tls.testing.serverKeyPair();
+    const server_public = server_key.public_key.toUncompressedSec1();
+    const reset_key = [_]u8{0x92} **
+        quic.stateless_reset.static_key_len;
+    var server = try endpoint_server.Server.init(
+        allocator,
+        &server_endpoint,
+        .{
+            .local_connection_id = &.{},
+            .alpn_protocol = "netz-preferred-address-test",
+            .random = [_]u8{0x33} ** 32,
+            .x25519_secret_key = [_]u8{0x34} ** 32,
+            .key_exchange_groups = &.{.x25519},
+            .cipher_suites = &.{.aes_128_gcm_sha256},
+            .identity = .{
+                .certificate_chain = &.{&server_public},
+                .signer = .{ .ecdsa_p256_sha256 = .{
+                    .key_pair = server_key,
+                } },
+            },
+            .initial_one_rtt_config = .{ .enable_pacing = false },
+            .handshake_recovery = .{
+                .initial_pto_ms = 20,
+                .max_pto_ms = 40,
+                .max_duration_ms = 2_000,
+            },
+        },
+        .{
+            .max_pending_handshakes = 1,
+            .max_connections = 1,
+            .inbox_capacity = 16,
+            .handshake_timeout_ms = 2_000,
+            .stateless_reset_key = reset_key,
+            .automatic_connection_id_replenishment = false,
+            .preferred_address = server_endpoint.address(),
+        },
+    );
+    defer server.deinit();
+
+    const challenge = [_]u8{ 0x93, 1, 2, 3, 4, 5, 6, 7 };
+    const Shared = struct {
+        allocator: std.mem.Allocator,
+        io: std.Io,
+        server_address: std.Io.net.IpAddress,
+        public_key: [65]u8,
+        reset_key: [quic.stateless_reset.static_key_len]u8,
+        challenge: [8]u8,
+        done: std.Io.Event = .unset,
+        err: ?anyerror = null,
+
+        fn run(self: *@This()) void {
+            self.runFallible() catch |err| {
+                self.err = err;
+            };
+            self.done.set(self.io);
+        }
+
+        fn runFallible(self: *@This()) !void {
+            var endpoint = try quic.runtime.Endpoint.bind(
+                self.allocator,
+                self.io,
+                .{ .ip4 = .loopback(0) },
+                .{ .max_datagram_size = 4096 },
+            );
+            defer endpoint.deinit();
+            var established = try quic.handshake.connectWithTimeout(
+                &endpoint,
+                self.server_address,
+                .{
+                    .original_destination_connection_id = "preferred-odcid",
+                    .local_connection_id = "preferred-client",
+                    .server_name = "localhost",
+                    .alpn_protocols = &.{"netz-preferred-address-test"},
+                    .server_auth = .{
+                        .pinned_ecdsa_p256_public_key = self.public_key,
+                    },
+                    .random = [_]u8{0x35} ** 32,
+                    .x25519_secret_key = [_]u8{0x36} ** 32,
+                    .key_exchange_groups = &.{.x25519},
+                    .cipher_suites = &.{.aes_128_gcm_sha256},
+                    .local_transport_parameters = .{
+                        .active_connection_id_limit = 2,
+                    },
+                    .initial_one_rtt_config = .{ .enable_pacing = false },
+                    .handshake_recovery = .{
+                        .initial_pto_ms = 20,
+                        .max_pto_ms = 40,
+                        .max_duration_ms = 2_000,
+                    },
+                },
+                .fromSeconds(2),
+            );
+            defer established.deinit();
+            const preferred = established.connection.peerPreferredAddress() orelse
+                return error.TestUnexpectedResult;
+            try std.testing.expectEqual(
+                self.server_address,
+                quic.one_rtt.Connection.preferredAddressIp4(preferred).?,
+            );
+            try std.testing.expectEqualSlices(
+                u8,
+                &quic.stateless_reset.tokenForConnectionId(
+                    self.reset_key,
+                    preferred.connection_id,
+                ),
+                &preferred.stateless_reset_token,
+            );
+            try established.connection.beginPeerPreferredAddressMigration(
+                self.challenge,
+                .ipv4,
+            );
+            try established.connection.sendPendingPathChallenge();
+
+            const deadline = std.Io.Clock.Timestamp.fromNow(self.io, .{
+                .raw = .fromSeconds(2),
+                .clock = .awake,
+            });
+            var saw_response = false;
+            while (!established.connection.peerAddressValidated()) {
+                var packet = try established.connection
+                    .receivePacketServicingTimersDeadline(deadline);
+                defer packet.deinit(self.allocator);
+                for (packet.frames) |frame| {
+                    if (frame == .path_response and
+                        std.mem.eql(
+                            u8,
+                            &frame.path_response.data,
+                            &self.challenge,
+                        ))
+                    {
+                        saw_response = true;
+                    }
+                }
+                _ = try established.connection.sendAckForPacketIfNeeded(
+                    packet.packet.packet_number,
+                    packet.frames,
+                );
+            }
+            try std.testing.expect(saw_response);
+        }
+    };
+
+    var shared = Shared{
+        .allocator = allocator,
+        .io = io,
+        .server_address = server.address(),
+        .public_key = server_public,
+        .reset_key = reset_key,
+        .challenge = challenge,
+    };
+    const client_thread = try std.Thread.spawn(.{}, Shared.run, .{&shared});
+    var joined = false;
+    defer if (!joined) client_thread.join();
+
+    const versions = [_]u32{quic.Version.version_1.wireValue()};
+    const deadline = std.Io.Clock.Timestamp.fromNow(io, .{
+        .raw = .fromSeconds(3),
+        .clock = .awake,
+    });
+    var handle: ?quic.endpoint_dispatcher.ConnectionHandle = null;
+    var saw_preferred_challenge = false;
+    while (!saw_preferred_challenge) {
+        var event = try server.receiveWithDeadline(&versions, deadline);
+        defer event.deinit(allocator);
+        switch (event) {
+            .connected => |connected| {
+                handle = connected;
+                const established = server.connection(connected) orelse
+                    return error.TestUnexpectedResult;
+                try std.testing.expectEqual(
+                    @as(usize, 2),
+                    established.connection.localConnectionIdCount(),
+                );
+                try std.testing.expectEqual(
+                    @as(usize, 2),
+                    server.dispatcher.routeCount(),
+                );
+            },
+            .packet => |*packet| {
+                if (packet.connection_id_sequence != 1) {
+                    _ = try server.acknowledgePacketIfNeeded(packet);
+                    continue;
+                }
+                for (packet.packet.frames) |frame| {
+                    saw_preferred_challenge =
+                        saw_preferred_challenge or
+                        (frame == .path_challenge and
+                            std.mem.eql(
+                                u8,
+                                &frame.path_challenge.data,
+                                &challenge,
+                            ));
+                }
+                _ = try server.acknowledgePacketIfNeeded(packet);
+                const established = server.connection(
+                    packet.connection_handle,
+                ) orelse return error.TestUnexpectedResult;
+                _ = try established.connection.sendPendingPathResponses();
+                try server.refreshConnectionTimer(
+                    packet.connection_handle,
+                );
+            },
+            .timer => {},
+            .handshake_failed => |failure| return failure.err,
+            .unrouted => return error.TestUnexpectedResult,
+        }
+    }
+    try std.testing.expect(handle != null);
+    client_thread.join();
+    joined = true;
+    if (shared.err) |err| return err;
 }
 
 test "QUIC endpoint server resets a client after connection state loss" {

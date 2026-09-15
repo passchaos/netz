@@ -349,6 +349,20 @@ pub const LocalPool = struct {
         try self.registerInitial(connection_id, quic.stateless_reset.tokenForConnectionId(static_key, connection_id));
     }
 
+    /// Register the server CID carried by preferred_address as sequence 1.
+    /// Unlike `issue`, this CID has already been advertised in transport
+    /// parameters and therefore must not produce NEW_CONNECTION_ID.
+    pub fn registerPreferredAddress(
+        self: *LocalPool,
+        connection_id: []const u8,
+        token: [16]u8,
+    ) Error!void {
+        if (self.next_sequence_number != 1 or self.count() != 1) {
+            return error.ConnectionIdSequenceLimit;
+        }
+        _ = try self.issue(connection_id, token);
+    }
+
     pub fn issue(self: *LocalPool, connection_id: []const u8, token: [16]u8) Error!quic.Frame {
         return try self.issueWithRetirePriorTo(connection_id, token, self.retire_prior_to);
     }
@@ -878,6 +892,45 @@ test "QUIC local CID pool derives stateless reset tokens from static key" {
         &quic.stateless_reset.tokenForConnectionId(key, "new-cid"),
         &frame.new_connection_id.stateless_reset_token,
     );
+}
+
+test "QUIC local CID pool registers preferred address at sequence one" {
+    var pool = LocalPool{};
+    const initial_token = [_]u8{0x31} ** 16;
+    const preferred_token = [_]u8{0x32} ** 16;
+    try pool.registerInitial("initial-cid", initial_token);
+    try pool.registerPreferredAddress("preferred-cid", preferred_token);
+
+    var storage: [max_pool_size]LocalPool.ActiveId = undefined;
+    const active = try pool.activeIdsInto(&storage);
+    try std.testing.expectEqual(@as(usize, 2), active.len);
+    try std.testing.expectEqual(@as(u64, 0), active[0].sequence_number);
+    try std.testing.expectEqualStrings(
+        "initial-cid",
+        active[0].connection_id,
+    );
+    try std.testing.expectEqual(@as(u64, 1), active[1].sequence_number);
+    try std.testing.expectEqualStrings(
+        "preferred-cid",
+        active[1].connection_id,
+    );
+    try std.testing.expectEqual(@as(u64, 2), pool.next_sequence_number);
+
+    const before = pool;
+    try std.testing.expectError(
+        error.ConnectionIdSequenceLimit,
+        pool.registerPreferredAddress("second-preferred", [_]u8{0x33} ** 16),
+    );
+    try std.testing.expectEqualDeep(before, pool);
+
+    var duplicate = LocalPool{};
+    try duplicate.registerInitial("initial-cid", initial_token);
+    try std.testing.expectError(
+        error.DuplicateConnectionId,
+        duplicate.registerPreferredAddress("initial-cid", preferred_token),
+    );
+    try std.testing.expectEqual(@as(u64, 1), duplicate.next_sequence_number);
+    try std.testing.expectEqual(@as(usize, 1), duplicate.count());
 }
 
 test "QUIC local CID pool exposes every active route into caller storage" {

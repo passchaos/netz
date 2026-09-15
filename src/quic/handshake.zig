@@ -4471,6 +4471,11 @@ fn establishedConnection(
         peer_transport_parameters,
     ));
     errdefer connection.deinit();
+    if (local_endpoint == .server) {
+        if (local_transport_parameters.preferred_address) |preferred| {
+            try connection.registerLocalPreferredAddress(preferred);
+        }
+    }
     return .{
         .connection = connection,
         .local_connection_id = local_owned,

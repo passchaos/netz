@@ -2562,6 +2562,166 @@ test "QUIC endpoint dispatcher bounds pending admission and generates CIDs" {
     try std.testing.expect(try dispatcher.unregisterPendingHandshake(61));
 }
 
+test "QUIC endpoint dispatcher routes a pending preferred address CID" {
+    const allocator = std.testing.allocator;
+    var threaded = std.Io.Threaded.init(allocator, .{});
+    defer threaded.deinit();
+    const io = threaded.io();
+    var endpoint = try runtime.Endpoint.bind(
+        allocator,
+        io,
+        .{ .ip4 = .loopback(0) },
+        .{ .max_datagram_size = 4096 },
+    );
+    defer endpoint.deinit();
+    var dispatcher = Dispatcher.init(allocator, &endpoint);
+    defer dispatcher.deinit();
+    const peer = std.Io.net.IpAddress{ .ip4 = .loopback(5555) };
+    const initial_bytes = try allocator.dupe(u8, "initial");
+    var initial_datagram = runtime.OwnedBytes{
+        .from = peer,
+        .bytes = initial_bytes,
+    };
+    defer initial_datagram.deinit(allocator);
+    const initial = dispatcher_mod.InitialDatagram{
+        .datagram = initial_datagram,
+        .version = quic.Version.version_1.wireValue(),
+        .destination_connection_id = "original-dcid",
+        .source_connection_id = "client",
+        .first_packet_len = initial_bytes.len,
+    };
+    const inbox = try dispatcher.admitPendingHandshakeWithServerConnectionIds(
+        62,
+        initial,
+        1,
+        2,
+        2,
+    );
+    defer {
+        inbox.deinit();
+        allocator.destroy(inbox);
+    }
+    try std.testing.expectEqual(@as(usize, 3), inbox.connectionIds().len);
+    try std.testing.expect(!std.mem.eql(
+        u8,
+        inbox.connectionIds()[1].slice(),
+        inbox.connectionIds()[2].slice(),
+    ));
+
+    const keys = quic.protection.deriveAes128Keys(
+        [_]u8{0xf2} ** quic.protection.secret_len,
+    );
+    const preferred_id = inbox.connectionIds()[2];
+    const packet = try quic.protection.sealShortPacket(allocator, keys, .{
+        .destination_connection_id = preferred_id.slice(),
+        .packet_number = 0,
+        .payload = &.{@intFromEnum(quic.FrameType.ping)},
+    });
+    var event = try dispatcher.dispatch(.{
+        .from = peer,
+        .bytes = packet,
+    });
+    defer event.deinit(allocator);
+    try std.testing.expectEqual(
+        @as(Event, .{ .pending_handshake = 62 }),
+        event,
+    );
+    try std.testing.expectEqual(@as(usize, 1), inbox.applicationCount());
+
+    var connection = try one_rtt.Connection.init(&endpoint, .{
+        .peer = peer,
+        .receive_keys = keys,
+        .send_keys = keys,
+        .local_connection_id = inbox.connectionIds()[1].slice(),
+        .peer_connection_id = "client",
+        .local_endpoint = .server,
+        .enable_pacing = false,
+    });
+    defer connection.deinit();
+    try connection.registerLocalPreferredAddress(.{
+        .ipv4_address = .{ 127, 0, 0, 1 },
+        .ipv4_port = endpoint.address().ip4.port,
+        .connection_id = preferred_id.slice(),
+        .stateless_reset_token = [_]u8{0xf3} ** 16,
+    });
+    try dispatcher.promotePendingHandshake(62, 63, &connection);
+    var routed = try dispatcher.receive(
+        &.{quic.Version.version_1.wireValue()},
+    );
+    defer routed.deinit(allocator);
+    try std.testing.expect(routed == .packet);
+    try std.testing.expectEqual(@as(usize, 63), routed.packet.connection_handle);
+    try std.testing.expectEqual(@as(u64, 1), routed.packet.connection_id_sequence);
+    try std.testing.expect(routed.packet.packet.frames[0] == .ping);
+    try std.testing.expect(try dispatcher.unregisterConnection(63));
+}
+
+test "QUIC endpoint dispatcher routes generated preferred CID during handshake" {
+    const allocator = std.testing.allocator;
+    var threaded = std.Io.Threaded.init(allocator, .{});
+    defer threaded.deinit();
+    const io = threaded.io();
+    var endpoint = try runtime.Endpoint.bind(
+        allocator,
+        io,
+        .{ .ip4 = .loopback(0) },
+        .{ .max_datagram_size = 4096 },
+    );
+    defer endpoint.deinit();
+    var dispatcher = Dispatcher.init(allocator, &endpoint);
+    defer dispatcher.deinit();
+    const peer = std.Io.net.IpAddress{ .ip4 = .loopback(5555) };
+    const initial_bytes = try allocator.dupe(u8, "initial");
+    var initial_datagram = runtime.OwnedBytes{
+        .from = peer,
+        .bytes = initial_bytes,
+    };
+    defer initial_datagram.deinit(allocator);
+    const initial = dispatcher_mod.InitialDatagram{
+        .datagram = initial_datagram,
+        .version = quic.Version.version_1.wireValue(),
+        .destination_connection_id = "original-dcid",
+        .source_connection_id = "client",
+        .first_packet_len = initial_bytes.len,
+    };
+    const inbox = try dispatcher.admitPendingHandshakeWithServerConnectionIds(
+        62,
+        initial,
+        1,
+        2,
+        2,
+    );
+    defer {
+        inbox.deinit();
+        allocator.destroy(inbox);
+    }
+    try std.testing.expectEqual(@as(usize, 3), inbox.connectionIds().len);
+    try std.testing.expect(!std.mem.eql(
+        u8,
+        inbox.connectionIds()[1].slice(),
+        inbox.connectionIds()[2].slice(),
+    ));
+
+    var bytes = [_]u8{0} **
+        (1 + dispatcher_mod.default_server_connection_id_len + 1);
+    bytes[0] = 0x40;
+    @memcpy(
+        bytes[1..][0..dispatcher_mod.default_server_connection_id_len],
+        inbox.connectionIds()[2].slice(),
+    );
+    var event = try dispatcher.dispatch(.{
+        .from = peer,
+        .bytes = try allocator.dupe(u8, &bytes),
+    });
+    defer event.deinit(allocator);
+    try std.testing.expectEqual(
+        @as(Event, .{ .pending_handshake = 62 }),
+        event,
+    );
+    try std.testing.expectEqual(@as(usize, 1), inbox.applicationCount());
+    try std.testing.expect(try dispatcher.unregisterPendingHandshake(62));
+}
+
 test "QUIC endpoint dispatcher retains early application packets until promotion" {
     const allocator = std.testing.allocator;
     var threaded = std.Io.Threaded.init(allocator, .{});

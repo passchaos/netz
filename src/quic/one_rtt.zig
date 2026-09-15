@@ -1203,9 +1203,19 @@ pub const Connection = struct {
             break :request frame;
         } else null;
         const send_buffer_capacity = std.math.add(usize, config.max_datagram_size, max_short_packet_overhead) catch return error.OutOfMemory;
+        const preferred_connection_id_len = if (config.peer_preferred_address) |preferred|
+            preferred.connection_id.len
+        else
+            0;
+        if (preferred_connection_id_len >
+            quic.connection_id.max_connection_id_len)
+        {
+            return error.InvalidTransportParameter;
+        }
         const peer_connection_id_storage = try endpoint.allocator.alloc(
             u8,
-            quic.connection_id.max_connection_id_len,
+            quic.connection_id.max_connection_id_len +
+                preferred_connection_id_len,
         );
         var peer_connection_id_storage_owned = true;
         errdefer if (peer_connection_id_storage_owned) {
@@ -1218,6 +1228,12 @@ pub const Connection = struct {
         var stable_config = config;
         stable_config.peer_connection_id =
             peer_connection_id_storage[0..config.peer_connection_id.len];
+        if (config.peer_preferred_address) |preferred| {
+            const preferred_storage = peer_connection_id_storage[quic.connection_id.max_connection_id_len..][0..preferred.connection_id.len];
+            @memcpy(preferred_storage, preferred.connection_id);
+            stable_config.peer_preferred_address.?
+                .connection_id = preferred_storage;
+        }
         var prepared_send_keys = try quic.protection
             .PreparedPacketProtectionKeys.createIfAccelerated(
             endpoint.allocator,
@@ -1335,6 +1351,16 @@ pub const Connection = struct {
             try connection.peer_connection_ids.setInitialStatelessResetToken(
                 token,
             );
+        }
+        if (config.local_endpoint == .client) {
+            if (stable_config.peer_preferred_address) |preferred| {
+                try connection.peer_connection_ids.addWithLimit(
+                    1,
+                    preferred.connection_id,
+                    preferred.stateless_reset_token,
+                    stable_config.active_connection_id_limit,
+                );
+            }
         }
         if (config.tls_handshake_complete) {
             connection.handshake_status.onTlsComplete(switch (config.local_endpoint) {
@@ -1458,6 +1484,26 @@ pub const Connection = struct {
             self.config.peer_active_connection_id_limit,
             quic.connection_id.max_pool_size,
         );
+    }
+
+    /// Register the server CID already advertised in preferred_address. RFC
+    /// 9000 assigns this identifier sequence number 1, but it is not sent in a
+    /// NEW_CONNECTION_ID frame. Endpoint routers must synchronize afterward.
+    pub fn registerLocalPreferredAddress(
+        self: *Connection,
+        preferred: quic.PreferredAddress,
+    ) Error!void {
+        if (self.config.local_endpoint != .server or
+            self.config.peer_active_connection_id_limit < 2)
+        {
+            return error.InvalidTransportParameter;
+        }
+        var local_connection_ids = self.local_connection_ids;
+        try local_connection_ids.registerPreferredAddress(
+            preferred.connection_id,
+            preferred.stateless_reset_token,
+        );
+        self.local_connection_ids = local_connection_ids;
     }
 
     pub fn send(self: *Connection, frames: []const quic.Frame) Error!void {
@@ -8215,7 +8261,6 @@ pub const Connection = struct {
             .ipv6 => preferredAddressIp6(preferred) orelse return error.InvalidTransportParameter,
         };
         var peer_connection_ids = self.peer_connection_ids;
-        try peer_connection_ids.addWithLimit(1, preferred.connection_id, preferred.stateless_reset_token, self.config.active_connection_id_limit);
         try peer_connection_ids.markInUse(1);
         // RFC 9000 permits a client to use the server's preferred_address even
         // when disable_active_migration was advertised. That parameter only

@@ -876,29 +876,71 @@ pub const Dispatcher = struct {
         max_pending_handshakes: usize,
         inbox_capacity: usize,
     ) Error!*handshake_inbox.Inbox {
+        return self.admitPendingHandshakeWithServerConnectionIds(
+            handle,
+            initial,
+            max_pending_handshakes,
+            inbox_capacity,
+            1,
+        );
+    }
+
+    /// Admit a handshake with one initial server CID and optional additional
+    /// CIDs that were advertised in transport parameters, such as the
+    /// preferred-address sequence-1 CID. Every alias is routed before the
+    /// handshake worker can publish application traffic.
+    pub fn admitPendingHandshakeWithServerConnectionIds(
+        self: *Dispatcher,
+        handle: PendingHandshakeHandle,
+        initial: InitialDatagram,
+        max_pending_handshakes: usize,
+        inbox_capacity: usize,
+        server_connection_id_count: usize,
+    ) Error!*handshake_inbox.Inbox {
         if (max_pending_handshakes == 0 or
             self.pending_handshakes.count() >= max_pending_handshakes)
         {
             return error.PendingHandshakeLimitReached;
         }
-        var server_connection_id: [default_server_connection_id_len]u8 =
-            undefined;
-        // Collision probability is negligible, but lookup makes this a hard
-        // endpoint invariant rather than a probabilistic API contract.
-        while (true) {
-            try std.Io.randomSecure(self.endpoint.io, &server_connection_id);
-            if ((try self.router.lookup(&server_connection_id)) == null and
-                (try self.pending_router.lookup(&server_connection_id)) == null)
-            {
-                break;
+        if (server_connection_id_count == 0 or
+            server_connection_id_count >
+                quic.connection_id.max_pool_size - 1)
+        {
+            return error.InvalidConnectionId;
+        }
+        var generated: [quic.connection_id.max_pool_size - 1][
+            default_server_connection_id_len
+        ]u8 = undefined;
+        var ids: [quic.connection_id.max_pool_size][]const u8 = undefined;
+        ids[0] = initial.destination_connection_id;
+        for (generated[0..server_connection_id_count], 0..) |*candidate, index| {
+            // Collision probability is negligible, but lookup and the local
+            // duplicate check make this a hard endpoint invariant.
+            while (true) {
+                try std.Io.randomSecure(self.endpoint.io, candidate);
+                if ((try self.router.lookup(candidate)) != null or
+                    (try self.pending_router.lookup(candidate)) != null or
+                    std.mem.eql(u8, candidate, initial.destination_connection_id))
+                {
+                    continue;
+                }
+                var duplicate = false;
+                for (generated[0..index]) |prior| {
+                    if (std.mem.eql(u8, candidate, &prior)) {
+                        duplicate = true;
+                        break;
+                    }
+                }
+                if (!duplicate) break;
             }
+            ids[index + 1] = candidate;
         }
         const inbox = try self.allocator.create(handshake_inbox.Inbox);
         errdefer self.allocator.destroy(inbox);
         inbox.* = try handshake_inbox.Inbox.init(
             self.allocator,
             self.endpoint.io,
-            &.{ initial.destination_connection_id, &server_connection_id },
+            ids[0 .. server_connection_id_count + 1],
             initial.datagram.from,
             inbox_capacity,
         );
