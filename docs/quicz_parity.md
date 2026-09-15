@@ -510,8 +510,9 @@ authenticated non-probing traffic commits later sends to that local endpoint.
 Established servers register sequence 1 without emitting `NEW_CONNECTION_ID`;
 clients copy and register the advertised CID during connection construction,
 then select it for preferred-path validation. Real shared-server handshakes
-cover both same-address CID rotation and migration to a distinct UDP port: the
-client observes PATH_RESPONSE and a subsequent PING from the advertised address,
+cover both same-address CID rotation and migration to distinct IPv4 and IPv6
+UDP endpoints: the client observes PATH_RESPONSE and a subsequent PING from the
+advertised address,
 while the server routes the client's sequence-1 traffic. The two-connection
 gate proves preferred CIDs and reset tokens are not reused. Typed and raw
 caller-supplied preferred parameters are rejected because their fixed CID cannot
@@ -523,6 +524,10 @@ second socket completion is copied into one preallocated retained slot so
 canceling the receive race cannot lose it. Tests check callback payload
 pointers, two-packet batch delivery, simultaneous-socket preservation,
 callback-error state commitment, and source-correct stateless-reset responses.
+One preferred endpoint/address family can be advertised per server today; the
+RFC field can carry both IPv4 and IPv6 candidates under one CID, as exposed by
+Quinn's separate v4/v6 configuration, so simultaneous dual-stack advertisement
+remains open.
 
 ## Feature parity table
 

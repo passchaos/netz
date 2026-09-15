@@ -1065,24 +1065,42 @@ test "QUIC endpoint server routes preferred address CID and path validation" {
 }
 
 test "QUIC endpoint server migrates to a distinct preferred endpoint" {
+    try testDistinctPreferredEndpoint(.ipv4);
+}
+
+test "QUIC endpoint server migrates to a distinct IPv6 preferred endpoint" {
+    try testDistinctPreferredEndpoint(.ipv6);
+}
+
+fn testDistinctPreferredEndpoint(family: enum { ipv4, ipv6 }) !void {
     const allocator = std.testing.allocator;
     var threaded = std.Io.Threaded.init(allocator, .{
         .async_limit = .unlimited,
     });
     defer threaded.deinit();
     const io = threaded.io();
+    const primary_bind: std.Io.net.IpAddress = switch (family) {
+        .ipv4 => .{ .ip4 = .loopback(0) },
+        .ipv6 => .{ .ip6 = .loopback(0) },
+    };
+    const preferred_bind: std.Io.net.IpAddress = switch (family) {
+        .ipv4 => .{
+            .ip4 = .{ .bytes = .{ 127, 0, 0, 2 }, .port = 0 },
+        },
+        .ipv6 => .{ .ip6 = .loopback(0) },
+    };
 
     var server_endpoint = try quic.runtime.Endpoint.bind(
         allocator,
         io,
-        .{ .ip4 = .loopback(0) },
+        primary_bind,
         .{ .max_datagram_size = 4096 },
     );
     defer server_endpoint.deinit();
     var preferred_endpoint = try quic.runtime.Endpoint.bind(
         allocator,
         io,
-        .{ .ip4 = .{ .bytes = .{ 127, 0, 0, 2 }, .port = 0 } },
+        preferred_bind,
         .{ .max_datagram_size = 4096 },
     );
     defer preferred_endpoint.deinit();
@@ -1146,7 +1164,10 @@ test "QUIC endpoint server migrates to a distinct preferred endpoint" {
             var endpoint = try quic.runtime.Endpoint.bind(
                 self.allocator,
                 self.io,
-                .{ .ip4 = .loopback(0) },
+                switch (family) {
+                    .ipv4 => .{ .ip4 = .loopback(0) },
+                    .ipv6 => .{ .ip6 = .loopback(0) },
+                },
                 .{ .max_datagram_size = 4096 },
             );
             defer endpoint.deinit();
@@ -1182,11 +1203,16 @@ test "QUIC endpoint server migrates to a distinct preferred endpoint" {
                 return error.TestUnexpectedResult;
             try std.testing.expectEqual(
                 self.preferred_address,
-                quic.one_rtt.Connection.preferredAddressIp4(preferred).?,
+                switch (family) {
+                    .ipv4 => quic.one_rtt.Connection
+                        .preferredAddressIp4(preferred).?,
+                    .ipv6 => quic.one_rtt.Connection
+                        .preferredAddressIp6(preferred).?,
+                },
             );
             try established.connection.beginPeerPreferredAddressMigration(
                 self.challenge,
-                .ipv4,
+                family,
             );
             try established.connection.sendPendingPathChallenge();
 
