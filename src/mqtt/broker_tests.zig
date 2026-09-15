@@ -2,6 +2,7 @@ const std = @import("std");
 const mqtt = @import("mod.zig");
 const broker_mod = @import("broker.zig");
 const runtime = @import("runtime.zig");
+const runtime_backend = @import("../runtime.zig");
 
 const Broker = broker_mod.Broker;
 
@@ -1463,11 +1464,9 @@ test "broker publishes coherent retained system statistics" {
 
 test "broker periodically publishes system statistics" {
     const allocator = std.testing.allocator;
-    var threaded = std.Io.Threaded.init(allocator, .{
-        .async_limit = .unlimited,
-    });
-    defer threaded.deinit();
-    const io = threaded.io();
+    var backend = try runtime_backend.Backend.init(allocator);
+    defer backend.deinit();
+    const io = backend.io();
     var broker = try Broker.listen(
         allocator,
         io,
@@ -1487,9 +1486,8 @@ test "broker periodically publishes system statistics" {
         .broker = &broker,
         .connection_count = 1,
     };
-    const thread = try std.Thread.spawn(.{}, ServeState.run, .{&serve});
-    var joined = false;
-    defer if (!joined) thread.join();
+    var server_task = io.async(ServeState.run, .{&serve});
+    defer server_task.cancel(io);
 
     var subscriber = try connect(
         allocator,
@@ -1516,7 +1514,8 @@ test "broker periodically publishes system statistics" {
     );
     try std.testing.expectEqualStrings("1", publish.publish.payload);
     try subscriber.disconnect(0);
-    try joinServer(thread, &joined, &serve);
+    server_task.await(io);
+    if (serve.err) |err| return err;
 }
 
 test "broker rejects non-positive system statistics interval" {
