@@ -191,6 +191,100 @@ test "QUIC endpoint dispatcher owns CID routing across connections" {
     try std.testing.expect(!(try dispatcher.unregisterConnection(10)));
 }
 
+test "QUIC endpoint dispatcher consumes a short packet from a detached endpoint" {
+    const allocator = std.testing.allocator;
+    var threaded = std.Io.Threaded.init(allocator, .{});
+    defer threaded.deinit();
+    const io = threaded.io();
+
+    var primary = try runtime.Endpoint.bind(
+        allocator,
+        io,
+        .{ .ip4 = .loopback(0) },
+        .{ .max_datagram_size = 4096 },
+    );
+    defer primary.deinit();
+    var detached = try runtime.Endpoint.bind(
+        allocator,
+        io,
+        .{ .ip6 = .loopback(0) },
+        .{ .max_datagram_size = 4096 },
+    );
+    defer detached.deinit();
+    var peer = try runtime.Endpoint.bind(
+        allocator,
+        io,
+        .{ .ip6 = .loopback(0) },
+        .{ .max_datagram_size = 4096 },
+    );
+    defer peer.deinit();
+    const keys = quic.protection.deriveAes128Keys(
+        [_]u8{0xd9} ** quic.protection.secret_len,
+    );
+    const local_cid = "detached-local";
+    var connection = try one_rtt.Connection.init(&primary, .{
+        .peer = .{ .ip4 = .loopback(4433) },
+        .receive_keys = keys,
+        .send_keys = keys,
+        .local_connection_id = local_cid,
+        .peer_connection_id = "detached-peer",
+        .enable_pacing = false,
+    });
+    defer connection.deinit();
+    var dispatcher = Dispatcher.init(allocator, &primary);
+    defer dispatcher.deinit();
+    try dispatcher.registerConnection(30, &connection);
+
+    const payload = try one_rtt.encodeFrames(allocator, &.{.{ .ping = {} }});
+    defer allocator.free(payload);
+    const bytes = try quic.protection.sealShortPacket(allocator, keys, .{
+        .destination_connection_id = local_cid,
+        .packet_number = 0,
+        .payload = payload,
+    });
+    defer allocator.free(bytes);
+    try peer.sendBytes(detached.address(), bytes);
+
+    var storage: [4096]u8 = undefined;
+    const datagram = try detached.receiveBytesIntoWithTimeout(
+        &storage,
+        .fromSeconds(1),
+    );
+    const Visitor = struct {
+        fn visit(_: void, _: dispatcher_mod.RoutedPacketView) !void {
+            return error.TestUnexpectedResult;
+        }
+    };
+    var event = try dispatcher.dispatchVisitingDatagram(
+        datagram,
+        {},
+        Visitor.visit,
+    );
+    defer event.deinit(allocator);
+    try std.testing.expect(event == .consumed);
+    try std.testing.expectEqual(
+        @as(u64, 0),
+        connection.stats().packets_received,
+    );
+
+    const owned_bytes = try quic.protection.sealShortPacket(allocator, keys, .{
+        .destination_connection_id = local_cid,
+        .packet_number = 1,
+        .payload = payload,
+    });
+    var owned_event = try dispatcher.dispatch(.{
+        .from = peer.address(),
+        .received_on = &detached,
+        .bytes = owned_bytes,
+    });
+    defer owned_event.deinit(allocator);
+    try std.testing.expect(owned_event == .consumed);
+    try std.testing.expectEqual(
+        @as(u64, 0),
+        connection.stats().packets_received,
+    );
+}
+
 test "QUIC endpoint dispatcher immediately repairs packet-threshold loss" {
     const allocator = std.testing.allocator;
     var threaded = std.Io.Threaded.init(allocator, .{});

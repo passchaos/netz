@@ -1948,6 +1948,12 @@ fn isDiscardedShortPacketError(err: anyerror) bool {
         error.AuthenticationFailed,
         error.InvalidInitialPacket,
         error.InvalidHeaderProtectionSample,
+        // A multi-endpoint owner can still receive a delayed datagram after a
+        // preferred-address validation has failed and the connection has
+        // detached that local socket. The CID is public routing metadata; an
+        // endpoint mismatch discovered before decryption is therefore
+        // untrusted network input, not a fatal dispatcher error.
+        error.InvalidReceiveEndpoint,
         error.InvalidPacketNumber,
         error.InvalidPacketNumberLength,
         => true,

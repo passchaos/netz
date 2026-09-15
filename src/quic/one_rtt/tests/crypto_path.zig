@@ -3737,6 +3737,96 @@ test "QUIC failed preferred-address validation restores last validated address a
     );
 }
 
+test "QUIC preferred-address migration abort restores path transactionally" {
+    const allocator = std.testing.allocator;
+    var threaded = std.Io.Threaded.init(allocator, .{});
+    defer threaded.deinit();
+    const io = threaded.io();
+
+    var original_endpoint = try quic.runtime.Endpoint.bind(
+        allocator,
+        io,
+        .{ .ip4 = .loopback(0) },
+        .{ .max_datagram_size = 4096 },
+    );
+    defer original_endpoint.deinit();
+    var candidate_endpoint = try quic.runtime.Endpoint.bind(
+        allocator,
+        io,
+        .{ .ip6 = .loopback(0) },
+        .{ .max_datagram_size = 4096 },
+    );
+    defer candidate_endpoint.deinit();
+    var original_peer = try quic.runtime.Endpoint.bind(
+        allocator,
+        io,
+        .{ .ip4 = .loopback(0) },
+        .{ .max_datagram_size = 4096 },
+    );
+    defer original_peer.deinit();
+    var candidate_peer = try quic.runtime.Endpoint.bind(
+        allocator,
+        io,
+        .{ .ip6 = .loopback(0) },
+        .{ .max_datagram_size = 4096 },
+    );
+    defer candidate_peer.deinit();
+
+    const original_cid = "abort-original";
+    const preferred_cid = "abort-preferred";
+    const keys = quic.protection.deriveAes128Keys(
+        [_]u8{0x64} ** quic.protection.secret_len,
+    );
+    var connection = try one_rtt.Connection.init(&original_endpoint, .{
+        .peer = original_peer.address(),
+        .receive_keys = keys,
+        .send_keys = keys,
+        .local_connection_id = "abort-local",
+        .peer_connection_id = original_cid,
+        .peer_preferred_address = .{
+            .ipv6_address = candidate_peer.address().ip6.bytes,
+            .ipv6_port = candidate_peer.address().ip6.port,
+            .connection_id = preferred_cid,
+            .stateless_reset_token = [_]u8{0x65} ** 16,
+        },
+        .active_connection_id_limit = 2,
+        .enable_pacing = false,
+    });
+    defer connection.deinit();
+
+    try connection.beginPeerPreferredAddressMigrationFrom(
+        &candidate_endpoint,
+        [_]u8{ 0x66, 1, 2, 3, 4, 5, 6, 7 },
+        .ipv6,
+    );
+    try std.testing.expectEqual(candidate_peer.address(), connection.peerAddress());
+    try std.testing.expectEqual(&candidate_endpoint, connection.sendEndpoint());
+    try std.testing.expectEqualSlices(
+        u8,
+        preferred_cid,
+        connection.config.peer_connection_id,
+    );
+    try std.testing.expectEqual(
+        @as(usize, 1),
+        connection.pendingPathValidationCount(),
+    );
+
+    connection.abortPeerPreferredAddressMigration();
+    try std.testing.expectEqual(original_peer.address(), connection.peerAddress());
+    try std.testing.expectEqual(&original_endpoint, connection.sendEndpoint());
+    try std.testing.expectEqualSlices(
+        u8,
+        original_cid,
+        connection.config.peer_connection_id,
+    );
+    try std.testing.expect(connection.peerAddressValidated());
+    try std.testing.expectEqual(
+        @as(usize, 0),
+        connection.pendingPathValidationCount(),
+    );
+    connection.abortPeerPreferredAddressMigration();
+}
+
 test "QUIC 1-RTT connection exchanges PATH_CHALLENGE and PATH_RESPONSE" {
     const allocator = std.testing.allocator;
 

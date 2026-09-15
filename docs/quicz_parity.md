@@ -534,9 +534,20 @@ can start preferred-address validation from a caller-owned local endpoint,
 enabling IPv4-to-IPv6 and IPv6-to-IPv4 migration while one dispatcher serially
 injects both sockets. Tests verify sequence-1 routing, delayed packets on the
 retained old path, PATH_RESPONSE, subsequent traffic, wrong-family rollback,
-and timeout restoration of peer address, CID, and local endpoint. Direct
-blocking `Connection.receive*` remains a single-socket API; cross-family users
-must keep both sockets under an external dispatcher/event-loop owner.
+and timeout restoration of peer address, CID, and local endpoint. The shared
+HTTP/3 client pool now owns an optional opposite-family endpoint and exposes
+preferred migration through its lease. Its single receive owner races both
+sockets with `std.Io.Select`, folds the dispatcher timer into the same absolute
+deadline, preserves a simultaneous second datagram, and keeps its bounded
+caller-buffer receive path from allocating owning UDP datagrams for established
+packets. Real
+IPv4-to-IPv6 TLS/H3 coverage runs on zio through the `std.Io` abstraction,
+validates the advertised sequence-1 path, sends a request/response on IPv6,
+then releases and re-acquires the same origin and reuses the same connection. A
+second zio test leaves the preferred address silent, observes all validation
+retries and timeout rollback, and completes an H3 request on the original IPv4
+path. Direct blocking `Connection.receive*` remains a per-connection API;
+shared clients should use the pool's single receive owner.
 
 ## Feature parity table
 

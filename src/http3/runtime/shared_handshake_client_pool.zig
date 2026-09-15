@@ -1,8 +1,9 @@
-//! Authenticated HTTP/3 client pool with one shared UDP endpoint owner.
+//! Authenticated HTTP/3 client pool with one shared UDP receive owner.
 //!
-//! The pool owns one `std.Io` endpoint and one QUIC dispatcher. Handshakes
-//! consume only CID-routed inboxes, established clients remain heap-backed so
-//! dispatcher pointers stay stable, and only `receive*` reads the UDP socket.
+//! The pool owns a primary endpoint, an optional cross-family migration
+//! endpoint, and one QUIC dispatcher. Handshakes consume only CID-routed
+//! inboxes, established clients remain heap-backed so dispatcher pointers stay
+//! stable, and only `receive*` reads either UDP socket.
 
 const std = @import("std");
 const http3 = @import("../mod.zig");
@@ -12,6 +13,13 @@ const deadline_policy = @import("../../internal/deadline.zig");
 const supported_versions = [_]u32{
     quic.Version.version_1.wireValue(),
     quic.Version.version_2.wireValue(),
+};
+
+const PendingEndpointDatagramView = struct {
+    from: std.Io.net.IpAddress,
+    received_on: *quic.runtime.Endpoint,
+    len: usize,
+    ecn: quic.packet_space.EcnCodepoint,
 };
 
 pub const Error = error{
@@ -25,6 +33,11 @@ pub const Error = error{
 pub fn Options(comptime Runtime: type) type {
     return struct {
         local_address: std.Io.net.IpAddress,
+        /// Optional caller-selected local bind address for cross-family QUIC
+        /// preferred-address migration. It must use the other address family
+        /// from `local_address`; the pool remains the sole owner of both
+        /// receive sockets.
+        migration_local_address: ?std.Io.net.IpAddress = null,
         limits: Runtime.Limits = .{},
         client: Runtime.HandshakeClientOptions,
         idle: http3.origin_pool.Config = .{},
@@ -45,7 +58,14 @@ pub fn Pool(comptime Runtime: type) type {
         io: std.Io,
         options: Options(Runtime),
         endpoint: *quic.runtime.Endpoint,
+        migration_endpoint: ?*quic.runtime.Endpoint = null,
         dispatcher: *quic.endpoint_dispatcher.Dispatcher,
+        /// A second socket can complete concurrently with the selected receive
+        /// result. Retain that datagram so no authenticated packet is lost.
+        pending_multi_endpoint_datagram: ?quic.runtime.OwnedBytes = null,
+        migration_receive_storage: []u8 = &.{},
+        pending_multi_endpoint_storage: []u8 = &.{},
+        pending_multi_endpoint_view: ?PendingEndpointDatagramView = null,
         entries: std.AutoHashMapUnmanaged(
             quic.endpoint_dispatcher.ConnectionHandle,
             *Entry,
@@ -223,6 +243,42 @@ pub fn Pool(comptime Runtime: type) type {
                 return self.client().trySendRequestBodyBatch(chunks);
             }
 
+            /// Start validation of the server's preferred address from the
+            /// pool-owned endpoint for that address family. The first
+            /// PATH_CHALLENGE is sent immediately and subsequent retransmits
+            /// and failure rollback are driven by the pool receive loop.
+            pub fn beginPreferredAddressMigration(
+                self: *Lease,
+                challenge: [8]u8,
+                family: quic.one_rtt.PreferredAddressFamily,
+            ) !void {
+                if (!self.active) return error.InvalidLease;
+                const migration_endpoint = self.pool.migration_endpoint orelse
+                    return error.InvalidPoolOptions;
+                const connection = &self.client().established.connection;
+                try connection.beginPeerPreferredAddressMigrationFrom(
+                    migration_endpoint,
+                    challenge,
+                    family,
+                );
+                const now_ns = monotonicNowNs(self.pool.io);
+                connection.sendPendingPathChallengeAt(
+                    now_ns,
+                    connection.ptoPeriod(),
+                ) catch |err| switch (err) {
+                    error.AntiAmplificationLimited,
+                    error.CongestionLimited,
+                    error.PacingLimited,
+                    => {},
+                    else => |other| {
+                        connection.abortPeerPreferredAddressMigration();
+                        self.pool.refresh(self.handle) catch {};
+                        return other;
+                    },
+                };
+                try self.pool.refresh(self.handle);
+            }
+
             pub fn release(self: *Lease) void {
                 std.debug.assert(self.active);
                 self.pool.release(self.handle);
@@ -306,6 +362,38 @@ pub fn Pool(comptime Runtime: type) type {
                 options.limits.quic,
             );
             errdefer endpoint.deinit();
+            const migration_endpoint = if (options.migration_local_address) |migration_address| blk: {
+                if (sameAddressFamily(options.local_address, migration_address)) {
+                    return error.InvalidPoolOptions;
+                }
+                const candidate = try allocator.create(quic.runtime.Endpoint);
+                errdefer allocator.destroy(candidate);
+                candidate.* = try quic.runtime.Endpoint.bind(
+                    allocator,
+                    io,
+                    migration_address,
+                    options.limits.quic,
+                );
+                break :blk candidate;
+            } else null;
+            errdefer if (migration_endpoint) |candidate| {
+                candidate.deinit();
+                allocator.destroy(candidate);
+            };
+            const migration_receive_storage: []u8 = if (migration_endpoint != null)
+                try allocator.alloc(u8, endpoint.limits.max_datagram_size)
+            else
+                @constCast(&.{});
+            errdefer if (migration_receive_storage.len != 0) {
+                allocator.free(migration_receive_storage);
+            };
+            const pending_multi_endpoint_storage: []u8 = if (migration_endpoint != null)
+                try allocator.alloc(u8, endpoint.limits.max_datagram_size)
+            else
+                @constCast(&.{});
+            errdefer if (pending_multi_endpoint_storage.len != 0) {
+                allocator.free(pending_multi_endpoint_storage);
+            };
             const dispatcher = try allocator.create(
                 quic.endpoint_dispatcher.Dispatcher,
             );
@@ -316,7 +404,10 @@ pub fn Pool(comptime Runtime: type) type {
                 .io = io,
                 .options = options,
                 .endpoint = endpoint,
+                .migration_endpoint = migration_endpoint,
                 .dispatcher = dispatcher,
+                .migration_receive_storage = migration_receive_storage,
+                .pending_multi_endpoint_storage = pending_multi_endpoint_storage,
             };
         }
 
@@ -327,8 +418,23 @@ pub fn Pool(comptime Runtime: type) type {
             }
             while (self.firstHandle()) |handle| self.dropEntry(handle);
             self.entries.deinit(self.allocator);
+            if (self.pending_multi_endpoint_datagram) |*datagram| {
+                datagram.deinit(
+                    (datagram.received_on orelse self.endpoint).allocator,
+                );
+            }
+            if (self.migration_receive_storage.len != 0) {
+                self.allocator.free(self.migration_receive_storage);
+            }
+            if (self.pending_multi_endpoint_storage.len != 0) {
+                self.allocator.free(self.pending_multi_endpoint_storage);
+            }
             self.dispatcher.deinit();
             self.allocator.destroy(self.dispatcher);
+            if (self.migration_endpoint) |candidate| {
+                candidate.deinit();
+                self.allocator.destroy(candidate);
+            }
             self.endpoint.deinit();
             self.allocator.destroy(self.endpoint);
             self.* = undefined;
@@ -342,6 +448,13 @@ pub fn Pool(comptime Runtime: type) type {
 
         pub fn address(self: *const Self) std.Io.net.IpAddress {
             return self.endpoint.address();
+        }
+
+        pub fn migrationAddress(
+            self: *const Self,
+        ) ?std.Io.net.IpAddress {
+            const candidate = self.migration_endpoint orelse return null;
+            return candidate.address();
         }
 
         pub fn acquireUri(
@@ -557,8 +670,8 @@ pub fn Pool(comptime Runtime: type) type {
                 ).?;
                 select.async(
                     .endpoint,
-                    quic.endpoint_dispatcher.Dispatcher.receiveWithDeadline,
-                    .{ self.dispatcher, &supported_versions, poll_deadline },
+                    Self.receiveTransportWithDeadline,
+                    .{ self, poll_deadline },
                 );
                 switch (try select.await()) {
                     .connected => |completion| switch (completion) {
@@ -672,6 +785,16 @@ pub fn Pool(comptime Runtime: type) type {
             if (poll_interval.nanoseconds <= 0) {
                 return error.InvalidPoolOptions;
             }
+            if (self.migration_endpoint != null) {
+                const required_storage = std.math.mul(
+                    usize,
+                    output.len,
+                    self.endpoint.limits.max_datagram_size,
+                ) catch return error.BufferTooShort;
+                if (storage.len < required_storage) {
+                    return error.BufferTooShort;
+                }
+            }
             const deadline = std.Io.Clock.Timestamp.fromNow(
                 self.io,
                 .{ .raw = poll_interval, .clock = .awake },
@@ -692,6 +815,17 @@ pub fn Pool(comptime Runtime: type) type {
             output: []Event,
             deadline: std.Io.Clock.Timestamp,
         ) !usize {
+            // A cross-family pool races two sockets and may need to retain the
+            // simultaneously completed datagram. Drain immediately ready work
+            // through the caller-buffer visitor path; subsequent calls
+            // consume the retained packet before waiting.
+            if (self.migration_endpoint != null) {
+                return self.receiveManyMultiEndpoint(
+                    storage,
+                    output,
+                    deadline,
+                );
+            }
             while (true) {
                 var count: usize = 0;
                 errdefer for (output[0..count]) |*event| {
@@ -769,18 +903,160 @@ pub fn Pool(comptime Runtime: type) type {
             }
         }
 
+        fn receiveManyMultiEndpoint(
+            self: *Self,
+            storage: []u8,
+            output: []Event,
+            deadline: std.Io.Clock.Timestamp,
+        ) !usize {
+            var count: usize = 0;
+            errdefer for (output[0..count]) |*event| {
+                event.deinit(self.allocator);
+            };
+            while (count < output.len) {
+                const event_storage = storage[count * self.endpoint.limits.max_datagram_size ..];
+                const caller_deadline = if (count == 0)
+                    deadline
+                else
+                    std.Io.Clock.Timestamp.fromNow(self.io, .{
+                        .raw = .zero,
+                        .clock = .awake,
+                    });
+                const event = self.receiveMultiEndpointInto(
+                    event_storage,
+                    caller_deadline,
+                ) catch |err| switch (err) {
+                    error.Timeout => if (count != 0)
+                        return count
+                    else
+                        return err,
+                    else => |other| return other,
+                };
+                if (eventAlreadyReturned(output[0..count], event)) {
+                    var duplicate = event;
+                    duplicate.deinit(self.allocator);
+                    return count;
+                }
+                output[count] = event;
+                count += 1;
+            }
+            return count;
+        }
+
+        fn receiveMultiEndpointInto(
+            self: *Self,
+            storage: []u8,
+            caller_deadline: std.Io.Clock.Timestamp,
+        ) !Event {
+            while (true) {
+                if (try self.pollBufferedEvent()) |event| return event;
+                if (try self.dispatcher.poll()) |dispatcher_event_value| {
+                    var dispatcher_event = dispatcher_event_value;
+                    var event_owned = true;
+                    defer if (event_owned) dispatcher_event.deinit(
+                        self.allocator,
+                    );
+                    switch (dispatcher_event) {
+                        .packet => |*packet| {
+                            const handle = packet.connection_handle;
+                            try self.processPacket(packet);
+                            return (try self.pollBufferedEvent()) orelse
+                                .{ .progress = handle };
+                        },
+                        .timer => |timer| {
+                            if (try self.eventFromTimer(timer)) |event| {
+                                return event;
+                            }
+                        },
+                        .new_initial, .unrouted => {
+                            event_owned = false;
+                            return .{ .unrouted = dispatcher_event };
+                        },
+                        .consumed,
+                        .pending_handshake,
+                        .discarded_long_header,
+                        => {},
+                    }
+                    continue;
+                }
+
+                const candidate = self.migration_endpoint orelse unreachable;
+                const datagram = receiveViewFromEitherEndpoint(
+                    self,
+                    candidate,
+                    storage,
+                    multiEndpointReceiveTimeout(
+                        self.io,
+                        caller_deadline,
+                        self.dispatcher.nextTimerDeadline(),
+                    ),
+                ) catch |err| switch (err) {
+                    error.Timeout => {
+                        if (caller_deadline.durationFromNow(self.io)
+                            .raw.nanoseconds <= 0) return error.Timeout;
+                        continue;
+                    },
+                    else => |other| return other,
+                };
+                const received_on = datagram.received_on orelse self.endpoint;
+                if (received_on == candidate and datagram.bytes.len != 0 and
+                    (datagram.bytes[0] & 0x80) != 0)
+                {
+                    continue;
+                }
+                if (try received_on.sendVersionNegotiationIfUnsupported(
+                    datagram.from,
+                    datagram.bytes,
+                    &supported_versions,
+                )) continue;
+
+                const Adapter = struct {
+                    pool: *Self,
+
+                    fn visit(
+                        adapter: *@This(),
+                        packet: quic.endpoint_dispatcher.RoutedPacketView,
+                    ) !void {
+                        try adapter.pool.processPacketView(packet);
+                    }
+                };
+                var adapter = Adapter{ .pool = self };
+                var transport_event = try self.dispatcher
+                    .dispatchVisitingDatagram(
+                    datagram,
+                    &adapter,
+                    Adapter.visit,
+                );
+                defer transport_event.deinit(self.allocator);
+                switch (transport_event) {
+                    .packet => |packet| {
+                        return (try self.pollBufferedEvent()) orelse
+                            .{ .progress = packet.connection_handle };
+                    },
+                    .timer => |timer| {
+                        if (try self.eventFromTimer(timer)) |event| {
+                            return event;
+                        }
+                    },
+                    .new_initial, .unrouted => {
+                        return .{ .unrouted = takeVisitEvent(
+                            &transport_event,
+                        ) };
+                    },
+                    .consumed,
+                    .pending_handshake,
+                    .discarded_long_header,
+                    => {},
+                }
+            }
+        }
+
         fn receiveUntil(
             self: *Self,
             deadline: ?std.Io.Clock.Timestamp,
         ) !Event {
             if (try self.pollBufferedEvent()) |event| return event;
-            var routed = if (deadline) |absolute|
-                try self.dispatcher.receiveWithDeadline(
-                    &supported_versions,
-                    absolute,
-                )
-            else
-                try self.dispatcher.receive(&supported_versions);
+            var routed = try self.receiveTransportUntil(deadline);
             var routed_owned = true;
             defer if (routed_owned) routed.deinit(self.allocator);
             switch (routed) {
@@ -822,6 +1098,67 @@ pub fn Pool(comptime Runtime: type) type {
                 .pending_handshake,
                 .discarded_long_header,
                 => return .consumed,
+            }
+        }
+
+        fn receiveTransportWithDeadline(
+            self: *Self,
+            deadline: std.Io.Clock.Timestamp,
+        ) quic.endpoint_dispatcher.ReceiveError!quic.endpoint_dispatcher.Event {
+            return self.receiveTransportUntil(deadline);
+        }
+
+        fn receiveTransportUntil(
+            self: *Self,
+            deadline: ?std.Io.Clock.Timestamp,
+        ) quic.endpoint_dispatcher.ReceiveError!quic.endpoint_dispatcher.Event {
+            const candidate = self.migration_endpoint orelse {
+                return if (deadline) |absolute|
+                    self.dispatcher.receiveWithDeadline(
+                        &supported_versions,
+                        absolute,
+                    )
+                else
+                    self.dispatcher.receive(&supported_versions);
+            };
+            while (true) {
+                if (try self.dispatcher.poll()) |event| return event;
+                var datagram = receiveFromEitherEndpoint(
+                    self,
+                    candidate,
+                    multiEndpointReceiveTimeout(
+                        self.io,
+                        deadline,
+                        self.dispatcher.nextTimerDeadline(),
+                    ),
+                ) catch |err| switch (err) {
+                    error.Timeout => {
+                        if (deadline) |absolute| {
+                            if (absolute.durationFromNow(self.io)
+                                .raw.nanoseconds <= 0) return error.Timeout;
+                        }
+                        continue;
+                    },
+                    else => |other| return other,
+                };
+                const received_on = datagram.received_on orelse self.endpoint;
+                if (received_on == candidate and datagram.bytes.len != 0 and
+                    (datagram.bytes[0] & 0x80) != 0)
+                {
+                    datagram.deinit(received_on.allocator);
+                    continue;
+                }
+                if (try received_on.sendVersionNegotiationIfUnsupported(
+                    datagram.from,
+                    datagram.bytes,
+                    &supported_versions,
+                )) {
+                    datagram.deinit(received_on.allocator);
+                    continue;
+                }
+                const event = try self.dispatcher.dispatch(datagram);
+                if (event == .discarded_long_header) continue;
+                return event;
             }
         }
 
@@ -1273,6 +1610,204 @@ fn sameAddressFamily(
     };
 }
 
+fn receiveFromEitherEndpoint(
+    pool: anytype,
+    candidate: *quic.runtime.Endpoint,
+    timeout: std.Io.Timeout,
+) quic.runtime.ReceiveTimeoutError!quic.runtime.OwnedBytes {
+    if (pool.pending_multi_endpoint_view) |pending| {
+        pool.pending_multi_endpoint_view = null;
+        return .{
+            .from = pending.from,
+            .received_on = pending.received_on,
+            .bytes = try pending.received_on.allocator.dupe(
+                u8,
+                pool.pending_multi_endpoint_storage[0..pending.len],
+            ),
+            .ecn = pending.ecn,
+        };
+    }
+    if (pool.pending_multi_endpoint_datagram) |datagram| {
+        pool.pending_multi_endpoint_datagram = null;
+        return datagram;
+    }
+    const ReceiveResult =
+        quic.runtime.ReceiveTimeoutError!quic.runtime.OwnedBytes;
+    const Wake = union(enum) {
+        primary: ReceiveResult,
+        candidate: ReceiveResult,
+    };
+    var wake_storage: [2]Wake = undefined;
+    var select: std.Io.Select(Wake) = .init(pool.io, &wake_storage);
+    select.async(
+        .primary,
+        quic.runtime.Endpoint.receiveBytesTimeout,
+        .{ pool.endpoint, timeout },
+    );
+    select.async(
+        .candidate,
+        quic.runtime.Endpoint.receiveBytesTimeout,
+        .{ candidate, timeout },
+    );
+    const first = select.await() catch |err| {
+        select.cancelDiscard();
+        return err;
+    };
+    var retained: ?quic.runtime.OwnedBytes = null;
+    defer if (retained) |*datagram| {
+        datagram.deinit(
+            (datagram.received_on orelse pool.endpoint).allocator,
+        );
+    };
+    while (select.cancel()) |wake| switch (wake) {
+        .primary, .candidate => |result| if (result) |datagram| {
+            if (retained == null) {
+                retained = datagram;
+            } else {
+                var extra = datagram;
+                extra.deinit(
+                    (extra.received_on orelse pool.endpoint).allocator,
+                );
+            }
+        } else |_| {},
+    };
+    const selected = switch (first) {
+        .primary, .candidate => |result| result catch |err| {
+            if (retained) |datagram| {
+                retained = null;
+                return datagram;
+            }
+            return err;
+        },
+    };
+    if (retained) |datagram| {
+        std.debug.assert(pool.pending_multi_endpoint_datagram == null);
+        pool.pending_multi_endpoint_datagram = datagram;
+        retained = null;
+    }
+    return selected;
+}
+
+fn receiveViewFromEitherEndpoint(
+    pool: anytype,
+    candidate: *quic.runtime.Endpoint,
+    primary_storage: []u8,
+    timeout: std.Io.Timeout,
+) quic.runtime.ReceiveTimeoutError!quic.runtime.ReceivedBytesView {
+    if (primary_storage.len == 0) return error.BufferTooShort;
+    if (pool.pending_multi_endpoint_view) |pending| {
+        pool.pending_multi_endpoint_view = null;
+        return .{
+            .from = pending.from,
+            .received_on = pending.received_on,
+            .bytes = pool.pending_multi_endpoint_storage[0..pending.len],
+            .ecn = pending.ecn,
+        };
+    }
+    if (pool.pending_multi_endpoint_datagram) |pending_value| {
+        var pending = pending_value;
+        pool.pending_multi_endpoint_datagram = null;
+        defer pending.deinit(
+            (pending.received_on orelse pool.endpoint).allocator,
+        );
+        const storage = if (pending.received_on == candidate)
+            pool.migration_receive_storage
+        else
+            primary_storage;
+        if (pending.bytes.len > storage.len) return error.BufferTooShort;
+        @memcpy(storage[0..pending.bytes.len], pending.bytes);
+        return .{
+            .from = pending.from,
+            .received_on = pending.received_on,
+            .bytes = storage[0..pending.bytes.len],
+            .ecn = pending.ecn,
+        };
+    }
+
+    const bounded = timeout.toDeadline(pool.io);
+    const ReceiveResult = quic.runtime.ReceiveTimeoutError!quic.runtime.ReceivedBytesView;
+    const Wake = union(enum) {
+        primary: ReceiveResult,
+        candidate: ReceiveResult,
+    };
+    var wake_storage: [2]Wake = undefined;
+    var select: std.Io.Select(Wake) = .init(pool.io, &wake_storage);
+    select.async(
+        .primary,
+        quic.runtime.Endpoint.receiveBytesIntoTimeout,
+        .{ pool.endpoint, primary_storage, bounded },
+    );
+    select.async(
+        .candidate,
+        quic.runtime.Endpoint.receiveBytesIntoTimeout,
+        .{
+            candidate,
+            pool.migration_receive_storage[0..@min(
+                primary_storage.len,
+                pool.migration_receive_storage.len,
+            )],
+            bounded,
+        },
+    );
+    const first = select.await() catch |err| {
+        select.cancelDiscard();
+        return err;
+    };
+    while (select.cancel()) |wake| switch (wake) {
+        .primary, .candidate => |result| if (result) |view| {
+            if (pool.pending_multi_endpoint_view == null) {
+                std.debug.assert(
+                    view.bytes.len <=
+                        pool.pending_multi_endpoint_storage.len,
+                );
+                @memcpy(
+                    pool.pending_multi_endpoint_storage[0..view.bytes.len],
+                    view.bytes,
+                );
+                pool.pending_multi_endpoint_view = .{
+                    .from = view.from,
+                    .received_on = view.received_on orelse pool.endpoint,
+                    .len = view.bytes.len,
+                    .ecn = view.ecn,
+                };
+            }
+        } else |_| {},
+    };
+    return switch (first) {
+        .primary => |result| try result,
+        .candidate => |result| try result,
+    };
+}
+
+fn multiEndpointReceiveTimeout(
+    io: std.Io,
+    caller_deadline: ?std.Io.Clock.Timestamp,
+    scheduled: ?quic.endpoint_timers.EndpointTimerDeadline,
+) std.Io.Timeout {
+    var remaining_ns: ?i96 = if (caller_deadline) |deadline|
+        deadline.durationFromNow(io).raw.nanoseconds
+    else
+        null;
+    if (scheduled) |value| {
+        const timer = std.Io.Clock.Timestamp{
+            .clock = .awake,
+            .raw = .fromNanoseconds(
+                std.math.cast(i96, value.timer.deadline_ns) orelse
+                    std.math.maxInt(i96),
+            ),
+        };
+        const duration = timer.durationFromNow(io).raw.nanoseconds;
+        remaining_ns = if (remaining_ns) |current|
+            @min(current, duration)
+        else
+            duration;
+    }
+    return if (remaining_ns) |nanoseconds| .{ .duration = .{
+        .clock = .awake,
+        .raw = .fromNanoseconds(@max(nanoseconds, 0)),
+    } } else .none;
+}
+
 fn shouldTryNextAddress(err: anyerror) bool {
     return switch (err) {
         error.HandshakeTimeout,
@@ -1294,4 +1829,10 @@ fn nowMillis(io: std.Io) u64 {
     const now = std.Io.Clock.awake.now(io).nanoseconds;
     if (now <= 0) return 0;
     return @intCast(@divTrunc(now, std.time.ns_per_ms));
+}
+
+fn monotonicNowNs(io: std.Io) u64 {
+    const now = std.Io.Clock.awake.now(io).nanoseconds;
+    if (now <= 0) return 0;
+    return std.math.cast(u64, now) orelse std.math.maxInt(u64);
 }

@@ -108,6 +108,7 @@ pub const Error = quic.runtime.Error || quic.protection.Error || quic.packet_spa
     InvalidPtoJitter,
     PathValidationLimit,
     InvalidResetToken,
+    InvalidReceiveEndpoint,
 };
 
 pub const SendOptions = struct {
@@ -5107,7 +5108,7 @@ pub const Connection = struct {
             endpoint.io.userdata != self.endpoint.io.userdata or
             endpoint.io.vtable != self.endpoint.io.vtable)
         {
-            return error.InvalidPacket;
+            return error.InvalidReceiveEndpoint;
         }
         return endpoint;
     }
@@ -8399,6 +8400,15 @@ pub const Connection = struct {
                 preferred.connection_id,
             ).?,
         );
+    }
+
+    /// Cancel an in-progress preferred-address validation and restore the
+    /// complete last validated path. High-level adapters use this when the
+    /// initial PATH_CHALLENGE fails before a retryable transport deadline was
+    /// armed. The operation is idempotent after validation or rollback.
+    pub fn abortPeerPreferredAddressMigration(self: *Connection) void {
+        if (!self.peer_preferred_address_migration_active) return;
+        self.restoreLastValidatedPeerPath();
     }
 
     pub fn beginPeerMigration(self: *Connection, new_peer: net.IpAddress, challenge: [8]u8) Error!void {
