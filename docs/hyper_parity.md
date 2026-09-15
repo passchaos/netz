@@ -471,7 +471,9 @@ and max-window 1-MiB response scenarios on persistent HTTP/2 connections. The
 netz h2c benchmark mirrors them with 1,000 untimed warmup iterations for small
 messages (100 for 100 KiB) and 2,000 measured iterations. The 10-stream body
 workloads use 5 warmups and 20 measured batches because each batch transfers
-about 10 MiB:
+about 10 MiB. The current netz executable obtains `std.Io` from zio and
+schedules its local server through `std.Io.async`; its output identifies
+`zio-std-io`. Historical numbers below predate that migration:
 
 ```sh
 taskset -c 0 zig build bench-http2-h2c -Doptimize=ReleaseFast
@@ -750,7 +752,9 @@ local path dependency without modifying `~/Work/hyper`. Both peers run ten
 bodyless requests, wait until all ten handlers exist, then concurrently stream
 1 MiB per response with a 16-KiB maximum DATA frame size, an 8-KiB stream
 window and the RFC default 65,535-byte connection window. Both clients drain
-all response bodies concurrently.
+all response bodies concurrently. The current netz benchmark uses zio through
+`std.Io` and runs its server as a `std.Io.async` task; historical timings below
+were captured with `std.Io.Threaded`.
 
 ```sh
 taskset -c 0 zig build bench-http2-flow -Doptimize=ReleaseFast -- \
@@ -1170,8 +1174,10 @@ warmed-table regression verifies each additional insertion needs one string
 allocation rather than two. Decoder tables additionally omit the encoder-only
 name and exact-value hash indexes: inbound wire references are positional, so
 maintaining those maps spent two probes and retained capacity without serving
-a decode operation. The HPACK benchmark reports encoder and decoder churn
-separately; three pinned ReleaseFast runs measured 277-282 ns/insert with
+a decode operation. The HPACK benchmark now obtains its monotonic clock from
+zio and reports the backend explicitly; its historical numbers below predate
+that migration. It reports encoder and decoder churn separately; three pinned
+ReleaseFast runs measured 277-282 ns/insert with
 reverse indexes and 46-50 ns/insert for the decoder's positional-only table.
 Allocation, eviction, clone and failure-path tests verify the no-index
 lifecycle while encoder lookup behavior remains unchanged.

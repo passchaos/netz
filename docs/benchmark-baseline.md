@@ -203,6 +203,11 @@ results, not a whole-library superiority claim.
 
 ### HTTP/2 persistent consecutive and parallel round trips
 
+The current executable obtains `std.Io` from the zio backend and schedules its
+local server through `std.Io.async`; it prints `io backend: zio-std-io`. The
+numeric results in this section were captured before that migration and remain
+historical `std.Io.Threaded` evidence until a fixed-binary zio run is recorded.
+
 Captured on 2026-08-17 against Hyper's
 `http2_consecutive_x1_empty`, `http2_consecutive_x1_req_10b`,
 `http2_consecutive_x1_req_100kb`, and `http2_parallel_x10_empty` benchmarks.
@@ -451,6 +456,11 @@ These ranges establish advantages for the named loopback workloads only; they
 do not establish whole-library HTTP/2 superiority.
 
 ### HTTP/2 flow-controlled parallel responses
+
+This benchmark now uses the same zio-backed `std.Io` boundary and schedules
+its server with `std.Io.async`. The HPACK microbenchmark also obtains its clock
+from zio. Existing numeric results in this HTTP/2 section predate the migration
+and are retained as historical `std.Io.Threaded` baselines.
 
 The RFC 9218 selector now chooses urgency and the lowest stream-ID
 non-incremental winner in one candidate pass. Three CPU-0-pinned priority-mode

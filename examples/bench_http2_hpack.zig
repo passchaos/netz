@@ -17,9 +17,9 @@ const headers = [_]netz.http2.Hpack.HeaderField{
 pub fn main() !void {
     const allocator = std.heap.smp_allocator;
 
-    var threaded = std.Io.Threaded.init(allocator, .{});
-    defer threaded.deinit();
-    const io = threaded.io();
+    var backend = try netz.runtime.Backend.init(allocator);
+    defer backend.deinit();
+    const io = backend.io();
 
     var stateful_encoder = netz.http2.Hpack.Encoder{};
     defer stateful_encoder.deinit(allocator);
@@ -114,6 +114,7 @@ pub fn main() !void {
 
     std.debug.print(
         \\HTTP/2 HPACK benchmark
+        \\  io backend: zio-std-io
         \\  iterations: {d}
         \\  stateful encode-only total bytes: {d}, ns/op: {d}
         \\  stateful decode-only fields: {d}, ns/op: {d}

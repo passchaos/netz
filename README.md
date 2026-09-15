@@ -1037,6 +1037,8 @@ benchmarks obtain `std.Io` from `netz.runtime.Backend` and report
 `io backend: zio-std-io`; the network benchmarks schedule their local peer
 through `std.Io.async`. Historical Threaded measurements remain labeled as
 such in the benchmark baseline.
+The built-in HTTP/2 h2c, flow-control, and HPACK benchmarks follow the same
+model; h2c and flow-control schedule their local server with `std.Io.async`.
 
 The aggregate `bench` step runs the current protocol microbenchmarks:
 

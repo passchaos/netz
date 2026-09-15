@@ -63,9 +63,9 @@ pub fn main(init: std.process.Init) !void {
         .adaptive_window = options.adaptive,
         .no_rfc7540_priorities = options.priority,
     };
-    var threaded = std.Io.Threaded.init(allocator, .{});
-    defer threaded.deinit();
-    const io = threaded.io();
+    var backend = try netz.runtime.Backend.init(std.heap.smp_allocator);
+    defer backend.deinit();
+    const io = backend.io();
     var server = try netz.http2.runtime.Server.listen(
         allocator,
         io,
@@ -158,7 +158,8 @@ pub fn main(init: std.process.Init) !void {
         .options = options,
         .response_body = response_body,
     };
-    const thread = try std.Thread.spawn(.{}, Shared.run, .{&shared});
+    var server_task = io.async(Shared.run, .{&shared});
+    defer server_task.cancel(io);
 
     var client = try netz.http2.runtime.Client.connect(
         allocator,
@@ -268,7 +269,7 @@ pub fn main(init: std.process.Init) !void {
         client.close();
         client_open = false;
     }
-    thread.join();
+    server_task.await(io);
     if (options.cancel) {
         // Include server observation of every RST_STREAM in cancellation-race
         // latency rather than stopping at the client socket write.
@@ -287,6 +288,7 @@ pub fn main(init: std.process.Init) !void {
             (elapsed * 1024 * 1024);
     std.debug.print(
         \\HTTP/2 flow-controlled response benchmark
+        \\  io backend: zio-std-io
         \\  parallel streams: {d}
         \\  response bytes/stream: {d}
         \\  initial stream window: {d}

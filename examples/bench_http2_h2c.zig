@@ -54,9 +54,9 @@ pub fn main(init: std.process.Init) !void {
     else
         std.heap.smp_allocator;
 
-    var threaded = std.Io.Threaded.init(allocator, .{});
-    defer threaded.deinit();
-    const io = threaded.io();
+    var backend = try netz.runtime.Backend.init(std.heap.smp_allocator);
+    defer backend.deinit();
+    const io = backend.io();
 
     var server = try netz.http2.runtime.Server.listen(
         allocator,
@@ -269,7 +269,8 @@ pub fn main(init: std.process.Init) !void {
         .server = &server,
         .scenario = options.scenario,
     };
-    const thread = try std.Thread.spawn(.{}, Shared.run, .{&shared});
+    var server_task = io.async(Shared.run, .{&shared});
+    defer server_task.cancel(io);
 
     const authority = try std.fmt.allocPrint(
         allocator,
@@ -426,6 +427,7 @@ pub fn main(init: std.process.Init) !void {
 
         std.debug.print(
             \\HTTP/2 h2c runtime benchmark
+            \\  io backend: zio-std-io
             \\  scenario: {s}
             \\  parallel requests: {d}
             \\  warmup iterations: {d}
@@ -450,7 +452,7 @@ pub fn main(init: std.process.Init) !void {
         }
     }
 
-    thread.join();
+    server_task.await(io);
     if (shared.err) |err| return err;
 }
 
