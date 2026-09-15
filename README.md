@@ -1029,6 +1029,12 @@ zig build bench-quic-endpoint-cid-sync -Doptimize=ReleaseFast -- --iterations=20
 zig build bench-quic-connection-router -Doptimize=ReleaseFast -- --iterations=10000000
 ```
 
+The built-in HTTP/3 development, real-handshake transfer, QPACK, and Capsule
+benchmarks obtain `std.Io` from `netz.runtime.Backend` and report
+`io backend: zio-std-io`; the network benchmarks schedule their local peer
+through `std.Io.async`. Historical Threaded measurements remain labeled as
+such in the benchmark baseline.
+
 The aggregate `bench` step runs the current protocol microbenchmarks:
 
 - HTTP/1 borrowed request-head parsing versus owned full request parsing,

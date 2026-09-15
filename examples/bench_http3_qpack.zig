@@ -16,9 +16,9 @@ const Options = struct {
 pub fn main(init: std.process.Init) !void {
     const allocator = std.heap.smp_allocator;
     const options = try parseOptions(init, allocator);
-    var threaded = std.Io.Threaded.init(allocator, .{});
-    defer threaded.deinit();
-    const io = threaded.io();
+    var backend = try netz.runtime.Backend.init(allocator);
+    defer backend.deinit();
+    const io = backend.io();
 
     var table = netz.http3.Qpack.DynamicTable.init(allocator, 64 * 1024);
     defer table.deinit();
@@ -129,7 +129,7 @@ pub fn main(init: std.process.Init) !void {
         0;
 
     std.debug.print(
-        "HTTP/3 QPACK dynamic benchmark\n  iterations: {d}, table entries: {d}\n",
+        "HTTP/3 QPACK dynamic benchmark\n  io backend: zio-std-io\n  iterations: {d}, table entries: {d}\n",
         .{ options.iterations, table.entryCount() },
     );
     if (options.scenario == .all or options.scenario == .encode) {

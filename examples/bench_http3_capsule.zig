@@ -7,9 +7,9 @@ const capsules_per_buffer: usize = 8;
 
 pub fn main() !void {
     const allocator = std.heap.smp_allocator;
-    var threaded = std.Io.Threaded.init(allocator, .{});
-    defer threaded.deinit();
-    const io = threaded.io();
+    var backend = try netz.runtime.Backend.init(allocator);
+    defer backend.deinit();
+    const io = backend.io();
 
     var payload: [payload_len]u8 = undefined;
     for (&payload, 0..) |*byte, index| {
@@ -37,6 +37,7 @@ pub fn main() !void {
 
     std.debug.print(
         \\HTTP/3 Capsule Protocol benchmark
+        \\  io backend: zio-std-io
         \\  iterations: {d}, payload bytes: {d}, encoded bytes: {d}
         \\  parse single capsule:   {d} ns/op
         \\  iterate {d} capsules:    {d} ns/buffer, {d} ns/capsule

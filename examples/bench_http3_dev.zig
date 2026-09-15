@@ -7,9 +7,9 @@ pub fn main(init: std.process.Init) !void {
     const allocator = std.heap.smp_allocator;
     const iterations = try parseIterations(init, allocator);
 
-    var threaded = std.Io.Threaded.init(allocator, .{});
-    defer threaded.deinit();
-    const io = threaded.io();
+    var backend = try netz.runtime.Backend.init(allocator);
+    defer backend.deinit();
+    const io = backend.io();
 
     var server = try netz.http3.runtime.Server.bind(allocator, io, .{ .ip4 = .loopback(0) }, .{
         .quic = .{ .max_datagram_size = 4096, .max_frames_per_datagram = 8 },
@@ -42,7 +42,8 @@ pub fn main(init: std.process.Init) !void {
     };
 
     var shared = Shared{ .server = &server, .iterations = iterations };
-    const thread = try std.Thread.spawn(.{}, Shared.run, .{&shared});
+    var server_task = io.async(Shared.run, .{&shared});
+    defer server_task.cancel(io);
 
     var client = try netz.http3.runtime.Client.connect(allocator, io, .{ .ip4 = .loopback(0) }, server.address(), .{
         .quic = .{ .max_datagram_size = 4096, .max_frames_per_datagram = 8 },
@@ -67,11 +68,12 @@ pub fn main(init: std.process.Init) !void {
     else
         (@as(u64, iterations) *| std.time.ns_per_s) / elapsed;
 
-    thread.join();
+    server_task.await(io);
     if (shared.err) |err| return err;
 
     std.debug.print(
         \\HTTP/3 dev runtime benchmark
+        \\  io backend: zio-std-io
         \\  iterations: {d}
         \\  status total: {d}
         \\  ns/op: {d}

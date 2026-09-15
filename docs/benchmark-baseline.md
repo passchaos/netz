@@ -7,6 +7,10 @@ implementations under `~/Work`.
 The numbers below are **not** a completion claim.  They are a starting point for
 repeatable comparisons: same host, same compiler, explicit commands, and raw
 outputs that can be re-run after future optimizations.
+Unless a section explicitly identifies a zio-era rerun, measurements captured
+before 2026-09-15 used `std.Io.Threaded` and remain historical evidence only.
+Current benchmark output names the backend so results from different execution
+models cannot be silently combined.
 
 ## Host and toolchain
 
@@ -1223,6 +1227,11 @@ informational, Push Promise, automatic-Date, and allocation-failure tests cover
 `bench-http3-handshake-transfer` starts a loopback HTTP/3 server, creates a
 fresh QUIC/H3 client connection per iteration, streams a fixed-size body in the
 selected direction, and reports aggregate bytes/s. Both upload and download
+modes now run on the shared zio backend and pass only `std.Io` into the HTTP/3
+and QUIC stack; the server side is scheduled with `std.Io.async` instead of a
+manually spawned OS thread. The `bench-http3-dev`, QPACK, and Capsule
+executables use the same zio-provided clock/I/O boundary and print
+`io backend: zio-std-io`. Both upload and download
 modes use the handshake runtime's paced body sender: `CongestionLimited` and
 `FlowControlBlocked` drive peer packet processing so ACK/MAX_* frames can reopen
 send credit instead of turning large transfers into synchronous failures.
@@ -1251,6 +1260,13 @@ queue.
 long or stuck multi-iteration runs. `--trace-iteration` additionally prints
 coarse lifecycle stages (bind, connect, transfer, join) for each iteration.
 
+A 2026-09-15 ReleaseFast migration smoke ran 20 cleartext requests, one
+four-stream 64-KiB upload, one matching download, 1,000 iterations of each
+QPACK scenario, and the default one-million-iteration Capsule workload. Every
+command completed and printed `io backend: zio-std-io`; the request status
+totals and transfer byte counts were exact. These short runs establish the new
+runtime path and are not performance comparisons.
+
 ```sh
 taskset -c 0 zig build bench-http3-handshake-transfer -Doptimize=ReleaseFast -- --iterations=1 --body-bytes=16777216 --mode=upload --streams=1
 taskset -c 0 zig build bench-http3-handshake-transfer -Doptimize=ReleaseFast -- --iterations=1 --body-bytes=16777216 --mode=download --streams=1
@@ -1259,7 +1275,7 @@ taskset -c 0 zig build bench-http3-handshake-transfer -Doptimize=ReleaseFast -- 
 taskset -c 0 zig build bench-http3-handshake-transfer -Doptimize=ReleaseFast -- --iterations=5 --body-bytes=1048576 --mode=upload --streams=1
 ```
 
-Current 5-iteration 1 MiB upload smoke sample:
+Historical pre-zio 5-iteration 1 MiB upload smoke sample:
 
 ```text
 HTTP/3 real-handshake transfer benchmark
@@ -1277,7 +1293,7 @@ HTTP/3 real-handshake transfer benchmark
   stddev percent: 12.95
 ```
 
-Current 16 MiB single-stream upload result:
+Historical pre-zio 16 MiB single-stream upload result:
 
 ```text
 HTTP/3 real-handshake transfer benchmark
@@ -1292,7 +1308,7 @@ HTTP/3 real-handshake transfer benchmark
   MiB/s: 24
 ```
 
-Current 16 MiB single-stream download result:
+Historical pre-zio 16 MiB single-stream download result:
 
 ```text
 HTTP/3 real-handshake transfer benchmark
@@ -1307,7 +1323,7 @@ HTTP/3 real-handshake transfer benchmark
   MiB/s: 25
 ```
 
-Current 16 MiB / 4-stream upload result:
+Historical pre-zio 16 MiB / 4-stream upload result:
 
 ```text
 HTTP/3 real-handshake transfer benchmark
@@ -1337,7 +1353,7 @@ and recovered only through exponentially backed-off PTO probes. The same
 16 MiB / four-stream trace previously stalled after the server consumed about
 9.4 MiB. All five iterations above delivered every stream through FIN.
 
-Current 16 MiB / 4-stream download result:
+Historical pre-zio 16 MiB / 4-stream download result:
 
 ```text
 HTTP/3 real-handshake transfer benchmark
@@ -2057,6 +2073,9 @@ optimization target is reducing per-packet recovery ownership and STREAM/DATA
 framing overhead, then retesting batching on a host with a larger UDP receive
 queue. A completion audit cannot pass
 until this gap is closed with measured same-host evidence.
+All netz numbers in the tables above predate the zio migration and remain
+historical `std.Io.Threaded` baselines. They must not be cited as current zio
+performance; a fresh fixed-binary, CPU-pinned, odd-sample run is required.
 
 ### Allocation / peak-live evidence
 

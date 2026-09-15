@@ -54,9 +54,9 @@ pub fn main(init: std.process.Init) !void {
     else
         std.heap.smp_allocator;
 
-    var threaded = std.Io.Threaded.init(allocator, .{});
-    defer threaded.deinit();
-    const io = threaded.io();
+    var backend = try netz.runtime.Backend.init(args_allocator);
+    defer backend.deinit();
+    const io = backend.io();
 
     const transfer_body = try allocator.alloc(u8, config.body_bytes);
     defer allocator.free(transfer_body);
@@ -100,6 +100,7 @@ pub fn main(init: std.process.Init) !void {
     const bytes_per_second: u128 = if (elapsed == 0) 0 else (@as(u128, bytes_total) * std.time.ns_per_s) / elapsed;
     std.debug.print(
         \\HTTP/3 real-handshake transfer benchmark
+        \\  io backend: zio-std-io
         \\  mode: {s}
         \\  streams: {d}
         \\  response scheduler: {s}
@@ -350,8 +351,9 @@ fn runIteration(
         .ack_eliciting_threshold = config.ack_eliciting_threshold,
         .aggregate_upload = config.aggregate_upload,
     };
-    const thread = try std.Thread.spawn(.{}, Shared.run, .{&shared});
-    traceIteration(config, iteration, "server thread spawned");
+    var server_task = io.async(Shared.run, .{&shared});
+    defer server_task.cancel(io);
+    traceIteration(config, iteration, "server task spawned");
 
     var original_dcid: [8]u8 = undefined;
     var local_cid: [8]u8 = undefined;
@@ -426,8 +428,8 @@ fn runIteration(
         client_stats.recovery_queue_stats.cached_payload_bytes;
     traceIteration(config, iteration, "transfer done");
 
-    thread.join();
-    traceIteration(config, iteration, "server thread joined");
+    server_task.await(io);
+    traceIteration(config, iteration, "server task joined");
     if (shared.err) |err| return err;
     result.recovery_cache_hits +|= shared.recovery_cache_hits;
     result.recovery_cache_misses +|= shared.recovery_cache_misses;
