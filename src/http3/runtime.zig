@@ -199,6 +199,7 @@ const ClientRequestLifecycle = stream_lifecycle.Client;
 const ServerRequestLifecycle = stream_lifecycle.Server;
 const RequestStreamSet = buffered_request.Set;
 const ResponseStreamSet = buffered_response.Set;
+const PreparedRequest = buffered_request.PreparedReady;
 const PreparedResponse = buffered_response.PreparedReady;
 const OutboundBodySet = outbound_body.Set;
 const AssembledStream = buffered_common.AssembledStream;
@@ -6161,7 +6162,7 @@ pub const HandshakeServerSession = struct {
         if (self.streaming_requests.retainedCount() != 0) {
             return error.UnexpectedStream;
         }
-        const assembled = receiveConnectionRequestStreamBytesUntil(
+        var prepared = receiveConnectionRequestStreamBytesUntil(
             &self.established.connection,
             &self.receive_packets,
             self.options,
@@ -6186,11 +6187,13 @@ pub const HandshakeServerSession = struct {
                 return err;
             },
         };
-        errdefer self.established.connection.endpoint.allocator.free(assembled.bytes);
-        if (requestEndedBeforeHeaders(assembled.bytes)) {
+        defer prepared.deinit(
+            self.established.connection.endpoint.allocator,
+        );
+        if (requestEndedBeforeHeaders(prepared.bytes)) {
             self.failReceivedRequest(
-                assembled.stream_id,
-                assembled.bytes,
+                prepared.stream_id,
+                prepared.bytes,
                 error.RequestIncomplete,
                 true,
             ) catch {};
@@ -6198,13 +6201,13 @@ pub const HandshakeServerSession = struct {
         }
         var request = http3.decodeRequestWithDynamicTable(
             self.established.connection.endpoint.allocator,
-            assembled.bytes,
+            prepared.bytes,
             self.options.local_settings,
             self.qpack_decode.table,
         ) catch |err| {
             self.failReceivedRequest(
-                assembled.stream_id,
-                assembled.bytes,
+                prepared.stream_id,
+                prepared.bytes,
                 err,
                 true,
             ) catch {};
@@ -6216,12 +6219,14 @@ pub const HandshakeServerSession = struct {
         );
         try prepareServerRequestReceived(&self.request_lifecycle);
         _ = try self.established.connection
-            .requestCompletedPeerStreamRelease(assembled.stream_id);
+            .requestCompletedPeerStreamRelease(prepared.stream_id);
         self.qpack_decode.acknowledgeSectionsAssumeCapacity(
-            assembled.stream_id,
+            prepared.stream_id,
             request.qpack_section_acknowledgments,
         );
-        self.request_streams.remove(assembled.stream_id);
+        const assembled = self.request_streams.commitPreparedReady(
+            &prepared,
+        );
         serverRequestReceivedAssumeCapacity(
             &self.control,
             &self.request_lifecycle,
@@ -16999,7 +17004,7 @@ pub const ProtectedServer = struct {
         if (self.streaming_requests.retainedCount() != 0) {
             return error.UnexpectedStream;
         }
-        const assembled = self.receiveStreamBytesUntil(deadline) catch |err| {
+        var prepared = self.receiveStreamBytesUntil(deadline) catch |err| {
             self.failReceivedRequest(
                 self.request_streams.lastErrorFrom(),
                 self.request_streams.lastErrorStreamId(),
@@ -17009,12 +17014,12 @@ pub const ProtectedServer = struct {
             );
             return err;
         };
-        errdefer self.quic_server.endpoint.allocator.free(assembled.bytes);
-        if (requestEndedBeforeHeaders(assembled.bytes)) {
+        defer prepared.deinit(self.quic_server.endpoint.allocator);
+        if (requestEndedBeforeHeaders(prepared.bytes)) {
             self.failReceivedRequest(
-                assembled.from,
-                assembled.stream_id,
-                assembled.bytes,
+                prepared.from,
+                prepared.stream_id,
+                prepared.bytes,
                 error.RequestIncomplete,
                 true,
             );
@@ -17022,14 +17027,14 @@ pub const ProtectedServer = struct {
         }
         var request = http3.decodeRequestWithDynamicTable(
             self.quic_server.endpoint.allocator,
-            assembled.bytes,
+            prepared.bytes,
             self.config.local_settings,
             self.qpack_decode.table,
         ) catch |err| {
             self.failReceivedRequest(
-                assembled.from,
-                assembled.stream_id,
-                assembled.bytes,
+                prepared.from,
+                prepared.stream_id,
+                prepared.bytes,
                 err,
                 true,
             );
@@ -17041,10 +17046,12 @@ pub const ProtectedServer = struct {
         );
         try prepareServerRequestReceived(&self.request_lifecycle);
         self.qpack_decode.acknowledgeSectionsAssumeCapacity(
-            assembled.stream_id,
+            prepared.stream_id,
             request.qpack_section_acknowledgments,
         );
-        self.request_streams.remove(assembled.stream_id);
+        const assembled = self.request_streams.commitPreparedReady(
+            &prepared,
+        );
         serverRequestReceivedAssumeCapacity(
             &self.control,
             &self.request_lifecycle,
@@ -19504,8 +19511,8 @@ pub const ProtectedServer = struct {
     fn receiveStreamBytesUntil(
         self: *ProtectedServer,
         deadline: ?std.Io.Clock.Timestamp,
-    ) ReceiveTimeoutError!AssembledStream {
-        if (try self.request_streams.copyReady(
+    ) ReceiveTimeoutError!PreparedRequest {
+        if (try self.request_streams.prepareReady(
             self.qpack_decode.table,
             self.config.local_settings.qpack_blocked_streams,
         )) |ready| return ready;
@@ -19541,7 +19548,7 @@ pub const ProtectedServer = struct {
                 try self.sendQpackFeedback(reset.from);
                 return requestResetError(reset.application_error_code);
             }
-            if (try self.request_streams.copyReady(
+            if (try self.request_streams.prepareReady(
                 self.qpack_decode.table,
                 self.config.local_settings.qpack_blocked_streams,
             )) |ready| {
@@ -23115,7 +23122,7 @@ fn receiveConnectionRequestStreamBytes(
     request_streams: *RequestStreamSet,
     request_lifecycle: *ServerRequestLifecycle,
     peer_promised_push_ids: PromisedPushIds,
-) Error!AssembledStream {
+) Error!PreparedRequest {
     return receiveConnectionRequestStreamBytesUntil(
         connection,
         receive_packets,
@@ -23146,8 +23153,8 @@ fn receiveConnectionRequestStreamBytesUntil(
     peer_promised_push_ids: PromisedPushIds,
     detached_streams: ?*connect_datagram.Registry,
     deadline: ?std.Io.Clock.Timestamp,
-) ReceiveTimeoutError!AssembledStream {
-    if (try request_streams.copyReady(
+) ReceiveTimeoutError!PreparedRequest {
+    if (try request_streams.prepareReady(
         qpack_decode.table,
         options.local_settings.qpack_blocked_streams,
     )) |ready| return ready;
@@ -23187,7 +23194,7 @@ fn receiveConnectionRequestStreamBytesUntil(
         if (context.reset) |reset| {
             return requestResetError(reset.application_error_code);
         }
-        if (try request_streams.copyReady(
+        if (try request_streams.prepareReady(
             qpack_decode.table,
             options.local_settings.qpack_blocked_streams,
         )) |ready| {

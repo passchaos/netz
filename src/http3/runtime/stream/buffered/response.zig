@@ -11,18 +11,7 @@ pub const Reset = struct {
     application_error_code: u64,
 };
 
-pub const PreparedReady = struct {
-    from: net.IpAddress,
-    stream_id: u62,
-    bytes: []u8,
-    owns_bytes: bool,
-
-    pub fn deinit(self: *PreparedReady, allocator: std.mem.Allocator) void {
-        if (self.owns_bytes) allocator.free(self.bytes);
-        self.bytes = &.{};
-        self.owns_bytes = false;
-    }
-};
+pub const PreparedReady = common.PreparedStream;
 
 pub const Set = struct {
     const Entry = struct {

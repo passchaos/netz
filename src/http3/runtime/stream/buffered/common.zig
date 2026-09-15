@@ -1,13 +1,27 @@
+const std = @import("std");
 const http3 = @import("../../../mod.zig");
 const quic = @import("../../../../quic/mod.zig");
 const Error = @import("../../error.zig").Error;
 
-const net = @import("std").Io.net;
+const net = std.Io.net;
 
 pub const AssembledStream = struct {
     from: net.IpAddress,
     stream_id: u62,
     bytes: []u8,
+};
+
+pub const PreparedStream = struct {
+    from: net.IpAddress,
+    stream_id: u62,
+    bytes: []u8,
+    owns_bytes: bool,
+
+    pub fn deinit(self: *PreparedStream, allocator: std.mem.Allocator) void {
+        if (self.owns_bytes) allocator.free(self.bytes);
+        self.bytes = &.{};
+        self.owns_bytes = false;
+    }
 };
 
 pub fn messageBlockedByQpack(

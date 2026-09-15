@@ -349,6 +349,13 @@ pub fn applyServerRequestPacketFrames(
             try streaming.insertRequest(request_streams, from, frame.stream);
         } else {
             try request_streams.insert(from, frame.stream);
+            const copied_through = request_streams.contiguousEnd(
+                stream_id,
+            ) orelse return error.UnexpectedStream;
+            try request_id_validator.commitReceivedThrough(
+                stream_id,
+                copied_through,
+            );
         }
     }
     try validateBlockedStreamBudget(

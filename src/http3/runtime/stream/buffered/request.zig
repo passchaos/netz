@@ -6,6 +6,8 @@ const common = @import("common.zig");
 
 const net = std.Io.net;
 
+pub const PreparedReady = common.PreparedStream;
+
 pub const Set = struct {
     const Entry = struct {
         receive: quic.stream_state.RecvState,
@@ -59,20 +61,70 @@ pub const Set = struct {
         table: http3.Qpack.DynamicTable,
         max_blocked_streams: u64,
     ) Error!?common.AssembledStream {
-        const ready = try self.copyReady(table, max_blocked_streams) orelse
+        var prepared = try self.prepareReady(table, max_blocked_streams) orelse
             return null;
-        self.remove(ready.stream_id);
-        return ready;
+        defer prepared.deinit(self.allocator);
+        return self.commitPreparedReady(&prepared);
     }
 
     /// Copy the first complete request while retaining its reassembly state.
-    /// Aggregate runtimes use this to complete fallible local preparation
-    /// before committing request admission.
+    /// Use this when a caller needs an independently owned snapshot without a
+    /// later commit; aggregate servers use `prepareReady` instead.
     pub fn copyReady(
         self: *Set,
         table: http3.Qpack.DynamicTable,
         max_blocked_streams: u64,
     ) Error!?common.AssembledStream {
+        const entry = try self.readyEntry(
+            table,
+            max_blocked_streams,
+        ) orelse return null;
+        const final_size = entry.receive.final_size.?;
+        const owned = try self.allocator.dupe(
+            u8,
+            entry.receive.buffer.items[0..final_size],
+        );
+        return .{
+            .from = entry.from,
+            .stream_id = @intCast(entry.receive.stream_id),
+            .bytes = owned,
+        };
+    }
+
+    /// Prepare the first complete request without committing admission. When
+    /// possible, commit transfers the receive allocation without copying.
+    pub fn prepareReady(
+        self: *Set,
+        table: http3.Qpack.DynamicTable,
+        max_blocked_streams: u64,
+    ) Error!?PreparedReady {
+        const entry = try self.readyEntry(
+            table,
+            max_blocked_streams,
+        ) orelse return null;
+        const final_size = entry.receive.final_size.?;
+        const bytes = entry.receive.buffer.items[0..final_size];
+        if (try entry.receive.prepareCompleteBufferTransfer()) {
+            return .{
+                .from = entry.from,
+                .stream_id = @intCast(entry.receive.stream_id),
+                .bytes = entry.receive.buffer.items,
+                .owns_bytes = false,
+            };
+        }
+        return .{
+            .from = entry.from,
+            .stream_id = @intCast(entry.receive.stream_id),
+            .bytes = try self.allocator.dupe(u8, bytes),
+            .owns_bytes = true,
+        };
+    }
+
+    fn readyEntry(
+        self: *Set,
+        table: http3.Qpack.DynamicTable,
+        max_blocked_streams: u64,
+    ) Error!?*Entry {
         self.last_error_stream_id = null;
         self.last_error_from = null;
         var ready_index: ?usize = null;
@@ -99,15 +151,37 @@ pub const Set = struct {
             if (ready_index == null) ready_index = index;
         }
         const index = ready_index orelse return null;
-        const entry = &self.entries.items[index];
-        const final_size = entry.receive.final_size.?;
-        const owned = try self.allocator.dupe(
-            u8,
-            entry.receive.buffer.items[0..final_size],
-        );
-        const from = entry.from;
-        const stream_id: u62 = @intCast(entry.receive.stream_id);
-        return .{ .from = from, .stream_id = stream_id, .bytes = owned };
+        return &self.entries.items[index];
+    }
+
+    /// Commit a prepared request and transfer its wire bytes to the caller.
+    /// This operation is allocation-free.
+    pub fn commitPreparedReady(
+        self: *Set,
+        prepared: *PreparedReady,
+    ) common.AssembledStream {
+        var removed = self.takeEntry(prepared.stream_id) orelse unreachable;
+        std.debug.assert(removed.from.eql(&prepared.from));
+        const bytes = if (prepared.owns_bytes) blk: {
+            const owned = prepared.bytes;
+            prepared.bytes = &.{};
+            prepared.owns_bytes = false;
+            removed.deinit();
+            break :blk owned;
+        } else blk: {
+            std.debug.assert(
+                removed.receive.buffer.items.ptr == prepared.bytes.ptr,
+            );
+            const owned = removed.receive.takePreparedCompleteBuffer();
+            removed.deinit();
+            prepared.bytes = &.{};
+            break :blk owned;
+        };
+        return .{
+            .from = prepared.from,
+            .stream_id = prepared.stream_id,
+            .bytes = bytes,
+        };
     }
 
     pub fn cancel(
@@ -158,6 +232,19 @@ pub const Set = struct {
     pub fn contains(self: Set, stream_id: u62) bool {
         return self.entry_index.count() != 0 and
             self.entry_index.contains(stream_id);
+    }
+
+    /// Absolute end of the contiguous prefix already copied into aggregate
+    /// HTTP/3 ownership. The QUIC receive buffer can release this prefix
+    /// without waiting for the complete request or exposing partial bytes to
+    /// the application.
+    pub fn contiguousEnd(self: Set, stream_id: u62) ?u64 {
+        if (self.entry_index.count() == 0) return null;
+        const index = self.entry_index.get(stream_id) orelse return null;
+        return std.math.cast(
+            u64,
+            self.entries.items[index].receive.contiguous_end,
+        ) orelse std.math.maxInt(u64);
     }
 
     pub fn count(self: Set) usize {
@@ -347,6 +434,76 @@ test "HTTP/3 buffered request streams index reassembly entries" {
     try std.testing.expectEqualStrings(target_message, ready_request.bytes);
     try std.testing.expect(!requests.contains(12));
     try std.testing.expect(requests.contains(16));
+}
+
+test "HTTP/3 buffered request transfers prepared storage without copying" {
+    const allocator = std.heap.c_allocator;
+    const from: net.IpAddress = .{ .ip4 = .loopback(443) };
+    const message = "\x00\x03ok!";
+    var requests = Set.init(allocator, 512, 1);
+    defer requests.deinit();
+    try requests.insert(from, .{
+        .stream_id = 0,
+        .data = message,
+        .fin = true,
+    });
+    var table = http3.Qpack.DynamicTable.init(allocator, 0);
+    defer table.deinit();
+
+    const buffered_ptr = requests.entries.items[0].receive.buffer.items.ptr;
+    var prepared = (try requests.prepareReady(table, 0)) orelse
+        return error.TestUnexpectedResult;
+    defer prepared.deinit(allocator);
+    try std.testing.expect(!prepared.owns_bytes);
+    try std.testing.expectEqual(buffered_ptr, prepared.bytes.ptr);
+    try std.testing.expect(requests.contains(0));
+
+    prepared.deinit(allocator);
+    try std.testing.expect(requests.contains(0));
+    prepared = (try requests.prepareReady(table, 0)) orelse
+        return error.TestUnexpectedResult;
+    const ready = requests.commitPreparedReady(&prepared);
+    defer allocator.free(ready.bytes);
+    try std.testing.expectEqual(buffered_ptr, ready.bytes.ptr);
+    try std.testing.expectEqualStrings(message, ready.bytes);
+    try std.testing.expect(!requests.contains(0));
+}
+
+test "HTTP/3 buffered request preserves prepared fallback on allocation failure" {
+    const allocator = std.testing.allocator;
+    var failing = std.testing.FailingAllocator.init(allocator, .{
+        .resize_fail_index = 0,
+    });
+    const fallible = failing.allocator();
+    const from: net.IpAddress = .{ .ip4 = .loopback(443) };
+    const message = "\x00\x03ok!";
+    var requests = Set.init(fallible, 512, 1);
+    defer requests.deinit();
+    try requests.insert(from, .{
+        .stream_id = 0,
+        .data = message,
+        .fin = true,
+    });
+    var table = http3.Qpack.DynamicTable.init(allocator, 0);
+    defer table.deinit();
+
+    failing.fail_index = failing.alloc_index;
+    try std.testing.expectError(
+        error.OutOfMemory,
+        requests.prepareReady(table, 0),
+    );
+    try std.testing.expect(failing.has_induced_failure);
+    try std.testing.expect(requests.contains(0));
+
+    failing.fail_index = std.math.maxInt(usize);
+    var prepared = (try requests.prepareReady(table, 0)) orelse
+        return error.TestUnexpectedResult;
+    defer prepared.deinit(fallible);
+    try std.testing.expect(prepared.owns_bytes);
+    const ready = requests.commitPreparedReady(&prepared);
+    defer fallible.free(ready.bytes);
+    try std.testing.expectEqualStrings(message, ready.bytes);
+    try std.testing.expect(!requests.contains(0));
 }
 
 test "HTTP/3 buffered request rejects first blocked stream at zero budget" {

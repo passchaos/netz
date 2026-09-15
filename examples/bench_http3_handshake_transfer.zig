@@ -103,11 +103,13 @@ pub fn main(init: std.process.Init) !void {
         \\  mode: {s}
         \\  streams: {d}
         \\  response scheduler: {s}
+        \\  upload receive mode: {s}
         \\  response yield packets: {d}
         \\  body batch: {}
         \\  GRO receive: {}
         \\  1-RTT datagram bytes: {d}
         \\  paced body chunk bytes: {d}
+        \\  flow control bytes: {d}
         \\  server ACK-eliciting threshold: {d}
         \\  iterations: {d}
         \\  body bytes/iteration: {d}
@@ -117,7 +119,7 @@ pub fn main(init: std.process.Init) !void {
         \\  bytes/s: {d}
         \\  MiB/s: {d}
         \\
-    , .{ @tagName(config.mode), config.streams, if (config.mode == .download and config.streams > 1) "RFC 9218" else "single-stream/application", responseSchedulerDelayPackets(config), config.enable_body_batch, config.enable_gro_receive, transferOneRttDatagramSize(config), transferPacedBodyChunkBytes(config), config.ack_eliciting_threshold, config.iterations, config.body_bytes, bytes_total, status_total, if (config.iterations == 0) 0 else elapsed / config.iterations, bytes_per_second, bytes_per_second / (1024 * 1024) });
+    , .{ @tagName(config.mode), config.streams, if (config.mode == .download and config.streams > 1) "RFC 9218" else "single-stream/application", if (config.aggregate_upload) "aggregate" else "streaming", responseSchedulerDelayPackets(config), config.enable_body_batch, config.enable_gro_receive, transferOneRttDatagramSize(config), transferPacedBodyChunkBytes(config), transferFlowControlBytes(config), config.ack_eliciting_threshold, config.iterations, config.body_bytes, bytes_total, status_total, if (config.iterations == 0) 0 else elapsed / config.iterations, bytes_per_second, bytes_per_second / (1024 * 1024) });
     const summary = summarizeThroughput(throughput_samples);
     std.debug.print(
         "  mean MiB/s: {d:.2}\n" ++
@@ -267,6 +269,7 @@ fn runIteration(
         trace: bool,
         iteration: usize,
         ack_eliciting_threshold: u64,
+        aggregate_upload: bool,
         recovery_cache_hits: u64 = 0,
         recovery_cache_misses: u64 = 0,
         recovery_cached_blocks: usize = 0,
@@ -293,13 +296,20 @@ fn runIteration(
             switch (shared.mode) {
                 .upload => {
                     if (shared.trace) std.debug.print("  [iter {d}] server upload start\n", .{shared.iteration});
-                    try serveUpload(
-                        &session,
-                        shared.body_bytes,
-                        shared.streams,
-                        shared.trace,
-                        shared.iteration,
-                    );
+                    if (shared.aggregate_upload) {
+                        try serveAggregateUpload(
+                            &session,
+                            shared.body_bytes,
+                        );
+                    } else {
+                        try serveUpload(
+                            &session,
+                            shared.body_bytes,
+                            shared.streams,
+                            shared.trace,
+                            shared.iteration,
+                        );
+                    }
                     if (shared.trace) std.debug.print("  [iter {d}] server upload done\n", .{shared.iteration});
                 },
                 .download => try serveDownload(
@@ -338,6 +348,7 @@ fn runIteration(
         .trace = config.trace_iteration,
         .iteration = iteration,
         .ack_eliciting_threshold = config.ack_eliciting_threshold,
+        .aggregate_upload = config.aggregate_upload,
     };
     const thread = try std.Thread.spawn(.{}, Shared.run, .{&shared});
     traceIteration(config, iteration, "server thread spawned");
@@ -449,6 +460,31 @@ fn serveUpload(
             .body = "ok",
         });
     }
+}
+
+fn serveAggregateUpload(
+    session: *netz.http3.runtime.HandshakeServerSession,
+    body_bytes: usize,
+) !void {
+    var request = try session.receiveRequest();
+    defer request.deinit(session.established.connection.endpoint.allocator);
+    if (!std.mem.eql(u8, request.request.method, "POST") or
+        !std.mem.eql(u8, request.request.path, "/bench-transfer") or
+        request.request.body.len != body_bytes)
+    {
+        return error.InvalidFrame;
+    }
+    for (request.request.body) |byte| {
+        if (byte != 'x') return error.InvalidFrame;
+    }
+    try session.sendResponse(request.stream_id, .{
+        .status = 200,
+        .headers = &.{.{
+            .name = "server",
+            .value = "netz-transfer-bench",
+        }},
+        .body = "ok",
+    });
 }
 
 fn receiveUploadBodies(
@@ -990,6 +1026,7 @@ fn transferTransportParameters(config: Config) netz.quic.TransportParameters {
 }
 
 fn transferFlowControlBytes(config: Config) u64 {
+    if (config.flow_control_bytes) |value| return value;
     const body_bytes = std.math.cast(u64, config.body_bytes) orelse
         netz.quic.varint.max_value;
     const slack = @max(@as(u64, 1024 * 1024), body_bytes / 8);
@@ -1019,6 +1056,8 @@ const Config = struct {
     // capable hosts can measure it without regressing the portable baseline.
     enable_body_batch: bool = false,
     enable_gro_receive: bool = false,
+    aggregate_upload: bool = false,
+    flow_control_bytes: ?u64 = null,
     ack_eliciting_threshold: u64 = benchmark_ack_eliciting_threshold,
 };
 
@@ -1069,11 +1108,29 @@ fn parseArgs(init: std.process.Init, allocator: std.mem.Allocator) !Config {
             config.enable_body_batch = true;
         } else if (std.mem.eql(u8, arg, "--enable-gro-receive")) {
             config.enable_gro_receive = true;
+        } else if (std.mem.eql(u8, arg, "--aggregate-upload")) {
+            config.aggregate_upload = true;
+        } else if (std.mem.startsWith(u8, arg, "--flow-control-bytes=")) {
+            config.flow_control_bytes = try std.fmt.parseInt(
+                u64,
+                arg["--flow-control-bytes=".len..],
+                10,
+            );
+            if (config.flow_control_bytes.? == 0 or
+                config.flow_control_bytes.? > netz.quic.varint.max_value)
+            {
+                return error.InvalidArgument;
+            }
         } else {
             return error.InvalidArgument;
         }
     }
     if (config.streams > max_streams or config.streams > config.body_bytes) {
+        return error.InvalidArgument;
+    }
+    if (config.aggregate_upload and
+        (config.mode != .upload or config.streams != 1))
+    {
         return error.InvalidArgument;
     }
     return config;

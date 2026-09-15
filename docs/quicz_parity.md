@@ -561,6 +561,14 @@ memory pairs reduced median netz explicit peak bytes by 21.1%, cumulative
 allocation by 19.3%, and whole-process peak RSS by 16.0%. Five throughput pairs
 overlapped and the candidate won only 1/5, so this is an allocation/peak-memory
 improvement rather than a throughput claim.
+The symmetric aggregate request path also commits each copied contiguous prefix
+to QUIC before FIN and moves the completed reassembly allocation only after
+decode, QPACK, lifecycle, and transport-release preparation succeeds. A
+dedicated 16 MiB aggregate-upload benchmark measured 37.1% lower median
+explicit peak bytes and 39.5% lower cumulative allocation across three
+fixed-binary pairs. Five throughput pairs improved the tested median from
+59.00 to 67.15 MiB/s with 4/5 wins, but their ranges overlap slightly, so the
+result is not generalized beyond this bounded aggregate shape.
 Recursive response, whichever-ready, push, control, and CONNECT-DATAGRAM reads
 return the recoverable local `ConcurrentRead` error before consuming buffered
 events, UDP, or QPACK state; this error is never mapped to an HTTP/3 connection

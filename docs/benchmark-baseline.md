@@ -1481,6 +1481,33 @@ for the baseline and
 `473cf866d9150636431c1e122c5bf1041590118ea79519dc076c62640f07a8a5`
 for the candidate.
 
+The symmetric aggregate request path now uses the same two-phase transfer and
+returns QUIC receive credit as each contiguous prefix is copied into HTTP/3
+ownership. A deterministic 8-byte connection/stream-window test advances two
+6-byte prefixes before FIN. A dedicated single-stream `--aggregate-upload`
+mode in `bench-http3-handshake-transfer` exercises `receiveRequest()` rather
+than the benchmark's default streaming receiver; `--flow-control-bytes` keeps
+the historical 256 MiB default unless explicitly set. With 256 KiB of credit,
+the final binary completed a 1 MiB aggregate upload, while the frozen baseline
+stopped at 253,952 bytes and was terminated by the 10-second comparison limit.
+
+For the copy-cost comparison, three order-alternated fixed-binary memory pairs
+used 16 MiB requests, one stream, the default 256 MiB credit, and three measured
+iterations. Median explicit peak allocation fell from 104,304,658 to 65,633,749
+bytes (-37.1%), and median cumulative allocation fell from 279,031,715 to
+168,674,704 bytes (-39.5%). Five separate throughput pairs, five iterations
+each, measured baseline/candidate medians of 59.00/67.15 MiB/s; the paired
+ratio median was +13.7% with 4/5 wins, but the 57.40-64.74 and 64.14-68.25
+MiB/s ranges overlap slightly. This is a positive result for that bounded
+aggregate shape, not a general HTTP/3 throughput claim. Every run verified
+83,886,080 bytes and status total 1000. The final ReleaseFast binary SHA-256
+values were
+`0e5e7e978ae23043d5f7820fb98c5bb2cc5776da25d92b5951f3468cfef0fa55`
+for the baseline and
+`8ff68b3300e10dac770d74af0a15ea915a8cee9e73bc40d54dbca087cc4277b2`
+for the candidate. The ordinary streaming upload mode remains the default and
+passed the v1/v2 four-stream quic-go matrix after this change.
+
 The concurrent gate is reproducible with:
 
 ```sh
