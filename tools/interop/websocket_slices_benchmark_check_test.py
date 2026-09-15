@@ -10,6 +10,7 @@ class WebSocketSlicesBenchmarkCheckTest(unittest.TestCase):
         return (
             "record=result implementation=netz protocol=websocket-h2 "
             "transport=h2c mode=binary-echo role_pair=netz-self "
+            "client_io=zio-std-io server_io=zio-std-io "
             "connection_scope=persistent "
             "benchmark_scope=caller-copy-vs-direct-slices connections=1 "
             f"warmup=1 iterations=5 payload_bytes=4096 payload_schedule=fixed "
@@ -46,6 +47,23 @@ class WebSocketSlicesBenchmarkCheckTest(unittest.TestCase):
             contiguous = root / "contiguous.log"
             slices = root / "slices.log"
             contiguous.write_text(self.record("slices"), encoding="utf-8")
+            slices.write_text(self.record("slices"), encoding="utf-8")
+            with self.assertRaises(ValueError):
+                check.verify(
+                    "websocket-h2", 8, 1, 5, 4096, 1, contiguous, slices
+                )
+
+    def test_rejects_threaded_backend(self) -> None:
+        with TemporaryDirectory() as directory:
+            root = Path(directory)
+            contiguous = root / "contiguous.log"
+            slices = root / "slices.log"
+            contiguous.write_text(
+                self.record("contiguous").replace(
+                    "client_io=zio-std-io", "client_io=threaded"
+                ),
+                encoding="utf-8",
+            )
             slices.write_text(self.record("slices"), encoding="utf-8")
             with self.assertRaises(ValueError):
                 check.verify(

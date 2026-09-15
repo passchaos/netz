@@ -26,9 +26,9 @@ pub fn main(init: std.process.Init) !void {
         counting.allocator()
     else
         std.heap.smp_allocator;
-    var threaded = std.Io.Threaded.init(allocator, .{});
-    defer threaded.deinit();
-    const io = threaded.io();
+    var backend = try netz.runtime.Backend.init(std.heap.smp_allocator);
+    defer backend.deinit();
+    const io = backend.io();
 
     const original_dcid =
         [_]u8{ 0x48, 0x33, 0x57, 0x53, 0x42, 0x45, 0x4e, 0x43 };
@@ -107,7 +107,8 @@ pub fn main(init: std.process.Init) !void {
         .parts = options.parts,
         .compression = options.compression,
     };
-    const server_thread = try std.Thread.spawn(.{}, Shared.run, .{&shared});
+    var server_task = io.async(Shared.run, .{&shared});
+    defer server_task.cancel(io);
 
     var ws = try netz.websocket.runtime.h3.Client.connect(
         allocator,
@@ -169,7 +170,7 @@ pub fn main(init: std.process.Init) !void {
     const elapsed = nowNs(io) -| started;
     const allocations_after = counting.snapshot();
 
-    server_thread.join();
+    server_task.await(io);
     if (shared.err) |err| return err;
     const roundtrips_per_second: u128 = if (elapsed == 0)
         0
@@ -177,6 +178,7 @@ pub fn main(init: std.process.Init) !void {
         (@as(u128, options.iterations) * std.time.ns_per_s) / elapsed;
     std.debug.print(
         \\RFC 9220 WebSocket persistent echo benchmark
+        \\  io backend: zio-std-io
         \\  warmup iterations: {d}
         \\  measured iterations: {d}
         \\  payload bytes: {d}
@@ -211,6 +213,7 @@ pub fn main(init: std.process.Init) !void {
     std.debug.print(
         "record=result implementation=netz protocol=websocket-h3 " ++
             "transport=h3 mode=binary-echo role_pair=netz-self " ++
+            "client_io=zio-std-io server_io=zio-std-io " ++
             "connection_scope=persistent benchmark_scope={s} " ++
             "connections=1 warmup={d} iterations={d} payload_bytes={d} " ++
             "payload_schedule=fixed send_shape={s} parts={d} compression={} " ++

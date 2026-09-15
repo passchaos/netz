@@ -29,16 +29,9 @@ pub fn main(init: std.process.Init) !void {
     else
         std.heap.smp_allocator;
     const connections = options.connections;
-    // Every server-side connection handler blocks on its own socket while the
-    // matching client runs on an OS thread. An executor capped near the CPU
-    // count can therefore strand handlers above that count behind peers that
-    // are waiting for their echoes. Unlimited async resources keep this
-    // transport-concurrency benchmark from measuring scheduler starvation.
-    var threaded = std.Io.Threaded.init(allocator, .{
-        .async_limit = .unlimited,
-    });
-    defer threaded.deinit();
-    const io = threaded.io();
+    var backend = try netz.runtime.Backend.init(std.heap.smp_allocator);
+    defer backend.deinit();
+    const io = backend.io();
 
     var server = try netz.websocket.runtime.Server.listen(
         allocator,
@@ -114,11 +107,8 @@ pub fn main(init: std.process.Init) !void {
         .shape = options.send_shape,
         .parts = options.parts,
     };
-    const server_thread = try std.Thread.spawn(
-        .{},
-        Shared.run,
-        .{&shared},
-    );
+    var server_task = io.async(Shared.run, .{&shared});
+    defer server_task.cancel(io);
 
     const clients = try allocator.alloc(
         netz.websocket.runtime.Connection,
@@ -148,6 +138,7 @@ pub fn main(init: std.process.Init) !void {
 
     var ready = std.atomic.Value(usize).init(0);
     var failed = std.atomic.Value(bool).init(false);
+    var all_ready: std.Io.Event = .unset;
     var start: std.Io.Event = .unset;
     const worker_errors = try allocator.alloc(?anyerror, connections);
     defer allocator.free(worker_errors);
@@ -168,13 +159,14 @@ pub fn main(init: std.process.Init) !void {
     else
         null;
     defer if (latency_scratch) |samples| allocator.free(samples);
-    const workers = try allocator.alloc(std.Thread, connections);
-    defer allocator.free(workers);
+    var workers: std.Io.Group = .init;
+    defer workers.cancel(io);
     const Worker = struct {
         client: *netz.websocket.runtime.Connection,
         io: std.Io,
         ready: *std.atomic.Value(usize),
         failed: *std.atomic.Value(bool),
+        all_ready: *std.Io.Event,
         start: *std.Io.Event,
         err: *?anyerror,
         finished_ns: *u64,
@@ -187,11 +179,14 @@ pub fn main(init: std.process.Init) !void {
         parts: usize,
         warmup_iterations: usize,
         iterations: usize,
+        connections: usize,
 
         fn run(worker: *@This()) void {
             runFallible(worker) catch |err| {
                 worker.err.* = err;
                 worker.failed.store(true, .release);
+                worker.all_ready.set(worker.io);
+                worker.start.set(worker.io);
             };
         }
 
@@ -214,7 +209,10 @@ pub fn main(init: std.process.Init) !void {
                     payloadLength(worker.mixed, iteration),
                 );
             }
-            _ = worker.ready.fetchAdd(1, .release);
+            const previously_ready = worker.ready.fetchAdd(1, .acq_rel);
+            if (previously_ready + 1 == worker.connections) {
+                worker.all_ready.set(worker.io);
+            }
             worker.start.waitUncancelable(worker.io);
             var checksum: u64 = 0;
             for (0..worker.iterations) |iteration| {
@@ -251,6 +249,7 @@ pub fn main(init: std.process.Init) !void {
             .io = io,
             .ready = &ready,
             .failed = &failed,
+            .all_ready = &all_ready,
             .start = &start,
             .err = &worker_errors[index],
             .finished_ns = &finished_ns[index],
@@ -266,20 +265,14 @@ pub fn main(init: std.process.Init) !void {
             .parts = options.parts,
             .warmup_iterations = options.warmup_iterations,
             .iterations = options.iterations,
+            .connections = connections,
         };
-        workers[index] = try std.Thread.spawn(
-            .{},
-            Worker.run,
-            .{&worker_contexts[index]},
-        );
+        workers.async(io, Worker.run, .{&worker_contexts[index]});
     }
-    while (ready.load(.acquire) != connections) {
-        if (failed.load(.acquire)) break;
-        std.Thread.yield() catch {};
-    }
+    all_ready.waitUncancelable(io);
     const started = nowNs(io);
     start.set(io);
-    for (workers[0..connections]) |worker| worker.join();
+    try workers.await(io);
     for (worker_errors) |maybe_err| {
         if (maybe_err) |err| return err;
     }
@@ -294,7 +287,7 @@ pub fn main(init: std.process.Init) !void {
     }
     const elapsed = finished -| started;
 
-    server_thread.join();
+    server_task.await(io);
     if (shared.accept_error) |err| return err;
     var serve_result = shared.result orelse return error.ServerFailed;
     if (serve_result.firstError()) |err| {
@@ -322,6 +315,7 @@ pub fn main(init: std.process.Init) !void {
             elapsed;
     std.debug.print(
         \\WebSocket persistent echo benchmark
+        \\  io backend: zio-std-io
         \\  connections: {d}
         \\  warmup iterations: {d}
         \\  measured iterations: {d}
@@ -365,6 +359,7 @@ pub fn main(init: std.process.Init) !void {
     std.debug.print(
         "record=result implementation=netz protocol=websocket-h1 " ++
             "transport=tcp mode=binary-echo role_pair=netz-self " ++
+            "client_io=zio-std-io server_io=zio-std-io " ++
             "connection_scope=persistent benchmark_scope={s} " ++
             "connections={d} warmup={d} iterations={d} payload_bytes={d} " ++
             "payload_schedule={s} send_shape={s} parts={d} compression={} " ++

@@ -11,9 +11,9 @@ const mask_key = [4]u8{ 0x12, 0x34, 0x56, 0x78 };
 
 pub fn main() !void {
     const allocator = std.heap.smp_allocator;
-    var threaded = std.Io.Threaded.init(allocator, .{});
-    defer threaded.deinit();
-    const io = threaded.io();
+    var backend = try netz.runtime.Backend.init(allocator);
+    defer backend.deinit();
+    const io = backend.io();
 
     var payload: [payload_len]u8 = undefined;
     for (&payload, 0..) |*byte, index| byte.* = @truncate(index);
@@ -311,6 +311,7 @@ pub fn main() !void {
     );
     std.debug.print(
         \\WebSocket frame encode benchmark
+        \\  io backend: zio-std-io
         \\  iterations: {d}, payload bytes: {d}
         \\  allocating masked frame: {d} ns/op
         \\  caller-buffer masked frame: {d} ns/op

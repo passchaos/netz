@@ -161,6 +161,10 @@ pub fn build(b: *std.Build) void {
     const run_websocket_send_shape_tests = b.addRunArtifact(
         websocket_send_shape_tests,
     );
+    const websocket_slices_benchmark_checker_tests = b.addSystemCommand(&.{
+        "python3",
+        "tools/interop/websocket_slices_benchmark_check_test.py",
+    });
     const quic_quic_go_benchmark_checker_tests = b.addSystemCommand(&.{
         "python3",
         "tools/interop/quic_quic_go_benchmark_check_test.py",
@@ -211,6 +215,7 @@ pub fn build(b: *std.Build) void {
     test_step.dependOn(&run_http3_quic_go_bench_tests.step);
     test_step.dependOn(&run_exact_certificate_verifier_tests.step);
     test_step.dependOn(&run_websocket_send_shape_tests.step);
+    test_step.dependOn(&websocket_slices_benchmark_checker_tests.step);
     test_step.dependOn(&quic_quic_go_benchmark_checker_tests.step);
     test_step.dependOn(&quic_quic_go_auxiliary_checker_tests.step);
     test_step.dependOn(&quic_quic_go_churn_checker_tests.step);

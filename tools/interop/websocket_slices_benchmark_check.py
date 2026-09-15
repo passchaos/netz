@@ -86,6 +86,8 @@ def verify(
         "transport": transport,
         "mode": "binary-echo",
         "role_pair": "netz-self",
+        "client_io": "zio-std-io",
+        "server_io": "zio-std-io",
         "connection_scope": "persistent",
         "benchmark_scope": "caller-copy-vs-direct-slices",
         "connections": "1",
@@ -122,7 +124,7 @@ def verify(
         f"iterations={iterations} payload_bytes={payload_bytes} "
         f"checksum={expected_checksum} contiguous_ns={contiguous_ns} "
         f"slices_ns={slices_ns} slices_over_contiguous={slices_ns / contiguous_ns:.3f} "
-        "complete=true"
+        "client_io=zio-std-io server_io=zio-std-io complete=true"
     )
 
 

@@ -5,6 +5,7 @@
 //! `docs/benchmark-baseline.md` for the reproducible build command.
 const std = @import("std");
 const proto = @import("proto");
+const zio = @import("zio");
 
 const iterations: usize = 200_000;
 const payload_len: usize = 4096;
@@ -12,9 +13,9 @@ const mask_key = [4]u8{ 0x12, 0x34, 0x56, 0x78 };
 
 pub fn main() !void {
     const allocator = std.heap.smp_allocator;
-    var threaded = std.Io.Threaded.init(allocator, .{});
-    defer threaded.deinit();
-    const io = threaded.io();
+    const runtime = try zio.Runtime.init(allocator, .{});
+    defer runtime.deinit();
+    const io = runtime.io();
 
     var original: [payload_len]u8 = undefined;
     for (&original, 0..) |*byte, index| byte.* = @truncate(index);
@@ -52,6 +53,7 @@ pub fn main() !void {
             "{d} ns/op, checksum={d}\n",
         .{ elapsed / iterations, checksum },
     );
+    std.debug.print("clock backend: zio-std-io\n", .{});
 }
 
 fn nowNs(io: std.Io) u64 {

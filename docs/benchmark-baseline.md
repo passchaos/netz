@@ -3853,6 +3853,14 @@ evidence.
 
 ## WebSocket frame encoding comparison
 
+The current frame benchmark obtains its monotonic clock from zio-backed
+`std.Io` and prints `io backend: zio-std-io`. The H1, RFC 8441, and RFC 9220
+self-echo benchmarks use the same backend for both endpoints; their local
+servers and concurrent H1 clients run as `std.Io` tasks, and structured result
+records require `client_io=zio-std-io server_io=zio-std-io`. Numeric results in
+this WebSocket section that do not explicitly say they were rerun after the
+2026-09-15 migration remain historical `std.Io.Threaded` evidence.
+
 Captured on 2026-08-17 in `ReleaseFast` with 200,000 masked 4 KiB binary
 frames. The payload length and first mask byte vary per iteration so the
 compiler cannot fold frame generation out of the loop.
@@ -3916,6 +3924,21 @@ fragmentation.
 | RFC 8441 over h2c | 11.029 us | 11.056 us | 1.002 |
 | RFC 9220 over H3 | 86.039 us | 87.952 us | 1.022 |
 
+The 2026-09-15 zio rerun used the same CPU-0, five-sample alternating shape,
+20-warmup/1,000-measured, 4-KiB/eight-part configuration. Every record
+identified both endpoints as `zio-std-io`, transferred 8,192,000 logical bytes,
+and produced checksum 255,000:
+
+| Transport | Caller-joined range; median | Direct-slices range; median | slices / contiguous |
+|---|---:|---:|---:|
+| HTTP/1 upgrade | 15.837-16.359 us; 16.042 us | 16.200-18.181 us; 16.530 us | 1.030 |
+| RFC 8441 over h2c | 16.941-17.384 us; 17.057 us | 17.169-17.575 us; 17.340 us | 1.017 |
+| RFC 9220 over H3 | 136.130-144.065 us; 138.932 us | 137.948-142.750 us; 141.480 us | 1.018 |
+
+These are internal API-shape comparisons, not cross-library results. The older
+table above remains useful as historical Threaded evidence; it must not be
+combined with the zio ranges.
+
 Every input sample reported 8,192,000 logical bytes and checksum 255,000. The
 strict verifier also requires the exact protocol/transport, persistent
 self-role pair, shape, part count, warmup/iteration count, fixed payload
@@ -3955,11 +3978,17 @@ A direct same-input reference was compiled against
 `~/Work/websocket.zig/src/proto.zig` using its stack `writeFrameHeader`, a
 payload copy (needed to preserve the same immutable-input contract), and
 `proto.mask`. Three same-host samples were:
+The checked-in reference driver now uses zio's `std.Io` only for its monotonic
+clock and reports `clock backend: zio-std-io`; the older values below predate
+that migration.
 
 ```sh
-zig build-exe -OReleaseFast -lc --dep proto \
+zig build-exe -OReleaseFast -lc --dep proto --dep zio \
   -Mroot=benchmarks/reference/websocket_zig_frame.zig \
   -Mproto=/home/passchaos/Work/websocket.zig/src/proto.zig \
+  --dep zio_options \
+  -Mzio=zig-pkg/zio-0.17.0-xHbVVI_jJQC3YbgU7JydwAV7MuASkOTd73YqBaKlFFUz/src/zio.zig \
+  -Mzio_options=benchmarks/reference/zio_options.zig \
   -femit-bin=/tmp/bench-websocket-zig
 /tmp/bench-websocket-zig
 ```
@@ -4004,15 +4033,24 @@ Commands:
 taskset -c 0 zig build bench-websocket-echo -Doptimize=ReleaseFast
 
 zig build-exe -OReleaseFast -lc \
-  --dep websocket --dep counting_allocator \
+  --dep websocket --dep counting_allocator --dep zio \
   -Mroot=benchmarks/reference/websocket_zig_echo.zig \
   --dep build \
   -Mwebsocket=/home/passchaos/Work/websocket.zig/src/websocket.zig \
   -Mcounting_allocator=examples/support/counting_allocator.zig \
+  --dep zio_options \
+  -Mzio=zig-pkg/zio-0.17.0-xHbVVI_jJQC3YbgU7JydwAV7MuASkOTd73YqBaKlFFUz/src/zio.zig \
   -Mbuild=benchmarks/reference/websocket_zig_build_options.zig \
+  -Mzio_options=benchmarks/reference/zio_options.zig \
   -femit-bin=/tmp/bench-websocket-zig-echo
 taskset -c 0 /tmp/bench-websocket-zig-echo --tcp-nodelay
 ```
+
+The reference driver now gets its client I/O and clock from zio. The audited
+`websocket.zig` server API still owns its documented blocking worker thread, so
+that implementation detail remains part of the reference rather than being
+relabeled as a zio server. The historical cross-library numbers below predate
+the driver migration and are not current zio evidence.
 
 Four-connection mode uses one start barrier after every client finishes warmup
 and reports aggregate latency across 800 measured round trips. Twenty
@@ -4092,7 +4130,7 @@ Both sides use TCP_NODELAY, fixed 1 MiB stream / 8 MiB connection windows, a
 16 KiB HTTP/2 frame limit, no adaptive receive windows, no compression, and
 one outstanding 4 KiB message. Client frames carry fresh random masks. Both
 peers validate every round-dependent payload and require Close(1000, `done`).
-The current netz endpoints obtain `std.Io` from zio. Config, result, completion
+The external netz endpoints obtain `std.Io` from zio. Config, result, completion
 and memory records identify `zio-std-io` versus `hyper-tokio`, include the
 timeout, and are rejected if timing derivatives or runtime identities disagree.
 The performance and RSS numbers below were captured with the former

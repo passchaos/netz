@@ -205,6 +205,15 @@ both server and client paths.
 
 ## Direct frame hot-path evidence
 
+The current frame benchmark obtains its clock from a zio-backed `std.Io`. The
+H1, RFC 8441, and RFC 9220 self-echo benchmarks use that backend for both
+endpoints and schedule their local server through `std.Io.async`; H1
+multi-connection clients use `std.Io.Group` and an `std.Io.Event` start barrier.
+Every structured result identifies both endpoints as `zio-std-io`, and the
+caller-join/direct-slices verifier rejects missing or mismatched backend
+identities. Unless explicitly marked as a zio-era rerun, older timing ranges in
+this section remain historical `std.Io.Threaded` evidence.
+
 Run:
 
 ```sh
@@ -383,7 +392,8 @@ warmup exchanges, then 200 measured 4 KiB binary echo round trips. Client
 requests are masked, server replies are unmasked, both wire frames use minimal
 16-bit extended lengths, and both clients copy the echoed application payload
 back into their mutable send buffer before the next round. Handshake time is
-excluded. This evidence covers the public backend-neutral `std.Io` TCP runtime.
+excluded. The maintained netz executable obtains that backend-neutral `std.Io`
+from zio and no longer exposes a Threaded benchmark fallback.
 
 The same executable accepts `--compression`, negotiating permessage-deflate on
 both endpoints and exercising retained send/receive scratch plus direct caller-
@@ -484,8 +494,14 @@ direct-slices/caller-joined median ratios of 1.506 (HTTP/1), 1.017 (RFC 8441),
 and 1.382 (RFC 9220). H1 now uses the existing POSIX wide-iovec writer so its
 frame header plus eight payload slices fit one submission, while H3 groups
 borrowed ranges across application-slice boundaries into packet-sized DATA
-contributions. The final-code five-sample run measured 1.008, 1.002, and 1.022. Every
-sample verified 8,192,000 logical bytes and checksum 255,000. The gate
+contributions. The final-code historical Threaded five-sample run measured
+1.008, 1.002, and 1.022. The 2026-09-15 zio rerun, with the same five
+alternating CPU-0 samples, measured ratios of 1.030, 1.017, and 1.018. The
+caller-joined/direct-slices medians were 16.042/16.530 us for H1,
+17.057/17.340 us for RFC 8441, and 138.932/141.480 us for RFC 9220. Every zio
+record identified both endpoints as `zio-std-io`, transferred 8,192,000
+logical bytes, and produced checksum 255,000. Historical and zio results must
+not be combined. The gate
 deliberately has no speed threshold, and these self-echo results are neither an
 external-library comparison nor equal-wire evidence.
 
@@ -552,15 +568,24 @@ proves that a warmed fragmented encode performs no further caller-allocation.
 taskset -c 0 zig build bench-websocket-echo -Doptimize=ReleaseFast
 
 zig build-exe -OReleaseFast -lc \
-  --dep websocket --dep counting_allocator \
+  --dep websocket --dep counting_allocator --dep zio \
   -Mroot=benchmarks/reference/websocket_zig_echo.zig \
   --dep build \
   -Mwebsocket=/home/passchaos/Work/websocket.zig/src/websocket.zig \
   -Mcounting_allocator=examples/support/counting_allocator.zig \
+  --dep zio_options \
+  -Mzio=zig-pkg/zio-0.17.0-xHbVVI_jJQC3YbgU7JydwAV7MuASkOTd73YqBaKlFFUz/src/zio.zig \
   -Mbuild=benchmarks/reference/websocket_zig_build_options.zig \
+  -Mzio_options=benchmarks/reference/zio_options.zig \
   -femit-bin=/tmp/bench-websocket-zig-echo
 taskset -c 0 /tmp/bench-websocket-zig-echo --tcp-nodelay
 ```
+
+The reference driver now obtains its client-side `std.Io` and clock from zio.
+The audited `websocket.zig` server continues to use its own public blocking
+worker API; this is retained as a reference-library behavior rather than
+misreported as a zio server. The cross-library numbers below predate the driver
+migration and remain historical Threaded evidence.
 
 Twenty alternating CPU-0 samples with TCP_NODELAY enabled on both clients:
 

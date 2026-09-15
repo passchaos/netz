@@ -1034,6 +1034,8 @@ zig build bench-http3-qpack -Doptimize=ReleaseFast
 zig build bench-http3-quic-go -Doptimize=ReleaseFast -- --netz-only --mode=upload --warmup=1 --iterations=1 --streams=4 --body-bytes=65536
 zig build bench-websocket-frame -Doptimize=ReleaseFast
 zig build bench-websocket-receive-buffer -Doptimize=ReleaseFast
+zig build bench-websocket-echo -Doptimize=ReleaseFast
+zig build bench-websocket-h2-echo -Doptimize=ReleaseFast
 zig build bench-websocket-h3-echo -Doptimize=ReleaseFast -- --warmup=20 --iterations=200
 zig build bench-websocket-hyper-h2 -Doptimize=ReleaseFast -- --warmup=20 --iterations=1000 --payload-bytes=4096
 zig build bench-websocket-h3-quic-go -Doptimize=ReleaseFast -- --warmup=20 --iterations=1000 --payload-bytes=4096
@@ -1077,6 +1079,11 @@ through `std.Io.async`. Historical Threaded measurements remain labeled as
 such in the benchmark baseline.
 The built-in HTTP/2 h2c, flow-control, and HPACK benchmarks follow the same
 model; h2c and flow-control schedule their local server with `std.Io.async`.
+The built-in WebSocket frame and H1/H2/H3 echo benchmarks also use zio-provided
+`std.Io`; echo servers and concurrent H1 clients are scheduled with
+`std.Io.async`/`std.Io.Group`, and result records identify both endpoints as
+`zio-std-io`. Older WebSocket timing ranges remain historical Threaded data
+unless their section explicitly records a zio-era rerun.
 
 The aggregate `bench` step runs the current protocol microbenchmarks:
 
