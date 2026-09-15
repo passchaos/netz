@@ -133,7 +133,7 @@ PY
   "$server" "${server_args[@]}" >"$server_log" 2>&1 &
   server_pid=$!
   for _ in $(seq 1 200); do
-    if grep -Fq "netz grpc server ready: port=$port scenario=$scenario transport=$transport" "$server_log"; then
+    if grep -Fq "netz grpc server ready: port=$port scenario=$scenario transport=$transport client_io=grpc-cpp-posix-event-engine server_io=zio-std-io" "$server_log"; then
       break
     fi
     if ! kill -0 "$server_pid" 2>/dev/null; then
@@ -142,7 +142,7 @@ PY
     fi
     sleep 0.05
   done
-  if ! grep -Fq "netz grpc server ready: port=$port scenario=$scenario transport=$transport" "$server_log"; then
+  if ! grep -Fq "netz grpc server ready: port=$port scenario=$scenario transport=$transport client_io=grpc-cpp-posix-event-engine server_io=zio-std-io" "$server_log"; then
     echo "timed out waiting for netz server readiness for $scenario" >&2
     return 1
   fi
@@ -162,23 +162,25 @@ PY
     sleep 0.05
   done
   if ! grep -Fq "netz grpc server completed: scenario=$scenario transport=$transport" "$server_log"; then
-    if [[ "$transport" == tls &&
-          "$scenario" == timeout_on_sleeping_server ]] &&
+    if [[ "$scenario" == timeout_on_sleeping_server ]] &&
        ! grep -Fq "netz grpc server accepted: scenario=$scenario transport=$transport" "$server_log" &&
        kill -0 "$server_pid" 2>/dev/null; then
       # The upstream case uses a hard-coded 1 ms end-to-end deadline. It can
-      # therefore succeed with local DEADLINE_EXCEEDED before TLS accept
-      # finishes and before an RPC exists for the netz server to drain.
+      # therefore succeed with local DEADLINE_EXCEEDED before TCP scheduling
+      # (or TLS accept) creates an RPC for the netz server to drain.
       cleanup_server
-      echo "grpc-cpp client interoperated with netz: transport=$transport scenario=$scenario outcome=local-deadline-before-tls-accept"
+      echo "grpc-cpp client interoperated with netz: transport=$transport scenario=$scenario outcome=local-deadline-before-server-accept client_io=grpc-cpp-posix-event-engine server_io=zio-std-io"
       return
     fi
     echo "netz server did not complete $scenario" >&2
     return 1
   fi
+  grep -Fq \
+    'client_io=grpc-cpp-posix-event-engine server_io=zio-std-io' \
+    "$server_log"
   wait "$server_pid"
   server_pid=
-  echo "grpc-cpp client interoperated with netz: transport=$transport scenario=$scenario"
+  echo "grpc-cpp client interoperated with netz: transport=$transport scenario=$scenario client_io=grpc-cpp-posix-event-engine server_io=zio-std-io"
 }
 
 for transport in h2c tls; do
@@ -195,4 +197,4 @@ for transport in h2c tls; do
   done
 done
 
-echo 'grpc-cpp client interoperated with netz: transport=h2c+tls ping_pong=true empty_stream=true client_streaming=true server_streaming=true cancel=CANCEL deadline=DEADLINE_EXCEEDED metadata=unary+bidi certificate=verified alpn=h2'
+echo 'grpc-cpp client interoperated with netz: transport=h2c+tls ping_pong=true empty_stream=true client_streaming=true server_streaming=true cancel=CANCEL deadline=DEADLINE_EXCEEDED metadata=unary+bidi certificate=verified alpn=h2 client_io=grpc-cpp-posix-event-engine server_io=zio-std-io'

@@ -207,13 +207,26 @@ h2c and then over TLS with upstream's CA/server fixtures; netz connects to the
 loopback address while independently validating `foo.test.google.fr` and ALPN
 `h2`. The reverse gate runs each scenario against separate h2c and TLS netz
 server processes; the official client verifies the deterministic localhost
-certificate. Set `GRPC_ROOT` to use the same pinned source revision elsewhere,
+certificate. Both netz executables obtain `std.Io` from the zio-backed runtime.
+At this pinned Linux revision, gRPC C++ constructs its default Posix
+EventEngine; terminal records and runner assertions identify the role pair as
+`zio-std-io` and `grpc-cpp-posix-event-engine`. Set `GRPC_ROOT` to use the same
+pinned source revision elsewhere,
 or set `GRPC_CPP_INTEROP_SERVER`/`GRPC_CPP_INTEROP_CLIENT` to an already-built
 executable. `BAZEL`
 may select a non-default Bazel/Bazelisk executable; the script verifies it
 matches upstream's checked-in `.bazelversion`. The harness is reproducible even
 when a host lacks that exact Bazel release, but such a host cannot establish an
 external pass until the pinned tool or a prebuilt server is supplied.
+
+On 2026-09-15, after the zio migration, both complete h2c/TLS directions
+passed on Linux AArch64 against the same pinned upstream commit with Bazel
+8.7.0 and GCC. The netz client completed all four forward scenarios, while the
+official C++ client completed seven scenarios per transport. The upstream
+client's hard-coded 1 ms sleeping-server deadline can expire before either a
+cleartext or TLS accept creates an RPC; the runner accepts that local
+`DEADLINE_EXCEEDED` outcome only while the netz server remains alive and has
+not logged an accepted connection.
 
 On 2025-09-07 both bidirectional TLS gates passed against upstream commit
 `03d65cc67c450ccbb58a8a45627c4da83a886ccd` using Bazel 8.7.0 and GCC on
@@ -242,9 +255,10 @@ a 271828-byte unary request and a bidirectional request on one channel,
 requiring the expected 314159-byte responses plus exact ASCII initial-metadata
 and raw binary trailing-metadata echoes. Each case requires both the C++
 client's successful exit and a netz marker proving the expected terminal
-condition. For the upstream test's hard-coded 1 ms TLS deadline, the harness
-also records the legitimate race where the client reaches local
-`DEADLINE_EXCEEDED` before the TLS accept finishes and no server RPC exists.
+condition. For the upstream test's hard-coded 1 ms deadline, the harness also
+records the legitimate race where the client reaches local
+`DEADLINE_EXCEEDED` before the cleartext or TLS server accept finishes and no
+server RPC exists.
 
 The reflection gate passed on 2026-09-07 against the same pinned upstream
 revision, Bazel 8.7.0, and GCC. It generates a standard descriptor set with the

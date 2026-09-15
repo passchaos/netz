@@ -44,9 +44,9 @@ pub fn main(init: std.process.Init) !void {
     if (args.len == 4 and !tls_enabled) return error.InvalidArgument;
 
     const allocator = std.heap.c_allocator;
-    var threaded = std.Io.Threaded.init(allocator, .{});
-    defer threaded.deinit();
-    const io = threaded.io();
+    var backend = try netz.runtime.Backend.init(allocator);
+    defer backend.deinit();
+    const io = backend.io();
 
     const limits: netz.http2.runtime.Limits = .{
         .max_frame_payload = 64 * 1024,
@@ -93,7 +93,8 @@ pub fn main(init: std.process.Init) !void {
     defer if (tls_enabled) tls_server.deinit() else clear_server.deinit();
 
     std.debug.print(
-        "netz grpc server ready: port={d} scenario={s} transport={s}\n",
+        "netz grpc server ready: port={d} scenario={s} transport={s} " ++
+            "client_io=grpc-cpp-posix-event-engine server_io=zio-std-io\n",
         .{ port, @tagName(scenario), if (tls_enabled) "tls" else "h2c" },
     );
 
@@ -103,7 +104,9 @@ pub fn main(init: std.process.Init) !void {
                 err == error.UnexpectedEof)
             {
                 std.debug.print(
-                    "netz grpc server completed: scenario={s} transport=tls outcome=local-deadline-before-tls-accept\n",
+                    "netz grpc server completed: scenario={s} transport=tls " ++
+                        "outcome=local-deadline-before-tls-accept " ++
+                        "client_io=grpc-cpp-posix-event-engine server_io=zio-std-io\n",
                     .{@tagName(scenario)},
                 );
                 return;
@@ -137,7 +140,8 @@ pub fn main(init: std.process.Init) !void {
         },
     }
     std.debug.print(
-        "netz grpc server completed: scenario={s} transport={s}\n",
+        "netz grpc server completed: scenario={s} transport={s} " ++
+            "client_io=grpc-cpp-posix-event-engine server_io=zio-std-io\n",
         .{ @tagName(scenario), if (tls_enabled) "tls" else "h2c" },
     );
 }

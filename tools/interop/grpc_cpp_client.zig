@@ -34,9 +34,9 @@ pub fn main(init: std.process.Init) !void {
     }
 
     const allocator = std.heap.c_allocator;
-    var threaded = std.Io.Threaded.init(allocator, .{});
-    defer threaded.deinit();
-    const io = threaded.io();
+    var backend = try netz.runtime.Backend.init(allocator);
+    defer backend.deinit();
+    const io = backend.io();
 
     // The largest canonical metadata response is 314159 bytes.  Keep both
     // transport and gRPC bounds deliberately close to that fixture rather
@@ -98,7 +98,8 @@ pub fn main(init: std.process.Init) !void {
         "netz gRPC client interoperated with grpc-cpp: transport={s} " ++
             "ping_pong=4 metadata=initial+trailing-bin " ++
             "cancel=CANCEL reuse=true " ++
-            "deadline=DEADLINE_EXCEEDED-or-local-timeout+CANCEL\n",
+            "deadline=DEADLINE_EXCEEDED-or-local-timeout+CANCEL " ++
+            "client_io=zio-std-io server_io=grpc-cpp-posix-event-engine\n",
         .{if (tls_enabled) "tls" else "h2c"},
     );
 }
