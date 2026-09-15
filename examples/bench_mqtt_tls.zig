@@ -8,9 +8,9 @@ const max_packet_size: usize = 4096;
 
 pub fn main(_: std.process.Init) !void {
     const allocator = std.heap.smp_allocator;
-    var threaded = std.Io.Threaded.init(allocator, .{});
-    defer threaded.deinit();
-    const io = threaded.io();
+    var backend = try netz.runtime.Backend.init(allocator);
+    defer backend.deinit();
+    const io = backend.io();
 
     var certificate_der: [
         netz.tls.testing.certificate_der_len
@@ -73,13 +73,8 @@ pub fn main(_: std.process.Init) !void {
         }
     };
     var shared = Shared{ .server = &server };
-    const server_thread = try std.Thread.spawn(
-        .{},
-        Shared.run,
-        .{&shared},
-    );
-    var server_joined = false;
-    defer if (!server_joined) server_thread.join();
+    var server_task = io.async(Shared.run, .{&shared});
+    defer server_task.cancel(io);
 
     var client = try netz.mqtt.tls_runtime.Client.connectAddress(
         allocator,
@@ -121,8 +116,7 @@ pub fn main(_: std.process.Init) !void {
     }
     const elapsed = nowNs(io) -| started;
 
-    server_thread.join();
-    server_joined = true;
+    server_task.await(io);
     if (shared.err) |err| return err;
     const operations_per_second: u128 = if (elapsed == 0)
         0
@@ -130,6 +124,7 @@ pub fn main(_: std.process.Init) !void {
         (@as(u128, iterations) * std.time.ns_per_s) / elapsed;
     std.debug.print(
         \\MQTT-over-TLS QoS 1 benchmark
+        \\  io backend: zio-std-io
         \\  warmup publishes: {d}
         \\  measured publishes: {d}
         \\  payload bytes: {d}
@@ -143,6 +138,22 @@ pub fn main(_: std.process.Init) !void {
         elapsed / iterations,
         operations_per_second,
     });
+    std.debug.print(
+        "record=result implementation=netz protocol=mqtt5 transport=tls " ++
+            "mode=qos1-publish-puback role_pair=netz-self " ++
+            "client_io=zio-std-io server_io=zio-std-io " ++
+            "connection_scope=persistent warmup={d} iterations={d} " ++
+            "payload_bytes={d} elapsed_ns={d} ns_per_operation={d} " ++
+            "operations_per_s={d} complete=true\n",
+        .{
+            warmup_iterations,
+            iterations,
+            payload_bytes,
+            elapsed,
+            elapsed / iterations,
+            operations_per_second,
+        },
+    );
 }
 
 fn nowNs(io: std.Io) u64 {

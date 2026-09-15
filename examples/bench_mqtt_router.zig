@@ -9,9 +9,9 @@ const shared_iterations: usize = 100_000;
 pub fn main() !void {
     const allocator = std.heap.smp_allocator;
 
-    var threaded = std.Io.Threaded.init(allocator, .{});
-    defer threaded.deinit();
-    const io = threaded.io();
+    var backend = try netz.runtime.Backend.init(allocator);
+    defer backend.deinit();
+    const io = backend.io();
 
     var router = try netz.mqtt.router.Router.init(allocator);
     defer router.deinit();
@@ -68,6 +68,7 @@ pub fn main() !void {
 
     std.debug.print(
         \\MQTT router benchmark
+        \\  io backend: zio-std-io
         \\  filters: {d}
         \\  iterations: {d}
         \\  router matches: {d}, ns/op: {d}

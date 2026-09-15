@@ -1040,6 +1040,9 @@ zig build bench-websocket-h3-echo -Doptimize=ReleaseFast -- --warmup=20 --iterat
 zig build bench-websocket-hyper-h2 -Doptimize=ReleaseFast -- --warmup=20 --iterations=1000 --payload-bytes=4096
 zig build bench-websocket-h3-quic-go -Doptimize=ReleaseFast -- --warmup=20 --iterations=1000 --payload-bytes=4096
 zig build bench-mqtt-router -Doptimize=ReleaseFast
+zig build bench-mqtt-websocket -Doptimize=ReleaseFast
+taskset -c 0 zig build bench-mqtt-tls -Doptimize=ReleaseFast
+zig build compare-mqtt-mosquitto -Doptimize=ReleaseFast
 zig build bench-quic-short-packet -Doptimize=ReleaseFast
 zig build bench-quic-padding-parse -Doptimize=ReleaseFast
 zig build bench-quic-lb -Doptimize=ReleaseFast
@@ -1084,6 +1087,11 @@ The built-in WebSocket frame and H1/H2/H3 echo benchmarks also use zio-provided
 `std.Io.async`/`std.Io.Group`, and result records identify both endpoints as
 `zio-std-io`. Older WebSocket timing ranges remain historical Threaded data
 unless their section explicitly records a zio-era rerun.
+The MQTT router, TLS, WebSocket, and external broker driver likewise obtain
+`std.Io` from zio. Local TLS/WS servers and concurrent broker subscribers use
+`std.Io.async`/`std.Io.Group`; the Mosquitto comparison identifies its netz
+client as `zio-std-io`, the netz server as `zio-std-io`, and the reference
+server as `mosquitto-event-loop`.
 
 The aggregate `bench` step runs the current protocol microbenchmarks:
 

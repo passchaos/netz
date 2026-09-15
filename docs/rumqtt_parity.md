@@ -275,6 +275,12 @@ each subscriber receives and PUBACKs one QoS 1 delivery. The timer starts only
 after warmup deliveries have drained and ends when the last measured
 subscriber delivery is acknowledged. The checksum catches missing or
 mis-sized payloads.
+The current driver obtains `std.Io` from zio and runs all subscriber readers in
+an `std.Io.Group`; event barriers delimit connection readiness, drained warmup,
+and the measured interval without polling an OS-thread counter. Its structured
+result records always identify `client_io=zio-std-io` and accept only the
+explicit `netz/zio-std-io`, `mosquitto/mosquitto-event-loop`, or standalone
+external server identity pair.
 
 The netz broker is a finite process for deterministic teardown:
 
@@ -321,7 +327,8 @@ The repository now also packages the complete local Mosquitto comparison as a
 single build step. It builds the audited checkout with non-broker components
 disabled, allocates independent loopback ports, waits for each broker's ready
 marker, runs the same already-built netz client against both processes, checks
-non-zero throughput/delivery/checksum output, and tears down every child:
+the complete result shape, derived rates, latency ordering, backend identities,
+and independently calculated checksum, then tears down every child:
 
 ```sh
 zig build compare-mqtt-mosquitto -Doptimize=ReleaseFast
@@ -337,7 +344,9 @@ Mosquitto requires its normal development dependencies, including cJSON
 headers; the gate reports that requirement rather than silently using an
 unrelated system broker.
 
-2026-08-18 same-host `ReleaseFast` window-one validation:
+The numeric comparison below is the 2026-08-18 same-host `ReleaseFast`
+window-one run from the former Threaded client harness. It remains historical
+evidence and must not be cited as current zio performance:
 
 ```text
 broker      publishes/s   deliveries/s   checksum
@@ -838,6 +847,10 @@ avoiding the audited rumqttd limitation that rejects valid out-of-order ACKs.
 
 ## Shared router benchmark
 
+The current executable obtains its monotonic clock from zio-backed `std.Io` and
+prints `io backend: zio-std-io`. The numbers below predate that migration and
+remain historical Threaded evidence.
+
 Run:
 
 ```sh
@@ -884,8 +897,12 @@ It opens one MQTT 5 session, then measures 2,000 sequential 1 KiB
 PUBLISH/PUBACK exchanges after 100 warmups. The benchmark is a reproducible
 netz baseline, not yet a rumqtt speed ratio; an equal-wire rumqtt driver still
 belongs to the common broker-load work below.
+The maintained client and local server both obtain `std.Io` from zio, the
+server runs through `std.Io.async`, and the result identifies both endpoints as
+`zio-std-io`. The numeric result below predates that migration and remains a
+historical Threaded baseline.
 
-2026-08-17 same-host `ReleaseFast` smoke result:
+2026-08-17 same-host historical `ReleaseFast` smoke result:
 
 ```text
 ns/publish+PUBACK: 13,231
@@ -1022,9 +1039,13 @@ Run the steady-state 1 KiB QoS 1 baseline with:
 zig build bench-mqtt-tls -Doptimize=ReleaseFast
 ```
 
-2026-08-18 same-host `ReleaseFast`, median of three runs after 100 warmups and
-2,000 measured PUBLISH/PUBACK exchanges through the production TLS server and
-MQTT broker-side runtime:
+The maintained client and local TLS server now obtain `std.Io` from zio, the
+server is scheduled with `std.Io.async`, and the structured result identifies
+both endpoint runtimes as `zio-std-io`.
+
+The numbers below are the 2026-08-18 same-host `ReleaseFast` Threaded baseline,
+the median of three runs after 100 warmups and 2,000 measured PUBLISH/PUBACK
+exchanges through the production TLS server and MQTT broker-side runtime:
 
 ```text
 ns/publish+PUBACK: 19,427

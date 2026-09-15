@@ -21,6 +21,8 @@ const Config = struct {
     overlapping_subscriptions: usize = 1,
     publisher_window: usize = 1,
     session_expiry_seconds: u32 = 0,
+    server_implementation: []const u8 = "external",
+    server_io: []const u8 = "external-unspecified",
 };
 
 const Worker = struct {
@@ -33,26 +35,39 @@ const Worker = struct {
     ready: *std.atomic.Value(usize),
     warmup_complete: *std.atomic.Value(usize),
     failed: *std.atomic.Value(bool),
+    all_ready: *std.Io.Event,
     begin: *std.Io.Event,
+    all_warm: *std.Io.Event,
     measured_start: *std.Io.Event,
     err: *?anyerror,
     finished_ns: *u64,
     checksum: *u64,
+    subscriber_count: usize,
 
     fn run(self: *@This()) void {
         self.runFallible() catch |err| {
             self.err.* = err;
             self.failed.store(true, .release);
+            self.all_ready.set(self.io);
+            self.begin.set(self.io);
+            self.all_warm.set(self.io);
+            self.measured_start.set(self.io);
         };
     }
 
     fn runFallible(self: *@This()) !void {
-        _ = self.ready.fetchAdd(1, .release);
+        const previously_ready = self.ready.fetchAdd(1, .acq_rel);
+        if (previously_ready + 1 == self.subscriber_count) {
+            self.all_ready.set(self.io);
+        }
         self.begin.waitUncancelable(self.io);
 
         var checksum: u64 = 0;
         try self.consume(self.warmup_messages, &checksum);
-        _ = self.warmup_complete.fetchAdd(1, .release);
+        const previously_warm = self.warmup_complete.fetchAdd(1, .acq_rel);
+        if (previously_warm + 1 == self.subscriber_count) {
+            self.all_warm.set(self.io);
+        }
         self.measured_start.waitUncancelable(self.io);
         try self.consume(self.measured_messages, &checksum);
         self.checksum.* = checksum;
@@ -88,11 +103,9 @@ pub fn main(init: std.process.Init) !void {
     var stats_allocator = CountingAllocator.init(std.heap.smp_allocator);
     const config = try parseArgs(init, std.heap.smp_allocator);
     const allocator = stats_allocator.allocator();
-    var threaded = std.Io.Threaded.init(allocator, .{
-        .async_limit = .unlimited,
-    });
-    defer threaded.deinit();
-    const io = threaded.io();
+    var backend = try netz.runtime.Backend.init(std.heap.smp_allocator);
+    defer backend.deinit();
+    const io = backend.io();
 
     const subscribers = try allocator.alloc(
         netz.mqtt.runtime.Connection,
@@ -172,7 +185,9 @@ pub fn main(init: std.process.Init) !void {
     var ready = std.atomic.Value(usize).init(0);
     var warmup_complete = std.atomic.Value(usize).init(0);
     var failed = std.atomic.Value(bool).init(false);
+    var all_ready: std.Io.Event = .unset;
     var begin: std.Io.Event = .unset;
+    var all_warm: std.Io.Event = .unset;
     var measured_start: std.Io.Event = .unset;
     const errors = try allocator.alloc(?anyerror, config.subscribers);
     defer allocator.free(errors);
@@ -183,16 +198,11 @@ pub fn main(init: std.process.Init) !void {
     const checksums = try allocator.alloc(u64, config.subscribers);
     defer allocator.free(checksums);
     @memset(checksums, 0);
-    const workers = try allocator.alloc(std.Thread, config.subscribers);
-    defer allocator.free(workers);
+    var workers: std.Io.Group = .init;
+    defer workers.cancel(io);
     const contexts = try allocator.alloc(Worker, config.subscribers);
     defer allocator.free(contexts);
 
-    var workers_started: usize = 0;
-    var workers_joined = false;
-    defer if (!workers_joined) {
-        for (workers[0..workers_started]) |worker| worker.join();
-    };
     for (0..config.subscribers) |index| {
         contexts[index] = .{
             .client = &subscribers[index],
@@ -204,24 +214,19 @@ pub fn main(init: std.process.Init) !void {
             .ready = &ready,
             .warmup_complete = &warmup_complete,
             .failed = &failed,
+            .all_ready = &all_ready,
             .begin = &begin,
+            .all_warm = &all_warm,
             .measured_start = &measured_start,
             .err = &errors[index],
             .finished_ns = &finished_ns[index],
             .checksum = &checksums[index],
+            .subscriber_count = config.subscribers,
         };
-        workers[index] = try std.Thread.spawn(
-            .{},
-            Worker.run,
-            .{&contexts[index]},
-        );
-        workers_started += 1;
+        workers.async(io, Worker.run, .{&contexts[index]});
     }
 
-    while (ready.load(.acquire) != config.subscribers) {
-        if (failed.load(.acquire)) break;
-        std.Thread.yield() catch {};
-    }
+    all_ready.waitUncancelable(io);
     if (failed.load(.acquire)) return firstWorkerError(errors);
     begin.set(io);
 
@@ -242,10 +247,7 @@ pub fn main(init: std.process.Init) !void {
         null,
     );
 
-    while (warmup_complete.load(.acquire) != config.subscribers) {
-        if (failed.load(.acquire)) break;
-        std.Thread.yield() catch {};
-    }
+    all_warm.waitUncancelable(io);
     if (failed.load(.acquire)) return firstWorkerError(errors);
     const started_ns = nowNs(io);
     measured_start.set(io);
@@ -259,8 +261,7 @@ pub fn main(init: std.process.Init) !void {
         allocator,
         latency_samples,
     );
-    for (workers) |worker| worker.join();
-    workers_joined = true;
+    try workers.await(io);
     for (errors) |maybe_err| {
         if (maybe_err) |err| return err;
     }
@@ -298,6 +299,7 @@ pub fn main(init: std.process.Init) !void {
 
     std.debug.print(
         \\MQTT 5 TCP broker fanout workload
+        \\  client io backend: zio-std-io
         \\  endpoint: {f}
         \\  publishers: {d}
         \\  subscribers: {d}
@@ -341,6 +343,37 @@ pub fn main(init: std.process.Init) !void {
         stats_allocator.snapshot().peak_bytes,
         checksum,
     });
+    std.debug.print(
+        "record=result implementation=netz protocol=mqtt5 transport=tcp " ++
+            "mode=qos1-fanout role_pair=netz-client+{s}-server " ++
+            "client_io=zio-std-io server_io={s} " ++
+            "connection_scope=persistent publishers={d} subscribers={d} " ++
+            "overlapping_subscriptions={d} publisher_window={d} " ++
+            "session_expiry_seconds={d} warmup={d} publishes={d} " ++
+            "deliveries={d} payload_bytes={d} elapsed_ns={d} " ++
+            "publishes_per_s={d} deliveries_per_s={d} p50_ns={d} " ++
+            "p99_ns={d} p999_ns={d} checksum={d} complete=true\n",
+        .{
+            config.server_implementation,
+            config.server_io,
+            config.publishers,
+            config.subscribers,
+            config.overlapping_subscriptions,
+            config.publisher_window,
+            config.session_expiry_seconds,
+            config.warmup_messages,
+            config.messages,
+            measured_deliveries,
+            config.payload_bytes,
+            elapsed_ns,
+            publishes_per_second,
+            deliveries_per_second,
+            latency_p50,
+            latency_p99,
+            latency_p999,
+            checksum,
+        },
+    );
 }
 
 fn connect(
@@ -465,6 +498,15 @@ fn parseArgs(
                 arg["--session-expiry-seconds=".len..],
                 10,
             );
+        } else if (std.mem.startsWith(
+            u8,
+            arg,
+            "--server-implementation=",
+        )) {
+            config.server_implementation =
+                arg["--server-implementation=".len..];
+        } else if (std.mem.startsWith(u8, arg, "--server-io=")) {
+            config.server_io = arg["--server-io=".len..];
         } else {
             return error.InvalidArgument;
         }
@@ -472,6 +514,14 @@ fn parseArgs(
     if (config.publishers + config.subscribers > max_clients) {
         return error.InvalidArgument;
     }
+    const valid_server_identity =
+        (std.mem.eql(u8, config.server_implementation, "netz") and
+            std.mem.eql(u8, config.server_io, "zio-std-io")) or
+        (std.mem.eql(u8, config.server_implementation, "mosquitto") and
+            std.mem.eql(u8, config.server_io, "mosquitto-event-loop")) or
+        (std.mem.eql(u8, config.server_implementation, "external") and
+            std.mem.eql(u8, config.server_io, "external-unspecified"));
+    if (!valid_server_identity) return error.InvalidArgument;
     return config;
 }
 

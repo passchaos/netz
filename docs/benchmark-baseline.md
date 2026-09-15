@@ -49,7 +49,8 @@ zig build bench-quic-udp-batch -Doptimize=ReleaseFast
 taskset -c 0 zig build bench-mqtt-tls -Doptimize=ReleaseFast
 ```
 
-Two 2026-09-04 post-close-semantics MQTT-over-TLS regression samples used one
+Two historical 2026-09-04 post-close-semantics MQTT-over-TLS regression samples
+used the former `std.Io.Threaded` harness with one
 persistent native TLS 1.3 connection, 100 warmup exchanges, and 2,000 measured
 1-KiB QoS 1 publish/PUBACK round trips. They measured 11.693-11.812 us per
 operation and 84,658-85,518 operations/s on CPU 0. This is an internal hot-path
@@ -4266,6 +4267,19 @@ as the timing results above.
 
 ## MQTT 5 windowed QoS 1 broker fanout
 
+The current driver obtains `std.Io` from zio, schedules subscriber readers in
+an `std.Io.Group`, and uses events for readiness and warmup barriers. The
+Mosquitto runner validates a structured result for each server, including
+complete publish/delivery counts, derived rates, latency ordering, an
+independently calculated checksum, and `client_io=zio-std-io` paired with
+`server_io=zio-std-io` or `mosquitto-event-loop`. A 2026-09-15 default-size
+migration gate completed 2,000 publishes and 4,000 deliveries against each
+server with checksum 1,029,000. It was one unpinned sequential run, so it is
+correctness evidence rather than a new performance comparison.
+
+The comparison below predates the migration and remains historical
+`std.Io.Threaded` evidence.
+
 Captured on 2026-08-20 with one external client binary driving both brokers:
 
 ```sh
@@ -4333,6 +4347,10 @@ confirming the allocation-count simplification without overstating it as a
 throughput improvement.
 
 ## MQTT shared-subscription router
+
+The maintained executable obtains its clock from zio-backed `std.Io` and names
+that backend in its output. The numeric ranges below predate this migration and
+remain historical Threaded evidence.
 
 Captured on 2026-08-19 with:
 

@@ -48,6 +48,9 @@ wait_for_log() {
 
 build_mosquitto() {
   local build_dir="$work/mosquitto-build"
+  local multiarch
+  multiarch=$(cc -print-multiarch 2>/dev/null || true)
+  local system_cjson="/usr/lib/$multiarch/libcjson.so.1"
   local cmake_args=(
     -DCMAKE_BUILD_TYPE=Release
     -DWITH_APPS=OFF -DWITH_CLIENTS=OFF -DWITH_DOCS=OFF
@@ -58,7 +61,7 @@ build_mosquitto() {
     cmake_args+=("-DCJSON_INCLUDE_DIR=$CJSON_INCLUDE_DIR")
   elif [[ -f /usr/include/cjson/cJSON.h ]]; then
     cmake_args+=("-DCJSON_INCLUDE_DIR=/usr/include")
-  elif [[ -e /usr/lib/x86_64-linux-gnu/libcjson.so.1 ]]; then
+  elif [[ -n "$multiarch" && -e "$system_cjson" ]]; then
     # Runtime-only distro packages omit the development header and unversioned
     # linker name. Fetch the matching upstream declaration into the temporary
     # build tree; do not mutate the audited Mosquitto checkout or system.
@@ -72,9 +75,9 @@ build_mosquitto() {
   fi
   if [[ -n "${CJSON_LIBRARY:-}" ]]; then
     cmake_args+=("-DCJSON_LIBRARY=$CJSON_LIBRARY")
-  elif [[ ! -e /usr/lib/x86_64-linux-gnu/libcjson.so &&
-        -e /usr/lib/x86_64-linux-gnu/libcjson.so.1 ]]; then
-    ln -s /usr/lib/x86_64-linux-gnu/libcjson.so.1 \
+  elif [[ -n "$multiarch" && ! -e "/usr/lib/$multiarch/libcjson.so" &&
+        -e "$system_cjson" ]]; then
+    ln -s "$system_cjson" \
       "$work/libcjson.so"
     cmake_args+=("-DCJSON_LIBRARY=$work/libcjson.so")
   fi
@@ -127,6 +130,8 @@ resolve_mosquitto() {
 run_driver() {
   local port=$1
   local output=$2
+  local server_implementation=$3
+  local server_io=$4
   timeout 60s "$driver" \
     "--address=127.0.0.1:$port" \
     "--publishers=${PUBLISHERS:-2}" \
@@ -135,17 +140,17 @@ run_driver() {
     "--messages=${MESSAGES:-2000}" \
     "--payload-bytes=${PAYLOAD_BYTES:-256}" \
     "--publisher-window=${PUBLISHER_WINDOW:-16}" \
+    "--server-implementation=$server_implementation" \
+    "--server-io=$server_io" \
     >"$output" 2>&1
   grep -Fq 'MQTT 5 TCP broker fanout workload' "$output"
+  grep -Fq 'client io backend: zio-std-io' "$output"
+  grep -Fq \
+    "record=result implementation=netz protocol=mqtt5 transport=tcp mode=qos1-fanout role_pair=netz-client+$server_implementation-server client_io=zio-std-io server_io=$server_io" \
+    "$output"
   grep -Eq 'publishes/s: [1-9][0-9]*' "$output"
   grep -Eq 'deliveries/s: [1-9][0-9]*' "$output"
   grep -Eq 'checksum: [1-9][0-9]*' "$output"
-}
-
-result_value() {
-  local label=$1
-  local output=$2
-  awk -F': ' -v label="$label" '$1 ~ "^[[:space:]]*" label "$" { print $2 }' "$output"
 }
 
 mosquitto_binary=$(resolve_mosquitto)
@@ -158,8 +163,9 @@ netz_port=$(free_tcp_port)
   --max-outgoing-inflight=64 \
   >"$work/netz-server.log" 2>&1 &
 server_pid=$!
-wait_for_log "$work/netz-server.log" 'netz MQTT 3.1.1/5 broker listening'
-run_driver "$netz_port" "$work/netz-result.txt"
+wait_for_log "$work/netz-server.log" \
+  'netz MQTT 3.1.1/5 broker listening.*server_io=zio-std-io'
+run_driver "$netz_port" "$work/netz-result.txt" netz zio-std-io
 wait "$server_pid"
 server_pid=
 
@@ -176,22 +182,24 @@ EOF
   >"$work/mosquitto-server.log" 2>&1 &
 server_pid=$!
 wait_for_log "$work/mosquitto-server.log" 'mosquitto version.*running'
-run_driver "$mosquitto_port" "$work/mosquitto-result.txt"
+run_driver "$mosquitto_port" "$work/mosquitto-result.txt" \
+  mosquitto mosquitto-event-loop
 kill "$server_pid" 2>/dev/null || true
 wait "$server_pid" 2>/dev/null || true
 server_pid=
 
-for label in 'measured publishes' 'measured deliveries' 'checksum'; do
-  netz_value=$(result_value "$label" "$work/netz-result.txt")
-  mosquitto_value=$(result_value "$label" "$work/mosquitto-result.txt")
-  if [[ -z "$netz_value" || "$netz_value" != "$mosquitto_value" ]]; then
-    echo "comparison mismatch for $label: netz=$netz_value mosquitto=$mosquitto_value" >&2
-    exit 1
-  fi
-done
+python3 "$repo_root/tools/interop/mqtt_broker_benchmark_check.py" \
+  --netz-log "$work/netz-result.txt" \
+  --mosquitto-log "$work/mosquitto-result.txt" \
+  --publishers "${PUBLISHERS:-2}" \
+  --subscribers "${SUBSCRIBERS:-2}" \
+  --warmup "${WARMUP_MESSAGES:-100}" \
+  --messages "${MESSAGES:-2000}" \
+  --payload-bytes "${PAYLOAD_BYTES:-256}" \
+  --publisher-window "${PUBLISHER_WINDOW:-16}"
 
 echo '--- netz ---'
 cat "$work/netz-result.txt"
 echo '--- Mosquitto ---'
 cat "$work/mosquitto-result.txt"
-echo "equal-wire MQTT comparison passed (Mosquitto $(git -C "$mosquitto_root" rev-parse --short HEAD))"
+echo "equal-wire MQTT comparison passed (Mosquitto $(git -C "$mosquitto_root" rev-parse --short HEAD)) client_io=zio-std-io server_io=zio-std-io+mosquitto-event-loop"

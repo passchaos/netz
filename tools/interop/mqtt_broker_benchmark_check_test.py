@@ -1,0 +1,115 @@
+#!/usr/bin/env python3
+
+import importlib.util
+from pathlib import Path
+from tempfile import TemporaryDirectory
+import unittest
+
+MODULE = Path(__file__).with_name("mqtt_broker_benchmark_check.py")
+SPEC = importlib.util.spec_from_file_location("mqtt_broker_benchmark_check", MODULE)
+assert SPEC is not None and SPEC.loader is not None
+CHECK = importlib.util.module_from_spec(SPEC)
+SPEC.loader.exec_module(CHECK)
+
+
+class MqttBrokerBenchmarkCheckTest(unittest.TestCase):
+    def record(self, server: str, server_io: str) -> str:
+        elapsed = 1_000_000
+        return (
+            "record=result implementation=netz protocol=mqtt5 transport=tcp "
+            f"mode=qos1-fanout role_pair=netz-client+{server}-server "
+            f"client_io=zio-std-io server_io={server_io} "
+            "connection_scope=persistent publishers=2 subscribers=2 "
+            "overlapping_subscriptions=1 publisher_window=8 "
+            "session_expiry_seconds=0 warmup=10 publishes=100 deliveries=200 "
+            f"payload_bytes=256 elapsed_ns={elapsed} publishes_per_s=100000 "
+            "deliveries_per_s=200000 p50_ns=10 p99_ns=20 p999_ns=30 "
+            "checksum=53900 complete=true\n"
+        )
+
+    def verify(self, netz: Path, mosquitto: Path) -> str:
+        return CHECK.verify(netz, mosquitto, 2, 2, 10, 100, 256, 8)
+
+    def test_accepts_complete_pair(self) -> None:
+        with TemporaryDirectory() as directory:
+            netz = Path(directory, "netz.log")
+            mosquitto = Path(directory, "mosquitto.log")
+            netz.write_text(self.record("netz", "zio-std-io"))
+            mosquitto.write_text(
+                self.record("mosquitto", "mosquitto-event-loop")
+            )
+            output = self.verify(netz, mosquitto)
+            self.assertIn("client_io=zio-std-io", output)
+
+    def test_rejects_wrong_backend(self) -> None:
+        with TemporaryDirectory() as directory:
+            netz = Path(directory, "netz.log")
+            mosquitto = Path(directory, "mosquitto.log")
+            netz.write_text(self.record("netz", "threaded"))
+            mosquitto.write_text(
+                self.record("mosquitto", "mosquitto-event-loop")
+            )
+            with self.assertRaisesRegex(ValueError, "server_io"):
+                self.verify(netz, mosquitto)
+
+    def test_rejects_wrong_delivery_count(self) -> None:
+        with TemporaryDirectory() as directory:
+            netz = Path(directory, "netz.log")
+            mosquitto = Path(directory, "mosquitto.log")
+            netz.write_text(self.record("netz", "zio-std-io"))
+            mosquitto.write_text(
+                self.record("mosquitto", "mosquitto-event-loop").replace(
+                    "deliveries=200", "deliveries=199", 1
+                )
+            )
+            with self.assertRaisesRegex(ValueError, "deliveries"):
+                self.verify(netz, mosquitto)
+
+    def test_rejects_bad_derived_rate(self) -> None:
+        with TemporaryDirectory() as directory:
+            netz = Path(directory, "netz.log")
+            mosquitto = Path(directory, "mosquitto.log")
+            netz.write_text(
+                self.record("netz", "zio-std-io").replace(
+                    "publishes_per_s=100000", "publishes_per_s=1"
+                )
+            )
+            mosquitto.write_text(
+                self.record("mosquitto", "mosquitto-event-loop")
+            )
+            with self.assertRaisesRegex(ValueError, "publishes_per_s"):
+                self.verify(netz, mosquitto)
+
+    def test_rejects_checksum_mismatch(self) -> None:
+        with TemporaryDirectory() as directory:
+            netz = Path(directory, "netz.log")
+            mosquitto = Path(directory, "mosquitto.log")
+            netz.write_text(self.record("netz", "zio-std-io"))
+            mosquitto.write_text(
+                self.record("mosquitto", "mosquitto-event-loop").replace(
+                    "checksum=53900", "checksum=53901"
+                )
+            )
+            with self.assertRaisesRegex(ValueError, "checksums differ"):
+                self.verify(netz, mosquitto)
+
+    def test_rejects_identically_wrong_checksums(self) -> None:
+        with TemporaryDirectory() as directory:
+            netz = Path(directory, "netz.log")
+            mosquitto = Path(directory, "mosquitto.log")
+            netz.write_text(
+                self.record("netz", "zio-std-io").replace(
+                    "checksum=53900", "checksum=1"
+                )
+            )
+            mosquitto.write_text(
+                self.record("mosquitto", "mosquitto-event-loop").replace(
+                    "checksum=53900", "checksum=1"
+                )
+            )
+            with self.assertRaisesRegex(ValueError, "match the workload"):
+                self.verify(netz, mosquitto)
+
+
+if __name__ == "__main__":
+    unittest.main()
