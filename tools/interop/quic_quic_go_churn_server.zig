@@ -7,9 +7,9 @@ pub fn run(_: std.process.Init, args: []const []const u8) !void {
     const port = try std.fmt.parseInt(u16, args[0], 10);
     const expected_config = try churn.Config.parse(args[1..]);
     const allocator = std.heap.c_allocator;
-    var threaded = std.Io.Threaded.init(allocator, .{ .async_limit = .unlimited });
-    defer threaded.deinit();
-    const io = threaded.io();
+    var backend = try netz.runtime.Backend.init(allocator);
+    defer backend.deinit();
+    const io = backend.io();
     var certificate_der: [netz.tls.testing.certificate_der_len]u8 = undefined;
     try std.base64.standard.Decoder.decode(
         &certificate_der,
@@ -243,6 +243,7 @@ fn runReceiver(
 fn printResult(config: churn.Config, result: churn.Result) void {
     std.debug.print(
         "raw QUIC churn server passed: implementation=netz role_pair=quic-go-client+netz-server " ++
+            "client_io=quic-go-netpoll server_io=zio-std-io " ++
             "sender={s} fault={s} fault_scope={s}-outbound streams={d} fin={d} reset={d} " ++
             "bytes={d} checksum={d} reset_mask=0x{x:0>16} reset_code_sum={d} " ++
             "reset_final_size_verified={s} sibling=true\n",

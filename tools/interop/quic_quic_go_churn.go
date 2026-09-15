@@ -953,7 +953,7 @@ func printRawChurnClientResult(implementation, rolePair string, c rawChurnConfig
 	if c.fault == "reorder" {
 		resetFaults, finFaults = reset.reordered, fin.reordered
 	}
-	fmt.Printf("raw QUIC churn client passed: implementation=%s role_pair=%s sender=%s fault=%s fault_scope=%s-outbound streams=%d fin=%d reset=%d bytes=%d checksum=%d reset_mask=0x%016x reset_code_sum=%d considered=%d dropped=%d held=%d reordered=%d reset_faults=%d fin_faults=%d reset_final_size_verified=%t sibling=true peer-close=true\n", implementation, rolePair, ifSender(c.sender, "client", "server"), c.fault, scope, result.streams, result.fins, result.resets, result.receivedBytes, result.checksum, result.resetMask, result.resetCodeSum, total.considered, total.dropped, total.held, total.reordered, resetFaults, finFaults, finalSize)
+	fmt.Printf("raw QUIC churn client passed: implementation=%s role_pair=%s client_io=%s server_io=%s sender=%s fault=%s fault_scope=%s-outbound streams=%d fin=%d reset=%d bytes=%d checksum=%d reset_mask=0x%016x reset_code_sum=%d considered=%d dropped=%d held=%d reordered=%d reset_faults=%d fin_faults=%d reset_final_size_verified=%t sibling=true peer-close=true\n", implementation, rolePair, clientIO(rolePair), serverIO(rolePair), ifSender(c.sender, "client", "server"), c.fault, scope, result.streams, result.fins, result.resets, result.receivedBytes, result.checksum, result.resetMask, result.resetCodeSum, total.considered, total.dropped, total.held, total.reordered, resetFaults, finFaults, finalSize)
 }
 
 func printRawChurnServerResult(implementation, rolePair string, c rawChurnConfig, result rawChurnResult, finalSize bool) {
@@ -961,7 +961,7 @@ func printRawChurnServerResult(implementation, rolePair string, c rawChurnConfig
 	if c.sender == senderServer {
 		scope = implementation + "-server"
 	}
-	fmt.Printf("raw QUIC churn server passed: implementation=%s role_pair=%s sender=%s fault=%s fault_scope=%s-outbound streams=%d fin=%d reset=%d bytes=%d checksum=%d reset_mask=0x%016x reset_code_sum=%d reset_final_size_verified=%t sibling=true\n", implementation, rolePair, ifSender(c.sender, "client", "server"), c.fault, scope, result.streams, result.fins, result.resets, result.receivedBytes, result.checksum, result.resetMask, result.resetCodeSum, finalSize)
+	fmt.Printf("raw QUIC churn server passed: implementation=%s role_pair=%s client_io=%s server_io=%s sender=%s fault=%s fault_scope=%s-outbound streams=%d fin=%d reset=%d bytes=%d checksum=%d reset_mask=0x%016x reset_code_sum=%d reset_final_size_verified=%t sibling=true\n", implementation, rolePair, clientIO(rolePair), serverIO(rolePair), ifSender(c.sender, "client", "server"), c.fault, scope, result.streams, result.fins, result.resets, result.receivedBytes, result.checksum, result.resetMask, result.resetCodeSum, finalSize)
 }
 
 func logFatalRawChurn(err error) {

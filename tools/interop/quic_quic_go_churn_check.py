@@ -76,6 +76,8 @@ def verify(
     if reset_every < 1:
         raise ValueError("invalid reset cadence")
     client_impl, server_impl = implementations
+    client_io = "zio-std-io" if client_impl == "netz" else "quic-go-netpoll"
+    server_io = "zio-std-io" if server_impl == "netz" else "quic-go-netpoll"
     client = record(client_log, "raw QUIC churn client passed:")
     server = record(server_log, "raw QUIC churn server passed:")
     proxy = record(proxy_log, "udp fault proxy passed:")
@@ -90,6 +92,8 @@ def verify(
         for key, value in {
             "role_pair": role_pair,
             "sender": sender,
+            "client_io": client_io,
+            "server_io": server_io,
             "fault": fault,
             "fault_scope": f"{scope}-outbound",
             "sibling": "true",
@@ -132,6 +136,7 @@ def verify(
     print(
         "verified raw QUIC churn: "
         f"role_pair={role_pair} sender={sender} fault={fault} streams={streams} "
+        f"client_io={client_io} server_io={server_io} "
         f"fin={wanted['fin']} reset={wanted['reset']} bytes={wanted['bytes']} "
         f"checksum={wanted['checksum']} reset_mask=0x{wanted['reset_mask']:016x} "
         f"reset_code_sum={wanted['reset_code_sum']} {active}={client[active]}"

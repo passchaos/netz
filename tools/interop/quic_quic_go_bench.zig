@@ -259,33 +259,87 @@ pub fn nowNs(io: std.Io) u64 {
     return std.math.cast(u64, value) orelse std.math.maxInt(u64);
 }
 
-pub fn printConfig(sender: []const u8, role_pair: []const u8, config: Config) !void {
+fn direction(sender: Sender) []const u8 {
+    return if (sender == .client) "upload" else "download";
+}
+
+pub fn printConfig(
+    sender: []const u8,
+    role_pair: []const u8,
+    endpoint_role: []const u8,
+    sender_role: Sender,
+    config: Config,
+) !void {
     std.debug.print(
-        "implementation={s} protocol=quic-stream direction=upload role_pair={s} " ++
+        "record=config implementation={s} protocol=quic-stream direction={s} role_pair={s} " ++
+            "endpoint_role={s} sender_role={s} client_io={s} server_io={s} " ++
             "connection_scope=fresh-per-sample benchmark_scope=same-application-shape " ++
             "warmup={d} iterations={d} streams={d} bytes_per_stream={d} " ++
             "application_chunk_requested={d} application_chunk_effective={d} " ++
-            "stream_window={d} connection_window={d} steady_state_mtu=1280 " ++
+            "stream_window={d} connection_window={d} timeout_ms={d} steady_state_mtu=1280 " ++
             "quic_version=1 cipher=negotiated-unexposed cert_verify=true " ++
             "netz_gso=false netz_gro=false quic_go_gso=false " ++
             "quic_go_gro=false pacing=implementation-specific\n",
         .{
-            sender,                  role_pair,          config.warmup,           config.iterations,    config.streams,
-            config.bytes_per_stream, config.chunk_bytes, config.effectiveChunk(), config.stream_window, try config.connectionWindow(),
+            sender,                  direction(sender_role), role_pair,               endpoint_role,        @tagName(sender_role),
+            clientIo(role_pair),     serverIo(role_pair),    config.warmup,           config.iterations,    config.streams,
+            config.bytes_per_stream, config.chunk_bytes,     config.effectiveChunk(), config.stream_window, try config.connectionWindow(),
+            config.timeout_ms,
         },
     );
 }
 
-pub fn printSample(sender: []const u8, role_pair: []const u8, config: Config, sample: u32, elapsed_ns: u64, checksum: u64) !void {
+pub fn printSample(
+    sender: []const u8,
+    role_pair: []const u8,
+    endpoint_role: []const u8,
+    sender_role: Sender,
+    config: Config,
+    sample: u32,
+    elapsed_ns: u64,
+    checksum: u64,
+) !void {
     const total = try config.totalBytes();
     const mib_s = if (elapsed_ns == 0) 0.0 else @as(f64, @floatFromInt(total)) * @as(f64, @floatFromInt(std.time.ns_per_s)) /
         @as(f64, @floatFromInt(elapsed_ns)) / (1024.0 * 1024.0);
     std.debug.print(
-        "implementation={s} protocol=quic-stream direction=upload role_pair={s} " ++
+        "record=result implementation={s} protocol=quic-stream direction={s} role_pair={s} " ++
+            "endpoint_role={s} sender_role={s} client_io={s} server_io={s} " ++
             "connection_scope=fresh-per-sample benchmark_scope=same-application-shape " ++
             "sample={d} elapsed_ns={d} logical_MiB_s={d:.3} streams={d} " ++
-            "sent_bytes={d} received_bytes={d} checksum={d} complete=true\n",
-        .{ sender, role_pair, sample, elapsed_ns, mib_s, config.streams, total, total, checksum },
+            "bytes_per_stream={d} sent_bytes={d} received_bytes={d} checksum={d} " ++
+            "completion_exchange_verified=true complete=true\n",
+        .{
+            sender,                direction(sender_role), role_pair,           endpoint_role,
+            @tagName(sender_role), clientIo(role_pair),    serverIo(role_pair), sample,
+            elapsed_ns,            mib_s,                  config.streams,      config.bytes_per_stream,
+            total,                 total,                  checksum,
+        },
+    );
+}
+
+pub fn printReceiverCompletion(
+    implementation: []const u8,
+    role_pair: []const u8,
+    endpoint_role: []const u8,
+    sender: Sender,
+    config: Config,
+    sample: u32,
+    checksum: u64,
+) !void {
+    const total = try config.totalBytes();
+    std.debug.print(
+        "record=receiver-complete implementation={s} protocol=quic-stream " ++
+            "direction={s} role_pair={s} endpoint_role={s} sender_role={s} " ++
+            "client_io={s} server_io={s} connection_scope=fresh-per-sample " ++
+            "benchmark_scope=same-application-shape sample={d} streams={d} " ++
+            "bytes_per_stream={d} received_bytes={d} checksum={d} " ++
+            "completion_exchange_verified=true complete=true\n",
+        .{
+            implementation,   direction(sender),       role_pair,           endpoint_role,
+            @tagName(sender), clientIo(role_pair),     serverIo(role_pair), sample,
+            config.streams,   config.bytes_per_stream, total,               checksum,
+        },
     );
 }
 
@@ -293,13 +347,15 @@ pub fn printSocketTraffic(
     implementation: []const u8,
     role_pair: []const u8,
     endpoint_role: []const u8,
+    sender: Sender,
     config: Config,
     sample: u32,
     traffic: netz.quic.runtime.SocketTrafficStats,
 ) void {
     std.debug.print(
-        "implementation={s} protocol=quic-stream role_pair={s} " ++
-            "endpoint_role={s} sample={d} streams={d} " ++
+        "record=socket-traffic implementation={s} protocol=quic-stream role_pair={s} " ++
+            "endpoint_role={s} sender_role={s} client_io={s} server_io={s} " ++
+            "sample={d} streams={d} " ++
             "traffic_scope=connection socket_boundary=userspace-udp-payload " ++
             "udp_sent_datagrams={d} udp_sent_payload_bytes={d} " ++
             "udp_received_datagrams={d} udp_received_payload_bytes={d} " ++
@@ -308,6 +364,9 @@ pub fn printSocketTraffic(
             implementation,
             role_pair,
             endpoint_role,
+            @tagName(sender),
+            clientIo(role_pair),
+            serverIo(role_pair),
             sample,
             config.streams,
             traffic.sent_datagrams,
@@ -326,8 +385,8 @@ pub fn printNetzMemory(
     snapshot: anytype,
 ) void {
     std.debug.print(
-        "implementation=netz protocol=quic-stream role_pair={s} " ++
-            "endpoint_role={s} sender_role={s} streams={d} " ++
+        "record=memory implementation=netz protocol=quic-stream role_pair={s} " ++
+            "endpoint_role={s} sender_role={s} client_io={s} server_io={s} streams={d} " ++
             "memory_scope=benchmark-run-after-argument-parse " ++
             "allocator_scope=netz-explicit alloc_count={d} free_count={d} " ++
             "resize_count={d} remap_count={d} total_allocated_bytes={d} " ++
@@ -336,6 +395,8 @@ pub fn printNetzMemory(
             role_pair,
             endpoint_role,
             @tagName(sender),
+            clientIo(role_pair),
+            serverIo(role_pair),
             config.streams,
             snapshot.alloc_count,
             snapshot.free_count,
@@ -346,6 +407,20 @@ pub fn printNetzMemory(
             snapshot.peak_bytes,
         },
     );
+}
+
+pub fn clientIo(role_pair: []const u8) []const u8 {
+    return if (std.mem.startsWith(u8, role_pair, "netz-client"))
+        "zio-std-io"
+    else
+        "quic-go-netpoll";
+}
+
+pub fn serverIo(role_pair: []const u8) []const u8 {
+    return if (std.mem.endsWith(u8, role_pair, "netz-server"))
+        "zio-std-io"
+    else
+        "quic-go-netpoll";
 }
 
 pub const PayloadSet = struct {

@@ -4,15 +4,25 @@
 from __future__ import annotations
 
 import argparse
+import re
 from pathlib import Path
 
 
 def fields(line: str) -> dict[str, str]:
     result: dict[str, str] = {}
     for token in line.split():
-        if "=" in token:
-            key, value = token.split("=", 1)
-            result[key] = value
+        if "=" not in token:
+            continue
+        if token.count("=") != 1:
+            raise ValueError(f"malformed token {token!r}")
+        key, value = token.split("=", 1)
+        if (
+            not re.fullmatch(r"[A-Za-z][A-Za-z0-9_-]*", key)
+            or key in result
+            or not value
+        ):
+            raise ValueError(f"duplicate or empty field {token!r}")
+        result[key] = value
     return result
 
 
@@ -21,6 +31,8 @@ def load(path: Path, role_pair: str) -> list[dict[str, str]]:
     for line in path.read_text(encoding="utf-8").splitlines():
         record = fields(line)
         if (
+            record.get("record") == "socket-traffic"
+            and
             record.get("socket_boundary") == "userspace-udp-payload"
             and record.get("role_pair") == role_pair
         ):
@@ -50,9 +62,14 @@ def main() -> None:
     expected_impl = {
         "netz-client+quic-go-server": {"client": "netz", "server": "quic-go"},
         "quic-go-client+netz-server": {"client": "quic-go", "server": "netz"},
+        "netz-client+netz-server": {"client": "netz", "server": "netz"},
     }.get(args.role_pair)
     if expected_impl is None or args.iterations <= 0:
         raise SystemExit("invalid comparison configuration")
+    expected_io = {
+        role: "zio-std-io" if implementation == "netz" else "quic-go-netpoll"
+        for role, implementation in expected_impl.items()
+    }
 
     by_sample: dict[int, dict[str, dict[str, str]]] = {}
     for path in args.logs:
@@ -67,6 +84,12 @@ def main() -> None:
                 raise SystemExit(f"unexpected traffic record in {path}: {record}")
             if record.get("implementation") != expected_impl[role]:
                 raise SystemExit(f"implementation/role mismatch in {path}: {record}")
+            if (
+                record.get("sender_role") != args.sender
+                or record.get("client_io") != expected_io["client"]
+                or record.get("server_io") != expected_io["server"]
+            ):
+                raise SystemExit(f"runtime/role mismatch in {path}: {record}")
             if record.get("traffic_scope") != "connection" or record.get("complete") != "true":
                 raise SystemExit(f"incomplete traffic record in {path}: {record}")
             if record.get("logical_udp_segments") != "true":
@@ -115,6 +138,7 @@ def main() -> None:
         print(
             "protocol=quic-stream "
             f"role_pair={args.role_pair} sender_role={args.sender} "
+            f"client_io={expected_io['client']} server_io={expected_io['server']} "
             f"sample={sample} streams={args.streams} "
             "traffic_scope=connection socket_boundary=userspace-udp-payload "
             f"client_udp_sent_datagrams={client_tx_datagrams} "

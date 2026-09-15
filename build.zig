@@ -161,6 +161,18 @@ pub fn build(b: *std.Build) void {
     const run_websocket_send_shape_tests = b.addRunArtifact(
         websocket_send_shape_tests,
     );
+    const quic_quic_go_benchmark_checker_tests = b.addSystemCommand(&.{
+        "python3",
+        "tools/interop/quic_quic_go_benchmark_check_test.py",
+    });
+    const quic_quic_go_auxiliary_checker_tests = b.addSystemCommand(&.{
+        "python3",
+        "tools/interop/quic_quic_go_auxiliary_check_test.py",
+    });
+    const quic_quic_go_churn_checker_tests = b.addSystemCommand(&.{
+        "python3",
+        "tools/interop/quic_quic_go_churn_check_test.py",
+    });
 
     const test_step = b.step("test", "Run all tests");
     test_step.dependOn(&run_lib_tests.step);
@@ -171,6 +183,9 @@ pub fn build(b: *std.Build) void {
     test_step.dependOn(&run_http3_quic_go_bench_tests.step);
     test_step.dependOn(&run_exact_certificate_verifier_tests.step);
     test_step.dependOn(&run_websocket_send_shape_tests.step);
+    test_step.dependOn(&quic_quic_go_benchmark_checker_tests.step);
+    test_step.dependOn(&quic_quic_go_auxiliary_checker_tests.step);
+    test_step.dependOn(&quic_quic_go_churn_checker_tests.step);
 
     const mqtt_mtls_server = b.addExecutable(.{
         .name = "netz-mqtt-mtls-server",

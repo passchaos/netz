@@ -15,6 +15,8 @@ pub fn main(init: std.process.Init) !void {
     }
     const port = try std.fmt.parseInt(u16, args[2], 10);
     var sender: ?benchmark.Sender = null;
+    var role_pair: []const u8 = "quic-go-client+netz-server";
+    var role_pair_set = false;
     var stats = false;
     var config_args: std.ArrayList([]const u8) = .empty;
     defer config_args.deinit(std.heap.c_allocator);
@@ -27,13 +29,21 @@ pub fn main(init: std.process.Init) !void {
             ) orelse return error.InvalidArgument;
         } else if (std.mem.eql(u8, arg, "--stats")) {
             stats = true;
+        } else if (std.mem.startsWith(u8, arg, "--role-pair=")) {
+            if (role_pair_set) return error.InvalidArgument;
+            role_pair = arg["--role-pair=".len..];
+            role_pair_set = true;
         } else {
             try config_args.append(std.heap.c_allocator, arg);
         }
     }
     const selected_sender = sender orelse return error.InvalidArgument;
+    if (!std.mem.eql(u8, role_pair, "quic-go-client+netz-server") and
+        !std.mem.eql(u8, role_pair, "netz-client+netz-server"))
+    {
+        return error.InvalidArgument;
+    }
     const expected_config = try benchmark.Config.parse(config_args.items);
-    const role_pair = "quic-go-client+netz-server";
     var counting = CountingAllocator.init(std.heap.c_allocator);
     const allocator = if (stats) counting.allocator() else std.heap.c_allocator;
     defer if (stats) benchmark.printNetzMemory(
@@ -43,9 +53,9 @@ pub fn main(init: std.process.Init) !void {
         expected_config,
         counting.snapshot(),
     );
-    var threaded = std.Io.Threaded.init(allocator, .{ .async_limit = .unlimited });
-    defer threaded.deinit();
-    const io = threaded.io();
+    var backend = try netz.runtime.Backend.init(allocator);
+    defer backend.deinit();
+    const io = backend.io();
     var certificate_der: [netz.tls.testing.certificate_der_len]u8 = undefined;
     try std.base64.standard.Decoder.decode(
         &certificate_der,
@@ -67,8 +77,13 @@ pub fn main(init: std.process.Init) !void {
     );
     defer endpoint.deinit();
     std.debug.print("NETZ_QUIC_BENCH_PORT={d}\n", .{endpoint.address().ip4.port});
-    const sender_name = if (selected_sender == .server) "netz" else "quic-go";
-    try benchmark.printConfig(sender_name, role_pair, expected_config);
+    try benchmark.printConfig(
+        "netz",
+        role_pair,
+        "server",
+        selected_sender,
+        expected_config,
+    );
 
     for (0..try expected_config.rounds()) |round_index| {
         const traffic_before = socket_traffic.stats();
@@ -81,7 +96,6 @@ pub fn main(init: std.process.Init) !void {
             expected_config,
             selected_sender,
             @intCast(round_index),
-            sender_name,
             role_pair,
         );
         if (round_index >= expected_config.warmup) {
@@ -89,6 +103,7 @@ pub fn main(init: std.process.Init) !void {
                 "netz",
                 role_pair,
                 "server",
+                selected_sender,
                 expected_config,
                 @intCast(round_index - expected_config.warmup + 1),
                 socket_traffic.stats().since(traffic_before),
@@ -106,7 +121,6 @@ fn runRound(
     config: benchmark.Config,
     selected_sender: benchmark.Sender,
     round: u32,
-    sender_name: []const u8,
     role_pair: []const u8,
 ) !void {
     var server_cid: [8]u8 = undefined;
@@ -179,11 +193,24 @@ fn runRound(
         );
     if (selected_sender == .server and round >= config.warmup) {
         try benchmark.printSample(
-            sender_name,
+            "netz",
             role_pair,
+            "server",
+            selected_sender,
             config,
             round - config.warmup + 1,
             result.elapsed_ns,
+            result.checksum,
+        );
+    }
+    if (selected_sender == .client and round >= config.warmup) {
+        try benchmark.printReceiverCompletion(
+            "netz",
+            role_pair,
+            "server",
+            selected_sender,
+            config,
+            round - config.warmup + 1,
             result.checksum,
         );
     }
@@ -275,10 +302,6 @@ fn runReceiver(
     if (ack.received_bytes != result.bytes or ack.checksum != result.checksum) {
         return error.InvalidBenchmarkResult;
     }
-    std.debug.print(
-        "protocol=quic-stream role_pair=quic-go-client+netz-server receiver_complete=true round={d} received_bytes={d} checksum={d}\n",
-        .{ round, result.bytes, result.checksum },
-    );
     return .{ .elapsed_ns = 0, .checksum = result.checksum };
 }
 

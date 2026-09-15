@@ -17,9 +17,9 @@ pub fn run(_: std.process.Init, args: []const []const u8) !void {
     if (port == 0 or proxy_control_port == 0) return error.InvalidArgument;
     const config = try churn.Config.parse(args[3..]);
     const allocator = std.heap.c_allocator;
-    var threaded = std.Io.Threaded.init(allocator, .{ .async_limit = .unlimited });
-    defer threaded.deinit();
-    const io = threaded.io();
+    var backend = try netz.runtime.Backend.init(allocator);
+    defer backend.deinit();
+    const io = backend.io();
     const deadline = std.Io.Clock.Timestamp.fromNow(io, .{
         .clock = .awake,
         .raw = config.timeout(),
@@ -344,6 +344,7 @@ fn printResult(
     const counter_fin = if (config.fault == .loss) fin_faults.dropped else fin_faults.reordered;
     std.debug.print(
         "raw QUIC churn client passed: implementation=netz role_pair=netz-client+quic-go-server " ++
+            "client_io=zio-std-io server_io=quic-go-netpoll " ++
             "sender={s} fault={s} fault_scope={s}-outbound streams={d} fin={d} reset={d} " ++
             "bytes={d} checksum={d} reset_mask=0x{x:0>16} reset_code_sum={d} " ++
             "considered={d} dropped={d} held={d} reordered={d} reset_faults={d} " ++

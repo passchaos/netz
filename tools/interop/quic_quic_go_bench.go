@@ -421,7 +421,7 @@ func runServer(address, caOut string, c config, s sender) {
 		log.Fatal(err)
 	}
 	fmt.Printf("QUIC_GO_RAW_BENCH_ADDR=%s\n", address)
-	printConfig(ifSender(s, "netz", "quic-go"), "netz-client+quic-go-server", c)
+	printConfig("quic-go", "netz-client+quic-go-server", "server", s, c)
 	for round := uint32(0); round < c.rounds(); round++ {
 		trafficBefore := counting.stats()
 		ctx, cancel := context.WithTimeout(context.Background(), c.timeout)
@@ -437,7 +437,7 @@ func runServer(address, caOut string, c config, s sender) {
 			log.Fatal(err)
 		}
 		if round >= c.warmup {
-			printSocketTraffic("quic-go", "netz-client+quic-go-server", "server", c, round-c.warmup+1, counting.stats().since(trafficBefore))
+			printSocketTraffic("quic-go", "netz-client+quic-go-server", "server", s, c, round-c.warmup+1, counting.stats().since(trafficBefore))
 		}
 	}
 }
@@ -455,7 +455,7 @@ func runClient(address, caPath string, c config, s sender) {
 	if err != nil {
 		log.Fatal(err)
 	}
-	printConfig(ifSender(s, "quic-go", "netz"), "quic-go-client+netz-server", c)
+	printConfig("quic-go", "quic-go-client+netz-server", "client", s, c)
 	for round := uint32(0); round < c.rounds(); round++ {
 		udp, err := net.ListenUDP("udp4", nil)
 		if err != nil {
@@ -480,7 +480,10 @@ func runClient(address, caPath string, c config, s sender) {
 			log.Fatal(err)
 		}
 		if s == senderClient && round >= c.warmup {
-			printSample("quic-go", "quic-go-client+netz-server", c, round-c.warmup+1, result.elapsed, result.checksum)
+			printSample("quic-go", "quic-go-client+netz-server", "client", s, c, round-c.warmup+1, result.elapsed, result.checksum)
+		}
+		if s == senderServer && round >= c.warmup {
+			printReceiverCompletion("quic-go", "quic-go-client+netz-server", "client", s, c, round-c.warmup+1, result.checksum)
 		}
 		if s == senderServer {
 			if err := conn.CloseWithError(0, "benchmark complete"); err != nil {
@@ -492,7 +495,7 @@ func runClient(address, caPath string, c config, s sender) {
 			log.Fatal(err)
 		}
 		if round >= c.warmup {
-			printSocketTraffic("quic-go", "quic-go-client+netz-server", "client", c, round-c.warmup+1, counting.stats())
+			printSocketTraffic("quic-go", "quic-go-client+netz-server", "client", s, c, round-c.warmup+1, counting.stats())
 		}
 		_ = transport.Close()
 	}
@@ -560,7 +563,10 @@ func runServerRound(conn *quic.Conn, c config, s sender, round uint32) error {
 		return err
 	}
 	if s == senderServer && round >= c.warmup {
-		printSample("quic-go", "netz-client+quic-go-server", c, round-c.warmup+1, r.elapsed, r.checksum)
+		printSample("quic-go", "netz-client+quic-go-server", "server", s, c, round-c.warmup+1, r.elapsed, r.checksum)
+	}
+	if s == senderClient && round >= c.warmup {
+		printReceiverCompletion("quic-go", "netz-client+quic-go-server", "server", s, c, round-c.warmup+1, r.checksum)
 	}
 	if s == senderClient {
 		return conn.CloseWithError(0, "benchmark complete")
@@ -760,7 +766,6 @@ func runReceiver(conn *quic.Conn, control *quic.Stream, c config, s sender, roun
 	if ack.receivedBytes != total || ack.checksum != checksum {
 		return result{}, errors.New("invalid DONE_ACK result")
 	}
-	fmt.Printf("protocol=quic-stream receiver_complete=true round=%d received_bytes=%d checksum=%d\n", round, total, checksum)
 	return result{checksum: checksum}, nil
 }
 
@@ -858,20 +863,24 @@ func ifSender(s sender, whenClient, whenServer string) string {
 	}
 	return whenServer
 }
-func printConfig(implementation, rolePair string, c config) {
-	fmt.Printf("implementation=%s protocol=quic-stream direction=upload role_pair=%s connection_scope=fresh-per-sample benchmark_scope=same-application-shape warmup=%d iterations=%d streams=%d bytes_per_stream=%d application_chunk_requested=%d application_chunk_effective=%d stream_window=%d connection_window=%d steady_state_mtu=1280 quic_version=1 cipher=negotiated-unexposed cert_verify=true netz_gso=false netz_gro=false quic_go_gso=false quic_go_gro=false pacing=implementation-specific\n", implementation, rolePair, c.warmup, c.iterations, c.streams, c.bytesPerStream, c.chunkBytes, c.effectiveChunk(), c.streamWindow, c.connectionWindow())
+func printConfig(implementation, rolePair, endpointRole string, s sender, c config) {
+	fmt.Printf("record=config implementation=%s protocol=quic-stream direction=%s role_pair=%s endpoint_role=%s sender_role=%s client_io=%s server_io=%s connection_scope=fresh-per-sample benchmark_scope=same-application-shape warmup=%d iterations=%d streams=%d bytes_per_stream=%d application_chunk_requested=%d application_chunk_effective=%d stream_window=%d connection_window=%d timeout_ms=%d steady_state_mtu=1280 quic_version=1 cipher=negotiated-unexposed cert_verify=true netz_gso=false netz_gro=false quic_go_gso=false quic_go_gro=false pacing=implementation-specific\n", implementation, ifSender(s, "upload", "download"), rolePair, endpointRole, ifSender(s, "client", "server"), clientIO(rolePair), serverIO(rolePair), c.warmup, c.iterations, c.streams, c.bytesPerStream, c.chunkBytes, c.effectiveChunk(), c.streamWindow, c.connectionWindow(), c.timeout/time.Millisecond)
 }
-func printSample(implementation, rolePair string, c config, sample uint32, elapsed time.Duration, checksum uint64) {
+func printSample(implementation, rolePair, endpointRole string, s sender, c config, sample uint32, elapsed time.Duration, checksum uint64) {
 	mib := float64(c.totalBytes()) * 1e9 / float64(elapsed.Nanoseconds()) / (1024 * 1024)
-	fmt.Printf("implementation=%s protocol=quic-stream direction=upload role_pair=%s connection_scope=fresh-per-sample benchmark_scope=same-application-shape sample=%d elapsed_ns=%d logical_MiB_s=%.3f streams=%d sent_bytes=%d received_bytes=%d checksum=%d complete=true\n", implementation, rolePair, sample, elapsed.Nanoseconds(), mib, c.streams, c.totalBytes(), c.totalBytes(), checksum)
+	fmt.Printf("record=result implementation=%s protocol=quic-stream direction=%s role_pair=%s endpoint_role=%s sender_role=%s client_io=%s server_io=%s connection_scope=fresh-per-sample benchmark_scope=same-application-shape sample=%d elapsed_ns=%d logical_MiB_s=%.3f streams=%d bytes_per_stream=%d sent_bytes=%d received_bytes=%d checksum=%d completion_exchange_verified=true complete=true\n", implementation, ifSender(s, "upload", "download"), rolePair, endpointRole, ifSender(s, "client", "server"), clientIO(rolePair), serverIO(rolePair), sample, elapsed.Nanoseconds(), mib, c.streams, c.bytesPerStream, c.totalBytes(), c.totalBytes(), checksum)
 }
 
-func printSocketTraffic(implementation, rolePair, endpointRole string, c config, sample uint32, traffic socketTraffic) {
-	fmt.Printf("implementation=%s protocol=quic-stream role_pair=%s endpoint_role=%s sample=%d streams=%d traffic_scope=connection socket_boundary=userspace-udp-payload udp_sent_datagrams=%d udp_sent_payload_bytes=%d udp_received_datagrams=%d udp_received_payload_bytes=%d logical_udp_segments=true complete=true\n", implementation, rolePair, endpointRole, sample, c.streams, traffic.sentDatagrams, traffic.sentBytes, traffic.receivedDatagrams, traffic.receivedBytes)
+func printReceiverCompletion(implementation, rolePair, endpointRole string, s sender, c config, sample uint32, checksum uint64) {
+	fmt.Printf("record=receiver-complete implementation=%s protocol=quic-stream direction=%s role_pair=%s endpoint_role=%s sender_role=%s client_io=%s server_io=%s connection_scope=fresh-per-sample benchmark_scope=same-application-shape sample=%d streams=%d bytes_per_stream=%d received_bytes=%d checksum=%d completion_exchange_verified=true complete=true\n", implementation, ifSender(s, "upload", "download"), rolePair, endpointRole, ifSender(s, "client", "server"), clientIO(rolePair), serverIO(rolePair), sample, c.streams, c.bytesPerStream, c.totalBytes(), checksum)
+}
+
+func printSocketTraffic(implementation, rolePair, endpointRole string, s sender, c config, sample uint32, traffic socketTraffic) {
+	fmt.Printf("record=socket-traffic implementation=%s protocol=quic-stream role_pair=%s endpoint_role=%s sender_role=%s client_io=%s server_io=%s sample=%d streams=%d traffic_scope=connection socket_boundary=userspace-udp-payload udp_sent_datagrams=%d udp_sent_payload_bytes=%d udp_received_datagrams=%d udp_received_payload_bytes=%d logical_udp_segments=true complete=true\n", implementation, rolePair, endpointRole, ifSender(s, "client", "server"), clientIO(rolePair), serverIO(rolePair), sample, c.streams, traffic.sentDatagrams, traffic.sentBytes, traffic.receivedDatagrams, traffic.receivedBytes)
 }
 
 func printGoMemory(rolePair, endpointRole string, s sender, c config, before, after goMemorySnapshot) {
-	fmt.Printf("implementation=quic-go protocol=quic-stream role_pair=%s endpoint_role=%s sender_role=%s streams=%d memory_scope=benchmark-run-after-argument-parse allocator_scope=go-runtime-heap alloc_count=%d free_count=%d total_allocated_bytes=%d heap_alloc_bytes_end=%d heap_sys_bytes_end=%d runtime_sys_bytes_end=%d gc_cycles=%d complete=true\n", rolePair, endpointRole, ifSender(s, "client", "server"), c.streams, after.mallocs-before.mallocs, after.frees-before.frees, after.totalAlloc-before.totalAlloc, after.heapAlloc, after.heapSys, after.sys, after.numGC-before.numGC)
+	fmt.Printf("record=memory implementation=quic-go protocol=quic-stream role_pair=%s endpoint_role=%s sender_role=%s client_io=%s server_io=%s streams=%d memory_scope=benchmark-run-after-argument-parse allocator_scope=go-runtime-heap alloc_count=%d free_count=%d total_allocated_bytes=%d heap_alloc_bytes_end=%d heap_sys_bytes_end=%d runtime_sys_bytes_end=%d gc_cycles=%d complete=true\n", rolePair, endpointRole, ifSender(s, "client", "server"), clientIO(rolePair), serverIO(rolePair), c.streams, after.mallocs-before.mallocs, after.frees-before.frees, after.totalAlloc-before.totalAlloc, after.heapAlloc, after.heapSys, after.sys, after.numGC-before.numGC)
 }
 
 const (
@@ -1453,32 +1462,32 @@ func printPersistentClientResult(c persistentConfig, latencies []uint64, elapsed
 		for _, latency := range latencies {
 			totalNS += latency
 		}
-		fmt.Printf("record=result implementation=%s protocol=quic-stream mode=echo direction=roundtrip role_pair=%s result_owner=client run=%d client_io=%s server_io=%s connection_scope=persistent endpoint_topology=independent-udp benchmark_scope=same-application-shape warmup=%d iterations=%d connections=1 streams=1 payload_bytes=%d measured_bytes=%d total_bytes=%d checksum=%d total_elapsed_ns=%d mean_ns=%d min_ns=%d p50_ns=%d p90_ns=%d p99_ns=%d p999_ns=%d max_ns=%d cert_verify=true quic_version=1 gso=false gro=false sender_role=client completion_exchange_verified=true complete=true\n", implementation, c.rolePair, c.run, persistentClientIO(c.rolePair), persistentServerIO(c.rolePair), c.warmup, c.iterations, c.payloadBytes, uint64(c.iterations)*uint64(c.payloadBytes), bytes, checksum, totalNS, totalNS/uint64(c.iterations), latencies[0], persistentPercentile(latencies, 50, 100), persistentPercentile(latencies, 90, 100), persistentPercentile(latencies, 99, 100), persistentPercentile(latencies, 999, 1000), latencies[len(latencies)-1])
+		fmt.Printf("record=result implementation=%s protocol=quic-stream mode=echo direction=roundtrip role_pair=%s result_owner=client run=%d client_io=%s server_io=%s connection_scope=persistent endpoint_topology=independent-udp benchmark_scope=same-application-shape warmup=%d iterations=%d connections=1 streams=1 payload_bytes=%d measured_bytes=%d total_bytes=%d checksum=%d total_elapsed_ns=%d mean_ns=%d min_ns=%d p50_ns=%d p90_ns=%d p99_ns=%d p999_ns=%d max_ns=%d cert_verify=true quic_version=1 gso=false gro=false sender_role=client completion_exchange_verified=true complete=true\n", implementation, c.rolePair, c.run, clientIO(c.rolePair), serverIO(c.rolePair), c.warmup, c.iterations, c.payloadBytes, uint64(c.iterations)*uint64(c.payloadBytes), bytes, checksum, totalNS, totalNS/uint64(c.iterations), latencies[0], persistentPercentile(latencies, 50, 100), persistentPercentile(latencies, 90, 100), persistentPercentile(latencies, 99, 100), persistentPercentile(latencies, 999, 1000), latencies[len(latencies)-1])
 		return
 	}
 	if c.sender == senderServer {
 		implementation = persistentServerImplementation(c.rolePair)
 	}
 	mib := float64(bytes) * 1e9 / float64(elapsedNS) / (1024 * 1024)
-	fmt.Printf("record=result implementation=%s protocol=quic-stream mode=aggregate direction=%s role_pair=%s result_owner=client run=%d client_io=%s server_io=%s connection_scope=parallel-independent-endpoints endpoint_topology=one-udp-socket-per-connection benchmark_scope=same-application-shape timing_scope=stream-setup-through-verified-completion connections=%d streams=%d bytes_per_stream=%d transferred_bytes=%d checksum=%d elapsed_ns=%d logical_MiB_s=%.3f sender_role=%s cert_verify=true quic_version=1 gso=false gro=false completion_exchange_verified=true complete=true\n", implementation, ifSender(c.sender, "upload", "download"), c.rolePair, c.run, persistentClientIO(c.rolePair), persistentServerIO(c.rolePair), c.connections, c.streams, c.bytesPerStream, bytes, checksum, elapsedNS, mib, ifSender(c.sender, "client", "server"))
+	fmt.Printf("record=result implementation=%s protocol=quic-stream mode=aggregate direction=%s role_pair=%s result_owner=client run=%d client_io=%s server_io=%s connection_scope=parallel-independent-endpoints endpoint_topology=one-udp-socket-per-connection benchmark_scope=same-application-shape timing_scope=stream-setup-through-verified-completion connections=%d streams=%d bytes_per_stream=%d transferred_bytes=%d checksum=%d elapsed_ns=%d logical_MiB_s=%.3f sender_role=%s cert_verify=true quic_version=1 gso=false gro=false completion_exchange_verified=true complete=true\n", implementation, ifSender(c.sender, "upload", "download"), c.rolePair, c.run, clientIO(c.rolePair), serverIO(c.rolePair), c.connections, c.streams, c.bytesPerStream, bytes, checksum, elapsedNS, mib, ifSender(c.sender, "client", "server"))
 }
 
 func printPersistentServerComplete(c persistentConfig, bytes, checksum uint64) {
 	if c.mode == "echo" {
-		fmt.Printf("record=server-complete implementation=%s protocol=quic-stream mode=echo direction=roundtrip role_pair=%s endpoint_role=server run=%d client_io=%s server_io=%s connection_scope=persistent endpoint_topology=independent-udp benchmark_scope=same-application-shape warmup=%d iterations=%d connections=1 streams=1 payload_bytes=%d total_bytes=%d checksum=%d sender_role=client connections_complete=1 cert_verify=true quic_version=1 gso=false gro=false completion_exchange_verified=true complete=true\n", persistentServerImplementation(c.rolePair), c.rolePair, c.run, persistentClientIO(c.rolePair), persistentServerIO(c.rolePair), c.warmup, c.iterations, c.payloadBytes, bytes, checksum)
+		fmt.Printf("record=server-complete implementation=%s protocol=quic-stream mode=echo direction=roundtrip role_pair=%s endpoint_role=server run=%d client_io=%s server_io=%s connection_scope=persistent endpoint_topology=independent-udp benchmark_scope=same-application-shape warmup=%d iterations=%d connections=1 streams=1 payload_bytes=%d total_bytes=%d checksum=%d sender_role=client connections_complete=1 cert_verify=true quic_version=1 gso=false gro=false completion_exchange_verified=true complete=true\n", persistentServerImplementation(c.rolePair), c.rolePair, c.run, clientIO(c.rolePair), serverIO(c.rolePair), c.warmup, c.iterations, c.payloadBytes, bytes, checksum)
 		return
 	}
-	fmt.Printf("record=server-complete implementation=%s protocol=quic-stream mode=aggregate direction=%s role_pair=%s endpoint_role=server run=%d client_io=%s server_io=%s connection_scope=parallel-independent-endpoints endpoint_topology=one-udp-socket-per-connection benchmark_scope=same-application-shape warmup=0 iterations=1 connections=%d streams=%d bytes_per_stream=%d payload_bytes=%d transferred_bytes=%d checksum=%d sender_role=%s connections_complete=%d cert_verify=true quic_version=1 gso=false gro=false completion_exchange_verified=true complete=true\n", persistentServerImplementation(c.rolePair), ifSender(c.sender, "upload", "download"), c.rolePair, c.run, persistentClientIO(c.rolePair), persistentServerIO(c.rolePair), c.connections, c.streams, c.bytesPerStream, c.payloadBytes, bytes, checksum, ifSender(c.sender, "client", "server"), c.connections)
+	fmt.Printf("record=server-complete implementation=%s protocol=quic-stream mode=aggregate direction=%s role_pair=%s endpoint_role=server run=%d client_io=%s server_io=%s connection_scope=parallel-independent-endpoints endpoint_topology=one-udp-socket-per-connection benchmark_scope=same-application-shape warmup=0 iterations=1 connections=%d streams=%d bytes_per_stream=%d payload_bytes=%d transferred_bytes=%d checksum=%d sender_role=%s connections_complete=%d cert_verify=true quic_version=1 gso=false gro=false completion_exchange_verified=true complete=true\n", persistentServerImplementation(c.rolePair), ifSender(c.sender, "upload", "download"), c.rolePair, c.run, clientIO(c.rolePair), serverIO(c.rolePair), c.connections, c.streams, c.bytesPerStream, c.payloadBytes, bytes, checksum, ifSender(c.sender, "client", "server"), c.connections)
 }
 
-func persistentClientIO(rolePair string) string {
+func clientIO(rolePair string) string {
 	if strings.HasPrefix(rolePair, "netz-client") {
 		return "zio-std-io"
 	}
 	return "quic-go-netpoll"
 }
 
-func persistentServerIO(rolePair string) string {
+func serverIO(rolePair string) string {
 	if strings.HasSuffix(rolePair, "netz-server") {
 		return "zio-std-io"
 	}

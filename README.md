@@ -1013,6 +1013,7 @@ taskset -c 0 zig build bench-quic-handshake-stream -Doptimize=ReleaseFast -- --m
 zig build bench-quic-handshake-stream -Doptimize=ReleaseFast -- --mode=lifecycle-churn --iterations=4096 --streams=16 --loss-pct=5
 zig build bench-quic-handshake-stream -Doptimize=ReleaseFast -- --mode=lifecycle-churn --iterations=4096 --streams=16 --reorder-every=5
 zig build bench-quic-quic-go -Doptimize=ReleaseFast -- --warmup=2 --iterations=5 --bytes-per-stream=4194304 --chunk-bytes=16384 --stream-window=1048576
+zig build bench-quic-quic-go -Doptimize=ReleaseFast -- --netz-only --streams=1 --warmup=0 --iterations=1 --bytes-per-stream=262144
 zig build bench-quic-persistent-external -Doptimize=ReleaseFast -- --mode=both --samples=5 --connections=4 --warmup=200 --iterations=5000 --payload-bytes=1024 --bytes-per-stream=1048576
 zig build bench-quic-persistent-external -Doptimize=ReleaseFast -- --netz-only --mode=aggregate --samples=3 --connections=4 --streams=1 --bytes-per-stream=1048576 --server-topology=independent
 zig build bench-quic-one-rtt-send -Doptimize=ReleaseFast
@@ -1118,7 +1119,12 @@ connection per sample. Untimed control and stream preludes precede the timed
 payload, while DONE/DONE_ACK require exact byte, FIN, and checksum validation.
 Both endpoints also emit complete-connection userspace UDP payload/datagram
 counters; the runner joins them per sample and retains teardown observation
-deltas. Results remain `same-application-shape`: the counters demonstrate that
+deltas. Netz processes use zio behind the `std.Io` protocol boundary. A strict
+checker independently recomputes every measured-round checksum and requires
+matching sender, receiver-completion, runtime, shape, and throughput records.
+Use `--netz-only` when the audited quic-go fixture is unavailable to exercise
+both netz sender directions without treating the run as a cross-library
+comparison. Results remain `same-application-shape`: the counters demonstrate that
 ACK/pacing, packetization, and application scheduling are not externally
 equalized, and kernel/interface capture is still required for an equal-wire
 claim. Add `--stats` to record whole-process peak RSS for both implementations,

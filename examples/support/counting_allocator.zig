@@ -82,7 +82,7 @@ pub const CountingAllocator = struct {
         .{std.atomic.Value(usize).init(0)} ** bucket_count,
     alloc_bucket_bytes: [bucket_count]std.atomic.Value(usize) =
         .{std.atomic.Value(usize).init(0)} ** bucket_count,
-    exact_mutex: std.Io.Mutex = .init,
+    exact_mutex: std.atomic.Mutex = .unlocked,
     exact_sizes: [exact_size_capacity]ExactSize =
         .{ExactSize{}} ** exact_size_capacity,
     exact_size_len: usize = 0,
@@ -124,9 +124,8 @@ pub const CountingAllocator = struct {
                 self.alloc_bucket_bytes[index].load(.monotonic);
         }
         const mutable: *CountingAllocator = @constCast(self);
-        const io = std.Io.Threaded.global_single_threaded.io();
-        mutable.exact_mutex.lockUncancelable(io);
-        defer mutable.exact_mutex.unlock(io);
+        mutable.lockExactSizes();
+        defer mutable.exact_mutex.unlock();
         result.exact_size_len = self.exact_size_len;
         @memcpy(
             result.exact_sizes[0..self.exact_size_len],
@@ -186,9 +185,8 @@ pub const CountingAllocator = struct {
     }
 
     fn recordExactSize(self: *CountingAllocator, len: usize) void {
-        const io = std.Io.Threaded.global_single_threaded.io();
-        self.exact_mutex.lockUncancelable(io);
-        defer self.exact_mutex.unlock(io);
+        self.lockExactSizes();
+        defer self.exact_mutex.unlock();
         for (self.exact_sizes[0..self.exact_size_len]) |*entry| {
             if (entry.size != len) continue;
             entry.count += 1;
@@ -214,6 +212,10 @@ pub const CountingAllocator = struct {
             _ = self.total_freed.fetchAdd(delta, .monotonic);
             _ = self.current_bytes.fetchSub(delta, .monotonic);
         }
+    }
+
+    fn lockExactSizes(self: *CountingAllocator) void {
+        while (!self.exact_mutex.tryLock()) std.atomic.spinLoopHint();
     }
 
     fn bucketIndex(len: usize) usize {

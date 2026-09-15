@@ -32,6 +32,8 @@ class RawQuicChurnCheckTests(unittest.TestCase):
         receiver = server_impl if sender == "client" else client_impl
         common = (
             f"role_pair={role_pair} sender={sender} fault={fault} "
+            f"client_io={'zio-std-io' if client_impl == 'netz' else 'quic-go-netpoll'} "
+            f"server_io={'zio-std-io' if server_impl == 'netz' else 'quic-go-netpoll'} "
             f"fault_scope={scope}-outbound streams=32 fin=16 reset=16 "
             f"bytes=266240 checksum={checksum} reset_mask=0x00000000aaaaaaaa "
             "reset_code_sum=262400 sibling=true"
@@ -135,6 +137,17 @@ class RawQuicChurnCheckTests(unittest.TestCase):
                 )
             )
             with self.assertRaisesRegex(ValueError, "final-size evidence"):
+                self.verify_case(client, server, proxy)
+
+    def test_wrong_backend_is_rejected(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            client, server, proxy = self.write_case(directory)
+            server.write_text(
+                server.read_text().replace(
+                    "server_io=zio-std-io", "server_io=threaded",
+                )
+            )
+            with self.assertRaisesRegex(ValueError, "server_io"):
                 self.verify_case(client, server, proxy)
 
     def test_duplicate_result_is_rejected(self) -> None:

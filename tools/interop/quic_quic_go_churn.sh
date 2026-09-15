@@ -43,6 +43,8 @@ on_exit() {
 }
 trap on_exit EXIT
 
+python3 "$repo_root/tools/interop/quic_quic_go_churn_check_test.py"
+
 (cd "$fixture_dir" && go test -mod=readonly \
   "$repo_root/tools/interop/quic_quic_go_bench.go" \
   "$repo_root/tools/interop/quic_quic_go_churn.go" \

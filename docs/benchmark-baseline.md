@@ -2310,6 +2310,29 @@ zig build bench-quic-quic-go -Doptimize=ReleaseFast -- \
   --chunk-bytes=16384 --stream-window=1048576 --timeout-ms=30000
 ```
 
+The current harness runs every netz endpoint on zio and exposes only `std.Io`
+to the QUIC implementation. Config, sender result, receiver completion, socket
+traffic, and optional memory records carry `client_io` and `server_io`; the
+strict checkers reject missing or role-inconsistent backend identities and
+independently recompute each measured-round checksum. `--netz-only` provides a
+two-process zio functional gate when the audited quic-go fixture is absent. A
+2026-09-15 ReleaseFast smoke with one fresh connection per direction and a
+256-KiB payload verified checksum 33,423,360, exact bidirectional socket
+accounting, and completion exchange at 56.446 MiB/s client-send and 65.788
+MiB/s server-send. These are single-sample runtime checks, not comparative
+performance evidence.
+The final schema was also exercised against quic-go v0.59.0 for both role pairs
+and both sender directions, with and without memory telemetry; every 64-KiB
+sample verified checksum 8,355,840, completion exchange, paired socket traffic,
+and runtime identity. A reduced 32-stream matrix additionally passed loss and
+reordering in both directions and role pairs after the shared churn commands
+moved to zio. These are migration gates rather than performance samples.
+
+The cross-library measurements below were captured before this zio migration
+and remain historical `std.Io.Threaded` baselines. They must not be cited as
+zio performance; a new fixed-binary, CPU-pinned, order-interleaved quic-go run
+is required for a current ratio.
+
 CPU-0/client and CPU-1/server samples on 2026-09-08 measured:
 
 | Streams | Sender | Role pair | Throughput |

@@ -4,11 +4,26 @@
 from __future__ import annotations
 
 import argparse
+import re
 from pathlib import Path
 
 
 def fields(line: str) -> dict[str, str]:
-    return dict(token.split("=", 1) for token in line.split() if "=" in token)
+    result: dict[str, str] = {}
+    for token in line.split():
+        if "=" not in token:
+            continue
+        if token.count("=") != 1:
+            raise ValueError(f"malformed token {token!r}")
+        key, value = token.split("=", 1)
+        if (
+            not re.fullmatch(r"[A-Za-z][A-Za-z0-9_-]*", key)
+            or key in result
+            or not value
+        ):
+            raise ValueError(f"duplicate or empty field {token!r}")
+        result[key] = value
+    return result
 
 
 def load(path: Path, protocol: str, role_pair: str) -> dict[str, str]:
@@ -16,7 +31,8 @@ def load(path: Path, protocol: str, role_pair: str) -> dict[str, str]:
     for line in path.read_text(encoding="utf-8").splitlines():
         record = fields(line)
         if (
-            record.get("memory_scope")
+            record.get("record") == "memory"
+            and record.get("memory_scope")
             and record.get("protocol") == protocol
             and record.get("role_pair") == role_pair
         ):
@@ -57,6 +73,11 @@ def main() -> None:
     parser.add_argument("--warmup", type=int)
     parser.add_argument("--iterations", type=int)
     parser.add_argument("--quic-version", type=int)
+    parser.add_argument(
+        "--rss-source",
+        choices=("gnu-time-maxrss", "busybox-time-maxrss"),
+        default="gnu-time-maxrss",
+    )
     parser.add_argument("--client-log", required=True, type=Path)
     parser.add_argument("--server-log", required=True, type=Path)
     parser.add_argument("--client-rss", required=True, type=Path)
@@ -66,14 +87,31 @@ def main() -> None:
     expected = {
         "netz-client+quic-go-server": {"client": "netz", "server": "quic-go"},
         "quic-go-client+netz-server": {"client": "quic-go", "server": "netz"},
+        "netz-client+netz-server": {"client": "netz", "server": "netz"},
     }.get(args.role_pair)
     if (
         expected is None
         or args.protocol not in ("quic-stream", "http3")
+        or (
+            args.role_pair == "netz-client+netz-server"
+            and args.protocol != "quic-stream"
+        )
         or args.streams not in (1, 4, 16)
         or args.quic_version not in (None, 1, 2)
     ):
         raise SystemExit("invalid memory comparison configuration")
+    expected_io = (
+        {
+            role: (
+                "zio-std-io"
+                if implementation == "netz"
+                else "quic-go-netpoll"
+            )
+            for role, implementation in expected.items()
+        }
+        if args.protocol == "quic-stream"
+        else None
+    )
     if args.protocol == "http3" and (
         args.mode not in ("upload", "download")
         or args.body_bytes is None
@@ -96,6 +134,13 @@ def main() -> None:
             or record.get("protocol") != args.protocol
             or record.get("endpoint_role") != role
             or record.get("sender_role") != args.sender
+            or (
+                expected_io is not None
+                and (
+                    record.get("client_io") != expected_io["client"]
+                    or record.get("server_io") != expected_io["server"]
+                )
+            )
             or integer(record, "streams") != args.streams
             or record.get("memory_scope")
             != "benchmark-run-after-argument-parse"
@@ -125,10 +170,10 @@ def main() -> None:
         fields_out = " ".join(
             f"{key}={value}" for key, value in record.items()
             if key not in {
-                "implementation", "protocol", "mode", "role_pair",
+                "record", "implementation", "protocol", "mode", "role_pair",
                 "endpoint_role", "sender_role", "streams",
                 "body_bytes", "complete",
-                "quic_version",
+                "quic_version", "client_io", "server_io",
             }
         )
         shape = (
@@ -137,11 +182,17 @@ def main() -> None:
             if args.protocol == "http3"
             else ""
         )
+        io_shape = (
+            f"client_io={expected_io['client']} "
+            f"server_io={expected_io['server']} "
+            if expected_io is not None else ""
+        )
         print(
-            f"implementation={implementation} protocol={args.protocol} "
+            f"record=memory implementation={implementation} protocol={args.protocol} "
             f"role_pair={args.role_pair} endpoint_role={role} "
             f"sender_role={args.sender} streams={args.streams} "
-            f"{shape}rss_scope=whole-process rss_source=gnu-time-maxrss "
+            f"{io_shape}"
+            f"{shape}rss_scope=whole-process rss_source={args.rss_source} "
             f"process_peak_rss_kib={rss(rss_path)} {fields_out} complete=true"
         )
 
