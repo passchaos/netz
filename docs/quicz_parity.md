@@ -524,10 +524,14 @@ second socket completion is copied into one preallocated retained slot so
 canceling the receive race cannot lose it. Tests check callback payload
 pointers, two-packet batch delivery, simultaneous-socket preservation,
 callback-error state commitment, and source-correct stateless-reset responses.
-One preferred endpoint/address family can be advertised per server today; the
-RFC field can carry both IPv4 and IPv6 candidates under one CID, as exposed by
-Quinn's separate v4/v6 configuration, so simultaneous dual-stack advertisement
-remains open.
+The server can also encode IPv4 and IPv6 candidates together under the RFC's
+single preferred CID/token when one family uses the primary endpoint and the
+other uses the secondary endpoint, matching Quinn's separate v4/v6
+configuration surface. Typed wire round-trip tests require both candidates,
+and real handshakes verify each family both as a single-family advertisement
+and as the selected candidate of a dual-stack advertisement. A client
+connection still owns one local UDP endpoint, so actively changing its own
+address family during migration remains a separate gap.
 
 ## Feature parity table
 

@@ -46,6 +46,10 @@ pub const Options = struct {
     /// `preferred_address` must be null or exactly match this endpoint. The
     /// server remains the sole receive owner for both sockets.
     preferred_endpoint: ?*quic.runtime.Endpoint = null,
+    /// Optional second address carried in the same RFC preferred_address
+    /// parameter. One of the two addresses must be the primary endpoint and
+    /// `preferred_endpoint` supplies the other family.
+    preferred_additional_address: ?std.Io.net.IpAddress = null,
 };
 
 pub const WorkerError = quic.handshake.AcceptTimeoutError;
@@ -121,7 +125,7 @@ const Admission = struct {
     preferred_server_connection_id: [
         quic.endpoint_dispatcher.default_server_connection_id_len
     ]u8 = undefined,
-    preferred_address: ?std.Io.net.IpAddress = null,
+    preferred_endpoints: PreferredEndpointSet = .{},
     deadline_ns: u64,
     registered: bool = true,
     initial_owned: bool = true,
@@ -213,6 +217,16 @@ const PendingEndpointDatagramView = struct {
     ecn: quic.packet_space.EcnCodepoint,
 };
 
+const PreferredEndpointSet = struct {
+    ipv4: ?*quic.runtime.Endpoint = null,
+    ipv6: ?*quic.runtime.Endpoint = null,
+    secondary: ?*quic.runtime.Endpoint = null,
+
+    fn present(self: PreferredEndpointSet) bool {
+        return self.ipv4 != null or self.ipv6 != null;
+    }
+};
+
 /// Shared-endpoint raw QUIC connection owner. Connection pointers remain
 /// stable until `removeConnection` or `deinit`; callers must not move or free
 /// them. All UDP receives must flow through this server.
@@ -221,6 +235,7 @@ pub const Server = struct {
     endpoint: *quic.runtime.Endpoint,
     dispatcher: *quic.endpoint_dispatcher.Dispatcher,
     options: Options,
+    preferred_endpoints: PreferredEndpointSet = .{},
     handshake_options: quic.handshake.ServerOptions,
     last_stateless_reset_ns: ?u64 = null,
     connection_id_replenishment_failures: u64 = 0,
@@ -313,36 +328,12 @@ pub const Server = struct {
             // leave peers unable to use them after this process loses state.
             return error.InvalidOptions;
         }
-        const preferred_address = if (options.preferred_endpoint) |preferred_endpoint| blk: {
-            if (preferred_endpoint == endpoint or
-                preferred_endpoint.io.userdata != endpoint.io.userdata or
-                preferred_endpoint.io.vtable != endpoint.io.vtable or
-                preferred_endpoint.limits.max_datagram_size !=
-                    endpoint.limits.max_datagram_size)
-            {
-                return error.InvalidOptions;
-            }
-            if (preferred_endpoint.groReceiveEnabled()) {
-                // Multi-endpoint receive currently preserves one complete UDP
-                // datagram per wake; it must not split a GRO super-datagram.
-                return error.InvalidOptions;
-            }
-            if (options.preferred_address) |configured| {
-                if (!configured.eql(&preferred_endpoint.address())) {
-                    return error.InvalidOptions;
-                }
-            }
-            break :blk preferred_endpoint.address();
-        } else options.preferred_address;
-        if (preferred_address) |preferred| {
-            if (options.stateless_reset_key == null or
-                !preferredAddressIsUsable(preferred) or
-                (options.preferred_endpoint == null and
-                    !preferred.eql(&endpoint.address())))
-            {
-                return error.InvalidOptions;
-            }
-        }
+        const preferred_endpoints = try resolvePreferredEndpoints(
+            endpoint,
+            options,
+        );
+        if (preferred_endpoints.present() and
+            options.stateless_reset_key == null) return error.InvalidOptions;
         const completed_storage = try allocator.alloc(
             Completion,
             options.max_pending_handshakes,
@@ -359,14 +350,14 @@ pub const Server = struct {
         errdefer allocator.destroy(dispatcher);
         dispatcher.* = .init(allocator, endpoint);
         errdefer dispatcher.deinit();
-        const preferred_receive_storage = if (options.preferred_endpoint != null)
+        const preferred_receive_storage = if (preferred_endpoints.secondary != null)
             try allocator.alloc(u8, endpoint.limits.max_datagram_size)
         else
             &.{};
         errdefer if (preferred_receive_storage.len != 0) {
             allocator.free(preferred_receive_storage);
         };
-        const pending_multi_endpoint_storage = if (options.preferred_endpoint != null)
+        const pending_multi_endpoint_storage = if (preferred_endpoints.secondary != null)
             try allocator.alloc(u8, endpoint.limits.max_datagram_size)
         else
             &.{};
@@ -374,12 +365,21 @@ pub const Server = struct {
             allocator.free(pending_multi_endpoint_storage);
         };
         var effective_options = options;
-        effective_options.preferred_address = preferred_address;
+        effective_options.preferred_endpoint = preferred_endpoints.secondary;
+        effective_options.preferred_address = if (preferred_endpoints.secondary) |secondary|
+            secondary.address()
+        else if (preferred_endpoints.ipv4) |ipv4|
+            ipv4.address()
+        else if (preferred_endpoints.ipv6) |ipv6|
+            ipv6.address()
+        else
+            null;
         const server = Server{
             .allocator = allocator,
             .endpoint = endpoint,
             .dispatcher = dispatcher,
             .options = effective_options,
+            .preferred_endpoints = preferred_endpoints,
             .handshake_options = effective_handshake_options,
             .worker_context = worker_context,
             .completed_storage = completed_storage,
@@ -850,7 +850,7 @@ pub const Server = struct {
         {
             return error.BufferTooShort;
         }
-        if (self.options.preferred_endpoint != null) {
+        if (self.preferred_endpoints.secondary != null) {
             const required_storage = std.math.mul(
                 usize,
                 output.len,
@@ -1068,7 +1068,7 @@ pub const Server = struct {
         context: anytype,
         comptime visitor: anytype,
     ) (Error || callbackErrorSet(visitor))!VisitEvent {
-        if (self.options.preferred_endpoint != null) {
+        if (self.preferred_endpoints.secondary != null) {
             return self.receiveVisitingMultiEndpoint(
                 supported_versions,
                 storage,
@@ -1204,7 +1204,7 @@ pub const Server = struct {
                 }
                 continue;
             }
-            const preferred = self.options.preferred_endpoint orelse
+            const preferred = self.preferred_endpoints.secondary orelse
                 unreachable;
             const receive_timeout = multiEndpointReceiveTimeout(
                 self.endpoint.io,
@@ -1394,7 +1394,7 @@ pub const Server = struct {
             }
             _ = self.expireHandshakes(monotonicNowNs(self.endpoint.io));
         }
-        var endpoint_event = if (self.options.preferred_endpoint) |preferred| blk: {
+        var endpoint_event = if (self.preferred_endpoints.secondary) |preferred| blk: {
             if (comptime builtin.is_test) {
                 self.multi_endpoint_owning_count +|= 1;
             }
@@ -1524,7 +1524,7 @@ pub const Server = struct {
 
         const handle = self.reserveHandle();
         const initial = event.new_initial;
-        const has_preferred_address = self.options.preferred_address != null;
+        const has_preferred_address = self.preferred_endpoints.present();
         const inbox = try self.dispatcher
             .admitPendingHandshakeWithServerConnectionIds(
             handle,
@@ -1555,7 +1555,7 @@ pub const Server = struct {
             .connection = connection_storage,
             .initial = event.takeNewInitial().?,
             .server_connection_id = undefined,
-            .preferred_address = self.options.preferred_address,
+            .preferred_endpoints = self.preferred_endpoints,
             .deadline_ns = handshakeDeadlineNs(
                 self.endpoint.io,
                 self.options.handshake_timeout_ms,
@@ -1664,7 +1664,7 @@ pub const Server = struct {
                     handle,
                     &owned.connection,
                 );
-                if (self.options.preferred_endpoint) |preferred_endpoint| {
+                if (self.preferred_endpoints.secondary) |preferred_endpoint| {
                     try owned.connection.registerLocalPreferredEndpoint(
                         preferred_endpoint,
                     );
@@ -1769,12 +1769,12 @@ fn runWorker(
 ) std.Io.Cancelable!void {
     var options = context.options;
     options.local_connection_id = &admission.server_connection_id;
-    if (admission.preferred_address) |preferred_address| {
+    if (admission.preferred_endpoints.present()) {
         const key = options.initial_one_rtt_config
             .local_stateless_reset_key orelse unreachable;
         options.local_transport_parameters.preferred_address =
-            preferredAddressForEndpoint(
-                preferred_address,
+            preferredAddressForEndpoints(
+                admission.preferred_endpoints,
                 &admission.preferred_server_connection_id,
                 quic.stateless_reset.tokenForConnectionId(
                     key,
@@ -1804,26 +1804,113 @@ fn runWorker(
     };
 }
 
-fn preferredAddressForEndpoint(
-    address: std.Io.net.IpAddress,
+fn preferredAddressForEndpoints(
+    endpoints: PreferredEndpointSet,
     connection_id: []const u8,
     token: [quic.stateless_reset.token_len]u8,
 ) quic.PreferredAddress {
-    return switch (address) {
-        .ip4 => |ip4| .{
-            .ipv4_address = ip4.bytes,
-            .ipv4_port = ip4.port,
-            .connection_id = connection_id,
-            .stateless_reset_token = token,
-        },
-        .ip6 => |ip6| .{
-            .ipv6_address = ip6.bytes,
-            .ipv6_port = ip6.port,
-            .connection_id = connection_id,
-            .stateless_reset_token = token,
-        },
+    var preferred = quic.PreferredAddress{
+        .connection_id = connection_id,
+        .stateless_reset_token = token,
     };
+    if (endpoints.ipv4) |endpoint| {
+        preferred.ipv4_address = endpoint.address().ip4.bytes;
+        preferred.ipv4_port = endpoint.address().ip4.port;
+    }
+    if (endpoints.ipv6) |endpoint| {
+        preferred.ipv6_address = endpoint.address().ip6.bytes;
+        preferred.ipv6_port = endpoint.address().ip6.port;
+    }
+    return preferred;
 }
+
+fn resolvePreferredEndpoints(
+    primary: *quic.runtime.Endpoint,
+    options: Options,
+) error{InvalidOptions}!PreferredEndpointSet {
+    var result = PreferredEndpointSet{};
+    if (options.preferred_endpoint) |preferred| {
+        if (preferred == primary) return error.InvalidOptions;
+        if (options.preferred_address) |configured| {
+            if (!configured.eql(&preferred.address())) {
+                return error.InvalidOptions;
+            }
+        }
+        switch (preferred.address()) {
+            .ip4 => result.ipv4 = preferred,
+            .ip6 => result.ipv6 = preferred,
+        }
+    } else if (options.preferred_address) |address| {
+        if (!address.eql(&primary.address())) return error.InvalidOptions;
+        switch (address) {
+            .ip4 => result.ipv4 = primary,
+            .ip6 => result.ipv6 = primary,
+        }
+    }
+    if (options.preferred_additional_address) |additional| {
+        if (!additional.eql(&primary.address()) or
+            options.preferred_endpoint == null or
+            options.preferred_address != null) return error.InvalidOptions;
+        switch (additional) {
+            .ip4 => {
+                if (result.ipv4 != null) return error.InvalidOptions;
+                result.ipv4 = primary;
+            },
+            .ip6 => {
+                if (result.ipv6 != null) return error.InvalidOptions;
+                result.ipv6 = primary;
+            },
+        }
+    }
+    for ([_]?*quic.runtime.Endpoint{ result.ipv4, result.ipv6 }) |candidate| {
+        const endpoint = candidate orelse continue;
+        if (!preferredAddressIsUsable(endpoint.address()) or
+            endpoint.io.userdata != primary.io.userdata or
+            endpoint.io.vtable != primary.io.vtable or
+            endpoint.limits.max_datagram_size !=
+                primary.limits.max_datagram_size or
+            (endpoint != primary and endpoint.groReceiveEnabled()))
+        {
+            return error.InvalidOptions;
+        }
+    }
+    if (result.ipv4) |endpoint| {
+        if (endpoint.address() != .ip4) return error.InvalidOptions;
+    }
+    if (result.ipv6) |endpoint| {
+        if (endpoint.address() != .ip6) return error.InvalidOptions;
+    }
+    const ipv4_secondary = result.ipv4 != null and result.ipv4 != primary;
+    const ipv6_secondary = result.ipv6 != null and result.ipv6 != primary;
+    if (ipv4_secondary and ipv6_secondary) return error.InvalidOptions;
+    result.secondary = if (ipv4_secondary)
+        result.ipv4
+    else if (ipv6_secondary)
+        result.ipv6
+    else
+        null;
+    return result;
+}
+
+pub const testing = if (builtin.is_test) struct {
+    pub fn preferredAddressForOptions(
+        primary: *quic.runtime.Endpoint,
+        options: Options,
+        connection_id: []const u8,
+        token: [quic.stateless_reset.token_len]u8,
+    ) error{InvalidOptions}!quic.PreferredAddress {
+        const endpoints = try @import("endpoint_server.zig")
+            .resolvePreferredEndpoints(
+            primary,
+            options,
+        );
+        return @import("endpoint_server.zig").preferredAddressForEndpoints(
+            endpoints,
+            connection_id,
+            token,
+        );
+    }
+} else struct {};
 
 fn preferredAddressIsUsable(address: std.Io.net.IpAddress) bool {
     return switch (address) {

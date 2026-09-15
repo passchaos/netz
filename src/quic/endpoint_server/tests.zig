@@ -97,6 +97,36 @@ test "QUIC endpoint server rejects invalid admission limits" {
             .preferred_endpoint = &endpoint,
         }),
     );
+    try std.testing.expectError(
+        error.InvalidOptions,
+        endpoint_server.Server.init(allocator, &endpoint, .{
+            .local_connection_id = &.{},
+        }, .{
+            .stateless_reset_key = reset_key,
+            .preferred_additional_address = endpoint.address(),
+        }),
+    );
+    try std.testing.expectError(
+        error.InvalidOptions,
+        endpoint_server.Server.init(allocator, &endpoint, .{
+            .local_connection_id = &.{},
+        }, .{
+            .stateless_reset_key = reset_key,
+            .preferred_endpoint = &secondary,
+            .preferred_additional_address = endpoint.address(),
+        }),
+    );
+    try std.testing.expectError(
+        error.InvalidOptions,
+        endpoint_server.Server.init(allocator, &endpoint, .{
+            .local_connection_id = &.{},
+        }, .{
+            .stateless_reset_key = reset_key,
+            .preferred_address = secondary.address(),
+            .preferred_endpoint = &secondary,
+            .preferred_additional_address = endpoint.address(),
+        }),
+    );
     var other_threaded = std.Io.Threaded.init(allocator, .{});
     defer other_threaded.deinit();
     var other_io_endpoint = try quic.runtime.Endpoint.bind(
@@ -1065,14 +1095,80 @@ test "QUIC endpoint server routes preferred address CID and path validation" {
 }
 
 test "QUIC endpoint server migrates to a distinct preferred endpoint" {
-    try testDistinctPreferredEndpoint(.ipv4);
+    try testDistinctPreferredEndpoint(.ipv4, false);
 }
 
 test "QUIC endpoint server migrates to a distinct IPv6 preferred endpoint" {
-    try testDistinctPreferredEndpoint(.ipv6);
+    try testDistinctPreferredEndpoint(.ipv6, false);
 }
 
-fn testDistinctPreferredEndpoint(family: enum { ipv4, ipv6 }) !void {
+test "QUIC endpoint server validates dual-stack preferred IPv4 path" {
+    try testDistinctPreferredEndpoint(.ipv4, true);
+}
+
+test "QUIC endpoint server validates dual-stack preferred IPv6 path" {
+    try testDistinctPreferredEndpoint(.ipv6, true);
+}
+
+test "QUIC endpoint server advertises dual-stack preferred address" {
+    const allocator = std.testing.allocator;
+    var threaded = std.Io.Threaded.init(allocator, .{});
+    defer threaded.deinit();
+    const io = threaded.io();
+    var primary = try quic.runtime.Endpoint.bind(
+        allocator,
+        io,
+        .{ .ip4 = .loopback(0) },
+        .{ .max_datagram_size = 4096 },
+    );
+    defer primary.deinit();
+    var secondary = try quic.runtime.Endpoint.bind(
+        allocator,
+        io,
+        .{ .ip6 = .loopback(0) },
+        .{ .max_datagram_size = 4096 },
+    );
+    defer secondary.deinit();
+    const cid = "dual-stack-cid";
+    const token = [_]u8{0x94} ** quic.stateless_reset.token_len;
+    const advertised = try endpoint_server.testing.preferredAddressForOptions(
+        &primary,
+        .{
+            .stateless_reset_key = [_]u8{0x93} **
+                quic.stateless_reset.static_key_len,
+            .preferred_endpoint = &secondary,
+            .preferred_additional_address = primary.address(),
+        },
+        cid,
+        token,
+    );
+    try std.testing.expectEqual(primary.address().ip4.bytes, advertised.ipv4_address);
+    try std.testing.expectEqual(primary.address().ip4.port, advertised.ipv4_port);
+    try std.testing.expectEqual(secondary.address().ip6.bytes, advertised.ipv6_address);
+    try std.testing.expectEqual(secondary.address().ip6.port, advertised.ipv6_port);
+    try std.testing.expectEqualStrings(cid, advertised.connection_id);
+    try std.testing.expectEqual(token, advertised.stateless_reset_token);
+
+    var wire: std.ArrayList(u8) = .empty;
+    defer wire.deinit(allocator);
+    try quic.encodeTransportParametersForSource(
+        &wire,
+        allocator,
+        .{ .preferred_address = advertised },
+        .server,
+    );
+    const parsed = try quic.parseTransportParametersTyped(
+        allocator,
+        wire.items,
+        .server,
+    );
+    try std.testing.expectEqualDeep(advertised, parsed.preferred_address.?);
+}
+
+fn testDistinctPreferredEndpoint(
+    comptime family: enum { ipv4, ipv6 },
+    comptime dual_stack: bool,
+) !void {
     const allocator = std.testing.allocator;
     var threaded = std.Io.Threaded.init(allocator, .{
         .async_limit = .unlimited,
@@ -1084,10 +1180,14 @@ fn testDistinctPreferredEndpoint(family: enum { ipv4, ipv6 }) !void {
         .ipv6 => .{ .ip6 = .loopback(0) },
     };
     const preferred_bind: std.Io.net.IpAddress = switch (family) {
-        .ipv4 => .{
-            .ip4 = .{ .bytes = .{ 127, 0, 0, 2 }, .port = 0 },
-        },
-        .ipv6 => .{ .ip6 = .loopback(0) },
+        .ipv4 => if (dual_stack)
+            .{ .ip6 = .loopback(0) }
+        else
+            .{ .ip4 = .{ .bytes = .{ 127, 0, 0, 2 }, .port = 0 } },
+        .ipv6 => if (dual_stack)
+            .{ .ip4 = .loopback(0) }
+        else
+            .{ .ip6 = .loopback(0) },
     };
 
     var server_endpoint = try quic.runtime.Endpoint.bind(
@@ -1139,6 +1239,10 @@ fn testDistinctPreferredEndpoint(family: enum { ipv4, ipv6 }) !void {
             .stateless_reset_key = reset_key,
             .automatic_connection_id_replenishment = false,
             .preferred_endpoint = &preferred_endpoint,
+            .preferred_additional_address = if (dual_stack)
+                server_endpoint.address()
+            else
+                null,
         },
     );
     defer server.deinit();
@@ -1149,6 +1253,7 @@ fn testDistinctPreferredEndpoint(family: enum { ipv4, ipv6 }) !void {
         io: std.Io,
         original_address: std.Io.net.IpAddress,
         preferred_address: std.Io.net.IpAddress,
+        alternate_address: ?std.Io.net.IpAddress,
         public_key: [65]u8,
         reset_key: [quic.stateless_reset.static_key_len]u8,
         challenge: [8]u8,
@@ -1210,6 +1315,17 @@ fn testDistinctPreferredEndpoint(family: enum { ipv4, ipv6 }) !void {
                         .preferredAddressIp6(preferred).?,
                 },
             );
+            if (self.alternate_address) |alternate| {
+                try std.testing.expectEqual(
+                    alternate,
+                    switch (family) {
+                        .ipv4 => quic.one_rtt.Connection
+                            .preferredAddressIp6(preferred).?,
+                        .ipv6 => quic.one_rtt.Connection
+                            .preferredAddressIp4(preferred).?,
+                    },
+                );
+            }
             try established.connection.beginPeerPreferredAddressMigration(
                 self.challenge,
                 family,
@@ -1284,7 +1400,14 @@ fn testDistinctPreferredEndpoint(family: enum { ipv4, ipv6 }) !void {
         .allocator = allocator,
         .io = io,
         .original_address = server.address(),
-        .preferred_address = preferred_endpoint.address(),
+        .preferred_address = if (dual_stack)
+            server_endpoint.address()
+        else
+            preferred_endpoint.address(),
+        .alternate_address = if (dual_stack)
+            preferred_endpoint.address()
+        else
+            null,
         .public_key = server_public,
         .reset_key = reset_key,
         .challenge = challenge,
@@ -1343,7 +1466,7 @@ fn testDistinctPreferredEndpoint(family: enum { ipv4, ipv6 }) !void {
         return error.TestUnexpectedResult) orelse
         return error.TestUnexpectedResult;
     try std.testing.expectEqual(
-        preferred_endpoint.address(),
+        if (dual_stack) server_endpoint.address() else preferred_endpoint.address(),
         established.connection.sendEndpoint().address(),
     );
     const VisitContext = struct {
