@@ -186,14 +186,16 @@ zig build interop-grpc-cpp-client -Doptimize=ReleaseFast
 ```
 
 Run the independent Server Reflection gate, with upstream's official
-`grpc_cli` querying a one-shot netz h2c server:
+`grpc_cli` querying a one-shot zio-backed netz h2c server:
 
 ```sh
 zig build interop-grpc-reflection -Doptimize=ReleaseFast
 ```
 
 Generate pbz bindings and exercise all four generated client/handler RPC
-shapes over one real h2c channel, including typed handler failure mapping:
+shapes over one real h2c channel, including typed handler failure mapping.
+Both endpoints share zio's `std.Io`, and the local server is scheduled through
+`std.Io.async` rather than a manually managed OS thread:
 
 ```sh
 zig build interop-grpc-pbz -Doptimize=ReleaseFast
@@ -260,7 +262,10 @@ records the legitimate race where the client reaches local
 `DEADLINE_EXCEEDED` before the cleartext or TLS server accept finishes and no
 server RPC exists.
 
-The reflection gate passed on 2026-09-07 against the same pinned upstream
+The reflection gate passed again after the zio migration on 2026-09-15 against
+the same pinned upstream revision and its Linux Posix EventEngine. Its ready,
+completion, and runner records bind `grpc-cpp-posix-event-engine` to
+`zio-std-io`. The earlier 2026-09-07 run used the same upstream
 revision, Bazel 8.7.0, and GCC. It generates a standard descriptor set with the
 system `protoc`, imports it into the netz registry, and requires official
 `grpc_cli` queries to discover both reflection protocol versions plus the
@@ -322,9 +327,11 @@ upstream gRPC Core's `ServerEarlyReturnTest`.
 ## Remaining work before broad gRPC parity
 
 1. Generated pbz clients and handlers now have netz transport adapters for all
-   four RPC shapes, including owned typed failure details. Async/concurrent
-   scheduling policy remains above the intentionally single-owner duplex step
-   loop.
+   four RPC shapes, including owned typed failure details. The process gate now
+   obtains both endpoint handles from zio-backed `std.Io`, schedules its local
+   server through `std.Io.async`, and reports both runtimes as `zio-std-io`.
+   Higher-level concurrent scheduling policy remains above the intentionally
+   single-owner duplex step loop.
 2. Transport composition is now covered: `grpc.runtime.Client`,
    `grpc.runtime.Server`, and `grpc.runtime.TlsServer` own persistent HTTP/2
    channels. The TLS path enforces `h2` ALPN and retains certificate-

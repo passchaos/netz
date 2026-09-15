@@ -10,9 +10,9 @@ pub fn main(init: std.process.Init) !void {
     if (port == 0) return error.InvalidArgument;
 
     const allocator = std.heap.c_allocator;
-    var threaded = std.Io.Threaded.init(allocator, .{ .async_limit = .unlimited });
-    defer threaded.deinit();
-    const io = threaded.io();
+    var backend = try netz.runtime.Backend.init(allocator);
+    defer backend.deinit();
+    const io = backend.io();
     const descriptor_set = try std.Io.Dir.cwd().readFileAlloc(
         io,
         args[2],
@@ -38,12 +38,20 @@ pub fn main(init: std.process.Init) !void {
         4 * 1024 * 1024,
     );
     defer server.deinit();
-    std.debug.print("netz gRPC reflection server ready: port={d}\n", .{port});
+    std.debug.print(
+        "netz gRPC reflection server ready: port={d} " ++
+            "client_io=grpc-cpp-posix-event-engine server_io=zio-std-io\n",
+        .{port},
+    );
 
     var connection = try server.accept();
     defer connection.deinit();
     var stream = try connection.acceptDuplexWithTimeout(.fromSeconds(10));
     defer stream.deinit();
     try connection.serveReflection(&registry, &stream);
-    std.debug.print("netz gRPC reflection server completed\n", .{});
+    std.debug.print(
+        "netz gRPC reflection server completed " ++
+            "client_io=grpc-cpp-posix-event-engine server_io=zio-std-io\n",
+        .{},
+    );
 }

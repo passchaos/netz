@@ -122,9 +122,9 @@ const ServerState = struct {
 
 pub fn main(init: std.process.Init) !void {
     const allocator = std.heap.c_allocator;
-    var threaded = std.Io.Threaded.init(allocator, .{ .async_limit = .unlimited });
-    defer threaded.deinit();
-    const io = threaded.io();
+    var backend = try netz.runtime.Backend.init(allocator);
+    defer backend.deinit();
+    const io = backend.io();
     var server = try netz.grpc.runtime.Server.listen(
         allocator,
         io,
@@ -134,9 +134,10 @@ pub fn main(init: std.process.Init) !void {
     );
     defer server.deinit();
     var server_state = ServerState{ .server = &server };
-    const server_thread = try std.Thread.spawn(.{}, ServerState.run, .{
+    var server_future = io.async(ServerState.run, .{
         &server_state,
     });
+    defer server_future.cancel(io);
 
     var client = try netz.grpc.runtime.Client.connect(
         allocator,
@@ -286,11 +287,11 @@ pub fn main(init: std.process.Init) !void {
     );
     try std.testing.expect(generated_client.transport.lastFailure() == null);
 
-    server_thread.join();
+    server_future.await(io);
     if (server_state.err) |err| return err;
     _ = init;
     std.debug.print(
-        "pbz generated gRPC client/handler interoperated: unary=true client_stream=true server_stream=true bidi=true error_status=true\n",
+        "pbz generated gRPC client/handler interoperated: unary=true client_stream=true server_stream=true bidi=true error_status=true client_io=zio-std-io server_io=zio-std-io\n",
         .{},
     );
 }

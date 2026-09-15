@@ -320,7 +320,9 @@ starts with deterministic parsers, serializers, preallocated fixed-width wire-in
   gRPC RPC shapes; protobuf remains an application-layer choice and pbz is
   only a lazy integration dependency. The bidirectional h2c/TLS gRPC C++
   process gates run the netz endpoints on zio-backed `std.Io` and identify the
-  pinned Linux peer as `grpc-cpp-posix-event-engine`.
+  pinned Linux peer as `grpc-cpp-posix-event-engine`; the official reflection
+  and generated-pbz gates also use zio, with the pbz server scheduled through
+  `std.Io.async`.
 - QUIC varints with encode length reuse, preallocated direct writes, long-header parsing, stream IDs, transport parameters, and core
   frame codecs (STREAM, CRYPTO, ACK, close, DATAGRAM, flow-control frames) with one-byte control-frame, direct single-/multi-varint, varint-payload, STREAM, DATAGRAM, NEW_CONNECTION_ID, and ACK_FREQUENCY write/length, fixed PATH, STREAM flag-byte, reset/stop, NEW_TOKEN, NEW_CONNECTION_ID, CRYPTO, MAX_DATA, stream flow-control, close, ACK/ACK_ECN, DATAGRAM, and ACK_FREQUENCY frame-type write fast paths, frame-payload close-error classification, shortest-form frame-type enforcement, empty non-FIN STREAM no-op rejection, stream-count bounds on MAX_STREAMS/STREAMS_BLOCKED and
   RFC 9000 packet-type legality checks for Initial/Handshake/0-RTT/1-RTT, typed

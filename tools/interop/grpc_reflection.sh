@@ -117,7 +117,7 @@ run_case() {
   "$server" "$port" "$work/reflection.pb" >"$server_log" 2>&1 &
   server_pid=$!
   for _ in $(seq 1 200); do
-    if grep -Fq "netz gRPC reflection server ready: port=$port" "$server_log"; then
+    if grep -Fq "netz gRPC reflection server ready: port=$port client_io=grpc-cpp-posix-event-engine server_io=zio-std-io" "$server_log"; then
       break
     fi
     if ! kill -0 "$server_pid" 2>/dev/null; then
@@ -126,13 +126,15 @@ run_case() {
     fi
     sleep 0.05
   done
-  grep -Fq "netz gRPC reflection server ready: port=$port" "$server_log"
+  grep -Fq "netz gRPC reflection server ready: port=$port client_io=grpc-cpp-posix-event-engine server_io=zio-std-io" "$server_log"
   timeout "$case_timeout" "$grpc_cli" "$command" \
     "127.0.0.1:$port" "$@" \
     --channel_creds_type=insecure >"$output" 2>&1
   wait "$server_pid"
   server_pid=
-  grep -Fq 'netz gRPC reflection server completed' "$server_log"
+  grep -Fq \
+    'netz gRPC reflection server completed client_io=grpc-cpp-posix-event-engine server_io=zio-std-io' \
+    "$server_log"
 }
 
 run_case services ls
@@ -146,4 +148,4 @@ grep -Fxq 'Unary' "$work/output-service.log"
 run_case type type demo.Request
 grep -Fq 'string value = 1' "$work/output-type.log"
 
-echo 'grpc_cli interoperated with netz reflection: services=true service=true type=true'
+echo 'grpc_cli interoperated with netz reflection: services=true service=true type=true client_io=grpc-cpp-posix-event-engine server_io=zio-std-io'
