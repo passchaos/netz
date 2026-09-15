@@ -1454,6 +1454,33 @@ are one-sample functional gates, not throughput claims. The full tquic gate
 also passed in both directions with Retry on and off, GET/Range/POST digest,
 and bidirectional GOAWAY/drain/reject-next-stream coverage.
 
+The completed aggregate response now transfers its reassembly allocation into
+the owned result after all fallible validation and decoding have succeeded,
+instead of duplicating the complete encoded stream and then freeing the
+original. This follows the same broad ownership principle as Quinn's
+chunk-collecting `read_to_end`, while retaining the consumption-driven credit
+behavior exposed by quiche's `recv_body`. Allocators that cannot shrink the
+reassembly allocation in place keep the prior copy fallback; an induced
+resize-plus-allocation failure verifies that the original response remains
+retryable.
+
+Three order-alternated fixed-binary memory pairs used one warmup plus three
+measured fresh connections, a 16 MiB response, a 1 MiB transport stream window,
+and the quic-go-server/netz-client direction. The median netz explicit peak
+fell from 99,644,791 to 78,618,808 bytes (-21.1%), cumulative allocation from
+348,387,294 to 281,102,735 bytes (-19.3%), and whole-process peak RSS from
+420,400 to 353,104 KiB (-16.0%). Every run freed all explicit allocations and
+verified the complete response. Five separately order-alternated throughput
+pairs, with three measured responses per process, overlapped: the baseline and
+candidate medians were 15.725 and 15.804 MiB/s, while the paired throughput
+ratio median was 0.992 and the candidate won 1/5 pairs. The change is therefore
+retained as a memory reduction with no throughput-improvement claim. The frozen
+ReleaseFast client SHA-256 values were
+`26c14a80ac78300856281149c3e7e90577e36768b7a8365c32575e4d88585a9a`
+for the baseline and
+`473cf866d9150636431c1e122c5bf1041590118ea79519dc076c62640f07a8a5`
+for the candidate.
+
 The concurrent gate is reproducible with:
 
 ```sh

@@ -552,6 +552,15 @@ equal-wire superiority over quicz.
 
 Handshake-backed and lightweight protected HTTP/3 clients guard the
 connection-scoped receive owner while aggregate informational callbacks run.
+Completed aggregate responses now use a two-phase ownership transfer: all
+fallible HTTP/3/QPACK validation runs against the retained response, then the
+reassembly allocation is moved into the owned result without a second whole
+message copy when the allocator supports in-place shrink. The fallback remains
+transactional for other allocators. Three fixed-binary 16 MiB quic-go download
+memory pairs reduced median netz explicit peak bytes by 21.1%, cumulative
+allocation by 19.3%, and whole-process peak RSS by 16.0%. Five throughput pairs
+overlapped and the candidate won only 1/5, so this is an allocation/peak-memory
+improvement rather than a throughput claim.
 Recursive response, whichever-ready, push, control, and CONNECT-DATAGRAM reads
 return the recoverable local `ConcurrentRead` error before consuming buffered
 events, UDP, or QPACK state; this error is never mapped to an HTTP/3 connection

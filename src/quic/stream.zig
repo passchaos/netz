@@ -528,7 +528,25 @@ pub const RecvState = struct {
     /// protocol adapters independent of the receive-gap representation while
     /// preserving the existing zero-copy ownership handoff.
     pub fn takeCompleteBuffer(self: *RecvState) Error![]u8 {
-        const final_size = self.final_size orelse return error.NothingAvailable;
+        if (try self.prepareCompleteBufferTransfer()) {
+            return self.takePreparedCompleteBuffer();
+        }
+        const bytes = try self.buffer.toOwnedSlice(self.allocator);
+        const allocator = self.allocator;
+        const stream_id = self.stream_id;
+        const max_buffered = self.max_buffered;
+        self.received.deinit(self.allocator);
+        self.* = RecvState.init(allocator, stream_id, max_buffered);
+        return bytes;
+    }
+
+    /// Prepare a complete unread buffer for an allocation-free ownership
+    /// transfer. A successful in-place shrink preserves every existing slice
+    /// into the message; false leaves the complete message readable so a
+    /// caller can allocate a fallback copy before committing.
+    pub fn prepareCompleteBufferTransfer(self: *RecvState) Error!bool {
+        const final_size = self.final_size orelse
+            return error.NothingAvailable;
         if (self.storage_offset != 0 or
             self.read_offset != 0 or
             self.contiguous_end < final_size)
@@ -536,11 +554,30 @@ pub const RecvState = struct {
             return error.NothingAvailable;
         }
         self.buffer.items.len = final_size;
-        const bytes = try self.buffer.toOwnedSlice(self.allocator);
+        if (self.buffer.capacity == final_size) return true;
+        if (final_size == 0) return false;
+        if (!self.allocator.resize(
+            self.buffer.allocatedSlice(),
+            final_size,
+        )) return false;
+        self.buffer.capacity = final_size;
+        return true;
+    }
+
+    /// Finish a transfer prepared by `prepareCompleteBufferTransfer`.
+    /// No allocation or pointer movement occurs.
+    pub fn takePreparedCompleteBuffer(self: *RecvState) []u8 {
+        const final_size = self.final_size orelse unreachable;
+        std.debug.assert(self.storage_offset == 0);
+        std.debug.assert(self.read_offset == 0);
+        std.debug.assert(self.contiguous_end >= final_size);
+        std.debug.assert(self.buffer.items.len == final_size);
+        std.debug.assert(self.buffer.capacity == final_size);
+        const bytes = self.buffer.toOwnedSliceAssert();
         const allocator = self.allocator;
         const stream_id = self.stream_id;
         const max_buffered = self.max_buffered;
-        self.received.deinit(self.allocator);
+        self.received.deinit(allocator);
         self.* = RecvState.init(allocator, stream_id, max_buffered);
         return bytes;
     }

@@ -199,6 +199,7 @@ const ClientRequestLifecycle = stream_lifecycle.Client;
 const ServerRequestLifecycle = stream_lifecycle.Server;
 const RequestStreamSet = buffered_request.Set;
 const ResponseStreamSet = buffered_response.Set;
+const PreparedResponse = buffered_response.PreparedReady;
 const OutboundBodySet = outbound_body.Set;
 const AssembledStream = buffered_common.AssembledStream;
 pub const StreamingHead = stream_reader.Head;
@@ -13197,7 +13198,7 @@ pub const HandshakeClient = struct {
             return error.UnexpectedStream;
         }
         try self.request_lifecycle.prepareFinish();
-        const assembled = receiveConnectionResponseStreamBytesUntil(
+        var prepared = receiveConnectionResponseStreamBytesUntil(
             &self.established.connection,
             &self.receive_packets,
             stream_id,
@@ -13230,11 +13231,13 @@ pub const HandshakeClient = struct {
                 return err;
             },
         };
-        errdefer self.established.connection.endpoint.allocator.free(assembled.bytes);
-        if (assembled.bytes.len == 0) {
+        defer prepared.deinit(
+            self.established.connection.endpoint.allocator,
+        );
+        if (prepared.bytes.len == 0) {
             self.failReceivedResponse(
                 stream_id,
-                assembled.bytes,
+                prepared.bytes,
                 error.MissingStatus,
                 true,
             ) catch {};
@@ -13242,22 +13245,22 @@ pub const HandshakeClient = struct {
         }
         http3.validateResponsePushPromises(
             self.control,
-            assembled.bytes,
+            prepared.bytes,
         ) catch |err| {
             self.failReceivedResponse(
                 stream_id,
-                assembled.bytes,
+                prepared.bytes,
                 err,
                 true,
             ) catch {};
             return err;
         };
         const section_count = responseFieldSectionCount(
-            assembled.bytes,
+            prepared.bytes,
         ) catch |err| {
             self.failReceivedResponse(
                 stream_id,
-                assembled.bytes,
+                prepared.bytes,
                 err,
                 true,
             ) catch {};
@@ -13269,12 +13272,12 @@ pub const HandshakeClient = struct {
         errdefer self.push_streams.rollbackPromises(promise_checkpoint);
         registerResponsePushPromises(
             &self.push_streams,
-            assembled.stream_id,
-            assembled.bytes,
+            prepared.stream_id,
+            prepared.bytes,
         ) catch |err| {
             self.failReceivedResponse(
                 stream_id,
-                assembled.bytes,
+                prepared.bytes,
                 err,
                 true,
             ) catch {};
@@ -13287,7 +13290,7 @@ pub const HandshakeClient = struct {
             } else null;
         var response = http3.decodeResponseWithDynamicTableAndOptions(
             self.established.connection.endpoint.allocator,
-            assembled.bytes,
+            prepared.bytes,
             self.control.settings.local,
             self.qpack_decode.table,
             blk: {
@@ -13308,7 +13311,7 @@ pub const HandshakeClient = struct {
         ) catch |err| {
             self.failReceivedResponse(
                 stream_id,
-                assembled.bytes,
+                prepared.bytes,
                 err,
                 true,
             ) catch {};
@@ -13316,12 +13319,14 @@ pub const HandshakeClient = struct {
         };
         errdefer response.deinit(self.established.connection.endpoint.allocator);
         self.qpack_decode.acknowledgeSectionsAssumeCapacity(
-            assembled.stream_id,
+            prepared.stream_id,
             response.qpack_section_acknowledgments,
         );
         _ = try self.established.connection
             .requestCompletedLocalStreamRelease(stream_id);
-        self.response_streams.remove(stream_id);
+        const assembled = self.response_streams.commitPreparedReady(
+            &prepared,
+        );
         _ = self.request_lifecycle.finishAssumeCapacity(stream_id);
         _ = self.outbound_bodies.finish(stream_id);
         if (deadline) |absolute|
@@ -20734,7 +20739,7 @@ pub const ProtectedClient = struct {
             return error.UnexpectedStream;
         }
         try self.request_lifecycle.prepareFinish();
-        const assembled = self.receiveStreamBytesUntil(
+        var prepared = self.receiveStreamBytesUntil(
             stream_id,
             deadline,
         ) catch |err| switch (err) {
@@ -20750,12 +20755,12 @@ pub const ProtectedClient = struct {
                 return err;
             },
         };
-        errdefer self.quic_client.endpoint.allocator.free(assembled.bytes);
-        if (assembled.bytes.len == 0) {
+        defer prepared.deinit(self.quic_client.endpoint.allocator);
+        if (prepared.bytes.len == 0) {
             self.failReceivedResponse(
-                assembled.from,
+                prepared.from,
                 stream_id,
-                assembled.bytes,
+                prepared.bytes,
                 error.MissingStatus,
                 true,
             );
@@ -20763,24 +20768,24 @@ pub const ProtectedClient = struct {
         }
         http3.validateResponsePushPromises(
             self.control,
-            assembled.bytes,
+            prepared.bytes,
         ) catch |err| {
             self.failReceivedResponse(
-                assembled.from,
+                prepared.from,
                 stream_id,
-                assembled.bytes,
+                prepared.bytes,
                 err,
                 true,
             );
             return err;
         };
         const section_count = responseFieldSectionCount(
-            assembled.bytes,
+            prepared.bytes,
         ) catch |err| {
             self.failReceivedResponse(
-                assembled.from,
+                prepared.from,
                 stream_id,
-                assembled.bytes,
+                prepared.bytes,
                 err,
                 true,
             );
@@ -20792,13 +20797,13 @@ pub const ProtectedClient = struct {
         errdefer self.push_streams.rollbackPromises(promise_checkpoint);
         registerResponsePushPromises(
             &self.push_streams,
-            assembled.stream_id,
-            assembled.bytes,
+            prepared.stream_id,
+            prepared.bytes,
         ) catch |err| {
             self.failReceivedResponse(
-                assembled.from,
+                prepared.from,
                 stream_id,
-                assembled.bytes,
+                prepared.bytes,
                 err,
                 true,
             );
@@ -20811,7 +20816,7 @@ pub const ProtectedClient = struct {
             } else null;
         var response = http3.decodeResponseWithDynamicTableAndOptions(
             self.quic_client.endpoint.allocator,
-            assembled.bytes,
+            prepared.bytes,
             self.control.settings.local,
             self.qpack_decode.table,
             blk: {
@@ -20831,9 +20836,9 @@ pub const ProtectedClient = struct {
             },
         ) catch |err| {
             self.failReceivedResponse(
-                assembled.from,
+                prepared.from,
                 stream_id,
-                assembled.bytes,
+                prepared.bytes,
                 err,
                 true,
             );
@@ -20841,10 +20846,12 @@ pub const ProtectedClient = struct {
         };
         errdefer response.deinit(self.quic_client.endpoint.allocator);
         self.qpack_decode.acknowledgeSectionsAssumeCapacity(
-            assembled.stream_id,
+            prepared.stream_id,
             response.qpack_section_acknowledgments,
         );
-        self.response_streams.remove(stream_id);
+        const assembled = self.response_streams.commitPreparedReady(
+            &prepared,
+        );
         _ = self.request_lifecycle.finishAssumeCapacity(stream_id);
         _ = self.outbound_bodies.finish(stream_id);
         self.sendQpackFeedback() catch {};
@@ -22469,7 +22476,7 @@ pub const ProtectedClient = struct {
         self: *ProtectedClient,
         expected_stream_id: u62,
         deadline: ?std.Io.Clock.Timestamp,
-    ) ReceiveTimeoutError!AssembledStream {
+    ) ReceiveTimeoutError!PreparedResponse {
         if (self.callback_reader_active) return error.ConcurrentRead;
         if (self.response_streams.takeReset(expected_stream_id)) |code| {
             return if (code == http3.ApplicationErrorCode.request_rejected)
@@ -22477,7 +22484,7 @@ pub const ProtectedClient = struct {
             else
                 error.RequestCancelled;
         }
-        if (try self.response_streams.copyReady(
+        if (try self.response_streams.prepareReady(
             expected_stream_id,
             self.qpack_decode.table,
             self.config.local_settings.qpack_blocked_streams,
@@ -22494,7 +22501,7 @@ pub const ProtectedClient = struct {
                 else
                     error.RequestCancelled;
             }
-            if (try self.response_streams.copyReady(
+            if (try self.response_streams.prepareReady(
                 expected_stream_id,
                 self.qpack_decode.table,
                 self.config.local_settings.qpack_blocked_streams,
@@ -23243,7 +23250,7 @@ fn receiveConnectionResponseStreamBytes(
     streaming_responses: *StreamingResponseSet,
     push_streams: *PushStreamSet,
     request_lifecycle: *const ClientRequestLifecycle,
-) Error!AssembledStream {
+) Error!PreparedResponse {
     return receiveConnectionResponseStreamBytesUntil(
         connection,
         receive_packets,
@@ -23278,14 +23285,14 @@ fn receiveConnectionResponseStreamBytesUntil(
     request_lifecycle: *const ClientRequestLifecycle,
     detached_streams: ?*connect_datagram.Registry,
     deadline: ?std.Io.Clock.Timestamp,
-) ReceiveTimeoutError!AssembledStream {
+) ReceiveTimeoutError!PreparedResponse {
     if (response_streams.takeReset(expected_stream_id)) |code| {
         return if (code == http3.ApplicationErrorCode.request_rejected)
             error.RequestRejected
         else
             error.RequestCancelled;
     }
-    if (try response_streams.copyReady(
+    if (try response_streams.prepareReady(
         expected_stream_id,
         qpack_decode.table,
         options.local_settings.qpack_blocked_streams,
@@ -23319,7 +23326,7 @@ fn receiveConnectionResponseStreamBytesUntil(
             else
                 error.RequestCancelled;
         }
-        if (try response_streams.copyReady(
+        if (try response_streams.prepareReady(
             expected_stream_id,
             qpack_decode.table,
             options.local_settings.qpack_blocked_streams,
