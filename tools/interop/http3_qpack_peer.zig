@@ -7,6 +7,9 @@ const netz = @import("netz");
 
 pub fn main(init: std.process.Init) !void {
     const allocator = init.gpa;
+    var backend = try netz.runtime.Backend.init(allocator);
+    defer backend.deinit();
+    const io = backend.io();
     var encoder =
         netz.http3.runtime.QpackEncodeState.initAwaitingPeerSettings(
             allocator,
@@ -48,7 +51,7 @@ pub fn main(init: std.process.Init) !void {
     var instruction_len: [4]u8 = undefined;
     std.mem.writeInt(u32, &instruction_len, @intCast(instructions.len), .big);
     var writer_buffer: [4096]u8 = undefined;
-    var writer = std.Io.File.stdout().writer(init.io, &writer_buffer);
+    var writer = std.Io.File.stdout().writer(io, &writer_buffer);
     try writer.interface.writeAll(&instruction_len);
     try writer.interface.writeAll(instructions);
     try writer.interface.writeAll(block.items);
