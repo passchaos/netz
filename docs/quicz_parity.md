@@ -541,9 +541,10 @@ sockets with `std.Io.Select`, folds the dispatcher timer into the same absolute
 deadline, preserves a simultaneous second datagram, and keeps its bounded
 caller-buffer receive path from allocating owning UDP datagrams for established
 packets. Real
-IPv4-to-IPv6 TLS/H3 coverage runs on zio through the `std.Io` abstraction,
-validates the advertised sequence-1 path, sends a request/response on IPv6,
-then releases and re-acquires the same origin and reuses the same connection. A
+IPv4-to-IPv6 and IPv6-to-IPv4 TLS/H3 coverage runs on zio through the `std.Io`
+abstraction, validates the advertised sequence-1 path, sends a request/response
+on the preferred family, then releases and re-acquires the same origin and
+reuses the same connection. A
 second zio test leaves the preferred address silent, observes all validation
 retries and timeout rollback, and completes an H3 request on the original IPv4
 path. Direct blocking `Connection.receive*` remains a per-connection API;

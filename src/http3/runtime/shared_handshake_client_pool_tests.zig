@@ -380,7 +380,17 @@ fn headerValue(headers: anytype, name: []const u8) ?[]const u8 {
     return null;
 }
 
-test "HTTP/3 shared pool migrates across address families on zio" {
+test "HTTP/3 shared pool migrates from IPv4 to IPv6 on zio" {
+    try testSharedPoolCrossFamilyMigration(.ipv6);
+}
+
+test "HTTP/3 shared pool migrates from IPv6 to IPv4 on zio" {
+    try testSharedPoolCrossFamilyMigration(.ipv4);
+}
+
+fn testSharedPoolCrossFamilyMigration(
+    comptime target_family: quic.one_rtt.PreferredAddressFamily,
+) !void {
     const allocator = std.testing.allocator;
     var backend = try netz_runtime.Backend.initZio(allocator);
     defer backend.deinit();
@@ -401,23 +411,42 @@ test "HTTP/3 shared pool migrates across address families on zio" {
     var preferred_endpoint = try quic.runtime.Endpoint.bind(
         allocator,
         io,
-        .{ .ip6 = .loopback(0) },
+        switch (target_family) {
+            .ipv4 => .{ .ip4 = .loopback(0) },
+            .ipv6 => .{ .ip6 = .loopback(0) },
+        },
         limits.quic,
     );
     defer preferred_endpoint.deinit();
     const preferred_cid = "pool-preferred-cid";
     var transport = quic.practical_transport_parameters;
-    transport.preferred_address = .{
-        .ipv6_address = preferred_endpoint.address().ip6.bytes,
-        .ipv6_port = preferred_endpoint.address().ip6.port,
+    var preferred_address = quic.PreferredAddress{
         .connection_id = preferred_cid,
         .stateless_reset_token = [_]u8{0x6b} **
             quic.stateless_reset.token_len,
     };
+    switch (target_family) {
+        .ipv4 => {
+            preferred_address.ipv4_address =
+                preferred_endpoint.address().ip4.bytes;
+            preferred_address.ipv4_port =
+                preferred_endpoint.address().ip4.port;
+        },
+        .ipv6 => {
+            preferred_address.ipv6_address =
+                preferred_endpoint.address().ip6.bytes;
+            preferred_address.ipv6_port =
+                preferred_endpoint.address().ip6.port;
+        },
+    }
+    transport.preferred_address = preferred_address;
     var server = try runtime.HandshakeServer.bind(
         allocator,
         io,
-        .{ .ip4 = .loopback(0) },
+        switch (target_family) {
+            .ipv4 => .{ .ip6 = .loopback(0) },
+            .ipv6 => .{ .ip4 = .loopback(0) },
+        },
         limits,
         .{ .handshake = .{
             .local_connection_id = "pool-migration-srv",
@@ -644,8 +673,14 @@ test "HTTP/3 shared pool migrates across address families on zio" {
     };
 
     var pool = try runtime.SharedHandshakeClientPool.init(allocator, io, .{
-        .local_address = .{ .ip4 = .loopback(0) },
-        .migration_local_address = .{ .ip6 = .loopback(0) },
+        .local_address = switch (target_family) {
+            .ipv4 => .{ .ip6 = .loopback(0) },
+            .ipv6 => .{ .ip4 = .loopback(0) },
+        },
+        .migration_local_address = switch (target_family) {
+            .ipv4 => .{ .ip4 = .loopback(0) },
+            .ipv6 => .{ .ip6 = .loopback(0) },
+        },
         .limits = limits,
         .max_connections = 1,
         .client = .{ .handshake = .{
@@ -670,13 +705,23 @@ test "HTTP/3 shared pool migrates across address families on zio" {
         },
     });
     defer pool.deinit();
-    try std.testing.expect(pool.migrationAddress().? == .ip6);
+    try std.testing.expect(switch (target_family) {
+        .ipv4 => pool.migrationAddress().? == .ip4,
+        .ipv6 => pool.migrationAddress().? == .ip6,
+    });
 
-    const uri = try std.fmt.allocPrint(
-        allocator,
-        "https://127.0.0.1:{d}/",
-        .{server.address().ip4.port},
-    );
+    const uri = switch (target_family) {
+        .ipv4 => try std.fmt.allocPrint(
+            allocator,
+            "https://[::1]:{d}/",
+            .{server.address().ip6.port},
+        ),
+        .ipv6 => try std.fmt.allocPrint(
+            allocator,
+            "https://127.0.0.1:{d}/",
+            .{server.address().ip4.port},
+        ),
+    };
     defer allocator.free(uri);
     var lease = try pool.acquireUri(uri);
     var lease_active = true;
@@ -686,10 +731,15 @@ test "HTTP/3 shared pool migrates across address families on zio" {
         .peerPreferredAddress() orelse return error.TestUnexpectedResult;
     try std.testing.expectEqual(
         preferred_endpoint.address(),
-        quic.one_rtt.Connection.preferredAddressIp6(preferred).?,
+        switch (target_family) {
+            .ipv4 => quic.one_rtt.Connection
+                .preferredAddressIp4(preferred).?,
+            .ipv6 => quic.one_rtt.Connection
+                .preferredAddressIp6(preferred).?,
+        },
     );
     const challenge = [_]u8{ 0x6c, 1, 2, 3, 4, 5, 6, 7 };
-    try lease.beginPreferredAddressMigration(challenge, .ipv6);
+    try lease.beginPreferredAddressMigration(challenge, target_family);
     const migration_deadline = std.Io.Clock.Timestamp.fromNow(io, .{
         .raw = .fromSeconds(3),
         .clock = .awake,
