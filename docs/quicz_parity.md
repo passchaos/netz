@@ -56,6 +56,9 @@ The raw DATAGRAM, 1-RTT send/receive, and UDP GSO/GRO benchmarks also obtain all
 endpoint I/O and timing from zio-backed `std.Io`; the local DATAGRAM receiver
 runs through `std.Io.async`. Earlier results remain historical Threaded
 evidence until rerun under the documented fixed-binary protocol.
+The real-handshake STREAM benchmark now uses zio-backed `std.Io` for every
+mode. Aggregate connection workers share that backend through `std.Io.Group`;
+the public benchmark no longer creates OS-thread or Threaded-I/O fallbacks.
 
 ## Current `~/Work/quicz` comparison context
 

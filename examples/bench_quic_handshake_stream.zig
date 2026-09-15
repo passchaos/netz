@@ -62,8 +62,20 @@ const Mode = enum { upload, handshake, echo, stream_churn, lifecycle_churn, aggr
 pub fn main(init: std.process.Init) !void {
     const config = try parseArgs(init, std.heap.smp_allocator);
     const server_key = try makeBenchmarkServerKey();
+    var backend = try netz.runtime.Backend.init(std.heap.smp_allocator);
+    defer backend.deinit();
+    const io = backend.io();
+    std.debug.print(
+        "QUIC handshake/stream benchmark runtime: io_backend=zio-std-io\n",
+        .{},
+    );
     if (config.mode == .aggregate) {
-        try runAggregateBenchmark(config, server_key);
+        try runAggregateBenchmark(
+            std.heap.smp_allocator,
+            io,
+            config,
+            server_key,
+        );
         return;
     }
     if (config.mode == .loss or config.mode == .reorder or
@@ -71,6 +83,7 @@ pub fn main(init: std.process.Init) !void {
     {
         try runLossBenchmark(
             std.heap.smp_allocator,
+            io,
             config,
             server_key,
         );
@@ -81,10 +94,6 @@ pub fn main(init: std.process.Init) !void {
         counting.allocator()
     else
         std.heap.smp_allocator;
-
-    var threaded = std.Io.Threaded.init(allocator, .{});
-    defer threaded.deinit();
-    const io = threaded.io();
 
     if (config.mode == .handshake) {
         try runHandshakeBenchmark(allocator, io, config, server_key);
@@ -594,7 +603,7 @@ fn runIteration(
 
     while (!ready.load(.acquire)) {
         if (failed.load(.acquire)) return shared.err orelse error.ServerFailed;
-        std.Thread.yield() catch {};
+        try std.Io.sleep(io, .fromMicroseconds(1), .awake);
     }
     if (config.mode == .handshake) {
         const elapsed_ns = nowNs(io) -| handshake_started_ns;
@@ -1522,7 +1531,11 @@ fn sendTransfer(
         // the receiver can drain loopback before a large CUBIC window fills the
         // host's sysctl-capped UDP queue. Real deployments naturally get this
         // scheduling boundary from their event loop or network RTT.
-        std.Thread.yield() catch {};
+        try std.Io.sleep(
+            connection.endpoint.io,
+            .fromMicroseconds(1),
+            .awake,
+        );
     }
 }
 
@@ -1955,48 +1968,39 @@ fn lifecycleExpectedLossDrops(seed: u64, considered: usize, pct: u8) usize {
 }
 
 fn runAggregateBenchmark(
+    allocator: std.mem.Allocator,
+    io: std.Io,
     config: Config,
     server_key: EcdsaP256Sha256.KeyPair,
 ) !void {
-    const workers = try std.heap.smp_allocator.alloc(
-        std.Thread,
-        config.connections,
-    );
-    defer std.heap.smp_allocator.free(workers);
-    const results = try std.heap.smp_allocator.alloc(
+    const results = try allocator.alloc(
         AggregateWorkerResult,
         config.connections,
     );
-    defer std.heap.smp_allocator.free(results);
+    defer allocator.free(results);
     @memset(results, .{});
 
-    var spawned: usize = 0;
-    var joined = false;
-    defer if (!joined) {
-        for (workers[0..spawned]) |worker| worker.join();
-    };
-
-    // Match quicz's reference shape: worker creation, per-connection std.Io,
-    // real handshake, transfer, and teardown all live inside the aggregate
-    // timer. No start barrier hides setup cost from the reported throughput.
-    const timer_io = std.Io.Threaded.global_single_threaded.io();
-    const benchmark_started = nowNs(timer_io);
-    for (workers, results, 0..) |*worker, *result, index| {
-        worker.* = try std.Thread.spawn(
-            .{},
+    var workers: std.Io.Group = .init;
+    defer workers.cancel(io);
+    // Match quicz's reference shape: zio task scheduling, real handshakes,
+    // transfers, and teardown all live inside the aggregate timer. No start
+    // barrier hides setup cost from the reported throughput.
+    const benchmark_started = nowNs(io);
+    for (results, 0..) |*result, index| {
+        try workers.concurrent(
+            io,
             aggregateWorker,
             .{AggregateWorkerContext{
+                .io = io,
                 .index = index,
                 .config = config,
                 .server_key = server_key,
                 .result = result,
             }},
         );
-        spawned += 1;
     }
-    for (workers) |worker| worker.join();
-    joined = true;
-    const elapsed = nowNs(timer_io) -| benchmark_started;
+    try workers.await(io);
+    const elapsed = nowNs(io) -| benchmark_started;
 
     var total_received: usize = 0;
     var total_allocations: usize = 0;
@@ -2045,16 +2049,15 @@ fn runAggregateBenchmark(
 
 fn runLossBenchmark(
     allocator: std.mem.Allocator,
+    io: std.Io,
     config: Config,
     server_key: EcdsaP256Sha256.KeyPair,
 ) !void {
     var counting = CountingAllocator.init(allocator);
     const selected = if (config.stats) counting.allocator() else allocator;
-    var threaded = std.Io.Threaded.init(selected, .{});
-    defer threaded.deinit();
     const result = try runIteration(
         selected,
-        threaded.io(),
+        io,
         config,
         0,
         server_key,
@@ -2111,6 +2114,7 @@ const AggregateWorkerResult = struct {
 };
 
 const AggregateWorkerContext = struct {
+    io: std.Io,
     index: usize,
     config: Config,
     server_key: EcdsaP256Sha256.KeyPair,
@@ -2129,17 +2133,13 @@ fn aggregateWorkerFallible(context: AggregateWorkerContext) !void {
         counting.allocator()
     else
         std.heap.smp_allocator;
-    var threaded = std.Io.Threaded.init(allocator, .{});
-    defer threaded.deinit();
-    const io = threaded.io();
-
     var worker_config = context.config;
     worker_config.mode = .upload;
     worker_config.iterations = 1;
     worker_config.streams = 1;
     const result = try runIteration(
         allocator,
-        io,
+        context.io,
         worker_config,
         context.index,
         context.server_key,

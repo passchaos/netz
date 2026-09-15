@@ -20,6 +20,10 @@ The WebTransport DATAGRAM round-trip/burst and steady stream-batch benchmarks
 also use zio-backed `std.Io`; the DATAGRAM server work is scheduled with
 `std.Io.async`. Their older numeric results are historical Threaded evidence
 unless a section explicitly records a zio-era rerun.
+The real-handshake QUIC STREAM benchmark now uses one zio backend across every
+mode, including network-fault runs. Its aggregate mode schedules connection
+workers with `std.Io.Group`; previously recorded values remain historical
+Threaded evidence until explicitly rerun under zio.
 As of 2026-09-15, the ACK-range, connection-router, PADDING parser,
 short-packet protection, receive sliding-window, session-ticket keyring,
 endpoint CID synchronization, pending-ready-index, timer scheduler, and
