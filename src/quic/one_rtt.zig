@@ -206,6 +206,7 @@ const PendingDatagramObserver = struct {
     notify: *const fn (*anyopaque, usize) void,
 };
 pub const PendingDatagramObserverError = error{PendingDatagramObserverBound};
+pub const PreferredAddressFamily = enum { ipv4, ipv6 };
 
 fn callbackErrorSet(comptime callback: anytype) type {
     const callback_type = switch (@typeInfo(@TypeOf(callback))) {
@@ -5116,6 +5117,15 @@ pub const Connection = struct {
         if (received_on == self.send_endpoint or !hasNonProbingFrame(frames)) {
             return;
         }
+        if (self.config.local_endpoint == .client and
+            self.peer_preferred_address_migration_active and
+            received_on == self.last_validated_peer_path.endpoint)
+        {
+            // Delayed traffic on the retained server path is valid during
+            // preferred-address probing, but only validation failure may
+            // restore that local socket as the send path.
+            return;
+        }
         if (received_on == self.endpoint or
             received_on == self.preferred_endpoint)
         {
@@ -8330,18 +8340,55 @@ pub const Connection = struct {
         } };
     }
 
-    pub fn beginPeerPreferredAddressMigration(self: *Connection, challenge: [8]u8, family: enum { ipv4, ipv6 }) Error!void {
+    pub fn beginPeerPreferredAddressMigration(self: *Connection, challenge: [8]u8, family: PreferredAddressFamily) Error!void {
+        return self.beginPeerPreferredAddressMigrationFrom(
+            self.send_endpoint,
+            challenge,
+            family,
+        );
+    }
+
+    /// Begin preferred-address validation from a caller-owned local endpoint.
+    /// This enables cross-family migration while preserving the original
+    /// endpoint for delayed packets and failure rollback. A dispatcher/event
+    /// loop must continue routing both sockets into this connection.
+    pub fn beginPeerPreferredAddressMigrationFrom(
+        self: *Connection,
+        local_endpoint: *quic.runtime.Endpoint,
+        challenge: [8]u8,
+        family: PreferredAddressFamily,
+    ) Error!void {
+        if (self.config.local_endpoint != .client) {
+            return error.InvalidTransportParameter;
+        }
         const preferred = self.config.peer_preferred_address orelse return error.InvalidTransportParameter;
         const new_peer = switch (family) {
             .ipv4 => preferredAddressIp4(preferred) orelse return error.InvalidTransportParameter,
             .ipv6 => preferredAddressIp6(preferred) orelse return error.InvalidTransportParameter,
         };
+        if (local_endpoint.io.userdata != self.endpoint.io.userdata or
+            local_endpoint.io.vtable != self.endpoint.io.vtable or
+            local_endpoint.limits.max_datagram_size !=
+                self.endpoint.limits.max_datagram_size)
+        {
+            return error.InvalidTransportParameter;
+        }
+        const matching_family = switch (new_peer) {
+            .ip4 => local_endpoint.address() == .ip4,
+            .ip6 => local_endpoint.address() == .ip6,
+        };
+        if (!matching_family) return error.InvalidTransportParameter;
         var peer_connection_ids = self.peer_connection_ids;
         try peer_connection_ids.markInUse(1);
         // RFC 9000 permits a client to use the server's preferred_address even
         // when disable_active_migration was advertised. That parameter only
         // prohibits other client-chosen addresses.
         try self.beginPeerMigrationInternal(new_peer, challenge, false);
+        self.preferred_endpoint = if (local_endpoint == self.endpoint)
+            null
+        else
+            local_endpoint;
+        self.send_endpoint = local_endpoint;
         self.peer_preferred_address_migration_active = true;
         self.peer_connection_ids = peer_connection_ids;
         self.setPeerConnectionId(

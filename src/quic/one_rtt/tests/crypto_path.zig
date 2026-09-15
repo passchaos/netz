@@ -3381,6 +3381,185 @@ test "QUIC 1-RTT validates preferred endpoint ownership" {
     );
 }
 
+test "QUIC client validates preferred address from IPv4 to IPv6" {
+    try testClientPreferredAddressAcrossFamilies(.ipv6);
+}
+
+test "QUIC client validates preferred address from IPv6 to IPv4" {
+    try testClientPreferredAddressAcrossFamilies(.ipv4);
+}
+
+fn testClientPreferredAddressAcrossFamilies(
+    comptime target_family: one_rtt.PreferredAddressFamily,
+) !void {
+    const allocator = std.testing.allocator;
+    var threaded = std.Io.Threaded.init(allocator, .{});
+    defer threaded.deinit();
+    const io = threaded.io();
+    var client_v4 = try quic.runtime.Endpoint.bind(
+        allocator,
+        io,
+        .{ .ip4 = .loopback(0) },
+        .{ .max_datagram_size = 4096 },
+    );
+    defer client_v4.deinit();
+    var client_v6 = try quic.runtime.Endpoint.bind(
+        allocator,
+        io,
+        .{ .ip6 = .loopback(0) },
+        .{ .max_datagram_size = 4096 },
+    );
+    defer client_v6.deinit();
+    var server_v4 = try quic.runtime.Endpoint.bind(
+        allocator,
+        io,
+        .{ .ip4 = .loopback(0) },
+        .{ .max_datagram_size = 4096 },
+    );
+    defer server_v4.deinit();
+    var server_v6 = try quic.runtime.Endpoint.bind(
+        allocator,
+        io,
+        .{ .ip6 = .loopback(0) },
+        .{ .max_datagram_size = 4096 },
+    );
+    defer server_v6.deinit();
+    const client_original = switch (target_family) {
+        .ipv4 => &client_v6,
+        .ipv6 => &client_v4,
+    };
+    const client_candidate = switch (target_family) {
+        .ipv4 => &client_v4,
+        .ipv6 => &client_v6,
+    };
+    const server_original = switch (target_family) {
+        .ipv4 => &server_v6,
+        .ipv6 => &server_v4,
+    };
+    const server_candidate = switch (target_family) {
+        .ipv4 => &server_v4,
+        .ipv6 => &server_v6,
+    };
+
+    const client_cid = "cross-client";
+    const server_cid = "cross-server";
+    const preferred_cid = "cross-preferred";
+    const preferred_token = [_]u8{0x6d} ** 16;
+    const keys = quic.protection.deriveAes128Keys(
+        [_]u8{0x6e} ** quic.protection.secret_len,
+    );
+    const preferred = quic.PreferredAddress{
+        .ipv4_address = server_v4.address().ip4.bytes,
+        .ipv4_port = server_v4.address().ip4.port,
+        .ipv6_address = server_v6.address().ip6.bytes,
+        .ipv6_port = server_v6.address().ip6.port,
+        .connection_id = preferred_cid,
+        .stateless_reset_token = preferred_token,
+    };
+    var client = try one_rtt.Connection.init(client_original, .{
+        .peer = server_original.address(),
+        .receive_keys = keys,
+        .send_keys = keys,
+        .local_connection_id = client_cid,
+        .peer_connection_id = server_cid,
+        .peer_preferred_address = preferred,
+        .active_connection_id_limit = 2,
+        .enable_pacing = false,
+    });
+    defer client.deinit();
+    var server = try one_rtt.Connection.init(server_original, .{
+        .peer = client_original.address(),
+        .receive_keys = keys,
+        .send_keys = keys,
+        .local_connection_id = server_cid,
+        .peer_connection_id = client_cid,
+        .local_endpoint = .server,
+        .peer_active_connection_id_limit = 2,
+        .enable_pacing = false,
+    });
+    defer server.deinit();
+    try server.registerLocalPreferredAddress(preferred);
+    try server.registerLocalPreferredEndpoint(server_candidate);
+    var client_dispatcher = quic.endpoint_dispatcher.Dispatcher.init(
+        allocator,
+        client_original,
+    );
+    defer client_dispatcher.deinit();
+    var server_dispatcher = quic.endpoint_dispatcher.Dispatcher.init(
+        allocator,
+        server_original,
+    );
+    defer server_dispatcher.deinit();
+    try client_dispatcher.registerConnection(1, &client);
+    try server_dispatcher.registerConnection(2, &server);
+
+    const challenge = [_]u8{ 0x6f, 1, 2, 3, 4, 5, 6, 7 };
+    const peer_before = client.peerAddress();
+    const peer_cid_before = client.config.peer_connection_id;
+    try std.testing.expectError(
+        error.InvalidTransportParameter,
+        client.beginPeerPreferredAddressMigrationFrom(
+            client_original,
+            challenge,
+            target_family,
+        ),
+    );
+    try std.testing.expectEqual(peer_before, client.peerAddress());
+    try std.testing.expectEqualSlices(
+        u8,
+        peer_cid_before,
+        client.config.peer_connection_id,
+    );
+    try std.testing.expectEqual(client_original, client.sendEndpoint());
+    try client.beginPeerPreferredAddressMigrationFrom(
+        client_candidate,
+        challenge,
+        target_family,
+    );
+    try client.sendPendingPathChallenge();
+
+    // A delayed authenticated packet on the retained server path is accepted,
+    // but it cannot undo the in-progress cross-family local endpoint choice.
+    try server.send(&.{.{ .ping = {} }});
+    const old_path_datagram = try client_original.receiveBytesWithTimeout(
+        .fromSeconds(1),
+    );
+    var old_path_event = try client_dispatcher.dispatch(old_path_datagram);
+    defer old_path_event.deinit(allocator);
+    try std.testing.expect(old_path_event == .packet);
+    try std.testing.expectEqual(client_candidate, client.sendEndpoint());
+    try std.testing.expectEqual(server_candidate.address(), client.peerAddress());
+    try std.testing.expect(!client.peerAddressValidated());
+
+    const challenge_datagram = try server_candidate.receiveBytesWithTimeout(
+        .fromSeconds(1),
+    );
+    var challenge_event = try server_dispatcher.dispatch(challenge_datagram);
+    defer challenge_event.deinit(allocator);
+    try std.testing.expect(challenge_event == .packet);
+    try std.testing.expectEqual(@as(u64, 1), challenge_event.packet.connection_id_sequence);
+    try server.sendPendingPathResponse();
+
+    const response_datagram = try client_candidate.receiveBytesWithTimeout(
+        .fromSeconds(1),
+    );
+    var response_event = try client_dispatcher.dispatch(response_datagram);
+    defer response_event.deinit(allocator);
+    try std.testing.expect(response_event == .packet);
+    try std.testing.expect(client.peerAddressValidated());
+    try std.testing.expectEqual(server_candidate.address(), client.peerAddress());
+    try std.testing.expectEqual(client_candidate, client.sendEndpoint());
+
+    try client.send(&.{.{ .ping = {} }});
+    const ping_datagram = try server_candidate.receiveBytesWithTimeout(
+        .fromSeconds(1),
+    );
+    var ping_event = try server_dispatcher.dispatch(ping_datagram);
+    defer ping_event.deinit(allocator);
+    try std.testing.expect(ping_event == .packet);
+    try std.testing.expectEqual(server_candidate, server.sendEndpoint());
+}
+
 test "QUIC invalid packet cannot switch local send endpoint" {
     const allocator = std.testing.allocator;
     var threaded = std.Io.Threaded.init(allocator, .{});
@@ -3473,10 +3652,17 @@ test "QUIC failed preferred-address validation restores last validated address a
     var preferred_peer = try quic.runtime.Endpoint.bind(
         allocator,
         io,
-        .{ .ip4 = .loopback(0) },
+        .{ .ip6 = .loopback(0) },
         .{ .max_datagram_size = 4096 },
     );
     defer preferred_peer.deinit();
+    var candidate_local_endpoint = try quic.runtime.Endpoint.bind(
+        allocator,
+        io,
+        .{ .ip6 = .loopback(0) },
+        .{ .max_datagram_size = 4096 },
+    );
+    defer candidate_local_endpoint.deinit();
 
     const local_cid = [_]u8{ 0x71, 0x72, 0x73, 0x74 };
     const original_cid = [_]u8{ 0x81, 0x82, 0x83, 0x84 };
@@ -3485,8 +3671,8 @@ test "QUIC failed preferred-address validation restores last validated address a
         [_]u8{0x61} ** quic.protection.secret_len,
     );
     const preferred_address = quic.PreferredAddress{
-        .ipv4_address = preferred_peer.address().ip4.bytes,
-        .ipv4_port = preferred_peer.address().ip4.port,
+        .ipv6_address = preferred_peer.address().ip6.bytes,
+        .ipv6_port = preferred_peer.address().ip6.port,
         .connection_id = &preferred_cid,
         .stateless_reset_token = [_]u8{0x62} ** 16,
     };
@@ -3504,7 +3690,15 @@ test "QUIC failed preferred-address validation restores last validated address a
     connection.path_validation.max_challenge_transmissions = 1;
 
     const challenge = [_]u8{ 0x63, 1, 2, 3, 4, 5, 6, 7 };
-    try connection.beginPeerPreferredAddressMigration(challenge, .ipv4);
+    try connection.beginPeerPreferredAddressMigrationFrom(
+        &candidate_local_endpoint,
+        challenge,
+        .ipv6,
+    );
+    try std.testing.expectEqual(
+        &candidate_local_endpoint,
+        connection.sendEndpoint(),
+    );
     const failed_epoch = one_rtt.testing.currentPathEpoch(&connection);
     try connection.sendPendingPathChallengeAt(100, 50);
     var challenge_datagram = try preferred_peer.receiveBytes();
@@ -3515,6 +3709,7 @@ test "QUIC failed preferred-address validation restores last validated address a
         try connection.checkPathValidationTimeouts(150),
     );
     try std.testing.expectEqual(original_peer.address(), connection.peerAddress());
+    try std.testing.expectEqual(&local_endpoint, connection.sendEndpoint());
     try std.testing.expect(connection.peerAddressValidated());
     try std.testing.expectEqualSlices(
         u8,

@@ -529,9 +529,14 @@ single preferred CID/token when one family uses the primary endpoint and the
 other uses the secondary endpoint, matching Quinn's separate v4/v6
 configuration surface. Typed wire round-trip tests require both candidates,
 and real handshakes verify each family both as a single-family advertisement
-and as the selected candidate of a dual-stack advertisement. A client
-connection still owns one local UDP endpoint, so actively changing its own
-address family during migration remains a separate gap.
+and as the selected candidate of a dual-stack advertisement. Low-level clients
+can start preferred-address validation from a caller-owned local endpoint,
+enabling IPv4-to-IPv6 and IPv6-to-IPv4 migration while one dispatcher serially
+injects both sockets. Tests verify sequence-1 routing, delayed packets on the
+retained old path, PATH_RESPONSE, subsequent traffic, wrong-family rollback,
+and timeout restoration of peer address, CID, and local endpoint. Direct
+blocking `Connection.receive*` remains a single-socket API; cross-family users
+must keep both sockets under an external dispatcher/event-loop owner.
 
 ## Feature parity table
 
