@@ -64,8 +64,10 @@ const ReorderState = struct {
 
 pub fn main(init: std.process.Init) !void {
     const allocator = std.heap.smp_allocator;
-    const io = init.io;
     const config = try parseArgs(init, allocator);
+    var backend = try netz.runtime.Backend.init(allocator);
+    defer backend.deinit();
+    const io = backend.io();
     const original_dcid =
         [_]u8{ 0x57, 0x54, 0x42, 0x01, 0x57, 0x54, 0x42, 0x02 };
     const client_cid = [_]u8{ 0x57, 0x54, 0x42, 0x03 };
@@ -232,7 +234,8 @@ pub fn main(init: std.process.Init) !void {
         .expected_bytes = expectedReceivedBytes(config),
         .io = io,
     };
-    const thread = try std.Thread.spawn(.{}, Shared.run, .{&shared});
+    var server_task = io.async(Shared.run, .{&shared});
+    defer server_task.cancel(io);
 
     var client = try netz.webtransport.runtime.HandshakeClientSession.connect(
         allocator,
@@ -397,10 +400,13 @@ pub fn main(init: std.process.Init) !void {
         error.Canceled => {},
         else => return err,
     };
-    thread.join();
+    server_task.await(io);
     if (shared.err) |err| return err;
     const total_bytes = expectedReceivedBytes(config);
     if (shared.received != total_bytes) return error.IncompleteTransfer;
+    if (shared.checksum != expectedReceivedChecksum(payload, config)) {
+        return error.InvalidChecksum;
+    }
 
     const mib_per_second = if (elapsed_ns == 0)
         0
@@ -409,6 +415,7 @@ pub fn main(init: std.process.Init) !void {
             (elapsed_ns *| 1024 * 1024);
     std.debug.print(
         \\WebTransport stream benchmark
+        \\  io backend: zio-std-io
         \\  send mode: {s}
         \\  stream slices: {d}
         \\  streams: {d}
@@ -590,6 +597,20 @@ fn expectedReceivedBytes(config: Config) usize {
     const resets = resetStreamCount(config);
     return (config.streams - resets) * config.transfer_bytes +
         resets * @min(config.reset_after_bytes, config.transfer_bytes);
+}
+
+fn expectedReceivedChecksum(payload: []const u8, config: Config) u64 {
+    var full_checksum: u64 = 0;
+    for (payload) |byte| full_checksum +%= byte;
+
+    const prefix_len = @min(config.reset_after_bytes, payload.len);
+    var prefix_checksum: u64 = 0;
+    for (payload[0..prefix_len]) |byte| prefix_checksum +%= byte;
+
+    const resets = resetStreamCount(config);
+    const completed: u64 = @intCast(config.streams - resets);
+    const reset: u64 = @intCast(resets);
+    return full_checksum *% completed +% prefix_checksum *% reset;
 }
 
 fn streamIndex(stream_id: u62) ?usize {

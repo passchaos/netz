@@ -30,7 +30,9 @@ benchmark, loss, and reorder gates now runs on zio behind the `std.Io` protocol
 boundary. Machine-readable success records bind netz endpoints to
 `zio-std-io` and the independently maintained Tokio/Quinn peer to
 `wtransport-quinn-tokio`; strict verifiers reject legacy or mismatched backend
-identities. The wtransport-client/netz-server half verifies a
+identities. The local incremental stream benchmark also creates its backend
+explicitly and schedules the receiving peer with `std.Io.async`, rather than
+creating an OS-thread worker. The wtransport-client/netz-server half verifies a
 successful Extended CONNECT at `/interop`, bidirectional DATAGRAM exchange, a
 client-created bidirectional stream and its reverse direction, client- and
 server-created unidirectional streams, mapped application-code 71
