@@ -7,6 +7,9 @@ const iterations: usize = 100_000;
 
 pub fn main(init: std.process.Init) !void {
     const allocator = std.heap.smp_allocator;
+    var backend = try netz.runtime.Backend.init(init.gpa);
+    defer backend.deinit();
+    const io = backend.io();
     var store = netz.mqtt.retained.Store.init(allocator, .{
         .max_messages = retained_count,
     });
@@ -43,7 +46,6 @@ pub fn main(init: std.process.Init) !void {
         checksum +%= matches[0].payload[0];
     }
 
-    const io = init.io;
     const exact_started = nowNs(io);
     for (0..iterations) |index| {
         const device = index % retained_count;
@@ -71,6 +73,7 @@ pub fn main(init: std.process.Init) !void {
 
     std.debug.print(
         \\MQTT retained store benchmark
+        \\  io backend: zio-std-io
         \\  retained messages: {d}
         \\  exact lookup ns/op: {d}
         \\  wildcard full-scan ns/op: {d}

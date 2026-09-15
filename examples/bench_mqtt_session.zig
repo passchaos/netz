@@ -7,6 +7,9 @@ const queued_per_session: usize = 4;
 
 pub fn main(init: std.process.Init) !void {
     const allocator = std.heap.smp_allocator;
+    var backend = try netz.runtime.Backend.init(init.gpa);
+    defer backend.deinit();
+    const io = backend.io();
     var store = netz.mqtt.session.Store.init(allocator, .{
         .max_sessions = session_count,
         .max_queued_per_session = queued_per_session,
@@ -25,7 +28,6 @@ pub fn main(init: std.process.Init) !void {
         try store.disconnect(opened.handle, null, now);
     }
 
-    const io = init.io;
     var checksum: u64 = 0;
     const resume_started = nowNs(io);
     for (0..resume_iterations) |index| {
@@ -86,6 +88,7 @@ pub fn main(init: std.process.Init) !void {
 
     std.debug.print(
         \\MQTT persistent session benchmark
+        \\  io backend: zio-std-io
         \\  sessions: {d}
         \\  resume ns/op: {d}
         \\  offline queue ns/message: {d}

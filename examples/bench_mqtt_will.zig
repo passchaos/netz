@@ -6,6 +6,9 @@ const cycles: usize = 50;
 
 pub fn main(init: std.process.Init) !void {
     const allocator = std.heap.smp_allocator;
+    var backend = try netz.runtime.Backend.init(init.gpa);
+    defer backend.deinit();
+    const io = backend.io();
     var scheduler = netz.mqtt.will_scheduler.Scheduler.init(
         allocator,
         .{ .max_wills = will_count },
@@ -27,7 +30,6 @@ pub fn main(init: std.process.Init) !void {
     };
     var handles: [will_count]netz.mqtt.will_scheduler.Handle = undefined;
 
-    const io = init.io;
     var checksum: u64 = 0;
     var set_ns: u64 = 0;
     var schedule_ns: u64 = 0;
@@ -71,6 +73,7 @@ pub fn main(init: std.process.Init) !void {
     const operations = will_count * cycles;
     std.debug.print(
         \\MQTT Will Delay scheduler benchmark
+        \\  io backend: zio-std-io
         \\  wills/cycle: {d}
         \\  cycles: {d}
         \\  set ns/op: {d}

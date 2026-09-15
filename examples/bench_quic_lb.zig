@@ -4,6 +4,9 @@ const netz = @import("netz");
 const iterations: usize = 1_000_000;
 
 pub fn main(init: std.process.Init) !void {
+    var backend = try netz.runtime.Backend.init(init.gpa);
+    defer backend.deinit();
+    const io = backend.io();
     const key = [16]u8{
         0x8f, 0x95, 0xf0, 0x92, 0x45, 0x76, 0x5f, 0x80,
         0x25, 0x69, 0x34, 0xe5, 0x0c, 0x66, 0x20, 0x7f,
@@ -27,7 +30,7 @@ pub fn main(init: std.process.Init) !void {
     var decoded: [netz.quic.quic_lb.max_server_id_len]u8 = undefined;
 
     var checksum: usize = 0;
-    const started = nowNs(init.io);
+    const started = nowNs(io);
     for (0..iterations) |_| {
         const routed = try netz.quic.quic_lb.decodeServerId(
             config,
@@ -36,9 +39,10 @@ pub fn main(init: std.process.Init) !void {
         );
         checksum +%= routed[0];
     }
-    const elapsed = nowNs(init.io) - started;
+    const elapsed = nowNs(io) - started;
     std.debug.print(
         \\QUIC-LB encrypted routing benchmark
+        \\  io backend: zio-std-io
         \\  iterations: {d}, CID bytes: {d}, SID bytes: {d}
         \\  ns/route: {d}
         \\  checksum: {d}

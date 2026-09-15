@@ -1101,6 +1101,9 @@ Run the internal lookup baseline with:
 zig build bench-mqtt-retained -Doptimize=ReleaseFast
 ```
 
+The benchmark clock is provided by zio-backed `std.Io`; the 2026-08-19 values
+below predate that migration and remain historical Threaded evidence.
+
 2026-08-19 CPU-0-pinned `ReleaseFast` result with 4,096 retained entries:
 
 ```text
@@ -1156,6 +1159,9 @@ Run:
 zig build bench-mqtt-session -Doptimize=ReleaseFast
 ```
 
+The benchmark clock is provided by zio-backed `std.Io`; the 2026-08-18 values
+below predate that migration and remain historical Threaded evidence.
+
 2026-08-18 same-host `ReleaseFast` result with 4,096 Sessions:
 
 ```text
@@ -1199,6 +1205,9 @@ Run:
 ```sh
 zig build bench-mqtt-will -Doptimize=ReleaseFast
 ```
+
+The benchmark clock is provided by zio-backed `std.Io`; the 2026-08-18 values
+below predate that migration and remain historical Threaded evidence.
 
 2026-08-18 same-host `ReleaseFast`, 4,096 Wills over 50 cycles:
 

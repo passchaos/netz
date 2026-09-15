@@ -24,6 +24,9 @@ The real-handshake QUIC STREAM benchmark now uses one zio backend across every
 mode, including network-fault runs. Its aggregate mode schedules connection
 workers with `std.Io.Group`; previously recorded values remain historical
 Threaded evidence until explicitly rerun under zio.
+The MQTT retained/session/Will state benchmarks and QUIC-LB routing benchmark
+now obtain their monotonic clock from zio-backed `std.Io`; their older numeric
+results remain historical Threaded evidence.
 As of 2026-09-15, the ACK-range, connection-router, PADDING parser,
 short-packet protection, receive sliding-window, session-ticket keyring,
 endpoint CID synchronization, pending-ready-index, timer scheduler, and

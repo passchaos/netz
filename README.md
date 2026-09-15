@@ -1111,6 +1111,8 @@ The real-handshake QUIC STREAM benchmark uses the same zio-owned `std.Io` in
 upload, handshake, echo, churn, fault, and aggregate modes. Aggregate
 connections run as a `std.Io.Group` instead of creating OS threads or private
 I/O backends.
+The MQTT retained/session/Will schedulers and QUIC-LB routing benchmark also
+obtain their monotonic benchmark clock from zio-backed `std.Io`.
 
 The aggregate `bench` step runs the current protocol microbenchmarks:
 
