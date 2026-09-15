@@ -110,9 +110,12 @@ def summarize(
             if any(row.get("complete") != "true" for row in group):
                 raise ValueError(f"{role_pair}/{sender}: incomplete result")
             client_impl, server_impl = CHECK.endpoint_implementations(role_pair)
+            client_io, server_io = CHECK.endpoint_ios(role_pair)
             implementation = client_impl if mode == "echo" or sender == "client" else server_impl
             if any(
                 row.get("implementation") != implementation
+                or row.get("client_io") != client_io
+                or row.get("server_io") != server_io
                 or row.get("result_owner") != "client"
                 or row.get("benchmark_scope") != "same-application-shape"
                 or row.get("completion_exchange_verified") != "true"
@@ -128,6 +131,7 @@ def summarize(
                 output.append(
                     "record=summary protocol=quic-stream mode=echo "
                     f"role_pair={role_pair} sender_role=client samples={samples} "
+                    f"client_io={client_io} server_io={server_io} "
                     f"median_p50_ns={median} min_p50_ns={min(values)} "
                     f"max_p50_ns={max(values)} "
                     f"median_p99_ns={int(statistics.median(p99_values))} "
@@ -151,6 +155,7 @@ def summarize(
                 output.append(
                     "record=summary protocol=quic-stream mode=aggregate "
                     f"role_pair={role_pair} sender_role={sender} samples={samples} "
+                    f"client_io={client_io} server_io={server_io} "
                     f"median_elapsed_ns={median_elapsed} "
                     f"median_logical_MiB_s={median_throughput:.3f} "
                     f"min_logical_MiB_s={min(throughput):.3f} "

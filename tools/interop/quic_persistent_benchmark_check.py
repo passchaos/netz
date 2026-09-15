@@ -54,6 +54,14 @@ def endpoint_implementations(role_pair: str) -> tuple[str, str]:
     return pair
 
 
+def endpoint_ios(role_pair: str) -> tuple[str, str]:
+    client, server = endpoint_implementations(role_pair)
+    return (
+        "zio-std-io" if client == "netz" else "quic-go-netpoll",
+        "zio-std-io" if server == "netz" else "quic-go-netpoll",
+    )
+
+
 def transfer_checksum(bytes_per_stream: int, streams: int, connection: int) -> int:
     return sum(
         (offset * 131 + stream * 17 + connection * 29) & 0xFF
@@ -77,6 +85,7 @@ def require_shape(
     server_ack_delay_us: int,
 ) -> None:
     shared = server_topology == "shared"
+    client_io, server_io = endpoint_ios(role_pair)
     expected = {
         "implementation": implementation,
         "protocol": "quic-stream",
@@ -87,6 +96,8 @@ def require_shape(
         ),
         "role_pair": role_pair,
         "run": str(run),
+        "client_io": client_io,
+        "server_io": server_io,
         "connection_scope": (
             "persistent" if mode == "echo" else
             "parallel-shared-server-endpoint" if shared else

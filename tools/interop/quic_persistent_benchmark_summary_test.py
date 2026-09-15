@@ -29,6 +29,8 @@ class PersistentBenchmarkSummaryTest(unittest.TestCase):
                         "record=result protocol=quic-stream mode=echo "
                         f"role_pair={pair} sender_role=client result_owner=client "
                         f"implementation={'netz' if pair.startswith('netz-client') else 'quic-go'} "
+                        f"client_io={'zio-std-io' if pair.startswith('netz-client') else 'quic-go-netpoll'} "
+                        f"server_io={'zio-std-io' if pair.endswith('netz-server') else 'quic-go-netpoll'} "
                         f"run={run} warmup=1 iterations=2 connections=1 streams=1 "
                         f"payload_bytes=64 p50_ns={value} p99_ns={value + 10} "
                         f"p999_ns={value + 20} benchmark_scope=same-application-shape "
@@ -61,6 +63,8 @@ class PersistentBenchmarkSummaryTest(unittest.TestCase):
                     "record=result protocol=quic-stream mode=aggregate "
                     f"role_pair={pair} sender_role={sender} result_owner=client "
                     f"implementation={'netz' if (sender == 'client' and pair.startswith('netz-client')) or (sender == 'server' and pair.endswith('netz-server')) else 'quic-go'} "
+                    f"client_io={'zio-std-io' if pair.startswith('netz-client') else 'quic-go-netpoll'} "
+                    f"server_io={'zio-std-io' if pair.endswith('netz-server') else 'quic-go-netpoll'} "
                     "run=1 connections=4 streams=1 bytes_per_stream=1024 "
                     "timing_scope=stream-setup-through-verified-completion "
                     "endpoint_topology=one-udp-socket-per-connection "
@@ -86,6 +90,7 @@ class PersistentBenchmarkSummaryTest(unittest.TestCase):
                             f"direction={'upload' if sender == 'client' else 'download'} "
                             f"role_pair={pair} sender_role={sender} result_owner=client "
                             f"implementation={'netz' if pair.startswith('netz-client') else 'quic-go'} "
+                            "client_io=zio-std-io server_io=zio-std-io "
                             f"run={run} connections=4 streams=1 bytes_per_stream=1024 "
                             "timing_scope=stream-setup-through-verified-completion "
                             f"elapsed_ns=1000 logical_MiB_s={value:.3f} "
@@ -146,6 +151,7 @@ class PersistentBenchmarkSummaryTest(unittest.TestCase):
                     lines.append(
                         "record=result implementation=netz protocol=quic-stream "
                         "mode=aggregate role_pair=netz-client+netz-server "
+                        "client_io=zio-std-io server_io=zio-std-io "
                         f"sender_role={sender} result_owner=client run={run} "
                         "connections=4 streams=1 bytes_per_stream=1024 "
                         "timing_scope=stream-setup-through-verified-completion "
@@ -161,6 +167,35 @@ class PersistentBenchmarkSummaryTest(unittest.TestCase):
             self.assertEqual(len(output), 2)
             self.assertIn("median_logical_MiB_s=95.000", output[0])
             self.assertIn("median_logical_MiB_s=82.000", output[1])
+
+    def test_rejects_mixed_or_legacy_io_backend_rows(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            path = Path(directory, "results.log")
+            lines = []
+            for sender in ("client", "server"):
+                lines.append(
+                    "record=result implementation=netz protocol=quic-stream "
+                    "mode=aggregate role_pair=netz-client+netz-server "
+                    f"sender_role={sender} result_owner=client run=1 "
+                    "client_io=zio-std-io server_io=zio-std-io "
+                    "connections=4 streams=1 bytes_per_stream=1024 "
+                    "timing_scope=stream-setup-through-verified-completion "
+                    "endpoint_topology=one-udp-socket-per-connection "
+                    "elapsed_ns=1000 logical_MiB_s=100.000 "
+                    "benchmark_scope=same-application-shape "
+                    "completion_exchange_verified=true complete=true"
+                )
+            path.write_text("\n".join(lines) + "\n", encoding="utf-8")
+            output = SUMMARY.summarize(
+                path, "aggregate", 1, netz_only=True,
+            )
+            self.assertIn("client_io=zio-std-io", output[0])
+            path.write_text(
+                path.read_text().replace(" client_io=zio-std-io", "", 1),
+                encoding="utf-8",
+            )
+            with self.assertRaisesRegex(ValueError, "identity or proof"):
+                SUMMARY.summarize(path, "aggregate", 1, netz_only=True)
 
 
 if __name__ == "__main__":

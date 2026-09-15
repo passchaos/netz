@@ -1130,7 +1130,10 @@ connection after warmup; `aggregate` starts four independent UDP
 endpoint/connections through one GO barrier and transfers 1 MiB per connection
 in both sender directions. Every result requires a peer-verified DONE/DONE_ACK,
 exact byte count, FIN, independently recomputed checksum, and matching server
-completion record. It deliberately reports `same-application-shape`: endpoint
+completion record. Netz endpoints run on zio while the protocol and harness
+only consume `std.Io`; per-result `client_io` and `server_io` fields distinguish
+that path from quic-go's netpoll runtime and make legacy backend records fail
+strict validation. It deliberately reports `same-application-shape`: endpoint
 workers share one process CPU, but this is not a shared-socket QUIC listener or
 an equal-wire comparison.
 Pass `--server-topology=shared` to benchmark the netz/netz client-upload shape
@@ -1200,9 +1203,9 @@ _ = accept;
 HTTP/1 can also run over a real TCP stream:
 
 ```zig
-var threaded = std.Io.Threaded.init(allocator, .{});
-defer threaded.deinit();
-const io = threaded.io();
+var backend = try netz.runtime.Backend.init(allocator);
+defer backend.deinit();
+const io = backend.io();
 
 var response = try netz.http1.runtime.Client.requestUri(
     allocator,

@@ -19,6 +19,7 @@ class PersistentBenchmarkCheckTest(unittest.TestCase):
         common = (
             "protocol=quic-stream mode=aggregate direction=upload "
             "role_pair=quic-go-client+netz-server run=1 connections=4 streams=4 "
+            "client_io=quic-go-netpoll server_io=zio-std-io "
             "connection_scope=parallel-independent-endpoints "
             "endpoint_topology=one-udp-socket-per-connection "
             "benchmark_scope=same-application-shape bytes_per_stream=256 "
@@ -72,12 +73,32 @@ class PersistentBenchmarkCheckTest(unittest.TestCase):
             with self.assertRaisesRegex(ValueError, "duplicate"):
                 self.verify(client, server)
 
+    def test_rejects_wrong_or_missing_io_backend(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            client, server = self.write_pair(directory)
+            client.write_text(
+                client.read_text().replace(
+                    "client_io=quic-go-netpoll", "client_io=zio-std-io",
+                ),
+                encoding="utf-8",
+            )
+            with self.assertRaisesRegex(ValueError, "client_io mismatch"):
+                self.verify(client, server)
+            client, server = self.write_pair(directory)
+            server.write_text(
+                server.read_text().replace(" server_io=zio-std-io", ""),
+                encoding="utf-8",
+            )
+            with self.assertRaisesRegex(ValueError, "server_io mismatch"):
+                self.verify(client, server)
+
     def test_accepts_echo_and_rejects_bad_latency_order(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
             checksum = CHECK.echo_checksum(3, 64)
             common = (
                 "protocol=quic-stream mode=echo direction=roundtrip "
                 "role_pair=netz-client+quic-go-server run=2 "
+                "client_io=zio-std-io server_io=quic-go-netpoll "
                 "connection_scope=persistent endpoint_topology=independent-udp "
                 "benchmark_scope=same-application-shape warmup=1 iterations=2 "
                 "connections=1 streams=1 payload_bytes=64 total_bytes=192 "
@@ -122,6 +143,9 @@ class PersistentBenchmarkCheckTest(unittest.TestCase):
                     ).replace(
                         "implementation=quic-go",
                         "implementation=netz",
+                    ).replace(
+                        "client_io=quic-go-netpoll",
+                        "client_io=zio-std-io",
                     ).replace(
                         "connection_scope=parallel-independent-endpoints "
                         "endpoint_topology=one-udp-socket-per-connection",

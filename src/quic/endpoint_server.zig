@@ -290,7 +290,7 @@ pub const Server = struct {
         }
         if (handshake_options.transport_parameters.len != 0) {
             const raw_transport_parameters =
-                try quic.parseTransportParametersTyped(
+                quic.parseTransportParametersTyped(
                     endpoint.allocator,
                     handshake_options.transport_parameters,
                     .server,
@@ -350,17 +350,17 @@ pub const Server = struct {
         errdefer allocator.destroy(dispatcher);
         dispatcher.* = .init(allocator, endpoint);
         errdefer dispatcher.deinit();
-        const preferred_receive_storage = if (preferred_endpoints.secondary != null)
+        const preferred_receive_storage: []u8 = if (preferred_endpoints.secondary != null)
             try allocator.alloc(u8, endpoint.limits.max_datagram_size)
         else
-            &.{};
+            @constCast(&.{});
         errdefer if (preferred_receive_storage.len != 0) {
             allocator.free(preferred_receive_storage);
         };
-        const pending_multi_endpoint_storage = if (preferred_endpoints.secondary != null)
+        const pending_multi_endpoint_storage: []u8 = if (preferred_endpoints.secondary != null)
             try allocator.alloc(u8, endpoint.limits.max_datagram_size)
         else
-            &.{};
+            @constCast(&.{});
         errdefer if (pending_multi_endpoint_storage.len != 0) {
             allocator.free(pending_multi_endpoint_storage);
         };

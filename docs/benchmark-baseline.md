@@ -2387,6 +2387,24 @@ is accepted only after the peer has consumed and validated exact payload bytes,
 FIN, and checksum and the DONE/DONE_ACK exchange completes; a separate server
 record must independently agree.
 
+The netz side of the current harness uses zio as its execution backend and
+passes only `std.Io` into QUIC. Every result and server-completion record names
+both endpoint runtimes (`zio-std-io` or `quic-go-netpoll`), and the strict
+checker and summary reject missing or mismatched runtime identities. The
+historical measurements below predate that migration and were collected with
+the former `std.Io.Threaded` harness; they remain historical baselines, not zio
+performance evidence. New zio performance claims require a fresh fixed-binary,
+CPU-pinned, order-interleaved run.
+
+A 2026-09-15 ReleaseFast migration smoke used four connections, one 256-KiB
+stream per connection, and both sender roles. The shared-server topology
+verified 1,048,576 bytes and checksum 133,693,440 at 63.686 MiB/s upload and
+78.468 MiB/s download; the independent topology verified the same payload at
+81.419 and 77.144 MiB/s. A separate 2-warmup/20-measurement persistent echo
+run verified all 22,528 bytes and checksum 2,872,320. Every record identified
+both endpoints as `zio-std-io`. These single-sample results establish runtime
+and verifier coverage only; they are not comparative performance evidence.
+
 ```sh
 zig build bench-quic-persistent-external -Doptimize=ReleaseFast -- \
   --mode=echo --samples=5 --warmup=200 --iterations=5000 \

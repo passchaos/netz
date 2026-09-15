@@ -245,9 +245,9 @@ fn runServer(config: Config) !void {
         return runSharedServer(config);
     }
     const allocator = std.heap.c_allocator;
-    var threaded = std.Io.Threaded.init(allocator, .{ .async_limit = .unlimited });
-    defer threaded.deinit();
-    const io = threaded.io();
+    var backend = try netz.runtime.Backend.init(allocator);
+    defer backend.deinit();
+    const io = backend.io();
     const endpoints = try allocator.alloc(netz.quic.runtime.Endpoint, config.connections);
     defer allocator.free(endpoints);
     var initialized: usize = 0;
@@ -270,11 +270,11 @@ fn runServer(config: Config) !void {
 
     const contexts = try allocator.alloc(ServerWorker, config.connections);
     defer allocator.free(contexts);
-    const threads = try allocator.alloc(std.Thread, config.connections);
-    defer allocator.free(threads);
     const results = try allocator.alloc(WorkerResult, config.connections);
     defer allocator.free(results);
     @memset(results, .{});
+    var workers: std.Io.Group = .init;
+    defer workers.cancel(io);
     for (0..config.connections) |index| {
         contexts[index] = .{
             .allocator = allocator,
@@ -284,9 +284,9 @@ fn runServer(config: Config) !void {
             .index = @intCast(index),
             .result = &results[index],
         };
-        threads[index] = try std.Thread.spawn(.{}, ServerWorker.run, .{&contexts[index]});
+        workers.async(io, ServerWorker.run, .{&contexts[index]});
     }
-    for (threads) |thread| thread.join();
+    try workers.await(io);
     try printServerCompletion(config, results, null, null);
 }
 
@@ -335,9 +335,9 @@ const SharedReceiveStats = struct {
 
 fn runSharedServer(config: Config) !void {
     const allocator = std.heap.c_allocator;
-    var threaded = std.Io.Threaded.init(allocator, .{ .async_limit = .unlimited });
-    defer threaded.deinit();
-    const io = threaded.io();
+    var backend = try netz.runtime.Backend.init(allocator);
+    defer backend.deinit();
+    const io = backend.io();
     var socket_traffic: netz.quic.runtime.SocketTrafficCounters = .{};
     var limits = endpointLimits();
     limits.socket_traffic_counters = &socket_traffic;
@@ -1083,15 +1083,13 @@ fn trySendSharedRecord(
 fn runClient(config: Config, ports_text: []const u8, ca_path: []const u8) !void {
     if (!std.Io.Dir.path.isAbsolute(ca_path)) return error.InvalidArgument;
     const allocator = std.heap.c_allocator;
-    var threaded = std.Io.Threaded.init(allocator, .{ .async_limit = .unlimited });
-    defer threaded.deinit();
-    const io = threaded.io();
+    var backend = try netz.runtime.Backend.init(allocator);
+    defer backend.deinit();
+    const io = backend.io();
     const ports = try parsePorts(allocator, ports_text, config.connections);
     defer allocator.free(ports);
     const contexts = try allocator.alloc(ClientWorker, config.connections);
     defer allocator.free(contexts);
-    const threads = try allocator.alloc(std.Thread, config.connections);
-    defer allocator.free(threads);
     const results = try allocator.alloc(WorkerResult, config.connections);
     defer allocator.free(results);
     @memset(results, .{});
@@ -1099,8 +1097,10 @@ fn runClient(config: Config, ports_text: []const u8, ca_path: []const u8) !void 
     const latencies = try allocator.alloc(u64, latency_count);
     defer allocator.free(latencies);
     var ready = std.atomic.Value(usize).init(0);
-    var failed = std.atomic.Value(bool).init(false);
+    var all_ready: std.Io.Event = .unset;
     var start: std.Io.Event = .unset;
+    var workers: std.Io.Group = .init;
+    defer workers.cancel(io);
     for (0..config.connections) |index| {
         contexts[index] = .{
             .allocator = allocator,
@@ -1110,21 +1110,17 @@ fn runClient(config: Config, ports_text: []const u8, ca_path: []const u8) !void 
             .config = config,
             .index = @intCast(index),
             .ready = &ready,
-            .failed = &failed,
+            .all_ready = &all_ready,
             .start = &start,
             .latencies = if (config.mode == .echo) latencies else &.{},
             .result = &results[index],
         };
-        threads[index] = try std.Thread.spawn(.{}, ClientWorker.run, .{&contexts[index]});
+        workers.async(io, ClientWorker.run, .{&contexts[index]});
     }
-    while (ready.load(.acquire) != config.connections and
-        !failed.load(.acquire))
-    {
-        std.Thread.yield() catch {};
-    }
+    all_ready.waitUncancelable(io);
     const started_ns = transfer.nowNs(io);
     start.set(io);
-    for (threads) |thread| thread.join();
+    try workers.await(io);
     for (results) |result| if (result.err) |err| return err;
     var finished_ns = started_ns;
     var bytes: u64 = 0;
@@ -1241,7 +1237,7 @@ const ClientWorker = struct {
     config: Config,
     index: u32,
     ready: *std.atomic.Value(usize),
-    failed: *std.atomic.Value(bool),
+    all_ready: *std.Io.Event,
     start: *std.Io.Event,
     latencies: []u64,
     result: *WorkerResult,
@@ -1249,7 +1245,7 @@ const ClientWorker = struct {
     fn run(self: *@This()) void {
         self.runFallible() catch |err| {
             self.result.err = err;
-            self.failed.store(true, .release);
+            self.all_ready.set(self.io);
             self.start.set(self.io);
         };
     }
@@ -1335,6 +1331,7 @@ const ClientWorker = struct {
                 &established.connection,
                 self.config,
                 self.ready,
+                self.all_ready,
                 self.start,
                 self.latencies,
                 &control_offset,
@@ -1346,6 +1343,7 @@ const ClientWorker = struct {
                 self.config,
                 self.index,
                 self.ready,
+                self.all_ready,
                 self.start,
                 &control_offset,
                 deadline,
@@ -1365,6 +1363,7 @@ fn clientEcho(
     connection: *netz.quic.one_rtt.Connection,
     config: Config,
     ready_count: *std.atomic.Value(usize),
+    all_ready: *std.Io.Event,
     start: *std.Io.Event,
     latencies: []u64,
     control_offset: *u64,
@@ -1401,7 +1400,8 @@ fn clientEcho(
             deadline,
         );
     }
-    _ = ready_count.fetchAdd(1, .release);
+    const previous_ready = ready_count.fetchAdd(1, .release);
+    if (previous_ready + 1 == config.connections) all_ready.set(io);
     start.waitUncancelable(io);
     for (latencies, 0..) |*elapsed, index| {
         const sequence = config.warmup + @as(u32, @intCast(index));
@@ -1491,12 +1491,16 @@ fn clientAggregate(
     config: Config,
     connection_index: u32,
     ready_count: *std.atomic.Value(usize),
+    all_ready: *std.Io.Event,
     start: *std.Io.Event,
     control_offset: *u64,
     deadline: std.Io.Clock.Timestamp,
 ) !WorkerResult {
     const wire = config.wire();
-    _ = ready_count.fetchAdd(1, .release);
+    const previous_ready = ready_count.fetchAdd(1, .release);
+    if (previous_ready + 1 == config.connections) {
+        all_ready.set(connection.endpoint.io);
+    }
     start.waitUncancelable(connection.endpoint.io);
     try transfer.sendRecord(
         connection,
@@ -1798,6 +1802,7 @@ fn printClientResult(
         std.debug.print(
             "record=result implementation={s} protocol=quic-stream mode=echo " ++
                 "direction=roundtrip role_pair={s} result_owner=client run={d} " ++
+                "client_io={s} server_io={s} " ++
                 "connection_scope=persistent endpoint_topology=independent-udp " ++
                 "benchmark_scope=same-application-shape warmup={d} iterations={d} " ++
                 "connections=1 streams=1 payload_bytes={d} measured_bytes={d} " ++
@@ -1806,11 +1811,11 @@ fn printClientResult(
                 "max_ns={d} cert_verify=true quic_version=1 gso=false gro=false " ++
                 "sender_role=client completion_exchange_verified=true complete=true\n",
             .{
-                implementation,                 config.role_pair,               config.run,                                         config.warmup,
-                config.iterations,              config.payload_bytes,           @as(u64, config.iterations) * config.payload_bytes, bytes,
-                checksum,                       total_ns,                       total_ns / config.iterations,                       latencies[0],
-                percentile(latencies, 50, 100), percentile(latencies, 90, 100), percentile(latencies, 99, 100),                     percentile(latencies, 999, 1000),
-                latencies[latencies.len - 1],
+                implementation,                                     config.role_pair,                 config.run,                     clientIo(config.role_pair),
+                serverIo(config.role_pair),                         config.warmup,                    config.iterations,              config.payload_bytes,
+                @as(u64, config.iterations) * config.payload_bytes, bytes,                            checksum,                       total_ns,
+                total_ns / config.iterations,                       latencies[0],                     percentile(latencies, 50, 100), percentile(latencies, 90, 100),
+                percentile(latencies, 99, 100),                     percentile(latencies, 999, 1000), latencies[latencies.len - 1],
             },
         );
         return;
@@ -1821,6 +1826,7 @@ fn printClientResult(
     std.debug.print(
         "record=result implementation={s} protocol=quic-stream mode=aggregate " ++
             "direction={s} role_pair={s} result_owner=client run={d} " ++
+            "client_io={s} server_io={s} " ++
             "connection_scope={s} " ++
             "endpoint_topology={s} " ++
             "benchmark_scope=same-application-shape " ++
@@ -1833,12 +1839,13 @@ fn printClientResult(
             "cert_verify=true quic_version=1 gso=false gro=false " ++
             "completion_exchange_verified=true complete=true\n",
         .{
-            implementation,          transferDirection(config),  config.role_pair,
-            config.run,              connectionScope(config),    endpointTopology(config),
-            config.connections,      config.streams,             config.bytes_per_stream,
-            bytes,                   checksum,                   serverReceiveBatch(config),
-            config.server_ack_every, config.server_ack_delay_us, elapsed_ns,
-            mib_s,                   @tagName(config.sender),
+            implementation,             transferDirection(config),  config.role_pair,
+            config.run,                 clientIo(config.role_pair), serverIo(config.role_pair),
+            connectionScope(config),    endpointTopology(config),   config.connections,
+            config.streams,             config.bytes_per_stream,    bytes,
+            checksum,                   serverReceiveBatch(config), config.server_ack_every,
+            config.server_ack_delay_us, elapsed_ns,                 mib_s,
+            @tagName(config.sender),
         },
     );
 }
@@ -1861,6 +1868,7 @@ fn printServerCompletion(
             "record=server-complete implementation={s} protocol=quic-stream " ++
                 "mode=echo direction=roundtrip role_pair={s} endpoint_role=server " ++
                 "run={d} connection_scope=persistent endpoint_topology=independent-udp " ++
+                "client_io={s} server_io={s} " ++
                 "benchmark_scope=same-application-shape warmup={d} iterations={d} " ++
                 "connections=1 streams=1 payload_bytes={d} total_bytes={d} " ++
                 "checksum={d} sender_role=client connections_complete=1 " ++
@@ -1868,7 +1876,8 @@ fn printServerCompletion(
                 "completion_exchange_verified=true complete=true\n",
             .{
                 serverImplementation(config.role_pair), config.role_pair,
-                config.run,                             config.warmup,
+                config.run,                             clientIo(config.role_pair),
+                serverIo(config.role_pair),             config.warmup,
                 config.iterations,                      config.payload_bytes,
                 bytes,                                  checksum,
             },
@@ -1882,6 +1891,7 @@ fn printServerCompletion(
             "mode=aggregate direction={s} role_pair={s} endpoint_role=server " ++
             "run={d} connection_scope={s} " ++
             "endpoint_topology={s} " ++
+            "client_io={s} server_io={s} " ++
             "benchmark_scope=same-application-shape warmup=0 iterations=1 " ++
             "connections={d} streams={d} bytes_per_stream={d} payload_bytes={d} " ++
             "transferred_bytes={d} checksum={d} sender_role={s} " ++
@@ -1898,16 +1908,17 @@ fn printServerCompletion(
             "connections_complete={d} cert_verify=true quic_version=1 " ++
             "gso=false gro=false completion_exchange_verified=true complete=true\n",
         .{
-            serverImplementation(config.role_pair), transferDirection(config),  config.role_pair,
-            config.run,                             connectionScope(config),    endpointTopology(config),
-            config.connections,                     config.streams,             config.bytes_per_stream,
-            config.payload_bytes,                   bytes,                      checksum,
-            @tagName(config.sender),                serverReceiveBatch(config), config.server_ack_every,
-            config.server_ack_delay_us,             receive.calls,              receive.events,
-            receive.max_events,                     receive.received_datagrams, receive.max_received_datagrams,
-            receive.connected_events,               receive.packet_events,      receive.timer_events,
-            traffic.sent_datagrams,                 traffic.sent_bytes,         traffic.received_datagrams,
-            traffic.received_bytes,                 config.connections,
+            serverImplementation(config.role_pair), transferDirection(config),      config.role_pair,
+            config.run,                             connectionScope(config),        endpointTopology(config),
+            clientIo(config.role_pair),             serverIo(config.role_pair),     config.connections,
+            config.streams,                         config.bytes_per_stream,        config.payload_bytes,
+            bytes,                                  checksum,                       @tagName(config.sender),
+            serverReceiveBatch(config),             config.server_ack_every,        config.server_ack_delay_us,
+            receive.calls,                          receive.events,                 receive.max_events,
+            receive.received_datagrams,             receive.max_received_datagrams, receive.connected_events,
+            receive.packet_events,                  receive.timer_events,           traffic.sent_datagrams,
+            traffic.sent_bytes,                     traffic.received_datagrams,     traffic.received_bytes,
+            config.connections,
         },
     );
 }
@@ -1963,6 +1974,20 @@ fn serverImplementation(role_pair: []const u8) []const u8 {
         "netz"
     else
         "quic-go";
+}
+
+fn clientIo(role_pair: []const u8) []const u8 {
+    return if (std.mem.startsWith(u8, role_pair, "netz-client"))
+        "zio-std-io"
+    else
+        "quic-go-netpoll";
+}
+
+fn serverIo(role_pair: []const u8) []const u8 {
+    return if (std.mem.endsWith(u8, role_pair, "netz-server"))
+        "zio-std-io"
+    else
+        "quic-go-netpoll";
 }
 
 test "persistent QUIC benchmark config rejects ambiguous shapes" {
