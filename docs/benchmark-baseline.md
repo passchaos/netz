@@ -3034,6 +3034,45 @@ candidate won 1/5 pairs in both shapes and both ranges overlap. This records an
 approximately 1% median validation cost for closing protocol correctness gaps;
 it is not treated as a performance improvement.
 
+The shared-server benchmark now negotiates draft-07 ACK_FREQUENCY instead of
+silently installing a benchmark-only receive policy. Both endpoints advertise
+`min_ack_delay=1000`; the client appends one ACK_FREQUENCY request to its first
+non-empty 1-RTT packet, while the server deliberately does not make the reverse
+request. The wire Ack-Eliciting Threshold is a tolerance, not the local trigger
+count: wire value 3 requests an ACK on the fourth ack-eliciting packet. The
+receive path now performs that `+1` conversion with saturation. The requested
+maximum ACK delay remains the peer's transport-parameter value, so the policy
+does not lengthen PTO. Low-level keyed connections retain their 1/0 defaults,
+and handshake users must opt in to sending the request after peer capability is
+known.
+
+Five fixed-binary, order-interleaved 16-connection, 16-MiB-total pairs compared
+parent `017a3473` with server ACK/2 against the negotiated client request for
+server ACK/4. The parent and candidate executable SHA-256 values were
+`a17c6f4596040cd9a230e24dee0c5b1c81fdbb9d966ff2e7cc8f922e6484c593`
+and `7a0d8fc6897283145071a3c117d2cf6db59098e8fcab36a97c9bd0eac282b672`.
+Client-sender samples were 65.267, 56.383, 57.579, 66.328, and 57.252
+MiB/s for the parent versus 90.483, 76.974, 68.014, 81.159, and 55.224
+MiB/s for the candidate. Their medians were 57.579 and 76.974 MiB/s, a
+33.7% increase with 4/5 paired wins. The ranges, 56.383-66.328 and
+55.224-90.483 MiB/s, overlap, so this does not establish a universal or
+per-run win. Server UDP sends fell from 10,579-12,304 datagrams (10,950
+median) to 4,377-4,472 (4,445 median), a 59.4% median reduction.
+
+The server-sender control retained the client's ordinary ACK behavior. Parent
+samples were 78.970, 95.858, 80.281, 78.660, and 85.087 MiB/s; candidate
+samples were 80.489, 87.458, 76.407, 90.833, and 85.733 MiB/s. Medians were
+80.281 and 85.733 MiB/s with 3/5 candidate wins, but the ranges overlap. This
+is evidence against the systematic download regression seen with bidirectional
+requests, not a download speedup claim. Every arm verified 16,777,216 bytes,
+checksum 2,139,095,040, all 16 connections, and DONE/DONE_ACK completion.
+Direct tests additionally prove first-packet HANDSHAKE_DONE/ACK_FREQUENCY
+coalescing, socket-failure retry without consuming the sequence or pending
+request, PTO retransmission after a successful send, explicit-request override,
+and rejection when the peer did not advertise support. A post-freeze rebuild
+reproduced the candidate hash, and a two-connection shared smoke reported
+ACK/4 while completing exact upload and download verification.
+
 ### Raw QUIC mixed FIN/reset recovery versus quic-go
 
 The separate process gate below exercises terminal stream churn instead of

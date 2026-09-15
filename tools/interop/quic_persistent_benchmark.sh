@@ -19,7 +19,7 @@ stream_window=${NETZ_QUIC_PERSISTENT_STREAM_WINDOW:-1048576}
 timeout_ms=${NETZ_QUIC_PERSISTENT_TIMEOUT_MS:-30000}
 server_topology=independent
 shared_receive_batch=${NETZ_QUIC_PERSISTENT_SHARED_RECEIVE_BATCH:-32}
-server_ack_every=${NETZ_QUIC_PERSISTENT_SERVER_ACK_EVERY:-2}
+server_ack_every=${NETZ_QUIC_PERSISTENT_SERVER_ACK_EVERY:-}
 server_ack_delay_us=${NETZ_QUIC_PERSISTENT_SERVER_ACK_DELAY_US:-25000}
 netz_only=false
 for arg in "$@"; do
@@ -43,6 +43,13 @@ for arg in "$@"; do
     *) echo "unknown persistent benchmark option: $arg" >&2; exit 2 ;;
   esac
 done
+if [[ -z $server_ack_every ]]; then
+  if [[ $server_topology == shared ]]; then
+    server_ack_every=4
+  else
+    server_ack_every=2
+  fi
+fi
 if [[ $modes != echo && $modes != aggregate && $modes != both ]]; then
   echo 'mode must be echo, aggregate, or both' >&2
   exit 2

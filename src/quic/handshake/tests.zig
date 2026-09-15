@@ -3089,7 +3089,10 @@ test "QUIC integrated handshake applies negotiated transport parameters over QUI
                 .local_connection_id = cid,
                 .local_transport_parameters = params,
                 .version = .version_2,
-                .initial_one_rtt_config = .{ .enable_pacing = false },
+                .initial_one_rtt_config = .{
+                    .enable_pacing = false,
+                    .ack_frequency_request = .{},
+                },
                 .random = [_]u8{0x72} ** 32,
                 .x25519_secret_key = [_]u8{0x74} ** 32,
             });
@@ -3113,6 +3116,9 @@ test "QUIC integrated handshake applies negotiated transport parameters over QUI
             try std.testing.expect(established.connection.config.enable_ack_frequency);
             try std.testing.expectEqual(@as(?u64, 2_000), established.connection.config.local_min_ack_delay);
             try std.testing.expectEqual(@as(?u64, 1_000), established.connection.config.peer_min_ack_delay);
+            try std.testing.expect(
+                established.connection.automaticAckFrequencyPending(),
+            );
             try std.testing.expectEqual(
                 @as(?[quic.stateless_reset.token_len]u8, null),
                 established.connection.config.peer_stateless_reset_token,
@@ -3120,6 +3126,20 @@ test "QUIC integrated handshake applies negotiated transport parameters over QUI
             try std.testing.expectEqual(quic.congestion.Algorithm.cubic, established.connection.congestionAlgorithm());
             try std.testing.expect(established.connection.hystartEnabled());
             try std.testing.expect(!established.connection.pacingEnabled());
+            var request = try established.connection.receivePacket();
+            defer request.deinit(allocator);
+            try std.testing.expectEqual(@as(usize, 2), request.frames.len);
+            try std.testing.expect(request.frames[0] == .ping);
+            try std.testing.expect(request.frames[1] == .ack_frequency);
+            try std.testing.expectEqual(
+                @as(u64, 3),
+                request.frames[1].ack_frequency.ack_eliciting_threshold,
+            );
+            try std.testing.expectEqual(
+                @as(u64, 4),
+                established.connection.ackFrequencyThreshold(),
+            );
+            try established.connection.send(&.{.{ .ping = {} }});
         }
     };
 
@@ -3132,7 +3152,10 @@ test "QUIC integrated handshake applies negotiated transport parameters over QUI
         .server_name = "localhost",
         .local_transport_parameters = client_tp,
         .version = .version_2,
-        .initial_one_rtt_config = .{ .enable_pacing = false },
+        .initial_one_rtt_config = .{
+            .enable_pacing = false,
+            .ack_frequency_request = .{},
+        },
         .random = [_]u8{0x71} ** 32,
         .x25519_secret_key = [_]u8{0x73} ** 32,
     });
@@ -3156,6 +3179,7 @@ test "QUIC integrated handshake applies negotiated transport parameters over QUI
     try std.testing.expect(established.connection.config.enable_ack_frequency);
     try std.testing.expectEqual(@as(?u64, 1_000), established.connection.config.local_min_ack_delay);
     try std.testing.expectEqual(@as(?u64, 2_000), established.connection.config.peer_min_ack_delay);
+    try std.testing.expect(established.connection.automaticAckFrequencyPending());
     try std.testing.expectEqual(
         @as(?[quic.stateless_reset.token_len]u8, server_reset_token),
         established.connection.config.peer_stateless_reset_token,
@@ -3174,6 +3198,22 @@ test "QUIC integrated handshake applies negotiated transport parameters over QUI
     try std.testing.expectEqual(quic.congestion.Algorithm.cubic, established.connection.congestionAlgorithm());
     try std.testing.expect(established.connection.hystartEnabled());
     try std.testing.expect(!established.connection.pacingEnabled());
+    try established.connection.send(&.{.{ .ping = {} }});
+    try std.testing.expect(!established.connection.automaticAckFrequencyPending());
+    var server_request = try established.connection.receivePacket();
+    defer server_request.deinit(allocator);
+    try std.testing.expectEqual(@as(usize, 3), server_request.frames.len);
+    try std.testing.expect(server_request.frames[0] == .ping);
+    try std.testing.expect(server_request.frames[1] == .handshake_done);
+    try std.testing.expect(server_request.frames[2] == .ack_frequency);
+    try std.testing.expectEqual(
+        @as(u64, 3),
+        server_request.frames[2].ack_frequency.ack_eliciting_threshold,
+    );
+    try std.testing.expectEqual(
+        @as(u64, 4),
+        established.connection.ackFrequencyThreshold(),
+    );
     try std.testing.expectError(error.FlowControlBlocked, established.connection.send(&[_]quic.Frame{.{ .stream = .{
         .stream_id = 0,
         .data = "this exceeds server's stream credit",

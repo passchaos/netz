@@ -152,6 +152,18 @@ const Config = struct {
         };
     }
 
+    fn transportParameters(
+        self: Config,
+    ) !netz.quic.TransportParameters {
+        var parameters = try self.wire().transportParameters();
+        if (self.server_topology == .shared and
+            self.server_ack_delay_us >= 1_000)
+        {
+            parameters.min_ack_delay = 1_000;
+        }
+        return parameters;
+    }
+
     fn totalEchoRounds(self: Config) !u32 {
         return std.math.add(u32, self.warmup, self.iterations) catch
             error.InvalidArgument;
@@ -167,8 +179,26 @@ const Config = struct {
         self: Config,
     ) !netz.quic.handshake.OneRttConfig {
         var config = try self.wire().oneRttConfig();
-        config.local_ack_eliciting_threshold = self.server_ack_every;
+        config.ack_frequency_request = null;
+        config.local_ack_eliciting_threshold =
+            if (self.server_ack_delay_us >= 1_000)
+                2
+            else
+                self.server_ack_every;
         config.local_max_ack_delay_us = self.server_ack_delay_us;
+        return config;
+    }
+
+    fn clientOneRttConfig(self: Config) !netz.quic.handshake.OneRttConfig {
+        var config = try self.wire().oneRttConfig();
+        if (self.server_topology == .shared and
+            self.server_ack_delay_us >= 1_000)
+        {
+            config.ack_frequency_request = .{
+                .ack_eliciting_threshold = self.server_ack_every - 1,
+                .reordering_threshold = netz.quic.packet_space.default_packet_threshold,
+            };
+        }
         return config;
     }
 };
@@ -331,7 +361,7 @@ fn runSharedServer(config: Config) !void {
             .version = .version_1,
             .available_versions = &.{.version_1},
             .alpn_protocol = alpn,
-            .local_transport_parameters = try config.wire().transportParameters(),
+            .local_transport_parameters = try config.transportParameters(),
             .identity = .{
                 .certificate_chain = &.{&certificate_der},
                 .signer = .{ .ecdsa_p256_sha256 = .{
@@ -1136,7 +1166,7 @@ const ServerWorker = struct {
                 .version = .version_1,
                 .available_versions = &.{.version_1},
                 .alpn_protocol = alpn,
-                .local_transport_parameters = try self.config.wire().transportParameters(),
+                .local_transport_parameters = try self.config.transportParameters(),
                 .identity = .{
                     .certificate_chain = &.{&certificate_der},
                     .signer = .{ .ecdsa_p256_sha256 = .{
@@ -1260,9 +1290,9 @@ const ClientWorker = struct {
                 .server_name = "localhost",
                 .alpn_protocols = &.{alpn},
                 .server_auth = verifier.clientVerifier(),
-                .local_transport_parameters = try self.config.wire().transportParameters(),
+                .local_transport_parameters = try self.config.transportParameters(),
                 .max_crypto_buffer = 64 * 1024,
-                .initial_one_rtt_config = try self.config.wire().oneRttConfig(),
+                .initial_one_rtt_config = try self.config.clientOneRttConfig(),
             },
             self.config.timeout(),
         );

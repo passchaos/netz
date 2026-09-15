@@ -620,6 +620,10 @@ pub const practical_transport_parameters = TransportParameters{
     .initial_max_streams_uni = 100,
     .active_connection_id_limit = 4,
     .max_datagram_frame_size = 65_535,
+    // Match the timer granularity advertised by Quinn. Presence negotiates
+    // draft ACK_FREQUENCY support; ordinary ACK behavior remains unchanged
+    // until an authenticated request arrives.
+    .min_ack_delay = 1_000,
 };
 
 /// Encodes QUIC transport parameters advertised by `source`.

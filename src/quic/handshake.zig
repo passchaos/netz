@@ -242,6 +242,10 @@ pub const OneRttConfig = struct {
     local_max_ack_delay_us: u64 = 25_000,
     local_ack_reordering_threshold: u64 =
         quic.packet_space.default_packet_threshold,
+    /// Optional negotiated ACK_FREQUENCY request. The wire threshold is the
+    /// maximum number of ack-eliciting packets the peer may leave unacked.
+    /// Null preserves the peer's transport-parameter ACK policy.
+    ack_frequency_request: ?quic.one_rtt.AckFrequencyRequest = null,
     /// Stable endpoint secret used to derive reset tokens for every locally
     /// issued connection ID. Servers also bind the Initial Source Connection
     /// ID transport-parameter token to this key during the handshake.
@@ -329,6 +333,10 @@ pub const OneRttConfig = struct {
             .enable_ack_frequency = local_transport_parameters.min_ack_delay != null or peer_transport_parameters.min_ack_delay != null,
             .local_min_ack_delay = local_transport_parameters.min_ack_delay,
             .peer_min_ack_delay = peer_transport_parameters.min_ack_delay,
+            .automatic_ack_frequency_request = if (peer_transport_parameters.min_ack_delay != null)
+                self.ack_frequency_request
+            else
+                null,
             .local_stateless_reset_key = self.local_stateless_reset_key,
             .peer_stateless_reset_token = peer_transport_parameters.stateless_reset_token,
             .tls_handshake_complete = true,
@@ -4992,6 +5000,41 @@ test "QUIC handshake one-RTT config propagates local ACK policy" {
         .{},
     );
     try std.testing.expectEqual(@as(u64, 10_000), clamped.local_max_ack_delay_us);
+    try std.testing.expect(defaults.automatic_ack_frequency_request == null);
+    const negotiated = (OneRttConfig{
+        .ack_frequency_request = .{},
+    }).apply(
+        .version_1,
+        .{ .ip4 = .loopback(443) },
+        keys,
+        keys,
+        "local",
+        "peer",
+        .client,
+        .{ .min_ack_delay = 1_000 },
+        .{ .min_ack_delay = 2_000 },
+    );
+    try std.testing.expectEqual(
+        @as(u64, 3),
+        negotiated.automatic_ack_frequency_request.?
+            .ack_eliciting_threshold,
+    );
+    const disabled_request = (OneRttConfig{
+        .ack_frequency_request = null,
+    }).apply(
+        .version_1,
+        .{ .ip4 = .loopback(443) },
+        keys,
+        keys,
+        "local",
+        "peer",
+        .client,
+        .{ .min_ack_delay = 1_000 },
+        .{ .min_ack_delay = 2_000 },
+    );
+    try std.testing.expect(
+        disabled_request.automatic_ack_frequency_request == null,
+    );
 }
 
 test "QUIC server transport parameters bind reset token to local CID" {

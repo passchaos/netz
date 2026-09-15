@@ -398,6 +398,10 @@ pub const ConnectionConfig = struct {
     /// Peer's advertised `min_ack_delay`; gates local ACK_FREQUENCY and
     /// validates the delay requested by the caller (microseconds).
     peer_min_ack_delay: ?u64 = null,
+    /// Optional request appended to the first non-empty 1-RTT packet after a
+    /// handshake has negotiated ACK_FREQUENCY support. Direct keyed
+    /// connections leave this null by default.
+    automatic_ack_frequency_request: ?AckFrequencyRequest = null,
     local_stateless_reset_key: ?[quic.stateless_reset.static_key_len]u8 = null,
     /// Authenticated server transport-parameter token for the peer's Initial
     /// connection ID. Only clients can receive this parameter.
@@ -415,6 +419,13 @@ pub const ConnectionConfig = struct {
     /// succeeds. Manually keyed connections leave it false and can call
     /// `markTlsHandshakeComplete` explicitly.
     tls_handshake_complete: bool = false,
+};
+
+pub const AckFrequencyRequest = struct {
+    /// Wire-level maximum number of ack-eliciting packets the peer may receive
+    /// without an ACK. Three therefore requests an ACK on packet four.
+    ack_eliciting_threshold: u64 = 3,
+    reordering_threshold: u64 = quic.packet_space.default_packet_threshold,
 };
 
 const StreamFlowEntry = struct {
@@ -844,6 +855,7 @@ const max_short_packet_overhead: usize = 1 + 20 + 4 + quic.protection.aead_tag_l
 // automatic HANDSHAKE_DONE augmentation for that common first-flight shape on
 // the stack while retaining an exact fallback for lower-level callers.
 const handshake_done_frame_stack_capacity: usize = 16;
+const pending_control_frame_stack_capacity: usize = 18;
 const pending_ack_frame_stack_capacity: usize = 16;
 // Match the default receive parser bound so a peer can consume one update for
 // every frame in the coalesced credit packet without special configuration.
@@ -863,6 +875,57 @@ fn appendPendingHandshakeDone(
     @memcpy(combined[0..frames.len], frames);
     combined[frames.len] = .{ .handshake_done = {} };
     return combined;
+}
+
+const PendingControlFrames = struct {
+    frames: []quic.Frame,
+};
+
+fn appendPendingControlFrames(
+    self: *Connection,
+    stack: *[pending_control_frame_stack_capacity]quic.Frame,
+    frames: []const quic.Frame,
+) Error!PendingControlFrames {
+    const append_handshake_done = self.handshake_status.needsHandshakeDone() and
+        !frame_traits.containsHandshakeDone(frames);
+    const append_ack_frequency = self.pending_ack_frequency_request != null and
+        !containsAckFrequency(frames);
+    const additional = @as(usize, @intFromBool(append_handshake_done)) +
+        @intFromBool(append_ack_frequency);
+    const combined_len = std.math.add(usize, frames.len, additional) catch
+        return error.InvalidFrameLength;
+    const combined = if (combined_len <= stack.len)
+        stack[0..combined_len]
+    else
+        try self.endpoint.allocator.alloc(quic.Frame, combined_len);
+    @memcpy(combined[0..frames.len], frames);
+    var index = frames.len;
+    if (append_handshake_done) {
+        combined[index] = .{ .handshake_done = {} };
+        index += 1;
+    }
+    if (append_ack_frequency) {
+        combined[index] = .{
+            .ack_frequency = self.pending_ack_frequency_request.?,
+        };
+    }
+    return .{ .frames = combined };
+}
+
+fn containsAckFrequency(frames: []const quic.Frame) bool {
+    for (frames) |frame| if (frame == .ack_frequency) return true;
+    return false;
+}
+
+fn newestAckFrequencySequence(frames: []const quic.Frame) ?u64 {
+    var newest: ?u64 = null;
+    for (frames) |frame| {
+        if (frame != .ack_frequency) continue;
+        if (newest == null or frame.ack_frequency.sequence_number > newest.?) {
+            newest = frame.ack_frequency.sequence_number;
+        }
+    }
+    return newest;
 }
 
 fn appendPendingAck(
@@ -1041,6 +1104,7 @@ pub const Connection = struct {
     path_response_target_head: usize = 0,
     ack_frequency_send_next_sequence: u64 = 0,
     ack_frequency_recv_next_sequence: u64 = 0,
+    pending_ack_frequency_request: ?quic.AckFrequencyFrame = null,
     ack_eliciting_threshold: u64 = 1,
     ack_eliciting_since_last_ack: u64 = 0,
     ack_delay_start_ns: ?u64 = null,
@@ -1096,6 +1160,30 @@ pub const Connection = struct {
         if (config.local_max_ack_delay_us >= max_requested_ack_delay_us) {
             return error.InvalidTransportParameter;
         }
+        const pending_ack_frequency_request = if (config.automatic_ack_frequency_request) |request| request: {
+            if (!config.enable_ack_frequency or
+                config.peer_min_ack_delay == null)
+            {
+                return error.InvalidTransportParameter;
+            }
+            const requested_delay = std.math.mul(
+                u64,
+                config.peer_max_ack_delay_ms,
+                1_000,
+            ) catch return error.InvalidTransportParameter;
+            try validateRequestedMaxAckDelay(
+                requested_delay,
+                config.peer_min_ack_delay,
+            );
+            const frame = quic.AckFrequencyFrame{
+                .sequence_number = 0,
+                .ack_eliciting_threshold = request.ack_eliciting_threshold,
+                .request_max_ack_delay = requested_delay,
+                .reordering_threshold = request.reordering_threshold,
+            };
+            _ = try (quic.Frame{ .ack_frequency = frame }).wireLen();
+            break :request frame;
+        } else null;
         const send_buffer_capacity = std.math.add(usize, config.max_datagram_size, max_short_packet_overhead) catch return error.OutOfMemory;
         const peer_connection_id_storage = try endpoint.allocator.alloc(
             u8,
@@ -1187,6 +1275,7 @@ pub const Connection = struct {
             .ack_eliciting_threshold = config.local_ack_eliciting_threshold,
             .requested_max_ack_delay = config.local_max_ack_delay_us,
             .ack_reordering_threshold = config.local_ack_reordering_threshold,
+            .pending_ack_frequency_request = pending_ack_frequency_request,
         };
         prepared_send_keys = null;
         prepared_receive_keys = null;
@@ -2139,7 +2228,9 @@ pub const Connection = struct {
         // while HANDSHAKE_DONE is unsent. It appends the control frame after
         // the caller's frames, preserving application order, and later calls
         // retain normal GSO/sendmmsg batching.
-        if (self.handshake_status.needsHandshakeDone()) {
+        if (self.handshake_status.needsHandshakeDone() or
+            self.pending_ack_frequency_request != null)
+        {
             try self.sendWithEcnAtImpl(
                 packets[0],
                 self.autoEcnForFrames(packets[0]),
@@ -2641,6 +2732,7 @@ pub const Connection = struct {
                 self.congestion.onPacketSent(packet.packet_number);
             }
             self.noteSentStreams(packet.frames);
+            self.noteAckFrequencySent(packet.frames);
         }
         self.releaseAntiAmplification(
             total_packet_len - sent_packet_len,
@@ -2718,29 +2810,34 @@ pub const Connection = struct {
         automatic_ecn: bool,
     ) Error!void {
         if (frames.len != 0 and
-            self.handshake_status.needsHandshakeDone() and
-            !frame_traits.containsHandshakeDone(frames))
+            ((self.handshake_status.needsHandshakeDone() and
+                !frame_traits.containsHandshakeDone(frames)) or
+                (self.pending_ack_frequency_request != null and
+                    !containsAckFrequency(frames))))
         {
-            var stack: [handshake_done_frame_stack_capacity]quic.Frame =
+            var stack: [pending_control_frame_stack_capacity]quic.Frame =
                 undefined;
-            const combined = try appendPendingHandshakeDone(
-                self.endpoint.allocator,
+            const pending = try appendPendingControlFrames(
+                self,
                 &stack,
                 frames,
             );
-            defer if (combined.ptr != stack[0..].ptr) {
-                self.endpoint.allocator.free(combined);
+            defer if (pending.frames.ptr != stack[0..].ptr) {
+                self.endpoint.allocator.free(pending.frames);
             };
             // Keep caller frames first so scheduling HANDSHAKE_DONE cannot
             // reorder the application's first 1-RTT frame.
-            return self.sendWithEcnAtRaw(
-                combined,
+            try self.sendWithEcnAtRaw(
+                pending.frames,
                 ecn,
                 sent_time_ns,
                 automatic_ecn,
             );
+            self.noteAckFrequencySent(pending.frames);
+            return;
         }
         try self.sendWithEcnAtRaw(frames, ecn, sent_time_ns, automatic_ecn);
+        self.noteAckFrequencySent(frames);
     }
 
     fn sendWithEcnAtRaw(
@@ -4072,6 +4169,18 @@ pub const Connection = struct {
             payload_len = std.math.add(usize, payload_len, 1) catch
                 return error.InvalidFrameLength;
         }
+        if (packet_offset == 0 and
+            self.pending_ack_frequency_request != null and
+            !containsAckFrequency(frames))
+        {
+            payload_len = std.math.add(
+                usize,
+                payload_len,
+                try (quic.Frame{
+                    .ack_frequency = self.pending_ack_frequency_request.?,
+                }).wireLen(),
+            ) catch return error.InvalidFrameLength;
+        }
         const packet_number_len =
             quic.protection.packetNumberLenForPayload(
                 packet_number,
@@ -4141,7 +4250,6 @@ pub const Connection = struct {
         // otherwise a transient validation or transport error would create a
         // local gap and make the next retry appear newer than what actually
         // reached the peer.
-        self.ack_frequency_send_next_sequence +|= 1;
         return sequence_number;
     }
 
@@ -4154,6 +4262,10 @@ pub const Connection = struct {
 
     pub fn ackFrequencyThreshold(self: Connection) u64 {
         return self.ack_eliciting_threshold;
+    }
+
+    pub fn automaticAckFrequencyPending(self: Connection) bool {
+        return self.pending_ack_frequency_request != null;
     }
 
     pub fn requestedMaxAckDelay(self: Connection) u64 {
@@ -4300,31 +4412,48 @@ pub const Connection = struct {
     ) Error!void {
         try self.validateNextPacketNumber();
         if (frames.len != 0 and
-            self.handshake_status.needsHandshakeDone() and
-            !frame_traits.containsHandshakeDone(frames))
+            ((self.handshake_status.needsHandshakeDone() and
+                !frame_traits.containsHandshakeDone(frames)) or
+                (self.pending_ack_frequency_request != null and
+                    !containsAckFrequency(frames))))
         {
-            var stack: [handshake_done_frame_stack_capacity]quic.Frame =
+            var stack: [pending_control_frame_stack_capacity]quic.Frame =
                 undefined;
-            const combined = try appendPendingHandshakeDone(
-                self.endpoint.allocator,
+            const pending = try appendPendingControlFrames(
+                self,
                 &stack,
                 frames,
             );
-            defer if (combined.ptr != stack[0..].ptr) {
-                self.endpoint.allocator.free(combined);
+            defer if (pending.frames.ptr != stack[0..].ptr) {
+                self.endpoint.allocator.free(pending.frames);
             };
-            return self.sendTrackedFramesEcnAtUncheckedRaw(
-                combined,
+            try self.sendTrackedFramesEcnAtUncheckedRaw(
+                pending.frames,
                 ecn,
                 sent_time_ns,
                 null,
             );
+            self.noteAckFrequencySent(pending.frames);
+            return;
         }
         try self.sendTrackedFramesEcnAtUncheckedRaw(
             frames,
             ecn,
             sent_time_ns,
             validated_traits,
+        );
+        self.noteAckFrequencySent(frames);
+    }
+
+    fn noteAckFrequencySent(
+        self: *Connection,
+        frames: []const quic.Frame,
+    ) void {
+        const sequence = newestAckFrequencySequence(frames) orelse return;
+        self.pending_ack_frequency_request = null;
+        self.ack_frequency_send_next_sequence = @max(
+            self.ack_frequency_send_next_sequence,
+            sequence +| 1,
         );
     }
 
@@ -12430,7 +12559,9 @@ pub const Connection = struct {
         try self.validateAckFrequencyForReceive(ack_frequency);
         if (ack_frequency.sequence_number < self.ack_frequency_recv_next_sequence) return;
         self.ack_frequency_recv_next_sequence = ack_frequency.sequence_number +| 1;
-        self.ack_eliciting_threshold = ack_frequency.ack_eliciting_threshold;
+        // The wire value is how many ack-eliciting packets may remain
+        // unacknowledged. Internally we store the count that triggers an ACK.
+        self.ack_eliciting_threshold = ack_frequency.ack_eliciting_threshold +| 1;
         self.requested_max_ack_delay = ack_frequency.request_max_ack_delay;
         self.ack_reordering_threshold = ack_frequency.reordering_threshold;
     }

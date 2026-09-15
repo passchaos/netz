@@ -48,8 +48,7 @@ taskset -c 0 zig build bench-quic-endpoint-pending -Doptimize=ReleaseFast -- \
 zig build bench-quic-persistent-external -Doptimize=ReleaseFast -- \
   --mode=aggregate --samples=5 --connections=4 --streams=1 \
   --bytes-per-stream=1048576 --server-topology=shared \
-  --shared-receive-batch=32 --server-ack-every=2 \
-  --server-ack-delay-us=25000
+  --shared-receive-batch=32
 zig build bench-quic-persistent-external -Doptimize=ReleaseFast -- \
   --netz-only --mode=aggregate --samples=3 --connections=4 --streams=1 \
   --bytes-per-stream=1048576 --server-topology=independent

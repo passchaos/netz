@@ -382,6 +382,9 @@ starts with deterministic parsers, serializers, preallocated fixed-width wire-in
   draft ACK_FREQUENCY and IMMEDIATE_ACK frame codecs with `min_ack_delay`
   transport-parameter negotiation and opt-in 1-RTT state updates for requested
   ACK threshold/max-delay/reordering behavior, directional capability checks,
+  optional peer-gated automatic requests appended to the first non-empty 1-RTT
+  packet (alongside HANDSHAKE_DONE when required), socket-commit-safe pending
+  state and ordinary PTO recovery, wire-tolerance-to-local-trigger conversion,
   transactional rejection of requests below the advertised minimum or at least
   2^14 milliseconds, and zero-valued immediate-ACK/disabled-reordering modes,
   plus automatic ACK coalescing
@@ -1128,7 +1131,12 @@ Pass `--server-topology=shared` to benchmark the netz/netz client-upload shape
 with one server UDP socket and the production endpoint dispatcher. That mode
 uses a bounded caller-buffer receive drain (32 messages by default, selectable
 with `--shared-receive-batch=1..64`) and records the selected batch size in
-every strictly verified result.
+every strictly verified result. Its default `--server-ack-every=4` is a
+negotiated, client-originated ACK_FREQUENCY request: both endpoints advertise
+support, but the server does not request sparser client ACKs, preserving the
+download control. Independent topology retains ACK/2. An explicit option still
+overrides either default; delays below 1 ms exercise the legacy local benchmark
+policy without sending ACK_FREQUENCY.
 
 `bench-http3-quic-go` runs certificate-verified HTTP/3 upload/download in both
 client/server role pairings, with a fresh connection and untimed ready request
