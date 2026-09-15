@@ -1110,7 +1110,11 @@ fallback or OS-thread worker is exposed.
 The real-handshake QUIC STREAM benchmark uses the same zio-owned `std.Io` in
 upload, handshake, echo, churn, fault, and aggregate modes. Aggregate
 connections run as a `std.Io.Group` instead of creating OS threads or private
-I/O backends.
+I/O backends. The HTTP/3 real-handshake transfer benchmark also keeps its
+client connection pump alive while the short-lived server drains reliable
+response recovery, so a lost final ACK is answered after the server's PTO
+retransmission instead of turning successful DATA delivery into teardown
+timeout.
 The persistent QUIC runner accepts `--server-topology=compare --netz-only` to
 run an odd, mirrored-order fixed-binary A/B between independent server sockets
 and the shared server endpoint, with identical ACK policy and strict per-run

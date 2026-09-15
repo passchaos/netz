@@ -1,6 +1,7 @@
 const std = @import("std");
 const http3 = @import("../../../mod.zig");
 const runtime = @import("../../../runtime.zig");
+const netz_runtime = @import("../../../../runtime.zig");
 
 const quic = @import("../../../../quic/mod.zig");
 const large_header_value =
@@ -15,6 +16,20 @@ const DropNextDatagram = struct {
         if (!self.armed) return false;
         self.armed = false;
         self.dropped += 1;
+        return true;
+    }
+};
+
+const ConcurrentDropNextDatagram = struct {
+    armed: std.atomic.Value(bool) = .init(false),
+    dropped: std.atomic.Value(usize) = .init(0),
+
+    fn shouldDrop(context: *anyopaque, _: []const u8) bool {
+        const self: *ConcurrentDropNextDatagram = @ptrCast(
+            @alignCast(context),
+        );
+        if (!self.armed.swap(false, .acq_rel)) return false;
+        _ = self.dropped.fetchAdd(1, .monotonic);
         return true;
     }
 };
@@ -246,6 +261,156 @@ test "HTTP/3 handshake recovery drain retransmits a dropped final response" {
     if (shared.err) |err| return err;
     try std.testing.expect(shared.recovery_drained);
     try std.testing.expectEqual(@as(usize, 1), drop.dropped);
+}
+
+test "HTTP/3 zio client drives recovery after its final ACK is dropped" {
+    const allocator = std.testing.allocator;
+    var backend = try netz_runtime.Backend.initZio(allocator);
+    defer backend.deinit();
+    const io = backend.io();
+
+    const original_dcid = [_]u8{
+        0x35, 0x36, 0x37, 0x38, 0x39, 0x3a, 0x3b, 0x3c,
+    };
+    const client_cid = [_]u8{ 0x3d, 0x3e, 0x3f, 0x40 };
+    const server_cid = [_]u8{ 0x41, 0x42, 0x43, 0x44 };
+    var drop: ConcurrentDropNextDatagram = .{};
+    var server = try runtime.HandshakeServer.bind(
+        allocator,
+        io,
+        .{ .ip4 = .loopback(0) },
+        .{ .quic = .{
+            .max_datagram_size = 4096,
+            .max_frames_per_datagram = 16,
+        } },
+        .{ .handshake = .{
+            .local_connection_id = &server_cid,
+            .initial_one_rtt_config = .{
+                .max_datagram_size = 1400,
+                .enable_pacing = false,
+            },
+            .random = [_]u8{0x45} ** 32,
+            .x25519_secret_key = [_]u8{0x46} ** 32,
+        } },
+    );
+    defer server.deinit();
+
+    const body = "final ACK loss must not strand response recovery";
+    const Shared = struct {
+        server: *runtime.HandshakeServer,
+        drop: *ConcurrentDropNextDatagram,
+        body: []const u8,
+        io: std.Io,
+        done: std.Io.Event = .unset,
+        pending_before_drain: usize = 0,
+        packets_before_drain: u64 = 0,
+        packets_after_drain: u64 = 0,
+        err: ?anyerror = null,
+
+        fn run(self: *@This()) void {
+            defer self.done.set(self.io);
+            self.runFallible() catch |err| {
+                self.err = err;
+            };
+        }
+
+        fn runFallible(self: *@This()) !void {
+            var session = try self.server.accept();
+            defer session.deinit();
+            var request = try session.receiveRequest();
+            defer request.deinit(allocator);
+            self.drop.armed.store(true, .release);
+            try session.sendResponse(request.stream_id, .{
+                .status = 200,
+                .body = self.body,
+            });
+            self.pending_before_drain =
+                session.established.connection.pendingRecoveryCount();
+            self.packets_before_drain =
+                session.established.connection.stats().packets_sent;
+            try session.waitForRecoveryIdleWithTimeout(.fromSeconds(2));
+            self.packets_after_drain =
+                session.established.connection.stats().packets_sent;
+        }
+    };
+    var shared = Shared{
+        .server = &server,
+        .drop = &drop,
+        .body = body,
+        .io = io,
+    };
+    var server_task = io.async(Shared.run, .{&shared});
+    defer server_task.cancel(io);
+
+    var client = try runtime.HandshakeClient.connect(
+        allocator,
+        io,
+        .{ .ip4 = .loopback(0) },
+        server.address(),
+        .{ .quic = .{
+            .max_datagram_size = 4096,
+            .max_frames_per_datagram = 16,
+            .send_interceptor = .{
+                .context = &drop,
+                .should_drop = ConcurrentDropNextDatagram.shouldDrop,
+            },
+        } },
+        .{ .handshake = .{
+            .original_destination_connection_id = &original_dcid,
+            .local_connection_id = &client_cid,
+            .server_name = "localhost",
+            .initial_one_rtt_config = .{
+                .max_datagram_size = 1400,
+                .enable_pacing = false,
+            },
+            .random = [_]u8{0x47} ** 32,
+            .x25519_secret_key = [_]u8{0x48} ** 32,
+        } },
+    );
+    defer client.deinit();
+    client.established.connection.configureAckPolicy(
+        64,
+        25_000,
+        quic.packet_space.default_packet_threshold,
+    );
+
+    const stream_id = try client.sendRequest(.{
+        .method = "GET",
+        .path = "/drop-final-ack",
+        .authority = "localhost",
+    });
+    var response = try client.receiveResponseWithTimeout(
+        stream_id,
+        .fromSeconds(2),
+    );
+    defer response.deinit(allocator);
+    try std.testing.expectEqualStrings(body, response.response.body);
+    try std.testing.expectEqual(
+        @as(usize, 1),
+        drop.dropped.load(.acquire),
+    );
+
+    const deadline = std.Io.Clock.Timestamp.fromNow(io, .{
+        .clock = .awake,
+        .raw = .fromSeconds(2),
+    });
+    while (!shared.done.isSet()) {
+        if (deadline.durationFromNow(io).raw.nanoseconds <= 0) {
+            return error.Timeout;
+        }
+        client.pollControlWithTimeout(.fromMilliseconds(10)) catch |err|
+            switch (err) {
+                error.Timeout => {},
+                else => return err,
+            };
+    }
+
+    server_task.await(io);
+    if (shared.err) |err| return err;
+    try std.testing.expect(shared.pending_before_drain != 0);
+    try std.testing.expect(
+        shared.packets_after_drain > shared.packets_before_drain,
+    );
 }
 
 test "HTTP/3 handshake server schedules response bodies by priority" {

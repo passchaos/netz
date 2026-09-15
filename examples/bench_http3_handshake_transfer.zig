@@ -267,6 +267,7 @@ fn runIteration(
         streams: usize,
         mode: Mode,
         body: []const u8,
+        io: std.Io,
         trace: bool,
         iteration: usize,
         ack_eliciting_threshold: u64,
@@ -276,8 +277,10 @@ fn runIteration(
         recovery_cached_blocks: usize = 0,
         recovery_cached_bytes: usize = 0,
         err: ?anyerror = null,
+        recovery_drained: std.Io.Event = .unset,
 
         fn run(shared: *@This()) void {
+            defer shared.recovery_drained.set(shared.io);
             runFallible(shared) catch |err| {
                 if (shared.trace) {
                     std.debug.print("  [iter {d}] server error: {}\n", .{ shared.iteration, err });
@@ -346,6 +349,7 @@ fn runIteration(
         .streams = config.streams,
         .mode = config.mode,
         .body = transfer_body,
+        .io = io,
         .trace = config.trace_iteration,
         .iteration = iteration,
         .ack_eliciting_threshold = config.ack_eliciting_threshold,
@@ -427,6 +431,17 @@ fn runIteration(
     result.recovery_cached_bytes +|=
         client_stats.recovery_queue_stats.cached_payload_bytes;
     traceIteration(config, iteration, "transfer done");
+    // The final ACK is not itself retransmitted. Keep the client connection
+    // driver alive until the server confirms its reliable response is out of
+    // recovery; if that ACK was lost, a PTO retransmission receives a fresh
+    // ACK instead of leaving this short-lived benchmark deadlocked.
+    while (!shared.recovery_drained.isSet()) {
+        client.pollControlWithTimeout(.fromMilliseconds(1)) catch |err|
+            switch (err) {
+                error.Timeout => {},
+                else => return err,
+            };
+    }
 
     server_task.await(io);
     traceIteration(config, iteration, "server task joined");

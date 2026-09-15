@@ -2957,6 +2957,18 @@ so this is reliability evidence rather than a throughput claim. Focused tests
 cover STREAM-before-ACK wire ordering, frame-budget fallback, oversize rollback,
 and clearing the delayed-ACK deadline at response and push completion.
 
+The zio multi-message receive update exposed the complementary loss case in
+the single-process transfer benchmark: its final ACK could be sent and lost,
+after which the client stopped driving the connection while the server waited
+for reliable response recovery. The benchmark now continues bounded HTTP/3
+control polling until the server reports an empty recovery queue. A real zio
+handshake regression deliberately drops that terminal ACK, requires the server
+to send a PTO retransmission, and then verifies that client polling produces a
+fresh ACK and lets the server finish. Five consecutive 16-MiB/four-stream runs
+completed in all four upload/download and ordinary/body-batch shapes; the
+download means were 65.80 and 72.32 MiB/s, respectively. These timings are
+recorded only as post-fix stability evidence.
+
 The server and dispatcher now both expose batch visitor entry points taking an
 already-composed std.Io.Timeout. Public WithDeadline forms retain strict
 awake-clock and expiry validation, while the shared benchmark can compose its
