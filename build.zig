@@ -173,6 +173,10 @@ pub fn build(b: *std.Build) void {
         "python3",
         "tools/interop/quic_quic_go_churn_check_test.py",
     });
+    const quic_handshake_benchmark_checker_tests = b.addSystemCommand(&.{
+        "python3",
+        "tools/interop/quic_handshake_benchmark_check_test.py",
+    });
 
     const test_step = b.step("test", "Run all tests");
     test_step.dependOn(&run_lib_tests.step);
@@ -186,6 +190,7 @@ pub fn build(b: *std.Build) void {
     test_step.dependOn(&quic_quic_go_benchmark_checker_tests.step);
     test_step.dependOn(&quic_quic_go_auxiliary_checker_tests.step);
     test_step.dependOn(&quic_quic_go_churn_checker_tests.step);
+    test_step.dependOn(&quic_handshake_benchmark_checker_tests.step);
 
     const mqtt_mtls_server = b.addExecutable(.{
         .name = "netz-mqtt-mtls-server",
@@ -981,6 +986,7 @@ pub fn build(b: *std.Build) void {
         &.{"tools/interop/quic_handshake_benchmark.sh"},
     );
     quic_handshake_bench.addArtifactArg(quic_handshake_bench_exe);
+    if (b.args) |args| quic_handshake_bench.addArgs(args);
     const quic_handshake_bench_step = b.step(
         "bench-quic-handshake-external",
         "Compare fresh certificate-verified QUIC handshakes across netz/quic-go role pairs",

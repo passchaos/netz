@@ -580,6 +580,14 @@ also verified every byte under 24/120 reordered datagrams and 6/126 seeded
 drops. This is an internal validation result, not evidence of general or
 equal-wire superiority over quicz.
 
+The external certificate-verified handshake matrix now runs every netz endpoint
+on zio behind `std.Io` and binds each sample, result, and server completion to
+both endpoint runtimes, its endpoint role, and the configured timeout. A
+2026-09-15 5 x 100 rerun measured client P50 at 1.365 ms for netz versus 1.044
+ms for quic-go against a fixed quic-go server, and 0.981 versus 0.870 ms against
+a fixed netz server. The zio client handshake path therefore remains a concrete
+optimization target; historical Threaded ratios are not treated as zio results.
+
 | Area from `~/Work/quicz` examples | netz status | Evidence | Remaining work |
 | --- | --- | --- | --- |
 | QUIC 1-RTT STREAM echo (`quic_echo_*`, `udp_one_rtt_loopback`) | Covered with local and cross-process latency evidence plus an equal-CPU-layout quic-go throughput harness | `examples/quic_echo.zig`, `examples/bench_quic_handshake_stream.zig`, `bench-quic-quic-go`, and `bench-quic-persistent-external`; CPU-0-pinned local netz P50/P99/P99.9 echo ranges were 10.44-10.57 / 15.22-15.53 / 31.89-47.02 us versus quicz 10.5-10.7 / 16.0-19.5 / 206.3-211.2 us. The certificate-verified two-process persistent 1-KiB echo keeps one request outstanding: five historical pre-zio runs gave netz-client median P50 24.172 us versus quic-go-client 25.851 us against a fixed quic-go server (1.069x), and 23.729 versus 24.361 us against a fixed netz server (1.027x). The fresh-connection throughput harness pins client/server separately, runs both sender roles, and requires exact FIN/bytes/checksum for 1 and 4 unidirectional streams. Its netz endpoints and persistent netz endpoints now run on zio behind `std.Io`; strict result, completion, socket, and memory validation rejects legacy or mismatched backend identities. Complete-connection userspace socket accounting is also available. All external comparisons remain `same-application-shape`, and historical Threaded ratios are not zio results. | Re-run the cross-library matrices on zio, then add kernel/interface capture on a permitted host and equalize GRO, ACK/pacing, packetization, and application scheduling before a general STREAM ratio. |

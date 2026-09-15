@@ -73,9 +73,9 @@ fn runClient(
     config: Config,
 ) !void {
     const allocator = std.heap.c_allocator;
-    var threaded = std.Io.Threaded.init(allocator, .{ .async_limit = .unlimited });
-    defer threaded.deinit();
-    const io = threaded.io();
+    var backend = try netz.runtime.Backend.init(allocator);
+    defer backend.deinit();
+    const io = backend.io();
     const now = std.Io.Clock.real.now(io);
     var ca_bundle: std.crypto.Certificate.Bundle = .empty;
     defer ca_bundle.deinit(allocator);
@@ -129,9 +129,14 @@ fn runClient(
             measured_index += 1;
             std.debug.print(
                 "record=handshake-sample implementation=netz protocol=quic-v1 " ++
-                    "mode=handshake role_pair={s} run={d} sample={d} " ++
-                    "elapsed_ns={d} verified=true\n",
-                .{ config.role_pair, config.run, measured_index, elapsed },
+                    "mode=handshake role_pair={s} endpoint_role=client " ++
+                    "run={d} sample={d} client_io={s} server_io={s} " ++
+                    "timeout_ms={d} elapsed_ns={d} verified=true\n",
+                .{
+                    config.role_pair,           config.run,                 measured_index,
+                    clientIo(config.role_pair), serverIo(config.role_pair), config.timeout_ms,
+                    elapsed,
+                },
             );
         }
     }
@@ -140,9 +145,9 @@ fn runClient(
 
 fn runServer(port: u16, config: Config) !void {
     const allocator = std.heap.c_allocator;
-    var threaded = std.Io.Threaded.init(allocator, .{ .async_limit = .unlimited });
-    defer threaded.deinit();
-    const io = threaded.io();
+    var backend = try netz.runtime.Backend.init(allocator);
+    defer backend.deinit();
+    const io = backend.io();
     var certificate_der: [netz.tls.testing.certificate_der_len]u8 = undefined;
     try std.base64.standard.Decoder.decode(
         &certificate_der,
@@ -186,12 +191,16 @@ fn runServer(port: u16, config: Config) !void {
     }
     std.debug.print(
         "record=server-complete implementation=netz protocol=quic-v1 " ++
-            "mode=handshake role_pair={s} run={d} warmup={d} iterations={d} " ++
+            "mode=handshake role_pair={s} endpoint_role=server run={d} " ++
+            "warmup={d} iterations={d} " ++
+            "client_io={s} server_io={s} timeout_ms={d} " ++
             "connections={d} echo_bytes={d} checksum={d} " ++
             "echo_verified=true peer_close=true complete=true\n",
         .{
-            config.role_pair, config.run,          config.warmup, config.iterations,
-            config.total(),   config.total() * 32, checksum,
+            config.role_pair,  config.run,                 config.warmup,
+            config.iterations, clientIo(config.role_pair), serverIo(config.role_pair),
+            config.timeout_ms, config.total(),             config.total() * 32,
+            checksum,
         },
     );
 }
@@ -299,15 +308,19 @@ fn printResult(
     for (latencies) |elapsed| total_elapsed_ns +|= elapsed;
     std.debug.print(
         "record=result implementation={s} protocol=quic-v1 mode=handshake " ++
-            "role_pair={s} run={d} timing_scope=client-connect-only " ++
+            "role_pair={s} endpoint_role=client run={d} " ++
+            "timing_scope=client-connect-only " ++
+            "client_io={s} server_io={s} timeout_ms={d} " ++
             "verification=certificate key_exchange=x25519 cipher=aes-128-gcm-sha256 " ++
             "warmup={d} iterations={d} connections={d} echo_bytes={d} " ++
             "checksum={d} total_elapsed_ns={d} p50_ns={d} p99_ns={d} " ++
             "echo_verified=true complete=true\n",
         .{
-            implementation,    config.role_pair,          config.run,                config.warmup,
-            config.iterations, config.total(),            config.total() * 32,       checksum,
-            total_elapsed_ns,  percentile(latencies, 50), percentile(latencies, 99),
+            implementation,             config.role_pair,           config.run,
+            clientIo(config.role_pair), serverIo(config.role_pair), config.timeout_ms,
+            config.warmup,              config.iterations,          config.total(),
+            config.total() * 32,        checksum,                   total_elapsed_ns,
+            percentile(latencies, 50),  percentile(latencies, 99),
         },
     );
 }
@@ -333,6 +346,20 @@ fn validRolePair(value: []const u8) bool {
         std.mem.eql(u8, value, "quic-go-client+quic-go-server") or
         std.mem.eql(u8, value, "quic-go-client+netz-server") or
         std.mem.eql(u8, value, "netz-client+netz-server");
+}
+
+fn clientIo(role_pair: []const u8) []const u8 {
+    return if (std.mem.startsWith(u8, role_pair, "netz-client"))
+        "zio-std-io"
+    else
+        "quic-go-netpoll";
+}
+
+fn serverIo(role_pair: []const u8) []const u8 {
+    return if (std.mem.endsWith(u8, role_pair, "netz-server"))
+        "zio-std-io"
+    else
+        "quic-go-netpoll";
 }
 
 fn option(arg: []const u8, prefix: []const u8) ?[]const u8 {

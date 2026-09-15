@@ -11,8 +11,10 @@ from pathlib import Path
 def fields(line: str) -> dict[str, str]:
     result: dict[str, str] = {}
     for token in line.split():
-        if token.count("=") != 1:
+        if "=" not in token:
             continue
+        if token.count("=") != 1:
+            raise ValueError(f"malformed token {token!r}")
         key, value = token.split("=", 1)
         if not re.fullmatch(r"[A-Za-z][A-Za-z0-9_-]*", key):
             raise ValueError(f"invalid field {token!r}")
@@ -50,6 +52,7 @@ def verify(
     samples: int,
     warmup: int,
     iterations: int,
+    timeout_ms: int,
     client_log: Path,
     server_log: Path,
 ) -> None:
@@ -61,9 +64,14 @@ def verify(
     }.get(role_pair)
     if implementations is None or samples < 1 or samples % 2 == 0:
         raise ValueError("invalid role pair or sample count")
-    if warmup < 0 or iterations < 1:
+    if (
+        warmup < 0 or warmup > 4096 or iterations < 1 or iterations > 4096
+        or timeout_ms < 1 or timeout_ms > 600_000
+    ):
         raise ValueError("invalid iteration shape")
     client_impl, server_impl = implementations
+    client_io = "zio-std-io" if client_impl == "netz" else "quic-go-netpoll"
+    server_io = "zio-std-io" if server_impl == "netz" else "quic-go-netpoll"
     total_connections = warmup + iterations
     expected_checksum = total_connections * (total_connections - 1) // 2
     expected_common = {
@@ -72,6 +80,9 @@ def verify(
         "role_pair": role_pair,
         "warmup": str(warmup),
         "iterations": str(iterations),
+        "client_io": client_io,
+        "server_io": server_io,
+        "timeout_ms": str(timeout_ms),
         "connections": str(total_connections),
         "echo_bytes": str(total_connections * 32),
         "checksum": str(expected_checksum),
@@ -102,6 +113,9 @@ def verify(
         ):
             if row.get("implementation") != implementation:
                 raise ValueError(f"run {outer_run} {label}: implementation mismatch")
+            expected_role = "client" if label == "result" else "server"
+            if row.get("endpoint_role") != expected_role:
+                raise ValueError(f"run {outer_run} {label}: endpoint role mismatch")
             for key, value in expected_common.items():
                 if row.get(key) != value:
                     raise ValueError(f"run {outer_run} {label}: {key} mismatch")
@@ -123,6 +137,8 @@ def verify(
             for key, value in {
                 "implementation": client_impl, "protocol": "quic-v1",
                 "mode": "handshake", "role_pair": role_pair,
+                "client_io": client_io, "server_io": server_io,
+                "endpoint_role": "client", "timeout_ms": str(timeout_ms),
                 "verified": "true",
             }.items():
                 if row.get(key) != value:
@@ -151,6 +167,7 @@ def verify(
     print(
         f"protocol=quic-v1 mode=handshake role_pair={role_pair} samples={samples} "
         f"warmup={warmup} iterations={iterations} p50_ns={p50_ns} p99_ns={p99_ns} "
+        f"client_io={client_io} server_io={server_io} "
         f"median_total_elapsed_ns={total_ns} "
         f"connects_per_second_from_timed_sum={rate:.1f} "
         f"checksum={expected_checksum} complete=true"
@@ -163,12 +180,14 @@ def main() -> None:
     parser.add_argument("--samples", type=int, required=True)
     parser.add_argument("--warmup", type=int, required=True)
     parser.add_argument("--iterations", type=int, required=True)
+    parser.add_argument("--timeout-ms", type=int, required=True)
     parser.add_argument("--client-log", type=Path, required=True)
     parser.add_argument("--server-log", type=Path, required=True)
     args = parser.parse_args()
     verify(
         role_pair=args.role_pair, samples=args.samples, warmup=args.warmup,
-        iterations=args.iterations, client_log=args.client_log, server_log=args.server_log,
+        iterations=args.iterations, timeout_ms=args.timeout_ms,
+        client_log=args.client_log, server_log=args.server_log,
     )
 
 

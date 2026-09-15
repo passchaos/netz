@@ -3402,6 +3402,7 @@ UDP endpoint plus full handshake for every sample:
 
 ```sh
 zig build bench-quic-handshake-external -Doptimize=ReleaseFast
+zig build bench-quic-handshake-external -Doptimize=ReleaseFast -- --netz-only
 ```
 
 Both processes are pinned to distinct CPUs. Each run performs 10 untimed warmup
@@ -3416,7 +3417,29 @@ percentile from 100 sample records and requires a matching server completion
 record for all 110 connections, 3,520 echoed bytes, checksum 5,995, and peer
 close.
 
-The final 2026-09-09 CPU-0/client and CPU-1/server medians after the exact
+The current netz client and server run on zio behind `std.Io`. Handshake
+samples, aggregate results, and server completions carry `client_io`,
+`server_io`, `endpoint_role`, and `timeout_ms`; the strict verifier rejects
+missing, mismatched, legacy-backend, or wrong-owner records. A 2026-09-15
+ReleaseFast 5 x 100 order-interleaved rerun produced these zio-era medians:
+
+| Complete role pair | P50 connect | P99 connect | Derived connects/s |
+|---|---:|---:|---:|
+| netz client + quic-go server | 1.365 ms | 1.863 ms | 718.1 |
+| quic-go client + quic-go server | 1.044 ms | 2.150 ms | 925.0 |
+| quic-go client + netz server | 0.870 ms | 1.735 ms | 1,120.0 |
+| netz client + netz server | 0.981 ms | 1.369 ms | 963.7 |
+
+All 2,200 connections completed the authenticated echo/close exchange and all
+20 result plus 20 server-completion records verified checksum 5,995. Against
+a fixed quic-go server the netz-client P50 is 1.31x higher and its derived rate
+is 0.78x; against a fixed netz server its P50 is 1.13x higher and rate 0.86x.
+The current zio client handshake path therefore remains a concrete performance
+gap. The netz/netz tail is lower in this run, but the workloads are not
+equal-wire and the per-run P99 ranges overlap, so this is not a broad tail
+superiority claim.
+
+The historical 2026-09-09 CPU-0/client and CPU-1/server medians after the exact
 trust-anchor and P-256 verification optimizations were:
 
 | Complete role pair | P50 connect | P99 connect | Derived connects/s |
@@ -3427,6 +3450,8 @@ trust-anchor and P-256 verification optimizations were:
 | netz client + netz server | 0.749 ms | 0.787 ms | 1,332.1 |
 
 These are complete role-pair results, not separable client/server costs. The
+2026-09-09 table predates the zio migration and is retained as a
+`std.Io.Threaded` baseline, not current zio performance. The
 same-server comparisons leave netz's client handshake path as a concrete
 remaining latency target: 1.20x the quic-go client P50 against the quic-go
 server and 1.14x against the netz server in this capture. The harness does not

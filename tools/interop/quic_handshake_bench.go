@@ -21,6 +21,7 @@ import (
 	"net"
 	"os"
 	"sort"
+	"strings"
 	"time"
 
 	quic "github.com/quic-go/quic-go"
@@ -144,8 +145,8 @@ func runHandshakeServer(address, caOut string, c handshakeConfig) {
 		checksum += uint64(round)
 	}
 	fmt.Printf(
-		"record=server-complete implementation=quic-go protocol=quic-v1 mode=handshake role_pair=%s run=%d warmup=%d iterations=%d connections=%d echo_bytes=%d checksum=%d echo_verified=true peer_close=true complete=true\n",
-		c.rolePair, c.run, c.warmup, c.iterations, c.total(), c.total()*32, checksum,
+		"record=server-complete implementation=quic-go protocol=quic-v1 mode=handshake role_pair=%s endpoint_role=server run=%d warmup=%d iterations=%d client_io=%s server_io=%s timeout_ms=%d connections=%d echo_bytes=%d checksum=%d echo_verified=true peer_close=true complete=true\n",
+		c.rolePair, c.run, c.warmup, c.iterations, clientIO(c.rolePair), serverIO(c.rolePair), c.timeout/time.Millisecond, c.total(), c.total()*32, checksum,
 	)
 }
 
@@ -203,7 +204,7 @@ func runHandshakeClient(address, caPath string, c handshakeConfig) {
 		if round >= c.warmup {
 			latencies[measured] = elapsed
 			measured++
-			fmt.Printf("record=handshake-sample implementation=quic-go protocol=quic-v1 mode=handshake role_pair=%s run=%d sample=%d elapsed_ns=%d verified=true\n", c.rolePair, c.run, measured, elapsed)
+			fmt.Printf("record=handshake-sample implementation=quic-go protocol=quic-v1 mode=handshake role_pair=%s endpoint_role=client run=%d sample=%d client_io=%s server_io=%s timeout_ms=%d elapsed_ns=%d verified=true\n", c.rolePair, c.run, measured, clientIO(c.rolePair), serverIO(c.rolePair), c.timeout/time.Millisecond, elapsed)
 		}
 	}
 	printGoResult(c, latencies, checksum)
@@ -293,7 +294,21 @@ func printGoResult(c handshakeConfig, latencies []uint64, checksum uint64) {
 	for _, latency := range latencies {
 		total += latency
 	}
-	fmt.Printf("record=result implementation=quic-go protocol=quic-v1 mode=handshake role_pair=%s run=%d timing_scope=client-connect-only verification=certificate key_exchange=x25519 cipher=aes-128-gcm-sha256 warmup=%d iterations=%d connections=%d echo_bytes=%d checksum=%d total_elapsed_ns=%d p50_ns=%d p99_ns=%d echo_verified=true complete=true\n", c.rolePair, c.run, c.warmup, c.iterations, c.total(), c.total()*32, checksum, total, percentile(latencies, 50), percentile(latencies, 99))
+	fmt.Printf("record=result implementation=quic-go protocol=quic-v1 mode=handshake role_pair=%s endpoint_role=client run=%d timing_scope=client-connect-only client_io=%s server_io=%s timeout_ms=%d verification=certificate key_exchange=x25519 cipher=aes-128-gcm-sha256 warmup=%d iterations=%d connections=%d echo_bytes=%d checksum=%d total_elapsed_ns=%d p50_ns=%d p99_ns=%d echo_verified=true complete=true\n", c.rolePair, c.run, clientIO(c.rolePair), serverIO(c.rolePair), c.timeout/time.Millisecond, c.warmup, c.iterations, c.total(), c.total()*32, checksum, total, percentile(latencies, 50), percentile(latencies, 99))
+}
+
+func clientIO(rolePair string) string {
+	if strings.HasPrefix(rolePair, "netz-client") {
+		return "zio-std-io"
+	}
+	return "quic-go-netpoll"
+}
+
+func serverIO(rolePair string) string {
+	if strings.HasSuffix(rolePair, "netz-server") {
+		return "zio-std-io"
+	}
+	return "quic-go-netpoll"
 }
 
 func percentile(sorted []uint64, percent int) uint64 {

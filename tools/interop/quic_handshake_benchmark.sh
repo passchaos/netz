@@ -2,10 +2,22 @@
 set -euo pipefail
 
 netz_bench=${1:?netz handshake benchmark executable path}
+shift
 repo_root=$(cd "$(dirname "$0")/../.." && pwd)
 fixture_dir=${QUICZ_ROOT:-"$HOME/Work/quicz"}/examples/interop/go_echo_client
-if [[ ! -f $fixture_dir/go.mod ]]; then
+netz_only=${NETZ_QUIC_HANDSHAKE_NETZ_ONLY:-false}
+for arg in "$@"; do
+  case $arg in
+    --netz-only) netz_only=true ;;
+    *) echo "unknown handshake benchmark option: $arg" >&2; exit 2 ;;
+  esac
+done
+if [[ $netz_only != true && ! -f $fixture_dir/go.mod ]]; then
   echo "audited quic-go fixture not found under $fixture_dir" >&2
+  exit 127
+fi
+if [[ $netz_only != true ]] && ! command -v go >/dev/null 2>&1; then
+  echo 'go not found' >&2
   exit 127
 fi
 
@@ -13,7 +25,9 @@ samples=${NETZ_QUIC_HANDSHAKE_SAMPLES:-5}
 warmup=${NETZ_QUIC_HANDSHAKE_WARMUP:-10}
 iterations=${NETZ_QUIC_HANDSHAKE_ITERATIONS:-100}
 timeout_ms=${NETZ_QUIC_HANDSHAKE_TIMEOUT_MS:-10000}
-if (( samples < 1 || samples % 2 == 0 || warmup < 0 || iterations < 1 )); then
+if (( samples < 1 || samples % 2 == 0 || warmup < 0 || warmup > 4096 ||
+      iterations < 1 || iterations > 4096 || timeout_ms < 1 ||
+      timeout_ms > 600000 )); then
   echo 'invalid handshake benchmark configuration' >&2
   exit 2
 fi
@@ -59,12 +73,16 @@ on_exit() {
 }
 trap on_exit EXIT
 
-(cd "$fixture_dir" && go test -mod=readonly \
-  "$repo_root/tools/interop/quic_handshake_bench.go" \
-  "$repo_root/tools/interop/quic_handshake_bench_test.go")
-(cd "$fixture_dir" && go build -mod=readonly \
-  -o "$work/quic-go-handshake-bench" \
-  "$repo_root/tools/interop/quic_handshake_bench.go")
+python3 "$repo_root/tools/interop/quic_handshake_benchmark_check_test.py"
+
+if [[ $netz_only != true ]]; then
+  (cd "$fixture_dir" && go test -mod=readonly \
+    "$repo_root/tools/interop/quic_handshake_bench.go" \
+    "$repo_root/tools/interop/quic_handshake_bench_test.go")
+  (cd "$fixture_dir" && go build -mod=readonly \
+    -o "$work/quic-go-handshake-bench" \
+    "$repo_root/tools/interop/quic_handshake_bench.go")
+fi
 
 cat >"$work/netz-ca.pem" <<'EOF'
 -----BEGIN CERTIFICATE-----
@@ -138,8 +156,13 @@ pairs=(
   'quic-go-client+netz-server:quic-go:netz'
   'netz-client+netz-server:netz:netz'
 )
+if [[ $netz_only == true ]]; then
+  pairs=('netz-client+netz-server:netz:netz')
+fi
 for ((outer_run = 1; outer_run <= samples; outer_run += 1)); do
-  if (( outer_run % 2 == 1 )); then
+  if [[ $netz_only == true ]]; then
+    order=(0)
+  elif (( outer_run % 2 == 1 )); then
     order=(0 1 2 3)
   else
     order=(3 2 1 0)
@@ -156,7 +179,8 @@ for entry in "${pairs[@]}"; do
   grep '^record=server-complete ' "$work/$role_pair-server.log"
   python3 "$repo_root/tools/interop/quic_handshake_benchmark_check.py" \
     "--role-pair=$role_pair" "--samples=$samples" "--warmup=$warmup" \
-    "--iterations=$iterations" "--client-log=$work/$role_pair-client.log" \
+    "--iterations=$iterations" "--timeout-ms=$timeout_ms" \
+    "--client-log=$work/$role_pair-client.log" \
     "--server-log=$work/$role_pair-server.log"
 done
 

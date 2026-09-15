@@ -29,13 +29,18 @@ class QuicHandshakeBenchmarkCheckTest(unittest.TestCase):
             for sample, value in enumerate(elapsed, 1):
                 sample_lines.append(
                     f"record=handshake-sample implementation={client_impl} protocol=quic-v1 "
-                    f"mode=handshake role_pair={role_pair} run={run} "
-                    f"sample={sample} elapsed_ns={value} verified=true"
+                    f"mode=handshake role_pair={role_pair} endpoint_role=client run={run} "
+                    f"client_io={'zio-std-io' if client_impl == 'netz' else 'quic-go-netpoll'} "
+                    f"server_io={'zio-std-io' if server_impl == 'netz' else 'quic-go-netpoll'} "
+                    f"sample={sample} timeout_ms=10000 elapsed_ns={value} verified=true"
                 )
             ordered = sorted(elapsed)
             result_lines.append(
                 f"record=result implementation={client_impl} protocol=quic-v1 mode=handshake "
-                f"role_pair={role_pair} run={run} "
+                f"role_pair={role_pair} endpoint_role=client run={run} "
+                f"client_io={'zio-std-io' if client_impl == 'netz' else 'quic-go-netpoll'} "
+                f"server_io={'zio-std-io' if server_impl == 'netz' else 'quic-go-netpoll'} "
+                "timeout_ms=10000 "
                 "timing_scope=client-connect-only verification=certificate "
                 "key_exchange=x25519 cipher=aes-128-gcm-sha256 warmup=2 "
                 f"iterations={iterations} connections={total_connections} "
@@ -46,7 +51,10 @@ class QuicHandshakeBenchmarkCheckTest(unittest.TestCase):
             )
             server_lines.append(
                 f"record=server-complete implementation={server_impl} protocol=quic-v1 "
-                f"mode=handshake role_pair={role_pair} run={run} "
+                f"mode=handshake role_pair={role_pair} endpoint_role=server run={run} "
+                f"client_io={'zio-std-io' if client_impl == 'netz' else 'quic-go-netpoll'} "
+                f"server_io={'zio-std-io' if server_impl == 'netz' else 'quic-go-netpoll'} "
+                "timeout_ms=10000 "
                 f"warmup=2 iterations={iterations} connections={total_connections} "
                 f"echo_bytes={total_connections * 32} checksum={checksum} "
                 "echo_verified=true peer_close=true complete=true"
@@ -68,7 +76,7 @@ class QuicHandshakeBenchmarkCheckTest(unittest.TestCase):
                 )
                 check.verify(
                     role_pair=role_pair, samples=3, warmup=2,
-                    iterations=3, client_log=client, server_log=server,
+                    iterations=3, timeout_ms=10000, client_log=client, server_log=server,
                 )
 
     def test_rejects_bad_total(self) -> None:
@@ -80,7 +88,7 @@ class QuicHandshakeBenchmarkCheckTest(unittest.TestCase):
             with self.assertRaises(ValueError):
                 check.verify(
                     role_pair="netz-client+quic-go-server", samples=1, warmup=2,
-                    iterations=3, client_log=client, server_log=server,
+                    iterations=3, timeout_ms=10000, client_log=client, server_log=server,
                 )
 
     def test_rejects_missing_server_completion(self) -> None:
@@ -90,7 +98,7 @@ class QuicHandshakeBenchmarkCheckTest(unittest.TestCase):
             with self.assertRaises(ValueError):
                 check.verify(
                     role_pair="netz-client+quic-go-server", samples=1, warmup=2,
-                    iterations=3, client_log=client, server_log=server,
+                    iterations=3, timeout_ms=10000, client_log=client, server_log=server,
                 )
 
     def test_rejects_even_sample_count(self) -> None:
@@ -99,7 +107,44 @@ class QuicHandshakeBenchmarkCheckTest(unittest.TestCase):
             with self.assertRaises(ValueError):
                 check.verify(
                     role_pair="netz-client+quic-go-server", samples=2, warmup=2,
-                    iterations=3, client_log=client, server_log=server,
+                    iterations=3, timeout_ms=10000, client_log=client, server_log=server,
+                )
+
+    def test_rejects_wrong_backend(self) -> None:
+        with TemporaryDirectory() as directory:
+            client, server = self.write_case(directory)
+            client.write_text(
+                client.read_text().replace(
+                    "client_io=zio-std-io", "client_io=threaded",
+                )
+            )
+            with self.assertRaisesRegex(ValueError, "client_io"):
+                check.verify(
+                    role_pair="netz-client+quic-go-server", samples=1, warmup=2,
+                    iterations=3, timeout_ms=10000, client_log=client, server_log=server,
+                )
+
+    def test_rejects_wrong_endpoint_role_and_timeout(self) -> None:
+        with TemporaryDirectory() as directory:
+            client, server = self.write_case(directory)
+            server.write_text(
+                server.read_text().replace(
+                    "endpoint_role=server", "endpoint_role=client",
+                )
+            )
+            with self.assertRaisesRegex(ValueError, "endpoint role"):
+                check.verify(
+                    role_pair="netz-client+quic-go-server", samples=1, warmup=2,
+                    iterations=3, timeout_ms=10000, client_log=client, server_log=server,
+                )
+            client, server = self.write_case(directory)
+            client.write_text(
+                client.read_text().replace("timeout_ms=10000", "timeout_ms=9999", 1)
+            )
+            with self.assertRaisesRegex(ValueError, "timeout_ms"):
+                check.verify(
+                    role_pair="netz-client+quic-go-server", samples=1, warmup=2,
+                    iterations=3, timeout_ms=10000, client_log=client, server_log=server,
                 )
 
 
