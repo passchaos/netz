@@ -864,7 +864,10 @@ The RFC 8441 Hyper 1.11 peer now also has a dual-role, two-CPU persistent echo
 gate, `bench-websocket-hyper-h2`. It excludes h2c/SETTINGS/CONNECT/READY and
 warmup from timing, disables compression and adaptive windows, uses one
 outstanding 4 KiB message, and validates every round-dependent payload at both
-peers before a normal Close. Five 1,000-round runs measured
+peers before a normal Close. The current netz client and server obtain
+`std.Io` from zio, and the strict checker binds every config, result, completion
+and memory record to `zio-std-io` or `hyper-tokio`. The five 1,000-round runs
+below predate that migration and remain historical Threaded evidence:
 20.33-22.29 us/roundtrip for netz-client + Hyper-server and
 21.07-23.28 us/roundtrip for Hyper-client + netz-server. These are role-pair
 same-application-shape results, not equal-wire or isolated single-library

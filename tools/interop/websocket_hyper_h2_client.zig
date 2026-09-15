@@ -21,9 +21,9 @@ pub fn main(init: std.process.Init) !void {
     }
 
     const allocator = std.heap.c_allocator;
-    var threaded = std.Io.Threaded.init(allocator, .{});
-    defer threaded.deinit();
-    const io = threaded.io();
+    var backend = try netz.runtime.Backend.init(allocator);
+    defer backend.deinit();
+    const io = backend.io();
 
     const limits: netz.http2.runtime.Limits = .{
         .max_frame_payload = 4096,
@@ -150,7 +150,7 @@ pub fn main(init: std.process.Init) !void {
     }
 
     std.debug.print(
-        "netz RFC 8441 client interoperated with Hyper: transport={s} fragmented-text ping pong bounded-close tls_metadata={s} key_update={s}\n",
+        "netz RFC 8441 client interoperated with Hyper: transport={s} fragmented-text ping pong bounded-close tls_metadata={s} key_update={s} client_io=zio-std-io server_io=hyper-tokio\n",
         .{
             if (tls_enabled) "tls" else "h2c",
             if (tls_enabled) "verified" else "n/a",
@@ -194,9 +194,11 @@ fn runBenchmarkWithAllocator(
     port: u16,
     config: benchmark.Config,
 ) !void {
-    var threaded = std.Io.Threaded.init(allocator, .{ .async_limit = .unlimited });
-    defer threaded.deinit();
-    const io = threaded.io();
+    // Keep zio's executor bookkeeping outside the explicit protocol allocator
+    // so --stats remains comparable with the historical workload scope.
+    var backend = try netz.runtime.Backend.init(std.heap.smp_allocator);
+    defer backend.deinit();
+    const io = backend.io();
     var h2 = try netz.http2.runtime.Client.connect(
         allocator,
         io,

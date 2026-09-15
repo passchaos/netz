@@ -34,17 +34,32 @@ stats=false
 warmup=20
 iterations=1000
 payload_bytes=4096
+timeout_ms=30000
 for arg in "$@"; do
   case "$arg" in
     --stats) stats=true ;;
     --warmup=*) warmup=${arg#--warmup=} ;;
     --iterations=*) iterations=${arg#--iterations=} ;;
     --payload-bytes=*) payload_bytes=${arg#--payload-bytes=} ;;
+    --timeout-ms=*) timeout_ms=${arg#--timeout-ms=} ;;
   esac
 done
-time_bin=${TIME_BIN:-/usr/bin/time}
-if [[ $stats == true && ! -x $time_bin ]]; then
-  echo "GNU time not found at $time_bin" >&2
+time_command=()
+rss_source=gnu-time-maxrss
+if [[ -n ${TIME_BIN:-} ]]; then
+  if [[ ! -x $TIME_BIN ]]; then
+    echo "time executable not found at $TIME_BIN" >&2
+    exit 127
+  fi
+  time_command=("$TIME_BIN")
+elif [[ -x /usr/bin/time ]]; then
+  time_command=(/usr/bin/time)
+elif command -v busybox >/dev/null 2>&1; then
+  time_command=("$(command -v busybox)" time)
+  rss_source=busybox-time-maxrss
+fi
+if [[ $stats == true && ${#time_command[@]} -eq 0 ]]; then
+  echo 'GNU or BusyBox time not found' >&2
   exit 127
 fi
 cargo_args=(build --quiet --release --offline --locked \
@@ -90,16 +105,18 @@ check_result() {
   local check_args=(python3 \
     "$repo_root/tools/interop/websocket_h2_benchmark_check.py" \
     --role-pair="$1" --warmup="$warmup" --iterations="$iterations" \
-    --payload-bytes="$payload_bytes" --client-log="$2" --server-log="$3")
+    --payload-bytes="$payload_bytes" --timeout-ms="$timeout_ms" \
+    --client-log="$2" --server-log="$3")
   if [[ -n ${4:-} ]]; then
-    check_args+=(--client-rss="$4" --server-rss="$5")
+    check_args+=(--client-rss="$4" --server-rss="$5" \
+      --rss-source="$rss_source")
   fi
   "${check_args[@]}"
 }
 
 port=$(free_tcp_port)
 if [[ $stats == true ]]; then
-  timeout 180s "$time_bin" -f '%M' -o "$work/hyper-server.rss" \
+  timeout 180s "${time_command[@]}" -f '%M' -o "$work/hyper-server.rss" \
     taskset -c "$server_cpu" "$peer" server "$port" "$@" \
     >"$work/hyper-server.log" 2>&1 &
 else
@@ -109,7 +126,7 @@ fi
 server_pid=$!
 wait_for_line "$server_pid" "$work/hyper-server.log" HYPER_WEBSOCKET_H2_BENCH_PORT
 if [[ $stats == true ]]; then
-  timeout 180s "$time_bin" -f '%M' -o "$work/netz-client.rss" \
+  timeout 180s "${time_command[@]}" -f '%M' -o "$work/netz-client.rss" \
     taskset -c "$client_cpu" "$netz_client" bench-client "$port" "$@" \
     >"$work/netz-client.log" 2>&1
 else
@@ -130,7 +147,7 @@ cat "$work/netz-client.log"
 
 port=$(free_tcp_port)
 if [[ $stats == true ]]; then
-  timeout 180s "$time_bin" -f '%M' -o "$work/netz-server.rss" \
+  timeout 180s "${time_command[@]}" -f '%M' -o "$work/netz-server.rss" \
     taskset -c "$server_cpu" "$netz_server" bench-server "$port" "$@" \
     >"$work/netz-server.log" 2>&1 &
 else
@@ -140,7 +157,7 @@ fi
 server_pid=$!
 wait_for_line "$server_pid" "$work/netz-server.log" NETZ_WEBSOCKET_H2_BENCH_PORT
 if [[ $stats == true ]]; then
-  timeout 180s "$time_bin" -f '%M' -o "$work/hyper-client.rss" \
+  timeout 180s "${time_command[@]}" -f '%M' -o "$work/hyper-client.rss" \
     taskset -c "$client_cpu" "$peer" client "$port" "$@" \
     >"$work/hyper-client.log" 2>&1
 else

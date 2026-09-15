@@ -41,9 +41,11 @@ fn runBenchmarkWithAllocator(
     port: u16,
     expected_config: benchmark.Config,
 ) !void {
-    var threaded = std.Io.Threaded.init(allocator, .{ .async_limit = .unlimited });
-    defer threaded.deinit();
-    const io = threaded.io();
+    // Keep zio's executor bookkeeping outside the explicit protocol allocator
+    // so --stats remains comparable with the historical workload scope.
+    var backend = try netz.runtime.Backend.init(std.heap.smp_allocator);
+    defer backend.deinit();
+    const io = backend.io();
     var server = try netz.http2.runtime.Server.listen(
         allocator,
         io,
@@ -105,13 +107,16 @@ fn runBenchmarkWithAllocator(
     std.debug.print(
         "record=server-complete implementation=netz protocol=websocket-h2 " ++
             "transport=h2c mode=binary-echo role_pair=hyper-client+netz-server " ++
-            "endpoint_role=server connection_scope=persistent warmup={d} " ++
-            "iterations={d} payload_bytes={d} sent_bytes={d} " ++
+            "endpoint_role=server client_io=hyper-tokio server_io=zio-std-io " ++
+            "connection_scope=persistent benchmark_scope=same-application-shape " ++
+            "warmup={d} " ++
+            "iterations={d} payload_bytes={d} timeout_ms={d} sent_bytes={d} " ++
             "received_bytes={d} checksum={d} server_complete=true\n",
         .{
             config.warmup,
             config.iterations,
             config.payload_bytes,
+            config.timeout_ms,
             @as(u64, config.iterations) * config.payload_bytes,
             @as(u64, config.iterations) * config.payload_bytes,
             checksum,

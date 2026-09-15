@@ -723,7 +723,9 @@ audited Hyper fixture uses rustls to request KeyUpdate before RFC 8441 setup;
 netz verifies the server certificate, `h2` ALPN and typed suite/hash, derives an
 exporter through the WebSocket object, compares it byte-for-byte with rustls's
 independent output, returns exactly one update, and then
-completes fragmented text, Ping/Pong and bounded Close on the rotated keys.
+completes fragmented text, Ping/Pong and bounded Close on the rotated keys. The
+netz client obtains `std.Io` from the zio-backed runtime, and the runner requires
+the terminal records to identify `zio-std-io` and `hyper-tokio`.
 
 Both stream WebSocket and RFC 8441 adapters now expose absolute-deadline frame
 reads plus `closeWithTimeout`. A close step sends Close at most once, consumes

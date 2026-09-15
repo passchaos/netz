@@ -1604,7 +1604,9 @@ sibling reuse, and connection-error precedence.
    one RFC 6455 message across both caller slices, and the underlying tunnel's
    slice writer permits HTTP/2 DATA frames to cross either logical join. The
    existing bidirectional Hyper RFC 8441
-   process gate remains the external interoperability check. Five CPU-0 4-KiB
+   process gate remains the external interoperability check. Its netz endpoint
+   now obtains `std.Io` from zio, and the runner binds the peer identities as
+   `zio-std-io` and `hyper-tokio`. Five CPU-0 4-KiB
    echo samples after adding H2 two-part writes measured 30.987-32.321
    us/roundtrip (31.394 us mean, 31.072 us median, 1.63% relative standard
    deviation); this overlaps the prior range and is not presented as

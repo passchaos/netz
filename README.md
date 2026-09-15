@@ -924,6 +924,8 @@ zig build interop-http3-quic-go -Doptimize=ReleaseFast
 zig build interop-websocket-h3-quic-go -Doptimize=ReleaseFast
 # Use Hyper's HTTP/2 Extended CONNECT server to validate netz RFC 8441 frame
 # masking, text exchange, Ping/Pong, and the WebSocket Close handshake.
+# The netz endpoint obtains std.Io from zio; the gate asserts zio-std-io
+# against the audited Hyper fixture's hyper-tokio execution backend.
 zig build interop-websocket-hyper-h2 -Doptimize=ReleaseFast
 # Build the quic-go fixtures from the audited local quicz checkout and run
 # certificate-verified, ALPN-checked two-stream echoes in both directions,
@@ -1193,11 +1195,13 @@ measured interval and byte-exact validation at both peers. They are also
 labeled `same-application-shape`. Both runners accept `--stats` for
 whole-process RSS plus separately scoped runtime allocation telemetry. Their
 strict verifiers require distinct client-result and server-completion records
-and independently recompute every measured payload checksum. The H3 netz
-endpoints use zio behind `std.Io`; its config, result, completion, and memory
-records bind both endpoint runtimes and the timeout, and its verifier rejects
-legacy backend or mismatched timing records. Allocation counters are not
-compared across languages.
+and independently recompute every measured payload checksum. Both H2 and H3
+netz endpoints use zio behind `std.Io`; their config, result, completion, and
+memory records bind both endpoint runtimes and the timeout, and their verifiers
+reject legacy backend or mismatched timing records. Zio executor bookkeeping
+uses the runtime allocator rather than the benchmark counting allocator, so
+`netz-explicit` remains scoped to protocol workload allocations. Allocation
+counters are not compared across languages.
 `bench-webtransport-wtransport` provides the
 analogous stream upload and DATAGRAM ping-pong comparison described above. It
 also accepts `--stats` for four-process peak RSS and separately scoped netz

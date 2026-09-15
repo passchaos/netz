@@ -108,6 +108,7 @@ fn main() {
 async fn run_server(port: u16, config: Config) {
     let listener = TcpListener::bind(("127.0.0.1", port)).await.expect("bind");
     println!("HYPER_WEBSOCKET_H2_BENCH_PORT={port}");
+    print_config("netz-client+hyper-server", config);
     io::stdout().flush().unwrap();
     let (stream, _) = listener.accept().await.expect("accept");
     stream.set_nodelay(true).unwrap();
@@ -286,7 +287,7 @@ async fn run_echo_server(
     .await
     .expect("close write timeout");
     stream.shutdown().await.expect("shutdown");
-    println!("record=server-complete implementation=hyper protocol=websocket-h2 transport=h2c mode=binary-echo role_pair=netz-client+hyper-server endpoint_role=server connection_scope=persistent warmup={} iterations={} payload_bytes={} sent_bytes={} received_bytes={} checksum={} server_complete=true", config.warmup, config.iterations, config.payload_bytes, u64::from(config.iterations) * config.payload_bytes as u64, u64::from(config.iterations) * config.payload_bytes as u64, checksum);
+    println!("record=server-complete implementation=hyper protocol=websocket-h2 transport=h2c mode=binary-echo role_pair=netz-client+hyper-server endpoint_role=server client_io=zio-std-io server_io=hyper-tokio connection_scope=persistent benchmark_scope=same-application-shape warmup={} iterations={} payload_bytes={} timeout_ms={} sent_bytes={} received_bytes={} checksum={} server_complete=true", config.warmup, config.iterations, config.payload_bytes, config.timeout.as_millis(), u64::from(config.iterations) * config.payload_bytes as u64, u64::from(config.iterations) * config.payload_bytes as u64, checksum);
 }
 
 async fn run_echo_client(
@@ -506,11 +507,16 @@ fn verify_payload(payload: &[u8], round: u32) -> u64 {
     c
 }
 fn print_config(role: &str, c: Config) {
-    println!("protocol=websocket-h2 transport=h2c mode=binary-echo role_pair={role} connection_scope=persistent benchmark_scope=same-application-shape warmup={} iterations={} payload_bytes={} stream_window=1048576 connection_window=8388608 max_frame_size=16384 tcp_nodelay=true compression=false",c.warmup,c.iterations,c.payload_bytes);
+    let endpoint_role = if role.starts_with("hyper-client") {
+        "client"
+    } else {
+        "server"
+    };
+    println!("record=config implementation=hyper protocol=websocket-h2 transport=h2c mode=binary-echo role_pair={role} endpoint_role={endpoint_role} client_io={} server_io={} connection_scope=persistent benchmark_scope=same-application-shape warmup={} iterations={} payload_bytes={} timeout_ms={} stream_window=1048576 connection_window=8388608 max_frame_size=16384 tcp_nodelay=true compression=false",client_io(role),server_io(role),c.warmup,c.iterations,c.payload_bytes,c.timeout.as_millis());
 }
 fn print_result(role: &str, c: Config, e: Duration, checksum: u64) {
     let r = c.iterations as f64 / e.as_secs_f64();
-    println!("record=result implementation=hyper protocol=websocket-h2 transport=h2c mode=binary-echo role_pair={role} endpoint_role=client connection_scope=persistent benchmark_scope=same-application-shape warmup={} iterations={} payload_bytes={} elapsed_ns={} ns_per_roundtrip={:.3} roundtrips_per_s={:.3} logical_MiB_s={:.3} sent_bytes={} received_bytes={} checksum={} complete=true",c.warmup,c.iterations,c.payload_bytes,e.as_nanos(),e.as_nanos() as f64/c.iterations as f64,r,r*c.payload_bytes as f64*2.0/(1024.0*1024.0),u64::from(c.iterations)*c.payload_bytes as u64,u64::from(c.iterations)*c.payload_bytes as u64,checksum);
+    println!("record=result implementation=hyper protocol=websocket-h2 transport=h2c mode=binary-echo role_pair={role} endpoint_role=client client_io={} server_io={} connection_scope=persistent benchmark_scope=same-application-shape warmup={} iterations={} payload_bytes={} timeout_ms={} elapsed_ns={} ns_per_roundtrip={:.3} roundtrips_per_s={:.3} logical_MiB_s={:.3} sent_bytes={} received_bytes={} checksum={} complete=true",client_io(role),server_io(role),c.warmup,c.iterations,c.payload_bytes,c.timeout.as_millis(),e.as_nanos(),e.as_nanos() as f64/c.iterations as f64,r,r*c.payload_bytes as f64*2.0/(1024.0*1024.0),u64::from(c.iterations)*c.payload_bytes as u64,u64::from(c.iterations)*c.payload_bytes as u64,checksum);
 }
 
 #[cfg(feature = "allocation-stats")]
@@ -520,5 +526,21 @@ fn print_memory(role: &str, c: Config, stats: counting_allocator::Snapshot) {
     } else {
         "netz-client+hyper-server"
     };
-    println!("record=memory implementation=hyper protocol=websocket-h2 transport=h2c mode=binary-echo role_pair={role_pair} endpoint_role={role} connection_scope=persistent warmup={} iterations={} payload_bytes={} memory_scope=process-start-through-runtime-teardown allocator_scope=rust-system-requested alloc_count={} free_count={} realloc_count={} total_allocated_bytes={} total_freed_bytes={} live_bytes_end={} peak_live_bytes={} complete=true", c.warmup, c.iterations, c.payload_bytes, stats.alloc_count, stats.free_count, stats.realloc_count, stats.total_allocated, stats.total_freed, stats.current_bytes, stats.peak_bytes);
+    println!("record=memory implementation=hyper protocol=websocket-h2 transport=h2c mode=binary-echo role_pair={role_pair} endpoint_role={role} client_io={} server_io={} connection_scope=persistent warmup={} iterations={} payload_bytes={} timeout_ms={} memory_scope=process-start-through-runtime-teardown allocator_scope=rust-system-requested alloc_count={} free_count={} realloc_count={} total_allocated_bytes={} total_freed_bytes={} live_bytes_end={} peak_live_bytes={} complete=true", client_io(role_pair), server_io(role_pair), c.warmup, c.iterations, c.payload_bytes, c.timeout.as_millis(), stats.alloc_count, stats.free_count, stats.realloc_count, stats.total_allocated, stats.total_freed, stats.current_bytes, stats.peak_bytes);
+}
+
+fn client_io(role_pair: &str) -> &'static str {
+    if role_pair.starts_with("netz-client") {
+        "zio-std-io"
+    } else {
+        "hyper-tokio"
+    }
+}
+
+fn server_io(role_pair: &str) -> &'static str {
+    if role_pair.ends_with("netz-server") {
+        "zio-std-io"
+    } else {
+        "hyper-tokio"
+    }
 }

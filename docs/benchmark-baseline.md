@@ -4045,6 +4045,12 @@ Both sides use TCP_NODELAY, fixed 1 MiB stream / 8 MiB connection windows, a
 16 KiB HTTP/2 frame limit, no adaptive receive windows, no compression, and
 one outstanding 4 KiB message. Client frames carry fresh random masks. Both
 peers validate every round-dependent payload and require Close(1000, `done`).
+The current netz endpoints obtain `std.Io` from zio. Config, result, completion
+and memory records identify `zio-std-io` versus `hyper-tokio`, include the
+timeout, and are rejected if timing derivatives or runtime identities disagree.
+The performance and RSS numbers below were captured with the former
+`std.Io.Threaded` harness and are retained as historical baselines, not current
+zio performance evidence.
 
 ```sh
 zig build bench-websocket-hyper-h2 -Doptimize=ReleaseFast -- \
@@ -4067,8 +4073,9 @@ ratio is inferred.
 
 The same command accepts `--stats`. In this mode the runner builds only the
 Hyper benchmark binary with its `allocation-stats` feature, wraps all four
-client/server processes with GNU time, and requires one structured result, one
-server-completion record, and two memory records for each role pair. The
+client/server processes with GNU or BusyBox time, records the exact RSS source,
+and requires one structured result, one server-completion record, two config
+records and two memory records for each role pair. The
 functional verifier independently recomputes the checksum across all measured
 rounds, so a memory record cannot satisfy a missing echo result. Three runs of
 the default 20-warmup/1,000-measured/4-KiB workload recorded:
@@ -4085,10 +4092,13 @@ maximum RSS is the cross-language metric. Netz's explicit allocator and Rust's
 global `System`-allocator requested-byte counters have different scopes and are
 not treated as a cross-language allocation ratio. The netz counter starts after
 argument parsing and proves zero live bytes after full H2/WebSocket/runtime
-teardown. Hyper counts from process start; the benchmark now waits for the
+teardown. Zio executor bookkeeping intentionally uses the runtime allocator and
+is excluded from that explicit protocol-allocation scope. Hyper counts from
+process start; the benchmark now waits for the
 server upgrade/echo task, propagates the client connection-driver result, and
 drops the Tokio runtime before taking its final snapshot. Default runs do not
-enable the Rust allocation feature, the netz wrapper, or GNU time.
+enable the Rust allocation feature, the netz wrapper, or an external time
+wrapper.
 
 The RFC 9220 HTTP/3 benchmark also accepts `--warmup=N` and `--iterations=N`
 (defaults 20 and 200), allowing longer profiling runs without source edits.

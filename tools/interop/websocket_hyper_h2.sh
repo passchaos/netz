@@ -56,10 +56,10 @@ server_pid=
 cat "$work/client.log"
 cat "$work/server.log"
 grep -Fq \
-  'netz RFC 8441 client interoperated with Hyper: transport=h2c fragmented-text ping pong bounded-close tls_metadata=n/a key_update=n/a' \
+  'netz RFC 8441 client interoperated with Hyper: transport=h2c fragmented-text ping pong bounded-close tls_metadata=n/a key_update=n/a client_io=zio-std-io server_io=hyper-tokio' \
   "$work/client.log"
 grep -Fq \
-  'Hyper RFC 8441 server interoperated with netz: fragmented-text ping pong bounded-close' \
+  'Hyper RFC 8441 server interoperated with netz: fragmented-text ping pong bounded-close client_io=zio-std-io server_io=hyper-tokio' \
   "$work/server.log"
 
 cat >"$work/cert.pem" <<'EOF'
@@ -105,11 +105,11 @@ server_pid=
 cat "$work/tls-client.log"
 cat "$work/tls-server.log"
 grep -Fq \
-  'netz RFC 8441 client interoperated with Hyper: transport=tls fragmented-text ping pong bounded-close tls_metadata=verified key_update=verified' \
+  'netz RFC 8441 client interoperated with Hyper: transport=tls fragmented-text ping pong bounded-close tls_metadata=verified key_update=verified client_io=zio-std-io server_io=hyper-tokio' \
   "$work/tls-client.log"
 grep -Fq \
   'rustls RFC 8441 server sent TLS KeyUpdate request' \
   "$work/tls-server.log"
 grep -Fq \
-  'Hyper RFC 8441 server interoperated with netz: fragmented-text ping pong bounded-close' \
+  'Hyper RFC 8441 server interoperated with netz: fragmented-text ping pong bounded-close client_io=zio-std-io server_io=hyper-tokio' \
   "$work/tls-server.log"
