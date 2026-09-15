@@ -46,8 +46,10 @@ zig build bench-quic-handshake-stream -Doptimize=ReleaseFast -- --iterations=3 -
 ```
 
 The maintained ACK-range, connection-router, PADDING parser, short-packet
-protection, receive sliding-window, and session-ticket keyring microbenchmarks
-obtain their monotonic clock from `netz.runtime.Backend` and report
+protection, receive sliding-window, session-ticket keyring, endpoint CID
+synchronization, pending-ready-index, timer scheduler, and receive-stream-ID
+microbenchmarks obtain any required UDP endpoint and their monotonic clock from
+`netz.runtime.Backend` and report
 `zio-std-io`. Numeric comparisons captured before 2026-09-15 remain historical
 Threaded evidence unless a result is explicitly labeled as a zio-era rerun.
 

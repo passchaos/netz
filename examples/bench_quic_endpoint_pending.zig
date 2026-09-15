@@ -7,12 +7,13 @@ const connection_counts = [_]usize{ 1, 16, 128, 1024 };
 pub fn main(init: std.process.Init) !void {
     const iterations = try parseIterations(init);
     const allocator = std.heap.smp_allocator;
-    var threaded = std.Io.Threaded.init(allocator, .{});
-    defer threaded.deinit();
-    const io = threaded.io();
+    var backend = try netz.runtime.Backend.init(allocator);
+    defer backend.deinit();
+    const io = backend.io();
 
     std.debug.print(
         \\QUIC endpoint pending-packet lookup benchmark
+        \\  io backend: zio-std-io
         \\  direct iterations: {d}
         \\  dispatcher ready queue is empty
         \\  times are integer hundredths of a nanosecond per operation

@@ -6,9 +6,9 @@ const default_iterations: usize = 2_000_000;
 pub fn main(init: std.process.Init) !void {
     const iterations = try parseIterations(init);
     const allocator = std.heap.smp_allocator;
-    var threaded = std.Io.Threaded.init(allocator, .{});
-    defer threaded.deinit();
-    const io = threaded.io();
+    var backend = try netz.runtime.Backend.init(allocator);
+    defer backend.deinit();
+    const io = backend.io();
 
     var endpoint = try netz.quic.runtime.Endpoint.bind(
         allocator,
@@ -96,6 +96,7 @@ pub fn main(init: std.process.Init) !void {
         forced_elapsed * 100 / cached_elapsed;
     std.debug.print(
         \\QUIC endpoint CID synchronization benchmark
+        \\  io backend: zio-std-io
         \\  iterations: {d}, active CIDs: 4
         \\  forced sync: {d} ns/op
         \\  revision fast path: {d} ns/op

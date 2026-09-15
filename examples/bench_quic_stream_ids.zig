@@ -7,9 +7,9 @@ const default_iterations: usize = 200_000;
 pub fn main(init: std.process.Init) !void {
     const iterations = try parseIterations(init);
     const allocator = std.heap.smp_allocator;
-    var threaded = std.Io.Threaded.init(allocator, .{});
-    defer threaded.deinit();
-    const io = threaded.io();
+    var backend = try netz.runtime.Backend.init(allocator);
+    defer backend.deinit();
+    const io = backend.io();
     var endpoint = try netz.quic.runtime.Endpoint.bind(
         allocator,
         io,
@@ -61,6 +61,7 @@ pub fn main(init: std.process.Init) !void {
     }
     const elapsed = nowNs(io) -| started;
     std.debug.print("QUIC receive-stream ID enumeration benchmark\n" ++
+        "  io backend: zio-std-io\n" ++
         "  iterations: {d}\n" ++
         "  active streams: {d}\n" ++
         "  elapsed ns: {d}\n" ++

@@ -15,9 +15,9 @@ pub fn main(init: std.process.Init) !void {
     const options = try parseOptions(init);
     const iterations = options.iterations;
     const allocator = std.heap.smp_allocator;
-    var threaded = std.Io.Threaded.init(allocator, .{});
-    defer threaded.deinit();
-    const io = threaded.io();
+    var backend = try netz.runtime.Backend.init(allocator);
+    defer backend.deinit();
+    const io = backend.io();
 
     if (options.loss_deadline_only) {
         const loss_deadline = try benchmarkLossDeadline(
@@ -26,7 +26,9 @@ pub fn main(init: std.process.Init) !void {
             iterations,
         );
         std.debug.print(
-            "QUIC loss deadline benchmark: sent_packets=256 acknowledged_records=255 one_gap=true iterations={d} ns/query={d}.{d:0>2}\n",
+            "QUIC loss deadline benchmark: io_backend=zio-std-io " ++
+                "sent_packets=256 acknowledged_records=255 one_gap=true " ++
+                "iterations={d} ns/query={d}.{d:0>2}\n",
             .{ iterations, loss_deadline / 100, loss_deadline % 100 },
         );
         return;
@@ -34,6 +36,7 @@ pub fn main(init: std.process.Init) !void {
 
     std.debug.print(
         \\QUIC endpoint timer scheduler scaling benchmark
+        \\  io backend: zio-std-io
         \\  fast-path iterations: {d}
         \\  bounded due capacity: 32 (one due entry at array tail)
         \\  times are integer hundredths of a nanosecond per operation

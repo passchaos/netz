@@ -12,8 +12,10 @@ before 2026-09-15 used `std.Io.Threaded` and remain historical evidence only.
 Current benchmark output names the backend so results from different execution
 models cannot be silently combined.
 As of 2026-09-15, the ACK-range, connection-router, PADDING parser,
-short-packet protection, receive sliding-window, and session-ticket keyring
-microbenchmarks all obtain their monotonic clock from
+short-packet protection, receive sliding-window, session-ticket keyring,
+endpoint CID synchronization, pending-ready-index, timer scheduler, and
+receive-stream-ID microbenchmarks all obtain their endpoint, where needed, and
+monotonic clock from
 `netz.runtime.Backend` and print `zio-std-io`. Their previously recorded
 optimization comparisons remain useful as same-harness historical evidence,
 but are not current zio performance measurements unless a later paragraph
@@ -3150,9 +3152,11 @@ topologies were not order-interleaved, so this supersedes the stale 0.717x
 observation only as a current noisy baseline, not as evidence that the shared
 topology has conclusively reached parity.
 
-The endpoint CID router benchmark now obtains its monotonic clock from
-zio-backed `std.Io` and prints `io backend: zio-std-io`; the historical A/B
-numbers below predate that runtime migration. The endpoint CID router uses
+The endpoint CID router, CID synchronization, pending-ready-index, timer
+scheduler, and receive-stream-ID benchmarks now obtain their UDP endpoint,
+where needed, and monotonic clock from zio-backed `std.Io`; each prints the
+runtime identity. Their historical A/B numbers below predate that runtime
+migration. The endpoint CID router uses
 `HashMap.getAdapted` with the borrowed CID
 slice from the datagram instead of zero-filling and copying it into a 20-byte
 fixed key for every lookup. Stored keys remain fixed-size and owned, and all

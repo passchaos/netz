@@ -1096,6 +1096,9 @@ server as `mosquitto-event-loop`.
 The QUIC ACK-range, connection-router, PADDING, short-packet, receive-window,
 and ticket-keyring microbenchmarks obtain their monotonic clock from the same
 zio-backed `std.Io` and report that identity.
+The endpoint CID synchronization, pending-ready-index, timer scheduler, and
+receive-stream-ID benchmarks likewise create their UDP endpoint and monotonic
+clock through zio-backed `std.Io`; they perform no peer network traffic.
 
 The aggregate `bench` step runs the current protocol microbenchmarks:
 
