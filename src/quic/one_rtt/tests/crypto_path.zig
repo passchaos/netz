@@ -3480,17 +3480,11 @@ fn testClientPreferredAddressAcrossFamilies(
     defer server.deinit();
     try server.registerLocalPreferredAddress(preferred);
     try server.registerLocalPreferredEndpoint(server_candidate);
-    var client_dispatcher = quic.endpoint_dispatcher.Dispatcher.init(
-        allocator,
-        client_original,
-    );
-    defer client_dispatcher.deinit();
     var server_dispatcher = quic.endpoint_dispatcher.Dispatcher.init(
         allocator,
         server_original,
     );
     defer server_dispatcher.deinit();
-    try client_dispatcher.registerConnection(1, &client);
     try server_dispatcher.registerConnection(2, &server);
 
     const challenge = [_]u8{ 0x6f, 1, 2, 3, 4, 5, 6, 7 };
@@ -3517,16 +3511,19 @@ fn testClientPreferredAddressAcrossFamilies(
         target_family,
     );
     try client.sendPendingPathChallenge();
+    const deadline = std.Io.Clock.Timestamp.fromNow(io, .{
+        .clock = .awake,
+        .raw = .fromSeconds(1),
+    });
 
     // A delayed authenticated packet on the retained server path is accepted,
     // but it cannot undo the in-progress cross-family local endpoint choice.
     try server.send(&.{.{ .ping = {} }});
-    const old_path_datagram = try client_original.receiveBytesWithTimeout(
-        .fromSeconds(1),
+    var old_path_packet = try client.receivePacketServicingTimersDeadline(
+        deadline,
     );
-    var old_path_event = try client_dispatcher.dispatch(old_path_datagram);
-    defer old_path_event.deinit(allocator);
-    try std.testing.expect(old_path_event == .packet);
+    defer old_path_packet.deinit(allocator);
+    try std.testing.expect(old_path_packet.frames[0] == .ping);
     try std.testing.expectEqual(client_candidate, client.sendEndpoint());
     try std.testing.expectEqual(server_candidate.address(), client.peerAddress());
     try std.testing.expect(!client.peerAddressValidated());
@@ -3540,12 +3537,11 @@ fn testClientPreferredAddressAcrossFamilies(
     try std.testing.expectEqual(@as(u64, 1), challenge_event.packet.connection_id_sequence);
     try server.sendPendingPathResponse();
 
-    const response_datagram = try client_candidate.receiveBytesWithTimeout(
-        .fromSeconds(1),
+    var response_packet = try client.receivePacketServicingTimersDeadline(
+        deadline,
     );
-    var response_event = try client_dispatcher.dispatch(response_datagram);
-    defer response_event.deinit(allocator);
-    try std.testing.expect(response_event == .packet);
+    defer response_packet.deinit(allocator);
+    try std.testing.expect(response_packet.frames[0] == .path_response);
     try std.testing.expect(client.peerAddressValidated());
     try std.testing.expectEqual(server_candidate.address(), client.peerAddress());
     try std.testing.expectEqual(client_candidate, client.sendEndpoint());

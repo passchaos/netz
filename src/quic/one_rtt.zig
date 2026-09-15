@@ -267,6 +267,7 @@ const ReceivedDatagramBatch = union(enum) {
         return switch (self.*) {
             .owned => |*batch| .{
                 .from = batch.from,
+                .received_on = batch.received_on,
                 .storage = batch.storage,
                 .segment_size = batch.segment_size,
                 .segment_count = batch.segment_count,
@@ -1392,7 +1393,9 @@ pub const Connection = struct {
 
     pub fn deinit(self: *Connection) void {
         if (self.pending_received_datagram) |*datagram| {
-            datagram.deinit(self.endpoint.allocator);
+            datagram.deinit(
+                (datagram.received_on orelse self.endpoint).allocator,
+            );
         }
         self.received.deinit();
         self.sent.deinit();
@@ -8611,6 +8614,12 @@ pub const Connection = struct {
         self.peer_preferred_address_migration_active = false;
         self.config.peer = restored.peer;
         self.send_endpoint = restored.endpoint;
+        if (self.config.local_endpoint == .client) {
+            self.preferred_endpoint = if (restored.endpoint == self.endpoint)
+                null
+            else
+                restored.endpoint;
+        }
         if (self.peer_connection_ids.selectForPath(
             restored.connectionId(),
         )) |connection_id| {
@@ -9672,12 +9681,15 @@ pub const Connection = struct {
         now_ns: ?u64,
     ) Error!?ReceivedPacket {
         var pending = self.takePendingReceivedDatagram() orelse return null;
-        defer pending.deinit(self.endpoint.allocator);
-        return try self.processReceivedBytesOrDropPeerAddressAt(
+        defer pending.deinit(
+            (pending.received_on orelse self.endpoint).allocator,
+        );
+        return try self.processReceivedBytesOrDropPeerAddressOnEndpointAt(
             pending.from,
             pending.bytes,
             pending.ecn,
             now_ns,
+            pending.received_on,
         );
     }
 
@@ -9748,18 +9760,21 @@ pub const Connection = struct {
             var datagram = try self.receiveBytesServicingTimersUntil(
                 caller_deadline,
             );
-            defer datagram.deinit(self.endpoint.allocator);
+            defer datagram.deinit(
+                (datagram.received_on orelse self.endpoint).allocator,
+            );
             // Once 1-RTT keys are installed, retransmitted Initial/Handshake
             // datagrams belong to discarded packet-number spaces. RFC 9001
             // requires silently discarding them; feeding their long header to
             // the short-header decoder incorrectly turns ordinary handshake
             // loss recovery into an application receive failure.
             if (isDiscardedLongHeaderPacket(datagram.bytes)) continue;
-            var packet = (try self.processReceivedBytesOrDropPeerAddressAt(
+            var packet = (try self.processReceivedBytesOrDropPeerAddressOnEndpointAt(
                 datagram.from,
                 datagram.bytes,
                 datagram.ecn,
                 self.monotonicNowNs(),
+                datagram.received_on,
             )) orelse continue;
             errdefer packet.deinit(self.endpoint.allocator);
             _ = try self.retransmitPacketThresholdLosses(max_batch_packets);
@@ -9814,8 +9829,9 @@ pub const Connection = struct {
                 timer,
                 caller_deadline,
             );
-            if (receive_timeout == .none) return self.endpoint.receiveBytes();
-            return self.endpoint.receiveBytesTimeout(receive_timeout) catch |err| switch (err) {
+            return self.receiveBytesFromActiveEndpoints(
+                receive_timeout,
+            ) catch |err| switch (err) {
                 error.Timeout => {
                     const timeout_ns = self.monotonicNowNs();
                     if (callerDeadlineExpired(
@@ -9838,10 +9854,7 @@ pub const Connection = struct {
                 // Some std.Io backends cannot provide a timed network wait.
                 // A plain receive still preserves transport correctness; only
                 // the unavailable backend's timer wake-up precision is lost.
-                error.ConcurrencyUnavailable => if (caller_deadline == null)
-                    self.endpoint.receiveBytes()
-                else
-                    error.ConcurrencyUnavailable,
+                error.ConcurrencyUnavailable => return err,
                 else => |other| return @errorCast(other),
             };
         }
@@ -9882,7 +9895,9 @@ pub const Connection = struct {
             .{ .kind = .loss_time, .deadline_ns = deadline_ns },
             caller_deadline,
         );
-        const datagram = self.endpoint.receiveBytesTimeout(timeout) catch |err| switch (err) {
+        const datagram = self.receiveBytesFromActiveEndpoints(
+            timeout,
+        ) catch |err| switch (err) {
             error.Timeout => {
                 if (callerDeadlineExpired(
                     caller_deadline,
@@ -9891,14 +9906,83 @@ pub const Connection = struct {
                 return null;
             },
             error.ConcurrencyUnavailable => {
-                if (caller_deadline != null) {
-                    return error.ConcurrencyUnavailable;
-                }
-                return try self.endpoint.receiveBytes();
+                return error.ConcurrencyUnavailable;
             },
             else => |other| return @errorCast(other),
         };
         return @as(?quic.runtime.OwnedBytes, datagram);
+    }
+
+    fn receiveBytesFromActiveEndpoints(
+        self: *Connection,
+        timeout: std.Io.Timeout,
+    ) (Error || quic.runtime.ReceiveTimeoutError)!quic.runtime.OwnedBytes {
+        if (self.takePendingReceivedDatagram()) |pending| return pending;
+        if (!self.peer_preferred_address_migration_active or
+            self.last_validated_peer_path.endpoint == self.send_endpoint)
+        {
+            return self.send_endpoint.receiveBytesTimeout(timeout);
+        }
+        const old_endpoint = self.last_validated_peer_path.endpoint;
+        const candidate_endpoint = self.send_endpoint;
+        const bounded = timeout.toDeadline(self.endpoint.io);
+        const ReceiveResult = quic.runtime.ReceiveTimeoutError!quic.runtime.OwnedBytes;
+        const Wake = union(enum) {
+            old: ReceiveResult,
+            candidate: ReceiveResult,
+        };
+        var wake_storage: [2]Wake = undefined;
+        var select: std.Io.Select(Wake) = .init(
+            self.endpoint.io,
+            &wake_storage,
+        );
+        select.async(
+            .old,
+            quic.runtime.Endpoint.receiveBytesTimeout,
+            .{ old_endpoint, bounded },
+        );
+        select.async(
+            .candidate,
+            quic.runtime.Endpoint.receiveBytesTimeout,
+            .{ candidate_endpoint, bounded },
+        );
+        const first = select.await() catch |err| {
+            select.cancelDiscard();
+            return err;
+        };
+        var retained: ?quic.runtime.OwnedBytes = null;
+        defer if (retained) |*datagram| {
+            datagram.deinit(
+                (datagram.received_on orelse self.endpoint).allocator,
+            );
+        };
+        while (select.cancel()) |wake| switch (wake) {
+            .old, .candidate => |result| if (result) |datagram| {
+                if (retained == null) {
+                    retained = datagram;
+                } else {
+                    var extra = datagram;
+                    extra.deinit(
+                        (extra.received_on orelse self.endpoint).allocator,
+                    );
+                }
+            } else |_| {},
+        };
+        const selected = switch (first) {
+            .old, .candidate => |result| result catch |err| {
+                if (retained) |datagram| {
+                    retained = null;
+                    return datagram;
+                }
+                return err;
+            },
+        };
+        if (retained) |datagram| {
+            std.debug.assert(self.pending_received_datagram == null);
+            self.pending_received_datagram = datagram;
+            retained = null;
+        }
+        return selected;
     }
 
     pub fn receivePacketOrDropAfterClose(self: *Connection) Error!?ReceivedPacket {
@@ -11459,8 +11543,32 @@ pub const Connection = struct {
         ecn: quic.packet_space.EcnCodepoint,
         now_ns: ?u64,
     ) Error!?ReceivedPacket {
+        return self.processReceivedBytesOrDropPeerAddressOnEndpointAt(
+            from,
+            bytes,
+            ecn,
+            now_ns,
+            self.endpoint,
+        );
+    }
+
+    fn processReceivedBytesOrDropPeerAddressOnEndpointAt(
+        self: *Connection,
+        from: net.IpAddress,
+        bytes: []const u8,
+        ecn: quic.packet_space.EcnCodepoint,
+        now_ns: ?u64,
+        received_on: ?*quic.runtime.Endpoint,
+    ) Error!?ReceivedPacket {
         if (self.shouldDiscardPeerAddressBeforeAuthentication(from)) return null;
-        return try self.processReceivedBytesAt(from, bytes, ecn, now_ns);
+        return try self.processReceivedBytesWithDestinationIdAt(
+            from,
+            bytes,
+            self.config.local_connection_id.len,
+            ecn,
+            now_ns,
+            received_on,
+        );
     }
 
     fn acceptPeerKeyUpdate(
