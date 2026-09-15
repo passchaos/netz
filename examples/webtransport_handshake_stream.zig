@@ -3,7 +3,9 @@ const netz = @import("netz");
 
 pub fn main(init: std.process.Init) !void {
     const allocator = init.gpa;
-    const io = init.io;
+    var backend = try netz.runtime.Backend.init(allocator);
+    defer backend.deinit();
+    const io = backend.io();
 
     const original_dcid =
         [_]u8{ 0x77, 0x74, 0x10, 0x01, 0x77, 0x74, 0x10, 0x02 };
@@ -80,11 +82,8 @@ pub fn main(init: std.process.Init) !void {
     };
 
     var shared = Shared{ .server = &server };
-    const thread = try std.Thread.spawn(
-        .{},
-        Shared.run,
-        .{&shared},
-    );
+    var server_task = io.async(Shared.run, .{&shared});
+    defer server_task.cancel(io);
 
     var client =
         try netz.webtransport.runtime.HandshakeClientSession.connect(
@@ -137,7 +136,7 @@ pub fn main(init: std.process.Init) !void {
         return error.UnexpectedStream;
     }
 
-    thread.join();
+    server_task.await(io);
     if (shared.err) |err| return err;
     std.debug.print(
         "WebTransport handshake streams ok: bidi={d}, uni={d}, " ++

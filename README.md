@@ -1273,6 +1273,10 @@ implementation (io_uring with automatic epoll fallback on Linux, plus portable
 backends elsewhere) and reports initialization failure rather than silently
 changing execution models. Neither zio nor OS-specific rings leak into the
 HTTP, WebSocket, QUIC, or other protocol APIs.
+All runnable non-benchmark examples construct this backend and schedule local
+concurrent work through `std.Io.async`; benchmark and low-level white-box code
+may still construct specialized I/O fixtures to measure or fault-inject a
+specific path.
 
 Every WebTransport session facade exposes its DATAGRAM payload budget so
 callers can avoid sending a payload the underlying QUIC endpoint or peer will

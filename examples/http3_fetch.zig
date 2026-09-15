@@ -22,7 +22,9 @@ const DiscoveredTarget = struct {
 
 pub fn main(init: std.process.Init) !void {
     const allocator = init.gpa;
-    const io = init.io;
+    var backend = try netz.runtime.Backend.init(allocator);
+    defer backend.deinit();
+    const io = backend.io();
 
     var args = try std.process.Args.Iterator.initAllocator(init.minimal.args, allocator);
     defer args.deinit();

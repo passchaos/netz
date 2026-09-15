@@ -3,11 +3,9 @@ const netz = @import("netz");
 
 pub fn main() !void {
     const allocator = std.heap.smp_allocator;
-    var threaded = std.Io.Threaded.init(allocator, .{
-        .async_limit = .unlimited,
-    });
-    defer threaded.deinit();
-    const io = threaded.io();
+    var backend = try netz.runtime.Backend.init(allocator);
+    defer backend.deinit();
+    const io = backend.io();
 
     var server = try netz.http2.runtime.Server.listen(
         allocator,
@@ -52,7 +50,8 @@ pub fn main() !void {
     };
 
     var shared = Shared{ .server = &server };
-    const thread = try std.Thread.spawn(.{}, Shared.run, .{&shared});
+    var server_task = io.async(Shared.run, .{&shared});
+    defer server_task.cancel(io);
 
     var client = try netz.http2.runtime.Client.connect(
         allocator,
@@ -74,7 +73,7 @@ pub fn main() !void {
     );
     defer response.deinit();
 
-    thread.join();
+    server_task.await(io);
     if (shared.err) |err| return err;
     std.debug.print(
         "gRPC client received status={t} message={x}\n",

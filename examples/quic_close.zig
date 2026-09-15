@@ -3,7 +3,9 @@ const netz = @import("netz");
 
 pub fn main(init: std.process.Init) !void {
     const allocator = init.gpa;
-    const io = init.io;
+    var backend = try netz.runtime.Backend.init(allocator);
+    defer backend.deinit();
+    const io = backend.io();
 
     var server_endpoint = try netz.quic.runtime.Endpoint.bind(allocator, io, .{ .ip4 = .loopback(0) }, .{ .max_datagram_size = 1400 });
     defer server_endpoint.deinit();

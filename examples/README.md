@@ -346,4 +346,5 @@ Because netz runtimes take a `std.Io` value, protocol code stays backend-neutral
 `netz.runtime.Backend.init()` owns zio and exposes only its `std.Io` value, so
 backend or platform details do not spread through protocol implementations.
 Initialization fails explicitly instead of silently switching to a thread-pool
-I/O model.
+I/O model. Runnable examples also use `std.Io.async` for in-process concurrency;
+only benchmark fixtures select specialized backends for controlled measurement.

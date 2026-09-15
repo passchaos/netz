@@ -60,11 +60,9 @@ pub fn main(init: std.process.Init) !void {
     // Library users still choose the allocator passed to Broker.listen.
     const allocator = std.heap.c_allocator;
     const config = try parseArgs(init);
-    var threaded = std.Io.Threaded.init(allocator, .{
-        .async_limit = .unlimited,
-    });
-    defer threaded.deinit();
-    const io = threaded.io();
+    var backend = try netz.runtime.Backend.init(allocator);
+    defer backend.deinit();
+    const io = backend.io();
 
     const Credentials = struct {
         username: []const u8,

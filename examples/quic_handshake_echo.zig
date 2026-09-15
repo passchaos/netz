@@ -3,7 +3,9 @@ const netz = @import("netz");
 
 pub fn main(init: std.process.Init) !void {
     const allocator = init.gpa;
-    const io = init.io;
+    var backend = try netz.runtime.Backend.init(allocator);
+    defer backend.deinit();
+    const io = backend.io();
 
     var server_endpoint = try netz.quic.runtime.Endpoint.bind(
         allocator,
@@ -72,7 +74,8 @@ pub fn main(init: std.process.Init) !void {
         .cid = &server_cid,
         .expected_payload = payload,
     };
-    const thread = try std.Thread.spawn(.{}, Shared.run, .{&shared});
+    var server_task = io.async(Shared.run, .{&shared});
+    defer server_task.cancel(io);
 
     var established = try netz.quic.handshake.connect(
         &client_endpoint,
@@ -98,7 +101,7 @@ pub fn main(init: std.process.Init) !void {
     var echoed = try established.connection.receivePacket();
     defer echoed.deinit(allocator);
 
-    thread.join();
+    server_task.await(io);
     if (shared.err) |err| return err;
     try expectSingleStreamPayload(echoed.frames, 0, payload);
 
