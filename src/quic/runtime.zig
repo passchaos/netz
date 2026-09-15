@@ -3371,11 +3371,9 @@ test "QUIC UDP endpoint receives plain batch into caller storage" {
 
 test "QUIC UDP endpoint drains ready datagrams into caller storage" {
     const allocator = std.testing.allocator;
-    var threaded = std.Io.Threaded.init(allocator, .{
-        .async_limit = .unlimited,
-    });
-    defer threaded.deinit();
-    const io = threaded.io();
+    var backend = try @import("../runtime.zig").Backend.initZio(allocator);
+    defer backend.deinit();
+    const io = backend.io();
     var receiver = try Endpoint.bind(
         allocator,
         io,

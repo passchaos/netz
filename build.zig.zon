@@ -6,8 +6,8 @@
     .dependencies = .{
         .vail = .{ .path = "../vail" },
         .zio = .{
-            .url = "git+https://github.com/lalinsky/zio#v0.17.0",
-            .hash = "zio-0.17.0-xHbVVI_jJQC3YbgU7JydwAV7MuASkOTd73YqBaKlFFUz",
+            .url = "git+https://github.com/lalinsky/zio#54cb18f05d3feaec431353de85d5d10dac93d37b",
+            .hash = "zio-0.17.0-xHbVVELgKQBIzMAdDWTrIamBlTyFlijzxFU7G4f2NUcw",
         },
         .pbz = .{ .path = "../pbz" },
     },

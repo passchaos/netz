@@ -3187,6 +3187,44 @@ ranges were 41.649-44.977 and 36.148-58.804 MiB/s. This is a same-stack
 topology baseline that quantifies the shared endpoint scheduling gap; it is not
 a cross-library speed claim.
 
+That gap was traced below the QUIC dispatcher: zio v0.17.0 implemented the
+multi-slot `std.Io` network receive operation with one `recvmsg`, so the
+caller's 32-message buffer normally returned one datagram. Netz now pins zio
+commit `54cb18f05d3feaec431353de85d5d10dac93d37b`, which implements the same
+`std.Io.net.Socket.receiveManyTimeout` contract with native multi-slot UDP
+receive (`recvmmsg` when no ancillary buffers are needed and a portable drain
+fallback otherwise). Direct Linux zio/`std.Io` and QUIC-endpoint regressions
+queue multiple datagrams and require one call to return all of them in order;
+the latter covers the ancillary-control path used for ECN. No zio or
+OS-specific API enters the QUIC layer.
+
+A fixed-binary, CPU-0/1, five-pair shared-only A/B against the v0.17.0 binary
+measured 65.915 versus 42.417 MiB/s client-sender medians (1.554x, 4/5 paired
+wins) and 65.633 versus 48.363 MiB/s server-sender medians (1.357x, 3/5 paired
+wins). The candidate ranges remained wide, so these are workload-specific
+medians rather than a general speed claim. More directly, completed shared
+runs returned as many as 32 events from one receive call, whereas the old
+backend returned at most one packet event in the upload path and three total
+events in the timer-heavy download path. Ten subsequent shared runs completed
+both sender directions with exact 4,194,304-byte payloads, checksum
+534,773,760, four completions, and DONE/DONE_ACK.
+
+The strict topology gate was then rerun on the final candidate with the same
+four connections, 1 MiB per connection, ACK/2, 25-ms delay, and mirrored
+ordering:
+
+```text
+sender          independent median  shared median  shared/independent
+client             70.158 MiB/s      72.318 MiB/s       1.031x
+server             64.338 MiB/s      67.712 MiB/s       1.052x
+```
+
+Independent ranges were 65.909-77.678 and 61.757-69.883 MiB/s; shared ranges
+were 70.069-77.274 and 44.199-69.233 MiB/s. The overlapping ranges do not show
+that shared is faster, but this controlled run no longer reproduces the prior
+0.661x/0.649x median deficit. The remaining work is wider connection-count and
+host coverage plus capture-backed equal-wire comparison.
+
 The endpoint CID router, CID synchronization, pending-ready-index, timer
 scheduler, and receive-stream-ID benchmarks now obtain their UDP endpoint,
 where needed, and monotonic clock from zio-backed `std.Io`; each prints the

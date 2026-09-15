@@ -1678,11 +1678,12 @@ facility, not a replacement for authenticated handshake-backed HTTP/3.
    capture, WebSocket/WebTransport allocation telemetry, lossy/reordered on-wire lifecycle churn,
    and broader connection-count scaling. Persistent echo, four independent
    connections, and a four-connection shared-server-socket event loop are now
-   covered. Continue optimizing the shared dispatcher's owning receive path.
-   Its initial same-binary result was 0.717x the independent-server topology;
-   the latest three-sample observation had overlapping ranges and median ratios
-   of 1.026x for client-sender and 0.867x for server-sender, but was not
-   topology-order-interleaved and therefore does not establish parity.
+   covered. The pinned zio backend now fulfills multi-slot `std.Io` UDP receive
+   with native batching. A five-sample mirrored-order topology run measured
+   shared/independent medians of 1.031x for client-sender and 1.052x for
+   server-sender, replacing the pre-fix 0.661x/0.649x baseline. The ranges
+   overlap, so this removes the observed median deficit without establishing
+   that shared topology is generally faster.
    `bench-quic-persistent-external --mode=aggregate --netz-only
    --server-topology=compare` now provides that missing fixed-binary, odd-sample
    mirrored-order topology gate. It fixes both sides to ACK-every=2 and 25 ms,

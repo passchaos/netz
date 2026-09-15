@@ -1,4 +1,5 @@
 const std = @import("std");
+const builtin = @import("builtin");
 const zio = @import("zio");
 
 /// Runtime backend for netz examples and applications.
@@ -117,4 +118,50 @@ test "runtime backend zio std.Io TCP round trip" {
 
     echo.await(io);
     try echo_result;
+}
+
+test "runtime backend zio std.Io drains queued UDP datagrams in one batch" {
+    if (builtin.os.tag != .linux) return error.SkipZigTest;
+
+    var backend = try Backend.initZio(std.testing.allocator);
+    defer backend.deinit();
+    const io = backend.io();
+
+    var sender = try std.Io.net.IpAddress.bind(
+        &.{ .ip4 = .loopback(0) },
+        io,
+        .{ .mode = .dgram },
+    );
+    defer sender.close(io);
+    var receiver = try std.Io.net.IpAddress.bind(
+        &.{ .ip4 = .loopback(0) },
+        io,
+        .{ .mode = .dgram },
+    );
+    defer receiver.close(io);
+
+    const expected = [_][]const u8{ "one", "two", "three", "four" };
+    for (expected) |payload| {
+        try sender.send(io, &receiver.address, payload);
+    }
+
+    var messages: [expected.len]std.Io.net.IncomingMessage =
+        @splat(.init);
+    var storage: [expected.len * 16]u8 = undefined;
+    const receive_error, const count = receiver.receiveManyTimeout(
+        io,
+        &messages,
+        &storage,
+        .{},
+        .{ .duration = .{
+            .clock = .awake,
+            .raw = .fromSeconds(1),
+        } },
+    );
+    try std.testing.expectEqual(null, receive_error);
+    try std.testing.expectEqual(expected.len, count);
+    for (messages[0..count], expected) |message, payload| {
+        try std.testing.expectEqualStrings(payload, message.data);
+        try std.testing.expect(message.from.eql(&sender.address));
+    }
 }

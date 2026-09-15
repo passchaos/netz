@@ -1114,7 +1114,10 @@ I/O backends.
 The persistent QUIC runner accepts `--server-topology=compare --netz-only` to
 run an odd, mirrored-order fixed-binary A/B between independent server sockets
 and the shared server endpoint, with identical ACK policy and strict per-run
-payload/checksum checks.
+payload/checksum checks. The pinned zio revision implements multi-slot UDP
+receive for `std.Io.net.Socket.receiveManyTimeout`, so the shared endpoint's
+bounded receive batch is a real backend batch. Protocol code still consumes
+only `std.Io`.
 The MQTT retained/session/Will schedulers and QUIC-LB routing benchmark also
 obtain their monotonic benchmark clock from zio-backed `std.Io`.
 
@@ -1384,8 +1387,10 @@ still unavailable. All protocol runtimes nevertheless stay on the `std.Io`
 abstraction: `netz.runtime.Backend.init()` uses zio's complete `std.Io`
 implementation (io_uring with automatic epoll fallback on Linux, plus portable
 backends elsewhere) and reports initialization failure rather than silently
-changing execution models. Neither zio nor OS-specific rings leak into the
-HTTP, WebSocket, QUIC, or other protocol APIs.
+changing execution models. The dependency is pinned to upstream commit
+`54cb18f05d3feaec431353de85d5d10dac93d37b`, whose multi-message UDP receive
+support is required by shared-endpoint batching. Neither zio nor OS-specific
+rings leak into the HTTP, WebSocket, QUIC, or other protocol APIs.
 All runnable non-benchmark examples construct this backend and schedule local
 concurrent work through `std.Io.async`; benchmark and low-level white-box code
 may still construct specialized I/O fixtures to measure or fault-inject a
