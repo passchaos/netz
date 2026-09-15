@@ -1432,6 +1432,28 @@ claiming identical wire work. The important result is that a reproducible
 full-stack comparison now exists and fails closed on any header, byte, EOF, or
 checksum mismatch.
 
+The aggregate response receive path was revalidated on 2026-09-14 after a
+quic-go download consistently stopped once roughly 336 KiB had arrived. The
+HTTP/3 layer had already copied each contiguous response prefix into its own
+bounded reassembly, but the QUIC receive cursor remained unchanged until FIN,
+so the peer eventually exhausted stream credit while the client waited for the
+rest of the response. Aggregate routing now commits only the contiguous copied
+prefix back to QUIC immediately; streaming responses retain their existing
+application-read-driven backpressure. A focused 8-byte-window test verifies
+that two 6-byte prefixes advance both the transport read offset and advertised
+stream limit before FIN.
+
+The benchmark fixture also now budgets the wire bytes retained by aggregate
+reassembly rather than only the logical body: quic-go's 1152-byte application
+writes produce 911 DATA frames for a 1 MiB body, requiring 2733 bytes of DATA
+frame headers plus the bounded response-header margin. With the transport
+window still fixed at 1 MiB, single-, 4-, and 16-stream downloads passed for
+QUIC v1 and v2 in both endpoint-role pairings. The 16-stream cases verified
+16,777,216 aggregate bytes, all 16 streams, and checksum 2,139,095,040. These
+are one-sample functional gates, not throughput claims. The full tquic gate
+also passed in both directions with Retry on and off, GET/Range/POST digest,
+and bidirectional GOAWAY/drain/reject-next-stream coverage.
+
 The concurrent gate is reproducible with:
 
 ```sh

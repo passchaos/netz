@@ -386,6 +386,15 @@ pub fn routePacket(
             if (try streaming.insert(from, frame.stream)) continue;
         }
         try state.response_streams.insert(from, frame.stream);
+        if (state.connection) |connection| {
+            const copied_through = state.response_streams.contiguousEnd(
+                stream_id,
+            ) orelse return error.UnexpectedStream;
+            try connection.commitReceivedThrough(
+                stream_id,
+                copied_through,
+            );
+        }
     }
     try validateBlockedStreamBudget(state);
     return flush_qpack_feedback or

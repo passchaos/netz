@@ -150,16 +150,41 @@ pub const Config = struct {
     }
 
     pub fn sessionOptions(self: Config) !netz.http3.runtime.HandshakeSessionOptions {
-        const body = std.math.cast(usize, self.body_bytes) orelse
-            return error.InvalidArgument;
         return .{
-            .max_stream_buffer = @max(body +| 1024, 64 * 1024),
+            .max_stream_buffer = try self.aggregateStreamBufferLimit(),
             .max_stream_frame_data = mtu,
             .paced_body_chunk_bytes = @intCast(self.effectiveChunk()),
             .enable_data_prefix_fast_path = true,
             .max_concurrent_request_streams = std.math.cast(usize, @as(u64, self.streams) + 8) orelse
                 return error.InvalidArgument,
         };
+    }
+
+    fn aggregateStreamBufferLimit(self: Config) !usize {
+        const body = std.math.cast(usize, self.body_bytes) orelse
+            return error.InvalidArgument;
+        const chunk = self.effectiveChunk();
+        const chunk_count = body / chunk + @intFromBool(body % chunk != 0);
+        // The quic-go peer turns each application Write into one HTTP/3 DATA
+        // frame. Account for every DATA type and length varint in addition to
+        // the logical body. The fixed margin covers the benchmark's bounded
+        // response HEADERS block and avoids changing the production default.
+        const data_header_bytes = std.math.mul(
+            usize,
+            chunk_count,
+            1 + try netz.quic.varint.length(chunk),
+        ) catch return error.InvalidArgument;
+        const framed_body = std.math.add(
+            usize,
+            body,
+            data_header_bytes,
+        ) catch return error.InvalidArgument;
+        const aggregate_limit = std.math.add(
+            usize,
+            framed_body,
+            1024,
+        ) catch return error.InvalidArgument;
+        return @max(aggregate_limit, 64 * 1024);
     }
 };
 
@@ -410,6 +435,20 @@ test "HTTP/3 external benchmark version selects peer compatibility" {
     try std.testing.expectError(
         error.InvalidArgument,
         Config.parse(&.{ "--mode=upload", "--version=2", "--version=2" }),
+    );
+}
+
+test "HTTP/3 external benchmark budgets aggregate DATA framing" {
+    const config: Config = .{
+        .mode = .download,
+        .body_bytes = 1024 * 1024,
+        .chunk_bytes = 16 * 1024,
+        .stream_window = 1024 * 1024,
+    };
+    try std.testing.expectEqual(@as(usize, 1152), config.effectiveChunk());
+    try std.testing.expectEqual(
+        @as(usize, 1024 * 1024 + 911 * 3 + 1024),
+        (try config.sessionOptions()).max_stream_buffer,
     );
 }
 

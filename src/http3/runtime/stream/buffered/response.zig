@@ -208,6 +208,19 @@ pub const Set = struct {
                 self.entry_index.contains(stream_id));
     }
 
+    /// Absolute end of the contiguous prefix already copied into aggregate
+    /// HTTP/3 ownership. The QUIC receive buffer can release this prefix
+    /// without waiting for the complete response or exposing partial bytes to
+    /// the application.
+    pub fn contiguousEnd(self: Set, stream_id: u62) ?u64 {
+        if (self.entry_index.count() == 0) return null;
+        const index = self.entry_index.get(stream_id) orelse return null;
+        return std.math.cast(
+            u64,
+            self.entries.items[index].receive.contiguous_end,
+        ) orelse std.math.maxInt(u64);
+    }
+
     pub fn firstStreamId(self: Set) ?u62 {
         if (self.entries.items.len == 0) return null;
         return @intCast(self.entries.items[0].receive.stream_id);
