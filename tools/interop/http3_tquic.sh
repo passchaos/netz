@@ -86,7 +86,7 @@ run_netz_client_case() {
   timeout 20s "$netz_client" "$port" "$work/cert.pem" \
     "${client_args[@]}" \
     >"$work/netz-client-$retry.log" 2>&1
-  grep -Fq "netz HTTP/3 client interoperated with tquic: verified=true retry=$retry requests=3 connection_reused=true get=9 range=206/5 post_md5=32" \
+  grep -Fq "netz HTTP/3 client interoperated with tquic: verified=true retry=$retry requests=3 connection_reused=true get=9 range=206/5 post_md5=32 client_io=zio-std-io server_io=tquic-mio" \
     "$work/netz-client-$retry.log"
   cat "$work/netz-client-$retry.log"
   kill "$server_pid" 2>/dev/null || true
@@ -111,7 +111,7 @@ run_netz_client_graceful_case() {
   timeout 20s "$netz_client" "$port" "$work/cert.pem" \
     "${client_args[@]}" \
     >"$work/netz-client-graceful-$retry.log" 2>&1
-  grep -Fq "netz HTTP/3 client gracefully drained tquic: retry=$retry goaway=0 active_stream=0 active_drained=true next_rejected=true" \
+  grep -Fq "netz HTTP/3 client gracefully drained tquic: retry=$retry goaway=0 active_stream=0 active_drained=true next_rejected=true client_io=zio-std-io server_io=tquic-mio" \
     "$work/netz-client-graceful-$retry.log"
   cat "$work/netz-client-graceful-$retry.log"
   kill "$server_pid" 2>/dev/null || true
@@ -182,12 +182,12 @@ run_tquic_client_graceful_case() {
   client_pid=
   wait "$server_pid"
   server_pid=
-  grep -Fq "netz HTTP/3 server gracefully drained tquic: retry=$retry origin=true initial_goaway=max final_goaway=4 active_stream=0 active_drained=true next_rejected=true" \
+  grep -Fq "netz HTTP/3 server gracefully drained tquic: retry=$retry origin=true initial_goaway=max final_goaway=4 active_stream=0 active_drained=true next_rejected=true client_io=tquic-mio server_io=zio-std-io" \
     "$work/netz-server-graceful-$retry.log"
   # tquic creates the dump file before stream_new(), so rejection leaves an
   # empty placeholder rather than no file at all.
   test ! -s "$graceful_downloads/two.txt"
-  echo "tquic HTTP/3 client gracefully drained by netz: retry=$retry initial_goaway=max final_goaway=4 active_stream=0 active_drained=true next_rejected=true"
+  echo "tquic HTTP/3 client gracefully drained by netz: retry=$retry initial_goaway=max final_goaway=4 active_stream=0 active_drained=true next_rejected=true client_io=tquic-mio server_io=zio-std-io"
   cat "$work/netz-server-graceful-$retry.log"
 }
 
@@ -221,7 +221,7 @@ run_tquic_client_case() {
   server_pid=
   grep -Fq 'requests: sent 2, finish 2, success 2' \
     "$work/tquic-client-$retry.log"
-  grep -Fq "netz HTTP/3 server interoperated with tquic: retry=$retry origin=true requests=2 connection_reused=true bodies=14,14" \
+  grep -Fq "netz HTTP/3 server interoperated with tquic: retry=$retry origin=true requests=2 connection_reused=true bodies=14,14 client_io=tquic-mio server_io=zio-std-io" \
     "$work/netz-server-$retry.log"
   test "$(cat "$work/downloads/one.txt")" = 'netz-tquic-one'
   test "$(cat "$work/downloads/two.txt")" = 'netz-tquic-two'

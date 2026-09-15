@@ -19,9 +19,9 @@ pub fn main(init: std.process.Init) !void {
         }
     }
     const allocator = init.gpa;
-    var threaded = std.Io.Threaded.init(allocator, .{ .async_limit = .unlimited });
-    defer threaded.deinit();
-    const io = threaded.io();
+    var backend = try netz.runtime.Backend.init(allocator);
+    defer backend.deinit();
+    const io = backend.io();
 
     var certificate_der: [netz.tls.testing.certificate_der_len]u8 = undefined;
     try std.base64.standard.Decoder.decode(
@@ -110,13 +110,13 @@ pub fn main(init: std.process.Init) !void {
         // follow-up request before this one-shot server exits.
         try std.Io.sleep(io, .fromMilliseconds(500), .awake);
         std.debug.print(
-            "netz HTTP/3 server gracefully drained tquic: retry={} origin=true initial_goaway=max final_goaway=4 active_stream=0 active_drained=true next_rejected=true\n",
+            "netz HTTP/3 server gracefully drained tquic: retry={} origin=true initial_goaway=max final_goaway=4 active_stream=0 active_drained=true next_rejected=true client_io=tquic-mio server_io=zio-std-io\n",
             .{force_retry},
         );
     } else {
         try std.Io.sleep(io, .fromMilliseconds(250), .awake);
         std.debug.print(
-            "netz HTTP/3 server interoperated with tquic: retry={} origin=true requests=2 connection_reused=true bodies=14,14\n",
+            "netz HTTP/3 server interoperated with tquic: retry={} origin=true requests=2 connection_reused=true bodies=14,14 client_io=tquic-mio server_io=zio-std-io\n",
             .{force_retry},
         );
     }

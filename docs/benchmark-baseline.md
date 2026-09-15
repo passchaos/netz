@@ -1473,7 +1473,10 @@ QUIC v1 and v2 in both endpoint-role pairings. The 16-stream cases verified
 16,777,216 aggregate bytes, all 16 streams, and checksum 2,139,095,040. These
 are one-sample functional gates, not throughput claims. The full tquic gate
 also passed in both directions with Retry on and off, GET/Range/POST digest,
-and bidirectional GOAWAY/drain/reject-next-stream coverage.
+and bidirectional GOAWAY/drain/reject-next-stream coverage. Its public netz
+client and server now run on zio behind `std.Io`; the runner requires
+`zio-std-io` for the netz endpoint and the audited `tquic-mio` identity for
+the tquic endpoint in every success record.
 
 The completed aggregate response now transfers its reassembly allocation into
 the owned result after all fallible validation and decoding have succeeded,

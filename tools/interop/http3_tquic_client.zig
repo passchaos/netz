@@ -20,9 +20,9 @@ pub fn main(init: std.process.Init) !void {
         }
     }
     const allocator = init.gpa;
-    var threaded = std.Io.Threaded.init(allocator, .{ .async_limit = .unlimited });
-    defer threaded.deinit();
-    const io = threaded.io();
+    var backend = try netz.runtime.Backend.init(allocator);
+    defer backend.deinit();
+    const io = backend.io();
     const now = std.Io.Clock.real.now(io);
     var ca_bundle: std.crypto.Certificate.Bundle = .empty;
     defer ca_bundle.deinit(allocator);
@@ -119,7 +119,7 @@ pub fn main(init: std.process.Init) !void {
         );
     }
     std.debug.print(
-        "netz HTTP/3 client interoperated with tquic: verified=true retry={} requests=3 connection_reused=true get=9 range=206/5 post_md5=32\n",
+        "netz HTTP/3 client interoperated with tquic: verified=true retry={} requests=3 connection_reused=true get=9 range=206/5 post_md5=32 client_io=zio-std-io server_io=tquic-mio\n",
         .{expect_retry},
     );
 }
@@ -158,7 +158,7 @@ fn runGracefulDrain(
         .authority = "localhost",
     }));
     std.debug.print(
-        "netz HTTP/3 client gracefully drained tquic: retry={} goaway=0 active_stream=0 active_drained=true next_rejected=true\n",
+        "netz HTTP/3 client gracefully drained tquic: retry={} goaway=0 active_stream=0 active_drained=true next_rejected=true client_io=zio-std-io server_io=tquic-mio\n",
         .{expect_retry},
     );
 }

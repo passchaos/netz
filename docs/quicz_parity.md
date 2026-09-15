@@ -595,6 +595,12 @@ matrices passed in both mixed role pairs; a zio-only v2 four-stream/RSS gate
 also completed with exact bytes/checksum and zero retained netz allocator bytes.
 The older throughput ranges remain pre-zio historical evidence until a full
 fixed-binary comparison is recaptured.
+The bidirectional tquic HTTP/3 process gate now follows the same runtime
+boundary: both netz executables use zio and pass only `std.Io` into the
+protocol stack. Its exact success records bind the netz endpoint to
+`zio-std-io` and the audited tquic tools at `0169abde20c6` to their
+`mio::Poll`/`mio::net::UdpSocket` loop (`tquic-mio`) for every ordinary, Retry,
+and GOAWAY/drain scenario.
 
 | Area from `~/Work/quicz` examples | netz status | Evidence | Remaining work |
 | --- | --- | --- | --- |
