@@ -16,6 +16,10 @@ benchmarks now obtain endpoint I/O and clocks from zio; the DATAGRAM receiver
 uses `std.Io.async` and cooperative `std.Io` sleeps. Numeric results in those
 sections that predate 2026-09-15 are historical Threaded evidence unless
 explicitly labeled as zio-era runs.
+The WebTransport DATAGRAM round-trip/burst and steady stream-batch benchmarks
+also use zio-backed `std.Io`; the DATAGRAM server work is scheduled with
+`std.Io.async`. Their older numeric results are historical Threaded evidence
+unless a section explicitly records a zio-era rerun.
 As of 2026-09-15, the ACK-range, connection-router, PADDING parser,
 short-packet protection, receive sliding-window, session-ticket keyring,
 endpoint CID synchronization, pending-ready-index, timer scheduler, and

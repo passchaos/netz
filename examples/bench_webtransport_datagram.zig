@@ -19,9 +19,9 @@ pub fn main(init: std.process.Init) !void {
 }
 
 fn runPingPong(allocator: std.mem.Allocator, iterations: usize) !void {
-    var threaded = std.Io.Threaded.init(allocator, .{});
-    defer threaded.deinit();
-    const io = threaded.io();
+    var backend = try netz.runtime.Backend.init(allocator);
+    defer backend.deinit();
+    const io = backend.io();
 
     var server = try netz.webtransport.runtime.Server.bind(allocator, io, .{ .ip4 = .loopback(0) }, .{
         .http3 = .{ .quic = .{ .max_datagram_size = 4096, .max_frames_per_datagram = 8 } },
@@ -60,7 +60,8 @@ fn runPingPong(allocator: std.mem.Allocator, iterations: usize) !void {
     };
 
     var shared = Shared{ .server = &server, .iterations = iterations };
-    const thread = try std.Thread.spawn(.{}, Shared.run, .{&shared});
+    var server_task = io.async(Shared.run, .{&shared});
+    defer server_task.cancel(io);
 
     var client = try netz.webtransport.runtime.ClientSession.connect(
         allocator,
@@ -95,11 +96,12 @@ fn runPingPong(allocator: std.mem.Allocator, iterations: usize) !void {
     else
         (@as(u64, datagrams) *| std.time.ns_per_s) / elapsed;
 
-    thread.join();
+    server_task.await(io);
     if (shared.err) |err| return err;
 
     std.debug.print(
         \\WebTransport datagram runtime benchmark
+        \\  io backend: zio-std-io
         \\  iterations: {d}
         \\  datagrams: {d}
         \\  payload bytes: {d}
@@ -124,9 +126,9 @@ fn runBurst(allocator: std.mem.Allocator, config: Config) !void {
 }
 
 fn runBurstHandshake(allocator: std.mem.Allocator, config: Config) !void {
-    var threaded = std.Io.Threaded.init(allocator, .{});
-    defer threaded.deinit();
-    const io = threaded.io();
+    var backend = try netz.runtime.Backend.init(allocator);
+    defer backend.deinit();
+    const io = backend.io();
     const original_dcid =
         [_]u8{ 0x57, 0x54, 0x44, 0x01, 0x57, 0x54, 0x44, 0x02 };
     const client_cid = [_]u8{ 0x57, 0x54, 0x44, 0x03 };
@@ -210,12 +212,8 @@ fn runBurstHandshake(allocator: std.mem.Allocator, config: Config) !void {
         .sent = &sent,
         .done = &done,
     };
-    const thread = try std.Thread.spawn(.{}, Shared.run, .{&shared});
-    var joined = false;
-    defer if (!joined) {
-        done.set(io);
-        thread.join();
-    };
+    var server_task = io.async(Shared.run, .{&shared});
+    defer server_task.cancel(io);
 
     var client = try netz.webtransport.runtime.HandshakeClientSession.connect(
         allocator,
@@ -247,8 +245,7 @@ fn runBurstHandshake(allocator: std.mem.Allocator, config: Config) !void {
         config,
     );
     done.set(io);
-    thread.join();
-    joined = true;
+    server_task.await(io);
     if (shared.err) |err| return err;
     if (shared.received != result.sent) return error.InvalidDatagramCount;
     var expected_checksum: u64 = 0;
@@ -348,7 +345,8 @@ fn printBurstResult(
     checksum: u64,
 ) void {
     std.debug.print(
-        "WebTransport real-handshake bounded DATAGRAM burst: attempted={d} " ++
+        "WebTransport real-handshake bounded DATAGRAM burst: " ++
+            "io_backend=zio-std-io attempted={d} " ++
             "sent={d} timed_out={d} received={d} payload_bytes={d} " ++
             "batch_size={d} send_calls={d} " ++
             "logical_MiB/s={d:.2} send_p50_ns={d} send_p99_ns={d} " ++

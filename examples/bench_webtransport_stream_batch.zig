@@ -14,9 +14,9 @@ const Options = struct {
 pub fn main(init: std.process.Init) !void {
     const options = try parseOptions(init);
     const allocator = std.heap.smp_allocator;
-    var threaded = std.Io.Threaded.init(allocator, .{});
-    defer threaded.deinit();
-    const io = threaded.io();
+    var backend = try netz.runtime.Backend.init(allocator);
+    defer backend.deinit();
+    const io = backend.io();
     var endpoint = try netz.quic.runtime.Endpoint.bind(
         allocator,
         io,
@@ -89,6 +89,7 @@ pub fn main(init: std.process.Init) !void {
     }
     std.debug.print(
         "WebTransport steady stream-batch staging benchmark\n" ++
+            "  io backend: zio-std-io\n" ++
             "  warmup iterations: {d}\n" ++
             "  measured iterations: {d}\n" ++
             "  streams/staging: {d}\n" ++
