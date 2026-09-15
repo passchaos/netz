@@ -14,9 +14,9 @@ pub fn main(init: std.process.Init) !void {
     if (args.len == 3 and !tls_enabled) return error.InvalidArgument;
 
     const allocator = std.heap.c_allocator;
-    var threaded = std.Io.Threaded.init(allocator, .{});
-    defer threaded.deinit();
-    const io = threaded.io();
+    var backend = try netz.runtime.Backend.init(allocator);
+    defer backend.deinit();
+    const io = backend.io();
     const limits: netz.http1.runtime.Limits = .{ .max_body_bytes = 4096 };
     var certificate_der: [netz.tls.testing.certificate_der_len]u8 = undefined;
     try std.base64.standard.Decoder.decode(
@@ -235,7 +235,7 @@ pub fn main(init: std.process.Init) !void {
     }
     try upgrade.write("netz upgrade reply");
     std.debug.print(
-        "netz HTTP/1 server interoperated with Hyper generic Upgrade: transport={s} protocol=netz-test server_preface=18 client_bytes=19 reply_bytes=18\n",
+        "netz HTTP/1 server interoperated with Hyper generic Upgrade: transport={s} protocol=netz-test server_preface=18 client_bytes=19 reply_bytes=18 client_io=hyper-tokio server_io=zio-std-io\n",
         .{if (tls_enabled) "tls" else "cleartext"},
     );
 }

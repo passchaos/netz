@@ -370,8 +370,13 @@ sides.
 The benchmark evidence is complemented by a strict process-boundary semantic
 gate. `zig build interop-http1-hyper -Doptimize=ReleaseFast` builds against the
 audited local Hyper checkout and runs the same scenarios over fresh cleartext
-and TLS 1.3 connections in both directions. The encrypted half uses the
-checked-in localhost identity and each client validates that certificate.
+and TLS 1.3 connections in both directions. Both netz executables obtain
+`std.Io` from `netz.runtime.Backend`, whose implementation is zio; the audited
+Hyper fixture uses a Tokio current-thread runtime. Terminal success records and
+runner assertions bind the endpoint identities as `zio-std-io` and
+`hyper-tokio`, so this gate verifies the execution backend as well as the wire
+semantics. The encrypted half uses the checked-in localhost identity and each
+client validates that certificate.
 Each peer sends a POST with two chunked DATA contributions, explicitly
 negotiates `TE: trailers`, and terminates with a request trailer. The receiving
 peer verifies method, query-bearing target, custom header, reconstructed body,

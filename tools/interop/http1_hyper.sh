@@ -89,10 +89,10 @@ grep -Fq \
   'response_head_timeout=5000ms' \
   "$work/netz-client.log"
 grep -Fq \
-  'Hyper/Tokio HTTP/1 fixture verified netz informational, Expect, CONNECT, Upgrade, and pooled reuse boundaries: observed=103,102 expect=103,100 early_final=417 body_sent=0 tunnel_bytes=17/18 upgrade_bytes=18/19 pooled_requests=2 pooled_connections=1' \
+  'Hyper/Tokio HTTP/1 fixture verified netz informational, Expect, CONNECT, Upgrade, and pooled reuse boundaries: observed=103,102 expect=103,100 early_final=417 body_sent=0 tunnel_bytes=17/18 upgrade_bytes=18/19 pooled_requests=2 pooled_connections=1 client_io=zio-std-io server_io=hyper-tokio' \
   "$work/hyper-server.log"
 grep -Fq \
-  'netz HTTP/1 pool reused Hyper connection: transport=cleartext requests=2 idle=1' \
+  'netz HTTP/1 pool reused Hyper connection: transport=cleartext requests=2 idle=1 client_io=zio-std-io server_io=hyper-tokio' \
   "$work/netz-client.log"
 echo 'Hyper HTTP/1 server -> netz client interop passed'
 
@@ -150,10 +150,10 @@ grep -Fq \
   'netz HTTP/1 server interoperated with Hyper CONNECT tunnel: transport=cleartext server_preface=17 client_bytes=18 reply_bytes=17' \
   "$work/netz-server.log"
 grep -Fq \
-  'Hyper HTTP/1 client interoperated with netz generic Upgrade: protocol=netz-test server_preface=18 client_bytes=19 reply_bytes=18' \
+  'Hyper HTTP/1 client interoperated with netz generic Upgrade: protocol=netz-test server_preface=18 client_bytes=19 reply_bytes=18 client_io=hyper-tokio server_io=zio-std-io' \
   "$work/hyper-client.log"
 grep -Fq \
-  'netz HTTP/1 server interoperated with Hyper generic Upgrade: transport=cleartext protocol=netz-test server_preface=18 client_bytes=19 reply_bytes=18' \
+  'netz HTTP/1 server interoperated with Hyper generic Upgrade: transport=cleartext protocol=netz-test server_preface=18 client_bytes=19 reply_bytes=18 client_io=hyper-tokio server_io=zio-std-io' \
   "$work/netz-server.log"
 echo 'Hyper HTTP/1 client -> netz server interop passed'
 
@@ -199,10 +199,10 @@ grep -Fq \
   'response_head_timeout=5000ms' \
   "$work/tls-netz-client.log"
 grep -Fq \
-  'Hyper/Tokio HTTP/1 fixture verified netz informational, Expect, CONNECT, Upgrade, and pooled reuse boundaries: observed=103,102 expect=103,100 early_final=417 body_sent=0 tunnel_bytes=17/18 upgrade_bytes=18/19 pooled_requests=2 pooled_connections=1' \
+  'Hyper/Tokio HTTP/1 fixture verified netz informational, Expect, CONNECT, Upgrade, and pooled reuse boundaries: observed=103,102 expect=103,100 early_final=417 body_sent=0 tunnel_bytes=17/18 upgrade_bytes=18/19 pooled_requests=2 pooled_connections=1 client_io=zio-std-io server_io=hyper-tokio' \
   "$work/tls-hyper-server.log"
 grep -Fq \
-  'netz HTTP/1 pool reused Hyper connection: transport=tls requests=2 idle=1' \
+  'netz HTTP/1 pool reused Hyper connection: transport=tls requests=2 idle=1 client_io=zio-std-io server_io=hyper-tokio' \
   "$work/tls-netz-client.log"
 grep -Fq \
   'rustls HTTP/1 server sent TLS KeyUpdate request' \
@@ -254,10 +254,10 @@ grep -Fq \
   'netz HTTP/1 server interoperated with Hyper CONNECT tunnel: transport=tls server_preface=17 client_bytes=18 reply_bytes=17' \
   "$work/tls-netz-server.log"
 grep -Fq \
-  'Hyper HTTP/1 client interoperated with netz generic Upgrade: protocol=netz-test server_preface=18 client_bytes=19 reply_bytes=18' \
+  'Hyper HTTP/1 client interoperated with netz generic Upgrade: protocol=netz-test server_preface=18 client_bytes=19 reply_bytes=18 client_io=hyper-tokio server_io=zio-std-io' \
   "$work/tls-hyper-client.log"
 grep -Fq \
-  'netz HTTP/1 server interoperated with Hyper generic Upgrade: transport=tls protocol=netz-test server_preface=18 client_bytes=19 reply_bytes=18' \
+  'netz HTTP/1 server interoperated with Hyper generic Upgrade: transport=tls protocol=netz-test server_preface=18 client_bytes=19 reply_bytes=18 client_io=hyper-tokio server_io=zio-std-io' \
   "$work/tls-netz-server.log"
 cat "$work/tls-hyper-client.log"
 cat "$work/tls-netz-server.log"

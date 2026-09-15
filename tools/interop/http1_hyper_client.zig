@@ -15,9 +15,9 @@ pub fn main(init: std.process.Init) !void {
     }
 
     const allocator = std.heap.c_allocator;
-    var threaded = std.Io.Threaded.init(allocator, .{});
-    defer threaded.deinit();
-    const io = threaded.io();
+    var backend = try netz.runtime.Backend.init(allocator);
+    defer backend.deinit();
+    const io = backend.io();
     var ca_bundle: std.crypto.Certificate.Bundle = .empty;
     defer ca_bundle.deinit(allocator);
     var ca_lock: std.Io.RwLock = .init;
@@ -459,7 +459,7 @@ pub fn main(init: std.process.Init) !void {
         return error.InvalidPooledResponse;
     }
     std.debug.print(
-        "netz HTTP/1 pool reused Hyper connection: transport={s} requests=2 idle=1\n",
+        "netz HTTP/1 pool reused Hyper connection: transport={s} requests=2 idle=1 client_io=zio-std-io server_io=hyper-tokio\n",
         .{if (tls_enabled) "tls" else "cleartext"},
     );
 }

@@ -902,6 +902,8 @@ zig build interop-http2-h2spec -Doptimize=ReleaseFast -- --tls
 # The netz client also proves 103-before-100 handling and a bodyless 417 early
 # final response that makes the incomplete HTTP/1 exchange non-reusable.
 zig build interop-http1-hyper -Doptimize=ReleaseFast
+# Both netz HTTP/1 endpoints obtain std.Io from zio; the gate asserts
+# zio-std-io versus the audited Hyper fixture's hyper-tokio runtime identity.
 # Build the locked local Hyper reference offline, then verify POST headers,
 # multi-frame bodies/trailers plus bidirectional cancellation of a 128-KiB
 # response at an 8-KiB stream window while a concurrent sibling completes on
