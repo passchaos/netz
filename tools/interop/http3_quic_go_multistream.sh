@@ -3,7 +3,9 @@ set -euo pipefail
 
 client=${1:?netz HTTP/3 benchmark client executable path}
 server=${2:?netz HTTP/3 benchmark server executable path}
+shift 2
 repo_root=$(cd "$(dirname "$0")/../.." && pwd)
+extra_args=("$@")
 runs=${NETZ_HTTP3_MULTISTREAM_ITERATIONS:-5}
 warmup=${NETZ_HTTP3_MULTISTREAM_WARMUP:-2}
 stream_values=${NETZ_HTTP3_MULTISTREAM_COUNTS:-"4 16"}
@@ -34,6 +36,7 @@ for version in $version_values; do
       "$client" "$server" --bench \
       "--warmup=$warmup" "--iterations=$runs" "--streams=$streams" \
       "--body-bytes=$body_bytes" "--chunk-bytes=$chunk_bytes" \
-      "--stream-window=$stream_window" "--timeout-ms=$timeout_ms"
+      "--stream-window=$stream_window" "--timeout-ms=$timeout_ms" \
+      "${extra_args[@]}"
   done
 done

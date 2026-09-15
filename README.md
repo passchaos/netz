@@ -997,6 +997,7 @@ zig build bench-http3-handshake-transfer -Doptimize=ReleaseFast -- --iterations=
 zig build bench-http3-handshake-transfer -Doptimize=ReleaseFast -- --iterations=1 --body-bytes=16777216 --mode=download --streams=4
 zig build bench-http3-capsule -Doptimize=ReleaseFast
 zig build bench-http3-qpack -Doptimize=ReleaseFast
+zig build bench-http3-quic-go -Doptimize=ReleaseFast -- --netz-only --mode=upload --warmup=1 --iterations=1 --streams=4 --body-bytes=65536
 zig build bench-websocket-frame -Doptimize=ReleaseFast
 zig build bench-websocket-receive-buffer -Doptimize=ReleaseFast
 zig build bench-websocket-h3-echo -Doptimize=ReleaseFast -- --warmup=20 --iterations=200
@@ -1158,9 +1159,14 @@ policy without sending ACK_FREQUENCY.
 client/server role pairings, with a fresh connection and untimed ready request
 per sample, matching payloads, flow windows, 1280-byte steady-state MTU, and
 1152-byte effective application chunks. Receiver-side byte, EOF, checksum, and
-status validation is mandatory. Set `NETZ_HTTP3_INTEROP_VERSION=2` to force
-QUIC v2; result and memory records carry `quic_version`, and strict checkers
-reject a mismatched peer/version run. The multi-stream aggregate gate exercises
+status validation is mandatory. Netz endpoints use zio behind the `std.Io`
+protocol boundary. Config, result, server-completion, and memory records name
+both endpoint runtimes; strict checkers reject legacy or mismatched backend,
+owner, shape, timeout, throughput, and checksum records. `--netz-only` provides
+a two-process zio gate when the external fixture is unavailable. Set
+`NETZ_HTTP3_INTEROP_VERSION=2` to force QUIC v2; result and memory records carry
+`quic_version`, and strict checkers reject a mismatched peer/version run. The
+multi-stream aggregate gate exercises
 both v1 and v2 by default. Results are labeled `same-application-shape`
 because quic-go's GSO/GRO and ACK/packetization policy are not all externally
 controllable. Add `--stats` for whole-process peak RSS plus separately scoped

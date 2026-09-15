@@ -1398,7 +1398,11 @@ history from one sample changing the next. Both sides use a fixed 1 MiB stream
 window by default; connection credit is that window times at least eight, and
 therefore grows to 16 MiB for the 16-stream shape. The steady-state MTU is 1280
 bytes and the effective application chunk is 1152 bytes. Netz explicitly
-disables GSO/GRO; quic-go reports its implementation defaults.
+disables GSO/GRO; quic-go reports its implementation defaults. The current
+netz client and server use zio behind `std.Io`. Config, client-owned result,
+server-completion, and memory records carry `client_io` and `server_io`; the
+strict checker also verifies endpoint ownership, the complete benchmark shape,
+finite recomputed throughput, and exact bytes/checksum.
 
 ```sh
 zig build bench-http3-quic-go -Doptimize=ReleaseFast -- \
@@ -1414,9 +1418,24 @@ zig build bench-http3-quic-go -Doptimize=ReleaseFast -- \
   --mode=upload --warmup=2 --iterations=5 --streams=4 \
   --body-bytes=4194304 --chunk-bytes=16384 \
   --stream-window=1048576 --timeout-ms=30000
+
+NETZ_HTTP3_INTEROP_VERSION=2 \
+zig build bench-http3-quic-go -Doptimize=ReleaseFast -- \
+  --netz-only --stats --mode=upload --warmup=1 --iterations=1 \
+  --streams=4 --body-bytes=65536 --chunk-bytes=16384 \
+  --stream-window=1048576 --timeout-ms=30000
 ```
 
-Sequential CPU-0/client, CPU-1/server samples on 2026-09-08 measured:
+A 2026-09-15 migration gate exercised QUIC v1 with one stream and QUIC v2
+with four streams in both upload/download directions and both mixed role pairs.
+The v2 four-stream records each verified 262,144 logical bytes and checksum
+33,423,360. With memory telemetry enabled, every netz process finished with
+`live_bytes=0`; the runner correctly labeled the available RSS tool as
+`busybox-time-maxrss`. A separate zio-only v2 four-stream gate passed both
+directions under the same schema. These are one-sample functional and
+evidence-pipeline checks, not performance comparisons.
+
+Historical pre-zio CPU-0/client, CPU-1/server samples on 2026-09-08 measured:
 
 | Sender implementation | Upload | Download |
 |---|---:|---:|
@@ -1425,7 +1444,9 @@ Sequential CPU-0/client, CPU-1/server samples on 2026-09-08 measured:
 
 Every sample verified status 200, exactly 4,194,304 logical bytes, and checksum
 534,773,760. The wide upload ranges are retained instead of compressed into a
-single ratio. This is `same-application-shape` evidence, not equal-wire and not
+single ratio. These measurements used the former `std.Io.Threaded` harness and
+must not be cited as zio performance. This is `same-application-shape` evidence,
+not equal-wire and not
 a whole-library superiority claim: capture-level UDP datagram counts/bytes,
 GSO/GRO behavior, ACK policy, and cipher confirmation are still required before
 claiming identical wire work. The important result is that a reproducible

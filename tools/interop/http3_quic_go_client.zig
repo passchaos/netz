@@ -64,9 +64,9 @@ pub fn main(init: std.process.Init) !void {
     }
 
     const allocator = std.heap.c_allocator;
-    var threaded = std.Io.Threaded.init(allocator, .{});
-    defer threaded.deinit();
-    const io = threaded.io();
+    var backend = try netz.runtime.Backend.init(allocator);
+    defer backend.deinit();
+    const io = backend.io();
 
     const now = std.Io.Clock.real.now(io);
     var ca_bundle: std.crypto.Certificate.Bundle = .empty;
@@ -296,17 +296,28 @@ fn runBenchmark(_: std.process.Init, args: []const []const u8) !void {
         return error.InvalidArgument;
     }
     var stats = false;
+    var role_pair: []const u8 = "netz-client+quic-go-server";
+    var role_pair_set = false;
     var config_args: std.ArrayList([]const u8) = .empty;
     defer config_args.deinit(std.heap.c_allocator);
     for (args[2..]) |arg| {
         if (std.mem.eql(u8, arg, "--stats") and !stats) {
             stats = true;
+        } else if (std.mem.startsWith(u8, arg, "--role-pair=") and
+            !role_pair_set)
+        {
+            role_pair = arg["--role-pair=".len..];
+            role_pair_set = true;
         } else {
             try config_args.append(std.heap.c_allocator, arg);
         }
     }
+    if (!std.mem.eql(u8, role_pair, "netz-client+quic-go-server") and
+        !std.mem.eql(u8, role_pair, "netz-client+netz-server"))
+    {
+        return error.InvalidArgument;
+    }
     const config = try benchmark.Config.parse(config_args.items);
-    const role_pair = "netz-client+quic-go-server";
     var counting = CountingAllocator.init(std.heap.c_allocator);
     const allocator = if (stats) counting.allocator() else std.heap.c_allocator;
     defer if (stats) benchmark.printNetzMemory(
@@ -315,9 +326,9 @@ fn runBenchmark(_: std.process.Init, args: []const []const u8) !void {
         config,
         counting.snapshot(),
     );
-    var threaded = std.Io.Threaded.init(allocator, .{ .async_limit = .unlimited });
-    defer threaded.deinit();
-    const io = threaded.io();
+    var backend = try netz.runtime.Backend.init(allocator);
+    defer backend.deinit();
+    const io = backend.io();
 
     const now = std.Io.Clock.real.now(io);
     var ca_bundle: std.crypto.Certificate.Bundle = .empty;
@@ -328,8 +339,9 @@ fn runBenchmark(_: std.process.Init, args: []const []const u8) !void {
         .now_seconds = now.toSeconds(),
     };
     try benchmark.printConfig(
-        if (config.mode == .upload) "netz" else "quic-go",
+        "netz",
         role_pair,
+        "client",
         config,
     );
 
@@ -379,8 +391,9 @@ fn runBenchmark(_: std.process.Init, args: []const []const u8) !void {
         };
         if (round >= config.warmup) {
             benchmark.printSample(
-                if (config.mode == .upload) "netz" else "quic-go",
+                benchmark.senderImplementation(role_pair, config),
                 role_pair,
+                "client",
                 config,
                 round - config.warmup + 1,
                 result.elapsed_ns,

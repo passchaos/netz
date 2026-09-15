@@ -3,6 +3,13 @@ set -euo pipefail
 
 client=${1:?netz HTTP/3 client executable path}
 server=${2:?netz HTTP/3 server executable path}
+bench_mode=${3:-}
+netz_only=false
+if [[ $bench_mode == --bench ]]; then
+  for arg in "${@:4}"; do
+    if [[ $arg == --netz-only ]]; then netz_only=true; fi
+  done
+fi
 quicz_root=${QUICZ_ROOT:-"$HOME/Work/quicz"}
 fixture_dir="$quicz_root/examples/interop/go_echo_client"
 netz_root=$(cd "$(dirname "$0")/../.." && pwd)
@@ -17,11 +24,11 @@ if [[ "$version" == 2 ]]; then
   go_version_args=(-v2-only)
   netz_version_args=(--version=2)
 fi
-if [[ ! -f "$fixture_dir/http3_peer/main.go" ]]; then
+if [[ $netz_only != true && ! -f "$fixture_dir/http3_peer/main.go" ]]; then
   echo "quic-go HTTP/3 fixture not found under $fixture_dir" >&2
   exit 127
 fi
-if ! command -v go >/dev/null 2>&1; then
+if [[ $netz_only != true ]] && ! command -v go >/dev/null 2>&1; then
   echo "go not found; install it to build the quic-go HTTP/3 fixture" >&2
   exit 127
 fi
@@ -51,6 +58,13 @@ trap on_exit EXIT
 
 if [[ ${3:-} == --bench ]]; then
   shift 3
+  filtered_args=()
+  for arg in "$@"; do
+    [[ $arg == --netz-only ]] || filtered_args+=("$arg")
+  done
+  set -- "${filtered_args[@]}"
+  python3 "$netz_root/tools/interop/http3_benchmark_check_test.py"
+  python3 "$netz_root/tools/interop/quic_quic_go_auxiliary_check_test.py"
   free_udp_port() {
     python3 - <<'PY'
 import socket
@@ -76,12 +90,14 @@ PY
   fi
   client_cpu=${bench_cpus[0]}
   server_cpu=${bench_cpus[1]}
-  (cd "$fixture_dir" && go test -mod=readonly \
-    "$netz_root/tools/interop/http3_quic_go_bench.go" \
-    "$netz_root/tools/interop/http3_quic_go_bench_test.go")
-  (cd "$fixture_dir" && go build -mod=readonly \
-    -o "$work/quic-go-http3-bench" \
-    "$netz_root/tools/interop/http3_quic_go_bench.go")
+  if [[ $netz_only != true ]]; then
+    (cd "$fixture_dir" && go test -mod=readonly \
+      "$netz_root/tools/interop/http3_quic_go_bench.go" \
+      "$netz_root/tools/interop/http3_quic_go_bench_test.go")
+    (cd "$fixture_dir" && go build -mod=readonly \
+      -o "$work/quic-go-http3-bench" \
+      "$netz_root/tools/interop/http3_quic_go_bench.go")
+  fi
   requested_modes=(upload download)
   common_args=()
   stats=false
@@ -89,6 +105,9 @@ PY
   iterations=5
   body_bytes=4194304
   streams=1
+  chunk_bytes=16384
+  stream_window=1048576
+  timeout_ms=30000
   for arg in "$@"; do
     if [[ $arg == --mode=* ]]; then
       requested_modes=("${arg#--mode=}")
@@ -103,12 +122,28 @@ PY
         --iterations=*) iterations=${arg#--iterations=} ;;
         --body-bytes=*) body_bytes=${arg#--body-bytes=} ;;
         --streams=*) streams=${arg#--streams=} ;;
+        --chunk-bytes=*) chunk_bytes=${arg#--chunk-bytes=} ;;
+        --stream-window=*) stream_window=${arg#--stream-window=} ;;
+        --timeout-ms=*) timeout_ms=${arg#--timeout-ms=} ;;
       esac
     fi
   done
-  time_bin=${TIME_BIN:-/usr/bin/time}
-  if [[ $stats == true && ! -x $time_bin ]]; then
-    echo "GNU time not found at $time_bin" >&2
+  time_command=()
+  rss_source=gnu-time-maxrss
+  if [[ -n ${TIME_BIN:-} ]]; then
+    if [[ ! -x $TIME_BIN ]]; then
+      echo "time executable not found at $TIME_BIN" >&2
+      exit 127
+    fi
+    time_command=("$TIME_BIN")
+  elif [[ -x /usr/bin/time ]]; then
+    time_command=(/usr/bin/time)
+  elif command -v busybox >/dev/null 2>&1; then
+    time_command=("$(command -v busybox)" time)
+    rss_source=busybox-time-maxrss
+  fi
+  if [[ $stats == true && ${#time_command[@]} -eq 0 ]]; then
+    echo 'GNU or BusyBox time not found' >&2
     exit 127
   fi
 
@@ -119,7 +154,7 @@ PY
   check_memory() {
     if [[ $stats != true ]]; then return; fi
     python3 "$netz_root/tools/interop/quic_memory_telemetry_check.py" \
-      --protocol=http3 "$@"
+      --protocol=http3 "--rss-source=$rss_source" "$@"
   }
 
   wait_for_line() {
@@ -158,9 +193,56 @@ PY
     pair_dir="$work/$benchmark_mode"
     mkdir -p "$pair_dir"
 
+    if [[ $netz_only == true ]]; then
+      port=$(free_udp_port)
+      local_mode_args=(--role-pair=netz-client+netz-server "${mode_args[@]}")
+      if [[ $stats == true ]]; then
+        timeout 180s "${time_command[@]}" -f '%M' \
+          -o "$pair_dir/netz-server.rss" taskset -c "$server_cpu" \
+          "$server" bench-server "$port" "${local_mode_args[@]}" \
+          >"$pair_dir/netz-server.log" 2>&1 &
+      else
+        timeout 180s taskset -c "$server_cpu" "$server" bench-server \
+          "$port" "${local_mode_args[@]}" >"$pair_dir/netz-server.log" 2>&1 &
+      fi
+      server_pid=$!
+      wait_for_line "$server_pid" "$pair_dir/netz-server.log" \
+        NETZ_HTTP3_BENCH_PORT >/dev/null
+      if [[ $stats == true ]]; then
+        timeout 180s "${time_command[@]}" -f '%M' \
+          -o "$pair_dir/netz-client.rss" taskset -c "$client_cpu" \
+          "$client" bench-client "$port" "$work/netz-ca.pem" \
+          "${local_mode_args[@]}" >"$pair_dir/netz-client.log" 2>&1
+      else
+        timeout 180s taskset -c "$client_cpu" "$client" bench-client \
+          "$port" "$work/netz-ca.pem" "${local_mode_args[@]}" \
+          >"$pair_dir/netz-client.log" 2>&1
+      fi
+      wait "$server_pid"
+      server_pid=
+      check_samples --role-pair=netz-client+netz-server \
+        --mode="$benchmark_mode" --iterations="$iterations" \
+        --streams="$streams" --body-bytes="$body_bytes" \
+        --quic-version="$version" --warmup="$warmup" \
+        --chunk-bytes="$chunk_bytes" --stream-window="$stream_window" \
+        --timeout-ms="$timeout_ms" --client-log="$pair_dir/netz-client.log" \
+        --server-log="$pair_dir/netz-server.log"
+      check_memory --role-pair=netz-client+netz-server \
+        --sender="$sender_role" --streams="$streams" \
+        --mode="$benchmark_mode" --body-bytes="$body_bytes" \
+        --quic-version="$version" --warmup="$warmup" \
+        --iterations="$iterations" --client-log="$pair_dir/netz-client.log" \
+        --server-log="$pair_dir/netz-server.log" \
+        --client-rss="$pair_dir/netz-client.rss" \
+        --server-rss="$pair_dir/netz-server.rss"
+      cat "$pair_dir/netz-server.log"
+      cat "$pair_dir/netz-client.log"
+      continue
+    fi
+
     port=$(free_udp_port)
     if [[ $stats == true ]]; then
-      timeout 180s "$time_bin" -f '%M' -o "$pair_dir/quic-go-server.rss" \
+      timeout 180s "${time_command[@]}" -f '%M' -o "$pair_dir/quic-go-server.rss" \
         taskset -c "$server_cpu" "$work/quic-go-http3-bench" \
         -role=server -addr="127.0.0.1:$port" \
         -ca-out="$pair_dir/quic-go-ca.pem" "${go_args[@]}" \
@@ -175,7 +257,7 @@ PY
     wait_for_line "$server_pid" "$pair_dir/quic-go-server.log" \
       QUIC_GO_HTTP3_BENCH_ADDR >/dev/null
     if [[ $stats == true ]]; then
-      timeout 180s "$time_bin" -f '%M' -o "$pair_dir/netz-client.rss" \
+      timeout 180s "${time_command[@]}" -f '%M' -o "$pair_dir/netz-client.rss" \
         taskset -c "$client_cpu" "$client" bench-client "$port" \
         "$pair_dir/quic-go-ca.pem" "${mode_args[@]}" \
         >"$pair_dir/netz-client.log" 2>&1
@@ -189,6 +271,8 @@ PY
     check_samples --role-pair=netz-client+quic-go-server \
       --mode="$benchmark_mode" --iterations="$iterations" \
       --streams="$streams" --body-bytes="$body_bytes" --quic-version="$version" \
+      --warmup="$warmup" --chunk-bytes="$chunk_bytes" \
+      --stream-window="$stream_window" --timeout-ms="$timeout_ms" \
       --client-log="$pair_dir/netz-client.log" \
       --server-log="$pair_dir/quic-go-server.log"
     check_memory --role-pair=netz-client+quic-go-server \
@@ -205,7 +289,7 @@ PY
 
     port=$(free_udp_port)
     if [[ $stats == true ]]; then
-      timeout 180s "$time_bin" -f '%M' -o "$pair_dir/netz-server.rss" \
+      timeout 180s "${time_command[@]}" -f '%M' -o "$pair_dir/netz-server.rss" \
         taskset -c "$server_cpu" "$server" bench-server "$port" \
         "${mode_args[@]}" >"$pair_dir/netz-server.log" 2>&1 &
     else
@@ -217,7 +301,7 @@ PY
     wait_for_line "$server_pid" "$pair_dir/netz-server.log" \
       NETZ_HTTP3_BENCH_PORT >/dev/null
     if [[ $stats == true ]]; then
-      timeout 180s "$time_bin" -f '%M' -o "$pair_dir/quic-go-client.rss" \
+      timeout 180s "${time_command[@]}" -f '%M' -o "$pair_dir/quic-go-client.rss" \
         taskset -c "$client_cpu" "$work/quic-go-http3-bench" \
         -role=client -addr="127.0.0.1:$port" -ca="$work/netz-ca.pem" \
         "${go_args[@]}" >"$pair_dir/quic-go-client.log" 2>&1
@@ -231,6 +315,8 @@ PY
     check_samples --role-pair=quic-go-client+netz-server \
       --mode="$benchmark_mode" --iterations="$iterations" \
       --streams="$streams" --body-bytes="$body_bytes" --quic-version="$version" \
+      --warmup="$warmup" --chunk-bytes="$chunk_bytes" \
+      --stream-window="$stream_window" --timeout-ms="$timeout_ms" \
       --client-log="$pair_dir/quic-go-client.log" \
       --server-log="$pair_dir/netz-server.log"
     check_memory --role-pair=quic-go-client+netz-server \

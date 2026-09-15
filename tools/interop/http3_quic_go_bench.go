@@ -22,6 +22,7 @@ import (
 	"os"
 	"runtime"
 	"strconv"
+	"strings"
 	"sync"
 	"time"
 
@@ -420,11 +421,7 @@ func runServer(address, caOut string, config benchConfig) {
 	errChan := make(chan error, 1)
 	go func() { errChan <- server.ListenAndServe() }()
 	fmt.Printf("QUIC_GO_HTTP3_BENCH_ADDR=%s\n", address)
-	implementation := "netz"
-	if config.mode == "download" {
-		implementation = "quic-go"
-	}
-	printConfig(implementation, "netz-client+quic-go-server", config)
+	printConfig("quic-go", "netz-client+quic-go-server", "server", config)
 	select {
 	case err := <-served:
 		if err != nil {
@@ -458,7 +455,7 @@ func runClient(address, caPath string, config benchConfig) {
 	if config.mode == "download" {
 		implementation = "netz"
 	}
-	printConfig(implementation, "quic-go-client+netz-server", config)
+	printConfig("quic-go", "quic-go-client+netz-server", "client", config)
 	for round := uint(0); round < config.rounds(); round++ {
 		transport := &http3.Transport{
 			TLSClientConfig: &tls.Config{RootCAs: roots, ServerName: "localhost", MinVersion: tls.VersionTLS13},
@@ -536,7 +533,7 @@ func runClient(address, caPath string, config benchConfig) {
 		}
 		cancelClose()
 		if round >= config.warmup {
-			printSample(implementation, "quic-go-client+netz-server", config, round-config.warmup+1, elapsed, aggregateChecksum)
+			printSample(implementation, "quic-go-client+netz-server", "client", config, round-config.warmup+1, elapsed, aggregateChecksum)
 		}
 		_ = transport.Close()
 	}
@@ -821,12 +818,12 @@ func verifyPayload(payload []byte, index, offset uint64, checksum *uint64) error
 	return nil
 }
 
-func printConfig(implementation, rolePair string, config benchConfig) {
-	fmt.Printf("implementation=%s protocol=http3 mode=%s role_pair=%s connection_scope=fresh-per-sample benchmark_scope=same-application-shape body_deadline_scope=sample warmup=%d iterations=%d streams=%d body_bytes=%d application_chunk_requested=%d application_chunk_effective=%d stream_window=%d connection_window=%d steady_state_mtu=1280 quic_version=%d cipher=negotiated-unexposed cert_verify=true gso=implementation-default gro=implementation-default pacing=true\n", implementation, config.mode, rolePair, config.warmup, config.iterations, config.streams, config.bodyBytes, config.chunkBytes, config.effectiveChunk(), config.streamWindow, config.connectionWindow(), config.version)
+func printConfig(implementation, rolePair, endpointRole string, config benchConfig) {
+	fmt.Printf("record=config implementation=%s protocol=http3 mode=%s role_pair=%s endpoint_role=%s sender_role=%s client_io=%s server_io=%s connection_scope=fresh-per-sample benchmark_scope=same-application-shape body_deadline_scope=sample warmup=%d iterations=%d streams=%d body_bytes=%d application_chunk_requested=%d application_chunk_effective=%d stream_window=%d connection_window=%d timeout_ms=%d steady_state_mtu=1280 quic_version=%d cipher=negotiated-unexposed cert_verify=true gso=implementation-default gro=implementation-default pacing=true\n", implementation, config.mode, rolePair, endpointRole, senderRole(config), clientIO(rolePair), serverIO(rolePair), config.warmup, config.iterations, config.streams, config.bodyBytes, config.chunkBytes, config.effectiveChunk(), config.streamWindow, config.connectionWindow(), config.timeout/time.Millisecond, config.version)
 }
-func printSample(implementation, rolePair string, config benchConfig, sample uint, elapsed time.Duration, checksum uint64) {
+func printSample(implementation, rolePair, endpointRole string, config benchConfig, sample uint, elapsed time.Duration, checksum uint64) {
 	mib := float64(config.totalBytes()) * 1e9 / float64(elapsed.Nanoseconds()) / (1024 * 1024)
-	fmt.Printf("record=result implementation=%s protocol=http3 mode=%s role_pair=%s connection_scope=fresh-per-sample benchmark_scope=same-application-shape body_deadline_scope=sample sample=%d streams=%d body_bytes=%d elapsed_ns=%d logical_MiB_s=%.3f sent_bytes=%d received_bytes=%d checksum=%d status=200 streams_finished=%d per_stream_verified=true quic_version=%d complete=true\n", implementation, config.mode, rolePair, sample, config.streams, config.bodyBytes, elapsed.Nanoseconds(), mib, config.totalBytes(), config.totalBytes(), checksum, config.streams, config.version)
+	fmt.Printf("record=result implementation=%s protocol=http3 mode=%s role_pair=%s result_owner=client endpoint_role=%s sender_role=%s client_io=%s server_io=%s connection_scope=fresh-per-sample benchmark_scope=same-application-shape body_deadline_scope=sample sample=%d streams=%d body_bytes=%d elapsed_ns=%d logical_MiB_s=%.3f sent_bytes=%d received_bytes=%d checksum=%d status=200 streams_finished=%d per_stream_verified=true quic_version=%d complete=true\n", implementation, config.mode, rolePair, endpointRole, senderRole(config), clientIO(rolePair), serverIO(rolePair), sample, config.streams, config.bodyBytes, elapsed.Nanoseconds(), mib, config.totalBytes(), config.totalBytes(), checksum, config.streams, config.version)
 }
 
 func printServerComplete(implementation, rolePair string, config benchConfig, sample uint, checksum uint64) {
@@ -836,7 +833,7 @@ func printServerComplete(implementation, rolePair string, config benchConfig, sa
 	} else {
 		sent = config.totalBytes()
 	}
-	fmt.Printf("record=server-complete implementation=%s protocol=http3 mode=%s role_pair=%s endpoint_role=server connection_scope=fresh-per-sample body_deadline_scope=sample sample=%d streams=%d body_bytes=%d sent_bytes=%d received_bytes=%d checksum=%d status=200 streams_finished=%d per_stream_verified=true quic_version=%d complete=true\n", implementation, config.mode, rolePair, sample, config.streams, config.bodyBytes, sent, received, checksum, config.streams, config.version)
+	fmt.Printf("record=server-complete implementation=%s protocol=http3 mode=%s role_pair=%s endpoint_role=server sender_role=%s client_io=%s server_io=%s connection_scope=fresh-per-sample benchmark_scope=same-application-shape body_deadline_scope=sample sample=%d streams=%d body_bytes=%d sent_bytes=%d received_bytes=%d checksum=%d status=200 streams_finished=%d per_stream_verified=true quic_version=%d complete=true\n", implementation, config.mode, rolePair, senderRole(config), clientIO(rolePair), serverIO(rolePair), sample, config.streams, config.bodyBytes, sent, received, checksum, config.streams, config.version)
 }
 
 func printMemory(rolePair, endpointRole string, config benchConfig, before, after memorySnapshot) {
@@ -844,7 +841,28 @@ func printMemory(rolePair, endpointRole string, config benchConfig, before, afte
 	if config.mode == "upload" {
 		senderRole = "client"
 	}
-	fmt.Printf("implementation=quic-go protocol=http3 mode=%s role_pair=%s endpoint_role=%s sender_role=%s streams=%d body_bytes=%d warmup=%d iterations=%d memory_scope=benchmark-run-after-argument-parse quic_version=%d allocator_scope=go-runtime-heap alloc_count=%d free_count=%d total_allocated_bytes=%d heap_alloc_bytes_end=%d heap_sys_bytes_end=%d runtime_sys_bytes_end=%d gc_cycles=%d complete=true\n", config.mode, rolePair, endpointRole, senderRole, config.streams, config.bodyBytes, config.warmup, config.iterations, config.version, after.mallocs-before.mallocs, after.frees-before.frees, after.totalAlloc-before.totalAlloc, after.heapAlloc, after.heapSys, after.sys, after.numGC-before.numGC)
+	fmt.Printf("record=memory implementation=quic-go protocol=http3 mode=%s role_pair=%s endpoint_role=%s sender_role=%s client_io=%s server_io=%s streams=%d body_bytes=%d warmup=%d iterations=%d memory_scope=benchmark-run-after-argument-parse quic_version=%d allocator_scope=go-runtime-heap alloc_count=%d free_count=%d total_allocated_bytes=%d heap_alloc_bytes_end=%d heap_sys_bytes_end=%d runtime_sys_bytes_end=%d gc_cycles=%d complete=true\n", config.mode, rolePair, endpointRole, senderRole, clientIO(rolePair), serverIO(rolePair), config.streams, config.bodyBytes, config.warmup, config.iterations, config.version, after.mallocs-before.mallocs, after.frees-before.frees, after.totalAlloc-before.totalAlloc, after.heapAlloc, after.heapSys, after.sys, after.numGC-before.numGC)
+}
+
+func senderRole(config benchConfig) string {
+	if config.mode == "upload" {
+		return "client"
+	}
+	return "server"
+}
+
+func clientIO(rolePair string) string {
+	if strings.HasPrefix(rolePair, "netz-client") {
+		return "zio-std-io"
+	}
+	return "quic-go-netpoll"
+}
+
+func serverIO(rolePair string) string {
+	if strings.HasSuffix(rolePair, "netz-server") {
+		return "zio-std-io"
+	}
+	return "quic-go-netpoll"
 }
 
 func localhostCertificate() (tls.Certificate, []byte, error) {

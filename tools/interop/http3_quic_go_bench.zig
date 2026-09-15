@@ -323,21 +323,32 @@ pub fn nowNs(io: std.Io) u64 {
     return std.math.cast(u64, value) orelse std.math.maxInt(u64);
 }
 
-pub fn printConfig(implementation: []const u8, role_pair: []const u8, config: Config) !void {
+pub fn printConfig(
+    implementation: []const u8,
+    role_pair: []const u8,
+    endpoint_role: []const u8,
+    config: Config,
+) !void {
     const effective_chunk = config.effectiveChunk();
     std.debug.print(
-        "implementation={s} protocol=http3 mode={s} role_pair={s} " ++
+        "record=config implementation={s} protocol=http3 mode={s} role_pair={s} " ++
+            "endpoint_role={s} sender_role={s} client_io={s} server_io={s} " ++
             "connection_scope=fresh-per-sample " ++
             "benchmark_scope=same-application-shape body_deadline_scope=sample warmup={d} " ++
             "iterations={d} streams={d} body_bytes={d} " ++
             "application_chunk_requested={d} application_chunk_effective={d} " ++
-            "stream_window={d} connection_window={d} steady_state_mtu=1280 " ++
+            "stream_window={d} connection_window={d} timeout_ms={d} " ++
+            "steady_state_mtu=1280 " ++
             "quic_version={d} cipher=negotiated-unexposed cert_verify=true " ++
             "gso=false gro=false pacing=true\n",
         .{
             implementation,
             config.mode.name(),
             role_pair,
+            endpoint_role,
+            senderRole(config),
+            clientIo(role_pair),
+            serverIo(role_pair),
             config.warmup,
             config.iterations,
             config.streams,
@@ -346,6 +357,7 @@ pub fn printConfig(implementation: []const u8, role_pair: []const u8, config: Co
             effective_chunk,
             config.stream_window,
             try config.connectionWindow(),
+            config.timeout_ms,
             if (config.version == .version_2) @as(u8, 2) else 1,
         },
     );
@@ -354,6 +366,7 @@ pub fn printConfig(implementation: []const u8, role_pair: []const u8, config: Co
 pub fn printSample(
     implementation: []const u8,
     role_pair: []const u8,
+    endpoint_role: []const u8,
     config: Config,
     sample: u32,
     elapsed_ns: u64,
@@ -365,12 +378,14 @@ pub fn printSample(
         @as(f64, @floatFromInt(elapsed_ns)) / (1024.0 * 1024.0);
     std.debug.print(
         "record=result implementation={s} protocol=http3 mode={s} role_pair={s} " ++
+            "result_owner=client endpoint_role={s} sender_role={s} " ++
+            "client_io={s} server_io={s} " ++
             "connection_scope=fresh-per-sample " ++
             "benchmark_scope=same-application-shape body_deadline_scope=sample sample={d} streams={d} " ++
             "body_bytes={d} elapsed_ns={d} logical_MiB_s={d:.3} sent_bytes={d} " ++
             "received_bytes={d} checksum={d} status=200 streams_finished={d} " ++
             "per_stream_verified=true quic_version={d} complete=true\n",
-        .{ implementation, config.mode.name(), role_pair, sample, config.streams, config.body_bytes, elapsed_ns, mib_s, total_bytes, total_bytes, checksum, config.streams, if (config.version == .version_2) @as(u8, 2) else 1 },
+        .{ implementation, config.mode.name(), role_pair, endpoint_role, senderRole(config), clientIo(role_pair), serverIo(role_pair), sample, config.streams, config.body_bytes, elapsed_ns, mib_s, total_bytes, total_bytes, checksum, config.streams, if (config.version == .version_2) @as(u8, 2) else 1 },
     );
 }
 
@@ -387,13 +402,16 @@ pub fn printServerComplete(
     std.debug.print(
         "record=server-complete implementation={s} protocol=http3 mode={s} " ++
             "role_pair={s} endpoint_role=server connection_scope=fresh-per-sample " ++
-            "body_deadline_scope=sample sample={d} streams={d} body_bytes={d} sent_bytes={d} " ++
+            "sender_role={s} client_io={s} server_io={s} " ++
+            "benchmark_scope=same-application-shape body_deadline_scope=sample " ++
+            "sample={d} streams={d} body_bytes={d} sent_bytes={d} " ++
             "received_bytes={d} checksum={d} status=200 streams_finished={d} " ++
             "per_stream_verified=true quic_version={d} complete=true\n",
         .{
-            implementation, config.mode.name(), role_pair,                                           sample,
-            config.streams, config.body_bytes,  sent_bytes,                                          received_bytes,
-            checksum,       config.streams,     if (config.version == .version_2) @as(u8, 2) else 1,
+            implementation,      config.mode.name(),                                  role_pair,      senderRole(config),
+            clientIo(role_pair), serverIo(role_pair),                                 sample,         config.streams,
+            config.body_bytes,   sent_bytes,                                          received_bytes, checksum,
+            config.streams,      if (config.version == .version_2) @as(u8, 2) else 1,
         },
     );
 }
@@ -459,8 +477,9 @@ pub fn printNetzMemory(
     snapshot: anytype,
 ) void {
     std.debug.print(
-        "implementation=netz protocol=http3 mode={s} role_pair={s} " ++
-            "endpoint_role={s} sender_role={s} streams={d} body_bytes={d} " ++
+        "record=memory implementation=netz protocol=http3 mode={s} role_pair={s} " ++
+            "endpoint_role={s} sender_role={s} client_io={s} server_io={s} " ++
+            "streams={d} body_bytes={d} " ++
             "warmup={d} iterations={d} " ++
             "memory_scope=benchmark-run-after-argument-parse " ++
             "quic_version={d} " ++
@@ -471,7 +490,9 @@ pub fn printNetzMemory(
             config.mode.name(),
             role_pair,
             endpoint_role,
-            if (config.mode == .upload) "client" else "server",
+            senderRole(config),
+            clientIo(role_pair),
+            serverIo(role_pair),
             config.streams,
             config.body_bytes,
             config.warmup,
@@ -486,4 +507,29 @@ pub fn printNetzMemory(
             snapshot.peak_bytes,
         },
     );
+}
+
+fn senderRole(config: Config) []const u8 {
+    return if (config.mode == .upload) "client" else "server";
+}
+
+pub fn clientIo(role_pair: []const u8) []const u8 {
+    return if (std.mem.startsWith(u8, role_pair, "netz-client"))
+        "zio-std-io"
+    else
+        "quic-go-netpoll";
+}
+
+pub fn serverIo(role_pair: []const u8) []const u8 {
+    return if (std.mem.endsWith(u8, role_pair, "netz-server"))
+        "zio-std-io"
+    else
+        "quic-go-netpoll";
+}
+
+pub fn senderImplementation(role_pair: []const u8, config: Config) []const u8 {
+    return if (config.mode == .upload)
+        (if (std.mem.startsWith(u8, role_pair, "netz-client")) "netz" else "quic-go")
+    else
+        (if (std.mem.endsWith(u8, role_pair, "netz-server")) "netz" else "quic-go");
 }

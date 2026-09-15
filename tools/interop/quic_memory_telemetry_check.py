@@ -92,26 +92,18 @@ def main() -> None:
     if (
         expected is None
         or args.protocol not in ("quic-stream", "http3")
-        or (
-            args.role_pair == "netz-client+netz-server"
-            and args.protocol != "quic-stream"
-        )
         or args.streams not in (1, 4, 16)
         or args.quic_version not in (None, 1, 2)
     ):
         raise SystemExit("invalid memory comparison configuration")
-    expected_io = (
-        {
-            role: (
-                "zio-std-io"
-                if implementation == "netz"
-                else "quic-go-netpoll"
-            )
-            for role, implementation in expected.items()
-        }
-        if args.protocol == "quic-stream"
-        else None
-    )
+    expected_io = {
+        role: (
+            "zio-std-io"
+            if implementation == "netz"
+            else "quic-go-netpoll"
+        )
+        for role, implementation in expected.items()
+    }
     if args.protocol == "http3" and (
         args.mode not in ("upload", "download")
         or args.body_bytes is None
@@ -134,13 +126,8 @@ def main() -> None:
             or record.get("protocol") != args.protocol
             or record.get("endpoint_role") != role
             or record.get("sender_role") != args.sender
-            or (
-                expected_io is not None
-                and (
-                    record.get("client_io") != expected_io["client"]
-                    or record.get("server_io") != expected_io["server"]
-                )
-            )
+            or record.get("client_io") != expected_io["client"]
+            or record.get("server_io") != expected_io["server"]
             or integer(record, "streams") != args.streams
             or record.get("memory_scope")
             != "benchmark-run-after-argument-parse"
@@ -185,7 +172,6 @@ def main() -> None:
         io_shape = (
             f"client_io={expected_io['client']} "
             f"server_io={expected_io['server']} "
-            if expected_io is not None else ""
         )
         print(
             f"record=memory implementation={implementation} protocol={args.protocol} "

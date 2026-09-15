@@ -38,9 +38,9 @@ pub fn main(init: std.process.Init) !void {
     }
 
     const allocator = std.heap.c_allocator;
-    var threaded = std.Io.Threaded.init(allocator, .{});
-    defer threaded.deinit();
-    const io = threaded.io();
+    var backend = try netz.runtime.Backend.init(allocator);
+    defer backend.deinit();
+    const io = backend.io();
     var certificate_der: [netz.tls.testing.certificate_der_len]u8 = undefined;
     try std.base64.standard.Decoder.decode(
         &certificate_der,
@@ -251,17 +251,28 @@ fn runBenchmark(_: std.process.Init, args: []const []const u8) !void {
     if (args.len == 0) return error.InvalidArgument;
     const port = try std.fmt.parseInt(u16, args[0], 10);
     var stats = false;
+    var role_pair: []const u8 = "quic-go-client+netz-server";
+    var role_pair_set = false;
     var config_args: std.ArrayList([]const u8) = .empty;
     defer config_args.deinit(std.heap.c_allocator);
     for (args[1..]) |arg| {
         if (std.mem.eql(u8, arg, "--stats") and !stats) {
             stats = true;
+        } else if (std.mem.startsWith(u8, arg, "--role-pair=") and
+            !role_pair_set)
+        {
+            role_pair = arg["--role-pair=".len..];
+            role_pair_set = true;
         } else {
             try config_args.append(std.heap.c_allocator, arg);
         }
     }
+    if (!std.mem.eql(u8, role_pair, "quic-go-client+netz-server") and
+        !std.mem.eql(u8, role_pair, "netz-client+netz-server"))
+    {
+        return error.InvalidArgument;
+    }
     const config = try benchmark.Config.parse(config_args.items);
-    const role_pair = "quic-go-client+netz-server";
     var counting = CountingAllocator.init(std.heap.c_allocator);
     const allocator = if (stats) counting.allocator() else std.heap.c_allocator;
     defer if (stats) benchmark.printNetzMemory(
@@ -270,9 +281,9 @@ fn runBenchmark(_: std.process.Init, args: []const []const u8) !void {
         config,
         counting.snapshot(),
     );
-    var threaded = std.Io.Threaded.init(allocator, .{ .async_limit = .unlimited });
-    defer threaded.deinit();
-    const io = threaded.io();
+    var backend = try netz.runtime.Backend.init(allocator);
+    defer backend.deinit();
+    const io = backend.io();
 
     var certificate_der: [netz.tls.testing.certificate_der_len]u8 = undefined;
     try std.base64.standard.Decoder.decode(
@@ -316,8 +327,9 @@ fn runBenchmark(_: std.process.Init, args: []const []const u8) !void {
     defer server.deinit();
     std.debug.print("NETZ_HTTP3_BENCH_PORT={d}\n", .{server.address().ip4.port});
     try benchmark.printConfig(
-        if (config.mode == .upload) "quic-go" else "netz",
+        "netz",
         role_pair,
+        "server",
         config,
     );
     var payloads = try benchmark.PayloadSet.init(allocator, config);

@@ -116,6 +116,7 @@ class RawQuicAuxiliaryCheckTest(unittest.TestCase):
             common = (
                 "record=memory protocol=http3 mode=upload "
                 "role_pair=netz-client+quic-go-server sender_role=client "
+                "client_io=zio-std-io server_io=quic-go-netpoll "
                 "streams=1 body_bytes=1024 warmup=1 iterations=1 quic_version=1 "
                 "memory_scope=benchmark-run-after-argument-parse complete=true "
             )
@@ -143,7 +144,7 @@ class RawQuicAuxiliaryCheckTest(unittest.TestCase):
                 f"--client-rss={client_rss}", f"--server-rss={server_rss}",
             )
             self.assertEqual(accepted.returncode, 0, accepted.stderr)
-            self.assertNotIn("client_io=", accepted.stdout)
+            self.assertIn("client_io=zio-std-io", accepted.stdout)
 
 
 if __name__ == "__main__":

@@ -587,6 +587,14 @@ both endpoint runtimes, its endpoint role, and the configured timeout. A
 ms for quic-go against a fixed quic-go server, and 0.981 versus 0.870 ms against
 a fixed netz server. The zio client handshake path therefore remains a concrete
 optimization target; historical Threaded ratios are not treated as zio results.
+The HTTP/3 quic-go benchmark likewise now runs both netz endpoint roles on zio
+behind `std.Io`. Its strict schema binds config, client-owned results, server
+completion, and memory telemetry to both endpoint runtimes and rejects mixed
+legacy data. QUIC v1 single-stream and QUIC v2 four-stream upload/download
+matrices passed in both mixed role pairs; a zio-only v2 four-stream/RSS gate
+also completed with exact bytes/checksum and zero retained netz allocator bytes.
+The older throughput ranges remain pre-zio historical evidence until a full
+fixed-binary comparison is recaptured.
 
 | Area from `~/Work/quicz` examples | netz status | Evidence | Remaining work |
 | --- | --- | --- | --- |

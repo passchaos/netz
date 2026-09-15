@@ -17,6 +17,7 @@ class Http3BenchmarkCheckTests(unittest.TestCase):
         value = CHECK.aggregate_checksum(1024, 4) if checksum is None else checksum
         common = (
             "protocol=http3 mode=download role_pair=quic-go-client+netz-server "
+            "sender_role=server client_io=quic-go-netpoll server_io=zio-std-io "
             "connection_scope=fresh-per-sample body_deadline_scope=sample "
             "sample=1 streams=4 body_bytes=1024 "
             f"checksum={value} status=200 streams_finished=4 "
@@ -24,13 +25,30 @@ class Http3BenchmarkCheckTests(unittest.TestCase):
         )
         client = pathlib.Path(directory, "client.log")
         server = pathlib.Path(directory, "server.log")
+        config_shape = (
+            "record=config protocol=http3 mode=download "
+            "role_pair=quic-go-client+netz-server sender_role=server "
+            "client_io=quic-go-netpoll server_io=zio-std-io "
+            "connection_scope=fresh-per-sample "
+            "benchmark_scope=same-application-shape body_deadline_scope=sample "
+            "warmup=1 iterations=1 streams=4 body_bytes=1024 "
+            "application_chunk_requested=512 application_chunk_effective=512 "
+            "stream_window=1048576 connection_window=8388608 timeout_ms=30000 "
+            "steady_state_mtu=1280 quic_version=2 cipher=negotiated-unexposed "
+            "cert_verify=true pacing=true"
+        )
         client.write_text(
-            "record=result implementation=netz benchmark_scope=same-application-shape "
-            f"{common} elapsed_ns=123 sent_bytes=4096 received_bytes=4096\n"
+            f"implementation=quic-go endpoint_role=client gso=implementation-default "
+            f"gro=implementation-default {config_shape}\n"
+            "record=result implementation=netz result_owner=client endpoint_role=client "
+            "benchmark_scope=same-application-shape "
+            f"{common} elapsed_ns=1000 logical_MiB_s=3906.250 "
+            "sent_bytes=4096 received_bytes=4096\n"
         )
         server.write_text(
+            f"implementation=netz endpoint_role=server gso=false gro=false {config_shape}\n"
             f"record=server-complete implementation=netz endpoint_role=server {common} "
-            "sent_bytes=4096 received_bytes=0\n"
+            "benchmark_scope=same-application-shape sent_bytes=4096 received_bytes=0\n"
         )
         return client, server
 
@@ -42,6 +60,10 @@ class Http3BenchmarkCheckTests(unittest.TestCase):
             streams=4,
             body_bytes=1024,
             quic_version=2,
+            warmup=1,
+            chunk_bytes=512,
+            stream_window=1048576,
+            timeout_ms=30000,
             client_log=client,
             server_log=server,
         )
@@ -66,14 +88,23 @@ class Http3BenchmarkCheckTests(unittest.TestCase):
     def test_missing_server_completion_is_rejected(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
             client, server = self.write_pair(directory)
-            server.write_text("")
+            server.write_text(
+                "\n".join(
+                    line for line in server.read_text().splitlines()
+                    if "record=server-complete" not in line
+                ) + "\n"
+            )
             with self.assertRaisesRegex(ValueError, "expected 1 server"):
                 self.verify_pair(client, server)
 
     def test_duplicate_result_is_rejected(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
             client, server = self.write_pair(directory)
-            client.write_text(client.read_text() * 2)
+            result = next(
+                line for line in client.read_text().splitlines()
+                if "record=result" in line
+            )
+            client.write_text(client.read_text() + result + "\n")
             with self.assertRaisesRegex(ValueError, "expected 1 result"):
                 self.verify_pair(client, server)
 
@@ -94,6 +125,41 @@ class Http3BenchmarkCheckTests(unittest.TestCase):
             )
             with self.assertRaisesRegex(ValueError, "quic_version"):
                 self.verify_pair(client, server)
+
+    def test_wrong_backend_is_rejected(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            client, server = self.write_pair(directory)
+            server.write_text(
+                server.read_text().replace(
+                    "server_io=zio-std-io", "server_io=threaded",
+                )
+            )
+            with self.assertRaisesRegex(ValueError, "server_io"):
+                self.verify_pair(client, server)
+
+    def test_accepts_netz_only_identity(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            client, server = self.write_pair(directory)
+            for path in (client, server):
+                path.write_text(
+                    path.read_text().replace(
+                        "quic-go-client+netz-server", "netz-client+netz-server",
+                    ).replace(
+                        "client_io=quic-go-netpoll", "client_io=zio-std-io",
+                    ).replace(
+                        "implementation=quic-go", "implementation=netz",
+                    ).replace(
+                        "gso=implementation-default", "gso=false",
+                    ).replace(
+                        "gro=implementation-default", "gro=false",
+                    )
+                )
+            CHECK.verify(
+                role_pair="netz-client+netz-server", mode="download",
+                iterations=1, streams=4, body_bytes=1024, quic_version=2,
+                warmup=1, chunk_bytes=512, stream_window=1048576,
+                timeout_ms=30000, client_log=client, server_log=server,
+            )
 
     def test_duplicate_field_is_rejected(self) -> None:
         with tempfile.TemporaryDirectory() as directory:

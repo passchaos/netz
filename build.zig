@@ -177,6 +177,10 @@ pub fn build(b: *std.Build) void {
         "python3",
         "tools/interop/quic_handshake_benchmark_check_test.py",
     });
+    const http3_benchmark_checker_tests = b.addSystemCommand(&.{
+        "python3",
+        "tools/interop/http3_benchmark_check_test.py",
+    });
 
     const test_step = b.step("test", "Run all tests");
     test_step.dependOn(&run_lib_tests.step);
@@ -191,6 +195,7 @@ pub fn build(b: *std.Build) void {
     test_step.dependOn(&quic_quic_go_auxiliary_checker_tests.step);
     test_step.dependOn(&quic_quic_go_churn_checker_tests.step);
     test_step.dependOn(&quic_handshake_benchmark_checker_tests.step);
+    test_step.dependOn(&http3_benchmark_checker_tests.step);
 
     const mqtt_mtls_server = b.addExecutable(.{
         .name = "netz-mqtt-mtls-server",
@@ -646,6 +651,7 @@ pub fn build(b: *std.Build) void {
     );
     http3_quic_go_multistream.addArtifactArg(http3_quic_go_client);
     http3_quic_go_multistream.addArtifactArg(http3_quic_go_server);
+    if (b.args) |args| http3_quic_go_multistream.addArgs(args);
     const http3_quic_go_multistream_step = b.step(
         "bench-http3-quic-go-multistream",
         "Compare verified 4/16-stream HTTP/3 transfers against quic-go",
