@@ -1216,6 +1216,11 @@ test "QUIC endpoint server migrates to a distinct preferred endpoint" {
                 established.connection.peerAddress(),
             );
             try established.connection.send(&.{.{ .ping = {} }});
+            try established.connection.send(&.{.{ .stream = .{
+                .stream_id = 0,
+                .data = "zero-copy",
+                .fin = true,
+            } }});
             var response = try established.connection
                 .receivePacketServicingTimersDeadline(deadline);
             defer response.deinit(self.allocator);
@@ -1315,29 +1320,61 @@ test "QUIC endpoint server migrates to a distinct preferred endpoint" {
         preferred_endpoint.address(),
         established.connection.sendEndpoint().address(),
     );
+    const VisitContext = struct {
+        ping_count: usize = 0,
+        saw_stream: bool = false,
+        storage: []const u8,
+        preferred_storage: []const u8,
+    };
     const Visitor = struct {
         fn visit(
-            saw_ping: *bool,
+            visit_context: *VisitContext,
             packet: quic.endpoint_dispatcher.RoutedPacketView,
         ) !void {
             try std.testing.expectEqual(@as(u64, 1), packet.connection_id_sequence);
             for (packet.packet.frames) |frame| {
-                saw_ping.* = saw_ping.* or frame == .ping;
+                visit_context.ping_count += @intFromBool(frame == .ping);
+                if (frame == .stream) {
+                    try std.testing.expectEqualStrings(
+                        "zero-copy",
+                        frame.stream.data,
+                    );
+                    const data_start = @intFromPtr(frame.stream.data.ptr);
+                    const storage_start = @intFromPtr(
+                        visit_context.storage.ptr,
+                    );
+                    const preferred_start = @intFromPtr(
+                        visit_context.preferred_storage.ptr,
+                    );
+                    const in_primary = data_start >= storage_start and
+                        data_start + frame.stream.data.len <=
+                            storage_start + visit_context.storage.len;
+                    const in_preferred = data_start >= preferred_start and
+                        data_start + frame.stream.data.len <=
+                            preferred_start +
+                                visit_context.preferred_storage.len;
+                    try std.testing.expect(in_primary or in_preferred);
+                    visit_context.saw_stream = true;
+                }
             }
         }
     };
-    var visitor_saw_ping = false;
-    var visitor_storage: [4096]u8 = undefined;
-    var visitor_events: [1]endpoint_server.VisitEvent = undefined;
-    while (!visitor_saw_ping) {
+    var visitor_storage: [2 * 4096]u8 = undefined;
+    var visit_context = VisitContext{
+        .storage = &visitor_storage,
+        .preferred_storage = server.preferred_receive_storage,
+    };
+    var visitor_events: [2]endpoint_server.VisitEvent = undefined;
+    while (!visit_context.saw_stream or visit_context.ping_count == 0) {
         const count = try server.receiveManyVisitingWithDeadline(
             &versions,
             &visitor_storage,
             &visitor_events,
             deadline,
-            &visitor_saw_ping,
+            &visit_context,
             Visitor.visit,
         );
+        try std.testing.expectEqual(@as(usize, 2), count);
         for (visitor_events[0..count]) |*event| {
             defer event.deinit(allocator);
             switch (event.*) {
@@ -1347,9 +1384,107 @@ test "QUIC endpoint server migrates to a distinct preferred endpoint" {
             }
         }
     }
+    try std.testing.expect(visit_context.saw_stream);
+    try std.testing.expectEqual(@as(usize, 1), visit_context.ping_count);
+    try std.testing.expect(server.multi_endpoint_view_count >= 2);
+    try std.testing.expect(server.multi_endpoint_owning_count >= 1);
     client_thread.join();
     joined = true;
     if (shared.err) |err| return err;
+}
+
+test "QUIC multi-endpoint visitor preserves transport state after callback error" {
+    const allocator = std.testing.allocator;
+    var threaded = std.Io.Threaded.init(allocator, .{
+        .async_limit = .unlimited,
+    });
+    defer threaded.deinit();
+    const io = threaded.io();
+    var primary = try quic.runtime.Endpoint.bind(
+        allocator,
+        io,
+        .{ .ip4 = .loopback(0) },
+        .{ .max_datagram_size = 4096 },
+    );
+    defer primary.deinit();
+    var preferred = try quic.runtime.Endpoint.bind(
+        allocator,
+        io,
+        .{ .ip4 = .loopback(0) },
+        .{ .max_datagram_size = 4096 },
+    );
+    defer preferred.deinit();
+    var peer = try quic.runtime.Endpoint.bind(
+        allocator,
+        io,
+        .{ .ip4 = .loopback(0) },
+        .{ .max_datagram_size = 4096 },
+    );
+    defer peer.deinit();
+    const keys = quic.protection.deriveAes128Keys(
+        [_]u8{0xb1} ** quic.protection.secret_len,
+    );
+    var connection = try quic.one_rtt.Connection.init(&primary, .{
+        .peer = peer.address(),
+        .receive_keys = keys,
+        .send_keys = keys,
+        .local_connection_id = "server-local",
+        .peer_connection_id = "peer-local",
+        .local_endpoint = .server,
+    });
+    defer connection.deinit();
+    try connection.registerLocalPreferredEndpoint(&preferred);
+    var server = try endpoint_server.Server.init(
+        allocator,
+        &primary,
+        .{ .local_connection_id = &.{} },
+        .{
+            .stateless_reset_key = [_]u8{0xb2} **
+                quic.stateless_reset.static_key_len,
+            .preferred_endpoint = &preferred,
+        },
+    );
+    defer server.deinit();
+    const handle: quic.endpoint_dispatcher.ConnectionHandle = 41;
+    try server.dispatcher.registerConnection(handle, &connection);
+    errdefer _ = server.dispatcher.unregisterConnection(handle) catch false;
+
+    try quic.one_rtt.sendFrames(
+        &peer,
+        preferred.address(),
+        keys,
+        .{
+            .destination_connection_id = "server-local",
+            .packet_number = 0,
+            .frames = &.{.{ .ping = {} }},
+        },
+    );
+    const Visitor = struct {
+        fn visit(
+            _: void,
+            _: quic.endpoint_dispatcher.RoutedPacketView,
+        ) error{Rejected}!void {
+            return error.Rejected;
+        }
+    };
+    var storage: [4096]u8 = undefined;
+    try std.testing.expectError(
+        error.Rejected,
+        server.receiveVisitingWithDeadline(
+            &.{quic.Version.version_1.wireValue()},
+            &storage,
+            .fromNow(io, .{
+                .clock = .awake,
+                .raw = .fromSeconds(1),
+            }),
+            {},
+            Visitor.visit,
+        ),
+    );
+    try std.testing.expectEqual(@as(u64, 1), connection.stats().packets_received);
+    try std.testing.expectEqual(&preferred, connection.sendEndpoint());
+    try server.dispatcher.refreshConnectionTimer(handle);
+    try std.testing.expect(try server.dispatcher.unregisterConnection(handle));
 }
 
 test "QUIC endpoint server resets a client after connection state loss" {

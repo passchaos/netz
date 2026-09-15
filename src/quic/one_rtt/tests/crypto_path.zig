@@ -3381,6 +3381,75 @@ test "QUIC 1-RTT validates preferred endpoint ownership" {
     );
 }
 
+test "QUIC invalid packet cannot switch local send endpoint" {
+    const allocator = std.testing.allocator;
+    var threaded = std.Io.Threaded.init(allocator, .{});
+    defer threaded.deinit();
+    const io = threaded.io();
+    var primary = try quic.runtime.Endpoint.bind(
+        allocator,
+        io,
+        .{ .ip4 = .loopback(0) },
+        .{ .max_datagram_size = 4096 },
+    );
+    defer primary.deinit();
+    var preferred = try quic.runtime.Endpoint.bind(
+        allocator,
+        io,
+        .{ .ip4 = .loopback(0) },
+        .{ .max_datagram_size = 4096 },
+    );
+    defer preferred.deinit();
+    var peer = try quic.runtime.Endpoint.bind(
+        allocator,
+        io,
+        .{ .ip4 = .loopback(0) },
+        .{ .max_datagram_size = 4096 },
+    );
+    defer peer.deinit();
+    const keys = quic.protection.deriveAes128Keys(
+        [_]u8{0x6c} ** quic.protection.secret_len,
+    );
+    var server = try one_rtt.Connection.init(&primary, .{
+        .peer = peer.address(),
+        .receive_keys = keys,
+        .send_keys = keys,
+        .local_connection_id = "server",
+        .peer_connection_id = "client",
+        .local_endpoint = .server,
+    });
+    defer server.deinit();
+    try server.registerLocalPreferredEndpoint(&preferred);
+
+    const payload = try one_rtt.encodeFrames(
+        allocator,
+        &.{ .{ .ping = {} }, .{ .new_token = .{ .token = "illegal" } } },
+    );
+    defer allocator.free(payload);
+    const bytes = try quic.protection.sealShortPacket(allocator, keys, .{
+        .destination_connection_id = "server",
+        .packet_number = 0,
+        .payload = payload,
+    });
+    defer allocator.free(bytes);
+    var datagram = try allocator.dupe(u8, bytes);
+    var routed = quic.runtime.RoutedBytes{
+        .datagram = .{
+            .from = peer.address(),
+            .received_on = &preferred,
+            .bytes = datagram,
+        },
+        .route = .{ .connection_index = 1 },
+        .destination_connection_id = datagram[1..][0.."server".len],
+    };
+    defer routed.deinit(allocator);
+    try std.testing.expectError(
+        error.InvalidFrame,
+        server.receiveRoutedDatagram(routed),
+    );
+    try std.testing.expectEqual(&primary, server.sendEndpoint());
+}
+
 test "QUIC failed preferred-address validation restores last validated address and CID" {
     const allocator = std.testing.allocator;
     var threaded = std.Io.Threaded.init(allocator, .{});

@@ -11222,6 +11222,7 @@ pub const Connection = struct {
             received_on,
             packet.payload,
         );
+        self.commitReceiveEndpoint(received_on, frames);
         const spin_connection_id_changed = !std.mem.eql(
             u8,
             peer_connection_id_before[0..peer_connection_id_before_len],
@@ -11368,6 +11369,7 @@ pub const Connection = struct {
             received_on,
             packet.packet.payload,
         );
+        self.commitReceiveEndpoint(received_on, packet.frames);
         const spin_connection_id_changed = !std.mem.eql(
             u8,
             peer_connection_id_before[0..peer_connection_id_before_len],
@@ -11589,6 +11591,7 @@ pub const Connection = struct {
             received_on,
             packet.packet.payload,
         );
+        self.commitReceiveEndpoint(received_on, packet.frames);
         const spin_connection_id_changed = !std.mem.eql(
             u8,
             peer_connection_id_before[0..peer_connection_id_before_len],
@@ -11809,7 +11812,7 @@ pub const Connection = struct {
         ecn: quic.packet_space.EcnCodepoint,
         packet_destination_connection_id: ?[]const u8,
         path_response_peer: ?net.IpAddress,
-        receive_endpoint: ?*quic.runtime.Endpoint,
+        path_response_endpoint: ?*quic.runtime.Endpoint,
         packet_payload: ?[]const u8,
     ) Error!void {
         var triggering_frame_index: ?usize = null;
@@ -11820,7 +11823,7 @@ pub const Connection = struct {
             ecn,
             packet_destination_connection_id,
             path_response_peer,
-            receive_endpoint,
+            path_response_endpoint,
             &triggering_frame_index,
         ) catch |err| {
             const triggering_frame = if (triggering_frame_index) |index|
@@ -11853,7 +11856,7 @@ pub const Connection = struct {
         ecn: quic.packet_space.EcnCodepoint,
         packet_destination_connection_id: ?[]const u8,
         path_response_peer: ?net.IpAddress,
-        receive_endpoint: ?*quic.runtime.Endpoint,
+        path_response_endpoint: ?*quic.runtime.Endpoint,
         triggering_frame_index: *?usize,
     ) Error!void {
         if (!try self.received.wouldRecordFresh(packet_number)) return error.DuplicatePacket;
@@ -11863,9 +11866,6 @@ pub const Connection = struct {
             triggering_frame_index,
         );
         if (!try self.received.recordWithEcn(packet_number, ecn)) return error.DuplicatePacket;
-        if (receive_endpoint) |endpoint| {
-            self.commitReceiveEndpoint(endpoint, frames);
-        }
         if (packet_number >= self.expected_packet_number) {
             self.expected_packet_number = packet_number + 1;
         }
@@ -12159,7 +12159,7 @@ pub const Connection = struct {
                         self.path_response_targets.appendAssumeCapacity(
                             .{
                                 .peer = path_response_peer,
-                                .endpoint = receive_endpoint,
+                                .endpoint = path_response_endpoint,
                             },
                         );
                         const response_now = now_ns orelse

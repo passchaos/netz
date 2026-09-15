@@ -2269,6 +2269,79 @@ test "QUIC endpoint dispatcher drains a coalesced packet after promotion" {
     try std.testing.expect(try dispatcher.unregisterConnection(52));
 }
 
+test "QUIC endpoint dispatcher visits an externally received datagram" {
+    const allocator = std.testing.allocator;
+    var threaded = std.Io.Threaded.init(allocator, .{});
+    defer threaded.deinit();
+    const io = threaded.io();
+    var endpoint = try runtime.Endpoint.bind(
+        allocator,
+        io,
+        .{ .ip4 = .loopback(0) },
+        .{ .max_datagram_size = 4096 },
+    );
+    defer endpoint.deinit();
+    var peer_endpoint = try runtime.Endpoint.bind(
+        allocator,
+        io,
+        .{ .ip4 = .loopback(0) },
+        .{ .max_datagram_size = 4096 },
+    );
+    defer peer_endpoint.deinit();
+    const keys = quic.protection.deriveAes128Keys(
+        [_]u8{0xd7} ** quic.protection.secret_len,
+    );
+    var connection = try one_rtt.Connection.init(&endpoint, .{
+        .peer = peer_endpoint.address(),
+        .receive_keys = keys,
+        .send_keys = keys,
+        .local_connection_id = "dispatch-view",
+        .peer_connection_id = "peer",
+        .local_endpoint = .server,
+        .enable_pacing = false,
+    });
+    defer connection.deinit();
+    var dispatcher = Dispatcher.init(allocator, &endpoint);
+    defer dispatcher.deinit();
+    try dispatcher.registerConnection(71, &connection);
+
+    try one_rtt.sendFrames(
+        &peer_endpoint,
+        endpoint.address(),
+        keys,
+        .{
+            .destination_connection_id = "dispatch-view",
+            .packet_number = 0,
+            .frames = &.{.{ .ping = {} }},
+        },
+    );
+    var storage: [4096]u8 = undefined;
+    const datagram = try endpoint.receiveBytesInto(&storage);
+    const Visitor = struct {
+        fn visit(
+            saw_ping: *bool,
+            packet: dispatcher_mod.RoutedPacketView,
+        ) !void {
+            for (packet.packet.frames) |frame| {
+                saw_ping.* = saw_ping.* or frame == .ping;
+            }
+        }
+    };
+    var saw_ping = false;
+    var event = try dispatcher.dispatchVisitingDatagram(
+        datagram,
+        &saw_ping,
+        Visitor.visit,
+    );
+    defer event.deinit(allocator);
+    try std.testing.expect(event == .packet);
+    try std.testing.expectEqual(
+        @as(ConnectionHandle, 71),
+        event.packet.connection_handle,
+    );
+    try std.testing.expect(saw_ping);
+}
+
 test "QUIC endpoint dispatcher ready index allocation failure is transactional" {
     const allocator = std.testing.allocator;
     var threaded = std.Io.Threaded.init(allocator, .{});

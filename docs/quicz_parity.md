@@ -516,10 +516,13 @@ while the server routes the client's sequence-1 traffic. The two-connection
 gate proves preferred CIDs and reset tokens are not reused. Typed and raw
 caller-supplied preferred parameters are rejected because their fixed CID cannot
 be shared safely; secondary endpoints must share the server's I/O context and
-remain caller-owned for its lifetime. The current multi-endpoint visitor and
-batch surfaces intentionally use the owning one-datagram adapter; restoring
-zero-copy/batched processing across both sockets is a performance follow-up, not
-a protocol-correctness gap.
+remain caller-owned for its lifetime. Multi-endpoint visitor receives race both
+sockets into separate reusable buffers, apply established packets in place, and
+drain immediately ready datagrams up to the caller's batch bound; only the rare
+second socket completion is copied into one preallocated retained slot so
+canceling the receive race cannot lose it. Tests check callback payload
+pointers, two-packet batch delivery, simultaneous-socket preservation,
+callback-error state commitment, and source-correct stateless-reset responses.
 
 ## Feature parity table
 

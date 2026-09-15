@@ -206,6 +206,13 @@ const WorkerContext = struct {
     completed: *std.Io.Queue(Completion),
 };
 
+const PendingEndpointDatagramView = struct {
+    from: std.Io.net.IpAddress,
+    received_on: *quic.runtime.Endpoint,
+    len: usize,
+    ecn: quic.packet_space.EcnCodepoint,
+};
+
 /// Shared-endpoint raw QUIC connection owner. Connection pointers remain
 /// stable until `removeConnection` or `deinit`; callers must not move or free
 /// them. All UDP receives must flow through this server.
@@ -236,6 +243,13 @@ pub const Server = struct {
         *quic.handshake.EstablishedConnection,
     ) = .empty,
     pending_multi_endpoint_datagram: ?quic.runtime.OwnedBytes = null,
+    preferred_receive_storage: []u8 = &.{},
+    pending_multi_endpoint_storage: []u8 = &.{},
+    pending_multi_endpoint_view: ?PendingEndpointDatagramView = null,
+    multi_endpoint_view_count: if (builtin.is_test) usize else void =
+        if (builtin.is_test) 0 else {},
+    multi_endpoint_owning_count: if (builtin.is_test) usize else void =
+        if (builtin.is_test) 0 else {},
 
     pub fn init(
         allocator: std.mem.Allocator,
@@ -345,6 +359,20 @@ pub const Server = struct {
         errdefer allocator.destroy(dispatcher);
         dispatcher.* = .init(allocator, endpoint);
         errdefer dispatcher.deinit();
+        const preferred_receive_storage = if (options.preferred_endpoint != null)
+            try allocator.alloc(u8, endpoint.limits.max_datagram_size)
+        else
+            &.{};
+        errdefer if (preferred_receive_storage.len != 0) {
+            allocator.free(preferred_receive_storage);
+        };
+        const pending_multi_endpoint_storage = if (options.preferred_endpoint != null)
+            try allocator.alloc(u8, endpoint.limits.max_datagram_size)
+        else
+            &.{};
+        errdefer if (pending_multi_endpoint_storage.len != 0) {
+            allocator.free(pending_multi_endpoint_storage);
+        };
         var effective_options = options;
         effective_options.preferred_address = preferred_address;
         const server = Server{
@@ -356,6 +384,8 @@ pub const Server = struct {
             .worker_context = worker_context,
             .completed_storage = completed_storage,
             .completed = completed,
+            .preferred_receive_storage = preferred_receive_storage,
+            .pending_multi_endpoint_storage = pending_multi_endpoint_storage,
         };
         worker_context.* = .{
             .endpoint = endpoint,
@@ -390,6 +420,12 @@ pub const Server = struct {
         self.connections.deinit(self.allocator);
         if (self.pending_multi_endpoint_datagram) |*datagram| {
             datagram.deinit((datagram.received_on orelse self.endpoint).allocator);
+        }
+        if (self.preferred_receive_storage.len != 0) {
+            self.allocator.free(self.preferred_receive_storage);
+        }
+        if (self.pending_multi_endpoint_storage.len != 0) {
+            self.allocator.free(self.pending_multi_endpoint_storage);
         }
         self.dispatcher.deinit();
         self.allocator.destroy(self.dispatcher);
@@ -814,6 +850,22 @@ pub const Server = struct {
         {
             return error.BufferTooShort;
         }
+        if (self.options.preferred_endpoint != null) {
+            const required_storage = std.math.mul(
+                usize,
+                output.len,
+                self.endpoint.limits.max_datagram_size,
+            ) catch return error.BufferTooShort;
+            if (storage.len < required_storage) return error.BufferTooShort;
+            return self.receiveManyVisitingMultiEndpoint(
+                supported_versions,
+                storage,
+                output,
+                timeout,
+                context,
+                visitor,
+            );
+        }
         return self.receiveManyVisitingUntil(
             supported_versions,
             storage,
@@ -855,18 +907,6 @@ pub const Server = struct {
         context: anytype,
         comptime visitor: anytype,
     ) (Error || callbackErrorSet(visitor))!usize {
-        if (self.options.preferred_endpoint != null) {
-            output[0] = try self.receiveVisitingMultiEndpoint(
-                supported_versions,
-                if (caller_deadline) |deadline|
-                    .{ .deadline = deadline }
-                else
-                    .none,
-                context,
-                visitor,
-            );
-            return 1;
-        }
         while (true) {
             const receive_timeout: std.Io.Timeout = if (self.hasActiveHandshakes()) deadline: {
                 if (self.pollCompletion()) |completion_value| {
@@ -919,6 +959,11 @@ pub const Server = struct {
                 Adapter.visit,
             ) catch |err| switch (err) {
                 error.Timeout => {
+                    if (self.pending_multi_endpoint_view != null or
+                        self.pending_multi_endpoint_datagram != null)
+                    {
+                        continue;
+                    }
                     if (caller_deadline) |deadline| {
                         if (deadline.durationFromNow(self.endpoint.io)
                             .raw.nanoseconds <= 0) return error.Timeout;
@@ -981,6 +1026,40 @@ pub const Server = struct {
         }
     }
 
+    fn receiveManyVisitingMultiEndpoint(
+        self: *Server,
+        supported_versions: []const u32,
+        storage: []u8,
+        output: []VisitEvent,
+        timeout: std.Io.Timeout,
+        context: anytype,
+        comptime visitor: anytype,
+    ) (Error || callbackErrorSet(visitor))!usize {
+        var count: usize = 0;
+        errdefer for (output[0..count]) |*event| {
+            event.deinit(self.allocator);
+        };
+        const first_timeout = timeout.toDeadline(self.endpoint.io);
+        while (count < output.len) {
+            const event_storage = storage[count * self.endpoint.limits.max_datagram_size ..];
+            output[count] = self.receiveVisitingMultiEndpoint(
+                supported_versions,
+                event_storage,
+                if (count == 0) first_timeout else .{ .duration = .{
+                    .clock = .awake,
+                    .raw = .zero,
+                } },
+                context,
+                visitor,
+            ) catch |err| switch (err) {
+                error.Timeout => if (count != 0) return count else return err,
+                else => |other| return other,
+            };
+            count += 1;
+        }
+        return count;
+    }
+
     fn receiveVisitingUntil(
         self: *Server,
         supported_versions: []const u32,
@@ -992,6 +1071,7 @@ pub const Server = struct {
         if (self.options.preferred_endpoint != null) {
             return self.receiveVisitingMultiEndpoint(
                 supported_versions,
+                storage,
                 .{ .deadline = absolute },
                 context,
                 visitor,
@@ -1093,47 +1173,211 @@ pub const Server = struct {
     fn receiveVisitingMultiEndpoint(
         self: *Server,
         supported_versions: []const u32,
+        storage: []u8,
         timeout: std.Io.Timeout,
         context: anytype,
         comptime visitor: anytype,
     ) (Error || callbackErrorSet(visitor))!VisitEvent {
+        const caller_deadline = timeout.toTimestamp(self.endpoint.io);
         while (true) {
-            var event = (try self.receiveUntil(
-                supported_versions,
+            const active_handshakes = self.hasActiveHandshakes();
+            if (active_handshakes) {
+                if (self.pollCompletion()) |completion_value| {
+                    var completion = completion_value;
+                    return eventToVisit(try self.finishCompletion(
+                        &completion,
+                    ));
+                }
+                _ = self.expireHandshakes(monotonicNowNs(self.endpoint.io));
+            }
+            if (try self.dispatcher.poll()) |dispatcher_event_value| {
+                var dispatcher_event = dispatcher_event_value;
+                defer dispatcher_event.deinit(self.allocator);
+                if (try self.finishDispatcherEvent(
+                    &dispatcher_event,
+                )) |event| {
+                    return try self.visitOwnedServerEvent(
+                        event,
+                        context,
+                        visitor,
+                    );
+                }
+                continue;
+            }
+            const preferred = self.options.preferred_endpoint orelse
+                unreachable;
+            const receive_timeout = multiEndpointReceiveTimeout(
+                self.endpoint.io,
                 timeout,
-            )) orelse continue;
+                self.dispatcher.nextTimerDeadline(),
+                if (active_handshakes)
+                    self.options.handshake_poll_interval
+                else
+                    null,
+            );
+            const datagram = receiveViewFromEitherEndpoint(
+                self,
+                preferred,
+                storage,
+                receive_timeout,
+            ) catch |err| switch (err) {
+                error.Timeout => {
+                    if (caller_deadline) |deadline| {
+                        if (deadline.durationFromNow(self.endpoint.io)
+                            .raw.nanoseconds <= 0) return error.Timeout;
+                    }
+                    continue;
+                },
+                else => |other| return other,
+            };
+            if (comptime builtin.is_test) {
+                self.multi_endpoint_view_count +|= 1;
+            }
+            if (datagram.received_on != self.endpoint and
+                datagram.bytes.len != 0 and
+                (datagram.bytes[0] & 0x80) != 0)
+            {
+                continue;
+            }
+            if (try datagram.received_on.?
+                .sendVersionNegotiationIfUnsupported(
+                datagram.from,
+                datagram.bytes,
+                supported_versions,
+            )) continue;
+
+            const Adapter = struct {
+                server: *Server,
+                context: @TypeOf(context),
+
+                fn visit(
+                    adapter: *@This(),
+                    packet: quic.endpoint_dispatcher.RoutedPacketView,
+                ) (Error || callbackErrorSet(visitor))!void {
+                    try visitor(adapter.context, packet);
+                    const established = adapter.server.connection(
+                        packet.connection_handle,
+                    ) orelse return error.UnknownConnectionHandle;
+                    _ = try established.connection.sendAckForPacketIfNeeded(
+                        packet.packet.packet_number,
+                        packet.packet.frames,
+                    );
+                }
+            };
+            var adapter = Adapter{ .server = self, .context = context };
+            var event = try self.dispatcher.dispatchVisitingDatagram(
+                datagram,
+                &adapter,
+                Adapter.visit,
+            );
+            defer event.deinit(self.allocator);
             switch (event) {
-                .packet => |*packet| {
-                    const view = quic.endpoint_dispatcher.RoutedPacketView{
-                        .connection_handle = packet.connection_handle,
-                        .connection_id_sequence = packet.connection_id_sequence,
-                        .packet = .{
-                            .from = packet.packet.from,
-                            .packet_number = packet.packet.packet.packet_number,
-                            .frames = packet.packet.frames,
-                            .peer_initiated_key_update = packet.packet.peer_initiated_key_update,
+                .new_initial => {
+                    const owned = visitEventToEvent(&event);
+                    var admission = owned;
+                    defer admission.deinit(self.allocator);
+                    self.admit(&admission) catch |err| switch (err) {
+                        error.PendingHandshakeLimitReached => {
+                            const rejected = admission;
+                            admission = .consumed;
+                            return .{ .unrouted = rejected };
                         },
+                        else => |other| return other,
                     };
-                    visitor(context, view) catch |err| {
-                        event.deinit(self.allocator);
-                        return err;
-                    };
-                    _ = self.acknowledgePacketIfNeeded(
-                        &event.packet,
-                    ) catch |err| {
-                        event.deinit(self.allocator);
-                        return err;
-                    };
-                    const result = VisitEvent{ .packet = .{
+                },
+                .packet => |packet| {
+                    self.maintainConnectionIds(packet.connection_handle);
+                    return .{ .packet = .{
                         .connection_handle = packet.connection_handle,
                         .connection_id_sequence = packet.connection_id_sequence,
                     } };
-                    event.deinit(self.allocator);
-                    return result;
                 },
-                else => return eventToVisit(event),
+                .timer => |timer| {
+                    self.maintainConnectionIds(timer.connection_handle);
+                    return .{ .timer = timer };
+                },
+                .unrouted => {
+                    if (try self.handleUnrouted(&event.unrouted)) continue;
+                    return .{ .unrouted = visitEventToEvent(&event) };
+                },
+                .consumed, .pending_handshake, .discarded_long_header => {},
             }
         }
+    }
+
+    fn finishDispatcherEvent(
+        self: *Server,
+        endpoint_event: *quic.endpoint_dispatcher.Event,
+    ) Error!?Event {
+        switch (endpoint_event.*) {
+            .new_initial => {
+                self.admit(endpoint_event) catch |err| switch (err) {
+                    error.PendingHandshakeLimitReached => {
+                        const rejected = endpoint_event.*;
+                        endpoint_event.* = .consumed;
+                        return .{ .unrouted = rejected };
+                    },
+                    else => |other| return other,
+                };
+                return null;
+            },
+            .packet => |packet| {
+                self.maintainConnectionIds(packet.connection_handle);
+                const result = Event{ .packet = packet };
+                endpoint_event.* = .consumed;
+                return result;
+            },
+            .timer => |timer| {
+                self.maintainConnectionIds(timer.connection_handle);
+                return .{ .timer = timer };
+            },
+            .unrouted => {
+                if (try self.handleUnrouted(&endpoint_event.unrouted)) {
+                    return null;
+                }
+                const result = Event{ .unrouted = endpoint_event.* };
+                endpoint_event.* = .consumed;
+                return result;
+            },
+            .consumed, .pending_handshake, .discarded_long_header => return null,
+        }
+    }
+
+    fn visitOwnedServerEvent(
+        self: *Server,
+        event_value: Event,
+        context: anytype,
+        comptime visitor: anytype,
+    ) (Error || callbackErrorSet(visitor))!VisitEvent {
+        var event = event_value;
+        var owns_event = true;
+        defer if (owns_event) event.deinit(self.allocator);
+        return switch (event) {
+            .packet => |*packet| blk: {
+                try visitor(context, .{
+                    .connection_handle = packet.connection_handle,
+                    .connection_id_sequence = packet.connection_id_sequence,
+                    .packet = .{
+                        .from = packet.packet.from,
+                        .packet_number = packet.packet.packet.packet_number,
+                        .frames = packet.packet.frames,
+                        .peer_initiated_key_update = packet.packet.peer_initiated_key_update,
+                    },
+                });
+                _ = try self.acknowledgePacketIfNeeded(packet);
+                break :blk .{ .packet = .{
+                    .connection_handle = packet.connection_handle,
+                    .connection_id_sequence = packet.connection_id_sequence,
+                } };
+            },
+            .connected => |handle| .{ .connected = handle },
+            .timer => |timer| .{ .timer = timer },
+            .handshake_failed => |failure| .{ .handshake_failed = failure },
+            .unrouted => |unrouted| blk: {
+                owns_event = false;
+                break :blk .{ .unrouted = unrouted };
+            },
+        };
     }
 
     fn receiveUntil(
@@ -1151,6 +1395,9 @@ pub const Server = struct {
             _ = self.expireHandshakes(monotonicNowNs(self.endpoint.io));
         }
         var endpoint_event = if (self.options.preferred_endpoint) |preferred| blk: {
+            if (comptime builtin.is_test) {
+                self.multi_endpoint_owning_count +|= 1;
+            }
             if (try self.dispatcher.poll()) |event| break :blk event;
             var datagram = receiveFromEitherEndpoint(
                 self,
@@ -1592,6 +1839,18 @@ fn receiveFromEitherEndpoint(
     preferred: *quic.runtime.Endpoint,
     timeout: std.Io.Timeout,
 ) quic.runtime.ReceiveTimeoutError!quic.runtime.OwnedBytes {
+    if (server.pending_multi_endpoint_view) |pending| {
+        server.pending_multi_endpoint_view = null;
+        return .{
+            .from = pending.from,
+            .received_on = pending.received_on,
+            .bytes = try pending.received_on.allocator.dupe(
+                u8,
+                server.pending_multi_endpoint_storage[0..pending.len],
+            ),
+            .ecn = pending.ecn,
+        };
+    }
     if (server.pending_multi_endpoint_datagram) |datagram| {
         server.pending_multi_endpoint_datagram = null;
         return datagram;
@@ -1631,11 +1890,111 @@ fn receiveFromEitherEndpoint(
     };
 }
 
+fn receiveViewFromEitherEndpoint(
+    server: *Server,
+    preferred: *quic.runtime.Endpoint,
+    primary_storage: []u8,
+    timeout: std.Io.Timeout,
+) quic.runtime.ReceiveTimeoutError!quic.runtime.ReceivedBytesView {
+    if (primary_storage.len == 0) return error.BufferTooShort;
+    if (server.pending_multi_endpoint_view) |pending| {
+        server.pending_multi_endpoint_view = null;
+        return .{
+            .from = pending.from,
+            .received_on = pending.received_on,
+            .bytes = server.pending_multi_endpoint_storage[0..pending.len],
+            .ecn = pending.ecn,
+        };
+    }
+    if (server.pending_multi_endpoint_datagram) |pending_value| {
+        var pending = pending_value;
+        server.pending_multi_endpoint_datagram = null;
+        defer pending.deinit(
+            (pending.received_on orelse server.endpoint).allocator,
+        );
+        const storage = if (pending.received_on == preferred)
+            server.preferred_receive_storage
+        else
+            primary_storage;
+        if (pending.bytes.len > storage.len) return error.BufferTooShort;
+        @memcpy(storage[0..pending.bytes.len], pending.bytes);
+        return .{
+            .from = pending.from,
+            .received_on = pending.received_on,
+            .bytes = storage[0..pending.bytes.len],
+            .ecn = pending.ecn,
+        };
+    }
+
+    const primary = server.endpoint;
+    const bounded = timeout.toDeadline(primary.io);
+    const ReceiveResult = quic.runtime.ReceiveTimeoutError!quic.runtime.ReceivedBytesView;
+    const Wake = union(enum) {
+        primary: ReceiveResult,
+        preferred: ReceiveResult,
+    };
+    var wake_storage: [2]Wake = undefined;
+    var select: std.Io.Select(Wake) = .init(primary.io, &wake_storage);
+    select.async(
+        .primary,
+        receiveEndpointDatagramInto,
+        .{ primary, primary_storage, bounded },
+    );
+    select.async(
+        .preferred,
+        receiveEndpointDatagramInto,
+        .{
+            preferred,
+            server.preferred_receive_storage[0..@min(
+                primary_storage.len,
+                server.preferred_receive_storage.len,
+            )],
+            bounded,
+        },
+    );
+    const first = select.await() catch |err| {
+        select.cancelDiscard();
+        return err;
+    };
+    while (select.cancel()) |wake| switch (wake) {
+        .primary, .preferred => |result| if (result) |view| {
+            if (server.pending_multi_endpoint_view == null) {
+                std.debug.assert(
+                    view.bytes.len <=
+                        server.pending_multi_endpoint_storage.len,
+                );
+                @memcpy(
+                    server.pending_multi_endpoint_storage[0..view.bytes.len],
+                    view.bytes,
+                );
+                server.pending_multi_endpoint_view = .{
+                    .from = view.from,
+                    .received_on = view.received_on orelse primary,
+                    .len = view.bytes.len,
+                    .ecn = view.ecn,
+                };
+            }
+        } else |_| {},
+    };
+    return switch (first) {
+        .primary => |result| try result,
+        .preferred => |result| try result,
+    };
+}
+
 fn receiveEndpointDatagram(
     endpoint: *quic.runtime.Endpoint,
     timeout: std.Io.Timeout,
 ) quic.runtime.ReceiveTimeoutError!quic.runtime.OwnedBytes {
     return endpoint.receiveBytesTimeout(timeout);
+}
+
+fn receiveEndpointDatagramInto(
+    endpoint: *quic.runtime.Endpoint,
+    storage: []u8,
+    timeout: std.Io.Timeout,
+) quic.runtime.ReceiveTimeoutError!quic.runtime.ReceivedBytesView {
+    return endpoint.receiveBytesIntoTimeout(storage, timeout);
 }
 
 fn multiEndpointReceiveTimeout(
@@ -1672,6 +2031,131 @@ fn multiEndpointReceiveTimeout(
         .clock = .awake,
         .raw = .fromNanoseconds(@max(nanoseconds, 0)),
     } } else .none;
+}
+
+test "QUIC endpoint server preserves simultaneous multi-endpoint datagrams" {
+    const allocator = std.testing.allocator;
+    var threaded = std.Io.Threaded.init(allocator, .{
+        .async_limit = .unlimited,
+    });
+    defer threaded.deinit();
+    const io = threaded.io();
+    var primary = try quic.runtime.Endpoint.bind(
+        allocator,
+        io,
+        .{ .ip4 = .loopback(0) },
+        .{ .max_datagram_size = 128 },
+    );
+    defer primary.deinit();
+    var preferred = try quic.runtime.Endpoint.bind(
+        allocator,
+        io,
+        .{ .ip4 = .loopback(0) },
+        .{ .max_datagram_size = 128 },
+    );
+    defer preferred.deinit();
+    var sender = try quic.runtime.Endpoint.bind(
+        allocator,
+        io,
+        .{ .ip4 = .loopback(0) },
+        .{ .max_datagram_size = 128 },
+    );
+    defer sender.deinit();
+    var failing = std.testing.FailingAllocator.init(allocator, .{
+        .fail_index = 0,
+    });
+    var server: Server = undefined;
+    server.allocator = failing.allocator();
+    server.endpoint = &primary;
+    server.pending_multi_endpoint_datagram = null;
+    server.preferred_receive_storage = try allocator.alloc(u8, 128);
+    server.pending_multi_endpoint_storage = try allocator.alloc(u8, 128);
+    server.pending_multi_endpoint_view = null;
+    defer {
+        if (server.pending_multi_endpoint_datagram) |*datagram| {
+            datagram.deinit((datagram.received_on orelse &primary).allocator);
+        }
+        allocator.free(server.preferred_receive_storage);
+        allocator.free(server.pending_multi_endpoint_storage);
+    }
+
+    try sender.sendBytes(primary.address(), "primary");
+    try sender.sendBytes(preferred.address(), "preferred");
+    var primary_storage: [128]u8 = undefined;
+    const deadline = std.Io.Clock.Timestamp.fromNow(io, .{
+        .clock = .awake,
+        .raw = .fromSeconds(1),
+    });
+    const first = try receiveViewFromEitherEndpoint(
+        &server,
+        &preferred,
+        &primary_storage,
+        .{ .deadline = deadline },
+    );
+    const first_primary = std.mem.eql(u8, first.bytes, "primary");
+    const first_preferred = std.mem.eql(u8, first.bytes, "preferred");
+    try std.testing.expect(first_primary != first_preferred);
+
+    const second = try receiveViewFromEitherEndpoint(
+        &server,
+        &preferred,
+        &primary_storage,
+        .{ .duration = .{ .clock = .awake, .raw = .zero } },
+    );
+    try std.testing.expect(if (first_primary)
+        std.mem.eql(u8, second.bytes, "preferred")
+    else
+        std.mem.eql(u8, second.bytes, "primary"));
+    try std.testing.expect(first.received_on != second.received_on);
+    try std.testing.expect(!failing.has_induced_failure);
+}
+
+test "QUIC endpoint server transfers a pending view to owning receive" {
+    const allocator = std.testing.allocator;
+    var threaded = std.Io.Threaded.init(allocator, .{});
+    defer threaded.deinit();
+    const io = threaded.io();
+    var primary = try quic.runtime.Endpoint.bind(
+        allocator,
+        io,
+        .{ .ip4 = .loopback(0) },
+        .{ .max_datagram_size = 128 },
+    );
+    defer primary.deinit();
+    var preferred = try quic.runtime.Endpoint.bind(
+        allocator,
+        io,
+        .{ .ip4 = .loopback(0) },
+        .{ .max_datagram_size = 128 },
+    );
+    defer preferred.deinit();
+    var server: Server = undefined;
+    server.allocator = allocator;
+    server.endpoint = &primary;
+    server.pending_multi_endpoint_datagram = null;
+    server.pending_multi_endpoint_storage = try allocator.alloc(u8, 128);
+    server.pending_multi_endpoint_view = .{
+        .from = .{ .ip4 = .loopback(4444) },
+        .received_on = &preferred,
+        .len = "retained-view".len,
+        .ecn = .ect0,
+    };
+    @memcpy(
+        server.pending_multi_endpoint_storage[0.."retained-view".len],
+        "retained-view",
+    );
+    defer allocator.free(server.pending_multi_endpoint_storage);
+
+    var datagram = try receiveFromEitherEndpoint(
+        &server,
+        &preferred,
+        .{ .duration = .{ .clock = .awake, .raw = .zero } },
+    );
+    defer datagram.deinit(datagram.received_on.?.allocator);
+    try std.testing.expectEqualStrings("retained-view", datagram.bytes);
+    try std.testing.expectEqual(&preferred, datagram.received_on.?);
+    try std.testing.expectEqual(quic.packet_space.EcnCodepoint.ect0, datagram.ecn);
+    try std.testing.expect(server.pending_multi_endpoint_view == null);
 }
 
 fn handshakeDeadlineNs(

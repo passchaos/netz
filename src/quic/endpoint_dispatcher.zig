@@ -986,6 +986,18 @@ pub const Dispatcher = struct {
         return null;
     }
 
+    /// Borrowing counterpart used by socket owners that perform their own
+    /// receive wait. The caller-provided datagram remains valid only during
+    /// `visitor`; exceptional events acquire ownership as usual.
+    pub fn dispatchVisitingDatagram(
+        self: *Dispatcher,
+        datagram: runtime.ReceivedBytesView,
+        context: anytype,
+        comptime visitor: anytype,
+    ) (Error || callbackErrorSet(visitor))!VisitEvent {
+        return self.dispatchVisiting(datagram, context, visitor);
+    }
+
     /// Reserve one bidirectional stream when the registered connection has
     /// peer credit. This operation never reads the shared UDP socket, waits,
     /// or emits STREAMS_BLOCKED; `null` asks the endpoint loop to drive more
