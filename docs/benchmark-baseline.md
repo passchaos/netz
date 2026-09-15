@@ -3168,6 +3168,25 @@ topologies were not order-interleaved, so this supersedes the stale 0.717x
 observation only as a current noisy baseline, not as evidence that the shared
 topology has conclusively reached parity.
 
+The topology runner now has a strict `--server-topology=compare --netz-only`
+mode. It reuses one ReleaseFast executable, pins client/server to CPUs 0/1,
+uses an odd sample count, mirrors independent/shared order on alternating
+rounds, fixes both topologies to ACK-every=2 and 25 ms, and validates every
+payload, checksum, completion exchange, backend identity, and topology before
+summarizing. A 2026-09-15 five-sample zio-era run with four connections and
+one 1-MiB stream per connection measured:
+
+```text
+sender          independent median  shared median  shared/independent
+client             66.070 MiB/s      43.653 MiB/s       0.661x
+server             63.710 MiB/s      41.337 MiB/s       0.649x
+```
+
+The independent ranges were 55.443-67.770 and 56.237-74.028 MiB/s; shared
+ranges were 41.649-44.977 and 36.148-58.804 MiB/s. This is a same-stack
+topology baseline that quantifies the shared endpoint scheduling gap; it is not
+a cross-library speed claim.
+
 The endpoint CID router, CID synchronization, pending-ready-index, timer
 scheduler, and receive-stream-ID benchmarks now obtain their UDP endpoint,
 where needed, and monotonic clock from zio-backed `std.Io`; each prints the

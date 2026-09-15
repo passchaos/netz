@@ -197,13 +197,57 @@ def summarize(
     return output
 
 
+def compare_topologies(
+    path: Path, samples: int, shared_receive_batch: int = 32,
+    server_ack_every: int = 2, server_ack_delay_us: int = 25000,
+) -> list[str]:
+    if server_ack_every != 2 or server_ack_delay_us != 25000:
+        raise ValueError("topology comparison requires identical ACK policy 2/25000")
+    independent = summarize(
+        path, "aggregate", samples, "independent", netz_only=True,
+    )
+    shared = summarize(
+        path, "aggregate", samples, "shared", shared_receive_batch,
+        server_ack_every, server_ack_delay_us, True,
+    )
+    medians: dict[tuple[str, str], float] = {}
+    for topology, lines in (("independent", independent), ("shared", shared)):
+        for line in lines:
+            row = fields(line)
+            sender = row.get("sender_role")
+            if sender not in ("client", "server"):
+                raise ValueError("invalid topology summary sender")
+            try:
+                medians[(topology, sender)] = float(
+                    row["median_logical_MiB_s"]
+                )
+            except (KeyError, ValueError) as error:
+                raise ValueError("invalid topology summary throughput") from error
+    output = independent + shared
+    for sender in ("client", "server"):
+        independent_value = medians[("independent", sender)]
+        shared_value = medians[("shared", sender)]
+        output.append(
+            "record=topology-comparison protocol=quic-stream mode=aggregate "
+            f"sender_role={sender} samples={samples} "
+            f"independent_median_logical_MiB_s={independent_value:.3f} "
+            f"shared_median_logical_MiB_s={shared_value:.3f} "
+            f"shared_over_independent={shared_value / independent_value:.3f} "
+            f"server_ack_every={server_ack_every} "
+            f"server_ack_delay_us={server_ack_delay_us} "
+            "client_io=zio-std-io server_io=zio-std-io "
+            "benchmark_scope=same-application-shape complete=true"
+        )
+    return output
+
+
 def main() -> None:
     parser = argparse.ArgumentParser()
     parser.add_argument("--mode", choices=("echo", "aggregate"), required=True)
     parser.add_argument("--samples", type=int, required=True)
     parser.add_argument("--log", type=Path, required=True)
     parser.add_argument(
-        "--server-topology", choices=("independent", "shared"),
+        "--server-topology", choices=("independent", "shared", "compare"),
         default="independent",
     )
     parser.add_argument("--shared-receive-batch", type=int, default=32)
@@ -211,13 +255,22 @@ def main() -> None:
     parser.add_argument("--server-ack-delay-us", type=int, default=25000)
     parser.add_argument("--netz-only", action="store_true")
     args = parser.parse_args()
-    for line in summarize(
-        args.log, args.mode, args.samples, args.server_topology,
-        args.shared_receive_batch,
-        args.server_ack_every,
-        args.server_ack_delay_us,
-        args.netz_only,
-    ):
+    if args.server_topology == "compare":
+        if args.mode != "aggregate" or not args.netz_only:
+            raise ValueError("topology comparison requires aggregate netz-only mode")
+        output = compare_topologies(
+            args.log, args.samples, args.shared_receive_batch,
+            args.server_ack_every, args.server_ack_delay_us,
+        )
+    else:
+        output = summarize(
+            args.log, args.mode, args.samples, args.server_topology,
+            args.shared_receive_batch,
+            args.server_ack_every,
+            args.server_ack_delay_us,
+            args.netz_only,
+        )
+    for line in output:
         print(line)
 
 

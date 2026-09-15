@@ -1111,6 +1111,10 @@ The real-handshake QUIC STREAM benchmark uses the same zio-owned `std.Io` in
 upload, handshake, echo, churn, fault, and aggregate modes. Aggregate
 connections run as a `std.Io.Group` instead of creating OS threads or private
 I/O backends.
+The persistent QUIC runner accepts `--server-topology=compare --netz-only` to
+run an odd, mirrored-order fixed-binary A/B between independent server sockets
+and the shared server endpoint, with identical ACK policy and strict per-run
+payload/checksum checks.
 The MQTT retained/session/Will schedulers and QUIC-LB routing benchmark also
 obtain their monotonic benchmark clock from zio-backed `std.Io`.
 

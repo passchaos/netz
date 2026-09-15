@@ -197,6 +197,51 @@ class PersistentBenchmarkSummaryTest(unittest.TestCase):
             with self.assertRaisesRegex(ValueError, "identity or proof"):
                 SUMMARY.summarize(path, "aggregate", 1, netz_only=True)
 
+    def test_topology_comparison_requires_both_verified_shapes(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            path = Path(directory, "results.log")
+            lines = []
+            values = {
+                ("independent", "client"): (80.0, 100.0, 90.0),
+                ("independent", "server"): (100.0, 120.0, 110.0),
+                ("shared", "client"): (72.0, 90.0, 81.0),
+                ("shared", "server"): (75.0, 99.0, 88.0),
+            }
+            for (topology, sender), samples in values.items():
+                shared = topology == "shared"
+                for run, value in enumerate(samples, 1):
+                    lines.append(
+                        "record=result implementation=netz protocol=quic-stream "
+                        "mode=aggregate role_pair=netz-client+netz-server "
+                        f"sender_role={sender} result_owner=client run={run} "
+                        "client_io=zio-std-io server_io=zio-std-io "
+                        "connections=4 streams=1 bytes_per_stream=1024 "
+                        "timing_scope=stream-setup-through-verified-completion "
+                        f"endpoint_topology={'shared-server-udp' if shared else 'one-udp-socket-per-connection'} "
+                        + (
+                            "server_receive_batch=32 server_ack_every=2 "
+                            "server_ack_delay_us=25000 "
+                            if shared else ""
+                        )
+                        + f"elapsed_ns=1000 logical_MiB_s={value:.3f} "
+                        "benchmark_scope=same-application-shape "
+                        "completion_exchange_verified=true complete=true"
+                    )
+            path.write_text("\n".join(lines) + "\n", encoding="utf-8")
+            output = SUMMARY.compare_topologies(path, 3, 32, 2, 25000)
+            self.assertEqual(len(output), 6)
+            self.assertIn("sender_role=client", output[-2])
+            self.assertIn("shared_over_independent=0.900", output[-2])
+            self.assertIn("sender_role=server", output[-1])
+            self.assertIn("shared_over_independent=0.800", output[-1])
+            self.assertIn("server_ack_every=2", output[-1])
+
+            path.write_text("\n".join(lines[:-1]) + "\n", encoding="utf-8")
+            with self.assertRaisesRegex(ValueError, "expected 3"):
+                SUMMARY.compare_topologies(path, 3, 32, 2, 25000)
+            with self.assertRaisesRegex(ValueError, "identical ACK policy"):
+                SUMMARY.compare_topologies(path, 3, 32, 4, 25000)
+
 
 if __name__ == "__main__":
     unittest.main()

@@ -54,12 +54,22 @@ if [[ $modes != echo && $modes != aggregate && $modes != both ]]; then
   echo 'mode must be echo, aggregate, or both' >&2
   exit 2
 fi
-if [[ $server_topology != independent && $server_topology != shared ]]; then
-  echo 'server topology must be independent or shared' >&2
+if [[ $server_topology != independent && $server_topology != shared &&
+      $server_topology != compare ]]; then
+  echo 'server topology must be independent, shared, or compare' >&2
   exit 2
 fi
-if [[ $server_topology == shared && $modes != aggregate ]]; then
-  echo 'shared server topology requires aggregate mode' >&2
+if [[ $server_topology != independent && $modes != aggregate ]]; then
+  echo 'shared/compare server topology requires aggregate mode' >&2
+  exit 2
+fi
+if [[ $server_topology == compare && $netz_only != true ]]; then
+  echo 'topology comparison requires --netz-only' >&2
+  exit 2
+fi
+if [[ $server_topology == compare ]] &&
+   (( server_ack_every != 2 || server_ack_delay_us != 25000 )); then
+  echo 'topology comparison requires identical ACK policy 2/25000' >&2
   exit 2
 fi
 if [[ $server_topology == independent && $netz_only != true ]]; then
@@ -92,7 +102,7 @@ if (( server_ack_every < 1 || server_ack_every > 64 ||
   echo 'server ACK policy must use ack-every 1..64 and delay 0..25000 us' >&2
   exit 2
 fi
-if [[ $server_topology != shared ]] &&
+if [[ $server_topology == independent ]] &&
    (( server_ack_every != 2 || server_ack_delay_us != 25000 )); then
   echo 'custom server ACK policy requires shared server topology' >&2
   exit 2
@@ -173,7 +183,14 @@ wait_for_ports() {
 
 run_pair() {
   local mode=$1 role_pair=$2 client_impl=$3 server_impl=$4 sender=$5 outer_run=$6
-  local pair_dir="$work/$mode-$role_pair-$sender-$outer_run"
+  local topology=${7:-$server_topology}
+  local effective_ack_every=2
+  local effective_ack_delay_us=25000
+  if [[ $topology == shared ]]; then
+    effective_ack_every=$server_ack_every
+    effective_ack_delay_us=$server_ack_delay_us
+  fi
+  local pair_dir="$work/$mode-$topology-$role_pair-$sender-$outer_run"
   mkdir -p "$pair_dir"
   local mode_connections=$connections mode_streams=$streams warmup=0 iterations=1
   if [[ $mode == echo ]]; then
@@ -189,11 +206,11 @@ run_pair() {
     "--timeout-ms=$timeout_ms"
   )
   if [[ $server_impl == netz ]]; then
-    common+=("--server-topology=$server_topology")
-    if [[ $server_topology == shared ]]; then
+    common+=("--server-topology=$topology")
+    if [[ $topology == shared ]]; then
       common+=("--shared-receive-batch=$shared_receive_batch")
-      common+=("--server-ack-every=$server_ack_every")
-      common+=("--server-ack-delay-us=$server_ack_delay_us")
+      common+=("--server-ack-every=$effective_ack_every")
+      common+=("--server-ack-delay-us=$effective_ack_delay_us")
     fi
   fi
   local go_common=()
@@ -237,10 +254,10 @@ run_pair() {
     "--connections=$mode_connections" "--warmup=$warmup" \
     "--iterations=$iterations" "--streams=$mode_streams" \
     "--bytes-per-stream=$aggregate_bytes" "--payload-bytes=$payload_bytes" \
-    "--sender=$sender" "--server-topology=$server_topology" \
+    "--sender=$sender" "--server-topology=$topology" \
     "--shared-receive-batch=$shared_receive_batch" \
-    "--server-ack-every=$server_ack_every" \
-    "--server-ack-delay-us=$server_ack_delay_us" \
+    "--server-ack-every=$effective_ack_every" \
+    "--server-ack-delay-us=$effective_ack_delay_us" \
     "--client-log=$pair_dir/client.log" \
     "--server-log=$pair_dir/server.log"
   grep '^record=result ' "$pair_dir/client.log" >>"$work/results.log"
@@ -255,35 +272,54 @@ pairs=(
   'quic-go-client+netz-server:quic-go:netz'
   'netz-client+netz-server:netz:netz'
 )
-if [[ $server_topology == shared || $netz_only == true ]]; then
+if [[ $server_topology != independent || $netz_only == true ]]; then
   pairs=('netz-client+netz-server:netz:netz')
 fi
-for ((outer_run = 1; outer_run <= samples; outer_run += 1)); do
-  if [[ $server_topology == shared || $netz_only == true ]]; then
-    order=(0)
-  elif (( outer_run % 2 == 1 )); then
-    order=(0 1 2 3)
-  else
-    order=(3 2 1 0)
-  fi
-  for index in "${order[@]}"; do
-    IFS=: read -r role_pair client_impl server_impl <<<"${pairs[index]}"
-    if [[ $modes == echo || $modes == both ]]; then
-      run_pair echo "$role_pair" "$client_impl" "$server_impl" client "$outer_run"
+if [[ $server_topology == compare ]]; then
+  for ((outer_run = 1; outer_run <= samples; outer_run += 1)); do
+    if (( outer_run % 2 == 1 )); then
+      trial_order=(
+        independent:client shared:client shared:server independent:server
+      )
+    else
+      trial_order=(
+        independent:server shared:server shared:client independent:client
+      )
     fi
-    if [[ $modes == aggregate || $modes == both ]]; then
-      if (( outer_run % 2 == 1 )); then
-        sender_order=(client server)
-      else
-        sender_order=(server client)
-      fi
-      for sender_role in "${sender_order[@]}"; do
-        run_pair aggregate "$role_pair" "$client_impl" "$server_impl" \
-          "$sender_role" "$outer_run"
-      done
-    fi
+    for trial in "${trial_order[@]}"; do
+      IFS=: read -r topology sender_role <<<"$trial"
+      run_pair aggregate netz-client+netz-server netz netz \
+        "$sender_role" "$outer_run" "$topology"
+    done
   done
-done
+elif [[ $server_topology != compare ]]; then
+  for ((outer_run = 1; outer_run <= samples; outer_run += 1)); do
+    if [[ $server_topology == shared || $netz_only == true ]]; then
+    order=(0)
+    elif (( outer_run % 2 == 1 )); then
+      order=(0 1 2 3)
+    else
+      order=(3 2 1 0)
+    fi
+    for index in "${order[@]}"; do
+      IFS=: read -r role_pair client_impl server_impl <<<"${pairs[index]}"
+      if [[ $modes == echo || $modes == both ]]; then
+        run_pair echo "$role_pair" "$client_impl" "$server_impl" client "$outer_run"
+      fi
+      if [[ $modes == aggregate || $modes == both ]]; then
+        if (( outer_run % 2 == 1 )); then
+          sender_order=(client server)
+        else
+          sender_order=(server client)
+        fi
+        for sender_role in "${sender_order[@]}"; do
+          run_pair aggregate "$role_pair" "$client_impl" "$server_impl" \
+            "$sender_role" "$outer_run"
+        done
+      fi
+    done
+  done
+fi
 if [[ $modes == echo || $modes == both ]]; then
   summary_args=(--mode=echo "--samples=$samples" "--log=$work/results.log")
   [[ $netz_only == true ]] && summary_args+=(--netz-only)
@@ -291,6 +327,15 @@ if [[ $modes == echo || $modes == both ]]; then
     "${summary_args[@]}"
 fi
 if [[ $modes == aggregate || $modes == both ]]; then
+  if [[ $server_topology == compare ]]; then
+    python3 "$repo_root/tools/interop/quic_persistent_benchmark_summary.py" \
+      --mode=aggregate --server-topology=compare --netz-only \
+      "--samples=$samples" "--log=$work/results.log" \
+      "--shared-receive-batch=$shared_receive_batch" \
+      "--server-ack-every=$server_ack_every" \
+      "--server-ack-delay-us=$server_ack_delay_us"
+    exit 0
+  fi
   summary_args=(
     --mode=aggregate "--samples=$samples" "--log=$work/results.log"
     "--server-topology=$server_topology"

@@ -1683,6 +1683,11 @@ facility, not a replacement for authenticated handshake-backed HTTP/3.
    the latest three-sample observation had overlapping ranges and median ratios
    of 1.026x for client-sender and 0.867x for server-sender, but was not
    topology-order-interleaved and therefore does not establish parity.
+   `bench-quic-persistent-external --mode=aggregate --netz-only
+   --server-topology=compare` now provides that missing fixed-binary, odd-sample
+   mirrored-order topology gate. It fixes both sides to ACK-every=2 and 25 ms,
+   then reports per-sender shared/independent median ratios after strict
+   completion validation.
    Complete-connection userspace UDP counters
    expose materially different wire shapes, but this host denies unprivileged
    capture. Equalize GRO, ACK/pacing, packetization, and application stream
