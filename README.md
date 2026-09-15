@@ -1099,6 +1099,10 @@ zio-backed `std.Io` and report that identity.
 The endpoint CID synchronization, pending-ready-index, timer scheduler, and
 receive-stream-ID benchmarks likewise create their UDP endpoint and monotonic
 clock through zio-backed `std.Io`; they perform no peer network traffic.
+The raw QUIC DATAGRAM throughput, 1-RTT send/receive, and UDP GSO/GRO
+benchmarks also use zio for endpoint I/O and timing. The DATAGRAM receiver is
+scheduled through `std.Io.async`, with cooperative `std.Io` sleeps replacing
+manual OS-thread yields.
 
 The aggregate `bench` step runs the current protocol microbenchmarks:
 

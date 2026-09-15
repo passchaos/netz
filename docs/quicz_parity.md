@@ -52,6 +52,10 @@ microbenchmarks obtain any required UDP endpoint and their monotonic clock from
 `netz.runtime.Backend` and report
 `zio-std-io`. Numeric comparisons captured before 2026-09-15 remain historical
 Threaded evidence unless a result is explicitly labeled as a zio-era rerun.
+The raw DATAGRAM, 1-RTT send/receive, and UDP GSO/GRO benchmarks also obtain all
+endpoint I/O and timing from zio-backed `std.Io`; the local DATAGRAM receiver
+runs through `std.Io.async`. Earlier results remain historical Threaded
+evidence until rerun under the documented fixed-binary protocol.
 
 ## Current `~/Work/quicz` comparison context
 

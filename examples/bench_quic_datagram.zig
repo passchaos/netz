@@ -11,9 +11,9 @@ const server_cid = [_]u8{ 0xaa, 0xbb, 0xcc, 0xdd };
 pub fn main() !void {
     const allocator = std.heap.smp_allocator;
 
-    var threaded = std.Io.Threaded.init(allocator, .{});
-    defer threaded.deinit();
-    const io = threaded.io();
+    var backend = try netz.runtime.Backend.init(allocator);
+    defer backend.deinit();
+    const io = backend.io();
 
     var client_endpoint = try netz.quic.runtime.Endpoint.bind(
         allocator,
@@ -106,9 +106,8 @@ pub fn main() !void {
         .done = &done,
         .bytes_received = &bytes_received,
     };
-    const server_thread = try std.Thread.spawn(.{}, ServerCtx.run, .{&server_ctx});
-    var joined = false;
-    defer if (!joined) server_thread.join();
+    var server_task = io.async(ServerCtx.run, .{&server_ctx});
+    defer server_task.cancel(io);
 
     var payload: [dgram_payload_size]u8 = undefined;
     @memset(&payload, 'D');
@@ -126,16 +125,17 @@ pub fn main() !void {
             sent += count;
             datagrams_sent += 1;
         }
-        std.Thread.yield() catch {};
-    }
-    while (bytes_received.load(.monotonic) < transfer_size) {
-        if (nowNs(io) > deadline_ns) return error.BenchmarkTimeout;
-        std.Thread.yield() catch {};
+        // DATAGRAM is intentionally unreliable, so keep only one bounded
+        // burst outstanding. This also gives a single-executor zio runtime a
+        // cooperative scheduling point without relying on an OS-thread yield.
+        while (bytes_received.load(.monotonic) < sent) {
+            if (nowNs(io) > deadline_ns) return error.BenchmarkTimeout;
+            try std.Io.sleep(io, .fromMicroseconds(1), .awake);
+        }
     }
     const elapsed = nowNs(io) -| start_ns;
     done.store(true, .release);
-    server_thread.join();
-    joined = true;
+    server_task.await(io);
     if (server_ctx.err) |err| return err;
 
     const received = bytes_received.load(.monotonic);
@@ -143,6 +143,7 @@ pub fn main() !void {
     const mib_per_second = mibPerSecond(received, elapsed);
     std.debug.print(
         \\QUIC DATAGRAM throughput benchmark
+        \\  io backend: zio-std-io
         \\  transfer bytes: {d}
         \\  payload bytes: {d}
         \\  datagrams sent: {d}

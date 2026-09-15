@@ -17,9 +17,9 @@ pub fn main(init: std.process.Init) !void {
         allocator,
     );
     const stream_fragments_per_packet = options.stream_fragments_per_packet;
-    var threaded = std.Io.Threaded.init(allocator, .{});
-    defer threaded.deinit();
-    const io = threaded.io();
+    var backend = try netz.runtime.Backend.init(allocator);
+    defer backend.deinit();
+    const io = backend.io();
 
     var receiver = try netz.quic.runtime.Endpoint.bind(
         allocator,
@@ -132,6 +132,7 @@ pub fn main(init: std.process.Init) !void {
     const ratio_x100 = ratioTimes100(sequential_ns, batch_ns);
     std.debug.print(
         \\QUIC 1-RTT send benchmark
+        \\  io backend: zio-std-io
         \\  iterations: {d}, packets/batch: {d}, STREAM descriptors/packet: {d}, payload bytes/packet: {d}
         \\  stateful batch GSO available after run: {}
         \\  stateful sequential: {d} ns/batch, {d} ns/packet

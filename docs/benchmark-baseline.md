@@ -11,6 +11,11 @@ Unless a section explicitly identifies a zio-era rerun, measurements captured
 before 2026-09-15 used `std.Io.Threaded` and remain historical evidence only.
 Current benchmark output names the backend so results from different execution
 models cannot be silently combined.
+The raw QUIC DATAGRAM throughput, 1-RTT send/receive, and UDP GSO/GRO
+benchmarks now obtain endpoint I/O and clocks from zio; the DATAGRAM receiver
+uses `std.Io.async` and cooperative `std.Io` sleeps. Numeric results in those
+sections that predate 2026-09-15 are historical Threaded evidence unless
+explicitly labeled as zio-era runs.
 As of 2026-09-15, the ACK-range, connection-router, PADDING parser,
 short-packet protection, receive sliding-window, session-ticket keyring,
 endpoint CID synchronization, pending-ready-index, timer scheduler, and

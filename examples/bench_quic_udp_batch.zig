@@ -10,9 +10,9 @@ const receive_iterations: usize = 5_000;
 
 pub fn main() !void {
     const allocator = std.heap.smp_allocator;
-    var threaded = std.Io.Threaded.init(allocator, .{});
-    defer threaded.deinit();
-    const io = threaded.io();
+    var backend = try netz.runtime.Backend.init(allocator);
+    defer backend.deinit();
+    const io = backend.io();
 
     var receiver = try netz.quic.runtime.Endpoint.bind(
         allocator,
@@ -59,6 +59,7 @@ pub fn main() !void {
 
     std.debug.print(
         \\QUIC UDP batch benchmark
+        \\  io backend: zio-std-io
         \\  send iterations: {d}, packets/batch: {d}, bytes/packet: {d}
         \\  GSO available after run: {}
         \\  UDP_SEGMENT: {d} ns/batch, {d} ns/packet
@@ -121,6 +122,7 @@ pub fn main() !void {
     const gro_receive_ratio_x100 = ratioTimes100(plain_receive_ns, gro_receive_ns);
     std.debug.print(
         \\QUIC UDP receive benchmark
+        \\  io backend: zio-std-io
         \\  receive iterations: {d}, packets/batch: {d}, bytes/packet: {d}
         \\  GRO available after run: {}
         \\  UDP_GRO:    {d} ns/batch, {d} ns/packet

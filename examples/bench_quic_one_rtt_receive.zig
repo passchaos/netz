@@ -19,9 +19,9 @@ const Options = struct {
 pub fn main(init: std.process.Init) !void {
     const allocator = std.heap.smp_allocator;
     const options = try parseOptions(init, allocator);
-    var threaded = std.Io.Threaded.init(allocator, .{});
-    defer threaded.deinit();
-    const io = threaded.io();
+    var backend = try netz.runtime.Backend.init(allocator);
+    defer backend.deinit();
+    const io = backend.io();
 
     const keys = netz.quic.protection.deriveAes128Keys([_]u8{0xb7} ** netz.quic.protection.secret_len);
     const client_cid = [_]u8{ 0xb1, 0xb2, 0xb3, 0xb4 };
@@ -50,7 +50,8 @@ pub fn main(init: std.process.Init) !void {
         );
         const total_packets = options.iterations * batch_size;
         std.debug.print(
-            "QUIC 1-RTT receive benchmark: mode={s} frame={s} warmup={d} iterations={d} " ++
+            "QUIC 1-RTT receive benchmark: io_backend=zio-std-io " ++
+                "mode={s} frame={s} warmup={d} iterations={d} " ++
                 "packets={d} ns/packet={d}\n",
             .{
                 @tagName(options.mode),
@@ -172,6 +173,7 @@ pub fn main(init: std.process.Init) !void {
         const service_ratio_x100 = ratioTimes100(gro, gro_service);
         std.debug.print(
             \\QUIC 1-RTT receive benchmark
+            \\  io backend: zio-std-io
             \\  frame: {s}, iterations: {d}, packets/batch: {d}, payload bytes/packet: {d}
             \\  GRO batch:    {d} ns/batch, {d} ns/packet
             \\  GRO state service: {d} ns/batch, {d} ns/packet
@@ -206,6 +208,7 @@ pub fn main(init: std.process.Init) !void {
     } else {
         std.debug.print(
             \\QUIC 1-RTT receive benchmark
+            \\  io backend: zio-std-io
             \\  frame: {s}, iterations: {d}, packets/batch: {d}, payload bytes/packet: {d}
             \\  GRO batch:    unavailable on this endpoint
             \\  GRO state service: unavailable on this endpoint
