@@ -17,11 +17,9 @@ pub fn main(init: std.process.Init) !void {
     }
 
     const allocator = init.gpa;
-    var threaded = std.Io.Threaded.init(allocator, .{
-        .async_limit = .unlimited,
-    });
-    defer threaded.deinit();
-    const io = threaded.io();
+    var backend = try netz.runtime.Backend.init(allocator);
+    defer backend.deinit();
+    const io = backend.io();
 
     var broker = try netz.mqtt.broker.Broker.init(allocator, io, .{
         .limits = .{
@@ -60,7 +58,8 @@ pub fn main(init: std.process.Init) !void {
         },
     };
     std.debug.print(
-        "netz MQTT mount interop server listening on {d} and {d}\n",
+        "netz MQTT mount interop server listening on {d} and {d} " ++
+            "client_io=python-socket server_io=zio-std-io\n",
         .{ global_port, mounted_port },
     );
     try broker.serveListeners(&listeners);

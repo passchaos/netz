@@ -10,6 +10,9 @@ import subprocess
 import sys
 
 
+RUNTIME = "client_io=python-socket server_io=zio-std-io"
+
+
 def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser()
     parser.add_argument("server", type=Path)
@@ -56,7 +59,8 @@ def main() -> None:
     )
     assert process.stdout is not None
     line = process.stdout.readline()
-    if "listening" not in line:
+    expected_ready = f"netz MQTT WS interop server listening {RUNTIME}"
+    if line.strip() != expected_ready:
         raise RuntimeError(f"netz Origin server failed to start: {line}")
 
     with socket.create_connection(("127.0.0.1", port), timeout=5) as denied:
@@ -100,7 +104,10 @@ def main() -> None:
         raise RuntimeError(
             f"netz Origin server exited {return_code}: " + process.stdout.read()
         )
-    print("Mosquitto-derived MQTT WebSocket Origin allowlist passed")
+    print(
+        "Mosquitto-derived MQTT WebSocket Origin allowlist passed "
+        + RUNTIME
+    )
 
 
 if __name__ == "__main__":

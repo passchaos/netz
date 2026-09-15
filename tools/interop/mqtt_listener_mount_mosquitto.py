@@ -10,6 +10,9 @@ import subprocess
 import sys
 
 
+RUNTIME = "client_io=python-socket server_io=zio-std-io"
+
+
 def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser()
     parser.add_argument("server", type=Path)
@@ -94,7 +97,11 @@ def run_case(server: Path, mqtt_packets, proto_ver: int) -> None:
     )
     assert process.stdout is not None
     line = process.stdout.readline()
-    if "listening" not in line:
+    expected_ready = (
+        f"netz MQTT mount interop server listening on {global_port} and "
+        f"{mounted_port} {RUNTIME}"
+    )
+    if line.strip() != expected_ready:
         raise RuntimeError(f"netz mount server failed to start: {line}")
 
     clients: list[socket.socket] = []
@@ -178,7 +185,8 @@ def main() -> None:
         run_case(args.server, mqtt_packets, proto_ver)
     print(
         "Mosquitto-derived MQTT listener mount-point interop passed: "
-        "v3.1.1 and v5 canonical ingress plus per-listener egress"
+        "v3.1.1 and v5 canonical ingress plus per-listener egress "
+        + RUNTIME
     )
 
 

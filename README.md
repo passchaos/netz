@@ -798,7 +798,11 @@ deadline. HTTP/1, HTTP/2, WSS, MQTT TLS, and MQTT WSS listeners forward the
 same server option, while HTTP/2 and identity-enabled MQTT/WSS clients expose
 the client-side option.
 WSS servers reuse the cleartext HTTP Upgrade/frame state machine and may expose
-verified TLS client chains. Event loops, congestion control,
+verified TLS client chains. The maintained MQTT mTLS, listener-mount, WS/WSS,
+PROXY-WS/WSS, and Origin interoperability processes obtain `std.Io` from
+`netz.runtime.Backend`; their external OpenSSL and Mosquitto-derived runners
+assert `server_io=zio-std-io` instead of accepting an unspecified backend.
+Event loops, congestion control,
 Richer high-level clients and servers can layer on the same byte-level pieces.
 
 The legacy HTTP/3 development runtime is intentionally labeled as cleartext; the
@@ -958,6 +962,14 @@ zig build interop-websocket-autobahn -Doptimize=ReleaseFast -- --tls
 # Without Docker, exercise the same adapter over real cleartext/TLS sockets,
 # including concurrent echoes, protocol-error isolation, and worker reuse.
 zig build interop-websocket-autobahn-smoke -Doptimize=ReleaseFast
+# Exercise MQTT mTLS against OpenSSL and MQTT 3.1.1/5 listener mounts,
+# WS/WSS plus PROXY v1/v2, and Origin policy with Mosquitto 5cd25465 helpers.
+# Every netz endpoint receives std.Io from zio and the runners assert its
+# zio-std-io runtime identity.
+zig build interop-mqtt-mtls-openssl -Doptimize=ReleaseFast
+zig build interop-mqtt-listener-mount-mosquitto -Doptimize=ReleaseFast
+zig build interop-mqtt-websocket-mosquitto -Doptimize=ReleaseFast
+zig build interop-mqtt-websocket-origin -Doptimize=ReleaseFast
 # Drive the browser WebSocket API from Chrome against netz. The gate checks
 # Origin rejection/acceptance, subprotocol and permessage-deflate negotiation,
 # compressed text, binary data, automatic Pong, and a clean Close handshake.

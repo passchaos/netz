@@ -27,11 +27,9 @@ pub fn main(init: std.process.Init) !void {
     const port = try std.fmt.parseInt(u16, args[3], 10);
 
     const allocator = init.gpa;
-    var threaded = std.Io.Threaded.init(allocator, .{
-        .async_limit = .unlimited,
-    });
-    defer threaded.deinit();
-    const io = threaded.io();
+    var backend = try netz.runtime.Backend.init(allocator);
+    defer backend.deinit();
+    const io = backend.io();
     const address = try std.Io.net.IpAddress.parse("127.0.0.1", port);
 
     switch (transport) {
@@ -56,7 +54,11 @@ pub fn main(init: std.process.Init) !void {
                 },
             );
             defer server.deinit();
-            std.debug.print("netz MQTT WS interop server listening\n", .{});
+            std.debug.print(
+                "netz MQTT WS interop server listening " ++
+                    "client_io=python-socket server_io=zio-std-io\n",
+                .{},
+            );
             if (transport == .origin) {
                 try std.testing.expectError(
                     error.InvalidOrigin,
@@ -100,7 +102,11 @@ pub fn main(init: std.process.Init) !void {
                 },
             );
             defer server.deinit();
-            std.debug.print("netz MQTT WSS interop server listening\n", .{});
+            std.debug.print(
+                "netz MQTT WSS interop server listening " ++
+                    "client_io=python-socket server_io=zio-std-io\n",
+                .{},
+            );
             try serveOne(
                 &server,
                 protocol,

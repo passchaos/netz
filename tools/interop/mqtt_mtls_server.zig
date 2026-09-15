@@ -24,9 +24,9 @@ pub fn main(init: std.process.Init) !void {
     const port = try std.fmt.parseInt(u16, args[2], 10);
 
     const allocator = init.gpa;
-    var threaded = std.Io.Threaded.init(allocator, .{});
-    defer threaded.deinit();
-    const io = threaded.io();
+    var backend = try netz.runtime.Backend.init(allocator);
+    defer backend.deinit();
+    const io = backend.io();
 
     var certificate_der: [tls_test.certificate_der_len]u8 = undefined;
     try std.base64.standard.Decoder.decode(
@@ -79,7 +79,11 @@ pub fn main(init: std.process.Init) !void {
         },
     );
     defer server.deinit();
-    std.debug.print("MQTT mTLS server listening\n", .{});
+    std.debug.print(
+        "MQTT mTLS server listening " ++
+            "client_io=openssl-sync server_io=zio-std-io\n",
+        .{},
+    );
 
     if (mode == .required_reject or mode == .required_untrusted) {
         _ = server.accept(.{ .protocol = .v5 }) catch |err| {
@@ -90,7 +94,8 @@ pub fn main(init: std.process.Init) !void {
             };
             if (err != expected) return err;
             std.debug.print(
-                "required mTLS rejected {s} client\n",
+                "required mTLS rejected {s} client " ++
+                    "client_io=openssl-sync server_io=zio-std-io\n",
                 .{switch (mode) {
                     .required_reject => "anonymous",
                     .required_untrusted => "untrusted",
@@ -122,7 +127,8 @@ pub fn main(init: std.process.Init) !void {
                 );
             }
             std.debug.print(
-                "required mTLS authenticated {s} peer certificate\n",
+                "required mTLS authenticated {s} peer certificate " ++
+                    "client_io=openssl-sync server_io=zio-std-io\n",
                 .{if (mode == .required_rsa) "RSA" else "ECDSA"},
             );
         },
@@ -131,7 +137,8 @@ pub fn main(init: std.process.Init) !void {
                 return error.UnexpectedPeerCertificate;
             }
             std.debug.print(
-                "optional mTLS accepted anonymous client\n",
+                "optional mTLS accepted anonymous client " ++
+                    "client_io=openssl-sync server_io=zio-std-io\n",
                 .{},
             );
         },

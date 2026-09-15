@@ -915,10 +915,16 @@ message, checks the exact PUBACK and PINGRESP, then verifies a netz-originated
 QoS 1 PUBLISH byte-for-byte before acknowledging it and disconnecting. The
 finite netz process validates the client ID, topic, complete payload pattern,
 and disconnect, so success cannot be inferred from the HTTP upgrade alone.
+The WS/WSS endpoint obtains its `std.Io` from `netz.runtime.Backend`; readiness
+and success records require `client_io=python-socket server_io=zio-std-io`. The
+same gate also runs MQTT 5 behind Mosquitto-shaped PROXY v1 WS and PROXY v2 WSS
+prefaces before the HTTP or TLS handshake.
 `zig build interop-mqtt-websocket-origin -Doptimize=ReleaseFast` separately
 ports Mosquitto's `13-websocket-bad-origin.py` request shape: a disallowed
 origin is closed before upgrade, then an allowed origin completes WebSocket and
-MQTT 5 negotiation on the same finite server process.
+MQTT 5 negotiation on the same finite zio-backed server process; its runner
+requires the same backend identity rather than accepting a generic listening
+message.
 
 The audited rumqtt client supports MQTT 3.1.1 and MQTT 5 over WebSocket, while
 the rumqttd server path still contains `TODO: Add support for V5 protocol with
@@ -1006,7 +1012,9 @@ rejection. The explicit
 `zig build interop-mqtt-mtls-openssl` gate additionally proves authenticated,
 ECDSA and RSA-PSS client identities, anonymous-rejected, untrusted-rejected,
 and optional-anonymous TLS 1.3 paths against OpenSSL's real
-client-certificate implementation.
+client-certificate implementation. The netz endpoint obtains `std.Io` from
+zio, and the gate requires every readiness/result record to identify
+`client_io=openssl-sync server_io=zio-std-io`.
 
 Run the steady-state 1 KiB QoS 1 baseline with:
 
@@ -1300,7 +1308,9 @@ Present, takeover DISCONNECT and missing-username refusal bytes.
 `zig build interop-mqtt-listener-mount-mosquitto -Doptimize=ReleaseFast`
 also ports Mosquitto's `10-listener-mount-point.py` process shape for both
 MQTT 3.1.1 and MQTT 5, verifying canonical ingress and destination-specific
-egress against Mosquitto's independent wire-packet helpers.
+egress against Mosquitto's independent wire-packet helpers. The two listeners
+and broker share one zio-backed `std.Io`; the runner rejects readiness records
+that do not contain `client_io=python-socket server_io=zio-std-io`.
 Raw MQTT and MQTT-over-WebSocket additionally expose Unix-domain server/client
 paths, including `PendingSource` integration with both Broker serving modes.
 They reuse the normal MQTT and WebSocket state machines while rejecting PROXY

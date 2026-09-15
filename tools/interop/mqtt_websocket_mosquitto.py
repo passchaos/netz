@@ -18,6 +18,7 @@ MIIBMDCB1qADAgECAgISNDAKBggqhkjOPQQDAjAUMRIwEAYDVQQDDAlsb2NhbGhvc3QwHhcNMjYwMTAx
 -----END CERTIFICATE-----
 """
 PAYLOAD = b"abcdefghijklmnopqrstuvwxyz0123456789" * 1821
+RUNTIME = "client_io=python-socket server_io=zio-std-io"
 
 
 def parse_args() -> argparse.Namespace:
@@ -93,7 +94,9 @@ def run_case(server: Path, websocket_wrapper, do_send, mqtt_packets, mqtt5_props
     )
     assert process.stdout is not None
     line = process.stdout.readline()
-    if "listening" not in line:
+    carrier = "WSS" if transport in ("wss", "proxy_wss") else "WS"
+    expected_ready = f"netz MQTT {carrier} interop server listening {RUNTIME}"
+    if line.strip() != expected_ready:
         raise RuntimeError(f"netz {transport} server failed to start: {line}")
 
     raw = socket.create_connection(("127.0.0.1", port), timeout=5)
@@ -209,7 +212,7 @@ def run_case(server: Path, websocket_wrapper, do_send, mqtt_packets, mqtt5_props
         f"Mosquitto-derived MQTT {transport.upper()} {protocol_name} "
         f"interop passed: {len(PAYLOAD)}-byte split PUBLISH, coalesced "
         "PING, preserved interleaved PUBLISH, bounded netz PING round trip, "
-        "bidirectional QoS 1"
+        f"bidirectional QoS 1 {RUNTIME}"
     )
 
 

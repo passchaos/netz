@@ -49,7 +49,9 @@ run_server() {
   "$server" "$mode" "$port" "$@" >"$log" 2>&1 &
   server_pid=$!
   for _ in $(seq 1 100); do
-    if grep -q 'MQTT mTLS server listening' "$log" 2>/dev/null; then
+    if grep -Fq \
+      'MQTT mTLS server listening client_io=openssl-sync server_io=zio-std-io' \
+      "$log" 2>/dev/null; then
       return
     fi
     if ! kill -0 "$server_pid" 2>/dev/null; then
@@ -90,21 +92,27 @@ run_server required "$port" "$work/required.log"
 run_client "$port" -cert "$work/cert.pem" -key "$work/key.pem"
 wait "$server_pid"
 server_pid=
-grep -q 'required mTLS authenticated ECDSA peer certificate' "$work/required.log"
+grep -Fq \
+  'required mTLS authenticated ECDSA peer certificate client_io=openssl-sync server_io=zio-std-io' \
+  "$work/required.log"
 
 port=$(free_port)
 run_server required_rsa "$port" "$work/rsa.log" "$work/rsa-public.der"
 run_client "$port" -cert "$work/rsa-cert.pem" -key "$work/rsa-key.pem"
 wait "$server_pid"
 server_pid=
-grep -q 'required mTLS authenticated RSA peer certificate' "$work/rsa.log"
+grep -Fq \
+  'required mTLS authenticated RSA peer certificate client_io=openssl-sync server_io=zio-std-io' \
+  "$work/rsa.log"
 
 port=$(free_port)
 run_server required_reject "$port" "$work/reject.log"
 run_client "$port"
 wait "$server_pid"
 server_pid=
-grep -q 'required mTLS rejected anonymous client' "$work/reject.log"
+grep -Fq \
+  'required mTLS rejected anonymous client client_io=openssl-sync server_io=zio-std-io' \
+  "$work/reject.log"
 
 port=$(free_port)
 run_server required_untrusted "$port" "$work/untrusted.log"
@@ -113,11 +121,17 @@ run_client "$port" \
   -key "$work/untrusted-key.pem"
 wait "$server_pid"
 server_pid=
-grep -q 'required mTLS rejected untrusted client' "$work/untrusted.log"
+grep -Fq \
+  'required mTLS rejected untrusted client client_io=openssl-sync server_io=zio-std-io' \
+  "$work/untrusted.log"
 
 port=$(free_port)
 run_server optional_anonymous "$port" "$work/optional.log"
 run_client "$port"
 wait "$server_pid"
 server_pid=
-grep -q 'optional mTLS accepted anonymous client' "$work/optional.log"
+grep -Fq \
+  'optional mTLS accepted anonymous client client_io=openssl-sync server_io=zio-std-io' \
+  "$work/optional.log"
+
+echo 'OpenSSL MQTT mTLS interop passed: required ECDSA/RSA, anonymous rejection, untrusted rejection, optional anonymous client_io=openssl-sync server_io=zio-std-io'
