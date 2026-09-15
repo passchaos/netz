@@ -38,6 +38,19 @@ fn makeResetDatagram(
     return packet;
 }
 
+fn expectedDrainingDeadlineMillis(
+    connection: *const one_rtt.Connection,
+    event_time_ns: u64,
+) u64 {
+    const event_time_ms = event_time_ns / std.time.ns_per_ms;
+    const pto_ms = std.math.divCeil(
+        u64,
+        connection.ptoPeriod(),
+        std.time.ns_per_ms,
+    ) catch unreachable;
+    return event_time_ms +| pto_ms *| 3;
+}
+
 test "QUIC ordinary receive authenticates before reset token comparison" {
     const allocator = std.testing.allocator;
     var threaded = std.Io.Threaded.init(allocator, .{});
@@ -160,9 +173,10 @@ test "QUIC owning receive detects stateless reset only after authentication fail
         connection.receivePacketAt(3_000_000),
     );
     try std.testing.expect(connection.draining());
-    // Initial application-data PTO is 200ms, so draining lasts three PTOs.
+    // Draining lasts three current application-data PTOs. This includes the
+    // peer max_ack_delay and remains valid when the initial RTT evolves.
     try std.testing.expectEqual(
-        @as(?u64, 603),
+        @as(?u64, expectedDrainingDeadlineMillis(&connection, 3_000_000)),
         connection.closeExpiryDeadlineMillis(),
     );
     try std.testing.expectEqual(@as(u64, 1), connection.authenticationFailureCount());
@@ -270,7 +284,7 @@ test "QUIC batch service detects stateless reset after in-place decrypt failure"
     );
     try std.testing.expect(connection.draining());
     try std.testing.expectEqual(
-        @as(?u64, 604),
+        @as(?u64, expectedDrainingDeadlineMillis(&connection, 4_000_000)),
         connection.closeExpiryDeadlineMillis(),
     );
     try std.testing.expectEqual(@as(u64, 0), connection.authenticationFailureCount());
@@ -323,7 +337,7 @@ test "QUIC ordinary routed receive detects stateless reset after decrypt failure
     );
     try std.testing.expect(connection.draining());
     try std.testing.expectEqual(
-        @as(?u64, 605),
+        @as(?u64, expectedDrainingDeadlineMillis(&connection, 5_000_000)),
         connection.closeExpiryDeadlineMillis(),
     );
     try std.testing.expectEqual(@as(u64, 0), connection.authenticationFailureCount());

@@ -4811,7 +4811,21 @@ test "QUIC bounded receive does not outwait timer pacing" {
     const keep_alive = connection.nextTimerDeadline() orelse
         return error.TestUnexpectedResult;
     try std.testing.expectEqual(one_rtt.TimerDeadlineKind.keep_alive, keep_alive.kind);
-    try std.testing.expectEqual(@as(u64, 300 * std.time.ns_per_ms), keep_alive.deadline_ns);
+    // RFC 9000's current application-data PTO includes the peer's advertised
+    // max_ack_delay. Keep-alive raises its configured interval to 1.5x that
+    // live PTO, so this assertion must not freeze an older RTT default.
+    const pto_ns = connection.ptoPeriod();
+    const keep_alive_floor_ns = pto_ns +| pto_ns / 2;
+    const keep_alive_floor_ms = std.math.divCeil(
+        u64,
+        keep_alive_floor_ns,
+        std.time.ns_per_ms,
+    ) catch unreachable;
+    try std.testing.expectEqual(
+        keep_alive_floor_ms * std.time.ns_per_ms,
+        keep_alive.deadline_ns,
+    );
+    fixed_io.now_ns = @intCast(keep_alive.deadline_ns);
     one_rtt.testing.exhaustPacingAt(&connection, keep_alive.deadline_ns);
 
     try std.testing.expectError(

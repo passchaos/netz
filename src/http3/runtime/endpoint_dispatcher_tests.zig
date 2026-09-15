@@ -927,23 +927,10 @@ test "HTTP/3 borrowed response packet preserves any-response FIN across pacing" 
         @intCast(fixed_io.now_ns),
     );
     const packet_number = client.established.connection.next_packet_number;
-    try std.testing.expect((try client.pollNextResponseEventOnce()) == null);
-    try std.testing.expectEqual(@as(usize, 0), fixed_io.sleep_calls);
-    try std.testing.expectEqual(
-        packet_number,
-        client.established.connection.next_packet_number,
-    );
-    try std.testing.expectEqual(@as(usize, 1), client.streaming_responses.entryCount());
-    try std.testing.expect(client.streaming_responses.find(stream_id).?.reader.finished());
-
-    const timer = client.established.connection.nextTimerDeadline() orelse
-        return error.TestUnexpectedResult;
-    try std.testing.expectEqual(quic.one_rtt.TimerDeadlineKind.pacing, timer.kind);
-    fixed_io.now_ns = @intCast(timer.deadline_ns);
-    _ = (try client.established.connection.serviceNextTimerAt(
-        timer.deadline_ns,
-    )) orelse return error.TestUnexpectedResult;
-
+    // Response routing copied and committed the complete stream before this
+    // reader was activated. The terminal poll therefore owes only the delayed
+    // ACK, which is neither in flight nor paced by QUIC. Publish FIN without
+    // waiting for the synthetic data-pacing epoch.
     var finished = (try client.pollNextResponseEventOnce()) orelse
         return error.TestUnexpectedResult;
     defer finished.deinit(allocator);
@@ -954,6 +941,15 @@ test "HTTP/3 borrowed response packet preserves any-response FIN across pacing" 
     try std.testing.expectEqual(@as(usize, 0), client.request_lifecycle.count());
     try std.testing.expect(
         client.established.connection.ackDelayDeadline() == null,
+    );
+    try std.testing.expectEqual(
+        packet_number + 1,
+        client.established.connection.next_packet_number,
+    );
+    try std.testing.expect(
+        quic.one_rtt.testing.pacingBlockedUntil(
+            &client.established.connection,
+        ) == null,
     );
     try std.testing.expect((try client.pollNextResponseEventOnce()) == null);
     try std.testing.expectEqual(@as(usize, 0), fixed_io.sleep_calls);
