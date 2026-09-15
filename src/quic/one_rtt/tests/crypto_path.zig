@@ -1143,7 +1143,7 @@ test "QUIC 1-RTT anti-amplification credit services expired PTO" {
     // Consume the tiny remaining budget so the server is blocked exactly when
     // another datagram arrives with enough credit to service the already-due PTO.
     server.peer_address_bytes_sent = 27;
-    const serviced = (try server.recordPeerAddressDatagramReceived(210_000_000, 10)) orelse return error.TestUnexpectedResult;
+    const serviced = (try server.recordPeerAddressDatagramReceived(335_000_000, 10)) orelse return error.TestUnexpectedResult;
     try std.testing.expectEqual(one_rtt.LossDetectionTimerKind.pto, serviced.kind);
     try std.testing.expectEqual(@as(u8, 1), server.ptoBackoffCount());
     try std.testing.expect(server.antiAmplificationLimitRemaining().? < 30);

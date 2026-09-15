@@ -3096,6 +3096,39 @@ the ranges overlap. This is protocol/recovery evidence with no throughput or
 latency improvement claim. Every arm deterministically dropped 6/126
 datagrams, reported six transport losses, and verified 1,048,576 bytes.
 
+ACK_FREQUENCY requests can now also select an explicit Requested Max Ack Delay
+instead of inheriting the peer transport parameter. This follows Quinn's PTO
+safety rule: a larger request widens application-data PTO only after the packet
+is socket-visible; while several requests are unconfirmed, PTO retains their
+maximum possible delay; an ACK covering any copy of the newest recovery group
+commits that value and may then lower the bound. RTT ACK-delay capping, idle
+minimums, keep-alive floors, stateless-reset draining, persistent-congestion
+thresholds, PTO jitter, and path resets use the same effective value. The
+no-sample application-data PTO now also follows RFC 9002/Quinn's initial RTT +
+4*rttvar + max_ack_delay formula: with the 100-ms initial RTT and 25-ms peer
+delay it is 325 ms, rather than the former under-estimated 200 ms. Direct tests
+cover 25-to-80-ms widening, an unconfirmed 10-ms downshift that remains at
+80 ms, confirmation down to 10 ms, ACK of a retransmission copy, explicit
+packet-number acknowledgement, invalid values below `min_ack_delay` or at the
+2^14-ms limit, and socket failure leaving the original 25-ms PTO unchanged.
+The shared benchmark leaves the request override null, so its established ACK/4
+policy is unchanged; a post-change two-connection upload/download smoke verified
+exact bytes, checksum, connection completion, and ACK/4. A new 4-MiB 5%-loss run
+again dropped 25/504 datagrams, reported 25 transport losses, and verified all
+bytes.
+
+Five final-source, fixed-binary, order-interleaved 1-MiB pairs at 5% seeded
+loss and 100 us configured RTT compared parent `6cd4611c`
+(`aa13d564246e92a7a0c75d7fa25e35843be842e039c4d561ce47add5f058e12b`)
+with candidate
+`e1a73a652292414199c6b1277fbea2526785fbdfbc7b79f66f4a0f067cf8fb2a`.
+Parent elapsed times were 9.409, 9.552, 9.760, 10.740, and 9.332 ms; candidate
+times were 10.490, 9.699, 9.256, 9.276, and 9.390 ms. The candidate won 2/5
+pairs; independently sorted medians were 9.552 and 9.390 ms and ranges overlap.
+Every arm deterministically dropped 6/126 datagrams, reported six transport
+losses, and verified 1,048,576 bytes. This step is retained for protocol and
+recovery correctness, with no throughput or latency improvement claim.
+
 ### Raw QUIC mixed FIN/reset recovery versus quic-go
 
 The separate process gate below exercises terminal stream churn instead of

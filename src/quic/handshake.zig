@@ -5002,7 +5002,9 @@ test "QUIC handshake one-RTT config propagates local ACK policy" {
     try std.testing.expectEqual(@as(u64, 10_000), clamped.local_max_ack_delay_us);
     try std.testing.expect(defaults.automatic_ack_frequency_request == null);
     const negotiated = (OneRttConfig{
-        .ack_frequency_request = .{},
+        .ack_frequency_request = .{
+            .request_max_ack_delay_us = 50_000,
+        },
     }).apply(
         .version_1,
         .{ .ip4 = .loopback(443) },
@@ -5018,6 +5020,11 @@ test "QUIC handshake one-RTT config propagates local ACK policy" {
         @as(u64, 3),
         negotiated.automatic_ack_frequency_request.?
             .ack_eliciting_threshold,
+    );
+    try std.testing.expectEqual(
+        @as(?u64, 50_000),
+        negotiated.automatic_ack_frequency_request.?
+            .request_max_ack_delay_us,
     );
     const disabled_request = (OneRttConfig{
         .ack_frequency_request = null,

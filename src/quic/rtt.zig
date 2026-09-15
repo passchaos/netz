@@ -76,9 +76,25 @@ pub const Stats = struct {
     }
 
     pub fn pto(self: Stats, include_max_ack_delay: bool) u64 {
-        if (!self.has_measurement) return 2 * default_initial_rtt_ns;
+        return self.ptoWithMaxAckDelay(if (include_max_ack_delay)
+            self.max_ack_delay
+        else
+            0);
+    }
+
+    pub fn ptoWithMaxAckDelay(
+        self: Stats,
+        max_ack_delay_ns: u64,
+    ) u64 {
+        if (!self.has_measurement) {
+            return std.math.add(
+                u64,
+                3 * default_initial_rtt_ns,
+                max_ack_delay_ns,
+            ) catch max_pto_ns;
+        }
         const base = self.smoothed_rtt + @max(4 * self.rtt_var, timer_granularity_ns);
-        return base + if (include_max_ack_delay) self.max_ack_delay else 0;
+        return std.math.add(u64, base, max_ack_delay_ns) catch max_pto_ns;
     }
 
     pub fn lossDelay(self: Stats) u64 {
@@ -89,6 +105,17 @@ pub const Stats = struct {
 
     pub fn persistentCongestionThreshold(self: Stats) u64 {
         return std.math.mul(u64, self.pto(true), default_persistent_congestion_threshold) catch std.math.maxInt(u64);
+    }
+
+    pub fn persistentCongestionThresholdWithMaxAckDelay(
+        self: Stats,
+        max_ack_delay_ns: u64,
+    ) u64 {
+        return std.math.mul(
+            u64,
+            self.ptoWithMaxAckDelay(max_ack_delay_ns),
+            default_persistent_congestion_threshold,
+        ) catch std.math.maxInt(u64);
     }
 
     pub fn onPersistentCongestion(self: *Stats) void {
@@ -123,7 +150,14 @@ pub fn encodeAckDelayNanos(ack_delay_nanos: u64, ack_delay_exponent: u64) !u64 {
 test "QUIC RTT estimator initializes and computes PTO" {
     var stats = Stats{};
     try std.testing.expect(!stats.has_measurement);
-    try std.testing.expectEqual(@as(u64, 2 * default_initial_rtt_ns), stats.pto(true));
+    try std.testing.expectEqual(
+        @as(u64, 3 * default_initial_rtt_ns + default_max_ack_delay_ns),
+        stats.pto(true),
+    );
+    try std.testing.expectEqual(
+        @as(u64, 3 * default_initial_rtt_ns),
+        stats.pto(false),
+    );
     try std.testing.expectEqual(default_initial_rtt_ns, stats.smoothedOrInitial());
 
     stats.update(100_000_000, 0, false);
@@ -133,6 +167,21 @@ test "QUIC RTT estimator initializes and computes PTO" {
     try std.testing.expectEqual(@as(u64, 50_000_000), stats.rtt_var);
     try std.testing.expectEqual(@as(u64, 325_000_000), stats.pto(true));
     try std.testing.expectEqual(@as(u64, 300_000_000), stats.pto(false));
+}
+
+test "QUIC RTT estimator accepts a caller-supplied PTO ACK delay" {
+    var stats = Stats.init(25_000_000);
+    stats.updateAt(10_000_000, 0, true, 0);
+    try std.testing.expectEqual(@as(u64, 30_000_000), stats.pto(false));
+    try std.testing.expectEqual(@as(u64, 55_000_000), stats.pto(true));
+    try std.testing.expectEqual(
+        @as(u64, 110_000_000),
+        stats.ptoWithMaxAckDelay(80_000_000),
+    );
+    try std.testing.expectEqual(
+        @as(u64, 330_000_000),
+        stats.persistentCongestionThresholdWithMaxAckDelay(80_000_000),
+    );
 }
 
 test "QUIC RTT estimator applies capped ACK delay after handshake" {

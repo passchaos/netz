@@ -3582,14 +3582,15 @@ test "QUIC 1-RTT idle timeout is raised to three application PTOs" {
     });
     defer connection.deinit();
 
-    // With no RTT sample the 1-RTT PTO is 200 ms. RFC 9000 requires a 600 ms
-    // lower bound rather than expiring at the negotiated 1 ms preference.
-    try std.testing.expectEqual(@as(u64, 200_000_000), connection.ptoPeriod());
-    try std.testing.expectEqual(@as(?u64, 600), connection.effectiveIdleTimeoutMillis());
+    // With no RTT sample the 1-RTT PTO is the 300-ms initial base plus the
+    // peer's default 25-ms max ACK delay. RFC 9000 requires a 975-ms lower
+    // bound rather than expiring at the negotiated 1-ms preference.
+    try std.testing.expectEqual(@as(u64, 325_000_000), connection.ptoPeriod());
+    try std.testing.expectEqual(@as(?u64, 975), connection.effectiveIdleTimeoutMillis());
     connection.markActivity(10);
-    try std.testing.expectEqual(@as(?u64, 610), connection.idleTimeoutDeadlineMillis());
-    try std.testing.expect(!connection.checkIdleTimeout(609));
-    try std.testing.expect(connection.checkIdleTimeout(610));
+    try std.testing.expectEqual(@as(?u64, 985), connection.idleTimeoutDeadlineMillis());
+    try std.testing.expect(!connection.checkIdleTimeout(984));
+    try std.testing.expect(connection.checkIdleTimeout(985));
 }
 
 test "QUIC 1-RTT idle negotiation ignores a disabled peer value" {
@@ -3660,7 +3661,7 @@ test "QUIC 1-RTT PTO jitter validates configuration and keeps armed deadline sta
     const first_epoch = connection.pto_jitter_state.epoch;
     try std.testing.expectEqual(first, connection.ptoDeadline().?);
     try std.testing.expectEqual(first, connection.nextTimerDeadline().?.deadline_ns);
-    try std.testing.expect(first >= 160_000_000 and first <= 260_000_000);
+    try std.testing.expect(first >= 253_750_000 and first <= 416_250_000);
 
     // A later packet at the exact same timestamp is nevertheless a distinct
     // timer-arm event. The explicit epoch avoids relying on clock resolution.
@@ -3669,7 +3670,7 @@ test "QUIC 1-RTT PTO jitter validates configuration and keeps armed deadline sta
     const rearmed = connection.ptoDeadline() orelse
         return error.TestUnexpectedResult;
     try std.testing.expectEqual(rearmed, connection.ptoDeadline().?);
-    try std.testing.expect(rearmed >= 160_000_000 and rearmed <= 260_000_000);
+    try std.testing.expect(rearmed >= 253_750_000 and rearmed <= 416_250_000);
 }
 
 test "QUIC 1-RTT idle floor follows current RTT base PTO" {
@@ -3783,8 +3784,8 @@ test "QUIC 1-RTT keep-alive sends one PING after peer silence" {
     defer server.deinit();
 
     try std.testing.expect(server.keepAliveEnabled());
-    // 900ms is capped to half of the 1000ms idle timeout. The initial PTO
-    // floor is 300ms, so the idle-timeout cap remains the effective interval.
+    // 900ms is capped to half of the 1000ms idle timeout. The initial 325-ms
+    // application PTO yields a 487.5-ms floor, so the cap remains effective.
     try std.testing.expectEqual(@as(?u64, 500), server.keepAliveIntervalMillis());
     try std.testing.expectEqual(@as(?u64, null), server.keepAliveDeadlineMillis());
 
@@ -3878,7 +3879,7 @@ test "QUIC 1-RTT next timer deadline selects earliest work" {
     try connection.sendAt(&.{.{ .ping = {} }}, 100_000_000);
     const pto = connection.nextTimerDeadline() orelse return error.TestUnexpectedResult;
     try std.testing.expectEqual(one_rtt.TimerDeadlineKind.pto, pto.kind);
-    try std.testing.expectEqual(@as(u64, 300_000_000), pto.deadline_ns);
+    try std.testing.expectEqual(@as(u64, 425_000_000), pto.deadline_ns);
 
     try connection.queuePathChallenge([_]u8{1} ** 8);
     try connection.sendPendingPathChallengeAt(10, 20);

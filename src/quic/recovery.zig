@@ -279,6 +279,21 @@ pub const Queue = struct {
         return false;
     }
 
+    /// Return whether this already-validated ACK covers any packet-number copy
+    /// of one recovery group. ACK_FREQUENCY uses this before retiring the group
+    /// so the acknowledged request can update the sender's PTO model.
+    pub fn ackAcknowledgesGroup(
+        self: *const Queue,
+        group_id: u64,
+        ack: quic.AckFrame,
+    ) bool {
+        for (self.pending.items) |*entry| {
+            if (entry.group_id != group_id) continue;
+            return entryAcked(entry, ack);
+        }
+        return false;
+    }
+
     /// Whether retransmittable STREAM data, including FIN, is still awaiting
     /// acknowledgement for `stream_id`. This is used only at stream-close
     /// boundaries; keeping recovery payloads encoded avoids per-packet stream
@@ -804,6 +819,26 @@ test "QUIC recovery queue groups retransmissions and ACKs any copy" {
     try std.testing.expectEqual(@as(usize, 2), queue.pending.items[0].packetCount());
     try std.testing.expectEqual(@as(u64, 0), queue.groupIdForPacketNumber(0).?);
     try std.testing.expectEqual(@as(u64, 0), queue.groupIdForPacketNumber(4).?);
+    try std.testing.expect(queue.ackAcknowledgesGroup(0, .{
+        .largest_acknowledged = 4,
+        .ack_delay = 0,
+        .first_ack_range = 0,
+    }));
+    try std.testing.expect(queue.ackAcknowledgesGroup(0, .{
+        .largest_acknowledged = 0,
+        .ack_delay = 0,
+        .first_ack_range = 0,
+    }));
+    try std.testing.expect(!queue.ackAcknowledgesGroup(0, .{
+        .largest_acknowledged = 3,
+        .ack_delay = 0,
+        .first_ack_range = 0,
+    }));
+    try std.testing.expect(!queue.ackAcknowledgesGroup(99, .{
+        .largest_acknowledged = 4,
+        .ack_delay = 0,
+        .first_ack_range = 0,
+    }));
     const stats = queue.stats();
     try std.testing.expectEqual(@as(usize, 1), stats.pending_groups);
     try std.testing.expectEqual(@as(usize, 2), stats.packet_number_copies);

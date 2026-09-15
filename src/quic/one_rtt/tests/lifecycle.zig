@@ -1768,7 +1768,7 @@ test "QUIC 1-RTT PTO service sends up to two probes" {
     };
     defer client.endpoint.io = observed_send.delegate;
 
-    const serviced = (try client.serviceLossDetectionTimer(210_000_000)) orelse return error.TestUnexpectedResult;
+    const serviced = (try client.serviceLossDetectionTimer(335_000_000)) orelse return error.TestUnexpectedResult;
     try std.testing.expectEqual(one_rtt.LossDetectionTimerKind.pto, serviced.kind);
     try std.testing.expectEqual(@as(usize, 1), observed_send.calls);
     if (client.endpoint.gsoSendEnabled()) {

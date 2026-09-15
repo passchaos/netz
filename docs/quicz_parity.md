@@ -1177,7 +1177,19 @@ full-MTU reliable payload omits the optional byte instead of losing data. A
 real 4-MiB 5%-loss run dropped 25/504 datagrams and verified all bytes. Five
 fixed-binary 1-MiB/100-us pairs had 3/5 candidate wins but overlapping ranges
 and a slightly slower independently sorted median, so this is a recovery
-correctness result rather than a speed claim.
+correctness result rather than a speed claim. Callers can additionally select
+an explicit Requested Max Ack Delay. The sender includes any socket-visible but
+unconfirmed increase in PTO immediately, retains the maximum across successive
+requests, and commits a decrease only when an ACK covers the newest request's
+recovery group or any retransmission copy. RTT adjustment, PTO jitter, idle and
+keep-alive bounds, persistent congestion, path reset, and close/drain timing use
+the same effective delay. The no-sample application-data PTO now includes the
+full RFC 9002 initial RTT + 4*rttvar + max_ack_delay (325 ms at defaults) rather
+than the previous 200-ms underestimate. Socket failure leaves the prior PTO
+unchanged, and the shared benchmark's null delay override preserves its ACK/4
+policy. A final-source five-pair 5%-loss/100-us check won 2/5; medians moved
+from 9.552 to 9.390 ms but the ranges overlap, so no performance gain is
+claimed.
 The dispatcher now also mirrors each connection's authoritative fixed-capacity
 local CID pool. Initial IDs are installed at registration, dispatcher-mediated
 NEW_CONNECTION_ID sends preflight endpoint-wide collisions before changing

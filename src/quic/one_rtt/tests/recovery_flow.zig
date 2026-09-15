@@ -1846,14 +1846,14 @@ test "QUIC 1-RTT connection exposes PTO backoff deadlines and services timer" {
     const ping = [_]quic.Frame{.{ .ping = {} }};
     try client.sendAt(&ping, 10_000_000);
     try std.testing.expectEqual(@as(u8, 0), client.ptoBackoffCount());
-    try std.testing.expectEqual(@as(u64, 200_000_000), client.ptoPeriod());
-    try std.testing.expectEqual(@as(?u64, 210_000_000), client.ptoDeadline());
+    try std.testing.expectEqual(@as(u64, 325_000_000), client.ptoPeriod());
+    try std.testing.expectEqual(@as(?u64, 335_000_000), client.ptoDeadline());
     const first_deadline = client.lossDetectionTimerDeadline() orelse return error.TestUnexpectedResult;
     try std.testing.expectEqual(one_rtt.LossDetectionTimerKind.pto, first_deadline.kind);
-    try std.testing.expectEqual(@as(u64, 210_000_000), first_deadline.deadline_ns);
+    try std.testing.expectEqual(@as(u64, 335_000_000), first_deadline.deadline_ns);
 
-    try std.testing.expectEqual(@as(?one_rtt.LossDetectionTimerDeadline, null), try client.serviceLossDetectionTimer(209_999_999));
-    const serviced = (try client.serviceLossDetectionTimer(210_000_000)) orelse return error.TestUnexpectedResult;
+    try std.testing.expectEqual(@as(?one_rtt.LossDetectionTimerDeadline, null), try client.serviceLossDetectionTimer(334_999_999));
+    const serviced = (try client.serviceLossDetectionTimer(335_000_000)) orelse return error.TestUnexpectedResult;
     try std.testing.expectEqual(one_rtt.LossDetectionTimerKind.pto, serviced.kind);
     try std.testing.expectEqual(@as(u8, 1), client.ptoBackoffCount());
 
@@ -1863,7 +1863,7 @@ test "QUIC 1-RTT connection exposes PTO backoff deadlines and services timer" {
     var probe = try server.receivePacket();
     defer probe.deinit(allocator);
     try std.testing.expectEqual(@as(u64, 1), probe.packet.packet_number);
-    try std.testing.expectEqual(@as(?u64, 610_000_000), client.ptoDeadline());
+    try std.testing.expectEqual(@as(?u64, 985_000_000), client.ptoDeadline());
     client.pto_count = 100;
     try std.testing.expectEqual(quic.rtt.max_pto_ns, client.ptoPeriod());
 
@@ -1966,8 +1966,8 @@ test "QUIC 1-RTT jitter remains stable across PTO backoff and ACK rearm" {
     try std.testing.expectEqual(@as(u8, 1), client.ptoBackoffCount());
     try std.testing.expect(client.ptoJitterEpoch() > first_epoch);
     const backed_off = client.jitteredPtoPeriod();
-    try std.testing.expect(backed_off >= 300_000_000);
-    try std.testing.expect(backed_off <= 500_000_000);
+    try std.testing.expect(backed_off >= 487_500_000);
+    try std.testing.expect(backed_off <= 812_500_000);
     try std.testing.expectEqual(client.ptoDeadline().?, client.ptoDeadline().?);
 
     var original = try server.receivePacket();
@@ -7723,6 +7723,202 @@ test "QUIC 1-RTT appends and retransmits negotiated ACK_FREQUENCY" {
     try std.testing.expectEqual(@as(u64, 4), server.ackFrequencyThreshold());
 }
 
+test "QUIC ACK_FREQUENCY custom delay conservatively updates PTO" {
+    const allocator = std.testing.allocator;
+    var threaded = std.Io.Threaded.init(allocator, .{});
+    defer threaded.deinit();
+    const io = threaded.io();
+
+    var receiver = try quic.runtime.Endpoint.bind(
+        allocator,
+        io,
+        .{ .ip4 = .loopback(0) },
+        .{ .max_datagram_size = 4096 },
+    );
+    defer receiver.deinit();
+    var sender = try quic.runtime.Endpoint.bind(
+        allocator,
+        io,
+        .{ .ip4 = .loopback(0) },
+        .{ .max_datagram_size = 4096 },
+    );
+    defer sender.deinit();
+    const keys = quic.protection.deriveAes128Keys(
+        [_]u8{0x95} ** quic.protection.secret_len,
+    );
+    var client = try one_rtt.Connection.init(&sender, .{
+        .peer = receiver.address(),
+        .receive_keys = keys,
+        .send_keys = keys,
+        .local_connection_id = "delay-client",
+        .peer_connection_id = "delay-server",
+        .enable_pacing = false,
+        .enable_ack_frequency = true,
+        .peer_min_ack_delay = 1_000,
+        .peer_max_ack_delay_ms = 25,
+        .automatic_ack_frequency_request = .{
+            .request_max_ack_delay_us = 80_000,
+        },
+        .tls_handshake_complete = true,
+    });
+    defer client.deinit();
+    var server = try one_rtt.Connection.init(&receiver, .{
+        .peer = sender.address(),
+        .receive_keys = keys,
+        .send_keys = keys,
+        .local_connection_id = "delay-server",
+        .peer_connection_id = "delay-client",
+        .local_endpoint = .server,
+        .enable_pacing = false,
+        .enable_ack_frequency = true,
+        .local_min_ack_delay = 1_000,
+    });
+    defer server.deinit();
+
+    client.rtt_stats.updateAt(10_000_000, 0, true, 0);
+    try std.testing.expectEqual(
+        @as(u64, 25_000_000),
+        client.peerMaxAckDelayForPtoNanos(),
+    );
+    try std.testing.expectEqual(@as(u64, 55_000_000), client.ptoPeriod());
+    try client.sendAt(&.{.{ .ping = {} }}, 1_000);
+    try std.testing.expectEqual(
+        @as(u64, 80_000_000),
+        client.peerMaxAckDelayForPtoNanos(),
+    );
+    try std.testing.expectEqual(@as(u64, 110_000_000), client.ptoPeriod());
+    var request = try server.receivePacket();
+    defer request.deinit(allocator);
+    try std.testing.expectEqual(
+        @as(u64, 80_000),
+        request.frames[1].ack_frequency.request_max_ack_delay,
+    );
+
+    // The peer may already use 80 ms, so a later 10-ms request cannot lower
+    // the PTO bound until that newer recovery group is acknowledged.
+    try std.testing.expectEqual(
+        @as(u64, 1),
+        try client.sendAckFrequency(3, 10_000, 3),
+    );
+    try std.testing.expectEqual(
+        @as(u64, 80_000_000),
+        client.peerMaxAckDelayForPtoNanos(),
+    );
+    try std.testing.expectEqual(@as(u64, 110_000_000), client.ptoPeriod());
+    var lower = try server.receivePacket();
+    defer lower.deinit(allocator);
+    try one_rtt.testing.applyReceivedFrames(
+        &client,
+        0,
+        &.{.{ .ack = .{
+            .largest_acknowledged = 0,
+            .ack_delay = 0,
+            .first_ack_range = 0,
+        } }},
+        null,
+        .not_ect,
+    );
+    try std.testing.expectEqual(
+        @as(u64, 80_000_000),
+        client.peerMaxAckDelayForPtoNanos(),
+    );
+    try std.testing.expect(client.latest_in_flight_ack_frequency != null);
+    try one_rtt.testing.applyReceivedFrames(
+        &client,
+        1,
+        &.{.{ .ack = .{
+            .largest_acknowledged = 1,
+            .ack_delay = 0,
+            .first_ack_range = 0,
+        } }},
+        null,
+        .not_ect,
+    );
+    try std.testing.expectEqual(
+        @as(u64, 10_000_000),
+        client.peerMaxAckDelayForPtoNanos(),
+    );
+    try std.testing.expectEqual(@as(u64, 40_000_000), client.ptoPeriod());
+    try std.testing.expect(client.latest_in_flight_ack_frequency == null);
+    try std.testing.expect(client.unconfirmed_max_ack_delay_us == null);
+}
+
+test "QUIC ACK_FREQUENCY retransmission copy commits requested PTO delay" {
+    const allocator = std.testing.allocator;
+    var threaded = std.Io.Threaded.init(allocator, .{});
+    defer threaded.deinit();
+    const io = threaded.io();
+    var receiver = try quic.runtime.Endpoint.bind(
+        allocator,
+        io,
+        .{ .ip4 = .loopback(0) },
+        .{ .max_datagram_size = 4096 },
+    );
+    defer receiver.deinit();
+    var sender = try quic.runtime.Endpoint.bind(
+        allocator,
+        io,
+        .{ .ip4 = .loopback(0) },
+        .{ .max_datagram_size = 4096 },
+    );
+    defer sender.deinit();
+    const keys = quic.protection.deriveAes128Keys(
+        [_]u8{0x94} ** quic.protection.secret_len,
+    );
+    var client = try one_rtt.Connection.init(&sender, .{
+        .peer = receiver.address(),
+        .receive_keys = keys,
+        .send_keys = keys,
+        .local_connection_id = "copy-client",
+        .peer_connection_id = "copy-server",
+        .enable_pacing = false,
+        .enable_ack_frequency = true,
+        .peer_min_ack_delay = 1_000,
+        .peer_max_ack_delay_ms = 25,
+    });
+    defer client.deinit();
+
+    _ = try client.sendAckFrequency(3, 75_000, 3);
+    try std.testing.expect(try client.retransmitPtoAt(2_000));
+    try std.testing.expectEqual(
+        @as(u64, 75_000_000),
+        client.peerMaxAckDelayForPtoNanos(),
+    );
+    var original = try receiver.receiveBytes();
+    defer original.deinit(allocator);
+    var retransmission = try receiver.receiveBytes();
+    defer retransmission.deinit(allocator);
+
+    const ack = quic.AckFrame{
+        .largest_acknowledged = 1,
+        .ack_delay = 0,
+        .first_ack_range = 0,
+    };
+    try one_rtt.sendFrames(&receiver, sender.address(), keys, .{
+        .destination_connection_id = "copy-client",
+        .packet_number = 0,
+        .frames = &.{.{ .ack = ack }},
+    });
+    var received_ack = try client.receivePacket();
+    defer received_ack.deinit(allocator);
+    try std.testing.expectEqual(
+        @as(u64, 75_000_000),
+        client.peerMaxAckDelayForPtoNanos(),
+    );
+    try std.testing.expect(client.latest_in_flight_ack_frequency == null);
+
+    _ = try client.sendAckFrequency(3, 9_000, 3);
+    try std.testing.expectEqual(
+        @as(u64, 75_000_000),
+        client.peerMaxAckDelayForPtoNanos(),
+    );
+    try std.testing.expect(client.markPacketAcknowledged(2));
+    try std.testing.expectEqual(
+        @as(u64, 9_000_000),
+        client.peerMaxAckDelayForPtoNanos(),
+    );
+}
+
 test "QUIC 1-RTT explicit ACK_FREQUENCY supersedes an automatic request" {
     const allocator = std.testing.allocator;
     var threaded = std.Io.Threaded.init(allocator, .{});
@@ -7819,7 +8015,10 @@ test "QUIC 1-RTT automatic ACK_FREQUENCY retries after socket failure" {
         .enable_pacing = false,
         .enable_ack_frequency = true,
         .peer_min_ack_delay = 1_000,
-        .automatic_ack_frequency_request = .{},
+        .peer_max_ack_delay_ms = 25,
+        .automatic_ack_frequency_request = .{
+            .request_max_ack_delay_us = 80_000,
+        },
         .tls_handshake_complete = true,
     });
     defer client.deinit();
@@ -7843,6 +8042,10 @@ test "QUIC 1-RTT automatic ACK_FREQUENCY retries after socket failure" {
         client.ack_frequency_send_next_sequence,
     );
     try std.testing.expectEqual(@as(usize, 0), client.pendingRecoveryCount());
+    try std.testing.expectEqual(
+        @as(u64, 25_000_000),
+        client.peerMaxAckDelayForPtoNanos(),
+    );
 
     sender.io = failed.delegate;
     try client.sendAt(&.{.{ .ping = {} }}, 2_000);
@@ -7850,6 +8053,10 @@ test "QUIC 1-RTT automatic ACK_FREQUENCY retries after socket failure" {
     try std.testing.expectEqual(
         @as(u64, 1),
         client.ack_frequency_send_next_sequence,
+    );
+    try std.testing.expectEqual(
+        @as(u64, 80_000_000),
+        client.peerMaxAckDelayForPtoNanos(),
     );
     var raw = try receiver.receiveBytes();
     defer raw.deinit(allocator);
@@ -7893,6 +8100,23 @@ test "QUIC 1-RTT automatic ACK_FREQUENCY requires peer negotiation" {
             .automatic_ack_frequency_request = .{},
         }),
     );
+    for ([_]u64{ 999, 16_384_000 }) |invalid_delay| {
+        try std.testing.expectError(
+            error.InvalidTransportParameter,
+            one_rtt.Connection.init(&endpoint, .{
+                .peer = endpoint.address(),
+                .receive_keys = keys,
+                .send_keys = keys,
+                .local_connection_id = "invalid-delay-local",
+                .peer_connection_id = "invalid-delay-peer",
+                .enable_ack_frequency = true,
+                .peer_min_ack_delay = 1_000,
+                .automatic_ack_frequency_request = .{
+                    .request_max_ack_delay_us = invalid_delay,
+                },
+            }),
+        );
+    }
 }
 
 test "QUIC 1-RTT local ACK policy initializes cadence and rejects excessive delay" {

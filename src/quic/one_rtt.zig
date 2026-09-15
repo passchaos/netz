@@ -425,7 +425,18 @@ pub const AckFrequencyRequest = struct {
     /// Wire-level maximum number of ack-eliciting packets the peer may receive
     /// without an ACK. Three therefore requests an ACK on packet four.
     ack_eliciting_threshold: u64 = 3,
+    /// Requested Max Ack Delay in microseconds. Null preserves the peer's
+    /// transport-parameter value. A larger explicit value is included in PTO
+    /// as soon as its request reaches the socket and remains conservative
+    /// until that recovery group is acknowledged.
+    request_max_ack_delay_us: ?u64 = null,
     reordering_threshold: u64 = quic.packet_space.default_packet_threshold,
+};
+
+const InFlightAckFrequencyRequest = struct {
+    sequence_number: u64,
+    recovery_group_id: u64,
+    request_max_ack_delay_us: u64,
 };
 
 const StreamFlowEntry = struct {
@@ -917,12 +928,16 @@ fn containsAckFrequency(frames: []const quic.Frame) bool {
     return false;
 }
 
-fn newestAckFrequencySequence(frames: []const quic.Frame) ?u64 {
-    var newest: ?u64 = null;
+fn newestAckFrequencyFrame(
+    frames: []const quic.Frame,
+) ?quic.AckFrequencyFrame {
+    var newest: ?quic.AckFrequencyFrame = null;
     for (frames) |frame| {
         if (frame != .ack_frequency) continue;
-        if (newest == null or frame.ack_frequency.sequence_number > newest.?) {
-            newest = frame.ack_frequency.sequence_number;
+        if (newest == null or
+            frame.ack_frequency.sequence_number > newest.?.sequence_number)
+        {
+            newest = frame.ack_frequency;
         }
     }
     return newest;
@@ -1105,6 +1120,8 @@ pub const Connection = struct {
     ack_frequency_send_next_sequence: u64 = 0,
     ack_frequency_recv_next_sequence: u64 = 0,
     pending_ack_frequency_request: ?quic.AckFrequencyFrame = null,
+    latest_in_flight_ack_frequency: ?InFlightAckFrequencyRequest = null,
+    unconfirmed_max_ack_delay_us: ?u64 = null,
     ack_eliciting_threshold: u64 = 1,
     ack_eliciting_since_last_ack: u64 = 0,
     ack_delay_start_ns: ?u64 = null,
@@ -1166,15 +1183,16 @@ pub const Connection = struct {
             {
                 return error.InvalidTransportParameter;
             }
-            const requested_delay = std.math.mul(
-                u64,
-                config.peer_max_ack_delay_ms,
-                1_000,
-            ) catch return error.InvalidTransportParameter;
-            try validateRequestedMaxAckDelay(
+            const requested_delay = request.request_max_ack_delay_us orelse
+                (std.math.mul(
+                    u64,
+                    config.peer_max_ack_delay_ms,
+                    1_000,
+                ) catch return error.InvalidTransportParameter);
+            validateRequestedMaxAckDelay(
                 requested_delay,
                 config.peer_min_ack_delay,
-            );
+            ) catch return error.InvalidTransportParameter;
             const frame = quic.AckFrequencyFrame{
                 .sequence_number = 0,
                 .ack_eliciting_threshold = request.ack_eliciting_threshold,
@@ -2732,7 +2750,10 @@ pub const Connection = struct {
                 self.congestion.onPacketSent(packet.packet_number);
             }
             self.noteSentStreams(packet.frames);
-            self.noteAckFrequencySent(packet.frames);
+            self.noteAckFrequencySent(
+                packet.frames,
+                packet.packet_number,
+            );
         }
         self.releaseAntiAmplification(
             total_packet_len - sent_packet_len,
@@ -2833,11 +2854,14 @@ pub const Connection = struct {
                 sent_time_ns,
                 automatic_ecn,
             );
-            self.noteAckFrequencySent(pending.frames);
+            self.noteAckFrequencySent(
+                pending.frames,
+                self.next_packet_number - 1,
+            );
             return;
         }
         try self.sendWithEcnAtRaw(frames, ecn, sent_time_ns, automatic_ecn);
-        self.noteAckFrequencySent(frames);
+        self.noteAckFrequencySent(frames, self.next_packet_number - 1);
     }
 
     fn sendWithEcnAtRaw(
@@ -3796,7 +3820,7 @@ pub const Connection = struct {
         if (self.effectiveIdleTimeoutMillis()) |idle_timeout| {
             interval = @min(interval, @max(@as(u64, 1), idle_timeout / 2));
         }
-        const base_pto_ns = self.rtt_stats.pto(true);
+        const base_pto_ns = self.basePtoNanos();
         const floor_ns = std.math.add(
             u64,
             base_pto_ns,
@@ -4433,7 +4457,10 @@ pub const Connection = struct {
                 sent_time_ns,
                 null,
             );
-            self.noteAckFrequencySent(pending.frames);
+            self.noteAckFrequencySent(
+                pending.frames,
+                self.next_packet_number - 1,
+            );
             return;
         }
         try self.sendTrackedFramesEcnAtUncheckedRaw(
@@ -4442,19 +4469,55 @@ pub const Connection = struct {
             sent_time_ns,
             validated_traits,
         );
-        self.noteAckFrequencySent(frames);
+        self.noteAckFrequencySent(frames, self.next_packet_number - 1);
     }
 
     fn noteAckFrequencySent(
         self: *Connection,
         frames: []const quic.Frame,
+        packet_number: u64,
     ) void {
-        const sequence = newestAckFrequencySequence(frames) orelse return;
+        const frame = newestAckFrequencyFrame(frames) orelse return;
         self.pending_ack_frequency_request = null;
         self.ack_frequency_send_next_sequence = @max(
             self.ack_frequency_send_next_sequence,
-            sequence +| 1,
+            frame.sequence_number +| 1,
         );
+        if (self.latest_in_flight_ack_frequency) |latest| {
+            if (frame.sequence_number <= latest.sequence_number) return;
+        }
+        const recovery_group_id = self.recovery.groupIdForPacketNumber(
+            packet_number,
+        ) orelse return;
+        self.latest_in_flight_ack_frequency = .{
+            .sequence_number = frame.sequence_number,
+            .recovery_group_id = recovery_group_id,
+            .request_max_ack_delay_us = frame.request_max_ack_delay,
+        };
+        self.unconfirmed_max_ack_delay_us = @max(
+            self.unconfirmed_max_ack_delay_us orelse 0,
+            frame.request_max_ack_delay,
+        );
+    }
+
+    fn ackFrequencyRequestAcknowledged(
+        self: *Connection,
+        ack: quic.AckFrame,
+    ) bool {
+        const latest = self.latest_in_flight_ack_frequency orelse
+            return false;
+        if (!self.recovery.ackAcknowledgesGroup(
+            latest.recovery_group_id,
+            ack,
+        )) return false;
+        self.rtt_stats.max_ack_delay = std.math.mul(
+            u64,
+            latest.request_max_ack_delay_us,
+            std.time.ns_per_us,
+        ) catch std.math.maxInt(u64);
+        self.latest_in_flight_ack_frequency = null;
+        self.unconfirmed_max_ack_delay_us = null;
+        return true;
     }
 
     fn sendTrackedFramesEcnAtUncheckedRaw(
@@ -4767,11 +4830,8 @@ pub const Connection = struct {
         self.resetSpinBit();
         self.resetEcnForPath();
         if (!preserve_rtt) {
-            self.rtt_stats = .init(std.math.mul(
-                u64,
-                self.config.peer_max_ack_delay_ms,
-                1_000_000,
-            ) catch quic.rtt.default_max_ack_delay_ns);
+            const peer_max_ack_delay_ns = self.rtt_stats.max_ack_delay;
+            self.rtt_stats = .init(peer_max_ack_delay_ns);
         }
         self.pmtud.resetForPath();
         self.pmtuProbeEpochBump();
@@ -5320,7 +5380,7 @@ pub const Connection = struct {
                 const event_now_ns = now_ns orelse self.monotonicNowNs();
                 self.enterStatelessResetDraining(
                     nanosToMillisFloor(event_now_ns),
-                    nanosToMillisCeil(self.rtt_stats.pto(true)),
+                    nanosToMillisCeil(self.basePtoNanos()),
                 ) catch |err| return err;
                 return error.ConnectionClosed;
             }
@@ -5652,6 +5712,24 @@ pub const Connection = struct {
         return self.pto_jitter_state.currentEpoch();
     }
 
+    /// Peer ACK delay used by application-data PTO. Requests that may already
+    /// be active at the peer widen the bound immediately; an ACK of the latest
+    /// request commits its value and can safely lower the bound again.
+    pub fn peerMaxAckDelayForPtoNanos(self: Connection) u64 {
+        const requested_ns = std.math.mul(
+            u64,
+            self.unconfirmed_max_ack_delay_us orelse 0,
+            std.time.ns_per_us,
+        ) catch std.math.maxInt(u64);
+        return @max(self.rtt_stats.max_ack_delay, requested_ns);
+    }
+
+    fn basePtoNanos(self: Connection) u64 {
+        return self.rtt_stats.ptoWithMaxAckDelay(
+            self.peerMaxAckDelayForPtoNanos(),
+        );
+    }
+
     /// Whether this connection preserves the contiguous prefix buffered when
     /// RESET_STREAM arrives for application delivery before its reset event.
     pub fn resetPartialDeliveryEnabled(self: Connection) bool {
@@ -5659,7 +5737,7 @@ pub const Connection = struct {
     }
 
     pub fn ptoPeriod(self: Connection) u64 {
-        var period = self.rtt_stats.pto(true);
+        var period = self.basePtoNanos();
         var remaining = self.pto_count;
         while (remaining != 0) : (remaining -= 1) {
             period = std.math.mul(u64, period, 2) catch return quic.rtt.max_pto_ns;
@@ -5672,7 +5750,7 @@ pub const Connection = struct {
     /// scheduler reads cannot move an already published deadline.
     pub fn jitteredPtoPeriod(self: *const Connection) u64 {
         return self.pto_jitter_state.period(
-            self.rtt_stats.pto(true),
+            self.basePtoNanos(),
             self.pto_count,
             quic.rtt.timer_granularity_ns,
             quic.rtt.max_pto_ns,
@@ -6101,14 +6179,31 @@ pub const Connection = struct {
 
     pub fn markPacketAcknowledged(self: *Connection, packet_number: u64) bool {
         defer self.refreshLossTimeDeadline();
+        const pto_base_before = self.basePtoNanos();
         const pto_anchor_before =
             self.sent.latestAckElicitingInFlightSentTimeForPathEpoch(
                 self.pmtu_path_epoch,
             );
         const handshake_done_group =
             self.handshake_status.recoveryGroupId();
+        const ack_frequency_updated = if (self
+            .latest_in_flight_ack_frequency) |latest|
+            self.recovery.groupIdForPacketNumber(packet_number) ==
+                latest.recovery_group_id
+        else
+            false;
         const marked_sent = self.sent.markAcknowledged(packet_number);
         const removed_recovery = self.recovery.acknowledgePacketNumber(packet_number);
+        if (ack_frequency_updated) {
+            const latest = self.latest_in_flight_ack_frequency.?;
+            self.rtt_stats.max_ack_delay = std.math.mul(
+                u64,
+                latest.request_max_ack_delay_us,
+                std.time.ns_per_us,
+            ) catch std.math.maxInt(u64);
+            self.latest_in_flight_ack_frequency = null;
+            self.unconfirmed_max_ack_delay_us = null;
+        }
         if (handshake_done_group) |group_id| {
             self.handshake_status.onRecoveryUpdated(
                 self.recovery.containsGroupId(group_id),
@@ -6122,7 +6217,8 @@ pub const Connection = struct {
         if (self.sent.latestAckElicitingInFlightSentTimeForPathEpoch(
             self.pmtu_path_epoch,
         ) !=
-            pto_anchor_before)
+            pto_anchor_before or
+            self.basePtoNanos() != pto_base_before)
         {
             self.pto_jitter_state.rearm();
         }
@@ -8827,6 +8923,14 @@ pub const Connection = struct {
         now_ns: u64,
     ) Error!bool {
         const sample = try self.ackRttSample(ack, now_ns) orelse return false;
+        self.applyRttSample(sample);
+        return true;
+    }
+
+    fn applyRttSample(
+        self: *Connection,
+        sample: quic.packet_space.SentPacketTracker.RttSample,
+    ) void {
         self.rtt_stats.updateAt(
             sample.latest_rtt_ns,
             sample.ack_delay_ns,
@@ -8834,7 +8938,6 @@ pub const Connection = struct {
             sample.sent_time_ns,
         );
         self.congestion.onRttSample(sample.largest_acknowledged, sample.latest_rtt_ns);
-        return true;
     }
 
     pub fn persistentCongestionPeriod(self: Connection) ?quic.packet_space.SentPacketTracker.PersistentCongestionPeriod {
@@ -8845,7 +8948,10 @@ pub const Connection = struct {
             self.last_persistent_congestion_packet_number,
             self.pmtu_path_epoch,
         ) orelse return null;
-        if (period.durationNs() <= self.rtt_stats.persistentCongestionThreshold()) return null;
+        if (period.durationNs() <= self.rtt_stats
+            .persistentCongestionThresholdWithMaxAckDelay(
+            self.peerMaxAckDelayForPtoNanos(),
+        )) return null;
         return period;
     }
 
@@ -8868,7 +8974,7 @@ pub const Connection = struct {
             @min(local, peer);
         const minimum_ns = std.math.mul(
             u64,
-            self.rtt_stats.pto(true),
+            self.basePtoNanos(),
             3,
         ) catch std.math.maxInt(u64);
         const minimum_ms = std.math.divCeil(
@@ -11648,7 +11754,7 @@ pub const Connection = struct {
                         self.sent.latestAckElicitingInFlightSentTimeForPathEpoch(
                             self.pmtu_path_epoch,
                         );
-                    const pto_base_before = self.rtt_stats.pto(true);
+                    const pto_base_before = self.basePtoNanos();
                     // Sample utilization before ACK accounting removes bytes
                     // from flight. Otherwise every ACK would make the sender
                     // look less utilized than it was while transmitting.
@@ -11658,8 +11764,10 @@ pub const Connection = struct {
                         self.handshake_status.recoveryGroupId();
                     const plain_ack_current_path_failure =
                         self.precheckPlainAckCurrentPathFailure(frame.ack);
-                    if (now_ns) |now| _ = try self
-                        .updateRttFromAckWithoutLossRefresh(frame.ack, now);
+                    const rtt_sample = if (now_ns) |now|
+                        try self.ackRttSample(frame.ack, now)
+                    else
+                        null;
                     const acked = self.sent.applyAckDetailedForProbeValidated(
                         frame.ack,
                         self.pmtud.active_probe_packet_number,
@@ -11674,6 +11782,9 @@ pub const Connection = struct {
                         ),
                         else => return err,
                     };
+                    const ack_frequency_updated =
+                        self.ackFrequencyRequestAcknowledged(frame.ack);
+                    if (rtt_sample) |sample| self.applyRttSample(sample);
                     self.handshake_status.onOneRttAcknowledged(
                         switch (self.config.local_endpoint) {
                             .client => .client,
@@ -11842,7 +11953,8 @@ pub const Connection = struct {
                             self.pmtu_path_epoch,
                         ) !=
                             pto_anchor_before or
-                        self.rtt_stats.pto(true) != pto_base_before)
+                        self.basePtoNanos() != pto_base_before or
+                        ack_frequency_updated)
                     {
                         self.pto_jitter_state.rearm();
                     }
@@ -12993,7 +13105,7 @@ pub const Connection = struct {
             // Round upward before multiplying so the millisecond deadline can
             // never expire before RFC 9000's three-PTO minimum.
             .pto_ms = pto_ms orelse
-                nanosToMillisCeil(self.rtt_stats.pto(true)),
+                nanosToMillisCeil(self.basePtoNanos()),
         };
     }
 

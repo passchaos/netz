@@ -384,7 +384,11 @@ starts with deterministic parsers, serializers, preallocated fixed-width wire-in
   ACK threshold/max-delay/reordering behavior, directional capability checks,
   optional peer-gated automatic requests appended to the first non-empty 1-RTT
   packet (alongside HANDSHAKE_DONE when required), socket-commit-safe pending
-  state and ordinary PTO recovery, wire-tolerance-to-local-trigger conversion,
+  state and ordinary PTO recovery, optional caller-selected Requested Max Ack
+  Delay with conservative in-flight/confirmed PTO accounting,
+  RFC 9002 initial application-data PTO including initial RTT variance and the
+  effective peer ACK delay,
+  wire-tolerance-to-local-trigger conversion,
   Quinn-style IMMEDIATE_ACK hints on negotiated PTO probes with exact-MTU
   fallback and non-retransmittable per-probe ownership,
   transactional rejection of requests below the advertised minimum or at least
