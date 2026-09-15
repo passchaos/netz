@@ -1268,11 +1268,11 @@ literals such as `http://[::1]:8080/` and `ws://[::1]:8080/chat`.
 
 On Zig 0.16, `std.Io.Uring` exists but its `std.Io.net` networking hooks are
 still unavailable. All protocol runtimes nevertheless stay on the `std.Io`
-abstraction: `netz.runtime.Backend.initAuto(.zio_then_threaded)` uses zio's
-complete `std.Io` implementation (io_uring with automatic epoll fallback on
-Linux, plus portable backends elsewhere), and falls back to `std.Io.Threaded`
-if zio cannot initialize. Neither zio nor OS-specific rings leak into the HTTP,
-WebSocket, QUIC, or other protocol APIs.
+abstraction: `netz.runtime.Backend.init()` uses zio's complete `std.Io`
+implementation (io_uring with automatic epoll fallback on Linux, plus portable
+backends elsewhere) and reports initialization failure rather than silently
+changing execution models. Neither zio nor OS-specific rings leak into the
+HTTP, WebSocket, QUIC, or other protocol APIs.
 
 Every WebTransport session facade exposes its DATAGRAM payload budget so
 callers can avoid sending a payload the underlying QUIC endpoint or peer will

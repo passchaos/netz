@@ -6,7 +6,7 @@ pub fn main() !void {
     defer _ = gpa.deinit();
     const allocator = gpa.allocator();
 
-    var backend = try netz.runtime.Backend.initAuto(allocator, .zio_then_threaded);
+    var backend = try netz.runtime.Backend.init(allocator);
     defer backend.deinit();
     const io = backend.io();
     std.debug.print("std.Io backend: {t}\n", .{backend.kind});
@@ -52,7 +52,8 @@ pub fn main() !void {
     };
 
     var shared = Shared{ .server = &server };
-    const thread = try std.Thread.spawn(.{}, Shared.run, .{&shared});
+    var server_task = io.async(Shared.run, .{&shared});
+    defer server_task.cancel(io);
 
     const uri = try std.fmt.allocPrint(allocator, "ws://127.0.0.1:{d}/chat", .{server.address().ip4.port});
     defer allocator.free(uri);
@@ -73,6 +74,6 @@ pub fn main() !void {
 
     try client.sendClose(.normal_closure, "bye");
 
-    thread.join();
+    server_task.await(io);
     if (shared.err) |err| return err;
 }

@@ -1,81 +1,39 @@
 const std = @import("std");
 const zio = @import("zio");
 
-/// Runtime backend selection for netz examples and applications.
+/// Runtime backend for netz examples and applications.
 ///
-/// Protocol modules consume only `std.Io`. Backend construction belongs here
-/// so HTTP, WebSocket, QUIC, and the other protocol implementations do not
-/// depend on zio or expose operating-system-specific event-loop APIs.
-pub const BackendPreference = enum {
-    /// Prefer zio's complete `std.Io` implementation and fall back to the
-    /// standard threaded implementation if zio cannot initialize.
-    zio_then_threaded,
-    /// Compatibility spelling retained for applications written before zio
-    /// replaced the incomplete Zig 0.16 `std.Io.Evented` backend.
-    evented_then_threaded,
-    /// Force the portable standard threaded backend.
-    threaded,
-};
-
-pub const BackendKind = enum {
-    zio,
-    threaded,
-};
+/// zio owns scheduling and platform I/O while protocol modules consume only
+/// its standard `std.Io` interface. No zio or operating-system-specific type
+/// crosses into HTTP, WebSocket, QUIC, or the other protocol APIs.
+pub const BackendKind = enum { zio };
 
 pub const Backend = struct {
     allocator: std.mem.Allocator,
-    kind: BackendKind,
-    storage: union(BackendKind) {
-        zio: *anyopaque,
-        threaded: std.Io.Threaded,
-    },
+    kind: BackendKind = .zio,
+    runtime: *anyopaque,
 
-    /// Select a backend without exposing its implementation to protocol code.
-    /// The legacy `.evented_then_threaded` preference is an alias for
-    /// `.zio_then_threaded`.
-    pub fn initAuto(
-        allocator: std.mem.Allocator,
-        preference: BackendPreference,
-    ) !Backend {
-        return switch (preference) {
-            .zio_then_threaded, .evented_then_threaded => initZio(allocator) catch initThreaded(allocator),
-            .threaded => initThreaded(allocator),
-        };
+    /// Initialize the supported asynchronous backend. Protocol callers receive
+    /// a `std.Io`; zio remains an implementation detail of this owner.
+    pub fn init(allocator: std.mem.Allocator) !Backend {
+        return initZio(allocator);
     }
 
-    /// Force zio and report initialization failure instead of falling back.
+    /// Explicit spelling for applications that want to document the backend.
     pub fn initZio(allocator: std.mem.Allocator) !Backend {
         const runtime = try zio.Runtime.init(allocator, .{});
         return .{
             .allocator = allocator,
-            .kind = .zio,
-            .storage = .{ .zio = @ptrCast(runtime) },
-        };
-    }
-
-    /// Force Zig's portable threaded `std.Io` implementation.
-    pub fn initThreaded(allocator: std.mem.Allocator) !Backend {
-        return .{
-            .allocator = allocator,
-            .kind = .threaded,
-            .storage = .{
-                .threaded = std.Io.Threaded.init(allocator, .{}),
-            },
+            .runtime = @ptrCast(runtime),
         };
     }
 
     pub fn io(self: *Backend) std.Io {
-        return switch (self.storage) {
-            .zio => |runtime| zioRuntime(runtime).io(),
-            .threaded => |*threaded| threaded.io(),
-        };
+        return zioRuntime(self.runtime).io();
     }
 
     pub fn deinit(self: *Backend) void {
-        switch (self.storage) {
-            .zio => |runtime| zioRuntime(runtime).deinit(),
-            .threaded => |*threaded| threaded.deinit(),
-        }
+        zioRuntime(self.runtime).deinit();
         self.* = undefined;
     }
 
@@ -85,7 +43,7 @@ pub const Backend = struct {
 };
 
 test "runtime backend initializes zio behind std.Io" {
-    var backend = try Backend.initZio(std.testing.allocator);
+    var backend = try Backend.init(std.testing.allocator);
     defer backend.deinit();
 
     try std.testing.expectEqual(BackendKind.zio, backend.kind);
@@ -159,23 +117,4 @@ test "runtime backend zio std.Io TCP round trip" {
 
     echo.await(io);
     try echo_result;
-}
-
-test "runtime backend can force Threaded" {
-    var backend = try Backend.initAuto(std.testing.allocator, .threaded);
-    defer backend.deinit();
-
-    try std.testing.expectEqual(BackendKind.threaded, backend.kind);
-    _ = backend.io();
-}
-
-test "legacy Evented preference selects zio or safe fallback" {
-    var backend = try Backend.initAuto(
-        std.testing.allocator,
-        .evented_then_threaded,
-    );
-    defer backend.deinit();
-
-    _ = backend.io();
-    try std.testing.expect(backend.kind == .zio or backend.kind == .threaded);
 }

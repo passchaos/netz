@@ -6,7 +6,7 @@ pub fn main() !void {
     defer _ = gpa.deinit();
     const allocator = gpa.allocator();
 
-    var backend = try netz.runtime.Backend.initAuto(allocator, .zio_then_threaded);
+    var backend = try netz.runtime.Backend.init(allocator);
     defer backend.deinit();
     const io = backend.io();
     std.debug.print("std.Io backend: {t}\n", .{backend.kind});
@@ -49,7 +49,8 @@ pub fn main() !void {
     };
 
     var shared = Shared{ .server = &server };
-    const thread = try std.Thread.spawn(.{}, Shared.run, .{&shared});
+    var server_task = io.async(Shared.run, .{&shared});
+    defer server_task.cancel(io);
 
     // This is HTTP/2 prior knowledge (h2c), similar in spirit to hyper's
     // conn::http2 handshake examples: the URI drives :authority and :scheme.
@@ -62,7 +63,7 @@ pub fn main() !void {
     });
     defer response.deinit(allocator);
 
-    thread.join();
+    server_task.await(io);
     if (shared.err) |err| return err;
     std.debug.print("HTTP/2 client received {d}: {s}\n", .{ response.status, response.body });
 }

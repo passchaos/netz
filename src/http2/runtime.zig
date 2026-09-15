@@ -19887,7 +19887,7 @@ test "HTTP/2 aggregate empty exchange borrows wire frames after warmup" {
 test "HTTP/2 serveConnection handles sequential requests" {
     const allocator = std.testing.allocator;
 
-    var backend = try @import("../runtime.zig").Backend.initAuto(allocator, .zio_then_threaded);
+    var backend = try @import("../runtime.zig").Backend.init(allocator);
     defer backend.deinit();
     const io = backend.io();
 
@@ -19923,7 +19923,8 @@ test "HTTP/2 serveConnection handles sequential requests" {
     };
 
     var shared = Shared{ .server = &server };
-    const thread = try std.Thread.spawn(.{}, Shared.run, .{&shared});
+    var server_task = io.async(Shared.run, .{&shared});
+    defer server_task.cancel(io);
 
     var client = try Client.connectHost(allocator, io, "localhost", server.address().ip4.port, .{
         .max_frame_payload = 4096,
@@ -19943,7 +19944,7 @@ test "HTTP/2 serveConnection handles sequential requests" {
     try std.testing.expectEqual(http2.ErrorCode.no_error, goaway.goaway.error_code);
     try std.testing.expectEqualStrings("serve-complete", goaway.goaway.debug_data);
 
-    thread.join();
+    server_task.await(io);
     if (shared.err) |err| return err;
     try std.testing.expectEqual(@as(usize, 2), shared.served);
     try std.testing.expectEqual(@as(usize, 2), shared.context.count);

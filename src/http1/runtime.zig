@@ -8217,7 +8217,7 @@ fn writeAllToStream(io: std.Io, stream: net.Stream, bytes: []const u8) net.Strea
 test "HTTP/1 runtime accepts matching absolute-form target" {
     const allocator = std.testing.allocator;
 
-    var backend = try @import("../runtime.zig").Backend.initAuto(allocator, .zio_then_threaded);
+    var backend = try @import("../runtime.zig").Backend.init(allocator);
     defer backend.deinit();
     const io = backend.io();
 
@@ -8249,7 +8249,8 @@ test "HTTP/1 runtime accepts matching absolute-form target" {
     };
 
     var shared = Shared{ .server = &server };
-    const thread = try std.Thread.spawn(.{}, Shared.run, .{&shared});
+    var server_task = io.async(Shared.run, .{&shared});
+    defer server_task.cancel(io);
 
     const stream = try server.address().connect(io, .{ .mode = .stream });
     defer stream.close(io);
@@ -8263,7 +8264,7 @@ test "HTTP/1 runtime accepts matching absolute-form target" {
     }, .{}, .GET);
     defer response.deinit(allocator);
 
-    thread.join();
+    server_task.await(io);
     if (shared.err) |err| return err;
     try std.testing.expectEqualStrings("absolute-ok", response.response.body);
 }
@@ -9953,7 +9954,7 @@ test "HTTP/1 async std.Io server handles concurrent clients" {
 test "HTTP/1 serveConnection handles keep-alive requests" {
     const allocator = std.testing.allocator;
 
-    var backend = try @import("../runtime.zig").Backend.initAuto(allocator, .zio_then_threaded);
+    var backend = try @import("../runtime.zig").Backend.init(allocator);
     defer backend.deinit();
     const io = backend.io();
 
@@ -10001,7 +10002,8 @@ test "HTTP/1 serveConnection handles keep-alive requests" {
     };
 
     var shared = Shared{ .server = &server };
-    const thread = try std.Thread.spawn(.{}, Shared.run, .{&shared});
+    var server_task = io.async(Shared.run, .{&shared});
+    defer server_task.cancel(io);
 
     var client = try Client.connectHost(allocator, io, "localhost", server.address().ip4.port, .{ .max_head_bytes = 4096, .max_body_bytes = 4096 });
     defer client.close();
@@ -10013,7 +10015,7 @@ test "HTTP/1 serveConnection handles keep-alive requests" {
     defer second.deinit(allocator);
     try std.testing.expectEqualStrings("two", second.response.body);
 
-    thread.join();
+    server_task.await(io);
     if (shared.err) |err| return err;
     try std.testing.expectEqual(@as(usize, 2), shared.served);
     try std.testing.expectEqual(@as(usize, 2), shared.context.count);
@@ -10120,7 +10122,7 @@ test "HTTP/1 serveConnection can disable keep-alive without consuming pipeline s
 test "HTTP/1 serveConnection adds close for request close" {
     const allocator = std.testing.allocator;
 
-    var backend = try @import("../runtime.zig").Backend.initAuto(allocator, .zio_then_threaded);
+    var backend = try @import("../runtime.zig").Backend.init(allocator);
     defer backend.deinit();
     const io = backend.io();
 
@@ -10151,7 +10153,8 @@ test "HTTP/1 serveConnection adds close for request close" {
     };
 
     var shared = Shared{ .server = &server };
-    const thread = try std.Thread.spawn(.{}, Shared.run, .{&shared});
+    var server_task = io.async(Shared.run, .{&shared});
+    defer server_task.cancel(io);
 
     var client = try Client.connectHost(allocator, io, "localhost", server.address().ip4.port, .{ .max_head_bytes = 4096, .max_body_bytes = 4096 });
     defer client.close();
@@ -10161,7 +10164,7 @@ test "HTTP/1 serveConnection adds close for request close" {
     try std.testing.expectEqualStrings("closing", response.response.body);
     try std.testing.expectEqualStrings("close", response.response.header("connection").?);
 
-    thread.join();
+    server_task.await(io);
     if (shared.err) |err| return err;
 }
 
@@ -10262,7 +10265,7 @@ test "HTTP/1 serveConnection retires TE plus CL requests before pipeline suffix"
 test "HTTP/1 serveConnection fixes HTTP/1.0 keep-alive response" {
     const allocator = std.testing.allocator;
 
-    var backend = try @import("../runtime.zig").Backend.initAuto(allocator, .zio_then_threaded);
+    var backend = try @import("../runtime.zig").Backend.init(allocator);
     defer backend.deinit();
     const io = backend.io();
 
@@ -10296,7 +10299,8 @@ test "HTTP/1 serveConnection fixes HTTP/1.0 keep-alive response" {
     };
 
     var shared = Shared{ .server = &server };
-    const thread = try std.Thread.spawn(.{}, Shared.run, .{&shared});
+    var server_task = io.async(Shared.run, .{&shared});
+    defer server_task.cancel(io);
 
     var client = try Client.connectHost(allocator, io, "localhost", server.address().ip4.port, .{ .max_head_bytes = 4096, .max_body_bytes = 4096 });
     defer client.close();
@@ -10313,7 +10317,7 @@ test "HTTP/1 serveConnection fixes HTTP/1.0 keep-alive response" {
     try std.testing.expectEqualStrings("close", second.response.header("connection").?);
     try std.testing.expectEqualStrings("second", second.response.body);
 
-    thread.join();
+    server_task.await(io);
     if (shared.err) |err| return err;
     try std.testing.expectEqual(@as(usize, 2), shared.served);
 }

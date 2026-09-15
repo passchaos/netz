@@ -343,7 +343,7 @@ Zig 0.16 and netz provide these related layers:
   would bypass `std.Io` cancellation, deadline, and ownership semantics.
 
 Because netz runtimes take a `std.Io` value, protocol code stays backend-neutral.
-`netz.runtime.Backend.initAuto(.zio_then_threaded)` centralizes zio-vs-Threaded
-selection without scattering backend or platform checks through protocol
-implementations. The older `.evented_then_threaded` spelling remains a source-
-compatible alias.
+`netz.runtime.Backend.init()` owns zio and exposes only its `std.Io` value, so
+backend or platform details do not spread through protocol implementations.
+Initialization fails explicitly instead of silently switching to a thread-pool
+I/O model.

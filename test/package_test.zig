@@ -7,7 +7,10 @@ test "public modules are reachable" {
     inline for (&.{ "connect", "io", "socket_options", "tls" }) |decl|
         try std.testing.expect(@hasDecl(netz.stream, decl));
     try std.testing.expect(@hasDecl(netz.runtime, "Backend"));
+    try std.testing.expect(@hasDecl(netz.runtime.Backend, "init"));
     try std.testing.expect(@hasDecl(netz.runtime.Backend, "initZio"));
+    try std.testing.expect(!@hasDecl(netz.runtime.Backend, "initThreaded"));
+    try std.testing.expect(!@hasDecl(netz.runtime.Backend, "initAuto"));
     try std.testing.expect(!@hasDecl(netz.runtime, "zio"));
     try std.testing.expect(@hasDecl(netz, "grpc"));
     try std.testing.expect(@hasDecl(netz.grpc, "Status"));

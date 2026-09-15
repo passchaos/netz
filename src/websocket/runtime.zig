@@ -13124,7 +13124,7 @@ test "WebSocket server rejects data sent with HTTP upgrade request" {
 test "WebSocket over HTTP/2 receiveFrameAuto replies to ping" {
     const allocator = std.testing.allocator;
 
-    var backend = try @import("../runtime.zig").Backend.initAuto(allocator, .zio_then_threaded);
+    var backend = try @import("../runtime.zig").Backend.init(allocator);
     defer backend.deinit();
     const io = backend.io();
 
@@ -13162,7 +13162,8 @@ test "WebSocket over HTTP/2 receiveFrameAuto replies to ping" {
     };
 
     var shared = Shared{ .server = &server };
-    const thread = try std.Thread.spawn(.{}, Shared.run, .{&shared});
+    var server_task = io.async(Shared.run, .{&shared});
+    defer server_task.cancel(io);
 
     var h2_client = try http2_runtime.Client.connect(allocator, io, server.address(), .{
         .max_frame_payload = 4096,
@@ -13186,7 +13187,7 @@ test "WebSocket over HTTP/2 receiveFrameAuto replies to ping" {
     defer close.deinit(allocator);
     try std.testing.expectEqual(websocket.Opcode.close, close.header.opcode);
 
-    thread.join();
+    server_task.await(io);
     if (shared.err) |err| return err;
 }
 
@@ -13896,7 +13897,7 @@ test "WebSocket over HTTP/2 deadline spans control frames" {
 test "WebSocket receiveFrameAuto replies to ping" {
     const allocator = std.testing.allocator;
 
-    var backend = try @import("../runtime.zig").Backend.initAuto(allocator, .zio_then_threaded);
+    var backend = try @import("../runtime.zig").Backend.init(allocator);
     defer backend.deinit();
     const io = backend.io();
 
@@ -13930,7 +13931,8 @@ test "WebSocket receiveFrameAuto replies to ping" {
     };
 
     var shared = Shared{ .server = &server };
-    const thread = try std.Thread.spawn(.{}, Shared.run, .{&shared});
+    var server_task = io.async(Shared.run, .{&shared});
+    defer server_task.cancel(io);
 
     var client = try Client.connect(allocator, io, server.address(), .{
         .host = "127.0.0.1",
@@ -13949,7 +13951,7 @@ test "WebSocket receiveFrameAuto replies to ping" {
     defer close.deinit(allocator);
     try std.testing.expectEqual(websocket.Opcode.close, close.header.opcode);
 
-    thread.join();
+    server_task.await(io);
     if (shared.err) |err| return err;
 }
 
@@ -14272,7 +14274,7 @@ test "WebSocket receiveFrameAuto does not pong after sending close" {
 test "WebSocket runtime exposes typed close frames" {
     const allocator = std.testing.allocator;
 
-    var backend = try @import("../runtime.zig").Backend.initAuto(allocator, .zio_then_threaded);
+    var backend = try @import("../runtime.zig").Backend.init(allocator);
     defer backend.deinit();
     const io = backend.io();
 
@@ -14308,7 +14310,8 @@ test "WebSocket runtime exposes typed close frames" {
     };
 
     var shared = Shared{ .server = &server };
-    const thread = try std.Thread.spawn(.{}, Shared.run, .{&shared});
+    var server_task = io.async(Shared.run, .{&shared});
+    defer server_task.cancel(io);
 
     var client = try Client.connect(allocator, io, server.address(), .{
         .host = "127.0.0.1",
@@ -14323,7 +14326,7 @@ test "WebSocket runtime exposes typed close frames" {
     try std.testing.expectEqualStrings("restart", close_frame.reason);
     try client.sendCloseFrame(.{ .code = .normal_closure, .reason = "ack" });
 
-    thread.join();
+    server_task.await(io);
     if (shared.err) |err| return err;
 }
 
