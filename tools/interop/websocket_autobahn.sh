@@ -61,6 +61,9 @@ if ! grep -q 'Autobahn WebSocket server listening' "$work/server.log"; then
   cat "$work/server.log" >&2
   exit 1
 fi
+grep -Fq \
+  'workers=64 server_io=zio-std-io' \
+  "$work/server.log"
 
 cases='["*"]'
 if [[ $# -ne 0 ]]; then

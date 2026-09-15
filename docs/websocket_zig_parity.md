@@ -1068,6 +1068,16 @@ applying TCP-only socket options.
    Dockerized Autobahn Testsuite 25.10.1 fuzzing client against the dedicated
    long-lived netz echo endpoint. Passing `--tls` runs the identical cases over
    native TLS 1.3 WSS using the checked-in localhost test identity. On
+   current builds the listener obtains `std.Io` from zio and uses the runtime's
+   bounded long-running supervisor with 64 reusable accept/connection workers;
+   the runner rejects a server that does not identify `server_io=zio-std-io`.
+   The 517-case results
+   below predate that migration and remain historical Threaded evidence until
+   the container suite is rerun on zio. The separate
+   `interop-websocket-autobahn-smoke` gate uses real cleartext and TLS sockets
+   without Docker: eight simultaneous peers verify masked text/binary echo,
+   Ping/Pong and Close, then an unmasked frame requires Close(1002), and a new
+   connection proves the listener and reusable worker remain healthy. On
    2026-08-21, the full WSS run completed all 517 cases with the same result as
    cleartext: behavior counts `OK=514` and `INFORMATIONAL=3`, and close-behavior
    counts `OK=514` and `INFORMATIONAL=3`. The cleartext run likewise completed

@@ -9,6 +9,7 @@ const std = @import("std");
 const netz = @import("netz");
 
 const max_message_bytes: usize = 20_000_000;
+const max_connections: usize = 64;
 
 pub fn main(init: std.process.Init) !void {
     const args = try init.minimal.args.toSlice(init.arena.allocator());
@@ -19,11 +20,9 @@ pub fn main(init: std.process.Init) !void {
     if (args.len == 3 and !use_tls) return error.InvalidArgument;
 
     const allocator = std.heap.c_allocator;
-    var threaded = std.Io.Threaded.init(allocator, .{
-        .async_limit = .unlimited,
-    });
-    defer threaded.deinit();
-    const io = threaded.io();
+    var backend = try netz.runtime.Backend.init(allocator);
+    defer backend.deinit();
+    const io = backend.io();
     const limits: netz.websocket.runtime.Limits = .{
         .max_head_bytes = 4096,
         .max_frame_bytes = max_message_bytes,
@@ -68,36 +67,40 @@ pub fn main(init: std.process.Init) !void {
 
 fn serveForever(server: anytype) !void {
     std.debug.print(
-        "netz Autobahn WebSocket server listening on {f}\n",
-        .{server.address()},
+        "netz Autobahn WebSocket server listening on {f} " ++
+            "workers={d} server_io=zio-std-io\n",
+        .{ server.address(), max_connections },
     );
 
-    while (true) {
-        var connection = server.accept(.{
-            .enable_permessage_deflate = true,
-        }) catch continue;
-        const thread = std.Thread.spawn(
-            .{},
-            echoConnection,
-            .{connection},
-        ) catch {
-            connection.close();
-            continue;
-        };
-        thread.detach();
-    }
+    var shutdown: std.Io.Event = .unset;
+    var context = EchoContext{};
+    try server.serveUntil(
+        EchoContext,
+        &context,
+        EchoContext.handle,
+        max_connections,
+        .{ .enable_permessage_deflate = true },
+        .{
+            .shutdown = &shutdown,
+            .accept_error_policy = .continue_serving,
+            .connection_error_policy = .continue_serving,
+        },
+    );
 }
 
-fn echoConnection(initial: netz.websocket.runtime.Connection) void {
-    var connection = initial;
-    defer connection.close();
-    while (true) {
-        var message = connection.receiveMessage() catch return;
-        defer message.deinit(connection.allocator);
-        switch (message.opcode) {
-            .text => connection.sendText(message.payload) catch return,
-            .binary => connection.sendBinary(message.payload) catch return,
-            else => return,
+const EchoContext = struct {
+    fn handle(
+        _: *@This(),
+        connection: *netz.websocket.runtime.Connection,
+    ) netz.websocket.runtime.Error!void {
+        while (true) {
+            var message = try connection.receiveMessage();
+            defer message.deinit(connection.allocator);
+            switch (message.opcode) {
+                .text => try connection.sendText(message.payload),
+                .binary => try connection.sendBinary(message.payload),
+                else => return,
+            }
         }
     }
-}
+};

@@ -378,6 +378,16 @@ pub fn build(b: *std.Build) void {
         "Run external Autobahn against netz (pass --tls for WSS)",
     );
     websocket_autobahn_step.dependOn(&websocket_autobahn.step);
+    const websocket_autobahn_smoke = b.addSystemCommand(
+        &.{ "python3", "tools/interop/websocket_autobahn_smoke.py" },
+    );
+    websocket_autobahn_smoke.addArtifactArg(websocket_autobahn_server);
+    const websocket_autobahn_smoke_step = b.step(
+        "interop-websocket-autobahn-smoke",
+        "Run real-socket cleartext/TLS smoke for the Autobahn adapter",
+    );
+    websocket_autobahn_smoke_step.dependOn(&websocket_autobahn_smoke.step);
+    test_step.dependOn(&websocket_autobahn_smoke.step);
 
     const websocket_chrome_server = b.addExecutable(.{
         .name = "netz-websocket-chrome-server",

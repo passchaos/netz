@@ -948,8 +948,12 @@ zig build interop-quic-quic-go -Doptimize=ReleaseFast
 # Requires Docker and the crossbario/autobahn-testsuite image. Optional trailing
 # arguments select individual case IDs; with none, all 517 cases run. Pass
 # --tls before case IDs to run the same gate over native TLS 1.3 WSS.
+# The long-lived netz endpoint uses 64 reusable zio-backed std.Io workers.
 zig build interop-websocket-autobahn -Doptimize=ReleaseFast
 zig build interop-websocket-autobahn -Doptimize=ReleaseFast -- --tls
+# Without Docker, exercise the same adapter over real cleartext/TLS sockets,
+# including concurrent echoes, protocol-error isolation, and worker reuse.
+zig build interop-websocket-autobahn-smoke -Doptimize=ReleaseFast
 # Drive the browser WebSocket API from Chrome against netz. The gate checks
 # Origin rejection/acceptance, subprotocol and permessage-deflate negotiation,
 # compressed text, binary data, automatic Pong, and a clean Close handshake.
