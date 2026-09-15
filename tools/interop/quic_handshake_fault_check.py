@@ -59,6 +59,11 @@ def verify(
     if role_pair == "netz-client+quic-go-server":
         require_once(
             client_log,
+            "netz QUIC interop runtime: endpoint_role=client "
+            "client_io=zio-std-io server_io=quic-go-netpoll",
+        )
+        require_once(
+            client_log,
             "netz QUIC client interoperated with quic-go: verified=true "
             f"version={version} retry=false alpn=hq-interop streams=2 bytes=10 "
             "peer_close=57",
@@ -69,6 +74,11 @@ def verify(
             "key_updates=0 echo_streams=2 echo_bytes=10",
         )
     else:
+        require_once(
+            server_log,
+            "netz QUIC interop runtime: endpoint_role=server "
+            "client_io=quic-go-netpoll server_io=zio-std-io",
+        )
         require_once(
             client_log,
             "go_quic_peer_close_client: handshake_done=true peer_close=58 "
@@ -107,7 +117,10 @@ def verify(
         "verified QUIC handshake fault recovery: "
         f"role_pair={role_pair} direction={direction} fault={fault} "
         f"fault_scope={scope} {active}=1 certificate=true alpn=hq-interop "
-        f"version={version} streams=2 bytes=10 peer_close=true complete=true"
+        f"version={version} streams=2 bytes=10 client_io="
+        f"{'zio-std-io' if client_impl == 'netz' else 'quic-go-netpoll'} "
+        f"server_io={'zio-std-io' if server_impl == 'netz' else 'quic-go-netpoll'} "
+        "peer_close=true complete=true"
     )
 
 

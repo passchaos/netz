@@ -111,6 +111,9 @@ async fn run_server(
         .with_io(address)?
         .start()?;
     println!("s2n-quic interop server listening={address}");
+    println!(
+        "s2n-quic interop runtime: endpoint_role=server client_io=zio-std-io server_io=s2n-quic-tokio"
+    );
 
     let mut connection = timeout(TIMEOUT, server.accept())
         .await
@@ -164,6 +167,9 @@ async fn run_client(port: u16, ca: &str, scenario: Scenario) -> Result<()> {
     ensure!(
         scenario != Scenario::Flow && scenario != Scenario::Retry,
         "flow and retry are server-only scenarios"
+    );
+    println!(
+        "s2n-quic interop runtime: endpoint_role=client client_io=s2n-quic-tokio server_io=zio-std-io"
     );
     // Clear platform roots first so a successful connection proves that the
     // checked-in netz localhost certificate, rather than ambient trust, was

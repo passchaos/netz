@@ -1496,7 +1496,11 @@ drain, and close after the fix.
    `zig build interop-quic-quic-go -Doptimize=ReleaseFast` builds quic-go
    v0.59.0 from the audited `~/Work/quicz` fixture, loads its generated
    localhost CA into netz's verifier, requires TLS 1.3 `hq-interop` ALPN, and
-   verifies two independent bidirectional STREAM echoes plus FIN. The same gate
+   verifies two independent bidirectional STREAM echoes plus FIN. The shared
+   netz client/server executables obtain `std.Io` from the zio-backed
+   `netz.runtime.Backend`; the runner and handshake-fault verifier require
+   `zio-std-io` and `quic-go-netpoll` identities for the appropriate endpoint
+   roles. The same gate
    forces RFC 9369 QUIC v2 in both directions on separate connections: netz
    selects v2 against a v2-only quic-go server, and a v2-only quic-go client
    completes the same two-stream exchange against a v2-only netz server. Both
@@ -1593,7 +1597,10 @@ drain, and close after the fix.
    `zig build interop-quic-s2n -Doptimize=ReleaseFast`. A netz client
    authenticates a freshly CA-signed localhost leaf served by s2n-tls, and an
    s2n-quic client with an otherwise empty trust store authenticates netz's
-   fixture identity. The s2n server also asserts the `localhost` SNI. Both
+   fixture identity. The same zio-backed netz peer executables are used here;
+   the fixture's `#[tokio::main]` runtime and both shell directions explicitly
+   assert `zio-std-io` versus `s2n-quic-tokio`. The s2n server also asserts the
+   `localhost` SNI. Both
    directions require `hq-interop`, exact stream IDs 0 and 4, two
    FIN-terminated echoes totaling ten bytes, and the expected peer
    application-close code. Separate connections in both directions verify

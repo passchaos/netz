@@ -69,9 +69,16 @@ pub fn main(init: std.process.Init) !void {
             &.{ .x25519_mlkem768, .x25519, .secp256r1 };
 
     const allocator = std.heap.c_allocator;
-    var threaded = std.Io.Threaded.init(allocator, .{});
-    defer threaded.deinit();
-    const io = threaded.io();
+    var backend = try netz.runtime.Backend.init(allocator);
+    defer backend.deinit();
+    const io = backend.io();
+    std.debug.print(
+        "netz QUIC interop runtime: endpoint_role=client client_io=zio-std-io server_io={s}\n",
+        .{switch (peer) {
+            .quic_go => "quic-go-netpoll",
+            .s2n_quic => "s2n-quic-tokio",
+        }},
+    );
 
     const now = std.Io.Clock.real.now(io);
     var ca_bundle: std.crypto.Certificate.Bundle = .empty;

@@ -229,9 +229,9 @@ pub fn main(init: std.process.Init) !void {
         .echo;
 
     const allocator = std.heap.c_allocator;
-    var threaded = std.Io.Threaded.init(allocator, .{});
-    defer threaded.deinit();
-    const io = threaded.io();
+    var backend = try netz.runtime.Backend.init(allocator);
+    defer backend.deinit();
+    const io = backend.io();
     var certificate_der: [netz.tls.testing.certificate_der_len]u8 = undefined;
     try std.base64.standard.Decoder.decode(
         &certificate_der,
@@ -259,6 +259,18 @@ pub fn main(init: std.process.Init) !void {
     std.debug.print(
         "netz QUIC interop server listening on {f}\n",
         .{endpoint.address()},
+    );
+    std.debug.print(
+        "netz QUIC interop runtime: endpoint_role=server client_io={s} server_io=zio-std-io\n",
+        .{switch (mode) {
+            .s2n,
+            .s2n_reset,
+            .s2n_stop,
+            .s2n_reset_loss,
+            .s2n_stop_loss,
+            => "s2n-quic-tokio",
+            else => "quic-go-netpoll",
+        }},
     );
 
     var server_cid: [8]u8 = undefined;

@@ -109,6 +109,12 @@ run_netz_client_case() {
     --peer=s2n-quic "--scenario=$scenario" >"$client_log" 2>&1
   wait "$server_pid"
   server_pid=
+  grep -Fq \
+    'netz QUIC interop runtime: endpoint_role=client client_io=zio-std-io server_io=s2n-quic-tokio' \
+    "$client_log"
+  grep -Fq \
+    's2n-quic interop runtime: endpoint_role=server client_io=zio-std-io server_io=s2n-quic-tokio' \
+    "$server_log"
   grep -Fq "$client_result" "$client_log"
   grep -Fq "$server_result" "$server_log"
   cat "$client_log"
@@ -150,6 +156,12 @@ timeout 20s "$netz_client" "$port" "$work/s2n-ca.pem" \
   --peer=s2n-quic --expect-retry >"$work/netz-client-retry.log" 2>&1
 wait "$server_pid"
 server_pid=
+grep -Fq \
+  'netz QUIC interop runtime: endpoint_role=client client_io=zio-std-io server_io=s2n-quic-tokio' \
+  "$work/netz-client-retry.log"
+grep -Fq \
+  's2n-quic interop runtime: endpoint_role=server client_io=zio-std-io server_io=s2n-quic-tokio' \
+  "$work/s2n-server-retry.log"
 grep -Fq \
   'netz QUIC client interoperated with s2n-quic: verified=true version=1 retry=true alpn=hq-interop streams=2 bytes=10 peer_close=57' \
   "$work/netz-client-retry.log"
@@ -193,6 +205,12 @@ run_s2n_client_case() {
     "$scenario" >"$client_log" 2>&1
   wait "$server_pid"
   server_pid=
+  grep -Fq \
+    's2n-quic interop runtime: endpoint_role=client client_io=s2n-quic-tokio server_io=zio-std-io' \
+    "$client_log"
+  grep -Fq \
+    'netz QUIC interop runtime: endpoint_role=server client_io=s2n-quic-tokio server_io=zio-std-io' \
+    "$server_log"
   grep -Fq "$client_result" "$client_log"
   grep -Fq "$server_result" "$server_log"
   cat "$client_log"

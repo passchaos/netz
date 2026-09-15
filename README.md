@@ -941,6 +941,8 @@ zig build interop-websocket-hyper-h2 -Doptimize=ReleaseFast
 # same-IP source-port rebinding drops four datagrams, recovers by PTO,
 # and verifies that NAT rebinding does not start active path validation.
 zig build interop-quic-quic-go -Doptimize=ReleaseFast
+# The shared netz QUIC peer client/server obtain std.Io from zio. The quic-go
+# and s2n-quic gates assert zio-std-io against their netpoll/Tokio runtimes.
 # Requires Docker and the crossbario/autobahn-testsuite image. Optional trailing
 # arguments select individual case IDs; with none, all 517 cases run. Pass
 # --tls before case IDs to run the same gate over native TLS 1.3 WSS.

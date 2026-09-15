@@ -16,6 +16,8 @@ class QuicHandshakeFaultCheckTest(unittest.TestCase):
         proxy = root / "proxy.log"
         if role_pair == "netz-client+quic-go-server":
             client.write_text(
+                "netz QUIC interop runtime: endpoint_role=client "
+                "client_io=zio-std-io server_io=quic-go-netpoll\n"
                 "netz QUIC client interoperated with quic-go: verified=true "
                 f"version={version} retry=false alpn=hq-interop streams=2 bytes=10 "
                 "peer_close=57\n",
@@ -34,11 +36,15 @@ class QuicHandshakeFaultCheckTest(unittest.TestCase):
                 encoding="utf-8",
             )
             server.write_text(
-                ("netz QUIC close server interoperated with quic-go: "
-                 "alpn=hq-interop peer_close=58\n")
-                if version == 1 else
-                ("netz QUIC v2 close server interoperated with quic-go: "
-                 "version=2 alpn=hq-interop peer_close=58\n"),
+                "netz QUIC interop runtime: endpoint_role=server "
+                "client_io=quic-go-netpoll server_io=zio-std-io\n"
+                + (
+                    ("netz QUIC close server interoperated with quic-go: "
+                     "alpn=hq-interop peer_close=58\n")
+                    if version == 1 else
+                    ("netz QUIC v2 close server interoperated with quic-go: "
+                     "version=2 alpn=hq-interop peer_close=58\n")
+                ),
                 encoding="utf-8",
             )
             scope_impl = "quic-go" if direction == "client" else "netz"
@@ -93,6 +99,25 @@ class QuicHandshakeFaultCheckTest(unittest.TestCase):
                 check.verify(
                     role_pair="netz-client+quic-go-server", direction="client",
                     fault="loss", version=1, client_log=client, server_log=server, proxy_log=proxy,
+                )
+
+    def test_rejects_missing_runtime_identity(self) -> None:
+        with TemporaryDirectory() as directory:
+            client, server, proxy = self.write_case(
+                directory, role_pair="quic-go-client+netz-server",
+                direction="server", fault="loss",
+            )
+            server.write_text(
+                server.read_text(encoding="utf-8").replace(
+                    "server_io=zio-std-io", "server_io=threaded"
+                ),
+                encoding="utf-8",
+            )
+            with self.assertRaises(ValueError):
+                check.verify(
+                    role_pair="quic-go-client+netz-server", direction="server",
+                    fault="loss", version=1, client_log=client,
+                    server_log=server, proxy_log=proxy,
                 )
 
     def test_rejects_extra_fault(self) -> None:
