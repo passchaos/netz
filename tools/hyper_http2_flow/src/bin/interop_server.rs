@@ -127,7 +127,7 @@ fn main() {
             // requests shared it. That can surface as a reset after all
             // asserted work, which is a valid shutdown for this scenario.
             let _ = connection.await;
-            println!("Hyper HTTP/2 server completed netz pool reuse: requests=2 connections=1");
+            println!("Hyper HTTP/2 server completed netz pool reuse: requests=2 connections=1 client_io=zio-std-io server_io=hyper-tokio");
         } else {
             // Hyper/h2 emits the recommended MAX_STREAM_ID GOAWAY,
             // synchronizes one RTT with PING, then narrows the boundary to the
@@ -139,7 +139,7 @@ fn main() {
                 .await
                 .expect("gracefully drain netz HTTP/2 client");
             println!(
-                "Hyper HTTP/2 server gracefully drained netz client: active_stream=9 new_request_refused=true"
+                "Hyper HTTP/2 server gracefully drained netz client: active_stream=9 new_request_refused=true client_io=zio-std-io server_io=hyper-tokio"
             );
         }
     });

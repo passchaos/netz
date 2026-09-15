@@ -53,6 +53,7 @@ if ! grep -q 'h2spec server listening' "$work/server.log"; then
   cat "$work/server.log" >&2
   exit 1
 fi
+grep -Fq 'server_io=zio-std-io' "$work/server.log"
 
 log="$work/h2spec.log"
 # Strict mode adds the connection-error GOAWAY check that h2spec otherwise

@@ -17,11 +17,9 @@ pub fn main(init: std.process.Init) !void {
     if (args.len == 3 and !use_tls) return error.InvalidArgument;
 
     const allocator = std.heap.c_allocator;
-    var threaded = std.Io.Threaded.init(allocator, .{
-        .async_limit = .unlimited,
-    });
-    defer threaded.deinit();
-    const io = threaded.io();
+    var backend = try netz.runtime.Backend.init(allocator);
+    defer backend.deinit();
+    const io = backend.io();
     const limits: netz.http2.runtime.Limits = .{
         .max_frame_payload = 16 * 1024,
         .max_body_bytes = 1024 * 1024,
@@ -69,23 +67,38 @@ fn serveForever(
     io: std.Io,
     allocator: std.mem.Allocator,
 ) !void {
+    const ConnectionTask = AcceptTask(@TypeOf(server.*));
     std.debug.print(
-        "netz h2spec server listening on {f}\n",
+        "netz h2spec server listening on {f} server_io=zio-std-io\n",
         .{server.address()},
     );
 
+    var connections: std.Io.Group = .init;
+    defer connections.cancel(io);
     while (true) {
         const stream = server.listener.accept(io) catch continue;
-        const thread = std.Thread.spawn(
-            .{},
-            acceptAndServe,
+        connections.concurrent(
+            io,
+            ConnectionTask.run,
             .{ server, io, allocator, stream },
         ) catch {
             stream.close(io);
             continue;
         };
-        thread.detach();
     }
+}
+
+fn AcceptTask(comptime ServerType: type) type {
+    return struct {
+        fn run(
+            server: *ServerType,
+            io: std.Io,
+            allocator: std.mem.Allocator,
+            stream: std.Io.net.Stream,
+        ) std.Io.Cancelable!void {
+            return acceptAndServe(server, io, allocator, stream);
+        }
+    };
 }
 
 fn acceptAndServe(
@@ -93,7 +106,7 @@ fn acceptAndServe(
     io: std.Io,
     allocator: std.mem.Allocator,
     stream: std.Io.net.Stream,
-) void {
+) std.Io.Cancelable!void {
     var connection = server.acceptStream(stream) catch |err| {
         std.debug.print(
             "netz h2spec connection accept failed: {s}\n",

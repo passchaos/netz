@@ -99,10 +99,10 @@ grep -Fq \
   'netz HTTP/2 keep-alive interoperated with Hyper: transport=h2c ack=true next_request=true' \
   "$work/netz-client.log"
 grep -Fq \
-  'netz HTTP/2 client drained Hyper GOAWAY: transport=h2c active_stream=9 new_request_refused=true' \
+  'netz HTTP/2 client drained Hyper GOAWAY: transport=h2c active_stream=9 new_request_refused=true client_io=zio-std-io server_io=hyper-tokio' \
   "$work/netz-client.log"
 grep -Fq \
-  'Hyper HTTP/2 server gracefully drained netz client: active_stream=9 new_request_refused=true' \
+  'Hyper HTTP/2 server gracefully drained netz client: active_stream=9 new_request_refused=true client_io=zio-std-io server_io=hyper-tokio' \
   "$work/server.log"
 echo 'Hyper HTTP/2 server -> netz client interop passed'
 
@@ -120,10 +120,10 @@ fi
 wait "$server_pid"
 server_pid=
 grep -Fq \
-  'netz HTTP/2 pool reused Hyper connection: transport=h2c requests=2 idle=1 total=1' \
+  'netz HTTP/2 pool reused Hyper connection: transport=h2c requests=2 idle=1 total=1 client_io=zio-std-io server_io=hyper-tokio' \
   "$work/pool-client.log"
 grep -Fq \
-  'Hyper HTTP/2 server completed netz pool reuse: requests=2 connections=1' \
+  'Hyper HTTP/2 server completed netz pool reuse: requests=2 connections=1 client_io=zio-std-io server_io=hyper-tokio' \
   "$work/pool-server.log"
 cat "$work/pool-client.log"
 echo 'netz HTTP/2 pool -> Hyper h2c reuse interop passed'
@@ -172,7 +172,7 @@ grep -Fq \
   'Hyper HTTP/2 client canceled flow-blocked netz stream and completed concurrent sibling: rst=CANCEL window=8192 received=8192 sibling=16384' \
   "$work/hyper-client.log"
 grep -Fq \
-  'Hyper HTTP/2 client drained netz GOAWAY: active_stream=13 new_request_refused=true' \
+  'Hyper HTTP/2 client drained netz GOAWAY: active_stream=13 new_request_refused=true client_io=hyper-tokio server_io=zio-std-io' \
   "$work/hyper-client.log"
 grep -Fq \
   'transport=h2c alpn=n/a method=POST body=13 trailers=1 status=201 response_body=13 response_trailers=1' \
@@ -187,7 +187,7 @@ grep -Fq \
   'netz HTTP/2 server completed concurrent handler batch: transport=h2c fast_before_slow=true requests=2' \
   "$work/netz-server.log"
 grep -Fq \
-  'netz HTTP/2 server gracefully drained Hyper client: transport=h2c last_stream=13 new_request_refused=true' \
+  'netz HTTP/2 server gracefully drained Hyper client: transport=h2c last_stream=13 new_request_refused=true client_io=hyper-tokio server_io=zio-std-io' \
   "$work/netz-server.log"
 echo 'Hyper HTTP/2 client -> netz server interop passed'
 
@@ -214,10 +214,10 @@ grep -Fq \
   'netz HTTP/2 keep-alive interoperated with Hyper: transport=tls ack=true next_request=true' \
   "$work/tls-netz-client.log"
 grep -Fq \
-  'netz HTTP/2 client drained Hyper GOAWAY: transport=tls active_stream=9 new_request_refused=true' \
+  'netz HTTP/2 client drained Hyper GOAWAY: transport=tls active_stream=9 new_request_refused=true client_io=zio-std-io server_io=hyper-tokio' \
   "$work/tls-netz-client.log"
 grep -Fq \
-  'Hyper HTTP/2 server gracefully drained netz client: active_stream=9 new_request_refused=true' \
+  'Hyper HTTP/2 server gracefully drained netz client: active_stream=9 new_request_refused=true client_io=zio-std-io server_io=hyper-tokio' \
   "$work/tls-hyper-server.log"
 grep -Fq \
   'rustls server sent TLS KeyUpdate request' \
@@ -243,10 +243,10 @@ fi
 wait "$server_pid"
 server_pid=
 grep -Fq \
-  'netz HTTP/2 pool reused Hyper connection: transport=tls requests=2 idle=1 total=1' \
+  'netz HTTP/2 pool reused Hyper connection: transport=tls requests=2 idle=1 total=1 client_io=zio-std-io server_io=hyper-tokio' \
   "$work/tls-pool-client.log"
 grep -Fq \
-  'Hyper HTTP/2 server completed netz pool reuse: requests=2 connections=1' \
+  'Hyper HTTP/2 server completed netz pool reuse: requests=2 connections=1 client_io=zio-std-io server_io=hyper-tokio' \
   "$work/tls-pool-server.log"
 cat "$work/tls-pool-client.log"
 echo 'netz HTTP/2 pool -> Hyper TLS reuse interop passed'
@@ -277,7 +277,7 @@ grep -Fq \
   'Hyper HTTP/2 client observed netz concurrent handlers: fast_before_slow=true requests=2' \
   "$work/tls-hyper-client.log"
 grep -Fq \
-  'Hyper HTTP/2 client drained netz GOAWAY: active_stream=13 new_request_refused=true' \
+  'Hyper HTTP/2 client drained netz GOAWAY: active_stream=13 new_request_refused=true client_io=hyper-tokio server_io=zio-std-io' \
   "$work/tls-hyper-client.log"
 grep -Fq \
   'netz HTTP/2 server remained usable after Hyper keep-alive: transport=tls next_request=true' \
@@ -286,7 +286,7 @@ grep -Fq \
   'netz HTTP/2 server completed concurrent handler batch: transport=tls fast_before_slow=true requests=2' \
   "$work/tls-netz-server.log"
 grep -Fq \
-  'netz HTTP/2 server gracefully drained Hyper client: transport=tls last_stream=13 new_request_refused=true' \
+  'netz HTTP/2 server gracefully drained Hyper client: transport=tls last_stream=13 new_request_refused=true client_io=hyper-tokio server_io=zio-std-io' \
   "$work/tls-netz-server.log"
 grep -Fq \
   'netz HTTP/2 server interoperated with rustls KeyUpdate: sent=1 received=1 next_request=true' \

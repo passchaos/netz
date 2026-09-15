@@ -76,9 +76,9 @@ run_netz_client_case() {
     >"$work/netz-client-$transport.log" 2>&1
   wait "$server_pid"
   server_pid=
-  grep -Fq "netz HTTP/2 client accepted h2 server push: transport=$transport parent_stream=1 promised_stream=2 path=/style.css body=16" \
+  grep -Fq "netz HTTP/2 client accepted h2 server push: transport=$transport parent_stream=1 promised_stream=2 path=/style.css body=16 client_io=zio-std-io server_io=rust-h2-tokio" \
     "$work/netz-client-$transport.log"
-  grep -Fq "h2 server pushed to netz: parent_stream=1 promised_stream=2 path=/style.css body=16" \
+  grep -Fq "h2 server pushed to netz: parent_stream=1 promised_stream=2 path=/style.css body=16 client_io=zio-std-io server_io=rust-h2-tokio" \
     "$work/h2-server-$transport.log"
   cat "$work/netz-client-$transport.log"
   cat "$work/h2-server-$transport.log"
@@ -102,9 +102,9 @@ run_h2_client_case() {
     >"$work/h2-client-$transport.log" 2>&1
   wait "$server_pid"
   server_pid=
-  grep -Fq "h2 client disabled netz push: request_stream=1 promise_rejected=true parent_status=204" \
+  grep -Fq "h2 client disabled netz push: request_stream=1 promise_rejected=true parent_status=204 client_io=rust-h2-tokio server_io=zio-std-io" \
     "$work/h2-client-$transport.log"
-  grep -Fq "netz HTTP/2 server honored h2 push opt-out: transport=$transport request_stream=1 promise_rejected=true parent_status=204" \
+  grep -Fq "netz HTTP/2 server honored h2 push opt-out: transport=$transport request_stream=1 promise_rejected=true parent_status=204 client_io=rust-h2-tokio server_io=zio-std-io" \
     "$work/netz-server-$transport.log"
   cat "$work/h2-client-$transport.log"
   cat "$work/netz-server-$transport.log"
@@ -129,9 +129,9 @@ run_netz_informational_client_case() {
     >"$work/netz-informational-client-$transport.log" 2>&1
   wait "$server_pid"
   server_pid=
-  grep -Fq "netz HTTP/2 client observed h2 informational responses: transport=$transport statuses=103,102 final=200 body=5" \
+  grep -Fq "netz HTTP/2 client observed h2 informational responses: transport=$transport statuses=103,102 final=200 body=5 client_io=zio-std-io server_io=rust-h2-tokio" \
     "$work/netz-informational-client-$transport.log"
-  grep -Fq "h2 server sent informational responses to netz: statuses=103,102 final=200 body=5" \
+  grep -Fq "h2 server sent informational responses to netz: statuses=103,102 final=200 body=5 client_io=zio-std-io server_io=rust-h2-tokio" \
     "$work/h2-informational-server-$transport.log"
   cat "$work/netz-informational-client-$transport.log"
   cat "$work/h2-informational-server-$transport.log"
@@ -156,9 +156,9 @@ run_h2_informational_client_case() {
     >"$work/h2-informational-client-$transport.log" 2>&1
   wait "$server_pid"
   server_pid=
-  grep -Fq "h2 client received netz informational responses: statuses=103,102 final=200 body=5" \
+  grep -Fq "h2 client received netz informational responses: statuses=103,102 final=200 body=5 client_io=rust-h2-tokio server_io=zio-std-io" \
     "$work/h2-informational-client-$transport.log"
-  grep -Fq "netz HTTP/2 server sent informational responses to h2: transport=$transport statuses=103,102 final=200 body=5" \
+  grep -Fq "netz HTTP/2 server sent informational responses to h2: transport=$transport statuses=103,102 final=200 body=5 client_io=rust-h2-tokio server_io=zio-std-io" \
     "$work/netz-informational-server-$transport.log"
   cat "$work/h2-informational-client-$transport.log"
   cat "$work/netz-informational-server-$transport.log"

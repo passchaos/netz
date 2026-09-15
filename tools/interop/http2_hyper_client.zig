@@ -24,9 +24,9 @@ pub fn main(init: std.process.Init) !void {
     }
 
     const allocator = std.heap.c_allocator;
-    var threaded = std.Io.Threaded.init(allocator, .{});
-    defer threaded.deinit();
-    const io = threaded.io();
+    var backend = try netz.runtime.Backend.init(allocator);
+    defer backend.deinit();
+    const io = backend.io();
 
     const limits: netz.http2.runtime.Limits = .{
         .max_frame_payload = 16 * 1024,
@@ -246,7 +246,7 @@ pub fn main(init: std.process.Init) !void {
         }),
     );
     std.debug.print(
-        "netz HTTP/2 client drained Hyper GOAWAY: transport={s} active_stream=9 new_request_refused=true\n",
+        "netz HTTP/2 client drained Hyper GOAWAY: transport={s} active_stream=9 new_request_refused=true client_io=zio-std-io server_io=hyper-tokio\n",
         .{if (tls_enabled) "tls" else "h2c"},
     );
 }
@@ -297,7 +297,7 @@ fn runPoolInterop(
         return error.InvalidResponse;
     }
     std.debug.print(
-        "netz HTTP/2 pool reused Hyper connection: transport={s} requests=2 idle=1 total=1\n",
+        "netz HTTP/2 pool reused Hyper connection: transport={s} requests=2 idle=1 total=1 client_io=zio-std-io server_io=hyper-tokio\n",
         .{if (tls_enabled) "tls" else "h2c"},
     );
 }

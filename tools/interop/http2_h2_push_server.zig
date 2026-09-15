@@ -23,9 +23,9 @@ pub fn main(init: std.process.Init) !void {
     }
 
     const allocator = std.heap.c_allocator;
-    var threaded = std.Io.Threaded.init(allocator, .{});
-    defer threaded.deinit();
-    const io = threaded.io();
+    var backend = try netz.runtime.Backend.init(allocator);
+    defer backend.deinit();
+    const io = backend.io();
     var certificate_der: [netz.tls.testing.certificate_der_len]u8 = undefined;
     try std.base64.standard.Decoder.decode(
         &certificate_der,
@@ -73,7 +73,7 @@ pub fn main(init: std.process.Init) !void {
             .request_method = request.method,
         });
         std.debug.print(
-            "netz HTTP/2 server sent informational responses to h2: transport={s} statuses=103,102 final=200 body=5\n",
+            "netz HTTP/2 server sent informational responses to h2: transport={s} statuses=103,102 final=200 body=5 client_io=rust-h2-tokio server_io=zio-std-io\n",
             .{if (tls_enabled) "tls" else "h2c"},
         );
         return;
@@ -93,7 +93,7 @@ pub fn main(init: std.process.Init) !void {
         .request_method = request.method,
     });
     std.debug.print(
-        "netz HTTP/2 server honored h2 push opt-out: transport={s} request_stream=1 promise_rejected=true parent_status=204\n",
+        "netz HTTP/2 server honored h2 push opt-out: transport={s} request_stream=1 promise_rejected=true parent_status=204 client_io=rust-h2-tokio server_io=zio-std-io\n",
         .{if (tls_enabled) "tls" else "h2c"},
     );
 }

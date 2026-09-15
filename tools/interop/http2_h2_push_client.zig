@@ -24,9 +24,9 @@ pub fn main(init: std.process.Init) !void {
     const tls_enabled = certificate_path != null;
 
     const allocator = std.heap.c_allocator;
-    var threaded = std.Io.Threaded.init(allocator, .{});
-    defer threaded.deinit();
-    const io = threaded.io();
+    var backend = try netz.runtime.Backend.init(allocator);
+    defer backend.deinit();
+    const io = backend.io();
     const limits: netz.http2.runtime.Limits = .{
         .max_frame_payload = 16 * 1024,
         .max_body_bytes = 64 * 1024,
@@ -95,7 +95,7 @@ pub fn main(init: std.process.Init) !void {
     try expectHeader(pushed.headers, "x-hyper-push", "yes");
 
     std.debug.print(
-        "netz HTTP/2 client accepted h2 server push: transport={s} parent_stream=1 promised_stream=2 path=/style.css body=16\n",
+        "netz HTTP/2 client accepted h2 server push: transport={s} parent_stream=1 promised_stream=2 path=/style.css body=16 client_io=zio-std-io server_io=rust-h2-tokio\n",
         .{if (tls_enabled) "tls" else "h2c"},
     );
 }
@@ -158,7 +158,7 @@ fn runInformational(
         "yes",
     ));
     std.debug.print(
-        "netz HTTP/2 client observed h2 informational responses: transport={s} statuses=103,102 final=200 body=5\n",
+        "netz HTTP/2 client observed h2 informational responses: transport={s} statuses=103,102 final=200 body=5 client_io=zio-std-io server_io=rust-h2-tokio\n",
         .{if (tls_enabled) "tls" else "h2c"},
     );
 }

@@ -113,7 +113,7 @@ async fn run_informational_server(port: u16, tls_paths: Option<(String, String)>
     body.send_data(Bytes::from_static(b"final"), true)
         .expect("send final body");
     while connection.accept().await.is_some() {}
-    println!("h2 server sent informational responses to netz: statuses=103,102 final=200 body=5");
+    println!("h2 server sent informational responses to netz: statuses=103,102 final=200 body=5 client_io=zio-std-io server_io=rust-h2-tokio");
 }
 
 async fn run_informational_client(port: u16, ca_path: Option<(String, String)>) {
@@ -186,7 +186,7 @@ async fn run_informational_client(port: u16, ca_path: Option<(String, String)>) 
         body.data().await.is_none(),
         "unexpected extra response DATA"
     );
-    println!("h2 client received netz informational responses: statuses=103,102 final=200 body=5");
+    println!("h2 client received netz informational responses: statuses=103,102 final=200 body=5 client_io=rust-h2-tokio server_io=zio-std-io");
 }
 
 async fn run_push_server(port: u16, tls_paths: Option<(String, String)>) {
@@ -265,7 +265,7 @@ async fn run_push_server(port: u16, tls_paths: Option<(String, String)>) {
         .expect("send pushed response body");
 
     while connection.accept().await.is_some() {}
-    println!("h2 server pushed to netz: parent_stream=1 promised_stream=2 path=/style.css body=16");
+    println!("h2 server pushed to netz: parent_stream=1 promised_stream=2 path=/style.css body=16 client_io=zio-std-io server_io=rust-h2-tokio");
 }
 
 async fn run_push_disabled_client(port: u16, ca_path: Option<(String, String)>) {
@@ -328,7 +328,7 @@ async fn run_push_disabled_client(port: u16, ca_path: Option<(String, String)>) 
     drop(response);
     drop(sender);
     println!(
-        "h2 client disabled netz push: request_stream=1 promise_rejected=true parent_status=204"
+        "h2 client disabled netz push: request_stream=1 promise_rejected=true parent_status=204 client_io=rust-h2-tokio server_io=zio-std-io"
     );
 }
 

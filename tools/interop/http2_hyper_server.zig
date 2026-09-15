@@ -18,9 +18,9 @@ pub fn main(init: std.process.Init) !void {
     if (args.len == 3 and !tls_enabled) return error.InvalidArgument;
 
     const allocator = std.heap.c_allocator;
-    var threaded = std.Io.Threaded.init(allocator, .{});
-    defer threaded.deinit();
-    const io = threaded.io();
+    var backend = try netz.runtime.Backend.init(allocator);
+    defer backend.deinit();
+    const io = backend.io();
 
     const limits: netz.http2.runtime.Limits = .{
         .max_frame_payload = 16 * 1024,
@@ -268,7 +268,7 @@ pub fn main(init: std.process.Init) !void {
         .request_method = graceful_request.method,
     });
     std.debug.print(
-        "netz HTTP/2 server gracefully drained Hyper client: transport={s} last_stream=13 new_request_refused=true\n",
+        "netz HTTP/2 server gracefully drained Hyper client: transport={s} last_stream=13 new_request_refused=true client_io=hyper-tokio server_io=zio-std-io\n",
         .{if (tls_enabled) "tls" else "h2c"},
     );
 }

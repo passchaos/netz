@@ -339,7 +339,7 @@ fn main() {
             "unexpected post-GOAWAY readiness error: {refusal}"
         );
         println!(
-            "Hyper HTTP/2 client drained netz GOAWAY: active_stream=13 new_request_refused=true"
+            "Hyper HTTP/2 client drained netz GOAWAY: active_stream=13 new_request_refused=true client_io=hyper-tokio server_io=zio-std-io"
         );
     });
 }

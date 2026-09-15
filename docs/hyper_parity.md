@@ -1457,7 +1457,10 @@ sibling reuse, and connection-error precedence.
    build interop-http2-h2spec -Doptimize=ReleaseFast`, reconfirmed 2026-09-10).
    The gate now supplies `--strict` itself and parses h2spec's summary so an
    empty selection, skipped case, or failed case cannot be mistaken for a
-   successful conformance run. This covers the external h2c wire checks but
+   successful conformance run. The long-lived adapter now obtains `std.Io`
+   from zio and schedules accepted connections in a `std.Io.Group`, with no
+   detached OS-thread fallback; its readiness line identifies
+   `server_io=zio-std-io`. This covers the external h2c wire checks but
    does not replace broader HTTP client interoperability evidence. The native
    TLS 1.3 HTTP/2 runtime separately has an end-to-end encrypted request test
    that verifies `h2` ALPN and the transport-derived `https` pseudo-header,
@@ -1483,11 +1486,17 @@ sibling reuse, and connection-error precedence.
    preface; an OpenSSL control against the same netz listener negotiated TLS
    1.3, `TLS_AES_128_GCM_SHA256`, and ALPN `h2`, isolating that failure to the
    obsolete external ClientHello rather than the HTTP/2 or TLS server path.
+   After the zio migration, both h2c and TLS strict suites were rerun against
+   the upstream v2.6.0 commit `70ac2294`; each completed 147/147 with zero
+   skipped and zero failed cases.
    Bidirectional interoperability now has a separate process boundary rather
    than being inferred from those h2spec server-only results:
    `zig build interop-http2-hyper-client -Doptimize=ReleaseFast` builds a
    one-shot server from the audited `~/Work/hyper` checkout and drives it with
-   a netz client. Hyper verifies the POST method, query-bearing path, request
+   a netz client. Both netz endpoint roles use zio behind `std.Io`, while the
+   Hyper fixture uses its Tokio current-thread executor; the terminal records
+   and runner assertions bind them as `zio-std-io` and `hyper-tokio`. Hyper
+   verifies the POST method, query-bearing path, request
    header, body, and request trailer; netz verifies Hyper's 201 status, response
    header, two DATA frames joined into `hyper-response`, and terminal response
    trailer. The same gate then reverses the roles: an audited Hyper client sends
@@ -1552,7 +1561,10 @@ sibling reuse, and connection-error precedence.
    independent 200 response and exact CSS body, and also completes the parent
    response. In the reverse direction, the h2 client disables push and netz
    must reject `promisePush` before returning the normal 204 parent response.
-   Both scenarios run over h2c and certificate-verified TLS. The same gate now
+   Both scenarios run over h2c and certificate-verified TLS. The netz endpoint
+   is identified as `zio-std-io`; this direct h2 crate peer is identified as
+   `rust-h2-tokio`, rather than being mislabeled as the high-level Hyper API.
+   The same gate now
    also exchanges ordered 103 Early Hints and 102 Processing heads before a
    200 response in both directions. Netz exposes borrowed informational-head
    callbacks on aggregate and streaming request APIs, caps each chain with
