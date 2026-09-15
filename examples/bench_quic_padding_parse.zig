@@ -6,9 +6,9 @@ const padding_len: usize = 1200;
 
 pub fn main() !void {
     const allocator = std.heap.smp_allocator;
-    var threaded = std.Io.Threaded.init(allocator, .{});
-    defer threaded.deinit();
-    const io = threaded.io();
+    var backend = try netz.runtime.Backend.init(allocator);
+    defer backend.deinit();
+    const io = backend.io();
 
     var payload: [padding_len + 1]u8 = .{0} ** (padding_len + 1);
     payload[payload.len - 1] = @intFromEnum(netz.quic.FrameType.ping);
@@ -19,6 +19,7 @@ pub fn main() !void {
 
     std.debug.print(
         \\QUIC PADDING parse benchmark
+        \\  io backend: zio-std-io
         \\  iterations: {d}, padding bytes: {d}
         \\  padding-only payload:  {d} ns/op
         \\  padding before PING:   {d} ns/op

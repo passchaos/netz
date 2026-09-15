@@ -6,9 +6,9 @@ const iterations: usize = 100_000;
 pub fn main() !void {
     const allocator = std.heap.smp_allocator;
 
-    var threaded = std.Io.Threaded.init(allocator, .{});
-    defer threaded.deinit();
-    const io = threaded.io();
+    var backend = try netz.runtime.Backend.init(allocator);
+    defer backend.deinit();
+    const io = backend.io();
 
     const secret = [_]u8{0x51} ** netz.quic.protection.secret_len;
     const aes_keys = netz.quic.protection.deriveAes128Keys(secret);
@@ -62,6 +62,7 @@ pub fn main() !void {
 
     std.debug.print(
         \\QUIC short packet benchmark
+        \\  io backend: zio-std-io
         \\  iterations: {d}
         \\  packet len: {d}
         \\  AES in-place total: {d}, ns/op: {d}

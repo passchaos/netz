@@ -1063,6 +1063,7 @@ taskset -c 0 zig build bench-quic-one-rtt-receive -Doptimize=ReleaseFast -- --mo
 taskset -c 0 zig build bench-quic-one-rtt-receive -Doptimize=ReleaseFast -- --mode=visitor --frame=stream_gap --warmup=200 --iterations=5000
 zig build bench-quic-ack-ranges -Doptimize=ReleaseFast
 zig build bench-quic-stream-window -Doptimize=ReleaseFast
+zig build bench-quic-ticket-keyring -Doptimize=ReleaseFast
 zig build bench-quic-stream-ids -Doptimize=ReleaseFast -- --iterations=2000000
 zig build bench-quic-endpoint-cid-sync -Doptimize=ReleaseFast -- --iterations=2000000
 zig build bench-quic-connection-router -Doptimize=ReleaseFast -- --iterations=10000000
@@ -1092,6 +1093,9 @@ The MQTT router, TLS, WebSocket, and external broker driver likewise obtain
 `std.Io.async`/`std.Io.Group`; the Mosquitto comparison identifies its netz
 client as `zio-std-io`, the netz server as `zio-std-io`, and the reference
 server as `mosquitto-event-loop`.
+The QUIC ACK-range, connection-router, PADDING, short-packet, receive-window,
+and ticket-keyring microbenchmarks obtain their monotonic clock from the same
+zio-backed `std.Io` and report that identity.
 
 The aggregate `bench` step runs the current protocol microbenchmarks:
 

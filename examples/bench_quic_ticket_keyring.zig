@@ -5,9 +5,9 @@ const ticket = netz.quic.resumption.ticket;
 const iterations: usize = 200_000;
 
 pub fn main(init: std.process.Init) !void {
-    var threaded = std.Io.Threaded.init(init.gpa, .{});
-    defer threaded.deinit();
-    const io = threaded.io();
+    var backend = try netz.runtime.Backend.init(init.gpa);
+    defer backend.deinit();
+    const io = backend.io();
 
     var keyring = try ticket.Keyring.init(.{
         .id = 1,
@@ -63,7 +63,8 @@ pub fn main(init: std.process.Init) !void {
     var buffer: [512]u8 = undefined;
     var writer = std.Io.Writer.fixed(&buffer);
     try writer.print(
-        "quic_ticket_keyring iterations={d} sealed_bytes={d}\n" ++
+        "quic_ticket_keyring io_backend=zio-std-io " ++
+            "iterations={d} sealed_bytes={d}\n" ++
             "  seal: {d} ns/op ({d} checksum)\n" ++
             "  open: {d} ns/op ({d} checksum)\n",
         .{

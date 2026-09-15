@@ -10,9 +10,9 @@ const recovery_iterations: usize = 5_000;
 
 pub fn main() !void {
     const allocator = std.heap.smp_allocator;
-    var threaded = std.Io.Threaded.init(allocator, .{});
-    defer threaded.deinit();
-    const io = threaded.io();
+    var backend = try netz.runtime.Backend.init(allocator);
+    defer backend.deinit();
+    const io = backend.io();
 
     var received = netz.quic.packet_space.ReceivedPacketTracker.init(
         allocator,
@@ -30,6 +30,7 @@ pub fn main() !void {
 
     const allocating_ns, const allocating_checksum = try measureAllocating(
         allocator,
+        io,
         received,
     );
     const stack_ns, const stack_checksum = try measureCallerStorage(
@@ -49,6 +50,7 @@ pub fn main() !void {
 
     std.debug.print(
         \\QUIC ACK range benchmark
+        \\  io backend: zio-std-io
         \\  iterations: {d}, tracked ranges: {d}, extra ACK ranges/frame: {d}
         \\  allocating ackFrame:      {d} ns/op
         \\  caller-storage ackFrame:  {d} ns/op
@@ -120,12 +122,9 @@ fn measureRecoveryAckRanges(
 
 fn measureAllocating(
     allocator: std.mem.Allocator,
+    io: std.Io,
     received: netz.quic.packet_space.ReceivedPacketTracker,
 ) !struct { u64, u64 } {
-    var threaded = std.Io.Threaded.init(allocator, .{});
-    defer threaded.deinit();
-    const io = threaded.io();
-
     var checksum: u64 = 0;
     const started = nowNs(io);
     for (0..iterations) |_| {

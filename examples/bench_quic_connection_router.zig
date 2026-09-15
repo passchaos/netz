@@ -8,9 +8,9 @@ const cid_len: usize = 16;
 pub fn main(init: std.process.Init) !void {
     const iterations = try parseIterations(init);
     const allocator = std.heap.smp_allocator;
-    var threaded = std.Io.Threaded.init(allocator, .{});
-    defer threaded.deinit();
-    const io = threaded.io();
+    var backend = try netz.runtime.Backend.init(allocator);
+    defer backend.deinit();
+    const io = backend.io();
 
     var router = netz.quic.connection_router.Router.init(allocator);
     defer router.deinit();
@@ -56,6 +56,7 @@ pub fn main(init: std.process.Init) !void {
 
     std.debug.print(
         \\QUIC connection router benchmark
+        \\  io backend: zio-std-io
         \\  iterations: {d}, routes: {d}, CID bytes: {d}
         \\  hit:  {d}.{d:0>2} ns/op
         \\  miss: {d}.{d:0>2} ns/op

@@ -7,9 +7,9 @@ const window_size: usize = 16 * 1024;
 
 pub fn main() !void {
     const allocator = std.heap.smp_allocator;
-    var threaded = std.Io.Threaded.init(allocator, .{});
-    defer threaded.deinit();
-    const io = threaded.io();
+    var backend = try netz.runtime.Backend.init(allocator);
+    defer backend.deinit();
+    const io = backend.io();
 
     var state = netz.quic.stream_state.RecvState.init(
         allocator,
@@ -42,6 +42,7 @@ pub fn main() !void {
 
     std.debug.print(
         \\QUIC receive sliding-window benchmark
+        \\  io backend: zio-std-io
         \\  chunks: {d}, bytes/chunk: {d}, total bytes: {d}
         \\  ns/chunk: {d}, ns/byte: {d}
         \\  peak retained bytes: {d}

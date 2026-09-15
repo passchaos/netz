@@ -11,6 +11,13 @@ Unless a section explicitly identifies a zio-era rerun, measurements captured
 before 2026-09-15 used `std.Io.Threaded` and remain historical evidence only.
 Current benchmark output names the backend so results from different execution
 models cannot be silently combined.
+As of 2026-09-15, the ACK-range, connection-router, PADDING parser,
+short-packet protection, receive sliding-window, and session-ticket keyring
+microbenchmarks all obtain their monotonic clock from
+`netz.runtime.Backend` and print `zio-std-io`. Their previously recorded
+optimization comparisons remain useful as same-harness historical evidence,
+but are not current zio performance measurements unless a later paragraph
+explicitly identifies a zio rerun.
 
 ## Host and toolchain
 
@@ -665,6 +672,12 @@ Two 1,000,000-iteration 32-field comparisons measured 711-715 ns/block versus
 
 ### QUIC prepared packet protection
 
+The maintained short-packet executable obtains its monotonic clock from
+zio-backed `std.Io` and reports `io backend: zio-std-io`. Numeric results in
+this subsection predate that migration unless explicitly labeled otherwise and
+remain historical Threaded evidence; the backend change itself is not a crypto
+throughput claim.
+
 Connections built with Vail's linked AWS-LC-compatible backend now keep one
 initialized AES-GCM context and AES header-protection key schedule for each
 current send/receive key generation. This matches quiche's connection-owned
@@ -902,6 +915,11 @@ same borrowed batch shape for caller-provided 65,535-byte GRO storage, while
 its owning batch API and HTTP/3 cursor retain their existing lifetimes.
 
 ### QUIC recovery ACK range application
+
+The maintained ACK-range executable uses one zio-backed `std.Io` clock for all
+allocation, caller-storage, stale-check, sent-validation, and recovery-cycle
+arms and prints the backend identity. Older values below are historical
+Threaded measurements and are not mixed with later zio runs.
 
 `bench-quic-ack-ranges` now includes a complete recovery cycle that tracks 128
 payload groups and retires them with two 64-range ACK frames. Recovery validates
@@ -3132,7 +3150,10 @@ topologies were not order-interleaved, so this supersedes the stale 0.717x
 observation only as a current noisy baseline, not as evidence that the shared
 topology has conclusively reached parity.
 
-The endpoint CID router now uses `HashMap.getAdapted` with the borrowed CID
+The endpoint CID router benchmark now obtains its monotonic clock from
+zio-backed `std.Io` and prints `io backend: zio-std-io`; the historical A/B
+numbers below predate that runtime migration. The endpoint CID router uses
+`HashMap.getAdapted` with the borrowed CID
 slice from the datagram instead of zero-filling and copying it into a 20-byte
 fixed key for every lookup. Stored keys remain fixed-size and owned, and all
 registration, collision, mixed-length longest-prefix, removal, long-header, and
