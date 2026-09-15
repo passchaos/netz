@@ -5408,7 +5408,7 @@ pub const Connection = struct {
             ) == null) {
                 return 0;
             }
-            try self.sendPtoPingAt(now_ns);
+            try self.sendPtoFallbackProbeAt(now_ns);
             self.incrementPtoCount();
             return 1;
         }
@@ -5425,14 +5425,29 @@ pub const Connection = struct {
         return sent_count;
     }
 
+    fn ptoProbeRequestsImmediateAck(self: Connection) bool {
+        // A peer transport-parameter advertisement, rather than the legacy
+        // direct-key enable flag alone, proves that IMMEDIATE_ACK is legal.
+        return self.config.enable_ack_frequency and
+            self.config.peer_min_ack_delay != null;
+    }
+
     /// Probe an outstanding flight whose original packet carried no
-    /// retransmittable bytes (for example a pure RFC 9221 DATAGRAM). The fresh
-    /// PING establishes normal recovery ownership without replaying the
-    /// unreliable application payload.
-    fn sendPtoPingAt(self: *Connection, sent_time_ns: ?u64) Error!void {
+    /// retransmittable bytes (for example a pure RFC 9221 DATAGRAM). A
+    /// negotiated peer receives a fresh IMMEDIATE_ACK; legacy peers receive a
+    /// PING with normal recovery ownership. Neither path replays unreliable
+    /// application payload.
+    fn sendPtoFallbackProbeAt(
+        self: *Connection,
+        sent_time_ns: ?u64,
+    ) Error!void {
         try self.validateNextPacketNumber();
         const packet_number = self.next_packet_number;
-        const payload = [_]u8{@intFromEnum(quic.FrameType.ping)};
+        const request_immediate_ack = self.ptoProbeRequestsImmediateAck();
+        const payload = [_]u8{if (request_immediate_ack)
+            @intFromEnum(quic.FrameType.immediate_ack)
+        else
+            @intFromEnum(quic.FrameType.ping)};
         const packet_number_len = quic.protection.packetNumberLenForPayload(
             packet_number,
             self.sent.largestAcknowledged(),
@@ -5452,8 +5467,16 @@ pub const Connection = struct {
 
         self.congestion.onPtoProbeSent(payload.len);
         errdefer self.congestion.discard(payload.len);
-        _ = try self.recovery.trackSent(packet_number, &payload);
-        errdefer _ = self.recovery.forgetPacketNumber(packet_number);
+        // IMMEDIATE_ACK is deliberately not retransmitted: every future PTO
+        // creates a fresh request. Legacy PING retains recovery ownership.
+        const tracked_recovery = !request_immediate_ack;
+        if (tracked_recovery) _ = try self.recovery.trackSent(
+            packet_number,
+            &payload,
+        );
+        errdefer if (tracked_recovery) {
+            _ = self.recovery.forgetPacketNumber(packet_number);
+        };
         try self.sent.sentAtWithDatagramSizeAndPathEpoch(
             packet_number,
             true,
@@ -5723,7 +5746,9 @@ pub const Connection = struct {
         candidate: quic.recovery.Candidate,
         packet_number: u64,
         packet_number_len: u8,
+        payload_len: usize,
         packet_len: usize,
+        request_immediate_ack: bool,
     };
 
     const PtoProbeBatchResult = struct {
@@ -5767,13 +5792,36 @@ pub const Connection = struct {
             const candidate = self.recovery.ptoCandidateAt(first_candidate_index + count) orelse break;
             const packet_number = std.math.add(u64, self.next_packet_number, count) catch return error.InvalidPacketNumber;
             if (packet_number > quic.protection.max_packet_number) return error.InvalidPacketNumber;
-            const packet_number_len = quic.protection.packetNumberLenForPayload(packet_number, self.sent.largestAcknowledged(), candidate.payload.len);
-            const packet_len = try quic.protection.shortPacketLen(.{
-                .destination_connection_id = self.config.peer_connection_id,
-                .packet_number = packet_number,
-                .packet_number_len = packet_number_len,
-                .payload = candidate.payload,
-            });
+            var payload_len = candidate.payload.len;
+            var request_immediate_ack = self.ptoProbeRequestsImmediateAck();
+            if (request_immediate_ack) {
+                payload_len = std.math.add(usize, payload_len, 1) catch
+                    return error.InvalidPayloadLength;
+            }
+            var packet_number_len = quic.protection.packetNumberLenForPayload(packet_number, self.sent.largestAcknowledged(), payload_len);
+            var packet_len =
+                try quic.protection.shortPacketLenForPayloadLen(
+                    self.config.peer_connection_id.len,
+                    packet_number,
+                    packet_number_len,
+                    payload_len,
+                );
+            if (request_immediate_ack and
+                (packet_len > self.currentSendDatagramSize() or
+                    packet_len > self.endpoint.limits.max_datagram_size))
+            {
+                // A full-sized reliable payload is more important than this
+                // optional hint. Retry it unchanged when no byte remains.
+                request_immediate_ack = false;
+                payload_len = candidate.payload.len;
+                packet_number_len = quic.protection.packetNumberLenForPayload(packet_number, self.sent.largestAcknowledged(), payload_len);
+                packet_len = try quic.protection.shortPacketLen(.{
+                    .destination_connection_id = self.config.peer_connection_id,
+                    .packet_number = packet_number,
+                    .packet_number_len = packet_number_len,
+                    .payload = candidate.payload,
+                });
+            }
             if (packet_len > self.currentSendDatagramSize() or
                 packet_len > self.endpoint.limits.max_datagram_size)
             {
@@ -5810,9 +5858,11 @@ pub const Connection = struct {
                 .candidate = candidate,
                 .packet_number = packet_number,
                 .packet_number_len = packet_number_len,
+                .payload_len = payload_len,
                 .packet_len = packet_len,
+                .request_immediate_ack = request_immediate_ack,
             };
-            total_payload_len = std.math.add(usize, total_payload_len, candidate.payload.len) catch return error.InvalidPayloadLength;
+            total_payload_len = std.math.add(usize, total_payload_len, payload_len) catch return error.InvalidPayloadLength;
             total_packet_len = std.math.add(usize, total_packet_len, packet_len) catch return error.InvalidPayloadLength;
         }
         if (count == 0) return .{
@@ -5841,14 +5891,14 @@ pub const Connection = struct {
         }
 
         for (probes[0..count]) |probe| {
-            self.congestion.onPtoProbeSent(probe.candidate.payload.len);
-            tracked_congestion += probe.candidate.payload.len;
+            self.congestion.onPtoProbeSent(probe.payload_len);
+            tracked_congestion += probe.payload_len;
             try self.recovery.recordRetransmission(probe.candidate.group_index, probe.packet_number);
             recorded_recovery_count += 1;
             try self.sent.sentAtWithDatagramSizeAndPathEpoch(
                 probe.packet_number,
                 true,
-                probe.candidate.payload.len,
+                probe.payload_len,
                 probe.packet_len,
                 .not_ect,
                 sent_time_ns,
@@ -5872,18 +5922,39 @@ pub const Connection = struct {
                 probe.packet_number,
                 sent_time_ns,
             );
-            const packet = try self.sealCurrentShortPacketInto(
-                self.send_packet_buffer.items[packet_offset..][0..probe.packet_len],
-                .{
-                    .destination_connection_id = self.config.peer_connection_id,
-                    .packet_number = probe.packet_number,
-                    .packet_number_len = probe.packet_number_len,
-                    .fixed_bit = self.nextFixedBit(),
-                    .spin_bit = self.nextSpinBit(),
-                    .key_phase = self.send_key_phase.currentKeyPhase(),
-                    .payload = probe.candidate.payload,
-                },
-            );
+            const packet_storage = self.send_packet_buffer
+                .items[packet_offset..][0..probe.packet_len];
+            const options: quic.protection.ShortPacketOptions = .{
+                .destination_connection_id = self.config.peer_connection_id,
+                .packet_number = probe.packet_number,
+                .packet_number_len = probe.packet_number_len,
+                .fixed_bit = self.nextFixedBit(),
+                .spin_bit = self.nextSpinBit(),
+                .key_phase = self.send_key_phase.currentKeyPhase(),
+                .payload = if (probe.request_immediate_ack) blk: {
+                    const payload_offset = 1 +
+                        self.config.peer_connection_id.len +
+                        @as(usize, probe.packet_number_len);
+                    const payload = packet_storage[payload_offset..][0..probe.payload_len];
+                    @memcpy(
+                        payload[0..probe.candidate.payload.len],
+                        probe.candidate.payload,
+                    );
+                    payload[payload.len - 1] =
+                        @intFromEnum(quic.FrameType.immediate_ack);
+                    break :blk payload;
+                } else probe.candidate.payload,
+            };
+            const packet = if (probe.request_immediate_ack)
+                try self.sealCurrentShortPacketInPlace(
+                    packet_storage,
+                    options,
+                )
+            else
+                try self.sealCurrentShortPacketInto(
+                    packet_storage,
+                    options,
+                );
             self.recordPacketEncrypted();
             protected_count += 1;
             datagrams[i] = packet;
@@ -5909,7 +5980,7 @@ pub const Connection = struct {
                 now_ns,
                 true,
             );
-            sent_payload_len += probe.candidate.payload.len;
+            sent_payload_len += probe.payload_len;
             sent_packet_len += probe.packet_len;
             self.pacer.onPacketSentAt(
                 now_ns,
@@ -5943,16 +6014,59 @@ pub const Connection = struct {
     fn retransmitCandidateAt(self: *Connection, candidate: quic.recovery.Candidate, mode: RetransmitMode, sent_time_ns: ?u64) Error!void {
         try self.validateNextPacketNumber();
         const packet_number = self.next_packet_number;
+        var payload = candidate.payload;
+        std.debug.assert(self.send_frame_buffer.items.len == 0);
+        defer self.send_frame_buffer.items.len = 0;
+        var request_immediate_ack = mode == .pto_probe and
+            self.ptoProbeRequestsImmediateAck();
+        if (request_immediate_ack) {
+            const augmented_len = std.math.add(
+                usize,
+                candidate.payload.len,
+                1,
+            ) catch return error.InvalidPayloadLength;
+            const augmented_packet_number_len =
+                quic.protection.packetNumberLenForPayload(
+                    packet_number,
+                    self.sent.largestAcknowledged(),
+                    augmented_len,
+                );
+            const augmented_packet_len =
+                try quic.protection.shortPacketLenForPayloadLen(
+                    self.config.peer_connection_id.len,
+                    packet_number,
+                    augmented_packet_number_len,
+                    augmented_len,
+                );
+            if (augmented_packet_len <= self.currentSendDatagramSize() and
+                augmented_packet_len <= self.endpoint.limits.max_datagram_size)
+            {
+                try self.send_frame_buffer.ensureUnusedCapacity(
+                    self.endpoint.allocator,
+                    augmented_len,
+                );
+                self.send_frame_buffer.items.len = augmented_len;
+                @memcpy(
+                    self.send_frame_buffer.items[0..candidate.payload.len],
+                    candidate.payload,
+                );
+                self.send_frame_buffer.items[augmented_len - 1] =
+                    @intFromEnum(quic.FrameType.immediate_ack);
+                payload = self.send_frame_buffer.items;
+            } else {
+                request_immediate_ack = false;
+            }
+        }
         const packet_number_len = quic.protection.packetNumberLenForPayload(
             packet_number,
             self.sent.largestAcknowledged(),
-            candidate.payload.len,
+            payload.len,
         );
         const packet_len = try quic.protection.shortPacketLen(.{
             .destination_connection_id = self.config.peer_connection_id,
             .packet_number = packet_number,
             .packet_number_len = packet_number_len,
-            .payload = candidate.payload,
+            .payload = payload,
         });
         if (packet_len > self.currentSendDatagramSize() or
             packet_len > self.endpoint.limits.max_datagram_size)
@@ -5960,24 +6074,24 @@ pub const Connection = struct {
             return error.DatagramTooLarge;
         }
         switch (mode) {
-            .congestion_controlled => try self.congestion.reserve(candidate.payload.len),
-            .pto_probe => self.congestion.onPtoProbeSent(candidate.payload.len),
+            .congestion_controlled => try self.congestion.reserve(payload.len),
+            .pto_probe => self.congestion.onPtoProbeSent(payload.len),
         }
-        errdefer self.congestion.discard(candidate.payload.len);
+        errdefer self.congestion.discard(payload.len);
 
         try self.recovery.recordRetransmission(candidate.group_index, packet_number);
         errdefer _ = self.recovery.forgetPacketNumber(packet_number);
         try self.sent.sentAtWithDatagramSizeAndPathEpoch(
             packet_number,
             true,
-            candidate.payload.len,
+            payload.len,
             packet_len,
             .not_ect,
             sent_time_ns,
             self.pmtu_path_epoch,
         );
         errdefer _ = self.sent.forget(packet_number);
-        try self.sendPayloadPacketAt(packet_number, candidate.payload, sent_time_ns, true);
+        try self.sendPayloadPacketAt(packet_number, payload, sent_time_ns, true);
         self.next_packet_number += 1;
     }
 

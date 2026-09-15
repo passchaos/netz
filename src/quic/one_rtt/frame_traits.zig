@@ -94,6 +94,15 @@ pub fn classify(frame: quic.Frame) Traits {
             .in_flight = true,
             .has_non_retransmittable = true,
         },
+        // draft-ietf-quic-ack-frequency: IMMEDIATE_ACK is ack-eliciting, but
+        // retransmitting it outside the packet that needs prompt feedback can
+        // spuriously change the peer's ACK schedule. PTO paths add a fresh
+        // instance to the probe instead.
+        .immediate_ack => .{
+            .ack_eliciting = true,
+            .in_flight = true,
+            .has_non_retransmittable = true,
+        },
         .path_challenge => .{
             .ack_eliciting = true,
             .in_flight = true,

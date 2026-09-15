@@ -947,6 +947,206 @@ test "QUIC DATAGRAM recovery probes without retransmitting unreliable payload" {
     try std.testing.expectEqual(@as(u64, 2), server.datagramsReceived());
 }
 
+test "QUIC negotiated PTO requests an immediate ACK for unreliable flight" {
+    const allocator = std.testing.allocator;
+    var threaded = std.Io.Threaded.init(allocator, .{});
+    defer threaded.deinit();
+    const io = threaded.io();
+
+    var receiver = try quic.runtime.Endpoint.bind(
+        allocator,
+        io,
+        .{ .ip4 = .loopback(0) },
+        .{ .max_datagram_size = 4096 },
+    );
+    defer receiver.deinit();
+    var sender = try quic.runtime.Endpoint.bind(
+        allocator,
+        io,
+        .{ .ip4 = .loopback(0) },
+        .{ .max_datagram_size = 4096 },
+    );
+    defer sender.deinit();
+    const keys = quic.protection.deriveAes128Keys(
+        [_]u8{0xd7} ** quic.protection.secret_len,
+    );
+    var client = try one_rtt.Connection.init(&sender, .{
+        .peer = receiver.address(),
+        .receive_keys = keys,
+        .send_keys = keys,
+        .local_connection_id = "immediate-client",
+        .peer_connection_id = "immediate-server",
+        .peer_max_datagram_frame_size = 1200,
+        .enable_pacing = false,
+        .enable_ack_frequency = true,
+        .peer_min_ack_delay = 1_000,
+    });
+    defer client.deinit();
+    var server = try one_rtt.Connection.init(&receiver, .{
+        .peer = sender.address(),
+        .receive_keys = keys,
+        .send_keys = keys,
+        .local_connection_id = "immediate-server",
+        .peer_connection_id = "immediate-client",
+        .local_endpoint = .server,
+        .local_max_datagram_frame_size = 1200,
+        .enable_pacing = false,
+        .enable_ack_frequency = true,
+        .local_min_ack_delay = 1_000,
+        .local_ack_eliciting_threshold = 4,
+    });
+    defer server.deinit();
+
+    try client.sendDatagram("unreliable");
+    try std.testing.expectEqual(@as(usize, 0), client.pendingRecoveryCount());
+    try std.testing.expect(try client.retransmitPtoAt(1));
+    // IMMEDIATE_ACK is packet-specific and is not retained as reliable data.
+    try std.testing.expectEqual(@as(usize, 0), client.pendingRecoveryCount());
+
+    var original = try server.receivePacket();
+    defer original.deinit(allocator);
+    var probe = try server.receivePacket();
+    defer probe.deinit(allocator);
+    try std.testing.expectEqual(@as(usize, 1), probe.frames.len);
+    try std.testing.expect(probe.frames[0] == .immediate_ack);
+    try std.testing.expect(server.immediateAckRequested());
+    try std.testing.expect(try server.sendAckForPacketIfNeeded(
+        probe.packet.packet_number,
+        probe.frames,
+    ));
+}
+
+test "QUIC negotiated PTO batch appends IMMEDIATE_ACK to every probe" {
+    const allocator = std.testing.allocator;
+    var threaded = std.Io.Threaded.init(allocator, .{});
+    defer threaded.deinit();
+    const io = threaded.io();
+
+    var receiver = try quic.runtime.Endpoint.bind(
+        allocator,
+        io,
+        .{ .ip4 = .loopback(0) },
+        .{ .max_datagram_size = 4096 },
+    );
+    defer receiver.deinit();
+    var sender = try quic.runtime.Endpoint.bind(
+        allocator,
+        io,
+        .{ .ip4 = .loopback(0) },
+        .{ .max_datagram_size = 4096 },
+    );
+    defer sender.deinit();
+    const keys = quic.protection.deriveAes128Keys(
+        [_]u8{0xd6} ** quic.protection.secret_len,
+    );
+    var client = try one_rtt.Connection.init(&sender, .{
+        .peer = receiver.address(),
+        .receive_keys = keys,
+        .send_keys = keys,
+        .local_connection_id = "batch-client",
+        .peer_connection_id = "batch-server",
+        .enable_pacing = false,
+        .enable_ack_frequency = true,
+        .peer_min_ack_delay = 1_000,
+    });
+    defer client.deinit();
+    var server = try one_rtt.Connection.init(&receiver, .{
+        .peer = sender.address(),
+        .receive_keys = keys,
+        .send_keys = keys,
+        .local_connection_id = "batch-server",
+        .peer_connection_id = "batch-client",
+        .local_endpoint = .server,
+        .enable_pacing = false,
+        .enable_ack_frequency = true,
+        .local_min_ack_delay = 1_000,
+    });
+    defer server.deinit();
+
+    try client.sendAt(&.{.{ .ping = {} }}, 1_000);
+    try client.sendAt(&.{.{ .ping = {} }}, 1_000);
+    try std.testing.expectEqual(
+        @as(usize, 2),
+        try client.retransmitPtoProbesAt(2_000, 2),
+    );
+    var original0 = try server.receivePacket();
+    defer original0.deinit(allocator);
+    var original1 = try server.receivePacket();
+    defer original1.deinit(allocator);
+    var probe0 = try server.receivePacket();
+    defer probe0.deinit(allocator);
+    var probe1 = try server.receivePacket();
+    defer probe1.deinit(allocator);
+    for ([_]one_rtt.ReceivedPacket{ probe0, probe1 }) |probe| {
+        try std.testing.expectEqual(@as(usize, 2), probe.frames.len);
+        try std.testing.expect(probe.frames[0] == .ping);
+        try std.testing.expect(probe.frames[1] == .immediate_ack);
+    }
+}
+
+test "QUIC negotiated PTO preserves a full datagram without IMMEDIATE_ACK" {
+    const allocator = std.testing.allocator;
+    var threaded = std.Io.Threaded.init(allocator, .{});
+    defer threaded.deinit();
+    const io = threaded.io();
+
+    var receiver = try quic.runtime.Endpoint.bind(
+        allocator,
+        io,
+        .{ .ip4 = .loopback(0) },
+        .{ .max_datagram_size = 4096 },
+    );
+    defer receiver.deinit();
+    var sender = try quic.runtime.Endpoint.bind(
+        allocator,
+        io,
+        .{ .ip4 = .loopback(0) },
+        .{ .max_datagram_size = 4096 },
+    );
+    defer sender.deinit();
+    const keys = quic.protection.deriveAes128Keys(
+        [_]u8{0xd5} ** quic.protection.secret_len,
+    );
+    var client = try one_rtt.Connection.init(&sender, .{
+        .peer = receiver.address(),
+        .receive_keys = keys,
+        .send_keys = keys,
+        .local_connection_id = "c",
+        .peer_connection_id = "s",
+        .max_datagram_size = 23,
+        .enable_pacing = false,
+        .enable_ack_frequency = true,
+        .peer_min_ack_delay = 1_000,
+    });
+    defer client.deinit();
+    var server = try one_rtt.Connection.init(&receiver, .{
+        .peer = sender.address(),
+        .receive_keys = keys,
+        .send_keys = keys,
+        .local_connection_id = "s",
+        .peer_connection_id = "c",
+        .local_endpoint = .server,
+        .max_datagram_size = 23,
+        .enable_pacing = false,
+        .enable_ack_frequency = true,
+        .local_min_ack_delay = 1_000,
+    });
+    defer server.deinit();
+
+    try client.send(&.{.{ .stream = .{
+        .stream_id = 0,
+        .data = "a",
+    } }});
+    try std.testing.expect(try client.retransmitPtoAt(1));
+    var original = try server.receivePacket();
+    defer original.deinit(allocator);
+    var probe = try server.receivePacket();
+    defer probe.deinit(allocator);
+    try std.testing.expectEqual(@as(usize, 1), probe.frames.len);
+    try std.testing.expect(probe.frames[0] == .stream);
+    try std.testing.expect(!server.immediateAckRequested());
+}
+
 test "QUIC bounded DATAGRAM send waits for ACK congestion credit" {
     const allocator = std.testing.allocator;
     var threaded = std.Io.Threaded.init(allocator, .{
@@ -1329,6 +1529,8 @@ test "QUIC 1-RTT PTO batch commits a socket-sent prefix before returning error" 
         .send_keys = keys,
         .local_connection_id = &client_cid,
         .peer_connection_id = &server_cid,
+        .enable_ack_frequency = true,
+        .peer_min_ack_delay = 1_000,
     });
     defer client.deinit();
     var server = try one_rtt.Connection.init(&server_endpoint, .{
@@ -1338,6 +1540,8 @@ test "QUIC 1-RTT PTO batch commits a socket-sent prefix before returning error" 
         .local_connection_id = &server_cid,
         .peer_connection_id = &client_cid,
         .local_endpoint = .server,
+        .enable_ack_frequency = true,
+        .local_min_ack_delay = 1_000,
     });
     defer server.deinit();
 
@@ -1366,7 +1570,7 @@ test "QUIC 1-RTT PTO batch commits a socket-sent prefix before returning error" 
     try std.testing.expectEqual(@as(usize, 1), partial_send.calls);
     try std.testing.expectEqual(@as(u64, 4), client.next_packet_number);
     try std.testing.expectEqual(@as(u8, 1), client.ptoBackoffCount());
-    try std.testing.expectEqual(bytes_in_flight_before + 1, client.bytesInFlight());
+    try std.testing.expectEqual(bytes_in_flight_before + 2, client.bytesInFlight());
     try std.testing.expectEqual(@as(usize, 2), client.recovery.pending.items[0].packetCount());
     try std.testing.expectEqual(@as(usize, 1), client.recovery.pending.items[1].packetCount());
 
@@ -1379,6 +1583,9 @@ test "QUIC 1-RTT PTO batch commits a socket-sent prefix before returning error" 
     try std.testing.expectEqual(@as(u64, 0), original0.packet.packet_number);
     try std.testing.expectEqual(@as(u64, 1), original1.packet.packet_number);
     try std.testing.expectEqual(@as(u64, 2), probe0.packet.packet_number);
+    try std.testing.expectEqual(@as(usize, 2), probe0.frames.len);
+    try std.testing.expect(probe0.frames[0] == .ping);
+    try std.testing.expect(probe0.frames[1] == .immediate_ack);
 
     client.endpoint.io = partial_send.delegate;
     try std.testing.expectEqual(
@@ -1392,6 +1599,11 @@ test "QUIC 1-RTT PTO batch commits a socket-sent prefix before returning error" 
     defer retry1.deinit(allocator);
     try std.testing.expectEqual(@as(u64, 4), retry0.packet.packet_number);
     try std.testing.expectEqual(@as(u64, 5), retry1.packet.packet_number);
+    for ([_]one_rtt.ReceivedPacket{ retry0, retry1 }) |probe| {
+        try std.testing.expectEqual(@as(usize, 2), probe.frames.len);
+        try std.testing.expect(probe.frames[0] == .ping);
+        try std.testing.expect(probe.frames[1] == .immediate_ack);
+    }
 }
 
 test "QUIC 1-RTT PTO batch retires sealed nonces after zero socket progress" {
@@ -1424,6 +1636,8 @@ test "QUIC 1-RTT PTO batch retires sealed nonces after zero socket progress" {
         .local_connection_id = "client",
         .peer_connection_id = "server",
         .enable_pacing = false,
+        .enable_ack_frequency = true,
+        .peer_min_ack_delay = 1_000,
     });
     defer client.deinit();
 
@@ -1489,6 +1703,16 @@ test "QUIC 1-RTT PTO batch retires sealed nonces after zero socket progress" {
     defer opened1.deinit(allocator);
     try std.testing.expectEqual(@as(u64, 4), opened0.packet_number);
     try std.testing.expectEqual(@as(u64, 5), opened1.packet_number);
+    for ([_][]const u8{ opened0.payload, opened1.payload }) |payload| {
+        const first = try quic.parseFrame(payload);
+        try std.testing.expect(first.frame == .ping);
+        const second = try quic.parseFrame(payload[first.consumed..]);
+        try std.testing.expect(second.frame == .immediate_ack);
+        try std.testing.expectEqual(
+            payload.len,
+            first.consumed + second.consumed,
+        );
+    }
 }
 
 test "QUIC 1-RTT PTO retransmits unacked response stream packets after partial ACK" {
@@ -7164,7 +7388,12 @@ test "QUIC 1-RTT ACK_FREQUENCY and IMMEDIATE_ACK state" {
     try std.testing.expectEqual(@as(u64, 34_000), client.requestedMaxAckDelay());
     try std.testing.expectEqual(@as(u64, 7), client.ackReorderingThreshold());
 
+    const recovery_before_immediate_ack = client.pendingRecoveryCount();
     try client.sendImmediateAck();
+    try std.testing.expectEqual(
+        recovery_before_immediate_ack,
+        client.pendingRecoveryCount(),
+    );
     var immediate = try server.receivePacket();
     defer immediate.deinit(allocator);
     try std.testing.expect(server.immediateAckRequested());
@@ -7482,13 +7711,15 @@ test "QUIC 1-RTT appends and retransmits negotiated ACK_FREQUENCY" {
     try std.testing.expect(try client.retransmitPtoAt(2_000));
     var retry = try server.receivePacket();
     defer retry.deinit(allocator);
-    try std.testing.expectEqual(@as(usize, 2), retry.frames.len);
+    try std.testing.expectEqual(@as(usize, 3), retry.frames.len);
     try std.testing.expect(retry.frames[0] == .ping);
     try std.testing.expect(retry.frames[1] == .ack_frequency);
     try std.testing.expectEqual(
         @as(u64, 0),
         retry.frames[1].ack_frequency.sequence_number,
     );
+    try std.testing.expect(retry.frames[2] == .immediate_ack);
+    try std.testing.expect(server.immediateAckRequested());
     try std.testing.expectEqual(@as(u64, 4), server.ackFrequencyThreshold());
 }
 

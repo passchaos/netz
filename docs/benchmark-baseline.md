@@ -3073,6 +3073,29 @@ and rejection when the peer did not advertise support. A post-freeze rebuild
 reproduced the candidate hash, and a two-connection shared smoke reported
 ACK/4 while completing exact upload and download verification.
 
+The follow-up recovery path now mirrors audited Quinn
+`d9c8c4c695fc64292d9b117844ea6924ca0d0815`: when the peer advertised
+ACK_FREQUENCY support, every application-data PTO probe also carries
+IMMEDIATE_ACK so the sparse ACK policy cannot delay recovery feedback. The
+hint is ack-eliciting and congestion-accounted but not retained in the recovery
+payload; every later PTO creates a fresh request. A full-MTU reliable payload
+keeps all data and omits the optional byte. Direct tests cover a pure-DATAGRAM
+flight, single and two-probe reliable recovery, exact-MTU fallback, socket zero
+progress, partial batch progress, and the original unnegotiated PING path.
+
+A ReleaseFast real TLS/QUIC 4-MiB loss run dropped exactly 25/504 datagrams,
+reported 25 transport losses, and verified all bytes. Five fixed-binary,
+order-interleaved 1-MiB pairs at 5% seeded loss and 100 us configured RTT used
+parent `c3f85d99` (`770015f1a18753f64449e3dd49424e1c7bfe2b155936c54e090d419c7680f546`)
+and candidate
+`ff0b8337cfa57c821675feb517ad732aff0232109b094ce3b842f13ce1c91a9c`.
+Parent elapsed times were 10.161, 9.314, 10.213, 9.131, and 9.272 ms;
+candidate times were 9.543, 9.294, 9.821, 9.946, and 9.373 ms. The candidate
+won 3/5 pairs, while independently sorted medians were 9.314 and 9.543 ms and
+the ranges overlap. This is protocol/recovery evidence with no throughput or
+latency improvement claim. Every arm deterministically dropped 6/126
+datagrams, reported six transport losses, and verified 1,048,576 bytes.
+
 ### Raw QUIC mixed FIN/reset recovery versus quic-go
 
 The separate process gate below exercises terminal stream churn instead of

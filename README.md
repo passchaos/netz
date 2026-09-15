@@ -385,6 +385,8 @@ starts with deterministic parsers, serializers, preallocated fixed-width wire-in
   optional peer-gated automatic requests appended to the first non-empty 1-RTT
   packet (alongside HANDSHAKE_DONE when required), socket-commit-safe pending
   state and ordinary PTO recovery, wire-tolerance-to-local-trigger conversion,
+  Quinn-style IMMEDIATE_ACK hints on negotiated PTO probes with exact-MTU
+  fallback and non-retransmittable per-probe ownership,
   transactional rejection of requests below the advertised minimum or at least
   2^14 milliseconds, and zero-valued immediate-ACK/disabled-reordering modes,
   plus automatic ACK coalescing

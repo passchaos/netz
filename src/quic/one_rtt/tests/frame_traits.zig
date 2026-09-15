@@ -38,6 +38,13 @@ test "QUIC 1-RTT frame traits distinguish unreliable and probing frames" {
     try std.testing.expect(datagram.has_non_retransmittable);
     try std.testing.expect(datagram.autoEcnEligible());
 
+    const immediate_ack = frame_traits.classify(.{ .immediate_ack = {} });
+    try std.testing.expect(immediate_ack.ack_eliciting);
+    try std.testing.expect(immediate_ack.in_flight);
+    try std.testing.expect(!immediate_ack.retransmittable);
+    try std.testing.expect(immediate_ack.has_non_retransmittable);
+    try std.testing.expect(immediate_ack.autoEcnEligible());
+
     const path = try frame_traits.analyze(&.{
         .{ .path_challenge = .{ .data = [_]u8{1} ** 8 } },
         .{ .ping = {} },

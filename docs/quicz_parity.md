@@ -1171,7 +1171,13 @@ exact checksum, 16 completions, and DONE/DONE_ACK. The frame's wire tolerance
 of three is converted to an internal fourth-packet trigger; negotiated automatic
 requests share the first non-empty 1-RTT packet with HANDSHAKE_DONE when needed,
 remain pending across socket failure, and enter ordinary PTO recovery only after
-successful transmission.
+successful transmission. Once negotiated, every application-data PTO probe also
+carries a fresh, non-retransmittable IMMEDIATE_ACK hint, matching Quinn; a
+full-MTU reliable payload omits the optional byte instead of losing data. A
+real 4-MiB 5%-loss run dropped 25/504 datagrams and verified all bytes. Five
+fixed-binary 1-MiB/100-us pairs had 3/5 candidate wins but overlapping ranges
+and a slightly slower independently sorted median, so this is a recovery
+correctness result rather than a speed claim.
 The dispatcher now also mirrors each connection's authoritative fixed-capacity
 local CID pool. Initial IDs are installed at registration, dispatcher-mediated
 NEW_CONNECTION_ID sends preflight endpoint-wide collisions before changing
