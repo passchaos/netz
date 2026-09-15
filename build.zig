@@ -185,6 +185,14 @@ pub fn build(b: *std.Build) void {
         "python3",
         "tools/interop/websocket_h3_benchmark_check_test.py",
     });
+    const webtransport_benchmark_checker_tests = b.addSystemCommand(&.{
+        "python3",
+        "tools/interop/webtransport_benchmark_check_test.py",
+    });
+    const webtransport_churn_checker_tests = b.addSystemCommand(&.{
+        "python3",
+        "tools/interop/webtransport_churn_check_test.py",
+    });
 
     const test_step = b.step("test", "Run all tests");
     test_step.dependOn(&run_lib_tests.step);
@@ -201,6 +209,8 @@ pub fn build(b: *std.Build) void {
     test_step.dependOn(&quic_handshake_benchmark_checker_tests.step);
     test_step.dependOn(&http3_benchmark_checker_tests.step);
     test_step.dependOn(&websocket_h3_benchmark_checker_tests.step);
+    test_step.dependOn(&webtransport_benchmark_checker_tests.step);
+    test_step.dependOn(&webtransport_churn_checker_tests.step);
 
     const mqtt_mtls_server = b.addExecutable(.{
         .name = "netz-mqtt-mtls-server",

@@ -17,7 +17,8 @@ class ChurnCheckTests(unittest.TestCase):
         fields = (
             "fault=loss fault_scope=netz-client-outbound streams=32 fin=16 "
             f"reset=16 bytes=266240 checksum={checksum} "
-            "reset_mask=0x00000000aaaaaaaa reset_code_sum=262400 sibling=true"
+            "reset_mask=0x00000000aaaaaaaa reset_code_sum=262400 sibling=true "
+            "client_io=zio-std-io server_io=wtransport-quinn-tokio"
         )
         client = pathlib.Path(directory, "client.log")
         server = pathlib.Path(directory, "server.log")
@@ -95,6 +96,19 @@ class ChurnCheckTests(unittest.TestCase):
                     server_log=server,
                 )
 
+    def test_backend_mismatch_is_rejected(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            client, server = self.write_pair(directory)
+            client.write_text(
+                client.read_text().replace("client_io=zio-std-io", "client_io=threaded")
+            )
+            with self.assertRaisesRegex(ValueError, "backend identity"):
+                CHECK.verify(
+                    sender="netz", fault="loss", streams=32,
+                    bytes_per_stream=16_384, reset_after_bytes=256,
+                    reset_every=2, client_log=client, server_log=server,
+                )
+
     def test_inactive_fault_counter_is_rejected(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
             client, server = self.write_pair(directory)
@@ -118,6 +132,8 @@ class ChurnCheckTests(unittest.TestCase):
                 client.read_text()
                 .replace("netz client", "wtransport client")
                 .replace("netz-client-outbound", "wtransport-client-outbound")
+                .replace("client_io=zio-std-io server_io=wtransport-quinn-tokio",
+                         "client_io=wtransport-quinn-tokio server_io=zio-std-io")
                 .replace("considered=314 dropped=12", "considered=2 dropped=2")
                 .replace(
                     "peer-close=true",
@@ -129,6 +145,8 @@ class ChurnCheckTests(unittest.TestCase):
                 server.read_text()
                 .replace("wtransport server", "netz server")
                 .replace("netz-client-outbound", "wtransport-client-outbound")
+                .replace("client_io=zio-std-io server_io=wtransport-quinn-tokio",
+                         "client_io=wtransport-quinn-tokio server_io=zio-std-io")
             )
             proxy = pathlib.Path(directory, "proxy.log")
             proxy.write_text(
@@ -156,6 +174,8 @@ class ChurnCheckTests(unittest.TestCase):
                 client.read_text()
                 .replace("netz client", "wtransport client")
                 .replace("netz-client-outbound", "wtransport-client-outbound")
+                .replace("client_io=zio-std-io server_io=wtransport-quinn-tokio",
+                         "client_io=wtransport-quinn-tokio server_io=zio-std-io")
                 .replace("considered=314 dropped=12", "considered=2 dropped=2")
                 .replace(
                     "peer-close=true",
@@ -167,6 +187,8 @@ class ChurnCheckTests(unittest.TestCase):
                 server.read_text()
                 .replace("wtransport server", "netz server")
                 .replace("netz-client-outbound", "wtransport-client-outbound")
+                .replace("client_io=zio-std-io server_io=wtransport-quinn-tokio",
+                         "client_io=wtransport-quinn-tokio server_io=zio-std-io")
             )
             proxy = pathlib.Path(directory, "proxy.log")
             proxy.write_text(
@@ -195,6 +217,8 @@ class ChurnCheckTests(unittest.TestCase):
                 client.read_text()
                 .replace("netz client", "wtransport client")
                 .replace("netz-client-outbound", "wtransport-client-outbound")
+                .replace("client_io=zio-std-io server_io=wtransport-quinn-tokio",
+                         "client_io=wtransport-quinn-tokio server_io=zio-std-io")
                 .replace("considered=314 dropped=12", "considered=2 dropped=2")
                 .replace(
                     "peer-close=true",
@@ -206,6 +230,8 @@ class ChurnCheckTests(unittest.TestCase):
                 server.read_text()
                 .replace("wtransport server", "netz server")
                 .replace("netz-client-outbound", "wtransport-client-outbound")
+                .replace("client_io=zio-std-io server_io=wtransport-quinn-tokio",
+                         "client_io=wtransport-quinn-tokio server_io=zio-std-io")
             )
             proxy = pathlib.Path(directory, "proxy.log")
             proxy.write_text(

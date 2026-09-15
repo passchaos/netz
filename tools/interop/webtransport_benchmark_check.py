@@ -4,6 +4,7 @@
 from __future__ import annotations
 
 import argparse
+import math
 from pathlib import Path
 
 
@@ -80,6 +81,8 @@ def validate_shape(
     timeout_ms: int,
     netz_ack_every: int,
     netz_max_ack_delay_us: int,
+    endpoint_io: dict[str, str],
+    config_record: bool = False,
 ) -> None:
     direction = "upload" if mode == "stream-upload" else "roundtrip"
     expected = {
@@ -90,6 +93,8 @@ def validate_shape(
         "direction": direction,
         "role_pair": role_pair,
         "endpoint_role": endpoint_role,
+        "client_io": endpoint_io["client"],
+        "server_io": endpoint_io["server"],
         "connection_scope": "persistent",
         "warmup": str(warmup),
         "iterations": str(iterations),
@@ -97,11 +102,15 @@ def validate_shape(
         "bytes_per_stream": str(bytes_per_stream),
         "payload_bytes": str(payload_bytes),
         "chunk_bytes": str(chunk_bytes),
-        "stream_window": str(stream_window),
         "timeout_ms": str(timeout_ms),
         "netz_ack_every": str(netz_ack_every),
         "netz_max_ack_delay_us": str(netz_max_ack_delay_us),
     }
+    if config_record:
+        expected["stream_window_requested"] = str(stream_window)
+        expected["stream_window_effective"] = str(stream_window)
+    else:
+        expected["stream_window"] = str(stream_window)
     for key, value in expected.items():
         if record.get(key) != value:
             raise SystemExit(
@@ -136,6 +145,7 @@ def validate_traffic(
     timeout_ms: int,
     netz_ack_every: int,
     netz_max_ack_delay_us: int,
+    endpoint_io: dict[str, str],
 ) -> None:
     validate_shape(
         record, role_pair=role_pair, implementation=implementation,
@@ -146,6 +156,7 @@ def validate_traffic(
         timeout_ms=timeout_ms,
         netz_ack_every=netz_ack_every,
         netz_max_ack_delay_us=netz_max_ack_delay_us,
+        endpoint_io=endpoint_io,
     )
     expected_source = (
         "netz-socket-counters"
@@ -185,6 +196,7 @@ def main() -> None:
     parser.add_argument("--server-log", required=True, type=Path)
     parser.add_argument("--client-rss", type=Path)
     parser.add_argument("--server-rss", type=Path)
+    parser.add_argument("--rss-source", default="gnu-time-maxrss")
     parser.add_argument("--require-traffic", action="store_true")
     args = parser.parse_args()
 
@@ -192,6 +204,14 @@ def main() -> None:
         "netz-client+wtransport-server": {"client": "netz", "server": "wtransport"},
         "wtransport-client+netz-server": {"client": "wtransport", "server": "netz"},
     }.get(args.role_pair)
+    endpoint_io = {
+        role: (
+            "zio-std-io"
+            if implementation == "netz"
+            else "wtransport-quinn-tokio"
+        )
+        for role, implementation in (implementations or {}).items()
+    }
     if (
         implementations is None
         or args.warmup <= 0
@@ -206,6 +226,40 @@ def main() -> None:
         or not 0 <= args.netz_max_ack_delay_us <= 25_000
     ):
         raise SystemExit("invalid WebTransport validation configuration")
+
+    expected_connection_window = args.stream_window * (args.streams + 8)
+    for role, path in (("client", args.client_log), ("server", args.server_log)):
+        config_records = records(path, "config", args.role_pair)
+        if len(config_records) != 1:
+            raise SystemExit(
+                f"expected one {role} config record, found {len(config_records)}"
+            )
+        config = config_records[0]
+        validate_shape(
+            config, role_pair=args.role_pair, implementation=implementations[role],
+            endpoint_role=role, mode=args.mode, warmup=args.warmup,
+            iterations=args.iterations, streams=args.streams,
+            bytes_per_stream=args.bytes_per_stream, payload_bytes=args.payload_bytes,
+            chunk_bytes=args.chunk_bytes, stream_window=args.stream_window,
+            timeout_ms=args.timeout_ms, netz_ack_every=args.netz_ack_every,
+            netz_max_ack_delay_us=args.netz_max_ack_delay_us, endpoint_io=endpoint_io,
+            config_record=True,
+        )
+        expected_config = {
+            "benchmark_scope": "same-application-shape",
+            "connection_window": str(expected_connection_window),
+            "quic_version": "1",
+            "cipher": "negotiated-unexposed",
+            "cert_verify": "false",
+            "gso": "false",
+            "gro": "false" if implementations[role] == "netz" else "implementation-default",
+            "pacing": "true",
+        }
+        for key, value in expected_config.items():
+            if config.get(key) != value:
+                raise SystemExit(f"{role} config {key} mismatch: {config}")
+        if integer(config, "max_datagram_size", positive=True) > 1200:
+            raise SystemExit(f"invalid negotiated datagram limit: {config}")
 
     results = records(args.client_log, "result", args.role_pair)
     server_records = records(args.server_log, "server-complete", args.role_pair)
@@ -225,6 +279,7 @@ def main() -> None:
             timeout_ms=args.timeout_ms,
             netz_ack_every=args.netz_ack_every,
             netz_max_ack_delay_us=args.netz_max_ack_delay_us,
+            endpoint_io=endpoint_io,
         )
         if result.get("benchmark_scope") != "same-application-shape" or result.get("complete") != "true":
             raise SystemExit(f"invalid result completion: {result}")
@@ -238,8 +293,12 @@ def main() -> None:
         timeout_ms=args.timeout_ms,
         netz_ack_every=args.netz_ack_every,
         netz_max_ack_delay_us=args.netz_max_ack_delay_us,
+        endpoint_io=endpoint_io,
     )
-    if server.get("server_complete") != "true":
+    if (
+        server.get("benchmark_scope") != "same-application-shape"
+        or server.get("server_complete") != "true"
+    ):
         raise SystemExit(f"invalid server completion: {server}")
 
     if args.mode == "stream-upload":
@@ -250,6 +309,16 @@ def main() -> None:
                 raise SystemExit(f"invalid sample sequence: {result}")
             if integer(result, "elapsed_ns", positive=True) <= 0:
                 raise SystemExit(f"invalid elapsed time: {result}")
+            elapsed_ns = integer(result, "elapsed_ns", positive=True)
+            throughput = float(result.get("logical_MiB_s", "nan"))
+            expected_throughput = (
+                bytes_per_result * 1_000_000_000 / elapsed_ns / (1024 * 1024)
+            )
+            if (
+                not math.isfinite(throughput)
+                or abs(throughput - expected_throughput) > 0.00051
+            ):
+                raise SystemExit(f"invalid logical_MiB_s: {result}")
             if integer(result, "streams_finished") != args.streams:
                 raise SystemExit(f"invalid finished stream count: {result}")
             if integer(result, "sent_bytes") != bytes_per_result or integer(result, "received_bytes") != bytes_per_result:
@@ -284,7 +353,9 @@ def main() -> None:
     print(
         f"protocol=webtransport mode={args.mode} role_pair={args.role_pair} "
         f"warmup={args.warmup} iterations={args.iterations} streams={args.streams} "
-        f"bytes={expected_bytes} checksum={expected_checksum} complete=true"
+        f"bytes={expected_bytes} checksum={expected_checksum} "
+        f"client_io={endpoint_io['client']} server_io={endpoint_io['server']} "
+        "complete=true"
     )
 
     if args.require_traffic:
@@ -305,6 +376,7 @@ def main() -> None:
                 stream_window=args.stream_window, timeout_ms=args.timeout_ms,
                 netz_ack_every=args.netz_ack_every,
                 netz_max_ack_delay_us=args.netz_max_ack_delay_us,
+                endpoint_io=endpoint_io,
             )
             joined[role] = traffic_record
         client = joined["client"]
@@ -346,6 +418,8 @@ def main() -> None:
         raise SystemExit("both RSS files are required together")
     if args.client_rss is None:
         return
+    if args.rss_source not in ("gnu-time-maxrss", "busybox-time-maxrss"):
+        raise SystemExit("invalid RSS source")
     for role, log_path, rss_path in (
         ("client", args.client_log, args.client_rss),
         ("server", args.server_log, args.server_rss),
@@ -366,6 +440,7 @@ def main() -> None:
             timeout_ms=args.timeout_ms,
             netz_ack_every=args.netz_ack_every,
             netz_max_ack_delay_us=args.netz_max_ack_delay_us,
+            endpoint_io=endpoint_io,
         )
         expected_scope = "netz-explicit" if implementation == "netz" else "rust-system-requested"
         expected_memory_scope = (
@@ -388,6 +463,7 @@ def main() -> None:
         excluded = {
             "record", "implementation", "protocol", "transport",
             "mode", "direction", "role_pair", "endpoint_role",
+            "client_io", "server_io",
             "connection_scope", "warmup", "iterations", "streams",
             "bytes_per_stream", "payload_bytes", "chunk_bytes",
             "stream_window", "timeout_ms", "complete",
@@ -401,12 +477,13 @@ def main() -> None:
             f"transport=h3 mode={args.mode} "
             f"direction={'upload' if args.mode == 'stream-upload' else 'roundtrip'} "
             f"role_pair={args.role_pair} "
-            f"endpoint_role={role} connection_scope=persistent "
+            f"endpoint_role={role} client_io={endpoint_io['client']} "
+            f"server_io={endpoint_io['server']} connection_scope=persistent "
             f"warmup={args.warmup} iterations={args.iterations} "
             f"streams={args.streams} bytes_per_stream={args.bytes_per_stream} "
             f"payload_bytes={args.payload_bytes} chunk_bytes={args.chunk_bytes} "
             f"stream_window={args.stream_window} timeout_ms={args.timeout_ms} "
-            f"rss_scope=whole-process rss_source=gnu-time-maxrss "
+            f"rss_scope=whole-process rss_source={args.rss_source} "
             f"process_peak_rss_kib={read_rss(rss_path)} {detail} complete=true"
         )
 

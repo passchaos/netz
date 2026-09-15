@@ -84,9 +84,22 @@ PY
     echo '--stats and --traffic must run separately' >&2
     exit 2
   fi
-  time_bin=${TIME_BIN:-/usr/bin/time}
-  if [[ $stats == true && ! -x $time_bin ]]; then
-    echo "GNU time not found at $time_bin" >&2
+  time_command=()
+  rss_source=gnu-time-maxrss
+  if [[ -n ${TIME_BIN:-} ]]; then
+    if [[ ! -x $TIME_BIN ]]; then
+      echo "time executable not found at $TIME_BIN" >&2
+      exit 127
+    fi
+    time_command=("$TIME_BIN")
+  elif [[ -x /usr/bin/time ]]; then
+    time_command=(/usr/bin/time)
+  elif command -v busybox >/dev/null 2>&1; then
+    time_command=("$(command -v busybox)" time)
+    rss_source=busybox-time-maxrss
+  fi
+  if [[ $stats == true && ${#time_command[@]} -eq 0 ]]; then
+    echo 'GNU or BusyBox time not found' >&2
     exit 127
   fi
   cargo_args=(build --quiet --release --locked --manifest-path "$client_manifest")
@@ -145,7 +158,8 @@ PY
         --netz-max-ack-delay-us="$netz_max_ack_delay_us" \
         --client-log="$2" --server-log="$3")
       if [[ -n ${4:-} ]]; then
-        check_args+=(--client-rss="$4" --server-rss="$5")
+        check_args+=(--client-rss="$4" --server-rss="$5" \
+          --rss-source="$rss_source")
       fi
       if [[ $traffic == true ]]; then
         check_args+=(--require-traffic)
@@ -154,7 +168,7 @@ PY
     }
 
     if [[ $stats == true ]]; then
-      timeout 180s "$time_bin" -f '%M' -o "$pair_dir/netz-server.rss" \
+      timeout 180s "${time_command[@]}" -f '%M' -o "$pair_dir/netz-server.rss" \
         taskset -c "$server_cpu" "$netz_server" \
         bench-server 0 "${mode_args[@]}" \
         >"$pair_dir/netz-server.log" 2>&1 &
@@ -168,7 +182,7 @@ PY
     netz_port=$(wait_for_port "$server_pid" \
       "$pair_dir/netz-server.log" NETZ_BENCH_PORT)
     if [[ $stats == true ]]; then
-      timeout 180s "$time_bin" -f '%M' -o "$pair_dir/wtransport-client.rss" \
+      timeout 180s "${time_command[@]}" -f '%M' -o "$pair_dir/wtransport-client.rss" \
         taskset -c "$client_cpu" "$rust_bench" \
         bench-client "$netz_port" "${mode_args[@]}" \
         >"$pair_dir/wtransport-client.log" 2>&1
@@ -192,7 +206,7 @@ PY
 
     rust_log="$pair_dir/wtransport-server.log"
     if [[ $stats == true ]]; then
-      timeout 180s "$time_bin" -f '%M' -o "$pair_dir/wtransport-server.rss" \
+      timeout 180s "${time_command[@]}" -f '%M' -o "$pair_dir/wtransport-server.rss" \
         taskset -c "$server_cpu" "$rust_bench" \
         bench-server 0 "${mode_args[@]}" >"$rust_log" 2>&1 &
     else
@@ -204,7 +218,7 @@ PY
     rust_port=$(wait_for_port "$server_pid" "$rust_log" \
       WTRANSPORT_BENCH_PORT)
     if [[ $stats == true ]]; then
-      timeout 180s "$time_bin" -f '%M' -o "$pair_dir/netz-client.rss" \
+      timeout 180s "${time_command[@]}" -f '%M' -o "$pair_dir/netz-client.rss" \
         taskset -c "$client_cpu" "$netz_client" \
         bench-client "$rust_port" "${mode_args[@]}" \
         >"$pair_dir/netz-client.log" 2>&1
@@ -281,6 +295,8 @@ grep -Fq \
   "$work/wtransport-client.log"
 grep -Fq 'oversized_rejected=true bidi uni reset=71 stop=72 concurrent_sibling=true reuse=true drain-before-close=true close' \
   "$work/wtransport-client.log"
+grep -Fq 'client_io=wtransport-quinn-tokio server_io=zio-std-io' \
+  "$work/wtransport-client.log"
 grep -Fq \
   'netz WebTransport server interop passed: CONNECT DATAGRAM max_datagram_size=' \
   "$work/server.log"
@@ -288,6 +304,8 @@ grep -Fq \
   'netz WebTransport interop accepted CONNECT with admission metadata' \
   "$work/server.log"
 grep -Fq 'oversized_rejected=true bidi uni reset=71 stop=72 concurrent_sibling=true reuse=true drain-before-connection-close=true close' \
+  "$work/server.log"
+grep -Fq 'client_io=wtransport-quinn-tokio server_io=zio-std-io' \
   "$work/server.log"
 
 rust_log="$work/wtransport-server.log"
@@ -334,3 +352,7 @@ grep -Fq \
 grep -Fq 'wtransport server rejected CONNECT with 404' "$rust_log"
 grep -Fq 'oversized_rejected=true bidi uni reset=73 stop=74 reuse=true' \
   "$rust_log"
+grep -Fq 'client_io=zio-std-io server_io=wtransport-quinn-tokio' \
+  "$rust_log"
+grep -Fq 'client_io=zio-std-io server_io=wtransport-quinn-tokio' \
+  "$work/netz-client.log"

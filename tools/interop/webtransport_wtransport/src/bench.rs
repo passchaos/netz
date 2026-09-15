@@ -402,6 +402,7 @@ pub async fn run_client(args: &[String], traffic: bool) -> Result<Config> {
     print_config(
         "wtransport",
         "wtransport-client+netz-server",
+        "client",
         &config,
         &connection,
     );
@@ -487,6 +488,7 @@ pub async fn run_churn_client(
     print_config(
         "wtransport",
         "wtransport-client+netz-server",
+        "client",
         &config,
         &connection,
     );
@@ -529,6 +531,7 @@ pub async fn run_server(args: &[String], traffic: bool) -> Result<Config> {
     print_config(
         "wtransport",
         "netz-client+wtransport-server",
+        "server",
         &config,
         &connection,
     );
@@ -591,6 +594,7 @@ pub async fn run_churn_server(args: &[String], fault: &str) -> Result<Config> {
     print_config(
         "wtransport",
         "netz-client+wtransport-server",
+        "server",
         &config,
         &connection,
     );
@@ -629,11 +633,19 @@ fn validate_datagram_limit(connection: &Connection, config: &Config) -> Result<(
     Ok(())
 }
 
-fn print_config(implementation: &str, role_pair: &str, config: &Config, connection: &Connection) {
+fn print_config(
+    implementation: &str,
+    role_pair: &str,
+    endpoint_role: &str,
+    config: &Config,
+    connection: &Connection,
+) {
     println!(
-        "implementation={implementation} protocol=webtransport transport=h3 mode={} direction={} role_pair={role_pair} connection_scope=persistent benchmark_scope=same-application-shape warmup={} iterations={} streams={} bytes_per_stream={} payload_bytes={} chunk_bytes={} stream_window_requested={} stream_window_effective={} connection_window={} max_datagram_size={} quic_version=1 netz_ack_every={} netz_max_ack_delay_us={} cipher=negotiated-unexposed cert_verify=false gso=false gro=implementation-default pacing=true",
+        "record=config implementation={implementation} protocol=webtransport transport=h3 mode={} direction={} role_pair={role_pair} endpoint_role={endpoint_role} client_io={} server_io={} connection_scope=persistent benchmark_scope=same-application-shape warmup={} iterations={} streams={} bytes_per_stream={} payload_bytes={} chunk_bytes={} stream_window_requested={} stream_window_effective={} connection_window={} max_datagram_size={} timeout_ms={} quic_version=1 netz_ack_every={} netz_max_ack_delay_us={} cipher=negotiated-unexposed cert_verify=false gso=false gro=implementation-default pacing=true",
         config.mode.name(),
         config.mode.direction(),
+        client_io(role_pair),
+        server_io(role_pair),
         config.warmup,
         config.iterations,
         config.streams,
@@ -644,6 +656,7 @@ fn print_config(implementation: &str, role_pair: &str, config: &Config, connecti
         config.stream_window,
         config.connection_window().unwrap(),
         connection.max_datagram_size().unwrap_or(0),
+        config.timeout_ms,
         config.netz_ack_every,
         config.netz_max_ack_delay_us,
     );
@@ -801,9 +814,11 @@ async fn run_stream_client(
                 logical_bytes as f64 * 1_000_000_000.0 / elapsed as f64 / (1024.0 * 1024.0)
             };
             println!(
-                "record=result implementation={implementation} protocol=webtransport transport=h3 mode={} direction={} role_pair={role_pair} endpoint_role=client connection_scope=persistent benchmark_scope=same-application-shape warmup={} iterations={} streams={} bytes_per_stream={} payload_bytes={} chunk_bytes={} stream_window={} timeout_ms={} netz_ack_every={} netz_max_ack_delay_us={} sample={sample} elapsed_ns={elapsed} logical_MiB_s={mib_s:.3} sent_bytes={logical_bytes} received_bytes={} streams_finished={} checksum={} complete=true",
+                "record=result implementation={implementation} protocol=webtransport transport=h3 mode={} direction={} role_pair={role_pair} endpoint_role=client client_io={} server_io={} connection_scope=persistent benchmark_scope=same-application-shape warmup={} iterations={} streams={} bytes_per_stream={} payload_bytes={} chunk_bytes={} stream_window={} timeout_ms={} netz_ack_every={} netz_max_ack_delay_us={} sample={sample} elapsed_ns={elapsed} logical_MiB_s={mib_s:.3} sent_bytes={logical_bytes} received_bytes={} streams_finished={} checksum={} complete=true",
                 config.mode.name(),
                 config.mode.direction(),
+                client_io(role_pair),
+                server_io(role_pair),
                 config.warmup,
                 config.iterations,
                 config.streams,
@@ -993,9 +1008,11 @@ async fn run_ping_client(
     let sum: u128 = samples.iter().map(|value| u128::from(*value)).sum();
     let mean = (sum / samples.len() as u128) as u64;
     println!(
-        "record=result implementation={implementation} protocol=webtransport transport=h3 mode={} direction={} role_pair={role_pair} endpoint_role=client connection_scope=persistent benchmark_scope=same-application-shape warmup={} iterations={} streams={} bytes_per_stream={} payload_bytes={} chunk_bytes={} stream_window={} timeout_ms={} netz_ack_every={} netz_max_ack_delay_us={} p50_ns={} p90_ns={} p99_ns={} p999_ns={} mean_ns={mean} min_ns={} max_ns={} sent_bytes={} received_bytes={} checksum={checksum} complete=true",
+        "record=result implementation={implementation} protocol=webtransport transport=h3 mode={} direction={} role_pair={role_pair} endpoint_role=client client_io={} server_io={} connection_scope=persistent benchmark_scope=same-application-shape warmup={} iterations={} streams={} bytes_per_stream={} payload_bytes={} chunk_bytes={} stream_window={} timeout_ms={} netz_ack_every={} netz_max_ack_delay_us={} p50_ns={} p90_ns={} p99_ns={} p999_ns={} mean_ns={mean} min_ns={} max_ns={} sent_bytes={} received_bytes={} checksum={checksum} complete=true",
         config.mode.name(),
         config.mode.direction(),
+        client_io(role_pair),
+        server_io(role_pair),
         config.warmup,
         config.iterations,
         config.streams,
@@ -1095,9 +1112,11 @@ fn print_server_complete(implementation: &str, role_pair: &str, config: &Config)
         ),
     };
     println!(
-        "record=server-complete implementation={implementation} protocol=webtransport transport=h3 mode={} direction={} role_pair={role_pair} endpoint_role=server connection_scope=persistent warmup={} iterations={} streams={} bytes_per_stream={} payload_bytes={} chunk_bytes={} stream_window={} timeout_ms={} netz_ack_every={} netz_max_ack_delay_us={} sent_bytes={bytes} received_bytes={bytes} checksum={checksum} server_complete=true",
+        "record=server-complete implementation={implementation} protocol=webtransport transport=h3 mode={} direction={} role_pair={role_pair} endpoint_role=server client_io={} server_io={} connection_scope=persistent benchmark_scope=same-application-shape warmup={} iterations={} streams={} bytes_per_stream={} payload_bytes={} chunk_bytes={} stream_window={} timeout_ms={} netz_ack_every={} netz_max_ack_delay_us={} sent_bytes={bytes} received_bytes={bytes} checksum={checksum} server_complete=true",
         config.mode.name(),
         config.mode.direction(),
+        client_io(role_pair),
+        server_io(role_pair),
         config.warmup,
         config.iterations,
         config.streams,
@@ -1119,9 +1138,11 @@ fn print_traffic(
     stats: wtransport::quinn::ConnectionStats,
 ) {
     println!(
-        "record=traffic implementation={implementation} protocol=webtransport transport=h3 mode={} direction={} role_pair={role_pair} endpoint_role={endpoint_role} connection_scope=persistent warmup={} iterations={} streams={} bytes_per_stream={} payload_bytes={} chunk_bytes={} stream_window={} timeout_ms={} netz_ack_every={} netz_max_ack_delay_us={} traffic_scope=connection socket_boundary=userspace-udp-payload traffic_source=quinn-connection-stats udp_sent_datagrams={} udp_sent_payload_bytes={} udp_received_datagrams={} udp_received_payload_bytes={} logical_udp_segments=true complete=true",
+        "record=traffic implementation={implementation} protocol=webtransport transport=h3 mode={} direction={} role_pair={role_pair} endpoint_role={endpoint_role} client_io={} server_io={} connection_scope=persistent warmup={} iterations={} streams={} bytes_per_stream={} payload_bytes={} chunk_bytes={} stream_window={} timeout_ms={} netz_ack_every={} netz_max_ack_delay_us={} traffic_scope=connection socket_boundary=userspace-udp-payload traffic_source=quinn-connection-stats udp_sent_datagrams={} udp_sent_payload_bytes={} udp_received_datagrams={} udp_received_payload_bytes={} logical_udp_segments=true complete=true",
         config.mode.name(),
         config.mode.direction(),
+        client_io(role_pair),
+        server_io(role_pair),
         config.warmup,
         config.iterations,
         config.streams,
@@ -1151,9 +1172,11 @@ pub(crate) fn print_memory(
         ("netz-client+wtransport-server", "server")
     };
     println!(
-        "record=memory implementation=wtransport protocol=webtransport transport=h3 mode={} direction={} role_pair={role_pair} endpoint_role={endpoint_role} connection_scope=persistent warmup={} iterations={} streams={} bytes_per_stream={} payload_bytes={} chunk_bytes={} stream_window={} timeout_ms={} netz_ack_every={} netz_max_ack_delay_us={} memory_scope=process-start-through-runtime-teardown allocator_scope=rust-system-requested alloc_count={} free_count={} realloc_count={} total_allocated_bytes={} total_freed_bytes={} live_bytes_end={} peak_live_bytes={} complete=true",
+        "record=memory implementation=wtransport protocol=webtransport transport=h3 mode={} direction={} role_pair={role_pair} endpoint_role={endpoint_role} client_io={} server_io={} connection_scope=persistent warmup={} iterations={} streams={} bytes_per_stream={} payload_bytes={} chunk_bytes={} stream_window={} timeout_ms={} netz_ack_every={} netz_max_ack_delay_us={} memory_scope=process-start-through-runtime-teardown allocator_scope=rust-system-requested alloc_count={} free_count={} realloc_count={} total_allocated_bytes={} total_freed_bytes={} live_bytes_end={} peak_live_bytes={} complete=true",
         config.mode.name(),
         config.mode.direction(),
+        client_io(role_pair),
+        server_io(role_pair),
         config.warmup,
         config.iterations,
         config.streams,
@@ -1172,6 +1195,22 @@ pub(crate) fn print_memory(
         stats.current_bytes,
         stats.peak_bytes,
     );
+}
+
+fn client_io(role_pair: &str) -> &'static str {
+    if role_pair.starts_with("netz-client") {
+        "zio-std-io"
+    } else {
+        "wtransport-quinn-tokio"
+    }
+}
+
+fn server_io(role_pair: &str) -> &'static str {
+    if role_pair.ends_with("netz-server") {
+        "zio-std-io"
+    } else {
+        "wtransport-quinn-tokio"
+    }
 }
 
 #[cfg(test)]

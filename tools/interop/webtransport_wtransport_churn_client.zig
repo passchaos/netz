@@ -81,9 +81,9 @@ const FaultState = struct {
 pub fn run(_: std.process.Init, args: []const []const u8) !void {
     const allocator = std.heap.c_allocator;
     const config = try parseArgs(args);
-    var threaded = std.Io.Threaded.init(allocator, .{ .async_limit = .unlimited });
-    defer threaded.deinit();
-    const threaded_io = threaded.io();
+    var backend = try netz.runtime.Backend.init(allocator);
+    defer backend.deinit();
+    const io = backend.io();
 
     var fault = FaultState{
         .loss_pct = if (config.fault == .loss) config.loss_pct else 0,
@@ -113,7 +113,7 @@ pub fn run(_: std.process.Init, args: []const []const u8) !void {
     };
     var client = try netz.webtransport.runtime.HandshakeClientSession.connectUri(
         allocator,
-        threaded_io,
+        io,
         .{ .ip4 = .loopback(0) },
         uri,
         .{
@@ -159,13 +159,14 @@ pub fn run(_: std.process.Init, args: []const []const u8) !void {
     try benchmark.printConfig(
         "netz",
         "netz-client+wtransport-server",
+        "client",
         bench_config,
         datagram_limit,
     );
 
     const control = try benchmark.openControlClient(&client, bench_config);
     const control_id = control.stream_id;
-    const deadline = std.Io.Clock.Timestamp.fromNow(threaded_io, .{
+    const deadline = std.Io.Clock.Timestamp.fromNow(io, .{
         .raw = .fromMilliseconds(config.timeout_ms),
         .clock = .awake,
     });
@@ -293,7 +294,7 @@ pub fn run(_: std.process.Init, args: []const []const u8) !void {
         return error.FaultNotExercised;
     }
     std.debug.print(
-        "netz client churn passed: fault={s} fault_scope=netz-client-outbound streams={d} fin={d} reset={d} bytes={d} checksum={d} reset_mask=0x{x:0>16} reset_code_sum={d} considered={d} dropped={d} held={d} sibling=true peer-close=true\n",
+        "netz client churn passed: fault={s} fault_scope=netz-client-outbound streams={d} fin={d} reset={d} bytes={d} checksum={d} reset_mask=0x{x:0>16} reset_code_sum={d} considered={d} dropped={d} held={d} sibling=true peer-close=true client_io=zio-std-io server_io=wtransport-quinn-tokio\n",
         .{
             @tagName(config.fault),
             config.streams,

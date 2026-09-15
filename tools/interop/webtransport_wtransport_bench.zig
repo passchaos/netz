@@ -438,17 +438,20 @@ pub fn validateDatagramLimit(session: anytype, config: Config) !usize {
 pub fn printConfig(
     implementation: []const u8,
     role_pair: []const u8,
+    endpoint_role: []const u8,
     config: Config,
     datagram_limit: usize,
 ) !void {
     std.debug.print(
-        "implementation={s} protocol=webtransport transport=h3 mode={s} " ++
-            "direction={s} role_pair={s} connection_scope=persistent " ++
+        "record=config implementation={s} protocol=webtransport transport=h3 mode={s} " ++
+            "direction={s} role_pair={s} endpoint_role={s} " ++
+            "client_io={s} server_io={s} connection_scope=persistent " ++
             "benchmark_scope=same-application-shape warmup={d} " ++
             "iterations={d} streams={d} bytes_per_stream={d} " ++
             "payload_bytes={d} chunk_bytes={d} " ++
             "stream_window_requested={d} stream_window_effective={d} " ++
-            "connection_window={d} max_datagram_size={d} quic_version=1 " ++
+            "connection_window={d} max_datagram_size={d} timeout_ms={d} " ++
+            "quic_version=1 " ++
             "netz_ack_every={d} netz_max_ack_delay_us={d} " ++
             "cipher=negotiated-unexposed cert_verify=false gso=false " ++
             "gro=false pacing=true\n",
@@ -457,6 +460,9 @@ pub fn printConfig(
             config.mode.name(),
             config.mode.direction(),
             role_pair,
+            endpoint_role,
+            clientIo(role_pair),
+            serverIo(role_pair),
             config.warmup,
             config.iterations,
             config.streams,
@@ -467,6 +473,7 @@ pub fn printConfig(
             config.stream_window,
             try config.connectionWindow(),
             datagram_limit,
+            config.timeout_ms,
             config.netz_ack_every,
             config.netz_max_ack_delay_us,
         },
@@ -768,7 +775,8 @@ fn runStreamClient(
                 "record=result implementation=netz protocol=webtransport " ++
                     "transport=h3 mode={s} direction={s} " ++
                     "role_pair=netz-client+wtransport-server " ++
-                    "endpoint_role=client connection_scope=persistent " ++
+                    "endpoint_role=client client_io=zio-std-io " ++
+                    "server_io=wtransport-quinn-tokio connection_scope=persistent " ++
                     "benchmark_scope=same-application-shape warmup={d} " ++
                     "iterations={d} streams={d} bytes_per_stream={d} " ++
                     "payload_bytes={d} chunk_bytes={d} stream_window={d} " ++
@@ -1022,7 +1030,8 @@ fn runPingClient(
         "record=result implementation=netz protocol=webtransport " ++
             "transport=h3 mode={s} direction={s} " ++
             "role_pair=netz-client+wtransport-server " ++
-            "endpoint_role=client connection_scope=persistent " ++
+            "endpoint_role=client client_io=zio-std-io " ++
+            "server_io=wtransport-quinn-tokio connection_scope=persistent " ++
             "benchmark_scope=same-application-shape warmup={d} " ++
             "iterations={d} streams={d} bytes_per_stream={d} " ++
             "payload_bytes={d} chunk_bytes={d} stream_window={d} " ++
@@ -1097,7 +1106,9 @@ pub fn printServerComplete(
     std.debug.print(
         "record=server-complete implementation=netz protocol=webtransport " ++
             "transport=h3 mode={s} direction={s} role_pair={s} " ++
-            "endpoint_role=server connection_scope=persistent warmup={d} " ++
+            "endpoint_role=server client_io={s} server_io={s} " ++
+            "connection_scope=persistent benchmark_scope=same-application-shape " ++
+            "warmup={d} " ++
             "iterations={d} streams={d} bytes_per_stream={d} " ++
             "payload_bytes={d} chunk_bytes={d} stream_window={d} " ++
             "timeout_ms={d} netz_ack_every={d} " ++
@@ -1107,6 +1118,8 @@ pub fn printServerComplete(
             config.mode.name(),
             config.mode.direction(),
             role_pair,
+            clientIo(role_pair),
+            serverIo(role_pair),
             config.warmup,
             config.iterations,
             config.streams,
@@ -1133,7 +1146,8 @@ pub fn printNetzMemory(
     std.debug.print(
         "record=memory implementation=netz protocol=webtransport transport=h3 " ++
             "mode={s} direction={s} role_pair={s} endpoint_role={s} " ++
-            "connection_scope=persistent warmup={d} iterations={d} " ++
+            "client_io={s} server_io={s} connection_scope=persistent " ++
+            "warmup={d} iterations={d} " ++
             "streams={d} bytes_per_stream={d} payload_bytes={d} " ++
             "chunk_bytes={d} stream_window={d} timeout_ms={d} " ++
             "netz_ack_every={d} netz_max_ack_delay_us={d} " ++
@@ -1146,6 +1160,8 @@ pub fn printNetzMemory(
             config.mode.direction(),
             role_pair,
             endpoint_role,
+            clientIo(role_pair),
+            serverIo(role_pair),
             config.warmup,
             config.iterations,
             config.streams,
@@ -1176,7 +1192,8 @@ pub fn printNetzTraffic(
     std.debug.print(
         "record=traffic implementation=netz protocol=webtransport transport=h3 " ++
             "mode={s} direction={s} role_pair={s} endpoint_role={s} " ++
-            "connection_scope=persistent warmup={d} iterations={d} " ++
+            "client_io={s} server_io={s} connection_scope=persistent " ++
+            "warmup={d} iterations={d} " ++
             "streams={d} bytes_per_stream={d} payload_bytes={d} " ++
             "chunk_bytes={d} stream_window={d} timeout_ms={d} " ++
             "netz_ack_every={d} netz_max_ack_delay_us={d} " ++
@@ -1190,6 +1207,8 @@ pub fn printNetzTraffic(
             config.mode.direction(),
             role_pair,
             endpoint_role,
+            clientIo(role_pair),
+            serverIo(role_pair),
             config.warmup,
             config.iterations,
             config.streams,
@@ -1206,6 +1225,20 @@ pub fn printNetzTraffic(
             traffic.received_bytes,
         },
     );
+}
+
+pub fn clientIo(role_pair: []const u8) []const u8 {
+    return if (std.mem.startsWith(u8, role_pair, "netz-client"))
+        "zio-std-io"
+    else
+        "wtransport-quinn-tokio";
+}
+
+pub fn serverIo(role_pair: []const u8) []const u8 {
+    return if (std.mem.endsWith(u8, role_pair, "netz-server"))
+        "zio-std-io"
+    else
+        "wtransport-quinn-tokio";
 }
 
 fn runPingServer(

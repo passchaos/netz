@@ -112,6 +112,8 @@ grep -Fq 'Chrome WebTransport Origin policy passed: rejected=true' \
   "$work/rejected-client.log"
 grep -Fq 'netz WebTransport Origin policy passed: rejected=403' \
   "$work/rejected-server.log"
+grep -Fq 'client_io=chromium-network-service server_io=zio-std-io' \
+  "$work/rejected-server.log"
 
 server_args=(
   "$netz_server" "$port" "$work/cert.der" "$work/private-scalar.bin"
@@ -158,6 +160,8 @@ if [[ ${WEBTRANSPORT_ORIGIN_ONLY:-0} == 1 ]]; then
   grep -Fq \
     'netz WebTransport Origin policy passed: exact-origin=true' \
     "$work/server.log"
+  grep -Fq 'client_io=chromium-network-service server_io=zio-std-io' \
+    "$work/server.log"
   exit 0
 fi
 grep -Fq \
@@ -168,4 +172,6 @@ grep -Fq \
   "$work/server.log"
 grep -Fq \
   'oversized_rejected=true bidi uni reset=71 stop=72 concurrent_sibling=true reuse=true drain-before-close=true close' \
+  "$work/server.log"
+grep -Fq 'client_io=chromium-network-service server_io=zio-std-io' \
   "$work/server.log"

@@ -28,11 +28,14 @@ class BenchmarkCheckTest(unittest.TestCase):
 
     @staticmethod
     def shape(implementation: str, endpoint_role: str) -> str:
+        client_io = "zio-std-io"
+        server_io = "wtransport-quinn-tokio"
         return (
             f"implementation={implementation} protocol=webtransport transport=h3 "
             "mode=stream-upload direction=upload "
             "role_pair=netz-client+wtransport-server "
-            f"endpoint_role={endpoint_role} connection_scope=persistent "
+            f"endpoint_role={endpoint_role} client_io={client_io} "
+            f"server_io={server_io} connection_scope=persistent "
             "warmup=1 iterations=2 streams=2 bytes_per_stream=256 "
             "payload_bytes=32 chunk_bytes=64 stream_window=1024 "
             "timeout_ms=100 netz_ack_every=2 netz_max_ack_delay_us=25000"
@@ -50,6 +53,7 @@ class BenchmarkCheckTest(unittest.TestCase):
     def server_complete(self) -> str:
         return (
             f"record=server-complete {self.shape('wtransport', 'server')} "
+            "benchmark_scope=same-application-shape "
             "sent_bytes=1024 received_bytes=1024 checksum=130560 "
             "server_complete=true"
         )
@@ -111,8 +115,28 @@ class BenchmarkCheckTest(unittest.TestCase):
         client_extra: tuple[str, ...] = (),
         server_extra: tuple[str, ...] = (),
     ) -> None:
-        client = [self.result(1), self.result(2)]
-        server = [self.server_complete()]
+        config = (
+            "record=config "
+            f"{self.shape('{implementation}', '{endpoint_role}')} "
+            "benchmark_scope=same-application-shape "
+            "stream_window_requested=1024 stream_window_effective=1024 "
+            "connection_window=10240 max_datagram_size=1200 quic_version=1 "
+            "cipher=negotiated-unexposed cert_verify=false gso=false "
+            "gro={gro} pacing=true"
+        )
+        client = [
+            config.format(
+                implementation="netz", endpoint_role="client", gro="false",
+            ),
+            self.result(1), self.result(2),
+        ]
+        server = [
+            config.format(
+                implementation="wtransport", endpoint_role="server",
+                gro="implementation-default",
+            ),
+            self.server_complete(),
+        ]
         if traffic:
             client.append(
                 self.traffic(
@@ -177,6 +201,34 @@ class BenchmarkCheckTest(unittest.TestCase):
         self.assertIn("record=traffic-summary", result.stdout)
         self.assertEqual(result.stdout.count("record=memory"), 2)
 
+    def test_accepts_reverse_backend_identity(self) -> None:
+        self.write_logs()
+        common_replacements = (
+            ("netz-client+wtransport-server", "wtransport-client+netz-server"),
+            ("client_io=zio-std-io server_io=wtransport-quinn-tokio",
+             "client_io=wtransport-quinn-tokio server_io=zio-std-io"),
+        )
+        client_text = self.client_log.read_text(encoding="utf-8")
+        server_text = self.server_log.read_text(encoding="utf-8")
+        for before, after in common_replacements:
+            client_text = client_text.replace(before, after)
+            server_text = server_text.replace(before, after)
+        self.client_log.write_text(
+            client_text.replace("implementation=netz", "implementation=wtransport").replace(
+                "gro=false", "gro=implementation-default"
+            ),
+            encoding="utf-8",
+        )
+        self.server_log.write_text(
+            server_text.replace("implementation=wtransport", "implementation=netz").replace(
+                "gro=implementation-default", "gro=false"
+            ),
+            encoding="utf-8",
+        )
+        self.role_pair = "wtransport-client+netz-server"
+        result = self.run_check()
+        self.assertEqual(result.returncode, 0, result.stderr)
+
     def test_rejects_duplicate_result(self) -> None:
         self.write_logs(client_extra=(self.result(2),))
         self.assert_rejected(self.run_check())
@@ -186,6 +238,37 @@ class BenchmarkCheckTest(unittest.TestCase):
         text = self.client_log.read_text(encoding="utf-8")
         self.client_log.write_text(
             text.replace("checksum=65280", "checksum=65281", 1),
+            encoding="utf-8",
+        )
+        self.assert_rejected(self.run_check())
+
+    def test_rejects_wrong_backend(self) -> None:
+        self.write_logs()
+        self.client_log.write_text(
+            self.client_log.read_text(encoding="utf-8").replace(
+                "client_io=zio-std-io", "client_io=threaded", 1
+            ),
+            encoding="utf-8",
+        )
+        self.assert_rejected(self.run_check())
+
+    def test_rejects_missing_config(self) -> None:
+        self.write_logs()
+        self.server_log.write_text(
+            "\n".join(
+                line for line in self.server_log.read_text(encoding="utf-8").splitlines()
+                if "record=config" not in line
+            ) + "\n",
+            encoding="utf-8",
+        )
+        self.assert_rejected(self.run_check())
+
+    def test_rejects_throughput_mismatch(self) -> None:
+        self.write_logs()
+        self.client_log.write_text(
+            self.client_log.read_text(encoding="utf-8").replace(
+                "logical_MiB_s=488.281", "logical_MiB_s=1", 1
+            ),
             encoding="utf-8",
         )
         self.assert_rejected(self.run_check())

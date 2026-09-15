@@ -38,9 +38,9 @@ pub fn run(_: std.process.Init, args: []const []const u8) !void {
     }
 
     const allocator = std.heap.c_allocator;
-    var threaded = std.Io.Threaded.init(allocator, .{ .async_limit = .unlimited });
-    defer threaded.deinit();
-    const io = threaded.io();
+    var backend = try netz.runtime.Backend.init(allocator);
+    defer backend.deinit();
+    const io = backend.io();
     var certificate_der: [netz.tls.testing.certificate_der_len]u8 = undefined;
     try std.base64.standard.Decoder.decode(
         &certificate_der,
@@ -264,7 +264,7 @@ pub fn run(_: std.process.Init, args: []const []const u8) !void {
     try session.finishStreamWithDeadline(control.stream_id, deadline);
     try receiveExactAndFin(&session, control.stream_id, close_ready, deadline);
     std.debug.print(
-        "netz server churn passed: fault={s} fault_scope=wtransport-client-outbound streams={d} fin={d} reset={d} bytes={d} checksum={d} reset_mask=0x{x:0>16} reset_code_sum={d} sibling=true\n",
+        "netz server churn passed: fault={s} fault_scope=wtransport-client-outbound streams={d} fin={d} reset={d} bytes={d} checksum={d} reset_mask=0x{x:0>16} reset_code_sum={d} sibling=true client_io=wtransport-quinn-tokio server_io=zio-std-io\n",
         .{ fault, result.streams, result.fins, result.resets, result.received_bytes, result.checksum, result.reset_mask, result.reset_code_sum },
     );
     try session.closeConnection(0, "churn complete");

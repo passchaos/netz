@@ -4503,6 +4503,12 @@ zig build bench-webtransport-wtransport -Doptimize=ReleaseFast -- \
 
 The runner selects two CPUs from its current affinity mask and pins the client
 and server separately. Each pair performs a real QUIC v1/TLS/HTTP/3 CONNECT,
+with every netz endpoint running on zio behind `std.Io` and the Rust peer using
+its Tokio multi-thread runtime over wtransport/Quinn. Config, result,
+server-completion, traffic, and memory records carry `client_io` and
+`server_io`; the strict verifier rejects legacy or mismatched identities,
+requires one config from each endpoint, validates the complete configured
+shape, and recomputes stream throughput. Each pair then
 opens one dedicated bidirectional WebTransport control stream, and validates
 the fixed big-endian `CONFIG`/`CONFIG_ACK` exchange before timing. Stream
 rounds open and associate every data stream before `ROUND_READY`/`GO`; the
@@ -4555,12 +4561,23 @@ four-stream rounds verified 262,144 logical bytes, four FINs, and checksum
 runs establish harness correctness only and are not retained as performance
 claims.
 
-The current CPU-0/client, CPU-1/server run uses 20 warmups plus five measured
-iterations and explicitly gives the netz endpoint the RFC 9000-style local ACK
-policy of one ACK per two ack-eliciting packets or 25 ms, while preserving an
-immediate ACK for reordering gaps of three packets. Five runs (25 samples per
-role pair) measured 141.489-145.081 MiB/s with the wtransport client sender and
-207.671-210.863 MiB/s with the netz client sender. Four 4-MiB
+A 2026-09-15 zio migration smoke used two 64-KiB streams, one warmup, and three
+measured rounds in both role pairs, followed by three measured 32-byte
+DATAGRAM round trips. Each stream pair verified 393,216 aggregate bytes and
+checksum 50,135,040; each DATAGRAM pair verified 128 bytes including warmup
+and checksum 10,166. Both netz endpoint roles ended with `live_bytes=0`, and
+the available whole-process RSS source was labeled `busybox-time-maxrss`. A
+separate 32-stream churn gate passed loss and pair reordering in both sender
+directions with 16 FINs, 16 resets, 266,240 bytes, checksum 33,945,600, reset
+mask `0x00000000aaaaaaaa`, and code sum 262,400. These are functional and
+evidence-pipeline gates, not performance comparisons.
+
+The historical pre-zio CPU-0/client, CPU-1/server run used 20 warmups plus five
+measured iterations and explicitly gave the netz endpoint the RFC 9000-style
+local ACK policy of one ACK per two ack-eliciting packets or 25 ms, while
+preserving an immediate ACK for reordering gaps of three packets. Five runs
+(25 samples per role pair) measured 141.489-145.081 MiB/s with the wtransport
+client sender and 207.671-210.863 MiB/s with the netz client sender. Four 4-MiB
 streams measured 80.14-83.35 MiB/s and 194.44-195.46 MiB/s respectively; every
 sample verified 16,777,216 bytes, four FINs, and checksum 2,139,095,040. The
 five 200-warmup/5,000-sample 32-byte DATAGRAM ping-pong runs measured
@@ -4569,11 +4586,12 @@ wtransport-client p50/p90/p99/p99.9 ranges of 28.815-29.549 /
 29.632-29.804 / 33.207-33.807 / 34.536-35.829 / 37.897-39.480 us, with
 checksum 15,084,056 in both directions. These are same-application-shape
 cross-process samples, not equal-wire ratios or whole-library superiority
-claims.
+claims. They were captured with the former `std.Io.Threaded` netz harness and
+must not be cited as current zio performance.
 
-Five order-alternated A/B pairs isolate the ACK-policy change. Both arms used
-the same current benchmark code, workload, CPU assignment, and `--traffic`
-instrumentation; A passed `--netz-ack-every=1` and
+Five historical order-alternated A/B pairs isolated the ACK-policy change.
+Both arms used the same benchmark code, workload, CPU assignment, and
+`--traffic` instrumentation; A passed `--netz-ack-every=1` and
 `--netz-max-ack-delay-us=0`, while B passed `--netz-ack-every=2` and
 `--netz-max-ack-delay-us=25000`. Pair order alternated A/B then B/A to reduce
 time-order bias. For wtransport-client + netz-server, median stream throughput
@@ -4590,8 +4608,8 @@ and wraps all four processes with GNU time. The strict verifier requires the
 exact number of stream sample records (or one DATAGRAM percentile record), one
 separate server-completion record, and two memory records per role pair. It
 independently reconstructs stream and DATAGRAM checksums, so memory output
-cannot substitute for application completion. Three default-shape runs
-recorded the following whole-process peak RSS:
+cannot substitute for application completion. Three historical pre-zio
+default-shape runs recorded the following whole-process peak RSS:
 
 | Mode | Implementation | Endpoint role | Process peak RSS (KiB) |
 |---|---|---|---:|
@@ -4617,9 +4635,10 @@ RSS is the cross-language metric, and the differently scoped allocator
 counters are not used as a cross-language ratio. These memory observations
 retain the same `same-application-shape` boundary as the timing results.
 
-`--traffic` is a separate opt-in pass because netz's thread-safe endpoint
-counters add atomic work. It joins one complete-connection record from each
-endpoint after handshake, all warmup and measured work, the benchmark
+The historical `--traffic` pass was a separate opt-in because netz's
+thread-safe endpoint counters add atomic work. It joined one complete-connection
+record from each endpoint after handshake, all warmup and measured work, the
+benchmark
 acknowledgment, `CLOSE_ACK`, and the bidirectional control-stream FIN exchange.
 Netz reports successful socket I/O;
 wtransport reports Quinn `ConnectionStats.udp_tx/udp_rx`. Both count UDP

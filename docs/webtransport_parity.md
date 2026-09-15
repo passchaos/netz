@@ -25,7 +25,12 @@ WEBTRANSPORT_ORIGIN_ONLY=1 zig build interop-webtransport-chrome -Doptimize=Rele
 
 The external interoperability gate builds the audited `~/Work/wtransport`
 checkout at `d96cbb8` and exercises both directions over real TLS
-1.3/QUIC/HTTP/3 connections. The wtransport-client/netz-server half verifies a
+1.3/QUIC/HTTP/3 connections. Every netz process in the native interop,
+benchmark, loss, and reorder gates now runs on zio behind the `std.Io` protocol
+boundary. Machine-readable success records bind netz endpoints to
+`zio-std-io` and the independently maintained Tokio/Quinn peer to
+`wtransport-quinn-tokio`; strict verifiers reject legacy or mismatched backend
+identities. The wtransport-client/netz-server half verifies a
 successful Extended CONNECT at `/interop`, bidirectional DATAGRAM exchange, a
 client-created bidirectional stream and its reverse direction, client- and
 server-created unidirectional streams, mapped application-code 71
@@ -74,6 +79,9 @@ The Chrome gate drives the browser's real `WebTransport` API through
 Puppeteer, not a native QUIC substitute. It generates a fresh P-256 localhost
 identity because the browser's `serverCertificateHashes` exception requires a
 certificate validity period of at most two weeks. The server receives the
+same zio-backed netz server binary and its success records identify the browser
+side as `chromium-network-service`, avoiding a false wtransport runtime label.
+The server receives the
 origin page's dynamically allocated `http://localhost:<port>` serialization as
 an exact allowlist and verifies the browser-generated Origin before accepting
 CONNECT. Before that allowed run, a second netz listener deliberately trusts a

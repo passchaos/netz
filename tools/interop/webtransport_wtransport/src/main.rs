@@ -275,7 +275,7 @@ async fn run_interop(all_args: &[String]) -> Result<()> {
     // capsule's framing; it then closes QUIC with H3_NO_ERROR.
     endpoint.close(VarInt::from_u32(0), b"interop complete");
     endpoint.wait_idle().await;
-    println!("wtransport client interop passed: CONNECT admission-headers=true DATAGRAM max_datagram_size={max_datagram_size} oversized_rejected=true bidi uni reset=71 stop=72 concurrent_sibling=true reuse=true drain-before-close=true close");
+    println!("wtransport client interop passed: CONNECT admission-headers=true DATAGRAM max_datagram_size={max_datagram_size} oversized_rejected=true bidi uni reset=71 stop=72 concurrent_sibling=true reuse=true drain-before-close=true close client_io=wtransport-quinn-tokio server_io=zio-std-io");
     Ok(())
 }
 
@@ -416,7 +416,7 @@ async fn run_server() -> Result<()> {
     connection.close(VarInt::from_u32(0), b"interop complete");
     endpoint.wait_idle().await;
     println!(
-        "wtransport server interop passed: CONNECT admission-headers=true DATAGRAM max_datagram_size={max_datagram_size} oversized_rejected=true bidi uni reset=73 stop=74 reuse=true"
+        "wtransport server interop passed: CONNECT admission-headers=true DATAGRAM max_datagram_size={max_datagram_size} oversized_rejected=true bidi uni reset=73 stop=74 reuse=true client_io=zio-std-io server_io=wtransport-quinn-tokio"
     );
     Ok(())
 }

@@ -1188,7 +1188,10 @@ analogous stream upload and DATAGRAM ping-pong comparison described above. It
 also accepts `--stats` for four-process peak RSS and separately scoped netz
 explicit-allocation / Rust system-requested-allocation telemetry. Its strict
 verifier checks every stream sample or the aggregate DATAGRAM result plus an
-independent server-completion record.
+independent server-completion record. All netz WebTransport interop, benchmark,
+and churn endpoints use zio behind `std.Io`; their records identify
+`zio-std-io` versus the peer's `wtransport-quinn-tokio` runtime, and the
+verifiers reject missing or mismatched identities.
 Add `--traffic` in a separate run to join complete-connection userspace UDP
 payload bytes and logical datagram counts from the netz endpoint and Quinn
 connection statistics. This records wire-shape differences without presenting

@@ -798,23 +798,32 @@ The native wtransport interop now also exposes a two-CPU cross-process
 `bench-webtransport-wtransport` gate. It runs both implementation-role
 directions for deterministic stream uploads and one-outstanding DATAGRAM
 ping-pong with CONFIG/GO/DONE boundaries, byte/checksum/FIN validation, warmup,
-and stable machine-readable results. It is deliberately reported as
-same-application-shape rather than equal-wire: the two peers currently expose
+and stable machine-readable results. Every netz role now runs on zio behind
+`std.Io`; config, result, completion, traffic, memory, and churn records bind
+both endpoints to `zio-std-io` or `wtransport-quinn-tokio`, and strict
+verifiers reject mismatches. A zio migration smoke passed two 64-KiB streams
+for three measured rounds and three 32-byte DATAGRAM round trips in both role
+pairs, with exact checksums and zero retained netz allocator bytes. A separate
+32-stream matrix passed loss and reorder in both sender directions. These are
+functional gates, not performance comparisons. The harness is deliberately
+reported as same-application-shape rather than equal-wire: the two peers expose
 different effective WebTransport DATAGRAM payload limits. Userspace UDP
 accounting below proves the stream shapes differ; kernel/interface capture is
 still needed before any equivalent-packetization claim.
 Its opt-in process-memory matrix covers stream upload and DATAGRAM ping-pong in
-both role directions. Three default-shape runs measured stream RSS at 10,240
-KiB for the netz client versus 11,264-11,312 KiB for the wtransport client,
+both role directions. Historical pre-zio default-shape runs measured stream
+RSS at 10,240 KiB for the netz client versus 11,264-11,312 KiB for the
+wtransport client,
 and 4,352 KiB for the netz server versus 6,144-6,400 KiB for the wtransport
 server. DATAGRAM RSS was 3,840 KiB for both netz roles, 6,144-6,400 KiB for
 the wtransport client, and 5,888-6,144 KiB for its server. Netz explicit
 allocation records ended at zero live bytes; Rust system-requested counters
 remain separately scoped diagnostics. A strict verifier independently derives
 the expected bytes/checksum and requires distinct result, server-completion,
-and memory records.
-A separate `--traffic` pass joins both endpoints' userspace UDP payload bytes
-and logical datagram counts for the complete persistent connection. Three
+and memory records. These RSS values are not current zio measurements.
+A separate historical pre-zio `--traffic` pass joined both endpoints' userspace
+UDP payload bytes and logical datagram counts for the complete persistent
+connection. Three
 stream runs measured 112.094-112.114 MB / 180,705-180,728 datagrams for
 wtransport-client + netz-server, versus 108.990-109.108 MB /
 115,105-117,800 datagrams for netz-client + wtransport-server. The 32-byte

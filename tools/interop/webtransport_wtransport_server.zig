@@ -84,11 +84,9 @@ pub fn main(init: std.process.Init) !void {
     if (port == 0) return error.InvalidArgument;
 
     const allocator = std.heap.c_allocator;
-    var threaded = std.Io.Threaded.init(allocator, .{
-        .async_limit = .unlimited,
-    });
-    defer threaded.deinit();
-    const io = threaded.io();
+    var backend = try netz.runtime.Backend.init(allocator);
+    defer backend.deinit();
+    const io = backend.io();
 
     var built_in_certificate_der: [
         netz.tls.testing.certificate_der_len
@@ -133,6 +131,10 @@ pub fn main(init: std.process.Init) !void {
         std.mem.eql(u8, args[5], "origin-only");
     const reject_origin = args.len == 6 and
         std.mem.eql(u8, args[5], "reject-origin");
+    const client_io = if (args.len >= 4)
+        "chromium-network-service"
+    else
+        "wtransport-quinn-tokio";
     if (args.len == 6 and !origin_only and !reject_origin) {
         return error.InvalidArgument;
     }
@@ -190,8 +192,8 @@ pub fn main(init: std.process.Init) !void {
             pending_owned = false;
             defer rejected.deinit();
             std.debug.print(
-                "netz WebTransport Origin policy passed: rejected=403\n",
-                .{},
+                "netz WebTransport Origin policy passed: rejected=403 client_io={s} server_io=zio-std-io\n",
+                .{client_io},
             );
             try std.Io.sleep(io, .fromMilliseconds(100), .awake);
             return;
@@ -241,8 +243,8 @@ pub fn main(init: std.process.Init) !void {
     );
     if (origin_only) {
         std.debug.print(
-            "netz WebTransport Origin policy passed: exact-origin=true\n",
-            .{},
+            "netz WebTransport Origin policy passed: exact-origin=true client_io={s} server_io=zio-std-io\n",
+            .{client_io},
         );
         try std.Io.sleep(io, .fromMilliseconds(100), .awake);
         return;
@@ -409,13 +411,14 @@ pub fn main(init: std.process.Init) !void {
     }
     try std.Io.sleep(io, .fromMilliseconds(100), .awake);
     std.debug.print(
-        "netz WebTransport server interop passed: CONNECT DATAGRAM max_datagram_size={d} oversized_rejected=true bidi uni reset=71 stop=72 concurrent_sibling=true reuse=true {s} close\n",
+        "netz WebTransport server interop passed: CONNECT DATAGRAM max_datagram_size={d} oversized_rejected=true bidi uni reset=71 stop=72 concurrent_sibling=true reuse=true {s} close client_io={s} server_io=zio-std-io\n",
         .{
             max_datagram_size,
             if (allowed_origins.len == 0)
                 "drain-before-connection-close=true"
             else
                 "drain-before-close=true",
+            client_io,
         },
     );
 }
@@ -459,11 +462,9 @@ fn runBenchmarkWithAllocator(
     config: benchmark.Config,
     traffic: bool,
 ) !void {
-    var threaded = std.Io.Threaded.init(allocator, .{
-        .async_limit = .unlimited,
-    });
-    defer threaded.deinit();
-    const io = threaded.io();
+    var backend = try netz.runtime.Backend.init(allocator);
+    defer backend.deinit();
+    const io = backend.io();
 
     var certificate_der: [netz.tls.testing.certificate_der_len]u8 = undefined;
     try std.base64.standard.Decoder.decode(
@@ -529,6 +530,7 @@ fn runBenchmarkWithAllocator(
     try benchmark.printConfig(
         "netz",
         "wtransport-client+netz-server",
+        "server",
         config,
         datagram_limit,
     );

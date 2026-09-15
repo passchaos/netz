@@ -237,7 +237,7 @@ pub(crate) async fn run_client_connection(
         "proxy counters changed after final disarm"
     );
     println!(
-        "wtransport client churn passed: fault={fault} fault_scope=wtransport-client-outbound streams={} fin={} reset={} bytes={} checksum={} reset_mask=0x{:016x} reset_code_sum={} considered={} dropped={} held={} reordered={} reset_dropped={} reset_held={} reset_reordered={} fin_dropped={} fin_held={} fin_reordered={} sibling=true peer-close=true",
+        "wtransport client churn passed: fault={fault} fault_scope=wtransport-client-outbound streams={} fin={} reset={} bytes={} checksum={} reset_mask=0x{:016x} reset_code_sum={} considered={} dropped={} held={} reordered={} reset_dropped={} reset_held={} reset_reordered={} fin_dropped={} fin_held={} fin_reordered={} sibling=true peer-close=true client_io=wtransport-quinn-tokio server_io=zio-std-io",
         result.streams,
         result.fins,
         result.resets,
@@ -552,7 +552,7 @@ pub(crate) async fn run_server_connection(
         .await
         .context("churn control response FIN timed out")??;
     println!(
-        "wtransport server churn passed: fault={fault} fault_scope=netz-client-outbound streams={stream_count} fin={fins} reset={resets} bytes={received_bytes} checksum={checksum} reset_mask=0x{reset_mask:016x} reset_code_sum={reset_code_sum} sibling=true"
+        "wtransport server churn passed: fault={fault} fault_scope=netz-client-outbound streams={stream_count} fin={fins} reset={resets} bytes={received_bytes} checksum={checksum} reset_mask=0x{reset_mask:016x} reset_code_sum={reset_code_sum} sibling=true client_io=zio-std-io server_io=wtransport-quinn-tokio"
     );
     Ok(())
 }

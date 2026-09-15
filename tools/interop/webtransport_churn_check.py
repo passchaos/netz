@@ -76,6 +76,11 @@ def verify(
     server_implementation = "wtransport" if sender == "netz" else "netz"
     server_prefix = f"{server_implementation} server churn passed:"
     scope = f"{sender}-client-outbound"
+    endpoint_io = (
+        {"client": "zio-std-io", "server": "wtransport-quinn-tokio"}
+        if sender == "netz"
+        else {"client": "wtransport-quinn-tokio", "server": "zio-std-io"}
+    )
     client = record(client_log, client_prefix)
     server = record(server_log, server_prefix)
     for name, values in (("client", client), ("server", server)):
@@ -85,6 +90,11 @@ def verify(
             raise ValueError(f"{name}: invalid fault scope")
         if values.get("sibling") != "true":
             raise ValueError(f"{name}: sibling did not survive")
+        if (
+            values.get("client_io") != endpoint_io["client"]
+            or values.get("server_io") != endpoint_io["server"]
+        ):
+            raise ValueError(f"{name}: backend identity mismatch")
         for field, value in wanted.items():
             actual = parse_int(values.get(field, "-1"))
             if actual != value:
@@ -135,6 +145,7 @@ def verify(
         f"reset={wanted['reset']} bytes={wanted['bytes']} "
         f"checksum={wanted['checksum']} reset_mask=0x{wanted['reset_mask']:016x} "
         f"reset_code_sum={wanted['reset_code_sum']} "
+        f"client_io={endpoint_io['client']} server_io={endpoint_io['server']} "
         f"considered={client['considered']} {counter}={client[counter]}"
     )
 

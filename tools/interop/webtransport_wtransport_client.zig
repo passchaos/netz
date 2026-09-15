@@ -91,11 +91,9 @@ pub fn main(init: std.process.Init) !void {
     if (port == 0) return error.InvalidArgument;
 
     const allocator = std.heap.c_allocator;
-    var threaded = std.Io.Threaded.init(allocator, .{
-        .async_limit = .unlimited,
-    });
-    defer threaded.deinit();
-    const io = threaded.io();
+    var backend = try netz.runtime.Backend.init(allocator);
+    defer backend.deinit();
+    const io = backend.io();
     const original_dcid = [_]u8{ 0x77, 0x74, 0x63, 0x6c, 0x69, 0x00, 0x00, 0x01 };
     const client_cid = [_]u8{ 0x77, 0x74, 0x63, 0x6c, 0x69, 0x00, 0x00, 0x02 };
     var stop_loss = StopLoss{};
@@ -278,7 +276,7 @@ pub fn main(init: std.process.Init) !void {
         .transport => return error.UnexpectedConnectionClose,
     }
     std.debug.print(
-        "netz WebTransport client interop passed: CONNECT uri=true rejection=404 admission-headers=true DATAGRAM max_datagram_size={d} oversized_rejected=true bidi uni reset=73 stop=74 dropped_stop_sending=1 concurrent_sibling=true reuse=true peer-close\n",
+        "netz WebTransport client interop passed: CONNECT uri=true rejection=404 admission-headers=true DATAGRAM max_datagram_size={d} oversized_rejected=true bidi uni reset=73 stop=74 dropped_stop_sending=1 concurrent_sibling=true reuse=true peer-close client_io=zio-std-io server_io=wtransport-quinn-tokio\n",
         .{max_datagram_size},
     );
 }
@@ -323,11 +321,9 @@ fn runBenchmarkWithAllocator(
     config: benchmark.Config,
     traffic: bool,
 ) !void {
-    var threaded = std.Io.Threaded.init(allocator, .{
-        .async_limit = .unlimited,
-    });
-    defer threaded.deinit();
-    const io = threaded.io();
+    var backend = try netz.runtime.Backend.init(allocator);
+    defer backend.deinit();
+    const io = backend.io();
     const original_dcid =
         [_]u8{ 0x6e, 0x7a, 0x77, 0x74, 0x62, 0x00, 0x00, 0x01 };
     const client_cid =
@@ -380,6 +376,7 @@ fn runBenchmarkWithAllocator(
     try benchmark.printConfig(
         "netz",
         "netz-client+wtransport-server",
+        "client",
         config,
         datagram_limit,
     );
