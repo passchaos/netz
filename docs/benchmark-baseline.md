@@ -3129,6 +3129,24 @@ Every arm deterministically dropped 6/126 datagrams, reported six transport
 losses, and verified 1,048,576 bytes. This step is retained for protocol and
 recovery correctness, with no throughput or latency improvement claim.
 
+One follow-up packet-protection shortcut was tested and rejected. The ordinary
+single-packet path already computes protected length in `prepareFramesForSend`;
+the candidate reused that value for sent metadata and the final sealing helper
+instead of recomputing it twice. Five fixed-binary CPU-0 pairs of the
+32-packet/1-KiB send microbenchmark moved sequential median only from 138,952
+to 138,631 ns/batch (0.23%, 3/5 wins), while the batch control was likewise
+noise-level. The parent/candidate send-benchmark SHA-256 values were
+`2034af763f6044020917dfd7bb7ef41ccaec61ecf72e76a2d1ab14e86d68cac3` and
+`5691f247827163eb8263da81526bf7ce56590952484217ae93e20872bbb8f284`.
+Five order-interleaved 16-MiB/four-stream real TLS/HTTP/3 upload
+pairs measured parent 136.50-145.20 MiB/s (142.68 median) and candidate
+138.72-147.46 MiB/s (142.33 median), with 2/5 candidate wins. Every run
+verified 16,777,216 bytes and status total 800; those binaries hashed to
+`987d2e01b5cffee31268c01d6b8eb2dcb9cfc2b5ca825af27f3471e86ac0f3e1` and
+`894c3503e775abf5cd87aa0102b98d8204404d924a5d919976cbe1701646b674`.
+The implementation was removed;
+these overlapping results do not justify adding another internal API parameter.
+
 ### Raw QUIC mixed FIN/reset recovery versus quic-go
 
 The separate process gate below exercises terminal stream churn instead of
