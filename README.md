@@ -564,6 +564,8 @@ starts with deterministic parsers, serializers, preallocated fixed-width wire-in
   encoding, in-place current-key 1-RTT decryption, reusable receive/frame
   scratch, and bounded non-GRO multi-datagram receive cursors that amortize
   zio socket waits while exposing only one packet at a time to HTTP/3,
+  preserving any datagrams already dequeued when a later batch-drain receive
+  reports an error,
   strict wire-order low-peak batch servicing, and bounded power-of-two
   recovery-payload reuse with allocation-free ACK-time recycling, four direct
   per-class slots, payload-intrusive overflow free lists, and a global

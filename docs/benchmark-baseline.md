@@ -1349,6 +1349,10 @@ the dual-socket single-packet path. A real zio regression proves that callback
 failure commits only the visited packet, preserves the unread suffix in order,
 does not advance it on an invalid deadline, and triggers the configured ACK
 threshold only when the second packet is consumed.
+The endpoint also honors `std.Io`'s partial receive result: when a backend
+returns a non-empty datagram prefix together with an error from a later drain,
+netz exposes and accounts for that prefix instead of dropping bytes already
+removed from the socket. A zero-count result still propagates the error.
 `--ack-eliciting-threshold` controls the server ACK policy; the default of four
 is the stable winner from the same-host 2/4/8/16/32 scan. Packet-size-aware
 cross-stream body batches are available through

@@ -986,8 +986,30 @@ pub const Endpoint = struct {
             .{},
             timeout,
         );
-        if (receive_error) |err| return err;
-        std.debug.assert(count != 0 and count <= out.len);
+        return self.finishManyKernelBytesInto(
+            messages[0..out.len],
+            out,
+            receive_error,
+            count,
+        );
+    }
+
+    fn finishManyKernelBytesInto(
+        self: *Endpoint,
+        messages: []const net.IncomingMessage,
+        out: []ReceivedBytesView,
+        receive_error: ?ReceiveTimeoutError,
+        count: usize,
+    ) ReceiveTimeoutError!usize {
+        std.debug.assert(count <= messages.len and count <= out.len);
+        if (count == 0) {
+            if (receive_error) |err| return err;
+            unreachable;
+        }
+        // `std.Io` may report an error from a nonblocking drain after one or
+        // more datagrams were already removed from the socket. Preserve that
+        // visible prefix; a persistent socket error will be observed by the
+        // next receive call.
         for (messages[0..count], out[0..count]) |incoming, *view| {
             self.recordSocketReceived(incoming);
             view.* = try self.finishKernelBytesInto(incoming);
@@ -4082,6 +4104,61 @@ test "QUIC endpoint pending receive queue reuses consumed slots" {
 
     for (endpoint.pending_received.items) |*pending| pending.deinit(allocator);
     endpoint.pending_received.clearRetainingCapacity();
+}
+
+test "QUIC endpoint preserves a received batch prefix before socket error" {
+    var endpoint = Endpoint{
+        .io = undefined,
+        .allocator = std.testing.allocator,
+        .socket = undefined,
+        .limits = .{ .max_datagram_size = 16 },
+    };
+    const source = net.IpAddress{ .ip4 = .loopback(443) };
+    var messages = [_]net.IncomingMessage{
+        .{
+            .from = source,
+            .data = @constCast("first"),
+            .control = &.{},
+            .flags = .{
+                .eor = false,
+                .trunc = false,
+                .ctrunc = false,
+                .oob = false,
+                .errqueue = false,
+            },
+        },
+        .{
+            .from = source,
+            .data = @constCast("second"),
+            .control = &.{},
+            .flags = .{
+                .eor = false,
+                .trunc = false,
+                .ctrunc = false,
+                .oob = false,
+                .errqueue = false,
+            },
+        },
+    };
+    var views: [messages.len]ReceivedBytesView = undefined;
+    const count = try endpoint.finishManyKernelBytesInto(
+        &messages,
+        &views,
+        error.NetworkDown,
+        messages.len,
+    );
+    try std.testing.expectEqual(messages.len, count);
+    try std.testing.expectEqualStrings("first", views[0].bytes);
+    try std.testing.expectEqualStrings("second", views[1].bytes);
+    try std.testing.expectError(
+        error.NetworkDown,
+        endpoint.finishManyKernelBytesInto(
+            &messages,
+            &views,
+            error.NetworkDown,
+            0,
+        ),
+    );
 }
 
 test "QUIC UDP endpoint disables rejected GSO and retries send-many" {
