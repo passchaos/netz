@@ -1160,6 +1160,22 @@ pub const Connection = struct {
     send_batch_packet_stream_scratch: std.ArrayList(ReservedStreamCredit) = .empty,
 
     pub fn init(endpoint: *quic.runtime.Endpoint, config: ConnectionConfig) Error!Connection {
+        return initWithReceivePacketStorage(endpoint, config, null);
+    }
+
+    /// Initialize established state while consuming an optional receive
+    /// allocation on every return path. Integrated handshakes transfer their
+    /// datagram reader here so connection setup does not overlap duplicate
+    /// path-sized buffers.
+    pub fn initWithReceivePacketStorage(
+        endpoint: *quic.runtime.Endpoint,
+        config: ConnectionConfig,
+        owned_receive_packet: ?[]u8,
+    ) Error!Connection {
+        var receive_packet_storage = owned_receive_packet;
+        errdefer if (receive_packet_storage) |storage| {
+            endpoint.allocator.free(storage);
+        };
         if (config.local_endpoint == .server and
             config.peer_stateless_reset_token != null)
         {
@@ -1253,6 +1269,18 @@ pub const Connection = struct {
         errdefer if (prepared_receive_keys) |prepared| {
             prepared.destroy(endpoint.allocator);
         };
+        const transferred_receive_packet = receive_packet_storage;
+        receive_packet_storage = null;
+        var scratch = try connection_scratch.Buffers
+            .initWithReceivePacketStorage(
+            endpoint.allocator,
+            send_buffer_capacity,
+            endpoint.limits.max_datagram_size,
+            config.max_ack_ranges,
+            transferred_receive_packet,
+        );
+        var scratch_owned = true;
+        errdefer if (scratch_owned) scratch.deinit(endpoint.allocator);
         var connection = Connection{
             .endpoint = endpoint,
             .send_endpoint = endpoint,
@@ -1314,13 +1342,9 @@ pub const Connection = struct {
             .requested_max_ack_delay = config.local_max_ack_delay_us,
             .ack_reordering_threshold = config.local_ack_reordering_threshold,
             .pending_ack_frequency_request = pending_ack_frequency_request,
-            .scratch = try .init(
-                endpoint.allocator,
-                send_buffer_capacity,
-                endpoint.limits.max_datagram_size,
-                config.max_ack_ranges,
-            ),
+            .scratch = scratch,
         };
+        scratch_owned = false;
         prepared_send_keys = null;
         prepared_receive_keys = null;
         peer_connection_id_storage_owned = false;

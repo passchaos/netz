@@ -666,6 +666,17 @@ quicz-aligned P50 improved 0.6% with 4/7 wins and verified P50 improved 0.7%
 with 7/7 wins. A seven-pair first-echo control improved 13.3% with 7/7 wins,
 while one long-lived echo control improved 4.7%; the latter is only supporting
 evidence, so no broad steady-state throughput claim is made.
+Direct zio-backed handshakes now receive into one handshake-scoped allocation
+and transfer that exact storage into established 1-RTT receive scratch. A
+scoped release hook preserves datagram lifetime; nested fragmented-flight reads
+fall back to owned storage, and dispatcher inbox sources retain their owning
+FIFO contract. This mirrors Quinn's endpoint `recv_buf` and tquic's loop-level
+receive buffer without exposing a Threaded production fallback. Against the
+preceding fixed binary, 100 two-endpoint handshakes reduced skip-verification
+allocation calls 10.3%, cumulative bytes 40.4%, and peak live bytes 15.1%; the
+verified reductions were 9.6%, 40.3%, and 15.0%. Seven CPU-0 alternating pairs
+showed only noise-level handshake movement (skip P50 +0.5%, verified P50 +0.1%)
+and a 5,000-round echo control was unchanged at 15.574 versus 15.575 us.
 
 Handshake-backed and lightweight protected HTTP/3 clients guard the
 connection-scoped receive owner while aggregate informational callbacks run.

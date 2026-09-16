@@ -3850,6 +3850,45 @@ A seven-pair first-echo control moved the one-round median from 146.945 to
 from 16.287 to 15.519 us; it is only supporting evidence, not a broad
 steady-state speed claim.
 
+The next zio receive-path step gives direct endpoint-backed handshake sources
+one reusable datagram allocation. Each returned datagram keeps a scoped release
+hook, so a nested flight receive falls back to the source's owning path while
+the preceding bytes remain live. Routed dispatcher inboxes expose no
+caller-buffer capability and retain their existing owning FIFO semantics. At
+successful establishment the reader allocation transfers into the connection's
+1-RTT receive scratch instead of overlapping a second path-sized allocation.
+This follows Quinn's allocate-once endpoint `recv_buf` and tquic's receive buffer
+outside its endpoint loop, while keeping netz's zio/`std.Io` boundary and
+explicit source ownership. The reusable reader is isolated in
+`src/quic/handshake/datagram_reader.zig`; tests cover reuse, nested lifetime,
+owning-source fallback, transfer identity, validation failure, and allocation-
+failure rollback.
+
+The fixed baseline for this step is the preceding direct-packet-scratch binary
+SHA-256
+`11427ea0239aaba6c4d88d7734908e36fae2b6f3a2b7a771d74a35b66f167452`;
+the final receive-reuse candidate is
+`a3d4f0f7068cff7a6b5281a35e9d0a62b5f1f7233fd23335c169764394646cf8`.
+In 100 fresh local client+server handshakes with verification skipped,
+allocation calls fell from 7,801 to 7,001 (10.3%), cumulative allocated bytes
+from 11,773,609 to 7,014,691 (40.4%), and peak live bytes from 61,333 to 52,098
+(15.1%). With CertificateVerify enabled, the corresponding values were 8,301
+to 7,501 calls (9.6%), 11,812,079 to 7,053,071 bytes (40.3%), and 61,414 to
+52,179 peak bytes (15.0%). Both modes ended at zero live bytes. Exact 8,900-byte
+allocations fell from four to two per handshake: one receive allocation per
+endpoint remains and becomes that connection's established receive scratch.
+
+Seven CPU-0-pinned, order-alternated, 200-handshake pairs showed no stable
+latency change. In quicz-aligned mode, median P50 moved from 578.520 to 581.150
+us (candidate 2/7 wins) while median rate moved from 1,568.2 to 1,574.3/s
+(3/7 wins). With CertificateVerify, median P50 moved from 895.262 to 896.132 us
+(3/7 wins), and median rate from 1,053.6 to 1,052.3/s (3/7 wins). A seven-pair
+first-echo control moved from 104.528 to 106.186 us with 4/7 wins, and one
+5,000-round steady control was effectively unchanged at 15.574 versus 15.575
+us. These timings are noise-level controls; the supported result is lower
+allocation volume and peak memory without a measured application-data
+regression.
+
 ### Raw QUIC real-handshake 1 KiB echo latency
 
 Captured on 2026-08-20 with one real authenticated handshake followed by 5,000

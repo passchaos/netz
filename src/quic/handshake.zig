@@ -4,6 +4,7 @@ const key_exchange = @import("handshake/key_exchange.zig");
 const retransmit = @import("handshake/retransmit.zig");
 const retry = @import("handshake/retry.zig");
 const transport_limits = @import("handshake/transport_limits.zig");
+const datagram_reader = @import("handshake/datagram_reader.zig");
 const fixed_bit = @import("one_rtt/fixed_bit.zig");
 
 const net = std.Io.net;
@@ -591,6 +592,7 @@ pub fn establishPreconfigured(
         options.resumption_master_secret,
         options.exporter_master_secret,
         options.peer_certificates,
+        null,
     );
 }
 
@@ -1263,6 +1265,8 @@ pub fn connectFrom(
     peer: net.IpAddress,
     options: ClientOptions,
 ) Error!EstablishedConnection {
+    var reader = datagram_reader.Reader.init(endpoint.allocator, source);
+    defer reader.deinit();
     if (options.resumption_session == null and
         options.early_data == null and
         options.auto_resumption != null)
@@ -1273,7 +1277,7 @@ pub fn connectFrom(
             options.alpn_protocols,
         )) orelse return connectAttempt(
             endpoint,
-            source,
+            &reader,
             peer,
             options,
             false,
@@ -1286,14 +1290,21 @@ pub fn connectFrom(
         resumed_options.resumption_server_id = automatic.server_id;
         return connectAttempt(
             endpoint,
-            source,
+            &reader,
             peer,
             resumed_options,
             false,
             false,
         );
     }
-    return connectAttempt(endpoint, source, peer, options, false, false);
+    return connectAttempt(
+        endpoint,
+        &reader,
+        peer,
+        options,
+        false,
+        false,
+    );
 }
 
 pub fn connectFromWithDeadline(
@@ -1352,12 +1363,13 @@ fn clientOptionsBefore(
 
 fn connectAttempt(
     endpoint: *quic.runtime.Endpoint,
-    source: quic.runtime.DatagramSource,
+    reader: *datagram_reader.Reader,
     peer: net.IpAddress,
     options: ClientOptions,
     version_negotiation_processed: bool,
     early_data_offered_before_version_negotiation: bool,
 ) Error!EstablishedConnection {
+    const source = reader.datagramSource();
     try validateConfiguredVersions(options.version, options.available_versions);
     if (options.retry_source_connection_id.len != 0 and options.address_validation_token.len == 0) {
         return error.InvalidPacket;
@@ -1655,7 +1667,10 @@ fn connectAttempt(
         // continues with the exact same ClientHello/binder bytes.
         send_early_data = false;
     }
-    defer server_datagram.deinit(endpoint.allocator);
+    var server_datagram_owned = true;
+    defer if (server_datagram_owned) {
+        server_datagram.deinit(endpoint.allocator);
+    };
     if (isVersionNegotiationDatagram(server_datagram.bytes)) {
         var negotiated = (try quic.version_negotiation.processClient(endpoint.allocator, .{
             .chosen_version = options.version,
@@ -1673,9 +1688,11 @@ fn connectAttempt(
         // rather than replaying early data under the negotiated version.
         next.early_data = null;
         next.resumption_session = resumption_session;
+        server_datagram.deinit(endpoint.allocator);
+        server_datagram_owned = false;
         return connectAttempt(
             endpoint,
-            source,
+            reader,
             peer,
             next,
             true,
@@ -1800,12 +1817,20 @@ fn connectAttempt(
         );
     }
 
+    const server_handshake_ecn = server_datagram.ecn;
+    var server_handshake_tail =
+        server_datagram.bytes[server_initial_info.len..];
+    if (server_handshake_tail.len == 0) {
+        server_datagram.deinit(endpoint.allocator);
+        server_datagram_owned = false;
+        server_handshake_tail = &.{};
+    }
     var server_handshake = receiveServerHandshakeCrypto(
         endpoint,
         source,
         server_initial.from,
-        server_datagram.bytes[server_initial_info.len..],
-        server_datagram.ecn,
+        server_handshake_tail,
+        server_handshake_ecn,
         handshake.server_quic,
         0,
         options.max_crypto_buffer,
@@ -1829,6 +1854,10 @@ fn connectAttempt(
         }
         return err;
     };
+    if (server_datagram_owned) {
+        server_datagram.deinit(endpoint.allocator);
+        server_datagram_owned = false;
+    }
     defer server_handshake.deinit(endpoint.allocator);
     const server_flight = try splitServerFlight(
         server_handshake.crypto_data,
@@ -2104,6 +2133,7 @@ fn connectAttempt(
             application_transcript_hash,
         ),
         if (peer_certificate) |certificate| certificate.entries else &.{},
+        reader,
     );
     errdefer established.deinit();
     if (server_handshake.coalesced_one_rtt) |one_rtt| {
@@ -2343,10 +2373,16 @@ pub const testing = struct {
 
 fn acceptInternal(
     endpoint: *quic.runtime.Endpoint,
-    source: quic.runtime.DatagramSource,
+    upstream_source: quic.runtime.DatagramSource,
     first_datagram: ?quic.runtime.OwnedBytes,
     options: ServerOptions,
 ) Error!EstablishedConnection {
+    var reader = datagram_reader.Reader.init(
+        endpoint.allocator,
+        upstream_source,
+    );
+    defer reader.deinit();
+    const source = reader.datagramSource();
     var owned_first = first_datagram;
     defer if (owned_first) |*datagram| datagram.deinit(endpoint.allocator);
     try validateConfiguredVersions(options.version, options.available_versions);
@@ -2939,7 +2975,10 @@ fn acceptInternal(
         containsHandshakePacket,
         retransmit.InitialHandshakeFlight.observeReceived,
     );
-    defer client_handshake_datagram.deinit(endpoint.allocator);
+    var client_handshake_datagram_owned = true;
+    defer if (client_handshake_datagram_owned) {
+        client_handshake_datagram.deinit(endpoint.allocator);
+    };
     var client_handshake = receiveClientHandshakeCryptoFromDatagram(
         endpoint,
         source,
@@ -2973,6 +3012,8 @@ fn acceptInternal(
         }
         return err;
     };
+    client_handshake_datagram.deinit(endpoint.allocator);
+    client_handshake_datagram_owned = false;
     defer client_handshake.deinit(endpoint.allocator);
     const client_flight = try splitClientFlight(
         client_handshake.crypto_data,
@@ -3084,6 +3125,7 @@ fn acceptInternal(
             }),
         ),
         if (peer_certificate) |certificate| certificate.entries else &.{},
+        &reader,
     );
     errdefer established.deinit();
     if (client_handshake.coalesced_one_rtt) |bytes| {
@@ -4449,7 +4491,15 @@ fn establishedConnection(
     resumption_master_secret: ?quic.tls.secret.Secret,
     exporter_master_secret: ?quic.tls.secret.Secret,
     peer_certificates: []const []const u8,
+    handshake_reader: ?*datagram_reader.Reader,
 ) Error!EstablishedConnection {
+    var owned_receive_packet = if (handshake_reader) |reader|
+        reader.takeStorage()
+    else
+        null;
+    errdefer if (owned_receive_packet) |storage| {
+        endpoint.allocator.free(storage);
+    };
     const local_owned = try endpoint.allocator.dupe(u8, local_connection_id);
     errdefer endpoint.allocator.free(local_owned);
     const peer_owned = try endpoint.allocator.dupe(u8, peer_connection_id);
@@ -4462,17 +4512,24 @@ fn establishedConnection(
         else
             try .init(endpoint.allocator, peer_certificates);
     errdefer if (peer_certificate_chain) |*chain| chain.deinit();
-    var connection = try quic.one_rtt.Connection.init(endpoint, config.apply(
-        version,
-        peer,
-        receive_keys,
-        send_keys,
-        local_owned,
-        peer_owned,
-        local_endpoint,
-        local_transport_parameters,
-        peer_transport_parameters,
-    ));
+    const transferred_receive_packet = owned_receive_packet;
+    owned_receive_packet = null;
+    var connection = try quic.one_rtt.Connection
+        .initWithReceivePacketStorage(
+        endpoint,
+        config.apply(
+            version,
+            peer,
+            receive_keys,
+            send_keys,
+            local_owned,
+            peer_owned,
+            local_endpoint,
+            local_transport_parameters,
+            peer_transport_parameters,
+        ),
+        transferred_receive_packet,
+    );
     errdefer connection.deinit();
     if (local_endpoint == .server) {
         if (local_transport_parameters.preferred_address) |preferred| {

@@ -19,7 +19,32 @@ pub const Buffers = struct {
         receive_packet_capacity: usize,
         receive_ack_range_capacity: usize,
     ) std.mem.Allocator.Error!Buffers {
-        var buffers: Buffers = .{};
+        return initWithReceivePacketStorage(
+            allocator,
+            send_packet_capacity,
+            receive_packet_capacity,
+            receive_ack_range_capacity,
+            null,
+        );
+    }
+
+    /// Consume an existing receive allocation on every return path. Handshake
+    /// readers use this to hand their reusable datagram buffer to established
+    /// 1-RTT state without overlapping two path-sized allocations.
+    pub fn initWithReceivePacketStorage(
+        allocator: std.mem.Allocator,
+        send_packet_capacity: usize,
+        receive_packet_capacity: usize,
+        receive_ack_range_capacity: usize,
+        owned_receive_packet: ?[]u8,
+    ) std.mem.Allocator.Error!Buffers {
+        var buffers: Buffers = .{
+            .receive_packet = if (owned_receive_packet) |storage| blk: {
+                var list = std.ArrayList(u8).fromOwnedSlice(storage);
+                list.items.len = 0;
+                break :blk list;
+            } else .empty,
+        };
         errdefer buffers.deinit(allocator);
         try buffers.send_packet.ensureTotalCapacity(
             allocator,
@@ -63,7 +88,47 @@ test "QUIC one-RTT scratch initialization rolls back every allocation" {
     );
 }
 
+test "QUIC one-RTT scratch adopts existing receive storage" {
+    const allocator = std.testing.allocator;
+    const storage = try allocator.alloc(u8, 4096);
+    const storage_ptr = storage.ptr;
+    var buffers = try Buffers.initWithReceivePacketStorage(
+        allocator,
+        1400,
+        4096,
+        32,
+        storage,
+    );
+    defer buffers.deinit(allocator);
+
+    try std.testing.expectEqual(
+        storage_ptr,
+        buffers.receive_packet.allocatedSlice().ptr,
+    );
+    try std.testing.expectEqual(@as(usize, 4096), buffers.receive_packet.capacity);
+}
+
+test "QUIC one-RTT adopted scratch rolls back every allocation failure" {
+    try std.testing.checkAllAllocationFailures(
+        std.testing.allocator,
+        initWithOwnedReceiveForTest,
+        .{},
+    );
+}
+
 fn initForTest(allocator: std.mem.Allocator) !void {
     var buffers = try Buffers.init(allocator, 1400, 4096, 32);
+    defer buffers.deinit(allocator);
+}
+
+fn initWithOwnedReceiveForTest(allocator: std.mem.Allocator) !void {
+    const storage = try allocator.alloc(u8, 16);
+    var buffers = try Buffers.initWithReceivePacketStorage(
+        allocator,
+        1400,
+        4096,
+        32,
+        storage,
+    );
     defer buffers.deinit(allocator);
 }

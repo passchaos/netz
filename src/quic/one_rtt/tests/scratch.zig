@@ -38,6 +38,40 @@ test "QUIC one-RTT connection omits plaintext staging scratch" {
     );
 }
 
+test "QUIC one-RTT initialization consumes adopted receive storage on validation failure" {
+    const allocator = std.testing.allocator;
+    var threaded = std.Io.Threaded.init(allocator, .{});
+    defer threaded.deinit();
+    var endpoint = try quic.runtime.Endpoint.bind(
+        allocator,
+        threaded.io(),
+        .{ .ip4 = .loopback(0) },
+        .{ .max_datagram_size = 1400 },
+    );
+    defer endpoint.deinit();
+    const keys = quic.protection.deriveAes128Keys(
+        [_]u8{0xd0} ** quic.protection.secret_len,
+    );
+    const storage = try allocator.alloc(u8, 1400);
+
+    try std.testing.expectError(
+        error.InvalidTransportParameter,
+        one_rtt.Connection.initWithReceivePacketStorage(
+            &endpoint,
+            .{
+                .peer = endpoint.address(),
+                .receive_keys = keys,
+                .send_keys = keys,
+                .local_connection_id = "local",
+                .peer_connection_id = "peer",
+                .local_endpoint = .server,
+                .peer_stateless_reset_token = [_]u8{0x7f} ** 16,
+            },
+            storage,
+        ),
+    );
+}
+
 test "QUIC mixed send encodes directly into protected scratch" {
     const allocator = std.testing.allocator;
     var threaded = std.Io.Threaded.init(allocator, .{});

@@ -2260,9 +2260,16 @@ pub const OwnedBytes = struct {
     bytes: []u8,
     ecn: quic.packet_space.EcnCodepoint = .not_ect,
     shared_buffer: ?*SharedReceiveBuffer = null,
+    /// Optional release hook for bytes that borrow caller-managed storage.
+    /// Owned endpoint and inbox datagrams leave this null and retain their
+    /// existing allocator/shared-buffer destruction path.
+    borrowed_release: ?BorrowedBytesRelease = null,
 
     pub fn deinit(self: *OwnedBytes, allocator: std.mem.Allocator) void {
-        if (self.shared_buffer) |shared| {
+        if (self.borrowed_release) |release| {
+            std.debug.assert(self.shared_buffer == null);
+            release.release_fn(release.context);
+        } else if (self.shared_buffer) |shared| {
             shared.release();
         } else {
             allocator.free(self.bytes);
@@ -2271,22 +2278,45 @@ pub const OwnedBytes = struct {
     }
 };
 
-/// Type-erased source for owned QUIC datagrams.
+pub const BorrowedBytesRelease = struct {
+    context: *anyopaque,
+    release_fn: *const fn (context: *anyopaque) void,
+};
+
+/// Type-erased source for lifetime-managed QUIC datagrams.
 ///
 /// Handshake state machines use this instead of assuming they own the UDP
-/// socket. The ordinary endpoint adapter preserves existing behavior, while a
-/// multi-connection endpoint can supply a CID-routed per-handshake inbox.
+/// socket. The ordinary endpoint adapter additionally exposes an optional
+/// caller-buffer receive path, while a multi-connection endpoint can supply a
+/// CID-routed per-handshake inbox with the original owning contract.
 pub const DatagramSource = struct {
     context: *anyopaque,
     receive_timeout_fn: *const fn (
         context: *anyopaque,
         timeout: std.Io.Timeout,
     ) ReceiveTimeoutError!OwnedBytes,
+    /// Optional direct receive path used by short-lived state machines that
+    /// can keep caller storage alive until `OwnedBytes.deinit`. Sources backed
+    /// by queues retain ownership and leave this unset.
+    receive_into_timeout_fn: ?*const fn (
+        context: *anyopaque,
+        buffer: []u8,
+        timeout: std.Io.Timeout,
+    ) ReceiveTimeoutError!ReceivedBytesView = null,
+    receive_into_capacity: usize = 0,
 
     pub fn fromEndpoint(endpoint: *Endpoint) DatagramSource {
         return .{
             .context = endpoint,
             .receive_timeout_fn = endpointReceiveTimeout,
+            .receive_into_timeout_fn = if (endpoint.gro_receive_enabled)
+                null
+            else
+                endpointReceiveIntoTimeout,
+            .receive_into_capacity = if (endpoint.gro_receive_enabled)
+                0
+            else
+                endpoint.limits.max_datagram_size,
         };
     }
 
@@ -2299,6 +2329,23 @@ pub const DatagramSource = struct {
         timeout: std.Io.Timeout,
     ) ReceiveTimeoutError!OwnedBytes {
         return self.receive_timeout_fn(self.context, timeout);
+    }
+
+    pub fn receiveIntoTimeout(
+        self: DatagramSource,
+        buffer: []u8,
+        timeout: std.Io.Timeout,
+    ) ReceiveTimeoutError!?ReceivedBytesView {
+        const receive_fn = self.receive_into_timeout_fn orelse return null;
+        if (buffer.len < self.receive_into_capacity) {
+            return error.BufferTooShort;
+        }
+        return try receive_fn(self.context, buffer, timeout);
+    }
+
+    pub fn receiveIntoCapacity(self: DatagramSource) usize {
+        if (self.receive_into_timeout_fn == null) return 0;
+        return self.receive_into_capacity;
     }
 
     pub fn receiveWithTimeout(
@@ -2329,6 +2376,23 @@ pub const DatagramSource = struct {
         const endpoint: *Endpoint = @ptrCast(@alignCast(context));
         return endpoint.receiveBytesTimeout(switch (timeout) {
             .deadline => |deadline| .{ .deadline = try deadline_policy.usableAwake(endpoint.io, deadline) },
+            else => timeout,
+        });
+    }
+
+    fn endpointReceiveIntoTimeout(
+        context: *anyopaque,
+        buffer: []u8,
+        timeout: std.Io.Timeout,
+    ) ReceiveTimeoutError!ReceivedBytesView {
+        const endpoint: *Endpoint = @ptrCast(@alignCast(context));
+        return endpoint.receiveBytesIntoTimeout(buffer, switch (timeout) {
+            .deadline => |deadline| .{
+                .deadline = try deadline_policy.usableAwake(
+                    endpoint.io,
+                    deadline,
+                ),
+            },
             else => timeout,
         });
     }
