@@ -1,23 +1,239 @@
 const std = @import("std");
+const builtin = @import("builtin");
 const deadline_policy = @import("../../../internal/deadline.zig");
 const quic = @import("../../../quic/mod.zig");
 const runtime_error = @import("../error.zig");
+const netz_runtime = @import("../../../runtime.zig");
 
 const Error = runtime_error.Error;
 const ReceiveTimeoutError = runtime_error.ReceiveTimeoutError;
+const receive_batch_capacity: usize = 16;
+const receive_batch_storage_limit: usize = 64 * 1024;
 
-/// Lazily drains one QUIC/GRO receive batch a packet at a time.
+fn rawDatagramBatchSlotCount(max_datagram_size: usize) usize {
+    if (max_datagram_size == 0) return 0;
+    return @min(
+        receive_batch_capacity,
+        receive_batch_storage_limit / max_datagram_size,
+    );
+}
+
+const RawDatagramBatch = struct {
+    allocator: std.mem.Allocator,
+    storage: []u8,
+    datagrams: []quic.runtime.ReceivedBytesView,
+    count: usize = 0,
+    next_index: usize = 0,
+
+    fn init(
+        connection: *quic.one_rtt.Connection,
+    ) Error!?RawDatagramBatch {
+        const allocator = connection.endpoint.allocator;
+        const datagram_size = connection.endpoint.limits.max_datagram_size;
+        const slot_count = rawDatagramBatchSlotCount(datagram_size);
+        if (slot_count < 2) return null;
+        const storage_len = std.math.mul(
+            usize,
+            datagram_size,
+            slot_count,
+        ) catch return error.OutOfMemory;
+        const storage = try allocator.alloc(u8, storage_len);
+        errdefer allocator.free(storage);
+        return .{
+            .allocator = allocator,
+            .storage = storage,
+            .datagrams = try allocator.alloc(
+                quic.runtime.ReceivedBytesView,
+                slot_count,
+            ),
+        };
+    }
+
+    fn deinit(self: *RawDatagramBatch) void {
+        self.allocator.free(self.datagrams);
+        self.allocator.free(self.storage);
+        self.* = undefined;
+    }
+
+    fn next(self: *RawDatagramBatch) ?quic.runtime.ReceivedBytesView {
+        if (self.next_index == self.count) return null;
+        const datagram = self.datagrams[self.next_index];
+        self.next_index += 1;
+        return datagram;
+    }
+};
+
+test "HTTP/3 connection cursor bounds raw datagram batch storage" {
+    try std.testing.expectEqual(
+        @as(usize, receive_batch_capacity),
+        rawDatagramBatchSlotCount(1400),
+    );
+    try std.testing.expectEqual(
+        @as(usize, 8),
+        rawDatagramBatchSlotCount(8192),
+    );
+    try std.testing.expectEqual(
+        @as(usize, 1),
+        rawDatagramBatchSlotCount(65_535),
+    );
+}
+
+/// Lazily drains one QUIC/GRO or independent-datagram receive batch a packet
+/// at a time.
 ///
 /// HTTP/3 stream readers intentionally observe only one packet before
 /// returning control to the application. Retaining the unconsumed suffix here
 /// preserves bounded DATA windows while amortizing receive and decryption.
 pub const Connection = struct {
     batch: ?quic.one_rtt.ReceivedPacketBatch = null,
+    raw_batch: ?RawDatagramBatch = null,
     ack_pending: bool = false,
 
     pub fn deinit(self: *Connection) void {
         if (self.batch) |*batch| batch.deinit();
+        if (self.raw_batch) |*batch| batch.deinit();
         self.* = undefined;
+    }
+
+    fn visitRawDatagram(
+        self: *Connection,
+        connection: *quic.one_rtt.Connection,
+        datagram: quic.runtime.ReceivedBytesView,
+        context: anytype,
+        comptime visitor: *const fn (
+            @TypeOf(context),
+            quic.one_rtt.ReceivedPacketView,
+        ) Error!void,
+    ) Error!bool {
+        const Context = @TypeOf(context);
+        const AdapterContext = struct {
+            cursor: *Connection,
+            connection: *quic.one_rtt.Connection,
+            context: Context,
+        };
+        const Adapter = struct {
+            fn visit(
+                adapter: *AdapterContext,
+                packet: quic.one_rtt.ReceivedPacketView,
+            ) Error!void {
+                _ = try adapter.connection.retransmitPacketThresholdLosses(
+                    quic.one_rtt.max_batch_packets,
+                );
+                _ = adapter.connection.sendAckForPacketIfNeeded(
+                    packet.packet_number,
+                    packet.frames,
+                ) catch {
+                    adapter.cursor.ack_pending = true;
+                };
+                try visitor(adapter.context, packet);
+            }
+        };
+        var adapter: AdapterContext = .{
+            .cursor = self,
+            .connection = connection,
+            .context = context,
+        };
+        return connection.visitReceivedDatagram(
+            datagram,
+            &adapter,
+            Adapter.visit,
+        );
+    }
+
+    fn visitSingle(
+        self: *Connection,
+        connection: *quic.one_rtt.Connection,
+        deadline: ?std.Io.Clock.Timestamp,
+        context: anytype,
+        comptime visitor: *const fn (
+            @TypeOf(context),
+            quic.one_rtt.ReceivedPacketView,
+        ) Error!void,
+    ) (Error || quic.runtime.ReceiveTimeoutError)!void {
+        const Context = @TypeOf(context);
+        const AdapterContext = struct {
+            cursor: *Connection,
+            connection: *quic.one_rtt.Connection,
+            context: Context,
+        };
+        const Adapter = struct {
+            fn visit(
+                adapter: *AdapterContext,
+                packet: quic.one_rtt.ReceivedPacketView,
+            ) Error!void {
+                _ = adapter.connection.sendAckForPacketIfNeeded(
+                    packet.packet_number,
+                    packet.frames,
+                ) catch {
+                    adapter.cursor.ack_pending = true;
+                };
+                try visitor(adapter.context, packet);
+            }
+        };
+        var adapter: AdapterContext = .{
+            .cursor = self,
+            .connection = connection,
+            .context = context,
+        };
+        if (deadline) |absolute| {
+            return connection.visitPacketServicingTimersDeadline(
+                absolute,
+                &adapter,
+                Adapter.visit,
+            );
+        }
+        return connection.visitPacketServicingTimers(
+            &adapter,
+            Adapter.visit,
+        );
+    }
+
+    fn visitRetainedRawDatagram(
+        self: *Connection,
+        connection: *quic.one_rtt.Connection,
+        context: anytype,
+        comptime visitor: *const fn (
+            @TypeOf(context),
+            quic.one_rtt.ReceivedPacketView,
+        ) Error!void,
+    ) Error!bool {
+        const raw_batch = if (self.raw_batch) |*value| value else return false;
+        while (raw_batch.next()) |datagram| {
+            if (try self.visitRawDatagram(
+                connection,
+                datagram,
+                context,
+                visitor,
+            )) return true;
+        }
+        return false;
+    }
+
+    fn ensureRawBatch(
+        self: *Connection,
+        connection: *quic.one_rtt.Connection,
+    ) Error!?*RawDatagramBatch {
+        if (self.raw_batch == null) {
+            self.raw_batch = (try RawDatagramBatch.init(connection)) orelse
+                return null;
+        }
+        return &self.raw_batch.?;
+    }
+
+    fn fillRawBatchWithDeadline(
+        self: *Connection,
+        connection: *quic.one_rtt.Connection,
+        deadline: std.Io.Clock.Timestamp,
+    ) ReceiveTimeoutError!void {
+        const raw_batch = (try self.ensureRawBatch(connection)) orelse
+            return error.BufferTooShort;
+        raw_batch.count = try connection
+            .receiveDatagramsIntoServicingTimersDeadline(
+            raw_batch.storage,
+            raw_batch.datagrams,
+            deadline,
+        );
+        raw_batch.next_index = 0;
     }
 
     pub fn visit(
@@ -43,37 +259,30 @@ pub const Connection = struct {
             self.batch = null;
         }
         if (!connection.endpoint.groReceiveEnabled()) {
-            const Context = @TypeOf(context);
-            const AdapterContext = struct {
-                cursor: *Connection,
-                connection: *quic.one_rtt.Connection,
-                context: Context,
+            const raw_batch = (try self.ensureRawBatch(connection)) orelse {
+                return self.visitSingle(
+                    connection,
+                    null,
+                    context,
+                    visitor,
+                ) catch |err| switch (err) {
+                    error.Timeout, error.ConcurrencyUnavailable => unreachable,
+                    else => |other| return @errorCast(other),
+                };
             };
-            const Adapter = struct {
-                fn visit(
-                    adapter: *AdapterContext,
-                    packet: quic.one_rtt.ReceivedPacketView,
-                ) Error!void {
-                    _ = adapter.connection.sendAckForPacketIfNeeded(
-                        packet.packet_number,
-                        packet.frames,
-                    ) catch {
-                        // QUIC and HTTP/3 state already accepted the packet.
-                        // Retry a cumulative ACK before the next receive.
-                        adapter.cursor.ack_pending = true;
-                    };
-                    try visitor(adapter.context, packet);
-                }
-            };
-            var adapter: AdapterContext = .{
-                .cursor = self,
-                .connection = connection,
-                .context = context,
-            };
-            return connection.visitPacketServicingTimers(
-                &adapter,
-                Adapter.visit,
-            );
+            while (true) {
+                if (try self.visitRetainedRawDatagram(
+                    connection,
+                    context,
+                    visitor,
+                )) return;
+                raw_batch.count = try connection
+                    .receiveDatagramsIntoServicingTimers(
+                    raw_batch.storage,
+                    raw_batch.datagrams,
+                );
+                raw_batch.next_index = 0;
+            }
         }
         var batch = try connection.receivePacketBatchServicingTimers();
         errdefer batch.deinit();
@@ -117,7 +326,24 @@ pub const Connection = struct {
             batch.deinit();
             self.batch = null;
         }
-        if (connection.endpoint.groReceiveEnabled()) {
+        if (!connection.endpoint.groReceiveEnabled()) {
+            if ((try self.ensureRawBatch(connection)) == null) {
+                return self.visitSingle(
+                    connection,
+                    deadline,
+                    context,
+                    visitor,
+                );
+            }
+            while (true) {
+                if (try self.visitRetainedRawDatagram(
+                    connection,
+                    context,
+                    visitor,
+                )) return;
+                try self.fillRawBatchWithDeadline(connection, deadline);
+            }
+        } else {
             return self.visitBatchWithDeadline(
                 connection,
                 deadline,
@@ -125,37 +351,6 @@ pub const Connection = struct {
                 visitor,
             );
         }
-
-        const Context = @TypeOf(context);
-        const AdapterContext = struct {
-            cursor: *Connection,
-            connection: *quic.one_rtt.Connection,
-            context: Context,
-        };
-        const Adapter = struct {
-            fn visit(
-                adapter: *AdapterContext,
-                packet: quic.one_rtt.ReceivedPacketView,
-            ) Error!void {
-                _ = adapter.connection.sendAckForPacketIfNeeded(
-                    packet.packet_number,
-                    packet.frames,
-                ) catch {
-                    adapter.cursor.ack_pending = true;
-                };
-                try visitor(adapter.context, packet);
-            }
-        };
-        var adapter: AdapterContext = .{
-            .cursor = self,
-            .connection = connection,
-            .context = context,
-        };
-        return connection.visitPacketServicingTimersDeadline(
-            deadline,
-            &adapter,
-            Adapter.visit,
-        );
     }
 
     fn visitBatchWithDeadline(
@@ -285,6 +480,145 @@ test "HTTP/3 connection cursor deadline validation preserves retained batch" {
     );
     try std.testing.expectEqual(@as(usize, 1), visits);
     try std.testing.expectEqual(@as(usize, 1), cursor.batch.?.next_index);
+}
+
+test "HTTP/3 connection cursor batches zio UDP but applies one packet at a time" {
+    if (builtin.os.tag != .linux) return error.SkipZigTest;
+
+    const allocator = std.testing.allocator;
+    var backend = try netz_runtime.Backend.initZio(allocator);
+    defer backend.deinit();
+    const io = backend.io();
+    var receiver = try quic.runtime.Endpoint.bind(
+        allocator,
+        io,
+        .{ .ip4 = .loopback(0) },
+        .{
+            .max_datagram_size = 1400,
+            .max_frames_per_datagram = 8,
+            .enable_gso_send = false,
+        },
+    );
+    defer receiver.deinit();
+    var sender = try quic.runtime.Endpoint.bind(
+        allocator,
+        io,
+        .{ .ip4 = .loopback(0) },
+        .{
+            .max_datagram_size = 1400,
+            .max_frames_per_datagram = 8,
+            .enable_gso_send = false,
+        },
+    );
+    defer sender.deinit();
+
+    const keys = quic.protection.deriveAes128Keys(
+        [_]u8{0x6a} ** quic.protection.secret_len,
+    );
+    var connection = try quic.one_rtt.Connection.init(&receiver, .{
+        .peer = sender.address(),
+        .receive_keys = keys,
+        .send_keys = keys,
+        .local_connection_id = "cursor-batch",
+        .peer_connection_id = "cursor-peer",
+        .local_endpoint = .server,
+        .enable_pacing = false,
+        .local_ack_eliciting_threshold = 2,
+        .local_max_ack_delay_us = 25_000,
+    });
+    defer connection.deinit();
+
+    const first_frames = [_]quic.Frame{.{ .stream = .{
+        .stream_id = 0,
+        .data = "first",
+        .fin = false,
+    } }};
+    const second_frames = [_]quic.Frame{.{ .stream = .{
+        .stream_id = 4,
+        .data = "second",
+        .fin = true,
+    } }};
+    const packets = [_][]const quic.Frame{ &first_frames, &second_frames };
+    try quic.one_rtt.sendFramesBatch(
+        &sender,
+        receiver.address(),
+        keys,
+        .{
+            .destination_connection_id = "cursor-batch",
+            .first_packet_number = 0,
+            .packets = &packets,
+        },
+    );
+
+    const VisitContext = struct {
+        packet_numbers: *[2]u64,
+        reject_first: bool = true,
+    };
+    const Visitor = struct {
+        fn visit(
+            context: *VisitContext,
+            packet: quic.one_rtt.ReceivedPacketView,
+        ) Error!void {
+            const index = @as(usize, @intCast(packet.packet_number));
+            if (index >= context.packet_numbers.len) {
+                return error.InvalidPacketNumber;
+            }
+            context.packet_numbers[index] = packet.packet_number;
+            if (context.reject_first) {
+                context.reject_first = false;
+                return error.InvalidFrame;
+            }
+        }
+    };
+    var cursor: Connection = .{};
+    defer cursor.deinit();
+    var packet_numbers = [_]u64{std.math.maxInt(u64)} ** 2;
+    var visit_context = VisitContext{ .packet_numbers = &packet_numbers };
+    const deadline = std.Io.Clock.Timestamp.fromNow(io, .{
+        .clock = .awake,
+        .raw = .fromSeconds(1),
+    });
+
+    try std.testing.expectError(
+        error.InvalidFrame,
+        cursor.visitWithDeadline(
+            &connection,
+            deadline,
+            &visit_context,
+            Visitor.visit,
+        ),
+    );
+    try std.testing.expectEqual(@as(u64, 0), packet_numbers[0]);
+    try std.testing.expectEqual(std.math.maxInt(u64), packet_numbers[1]);
+    try std.testing.expectEqual(@as(u64, 1), connection.stats().packets_received);
+    try std.testing.expect(connection.ackDelayDeadline() != null);
+    try std.testing.expect(cursor.raw_batch != null);
+    try std.testing.expectEqual(@as(usize, 1), cursor.raw_batch.?.count - cursor.raw_batch.?.next_index);
+    const retained_index = cursor.raw_batch.?.next_index;
+    try std.testing.expectError(
+        error.Timeout,
+        cursor.visitWithDeadline(
+            &connection,
+            .{ .clock = .real, .raw = .zero },
+            &visit_context,
+            Visitor.visit,
+        ),
+    );
+    try std.testing.expectEqual(
+        retained_index,
+        cursor.raw_batch.?.next_index,
+    );
+
+    try cursor.visitWithDeadline(
+        &connection,
+        deadline,
+        &visit_context,
+        Visitor.visit,
+    );
+    try std.testing.expectEqual(@as(u64, 1), packet_numbers[1]);
+    try std.testing.expectEqual(@as(u64, 2), connection.stats().packets_received);
+    try std.testing.expectEqual(@as(?u64, null), connection.ackDelayDeadline());
+    try std.testing.expectEqual(@as(usize, 0), cursor.raw_batch.?.count - cursor.raw_batch.?.next_index);
 }
 
 /// Stateless-key counterpart used by the preconfigured protected runtime.

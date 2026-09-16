@@ -10795,6 +10795,53 @@ pub const Connection = struct {
         }
     }
 
+    /// Apply one caller-buffer datagram and expose its authenticated packet
+    /// synchronously. A false result means the datagram belonged to a retired
+    /// packet-number space or was rejected by peer-address policy. This lets
+    /// upper-layer cursors retain a socket receive batch while preserving the
+    /// existing one-packet application scheduling boundary.
+    pub fn visitReceivedDatagramAt(
+        self: *Connection,
+        datagram: quic.runtime.ReceivedBytesView,
+        now_ns: ?u64,
+        context: anytype,
+        comptime visitor: anytype,
+    ) (Error || callbackErrorSet(visitor))!bool {
+        if (self.close_info != null or self.idle_timed_out) {
+            return error.ConnectionClosed;
+        }
+        if (isDiscardedLongHeaderPacket(datagram.bytes) or
+            self.shouldDiscardPeerAddressBeforeAuthentication(datagram.from))
+        {
+            return false;
+        }
+        try self.processReceivedBytesVisitingWithDestinationIdAt(
+            datagram.from,
+            datagram.bytes,
+            self.config.local_connection_id.len,
+            datagram.ecn,
+            now_ns,
+            datagram.received_on,
+            context,
+            visitor,
+        );
+        return true;
+    }
+
+    pub fn visitReceivedDatagram(
+        self: *Connection,
+        datagram: quic.runtime.ReceivedBytesView,
+        context: anytype,
+        comptime visitor: anytype,
+    ) (Error || callbackErrorSet(visitor))!bool {
+        return self.visitReceivedDatagramAt(
+            datagram,
+            self.monotonicNowNs(),
+            context,
+            visitor,
+        );
+    }
+
     /// Timer-aware borrowed receive used by blocking HTTP/3 and WebTransport
     /// pumps. ACK-driven retransmission is repaired before the visitor runs,
     /// matching `receivePacketServicingTimers`; the caller remains responsible
@@ -10846,6 +10893,160 @@ pub const Connection = struct {
             context,
             visitor,
         );
+    }
+
+    /// Fill caller storage with one or more independent UDP datagrams while
+    /// preserving the same transport/caller deadline arbitration as the
+    /// single-packet receive path. The datagrams remain encrypted and no QUIC
+    /// state is changed until the caller passes each view to
+    /// `visitReceivedDatagramAt`.
+    pub fn receiveDatagramsIntoServicingTimers(
+        self: *Connection,
+        storage: []u8,
+        output: []quic.runtime.ReceivedBytesView,
+    ) Error!usize {
+        return self.receiveDatagramsIntoServicingTimersUntil(
+            storage,
+            output,
+            null,
+        ) catch |err| switch (err) {
+            error.Timeout, error.ConcurrencyUnavailable => unreachable,
+            else => |other| return @errorCast(other),
+        };
+    }
+
+    pub fn receiveDatagramsIntoServicingTimersDeadline(
+        self: *Connection,
+        storage: []u8,
+        output: []quic.runtime.ReceivedBytesView,
+        deadline: std.Io.Clock.Timestamp,
+    ) (Error || quic.runtime.ReceiveTimeoutError)!usize {
+        return self.receiveDatagramsIntoServicingTimersUntil(
+            storage,
+            output,
+            try deadline_policy.usableAwake(self.endpoint.io, deadline),
+        );
+    }
+
+    fn receiveDatagramsIntoServicingTimersUntil(
+        self: *Connection,
+        storage: []u8,
+        output: []quic.runtime.ReceivedBytesView,
+        caller_deadline: ?std.Io.Clock.Timestamp,
+    ) (Error || quic.runtime.ReceiveTimeoutError)!usize {
+        if (self.endpoint.groReceiveEnabled()) {
+            return error.CallerBufferReceiveWithGro;
+        }
+        if (output.len == 0 or
+            output.len > quic.runtime.max_receive_batch_messages)
+        {
+            return error.BufferTooShort;
+        }
+        const required = std.math.mul(
+            usize,
+            self.endpoint.limits.max_datagram_size,
+            output.len,
+        ) catch return error.BufferTooShort;
+        if (storage.len < required) return error.BufferTooShort;
+
+        const first_now_ns = self.monotonicNowNs();
+        if (self.pending_received_datagram) |pending| {
+            if (pending.bytes.len > self.endpoint.limits.max_datagram_size) {
+                return error.BufferTooShort;
+            }
+            var owned = self.takePendingReceivedDatagram().?;
+            defer owned.deinit(
+                (owned.received_on orelse self.endpoint).allocator,
+            );
+            @memcpy(storage[0..owned.bytes.len], owned.bytes);
+            output[0] = .{
+                .from = owned.from,
+                .received_on = owned.received_on,
+                .bytes = storage[0..owned.bytes.len],
+                .ecn = owned.ecn,
+            };
+            return 1;
+        }
+        if (self.close_info != null or self.idle_timed_out) {
+            return error.ConnectionClosed;
+        }
+        if (self.peer_preferred_address_migration_active and
+            self.last_validated_peer_path.endpoint != self.send_endpoint)
+        {
+            output[0] = try self.receiveBytesIntoServicingTimersUntil(
+                caller_deadline,
+            );
+            return 1;
+        }
+        if (callerDeadlineExpired(caller_deadline, first_now_ns)) {
+            return error.Timeout;
+        }
+
+        while (true) {
+            if (self.close_info != null or self.idle_timed_out) {
+                return error.ConnectionClosed;
+            }
+            const now_ns = self.monotonicNowNs();
+            if (callerDeadlineExpired(caller_deadline, now_ns)) {
+                return error.Timeout;
+            }
+            const timer = self.nextTimerDeadline();
+            if (timer) |scheduled| if (now_ns >= scheduled.deadline_ns) {
+                if (try self.serviceNextTimerForBlockingReceive(
+                    now_ns,
+                    caller_deadline,
+                )) continue;
+                const datagram = (try self.receiveBytesIntoAfterBlockedTimer(
+                    storage[0..self.endpoint.limits.max_datagram_size],
+                    now_ns,
+                    caller_deadline,
+                )) orelse continue;
+                output[0] = datagram;
+                return 1;
+            };
+            const receive_timeout = earliestConnectionReceiveTimeout(
+                timer,
+                caller_deadline,
+            );
+            return self.endpoint.receiveManyBytesIntoTimeout(
+                storage,
+                output,
+                receive_timeout,
+            ) catch |err| switch (err) {
+                error.Timeout => {
+                    const timeout_ns = self.monotonicNowNs();
+                    if (callerDeadlineExpired(
+                        caller_deadline,
+                        timeout_ns,
+                    )) return error.Timeout;
+                    if (!try self.serviceNextTimerForBlockingReceive(
+                        timeout_ns,
+                        caller_deadline,
+                    )) {
+                        const datagram = (try self
+                            .receiveBytesIntoAfterBlockedTimer(
+                            storage[0..self.endpoint.limits
+                                .max_datagram_size],
+                            timeout_ns,
+                            caller_deadline,
+                        )) orelse continue;
+                        output[0] = datagram;
+                        return 1;
+                    }
+                    continue;
+                },
+                error.ConcurrencyUnavailable => {
+                    if (caller_deadline != null) {
+                        return error.ConcurrencyUnavailable;
+                    }
+                    output[0] = try self.endpoint.receiveBytesInto(
+                        storage[0..self.endpoint.limits.max_datagram_size],
+                    );
+                    return 1;
+                },
+                else => |other| return @errorCast(other),
+            };
+        }
     }
 
     fn visitPacketServicingTimersUntil(

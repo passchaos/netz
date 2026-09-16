@@ -1339,6 +1339,16 @@ default single-stream/multi-stream transfer sizing knobs, making it possible to
 search stable packet-size-aware configurations without source edits. The
 benchmark now creates a fresh loopback server/client pair per iteration and
 reports mean/stddev MiB/s, matching quicz's multi-iteration benchmark shape.
+For non-GRO endpoints with an explicit packet-sized receive limit, its HTTP/3
+cursor now drains up to sixteen independent UDP datagrams through one zio
+`std.Io` receive operation, retains at most 64 KiB of encrypted datagrams, and
+authenticates/applies exactly one packet per upper-layer turn. Large default
+65,535-byte endpoint limits retain the prior one-packet path instead of adding
+about 1 MiB per connection. Preferred-address migration likewise remains on
+the dual-socket single-packet path. A real zio regression proves that callback
+failure commits only the visited packet, preserves the unread suffix in order,
+does not advance it on an invalid deadline, and triggers the configured ACK
+threshold only when the second packet is consumed.
 `--ack-eliciting-threshold` controls the server ACK policy; the default of four
 is the stable winner from the same-host 2/4/8/16/32 scan. Packet-size-aware
 cross-stream body batches are available through
@@ -1350,6 +1360,16 @@ slightly slower than sequential submissions.
 also opt-in on this host: the path now completes long uploads/downloads without
 stalling, but its burst shape is slower and noisier under the same small receive
 queue.
+
+Five fixed-binary, CPU-0, order-alternated 16-MiB/four-stream comparisons
+against commit `8cc373ae` measured non-GRO cursor batching at 75.75 MiB/s
+download median versus 67.53 MiB/s before (1.122x, 5/5 paired wins). Upload,
+where the benchmark peer rather than the HTTP/3 receiver carries most payload
+work, measured 114.29 versus 115.13 MiB/s (0.993x, overlapping ranges, 3/5
+wins). One-stream upload/download medians were 162.93/141.37 MiB/s after and
+155.48/138.24 MiB/s before. All arms verified 16,777,216 body bytes and the
+expected status totals; these are same-process regression measurements, not an
+equal-wire cross-stack claim.
 `--verbose` prints per-iteration throughput lines (`[iter N]`) for diagnosing
 long or stuck multi-iteration runs. `--trace-iteration` additionally prints
 coarse lifecycle stages (bind, connect, transfer, join) for each iteration.
