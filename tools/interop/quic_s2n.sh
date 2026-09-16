@@ -85,6 +85,8 @@ run_netz_client_case() {
   local scenario=$1
   local client_result=$2
   local server_result=$3
+  local case_timeout=20
+  [[ "$scenario" == mixed-churn* ]] && case_timeout=40
   local port
   port=$(free_udp_port)
   local server_log="$work/s2n-server-$scenario.log"
@@ -105,7 +107,7 @@ run_netz_client_case() {
     echo 'timed out waiting for s2n-quic server' >&2
     return 1
   }
-  timeout 20s "$netz_client" "$port" "$work/s2n-ca.pem" \
+  timeout "${case_timeout}s" "$netz_client" "$port" "$work/s2n-ca.pem" \
     --peer=s2n-quic "--scenario=$scenario" >"$client_log" 2>&1
   wait "$server_pid"
   server_pid=
@@ -124,6 +126,9 @@ run_netz_client_case() {
 run_netz_client_case echo \
   'netz QUIC client interoperated with s2n-quic: verified=true version=1 retry=false alpn=hq-interop streams=2 bytes=10 peer_close=57' \
   's2n-quic server interoperated with netz: version=1 alpn=hq-interop sni=localhost streams=2 bytes=10 peer_close=57'
+run_netz_client_case datagram \
+  'netz QUIC client interoperated with s2n-quic: verified=true version=1 alpn=hq-interop datagram=true bidirectional=true small_datagrams=2 netz_boundary_bytes=1163 s2n_boundary_bytes=62 oversized_rejected=true stream_sibling=4 peer_close=57 client_io=zio-std-io server_io=s2n-quic-tokio' \
+  's2n-quic server interoperated with netz: verified=true version=1 alpn=hq-interop datagram=true bidirectional=true small_datagrams=2 netz_boundary_bytes=1163 s2n_boundary_bytes=62 oversized_rejected=true stream_sibling=4 peer_close=57 client_io=zio-std-io server_io=s2n-quic-tokio'
 run_netz_client_case reset \
   'netz QUIC client interoperated with s2n-quic: verified=true version=1 alpn=hq-interop reset_error=41 concurrent_sibling=4 echo_bytes=5 peer_close=57' \
   's2n-quic server interoperated with netz: version=1 alpn=hq-interop reset_error=41 concurrent_sibling=4 echo_bytes=5 peer_close=57'
@@ -197,6 +202,8 @@ run_s2n_client_case() {
   local server_mode=$2
   local client_result=$3
   local server_result=$4
+  local case_timeout=20
+  [[ "$scenario" == mixed-churn* ]] && case_timeout=40
   local port
   port=$(free_udp_port)
   local server_log="$work/netz-server-$scenario.log"
@@ -216,7 +223,7 @@ run_s2n_client_case() {
     echo 'timed out waiting for netz QUIC server' >&2
     return 1
   }
-  timeout 20s "$s2n_peer" client "$port" "$work/netz-ca.pem" \
+  timeout "${case_timeout}s" "$s2n_peer" client "$port" "$work/netz-ca.pem" \
     "$scenario" >"$client_log" 2>&1
   wait "$server_pid"
   server_pid=
@@ -235,6 +242,9 @@ run_s2n_client_case() {
 run_s2n_client_case echo s2n \
   's2n-quic client interoperated with netz: verified=true version=1 alpn=hq-interop streams=2 bytes=10 peer_close=58' \
   'netz QUIC close server interoperated with s2n-quic: alpn=hq-interop streams=2 bytes=10 peer_close=58'
+run_s2n_client_case datagram s2n_datagram \
+  's2n-quic client interoperated with netz: verified=true version=1 alpn=hq-interop datagram=true bidirectional=true small_datagrams=2 netz_boundary_bytes=1163 s2n_boundary_bytes=62 oversized_rejected=true stream_sibling=4 peer_close=58 client_io=s2n-quic-tokio server_io=zio-std-io' \
+  'netz QUIC server interoperated with s2n-quic: verified=true version=1 alpn=hq-interop datagram=true bidirectional=true small_datagrams=2 netz_boundary_bytes=1163 s2n_boundary_bytes=62 oversized_rejected=true stream_sibling=4 peer_close=58 client_io=s2n-quic-tokio server_io=zio-std-io'
 run_s2n_client_case reset s2n_reset \
   's2n-quic client interoperated with netz: verified=true version=1 alpn=hq-interop reset_error=41 concurrent_sibling=4 echo_bytes=5 peer_close=58' \
   'netz QUIC reset server interoperated with s2n-quic: alpn=hq-interop reset_error=41 concurrent_sibling=4 echo_bytes=5 peer_close=58'

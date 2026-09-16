@@ -4012,6 +4012,21 @@ packet parsing; it covers netz outbound faults only and does not claim injected
 s2n-quic outbound loss. This remains reliability coverage rather than a
 throughput comparison.
 
+The s2n-quic process matrix also enables its native unstable RFC 9221
+DATAGRAM provider and runs a separate bidirectional DATAGRAM connection for
+each endpoint-role pairing. Each peer sends two distinct small payloads and
+one boundary payload, and each receiver validates the three-member set without
+assuming DATAGRAM ordering. Netz advertises a 64-byte maximum DATAGRAM frame,
+so s2n-quic successfully sends the exact 62-byte length-present payload and
+rejects a 65-byte application payload locally as exceeding peer transport
+limits. Netz uses a 1200-byte path datagram size, reports and successfully
+sends its exact 1163-byte application boundary, and rejects 1164 bytes locally.
+After both unreliable directions finish, client-initiated stream 4 completes a
+FIN-terminated `world` echo and the peer application close is verified as 57
+or 58. Both strict process cases report `zio-std-io` for the netz endpoint and
+`s2n-quic-tokio` for the independent fixture. This is functional negotiation,
+boundary, isolation, and lifecycle evidence; it is not a throughput result.
+
 The next zio receive-path step gives direct endpoint-backed handshake sources
 one reusable datagram allocation. Each returned datagram keeps a scoped release
 hook, so a nested flight receive falls back to the source's owning path while

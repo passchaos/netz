@@ -964,6 +964,12 @@ zig build interop-quic-quic-go -Doptimize=ReleaseFast
 # The s2n matrix also holds each netz-emitted RESET_STREAM and STOP_SENDING
 # once, sends a sibling STREAM first, then verifies exact cancellation codes
 # and sibling completion in both endpoint-role directions. It additionally
+# enables s2n-quic's native RFC 9221 provider and exchanges three DATAGRAMs
+# each way in both endpoint-role directions. The gate verifies two distinct
+# small payloads without assuming delivery order, an exact 1163-byte netz
+# path boundary, s2n's exact 62-byte payload under a 64-byte advertised frame
+# limit, local oversized-send rejection, a reliable stream 4 echo, and final
+# application close. Netz remains zio-backed and consumes only std.Io. It also
 # runs a bounded 32-stream mixed lifecycle in both directions: every stream
 # delivers a verified 256-byte prefix, then alternating streams finish 16 KiB
 # or reset with an index-specific code before the final application close.

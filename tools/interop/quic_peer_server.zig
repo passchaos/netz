@@ -6,6 +6,7 @@ const OneShotReorder = @import("support/one_shot_reorder.zig").State;
 const PhasedFault = @import("support/phased_datagram_fault.zig").State;
 const s2n_churn = @import("support/s2n_churn.zig");
 const s2n_churn_receiver = @import("support/s2n_churn_receiver.zig");
+const s2n_datagram = @import("support/s2n_datagram.zig");
 
 const payloads = [_][]const u8{ "hello", "world" };
 const flow_control_payload = [_]u8{'f'} ** 12_288;
@@ -49,6 +50,7 @@ const Mode = enum {
     s2n_mixed_churn,
     s2n_mixed_churn_loss,
     s2n_mixed_churn_reorder,
+    s2n_datagram,
 };
 
 const CancellationLoss = struct {
@@ -302,6 +304,7 @@ pub fn main(init: std.process.Init) !void {
             .s2n_mixed_churn,
             .s2n_mixed_churn_loss,
             .s2n_mixed_churn_reorder,
+            .s2n_datagram,
             => "s2n-quic-tokio",
             else => "quic-go-netpoll",
         }},
@@ -319,6 +322,9 @@ pub fn main(init: std.process.Init) !void {
         },
         .stream_limit => {
             local_transport_parameters.initial_max_streams_bidi = 1;
+        },
+        .s2n_datagram => {
+            local_transport_parameters.max_datagram_frame_size = 64;
         },
         else => {},
     }
@@ -363,6 +369,8 @@ pub fn main(init: std.process.Init) !void {
             // ReleaseFast s2n-quic can coalesce the concurrent churn into
             // denser packets than the ordinary fixture's 16-frame budget.
             .max_frames_per_packet = 256,
+        } else if (mode == .s2n_datagram) .{
+            .max_datagram_size = 1200,
         } else .{
             .max_datagram_size = 8192,
         },
@@ -371,6 +379,7 @@ pub fn main(init: std.process.Init) !void {
     if (!std.mem.eql(u8, established.alpn, "hq-interop")) {
         return error.InvalidAlpn;
     }
+    var datagram_result: ?s2n_datagram.Result = null;
 
     if (mode == .migration or mode == .migration_loss) {
         const original_peer = established.connection.peerAddress();
@@ -653,6 +662,10 @@ pub fn main(init: std.process.Init) !void {
                 &churn_reorder,
             );
         },
+        .s2n_datagram => datagram_result = try s2n_datagram.run(
+            &established.connection,
+            .server,
+        ),
         .flow => {
             try receiveExpectedStream(
                 &established.connection,
@@ -716,13 +729,26 @@ pub fn main(init: std.process.Init) !void {
         mode == .s2n_reset_loss or mode == .s2n_stop_loss or
         mode == .s2n_reset_reorder or mode == .s2n_stop_reorder or
         mode == .s2n_mixed_churn or mode == .s2n_mixed_churn_loss or
-        mode == .s2n_mixed_churn_reorder)
+        mode == .s2n_mixed_churn_reorder or mode == .s2n_datagram)
     {
         // Give the peer time to consume both FIN-terminated echoes. The close
         // is intentionally delayed just like the ordinary fixture close so
         // the application-close assertion cannot truncate stream validation.
         try std.Io.sleep(io, .fromMilliseconds(250), .awake);
         try established.connection.closeApplication(58, "netz interop complete");
+        if (mode == .s2n_datagram) {
+            // The DATAGRAM case must prove that the peer observed the final
+            // application close, not merely that one best-effort UDP write
+            // was submitted. Keep the one-shot fixture alive and emit two
+            // bounded closing copies in case the first close packet is lost.
+            close_resend: for (0..2) |_| {
+                try std.Io.sleep(io, .fromMilliseconds(50), .awake);
+                established.connection.resendClose() catch |err| switch (err) {
+                    error.ConnectionClosed => break :close_resend,
+                    else => return err,
+                };
+            }
+        }
         switch (mode) {
             .s2n => std.debug.print(
                 "netz QUIC close server interoperated with s2n-quic: alpn=hq-interop streams=2 bytes=10 peer_close=58\n",
@@ -794,6 +820,10 @@ pub fn main(init: std.process.Init) !void {
                     .{},
                 );
             },
+            .s2n_datagram => std.debug.print(
+                "netz QUIC server interoperated with s2n-quic: verified=true version=1 alpn=hq-interop datagram=true bidirectional=true small_datagrams=2 netz_boundary_bytes={d} s2n_boundary_bytes=62 oversized_rejected=true stream_sibling=4 peer_close=58 client_io=s2n-quic-tokio server_io=zio-std-io\n",
+                .{datagram_result.?.boundary_bytes},
+            ),
             .peer_close => std.debug.print(
                 "netz QUIC close server interoperated with quic-go: alpn=hq-interop peer_close=58\n",
                 .{},
@@ -853,6 +883,7 @@ pub fn main(init: std.process.Init) !void {
         .s2n_mixed_churn => unreachable,
         .s2n_mixed_churn_loss => unreachable,
         .s2n_mixed_churn_reorder => unreachable,
+        .s2n_datagram => unreachable,
         .migration => unreachable,
         .migration_loss => unreachable,
         .nat_rebinding => unreachable,

@@ -7,5 +7,6 @@ publish = false
 [dependencies]
 anyhow = "1"
 bytes = "1"
-s2n-quic = { path = "../../../../../Work/s2n-quic/quic/s2n-quic", version = "=1.85.0" }
+futures-util = { version = "0.3", default-features = false }
+s2n-quic = { path = "../../../../../Work/s2n-quic/quic/s2n-quic", version = "=1.85.0", features = ["unstable-provider-datagram"] }
 tokio = { version = "1", features = ["macros", "rt-multi-thread", "time"] }

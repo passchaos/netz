@@ -9,6 +9,7 @@ const exact_certificate = @import("exact_certificate_verifier.zig");
 const OneShotReorder = @import("support/one_shot_reorder.zig").State;
 const PhasedFault = @import("support/phased_datagram_fault.zig").State;
 const s2n_churn = @import("support/s2n_churn.zig");
+const s2n_datagram = @import("support/s2n_datagram.zig");
 
 const payloads = [_][]const u8{ "hello", "world" };
 const key_update_payloads = [_][]const u8{
@@ -26,6 +27,7 @@ const Scenario = enum {
     mixed_churn,
     mixed_churn_loss,
     mixed_churn_reorder,
+    datagram,
 };
 const flow_control_payload = [_]u8{'f'} ** 12_288;
 
@@ -155,6 +157,11 @@ pub fn main(init: std.process.Init) !void {
     var client_cid: [8]u8 = undefined;
     try std.Io.randomSecure(io, &original_dcid);
     try std.Io.randomSecure(io, &client_cid);
+    var local_transport_parameters =
+        netz.quic.practical_transport_parameters;
+    if (scenario == .datagram) {
+        local_transport_parameters.max_datagram_frame_size = 64;
+    }
 
     var established = try netz.quic.handshake.connect(
         &endpoint,
@@ -175,6 +182,7 @@ pub fn main(init: std.process.Init) !void {
             // still exercises the standard RFC 9001 handshake path.
             .key_exchange_groups = key_exchange_groups,
             .server_auth = server_verifier,
+            .local_transport_parameters = local_transport_parameters,
             .max_crypto_buffer = 64 * 1024,
             .handshake_recovery = .{
                 .initial_pto_ms = 250,
@@ -183,7 +191,7 @@ pub fn main(init: std.process.Init) !void {
                 .max_duration_ms = 10_000,
             },
             .initial_one_rtt_config = .{
-                .max_datagram_size = 8192,
+                .max_datagram_size = if (scenario == .datagram) 1200 else 8192,
                 // The 32-stream churn can receive dense ACK/STREAM batches
                 // from s2n-quic; keep the ordinary fixture limit elsewhere.
                 .max_frames_per_packet = if (scenario == .mixed_churn or
@@ -207,6 +215,7 @@ pub fn main(init: std.process.Init) !void {
     if (established.retry_processed != expect_retry) {
         return error.UnexpectedRetryState;
     }
+    var datagram_result: ?s2n_datagram.Result = null;
 
     if (expect_key_update) {
         for (key_update_payloads, 0..) |payload, index| {
@@ -309,6 +318,10 @@ pub fn main(init: std.process.Init) !void {
             &established.connection,
             allocator,
         ),
+        .datagram => datagram_result = try s2n_datagram.run(
+            &established.connection,
+            .client,
+        ),
         .echo => unreachable,
     }
 
@@ -401,6 +414,10 @@ pub fn main(init: std.process.Init) !void {
                 .{},
             );
         },
+        .datagram => std.debug.print(
+            "netz QUIC client interoperated with s2n-quic: verified=true version=1 alpn=hq-interop datagram=true bidirectional=true small_datagrams=2 netz_boundary_bytes={d} s2n_boundary_bytes=62 oversized_rejected=true stream_sibling=4 peer_close=57 client_io=zio-std-io server_io=s2n-quic-tokio\n",
+            .{datagram_result.?.boundary_bytes},
+        ),
         .echo => unreachable,
     }
 }
@@ -481,6 +498,7 @@ fn exerciseCancellation(
         .mixed_churn,
         .mixed_churn_loss,
         .mixed_churn_reorder,
+        .datagram,
         => unreachable,
     };
     const target_stream_id = try connection.openStream();
@@ -528,6 +546,7 @@ fn exerciseCancellation(
         .mixed_churn,
         .mixed_churn_loss,
         .mixed_churn_reorder,
+        .datagram,
         => unreachable,
     }
     try receiveExpectedStream(

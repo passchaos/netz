@@ -5,6 +5,7 @@ use std::{net::SocketAddr, path::Path, time::Duration};
 use tokio::time::{sleep, timeout};
 
 mod churn;
+mod datagram;
 
 const ALPN: &[u8] = b"hq-interop";
 const PAYLOADS: [&[u8]; 2] = [b"hello", b"world"];
@@ -22,6 +23,7 @@ enum Scenario {
     MixedChurn,
     MixedChurnLoss,
     MixedChurnReorder,
+    Datagram,
     Flow,
     Retry,
 }
@@ -66,7 +68,7 @@ async fn main() -> Result<()> {
             run_client(port, &ca, scenario).await
         }
         _ => bail!(
-            "usage: netz-quic-s2n-interop server PORT CERT KEY [echo|reset|stop|flow|retry|mixed-churn|mixed-churn-loss|mixed-churn-reorder] | client PORT CA [echo|reset|stop|lossy-reset|lossy-stop|reordered-reset|reordered-stop|mixed-churn|mixed-churn-loss|mixed-churn-reorder]"
+            "usage: netz-quic-s2n-interop server PORT CERT KEY [echo|reset|stop|flow|retry|mixed-churn|mixed-churn-loss|mixed-churn-reorder|datagram] | client PORT CA [echo|reset|stop|lossy-reset|lossy-stop|reordered-reset|reordered-stop|mixed-churn|mixed-churn-loss|mixed-churn-reorder|datagram]"
         ),
     }
 }
@@ -83,6 +85,7 @@ fn parse_scenario(value: Option<String>) -> Result<Scenario> {
         "mixed-churn" => Ok(Scenario::MixedChurn),
         "mixed-churn-loss" => Ok(Scenario::MixedChurnLoss),
         "mixed-churn-reorder" => Ok(Scenario::MixedChurnReorder),
+        "datagram" => Ok(Scenario::Datagram),
         "flow" => Ok(Scenario::Flow),
         "retry" => Ok(Scenario::Retry),
         value => bail!("unknown scenario: {value}"),
@@ -114,12 +117,17 @@ async fn run_server(
         .with_certificate(Path::new(certificate), Path::new(private_key))?
         .build()?;
     let address: SocketAddr = format!("127.0.0.1:{port}").parse()?;
+    let datagram_provider = s2n_quic::provider::datagram::default::Endpoint::builder()
+        .with_send_capacity(8)?
+        .with_recv_capacity(8)?
+        .build()?;
     let mut server = Server::builder()
         .with_tls(tls)?
         .with_limits(scenario_limits(scenario)?)?
         .with_endpoint_limits(RetryPolicy {
             force: scenario == Scenario::Retry,
         })?
+        .with_datagram(datagram_provider)?
         .with_io(address)?
         .start()?;
     println!("s2n-quic interop server listening={address}");
@@ -140,6 +148,7 @@ async fn run_server(
         "unexpected SNI"
     );
 
+    let mut datagram_outcome = None;
     match scenario {
         Scenario::Echo | Scenario::Retry => echo_two_streams(&mut connection).await?,
         Scenario::Reset => serve_reset(&mut connection).await?,
@@ -154,6 +163,9 @@ async fn run_server(
         }
         Scenario::LossyReset | Scenario::LossyStop => unreachable!(),
         Scenario::Flow => serve_flow(&mut connection).await?,
+        Scenario::Datagram => {
+            datagram_outcome = Some(datagram::run(&mut connection, datagram::Role::Server).await?);
+        }
     }
     // Let the endpoint transmit both queued responses before application close
     // supersedes stream output in this deliberately short-lived fixture.
@@ -194,6 +206,11 @@ async fn run_server(
         Scenario::Retry => println!(
             "s2n-quic server interoperated with netz: version=1 retry=true alpn=hq-interop sni=localhost streams=2 bytes=10 peer_close=57"
         ),
+        Scenario::Datagram => println!(
+            "s2n-quic server interoperated with netz: verified=true version=1 alpn=hq-interop datagram=true bidirectional=true small_datagrams=2 netz_boundary_bytes={} s2n_boundary_bytes={} oversized_rejected=true stream_sibling=4 peer_close=57 client_io=zio-std-io server_io=s2n-quic-tokio",
+            datagram_outcome.as_ref().unwrap().boundary_bytes,
+            datagram::S2N_BOUNDARY_BYTES,
+        ),
     }
     Ok(())
 }
@@ -214,9 +231,14 @@ async fn run_client(port: u16, ca: &str, scenario: Scenario) -> Result<()> {
         .with_certificate(Path::new(ca))?
         .with_application_protocols([ALPN])?
         .build()?;
+    let datagram_provider = s2n_quic::provider::datagram::default::Endpoint::builder()
+        .with_send_capacity(8)?
+        .with_recv_capacity(8)?
+        .build()?;
     let mut client = Client::builder()
         .with_tls(tls)?
         .with_limits(scenario_limits(scenario)?)?
+        .with_datagram(datagram_provider)?
         .with_io("0.0.0.0:0")?
         .start()?;
     let address: SocketAddr = format!("127.0.0.1:{port}").parse()?;
@@ -229,6 +251,7 @@ async fn run_client(port: u16, ca: &str, scenario: Scenario) -> Result<()> {
         "unexpected ALPN"
     );
 
+    let mut datagram_outcome = None;
     match scenario {
         Scenario::Echo => request_two_echoes(&mut connection).await?,
         Scenario::Reset => request_reset(&mut connection).await?,
@@ -245,6 +268,9 @@ async fn run_client(port: u16, ca: &str, scenario: Scenario) -> Result<()> {
         }
         Scenario::Flow => unreachable!(),
         Scenario::Retry => unreachable!(),
+        Scenario::Datagram => {
+            datagram_outcome = Some(datagram::run(&mut connection, datagram::Role::Client).await?);
+        }
     }
 
     let close = timeout(TIMEOUT, connection.accept_bidirectional_stream())
@@ -293,6 +319,11 @@ async fn run_client(port: u16, ca: &str, scenario: Scenario) -> Result<()> {
         ),
         Scenario::Flow => unreachable!(),
         Scenario::Retry => unreachable!(),
+        Scenario::Datagram => println!(
+            "s2n-quic client interoperated with netz: verified=true version=1 alpn=hq-interop datagram=true bidirectional=true small_datagrams=2 netz_boundary_bytes={} s2n_boundary_bytes={} oversized_rejected=true stream_sibling=4 peer_close=58 client_io=s2n-quic-tokio server_io=zio-std-io",
+            datagram_outcome.as_ref().unwrap().boundary_bytes,
+            datagram::S2N_BOUNDARY_BYTES,
+        ),
     }
     Ok(())
 }

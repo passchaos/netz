@@ -1061,7 +1061,7 @@ pub fn build(b: *std.Build) void {
     quic_s2n.addArtifactArg(quic_peer_server);
     const quic_s2n_step = b.step(
         "interop-quic-s2n",
-        "Run verified QUIC stream, cancellation, and close interop with local s2n-quic",
+        "Run verified QUIC stream, DATAGRAM, cancellation, and close interop with local s2n-quic",
     );
     quic_s2n_step.dependOn(&quic_s2n.step);
 
