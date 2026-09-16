@@ -1742,7 +1742,15 @@ facility, not a replacement for authenticated handshake-backed HTTP/3.
    preflight now avoids unrelated general-packet shadows; seven paired runs
    reduced visitor/service median cost another 1.5%/2.8%. Packed receive-byte
    tracking then reduced those STREAM medians another 11.9%/11.7% and removed
-   the prior per-byte bitmap memset hotspot. Gap closure now finds the next
+   the prior per-byte bitmap memset hotspot. Ordered streams now keep this
+   presence state as an implicit dense prefix and allocate packed words only
+   after the first gap; the bitmap implementation and model tests moved to
+   `src/quic/stream/received_bitmap.zig`. Seven current fixed-binary visitor
+   pairs reduced ordered STREAM median 2.0% with 7/7 wins and left the reordered
+   gap control within 0.6%. A real H3 four-stream upload remained noise-level
+   (-0.4%, 3/7 wins), while seven allocator pairs used a 5.7% lower median
+   call count. Gap closure
+   finds the next
    absent receive bit by scanning packed machine words and using `ctz`, rather
    than testing every byte position. A dedicated `stream_gap` benchmark swaps
    adjacent packets without changing bytes, packet numbers, or stream offsets;

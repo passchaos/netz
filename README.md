@@ -573,6 +573,8 @@ starts with deterministic parsers, serializers, preallocated fixed-width wire-in
   recovery-payload reuse with allocation-free ACK-time recycling, four direct
   per-class slots, payload-intrusive overflow free lists, and a global
   idle-byte cap that lets the active size class absorb a complete ACK burst,
+  plus implicit dense-prefix STREAM receive tracking that allocates packed
+  presence words only after reordering creates a gap,
   endpoint-level connection-ID routing with single-probe registration and empty-length unregister skips,
   max-length-cached short-header dispatch with validated-key construction, empty-length long-header skips, unroutable zero-DCID long-header drops and static-key token derivation primitives for stable multi-connection
   demultiplexing wired into raw UDP receive routing and 1-RTT connection

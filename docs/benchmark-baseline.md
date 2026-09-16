@@ -842,8 +842,10 @@ HKDF-SM3.
 
 `RecvState` now stores received-byte presence as a packed, capacity-retaining
 word bitmap rather than one `bool` byte per buffered payload byte. Ordered
-append grows and fills the new words once; overlap checks, sparse gap filling,
-cloning, and non-word-aligned prefix compaction use the same bit representation.
+append uses an implicit all-present dense prefix without allocating bitmap
+words; the first gap materializes the packed representation. Overlap checks,
+sparse gap filling, cloning, and non-word-aligned prefix compaction then use
+that same explicit bit representation.
 Dedicated model and stream tests cover set/clear ranges across 64-bit
 boundaries, every prefix shift from 0 through 130 bits, sparse-tail gap filling,
 conflicts, FIN, and sliding receive windows. This cuts bitmap storage to about
@@ -877,6 +879,40 @@ service. A separate seven-pair real TLS/HTTP/3 four-stream upload run verified
 ms/iteration and median 82.492 -> 72.817 ms, with every candidate run faster.
 This is an internal reordered/gap-fill optimization result, not a cross-stack
 or equal-wire comparison.
+
+After the later packed-word, range-precheck, and zio-batching changes, the
+implicit dense-prefix representation was evaluated again against fixed
+ReleaseFast binaries. Ordered STREAM bytes now advance the bitmap's logical
+length without allocating or filling words; the first actual gap materializes
+the old packed representation transactionally. Byte-buffer and bitmap
+capacity are both reserved before either logical length changes, so allocation
+failure preserves the complete dense prefix, byte count, and FIN state. The
+implementation and bitmap model tests now live separately in
+`src/quic/stream/received_bitmap.zig`, reducing `src/quic/stream.zig` by about
+300 lines. This matches the sparse receive-range principle in Quinn, quiche,
+and tquic while preserving netz's byte-exact overlap-conflict checks.
+
+The receive benchmark baseline SHA-256 was
+`67af2f79d95e1d1f9c88d95e0de7938374c97172887c8d1547c6d1097ca7f32a`
+and the final candidate was
+`a5874c09951a68de83de4857ce902f159e59450cd896c7be4f2240686c2efeac`.
+Seven CPU-0, order-alternated, 5,000-iteration visitor pairs moved ordered
+STREAM median from 3001 to 2942 ns/packet (2.0%, 7/7 wins). The reordered
+`stream_gap` control moved from 3175 to 3194 ns/packet (-0.6%, 4/7 wins); its
+overlapping range is treated as noise rather than a regression claim.
+
+The corresponding real TLS/HTTP/3 four-stream upload used baseline SHA-256
+`d97b6c90e6c69ba2289d255f41fb48ecba7ff6a4b104257d559aea738069573a`
+and candidate SHA-256
+`66413befc85a749a304ad331da41722a959f39b578122bbab09a5d1c80bba455`.
+Seven CPU-0, order-alternated runs of three 16-MiB iterations moved median
+throughput from 146.90 to 146.31 MiB/s (-0.4%, 3/7 wins), which is noise-level.
+Seven matching allocator pairs had medians of 698 to 658 calls (5.7%) and 151
+to 119 exact 136-byte allocations. The 16-MiB application body dominates byte
+totals, so median cumulative allocation and peak changed only 0.041% and
+0.005%.
+The supported claim is therefore fewer ordered-stream allocations plus a small
+isolated receive-path improvement, not higher end-to-end throughput.
 
 A follow-up avoids treating every byte inside the allocated receive buffer as
 an actual overlap. Before either transactional preflight or committed insert
@@ -2389,7 +2425,11 @@ Rejected experiments after validation:
   materialized the bitmap only after a gap. It passed receive, overlap,
   preflight, and sliding-window tests, but five alternating 16 MiB/four-stream
   samples fell from 196.47 to 178.38 MiB/s mean (-9.2%). The representation
-  change and its tests were removed.
+  change and its tests were removed at that point. The receive pipeline has
+  since moved from byte flags to packed words, added word-level gap scans and
+  range prechecks, and gained zio receive batching. Re-evaluating the same
+  representation on this newer baseline is recorded below; the older negative
+  result remains here because it must not be generalized to the new pipeline.
 - Keeping the packed bitmap but replacing its per-byte checks with one slice
   comparison for the already-contiguous portion of a partially overlapping
   STREAM frame also passed focused and QUIC-wide tests. Seven CPU-0,

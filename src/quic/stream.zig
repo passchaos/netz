@@ -1,5 +1,6 @@
 const std = @import("std");
 const quic = @import("mod.zig");
+const ReceivedBitmap = @import("stream/received_bitmap.zig").Bitmap;
 
 pub const Error = error{
     WrongStream,
@@ -110,238 +111,6 @@ pub const SendState = struct {
 
     fn frameCount(data_len: usize, max_frame_data_len: usize) usize {
         return std.math.divCeil(usize, data_len, max_frame_data_len) catch unreachable;
-    }
-};
-
-const ReceivedBitmap = struct {
-    const Word = usize;
-    const word_bits = @bitSizeOf(Word);
-    const Shift = std.math.Log2Int(Word);
-
-    words: std.ArrayList(Word) = .empty,
-    bit_len: usize = 0,
-
-    const View = struct {
-        words: []const Word = &.{},
-        bit_len: usize = 0,
-
-        fn isSet(self: View, index: usize) bool {
-            std.debug.assert(index < self.bit_len);
-            return (self.words[wordIndex(index)] & bitMask(index)) != 0;
-        }
-
-        fn anySetInRange(
-            self: View,
-            range: std.bit_set.Range,
-        ) bool {
-            std.debug.assert(range.start <= range.end);
-            std.debug.assert(range.end <= self.bit_len);
-            if (range.start == range.end) return false;
-
-            const first_word = wordIndex(range.start);
-            const last_word = wordIndex(range.end - 1);
-            const start_bit: Shift = @truncate(range.start);
-            const start_mask = @as(Word, std.math.maxInt(Word)) << start_bit;
-            const end_bit: Shift = @truncate(range.end);
-            const end_mask = if (end_bit == 0)
-                std.math.maxInt(Word)
-            else
-                (@as(Word, 1) << end_bit) - 1;
-
-            if (first_word == last_word) {
-                return (self.words[first_word] & start_mask & end_mask) != 0;
-            }
-            if ((self.words[first_word] & start_mask) != 0) return true;
-            for (self.words[first_word + 1 .. last_word]) |word| {
-                if (word != 0) return true;
-            }
-            return (self.words[last_word] & end_mask) != 0;
-        }
-    };
-
-    fn deinit(self: *ReceivedBitmap, allocator: std.mem.Allocator) void {
-        self.words.deinit(allocator);
-        self.* = undefined;
-    }
-
-    fn clone(
-        self: ReceivedBitmap,
-        allocator: std.mem.Allocator,
-    ) std.mem.Allocator.Error!ReceivedBitmap {
-        var copy: ReceivedBitmap = .{};
-        try copy.words.ensureUnusedCapacity(allocator, self.words.items.len);
-        copy.words.appendSliceAssumeCapacity(self.words.items);
-        copy.bit_len = self.bit_len;
-        return copy;
-    }
-
-    fn len(self: ReceivedBitmap) usize {
-        return self.bit_len;
-    }
-
-    fn view(self: ReceivedBitmap) View {
-        return .{ .words = self.words.items, .bit_len = self.bit_len };
-    }
-
-    fn resize(
-        self: *ReceivedBitmap,
-        allocator: std.mem.Allocator,
-        new_len: usize,
-        fill: bool,
-    ) std.mem.Allocator.Error!void {
-        const old_len = self.bit_len;
-        const old_word_len = self.words.items.len;
-        const new_word_len = wordCount(new_len);
-        if (new_word_len > old_word_len) {
-            try self.words.resize(allocator, new_word_len);
-            @memset(
-                self.words.items[old_word_len..],
-                std.math.boolMask(Word, fill),
-            );
-        } else {
-            self.words.items.len = new_word_len;
-        }
-        self.bit_len = new_len;
-        if (new_len > old_len) {
-            const old_word_end = @min(
-                new_len,
-                old_word_len * word_bits,
-            );
-            if (old_len < old_word_end) {
-                self.setRangeValue(
-                    .{ .start = old_len, .end = old_word_end },
-                    fill,
-                );
-            }
-        }
-        self.clearPadding();
-    }
-
-    fn isSet(self: ReceivedBitmap, index: usize) bool {
-        return self.view().isSet(index);
-    }
-
-    fn anySetInRange(
-        self: ReceivedBitmap,
-        range: std.bit_set.Range,
-    ) bool {
-        return self.view().anySetInRange(range);
-    }
-
-    fn setRangeValue(
-        self: *ReceivedBitmap,
-        range: std.bit_set.Range,
-        value: bool,
-    ) void {
-        std.debug.assert(range.end <= self.bit_len);
-        std.debug.assert(range.start <= range.end);
-        if (range.start == range.end) return;
-
-        const start_word = wordIndex(range.start);
-        const start_bit: Shift = @truncate(range.start);
-        const end_word = wordIndex(range.end);
-        const end_bit: Shift = @truncate(range.end);
-        const fill_word = std.math.boolMask(Word, value);
-
-        if (start_word == end_word) {
-            const low = @as(Word, std.math.maxInt(Word)) << start_bit;
-            const high = @as(Word, std.math.maxInt(Word)) >>
-                ((word_bits - 1) - (end_bit - 1));
-            const mask = low & high;
-            self.words.items[start_word] =
-                (self.words.items[start_word] & ~mask) |
-                (fill_word & mask);
-            return;
-        }
-
-        var current = start_word;
-        if (start_bit != 0) {
-            const mask = @as(Word, std.math.maxInt(Word)) << start_bit;
-            self.words.items[current] =
-                (self.words.items[current] & ~mask) |
-                (fill_word & mask);
-            current += 1;
-        }
-        @memset(self.words.items[current..end_word], fill_word);
-        if (end_bit != 0) {
-            const mask = @as(Word, std.math.maxInt(Word)) >>
-                ((word_bits - 1) - (end_bit - 1));
-            self.words.items[end_word] =
-                (self.words.items[end_word] & ~mask) |
-                (fill_word & mask);
-        }
-    }
-
-    fn firstUnsetFrom(self: ReceivedBitmap, start: usize) usize {
-        std.debug.assert(start <= self.bit_len);
-        if (start == self.bit_len) return start;
-
-        var word_index = wordIndex(start);
-        var word = self.words.items[word_index];
-        const start_bit: Shift = @truncate(start);
-        if (start_bit != 0) {
-            word |= (@as(Word, 1) << start_bit) - 1;
-        }
-        while (true) {
-            const unset = ~word;
-            if (unset != 0) {
-                const candidate = word_index * word_bits + @ctz(unset);
-                return @min(candidate, self.bit_len);
-            }
-            word_index += 1;
-            if (word_index == self.words.items.len) return self.bit_len;
-            word = self.words.items[word_index];
-        }
-    }
-
-    fn removePrefix(self: *ReceivedBitmap, prefix_len: usize) void {
-        std.debug.assert(prefix_len <= self.bit_len);
-        const remaining = self.bit_len - prefix_len;
-        if (remaining == 0) {
-            self.words.items.len = 0;
-            self.bit_len = 0;
-            return;
-        }
-
-        const word_shift = prefix_len / word_bits;
-        const bit_shift: Shift = @truncate(prefix_len);
-        const old_word_len = self.words.items.len;
-        const new_word_len = wordCount(remaining);
-        for (0..new_word_len) |destination| {
-            const source = destination + word_shift;
-            var word = self.words.items[source] >> bit_shift;
-            if (bit_shift != 0 and source + 1 < old_word_len) {
-                const inverse_shift: Shift = @intCast(
-                    word_bits - @as(usize, bit_shift),
-                );
-                word |= self.words.items[source + 1] <<
-                    inverse_shift;
-            }
-            self.words.items[destination] = word;
-        }
-        self.words.items.len = new_word_len;
-        self.bit_len = remaining;
-        self.clearPadding();
-    }
-
-    fn clearPadding(self: *ReceivedBitmap) void {
-        if (self.bit_len == 0) return;
-        const used_bits = self.bit_len % word_bits;
-        if (used_bits == 0) return;
-        self.words.items[self.words.items.len - 1] &=
-            (@as(Word, 1) << @as(Shift, @intCast(used_bits))) - 1;
-    }
-
-    fn wordCount(bit_len: usize) usize {
-        return bit_len / word_bits + @intFromBool(bit_len % word_bits != 0);
-    }
-
-    fn wordIndex(index: usize) usize {
-        return index / word_bits;
-    }
-
-    fn bitMask(index: usize) Word {
-        return @as(Word, 1) << @as(Shift, @truncate(index));
     }
 };
 
@@ -473,11 +242,21 @@ pub const RecvState = struct {
             return error.FinalSizeMismatch;
         }
         if (relative_end > self.buffer.items.len) {
-            try self.buffer.resize(self.allocator, relative_end);
-            try self.received.resize(
+            const fill_received = relative_offset == old_len;
+            // Reserve both allocations before changing either logical length.
+            // A first gap can require bitmap materialization even when the
+            // byte buffer already has spare capacity; OOM must leave both
+            // halves retryable and aligned.
+            try self.buffer.ensureTotalCapacity(self.allocator, relative_end);
+            try self.received.ensureResizeCapacity(
                 self.allocator,
                 relative_end,
-                relative_offset == old_len,
+                fill_received,
+            );
+            self.buffer.items.len = relative_end;
+            self.received.resizeAssumeCapacity(
+                relative_end,
+                fill_received,
             );
             if (relative_offset > old_len) {
                 @memset(self.buffer.items[old_len..relative_offset], 0);
@@ -901,71 +680,6 @@ pub const RecvState = struct {
     };
 };
 
-test "QUIC receive bitmap matches byte model across range and prefix operations" {
-    const allocator = std.testing.allocator;
-    var bitmap: ReceivedBitmap = .{};
-    defer bitmap.deinit(allocator);
-    var model = [_]bool{false} ** 192;
-
-    try bitmap.resize(allocator, 130, false);
-    bitmap.setRangeValue(.{ .start = 3, .end = 127 }, true);
-    @memset(model[3..127], true);
-    bitmap.setRangeValue(.{ .start = 17, .end = 73 }, false);
-    @memset(model[17..73], false);
-    try std.testing.expect(bitmap.anySetInRange(.{ .start = 3, .end = 17 }));
-    try std.testing.expect(!bitmap.anySetInRange(.{ .start = 17, .end = 73 }));
-    try std.testing.expect(bitmap.anySetInRange(.{ .start = 72, .end = 128 }));
-    try std.testing.expect(!bitmap.anySetInRange(.{ .start = 130, .end = 130 }));
-    for (model[0..130], 0..) |expected, index| {
-        try std.testing.expectEqual(expected, bitmap.isSet(index));
-    }
-
-    try bitmap.resize(allocator, 191, true);
-    @memset(model[130..191], true);
-    try std.testing.expect(bitmap.anySetInRange(.{ .start = 127, .end = 191 }));
-    for (model[0..191], 0..) |expected, index| {
-        try std.testing.expectEqual(expected, bitmap.isSet(index));
-    }
-    for (0..192) |start| {
-        var expected = start;
-        while (expected < 191 and model[expected]) : (expected += 1) {}
-        try std.testing.expectEqual(expected, bitmap.firstUnsetFrom(start));
-    }
-
-    var cloned = try bitmap.clone(allocator);
-    defer cloned.deinit(allocator);
-    for (0..131) |prefix_len| {
-        var shifted = try cloned.clone(allocator);
-        defer shifted.deinit(allocator);
-        shifted.removePrefix(prefix_len);
-        for (model[prefix_len..191], 0..) |expected, index| {
-            try std.testing.expectEqual(expected, shifted.isSet(index));
-        }
-    }
-
-    bitmap.removePrefix(13);
-    for (model[13..191], 0..) |expected, index| {
-        try std.testing.expectEqual(expected, bitmap.isSet(index));
-        try std.testing.expectEqual(model[index], cloned.isSet(index));
-    }
-    for (0..179) |start| {
-        var expected = start;
-        while (expected < 178 and model[13 + expected]) : (expected += 1) {}
-        try std.testing.expectEqual(expected, bitmap.firstUnsetFrom(start));
-    }
-    try bitmap.resize(allocator, 65, false);
-    for (model[13..78], 0..) |expected, index| {
-        try std.testing.expectEqual(expected, bitmap.isSet(index));
-    }
-    bitmap.removePrefix(65);
-    try std.testing.expectEqual(@as(usize, 0), bitmap.len());
-    try std.testing.expectEqual(@as(usize, 0), bitmap.words.items.len);
-    try std.testing.expectEqual(
-        std.math.maxInt(usize) / ReceivedBitmap.word_bits + 1,
-        ReceivedBitmap.wordCount(std.math.maxInt(usize)),
-    );
-}
-
 test "QUIC send stream state writes offset STREAM frames" {
     const allocator = std.testing.allocator;
     var send = SendState.init(0);
@@ -1034,6 +748,104 @@ test "QUIC receive stream state reassembles out of order and tracks FIN" {
     try std.testing.expectEqualStrings("hello world", recv.available());
     try recv.consume("hello world".len);
     try std.testing.expect(recv.complete());
+    try std.testing.expect(recv.received.materializedCapacity() != 0);
+}
+
+test "QUIC ordered receive stream keeps an implicit dense prefix" {
+    const allocator = std.testing.allocator;
+    var recv = RecvState.init(allocator, 0, 64);
+    defer recv.deinit();
+    try recv.buffer.ensureTotalCapacity(allocator, 16);
+
+    var no_alloc = std.testing.FailingAllocator.init(
+        allocator,
+        .{ .fail_index = 0 },
+    );
+    recv.allocator = no_alloc.allocator();
+    try std.testing.expectEqual(
+        @as(u64, 8),
+        try recv.insertTracked(.{
+            .stream_id = 0,
+            .offset = 0,
+            .data = "abcdefgh",
+        }),
+    );
+    try std.testing.expectEqual(
+        @as(u64, 8),
+        try recv.insertTracked(.{
+            .stream_id = 0,
+            .offset = 8,
+            .data = "ijklmnop",
+            .fin = true,
+        }),
+    );
+    recv.allocator = allocator;
+
+    try std.testing.expect(!no_alloc.has_induced_failure);
+    try std.testing.expectEqual(@as(usize, 0), recv.received.materializedCapacity());
+    try std.testing.expectEqual(@as(usize, 16), recv.received.len());
+    try std.testing.expectEqualStrings("abcdefghijklmnop", recv.available());
+}
+
+test "QUIC receive stream materializes bitmap only for a gap" {
+    const allocator = std.testing.allocator;
+    var recv = RecvState.init(allocator, 0, 64);
+    defer recv.deinit();
+
+    try recv.insert(.{ .stream_id = 0, .offset = 0, .data = "abcd" });
+    try std.testing.expectEqual(@as(usize, 0), recv.received.materializedCapacity());
+    try recv.insert(.{ .stream_id = 0, .offset = 8, .data = "ijkl" });
+    try std.testing.expect(recv.received.materializedCapacity() != 0);
+    try std.testing.expect(recv.received.isSet(0));
+    try std.testing.expect(!recv.received.isSet(4));
+    try std.testing.expect(recv.received.isSet(8));
+}
+
+test "QUIC receive stream keeps dense state after bitmap materialization failure" {
+    const allocator = std.testing.allocator;
+    var recv = RecvState.init(allocator, 0, 64);
+    defer recv.deinit();
+    try recv.buffer.ensureTotalCapacity(allocator, 16);
+    try recv.insert(.{ .stream_id = 0, .offset = 0, .data = "abcd" });
+
+    var fail = std.testing.FailingAllocator.init(
+        allocator,
+        .{ .fail_index = 0 },
+    );
+    recv.allocator = fail.allocator();
+    try std.testing.expectError(
+        error.OutOfMemory,
+        recv.insert(.{ .stream_id = 0, .offset = 8, .data = "ijkl" }),
+    );
+    recv.allocator = allocator;
+
+    try std.testing.expect(fail.has_induced_failure);
+    try std.testing.expectEqual(@as(usize, 0), recv.received.materializedCapacity());
+    try std.testing.expectEqual(@as(usize, 4), recv.received.len());
+    try std.testing.expectEqual(@as(u64, 4), recv.receivedByteCount());
+    try std.testing.expectEqualStrings("abcd", recv.available());
+    try std.testing.expect(recv.final_size == null);
+
+    try recv.insert(.{ .stream_id = 0, .offset = 8, .data = "ijkl" });
+    try std.testing.expect(recv.received.materializedCapacity() != 0);
+}
+
+test "QUIC dense receive bitmap clone and compaction stay implicit" {
+    const allocator = std.testing.allocator;
+    var recv = RecvState.init(allocator, 0, 64);
+    defer recv.deinit();
+    try recv.insert(.{
+        .stream_id = 0,
+        .offset = 0,
+        .data = "abcdefghijklmnop",
+    });
+
+    var cloned = try recv.clone(allocator);
+    defer cloned.deinit();
+    try std.testing.expectEqual(@as(usize, 0), cloned.received.materializedCapacity());
+    try cloned.consume(16);
+    try std.testing.expectEqual(@as(usize, 0), cloned.received.materializedCapacity());
+    try std.testing.expectEqual(@as(usize, 0), cloned.received.len());
 }
 
 test "QUIC receive stream transfers complete buffer ownership" {
