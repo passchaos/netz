@@ -767,6 +767,20 @@ pairs were timing-neutral: median connection rate moved from 1,036.0 to
 1,033.7/s (-0.2%) and median P50 from 901,089 to 904,134 ns (+0.3%). The
 ownership policy and allocation-count regression live in
 `src/quic/one_rtt/prepared_keys.zig`.
+With Vail `b6dd7b6` additionally replacing its two mutually exclusive AES-GCM
+context slots with one suite-selected context, each netz prepared object is now
+1,008 bytes and the pair allocation is 2,016 bytes. The same 100-handshake
+current-stack run retained 7,701 allocations while total requested bytes fell
+to 7,456,115 and peak live bytes to 56,211. Vail's independent seven-pair
+traffic-crypto benchmark was timing-neutral, so this follow-up is also treated
+as an ownership/memory improvement rather than a throughput claim. The
+connection set also caches direct send/receive pointers next to its cold
+ownership tag, avoiding a union switch in every packet operation. Against a
+fixed binary with the same Vail state and pair allocation but tagged accessors,
+seven CPU-0 order-alternated H3 pairs moved the four-stream 16-MiB upload
+median from 160.63 to 163.40 MiB/s (+1.7%, 6/7 wins). Every three-iteration arm
+verified 50,331,648 bytes and status total 2,400; this is a small
+workload-specific result, not a general throughput claim.
 
 ### QUIC 1-RTT send
 

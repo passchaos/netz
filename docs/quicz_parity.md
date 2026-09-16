@@ -1777,7 +1777,14 @@ facility, not a replacement for authenticated handshake-backed HTTP/3.
    single-direction and non-accelerated variants for low-level mixed-suite
    configurations. A linked-backend 100-handshake run reduced allocations from
    7,901 to 7,701 with unchanged peak memory; seven fixed-binary paired runs
-   left median rate/P50 within 0.3%. Single-STREAM transactional
+   left median rate/P50 within 0.3%. Vail `b6dd7b6` then reduced each inner
+   prepared AEAD state from 1,344 to 752 bytes by keeping only the negotiated
+   AES context. The combined netz object is 1,008 bytes; a repeated 100-handshake
+   run retained 7,701 allocations but reduced total requested bytes to
+   7,456,115 and peak live bytes to 56,211. Direct directional pointers keep
+   the ownership tag off the per-packet access path; a same-Vail seven-pair H3
+   control improved the four-stream upload median 1.7% with 6/7 wins, retained
+   only as workload-specific supporting evidence. Single-STREAM transactional
    preflight now avoids unrelated general-packet shadows; seven paired runs
    reduced visitor/service median cost another 1.5%/2.8%. Packed receive-byte
    tracking then reduced those STREAM medians another 11.9%/11.7% and removed

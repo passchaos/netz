@@ -21,6 +21,8 @@ pub const Set = struct {
     };
 
     storage: Storage = .none,
+    send_keys: ?*Prepared = null,
+    receive_keys: ?*Prepared = null,
 
     pub fn init(
         allocator: std.mem.Allocator,
@@ -35,17 +37,27 @@ pub const Set = struct {
                 .send = .init(send_keys),
                 .receive = .init(receive_keys),
             };
-            return .{ .storage = .{ .pair = pair } };
+            return .{
+                .storage = .{ .pair = pair },
+                .send_keys = &pair.send,
+                .receive_keys = &pair.receive,
+            };
         }
         if (send_accelerated) {
             const prepared = try allocator.create(Prepared);
             prepared.* = .init(send_keys);
-            return .{ .storage = .{ .send_only = prepared } };
+            return .{
+                .storage = .{ .send_only = prepared },
+                .send_keys = prepared,
+            };
         }
         if (receive_accelerated) {
             const prepared = try allocator.create(Prepared);
             prepared.* = .init(receive_keys);
-            return .{ .storage = .{ .receive_only = prepared } };
+            return .{
+                .storage = .{ .receive_only = prepared },
+                .receive_keys = prepared,
+            };
         }
         return .{};
     }
@@ -63,36 +75,22 @@ pub const Set = struct {
         self.* = .{};
     }
 
-    pub fn send(self: *const Set) ?*const Prepared {
-        return switch (self.storage) {
-            .none, .receive_only => null,
-            .pair => |pair| &pair.send,
-            .send_only => |prepared| prepared,
-        };
+    pub inline fn send(self: *const Set) ?*const Prepared {
+        return self.send_keys;
     }
 
-    pub fn receive(self: *const Set) ?*const Prepared {
-        return switch (self.storage) {
-            .none, .send_only => null,
-            .pair => |pair| &pair.receive,
-            .receive_only => |prepared| prepared,
-        };
+    pub inline fn receive(self: *const Set) ?*const Prepared {
+        return self.receive_keys;
     }
 
     pub fn replaceSend(self: *Set, keys: protection.PacketProtectionKeys) void {
-        switch (self.storage) {
-            .pair => |pair| pair.send.replace(keys),
-            .send_only => |prepared| prepared.replace(keys),
-            .none, .receive_only => {},
-        }
+        const prepared = self.send_keys orelse return;
+        prepared.replace(keys);
     }
 
     pub fn replaceReceive(self: *Set, keys: protection.PacketProtectionKeys) void {
-        switch (self.storage) {
-            .pair => |pair| pair.receive.replace(keys),
-            .receive_only => |prepared| prepared.replace(keys),
-            .none, .send_only => {},
-        }
+        const prepared = self.receive_keys orelse return;
+        prepared.replace(keys);
     }
 
     fn supports(keys: protection.PacketProtectionKeys) bool {
