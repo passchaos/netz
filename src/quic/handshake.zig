@@ -3,6 +3,7 @@ const quic = @import("mod.zig");
 const key_exchange = @import("handshake/key_exchange.zig");
 const retransmit = @import("handshake/retransmit.zig");
 const retry = @import("handshake/retry.zig");
+const transport_limits = @import("handshake/transport_limits.zig");
 const fixed_bit = @import("one_rtt/fixed_bit.zig");
 
 const net = std.Io.net;
@@ -1390,6 +1391,7 @@ fn connectAttempt(
     const transport_parameters = try clientTransportParameters(
         endpoint.allocator,
         options,
+        endpoint.limits.max_datagram_size,
         &local_transport_parameters,
         &encoded_transport_parameters,
     );
@@ -2805,6 +2807,7 @@ fn acceptInternal(
     const transport_parameters = try serverTransportParameters(
         endpoint.allocator,
         effective_options,
+        endpoint.limits.max_datagram_size,
         original_destination_connection_id,
         effective_options.retry_source_connection_id,
         &local_transport_parameters,
@@ -4497,15 +4500,24 @@ fn establishedConnection(
 fn clientTransportParameters(
     allocator: std.mem.Allocator,
     options: ClientOptions,
+    receive_capacity: usize,
     local_transport_parameters: *quic.TransportParameters,
     encoded: *std.ArrayList(u8),
 ) Error![]const u8 {
     if (options.transport_parameters.len != 0) {
         local_transport_parameters.* = try quic.parseTransportParametersTyped(allocator, options.transport_parameters, .client);
         try validateClientTransportParameters(local_transport_parameters.*, options.local_connection_id, options.version, options.available_versions);
+        try transport_limits.validateAdvertised(
+            local_transport_parameters.max_udp_payload_size,
+            receive_capacity,
+        );
         return options.transport_parameters;
     }
 
+    transport_limits.limitGenerated(
+        local_transport_parameters,
+        receive_capacity,
+    );
     local_transport_parameters.initial_source_connection_id = options.local_connection_id;
     try validateClientTransportParameters(local_transport_parameters.*, options.local_connection_id, options.version, options.available_versions);
     try quic.encodeTransportParametersForSource(encoded, allocator, local_transport_parameters.*, .client);
@@ -4516,6 +4528,7 @@ fn clientTransportParameters(
 fn serverTransportParameters(
     allocator: std.mem.Allocator,
     options: ServerOptions,
+    receive_capacity: usize,
     original_destination_connection_id: []const u8,
     retry_source_connection_id: []const u8,
     local_transport_parameters: *quic.TransportParameters,
@@ -4523,6 +4536,10 @@ fn serverTransportParameters(
 ) Error![]const u8 {
     if (options.transport_parameters.len != 0) {
         local_transport_parameters.* = try quic.parseTransportParametersTyped(allocator, options.transport_parameters, .server);
+        try transport_limits.validateAdvertised(
+            local_transport_parameters.max_udp_payload_size,
+            receive_capacity,
+        );
         try applyServerStatelessResetToken(
             local_transport_parameters,
             options.local_connection_id,
@@ -4533,6 +4550,10 @@ fn serverTransportParameters(
         return options.transport_parameters;
     }
 
+    transport_limits.limitGenerated(
+        local_transport_parameters,
+        receive_capacity,
+    );
     local_transport_parameters.original_destination_connection_id = original_destination_connection_id;
     local_transport_parameters.initial_source_connection_id = options.local_connection_id;
     if (retry_source_connection_id.len != 0) {
@@ -5062,7 +5083,8 @@ test "QUIC server transport parameters bind reset token to local CID" {
         .initial_one_rtt_config = .{
             .local_stateless_reset_key = key,
         },
-    }, "original", &.{}, &local, &encoded);
+    }, 4096, "original", &.{}, &local, &encoded);
+    try std.testing.expectEqual(@as(u64, 4096), local.max_udp_payload_size);
     try std.testing.expectEqualSlices(
         u8,
         &expected,
@@ -5073,6 +5095,7 @@ test "QUIC server transport parameters bind reset token to local CID" {
         bytes,
         .server,
     );
+    try std.testing.expectEqual(@as(u64, 4096), parsed.max_udp_payload_size);
     try std.testing.expectEqualSlices(
         u8,
         &expected,
@@ -5093,7 +5116,7 @@ test "QUIC server transport parameters bind reset token to local CID" {
         .initial_one_rtt_config = .{
             .local_stateless_reset_key = key,
         },
-    }, "original", &.{}, &preferred_local, &preferred_encoded);
+    }, quic.default_max_udp_payload_size, "original", &.{}, &preferred_local, &preferred_encoded);
     try std.testing.expectEqualSlices(
         u8,
         &quic.stateless_reset.tokenForConnectionId(
@@ -5145,7 +5168,7 @@ test "QUIC server transport parameters bind reset token to local CID" {
         .initial_one_rtt_config = .{
             .local_stateless_reset_key = key,
         },
-    }, "original", &.{}, &parsed_raw, &unused_encoded);
+    }, quic.default_max_udp_payload_size, "original", &.{}, &parsed_raw, &unused_encoded);
     try std.testing.expectEqualSlices(u8, raw.items, returned_raw);
     try std.testing.expectEqualSlices(
         u8,
@@ -5170,7 +5193,7 @@ test "QUIC server transport parameters bind reset token to local CID" {
             .initial_one_rtt_config = .{
                 .local_stateless_reset_key = key,
             },
-        }, "original", &.{}, &parsed_raw, &unused_encoded),
+        }, quic.default_max_udp_payload_size, "original", &.{}, &parsed_raw, &unused_encoded),
     );
 }
 

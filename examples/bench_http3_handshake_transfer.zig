@@ -10,6 +10,9 @@ const min_stream_buffer: usize = 2 * 1024 * 1024;
 const default_streams: usize = 1;
 const max_streams: usize = 128;
 const default_round_robin_chunk_bytes: usize = 64 * 1024;
+const default_receive_batch_datagrams: usize =
+    (netz.http3.runtime.HandshakeSessionOptions{})
+        .max_receive_batch_datagrams;
 const single_stream_round_robin_chunk_bytes: usize = 8 * 1024;
 const benchmark_min_flow_control_bytes: u64 = 256 * 1024 * 1024;
 // ACK every four ack-eliciting packets. The previous threshold of 16 allowed
@@ -105,6 +108,8 @@ pub fn main(init: std.process.Init) !void {
         \\  streams: {d}
         \\  response scheduler: {s}
         \\  upload receive mode: {s}
+        \\  endpoint datagram bytes: {d}
+        \\  receive batch datagrams: {d}
         \\  response yield packets: {d}
         \\  body batch: {}
         \\  GRO receive: {}
@@ -120,7 +125,7 @@ pub fn main(init: std.process.Init) !void {
         \\  bytes/s: {d}
         \\  MiB/s: {d}
         \\
-    , .{ @tagName(config.mode), config.streams, if (config.mode == .download and config.streams > 1) "RFC 9218" else "single-stream/application", if (config.aggregate_upload) "aggregate" else "streaming", responseSchedulerDelayPackets(config), bodyBatchEnabled(config), config.enable_gro_receive, transferOneRttDatagramSize(config), transferPacedBodyChunkBytes(config), transferFlowControlBytes(config), config.ack_eliciting_threshold, config.iterations, config.body_bytes, bytes_total, status_total, if (config.iterations == 0) 0 else elapsed / config.iterations, bytes_per_second, bytes_per_second / (1024 * 1024) });
+    , .{ @tagName(config.mode), config.streams, if (config.mode == .download and config.streams > 1) "RFC 9218" else "single-stream/application", if (config.aggregate_upload) "aggregate" else "streaming", transferEndpointDatagramSize(config), config.receive_batch_datagrams, responseSchedulerDelayPackets(config), bodyBatchEnabled(config), config.enable_gro_receive, transferOneRttDatagramSize(config), transferPacedBodyChunkBytes(config), transferFlowControlBytes(config), config.ack_eliciting_threshold, config.iterations, config.body_bytes, bytes_total, status_total, if (config.iterations == 0) 0 else elapsed / config.iterations, bytes_per_second, bytes_per_second / (1024 * 1024) });
     const summary = summarizeThroughput(throughput_samples);
     std.debug.print(
         "  mean MiB/s: {d:.2}\n" ++
@@ -247,6 +252,7 @@ fn runIteration(
                 .max_crypto_buffer = 64 * 1024,
             },
             .session = .{
+                .max_receive_batch_datagrams = config.receive_batch_datagrams,
                 .max_stream_buffer = stream_buffer,
                 .max_stream_frame_data = config.max_stream_frame_data,
                 .paced_body_chunk_bytes = paced_body_chunk_bytes,
@@ -386,6 +392,7 @@ fn runIteration(
                 .handshake_recovery = .{ .initial_pto_ms = 250, .max_pto_ms = 2000, .max_retries = 4, .max_duration_ms = 10_000 },
             },
             .session = .{
+                .max_receive_batch_datagrams = config.receive_batch_datagrams,
                 .max_stream_buffer = stream_buffer,
                 .max_stream_frame_data = config.max_stream_frame_data,
                 .paced_body_chunk_bytes = paced_body_chunk_bytes,
@@ -990,7 +997,8 @@ fn findStreamIndex(stream_ids: []const u62, stream_id: u62) ?usize {
 }
 
 fn transferEndpointDatagramSize(config: Config) usize {
-    return config.one_rtt_datagram_size orelse
+    return config.endpoint_datagram_size orelse
+        config.one_rtt_datagram_size orelse
         if (config.streams == 1) single_stream_one_rtt_datagram_size else multi_stream_one_rtt_datagram_size;
 }
 
@@ -1061,6 +1069,8 @@ const Config = struct {
     streams: usize = default_streams,
     round_robin_chunk_bytes: ?usize = null,
     one_rtt_datagram_size: ?usize = null,
+    endpoint_datagram_size: ?usize = null,
+    receive_batch_datagrams: usize = default_receive_batch_datagrams,
     paced_body_chunk_bytes: ?usize = null,
     mode: Mode = .upload,
     stats: bool = false,
@@ -1093,6 +1103,23 @@ fn parseArgs(init: std.process.Init, allocator: std.mem.Allocator) !Config {
             config.round_robin_chunk_bytes = try parsePositiveUsize(arg["--round-robin-chunk-bytes=".len..]);
         } else if (std.mem.startsWith(u8, arg, "--one-rtt-datagram-size=")) {
             config.one_rtt_datagram_size = try parsePositiveUsize(arg["--one-rtt-datagram-size=".len..]);
+        } else if (std.mem.startsWith(u8, arg, "--endpoint-datagram-size=")) {
+            config.endpoint_datagram_size = try parsePositiveUsize(
+                arg["--endpoint-datagram-size=".len..],
+            );
+        } else if (std.mem.startsWith(
+            u8,
+            arg,
+            "--receive-batch-datagrams=",
+        )) {
+            config.receive_batch_datagrams = try parsePositiveUsize(
+                arg["--receive-batch-datagrams=".len..],
+            );
+            if (config.receive_batch_datagrams >
+                default_receive_batch_datagrams)
+            {
+                return error.InvalidArgument;
+            }
         } else if (std.mem.startsWith(u8, arg, "--paced-body-chunk-bytes=")) {
             config.paced_body_chunk_bytes = try parsePositiveUsize(arg["--paced-body-chunk-bytes=".len..]);
         } else if (std.mem.startsWith(u8, arg, "--ack-eliciting-threshold=")) {

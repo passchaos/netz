@@ -1334,18 +1334,24 @@ request streams, matching the shape of quicz's 4-stream aggregate benchmark.
 `--round-robin-chunk-bytes` controls the per-stream scheduling quantum used by
 multi-stream upload/download helpers; the default is 64 KiB, while smaller
 values are useful for probing ACK/credit fairness without editing source.
-`--one-rtt-datagram-size` and `--paced-body-chunk-bytes` override the benchmark's
-default single-stream/multi-stream transfer sizing knobs, making it possible to
-search stable packet-size-aware configurations without source edits. The
-benchmark now creates a fresh loopback server/client pair per iteration and
-reports mean/stddev MiB/s, matching quicz's multi-iteration benchmark shape.
-For non-GRO endpoints with an explicit packet-sized receive limit, its HTTP/3
-cursor now drains up to sixteen independent UDP datagrams through one zio
-`std.Io` receive operation, retains at most 64 KiB of encrypted datagrams, and
-authenticates/applies exactly one packet per upper-layer turn. Large default
-65,535-byte endpoint limits retain the prior one-packet path instead of adding
-about 1 MiB per connection. Preferred-address migration likewise remains on
-the dual-socket single-packet path. A real zio regression proves that callback
+`--endpoint-datagram-size`, `--one-rtt-datagram-size`, and
+`--paced-body-chunk-bytes` override the benchmark's receive and transfer sizing
+knobs. `--receive-batch-datagrams` selects 1 through 16 retained UDP datagrams
+without changing the executable, making fixed-binary policy comparisons
+possible. The benchmark creates a fresh loopback server/client pair per
+iteration and reports mean/stddev MiB/s, matching quicz's multi-iteration
+benchmark shape.
+
+Integrated HTTP/3 and WebTransport endpoints now default their physical UDP
+receive capacity to 4,096 bytes; generic QUIC endpoints retain 65,535. The
+handshake caps generated `max_udp_payload_size` advertisements to the endpoint
+capacity and rejects oversized raw transport-parameter overrides. At the HTTP/3
+default, the cursor drains up to sixteen independent UDP datagrams through one
+zio `std.Io` receive operation, retains at most 64 KiB of encrypted datagrams,
+and authenticates/applies exactly one packet per upper-layer turn. Endpoints
+whose capacity only permits one slot retain the single-packet path.
+Preferred-address migration likewise remains on the dual-socket single-packet
+path. A real zio regression proves that callback
 failure commits only the visited packet, preserves the unread suffix in order,
 does not advance it on an invalid deadline, and triggers the configured ACK
 threshold only when the second packet is consumed.
@@ -1366,6 +1372,15 @@ host's small UDP receive queue made bursts slower than sequential submission.
 also opt-in on this host: the path now completes long uploads/downloads without
 stalling, but its burst shape is slower and noisier under the same small receive
 queue.
+
+A 2026-09-15 same-binary receive-policy A/B used ReleaseFast executable SHA-256
+`3ca5bfbd06f7f61043fc3e40bba73b34221f443a6b4cb50fdb4f3e5816f1c8ac`,
+CPU 0, a 4,096-byte endpoint, and seven order-alternated 16 MiB/four-stream
+download pairs. Batch 16 achieved an 86.02 MiB/s median versus 67.20 MiB/s for
+batch 1 (1.280x, 6/7 paired wins). Every arm reported `zio-std-io`, exactly
+16,777,216 body bytes, and status total 800. This is a same-process receive
+policy result, not an equal-wire cross-stack claim. The bidirectional tquic
+HTTP/3 gate also passed with and without Retry after the default changed.
 
 Five fixed-binary, CPU-0, order-alternated 16-MiB/four-stream comparisons
 against commit `8cc373ae` measured non-GRO cursor batching at 75.75 MiB/s

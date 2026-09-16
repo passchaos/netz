@@ -4,20 +4,10 @@ const deadline_policy = @import("../../../internal/deadline.zig");
 const quic = @import("../../../quic/mod.zig");
 const runtime_error = @import("../error.zig");
 const netz_runtime = @import("../../../runtime.zig");
+const receive_policy = @import("policy.zig");
 
 const Error = runtime_error.Error;
 const ReceiveTimeoutError = runtime_error.ReceiveTimeoutError;
-const receive_batch_capacity: usize = 16;
-const receive_batch_storage_limit: usize = 64 * 1024;
-
-fn rawDatagramBatchSlotCount(max_datagram_size: usize) usize {
-    if (max_datagram_size == 0) return 0;
-    return @min(
-        receive_batch_capacity,
-        receive_batch_storage_limit / max_datagram_size,
-    );
-}
-
 const RawDatagramBatch = struct {
     allocator: std.mem.Allocator,
     storage: []u8,
@@ -27,10 +17,14 @@ const RawDatagramBatch = struct {
 
     fn init(
         connection: *quic.one_rtt.Connection,
+        max_datagrams: usize,
     ) Error!?RawDatagramBatch {
         const allocator = connection.endpoint.allocator;
         const datagram_size = connection.endpoint.limits.max_datagram_size;
-        const slot_count = rawDatagramBatchSlotCount(datagram_size);
+        const slot_count = receive_policy.rawDatagramSlotCount(
+            datagram_size,
+            max_datagrams,
+        );
         if (slot_count < 2) return null;
         const storage_len = std.math.mul(
             usize,
@@ -63,21 +57,6 @@ const RawDatagramBatch = struct {
     }
 };
 
-test "HTTP/3 connection cursor bounds raw datagram batch storage" {
-    try std.testing.expectEqual(
-        @as(usize, receive_batch_capacity),
-        rawDatagramBatchSlotCount(1400),
-    );
-    try std.testing.expectEqual(
-        @as(usize, 8),
-        rawDatagramBatchSlotCount(8192),
-    );
-    try std.testing.expectEqual(
-        @as(usize, 1),
-        rawDatagramBatchSlotCount(65_535),
-    );
-}
-
 /// Lazily drains one QUIC/GRO or independent-datagram receive batch a packet
 /// at a time.
 ///
@@ -88,6 +67,7 @@ pub const Connection = struct {
     batch: ?quic.one_rtt.ReceivedPacketBatch = null,
     raw_batch: ?RawDatagramBatch = null,
     ack_pending: bool = false,
+    max_datagrams: usize = receive_policy.max_raw_datagram_batch,
 
     pub fn deinit(self: *Connection) void {
         if (self.batch) |*batch| batch.deinit();
@@ -214,8 +194,10 @@ pub const Connection = struct {
         connection: *quic.one_rtt.Connection,
     ) Error!?*RawDatagramBatch {
         if (self.raw_batch == null) {
-            self.raw_batch = (try RawDatagramBatch.init(connection)) orelse
-                return null;
+            self.raw_batch = (try RawDatagramBatch.init(
+                connection,
+                self.max_datagrams,
+            )) orelse return null;
         }
         return &self.raw_batch.?;
     }
@@ -482,6 +464,35 @@ test "HTTP/3 connection cursor deadline validation preserves retained batch" {
     try std.testing.expectEqual(@as(usize, 1), cursor.batch.?.next_index);
 }
 
+test "HTTP/3 connection cursor disables raw batching at one datagram" {
+    const allocator = std.testing.allocator;
+    var threaded = std.Io.Threaded.init(allocator, .{});
+    defer threaded.deinit();
+    var endpoint = try quic.runtime.Endpoint.bind(
+        allocator,
+        threaded.io(),
+        .{ .ip4 = .loopback(0) },
+        .{ .max_datagram_size = receive_policy.default_endpoint_max_datagram_size },
+    );
+    defer endpoint.deinit();
+    const keys = quic.protection.deriveAes128Keys(
+        [_]u8{0x6b} ** quic.protection.secret_len,
+    );
+    var connection = try quic.one_rtt.Connection.init(&endpoint, .{
+        .peer = endpoint.address(),
+        .receive_keys = keys,
+        .send_keys = keys,
+        .local_connection_id = "cursor-single",
+        .peer_connection_id = "cursor-peer",
+    });
+    defer connection.deinit();
+
+    var cursor: Connection = .{ .max_datagrams = 1 };
+    defer cursor.deinit();
+    try std.testing.expect((try cursor.ensureRawBatch(&connection)) == null);
+    try std.testing.expect(cursor.raw_batch == null);
+}
+
 test "HTTP/3 connection cursor batches zio UDP but applies one packet at a time" {
     if (builtin.os.tag != .linux) return error.SkipZigTest;
 
@@ -494,7 +505,7 @@ test "HTTP/3 connection cursor batches zio UDP but applies one packet at a time"
         io,
         .{ .ip4 = .loopback(0) },
         .{
-            .max_datagram_size = 1400,
+            .max_datagram_size = receive_policy.default_endpoint_max_datagram_size,
             .max_frames_per_datagram = 8,
             .enable_gso_send = false,
         },
@@ -505,7 +516,7 @@ test "HTTP/3 connection cursor batches zio UDP but applies one packet at a time"
         io,
         .{ .ip4 = .loopback(0) },
         .{
-            .max_datagram_size = 1400,
+            .max_datagram_size = receive_policy.default_endpoint_max_datagram_size,
             .max_frames_per_datagram = 8,
             .enable_gso_send = false,
         },
@@ -593,6 +604,14 @@ test "HTTP/3 connection cursor batches zio UDP but applies one packet at a time"
     try std.testing.expectEqual(@as(u64, 1), connection.stats().packets_received);
     try std.testing.expect(connection.ackDelayDeadline() != null);
     try std.testing.expect(cursor.raw_batch != null);
+    try std.testing.expectEqual(
+        @as(usize, receive_policy.max_raw_datagram_batch),
+        cursor.raw_batch.?.datagrams.len,
+    );
+    try std.testing.expectEqual(
+        @as(usize, receive_policy.raw_datagram_storage_limit),
+        cursor.raw_batch.?.storage.len,
+    );
     try std.testing.expectEqual(@as(usize, 1), cursor.raw_batch.?.count - cursor.raw_batch.?.next_index);
     const retained_index = cursor.raw_batch.?.next_index;
     try std.testing.expectError(

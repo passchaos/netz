@@ -2565,7 +2565,14 @@ test "public modules are reachable" {
     try std.testing.expect(@hasDecl(netz.http3.capsule, "writeInto"));
     try std.testing.expect(@hasDecl(netz.http3.capsule, "protocolEnabled"));
     try std.testing.expect(@hasDecl(netz.http3.Frame, "parseHeader"));
-    try std.testing.expectEqual(@as(usize, 65_535), (netz.http3.runtime.Limits{}).quic.max_datagram_size);
+    try std.testing.expectEqual(
+        @as(usize, 4096),
+        (netz.http3.runtime.Limits{}).quic.max_datagram_size,
+    );
+    try std.testing.expectEqual(
+        @as(usize, 65_535),
+        (netz.quic.runtime.Limits{}).max_datagram_size,
+    );
     try std.testing.expect((netz.http3.runtime.Limits{}).auto_date_header);
     try std.testing.expect(@hasDecl(netz.quic.runtime.Endpoint, "receiveBytesBatchTimeout"));
     try std.testing.expect(@hasDecl(
@@ -7019,7 +7026,10 @@ test "public modules are reachable" {
     try std.testing.expect(@hasDecl(netz.webtransport, "defaultSettings"));
     try std.testing.expect(@hasDecl(netz.webtransport, "ensureDatagramsNegotiated"));
     try std.testing.expectEqual(@as(?usize, 1199), netz.webtransport.maxDatagramPayloadSize(1200, .init(0)));
-    try std.testing.expectEqual(@as(usize, 65_535), (netz.webtransport.runtime.Limits{}).http3.quic.max_datagram_size);
+    try std.testing.expectEqual(
+        @as(usize, 4096),
+        (netz.webtransport.runtime.Limits{}).http3.quic.max_datagram_size,
+    );
     try std.testing.expect(@hasDecl(
         netz.webtransport.runtime.Server,
         "receiveDatagramWithTimeout",

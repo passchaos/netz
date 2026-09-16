@@ -228,6 +228,13 @@ HTTP/3 fetcher: it starts a local QUIC/H3 server, performs a full client
 handshake, exchanges one POST/200 response, and exits without relying on
 external network access.
 
+`bench-http3-handshake-transfer` uses the same zio-backed `std.Io` path for
+real-handshake upload and download. `--endpoint-datagram-size=N` controls the
+physical UDP receive capacity and `--receive-batch-datagrams=N` selects a
+bounded 1-through-16 receive batch. Keep the endpoint value identical when
+using those options for a batch-policy A/B. The integrated HTTP/3 default is
+4,096 bytes; standalone QUIC endpoints retain their 65,535-byte default.
+
 The QUIC examples are preconfigured-key transport smoke tests that bypass TLS
 so individual 1-RTT features are easy to inspect:
 

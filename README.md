@@ -1122,6 +1122,14 @@ Multi-stream HTTP/3 transfer runs now enable cross-stream body batching by
 default after bounded zio receive batching removed the previous small-queue
 regression. Single-stream runs remain sequential; pass
 `--disable-body-batch` to retain a multi-stream A/B control.
+Integrated HTTP/3 and WebTransport endpoints default their physical UDP
+receive capacity to 4,096 bytes, while standalone QUIC endpoints retain the
+65,535-byte generic default. Generated QUIC `max_udp_payload_size` transport
+parameters are capped to that physical capacity, and an oversized raw override
+is rejected rather than advertising a receive size the endpoint cannot honor.
+The transfer benchmark exposes `--endpoint-datagram-size=N` and
+`--receive-batch-datagrams=N` (1 through 16) for same-binary receive-policy
+comparisons; all protocol I/O remains zio-backed `std.Io`.
 The persistent QUIC runner accepts `--server-topology=compare --netz-only` to
 run an odd, mirrored-order fixed-binary A/B between independent server sockets
 and the shared server endpoint, with identical ACK policy and strict per-run
@@ -1146,8 +1154,8 @@ The aggregate `bench` step runs the current protocol microbenchmarks:
 - HTTP/3 cleartext development request/response round trips,
 - HTTP/3 real-handshake paced upload/download throughput with configurable
   body size, direction mode, stream count, round-robin scheduling quantum,
-  1-RTT datagram size, paced body chunk size, optional cross-stream body packet
-  batching, and iteration count,
+  endpoint and 1-RTT datagram size, receive batch count, paced body chunk size,
+  optional cross-stream body packet batching, and iteration count,
 - HTTP/3 Alt-Svc `h3` / `h3-29` endpoint discovery parsing and origin-relative connection target resolution for real-site upgrade hints,
 - HTTP/3 Capsule Protocol parsing/iteration and caller-buffer encoding for
   CONNECT-stream extension payloads,

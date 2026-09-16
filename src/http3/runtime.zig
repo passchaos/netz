@@ -25,6 +25,7 @@ const send_packetizer = @import("runtime/send/packetizer.zig");
 const protected_send_module = @import("runtime/send/protected.zig");
 const send_scratch = @import("runtime/send/scratch.zig");
 const receive_cursor = @import("runtime/receive/cursor.zig");
+const receive_policy = @import("runtime/receive/policy.zig");
 const receive_connection_error =
     @import("runtime/receive/connection_error.zig");
 const request_routing = @import("runtime/receive/routing/request.zig");
@@ -504,7 +505,13 @@ const ProtectedPacketCursor = receive_cursor.Protected;
 const packetView = receive_cursor.packetView;
 
 pub const Limits = struct {
-    quic: quic.runtime.Limits = .{},
+    /// Keep the integrated HTTP/3 endpoint on the proven 4 KiB receive shape.
+    /// Generic QUIC endpoints retain their 65,535-byte physical receive
+    /// capacity, while this bounded default lets zio batch sixteen ordinary
+    /// UDP datagrams.
+    quic: quic.runtime.Limits = .{
+        .max_datagram_size = receive_policy.default_endpoint_max_datagram_size,
+    },
     /// Add a current IMF-fixdate `date` field to cleartext-development server
     /// final responses that do not already contain one.
     auto_date_header: bool = true,
@@ -3486,6 +3493,10 @@ pub const HandshakeSessionOptions = struct {
     max_frames_per_packet: usize = 8,
     max_stream_buffer: usize = 64 * 1024,
     max_concurrent_request_streams: usize = 128,
+    /// Maximum independent UDP datagrams retained by one zio/std.Io receive
+    /// turn. One disables batching without changing the receive state machine.
+    max_receive_batch_datagrams: usize =
+        receive_policy.max_raw_datagram_batch,
     /// Per-CONNECT receive queue bound for unreliable HTTP Datagrams.
     max_queued_connect_datagrams: usize = 16,
     /// Per-CONNECT byte bound shared by its queued application payloads.
@@ -5806,6 +5817,9 @@ pub const HandshakeServerSession = struct {
                 options.local_settings,
                 .request,
             ),
+            .receive_packets = .{
+                .max_datagrams = options.max_receive_batch_datagrams,
+            },
             .request_lifecycle = .init(allocator),
             .connect_datagrams = .init(allocator, .{
                 .max_associations = options.max_concurrent_request_streams,
@@ -11071,6 +11085,9 @@ pub const HandshakeClient = struct {
                 options.max_informational_responses,
                 options.local_settings,
             ),
+            .receive_packets = .{
+                .max_datagrams = options.max_receive_batch_datagrams,
+            },
             .request_lifecycle = .init(
                 allocator,
                 options.max_concurrent_request_streams,
@@ -22982,6 +22999,9 @@ fn validateProtectedConfig(config: ProtectedConfig) Error!void {
 
 fn validateHandshakeSessionOptions(options: HandshakeSessionOptions) Error!void {
     if (options.max_priority_updates == 0) return error.InvalidSetting;
+    try receive_policy.validateMaxDatagrams(
+        options.max_receive_batch_datagrams,
+    );
 }
 
 fn applyResponseReaderSemantics(
