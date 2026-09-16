@@ -975,6 +975,14 @@ zig build interop-quic-quic-go -Doptimize=ReleaseFast
 # or reset with an index-specific code before the final application close.
 # Separate loss/reorder variants make netz the sender in both endpoint roles
 # and inject exactly one outbound fault in the RESET phase and FIN phase.
+zig build interop-quic-s2n -Doptimize=ReleaseFast
+# A second independent RFC 9221 gate uses Quinn's native DATAGRAM API in both
+# endpoint-role directions. It verifies unordered small payloads, Quinn's
+# conservative 55-byte send boundary under netz's 64-byte frame limit, netz's
+# exact 1171-byte path/header boundary against Quinn's 8-byte CID, local
+# oversized rejection, reliable stream 4, close 57/58, ALPN/SNI, and explicit
+# zio-std-io versus quinn-tokio-rustls runtime identities.
+zig build interop-quic-quinn -Doptimize=ReleaseFast
 # Requires Docker and the crossbario/autobahn-testsuite image. Optional trailing
 # arguments select individual case IDs; with none, all 517 cases run. Pass
 # --tls before case IDs to run the same gate over native TLS 1.3 WSS.

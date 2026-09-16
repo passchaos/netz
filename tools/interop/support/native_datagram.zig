@@ -2,9 +2,11 @@ const std = @import("std");
 const netz = @import("netz");
 
 pub const Role = enum { client, server };
+pub const Peer = enum { s2n, quinn };
 
 pub const Result = struct {
-    boundary_bytes: usize,
+    netz_boundary_bytes: usize,
+    peer_boundary_bytes: usize,
 };
 
 const start = "NZDGRAM1";
@@ -15,13 +17,12 @@ const done = "NZDGRDN1";
 const ack = "NZDGRAK1";
 const sibling_payload = "world";
 const local_small = [_][]const u8{ "netz-alpha", "netz-beta" };
-const peer_small = [_][]const u8{ "s2n-alpha", "s2n-beta" };
-const peer_boundary_bytes = 62;
 const max_payload_storage = 8192;
 
 pub fn run(
     connection: *netz.quic.one_rtt.Connection,
     role: Role,
+    peer: Peer,
 ) !Result {
     const deadline = std.Io.Clock.Timestamp.fromNow(connection.endpoint.io, .{
         .clock = .awake,
@@ -48,7 +49,8 @@ pub fn run(
 
     const boundary_bytes = connection.maxDatagramPayloadSize() orelse
         return error.DatagramsNotNegotiated;
-    if (boundary_bytes < peer_boundary_bytes or
+    const expected_peer_boundary = peerBoundaryBytes(peer);
+    if (boundary_bytes < expected_peer_boundary or
         boundary_bytes + 1 > max_payload_storage)
     {
         return error.UnexpectedDatagramBoundary;
@@ -84,7 +86,7 @@ pub fn run(
         },
     }
 
-    try receivePeerDatagrams(connection, deadline);
+    try receivePeerDatagrams(connection, peer, deadline);
     switch (role) {
         .client => {
             try sendExact(
@@ -149,19 +151,24 @@ pub fn run(
         },
     }
 
-    return .{ .boundary_bytes = boundary_bytes };
+    return .{
+        .netz_boundary_bytes = boundary_bytes,
+        .peer_boundary_bytes = expected_peer_boundary,
+    };
 }
 
-const BoundarySource = enum { netz, s2n };
+const BoundarySource = enum { netz, s2n, quinn };
 
 fn fillBoundary(out: []u8, source: BoundarySource) void {
     const multiplier: usize = switch (source) {
         .netz => 29,
         .s2n => 31,
+        .quinn => 37,
     };
     const increment: usize = switch (source) {
         .netz => 7,
         .s2n => 11,
+        .quinn => 13,
     };
     for (out, 0..) |*byte, index| {
         byte.* = @truncate(index *% multiplier +% increment);
@@ -170,8 +177,11 @@ fn fillBoundary(out: []u8, source: BoundarySource) void {
 
 fn receivePeerDatagrams(
     connection: *netz.quic.one_rtt.Connection,
+    peer: Peer,
     deadline: std.Io.Clock.Timestamp,
 ) !void {
+    const peer_small = peerSmall(peer);
+    const peer_boundary_bytes = peerBoundaryBytes(peer);
     var seen = [_]bool{false} ** 3;
     var received_count: usize = 0;
     var storage: [max_payload_storage]u8 = undefined;
@@ -185,7 +195,7 @@ fn receivePeerDatagrams(
         else if (std.mem.eql(u8, payload, peer_small[1]))
             1
         else if (payload.len == peer_boundary_bytes and
-            boundaryMatches(payload, .s2n))
+            boundaryMatches(payload, peerBoundarySource(peer)))
             2
         else
             return error.UnexpectedDatagramPayload;
@@ -193,6 +203,30 @@ fn receivePeerDatagrams(
         seen[index] = true;
         received_count += 1;
     }
+}
+
+fn peerSmall(peer: Peer) [2][]const u8 {
+    return switch (peer) {
+        .s2n => .{ "s2n-alpha", "s2n-beta" },
+        .quinn => .{ "quinn-alpha", "quinn-beta" },
+    };
+}
+
+fn peerBoundaryBytes(peer: Peer) usize {
+    return switch (peer) {
+        .s2n => 62,
+        // Quinn intentionally subtracts Datagram::SIZE_BOUND (9) from the
+        // peer's 64-byte maximum frame size instead of using the payload's
+        // exact two-byte frame overhead. Its public API therefore exposes 55.
+        .quinn => 55,
+    };
+}
+
+fn peerBoundarySource(peer: Peer) BoundarySource {
+    return switch (peer) {
+        .s2n => .s2n,
+        .quinn => .quinn,
+    };
 }
 
 fn boundaryMatches(payload: []const u8, source: BoundarySource) bool {

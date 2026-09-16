@@ -9,7 +9,7 @@ const exact_certificate = @import("exact_certificate_verifier.zig");
 const OneShotReorder = @import("support/one_shot_reorder.zig").State;
 const PhasedFault = @import("support/phased_datagram_fault.zig").State;
 const s2n_churn = @import("support/s2n_churn.zig");
-const s2n_datagram = @import("support/s2n_datagram.zig");
+const native_datagram = @import("support/native_datagram.zig");
 
 const payloads = [_][]const u8{ "hello", "world" };
 const key_update_payloads = [_][]const u8{
@@ -40,7 +40,7 @@ pub fn main(init: std.process.Init) !void {
     }
     var expect_retry = false;
     var expect_key_update = false;
-    var peer: enum { quic_go, s2n_quic } = .quic_go;
+    var peer: enum { quic_go, s2n_quic, quinn } = .quic_go;
     var scenario: Scenario = .echo;
     var scenario_set = false;
     var version: netz.quic.Version = .version_1;
@@ -57,6 +57,9 @@ pub fn main(init: std.process.Init) !void {
         } else if (std.mem.eql(u8, arg, "--peer=s2n-quic")) {
             if (peer != .quic_go) return error.InvalidArgument;
             peer = .s2n_quic;
+        } else if (std.mem.eql(u8, arg, "--peer=quinn")) {
+            if (peer != .quic_go) return error.InvalidArgument;
+            peer = .quinn;
         } else if (std.mem.startsWith(u8, arg, "--scenario=")) {
             if (scenario_set) return error.InvalidArgument;
             scenario_set = true;
@@ -79,7 +82,7 @@ pub fn main(init: std.process.Init) !void {
         }
     }
     if (expect_retry and expect_key_update) return error.InvalidArgument;
-    if (peer == .s2n_quic and
+    if (peer != .quic_go and
         (expect_key_update or version != .version_1))
     {
         return error.InvalidArgument;
@@ -87,8 +90,11 @@ pub fn main(init: std.process.Init) !void {
     if (peer == .quic_go and scenario != .echo) {
         return error.InvalidArgument;
     }
+    if (peer == .quinn and (scenario != .datagram or expect_retry)) {
+        return error.InvalidArgument;
+    }
     const key_exchange_groups: []const netz.quic.tls_client_hello.NamedGroup =
-        if (peer == .s2n_quic)
+        if (peer != .quic_go)
             &.{.x25519}
         else
             &.{ .x25519_mlkem768, .x25519, .secp256r1 };
@@ -102,6 +108,7 @@ pub fn main(init: std.process.Init) !void {
         .{switch (peer) {
             .quic_go => "quic-go-netpoll",
             .s2n_quic => "s2n-quic-tokio",
+            .quinn => "quinn-tokio-rustls",
         }},
     );
 
@@ -215,7 +222,7 @@ pub fn main(init: std.process.Init) !void {
     if (established.retry_processed != expect_retry) {
         return error.UnexpectedRetryState;
     }
-    var datagram_result: ?s2n_datagram.Result = null;
+    var datagram_result: ?native_datagram.Result = null;
 
     if (expect_key_update) {
         for (key_update_payloads, 0..) |payload, index| {
@@ -318,9 +325,14 @@ pub fn main(init: std.process.Init) !void {
             &established.connection,
             allocator,
         ),
-        .datagram => datagram_result = try s2n_datagram.run(
+        .datagram => datagram_result = try native_datagram.run(
             &established.connection,
             .client,
+            switch (peer) {
+                .s2n_quic => .s2n,
+                .quinn => .quinn,
+                .quic_go => unreachable,
+            },
         ),
         .echo => unreachable,
     }
@@ -344,6 +356,7 @@ pub fn main(init: std.process.Init) !void {
                 // s2n-quic's public close API carries the RFC 9000
                 // application code but does not expose a reason phrase.
                 .s2n_quic => "",
+                .quinn => "quinn interop complete",
             };
             if (application.error_code != 57 or
                 !std.mem.eql(u8, application.reason_phrase, expected_reason))
@@ -366,6 +379,7 @@ pub fn main(init: std.process.Init) !void {
                 switch (peer) {
                     .quic_go => "quic-go",
                     .s2n_quic => "s2n-quic",
+                    .quinn => "Quinn",
                 },
                 if (version == .version_2) @as(u8, 2) else 1,
                 expect_retry,
@@ -414,10 +428,23 @@ pub fn main(init: std.process.Init) !void {
                 .{},
             );
         },
-        .datagram => std.debug.print(
-            "netz QUIC client interoperated with s2n-quic: verified=true version=1 alpn=hq-interop datagram=true bidirectional=true small_datagrams=2 netz_boundary_bytes={d} s2n_boundary_bytes=62 oversized_rejected=true stream_sibling=4 peer_close=57 client_io=zio-std-io server_io=s2n-quic-tokio\n",
-            .{datagram_result.?.boundary_bytes},
-        ),
+        .datagram => switch (peer) {
+            .s2n_quic => std.debug.print(
+                "netz QUIC client interoperated with s2n-quic: verified=true version=1 alpn=hq-interop datagram=true bidirectional=true small_datagrams=2 netz_boundary_bytes={d} s2n_boundary_bytes={d} oversized_rejected=true stream_sibling=4 peer_close=57 client_io=zio-std-io server_io=s2n-quic-tokio\n",
+                .{
+                    datagram_result.?.netz_boundary_bytes,
+                    datagram_result.?.peer_boundary_bytes,
+                },
+            ),
+            .quinn => std.debug.print(
+                "netz QUIC client interoperated with Quinn: verified=true version=1 alpn=hq-interop datagram=true bidirectional=true small_datagrams=2 netz_boundary_bytes={d} quinn_boundary_bytes={d} oversized_rejected=true stream_sibling=4 peer_close=57 client_io=zio-std-io server_io=quinn-tokio-rustls\n",
+                .{
+                    datagram_result.?.netz_boundary_bytes,
+                    datagram_result.?.peer_boundary_bytes,
+                },
+            ),
+            .quic_go => unreachable,
+        },
         .echo => unreachable,
     }
 }

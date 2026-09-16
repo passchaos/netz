@@ -1065,6 +1065,17 @@ pub fn build(b: *std.Build) void {
     );
     quic_s2n_step.dependOn(&quic_s2n.step);
 
+    const quic_quinn = b.addSystemCommand(
+        &.{"tools/interop/quic_quinn.sh"},
+    );
+    quic_quinn.addArtifactArg(quic_peer_client);
+    quic_quinn.addArtifactArg(quic_peer_server);
+    const quic_quinn_step = b.step(
+        "interop-quic-quinn",
+        "Run verified native QUIC DATAGRAM interop with local Quinn",
+    );
+    quic_quinn_step.dependOn(&quic_quinn.step);
+
     const webtransport_wtransport_server = b.addExecutable(.{
         .name = "netz-webtransport-wtransport-server",
         .root_module = b.createModule(.{

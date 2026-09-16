@@ -4027,6 +4027,21 @@ or 58. Both strict process cases report `zio-std-io` for the netz endpoint and
 `s2n-quic-tokio` for the independent fixture. This is functional negotiation,
 boundary, isolation, and lifecycle evidence; it is not a throughput result.
 
+An independent Quinn process matrix reuses the same wire-control protocol and
+runs the same two endpoint-role pairings at audited Quinn commit
+`d9c8c4c695fc64292d9b117844ea6924ca0d0815`. Quinn's public
+`max_datagram_size()` intentionally subtracts its conservative nine-byte
+DATAGRAM frame bound from netz's advertised 64-byte limit, so the exact Quinn
+payload boundary is 55 bytes and 56 bytes returns `TooLarge`. In the opposite
+direction, Quinn's eight-byte short-header CID gives netz an exact 1171-byte
+payload boundary for the fixed 1200-byte path, and netz rejects 1172 bytes.
+Both sides again validate two distinct small payloads plus the boundary as an
+unordered set, reliable stream 4, application close 57/58, certificate trust,
+ALPN/SNI, and `zio-std-io` versus `quinn-tokio-rustls`. The Zig protocol is
+shared in `tools/interop/support/native_datagram.zig`; the independent Quinn
+adapter remains isolated under `tools/interop/quic_quinn/`. This closes the
+second-native-peer functional gap without adding a performance claim.
+
 The next zio receive-path step gives direct endpoint-backed handshake sources
 one reusable datagram allocation. Each returned datagram keeps a scoped release
 hook, so a nested flight receive falls back to the source's owning path while
