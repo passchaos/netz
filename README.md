@@ -967,6 +967,8 @@ zig build interop-quic-quic-go -Doptimize=ReleaseFast
 # runs a bounded 32-stream mixed lifecycle in both directions: every stream
 # delivers a verified 256-byte prefix, then alternating streams finish 16 KiB
 # or reset with an index-specific code before the final application close.
+# Separate loss/reorder variants make netz the sender in both endpoint roles
+# and inject exactly one outbound fault in the RESET phase and FIN phase.
 # Requires Docker and the crossbario/autobahn-testsuite image. Optional trailing
 # arguments select individual case IDs; with none, all 517 cases run. Pass
 # --tls before case IDs to run the same gate over native TLS 1.3 WSS.

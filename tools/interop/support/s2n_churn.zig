@@ -1,5 +1,6 @@
 const std = @import("std");
 const netz = @import("netz");
+const PhasedFault = @import("phased_datagram_fault.zig").State;
 
 pub const stream_count: usize = 32;
 pub const bytes_per_stream: usize = 16 * 1024;
@@ -7,7 +8,9 @@ pub const prefix_bytes: usize = 256;
 pub const reset_code_base: u64 = 0x4000;
 pub const start = "NZS2NCH1";
 pub const ready = "NZS2NRD1";
-pub const done = "NZS2NDN1";
+pub const reset_sent = "NZS2NRT1";
+pub const resets_observed = "NZS2NRO1";
+pub const fin_sent = "NZS2NFN1";
 pub const ack = "NZS2NAK1";
 const result_len = 48;
 const max_chunk_len = 1024;
@@ -52,6 +55,8 @@ pub const Result = struct {
     }
 };
 
+pub const Role = enum { client, server };
+
 pub fn expectedResult() Result {
     var result: Result = .{
         .streams = stream_count,
@@ -77,21 +82,34 @@ pub fn expectedResult() Result {
     return result;
 }
 
-pub fn runSender(connection: *netz.quic.one_rtt.Connection) !Result {
+pub fn runSender(
+    connection: *netz.quic.one_rtt.Connection,
+    role: Role,
+    fault: ?*PhasedFault,
+) !Result {
     const deadline = std.Io.Clock.Timestamp.fromNow(connection.endpoint.io, .{
         .clock = .awake,
         .raw = .fromSeconds(30),
     });
     var control_offset: u64 = 0;
-    const control_id = try connection.openStreamWithDeadline(deadline);
-    if (control_id != 0) return error.UnexpectedStreamId;
-    try sendExact(connection, control_id, &control_offset, start, false, deadline);
+    if (role == .client) {
+        const control_id = try connection.openStreamWithDeadline(deadline);
+        if (control_id != 0) return error.UnexpectedStreamId;
+        try sendExact(connection, control_id, &control_offset, start, false, deadline);
+    } else {
+        var marker: [start.len]u8 = undefined;
+        try receiveExact(connection, 0, &marker, false, deadline);
+        if (!std.mem.eql(u8, &marker, start)) return error.InvalidChurnControl;
+    }
 
     var ids: [stream_count]u64 = undefined;
     var prefix: [prefix_bytes]u8 = undefined;
     for (&ids, 0..) |*stream_id, index| {
         stream_id.* = try connection.openStreamWithDeadline(deadline);
-        const expected_id: u64 = 4 + index * 4;
+        const expected_id: u64 = switch (role) {
+            .client => 4 + index * 4,
+            .server => 1 + index * 4,
+        };
         if (stream_id.* != expected_id) return error.UnexpectedStreamId;
         fillPayload(&prefix, index, 0);
         var offset: u64 = 0;
@@ -102,16 +120,34 @@ pub fn runSender(connection: *netz.quic.one_rtt.Connection) !Result {
     try receiveExact(connection, 0, &marker, false, deadline);
     if (!std.mem.eql(u8, &marker, ready)) return error.InvalidChurnControl;
 
+    const reset_fault_before = if (fault) |state| try state.arm() else 0;
+    for (ids, 0..) |stream_id, index| {
+        if (!shouldReset(index)) continue;
+        try connection.resetStreamWithDeadline(
+            stream_id,
+            reset_code_base + index,
+            deadline,
+        );
+    }
+    try sendExact(
+        connection,
+        0,
+        &control_offset,
+        reset_sent,
+        false,
+        deadline,
+    );
+    var observed: [resets_observed.len]u8 = undefined;
+    try receiveExact(connection, 0, &observed, false, deadline);
+    if (!std.mem.eql(u8, &observed, resets_observed)) {
+        return error.InvalidChurnControl;
+    }
+    if (fault) |state| _ = try state.completePhase(reset_fault_before);
+
+    const fin_fault_before = if (fault) |state| try state.arm() else 0;
     var payload: [max_chunk_len]u8 = undefined;
     for (ids, 0..) |stream_id, index| {
-        if (shouldReset(index)) {
-            try connection.resetStreamWithDeadline(
-                stream_id,
-                reset_code_base + index,
-                deadline,
-            );
-            continue;
-        }
+        if (shouldReset(index)) continue;
         var offset: usize = prefix_bytes;
         while (offset < bytes_per_stream) {
             const application_offset: usize = @intCast(offset);
@@ -132,11 +168,12 @@ pub fn runSender(connection: *netz.quic.one_rtt.Connection) !Result {
         }
     }
 
-    try sendExact(connection, 0, &control_offset, done, false, deadline);
+    try sendExact(connection, 0, &control_offset, fin_sent, false, deadline);
     var encoded: [result_len]u8 = undefined;
     try receiveExact(connection, 0, &encoded, false, deadline);
     const result = try Result.decode(&encoded);
     if (!std.meta.eql(result, expectedResult())) return error.InvalidChurnResult;
+    if (fault) |state| _ = try state.completePhase(fin_fault_before);
     try sendExact(connection, 0, &control_offset, ack, true, deadline);
     return result;
 }

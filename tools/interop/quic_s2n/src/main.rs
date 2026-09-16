@@ -20,6 +20,8 @@ enum Scenario {
     ReorderedReset,
     ReorderedStop,
     MixedChurn,
+    MixedChurnLoss,
+    MixedChurnReorder,
     Flow,
     Retry,
 }
@@ -64,7 +66,7 @@ async fn main() -> Result<()> {
             run_client(port, &ca, scenario).await
         }
         _ => bail!(
-            "usage: netz-quic-s2n-interop server PORT CERT KEY [echo|reset|stop|flow|retry|mixed-churn] | client PORT CA [echo|reset|stop|lossy-reset|lossy-stop|reordered-reset|reordered-stop|mixed-churn]"
+            "usage: netz-quic-s2n-interop server PORT CERT KEY [echo|reset|stop|flow|retry|mixed-churn|mixed-churn-loss|mixed-churn-reorder] | client PORT CA [echo|reset|stop|lossy-reset|lossy-stop|reordered-reset|reordered-stop|mixed-churn|mixed-churn-loss|mixed-churn-reorder]"
         ),
     }
 }
@@ -79,6 +81,8 @@ fn parse_scenario(value: Option<String>) -> Result<Scenario> {
         "reordered-reset" => Ok(Scenario::ReorderedReset),
         "reordered-stop" => Ok(Scenario::ReorderedStop),
         "mixed-churn" => Ok(Scenario::MixedChurn),
+        "mixed-churn-loss" => Ok(Scenario::MixedChurnLoss),
+        "mixed-churn-reorder" => Ok(Scenario::MixedChurnReorder),
         "flow" => Ok(Scenario::Flow),
         "retry" => Ok(Scenario::Retry),
         value => bail!("unknown scenario: {value}"),
@@ -143,7 +147,10 @@ async fn run_server(
         Scenario::ReorderedReset => serve_peer_reset_reordered(&mut connection).await?,
         Scenario::ReorderedStop => serve_peer_stop_reordered(&mut connection).await?,
         Scenario::MixedChurn => {
-            churn::run_receiver(&mut connection).await?;
+            churn::run_receiver(&mut connection, churn::ReceiverRole::Server).await?;
+        }
+        Scenario::MixedChurnLoss | Scenario::MixedChurnReorder => {
+            churn::run_receiver(&mut connection, churn::ReceiverRole::Server).await?;
         }
         Scenario::LossyReset | Scenario::LossyStop => unreachable!(),
         Scenario::Flow => serve_flow(&mut connection).await?,
@@ -173,6 +180,12 @@ async fn run_server(
         ),
         Scenario::MixedChurn => println!(
             "s2n-quic server interoperated with netz: version=1 alpn=hq-interop mixed_churn=true streams=32 fin=16 reset=16 bytes=266240 checksum=33945600 reset_mask=0x00000000aaaaaaaa reset_code_sum=262400 reset_prefix_bytes=256 terminal_states_verified=true peer_close=57"
+        ),
+        Scenario::MixedChurnLoss => println!(
+            "s2n-quic server interoperated with netz: version=1 alpn=hq-interop mixed_churn=true fault=loss fault_scope=netz-client-outbound streams=32 fin=16 reset=16 bytes=266240 checksum=33945600 reset_mask=0x00000000aaaaaaaa reset_code_sum=262400 reset_prefix_bytes=256 terminal_states_verified=true reset_faults=1 fin_faults=1 peer_close=57"
+        ),
+        Scenario::MixedChurnReorder => println!(
+            "s2n-quic server interoperated with netz: version=1 alpn=hq-interop mixed_churn=true fault=reorder fault_scope=netz-client-outbound streams=32 fin=16 reset=16 bytes=266240 checksum=33945600 reset_mask=0x00000000aaaaaaaa reset_code_sum=262400 reset_prefix_bytes=256 terminal_states_verified=true reset_faults=1 fin_faults=1 peer_close=57"
         ),
         Scenario::LossyReset | Scenario::LossyStop => unreachable!(),
         Scenario::Flow => println!(
@@ -227,6 +240,9 @@ async fn run_client(port: u16, ca: &str, scenario: Scenario) -> Result<()> {
         Scenario::MixedChurn => {
             churn::run_sender(&mut connection).await?;
         }
+        Scenario::MixedChurnLoss | Scenario::MixedChurnReorder => {
+            churn::run_receiver(&mut connection, churn::ReceiverRole::Client).await?;
+        }
         Scenario::Flow => unreachable!(),
         Scenario::Retry => unreachable!(),
     }
@@ -269,6 +285,12 @@ async fn run_client(port: u16, ca: &str, scenario: Scenario) -> Result<()> {
         Scenario::MixedChurn => println!(
             "s2n-quic client interoperated with netz: verified=true version=1 alpn=hq-interop mixed_churn=true streams=32 fin=16 reset=16 bytes=266240 checksum=33945600 reset_mask=0x00000000aaaaaaaa reset_code_sum=262400 reset_prefix_bytes=256 terminal_states_verified=true peer_close=58"
         ),
+        Scenario::MixedChurnLoss => println!(
+            "s2n-quic client interoperated with netz: verified=true version=1 alpn=hq-interop mixed_churn=true fault=loss fault_scope=netz-server-outbound streams=32 fin=16 reset=16 bytes=266240 checksum=33945600 reset_mask=0x00000000aaaaaaaa reset_code_sum=262400 reset_prefix_bytes=256 terminal_states_verified=true reset_faults=1 fin_faults=1 peer_close=58"
+        ),
+        Scenario::MixedChurnReorder => println!(
+            "s2n-quic client interoperated with netz: verified=true version=1 alpn=hq-interop mixed_churn=true fault=reorder fault_scope=netz-server-outbound streams=32 fin=16 reset=16 bytes=266240 checksum=33945600 reset_mask=0x00000000aaaaaaaa reset_code_sum=262400 reset_prefix_bytes=256 terminal_states_verified=true reset_faults=1 fin_faults=1 peer_close=58"
+        ),
         Scenario::Flow => unreachable!(),
         Scenario::Retry => unreachable!(),
     }
@@ -277,7 +299,10 @@ async fn run_client(port: u16, ca: &str, scenario: Scenario) -> Result<()> {
 
 fn scenario_limits(scenario: Scenario) -> Result<s2n_quic::provider::limits::Limits> {
     let limits = s2n_quic::provider::limits::Limits::new();
-    if scenario == Scenario::MixedChurn {
+    if matches!(
+        scenario,
+        Scenario::MixedChurn | Scenario::MixedChurnLoss | Scenario::MixedChurnReorder
+    ) {
         return Ok(limits
             .with_data_window(2 * 1024 * 1024)?
             .with_bidirectional_local_data_window(64 * 1024)?

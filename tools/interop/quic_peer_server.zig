@@ -3,6 +3,8 @@
 const std = @import("std");
 const netz = @import("netz");
 const OneShotReorder = @import("support/one_shot_reorder.zig").State;
+const PhasedFault = @import("support/phased_datagram_fault.zig").State;
+const s2n_churn = @import("support/s2n_churn.zig");
 const s2n_churn_receiver = @import("support/s2n_churn_receiver.zig");
 
 const payloads = [_][]const u8{ "hello", "world" };
@@ -45,6 +47,8 @@ const Mode = enum {
     s2n_reset_reorder,
     s2n_stop_reorder,
     s2n_mixed_churn,
+    s2n_mixed_churn_loss,
+    s2n_mixed_churn_reorder,
 };
 
 const CancellationLoss = struct {
@@ -246,6 +250,8 @@ pub fn main(init: std.process.Init) !void {
 
     var cancellation_loss = CancellationLoss{};
     var cancellation_reorder = OneShotReorder{};
+    var churn_loss = PhasedFault.init(.loss);
+    var churn_reorder = PhasedFault.init(.reorder);
     var endpoint_limits: netz.quic.runtime.Limits = .{
         .max_datagram_size = 8192,
     };
@@ -260,6 +266,16 @@ pub fn main(init: std.process.Init) !void {
         endpoint_limits.send_interceptor = .{
             .context = &cancellation_reorder,
             .should_hold = OneShotReorder.shouldHold,
+        };
+    } else if (mode == .s2n_mixed_churn_loss) {
+        endpoint_limits.send_interceptor = .{
+            .context = &churn_loss,
+            .should_drop = PhasedFault.shouldDrop,
+        };
+    } else if (mode == .s2n_mixed_churn_reorder) {
+        endpoint_limits.send_interceptor = .{
+            .context = &churn_reorder,
+            .should_hold = PhasedFault.shouldHold,
         };
     }
     var endpoint = try netz.quic.runtime.Endpoint.bind(
@@ -284,6 +300,8 @@ pub fn main(init: std.process.Init) !void {
             .s2n_reset_reorder,
             .s2n_stop_reorder,
             .s2n_mixed_churn,
+            .s2n_mixed_churn_loss,
+            .s2n_mixed_churn_reorder,
             => "s2n-quic-tokio",
             else => "quic-go-netpoll",
         }},
@@ -338,7 +356,9 @@ pub fn main(init: std.process.Init) !void {
             .max_receive_window = 8 * 1024,
             .stream_receive_window = 2 * 1024,
             .max_stream_receive_window = 2 * 1024,
-        } else if (mode == .s2n_mixed_churn) .{
+        } else if (mode == .s2n_mixed_churn or
+            mode == .s2n_mixed_churn_loss or
+            mode == .s2n_mixed_churn_reorder) .{
             .max_datagram_size = 8192,
             // ReleaseFast s2n-quic can coalesce the concurrent churn into
             // denser packets than the ordinary fixture's 16-frame budget.
@@ -619,6 +639,20 @@ pub fn main(init: std.process.Init) !void {
         .s2n_mixed_churn => {
             _ = try s2n_churn_receiver.run(&established.connection);
         },
+        .s2n_mixed_churn_loss => {
+            _ = try s2n_churn.runSender(
+                &established.connection,
+                .server,
+                &churn_loss,
+            );
+        },
+        .s2n_mixed_churn_reorder => {
+            _ = try s2n_churn.runSender(
+                &established.connection,
+                .server,
+                &churn_reorder,
+            );
+        },
         .flow => {
             try receiveExpectedStream(
                 &established.connection,
@@ -681,7 +715,8 @@ pub fn main(init: std.process.Init) !void {
         mode == .s2n_reset or mode == .s2n_stop or
         mode == .s2n_reset_loss or mode == .s2n_stop_loss or
         mode == .s2n_reset_reorder or mode == .s2n_stop_reorder or
-        mode == .s2n_mixed_churn)
+        mode == .s2n_mixed_churn or mode == .s2n_mixed_churn_loss or
+        mode == .s2n_mixed_churn_reorder)
     {
         // Give the peer time to consume both FIN-terminated echoes. The close
         // is intentionally delayed just like the ordinary fixture close so
@@ -741,6 +776,24 @@ pub fn main(init: std.process.Init) !void {
                 "netz QUIC server interoperated with s2n-quic: alpn=hq-interop mixed_churn=true streams=32 fin=16 reset=16 bytes=266240 checksum=33945600 reset_mask=0x00000000aaaaaaaa reset_code_sum=262400 reset_prefix_bytes=256 terminal_states_verified=true peer_close=58\n",
                 .{},
             ),
+            .s2n_mixed_churn_loss => {
+                if (churn_loss.injectedCount() != 2) {
+                    return error.UnexpectedChurnFaultCount;
+                }
+                std.debug.print(
+                    "netz QUIC server interoperated with s2n-quic: alpn=hq-interop mixed_churn=true fault=loss fault_scope=netz-server-outbound streams=32 fin=16 reset=16 bytes=266240 checksum=33945600 reset_mask=0x00000000aaaaaaaa reset_code_sum=262400 reset_prefix_bytes=256 terminal_states_verified=true reset_faults=1 fin_faults=1 dropped_datagrams=2 peer_close=58\n",
+                    .{},
+                );
+            },
+            .s2n_mixed_churn_reorder => {
+                if (churn_reorder.injectedCount() != 2) {
+                    return error.UnexpectedChurnFaultCount;
+                }
+                std.debug.print(
+                    "netz QUIC server interoperated with s2n-quic: alpn=hq-interop mixed_churn=true fault=reorder fault_scope=netz-server-outbound streams=32 fin=16 reset=16 bytes=266240 checksum=33945600 reset_mask=0x00000000aaaaaaaa reset_code_sum=262400 reset_prefix_bytes=256 terminal_states_verified=true reset_faults=1 fin_faults=1 reordered_pairs=2 peer_close=58\n",
+                    .{},
+                );
+            },
             .peer_close => std.debug.print(
                 "netz QUIC close server interoperated with quic-go: alpn=hq-interop peer_close=58\n",
                 .{},
@@ -798,6 +851,8 @@ pub fn main(init: std.process.Init) !void {
         .s2n_reset_reorder => unreachable,
         .s2n_stop_reorder => unreachable,
         .s2n_mixed_churn => unreachable,
+        .s2n_mixed_churn_loss => unreachable,
+        .s2n_mixed_churn_reorder => unreachable,
         .migration => unreachable,
         .migration_loss => unreachable,
         .nat_rebinding => unreachable,

@@ -7,6 +7,7 @@ const std = @import("std");
 const netz = @import("netz");
 const exact_certificate = @import("exact_certificate_verifier.zig");
 const OneShotReorder = @import("support/one_shot_reorder.zig").State;
+const PhasedFault = @import("support/phased_datagram_fault.zig").State;
 const s2n_churn = @import("support/s2n_churn.zig");
 
 const payloads = [_][]const u8{ "hello", "world" };
@@ -23,6 +24,8 @@ const Scenario = enum {
     reset_reorder,
     stop_reorder,
     mixed_churn,
+    mixed_churn_loss,
+    mixed_churn_reorder,
 };
 const flow_control_payload = [_]u8{'f'} ** 12_288;
 
@@ -62,6 +65,10 @@ pub fn main(init: std.process.Init) !void {
                 .stop_reorder
             else if (std.mem.eql(u8, value, "mixed-churn"))
                 .mixed_churn
+            else if (std.mem.eql(u8, value, "mixed-churn-loss"))
+                .mixed_churn_loss
+            else if (std.mem.eql(u8, value, "mixed-churn-reorder"))
+                .mixed_churn_reorder
             else
                 std.meta.stringToEnum(Scenario, value) orelse
                     return error.InvalidArgument;
@@ -116,6 +123,8 @@ pub fn main(init: std.process.Init) !void {
     } else bundle_verifier.clientVerifier();
 
     var cancellation_reorder = OneShotReorder{};
+    var churn_loss = PhasedFault.init(.loss);
+    var churn_reorder = PhasedFault.init(.reorder);
     var endpoint_limits: netz.quic.runtime.Limits = .{
         .max_datagram_size = 8192,
     };
@@ -123,6 +132,16 @@ pub fn main(init: std.process.Init) !void {
         endpoint_limits.send_interceptor = .{
             .context = &cancellation_reorder,
             .should_hold = OneShotReorder.shouldHold,
+        };
+    } else if (scenario == .mixed_churn_loss) {
+        endpoint_limits.send_interceptor = .{
+            .context = &churn_loss,
+            .should_drop = PhasedFault.shouldDrop,
+        };
+    } else if (scenario == .mixed_churn_reorder) {
+        endpoint_limits.send_interceptor = .{
+            .context = &churn_reorder,
+            .should_hold = PhasedFault.shouldHold,
         };
     }
     var endpoint = try netz.quic.runtime.Endpoint.bind(
@@ -167,7 +186,9 @@ pub fn main(init: std.process.Init) !void {
                 .max_datagram_size = 8192,
                 // The 32-stream churn can receive dense ACK/STREAM batches
                 // from s2n-quic; keep the ordinary fixture limit elsewhere.
-                .max_frames_per_packet = if (scenario == .mixed_churn)
+                .max_frames_per_packet = if (scenario == .mixed_churn or
+                    scenario == .mixed_churn_loss or
+                    scenario == .mixed_churn_reorder)
                     256
                 else
                     16,
@@ -269,7 +290,21 @@ pub fn main(init: std.process.Init) !void {
             scenario,
             &cancellation_reorder,
         ),
-        .mixed_churn => _ = try s2n_churn.runSender(&established.connection),
+        .mixed_churn => _ = try s2n_churn.runSender(
+            &established.connection,
+            .client,
+            null,
+        ),
+        .mixed_churn_loss => _ = try s2n_churn.runSender(
+            &established.connection,
+            .client,
+            &churn_loss,
+        ),
+        .mixed_churn_reorder => _ = try s2n_churn.runSender(
+            &established.connection,
+            .client,
+            &churn_reorder,
+        ),
         .flow => try exerciseFlowControl(
             &established.connection,
             allocator,
@@ -348,6 +383,24 @@ pub fn main(init: std.process.Init) !void {
             "netz QUIC client interoperated with s2n-quic: verified=true version=1 alpn=hq-interop mixed_churn=true streams=32 fin=16 reset=16 bytes=266240 checksum=33945600 reset_mask=0x00000000aaaaaaaa reset_code_sum=262400 reset_prefix_bytes=256 terminal_states_verified=true peer_close=57\n",
             .{},
         ),
+        .mixed_churn_loss => {
+            if (churn_loss.injectedCount() != 2) {
+                return error.UnexpectedChurnFaultCount;
+            }
+            std.debug.print(
+                "netz QUIC client interoperated with s2n-quic: verified=true version=1 alpn=hq-interop mixed_churn=true fault=loss fault_scope=netz-client-outbound streams=32 fin=16 reset=16 bytes=266240 checksum=33945600 reset_mask=0x00000000aaaaaaaa reset_code_sum=262400 reset_prefix_bytes=256 terminal_states_verified=true reset_faults=1 fin_faults=1 dropped_datagrams=2 peer_close=57\n",
+                .{},
+            );
+        },
+        .mixed_churn_reorder => {
+            if (churn_reorder.injectedCount() != 2) {
+                return error.UnexpectedChurnFaultCount;
+            }
+            std.debug.print(
+                "netz QUIC client interoperated with s2n-quic: verified=true version=1 alpn=hq-interop mixed_churn=true fault=reorder fault_scope=netz-client-outbound streams=32 fin=16 reset=16 bytes=266240 checksum=33945600 reset_mask=0x00000000aaaaaaaa reset_code_sum=262400 reset_prefix_bytes=256 terminal_states_verified=true reset_faults=1 fin_faults=1 reordered_pairs=2 peer_close=57\n",
+                .{},
+            );
+        },
         .echo => unreachable,
     }
 }
@@ -421,7 +474,14 @@ fn exerciseCancellation(
     const target_payload = switch (scenario) {
         .reset => "reset",
         .stop => "stop",
-        .echo, .flow, .reset_reorder, .stop_reorder, .mixed_churn => unreachable,
+        .echo,
+        .flow,
+        .reset_reorder,
+        .stop_reorder,
+        .mixed_churn,
+        .mixed_churn_loss,
+        .mixed_churn_reorder,
+        => unreachable,
     };
     const target_stream_id = try connection.openStream();
     if (target_stream_id != 0) return error.UnexpectedStreamId;
@@ -461,7 +521,14 @@ fn exerciseCancellation(
                 return error.UnexpectedStopSendingError;
             }
         },
-        .echo, .flow, .reset_reorder, .stop_reorder, .mixed_churn => unreachable,
+        .echo,
+        .flow,
+        .reset_reorder,
+        .stop_reorder,
+        .mixed_churn,
+        .mixed_churn_loss,
+        .mixed_churn_reorder,
+        => unreachable,
     }
     try receiveExpectedStream(
         connection,

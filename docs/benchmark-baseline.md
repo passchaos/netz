@@ -3954,9 +3954,17 @@ must report 266,240 accepted bytes, checksum 33,945,600, reset mask
 close. The protocol implementations are isolated in
 `tools/interop/support/s2n_churn*.zig` and
 `tools/interop/quic_s2n/src/churn.rs`, keeping the peer entry points focused on
-transport setup and scenario routing. This is reliability coverage rather than
-a throughput comparison; deterministic loss/reordering remains in the separate
-single-cancellation and quic-go/WebTransport churn gates.
+transport setup and scenario routing. The churn protocol now separates RESET
+and FIN terminal work with authenticated control markers. Four additional
+connections make netz the outbound sender as client and server, under loss and
+real pair reordering. A reusable phased interceptor arms immediately before
+each terminal phase and requires exactly one dropped datagram or completed
+hold/flush pair in each phase. The receiver acknowledges all exact resets
+before the second arm, then verifies every FIN payload before returning the
+same aggregate result. This proves recovery without depending on encrypted
+packet parsing; it covers netz outbound faults only and does not claim injected
+s2n-quic outbound loss. This remains reliability coverage rather than a
+throughput comparison.
 
 The next zio receive-path step gives direct endpoint-backed handshake sources
 one reusable datagram allocation. Each returned datagram keeps a scoped release

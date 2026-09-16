@@ -42,29 +42,50 @@ pub fn run(connection: *netz.quic.one_rtt.Connection) !churn.Result {
         deadline,
     );
     var buffer: [max_chunk_len]u8 = undefined;
+    var reset_marker: [churn.reset_sent.len]u8 = undefined;
+    try churn.receiveExact(connection, 0, &reset_marker, false, deadline);
+    if (!std.mem.eql(u8, &reset_marker, churn.reset_sent)) {
+        return error.InvalidChurnControl;
+    }
     for (0..churn.stream_count) |index| {
+        if (!churn.shouldReset(index)) continue;
         const stream_id = peerDataStreamId(index);
-        if (churn.shouldReset(index)) {
-            const event = try connection.receiveStreamIdWithDeadline(
-                stream_id,
-                &buffer,
-                deadline,
-            );
-            const reset = switch (event) {
-                .data => return error.ExpectedReset,
-                .reset => |value| value,
-            };
-            if (reset.stream_id != stream_id or
-                reset.application_error_code != churn.reset_code_base + index or
-                reset.final_size != churn.prefix_bytes)
-            {
-                return error.InvalidChurnReset;
-            }
-            result.resets += 1;
-            result.reset_mask |= @as(u64, 1) << @intCast(index);
-            result.reset_code_sum += reset.application_error_code;
-            continue;
+        const event = try connection.receiveStreamIdWithDeadline(
+            stream_id,
+            &buffer,
+            deadline,
+        );
+        const reset = switch (event) {
+            .data => return error.ExpectedReset,
+            .reset => |value| value,
+        };
+        if (reset.stream_id != stream_id or
+            reset.application_error_code != churn.reset_code_base + index or
+            reset.final_size != churn.prefix_bytes)
+        {
+            return error.InvalidChurnReset;
         }
+        result.resets += 1;
+        result.reset_mask |= @as(u64, 1) << @intCast(index);
+        result.reset_code_sum += reset.application_error_code;
+    }
+    try churn.sendExact(
+        connection,
+        0,
+        &control_offset,
+        churn.resets_observed,
+        false,
+        deadline,
+    );
+
+    var fin_marker: [churn.fin_sent.len]u8 = undefined;
+    try churn.receiveExact(connection, 0, &fin_marker, false, deadline);
+    if (!std.mem.eql(u8, &fin_marker, churn.fin_sent)) {
+        return error.InvalidChurnControl;
+    }
+    for (0..churn.stream_count) |index| {
+        if (churn.shouldReset(index)) continue;
+        const stream_id = peerDataStreamId(index);
 
         var offset: usize = churn.prefix_bytes;
         while (true) {
@@ -99,11 +120,6 @@ pub fn run(connection: *netz.quic.one_rtt.Connection) !churn.Result {
         result.fins += 1;
     }
 
-    var done_marker: [churn.done.len]u8 = undefined;
-    try churn.receiveExact(connection, 0, &done_marker, false, deadline);
-    if (!std.mem.eql(u8, &done_marker, churn.done)) {
-        return error.InvalidChurnControl;
-    }
     if (!std.meta.eql(result, churn.expectedResult())) {
         return error.InvalidChurnResult;
     }

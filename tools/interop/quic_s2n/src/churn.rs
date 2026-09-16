@@ -11,7 +11,9 @@ pub const RESET_CODE_BASE: u64 = 0x4000;
 const TIMEOUT: Duration = Duration::from_secs(30);
 const START: &[u8] = b"NZS2NCH1";
 const READY: &[u8] = b"NZS2NRD1";
-const DONE: &[u8] = b"NZS2NDN1";
+const RESET_SENT: &[u8] = b"NZS2NRT1";
+const RESETS_OBSERVED: &[u8] = b"NZS2NRO1";
+const FIN_SENT: &[u8] = b"NZS2NFN1";
 const ACK: &[u8] = b"NZS2NAK1";
 const RESULT_LEN: usize = 48;
 const MAX_CHUNK_LEN: usize = 1024;
@@ -25,6 +27,12 @@ pub struct ChurnResult {
     pub checksum: u64,
     pub reset_mask: u64,
     pub reset_code_sum: u64,
+}
+
+#[derive(Clone, Copy, Eq, PartialEq)]
+pub enum ReceiverRole {
+    Client,
+    Server,
 }
 
 impl ChurnResult {
@@ -71,8 +79,22 @@ pub async fn run_sender(connection: &mut Connection) -> Result<ChurnResult> {
     expect_marker(&mut control, READY, false, "churn ready").await?;
 
     for (index, stream) in streams.iter_mut().enumerate() {
+        if !should_reset(index) {
+            continue;
+        }
+        stream.reset(application::Error::new(RESET_CODE_BASE + index as u64)?)?;
+    }
+    send(&mut control, RESET_SENT, "churn reset marker").await?;
+    expect_marker(
+        &mut control,
+        RESETS_OBSERVED,
+        false,
+        "churn resets observed",
+    )
+    .await?;
+
+    for (index, stream) in streams.iter_mut().enumerate() {
         if should_reset(index) {
-            stream.reset(application::Error::new(RESET_CODE_BASE + index as u64)?)?;
             continue;
         }
         let mut offset = PREFIX_BYTES;
@@ -85,7 +107,7 @@ pub async fn run_sender(connection: &mut Connection) -> Result<ChurnResult> {
         stream.finish()?;
     }
 
-    send(&mut control, DONE, "churn done").await?;
+    send(&mut control, FIN_SENT, "churn FIN marker").await?;
     let encoded = receive_exact(&mut control, RESULT_LEN, false, "churn result").await?;
     let encoded: [u8; RESULT_LEN] = encoded.try_into().expect("fixed result length");
     let result = ChurnResult::decode(&encoded)?;
@@ -95,9 +117,19 @@ pub async fn run_sender(connection: &mut Connection) -> Result<ChurnResult> {
     Ok(result)
 }
 
-pub async fn run_receiver(connection: &mut Connection) -> Result<ChurnResult> {
-    let mut control = accept_bidi(connection, 0).await?;
-    expect_marker(&mut control, START, false, "churn start").await?;
+pub async fn run_receiver(connection: &mut Connection, role: ReceiverRole) -> Result<ChurnResult> {
+    let mut control = match role {
+        ReceiverRole::Server => {
+            let mut stream = accept_bidi(connection, 0).await?;
+            expect_marker(&mut stream, START, false, "churn start").await?;
+            stream
+        }
+        ReceiverRole::Client => {
+            let mut stream = open_bidi(connection, 0).await?;
+            send(&mut stream, START, "churn start").await?;
+            stream
+        }
+    };
 
     let mut streams = Vec::with_capacity(STREAMS);
     let mut result = ChurnResult {
@@ -110,7 +142,10 @@ pub async fn run_receiver(connection: &mut Connection) -> Result<ChurnResult> {
         reset_code_sum: 0,
     };
     for index in 0..STREAMS {
-        let expected_id = 4 + index as u64 * 4;
+        let expected_id = match role {
+            ReceiverRole::Server => 4 + index as u64 * 4,
+            ReceiverRole::Client => 1 + index as u64 * 4,
+        };
         let mut stream = accept_bidi(connection, expected_id).await?;
         let prefix = receive_exact(&mut stream, PREFIX_BYTES, false, "churn prefix").await?;
         result.received_bytes += prefix.len() as u64;
@@ -121,16 +156,25 @@ pub async fn run_receiver(connection: &mut Connection) -> Result<ChurnResult> {
     }
     send(&mut control, READY, "churn ready").await?;
 
+    expect_marker(&mut control, RESET_SENT, false, "churn reset marker").await?;
+    for (index, stream) in streams.iter_mut().enumerate() {
+        if !should_reset(index) {
+            continue;
+        }
+        let reset = receive_reset(stream, "churn reset").await?;
+        ensure!(
+            reset == RESET_CODE_BASE + index as u64,
+            "unexpected churn reset code"
+        );
+        result.resets += 1;
+        result.reset_mask |= 1u64 << index;
+        result.reset_code_sum += reset;
+    }
+    send(&mut control, RESETS_OBSERVED, "churn resets observed").await?;
+
+    expect_marker(&mut control, FIN_SENT, false, "churn FIN marker").await?;
     for (index, stream) in streams.iter_mut().enumerate() {
         if should_reset(index) {
-            let reset = receive_reset(stream, "churn reset").await?;
-            ensure!(
-                reset == RESET_CODE_BASE + index as u64,
-                "unexpected churn reset code"
-            );
-            result.resets += 1;
-            result.reset_mask |= 1u64 << index;
-            result.reset_code_sum += reset;
             continue;
         }
 
@@ -158,7 +202,6 @@ pub async fn run_receiver(connection: &mut Connection) -> Result<ChurnResult> {
         result.fins += 1;
     }
 
-    expect_marker(&mut control, DONE, false, "churn done").await?;
     ensure!(result == expected_result(), "unexpected churn result");
     send(&mut control, &result.encode(), "churn result").await?;
     expect_marker(&mut control, ACK, true, "churn ack").await?;
