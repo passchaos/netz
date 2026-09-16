@@ -10,6 +10,7 @@ use quinn::{
 use std::{net::SocketAddr, path::Path, sync::Arc, time::Duration};
 use tokio::time::{sleep, timeout};
 
+mod bench;
 mod datagram;
 
 const ALPN: &[u8] = b"hq-interop";
@@ -19,6 +20,31 @@ const TIMEOUT: Duration = Duration::from_secs(20);
 async fn main() -> Result<()> {
     let mut args = std::env::args().skip(1);
     match args.next().as_deref() {
+        Some("bench-server") => {
+            let port = parse_port(args.next())?;
+            let cert = args.next().context("benchmark server requires CERT")?;
+            let key = args.next().context("benchmark server requires KEY")?;
+            let role_pair = args.next().context("benchmark server requires ROLE_PAIR")?;
+            ensure!(
+                role_pair == "netz-client+quinn-server"
+                    || role_pair == "quinn-client+quinn-server",
+                "invalid benchmark role pair"
+            );
+            let config = bench::Config::parse(args)?;
+            run_bench_server(port, &cert, &key, &role_pair, config).await
+        }
+        Some("bench-client") => {
+            let port = parse_port(args.next())?;
+            let ca = args.next().context("benchmark client requires CA")?;
+            let role_pair = args.next().context("benchmark client requires ROLE_PAIR")?;
+            ensure!(
+                role_pair == "quinn-client+quinn-server"
+                    || role_pair == "quinn-client+netz-server",
+                "invalid benchmark role pair"
+            );
+            let config = bench::Config::parse(args)?;
+            run_bench_client(port, &ca, &role_pair, config).await
+        }
         Some("server") => {
             let port = parse_port(args.next())?;
             let cert = args.next().context("server requires CERT")?;
@@ -32,7 +58,7 @@ async fn main() -> Result<()> {
             ensure!(args.next().is_none(), "unexpected client argument");
             run_client(port, &ca).await
         }
-        _ => bail!("usage: netz-quic-quinn-interop server PORT CERT KEY | client PORT CA"),
+        _ => bail!("usage: netz-quic-quinn-interop server PORT CERT KEY | client PORT CA | bench-server PORT CERT KEY ROLE_PAIR [OPTIONS] | bench-client PORT CA ROLE_PAIR [OPTIONS]"),
     }
 }
 
@@ -42,16 +68,19 @@ fn parse_port(value: Option<String>) -> Result<u16> {
     Ok(port)
 }
 
-fn transport_config() -> Arc<TransportConfig> {
+fn transport_config_with_mtu(benchmark: bool) -> Arc<TransportConfig> {
     let mut config = TransportConfig::default();
     config
         .datagram_receive_buffer_size(Some(64 * 1024))
         .datagram_send_buffer_size(64 * 1024)
         .mtu_discovery_config(None);
+    if benchmark {
+        config.initial_mtu(1200).min_mtu(1200);
+    }
     Arc::new(config)
 }
 
-async fn run_server(port: u16, cert_path: &str, key_path: &str) -> Result<()> {
+fn server_config(cert_path: &str, key_path: &str, benchmark: bool) -> Result<ServerConfig> {
     let certificates = CertificateDer::pem_file_iter(Path::new(cert_path))
         .context("reading Quinn server certificate")?
         .collect::<std::result::Result<Vec<_>, _>>()
@@ -61,10 +90,31 @@ async fn run_server(port: u16, cert_path: &str, key_path: &str) -> Result<()> {
     let mut rustls_config = rustls::ServerConfig::builder()
         .with_no_client_auth()
         .with_single_cert(certificates, private_key)?;
-    rustls_config.alpn_protocols = vec![ALPN.to_vec()];
-    let mut server_config =
+    rustls_config.alpn_protocols = vec![if benchmark { bench::ALPN } else { ALPN }.to_vec()];
+    let mut config =
         ServerConfig::with_crypto(Arc::new(QuicServerConfig::try_from(rustls_config)?));
-    server_config.transport_config(transport_config());
+    config.transport_config(transport_config_with_mtu(benchmark));
+    Ok(config)
+}
+
+fn client_config(ca_path: &str, benchmark: bool) -> Result<ClientConfig> {
+    let mut roots = rustls::RootCertStore::empty();
+    for cert in
+        CertificateDer::pem_file_iter(Path::new(ca_path)).context("reading Quinn client CA")?
+    {
+        roots.add(cert.context("parsing Quinn client CA")?)?;
+    }
+    let mut rustls_config = rustls::ClientConfig::builder()
+        .with_root_certificates(roots)
+        .with_no_client_auth();
+    rustls_config.alpn_protocols = vec![if benchmark { bench::ALPN } else { ALPN }.to_vec()];
+    let mut config = ClientConfig::new(Arc::new(QuicClientConfig::try_from(rustls_config)?));
+    config.transport_config(transport_config_with_mtu(benchmark));
+    Ok(config)
+}
+
+async fn run_server(port: u16, cert_path: &str, key_path: &str) -> Result<()> {
+    let server_config = server_config(cert_path, key_path, false)?;
 
     let address: SocketAddr = format!("127.0.0.1:{port}").parse()?;
     let endpoint = Endpoint::server(server_config, address)?;
@@ -99,18 +149,7 @@ async fn run_client(port: u16, ca_path: &str) -> Result<()> {
     println!(
         "Quinn interop runtime: endpoint_role=client client_io=quinn-tokio-rustls server_io=zio-std-io"
     );
-    let mut roots = rustls::RootCertStore::empty();
-    for cert in
-        CertificateDer::pem_file_iter(Path::new(ca_path)).context("reading Quinn client CA")?
-    {
-        roots.add(cert.context("parsing Quinn client CA")?)?;
-    }
-    let mut rustls_config = rustls::ClientConfig::builder()
-        .with_root_certificates(roots)
-        .with_no_client_auth();
-    rustls_config.alpn_protocols = vec![ALPN.to_vec()];
-    let mut client_config = ClientConfig::new(Arc::new(QuicClientConfig::try_from(rustls_config)?));
-    client_config.transport_config(transport_config());
+    let client_config = client_config(ca_path, false)?;
 
     let endpoint = Endpoint::client("0.0.0.0:0".parse()?)?;
     endpoint.set_default_client_config(client_config);
@@ -143,6 +182,76 @@ async fn run_client(port: u16, ca_path: &str) -> Result<()> {
     Ok(())
 }
 
+async fn run_bench_server(
+    port: u16,
+    cert_path: &str,
+    key_path: &str,
+    role_pair: &str,
+    config: bench::Config,
+) -> Result<()> {
+    let address: SocketAddr = format!("127.0.0.1:{port}").parse()?;
+    let endpoint = Endpoint::server(server_config(cert_path, key_path, true)?, address)?;
+    println!("QUINN_DATAGRAM_BENCH_PORT={port}");
+    let incoming = timeout(config.timeout(), endpoint.accept())
+        .await
+        .context("benchmark connection timed out")?
+        .context("benchmark endpoint closed")?;
+    let connection = timeout(config.timeout(), incoming)
+        .await
+        .context("benchmark handshake timed out")??;
+    verify_bench_handshake(&connection)?;
+    let result = bench::run_server(&connection, config, role_pair).await?;
+    sleep(Duration::from_millis(100)).await;
+    connection.close(VarInt::from_u32(59), b"datagram benchmark complete");
+    timeout(config.timeout(), endpoint.wait_idle())
+        .await
+        .context("benchmark server close timed out")?;
+    ensure!(
+        result.received_bytes != 0 && result.checksum != 0,
+        "empty benchmark result"
+    );
+    Ok(())
+}
+
+async fn run_bench_client(
+    port: u16,
+    ca_path: &str,
+    role_pair: &str,
+    config: bench::Config,
+) -> Result<()> {
+    let endpoint = Endpoint::client("0.0.0.0:0".parse()?)?;
+    endpoint.set_default_client_config(client_config(ca_path, true)?);
+    let address: SocketAddr = format!("127.0.0.1:{port}").parse()?;
+    let connection = timeout(config.timeout(), endpoint.connect(address, "localhost")?)
+        .await
+        .context("benchmark handshake timed out")??;
+    verify_bench_handshake(&connection)?;
+    bench::print_config(
+        role_pair,
+        "client",
+        config,
+        connection
+            .max_datagram_size()
+            .context("DATAGRAM disabled")?,
+    );
+    bench::run_client(&connection, config, role_pair).await?;
+    let close = timeout(config.timeout(), connection.closed())
+        .await
+        .context("benchmark close timed out")?;
+    match close {
+        ConnectionError::ApplicationClosed(close) => {
+            ensure!(close.error_code.into_inner() == 59, "unexpected close code");
+            ensure!(
+                close.reason.as_ref() == b"datagram benchmark complete",
+                "unexpected close reason"
+            );
+        }
+        other => bail!("unexpected benchmark close: {other}"),
+    }
+    endpoint.wait_idle().await;
+    Ok(())
+}
+
 fn verify_handshake(connection: &Connection, server: bool) -> Result<()> {
     let data = connection
         .handshake_data()
@@ -156,5 +265,18 @@ fn verify_handshake(connection: &Connection, server: bool) -> Result<()> {
             "unexpected SNI"
         );
     }
+    Ok(())
+}
+
+fn verify_bench_handshake(connection: &Connection) -> Result<()> {
+    let data = connection
+        .handshake_data()
+        .context("missing benchmark handshake data")?
+        .downcast::<HandshakeData>()
+        .map_err(|_| anyhow::anyhow!("unexpected benchmark handshake data type"))?;
+    ensure!(
+        data.protocol.as_deref() == Some(bench::ALPN),
+        "unexpected benchmark ALPN"
+    );
     Ok(())
 }

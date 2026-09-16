@@ -209,6 +209,10 @@ pub fn build(b: *std.Build) void {
         "python3",
         "tools/interop/webtransport_churn_check_test.py",
     });
+    const quic_datagram_benchmark_checker_tests = b.addSystemCommand(&.{
+        "python3",
+        "tools/interop/quic_datagram_benchmark_check_test.py",
+    });
 
     const test_step = b.step("test", "Run all tests");
     test_step.dependOn(&run_lib_tests.step);
@@ -231,6 +235,7 @@ pub fn build(b: *std.Build) void {
     test_step.dependOn(&websocket_h3_benchmark_checker_tests.step);
     test_step.dependOn(&webtransport_benchmark_checker_tests.step);
     test_step.dependOn(&webtransport_churn_checker_tests.step);
+    test_step.dependOn(&quic_datagram_benchmark_checker_tests.step);
 
     const mqtt_mtls_server = b.addExecutable(.{
         .name = "netz-mqtt-mtls-server",
@@ -1075,6 +1080,43 @@ pub fn build(b: *std.Build) void {
         "Run verified native QUIC DATAGRAM interop with local Quinn",
     );
     quic_quinn_step.dependOn(&quic_quinn.step);
+
+    const quic_datagram_bench_client = b.addExecutable(.{
+        .name = "netz-quic-datagram-bench-client",
+        .root_module = b.createModule(.{
+            .root_source_file = b.path(
+                "tools/interop/quic_datagram_bench_client.zig",
+            ),
+            .target = target,
+            .optimize = optimize,
+            .imports = &.{.{ .name = "netz", .module = netz_mod }},
+        }),
+    });
+    const quic_datagram_bench_server = b.addExecutable(.{
+        .name = "netz-quic-datagram-bench-server",
+        .root_module = b.createModule(.{
+            .root_source_file = b.path(
+                "tools/interop/quic_datagram_bench_server.zig",
+            ),
+            .target = target,
+            .optimize = optimize,
+            .imports = &.{.{ .name = "netz", .module = netz_mod }},
+        }),
+    });
+    const quic_datagram_quinn_bench = b.addSystemCommand(&.{
+        "tools/interop/quic_datagram_quinn_benchmark.sh",
+    });
+    quic_datagram_quinn_bench.addArtifactArg(quic_datagram_bench_client);
+    quic_datagram_quinn_bench.addArtifactArg(quic_datagram_bench_server);
+    quic_datagram_quinn_bench.addArg(@tagName(optimize));
+    if (b.args) |args| quic_datagram_quinn_bench.addArgs(args);
+    const quic_datagram_quinn_bench_step = b.step(
+        "bench-quic-datagram-quinn",
+        "Compare zio-backed raw QUIC DATAGRAM latency with Quinn",
+    );
+    quic_datagram_quinn_bench_step.dependOn(
+        &quic_datagram_quinn_bench.step,
+    );
 
     const webtransport_wtransport_server = b.addExecutable(.{
         .name = "netz-webtransport-wtransport-server",

@@ -822,6 +822,37 @@ slower, so the medians are retained without an all-pairs claim. Direct batch
 and single-packet mixed-DATAGRAM tests verify that unreliable bytes are still
 absent from recovery. The benchmark accepts `--warmup=N` and `--iterations=N`
 so longer profiles do not require a source edit.
+### Raw QUIC DATAGRAM latency against Quinn
+
+The native Quinn RFC 9221 fixture now also supports a strict raw DATAGRAM
+ping-pong benchmark. It runs four role pairs so each client implementation is
+measured once against a fixed Quinn server and once against a fixed netz
+server. Every run uses a fresh certificate-verified QUIC v1 connection, a
+1200-byte steady-state MTU, disabled PMTU discovery, a 32-byte payload, one
+outstanding DATAGRAM, 200 warmups, and 5,000 measured post-handshake RTTs.
+The runner pins client/server to CPUs 0/1, hashes all three ReleaseFast
+binaries and the Quinn lockfile, requires five samples, and alternates A/B then
+B/A order. A strict Python verifier reconstructs all 5,200 payloads and their
+checksum, checks p50/p90/p99/p99.9 ordering, config/result/server-completion
+records, negotiated limits, control-stream FINs, and application close 59.
+
+The 2026-09-16 fixed-binary run reported:
+
+| Fixed server | Client | p50 median (us) | p50 range (us) | p99 median (us) | p99.9 median (us) |
+|---|---|---:|---:|---:|---:|
+| Quinn | netz | 45.296 | 44.769-45.750 | 61.963 | 70.537 |
+| Quinn | Quinn | 50.546 | 49.399-53.529 | 66.879 | 75.649 |
+| netz | netz | 47.315 | 46.649-48.194 | 62.426 | 85.825 |
+| netz | Quinn | 44.288 | 42.935-44.695 | 65.602 | 73.112 |
+
+Against the fixed Quinn server, netz's median p50 was 11.6% lower (1.116x).
+Against the fixed netz server, netz's median p50 was 6.4% higher (0.936x).
+The direction changes with the fixed peer, so this is explicitly
+`same-application-shape` evidence and does not support a universal latency or
+throughput claim. The command is
+`zig build bench-quic-datagram-quinn -Doptimize=ReleaseFast -- --samples=5
+--warmup=200 --iterations=5000`.
+
 The bounded QUIC DATAGRAM receive queue now lives in
 `one_rtt/datagram_queue.zig`. Its first successful admission reserves exactly
 the configured ring bound, so later enqueue/overwrite operations allocate

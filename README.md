@@ -1133,6 +1133,17 @@ The raw QUIC DATAGRAM throughput, 1-RTT send/receive, and UDP GSO/GRO
 benchmarks also use zio for endpoint I/O and timing. The DATAGRAM receiver is
 scheduled through `std.Io.async`, with cooperative `std.Io` sleeps replacing
 manual OS-thread yields.
+The independent raw DATAGRAM latency comparison uses certificate-verified
+netz and Quinn processes, pins the client/server to distinct CPUs, reuses fixed
+ReleaseFast binaries, requires an odd sample count, and alternates the netz and
+Quinn clients against each fixed server. Its one-outstanding 32-byte ping-pong
+times only post-handshake RTTs and verifies every sequence, checksum, control
+FIN, negotiated payload limit, and application close:
+
+```sh
+zig build bench-quic-datagram-quinn -Doptimize=ReleaseFast -- \
+  --samples=5 --warmup=200 --iterations=5000
+```
 The WebTransport DATAGRAM round-trip/burst, incremental stream, and steady
 stream-batch benchmarks likewise obtain endpoint I/O and monotonic time from
 zio. Their local server work runs through `std.Io.async`; no public Threaded
