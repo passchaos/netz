@@ -687,6 +687,13 @@ allocation/failure tests moved to
 upload pairs moved the 16-MiB/four-stream median from 144.52 to 145.63 MiB/s
 (0.8%, 6/7 wins) and reduced the allocator-call median from 658 to 652. This is
 a small internal lifecycle result, not a general cross-stack throughput claim.
+Server lifecycle state is likewise one stream-ID-to-priority map instead of an
+active array plus index map; it caches the lowest active ID directly for
+GOAWAY drain and scans only when that exact request finishes. The server logic
+and tests moved to `runtime/stream/lifecycle/server.zig`. Seven matched H3
+upload pairs were neutral at 148.86 versus 148.76 MiB/s median, while allocator
+calls fell deterministically from 652 to 651; this is recorded as structural
+and allocation evidence rather than a speed claim.
 
 Handshake-backed and lightweight protected HTTP/3 clients guard the
 connection-scoped receive owner while aggregate informational callbacks run.

@@ -1163,6 +1163,8 @@ The aggregate `bench` step runs the current protocol microbenchmarks:
   optional cross-stream body packet batching, and iteration count,
 - HTTP/3 client request lifecycle tracking through one stream-ID-keyed map,
   with allocation-free standard-method semantics and owned custom methods,
+- HTTP/3 server active-request lifecycle tracking through one stream-ID-keyed
+  priority map with direct lowest-ID caching for GOAWAY drain,
 - HTTP/3 Alt-Svc `h3` / `h3-29` endpoint discovery parsing and origin-relative connection target resolution for real-site upgrade hints,
 - HTTP/3 Capsule Protocol parsing/iteration and caller-buffer encoding for
   CONNECT-stream extension payloads,

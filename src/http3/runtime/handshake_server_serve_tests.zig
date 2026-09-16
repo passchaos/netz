@@ -714,7 +714,7 @@ test "HTTP/3 handshake server request deadlines preserve progress" {
             );
             try std.testing.expectEqual(
                 @as(usize, 1),
-                session.request_lifecycle.active_streams.items.len,
+                session.request_lifecycle.count(),
             );
             self.streaming_timed_out.set(self.io);
 

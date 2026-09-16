@@ -940,6 +940,23 @@ allocator outlier exercised additional recovery-cache growth, so these results
 support the simpler ownership model and removal of routine method copies, not a
 broad HTTP/3 throughput claim.
 
+The server side now uses the same single-source-of-truth layout: one
+stream-ID-to-priority map replaces the active-request array plus its parallel
+stream-ID-to-array-index map. The directly cached lowest active stream ID keeps
+the common GOAWAY drain query O(1); only removing that exact lowest stream scans
+the remaining map. The implementation and its unordered-insertion, priority,
+drain, and allocation-failure tests moved to
+`src/http3/runtime/stream/lifecycle/server.zig`. Against client-single-map
+baseline SHA-256
+`be0ee3d3328088c6aa727703dbb94f78767c12be7d05705aece34bf4917c21f2`,
+the final server-single-map binary SHA-256 was
+`ad4e9c8ec5e6f62f5737d70fb83a3b894a22686b19ffb13abd7f04bf589e5077`.
+Seven CPU-0 order-alternated 16-MiB/four-stream upload pairs were throughput-
+neutral: 148.86 versus 148.76 MiB/s medians (-0.07%, 3/7 candidate wins). Seven
+allocator pairs moved the median from 652 to 651 calls and reduced cumulative
+and peak bytes by 192. This is a structural simplification with a small
+deterministic allocation reduction, not a throughput improvement claim.
+
 A follow-up avoids treating every byte inside the allocated receive buffer as
 an actual overlap. Before either transactional preflight or committed insert
 performs byte-wise duplicate/conflict validation, the packed bitmap now checks
