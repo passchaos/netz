@@ -120,7 +120,7 @@ pub fn main(init: std.process.Init) !void {
         \\  bytes/s: {d}
         \\  MiB/s: {d}
         \\
-    , .{ @tagName(config.mode), config.streams, if (config.mode == .download and config.streams > 1) "RFC 9218" else "single-stream/application", if (config.aggregate_upload) "aggregate" else "streaming", responseSchedulerDelayPackets(config), config.enable_body_batch, config.enable_gro_receive, transferOneRttDatagramSize(config), transferPacedBodyChunkBytes(config), transferFlowControlBytes(config), config.ack_eliciting_threshold, config.iterations, config.body_bytes, bytes_total, status_total, if (config.iterations == 0) 0 else elapsed / config.iterations, bytes_per_second, bytes_per_second / (1024 * 1024) });
+    , .{ @tagName(config.mode), config.streams, if (config.mode == .download and config.streams > 1) "RFC 9218" else "single-stream/application", if (config.aggregate_upload) "aggregate" else "streaming", responseSchedulerDelayPackets(config), bodyBatchEnabled(config), config.enable_gro_receive, transferOneRttDatagramSize(config), transferPacedBodyChunkBytes(config), transferFlowControlBytes(config), config.ack_eliciting_threshold, config.iterations, config.body_bytes, bytes_total, status_total, if (config.iterations == 0) 0 else elapsed / config.iterations, bytes_per_second, bytes_per_second / (1024 * 1024) });
     const summary = summarizeThroughput(throughput_samples);
     std.debug.print(
         "  mean MiB/s: {d:.2}\n" ++
@@ -253,7 +253,7 @@ fn runIteration(
                 .enable_data_prefix_fast_path = enable_data_prefix_fast_path,
                 .response_scheduler_batch_delay_packets = responseSchedulerDelayPackets(config),
                 .response_scheduler_batch_delay_ns = if (config.mode == .download and config.streams > 1) multi_stream_response_batch_delay_ns else 0,
-                .response_scheduler_max_batch_packets = if (config.enable_body_batch) max_streams else 1,
+                .response_scheduler_max_batch_packets = if (bodyBatchEnabled(config)) max_streams else 1,
                 .max_concurrent_request_streams = max_streams,
             },
         },
@@ -812,7 +812,7 @@ fn sendUploadBodies(
                 round_pending = true;
             }
             if (chunk_count == 0) break;
-            if (config.enable_body_batch) {
+            if (bodyBatchEnabled(config)) {
                 try client.sendRequestBodyBatchPaced(chunks[0..chunk_count]);
             } else {
                 for (chunks[0..chunk_count]) |chunk| {
@@ -1068,10 +1068,9 @@ const Config = struct {
     trace_iteration: bool = false,
     enable_hystart: ?bool = null,
     enable_pacing: bool = true,
-    // This host's small sysctl-capped UDP receive queue makes four-packet GSO
-    // bursts slower than sequential submissions. Keep the batch mode opt-in so
-    // capable hosts can measure it without regressing the portable baseline.
-    enable_body_batch: bool = false,
+    /// Null selects batched sends for multi-stream workloads and sequential
+    /// sends for a single stream. Explicit flags retain an A/B control.
+    enable_body_batch: ?bool = null,
     enable_gro_receive: bool = false,
     aggregate_upload: bool = false,
     flow_control_bytes: ?u64 = null,
@@ -1123,6 +1122,8 @@ fn parseArgs(init: std.process.Init, allocator: std.mem.Allocator) !Config {
             config.enable_pacing = false;
         } else if (std.mem.eql(u8, arg, "--enable-body-batch")) {
             config.enable_body_batch = true;
+        } else if (std.mem.eql(u8, arg, "--disable-body-batch")) {
+            config.enable_body_batch = false;
         } else if (std.mem.eql(u8, arg, "--enable-gro-receive")) {
             config.enable_gro_receive = true;
         } else if (std.mem.eql(u8, arg, "--aggregate-upload")) {
@@ -1151,6 +1152,23 @@ fn parseArgs(init: std.process.Init, allocator: std.mem.Allocator) !Config {
         return error.InvalidArgument;
     }
     return config;
+}
+
+fn bodyBatchEnabled(config: Config) bool {
+    return config.enable_body_batch orelse (config.streams > 1);
+}
+
+test "HTTP/3 transfer benchmark defaults body batching by stream count" {
+    try std.testing.expect(!bodyBatchEnabled(.{ .streams = 1 }));
+    try std.testing.expect(bodyBatchEnabled(.{ .streams = 4 }));
+    try std.testing.expect(!bodyBatchEnabled(.{
+        .streams = 4,
+        .enable_body_batch = false,
+    }));
+    try std.testing.expect(bodyBatchEnabled(.{
+        .streams = 1,
+        .enable_body_batch = true,
+    }));
 }
 
 fn parseMode(raw: []const u8) !Mode {

@@ -1353,9 +1353,11 @@ threshold only when the second packet is consumed.
 is the stable winner from the same-host 2/4/8/16/32 scan. Packet-size-aware
 cross-stream body batches are available through
 `sendRequestBodyBatchPaced`/`sendResponseBodyBatchPaced`, and
-`--enable-body-batch` measures that path. It remains opt-in because this host's
-sysctl-capped 212,992-byte UDP receive queue makes four-packet GSO bursts
-slightly slower than sequential submissions.
+multi-stream runs now enable that path by default. `--disable-body-batch`
+retains the sequential A/B control, while `--enable-body-batch` can explicitly
+select batching at any stream count. The default changed only after zio and
+the HTTP/3 cursor gained bounded receive batching; before those changes this
+host's small UDP receive queue made bursts slower than sequential submission.
 `--enable-gro-receive` enables the timer-aware owning-batch receive path. It is
 also opt-in on this host: the path now completes long uploads/downloads without
 stalling, but its burst shape is slower and noisier under the same small receive
@@ -1370,6 +1372,11 @@ wins). One-stream upload/download medians were 162.93/141.37 MiB/s after and
 155.48/138.24 MiB/s before. All arms verified 16,777,216 body bytes and the
 expected status totals; these are same-process regression measurements, not an
 equal-wire cross-stack claim.
+With that receive path in place, seven same-binary, order-alternated
+four-stream comparisons also favored cross-stream body sending in every pair:
+upload median rose from 103.35 to 112.77 MiB/s (1.091x) and download from
+73.41 to 80.27 MiB/s (1.093x). Multi-stream benchmark mode therefore enables
+body batching by default; single-stream mode remains sequential.
 `--verbose` prints per-iteration throughput lines (`[iter N]`) for diagnosing
 long or stuck multi-iteration runs. `--trace-iteration` additionally prints
 coarse lifecycle stages (bind, connect, transfer, join) for each iteration.

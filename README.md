@@ -1116,6 +1116,10 @@ client connection pump alive while the short-lived server drains reliable
 response recovery, so a lost final ACK is answered after the server's PTO
 retransmission instead of turning successful DATA delivery into teardown
 timeout.
+Multi-stream HTTP/3 transfer runs now enable cross-stream body batching by
+default after bounded zio receive batching removed the previous small-queue
+regression. Single-stream runs remain sequential; pass
+`--disable-body-batch` to retain a multi-stream A/B control.
 The persistent QUIC runner accepts `--server-topology=compare --netz-only` to
 run an odd, mirrored-order fixed-binary A/B between independent server sockets
 and the shared server endpoint, with identical ACK policy and strict per-run
