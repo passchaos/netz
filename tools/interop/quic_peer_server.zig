@@ -2,6 +2,7 @@
 
 const std = @import("std");
 const netz = @import("netz");
+const OneShotReorder = @import("support/one_shot_reorder.zig").State;
 
 const payloads = [_][]const u8{ "hello", "world" };
 const flow_control_payload = [_]u8{'f'} ** 12_288;
@@ -40,6 +41,8 @@ const Mode = enum {
     s2n_stop,
     s2n_reset_loss,
     s2n_stop_loss,
+    s2n_reset_reorder,
+    s2n_stop_reorder,
 };
 
 const CancellationLoss = struct {
@@ -240,6 +243,7 @@ pub fn main(init: std.process.Init) !void {
     const key_pair = try netz.tls.testing.serverKeyPair();
 
     var cancellation_loss = CancellationLoss{};
+    var cancellation_reorder = OneShotReorder{};
     var endpoint_limits: netz.quic.runtime.Limits = .{
         .max_datagram_size = 8192,
     };
@@ -247,6 +251,13 @@ pub fn main(init: std.process.Init) !void {
         endpoint_limits.send_interceptor = .{
             .context = &cancellation_loss,
             .should_drop = CancellationLoss.shouldDrop,
+        };
+    } else if (mode == .s2n_reset_reorder or
+        mode == .s2n_stop_reorder)
+    {
+        endpoint_limits.send_interceptor = .{
+            .context = &cancellation_reorder,
+            .should_hold = OneShotReorder.shouldHold,
         };
     }
     var endpoint = try netz.quic.runtime.Endpoint.bind(
@@ -268,6 +279,8 @@ pub fn main(init: std.process.Init) !void {
             .s2n_stop,
             .s2n_reset_loss,
             .s2n_stop_loss,
+            .s2n_reset_reorder,
+            .s2n_stop_reorder,
             => "s2n-quic-tokio",
             else => "quic-go-netpoll",
         }},
@@ -520,24 +533,38 @@ pub fn main(init: std.process.Init) !void {
             );
             try sendEcho(&established.connection, 4, payloads[1]);
         },
-        .s2n_reset_loss => {
+        .s2n_reset_loss, .s2n_reset_reorder => {
             try receiveExpectedPrefix(
                 &established.connection,
                 allocator,
                 0,
                 "reset",
             );
-            cancellation_loss.arm();
+            if (mode == .s2n_reset_reorder) {
+                try receiveExpectedStream(
+                    &established.connection,
+                    allocator,
+                    4,
+                    payloads[1],
+                );
+            }
+            if (mode == .s2n_reset_loss) {
+                cancellation_loss.arm();
+            } else {
+                cancellation_reorder.arm();
+            }
             try established.connection.resetStream(0, 41);
-            try receiveExpectedStream(
-                &established.connection,
-                allocator,
-                4,
-                payloads[1],
-            );
+            if (mode == .s2n_reset_loss) {
+                try receiveExpectedStream(
+                    &established.connection,
+                    allocator,
+                    4,
+                    payloads[1],
+                );
+            }
             try sendEcho(&established.connection, 4, payloads[1]);
         },
-        .stop, .s2n_stop, .s2n_stop_loss => {
+        .stop, .s2n_stop, .s2n_stop_loss, .s2n_stop_reorder => {
             // quic-go can append probe bytes immediately after "stop" while
             // waiting for STOP_SENDING. Validate only the stable prefix before
             // cancelling its send side; RESET_STREAM supplies the final size.
@@ -547,8 +574,23 @@ pub fn main(init: std.process.Init) !void {
                 0,
                 "stop",
             );
-            if (mode == .s2n_stop_loss) cancellation_loss.arm();
+            if (mode == .s2n_stop_reorder) {
+                try receiveExpectedStream(
+                    &established.connection,
+                    allocator,
+                    4,
+                    payloads[1],
+                );
+            }
+            if (mode == .s2n_stop_loss) {
+                cancellation_loss.arm();
+            } else if (mode == .s2n_stop_reorder) {
+                cancellation_reorder.arm();
+            }
             try established.connection.sendStopSending(0, 42);
+            if (mode == .s2n_stop_reorder) {
+                try sendEcho(&established.connection, 4, payloads[1]);
+            }
             while (established.connection.streamResetReceived(0) == null) {
                 try receivePacket(&established.connection);
             }
@@ -556,13 +598,15 @@ pub fn main(init: std.process.Init) !void {
             if (reset.application_error_code != 42 or reset.final_size < 4) {
                 return error.UnexpectedResetError;
             }
-            try receiveExpectedStream(
-                &established.connection,
-                allocator,
-                4,
-                payloads[1],
-            );
-            try sendEcho(&established.connection, 4, payloads[1]);
+            if (mode != .s2n_stop_reorder) {
+                try receiveExpectedStream(
+                    &established.connection,
+                    allocator,
+                    4,
+                    payloads[1],
+                );
+                try sendEcho(&established.connection, 4, payloads[1]);
+            }
         },
         .flow => {
             try receiveExpectedStream(
@@ -624,7 +668,8 @@ pub fn main(init: std.process.Init) !void {
 
     if (mode == .peer_close or mode == .peer_close_v2 or mode == .s2n or
         mode == .s2n_reset or mode == .s2n_stop or
-        mode == .s2n_reset_loss or mode == .s2n_stop_loss)
+        mode == .s2n_reset_loss or mode == .s2n_stop_loss or
+        mode == .s2n_reset_reorder or mode == .s2n_stop_reorder)
     {
         // Give the peer time to consume both FIN-terminated echoes. The close
         // is intentionally delayed just like the ordinary fixture close so
@@ -659,6 +704,24 @@ pub fn main(init: std.process.Init) !void {
                 }
                 std.debug.print(
                     "netz QUIC stop-sending server interoperated with s2n-quic: alpn=hq-interop stop_error=42 reset_error=42 dropped_cancel_datagrams=1 retransmitted=true concurrent_sibling=4 echo_bytes=5 peer_close=58\n",
+                    .{},
+                );
+            },
+            .s2n_reset_reorder => {
+                if (cancellation_reorder.heldCount() != 1) {
+                    return error.CancellationDatagramNotReordered;
+                }
+                std.debug.print(
+                    "netz QUIC reset server interoperated with s2n-quic: alpn=hq-interop reset_error=41 held_cancel_datagrams=1 reordered=true sibling_before_cancel=true concurrent_sibling=4 echo_bytes=5 peer_close=58\n",
+                    .{},
+                );
+            },
+            .s2n_stop_reorder => {
+                if (cancellation_reorder.heldCount() != 1) {
+                    return error.CancellationDatagramNotReordered;
+                }
+                std.debug.print(
+                    "netz QUIC stop-sending server interoperated with s2n-quic: alpn=hq-interop stop_error=42 reset_error=42 held_cancel_datagrams=1 reordered=true sibling_before_cancel=true concurrent_sibling=4 echo_bytes=5 peer_close=58\n",
                     .{},
                 );
             },
@@ -716,6 +779,8 @@ pub fn main(init: std.process.Init) !void {
         .s2n_stop => unreachable,
         .s2n_reset_loss => unreachable,
         .s2n_stop_loss => unreachable,
+        .s2n_reset_reorder => unreachable,
+        .s2n_stop_reorder => unreachable,
         .migration => unreachable,
         .migration_loss => unreachable,
         .nat_rebinding => unreachable,

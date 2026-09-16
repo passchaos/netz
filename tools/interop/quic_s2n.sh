@@ -130,6 +130,12 @@ run_netz_client_case reset \
 run_netz_client_case stop \
   'netz QUIC client interoperated with s2n-quic: verified=true version=1 alpn=hq-interop stop_error=42 reset_sent=42 concurrent_sibling=4 echo_bytes=5 peer_close=57' \
   's2n-quic server interoperated with netz: version=1 alpn=hq-interop stop_error=42 reset_error=42 concurrent_sibling=4 echo_bytes=5 peer_close=57'
+run_netz_client_case reordered-reset \
+  'netz QUIC client interoperated with s2n-quic: verified=true version=1 alpn=hq-interop reset_error=41 held_cancel_datagrams=1 reordered=true sibling_before_cancel=true concurrent_sibling=4 echo_bytes=5 peer_close=57' \
+  's2n-quic server interoperated with netz: version=1 alpn=hq-interop reset_error=41 reordered=true sibling_before_cancel=true concurrent_sibling=4 echo_bytes=5 peer_close=57'
+run_netz_client_case reordered-stop \
+  'netz QUIC client interoperated with s2n-quic: verified=true version=1 alpn=hq-interop stop_error=42 reset_sent=42 held_cancel_datagrams=1 reordered=true sibling_before_cancel=true concurrent_sibling=4 echo_bytes=5 peer_close=57' \
+  's2n-quic server interoperated with netz: version=1 alpn=hq-interop stop_error=42 reset_error=42 reordered=true sibling_before_cancel=true concurrent_sibling=4 echo_bytes=5 peer_close=57'
 run_netz_client_case flow \
   'netz QUIC client interoperated with s2n-quic: verified=true version=1 alpn=hq-interop initial_max_data=8192 initial_max_stream_data=2048 flow_blocked=true stream_bytes=12288 echo_bytes=12288 peer_close=57' \
   's2n-quic server interoperated with netz: version=1 alpn=hq-interop initial_max_data=8192 initial_max_stream_data=2048 stream_bytes=12288 echo_bytes=12288 peer_close=57'
@@ -232,3 +238,9 @@ run_s2n_client_case lossy-reset s2n_reset_loss \
 run_s2n_client_case lossy-stop s2n_stop_loss \
   's2n-quic client interoperated with netz: verified=true version=1 alpn=hq-interop stop_error=42 reset_sent=42 dropped_cancel_datagrams=1 retransmitted=true concurrent_sibling=4 echo_bytes=5 peer_close=58' \
   'netz QUIC stop-sending server interoperated with s2n-quic: alpn=hq-interop stop_error=42 reset_error=42 dropped_cancel_datagrams=1 retransmitted=true concurrent_sibling=4 echo_bytes=5 peer_close=58'
+run_s2n_client_case reordered-reset s2n_reset_reorder \
+  's2n-quic client interoperated with netz: verified=true version=1 alpn=hq-interop reset_error=41 held_cancel_datagrams=1 reordered=true sibling_before_cancel=true concurrent_sibling=4 echo_bytes=5 peer_close=58' \
+  'netz QUIC reset server interoperated with s2n-quic: alpn=hq-interop reset_error=41 held_cancel_datagrams=1 reordered=true sibling_before_cancel=true concurrent_sibling=4 echo_bytes=5 peer_close=58'
+run_s2n_client_case reordered-stop s2n_stop_reorder \
+  's2n-quic client interoperated with netz: verified=true version=1 alpn=hq-interop stop_error=42 reset_sent=42 held_cancel_datagrams=1 reordered=true sibling_before_cancel=true concurrent_sibling=4 echo_bytes=5 peer_close=58' \
+  'netz QUIC stop-sending server interoperated with s2n-quic: alpn=hq-interop stop_error=42 reset_error=42 held_cancel_datagrams=1 reordered=true sibling_before_cancel=true concurrent_sibling=4 echo_bytes=5 peer_close=58'

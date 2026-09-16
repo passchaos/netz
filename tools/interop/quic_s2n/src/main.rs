@@ -15,6 +15,8 @@ enum Scenario {
     Stop,
     LossyReset,
     LossyStop,
+    ReorderedReset,
+    ReorderedStop,
     Flow,
     Retry,
 }
@@ -59,7 +61,7 @@ async fn main() -> Result<()> {
             run_client(port, &ca, scenario).await
         }
         _ => bail!(
-            "usage: netz-quic-s2n-interop server PORT CERT KEY [echo|reset|stop|flow|retry] | client PORT CA [echo|reset|stop|lossy-reset|lossy-stop]"
+            "usage: netz-quic-s2n-interop server PORT CERT KEY [echo|reset|stop|flow|retry] | client PORT CA [echo|reset|stop|lossy-reset|lossy-stop|reordered-reset|reordered-stop]"
         ),
     }
 }
@@ -71,6 +73,8 @@ fn parse_scenario(value: Option<String>) -> Result<Scenario> {
         "stop" => Ok(Scenario::Stop),
         "lossy-reset" => Ok(Scenario::LossyReset),
         "lossy-stop" => Ok(Scenario::LossyStop),
+        "reordered-reset" => Ok(Scenario::ReorderedReset),
+        "reordered-stop" => Ok(Scenario::ReorderedStop),
         "flow" => Ok(Scenario::Flow),
         "retry" => Ok(Scenario::Retry),
         value => bail!("unknown scenario: {value}"),
@@ -90,7 +94,7 @@ async fn run_server(
     scenario: Scenario,
 ) -> Result<()> {
     ensure!(
-        scenario != Scenario::LossyReset && scenario != Scenario::LossyStop,
+        !matches!(scenario, Scenario::LossyReset | Scenario::LossyStop),
         "lossy cancellation scenarios are client-only"
     );
     let mut tls_builder = tls::default::Server::builder();
@@ -132,6 +136,8 @@ async fn run_server(
         Scenario::Echo | Scenario::Retry => echo_two_streams(&mut connection).await?,
         Scenario::Reset => serve_reset(&mut connection).await?,
         Scenario::Stop => serve_stop(&mut connection).await?,
+        Scenario::ReorderedReset => serve_peer_reset_reordered(&mut connection).await?,
+        Scenario::ReorderedStop => serve_peer_stop_reordered(&mut connection).await?,
         Scenario::LossyReset | Scenario::LossyStop => unreachable!(),
         Scenario::Flow => serve_flow(&mut connection).await?,
     }
@@ -151,6 +157,12 @@ async fn run_server(
         ),
         Scenario::Stop => println!(
             "s2n-quic server interoperated with netz: version=1 alpn=hq-interop stop_error=42 reset_error=42 concurrent_sibling=4 echo_bytes=5 peer_close=57"
+        ),
+        Scenario::ReorderedReset => println!(
+            "s2n-quic server interoperated with netz: version=1 alpn=hq-interop reset_error=41 reordered=true sibling_before_cancel=true concurrent_sibling=4 echo_bytes=5 peer_close=57"
+        ),
+        Scenario::ReorderedStop => println!(
+            "s2n-quic server interoperated with netz: version=1 alpn=hq-interop stop_error=42 reset_error=42 reordered=true sibling_before_cancel=true concurrent_sibling=4 echo_bytes=5 peer_close=57"
         ),
         Scenario::LossyReset | Scenario::LossyStop => unreachable!(),
         Scenario::Flow => println!(
@@ -199,6 +211,8 @@ async fn run_client(port: u16, ca: &str, scenario: Scenario) -> Result<()> {
         Scenario::Stop => request_stop(&mut connection).await?,
         Scenario::LossyReset => request_peer_reset(&mut connection).await?,
         Scenario::LossyStop => request_stop(&mut connection).await?,
+        Scenario::ReorderedReset => request_peer_reset_reordered(&mut connection).await?,
+        Scenario::ReorderedStop => request_stop_reordered(&mut connection).await?,
         Scenario::Flow => unreachable!(),
         Scenario::Retry => unreachable!(),
     }
@@ -231,6 +245,12 @@ async fn run_client(port: u16, ca: &str, scenario: Scenario) -> Result<()> {
         ),
         Scenario::LossyStop => println!(
             "s2n-quic client interoperated with netz: verified=true version=1 alpn=hq-interop stop_error=42 reset_sent=42 dropped_cancel_datagrams=1 retransmitted=true concurrent_sibling=4 echo_bytes=5 peer_close=58"
+        ),
+        Scenario::ReorderedReset => println!(
+            "s2n-quic client interoperated with netz: verified=true version=1 alpn=hq-interop reset_error=41 held_cancel_datagrams=1 reordered=true sibling_before_cancel=true concurrent_sibling=4 echo_bytes=5 peer_close=58"
+        ),
+        Scenario::ReorderedStop => println!(
+            "s2n-quic client interoperated with netz: verified=true version=1 alpn=hq-interop stop_error=42 reset_sent=42 held_cancel_datagrams=1 reordered=true sibling_before_cancel=true concurrent_sibling=4 echo_bytes=5 peer_close=58"
         ),
         Scenario::Flow => unreachable!(),
         Scenario::Retry => unreachable!(),
@@ -311,6 +331,74 @@ async fn serve_stop(connection: &mut Connection) -> Result<()> {
         other => bail!("unexpected reset result: {other}"),
     }
     echo_sibling(connection).await
+}
+
+async fn serve_peer_reset_reordered(connection: &mut Connection) -> Result<()> {
+    let mut target = accept_bidi(connection).await?;
+    ensure!(target.id() == 0, "unexpected target stream id");
+    receive_prefix(&mut target, b"reset").await?;
+
+    let mut sibling = accept_bidi(connection).await?;
+    ensure!(sibling.id() == 4, "unexpected sibling stream id");
+    ensure!(
+        receive_all(&mut sibling).await? == PAYLOADS[1],
+        "unexpected sibling payload"
+    );
+    sibling.send(Bytes::copy_from_slice(PAYLOADS[1])).await?;
+    sibling.finish()?;
+
+    let reset = timeout(TIMEOUT, async {
+        loop {
+            match target.receive().await {
+                Ok(Some(_)) => {}
+                Ok(None) => bail!("target finished instead of resetting"),
+                Err(error) => break Ok::<s2n_quic::stream::Error, anyhow::Error>(error),
+            }
+        }
+    })
+    .await
+    .context("reordered RESET_STREAM timed out")??;
+    match reset {
+        s2n_quic::stream::Error::StreamReset { error, .. } => {
+            ensure!(u64::from(error) == 41, "unexpected reset code");
+        }
+        other => bail!("unexpected reset result: {other}"),
+    }
+    Ok(())
+}
+
+async fn serve_peer_stop_reordered(connection: &mut Connection) -> Result<()> {
+    let mut target = accept_bidi(connection).await?;
+    ensure!(target.id() == 0, "unexpected target stream id");
+    receive_prefix(&mut target, b"stop").await?;
+    target.send(Bytes::from_static(b"target")).await?;
+
+    let mut sibling = accept_bidi(connection).await?;
+    ensure!(sibling.id() == 4, "unexpected sibling stream id");
+    ensure!(
+        receive_all(&mut sibling).await? == PAYLOADS[1],
+        "unexpected sibling payload"
+    );
+    sibling.send(Bytes::copy_from_slice(PAYLOADS[1])).await?;
+    sibling.finish()?;
+
+    let stopped = timeout(TIMEOUT, async {
+        loop {
+            match target.send(Bytes::from_static(b"x")).await {
+                Ok(()) => sleep(Duration::from_millis(1)).await,
+                Err(error) => break Ok::<s2n_quic::stream::Error, anyhow::Error>(error),
+            }
+        }
+    })
+    .await
+    .context("reordered STOP_SENDING timed out")??;
+    match stopped {
+        s2n_quic::stream::Error::StreamReset { error, .. } => {
+            ensure!(u64::from(error) == 42, "unexpected stop code");
+        }
+        other => bail!("unexpected stop result: {other}"),
+    }
+    Ok(())
 }
 
 async fn echo_sibling(connection: &mut Connection) -> Result<()> {
@@ -406,6 +494,40 @@ async fn request_peer_reset(connection: &mut Connection) -> Result<()> {
     Ok(())
 }
 
+async fn request_peer_reset_reordered(connection: &mut Connection) -> Result<()> {
+    let mut target = timeout(TIMEOUT, connection.open_bidirectional_stream()).await??;
+    ensure!(target.id() == 0, "unexpected target stream id");
+    target.send(Bytes::from_static(b"reset")).await?;
+
+    let mut sibling = timeout(TIMEOUT, connection.open_bidirectional_stream()).await??;
+    ensure!(sibling.id() == 4, "unexpected sibling stream id");
+    sibling.send(Bytes::copy_from_slice(PAYLOADS[1])).await?;
+    sibling.finish()?;
+    ensure!(
+        receive_all(&mut sibling).await? == PAYLOADS[1],
+        "unexpected sibling echo"
+    );
+
+    let reset_result = timeout(TIMEOUT, async {
+        loop {
+            match target.receive().await {
+                Ok(Some(_)) => {}
+                Ok(None) => bail!("target finished instead of resetting"),
+                Err(error) => break Ok::<s2n_quic::stream::Error, anyhow::Error>(error),
+            }
+        }
+    })
+    .await
+    .context("reordered RESET_STREAM timed out")??;
+    match reset_result {
+        s2n_quic::stream::Error::StreamReset { error, .. } => {
+            ensure!(u64::from(error) == 41, "unexpected reset code");
+        }
+        other => bail!("unexpected reset result: {other}"),
+    }
+    Ok(())
+}
+
 async fn request_stop(connection: &mut Connection) -> Result<()> {
     let mut target = timeout(TIMEOUT, connection.open_bidirectional_stream()).await??;
     ensure!(target.id() == 0, "unexpected target stream id");
@@ -425,6 +547,39 @@ async fn request_stop(connection: &mut Connection) -> Result<()> {
             .await
             .context("STOP_SENDING timed out")?
     })?;
+    match stop_result {
+        s2n_quic::stream::Error::StreamReset { error, .. } => {
+            ensure!(u64::from(error) == 42, "unexpected stop code");
+        }
+        other => bail!("unexpected stop result: {other}"),
+    }
+    Ok(())
+}
+
+async fn request_stop_reordered(connection: &mut Connection) -> Result<()> {
+    let mut target = timeout(TIMEOUT, connection.open_bidirectional_stream()).await??;
+    ensure!(target.id() == 0, "unexpected target stream id");
+    target.send(Bytes::from_static(b"stop")).await?;
+
+    let mut sibling = timeout(TIMEOUT, connection.open_bidirectional_stream()).await??;
+    ensure!(sibling.id() == 4, "unexpected sibling stream id");
+    sibling.send(Bytes::copy_from_slice(PAYLOADS[1])).await?;
+    sibling.finish()?;
+    ensure!(
+        receive_all(&mut sibling).await? == PAYLOADS[1],
+        "unexpected sibling echo"
+    );
+
+    let stop_result = timeout(TIMEOUT, async {
+        loop {
+            match target.send(Bytes::from_static(b"x")).await {
+                Ok(()) => sleep(Duration::from_millis(1)).await,
+                Err(error) => break Ok::<s2n_quic::stream::Error, anyhow::Error>(error),
+            }
+        }
+    })
+    .await
+    .context("reordered STOP_SENDING timed out")??;
     match stop_result {
         s2n_quic::stream::Error::StreamReset { error, .. } => {
             ensure!(u64::from(error) == 42, "unexpected stop code");

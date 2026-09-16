@@ -3933,6 +3933,17 @@ A seven-pair first-echo control moved the one-round median from 146.945 to
 from 16.287 to 15.519 us; it is only supporting evidence, not a broad
 steady-state speed claim.
 
+The s2n-quic process matrix now also covers cancellation reordering in both
+endpoint-role directions. A reusable one-shot interop state arms immediately
+before netz emits RESET_STREAM(41) or STOP_SENDING(42), holds exactly that
+protected datagram, sends stream 4's complete `world` packet first, and then
+flushes the held cancellation. Both the netz-client/s2n-server and
+s2n-client/netz-server cases require one held datagram, peer-visible exact
+error codes, sibling completion before cancellation observation, and the final
+application close. The fault state and its deterministic contract test live in
+`tools/interop/support/one_shot_reorder.zig`; the existing loss-retransmission
+cases remain separate.
+
 The next zio receive-path step gives direct endpoint-backed handshake sources
 one reusable datagram allocation. Each returned datagram keeps a scoped release
 hook, so a nested flight receive falls back to the source's owning path while

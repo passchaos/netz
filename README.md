@@ -961,6 +961,9 @@ zig build interop-websocket-hyper-h2 -Doptimize=ReleaseFast
 zig build interop-quic-quic-go -Doptimize=ReleaseFast
 # The shared netz QUIC peer client/server obtain std.Io from zio. The quic-go
 # and s2n-quic gates assert zio-std-io against their netpoll/Tokio runtimes.
+# The s2n matrix also holds each netz-emitted RESET_STREAM and STOP_SENDING
+# once, sends a sibling STREAM first, then verifies exact cancellation codes
+# and sibling completion in both endpoint-role directions.
 # Requires Docker and the crossbario/autobahn-testsuite image. Optional trailing
 # arguments select individual case IDs; with none, all 517 cases run. Pass
 # --tls before case IDs to run the same gate over native TLS 1.3 WSS.

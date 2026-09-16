@@ -6,6 +6,7 @@
 const std = @import("std");
 const netz = @import("netz");
 const exact_certificate = @import("exact_certificate_verifier.zig");
+const OneShotReorder = @import("support/one_shot_reorder.zig").State;
 
 const payloads = [_][]const u8{ "hello", "world" };
 const key_update_payloads = [_][]const u8{
@@ -13,7 +14,7 @@ const key_update_payloads = [_][]const u8{
     "phase-one",
     "phase-two",
 };
-const Scenario = enum { echo, reset, stop, flow };
+const Scenario = enum { echo, reset, stop, flow, reset_reorder, stop_reorder };
 const flow_control_payload = [_]u8{'f'} ** 12_288;
 
 pub fn main(init: std.process.Init) !void {
@@ -45,10 +46,14 @@ pub fn main(init: std.process.Init) !void {
         } else if (std.mem.startsWith(u8, arg, "--scenario=")) {
             if (scenario_set) return error.InvalidArgument;
             scenario_set = true;
-            scenario = std.meta.stringToEnum(
-                Scenario,
-                arg["--scenario=".len..],
-            ) orelse return error.InvalidArgument;
+            const value = arg["--scenario=".len..];
+            scenario = if (std.mem.eql(u8, value, "reordered-reset"))
+                .reset_reorder
+            else if (std.mem.eql(u8, value, "reordered-stop"))
+                .stop_reorder
+            else
+                std.meta.stringToEnum(Scenario, value) orelse
+                    return error.InvalidArgument;
         } else {
             return error.InvalidArgument;
         }
@@ -99,11 +104,21 @@ pub fn main(init: std.process.Init) !void {
         break :blk exact_verifier.clientVerifier();
     } else bundle_verifier.clientVerifier();
 
+    var cancellation_reorder = OneShotReorder{};
+    var endpoint_limits: netz.quic.runtime.Limits = .{
+        .max_datagram_size = 8192,
+    };
+    if (scenario == .reset_reorder or scenario == .stop_reorder) {
+        endpoint_limits.send_interceptor = .{
+            .context = &cancellation_reorder,
+            .should_hold = OneShotReorder.shouldHold,
+        };
+    }
     var endpoint = try netz.quic.runtime.Endpoint.bind(
         allocator,
         io,
         .{ .ip4 = .loopback(0) },
-        .{ .max_datagram_size = 8192 },
+        endpoint_limits,
     );
     defer endpoint.deinit();
     var original_dcid: [8]u8 = undefined;
@@ -231,6 +246,12 @@ pub fn main(init: std.process.Init) !void {
             allocator,
             scenario,
         ),
+        .reset_reorder, .stop_reorder => try exerciseReorderedCancellation(
+            &established.connection,
+            allocator,
+            scenario,
+            &cancellation_reorder,
+        ),
         .flow => try exerciseFlowControl(
             &established.connection,
             allocator,
@@ -297,7 +318,76 @@ pub fn main(init: std.process.Init) !void {
             "netz QUIC client interoperated with s2n-quic: verified=true version=1 alpn=hq-interop initial_max_data=8192 initial_max_stream_data=2048 flow_blocked=true stream_bytes=12288 echo_bytes=12288 peer_close=57\n",
             .{},
         ),
+        .reset_reorder => std.debug.print(
+            "netz QUIC client interoperated with s2n-quic: verified=true version=1 alpn=hq-interop reset_error=41 held_cancel_datagrams=1 reordered=true sibling_before_cancel=true concurrent_sibling=4 echo_bytes=5 peer_close=57\n",
+            .{},
+        ),
+        .stop_reorder => std.debug.print(
+            "netz QUIC client interoperated with s2n-quic: verified=true version=1 alpn=hq-interop stop_error=42 reset_sent=42 held_cancel_datagrams=1 reordered=true sibling_before_cancel=true concurrent_sibling=4 echo_bytes=5 peer_close=57\n",
+            .{},
+        ),
         .echo => unreachable,
+    }
+}
+
+fn exerciseReorderedCancellation(
+    connection: *netz.quic.one_rtt.Connection,
+    allocator: std.mem.Allocator,
+    scenario: Scenario,
+    reorder: *OneShotReorder,
+) !void {
+    const target_stream_id = try connection.openStream();
+    if (target_stream_id != 0) return error.UnexpectedStreamId;
+    const target_payload = switch (scenario) {
+        .reset_reorder => "reset",
+        .stop_reorder => "stop",
+        else => unreachable,
+    };
+    try connection.send(&.{.{ .stream = .{
+        .stream_id = target_stream_id,
+        .offset = 0,
+        .data = target_payload,
+    } }});
+    if (scenario == .stop_reorder) {
+        try receiveExpectedPrefix(
+            connection,
+            allocator,
+            target_stream_id,
+            "target",
+        );
+    }
+
+    const sibling_stream_id = try connection.openStream();
+    if (sibling_stream_id != 4) return error.UnexpectedStreamId;
+    reorder.arm();
+    switch (scenario) {
+        .reset_reorder => try connection.resetStream(target_stream_id, 41),
+        .stop_reorder => try connection.sendStopSending(target_stream_id, 42),
+        else => unreachable,
+    }
+    try connection.send(&.{.{ .stream = .{
+        .stream_id = sibling_stream_id,
+        .offset = 0,
+        .data = payloads[1],
+        .fin = true,
+    } }});
+    try receiveExpectedStream(
+        connection,
+        allocator,
+        sibling_stream_id,
+        payloads[1],
+    );
+    if (scenario == .stop_reorder) {
+        while (connection.streamResetReceived(target_stream_id) == null) {
+            try receivePacket(connection);
+        }
+        const reset = connection.streamResetReceived(target_stream_id).?;
+        if (reset.application_error_code != 42 or reset.final_size < 6) {
+            return error.UnexpectedResetError;
+        }
+    }
+    if (reorder.heldCount() != 1) {
+        return error.CancellationDatagramNotReordered;
     }
 }
 
@@ -309,7 +399,7 @@ fn exerciseCancellation(
     const target_payload = switch (scenario) {
         .reset => "reset",
         .stop => "stop",
-        .echo, .flow => unreachable,
+        .echo, .flow, .reset_reorder, .stop_reorder => unreachable,
     };
     const target_stream_id = try connection.openStream();
     if (target_stream_id != 0) return error.UnexpectedStreamId;
@@ -349,7 +439,7 @@ fn exerciseCancellation(
                 return error.UnexpectedStopSendingError;
             }
         },
-        .echo, .flow => unreachable,
+        .echo, .flow, .reset_reorder, .stop_reorder => unreachable,
     }
     try receiveExpectedStream(
         connection,
@@ -481,6 +571,32 @@ fn receiveExpectedStream(
             connection.receivedStreamComplete(stream_id))
         {
             return;
+        }
+        try receivePacket(connection);
+    }
+}
+
+fn receiveExpectedPrefix(
+    connection: *netz.quic.one_rtt.Connection,
+    _: std.mem.Allocator,
+    stream_id: u64,
+    expected: []const u8,
+) !void {
+    while (true) {
+        if (connection.availableReceivedStream(stream_id)) |available| {
+            const prefix_len = @min(available.len, expected.len);
+            if (!std.mem.eql(
+                u8,
+                available[0..prefix_len],
+                expected[0..prefix_len],
+            )) return error.UnexpectedEcho;
+            if (available.len >= expected.len) {
+                try connection.releaseReceivedCapacity(
+                    stream_id,
+                    expected.len,
+                );
+                return;
+            }
         }
         try receivePacket(connection);
     }
