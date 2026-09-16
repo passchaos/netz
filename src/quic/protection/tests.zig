@@ -920,6 +920,18 @@ test "QUIC prepared short packet protection matches value-key paths" {
     }
 }
 
+test "QUIC prepared packet keys store one header schedule" {
+    const LegacyHeaderStorage = struct {
+        inner: @FieldType(protection.PreparedPacketProtectionKeys, "inner"),
+        aes_128: ?std.crypto.core.aes.AesEncryptCtx(std.crypto.core.aes.Aes128),
+        aes_256: ?std.crypto.core.aes.AesEncryptCtx(std.crypto.core.aes.Aes256),
+    };
+    try std.testing.expect(
+        @sizeOf(protection.PreparedPacketProtectionKeys) <
+            @sizeOf(LegacyHeaderStorage),
+    );
+}
+
 test "QUIC prepared short packet protection replaces key generations" {
     const current = protection.deriveAes128Keys(
         [_]u8{0x71} ** protection.secret_len,
@@ -954,6 +966,50 @@ test "QUIC prepared short packet protection replaces key generations" {
         options,
     );
     try std.testing.expectEqualSlices(u8, expected, actual);
+}
+
+test "QUIC prepared packet protection replaces cipher suites" {
+    const suites = [_]protection.CipherSuite{
+        .aes_128_gcm_sha256,
+        .aes_256_gcm_sha384,
+        .chacha20_poly1305_sha256,
+    };
+    const initial = try protection.deriveKeysForSecretForVersion(
+        version_1_wire_for_test,
+        suites[0],
+        trafficSecretForSuiteForTest(suites[0]),
+    );
+    var prepared = protection.PreparedPacketProtectionKeys.init(initial);
+    defer prepared.deinit();
+
+    inline for (suites, 0..) |suite, index| {
+        const keys = try protection.deriveKeysForSecretForVersion(
+            version_1_wire_for_test,
+            suite,
+            trafficSecretForSuiteForTest(suite),
+        );
+        prepared.replace(keys);
+        const options: protection.ShortPacketOptions = .{
+            .destination_connection_id = "suite-replace",
+            .packet_number = 100 + index,
+            .packet_number_len = 2,
+            .key_phase = index % 2 != 0,
+            .payload = "replacement suite",
+        };
+        var expected_storage: [128]u8 = undefined;
+        const expected = try protection.sealShortPacketInto(
+            &expected_storage,
+            keys,
+            options,
+        );
+        var actual_storage: [128]u8 = undefined;
+        const actual = try protection.sealShortPacketIntoPrepared(
+            &actual_storage,
+            &prepared,
+            options,
+        );
+        try std.testing.expectEqualSlices(u8, expected, actual);
+    }
 }
 
 test "QUIC short packet in-place open matches owning open" {

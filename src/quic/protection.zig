@@ -112,27 +112,29 @@ pub const PacketProtectionKeys = struct {
 /// builds retain the same allocation-free pure-Zig AEAD primitives. This type
 /// owns backend state and must be deinitialized exactly once.
 pub const PreparedPacketProtectionKeys = struct {
+    const HeaderProtection = union(enum) {
+        generic,
+        aes_128: std.crypto.core.aes.AesEncryptCtx(
+            std.crypto.core.aes.Aes128,
+        ),
+        aes_256: std.crypto.core.aes.AesEncryptCtx(
+            std.crypto.core.aes.Aes256,
+        ),
+    };
+
     inner: traffic_crypto.PreparedKeys,
-    aes_128_header: ?std.crypto.core.aes.AesEncryptCtx(
-        std.crypto.core.aes.Aes128,
-    ),
-    aes_256_header: ?std.crypto.core.aes.AesEncryptCtx(
-        std.crypto.core.aes.Aes256,
-    ),
+    header: HeaderProtection,
 
     pub fn init(keys: PacketProtectionKeys) PreparedPacketProtectionKeys {
         return .{
             .inner = .init(asVailKeys(keys)),
-            .aes_128_header = if (keys.suite == .aes_128_gcm_sha256)
-                std.crypto.core.aes.Aes128.initEnc(
+            .header = switch (keys.suite) {
+                .aes_128_gcm_sha256 => .{ .aes_128 = std.crypto.core.aes.Aes128.initEnc(
                     keys.suite_hp[0..aes_128_key_len].*,
-                )
-            else
-                null,
-            .aes_256_header = if (keys.suite == .aes_256_gcm_sha384)
-                std.crypto.core.aes.Aes256.initEnc(keys.suite_hp)
-            else
-                null,
+                ) },
+                .aes_256_gcm_sha384 => .{ .aes_256 = std.crypto.core.aes.Aes256.initEnc(keys.suite_hp) },
+                else => .generic,
+            },
         };
     }
 
@@ -212,15 +214,12 @@ pub const PreparedPacketProtectionKeys = struct {
         sample: [header_protection_sample_len]u8,
     ) [header_protection_mask_len]u8 {
         var encrypted: [header_protection_sample_len]u8 = undefined;
-        if (self.aes_128_header) |aes| {
-            aes.encrypt(&encrypted, &sample);
-            return encrypted[0..header_protection_mask_len].*;
+        switch (self.header) {
+            .generic => return self.inner.headerProtectionMask(sample),
+            .aes_128 => |*aes| aes.encrypt(&encrypted, &sample),
+            .aes_256 => |*aes| aes.encrypt(&encrypted, &sample),
         }
-        if (self.aes_256_header) |aes| {
-            aes.encrypt(&encrypted, &sample);
-            return encrypted[0..header_protection_mask_len].*;
-        }
-        return self.inner.headerProtectionMask(sample);
+        return encrypted[0..header_protection_mask_len].*;
     }
 };
 

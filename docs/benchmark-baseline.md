@@ -736,6 +736,24 @@ also proves that linked AES connections select prepared send/receive contexts
 and continue exchanging STREAM data across a key update, while ChaCha20 and
 SM4 remain on their existing paths.
 
+Prepared header-protection state now stores one tagged AES-128 or AES-256 key
+schedule instead of two mutually exclusive optional schedules. This follows
+the suite-specific header-key ownership in quiche/tquic and reduces
+`PreparedPacketProtectionKeys` from 1,792 to 1,600 bytes (10.7%). A live AES
+QUIC connection owns one send and one receive object, so its fixed prepared-key
+footprint falls by 384 bytes without changing allocation count. Tests compare
+all four traffic suites against the value-key path and exercise replacement
+across AES-128, AES-256, and ChaCha20 tags. Seven CPU-0, fixed-binary,
+order-alternated 100,000-operation pairs kept AES-128 prepared seal/open at
+205-225/251-257 ns and AES-256 at 224-242/269-273 ns on the candidate; the
+corresponding baseline ranges were 205-210/251-256 and
+225-228/271-275 ns. These overlap and are treated as throughput-neutral. Seven
+matching real-handshake, four-stream, 16-MiB-upload pairs completed every
+three-iteration arm with 50,331,648 bytes and status total 2,400. Median
+throughput moved from 162.15 to 162.32 MiB/s with 4/7 candidate wins, also
+noise-level; the retained benefit is the deterministic prepared-key memory
+reduction.
+
 ### QUIC 1-RTT send
 
 ```text

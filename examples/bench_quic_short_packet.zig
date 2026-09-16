@@ -61,6 +61,10 @@ pub fn main() !void {
     );
 
     std.debug.print(
+        "prepared key bytes: {d}\n",
+        .{@sizeOf(netz.quic.protection.PreparedPacketProtectionKeys)},
+    );
+    std.debug.print(
         \\QUIC short packet benchmark
         \\  io backend: zio-std-io
         \\  iterations: {d}

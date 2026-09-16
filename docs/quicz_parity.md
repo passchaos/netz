@@ -1766,6 +1766,13 @@ facility, not a replacement for authenticated handshake-backed HTTP/3.
    and reuses that preview for decryption instead of peeking Key Phase and then
    recomputing the mask. Five CPU-0 samples reduced median allocating, service,
    and visitor cost by 2.6%, 3.8%, and 4.5%. Single-STREAM transactional
+   Prepared AES state now keeps only the negotiated suite's header-protection
+   schedule in a tagged union, matching quiche/tquic's suite-specific key
+   ownership. Each prepared object shrank from 1,792 to 1,600 bytes and each
+   AES connection therefore retains 384 fewer bytes across send/receive state.
+   Seven fixed-binary short-packet and real H3 A/B pairs were throughput-neutral
+   (H3 median 162.15 to 162.32 MiB/s, 4/7 wins), so this is recorded only as a
+   deterministic memory reduction. Single-STREAM transactional
    preflight now avoids unrelated general-packet shadows; seven paired runs
    reduced visitor/service median cost another 1.5%/2.8%. Packed receive-byte
    tracking then reduced those STREAM medians another 11.9%/11.7% and removed
