@@ -117,6 +117,102 @@ test "QUIC DATAGRAM receive queue reserves its exact bound once" {
     try std.testing.expect(!fail.has_induced_failure);
 }
 
+test "QUIC DATAGRAM receive queue reuses popped exact-size payload" {
+    const allocator = std.testing.allocator;
+    var queue: Queue = .{};
+    defer queue.deinit(allocator);
+
+    try std.testing.expect(!try queue.pushCopyDroppingOldest(
+        allocator,
+        "first",
+        1,
+        2,
+    ));
+    var out: [8]u8 = undefined;
+    try std.testing.expectEqualStrings(
+        "first",
+        (try queue.popInto(allocator, &out)).?,
+    );
+
+    var fail = std.testing.FailingAllocator.init(
+        allocator,
+        .{ .fail_index = 0 },
+    );
+    try std.testing.expect(!try queue.pushCopyDroppingOldest(
+        fail.allocator(),
+        "again",
+        2,
+        2,
+    ));
+    try std.testing.expect(!fail.has_induced_failure);
+    try std.testing.expectEqualStrings(
+        "again",
+        (try queue.popInto(allocator, &out)).?,
+    );
+}
+
+test "QUIC DATAGRAM receive queue safely replaces recycled size" {
+    const allocator = std.testing.allocator;
+    var queue: Queue = .{};
+    defer queue.deinit(allocator);
+
+    try std.testing.expect(!try queue.pushCopyDroppingOldest(
+        allocator,
+        "old",
+        1,
+        1,
+    ));
+    var out: [8]u8 = undefined;
+    try std.testing.expectEqualStrings(
+        "old",
+        (try queue.popInto(allocator, &out)).?,
+    );
+    try std.testing.expect(!try queue.pushCopyDroppingOldest(
+        allocator,
+        "longer",
+        2,
+        1,
+    ));
+    try std.testing.expectError(
+        error.BufferTooSmall,
+        queue.popInto(allocator, out[0..2]),
+    );
+    try std.testing.expect(!try queue.pushCopyDroppingOldest(
+        allocator,
+        "longer",
+        3,
+        1,
+    ));
+    try std.testing.expectEqualStrings(
+        "longer",
+        (try queue.popInto(allocator, &out)).?,
+    );
+}
+
+test "QUIC DATAGRAM receive queue keeps drop-oldest accounting with recycle" {
+    const allocator = std.testing.allocator;
+    var queue: Queue = .{};
+    defer queue.deinit(allocator);
+
+    try std.testing.expect(!try queue.pushCopyDroppingOldest(
+        allocator,
+        "one",
+        1,
+        1,
+    ));
+    try std.testing.expect(try queue.pushCopyDroppingOldest(
+        allocator,
+        "two",
+        2,
+        1,
+    ));
+    var out: [8]u8 = undefined;
+    try std.testing.expectEqualStrings(
+        "two",
+        (try queue.popInto(allocator, &out)).?,
+    );
+}
+
 fn pushOwned(
     queue: *Queue,
     allocator: std.mem.Allocator,

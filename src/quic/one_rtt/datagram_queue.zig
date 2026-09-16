@@ -9,11 +9,13 @@ pub const Queue = struct {
     slots: std.ArrayList(?Entry) = .empty,
     head: usize = 0,
     len: usize = 0,
+    recycled_payload: ?[]u8 = null,
 
     pub fn deinit(self: *Queue, allocator: std.mem.Allocator) void {
         for (self.slots.items) |maybe_entry| {
             if (maybe_entry) |entry| allocator.free(entry.payload);
         }
+        if (self.recycled_payload) |payload| allocator.free(payload);
         self.slots.deinit(allocator);
         self.* = undefined;
     }
@@ -75,6 +77,46 @@ pub const Queue = struct {
         return dropped;
     }
 
+    /// Copy a borrowed payload into queue-owned storage. After an application
+    /// pop, one exact-size allocation is retained for the next admission. The
+    /// queue ordering and drop-oldest semantics match `pushDroppingOldest`.
+    pub fn pushCopyDroppingOldest(
+        self: *Queue,
+        allocator: std.mem.Allocator,
+        payload: []const u8,
+        packet_number: u64,
+        capacity: usize,
+    ) std.mem.Allocator.Error!bool {
+        std.debug.assert(capacity > 0);
+        std.debug.assert(self.len <= capacity);
+
+        // Reserve queue metadata before taking or allocating payload storage,
+        // so OOM leaves ownership and queue state unchanged.
+        if (self.len < capacity and self.slots.capacity < capacity) {
+            try self.slots.ensureTotalCapacityPrecise(allocator, capacity);
+        }
+        const owned = if (self.recycled_payload) |recycled| blk: {
+            if (recycled.len != payload.len) {
+                break :blk try allocator.dupe(u8, payload);
+            }
+            self.recycled_payload = null;
+            @memcpy(recycled, payload);
+            break :blk recycled;
+        } else try allocator.dupe(u8, payload);
+        var owns_payload = true;
+        errdefer if (owns_payload) self.recycleOrFree(allocator, owned);
+        const dropped = try self.pushDroppingOldest(
+            allocator,
+            owned,
+            packet_number,
+            capacity,
+        );
+        owns_payload = false;
+        const did_drop = dropped != null;
+        if (dropped) |oldest| self.recycleOrFree(allocator, oldest);
+        return did_drop;
+    }
+
     pub fn pop(self: *Queue) ?[]u8 {
         if (self.len == 0) return null;
         const payload = self.slots.items[self.head].?.payload;
@@ -86,6 +128,21 @@ pub const Queue = struct {
             self.head = (self.head + 1) % self.slots.items.len;
         }
         return payload;
+    }
+
+    /// Copy the oldest payload into caller storage and retain its allocation
+    /// for a later exact-size admission. A short output buffer preserves the
+    /// existing consume-on-error behavior while still recycling storage.
+    pub fn popInto(
+        self: *Queue,
+        allocator: std.mem.Allocator,
+        out: []u8,
+    ) error{BufferTooSmall}!?[]u8 {
+        const payload = self.pop() orelse return null;
+        defer self.recycleOrFree(allocator, payload);
+        if (payload.len > out.len) return error.BufferTooSmall;
+        @memcpy(out[0..payload.len], payload);
+        return out[0..payload.len];
     }
 
     pub fn countPacket(self: Queue, packet_number: u64) usize {
@@ -131,5 +188,14 @@ pub const Queue = struct {
         self.len = kept;
         if (kept == 0) self.head = 0;
         return discarded;
+    }
+
+    fn recycleOrFree(
+        self: *Queue,
+        allocator: std.mem.Allocator,
+        payload: []u8,
+    ) void {
+        if (self.recycled_payload) |recycled| allocator.free(recycled);
+        self.recycled_payload = payload;
     }
 };

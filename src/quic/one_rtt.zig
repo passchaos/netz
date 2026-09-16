@@ -3473,11 +3473,10 @@ pub const Connection = struct {
     }
 
     pub fn popDatagram(self: *Connection, out: []u8) Error!?[]u8 {
-        const payload = self.datagram_recv_queue.pop() orelse return null;
-        defer self.endpoint.allocator.free(payload);
-        if (payload.len > out.len) return error.DatagramBufferTooSmall;
-        @memcpy(out[0..payload.len], payload);
-        return out[0..payload.len];
+        return self.datagram_recv_queue.popInto(
+            self.endpoint.allocator,
+            out,
+        ) catch error.DatagramBufferTooSmall;
     }
 
     pub fn datagramReceiveQueueLen(self: Connection) usize {
@@ -13264,18 +13263,13 @@ pub const Connection = struct {
             self.datagrams_dropped_incoming_count +|= 1;
             return;
         }
-        const owned = try self.endpoint.allocator.dupe(u8, datagram.data);
-        var owns_payload = true;
-        errdefer if (owns_payload) self.endpoint.allocator.free(owned);
-        const dropped = try self.datagram_recv_queue.pushDroppingOldest(
+        const dropped = try self.datagram_recv_queue.pushCopyDroppingOldest(
             self.endpoint.allocator,
-            owned,
+            datagram.data,
             packet_number,
             self.config.max_datagram_queue_items,
         );
-        owns_payload = false;
-        if (dropped) |payload| {
-            self.endpoint.allocator.free(payload);
+        if (dropped) {
             self.datagrams_dropped_incoming_count +|= 1;
         }
         self.datagrams_received_count +|= 1;

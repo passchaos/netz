@@ -860,6 +860,19 @@ nothing and retain no geometric capacity beyond policy. Tests exercise
 wrap-around removal by packet number, stable survivor order, capacity-one
 replacement, caller ownership after OOM, and newest-data retention. The public
 queue/drop counters and packet-routing API are unchanged.
+The queue now additionally retains one exact-size payload allocation after an
+application pop. Repeated fixed-size DATAGRAM receive/pop therefore allocates
+the ring and first payload once, then copies subsequent payloads through the
+same storage; different sizes replace the single recycle slot safely. Focused
+tests prove exact-size admission succeeds under a fail-first allocator after
+the initial pop, preserve consume-on-small-buffer behavior, and retain
+drop-oldest accounting. Fixed-binary CPU-0/client, CPU-1/Quinn-server A/B used
+five 200-warmup/5,000-RTT pairs with alternating order. Median p50 moved only
+44.666 to 44.416 us (0.6%, 3/5 wins) and p99 61.047 to 60.547 us (0.8%). The
+reverse fixed-Quinn-client/netz-server comparison moved p50 44.334 to 44.231
+us (0.2%, 3/5 wins), with one noisy candidate p99 tail. These timing results
+are performance-neutral; the supported improvement is the deterministic
+steady-state payload-allocation removal, not a latency claim.
 Stateless `one_rtt.sendFramesInto` now accepts one caller-owned final packet
 buffer, encodes frames directly into its plaintext region, seals AEAD in place,
 and submits it without heap allocation. Its exact sizing helper validates every

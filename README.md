@@ -1240,7 +1240,8 @@ The aggregate `bench` step runs the current protocol microbenchmarks:
   AES header keys that avoid per-packet crypto setup and refresh on key updates,
 - bounded QUIC DATAGRAM receive queuing in an O(1) ring under
   `quic/one_rtt/datagram_queue.zig`, with exact one-time capacity reservation,
-  newest-data retention, packet-number rollback, and explicit payload ownership,
+  one exact-size popped-payload recycle slot, newest-data retention,
+  packet-number rollback, and explicit payload ownership,
 - QUIC long PADDING run parsing for Initial padding and PMTUD/probe payloads,
 - QUIC-LB encrypted server-ID extraction with the draft's three-pass
   load-balancer optimization,
