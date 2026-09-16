@@ -6,6 +6,7 @@ const frame_traits = @import("one_rtt/frame_traits.zig");
 const datagram_queue = @import("one_rtt/datagram_queue.zig");
 const handshake_status = @import("one_rtt/handshake_status.zig");
 const pto_jitter = @import("one_rtt/pto_jitter.zig");
+const prepared_keys = @import("one_rtt/prepared_keys.zig");
 const connection_scratch = @import("one_rtt/scratch.zig");
 const deadline_policy = @import("../internal/deadline.zig");
 
@@ -1062,8 +1063,7 @@ pub const Connection = struct {
     /// Current-generation packet keys with optional backend AEAD setup kept
     /// alive across packets. The movable key-phase state remains plain data;
     /// these connection-owned contexts are refreshed only on phase changes.
-    prepared_send_keys: ?*quic.protection.PreparedPacketProtectionKeys,
-    prepared_receive_keys: ?*quic.protection.PreparedPacketProtectionKeys,
+    prepared_keys: prepared_keys.Set,
     pending_key_update_ack_threshold: ?u64 = null,
     send_key_generation_encrypted_packets: u64 = 0,
     receive_authentication_failures: u64 = 0,
@@ -1253,22 +1253,12 @@ pub const Connection = struct {
             stable_config.peer_preferred_address.?
                 .connection_id = preferred_storage;
         }
-        var prepared_send_keys = try quic.protection
-            .PreparedPacketProtectionKeys.createIfAccelerated(
+        var prepared_key_set = try prepared_keys.Set.init(
             endpoint.allocator,
             config.send_keys,
-        );
-        errdefer if (prepared_send_keys) |prepared| {
-            prepared.destroy(endpoint.allocator);
-        };
-        var prepared_receive_keys = try quic.protection
-            .PreparedPacketProtectionKeys.createIfAccelerated(
-            endpoint.allocator,
             config.receive_keys,
         );
-        errdefer if (prepared_receive_keys) |prepared| {
-            prepared.destroy(endpoint.allocator);
-        };
+        errdefer prepared_key_set.deinit(endpoint.allocator);
         const transferred_receive_packet = receive_packet_storage;
         receive_packet_storage = null;
         var scratch = try connection_scratch.Buffers
@@ -1324,8 +1314,7 @@ pub const Connection = struct {
                 false,
                 config.key_update_profile,
             ),
-            .prepared_send_keys = prepared_send_keys,
-            .prepared_receive_keys = prepared_receive_keys,
+            .prepared_keys = prepared_key_set,
             .peer_max_streams_bidi = config.initial_send_max_streams_bidi,
             .peer_max_streams_uni = config.initial_send_max_streams_uni,
             .recv_max_streams_bidi = config.initial_receive_max_streams_bidi,
@@ -1345,8 +1334,7 @@ pub const Connection = struct {
             .scratch = scratch,
         };
         scratch_owned = false;
-        prepared_send_keys = null;
-        prepared_receive_keys = null;
+        prepared_key_set = .{};
         peer_connection_id_storage_owned = false;
         errdefer connection.deinit();
         connection.fixed_bit_generator = try .init(
@@ -1428,12 +1416,7 @@ pub const Connection = struct {
         self.send_batch_packet_stream_scratch.deinit(
             self.endpoint.allocator,
         );
-        if (self.prepared_send_keys) |prepared| {
-            prepared.destroy(self.endpoint.allocator);
-        }
-        if (self.prepared_receive_keys) |prepared| {
-            prepared.destroy(self.endpoint.allocator);
-        }
+        self.prepared_keys.deinit(self.endpoint.allocator);
         self.fixed_bit_generator.deinit();
         self.endpoint.allocator.free(self.peer_connection_id_storage);
         self.* = undefined;
@@ -5308,7 +5291,7 @@ pub const Connection = struct {
         options: quic.protection.ShortPacketOptions,
     ) Error![]u8 {
         if (comptime quic.protection.prepared_packet_protection_enabled) {
-            if (self.prepared_send_keys) |prepared| {
+            if (self.prepared_keys.send()) |prepared| {
                 return quic.protection.sealShortPacketIntoPrepared(
                     packet,
                     prepared,
@@ -5329,7 +5312,7 @@ pub const Connection = struct {
         options: quic.protection.ShortPacketOptions,
     ) Error![]u8 {
         if (comptime quic.protection.prepared_packet_protection_enabled) {
-            if (self.prepared_send_keys) |prepared| {
+            if (self.prepared_keys.send()) |prepared| {
                 return quic.protection.sealShortPacketInPlacePrepared(
                     packet,
                     prepared,
@@ -5489,9 +5472,7 @@ pub const Connection = struct {
         now_ns: ?u64,
     ) void {
         self.send_key_phase.initiateKeyUpdate();
-        if (self.prepared_send_keys) |prepared| {
-            prepared.replace(self.send_key_phase.currentKeys());
-        }
+        self.prepared_keys.replaceSend(self.send_key_phase.currentKeys());
         self.pending_key_update_ack_threshold = first_packet_number;
         self.send_key_generation_encrypted_packets = 0;
         if (self.config.qlog_observer) |observer| {
@@ -11393,7 +11374,7 @@ pub const Connection = struct {
         allow_zero_fixed_bit: bool,
     ) quic.protection.Error!quic.protection.CurrentKeyOpenResult {
         if (comptime quic.protection.prepared_packet_protection_enabled) {
-            if (self.prepared_receive_keys) |prepared| {
+            if (self.prepared_keys.receive()) |prepared| {
                 return quic.protection
                     .openShortPacketInPlaceForPreparedKeyPhaseWithFixedBitPolicy(
                     prepared,
@@ -11795,9 +11776,7 @@ pub const Connection = struct {
         now_ns: ?u64,
     ) Error!void {
         if (!self.receive_key_phase.updateAfterReceiving(peer_key_phase)) return;
-        if (self.prepared_receive_keys) |prepared| {
-            prepared.replace(self.receive_key_phase.currentKeys());
-        }
+        self.prepared_keys.replaceReceive(self.receive_key_phase.currentKeys());
         if (self.config.qlog_observer) |observer| {
             observer.keyUpdated(
                 self.qlogEventTime(now_ns orelse self.monotonicNowNs()),
@@ -15444,13 +15423,13 @@ pub const testing = struct {
     pub fn hasPreparedSendPacketProtection(
         connection: *const Connection,
     ) bool {
-        return connection.prepared_send_keys != null;
+        return connection.prepared_keys.send() != null;
     }
 
     pub fn hasPreparedReceivePacketProtection(
         connection: *const Connection,
     ) bool {
-        return connection.prepared_receive_keys != null;
+        return connection.prepared_keys.receive() != null;
     }
 
     pub const LocalCloseInfo = struct {

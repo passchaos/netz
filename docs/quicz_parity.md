@@ -1772,7 +1772,12 @@ facility, not a replacement for authenticated handshake-backed HTTP/3.
    AES connection therefore retains 384 fewer bytes across send/receive state.
    Seven fixed-binary short-packet and real H3 A/B pairs were throughput-neutral
    (H3 median 162.15 to 162.32 MiB/s, 4/7 wins), so this is recorded only as a
-   deterministic memory reduction. Single-STREAM transactional
+   deterministic memory reduction. Connection ownership now groups send and
+   receive prepared contexts into one stable allocation while retaining
+   single-direction and non-accelerated variants for low-level mixed-suite
+   configurations. A linked-backend 100-handshake run reduced allocations from
+   7,901 to 7,701 with unchanged peak memory; seven fixed-binary paired runs
+   left median rate/P50 within 0.3%. Single-STREAM transactional
    preflight now avoids unrelated general-packet shadows; seven paired runs
    reduced visitor/service median cost another 1.5%/2.8%. Packed receive-byte
    tracking then reduced those STREAM medians another 11.9%/11.7% and removed

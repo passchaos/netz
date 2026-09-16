@@ -754,6 +754,20 @@ throughput moved from 162.15 to 162.32 MiB/s with 4/7 candidate wins, also
 noise-level; the retained benefit is the deterministic prepared-key memory
 reduction.
 
+Connection ownership now groups the accelerated send and receive contexts into
+one stable pair allocation. Direct preconfigured connections with an
+accelerated suite in only one direction retain a single-context allocation,
+while non-accelerated pairs allocate none; this keeps the public mixed-suite
+configuration compatible. A linked-backend 100-handshake allocator run fell
+from 7,901 to 7,701 allocations, exactly two fewer allocations per benchmark
+round because each round constructs a client and server connection. Requested
+bytes were effectively unchanged (7,693,101 to 7,692,942) and peak live bytes
+remained 58,579. Seven CPU-0 fixed-binary, alternating-order 100-handshake
+pairs were timing-neutral: median connection rate moved from 1,036.0 to
+1,033.7/s (-0.2%) and median P50 from 901,089 to 904,134 ns (+0.3%). The
+ownership policy and allocation-count regression live in
+`src/quic/one_rtt/prepared_keys.zig`.
+
 ### QUIC 1-RTT send
 
 ```text
