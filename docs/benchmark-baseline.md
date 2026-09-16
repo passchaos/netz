@@ -914,6 +914,32 @@ totals, so median cumulative allocation and peak changed only 0.041% and
 The supported claim is therefore fewer ordered-stream allocations plus a small
 isolated receive-path improvement, not higher end-to-end throughput.
 
+HTTP/3 clients previously stored every outstanding request across parallel
+stream-ID, index, and semantics arrays plus a hash index, and copied every
+method string independently. The lifecycle now owns one stream-ID-keyed map.
+Its value stores the response-relevant method classification and Extended
+CONNECT bit; the standard GET/HEAD/POST/PUT/DELETE/CONNECT/OPTIONS/TRACE/PATCH
+methods are inline tags, while extension methods retain an owned exact string
+so send retries cannot alias caller memory. The implementation and its
+allocation/failure tests moved to
+`src/http3/runtime/stream/lifecycle/client.zig`; server priority and GOAWAY
+tracking remain in the parent lifecycle module. This follows Hyper/http's
+typed standard-method representation while preserving netz's exact custom-
+method retry checks and HEAD/traditional-CONNECT response semantics.
+
+The fixed dense-prefix baseline SHA-256 for the real TLS/HTTP/3 upload was
+`66413befc85a749a304ad331da41722a959f39b578122bbab09a5d1c80bba455`;
+the final single-map lifecycle candidate was
+`be0ee3d3328088c6aa727703dbb94f78767c12be7d05705aece34bf4917c21f2`.
+Seven CPU-0, order-alternated runs of three 16-MiB/four-stream iterations moved
+median throughput from 144.52 to 145.63 MiB/s (+0.8%, 6/7 wins) and median
+latency from 110.752 to 109.647 ms/iteration (1.0% lower). Seven matching
+allocator pairs moved the median from 658 to 652 calls; cumulative allocation
+and peak were each 120 bytes lower in six of seven candidate runs. One candidate
+allocator outlier exercised additional recovery-cache growth, so these results
+support the simpler ownership model and removal of routine method copies, not a
+broad HTTP/3 throughput claim.
+
 A follow-up avoids treating every byte inside the allocated receive buffer as
 an actual overlap. Before either transactional preflight or committed insert
 performs byte-wise duplicate/conflict validation, the packed bitmap now checks

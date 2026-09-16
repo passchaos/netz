@@ -677,6 +677,16 @@ allocation calls 10.3%, cumulative bytes 40.4%, and peak live bytes 15.1%; the
 verified reductions were 9.6%, 40.3%, and 15.0%. Seven CPU-0 alternating pairs
 showed only noise-level handshake movement (skip P50 +0.5%, verified P50 +0.1%)
 and a 5,000-round echo control was unchanged at 15.574 versus 15.575 us.
+HTTP/3 client request lifecycle state now uses one stream-ID-keyed map instead
+of parallel ID, index, and semantics arrays plus a map. Standard HTTP methods
+are inline tags, while extension methods retain exact owned bytes for safe send
+retry; HEAD, traditional CONNECT, Extended CONNECT, GOAWAY retry disposition,
+and finished-stream behavior are unchanged. The client implementation and its
+allocation/failure tests moved to
+`src/http3/runtime/stream/lifecycle/client.zig`. Seven fixed-binary CPU-0 H3
+upload pairs moved the 16-MiB/four-stream median from 144.52 to 145.63 MiB/s
+(0.8%, 6/7 wins) and reduced the allocator-call median from 658 to 652. This is
+a small internal lifecycle result, not a general cross-stack throughput claim.
 
 Handshake-backed and lightweight protected HTTP/3 clients guard the
 connection-scoped receive owner while aggregate informational callbacks run.

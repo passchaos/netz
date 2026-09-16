@@ -425,7 +425,7 @@ test "HTTP/3 protected client observes and bounds informational responses" {
     try std.testing.expectEqual(next_stream_id, client.next_stream_id);
     try std.testing.expectEqual(
         @as(usize, 0),
-        client.request_lifecycle.outstanding.items.len,
+        client.request_lifecycle.count(),
     );
 
     var observation: Observation = .{};
@@ -584,7 +584,7 @@ test "HTTP/3 authenticated informational deadline variants validate and deliver"
     );
     try std.testing.expectEqual(
         @as(usize, 0),
-        client.request_lifecycle.outstanding.items.len,
+        client.request_lifecycle.count(),
     );
 
     var reentrant = HandshakeReentrantObservation{ .client = &client };

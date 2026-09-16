@@ -1161,6 +1161,8 @@ The aggregate `bench` step runs the current protocol microbenchmarks:
   body size, direction mode, stream count, round-robin scheduling quantum,
   endpoint and 1-RTT datagram size, receive batch count, paced body chunk size,
   optional cross-stream body packet batching, and iteration count,
+- HTTP/3 client request lifecycle tracking through one stream-ID-keyed map,
+  with allocation-free standard-method semantics and owned custom methods,
 - HTTP/3 Alt-Svc `h3` / `h3-29` endpoint discovery parsing and origin-relative connection target resolution for real-site upgrade hints,
 - HTTP/3 Capsule Protocol parsing/iteration and caller-buffer encoding for
   CONNECT-stream extension payloads,
