@@ -3,6 +3,7 @@
 const std = @import("std");
 const netz = @import("netz");
 const OneShotReorder = @import("support/one_shot_reorder.zig").State;
+const s2n_churn_receiver = @import("support/s2n_churn_receiver.zig");
 
 const payloads = [_][]const u8{ "hello", "world" };
 const flow_control_payload = [_]u8{'f'} ** 12_288;
@@ -43,6 +44,7 @@ const Mode = enum {
     s2n_stop_loss,
     s2n_reset_reorder,
     s2n_stop_reorder,
+    s2n_mixed_churn,
 };
 
 const CancellationLoss = struct {
@@ -281,6 +283,7 @@ pub fn main(init: std.process.Init) !void {
             .s2n_stop_loss,
             .s2n_reset_reorder,
             .s2n_stop_reorder,
+            .s2n_mixed_churn,
             => "s2n-quic-tokio",
             else => "quic-go-netpoll",
         }},
@@ -335,6 +338,11 @@ pub fn main(init: std.process.Init) !void {
             .max_receive_window = 8 * 1024,
             .stream_receive_window = 2 * 1024,
             .max_stream_receive_window = 2 * 1024,
+        } else if (mode == .s2n_mixed_churn) .{
+            .max_datagram_size = 8192,
+            // ReleaseFast s2n-quic can coalesce the concurrent churn into
+            // denser packets than the ordinary fixture's 16-frame budget.
+            .max_frames_per_packet = 256,
         } else .{
             .max_datagram_size = 8192,
         },
@@ -608,6 +616,9 @@ pub fn main(init: std.process.Init) !void {
                 try sendEcho(&established.connection, 4, payloads[1]);
             }
         },
+        .s2n_mixed_churn => {
+            _ = try s2n_churn_receiver.run(&established.connection);
+        },
         .flow => {
             try receiveExpectedStream(
                 &established.connection,
@@ -669,7 +680,8 @@ pub fn main(init: std.process.Init) !void {
     if (mode == .peer_close or mode == .peer_close_v2 or mode == .s2n or
         mode == .s2n_reset or mode == .s2n_stop or
         mode == .s2n_reset_loss or mode == .s2n_stop_loss or
-        mode == .s2n_reset_reorder or mode == .s2n_stop_reorder)
+        mode == .s2n_reset_reorder or mode == .s2n_stop_reorder or
+        mode == .s2n_mixed_churn)
     {
         // Give the peer time to consume both FIN-terminated echoes. The close
         // is intentionally delayed just like the ordinary fixture close so
@@ -725,6 +737,10 @@ pub fn main(init: std.process.Init) !void {
                     .{},
                 );
             },
+            .s2n_mixed_churn => std.debug.print(
+                "netz QUIC server interoperated with s2n-quic: alpn=hq-interop mixed_churn=true streams=32 fin=16 reset=16 bytes=266240 checksum=33945600 reset_mask=0x00000000aaaaaaaa reset_code_sum=262400 reset_prefix_bytes=256 terminal_states_verified=true peer_close=58\n",
+                .{},
+            ),
             .peer_close => std.debug.print(
                 "netz QUIC close server interoperated with quic-go: alpn=hq-interop peer_close=58\n",
                 .{},
@@ -781,6 +797,7 @@ pub fn main(init: std.process.Init) !void {
         .s2n_stop_loss => unreachable,
         .s2n_reset_reorder => unreachable,
         .s2n_stop_reorder => unreachable,
+        .s2n_mixed_churn => unreachable,
         .migration => unreachable,
         .migration_loss => unreachable,
         .nat_rebinding => unreachable,

@@ -963,7 +963,10 @@ zig build interop-quic-quic-go -Doptimize=ReleaseFast
 # and s2n-quic gates assert zio-std-io against their netpoll/Tokio runtimes.
 # The s2n matrix also holds each netz-emitted RESET_STREAM and STOP_SENDING
 # once, sends a sibling STREAM first, then verifies exact cancellation codes
-# and sibling completion in both endpoint-role directions.
+# and sibling completion in both endpoint-role directions. It additionally
+# runs a bounded 32-stream mixed lifecycle in both directions: every stream
+# delivers a verified 256-byte prefix, then alternating streams finish 16 KiB
+# or reset with an index-specific code before the final application close.
 # Requires Docker and the crossbario/autobahn-testsuite image. Optional trailing
 # arguments select individual case IDs; with none, all 517 cases run. Pass
 # --tls before case IDs to run the same gate over native TLS 1.3 WSS.

@@ -4,6 +4,8 @@ use s2n_quic::{client::Connect, provider::tls, Client, Connection, Server};
 use std::{net::SocketAddr, path::Path, time::Duration};
 use tokio::time::{sleep, timeout};
 
+mod churn;
+
 const ALPN: &[u8] = b"hq-interop";
 const PAYLOADS: [&[u8]; 2] = [b"hello", b"world"];
 const TIMEOUT: Duration = Duration::from_secs(10);
@@ -17,6 +19,7 @@ enum Scenario {
     LossyStop,
     ReorderedReset,
     ReorderedStop,
+    MixedChurn,
     Flow,
     Retry,
 }
@@ -61,7 +64,7 @@ async fn main() -> Result<()> {
             run_client(port, &ca, scenario).await
         }
         _ => bail!(
-            "usage: netz-quic-s2n-interop server PORT CERT KEY [echo|reset|stop|flow|retry] | client PORT CA [echo|reset|stop|lossy-reset|lossy-stop|reordered-reset|reordered-stop]"
+            "usage: netz-quic-s2n-interop server PORT CERT KEY [echo|reset|stop|flow|retry|mixed-churn] | client PORT CA [echo|reset|stop|lossy-reset|lossy-stop|reordered-reset|reordered-stop|mixed-churn]"
         ),
     }
 }
@@ -75,6 +78,7 @@ fn parse_scenario(value: Option<String>) -> Result<Scenario> {
         "lossy-stop" => Ok(Scenario::LossyStop),
         "reordered-reset" => Ok(Scenario::ReorderedReset),
         "reordered-stop" => Ok(Scenario::ReorderedStop),
+        "mixed-churn" => Ok(Scenario::MixedChurn),
         "flow" => Ok(Scenario::Flow),
         "retry" => Ok(Scenario::Retry),
         value => bail!("unknown scenario: {value}"),
@@ -138,6 +142,9 @@ async fn run_server(
         Scenario::Stop => serve_stop(&mut connection).await?,
         Scenario::ReorderedReset => serve_peer_reset_reordered(&mut connection).await?,
         Scenario::ReorderedStop => serve_peer_stop_reordered(&mut connection).await?,
+        Scenario::MixedChurn => {
+            churn::run_receiver(&mut connection).await?;
+        }
         Scenario::LossyReset | Scenario::LossyStop => unreachable!(),
         Scenario::Flow => serve_flow(&mut connection).await?,
     }
@@ -163,6 +170,9 @@ async fn run_server(
         ),
         Scenario::ReorderedStop => println!(
             "s2n-quic server interoperated with netz: version=1 alpn=hq-interop stop_error=42 reset_error=42 reordered=true sibling_before_cancel=true concurrent_sibling=4 echo_bytes=5 peer_close=57"
+        ),
+        Scenario::MixedChurn => println!(
+            "s2n-quic server interoperated with netz: version=1 alpn=hq-interop mixed_churn=true streams=32 fin=16 reset=16 bytes=266240 checksum=33945600 reset_mask=0x00000000aaaaaaaa reset_code_sum=262400 reset_prefix_bytes=256 terminal_states_verified=true peer_close=57"
         ),
         Scenario::LossyReset | Scenario::LossyStop => unreachable!(),
         Scenario::Flow => println!(
@@ -193,6 +203,7 @@ async fn run_client(port: u16, ca: &str, scenario: Scenario) -> Result<()> {
         .build()?;
     let mut client = Client::builder()
         .with_tls(tls)?
+        .with_limits(scenario_limits(scenario)?)?
         .with_io("0.0.0.0:0")?
         .start()?;
     let address: SocketAddr = format!("127.0.0.1:{port}").parse()?;
@@ -213,6 +224,9 @@ async fn run_client(port: u16, ca: &str, scenario: Scenario) -> Result<()> {
         Scenario::LossyStop => request_stop(&mut connection).await?,
         Scenario::ReorderedReset => request_peer_reset_reordered(&mut connection).await?,
         Scenario::ReorderedStop => request_stop_reordered(&mut connection).await?,
+        Scenario::MixedChurn => {
+            churn::run_sender(&mut connection).await?;
+        }
         Scenario::Flow => unreachable!(),
         Scenario::Retry => unreachable!(),
     }
@@ -252,6 +266,9 @@ async fn run_client(port: u16, ca: &str, scenario: Scenario) -> Result<()> {
         Scenario::ReorderedStop => println!(
             "s2n-quic client interoperated with netz: verified=true version=1 alpn=hq-interop stop_error=42 reset_sent=42 held_cancel_datagrams=1 reordered=true sibling_before_cancel=true concurrent_sibling=4 echo_bytes=5 peer_close=58"
         ),
+        Scenario::MixedChurn => println!(
+            "s2n-quic client interoperated with netz: verified=true version=1 alpn=hq-interop mixed_churn=true streams=32 fin=16 reset=16 bytes=266240 checksum=33945600 reset_mask=0x00000000aaaaaaaa reset_code_sum=262400 reset_prefix_bytes=256 terminal_states_verified=true peer_close=58"
+        ),
         Scenario::Flow => unreachable!(),
         Scenario::Retry => unreachable!(),
     }
@@ -260,6 +277,14 @@ async fn run_client(port: u16, ca: &str, scenario: Scenario) -> Result<()> {
 
 fn scenario_limits(scenario: Scenario) -> Result<s2n_quic::provider::limits::Limits> {
     let limits = s2n_quic::provider::limits::Limits::new();
+    if scenario == Scenario::MixedChurn {
+        return Ok(limits
+            .with_data_window(2 * 1024 * 1024)?
+            .with_bidirectional_local_data_window(64 * 1024)?
+            .with_bidirectional_remote_data_window(64 * 1024)?
+            .with_max_open_local_bidirectional_streams(64)?
+            .with_max_open_remote_bidirectional_streams(64)?);
+    }
     if scenario != Scenario::Flow {
         return Ok(limits);
     }

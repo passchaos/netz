@@ -3944,6 +3944,20 @@ application close. The fault state and its deterministic contract test live in
 `tools/interop/support/one_shot_reorder.zig`; the existing loss-retransmission
 cases remain separate.
 
+The same s2n-quic gate now includes a clean-network, bounded mixed lifecycle
+in both endpoint-role directions. It opens one persistent control stream and
+32 concurrent data streams, verifies a deterministic 256-byte prefix on every
+stream, then alternates 16 full 16-KiB FIN completions with 16 RESET_STREAM
+terminations. Reset codes are `0x4000 + stream_index`; both independent peers
+must report 266,240 accepted bytes, checksum 33,945,600, reset mask
+`0x00000000aaaaaaaa`, reset-code sum 262,400, and the expected application
+close. The protocol implementations are isolated in
+`tools/interop/support/s2n_churn*.zig` and
+`tools/interop/quic_s2n/src/churn.rs`, keeping the peer entry points focused on
+transport setup and scenario routing. This is reliability coverage rather than
+a throughput comparison; deterministic loss/reordering remains in the separate
+single-cancellation and quic-go/WebTransport churn gates.
+
 The next zio receive-path step gives direct endpoint-backed handshake sources
 one reusable datagram allocation. Each returned datagram keeps a scoped release
 hook, so a nested flight receive falls back to the source's owning path while

@@ -7,6 +7,7 @@ const std = @import("std");
 const netz = @import("netz");
 const exact_certificate = @import("exact_certificate_verifier.zig");
 const OneShotReorder = @import("support/one_shot_reorder.zig").State;
+const s2n_churn = @import("support/s2n_churn.zig");
 
 const payloads = [_][]const u8{ "hello", "world" };
 const key_update_payloads = [_][]const u8{
@@ -14,7 +15,15 @@ const key_update_payloads = [_][]const u8{
     "phase-one",
     "phase-two",
 };
-const Scenario = enum { echo, reset, stop, flow, reset_reorder, stop_reorder };
+const Scenario = enum {
+    echo,
+    reset,
+    stop,
+    flow,
+    reset_reorder,
+    stop_reorder,
+    mixed_churn,
+};
 const flow_control_payload = [_]u8{'f'} ** 12_288;
 
 pub fn main(init: std.process.Init) !void {
@@ -51,6 +60,8 @@ pub fn main(init: std.process.Init) !void {
                 .reset_reorder
             else if (std.mem.eql(u8, value, "reordered-stop"))
                 .stop_reorder
+            else if (std.mem.eql(u8, value, "mixed-churn"))
+                .mixed_churn
             else
                 std.meta.stringToEnum(Scenario, value) orelse
                     return error.InvalidArgument;
@@ -154,6 +165,12 @@ pub fn main(init: std.process.Init) !void {
             },
             .initial_one_rtt_config = .{
                 .max_datagram_size = 8192,
+                // The 32-stream churn can receive dense ACK/STREAM batches
+                // from s2n-quic; keep the ordinary fixture limit elsewhere.
+                .max_frames_per_packet = if (scenario == .mixed_churn)
+                    256
+                else
+                    16,
                 .key_update_profile = if (version == .version_2 and
                     expect_key_update)
                     .quic_go_v0_59
@@ -252,6 +269,7 @@ pub fn main(init: std.process.Init) !void {
             scenario,
             &cancellation_reorder,
         ),
+        .mixed_churn => _ = try s2n_churn.runSender(&established.connection),
         .flow => try exerciseFlowControl(
             &established.connection,
             allocator,
@@ -324,6 +342,10 @@ pub fn main(init: std.process.Init) !void {
         ),
         .stop_reorder => std.debug.print(
             "netz QUIC client interoperated with s2n-quic: verified=true version=1 alpn=hq-interop stop_error=42 reset_sent=42 held_cancel_datagrams=1 reordered=true sibling_before_cancel=true concurrent_sibling=4 echo_bytes=5 peer_close=57\n",
+            .{},
+        ),
+        .mixed_churn => std.debug.print(
+            "netz QUIC client interoperated with s2n-quic: verified=true version=1 alpn=hq-interop mixed_churn=true streams=32 fin=16 reset=16 bytes=266240 checksum=33945600 reset_mask=0x00000000aaaaaaaa reset_code_sum=262400 reset_prefix_bytes=256 terminal_states_verified=true peer_close=57\n",
             .{},
         ),
         .echo => unreachable,
@@ -399,7 +421,7 @@ fn exerciseCancellation(
     const target_payload = switch (scenario) {
         .reset => "reset",
         .stop => "stop",
-        .echo, .flow, .reset_reorder, .stop_reorder => unreachable,
+        .echo, .flow, .reset_reorder, .stop_reorder, .mixed_churn => unreachable,
     };
     const target_stream_id = try connection.openStream();
     if (target_stream_id != 0) return error.UnexpectedStreamId;
@@ -439,7 +461,7 @@ fn exerciseCancellation(
                 return error.UnexpectedStopSendingError;
             }
         },
-        .echo, .flow, .reset_reorder, .stop_reorder => unreachable,
+        .echo, .flow, .reset_reorder, .stop_reorder, .mixed_churn => unreachable,
     }
     try receiveExpectedStream(
         connection,
