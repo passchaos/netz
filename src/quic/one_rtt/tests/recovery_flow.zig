@@ -1465,8 +1465,6 @@ test "QUIC 1-RTT single send builds frames in recovery ownership" {
         .enable_pacing = false,
     });
     defer connection.deinit();
-    const frame_buffer_capacity = connection.send_frame_buffer.capacity;
-
     const frames = [_]quic.Frame{.{ .stream = .{
         .stream_id = 0,
         .data = "single recovery bytes",
@@ -1482,13 +1480,6 @@ test "QUIC 1-RTT single send builds frames in recovery ownership" {
         expected.items,
         one_rtt.testing.recoveryPayloadForPacket(&connection, 0).?,
     );
-    // Reliable single-packet sends never materialize plaintext in the
-    // transient frame buffer after direct recovery construction.
-    try std.testing.expectEqual(
-        frame_buffer_capacity,
-        connection.send_frame_buffer.capacity,
-    );
-
     var raw = try receiver.receiveBytes();
     defer raw.deinit(allocator);
     var received = try one_rtt.openReceivedBytes(

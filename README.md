@@ -560,9 +560,10 @@ starts with deterministic parsers, serializers, preallocated fixed-width wire-in
   Linux `UDP_SEGMENT` offload for
   contiguous equal-sized packet batches with one-shot capability fallback and
   opt-in Linux `UDP_GRO` receive coalescing with shared zero-copy segment
-  ownership or caller-buffer batch views, preallocated 1-RTT frame payload
-  encoding, in-place current-key 1-RTT decryption, reusable receive/frame
-  scratch, and bounded non-GRO multi-datagram receive cursors that amortize
+  ownership or caller-buffer batch views, reusable 1-RTT packet-codec scratch,
+  direct recovery-payload encoding, direct mixed-frame encoding into final
+  protected-packet storage, in-place current-key 1-RTT decryption, and bounded
+  non-GRO multi-datagram receive cursors that amortize
   zio socket waits while exposing only one packet at a time to HTTP/3,
   preserving any datagrams already dequeued when a later batch-drain receive
   reports an error,

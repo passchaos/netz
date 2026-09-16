@@ -212,12 +212,13 @@ ACK flush before transferring receive-loop ownership out of HTTP/3. The same
 absolute handshake deadline covers any pacing wait. The 1200-byte-MTU
 80-request/80-response-field regression failed consistently without this
 handoff and completed in three consecutive focused runs after it.
-PMTU probe construction now uses the connection's pre-sized plaintext scratch
-for the canonical PING-plus-PADDING payload instead of allocating and freeing a
-probe-sized temporary list on every search step. Recovery still takes stable
-ownership before the socket write. A real UDP regression sends and retires one
-probe, then re-arms the same size under an allocator that rejects all new
-allocations; the second exact-size probe succeeds with stable scratch pointers.
+PMTU probe construction now writes the canonical PING-plus-PADDING payload
+directly into the connection's protected-packet buffer instead of allocating
+and freeing a probe-sized temporary list on every search step. Recovery still
+excludes probe payload while sent-packet metadata records its identity before
+the socket write. A real UDP regression sends and retires one probe, then
+re-arms the same size under an allocator that rejects all new allocations; the
+second exact-size probe succeeds with stable packet-scratch pointers.
 The full 2,958-test Netz suite and both quic-go and s2n-quic transport matrices
 remain green after the change.
 QUIC PMTU handling now also detects path MTU black holes from ordinary
@@ -651,6 +652,20 @@ runtime and handshake facades. A CPU-0, seven-pair, order-alternated, same-binar
 `zio-std-io` on every arm. Bidirectional tquic interop passed with and without
 Retry; the quic-go gate could not run in that environment because its external
 fixture checkout was absent.
+
+Established 1-RTT connections now group packet-codec scratch in a dedicated
+module and eliminate the separate plaintext buffer. Reliable frames encode
+directly into recovery ownership; mixed frames, PMTU probes, and augmented PTO
+retransmissions encode into final packet storage before in-place AEAD. This
+matches the reusable-buffer principle visible in Quinn and tquic plus quiche's
+caller-output send interface. A 100-iteration
+local two-endpoint handshake run reduced allocation calls from 8,001 to 7,801,
+cumulative bytes from 14,469,287 to 11,773,513, and peak live bytes from 88,289
+to 61,333. Seven fixed-binary, CPU-0 pairs found only small timing movement:
+quicz-aligned P50 improved 0.6% with 4/7 wins and verified P50 improved 0.7%
+with 7/7 wins. A seven-pair first-echo control improved 13.3% with 7/7 wins,
+while one long-lived echo control improved 4.7%; the latter is only supporting
+evidence, so no broad steady-state throughput claim is made.
 
 Handshake-backed and lightweight protected HTTP/3 clients guard the
 connection-scoped receive owner while aggregate informational callbacks run.

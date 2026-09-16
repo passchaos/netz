@@ -6,6 +6,7 @@ const frame_traits = @import("one_rtt/frame_traits.zig");
 const datagram_queue = @import("one_rtt/datagram_queue.zig");
 const handshake_status = @import("one_rtt/handshake_status.zig");
 const pto_jitter = @import("one_rtt/pto_jitter.zig");
+const connection_scratch = @import("one_rtt/scratch.zig");
 const deadline_policy = @import("../internal/deadline.zig");
 
 const net = std.Io.net;
@@ -1146,13 +1147,9 @@ pub const Connection = struct {
     ack_reordering_threshold: u64 = quic.packet_space.default_packet_threshold,
     immediate_ack_requested: bool = false,
     pacing_blocked_until_ns: ?u64 = null,
-    /// Reused plaintext frame storage. ACK-eliciting payloads are copied only
-    /// when recovery needs stable ownership; transient encoding itself is
-    /// allocation-free after connection initialization.
-    send_frame_buffer: std.ArrayList(u8) = .empty,
-    /// Reused protected-datagram storage. Packet protection writes directly
-    /// into this buffer, avoiding one heap allocation/free pair per 1-RTT send.
-    send_packet_buffer: std.ArrayList(u8) = .empty,
+    /// Packet codec scratch shares lifecycle and cleanup. Plaintext is encoded
+    /// directly into recovery ownership or the final packet payload region.
+    scratch: connection_scratch.Buffers,
     /// Reused flow-credit aggregation for stateful packet sends and batches.
     ///
     /// A packet may carry multiple STREAM frames for one stream and later
@@ -1161,16 +1158,6 @@ pub const Connection = struct {
     /// recovery's required stable payload ownership.
     send_batch_stream_scratch: std.ArrayList(ReservedStreamCredit) = .empty,
     send_batch_packet_stream_scratch: std.ArrayList(ReservedStreamCredit) = .empty,
-    /// Reused socket receive storage for synchronous visitor and state-only
-    /// service paths. GRO grows this lazily to the largest kernel coalesced
-    /// payload; owning diagnostic receives keep independent lifetime storage.
-    receive_packet_buffer: std.ArrayList(u8) = .empty,
-    receive_ack_range_buffer: std.ArrayList(quic.AckRange) = .empty,
-    /// Borrowed frame views used by state-only service and synchronous packet
-    /// visitors. They never outlive the current decrypted datagram/GRO segment
-    /// and therefore avoid one frame slice allocation per packet on the
-    /// event-loop fast path.
-    receive_frame_buffer: std.ArrayList(quic.Frame) = .empty,
 
     pub fn init(endpoint: *quic.runtime.Endpoint, config: ConnectionConfig) Error!Connection {
         if (config.local_endpoint == .server and
@@ -1327,6 +1314,12 @@ pub const Connection = struct {
             .requested_max_ack_delay = config.local_max_ack_delay_us,
             .ack_reordering_threshold = config.local_ack_reordering_threshold,
             .pending_ack_frequency_request = pending_ack_frequency_request,
+            .scratch = try .init(
+                endpoint.allocator,
+                send_buffer_capacity,
+                endpoint.limits.max_datagram_size,
+                config.max_ack_ranges,
+            ),
         };
         prepared_send_keys = null;
         prepared_receive_keys = null;
@@ -1339,16 +1332,6 @@ pub const Connection = struct {
         connection.pto_jitter_state = try .init(
             endpoint.io,
             config.pto_jitter_percentage,
-        );
-        try connection.send_frame_buffer.ensureTotalCapacity(endpoint.allocator, config.max_datagram_size);
-        try connection.send_packet_buffer.ensureTotalCapacity(endpoint.allocator, send_buffer_capacity);
-        try connection.receive_packet_buffer.ensureTotalCapacity(
-            endpoint.allocator,
-            endpoint.limits.max_datagram_size,
-        );
-        try connection.receive_ack_range_buffer.ensureTotalCapacity(
-            endpoint.allocator,
-            config.max_ack_ranges,
         );
         if (config.local_stateless_reset_key) |key| {
             try connection.local_connection_ids.registerInitialWithStaticKey(config.local_connection_id, key);
@@ -1416,15 +1399,11 @@ pub const Connection = struct {
         self.closed_local_uni_streams.deinit(self.endpoint.allocator);
         self.path_response_targets.deinit(self.endpoint.allocator);
         self.datagram_recv_queue.deinit(self.endpoint.allocator);
-        self.send_frame_buffer.deinit(self.endpoint.allocator);
-        self.send_packet_buffer.deinit(self.endpoint.allocator);
+        self.scratch.deinit(self.endpoint.allocator);
         self.send_batch_stream_scratch.deinit(self.endpoint.allocator);
         self.send_batch_packet_stream_scratch.deinit(
             self.endpoint.allocator,
         );
-        self.receive_packet_buffer.deinit(self.endpoint.allocator);
-        self.receive_ack_range_buffer.deinit(self.endpoint.allocator);
-        self.receive_frame_buffer.deinit(self.endpoint.allocator);
         if (self.prepared_send_keys) |prepared| {
             prepared.destroy(self.endpoint.allocator);
         }
@@ -2613,7 +2592,7 @@ pub const Connection = struct {
             else
                 .not_ect;
 
-        try self.send_packet_buffer.ensureTotalCapacity(
+        try self.scratch.send_packet.ensureTotalCapacity(
             self.endpoint.allocator,
             total_packet_len,
         );
@@ -2674,9 +2653,9 @@ pub const Connection = struct {
                 sent_time_ns,
             );
         }
-        self.send_packet_buffer.items.len =
-            self.send_packet_buffer.capacity;
-        defer self.send_packet_buffer.items.len = 0;
+        self.scratch.send_packet.items.len =
+            self.scratch.send_packet.capacity;
+        defer self.scratch.send_packet.items.len = 0;
         var datagrams: [max_batch_packets][]const u8 = undefined;
         var packet_offset: usize = 0;
         var protected_count: usize = 0;
@@ -2688,7 +2667,7 @@ pub const Connection = struct {
             }
         };
         for (prepared[0..count], 0..) |packet, i| {
-            const packet_storage = self.send_packet_buffer.items[packet_offset..][0..packet.packet_len];
+            const packet_storage = self.scratch.send_packet.items[packet_offset..][0..packet.packet_len];
             const payload_offset = 1 + self.config.peer_connection_id.len + @as(usize, packet.packet_number_len);
             const payload = packet_storage[payload_offset..][0..packet.payload_len];
             const recovery_payload: ?[]const u8 = blk: {
@@ -2989,7 +2968,6 @@ pub const Connection = struct {
         }
 
         if (stream_bytes > self.send_flow.available()) {
-            self.send_frame_buffer.items.len = 0;
             packet_streams.clearRetainingCapacity();
             try self.sendDataBlockedAt(sent_time_ns);
             return error.FlowControlBlocked;
@@ -3000,7 +2978,6 @@ pub const Connection = struct {
             else
                 self.initialSendStreamDataLimit(credit.stream_id);
             if (credit.bytes > available) {
-                self.send_frame_buffer.items.len = 0;
                 packet_streams.clearRetainingCapacity();
                 try self.sendStreamDataBlockedAt(
                     credit.stream_id,
@@ -4719,6 +4696,9 @@ pub const Connection = struct {
         automatic_ecn: bool,
     ) Error!void {
         const packet_number = self.next_packet_number;
+        std.debug.assert(
+            self.scratch.send_packet.capacity >= prepared.packet_len,
+        );
         var tracked_congestion = false;
         if (prepared.is_in_flight) {
             try self.congestion.reserve(prepared.payload_len);
@@ -4758,28 +4738,21 @@ pub const Connection = struct {
             recovery_payload = tracked.payload;
             recovery_group_id = tracked.group_id;
         }
-        if (recovery_payload == null or
-            prepared.recovery_payload_len != prepared.payload_len)
-        {
-            std.debug.assert(self.send_frame_buffer.items.len == 0);
-            errdefer self.send_frame_buffer.items.len = 0;
-            try self.send_frame_buffer.ensureUnusedCapacity(
-                self.endpoint.allocator,
-                prepared.payload_len,
+        const payload_in_packet_storage = recovery_payload == null or
+            prepared.recovery_payload_len != prepared.payload_len;
+        const payload = if (payload_in_packet_storage) blk: {
+            const packet_storage = self.scratch.send_packet.allocatedSlice()[0..prepared.packet_len];
+            const payload_offset = 1 + self.config.peer_connection_id.len +
+                @as(usize, prepared.packet_number_len);
+            var encoded = std.ArrayList(u8).initBuffer(
+                packet_storage[payload_offset..][0..prepared.payload_len],
             );
             for (prepared.frames) |frame| {
-                try frame.writeAssumeCapacity(&self.send_frame_buffer);
+                try frame.writeAssumeCapacity(&encoded);
             }
-            std.debug.assert(
-                self.send_frame_buffer.items.len == prepared.payload_len,
-            );
-        }
-        defer self.send_frame_buffer.items.len = 0;
-        const payload = if (recovery_payload != null and
-            prepared.recovery_payload_len == prepared.payload_len)
-            recovery_payload.?
-        else
-            self.send_frame_buffer.items;
+            std.debug.assert(encoded.items.len == prepared.payload_len);
+            break :blk encoded.items;
+        } else recovery_payload.?;
 
         try self.sent.sentInFlightAtWithExactDatagramMetadataAndPathEpoch(
             packet_number,
@@ -4814,6 +4787,7 @@ pub const Connection = struct {
             prepared.is_ack_eliciting,
             prepared.is_in_flight,
             automatic_ecn,
+            payload_in_packet_storage,
         );
         if (prepared.contains_handshake_done) {
             self.handshake_status.onHandshakeDoneTracked(
@@ -5011,21 +4985,15 @@ pub const Connection = struct {
         const overhead = 1 + self.config.peer_connection_id.len + packet_number_len + quic.protection.aead_tag_len;
         if (probe_size <= overhead + 1) return null;
         const target_payload_len = probe_size - overhead;
+        std.debug.assert(self.scratch.send_packet.capacity >= probe_size);
 
-        // `init` reserves at least one path-sized plaintext payload. Reuse it
-        // for PMTU probes instead of allocating and zero-filling a temporary
-        // ArrayList for every binary-search step. QUIC PING and PADDING are
-        // each one-byte frame types, so their encoded payload is canonical.
-        std.debug.assert(self.send_frame_buffer.items.len == 0);
-        defer self.send_frame_buffer.items.len = 0;
-        try self.send_frame_buffer.ensureUnusedCapacity(
-            self.endpoint.allocator,
-            target_payload_len,
-        );
-        self.send_frame_buffer.items.len = target_payload_len;
-        @memset(self.send_frame_buffer.items, 0);
-        self.send_frame_buffer.items[0] = @intFromEnum(quic.FrameType.ping);
-        const payload = self.send_frame_buffer.items;
+        // Build PING plus PADDING directly in the final packet payload region,
+        // then let the in-place protector overwrite it with ciphertext.
+        const packet_storage = self.scratch.send_packet.allocatedSlice();
+        const payload_offset = overhead - quic.protection.aead_tag_len;
+        const payload = packet_storage[payload_offset..][0..target_payload_len];
+        @memset(payload, 0);
+        payload[0] = @intFromEnum(quic.FrameType.ping);
 
         try self.congestion.reserve(payload.len);
         errdefer self.congestion.discard(payload.len);
@@ -5056,6 +5024,7 @@ pub const Connection = struct {
             true,
             true,
             false,
+            true,
         );
         self.next_packet_number += 1;
         self.pmtud.onProbeSentWithIdentity(
@@ -5288,7 +5257,14 @@ pub const Connection = struct {
         return budget;
     }
 
-    fn sendPayloadPacketAt(self: *Connection, packet_number: u64, payload: []const u8, sent_time_ns: ?u64, pace_packet: bool) Error!void {
+    fn sendPayloadPacketAt(
+        self: *Connection,
+        packet_number: u64,
+        payload: []const u8,
+        sent_time_ns: ?u64,
+        pace_packet: bool,
+        payload_in_packet_storage: bool,
+    ) Error!void {
         try self.sendPayloadPacketWithPacketNumberLenAt(
             packet_number,
             payload,
@@ -5298,6 +5274,7 @@ pub const Connection = struct {
             true,
             pace_packet,
             false,
+            payload_in_packet_storage,
         );
     }
 
@@ -5353,6 +5330,7 @@ pub const Connection = struct {
         ack_eliciting: bool,
         pace_packet: bool,
         automatic_ecn: bool,
+        payload_in_packet_storage: bool,
     ) Error!void {
         const sizing_options: quic.protection.ShortPacketOptions = .{
             .destination_connection_id = self.config.peer_connection_id,
@@ -5379,6 +5357,10 @@ pub const Connection = struct {
                 return error.PacingLimited;
             }
         }
+        // Connection initialization reserves a full single-packet buffer, so
+        // no allocation can occur after this transaction starts mutating
+        // key-update, anti-amplification, or nonce state.
+        std.debug.assert(self.scratch.send_packet.capacity >= packet_len);
 
         // Pacing is a retryable preflight result. Check it before key updates
         // or AEAD sealing so a deferred retransmission cannot consume a nonce
@@ -5396,11 +5378,19 @@ pub const Connection = struct {
             .key_phase = self.send_key_phase.currentKeyPhase(),
             .payload = payload,
         };
-        try self.send_packet_buffer.ensureTotalCapacity(self.endpoint.allocator, packet_len);
-        self.send_packet_buffer.items.len = self.send_packet_buffer.capacity;
-        defer self.send_packet_buffer.items.len = 0;
-        const packet = try self.sealCurrentShortPacketInto(
-            self.send_packet_buffer.items,
+        const packet_storage = self.scratch.send_packet.allocatedSlice();
+        const packet = if (payload_in_packet_storage) blk: {
+            const payload_offset = 1 + self.config.peer_connection_id.len +
+                @as(usize, packet_number_len);
+            std.debug.assert(
+                payload.ptr == packet_storage.ptr + payload_offset,
+            );
+            break :blk try self.sealCurrentShortPacketInPlace(
+                packet_storage[0..packet_len],
+                packet_options,
+            );
+        } else try self.sealCurrentShortPacketInto(
+            packet_storage,
             packet_options,
         );
         self.recordPacketEncrypted();
@@ -5660,6 +5650,7 @@ pub const Connection = struct {
         {
             return error.DatagramTooLarge;
         }
+        std.debug.assert(self.scratch.send_packet.capacity >= packet_len);
 
         self.congestion.onPtoProbeSent(payload.len);
         errdefer self.congestion.discard(payload.len);
@@ -5688,6 +5679,7 @@ pub const Connection = struct {
             &payload,
             sent_time_ns,
             true,
+            false,
         );
         self.next_packet_number += 1;
     }
@@ -6083,6 +6075,10 @@ pub const Connection = struct {
             .sent_count = 0,
             .protected_count = 0,
         };
+        try self.scratch.send_packet.ensureTotalCapacity(
+            self.endpoint.allocator,
+            total_packet_len,
+        );
 
         try self.reserveAntiAmplification(total_packet_len);
         errdefer self.releaseAntiAmplification(total_packet_len);
@@ -6121,9 +6117,8 @@ pub const Connection = struct {
             tracked_sent_count += 1;
         }
 
-        try self.send_packet_buffer.ensureTotalCapacity(self.endpoint.allocator, total_packet_len);
-        self.send_packet_buffer.items.len = self.send_packet_buffer.capacity;
-        defer self.send_packet_buffer.items.len = 0;
+        self.scratch.send_packet.items.len = self.scratch.send_packet.capacity;
+        defer self.scratch.send_packet.items.len = 0;
 
         var datagrams: [max_batch_packets][]const u8 = undefined;
         var packet_offset: usize = 0;
@@ -6136,7 +6131,7 @@ pub const Connection = struct {
                 probe.packet_number,
                 sent_time_ns,
             );
-            const packet_storage = self.send_packet_buffer
+            const packet_storage = self.scratch.send_packet
                 .items[packet_offset..][0..probe.packet_len];
             const options: quic.protection.ShortPacketOptions = .{
                 .destination_connection_id = self.config.peer_connection_id,
@@ -6229,8 +6224,7 @@ pub const Connection = struct {
         try self.validateNextPacketNumber();
         const packet_number = self.next_packet_number;
         var payload = candidate.payload;
-        std.debug.assert(self.send_frame_buffer.items.len == 0);
-        defer self.send_frame_buffer.items.len = 0;
+        var payload_in_packet_storage = false;
         var request_immediate_ack = mode == .pto_probe and
             self.ptoProbeRequestsImmediateAck();
         if (request_immediate_ack) {
@@ -6255,18 +6249,18 @@ pub const Connection = struct {
             if (augmented_packet_len <= self.currentSendDatagramSize() and
                 augmented_packet_len <= self.endpoint.limits.max_datagram_size)
             {
-                try self.send_frame_buffer.ensureUnusedCapacity(
-                    self.endpoint.allocator,
-                    augmented_len,
-                );
-                self.send_frame_buffer.items.len = augmented_len;
+                const payload_offset = 1 +
+                    self.config.peer_connection_id.len +
+                    @as(usize, augmented_packet_number_len);
+                const augmented = self.scratch.send_packet.allocatedSlice()[payload_offset..][0..augmented_len];
                 @memcpy(
-                    self.send_frame_buffer.items[0..candidate.payload.len],
+                    augmented[0..candidate.payload.len],
                     candidate.payload,
                 );
-                self.send_frame_buffer.items[augmented_len - 1] =
+                augmented[augmented_len - 1] =
                     @intFromEnum(quic.FrameType.immediate_ack);
-                payload = self.send_frame_buffer.items;
+                payload = augmented;
+                payload_in_packet_storage = true;
             } else {
                 request_immediate_ack = false;
             }
@@ -6287,6 +6281,7 @@ pub const Connection = struct {
         {
             return error.DatagramTooLarge;
         }
+        std.debug.assert(self.scratch.send_packet.capacity >= packet_len);
         switch (mode) {
             .congestion_controlled => try self.congestion.reserve(payload.len),
             .pto_probe => self.congestion.onPtoProbeSent(payload.len),
@@ -6305,7 +6300,13 @@ pub const Connection = struct {
             self.pmtu_path_epoch,
         );
         errdefer _ = self.sent.forget(packet_number);
-        try self.sendPayloadPacketAt(packet_number, payload, sent_time_ns, true);
+        try self.sendPayloadPacketAt(
+            packet_number,
+            payload,
+            sent_time_ns,
+            true,
+            payload_in_packet_storage,
+        );
         self.next_packet_number += 1;
     }
 
@@ -10745,7 +10746,7 @@ pub const Connection = struct {
     /// released.
     ///
     /// The overwhelmingly common current-key path decrypts in place and reuses
-    /// `receive_frame_buffer`. Key-phase transitions use the owning decoder so
+    /// connection scratch. Key-phase transitions use the owning decoder so
     /// failed next/previous-key trials can safely retry intact ciphertext.
     pub fn visitPacket(
         self: *Connection,
@@ -10780,7 +10781,7 @@ pub const Connection = struct {
         }
         while (true) {
             const datagram = try self.endpoint.receiveBytesInto(
-                self.receive_packet_buffer.allocatedSlice(),
+                self.scratch.receive_packet.allocatedSlice(),
             );
             if (isDiscardedLongHeaderPacket(datagram.bytes)) continue;
             if (self.shouldDiscardPeerAddressBeforeAuthentication(datagram.from)) continue;
@@ -11151,7 +11152,7 @@ pub const Connection = struct {
         self: *Connection,
         caller_deadline: ?std.Io.Clock.Timestamp,
     ) (Error || quic.runtime.ReceiveTimeoutError)!quic.runtime.ReceivedBytesView {
-        const storage = self.receive_packet_buffer.allocatedSlice();
+        const storage = self.scratch.receive_packet.allocatedSlice();
         while (true) {
             if (self.close_info != null or self.idle_timed_out) {
                 return error.ConnectionClosed;
@@ -11421,11 +11422,11 @@ pub const Connection = struct {
             quic.runtime.max_gro_receive_bytes
         else
             self.endpoint.limits.max_datagram_size;
-        try self.receive_packet_buffer.ensureTotalCapacity(
+        try self.scratch.receive_packet.ensureTotalCapacity(
             self.endpoint.allocator,
             required,
         );
-        return self.receive_packet_buffer.allocatedSlice();
+        return self.scratch.receive_packet.allocatedSlice();
     }
 
     fn processReceivedDatagramBatchVisitingAt(
@@ -11438,7 +11439,6 @@ pub const Connection = struct {
         if (self.shouldDiscardPeerAddressBeforeAuthentication(datagrams.from)) {
             return 0;
         }
-
         var completed: usize = 0;
         for (0..datagrams.segment_count) |index| {
             const bytes = datagrams.datagramAtMutable(index) orelse
@@ -11500,26 +11500,6 @@ pub const Connection = struct {
         return completed;
     }
 
-    fn processOpenedBytesInPlaceAt(
-        self: *Connection,
-        from: net.IpAddress,
-        bytes: []u8,
-        ecn: quic.packet_space.EcnCodepoint,
-        now_ns: ?u64,
-        packet: quic.protection.OpenedShortPacketView,
-    ) Error!void {
-        return self.processOpenedBytesInPlaceVisitingAt(
-            from,
-            bytes,
-            ecn,
-            now_ns,
-            packet,
-            self.endpoint,
-            {},
-            discardPacketView,
-        );
-    }
-
     fn processOpenedBytesInPlaceVisitingAt(
         self: *Connection,
         from: net.IpAddress,
@@ -11533,8 +11513,8 @@ pub const Connection = struct {
     ) (Error || callbackErrorSet(visitor))!void {
         const frames = try self.parseServicePacketFramesOrClose(packet.payload, now_ns);
         defer {
-            self.receive_frame_buffer.clearRetainingCapacity();
-            self.receive_ack_range_buffer.clearRetainingCapacity();
+            self.scratch.receive_frames.clearRetainingCapacity();
+            self.scratch.receive_ack_ranges.clearRetainingCapacity();
         }
         var peer_address_update = try self.preparePeerAddressUpdate(
             from,
@@ -11602,11 +11582,11 @@ pub const Connection = struct {
     }
 
     fn parseServicePacketFramesOrClose(self: *Connection, payload: []const u8, now_ns: ?u64) Error![]quic.Frame {
-        std.debug.assert(self.receive_frame_buffer.items.len == 0);
-        std.debug.assert(self.receive_ack_range_buffer.items.len == 0);
+        std.debug.assert(self.scratch.receive_frames.items.len == 0);
+        std.debug.assert(self.scratch.receive_ack_ranges.items.len == 0);
         errdefer {
-            self.receive_frame_buffer.clearRetainingCapacity();
-            self.receive_ack_range_buffer.clearRetainingCapacity();
+            self.scratch.receive_frames.clearRetainingCapacity();
+            self.scratch.receive_ack_ranges.clearRetainingCapacity();
         }
         if (payload.len == 0) {
             try self.closeTransportAt(
@@ -11621,16 +11601,16 @@ pub const Connection = struct {
 
         var pos: usize = 0;
         while (pos < payload.len) {
-            if (self.receive_frame_buffer.items.len >= self.config.max_frames_per_packet) return error.MissingFrame;
+            if (self.scratch.receive_frames.items.len >= self.config.max_frames_per_packet) return error.MissingFrame;
             const frame_type = quic.rawFrameTypeValue(payload[pos..]);
-            const ack_range_start = self.receive_ack_range_buffer.items.len;
-            self.receive_ack_range_buffer.items.len =
-                self.receive_ack_range_buffer.capacity;
+            const ack_range_start = self.scratch.receive_ack_ranges.items.len;
+            self.scratch.receive_ack_ranges.items.len =
+                self.scratch.receive_ack_ranges.capacity;
             const parsed = quic.parseFrameInto(
                 payload[pos..],
-                self.receive_ack_range_buffer.items[ack_range_start..],
+                self.scratch.receive_ack_ranges.items[ack_range_start..],
             ) catch |err| {
-                self.receive_ack_range_buffer.items.len = ack_range_start;
+                self.scratch.receive_ack_ranges.items.len = ack_range_start;
                 if (err == error.OutOfMemory) return err;
                 const code = quic.frameDecodeTransportErrorCode(err) orelse return err;
                 try self.closeTransportAt(
@@ -11642,12 +11622,15 @@ pub const Connection = struct {
                 );
                 return error.InvalidFrame;
             };
-            self.receive_ack_range_buffer.items.len = ack_range_start +
+            self.scratch.receive_ack_ranges.items.len = ack_range_start +
                 if (parsed.frame == .ack) parsed.frame.ack.ranges.len else 0;
-            try self.receive_frame_buffer.append(self.endpoint.allocator, parsed.frame);
+            try self.scratch.receive_frames.append(
+                self.endpoint.allocator,
+                parsed.frame,
+            );
             pos += parsed.consumed;
         }
-        return self.receive_frame_buffer.items;
+        return self.scratch.receive_frames.items;
     }
 
     fn processReceivedBytesAt(
@@ -15482,6 +15465,10 @@ pub const testing = struct {
 
     pub fn expectedPacketNumber(connection: *const Connection) u64 {
         return connection.expected_packet_number;
+    }
+
+    pub fn nextPacketNumber(connection: *const Connection) u64 {
+        return connection.next_packet_number;
     }
 
     pub fn ackFrequencyReceiveNextSequence(

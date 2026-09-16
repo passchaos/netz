@@ -687,9 +687,8 @@ test "QUIC PMTU probes reuse connection packet construction storage" {
     defer connection.deinit();
 
     const first_size = (try connection.sendPmtuProbeAt(1300, 100)).?;
-    const payload_capacity = connection.send_frame_buffer.capacity;
-    const payload_ptr = connection.send_frame_buffer.allocatedSlice().ptr;
-    try std.testing.expectEqual(@as(usize, 0), connection.send_frame_buffer.items.len);
+    const packet_capacity = connection.scratch.send_packet.capacity;
+    const packet_ptr = connection.scratch.send_packet.allocatedSlice().ptr;
     var first_wire = try receiver.receiveBytes();
     first_wire.deinit(allocator);
 
@@ -711,9 +710,8 @@ test "QUIC PMTU probes reuse connection packet construction storage" {
         (try connection.sendPmtuProbeAt(1300, 200)).?,
     );
     try std.testing.expect(!counting.has_induced_failure);
-    try std.testing.expectEqual(payload_capacity, connection.send_frame_buffer.capacity);
-    try std.testing.expectEqual(payload_ptr, connection.send_frame_buffer.allocatedSlice().ptr);
-    try std.testing.expectEqual(@as(usize, 0), connection.send_frame_buffer.items.len);
+    try std.testing.expectEqual(packet_capacity, connection.scratch.send_packet.capacity);
+    try std.testing.expectEqual(packet_ptr, connection.scratch.send_packet.allocatedSlice().ptr);
 }
 
 test "QUIC 1-RTT PMTUD gates ordinary sends until probe succeeds" {

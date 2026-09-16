@@ -3814,6 +3814,42 @@ a universal handshake-superiority claim. A 100-connection `--stats` run ended
 with zero live bytes and used 9,001 allocations, 14,985,675 cumulative bytes
 and an 88,276-byte peak.
 
+Established connections now keep reusable protected-packet, receive-datagram,
+frame, and ACK-range storage together in one lifecycle module. Reliable frames
+encode directly into stable recovery ownership; mixed/non-retransmittable
+frames, PMTU probes, and PTO IMMEDIATE_ACK augmentation encode directly into
+the final packet payload before in-place AEAD. This removes the redundant
+path-sized plaintext scratch allocation entirely. It follows the reusable-
+buffer principle visible in Quinn's endpoint `RecvState` and tquic's endpoint
+receive loop, plus quiche's caller-output send interface, while retaining
+netz's connection-local ownership and zio/`std.Io` boundary. Direct tests
+decrypt the mixed-frame wire result and cover scratch-init allocation rollback.
+The implementation and dedicated tests live in `src/quic/one_rtt/scratch.zig`
+and `src/quic/one_rtt/tests/scratch.zig`.
+
+In a 100-iteration local client+server handshake run with server verification
+skipped, the fixed baseline used 8,001 allocations, 14,469,287 cumulative
+bytes, and an 88,289-byte peak. The direct-encoding build used 7,801 allocations,
+11,773,513 cumulative bytes, and a 61,333-byte peak: 2.5% fewer allocations,
+18.6% fewer allocated bytes, and a 30.5% lower peak. With P-256
+CertificateVerify enabled, the corresponding counts were 8,501 to 8,301,
+14,507,829 to 11,812,274 bytes, and 88,370 to 61,414 peak bytes.
+
+Seven CPU-0, order-alternated, 200-handshake comparisons used baseline SHA-256
+`5cbf897b6c89defa292b082265802c1a47f92a3463622e72ea7deef4ece426e1`
+and candidate SHA-256
+`11427ea0239aaba6c4d88d7734908e36fae2b6f3a2b7a771d74a35b66f167452`.
+In quicz-aligned mode, median P50 moved from 600.753 to 596.874 us (0.6%,
+4/7 wins), and median rate from 1,503.5 to 1,511.5 connections/s (0.5%,
+4/7 wins). With CertificateVerify, median P50 moved from 919.422 to 912.597 us
+(0.7%, 7/7 wins), while median rate moved from 1,013.7 to 1,021.3/s (0.7%,
+6/7 wins). These timing differences are noise-level; the supported claim is
+reduced allocation and memory without a measured handshake-latency regression.
+A seven-pair first-echo control moved the one-round median from 146.945 to
+127.427 us with 7/7 paired wins. One 5,000-round steady-state control moved
+from 16.287 to 15.519 us; it is only supporting evidence, not a broad
+steady-state speed claim.
+
 ### Raw QUIC real-handshake 1 KiB echo latency
 
 Captured on 2026-08-20 with one real authenticated handshake followed by 5,000
