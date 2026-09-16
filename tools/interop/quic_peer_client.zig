@@ -348,7 +348,7 @@ fn exerciseReorderedCancellation(
         .offset = 0,
         .data = target_payload,
     } }});
-    if (scenario == .stop_reorder) {
+    if (scenario == .reset_reorder or scenario == .stop_reorder) {
         try receiveExpectedPrefix(
             connection,
             allocator,

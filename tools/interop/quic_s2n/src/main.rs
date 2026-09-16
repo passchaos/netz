@@ -337,6 +337,7 @@ async fn serve_peer_reset_reordered(connection: &mut Connection) -> Result<()> {
     let mut target = accept_bidi(connection).await?;
     ensure!(target.id() == 0, "unexpected target stream id");
     receive_prefix(&mut target, b"reset").await?;
+    target.send(Bytes::from_static(b"target")).await?;
 
     let mut sibling = accept_bidi(connection).await?;
     ensure!(sibling.id() == 4, "unexpected sibling stream id");
