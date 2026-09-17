@@ -1,6 +1,7 @@
 test {
     _ = @import("closed_streams.zig");
     _ = @import("datagram_queue.zig");
+    _ = @import("datagram_receive.zig");
     _ = @import("frame_traits.zig");
     _ = @import("basic.zig");
     _ = @import("crypto_path.zig");

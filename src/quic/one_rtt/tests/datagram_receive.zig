@@ -1,0 +1,267 @@
+const std = @import("std");
+const quic = @import("../../mod.zig");
+const one_rtt = @import("../../one_rtt.zig");
+
+test "QUIC 1-RTT caller-buffer DATAGRAM receive preserves ordering and storage" {
+    const allocator = std.testing.allocator;
+    var threaded = std.Io.Threaded.init(allocator, .{});
+    defer threaded.deinit();
+    const io = threaded.io();
+    var server_endpoint = try quic.runtime.Endpoint.bind(
+        allocator,
+        io,
+        .{ .ip4 = .loopback(0) },
+        .{ .max_datagram_size = 4096 },
+    );
+    defer server_endpoint.deinit();
+    var client_endpoint = try quic.runtime.Endpoint.bind(
+        allocator,
+        io,
+        .{ .ip4 = .loopback(0) },
+        .{ .max_datagram_size = 4096 },
+    );
+    defer client_endpoint.deinit();
+    const client_cid = [_]u8{ 0xd1, 0xd2, 0xd3, 0xd4 };
+    const server_cid = [_]u8{ 0xd5, 0xd6, 0xd7, 0xd8 };
+    const keys = quic.protection.deriveAes128Keys(
+        [_]u8{0xd0} ** quic.protection.secret_len,
+    );
+    var client = try one_rtt.Connection.init(&client_endpoint, .{
+        .peer = server_endpoint.address(),
+        .receive_keys = keys,
+        .send_keys = keys,
+        .local_connection_id = &client_cid,
+        .peer_connection_id = &server_cid,
+        .peer_max_datagram_frame_size = 1200,
+        .enable_pacing = false,
+    });
+    defer client.deinit();
+    var server = try one_rtt.Connection.init(&server_endpoint, .{
+        .peer = client_endpoint.address(),
+        .receive_keys = keys,
+        .send_keys = keys,
+        .local_connection_id = &server_cid,
+        .peer_connection_id = &client_cid,
+        .local_endpoint = .server,
+        .local_max_datagram_frame_size = 1200,
+        .max_datagram_queue_items = 2,
+        .enable_pacing = false,
+    });
+    defer server.deinit();
+    var out: [16]u8 = undefined;
+
+    try client.sendDatagram("queued");
+    var queued = try server.receivePacket();
+    defer queued.deinit(allocator);
+    try client.sendDatagram("later");
+    try std.testing.expectEqualStrings(
+        "queued",
+        try server.receiveDatagramWithTimeout(&out, .fromSeconds(1)),
+    );
+    try std.testing.expectEqualStrings(
+        "later",
+        try server.receiveDatagramWithTimeout(&out, .fromSeconds(1)),
+    );
+
+    try client.sendDatagram("direct");
+    try std.testing.expectEqualStrings(
+        "direct",
+        try server.receiveDatagramWithTimeout(&out, .fromSeconds(1)),
+    );
+    try std.testing.expectEqual(@as(usize, 0), server.datagramReceiveQueueLen());
+
+    // Packet/frame scratch was warmed above. A second direct fixed-size read
+    // must not need a payload allocation from the receiver endpoint.
+    try client.sendDatagram("steady");
+    var fail = std.testing.FailingAllocator.init(
+        allocator,
+        .{ .fail_index = 0 },
+    );
+    const steady = blk: {
+        server_endpoint.allocator = fail.allocator();
+        defer server_endpoint.allocator = allocator;
+        break :blk try server.receiveDatagramWithTimeout(
+            &out,
+            .fromSeconds(1),
+        );
+    };
+    try std.testing.expectEqualStrings("steady", steady);
+    try std.testing.expect(!fail.has_induced_failure);
+
+    try client.send(&.{
+        .{ .datagram = .{ .data = "first", .length_present = true } },
+        .{ .datagram = .{ .data = "second", .length_present = true } },
+    });
+    try std.testing.expectEqualStrings(
+        "first",
+        try server.receiveDatagramWithTimeout(&out, .fromSeconds(1)),
+    );
+    try std.testing.expectEqual(@as(usize, 1), server.datagramReceiveQueueLen());
+    try std.testing.expectEqualStrings(
+        "second",
+        (try server.popDatagram(&out)).?,
+    );
+
+    try client.sendDatagram("large");
+    try std.testing.expectError(
+        error.DatagramBufferTooSmall,
+        server.receiveDatagramWithTimeout(out[0..2], .fromSeconds(1)),
+    );
+    try std.testing.expectEqual(@as(usize, 0), server.datagramReceiveQueueLen());
+    try std.testing.expectError(
+        error.Timeout,
+        server.receiveDatagramWithTimeout(&out, .zero),
+    );
+}
+
+test "QUIC 1-RTT caller-buffer DATAGRAM receive rejects disabled negotiation" {
+    const allocator = std.testing.allocator;
+    var threaded = std.Io.Threaded.init(allocator, .{});
+    defer threaded.deinit();
+    const io = threaded.io();
+    var endpoint = try quic.runtime.Endpoint.bind(
+        allocator,
+        io,
+        .{ .ip4 = .loopback(0) },
+        .{ .max_datagram_size = 1200 },
+    );
+    defer endpoint.deinit();
+    const cid = [_]u8{ 0xd9, 0xda, 0xdb, 0xdc };
+    const keys = quic.protection.deriveAes128Keys(
+        [_]u8{0xd8} ** quic.protection.secret_len,
+    );
+    var connection = try one_rtt.Connection.init(&endpoint, .{
+        .peer = endpoint.address(),
+        .receive_keys = keys,
+        .send_keys = keys,
+        .local_connection_id = &cid,
+        .peer_connection_id = &cid,
+    });
+    defer connection.deinit();
+    var out: [32]u8 = undefined;
+    try std.testing.expectError(
+        error.DatagramsNotEnabled,
+        connection.receiveDatagramWithTimeout(&out, .fromMilliseconds(1)),
+    );
+}
+
+test "QUIC 1-RTT caller-buffer DATAGRAM receive bypasses disabled queue" {
+    const allocator = std.testing.allocator;
+    var threaded = std.Io.Threaded.init(allocator, .{});
+    defer threaded.deinit();
+    const io = threaded.io();
+    var sender_endpoint = try quic.runtime.Endpoint.bind(
+        allocator,
+        io,
+        .{ .ip4 = .loopback(0) },
+        .{ .max_datagram_size = 1200 },
+    );
+    defer sender_endpoint.deinit();
+    var receiver_endpoint = try quic.runtime.Endpoint.bind(
+        allocator,
+        io,
+        .{ .ip4 = .loopback(0) },
+        .{ .max_datagram_size = 1200 },
+    );
+    defer receiver_endpoint.deinit();
+    const sender_cid = [_]u8{ 0xdd, 0xde, 0xdf, 0xe0 };
+    const receiver_cid = [_]u8{ 0xe1, 0xe2, 0xe3, 0xe4 };
+    const keys = quic.protection.deriveAes128Keys(
+        [_]u8{0xdc} ** quic.protection.secret_len,
+    );
+    var sender = try one_rtt.Connection.init(&sender_endpoint, .{
+        .peer = receiver_endpoint.address(),
+        .receive_keys = keys,
+        .send_keys = keys,
+        .local_connection_id = &sender_cid,
+        .peer_connection_id = &receiver_cid,
+        .peer_max_datagram_frame_size = 1200,
+        .enable_pacing = false,
+    });
+    defer sender.deinit();
+    var receiver = try one_rtt.Connection.init(&receiver_endpoint, .{
+        .peer = sender_endpoint.address(),
+        .receive_keys = keys,
+        .send_keys = keys,
+        .local_connection_id = &receiver_cid,
+        .peer_connection_id = &sender_cid,
+        .local_endpoint = .server,
+        .local_max_datagram_frame_size = 1200,
+        .max_datagram_queue_items = 0,
+        .enable_pacing = false,
+    });
+    defer receiver.deinit();
+
+    try sender.sendDatagram("direct-only");
+    var out: [32]u8 = undefined;
+    try std.testing.expectEqualStrings(
+        "direct-only",
+        try receiver.receiveDatagramWithTimeout(&out, .fromSeconds(1)),
+    );
+    try std.testing.expectEqual(@as(u64, 1), receiver.datagramsReceived());
+    try std.testing.expectEqual(
+        @as(u64, 0),
+        receiver.datagramsDroppedIncoming(),
+    );
+    try std.testing.expectEqual(@as(usize, 0), receiver.datagramReceiveQueueLen());
+}
+
+test "QUIC 1-RTT caller-buffer DATAGRAM waits for whole-packet validation" {
+    const allocator = std.testing.allocator;
+    var threaded = std.Io.Threaded.init(allocator, .{});
+    defer threaded.deinit();
+    const io = threaded.io();
+    var sender_endpoint = try quic.runtime.Endpoint.bind(
+        allocator,
+        io,
+        .{ .ip4 = .loopback(0) },
+        .{ .max_datagram_size = 1200 },
+    );
+    defer sender_endpoint.deinit();
+    var receiver_endpoint = try quic.runtime.Endpoint.bind(
+        allocator,
+        io,
+        .{ .ip4 = .loopback(0) },
+        .{ .max_datagram_size = 1200 },
+    );
+    defer receiver_endpoint.deinit();
+    const sender_cid = [_]u8{ 0xe5, 0xe6, 0xe7, 0xe8 };
+    const receiver_cid = [_]u8{ 0xe9, 0xea, 0xeb, 0xec };
+    const keys = quic.protection.deriveAes128Keys(
+        [_]u8{0xe4} ** quic.protection.secret_len,
+    );
+    var sender = try one_rtt.Connection.init(&sender_endpoint, .{
+        .peer = receiver_endpoint.address(),
+        .receive_keys = keys,
+        .send_keys = keys,
+        .local_connection_id = &sender_cid,
+        .peer_connection_id = &receiver_cid,
+        .peer_max_datagram_frame_size = 1200,
+        .enable_pacing = false,
+    });
+    defer sender.deinit();
+    var receiver = try one_rtt.Connection.init(&receiver_endpoint, .{
+        .peer = sender_endpoint.address(),
+        .receive_keys = keys,
+        .send_keys = keys,
+        .local_connection_id = &receiver_cid,
+        .peer_connection_id = &sender_cid,
+        .local_endpoint = .server,
+        .local_max_datagram_frame_size = 8,
+        .enable_pacing = false,
+    });
+    defer receiver.deinit();
+
+    try sender.send(&.{
+        .{ .datagram = .{ .data = "ok", .length_present = true } },
+        .{ .datagram = .{ .data = "1234567", .length_present = true } },
+    });
+    var out: [16]u8 = [_]u8{0xaa} ** 16;
+    try std.testing.expectError(
+        error.InvalidFrame,
+        receiver.receiveDatagramWithTimeout(&out, .fromSeconds(1)),
+    );
+    try std.testing.expectEqualSlices(u8, &([_]u8{0xaa} ** 16), &out);
+    try std.testing.expectEqual(@as(u64, 0), receiver.datagramsReceived());
+    try std.testing.expectEqual(@as(usize, 0), receiver.datagramReceiveQueueLen());
+}

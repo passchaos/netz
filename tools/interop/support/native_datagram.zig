@@ -186,10 +186,10 @@ fn receivePeerDatagrams(
     var received_count: usize = 0;
     var storage: [max_payload_storage]u8 = undefined;
     while (received_count < seen.len) {
-        const payload = try connection.popDatagram(&storage) orelse {
-            try connection.servicePacketServicingTimersDeadline(deadline);
-            continue;
-        };
+        const payload = try connection.receiveDatagramWithDeadline(
+            &storage,
+            deadline,
+        );
         const index: usize = if (std.mem.eql(u8, payload, peer_small[0]))
             0
         else if (std.mem.eql(u8, payload, peer_small[1]))

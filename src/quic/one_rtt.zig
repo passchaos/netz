@@ -4,6 +4,7 @@ const fixed_bit = @import("one_rtt/fixed_bit.zig");
 const closed_streams = @import("one_rtt/closed_streams.zig");
 const frame_traits = @import("one_rtt/frame_traits.zig");
 const datagram_queue = @import("one_rtt/datagram_queue.zig");
+const datagram_receive = @import("one_rtt/datagram_receive.zig");
 const handshake_status = @import("one_rtt/handshake_status.zig");
 const pto_jitter = @import("one_rtt/pto_jitter.zig");
 const prepared_keys = @import("one_rtt/prepared_keys.zig");
@@ -1123,6 +1124,7 @@ pub const Connection = struct {
     outgoing_streams_created_count: u64 = 0,
     incoming_streams_created_count: u64 = 0,
     datagram_recv_queue: DatagramRecvQueue = .{},
+    datagram_receive_target: ?*datagram_receive.Target = null,
     datagrams_sent_count: u64 = 0,
     datagrams_received_count: u64 = 0,
     datagrams_dropped_incoming_count: u64 = 0,
@@ -3477,6 +3479,48 @@ pub const Connection = struct {
             self.endpoint.allocator,
             out,
         ) catch error.DatagramBufferTooSmall;
+    }
+
+    /// Receive one unreliable DATAGRAM into caller storage. Queued payloads
+    /// retain FIFO priority. When the queue is empty, the first fitting
+    /// DATAGRAM in the next authenticated packet is copied directly from the
+    /// decoded frame; later DATAGRAMs in that packet remain queued in order.
+    pub fn receiveDatagram(self: *Connection, out: []u8) Error![]u8 {
+        return self.receiveDatagramUntil(out, null) catch |err| switch (err) {
+            error.Timeout => unreachable,
+            else => |other| return @errorCast(other),
+        };
+    }
+
+    pub fn receiveDatagramWithTimeout(
+        self: *Connection,
+        out: []u8,
+        timeout: std.Io.Duration,
+    ) (Error || quic.runtime.ReceiveTimeoutError)![]u8 {
+        if (timeout.nanoseconds <= 0) return error.Timeout;
+        return self.receiveDatagramWithDeadline(out, .fromNow(
+            self.endpoint.io,
+            .{ .raw = timeout, .clock = .awake },
+        ));
+    }
+
+    pub fn receiveDatagramWithDeadline(
+        self: *Connection,
+        out: []u8,
+        deadline: std.Io.Clock.Timestamp,
+    ) (Error || quic.runtime.ReceiveTimeoutError)![]u8 {
+        return self.receiveDatagramUntil(
+            out,
+            try deadline_policy.usableAwake(self.endpoint.io, deadline),
+        );
+    }
+
+    fn receiveDatagramUntil(
+        self: *Connection,
+        out: []u8,
+        deadline: ?std.Io.Clock.Timestamp,
+    ) (Error || quic.runtime.ReceiveTimeoutError)![]u8 {
+        return datagram_receive.receiveUntil(Error, self, out, deadline);
     }
 
     pub fn datagramReceiveQueueLen(self: Connection) usize {
@@ -13259,8 +13303,15 @@ pub const Connection = struct {
         packet_number: u64,
     ) Error!void {
         try self.validateDatagramFrame(datagram);
+        if (self.datagram_receive_target) |target| {
+            if (target.consume(datagram.data)) {
+                self.datagrams_received_count +|= 1;
+                return;
+            }
+        }
         if (self.config.max_datagram_queue_items == 0) {
             self.datagrams_dropped_incoming_count +|= 1;
+            self.datagrams_received_count +|= 1;
             return;
         }
         const dropped = try self.datagram_recv_queue.pushCopyDroppingOldest(

@@ -430,10 +430,7 @@ fn receiveDatagram(
     storage: []u8,
     deadline: std.Io.Clock.Timestamp,
 ) ![]u8 {
-    while (true) {
-        if (try connection.popDatagram(storage)) |payload| return payload;
-        try connection.servicePacketServicingTimersDeadline(deadline);
-    }
+    return connection.receiveDatagramWithDeadline(storage, deadline);
 }
 
 fn sendRecord(

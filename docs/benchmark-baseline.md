@@ -873,6 +873,20 @@ reverse fixed-Quinn-client/netz-server comparison moved p50 44.334 to 44.231
 us (0.2%, 3/5 wins), with one noisy candidate p99 tail. These timing results
 are performance-neutral; the supported improvement is the deterministic
 steady-state payload-allocation removal, not a latency claim.
+The connection additionally exposes blocking, relative-timeout, and
+absolute-deadline caller-buffer DATAGRAM receive APIs. Existing queued data
+keeps FIFO priority; when the queue is empty, the first fitting DATAGRAM in an
+authenticated packet is copied directly from the decoded frame into caller
+storage and same-packet successors remain queued. Tests cover single-frame
+direct delivery, multi-frame ordering, short-buffer consumption/error, zero
+timeout, and disabled negotiation. The raw Quinn matrix now uses this path.
+An order-balanced fixed-binary A/B used five 200-warmup/5,000-RTT pairs per
+direction. Against the fixed Quinn server, the client p50 median moved from
+44.250 to 43.769 us (1.1% lower, candidate faster in 4/5 pairs). Against the
+fixed Quinn client, the netz server p50 median moved from 44.009 to 43.205 us
+(1.8% lower, candidate faster in 4/5 pairs). The p99 samples were noisy and
+included a candidate high tail, so this is a small workload-specific p50
+improvement rather than a tail-latency or general QUIC performance claim.
 Stateless `one_rtt.sendFramesInto` now accepts one caller-owned final packet
 buffer, encodes frames directly into its plaintext region, seals AEAD in place,
 and submits it without heap allocation. Its exact sizing helper validates every
