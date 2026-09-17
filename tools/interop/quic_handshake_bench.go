@@ -294,7 +294,7 @@ func printGoResult(c handshakeConfig, latencies []uint64, checksum uint64) {
 	for _, latency := range latencies {
 		total += latency
 	}
-	fmt.Printf("record=result implementation=quic-go protocol=quic-v1 mode=handshake role_pair=%s endpoint_role=client run=%d timing_scope=client-connect-only client_io=%s server_io=%s timeout_ms=%d verification=certificate key_exchange=x25519 cipher=aes-128-gcm-sha256 warmup=%d iterations=%d connections=%d echo_bytes=%d checksum=%d total_elapsed_ns=%d p50_ns=%d p99_ns=%d echo_verified=true complete=true\n", c.rolePair, c.run, clientIO(c.rolePair), serverIO(c.rolePair), c.timeout/time.Millisecond, c.warmup, c.iterations, c.total(), c.total()*32, checksum, total, percentile(latencies, 50), percentile(latencies, 99))
+	fmt.Printf("record=result implementation=quic-go protocol=quic-v1 mode=handshake role_pair=%s endpoint_role=client run=%d timing_scope=client-connect-only client_io=%s server_io=%s timeout_ms=%d verification=certificate resumption=disabled key_exchange=x25519 cipher=aes-128-gcm-sha256 warmup=%d iterations=%d connections=%d echo_bytes=%d checksum=%d total_elapsed_ns=%d p50_ns=%d p99_ns=%d echo_verified=true complete=true\n", c.rolePair, c.run, clientIO(c.rolePair), serverIO(c.rolePair), c.timeout/time.Millisecond, c.warmup, c.iterations, c.total(), c.total()*32, checksum, total, percentile(latencies, 50), percentile(latencies, 99))
 }
 
 func clientIO(rolePair string) string {

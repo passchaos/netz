@@ -22,6 +22,9 @@ class QuicHandshakeBenchmarkCheckTest(unittest.TestCase):
             "netz-client+quic-go-server": ("netz", "quic-go"),
             "quic-go-client+quic-go-server": ("quic-go", "quic-go"),
             "quic-go-client+netz-server": ("quic-go", "netz"),
+            "netz-client+quinn-server": ("netz", "quinn"),
+            "quinn-client+quinn-server": ("quinn", "quinn"),
+            "quinn-client+netz-server": ("quinn", "netz"),
             "netz-client+netz-server": ("netz", "netz"),
         }[role_pair]
         for run in range(1, samples + 1):
@@ -30,18 +33,18 @@ class QuicHandshakeBenchmarkCheckTest(unittest.TestCase):
                 sample_lines.append(
                     f"record=handshake-sample implementation={client_impl} protocol=quic-v1 "
                     f"mode=handshake role_pair={role_pair} endpoint_role=client run={run} "
-                    f"client_io={'zio-std-io' if client_impl == 'netz' else 'quic-go-netpoll'} "
-                    f"server_io={'zio-std-io' if server_impl == 'netz' else 'quic-go-netpoll'} "
+                    f"client_io={check.io_name(client_impl)} "
+                    f"server_io={check.io_name(server_impl)} "
                     f"sample={sample} timeout_ms=10000 elapsed_ns={value} verified=true"
                 )
             ordered = sorted(elapsed)
             result_lines.append(
                 f"record=result implementation={client_impl} protocol=quic-v1 mode=handshake "
                 f"role_pair={role_pair} endpoint_role=client run={run} "
-                f"client_io={'zio-std-io' if client_impl == 'netz' else 'quic-go-netpoll'} "
-                f"server_io={'zio-std-io' if server_impl == 'netz' else 'quic-go-netpoll'} "
+                f"client_io={check.io_name(client_impl)} "
+                f"server_io={check.io_name(server_impl)} "
                 "timeout_ms=10000 "
-                "timing_scope=client-connect-only verification=certificate "
+                "timing_scope=client-connect-only verification=certificate resumption=disabled "
                 "key_exchange=x25519 cipher=aes-128-gcm-sha256 warmup=2 "
                 f"iterations={iterations} connections={total_connections} "
                 f"echo_bytes={total_connections * 32} checksum={checksum} "
@@ -52,8 +55,8 @@ class QuicHandshakeBenchmarkCheckTest(unittest.TestCase):
             server_lines.append(
                 f"record=server-complete implementation={server_impl} protocol=quic-v1 "
                 f"mode=handshake role_pair={role_pair} endpoint_role=server run={run} "
-                f"client_io={'zio-std-io' if client_impl == 'netz' else 'quic-go-netpoll'} "
-                f"server_io={'zio-std-io' if server_impl == 'netz' else 'quic-go-netpoll'} "
+                f"client_io={check.io_name(client_impl)} "
+                f"server_io={check.io_name(server_impl)} "
                 "timeout_ms=10000 "
                 f"warmup=2 iterations={iterations} connections={total_connections} "
                 f"echo_bytes={total_connections * 32} checksum={checksum} "
@@ -69,6 +72,9 @@ class QuicHandshakeBenchmarkCheckTest(unittest.TestCase):
             "quic-go-client+quic-go-server",
             "quic-go-client+netz-server",
             "netz-client+netz-server",
+            "netz-client+quinn-server",
+            "quinn-client+quinn-server",
+            "quinn-client+netz-server",
         ):
             with self.subTest(role_pair=role_pair), TemporaryDirectory() as directory:
                 client, server = self.write_case(

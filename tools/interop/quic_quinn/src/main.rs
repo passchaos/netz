@@ -12,6 +12,7 @@ use tokio::time::{sleep, timeout};
 
 mod bench;
 mod datagram;
+mod handshake_bench;
 
 const ALPN: &[u8] = b"hq-interop";
 const TIMEOUT: Duration = Duration::from_secs(20);
@@ -20,6 +21,21 @@ const TIMEOUT: Duration = Duration::from_secs(20);
 async fn main() -> Result<()> {
     let mut args = std::env::args().skip(1);
     match args.next().as_deref() {
+        Some("handshake-bench-server") => {
+            let port = parse_port(args.next())?;
+            let cert = args.next().context("benchmark server requires CERT")?;
+            let key = args.next().context("benchmark server requires KEY")?;
+            let role_pair = args.next().context("benchmark server requires ROLE_PAIR")?;
+            let config = handshake_bench::Config::parse(args)?;
+            handshake_bench::run_server(port, &cert, &key, &role_pair, config).await
+        }
+        Some("handshake-bench-client") => {
+            let port = parse_port(args.next())?;
+            let ca = args.next().context("benchmark client requires CA")?;
+            let role_pair = args.next().context("benchmark client requires ROLE_PAIR")?;
+            let config = handshake_bench::Config::parse(args)?;
+            handshake_bench::run_client(port, &ca, &role_pair, config).await
+        }
         Some("bench-server") => {
             let port = parse_port(args.next())?;
             let cert = args.next().context("benchmark server requires CERT")?;
@@ -58,7 +74,7 @@ async fn main() -> Result<()> {
             ensure!(args.next().is_none(), "unexpected client argument");
             run_client(port, &ca).await
         }
-        _ => bail!("usage: netz-quic-quinn-interop server PORT CERT KEY | client PORT CA | bench-server PORT CERT KEY ROLE_PAIR [OPTIONS] | bench-client PORT CA ROLE_PAIR [OPTIONS]"),
+        _ => bail!("usage: netz-quic-quinn-interop server PORT CERT KEY | client PORT CA | bench-server PORT CERT KEY ROLE_PAIR [OPTIONS] | bench-client PORT CA ROLE_PAIR [OPTIONS] | handshake-bench-server PORT CERT KEY ROLE_PAIR [OPTIONS] | handshake-bench-client PORT CA ROLE_PAIR [OPTIONS]"),
     }
 }
 

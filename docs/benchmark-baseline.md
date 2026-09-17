@@ -3892,6 +3892,45 @@ percentile from 100 sample records and requires a matching server completion
 record for all 110 connections, 3,520 echoed bytes, checksum 5,995, and peer
 close.
 
+The pinned Quinn revision
+`d9c8c4c695fc64292d9b117844ea6924ca0d0815` now provides the same executable
+four-role matrix when the audited quic-go fixture is unavailable:
+
+```sh
+zig build bench-quic-handshake-quinn -Doptimize=ReleaseFast -- \
+  --samples=5 --warmup=10 --iterations=100
+```
+
+Both stacks are restricted to QUIC v1, TLS 1.3, X25519,
+TLS_AES_128_GCM_SHA256, certificate verification, and disabled TLS resumption.
+The runner hashes the fixed ReleaseFast netz/Quinn binaries and Quinn lockfile,
+pins clients and servers to CPUs 0/1, and uses odd ABBA-ordered samples. A
+strict matrix verifier checks that order plus every raw handshake sample,
+aggregate, server completion, runtime identity, echo byte/checksum, and close.
+The client keeps its fresh endpoint alive for 5 ms after the untimed echo and
+100 ms after the final connection so the long-running peer observes the
+already-submitted CONNECTION_CLOSE; neither grace interval enters the
+connect-only timing.
+
+The 2026-09-16 5 x 100 full-handshake capture used netz binary SHA-256
+`fbb112f461774e4edb8fa8f05f46b78af138f3ce348ffade25d3d57929d307b6`
+and Quinn binary SHA-256
+`931a0f03e7821268eb93cc0388d8302162304821c1987877e2f2800f683c63f1`:
+
+| Complete role pair | P50 connect | P99 connect | Derived connects/s |
+|---|---:|---:|---:|
+| netz client + Quinn server | 2.565 ms | 6.649 ms | 375.3 |
+| Quinn client + Quinn server | 1.312 ms | 2.700 ms | 741.4 |
+| Quinn client + netz server | 2.208 ms | 6.551 ms | 436.2 |
+| netz client + netz server | 1.517 ms | 3.340 ms | 546.5 |
+
+Against the fixed Quinn server, netz's p50 was 1.95x higher (0.512x). Against
+the fixed netz server, netz's p50 was 28.2% lower (1.393x). The direction
+reverses with the server, so this establishes a concrete netz-client/Quinn
+server optimization target but not a general client or server ranking. The
+benchmark remains `same-security-policy`: executor design, packetization,
+socket plumbing, and exact certificate wire representation are not equalized.
+
 The current netz client and server run on zio behind `std.Io`. Handshake
 samples, aggregate results, and server completions carry `client_io`,
 `server_io`, `endpoint_role`, and `timeout_ms`; the strict verifier rejects

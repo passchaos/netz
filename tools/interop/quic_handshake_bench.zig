@@ -234,6 +234,14 @@ fn clientEchoAndClose(
     } }});
     try receiveExactStream(connection, stream_id, &marker, config);
     try connection.closeApplication(close_code, close_reason);
+    // Keep the per-round UDP endpoint alive long enough for the already
+    // submitted CONNECTION_CLOSE to reach the peer. This occurs after the
+    // measured handshake and verified echo.
+    try std.Io.sleep(
+        connection.endpoint.io,
+        .fromMilliseconds(if (round + 1 == config.total()) 100 else 5),
+        .awake,
+    );
 }
 
 fn serverEchoAndWaitClose(
@@ -311,7 +319,8 @@ fn printResult(
             "role_pair={s} endpoint_role=client run={d} " ++
             "timing_scope=client-connect-only " ++
             "client_io={s} server_io={s} timeout_ms={d} " ++
-            "verification=certificate key_exchange=x25519 cipher=aes-128-gcm-sha256 " ++
+            "verification=certificate resumption=disabled " ++
+            "key_exchange=x25519 cipher=aes-128-gcm-sha256 " ++
             "warmup={d} iterations={d} connections={d} echo_bytes={d} " ++
             "checksum={d} total_elapsed_ns={d} p50_ns={d} p99_ns={d} " ++
             "echo_verified=true complete=true\n",
@@ -345,21 +354,30 @@ fn validRolePair(value: []const u8) bool {
     return std.mem.eql(u8, value, "netz-client+quic-go-server") or
         std.mem.eql(u8, value, "quic-go-client+quic-go-server") or
         std.mem.eql(u8, value, "quic-go-client+netz-server") or
+        std.mem.eql(u8, value, "netz-client+quinn-server") or
+        std.mem.eql(u8, value, "quinn-client+quinn-server") or
+        std.mem.eql(u8, value, "quinn-client+netz-server") or
         std.mem.eql(u8, value, "netz-client+netz-server");
 }
 
 fn clientIo(role_pair: []const u8) []const u8 {
-    return if (std.mem.startsWith(u8, role_pair, "netz-client"))
-        "zio-std-io"
-    else
-        "quic-go-netpoll";
+    if (std.mem.startsWith(u8, role_pair, "netz-client")) {
+        return "zio-std-io";
+    }
+    if (std.mem.startsWith(u8, role_pair, "quinn-client")) {
+        return "quinn-tokio-rustls";
+    }
+    return "quic-go-netpoll";
 }
 
 fn serverIo(role_pair: []const u8) []const u8 {
-    return if (std.mem.endsWith(u8, role_pair, "netz-server"))
-        "zio-std-io"
-    else
-        "quic-go-netpoll";
+    if (std.mem.endsWith(u8, role_pair, "netz-server")) {
+        return "zio-std-io";
+    }
+    if (std.mem.endsWith(u8, role_pair, "quinn-server")) {
+        return "quinn-tokio-rustls";
+    }
+    return "quic-go-netpoll";
 }
 
 fn option(arg: []const u8, prefix: []const u8) ?[]const u8 {

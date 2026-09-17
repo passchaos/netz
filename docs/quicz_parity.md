@@ -619,6 +619,12 @@ protocol stack. Its exact success records bind the netz endpoint to
 `zio-std-io` and the audited tquic tools at `0169abde20c6` to their
 `mio::Poll`/`mio::net::UdpSocket` loop (`tquic-mio`) for every ordinary, Retry,
 and GOAWAY/drain scenario.
+The fresh-handshake matrix now also has a self-contained Quinn/rustls peer at
+the pinned audited revision. It verifies 2,200 full, non-resumed QUIC v1
+handshakes across four role pairs with X25519, AES-128-GCM-SHA256, certificate
+verification, a round-indexed echo, and peer close. Fixed Quinn-server results
+leave a concrete netz-client gap, while the fixed netz-server direction
+reverses; both remain same-security-policy rather than equal-wire claims.
 
 | Area from `~/Work/quicz` examples | netz status | Evidence | Remaining work |
 | --- | --- | --- | --- |

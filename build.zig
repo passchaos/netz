@@ -181,6 +181,12 @@ pub fn build(b: *std.Build) void {
         "python3",
         "tools/interop/quic_handshake_benchmark_check_test.py",
     });
+    const quic_quinn_handshake_benchmark_checker_tests = b.addSystemCommand(
+        &.{
+            "python3",
+            "tools/interop/quic_quinn/handshake_benchmark_check_test.py",
+        },
+    );
     const http3_benchmark_checker_tests = b.addSystemCommand(&.{
         "python3",
         "tools/interop/http3_benchmark_check_test.py",
@@ -228,6 +234,9 @@ pub fn build(b: *std.Build) void {
     test_step.dependOn(&quic_quic_go_auxiliary_checker_tests.step);
     test_step.dependOn(&quic_quic_go_churn_checker_tests.step);
     test_step.dependOn(&quic_handshake_benchmark_checker_tests.step);
+    test_step.dependOn(
+        &quic_quinn_handshake_benchmark_checker_tests.step,
+    );
     test_step.dependOn(&http3_benchmark_checker_tests.step);
     test_step.dependOn(&websocket_h2_benchmark_checker_tests.step);
     test_step.dependOn(&http1_hyper_benchmark_checker_tests.step);
@@ -1048,6 +1057,19 @@ pub fn build(b: *std.Build) void {
         "Compare fresh certificate-verified QUIC handshakes across netz/quic-go role pairs",
     );
     quic_handshake_bench_step.dependOn(&quic_handshake_bench.step);
+    const quic_handshake_quinn_bench = b.addSystemCommand(
+        &.{"tools/interop/quic_quinn/handshake_benchmark.sh"},
+    );
+    quic_handshake_quinn_bench.addArtifactArg(quic_handshake_bench_exe);
+    quic_handshake_quinn_bench.addArg(@tagName(optimize));
+    if (b.args) |args| quic_handshake_quinn_bench.addArgs(args);
+    const quic_handshake_quinn_bench_step = b.step(
+        "bench-quic-handshake-quinn",
+        "Compare fresh certificate-verified QUIC handshakes with Quinn",
+    );
+    quic_handshake_quinn_bench_step.dependOn(
+        &quic_handshake_quinn_bench.step,
+    );
     const quic_quic_go_churn = b.addSystemCommand(
         &.{"tools/interop/quic_quic_go_churn.sh"},
     );

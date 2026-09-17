@@ -60,6 +60,9 @@ def verify(
         "netz-client+quic-go-server": ("netz", "quic-go"),
         "quic-go-client+quic-go-server": ("quic-go", "quic-go"),
         "quic-go-client+netz-server": ("quic-go", "netz"),
+        "netz-client+quinn-server": ("netz", "quinn"),
+        "quinn-client+quinn-server": ("quinn", "quinn"),
+        "quinn-client+netz-server": ("quinn", "netz"),
         "netz-client+netz-server": ("netz", "netz"),
     }.get(role_pair)
     if implementations is None or samples < 1 or samples % 2 == 0:
@@ -70,8 +73,8 @@ def verify(
     ):
         raise ValueError("invalid iteration shape")
     client_impl, server_impl = implementations
-    client_io = "zio-std-io" if client_impl == "netz" else "quic-go-netpoll"
-    server_io = "zio-std-io" if server_impl == "netz" else "quic-go-netpoll"
+    client_io = io_name(client_impl)
+    server_io = io_name(server_impl)
     total_connections = warmup + iterations
     expected_checksum = total_connections * (total_connections - 1) // 2
     expected_common = {
@@ -122,6 +125,7 @@ def verify(
         for key, value in {
             "timing_scope": "client-connect-only",
             "verification": "certificate",
+            "resumption": "disabled",
             "key_exchange": "x25519",
             "cipher": "aes-128-gcm-sha256",
             "echo_verified": "true",
@@ -172,6 +176,14 @@ def verify(
         f"connects_per_second_from_timed_sum={rate:.1f} "
         f"checksum={expected_checksum} complete=true"
     )
+
+
+def io_name(implementation: str) -> str:
+    return {
+        "netz": "zio-std-io",
+        "quic-go": "quic-go-netpoll",
+        "quinn": "quinn-tokio-rustls",
+    }[implementation]
 
 
 def main() -> None:
