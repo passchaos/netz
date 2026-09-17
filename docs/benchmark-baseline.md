@@ -832,6 +832,28 @@ packets) sequentially and 20.950 us/batch (654 ns/payload, 8,000 packets)
 packed, a 4.89x relative payload-rate gain. This is a sender-only local
 microbenchmark and is the fixed baseline for the next pure-DATAGRAM
 bookkeeping optimization; it is not a cross-stack claim.
+
+The follow-up specializes the shared batch state machine at compile time for
+the public pure-DATAGRAM path. It keeps the same congestion, pacing, ECN,
+anti-amplification, sent-packet, key-update, nonce, and socket-prefix commit
+logic, while skipping constant frame-trait classification, STREAM credit
+planning, empty recovery-payload tracking, and their rollback scans. The
+generic STREAM/mixed-frame batch path is unchanged. Fixed ReleaseFast binaries
+(`d2014ce1750b4668bc633fea8204cc18ea2e639df0cf47668b99315ab1e60026`
+baseline, `8f052801cbeb7fc319556c3dd866ea0a3a34de65aefee089bd25d91e444ac1b1`
+candidate) were pinned to CPU 0 and alternated by pair:
+
+| DATAGRAM payload | Pairs | Baseline packed median | Specialized median | Reduction | Pair wins |
+|---:|---:|---:|---:|---:|---:|
+| 32 B | 5 | 18.733 us/batch | 5.651 us/batch | 69.8% | 5/5 |
+| 256 B | 7 | 20.907 us/batch | 16.766 us/batch | 19.8% | 7/7 |
+| 1024 B | 5 | 60.396 us/batch | 55.737 us/batch | 7.7% | 5/5 |
+
+Each invocation used 100 warmups and 20,000 measured 32-payload batches. A
+five-pair STREAM-batch control was timing-neutral amid a host-speed shift
+(165.471 versus 166.287 us/batch medians with overlapping samples), as expected
+because it still instantiates the generic path. This isolates the improvement
+to pure DATAGRAM bookkeeping; it is not an end-to-end result.
 ### Raw QUIC DATAGRAM latency against Quinn
 
 The native Quinn RFC 9221 fixture now also supports a strict raw DATAGRAM
@@ -907,6 +929,26 @@ for the netz client,
 for the netz server, and
 `e3aac9cece02e028b5909e869c2fd86ed249174c21e2b79907460f0a70f45215`
 for the Quinn fixture.
+
+After the pure-DATAGRAM specialization, the final same-shape window matrix used
+netz client/server hashes
+`64ba9891a367464057364c2feae3e3ca476018c1b748594074d7d5ab9be2c9b6` /
+`52081c6bde32f192f509a19886f0b89cbf2f236b7827e6b2952094e96accf716`
+and the same Quinn binary. Its p50 medians were:
+
+| Payload | Fixed server | netz p50 (us) | Quinn p50 (us) | netz/Quinn speed |
+|---:|---|---:|---:|---:|
+| 32 B | Quinn | 56.556 | 62.472 | 1.105x |
+| 32 B | netz | 50.806 | 56.742 | 1.117x |
+| 256 B | Quinn | 88.324 | 85.268 | 0.965x |
+| 256 B | netz | 95.714 | 91.677 | 0.958x |
+| 1024 B | Quinn | 185.723 | 164.204 | 0.884x |
+| 1024 B | netz | 229.825 | 188.788 | 0.821x |
+
+Thus the 32-byte window workload now favors netz in both fixed-server
+comparisons. The 256-byte cases are within 5%; the 1024-byte cases still favor
+Quinn, leaving large-payload protection and event-loop work as the next target.
+These remain implementation-packetized, same-application-shape comparisons.
 
 The bounded QUIC DATAGRAM receive queue now lives in
 `one_rtt/datagram_queue.zig`. Its first successful admission reserves exactly

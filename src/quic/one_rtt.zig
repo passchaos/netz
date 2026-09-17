@@ -2308,6 +2308,36 @@ pub const Connection = struct {
         packets: []const []const quic.Frame,
         sent_time_ns: ?u64,
     ) Error!ConnectionBatchSendResult {
+        return self.sendManyProgressAtImpl(
+            false,
+            packets,
+            &.{},
+            sent_time_ns,
+        );
+    }
+
+    fn sendDatagramPacketsProgressAt(
+        self: *Connection,
+        packets: []const []const quic.Frame,
+        payload_lens: []const usize,
+        sent_time_ns: ?u64,
+    ) Error!ConnectionBatchSendResult {
+        std.debug.assert(payload_lens.len == packets.len);
+        return self.sendManyProgressAtImpl(
+            true,
+            packets,
+            payload_lens,
+            sent_time_ns,
+        );
+    }
+
+    fn sendManyProgressAtImpl(
+        self: *Connection,
+        comptime pure_datagrams: bool,
+        packets: []const []const quic.Frame,
+        payload_lens: []const usize,
+        sent_time_ns: ?u64,
+    ) Error!ConnectionBatchSendResult {
         if (packets.len == 0) {
             return .{ .sent_count = 0, .protected_count = 0 };
         }
@@ -2391,6 +2421,16 @@ pub const Connection = struct {
         // changing any transport decisions.
         for (packets[0..encryptable], 0..) |frames, i| {
             if (frames.len == 0) return error.MissingFrame;
+            if (comptime pure_datagrams) {
+                preflight[i] = .{
+                    .payload_len = payload_lens[i],
+                    .recovery_payload_len = 0,
+                    .ack_eliciting = true,
+                    .in_flight = true,
+                    .auto_ecn_eligible = true,
+                };
+                continue;
+            }
             var traits: OutboundFrameTraits = .{};
             var payload_len: usize = 0;
             var recovery_payload_len: usize = 0;
@@ -2513,55 +2553,59 @@ pub const Connection = struct {
                 }
             }
 
-            packet_streams.clearRetainingCapacity();
-            const packet_stream_bytes = try self
-                .collectOutboundStreamCreditIncrements(
-                frames,
-                planned_streams.items,
-                packet_streams,
-            );
-            if (packet_stream_bytes > send_flow_available -
-                @min(send_flow_available, total_stream_bytes))
-            {
-                if (count == 0) {
-                    try self.sendDataBlockedAt(now_ns);
-                    return error.FlowControlBlocked;
-                }
-                break;
-            }
-            var blocked_stream_id: ?u64 = null;
-            for (packet_streams.items) |credit| {
-                const planned = reservedStreamBytes(
+            const packet_stream_bytes: u64 = if (comptime pure_datagrams)
+                0
+            else stream_bytes: {
+                packet_streams.clearRetainingCapacity();
+                const stream_bytes = try self
+                    .collectOutboundStreamCreditIncrements(
+                    frames,
                     planned_streams.items,
-                    credit.stream_id,
+                    packet_streams,
                 );
-                const available = if (self.findSendStreamEntry(
-                    credit.stream_id,
-                )) |entry|
-                    entry.flow.available()
-                else
-                    self.initialSendStreamDataLimit(credit.stream_id);
-                if (credit.bytes > available - @min(available, planned)) {
-                    blocked_stream_id = credit.stream_id;
+                if (stream_bytes > send_flow_available -
+                    @min(send_flow_available, total_stream_bytes))
+                {
+                    if (count == 0) {
+                        try self.sendDataBlockedAt(now_ns);
+                        return error.FlowControlBlocked;
+                    }
                     break;
                 }
-            }
-            if (blocked_stream_id) |stream_id| {
-                if (count == 0) {
-                    try self.sendStreamDataBlockedAt(stream_id, now_ns);
-                    return error.FlowControlBlocked;
+                var blocked_stream_id: ?u64 = null;
+                for (packet_streams.items) |credit| {
+                    const planned = reservedStreamBytes(
+                        planned_streams.items,
+                        credit.stream_id,
+                    );
+                    const available = if (self.findSendStreamEntry(
+                        credit.stream_id,
+                    )) |entry|
+                        entry.flow.available()
+                    else
+                        self.initialSendStreamDataLimit(credit.stream_id);
+                    if (credit.bytes > available - @min(available, planned)) {
+                        blocked_stream_id = credit.stream_id;
+                        break;
+                    }
                 }
-                break;
-            }
-
-            for (packet_streams.items) |credit| {
-                try addReservedStreamCredit(
-                    planned_streams,
-                    self.endpoint.allocator,
-                    credit.stream_id,
-                    credit.bytes,
-                );
-            }
+                if (blocked_stream_id) |stream_id| {
+                    if (count == 0) {
+                        try self.sendStreamDataBlockedAt(stream_id, now_ns);
+                        return error.FlowControlBlocked;
+                    }
+                    break;
+                }
+                for (packet_streams.items) |credit| {
+                    try addReservedStreamCredit(
+                        planned_streams,
+                        self.endpoint.allocator,
+                        credit.stream_id,
+                        credit.bytes,
+                    );
+                }
+                break :stream_bytes stream_bytes;
+            };
             prepared[count] = .{
                 .frames = frames,
                 .packet_number = packet_number,
@@ -2606,9 +2650,9 @@ pub const Connection = struct {
             self.endpoint.allocator,
             total_packet_len,
         );
-        for (planned_streams.items) |credit| {
+        if (comptime !pure_datagrams) for (planned_streams.items) |credit| {
             _ = try self.sendStreamEntry(credit.stream_id);
-        }
+        };
 
         var connection_flow_reserved = false;
         var reserved_stream_count: usize = 0;
@@ -2680,7 +2724,9 @@ pub const Connection = struct {
             const packet_storage = self.scratch.send_packet.items[packet_offset..][0..packet.packet_len];
             const payload_offset = 1 + self.config.peer_connection_id.len + @as(usize, packet.packet_number_len);
             const payload = packet_storage[payload_offset..][0..packet.payload_len];
-            const recovery_payload: ?[]const u8 = blk: {
+            const recovery_payload: ?[]const u8 = if (comptime pure_datagrams)
+                null
+            else blk: {
                 if (packet.recovery_payload_len != 0) {
                     // Encode once into stable recovery ownership, then copy
                     // those bytes directly through AEAD when the full packet
@@ -2823,11 +2869,13 @@ pub const Connection = struct {
                 );
                 self.congestion.onPacketSent(packet.packet_number);
             }
-            self.noteSentStreams(packet.frames);
-            self.noteAckFrequencySent(
-                packet.frames,
-                packet.packet_number,
-            );
+            if (comptime !pure_datagrams) {
+                self.noteSentStreams(packet.frames);
+                self.noteAckFrequencySent(
+                    packet.frames,
+                    packet.packet_number,
+                );
+            }
         }
         self.releaseAntiAmplification(
             total_packet_len - sent_packet_len,
@@ -3360,12 +3408,14 @@ pub const Connection = struct {
             var frame_storage: [max_batch_packets]quic.Frame = undefined;
             var packets: [max_batch_packets][]const quic.Frame = undefined;
             var packet_payload_ends: [max_batch_packets]usize = undefined;
+            var packet_payload_lens: [max_batch_packets]usize = undefined;
             const packet_count = try self.planDatagramPacketPrefix(
                 payloads[payload_offset..payload_end],
                 packet_offset,
                 &frame_storage,
                 &packets,
                 &packet_payload_ends,
+                &packet_payload_lens,
             );
             payload_offset = payload_end;
             packet_offset = std.math.add(
@@ -3386,14 +3436,20 @@ pub const Connection = struct {
         var frame_storage: [max_batch_packets]quic.Frame = undefined;
         var packets: [max_batch_packets][]const quic.Frame = undefined;
         var packet_payload_ends: [max_batch_packets]usize = undefined;
+        var packet_payload_lens: [max_batch_packets]usize = undefined;
         const packet_count = try self.planDatagramPacketPrefix(
             payloads,
             0,
             &frame_storage,
             &packets,
             &packet_payload_ends,
+            &packet_payload_lens,
         );
-        const result = try self.sendManyProgress(packets[0..packet_count]);
+        const result = try self.sendDatagramPacketsProgressAt(
+            packets[0..packet_count],
+            packet_payload_lens[0..packet_count],
+            self.monotonicNowNs(),
+        );
         committed_count.* = if (result.sent_count == 0)
             0
         else
@@ -3409,6 +3465,7 @@ pub const Connection = struct {
         frame_storage: *[max_batch_packets]quic.Frame,
         packets: *[max_batch_packets][]const quic.Frame,
         packet_payload_ends: *[max_batch_packets]usize,
+        packet_payload_lens: *[max_batch_packets]usize,
     ) Error!usize {
         const payload_limit = @min(max_batch_packets, payloads.len);
         const packet_frame_limit = @max(
@@ -3420,6 +3477,7 @@ pub const Connection = struct {
         while (payload_index < payload_limit) {
             const frame_start = payload_index;
             var frame_count: usize = 0;
+            var payload_len: usize = 0;
             while (payload_index < payload_limit and
                 frame_count < packet_frame_limit)
             {
@@ -3427,19 +3485,60 @@ pub const Connection = struct {
                     .data = payloads[payload_index],
                     .length_present = true,
                 } };
-                const candidate = frame_storage[frame_start .. payload_index + 1];
-                if (try self.packetLenForFramesAtOffset(
-                    packet_offset + packet_count,
-                    candidate,
-                ) > self.currentSendDatagramSize()) {
+                const frame_len = datagramFrameWireSizeForLength(
+                    payloads[payload_index].len,
+                    true,
+                ) orelse return error.InvalidFrameLength;
+                const candidate_payload_len = std.math.add(
+                    usize,
+                    payload_len,
+                    frame_len,
+                ) catch return error.InvalidFrameLength;
+                const current_packet_offset = std.math.add(
+                    usize,
+                    packet_offset,
+                    packet_count,
+                ) catch return error.InvalidPacketNumber;
+                const packet_len = if (current_packet_offset == 0 and
+                    (self.handshake_status.needsHandshakeDone() or
+                        self.pending_ack_frequency_request != null))
+                    try self.packetLenForFramesAtOffset(
+                        current_packet_offset,
+                        frame_storage[frame_start .. payload_index + 1],
+                    )
+                else blk: {
+                    const packet_number = std.math.add(
+                        u64,
+                        self.next_packet_number,
+                        current_packet_offset,
+                    ) catch return error.InvalidPacketNumber;
+                    if (packet_number > quic.protection.max_packet_number) {
+                        return error.InvalidPacketNumber;
+                    }
+                    const packet_number_len =
+                        quic.protection.packetNumberLenForPayload(
+                            packet_number,
+                            self.sent.largestAcknowledged(),
+                            candidate_payload_len,
+                        );
+                    break :blk try quic.protection.shortPacketLenForPayloadLen(
+                        self.config.peer_connection_id.len,
+                        packet_number,
+                        packet_number_len,
+                        candidate_payload_len,
+                    );
+                };
+                if (packet_len > self.currentSendDatagramSize()) {
                     if (frame_count == 0) return error.DatagramTooLarge;
                     break;
                 }
+                payload_len = candidate_payload_len;
                 payload_index += 1;
                 frame_count += 1;
             }
             packets[packet_count] = frame_storage[frame_start..payload_index];
             packet_payload_ends[packet_count] = payload_index;
+            packet_payload_lens[packet_count] = payload_len;
             packet_count += 1;
         }
         return packet_count;
