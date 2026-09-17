@@ -1766,6 +1766,25 @@ facility, not a replacement for authenticated handshake-backed HTTP/3.
 
 ## Next recommended work
 
+The Quinn full-handshake matrix now removes its certificate-wire confounder:
+both server implementations receive the same generated CA-signed P-256 leaf
+and scalar, and the strict result includes the identity hash plus per-connect
+UDP counts/bytes. Phase timing showed repeat leaf-to-CA trust verification as
+the largest netz-client component. The new bounded, caller-owned TLS bundle
+verification cache keys successful decisions by exact host and DER chain while
+retaining mandatory per-connection CertificateVerify. A five-pair fixed-binary
+ABBA run reduced fixed-Quinn-server P50 from 2.283 to 1.709 ms and raised the
+rate from 376.0 to 508.2 connects/s. The remaining roughly 0.6-1.0 ms around
+each side of the trust callback is the next profiling target; packet counters
+show one 1,200-byte receive for both clients, so it should be split into QUIC
+protection/key-schedule/CertificateVerify and endpoint scheduling rather than
+attributed to extra receives.
+The subsequent shared-identity 5x100 cross-stack matrix measured 1.679 ms for
+netz versus 1.311 ms for Quinn at fixed-Quinn-server P50 (netz 0.781x), and
+2.055 ms for netz versus 2.272 ms for Quinn at fixed-netz-server P50 (netz
+1.105x). These remain complete role-pair observations, not isolated library or
+equal-wire rankings.
+
 1. Extend the two-CPU raw QUIC process comparison with kernel/interface packet
    capture, WebSocket/WebTransport allocation telemetry, lossy/reordered on-wire lifecycle churn,
    and broader connection-count scaling. Persistent echo, four independent

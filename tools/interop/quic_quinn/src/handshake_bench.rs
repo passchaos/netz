@@ -144,17 +144,20 @@ pub async fn run_client(port: u16, ca_path: &str, role_pair: &str, config: Confi
         .await
         .context("benchmark handshake timed out")??;
         let elapsed = started.elapsed().as_nanos().try_into().unwrap_or(u64::MAX);
+        let connect_stats = connection.stats();
         validate_handshake(&connection, true)?;
         client_echo_and_close(&connection, round, config.timeout())
             .await
             .with_context(|| format!("handshake client round {round}"))?;
         // Preserve the per-round socket briefly after the timed handshake and
         // verified echo so the peer can observe the submitted close packet.
+        // Twenty milliseconds also covers a temporarily descheduled server on
+        // shared CI hosts without changing the connect-only measurement.
         sleep(Duration::from_millis(
             if round + 1 == config.total().unwrap() {
                 100
             } else {
-                5
+                20
             },
         ))
         .await;
@@ -162,16 +165,18 @@ pub async fn run_client(port: u16, ca_path: &str, role_pair: &str, config: Confi
         if round >= config.warmup {
             latencies.push(elapsed);
             println!(
-                "record=handshake-sample implementation=quinn protocol=quic-v1 mode=handshake role_pair={role_pair} endpoint_role=client run={} sample={} client_io={} server_io={} timeout_ms={} elapsed_ns={elapsed} verified=true",
+                "record=handshake-sample implementation=quinn protocol=quic-v1 mode=handshake role_pair={role_pair} endpoint_role=client run={} sample={} client_io={} server_io={} timeout_ms={} elapsed_ns={elapsed} connect_tx_datagrams={} connect_tx_bytes={} connect_rx_datagrams={} connect_rx_bytes={} trust_cache=implementation-specific verified=true",
                 config.run, latencies.len(), client_io(role_pair),
                 server_io(role_pair), config.timeout_ms,
+                connect_stats.udp_tx.datagrams, connect_stats.udp_tx.bytes,
+                connect_stats.udp_rx.datagrams, connect_stats.udp_rx.bytes,
             );
         }
     }
     latencies.sort_unstable();
     let total_elapsed_ns: u64 = latencies.iter().copied().sum();
     println!(
-        "record=result implementation=quinn protocol=quic-v1 mode=handshake role_pair={role_pair} endpoint_role=client run={} timing_scope=client-connect-only client_io={} server_io={} timeout_ms={} verification=certificate resumption=disabled key_exchange=x25519 cipher=aes-128-gcm-sha256 warmup={} iterations={} connections={} echo_bytes={} checksum={checksum} total_elapsed_ns={total_elapsed_ns} p50_ns={} p99_ns={} echo_verified=true complete=true",
+        "record=result implementation=quinn protocol=quic-v1 mode=handshake role_pair={role_pair} endpoint_role=client run={} timing_scope=client-connect-only client_io={} server_io={} timeout_ms={} verification=certificate resumption=disabled trust_cache=implementation-specific key_exchange=x25519 cipher=aes-128-gcm-sha256 warmup={} iterations={} connections={} echo_bytes={} checksum={checksum} total_elapsed_ns={total_elapsed_ns} p50_ns={} p99_ns={} echo_verified=true complete=true",
         config.run, client_io(role_pair), server_io(role_pair), config.timeout_ms,
         config.warmup, config.iterations, config.total().unwrap(),
         config.total().unwrap() * 32, percentile(&latencies, 50),

@@ -51,7 +51,7 @@ if [[ -n $(git -C "$quinn_root" status --short) ]]; then
   echo 'Quinn checkout must be clean' >&2
   exit 1
 fi
-for command in cargo openssl python3 sha256sum taskset; do
+for command in cargo openssl python3 sha256sum taskset xxd; do
   command -v "$command" >/dev/null 2>&1 || {
     echo "$command is required for the Quinn handshake benchmark" >&2
     exit 127
@@ -140,15 +140,19 @@ openssl x509 -req -in "$work/quinn.csr" -CA "$work/quinn-ca.pem" \
   -CAkey "$work/quinn-ca-key.pem" -CAcreateserial \
   -out "$work/quinn-cert.pem" -days 1 -sha256 \
   -extfile "$work/quinn-leaf.ext"
-cat >"$work/netz-ca.pem" <<'EOF'
------BEGIN CERTIFICATE-----
-MIIBMDCB1qADAgECAgISNDAKBggqhkjOPQQDAjAUMRIwEAYDVQQDDAlsb2NhbGhvc3QwHhcNMjYwMTAxMDAwMDAwWhcNMzYwMTAxMDAwMDAwWjAUMRIwEAYDVQQDDAlsb2NhbGhvc3QwWTATBgcqhkjOPQIBBggqhkjOPQMBBwNCAARawLjuCeZXZ7tsfTRAu+FcuRLUr+ELbhoX/6Hs0fLlSZe0NNZYPUqZa65oYGMMs9Ud19Qc/RZMzn4vZv5+EakUoxgwFjAUBgNVHREEDTALgglsb2NhbGhvc3QwCgYIKoZIzj0EAwIDSQAwRgIhAJFAj+UlV/FOGaVRnB/9l7wXgSet0zn4CdgFIckqC1hEAiEApPR1fJT2M9PVNn3fwdZBboKEoWrUYLVy6sMvbrhNjKU=
------END CERTIFICATE-----
-EOF
+openssl x509 -in "$work/quinn-cert.pem" -outform der \
+  -out "$work/quinn-cert.der"
+openssl ec -in "$work/quinn-key.pem" -text -noout 2>/dev/null |
+  awk '/priv:/{capture=1;next}/pub:/{capture=0} capture {gsub(/[: ]/,""); printf "%s",$0}' |
+  xxd -r -p >"$work/quinn-key.scalar"
+if [[ $(wc -c <"$work/quinn-key.scalar") -ne 32 ]]; then
+  echo 'failed to extract the shared P-256 private scalar' >&2
+  exit 1
+fi
 
 results="$work/results.log"
 printf '%s\n' \
-  "record=environment protocol=quic-v1 mode=handshake peer=quinn samples=$samples schedule=abba client_cpu=$client_cpu server_cpu=$server_cpu host=$(hostname) arch=$(uname -m) kernel=$(uname -r) zig=$(zig version) rustc=$(rustc --version | awk '{print $2}') netz_build_mode=$build_mode quinn_revision=$quinn_revision netz_binary_sha256=$(sha256 "$netz_bench") quinn_binary_sha256=$(sha256 "$quinn_peer") quinn_lock_sha256=$(sha256 "$repo_root/tools/interop/quic_quinn/Cargo.lock") complete=true" \
+  "record=environment protocol=quic-v1 mode=handshake peer=quinn samples=$samples schedule=abba client_cpu=$client_cpu server_cpu=$server_cpu host=$(hostname) arch=$(uname -m) kernel=$(uname -r) zig=$(zig version) rustc=$(rustc --version | awk '{print $2}') netz_build_mode=$build_mode quinn_revision=$quinn_revision netz_binary_sha256=$(sha256 "$netz_bench") quinn_binary_sha256=$(sha256 "$quinn_peer") quinn_lock_sha256=$(sha256 "$repo_root/tools/interop/quic_quinn/Cargo.lock") server_identity=shared-ca-signed-p256-leaf server_certificate_chain_entries=1 server_certificate_der_bytes=$(wc -c <"$work/quinn-cert.der") server_certificate_sha256=$(sha256 "$work/quinn-cert.der") complete=true" \
   >"$results"
 
 run_pair() {
@@ -172,12 +176,13 @@ run_pair() {
     ca="$work/quinn-ca.pem"
   else
     timeout 300s taskset -c "$server_cpu" "$netz_bench" server "$port" \
+      "$work/quinn-cert.der" "$work/quinn-key.scalar" \
       "--role-pair=$role_pair" "${common[@]}" \
       >"$pair_dir/server.log" 2>&1 &
     server_pid=$!
     wait_for_line "$server_pid" "$pair_dir/server.log" \
       NETZ_HANDSHAKE_BENCH_PORT
-    ca="$work/netz-ca.pem"
+    ca="$work/quinn-ca.pem"
   fi
   if [[ $client_impl == quinn ]]; then
     timeout 300s taskset -c "$client_cpu" "$quinn_peer" \

@@ -3904,15 +3904,64 @@ zig build bench-quic-handshake-quinn -Doptimize=ReleaseFast -- \
 Both stacks are restricted to QUIC v1, TLS 1.3, X25519,
 TLS_AES_128_GCM_SHA256, certificate verification, and disabled TLS resumption.
 The runner hashes the fixed ReleaseFast netz/Quinn binaries and Quinn lockfile,
-pins clients and servers to CPUs 0/1, and uses odd ABBA-ordered samples. A
+pins clients and servers to separate CPUs (the first two available by default),
+and uses odd ABBA-ordered samples. A
 strict matrix verifier checks that order plus every raw handshake sample,
 aggregate, server completion, runtime identity, echo byte/checksum, and close.
-The client keeps its fresh endpoint alive for 5 ms after the untimed echo and
+The client keeps its fresh endpoint alive for 20 ms after the untimed echo and
 100 ms after the final connection so the long-running peer observes the
 already-submitted CONNECTION_CLOSE; neither grace interval enters the
 connect-only timing.
 
-The 2026-09-16 5 x 100 full-handshake capture used netz binary SHA-256
+The Quinn matrix now generates one CA-signed P-256 leaf and supplies the exact
+same leaf and private scalar to both server implementations. The environment
+record includes its DER length and SHA-256, and every client sample records UDP
+datagrams/bytes at connect completion. This removes the earlier comparison's
+self-signed 308-byte netz identity versus CA-signed roughly 468-byte Quinn
+identity confounder. With the shared identity, both clients receive one
+1,200-byte server datagram against Quinn; netz returns after two client
+datagrams/1,283 bytes, while Quinn returns after three/2,538 bytes. These are
+userspace UDP counters, not kernel packet capture, but they exclude extra netz
+receive scheduling as the source of the fixed-Quinn-server gap.
+
+Client-side phase timing around the production trust callback measured a
+representative nine-connection median split of 0.94 ms before trust, 1.31 ms
+inside X.509 path verification, and 0.94 ms after trust. The dominant repeated
+operation was therefore the unchanged leaf-to-CA signature verification.
+`tls.trust_cache.BundleVerifierCache` is now an opt-in, caller-owned, bounded
+cache for clients that intentionally retain one trust bundle and verification
+time snapshot across connections. Its SHA-256 key covers the exact server name,
+chain count, and length-delimited DER bytes; only successful path checks are
+cached, and TLS CertificateVerify still runs for every handshake. The Quinn
+benchmark uses 64 caller-provided entries and requires one cold miss followed
+by hits for every remaining connection.
+
+A same-binary, CPU-7/client and CPU-13/server, five-pair ABBA run against a
+fixed Quinn server measured the uncached path at 2.283 ms P50, 9.280 ms P99,
+and 376.0 connects/s from the median timed sum. The cached path measured 1.709
+ms, 6.757 ms, and 508.2 connects/s: 25.1% lower P50 and 35.2% higher derived
+rate. The P99 improvement is retained as local evidence only because this host
+has unrelated scheduler load.
+
+The final shared-identity 5 x 100 matrix used netz SHA-256
+`58c4fc0e50db7e57ee4e6f86d98136c2c03d2bb77fadea4508790d454c3f0666`
+and Quinn SHA-256
+`cd14eca7908d20123d4c822c71e1d5ca09037dfc5109688361f80dbe347ef4cd`:
+
+| Complete role pair | P50 connect | P99 connect | Derived connects/s |
+|---|---:|---:|---:|
+| netz client + Quinn server | 1.679 ms | 8.312 ms | 550.3 |
+| Quinn client + Quinn server | 1.311 ms | 3.175 ms | 738.8 |
+| Quinn client + netz server | 2.272 ms | 8.013 ms | 406.6 |
+| netz client + netz server | 2.055 ms | 4.462 ms | 455.8 |
+
+Against the fixed Quinn server, the remaining netz-client P50 gap is 28.0%
+(0.781x); against the fixed netz server, netz is 9.5% lower at P50 (1.105x).
+The direction still depends on the server. This matrix is now equal in server
+certificate bytes but remains same-security-policy rather than equal-wire: the
+client packetization differs materially, as the UDP counters above show.
+
+The historical 2026-09-16 5 x 100 full-handshake capture used netz binary SHA-256
 `fbb112f461774e4edb8fa8f05f46b78af138f3ce348ffade25d3d57929d307b6`
 and Quinn binary SHA-256
 `931a0f03e7821268eb93cc0388d8302162304821c1987877e2f2800f683c63f1`:
@@ -3928,8 +3977,10 @@ Against the fixed Quinn server, netz's p50 was 1.95x higher (0.512x). Against
 the fixed netz server, netz's p50 was 28.2% lower (1.393x). The direction
 reverses with the server, so this establishes a concrete netz-client/Quinn
 server optimization target but not a general client or server ranking. The
-benchmark remains `same-security-policy`: executor design, packetization,
-socket plumbing, and exact certificate wire representation are not equalized.
+historical benchmark remains `same-security-policy`: executor design,
+packetization, socket plumbing, and certificate representation were not
+equalized. The shared-identity matrix above supersedes it for current
+fixed-server comparisons.
 
 The current netz client and server run on zio behind `std.Io`. Handshake
 samples, aggregate results, and server completions carry `client_io`,

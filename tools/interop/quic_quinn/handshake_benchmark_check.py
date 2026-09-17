@@ -97,16 +97,22 @@ def validate(
         "client_cpu": str(client_cpu), "server_cpu": str(server_cpu),
         "netz_build_mode": "ReleaseFast",
         "quinn_revision": QUINN_REVISION, "complete": "true",
+        "server_identity": "shared-ca-signed-p256-leaf",
+        "server_certificate_chain_entries": "1",
     }
     for key, value in expected_environment.items():
         if environment.get(key) != value:
             raise ValueError(f"invalid environment {key}: {environment}")
-    for key in ("netz_binary_sha256", "quinn_binary_sha256", "quinn_lock_sha256"):
+    for key in (
+        "netz_binary_sha256", "quinn_binary_sha256", "quinn_lock_sha256",
+        "server_certificate_sha256",
+    ):
         if not SHA256.fullmatch(environment.get(key, "")):
             raise ValueError(f"invalid environment {key}: {environment}")
     for key in ("host", "arch", "kernel", "zig", "rustc"):
         if not environment.get(key):
             raise ValueError(f"missing environment {key}: {environment}")
+    integer(environment, "server_certificate_der_bytes", 1)
 
     raw_records = [
         row for line in log.read_text(encoding="utf-8").splitlines()
@@ -154,8 +160,14 @@ def validate(
                 **common, "record": "handshake-sample",
                 "implementation": client, "endpoint_role": "client",
                 "sample": str(sample_number), "verified": "true",
+                "trust_cache": "enabled" if client == "netz" else "implementation-specific",
             }, "handshake sample")
             integer(row, "elapsed_ns", 1)
+            for traffic_field in (
+                "connect_tx_datagrams", "connect_tx_bytes",
+                "connect_rx_datagrams", "connect_rx_bytes",
+            ):
+                integer(row, traffic_field, 1)
         checksum = str((warmup + iterations) * (warmup + iterations - 1) // 2)
         result_common = {
             **common, "warmup": str(warmup),
@@ -170,6 +182,7 @@ def validate(
             "implementation": client, "endpoint_role": "client",
             "timing_scope": "client-connect-only",
             "verification": "certificate", "resumption": "disabled",
+            "trust_cache": "enabled" if client == "netz" else "implementation-specific",
             "key_exchange": "x25519",
             "cipher": "aes-128-gcm-sha256",
         }, "result")
@@ -204,6 +217,17 @@ def validate(
         integer(row, "p50_ns", 1)
         integer(row, "p99_ns", 1)
         integer(row, "median_total_elapsed_ns", 1)
+        for traffic_field in (
+            "median_connect_tx_datagrams", "median_connect_tx_bytes",
+            "median_connect_rx_datagrams", "median_connect_rx_bytes",
+        ):
+            integer(row, traffic_field, 1)
+        if client == "netz":
+            for phase_field in (
+                "median_pre_trust_ns", "median_trust_ns",
+                "median_post_trust_ns",
+            ):
+                integer(row, phase_field)
         try:
             rate = float(row["connects_per_second_from_timed_sum"])
         except (KeyError, ValueError) as error:

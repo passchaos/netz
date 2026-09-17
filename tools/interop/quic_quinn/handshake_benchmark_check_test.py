@@ -17,7 +17,10 @@ class QuinnHandshakeMatrixCheckTest(unittest.TestCase):
             "netz_build_mode=ReleaseFast "
             f"quinn_revision={check.QUINN_REVISION} "
             f"netz_binary_sha256={'a' * 64} quinn_binary_sha256={'b' * 64} "
-            f"quinn_lock_sha256={'c' * 64} complete=true"
+            f"quinn_lock_sha256={'c' * 64} "
+            "server_identity=shared-ca-signed-p256-leaf "
+            "server_certificate_chain_entries=1 server_certificate_der_bytes=450 "
+            f"server_certificate_sha256={'d' * 64} complete=true"
         )
         run_lines = []
         for sample, pair in check.expected_order(samples):
@@ -33,14 +36,21 @@ class QuinnHandshakeMatrixCheckTest(unittest.TestCase):
                     f"role_pair={pair} run={sample} implementation={client} "
                     "endpoint_role=client "
                     f"client_io={check.io_name(client)} server_io={check.io_name(server)} "
-                    f"timeout_ms=10000 sample={sample_number} elapsed_ns={100 + sample_number} verified=true"
+                    f"timeout_ms=10000 sample={sample_number} elapsed_ns={100 + sample_number} "
+                    "connect_tx_datagrams=2 connect_tx_bytes=1300 "
+                    "connect_rx_datagrams=1 connect_rx_bytes=1200 "
+                    + ("pre_trust_ns=40 trust_ns=30 post_trust_ns=" + str(30 + sample_number) + " " if client == "netz" else "")
+                    + ("trust_cache=enabled " if client == "netz" else "trust_cache=implementation-specific ")
+                    + "verified=true"
                 )
             run_lines.append(
                 "record=result protocol=quic-v1 mode=handshake "
                 f"role_pair={pair} run={sample} implementation={client} "
                 "endpoint_role=client timing_scope=client-connect-only "
                 f"client_io={check.io_name(client)} server_io={check.io_name(server)} "
-                "timeout_ms=10000 verification=certificate resumption=disabled key_exchange=x25519 "
+                "timeout_ms=10000 verification=certificate resumption=disabled "
+                + ("trust_cache=enabled " if client == "netz" else "trust_cache=implementation-specific ")
+                + "key_exchange=x25519 "
                 "cipher=aes-128-gcm-sha256 warmup=2 iterations=3 connections=5 "
                 "echo_bytes=160 checksum=10 total_elapsed_ns=306 p50_ns=102 p99_ns=103 "
                 "echo_verified=true complete=true"
@@ -57,13 +67,20 @@ class QuinnHandshakeMatrixCheckTest(unittest.TestCase):
         summary_lines = []
         for index, pair in enumerate(check.ROLE_PAIRS):
             client, server = check.IMPLEMENTATIONS[pair]
+            phase_fields = (
+                "median_pre_trust_ns=40 median_trust_ns=30 "
+                "median_post_trust_ns=32 "
+                if client == "netz" else ""
+            )
             summary_lines.append(
                 "protocol=quic-v1 mode=handshake "
                 f"role_pair={pair} samples={samples} warmup=2 iterations=3 "
                 f"p50_ns={100 + index} p99_ns={200 + index} "
                 f"client_io={check.io_name(client)} server_io={check.io_name(server)} "
                 "median_total_elapsed_ns=303 connects_per_second_from_timed_sum=9900990.1 "
-                "checksum=10 complete=true"
+                "median_connect_tx_datagrams=2 median_connect_tx_bytes=1300 "
+                "median_connect_rx_datagrams=1 median_connect_rx_bytes=1200 "
+                + phase_fields + "checksum=10 complete=true"
             )
         summaries.write_text("\n".join(summary_lines) + "\n", encoding="utf-8")
         return log, summaries

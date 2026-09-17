@@ -208,6 +208,11 @@ test "public modules are reachable" {
     try std.testing.expect(@hasDecl(netz.tls, "trust"));
     try std.testing.expect(@hasDecl(netz.tls.trust, "BundleVerifier"));
     try std.testing.expect(@hasDecl(netz.tls.trust, "SystemStore"));
+    try std.testing.expect(@hasDecl(netz.tls, "trust_cache"));
+    try std.testing.expect(@hasDecl(
+        netz.tls.trust_cache,
+        "BundleVerifierCache",
+    ));
     try std.testing.expect(@hasDecl(
         netz.tls.stream,
         "ServerConnection",

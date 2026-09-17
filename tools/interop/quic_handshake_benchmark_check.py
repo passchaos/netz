@@ -94,20 +94,44 @@ def verify(
     results = records(client_log, "result")
     completions = records(server_log, "server-complete")
     sample_rows = records(client_log, "handshake-sample")
+    cache_rows = records(client_log, "trust-cache")
     if len(results) != samples or len(completions) != samples:
         raise ValueError("missing result or server completion records")
     if len(sample_rows) != samples * iterations:
         raise ValueError("incorrect handshake sample count")
+    if len(cache_rows) != (samples if client_impl == "netz" else 0):
+        raise ValueError("incorrect trust-cache record count")
 
     p50_values: list[int] = []
     p99_values: list[int] = []
     total_values: list[int] = []
+    traffic_values: dict[str, list[int]] = {key: [] for key in (
+        "connect_tx_datagrams", "connect_tx_bytes",
+        "connect_rx_datagrams", "connect_rx_bytes",
+    )}
+    phase_values: dict[str, list[int]] = {key: [] for key in (
+        "pre_trust_ns", "trust_ns", "post_trust_ns",
+    )}
     for outer_run in range(1, samples + 1):
         matching_results = [row for row in results if row.get("run") == str(outer_run)]
         matching_servers = [row for row in completions if row.get("run") == str(outer_run)]
         matching_samples = [row for row in sample_rows if row.get("run") == str(outer_run)]
         if len(matching_results) != 1 or len(matching_servers) != 1 or len(matching_samples) != iterations:
             raise ValueError(f"run {outer_run}: duplicate or missing records")
+        if client_impl == "netz":
+            matching_cache = [
+                row for row in cache_rows if row.get("run") == str(outer_run)
+            ]
+            if len(matching_cache) != 1:
+                raise ValueError(f"run {outer_run}: missing trust-cache record")
+            expect_cache = {
+                "role_pair": role_pair, "mode": "enabled",
+                "capacity": "64", "hits": str(total_connections - 1),
+                "misses": "1", "complete": "true",
+            }
+            for key, value in expect_cache.items():
+                if matching_cache[0].get(key) != value:
+                    raise ValueError(f"run {outer_run}: trust-cache {key} mismatch")
         result = matching_results[0]
         server = matching_servers[0]
         for label, row, implementation in (
@@ -122,14 +146,19 @@ def verify(
             for key, value in expected_common.items():
                 if row.get(key) != value:
                     raise ValueError(f"run {outer_run} {label}: {key} mismatch")
-        for key, value in {
+        expected_result_fields = {
             "timing_scope": "client-connect-only",
             "verification": "certificate",
             "resumption": "disabled",
             "key_exchange": "x25519",
             "cipher": "aes-128-gcm-sha256",
             "echo_verified": "true",
-        }.items():
+        }
+        if client_impl == "netz":
+            expected_result_fields["trust_cache"] = "enabled"
+        elif client_impl == "quinn":
+            expected_result_fields["trust_cache"] = "implementation-specific"
+        for key, value in expected_result_fields.items():
             if result.get(key) != value:
                 raise ValueError(f"run {outer_run}: {key} mismatch")
         if server.get("echo_verified") != "true" or server.get("peer_close") != "true":
@@ -138,13 +167,18 @@ def verify(
         measured: list[int] = []
         seen: set[int] = set()
         for row in matching_samples:
-            for key, value in {
+            expected_sample_fields = {
                 "implementation": client_impl, "protocol": "quic-v1",
                 "mode": "handshake", "role_pair": role_pair,
                 "client_io": client_io, "server_io": server_io,
                 "endpoint_role": "client", "timeout_ms": str(timeout_ms),
                 "verified": "true",
-            }.items():
+            }
+            if client_impl == "netz":
+                expected_sample_fields["trust_cache"] = "enabled"
+            elif client_impl == "quinn":
+                expected_sample_fields["trust_cache"] = "implementation-specific"
+            for key, value in expected_sample_fields.items():
                 if row.get(key) != value:
                     raise ValueError(f"run {outer_run}: sample {key} mismatch")
             sample_number = integer(row, "sample", 1)
@@ -152,6 +186,24 @@ def verify(
                 raise ValueError(f"run {outer_run}: invalid sample number")
             seen.add(sample_number)
             measured.append(integer(row, "elapsed_ns", 1))
+            if client_impl != "quic-go":
+                for traffic_field in (
+                    "connect_tx_datagrams", "connect_tx_bytes",
+                    "connect_rx_datagrams", "connect_rx_bytes",
+                ):
+                    traffic_values[traffic_field].append(
+                        integer(row, traffic_field, 1)
+                    )
+            if client_impl == "netz":
+                phases = [
+                    integer(row, "pre_trust_ns"),
+                    integer(row, "trust_ns"),
+                    integer(row, "post_trust_ns"),
+                ]
+                if sum(phases) != integer(row, "elapsed_ns", 1):
+                    raise ValueError(f"run {outer_run}: phase sum mismatch")
+                for key, value in zip(phase_values, phases):
+                    phase_values[key].append(value)
         measured.sort()
         total = sum(measured)
         p50 = percentile(measured, 50)
@@ -167,6 +219,29 @@ def verify(
     p50_ns = sorted(p50_values)[samples // 2]
     p99_ns = sorted(p99_values)[samples // 2]
     total_ns = sorted(total_values)[samples // 2]
+    traffic_fields = ""
+    if client_impl != "quic-go":
+        traffic_medians = {
+            key: sorted(values)[len(values) // 2]
+            for key, values in traffic_values.items()
+        }
+        traffic_fields = (
+            f"median_connect_tx_datagrams={traffic_medians['connect_tx_datagrams']} "
+            f"median_connect_tx_bytes={traffic_medians['connect_tx_bytes']} "
+            f"median_connect_rx_datagrams={traffic_medians['connect_rx_datagrams']} "
+            f"median_connect_rx_bytes={traffic_medians['connect_rx_bytes']} "
+        )
+    phase_fields = ""
+    if client_impl == "netz":
+        phase_medians = {
+            key: sorted(values)[len(values) // 2]
+            for key, values in phase_values.items()
+        }
+        phase_fields = (
+            f"median_pre_trust_ns={phase_medians['pre_trust_ns']} "
+            f"median_trust_ns={phase_medians['trust_ns']} "
+            f"median_post_trust_ns={phase_medians['post_trust_ns']} "
+        )
     rate = iterations * 1_000_000_000 / total_ns
     print(
         f"protocol=quic-v1 mode=handshake role_pair={role_pair} samples={samples} "
@@ -174,6 +249,8 @@ def verify(
         f"client_io={client_io} server_io={server_io} "
         f"median_total_elapsed_ns={total_ns} "
         f"connects_per_second_from_timed_sum={rate:.1f} "
+        f"{traffic_fields}"
+        f"{phase_fields}"
         f"checksum={expected_checksum} complete=true"
     )
 

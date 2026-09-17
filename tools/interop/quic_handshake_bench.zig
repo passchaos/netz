@@ -1,5 +1,7 @@
 const std = @import("std");
 const netz = @import("netz");
+const identity = @import("quic_handshake/identity.zig");
+const timed_verifier = @import("quic_handshake/timed_verifier.zig");
 
 const alpn = "netz-handshake-bench";
 const close_code: u64 = 67;
@@ -11,6 +13,7 @@ const Config = struct {
     iterations: usize = 100,
     run: usize = 1,
     timeout_ms: u32 = 10_000,
+    trust_cache: bool = true,
 
     fn parse(args: []const []const u8) !Config {
         var role_pair: ?[]const u8 = null;
@@ -27,6 +30,13 @@ const Config = struct {
                 result.run = try parsePositive(usize, value);
             } else if (option(arg, "--timeout-ms=")) |value| {
                 result.timeout_ms = try parsePositive(u32, value);
+            } else if (option(arg, "--trust-cache=")) |value| {
+                result.trust_cache = if (std.mem.eql(u8, value, "enabled"))
+                    true
+                else if (std.mem.eql(u8, value, "disabled"))
+                    false
+                else
+                    return error.InvalidArgument;
             } else {
                 return error.InvalidArgument;
             }
@@ -62,7 +72,26 @@ pub fn main(init: std.process.Init) !void {
     }
     if (std.mem.eql(u8, args[1], "server")) {
         const port = try parseNonNegative(u16, args[2]);
-        return runServer(port, try Config.parse(args[3..]));
+        if (args.len >= 4 and std.mem.startsWith(u8, args[3], "--")) {
+            return runServer(
+                port,
+                null,
+                null,
+                try Config.parse(args[3..]),
+            );
+        }
+        if (args.len < 6 or
+            !std.Io.Dir.path.isAbsolute(args[3]) or
+            !std.Io.Dir.path.isAbsolute(args[4]))
+        {
+            return error.InvalidArgument;
+        }
+        return runServer(
+            port,
+            args[3],
+            args[4],
+            try Config.parse(args[5..]),
+        );
     }
     return error.InvalidArgument;
 }
@@ -80,10 +109,21 @@ fn runClient(
     var ca_bundle: std.crypto.Certificate.Bundle = .empty;
     defer ca_bundle.deinit(allocator);
     try ca_bundle.addCertsFromFilePathAbsolute(allocator, io, now, ca_path);
-    var verifier = netz.quic.tls.trust.BundleVerifier{
-        .bundle = &ca_bundle,
-        .now_seconds = now.toSeconds(),
+    var trust_cache_entries: [64]netz.tls.trust_cache.Entry = undefined;
+    var trust_cache = netz.tls.trust_cache.BundleVerifierCache.init(
+        io,
+        &ca_bundle,
+        now.toSeconds(),
+        trust_cache_entries[0..if (config.trust_cache)
+            trust_cache_entries.len
+        else
+            0],
+    );
+    var verifier = timed_verifier.Timed{
+        .io = io,
+        .verifier = trust_cache.clientVerifier(),
     };
+    var socket_traffic: netz.quic.runtime.SocketTrafficCounters = .{};
     const latencies = try allocator.alloc(u64, config.iterations);
     defer allocator.free(latencies);
     var measured_index: usize = 0;
@@ -93,14 +133,19 @@ fn runClient(
             allocator,
             io,
             .{ .ip4 = .loopback(0) },
-            .{ .max_datagram_size = 4096 },
+            .{
+                .max_datagram_size = 4096,
+                .socket_traffic_counters = &socket_traffic,
+            },
         );
         defer endpoint.deinit();
+        const traffic_before = socket_traffic.stats();
         var original_dcid: [8]u8 = undefined;
         var client_cid: [8]u8 = undefined;
         try std.Io.randomSecure(io, &original_dcid);
         try std.Io.randomSecure(io, &client_cid);
         const started = nowNs(io);
+        verifier.reset(started);
         var established = try netz.quic.handshake.connectWithTimeout(
             &endpoint,
             .{ .ip4 = .loopback(port) },
@@ -119,7 +164,10 @@ fn runClient(
             },
             config.timeout(),
         );
-        const elapsed = nowNs(io) -| started;
+        const completed = nowNs(io);
+        const elapsed = completed -| started;
+        const phases = try verifier.phases(completed);
+        const traffic = socket_traffic.stats().since(traffic_before);
         defer established.deinit();
         try validateHandshake(established, true);
         try clientEchoAndClose(&established.connection, round, config);
@@ -131,29 +179,71 @@ fn runClient(
                 "record=handshake-sample implementation=netz protocol=quic-v1 " ++
                     "mode=handshake role_pair={s} endpoint_role=client " ++
                     "run={d} sample={d} client_io={s} server_io={s} " ++
-                    "timeout_ms={d} elapsed_ns={d} verified=true\n",
+                    "timeout_ms={d} elapsed_ns={d} " ++
+                    "connect_tx_datagrams={d} connect_tx_bytes={d} " ++
+                    "connect_rx_datagrams={d} connect_rx_bytes={d} " ++
+                    "pre_trust_ns={d} trust_ns={d} post_trust_ns={d} " ++
+                    "trust_cache={s} " ++
+                    "verified=true\n",
                 .{
                     config.role_pair,           config.run,                 measured_index,
                     clientIo(config.role_pair), serverIo(config.role_pair), config.timeout_ms,
-                    elapsed,
+                    elapsed,                    traffic.sent_datagrams,     traffic.sent_bytes,
+                    traffic.received_datagrams, traffic.received_bytes,     phases.pre_trust_ns,
+                    phases.trust_ns,            phases.post_trust_ns,       trustCacheName(config.trust_cache),
                 },
             );
         }
     }
+    const cache_stats = trust_cache.stats();
+    std.debug.print(
+        "record=trust-cache role_pair={s} run={d} mode={s} " ++
+            "capacity={d} hits={d} " ++
+            "misses={d} complete=true\n",
+        .{
+            config.role_pair,                                       config.run,       trustCacheName(config.trust_cache),
+            if (config.trust_cache) trust_cache_entries.len else 0, cache_stats.hits, cache_stats.misses,
+        },
+    );
     try printResult("netz", config, latencies, checksum);
 }
 
-fn runServer(port: u16, config: Config) !void {
+fn runServer(
+    port: u16,
+    certificate_path: ?[]const u8,
+    private_scalar_path: ?[]const u8,
+    config: Config,
+) !void {
     const allocator = std.heap.c_allocator;
     var backend = try netz.runtime.Backend.init(allocator);
     defer backend.deinit();
     const io = backend.io();
-    var certificate_der: [netz.tls.testing.certificate_der_len]u8 = undefined;
-    try std.base64.standard.Decoder.decode(
-        &certificate_der,
-        netz.tls.testing.certificate_base64,
-    );
-    const key_pair = try netz.tls.testing.serverKeyPair();
+    var built_in_certificate: [netz.tls.testing.certificate_der_len]u8 =
+        undefined;
+    var loaded_identity: ?identity.Loaded = if (certificate_path) |cert|
+        try identity.Loaded.init(
+            allocator,
+            io,
+            cert,
+            private_scalar_path orelse return error.InvalidArgument,
+        )
+    else
+        null;
+    defer if (loaded_identity) |*loaded| loaded.deinit(allocator);
+    const server_identity = if (loaded_identity) |*loaded|
+        loaded.serverIdentity()
+    else built_in: {
+        try std.base64.standard.Decoder.decode(
+            &built_in_certificate,
+            netz.tls.testing.certificate_base64,
+        );
+        break :built_in netz.quic.tls.auth.ServerIdentity{
+            .certificate_chain = &.{&built_in_certificate},
+            .signer = .{ .ecdsa_p256_sha256 = .{
+                .key_pair = try netz.tls.testing.serverKeyPair(),
+            } },
+        };
+    };
     var endpoint = try netz.quic.runtime.Endpoint.bind(
         allocator,
         io,
@@ -175,10 +265,7 @@ fn runServer(port: u16, config: Config) !void {
                 .alpn_protocol = alpn,
                 .key_exchange_groups = &.{.x25519},
                 .cipher_suites = &.{.aes_128_gcm_sha256},
-                .identity = .{
-                    .certificate_chain = &.{&certificate_der},
-                    .signer = .{ .ecdsa_p256_sha256 = .{ .key_pair = key_pair } },
-                },
+                .identity = server_identity,
                 .max_crypto_buffer = 64 * 1024,
                 .initial_one_rtt_config = .{ .max_datagram_size = 4096 },
             },
@@ -239,7 +326,7 @@ fn clientEchoAndClose(
     // measured handshake and verified echo.
     try std.Io.sleep(
         connection.endpoint.io,
-        .fromMilliseconds(if (round + 1 == config.total()) 100 else 5),
+        .fromMilliseconds(if (round + 1 == config.total()) 100 else 20),
         .awake,
     );
 }
@@ -320,18 +407,23 @@ fn printResult(
             "timing_scope=client-connect-only " ++
             "client_io={s} server_io={s} timeout_ms={d} " ++
             "verification=certificate resumption=disabled " ++
+            "trust_cache={s} " ++
             "key_exchange=x25519 cipher=aes-128-gcm-sha256 " ++
             "warmup={d} iterations={d} connections={d} echo_bytes={d} " ++
             "checksum={d} total_elapsed_ns={d} p50_ns={d} p99_ns={d} " ++
             "echo_verified=true complete=true\n",
         .{
-            implementation,             config.role_pair,           config.run,
-            clientIo(config.role_pair), serverIo(config.role_pair), config.timeout_ms,
-            config.warmup,              config.iterations,          config.total(),
-            config.total() * 32,        checksum,                   total_elapsed_ns,
-            percentile(latencies, 50),  percentile(latencies, 99),
+            implementation,                     config.role_pair,           config.run,
+            clientIo(config.role_pair),         serverIo(config.role_pair), config.timeout_ms,
+            trustCacheName(config.trust_cache), config.warmup,              config.iterations,
+            config.total(),                     config.total() * 32,        checksum,
+            total_elapsed_ns,                   percentile(latencies, 50),  percentile(latencies, 99),
         },
     );
+}
+
+fn trustCacheName(enabled: bool) []const u8 {
+    return if (enabled) "enabled" else "disabled";
 }
 
 fn makeMarker(round: usize) [16]u8 {
@@ -401,14 +493,23 @@ test "QUIC handshake benchmark configuration and marker are stable" {
         "--iterations=5",
         "--run=3",
         "--timeout-ms=1000",
+        "--trust-cache=disabled",
     });
     try std.testing.expectEqual(@as(usize, 7), config.total());
     try std.testing.expectEqual(@as(usize, 3), config.run);
+    try std.testing.expect(!config.trust_cache);
     try std.testing.expectError(
         error.InvalidArgument,
         Config.parse(&.{
             "--role-pair=netz-client+quic-go-server",
             "--iterations=0",
+        }),
+    );
+    try std.testing.expectError(
+        error.InvalidArgument,
+        Config.parse(&.{
+            "--role-pair=netz-client+quic-go-server",
+            "--trust-cache=maybe",
         }),
     );
     const first = makeMarker(0);
