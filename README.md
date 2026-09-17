@@ -378,8 +378,9 @@ starts with deterministic parsers, serializers, preallocated fixed-width wire-in
   zero-consume skips, contiguous duplicate-overlap fast paths, conflict detection, offset reassembly, FIN, RESET_STREAM final-size validation, and STOP_SENDING
   to RESET_STREAM response handling,
   RFC 9221 QUIC DATAGRAM negotiation limits with 1-RTT send helpers,
-  receive queues plus caller-buffer blocking/timeout/deadline reads,
-  max-payload calculation, queue overflow/drop counters, and
+  receive queues plus caller-buffer blocking/timeout/deadline reads, automatic
+  pending-ACK coalescing on single DATAGRAM sends, max-payload calculation,
+  queue overflow/drop counters, and
   oversized/disabled DATAGRAM rejection,
   RFC 9287 `grease_quic_bit` transport-parameter negotiation with strict
   pre-negotiation fixed-bit validation, negotiated zero-bit receive routing,

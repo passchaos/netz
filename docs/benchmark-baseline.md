@@ -887,6 +887,37 @@ fixed Quinn client, the netz server p50 median moved from 44.009 to 43.205 us
 (1.8% lower, candidate faster in 4/5 pairs). The p99 samples were noisy and
 included a candidate high tail, so this is a small workload-specific p50
 improvement rather than a tail-latency or general QUIC performance claim.
+Single DATAGRAM sends now also append a pending delayed ACK when both frames
+fit the path packet. This matches the unified packet builders in Quinn, quiche,
+and s2n-quic and avoids a separate ACK packet in request/response workloads. A
+full-size DATAGRAM that cannot fit the ACK falls back to the original send and
+leaves the ACK scheduled; validation, allocation, anti-amplification,
+congestion, and pacing failures before socket submission have the same safe
+fallback. Real-UDP tests verify the combined frame order, exact ACK range, one
+socket-visible datagram, and the full-size fallback.
+
+The fixed baseline binaries for this step were SHA-256
+`2ba8edf58157f4fa301c40f695cdf275feca5ab72e787f5ab7f1457687db69fa`
+(client) and
+`af97a63417c75c5f44d225a5f32f7d50cb9c65e1254578fe80fab94d63dbf017`
+(server); the final binaries were
+`024bd317fe37fd8ae9c92010a3eaf6cf24101cbe778ab7345e2af170e8e73883`
+and `244bfb698a7b5ef5661bdb149aed4a2746210a69ff8fe77017e9adb2ecb9398a`.
+Five order-alternated 200-warmup/5,000-RTT pairs on CPUs 0/1 moved the netz
+client p50 against a fixed Quinn server from 43.556 to 41.787 us (4.1% lower,
+5/5 wins), and the netz server p50 against a fixed Quinn client from 43.954 to
+42.649 us (3.0% lower, 5/5 wins). Median p99 moved from 60.555 to 57.278 us
+and 63.435 to 61.454 us respectively, with 5/5 wins in both directions; the
+ranges overlap, so these remain workload-specific latency results rather than
+a broad tail-latency claim.
+The resulting fixed-binary four-role matrix measured netz at 42.019 us versus
+Quinn at 52.166 us p50 with the Quinn server (1.241x), and netz at 35.972 us
+versus Quinn at 43.204 us with the netz server (1.201x). The corresponding p99
+medians were 57.223 versus 67.834 us and 44.444 versus 60.862 us. Netz leads
+both fixed-peer comparisons in this capture, but the benchmark still compares
+the same application shape rather than identical executor, syscall, or wire
+behavior, so the result remains scoped to this raw one-outstanding DATAGRAM
+workload.
 Stateless `one_rtt.sendFramesInto` now accepts one caller-owned final packet
 buffer, encodes frames directly into its plaintext region, seals AEAD in place,
 and submits it without heap allocation. Its exact sizing helper validates every

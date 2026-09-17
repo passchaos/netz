@@ -5,6 +5,7 @@ const closed_streams = @import("one_rtt/closed_streams.zig");
 const frame_traits = @import("one_rtt/frame_traits.zig");
 const datagram_queue = @import("one_rtt/datagram_queue.zig");
 const datagram_receive = @import("one_rtt/datagram_receive.zig");
+const datagram_send = @import("one_rtt/datagram_send.zig");
 const handshake_status = @import("one_rtt/handshake_status.zig");
 const pto_jitter = @import("one_rtt/pto_jitter.zig");
 const prepared_keys = @import("one_rtt/prepared_keys.zig");
@@ -3180,11 +3181,17 @@ pub const Connection = struct {
 
     pub fn sendDatagram(self: *Connection, data: []const u8) Error!void {
         try self.validateDatagramSend(data);
-        const frames = [_]quic.Frame{.{ .datagram = .{
-            .data = data,
-            .length_present = true,
-        } }};
-        try self.send(&frames);
+        while (true) {
+            const now_ns = self.monotonicNowNs();
+            self.trySendDatagramAtValidated(data, now_ns) catch |err| switch (err) {
+                error.PacingLimited => {
+                    try self.waitForPacing(now_ns);
+                    continue;
+                },
+                else => return err,
+            };
+            break;
+        }
         self.datagrams_sent_count +|= 1;
     }
 
@@ -3193,11 +3200,7 @@ pub const Connection = struct {
     /// deadline while preserving exactly-once application accounting.
     pub fn trySendDatagram(self: *Connection, data: []const u8) Error!void {
         try self.validateDatagramSend(data);
-        const frames = [_]quic.Frame{.{ .datagram = .{
-            .data = data,
-            .length_present = true,
-        } }};
-        try self.trySend(&frames);
+        try self.trySendDatagramAtValidated(data, self.monotonicNowNs());
         self.datagrams_sent_count +|= 1;
     }
 
@@ -3412,16 +3415,12 @@ pub const Connection = struct {
             return error.Timeout;
         }
         try self.validateDatagramSend(data);
-        const frames = [_]quic.Frame{.{ .datagram = .{
-            .data = data,
-            .length_present = true,
-        } }};
         while (true) {
             const now_ns = self.monotonicNowNs();
             if (callerDeadlineExpired(deadline, now_ns)) {
                 return error.Timeout;
             }
-            self.sendAutomaticallyAt(&frames, now_ns) catch |err| switch (err) {
+            self.trySendDatagramAtValidated(data, now_ns) catch |err| switch (err) {
                 error.PacingLimited => {
                     const pacing_deadline =
                         self.pacing_blocked_until_ns orelse return err;
@@ -3438,6 +3437,25 @@ pub const Connection = struct {
             self.datagrams_sent_count +|= 1;
             return;
         }
+    }
+
+    /// Send a validated DATAGRAM once, coalescing a delayed cumulative ACK
+    /// when it fits. The fallback errors are produced before socket submission,
+    /// so retrying the DATAGRAM alone cannot duplicate application data and
+    /// leaves the ACK pending for its normal timer.
+    fn trySendDatagramAtValidated(
+        self: *Connection,
+        data: []const u8,
+        sent_time_ns: u64,
+    ) Error!void {
+        return datagram_send.sendOne(
+            Error,
+            self,
+            data,
+            self.ack_eliciting_since_last_ack != 0 or
+                self.immediate_ack_requested,
+            sent_time_ns,
+        );
     }
 
     /// Perform exactly one DATAGRAM send attempt under a caller-owned
@@ -6478,6 +6496,21 @@ pub const Connection = struct {
         frames: []const quic.Frame,
         ack_delay: u64,
     ) Error!void {
+        return self.trySendWithPendingAckAt(
+            frames,
+            ack_delay,
+            self.monotonicNowNs(),
+        );
+    }
+
+    /// Timestamped one-attempt counterpart used by composed packet writers
+    /// that already sampled their event-loop clock for pacing and recovery.
+    pub fn trySendWithPendingAckAt(
+        self: *Connection,
+        frames: []const quic.Frame,
+        ack_delay: u64,
+        sent_time_ns: u64,
+    ) Error!void {
         var stack_ranges: [
             quic.packet_space.ReceivedPacketTracker.stack_ack_range_capacity
         ]quic.AckRange = undefined;
@@ -6499,7 +6532,7 @@ pub const Connection = struct {
         defer if (combined.ptr != stack_frames[0..].ptr) {
             self.endpoint.allocator.free(combined);
         };
-        try self.trySend(combined);
+        try self.sendAutomaticallyAt(combined, sent_time_ns);
         self.ackDelaySent();
     }
 
