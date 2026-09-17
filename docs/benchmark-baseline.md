@@ -3961,6 +3961,40 @@ The direction still depends on the server. This matrix is now equal in server
 certificate bytes but remains same-security-policy rather than equal-wire: the
 client packetization differs materially, as the UDP counters above show.
 
+The next client CPU pass replaced five overlapping whole-transcript hashes with
+one negotiated incremental transcript state plus cheap boundary snapshots. It
+retains the exact TLS ordering for authenticated, PSK, client-certificate,
+SHA-384, and SM3 paths; focused tests compare every snapshot against the former
+one-shot construction. A fixed-Quinn-server 5x100 ABBA run compared the already
+published cache baseline binary
+`36f290466c5d7fc37c4baf05137dd584ab28a8c4f7b08ed4855f3cf663e8d5dd`
+with the incremental binary
+`07ed8888345aaf0b9fcb2b996d5470529855fc558d3b96b85a6964c66b759853`.
+Median P50 fell from 1.586 to 1.275 ms (19.6%, four of five paired wins),
+median timed-sum rate rose from 615.7 to 730.2 connects/s (18.6%), and median
+P99 moved from 4.360 to 3.110 ms. The tail result remains local evidence on
+this loaded host.
+
+The final post-change shared-identity 5x100 matrix on the same CPUs used netz
+SHA-256
+`07ed8888345aaf0b9fcb2b996d5470529855fc558d3b96b85a6964c66b759853`
+and Quinn SHA-256
+`cd14eca7908d20123d4c822c71e1d5ca09037dfc5109688361f80dbe347ef4cd`:
+
+| Complete role pair | P50 connect | P99 connect | Derived connects/s |
+|---|---:|---:|---:|
+| netz client + Quinn server | 1.136 ms | 3.797 ms | 765.8 |
+| Quinn client + Quinn server | 1.051 ms | 4.628 ms | 834.1 |
+| Quinn client + netz server | 1.270 ms | 6.357 ms | 675.2 |
+| netz client + netz server | 1.617 ms | 3.781 ms | 593.1 |
+
+Against the fixed Quinn server, netz is now 8.1% higher at P50 (0.925x), down
+from the prior matrix's 28.0% gap. The fixed-netz-server direction measured
+netz at 0.785x in this run, reinforcing that whole-pair scheduling and server
+behavior still prevent an isolated client ranking. All four pairs retained the
+same median connect-time UDP datagram and byte counts as before the transcript
+change.
+
 The historical 2026-09-16 5 x 100 full-handshake capture used netz binary SHA-256
 `fbb112f461774e4edb8fa8f05f46b78af138f3ce348ffade25d3d57929d307b6`
 and Quinn binary SHA-256

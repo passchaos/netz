@@ -1784,6 +1784,20 @@ netz versus 1.311 ms for Quinn at fixed-Quinn-server P50 (netz 0.781x), and
 2.055 ms for netz versus 2.272 ms for Quinn at fixed-netz-server P50 (netz
 1.105x). These remain complete role-pair observations, not isolated library or
 equal-wire rankings.
+The QUIC client now also owns one incremental negotiated transcript state,
+matching the stateful transcript approach used by mature TLS stacks instead of
+rehashing ClientHello and ServerHello at five successive derivation/signature
+boundaries. SHA-256/SHA-384/SM3 snapshot equivalence plus authenticated, PSK,
+mTLS, and 0-RTT handshake tests cover the ordering. A fixed-Quinn-server 5x100
+same-binary ABBA moved P50 from 1.586 to 1.275 ms and timed-sum rate from 615.7
+to 730.2 connects/s; the next target is the remaining CertificateVerify and
+pre-trust packet/key-schedule work.
+The final shared-identity 5x100 matrix measured netz/Quinn at 1.136/1.051 ms
+P50 with the fixed Quinn server (netz 0.925x), versus the preceding
+1.679/1.311 ms matrix. UDP counts and bytes were unchanged. The fixed netz
+server produced 1.617/1.270 ms, so further work must continue to separate
+client cryptography from server scheduling rather than treating either
+complete-pair result as a universal implementation ranking.
 
 1. Extend the two-CPU raw QUIC process comparison with kernel/interface packet
    capture, WebSocket/WebTransport allocation telemetry, lossy/reordered on-wire lifecycle churn,

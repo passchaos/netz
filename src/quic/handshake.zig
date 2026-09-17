@@ -5,6 +5,7 @@ const retransmit = @import("handshake/retransmit.zig");
 const retry = @import("handshake/retry.zig");
 const transport_limits = @import("handshake/transport_limits.zig");
 const datagram_reader = @import("handshake/datagram_reader.zig");
+const client_transcript = @import("handshake/client_transcript.zig");
 const fixed_bit = @import("one_rtt/fixed_bit.zig");
 
 const net = std.Io.net;
@@ -1796,10 +1797,12 @@ fn connectAttempt(
         parsed_server.keyShare(),
     );
     defer shared.wipe();
-    const hs_hash = hashPartsForSuite(
-        parsed_server.cipher_suite,
-        &.{ client_hello.items, server_initial.crypto_data },
+    var transcript = client_transcript.Flow.init(
+        parsed_server.cipher_suite.hash(),
+        client_hello.items,
+        server_initial.crypto_data,
     );
+    const hs_hash = transcript.digest();
     const handshake =
         try quic.tls_client_hello
             .deriveRuntimeHandshakeSecretsFromSliceForVersion(
@@ -1928,14 +1931,9 @@ fn connectAttempt(
             try quic.tls.auth.parseCertificateVerify(
                 certificate_verify_bytes,
             );
-        const certificate_transcript_hash = hashPartsForSuite(
-            parsed_server.cipher_suite,
-            &.{
-                client_hello.items,
-                server_initial.crypto_data,
-                server_flight.through_certificate orelse
-                    return error.InvalidHandshakeFlight,
-            },
+        const certificate_transcript_hash = transcript.digestAfter(
+            server_flight.through_certificate orelse
+                return error.InvalidHandshakeFlight,
         );
         try quic.tls.auth.verifyCertificateVerify(
             peer_certificate.?.entries[0],
@@ -1943,6 +1941,28 @@ fn connectAttempt(
             certificate_transcript_hash.bytes(),
         );
     }
+    const server_finished = try quic.tls_client_hello.parseFinishedForHash(
+        server_flight.finished,
+        parsed_server.cipher_suite.hash(),
+    );
+    transcript.append(server_flight.before_finished);
+    const server_finished_hash = transcript.digest();
+    try quic.tls_client_hello.verifyFinishedForHash(
+        handshake.server_handshake_traffic_secret,
+        server_finished_hash,
+        server_finished,
+    );
+    transcript.append(server_flight.finished);
+    const application_transcript_hash = transcript.digest();
+    const application =
+        try quic.tls_client_hello
+            .deriveRuntimeApplicationSecretsForVersion(
+            options.version.wireValue(),
+            parsed_server.cipher_suite,
+            handshake.handshake_secret,
+            application_transcript_hash,
+        );
+
     var client_certificate: std.ArrayList(u8) = .empty;
     defer client_certificate.deinit(endpoint.allocator);
     var client_certificate_verify: std.ArrayList(u8) = .empty;
@@ -1965,16 +1985,8 @@ fn connectAttempt(
             identity.certificate_chain,
             request.request_context,
         );
-        const client_certificate_transcript_hash = hashPartsForSuite(
-            parsed_server.cipher_suite,
-            &.{
-                client_hello.items,
-                server_initial.crypto_data,
-                server_flight.before_finished,
-                server_flight.finished,
-                client_certificate.items,
-            },
-        );
+        const client_certificate_transcript_hash =
+            transcript.digestAfter(client_certificate.items);
         try quic.tls.auth.writeCertificateVerifyForRole(
             &client_certificate_verify,
             endpoint.allocator,
@@ -1983,54 +1995,6 @@ fn connectAttempt(
             .client,
         );
     }
-    const server_finished = try quic.tls_client_hello.parseFinishedForHash(
-        server_flight.finished,
-        parsed_server.cipher_suite.hash(),
-    );
-    const server_finished_hash = hashPartsForSuite(
-        parsed_server.cipher_suite,
-        &.{
-            client_hello.items,
-            server_initial.crypto_data,
-            server_flight.before_finished,
-        },
-    );
-    try quic.tls_client_hello.verifyFinishedForHash(
-        handshake.server_handshake_traffic_secret,
-        server_finished_hash,
-        server_finished,
-    );
-    const application_transcript_hash = hashPartsForSuite(
-        parsed_server.cipher_suite,
-        &.{
-            client_hello.items,
-            server_initial.crypto_data,
-            server_flight.before_finished,
-            server_flight.finished,
-        },
-    );
-    const application =
-        try quic.tls_client_hello
-            .deriveRuntimeApplicationSecretsForVersion(
-            options.version.wireValue(),
-            parsed_server.cipher_suite,
-            handshake.handshake_secret,
-            application_transcript_hash,
-        );
-
-    const client_verify = try quic.tls_client_hello
-        .computeFinishedVerifyDataForHash(
-        handshake.client_handshake_traffic_secret,
-        application_transcript_hash,
-    );
-    var client_finished: std.ArrayList(u8) = .empty;
-    defer client_finished.deinit(endpoint.allocator);
-    try quic.tls_client_hello.writeFinishedForHash(
-        &client_finished,
-        endpoint.allocator,
-        client_verify,
-    );
-
     var client_flight: std.ArrayList(u8) = .empty;
     defer client_flight.deinit(endpoint.allocator);
     try client_flight.appendSlice(
@@ -2041,33 +2005,25 @@ fn connectAttempt(
         endpoint.allocator,
         client_certificate_verify.items,
     );
-    if (client_flight.items.len != 0) {
-        const authenticated_client_hash = hashPartsForSuite(
-            parsed_server.cipher_suite,
-            &.{
-                client_hello.items,
-                server_initial.crypto_data,
-                server_flight.before_finished,
-                server_flight.finished,
-                client_flight.items,
-            },
-        );
-        const authenticated_client_verify =
-            try quic.tls_client_hello.computeFinishedVerifyDataForHash(
-                handshake.client_handshake_traffic_secret,
-                authenticated_client_hash,
-            );
-        client_finished.clearRetainingCapacity();
-        try quic.tls_client_hello.writeFinishedForHash(
-            &client_finished,
-            endpoint.allocator,
-            authenticated_client_verify,
-        );
-    }
+    const client_finished_hash = transcript.digestAfter(client_flight.items);
+    const client_verify = try quic.tls_client_hello
+        .computeFinishedVerifyDataForHash(
+        handshake.client_handshake_traffic_secret,
+        client_finished_hash,
+    );
+    var client_finished: std.ArrayList(u8) = .empty;
+    defer client_finished.deinit(endpoint.allocator);
+    try quic.tls_client_hello.writeFinishedForHash(
+        &client_finished,
+        endpoint.allocator,
+        client_verify,
+    );
     try client_flight.appendSlice(
         endpoint.allocator,
         client_finished.items,
     );
+    transcript.append(client_flight.items);
+    const complete_transcript_hash = transcript.digest();
     var client_handshake_send = retransmit.HandshakeFlight{
         .endpoint = endpoint,
         .peer = server_initial.from,
@@ -2120,13 +2076,7 @@ fn connectAttempt(
         early_data_status,
         try quic.tls.key_schedule.deriveResumptionMasterSecretFor(
             application.master_secret,
-            hashPartsForSuite(parsed_server.cipher_suite, &.{
-                client_hello.items,
-                server_initial.crypto_data,
-                server_flight.before_finished,
-                server_flight.finished,
-                client_flight.items,
-            }),
+            complete_transcript_hash,
         ),
         try quic.tls.key_schedule.deriveExporterMasterSecretFor(
             application.master_secret,
