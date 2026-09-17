@@ -1102,6 +1102,8 @@ zig build bench-quic-persistent-external -Doptimize=ReleaseFast -- --netz-only -
 zig build bench-quic-handshake-external -Doptimize=ReleaseFast -- --netz-only
 zig build bench-quic-handshake-quinn -Doptimize=ReleaseFast -- --samples=5 --warmup=10 --iterations=100
 zig build bench-quic-one-rtt-send -Doptimize=ReleaseFast
+taskset -c 0 zig build bench-quic-one-rtt-send -Doptimize=ReleaseFast -- \
+  --scenario=datagram --datagram-payload-bytes=256 --warmup=100 --iterations=1000
 zig build bench-quic-one-rtt-receive -Doptimize=ReleaseFast
 taskset -c 0 zig build bench-quic-one-rtt-receive -Doptimize=ReleaseFast -- --mode=visitor --frame=stream --warmup=200 --iterations=5000
 taskset -c 0 zig build bench-quic-one-rtt-receive -Doptimize=ReleaseFast -- --mode=visitor --frame=stream_gap --warmup=200 --iterations=5000

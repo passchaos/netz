@@ -67,6 +67,7 @@ zig build bench-http3-handshake-transfer -Doptimize=ReleaseFast -- --iterations=
 zig build bench-http3-handshake-transfer -Doptimize=ReleaseFast -- --iterations=1 --body-bytes=16777216 --mode=download --streams=4
 zig build bench-quic-one-rtt-send -Doptimize=ReleaseFast
 zig build bench-quic-one-rtt-send -Doptimize=ReleaseFast -- --stream-fragments=4
+taskset -c 0 zig build bench-quic-one-rtt-send -Doptimize=ReleaseFast -- --scenario=datagram --datagram-payload-bytes=256 --warmup=100 --iterations=1000
 zig build bench-quic-one-rtt-receive -Doptimize=ReleaseFast
 taskset -c 0 zig build bench-quic-one-rtt-receive -Doptimize=ReleaseFast -- --mode=visitor --frame=stream --warmup=200 --iterations=5000
 taskset -c 0 zig build bench-quic-one-rtt-receive -Doptimize=ReleaseFast -- --mode=visitor --frame=stream_gap --warmup=200 --iterations=5000
@@ -821,7 +822,16 @@ batch sample was a 116.687-us high tail and one final batch pair was 0.36%
 slower, so the medians are retained without an all-pairs claim. Direct batch
 and single-packet mixed-DATAGRAM tests verify that unreliable bytes are still
 absent from recovery. The benchmark accepts `--warmup=N` and `--iterations=N`
-so longer profiles do not require a source edit.
+so longer profiles do not require a source edit. It now also accepts
+`--scenario=datagram` and `--datagram-payload-bytes=1..1024` to isolate the
+public DATAGRAM batch sender. That mode compares 32 sequential logical payload
+sends against one packed batch and reports both logical payloads and actual
+QUIC packet numbers. On the published `8acb1db8` baseline, a CPU-0 256-byte,
+1,000-iteration run measured 102.619 us/batch (3,206 ns/payload, 32,000
+packets) sequentially and 20.950 us/batch (654 ns/payload, 8,000 packets)
+packed, a 4.89x relative payload-rate gain. This is a sender-only local
+microbenchmark and is the fixed baseline for the next pure-DATAGRAM
+bookkeeping optimization; it is not a cross-stack claim.
 ### Raw QUIC DATAGRAM latency against Quinn
 
 The native Quinn RFC 9221 fixture now also supports a strict raw DATAGRAM

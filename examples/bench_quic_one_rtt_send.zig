@@ -9,6 +9,10 @@ const default_stream_fragments_per_packet: usize = 1;
 const max_stream_fragments_per_packet: usize = 16;
 const default_warmup_iterations: usize = 100;
 const default_measured_iterations: usize = 1_000;
+const default_datagram_payload_bytes: usize = 256;
+const max_datagram_payload_bytes: usize = 1024;
+
+const Scenario = enum { stream, datagram };
 
 pub fn main(init: std.process.Init) !void {
     const allocator = std.heap.smp_allocator;
@@ -50,8 +54,17 @@ pub fn main(init: std.process.Init) !void {
     var payload: [payload_size]u8 = undefined;
     for (&payload, 0..) |*byte, index| byte.* = @truncate(index);
 
-    var frame_storage: [batch_size][max_stream_fragments_per_packet]netz.quic.Frame =
-        undefined;
+    if (options.scenario == .datagram) {
+        return runDatagramBenchmark(
+            io,
+            &receiver,
+            &sequential_sender,
+            &batch_sender,
+            options,
+        );
+    }
+
+    var frame_storage: [batch_size][max_stream_fragments_per_packet]netz.quic.Frame = undefined;
     var packets: [batch_size][]const netz.quic.Frame = undefined;
     for (&frame_storage, &packets, 0..) |*packet_frames, *packet, index| {
         const fragment_size = payload.len / stream_fragments_per_packet;
@@ -156,6 +169,139 @@ pub fn main(init: std.process.Init) !void {
     });
 }
 
+fn runDatagramBenchmark(
+    io: std.Io,
+    receiver: *netz.quic.runtime.Endpoint,
+    sequential_sender: *netz.quic.runtime.Endpoint,
+    batch_sender: *netz.quic.runtime.Endpoint,
+    options: Options,
+) !void {
+    const keys = netz.quic.protection.deriveAes128Keys(
+        [_]u8{0xd6} ** netz.quic.protection.secret_len,
+    );
+    const destination_connection_id = [_]u8{ 0xba, 0x7c, 0x11, 0x02 };
+    var payload_storage: [batch_size][max_datagram_payload_bytes]u8 = undefined;
+    var payloads: [batch_size][]const u8 = undefined;
+    for (&payload_storage, &payloads, 0..) |*storage, *payload, index| {
+        const bytes = storage[0..options.datagram_payload_bytes];
+        for (bytes, 0..) |*byte, offset| byte.* = @truncate(index + offset);
+        payload.* = bytes;
+    }
+    var sequential = try netz.quic.one_rtt.Connection.init(
+        sequential_sender,
+        .{
+            .peer = receiver.address(),
+            .receive_keys = keys,
+            .send_keys = keys,
+            .local_connection_id = &destination_connection_id,
+            .peer_connection_id = &destination_connection_id,
+            .peer_max_datagram_frame_size = 65_535,
+            .max_frames_per_packet = 1,
+            .enable_pacing = false,
+        },
+    );
+    defer sequential.deinit();
+    var batched = try netz.quic.one_rtt.Connection.init(
+        batch_sender,
+        .{
+            .peer = receiver.address(),
+            .receive_keys = keys,
+            .send_keys = keys,
+            .local_connection_id = &destination_connection_id,
+            .peer_connection_id = &destination_connection_id,
+            .peer_max_datagram_frame_size = 65_535,
+            .max_frames_per_packet = batch_size,
+            .enable_pacing = false,
+        },
+    );
+    defer batched.deinit();
+    sequential.congestion.congestion_window = std.math.maxInt(usize);
+    batched.congestion.congestion_window = std.math.maxInt(usize);
+
+    try runDatagramSequential(
+        &sequential,
+        &payloads,
+        options.warmup_iterations,
+    );
+    try runDatagramBatch(
+        &batched,
+        &payloads,
+        options.warmup_iterations,
+    );
+    const sequential_packet_start =
+        netz.quic.one_rtt.testing.nextPacketNumber(&sequential);
+    const batch_packet_start =
+        netz.quic.one_rtt.testing.nextPacketNumber(&batched);
+    const sequential_started = nowNs(io);
+    try runDatagramSequential(
+        &sequential,
+        &payloads,
+        options.measured_iterations,
+    );
+    const sequential_ns = nowNs(io) -| sequential_started;
+    const batch_started = nowNs(io);
+    try runDatagramBatch(
+        &batched,
+        &payloads,
+        options.measured_iterations,
+    );
+    const batch_ns = nowNs(io) -| batch_started;
+    const total_payloads = options.measured_iterations * batch_size;
+    const sequential_packets =
+        netz.quic.one_rtt.testing.nextPacketNumber(&sequential) -
+        sequential_packet_start;
+    const batch_packets = netz.quic.one_rtt.testing.nextPacketNumber(&batched) -
+        batch_packet_start;
+    const ratio_x100 = ratioTimes100(sequential_ns, batch_ns);
+    std.debug.print(
+        \\QUIC 1-RTT DATAGRAM send benchmark
+        \\  io backend: zio-std-io
+        \\  iterations: {d}, DATAGRAM payloads/batch: {d}, payload bytes/DATAGRAM: {d}
+        \\  stateful batch GSO available after run: {}
+        \\  stateful sequential: {d} ns/batch, {d} ns/payload, packets={d}
+        \\  stateful packed:     {d} ns/batch, {d} ns/payload, packets={d}
+        \\  stateful packed relative payload throughput: {d}.{d:0>2}x
+        \\  total payloads/path: {d}
+        \\
+    , .{
+        options.measured_iterations,
+        batch_size,
+        options.datagram_payload_bytes,
+        batch_sender.gsoSendEnabled(),
+        sequential_ns / options.measured_iterations,
+        sequential_ns / total_payloads,
+        sequential_packets,
+        batch_ns / options.measured_iterations,
+        batch_ns / total_payloads,
+        batch_packets,
+        ratio_x100 / 100,
+        ratio_x100 % 100,
+        total_payloads,
+    });
+}
+
+fn runDatagramSequential(
+    connection: *netz.quic.one_rtt.Connection,
+    payloads: []const []const u8,
+    iterations: usize,
+) !void {
+    for (0..iterations) |_| {
+        for (payloads) |payload| try connection.sendDatagram(payload);
+    }
+}
+
+fn runDatagramBatch(
+    connection: *netz.quic.one_rtt.Connection,
+    payloads: []const []const u8,
+    iterations: usize,
+) !void {
+    for (0..iterations) |_| {
+        var committed: usize = 0;
+        try connection.sendDatagrams(payloads, &committed);
+        if (committed != payloads.len) return error.IncompleteDatagramBatch;
+    }
+}
+
 fn runSequential(
     connection: *netz.quic.one_rtt.Connection,
     packets: []const []const netz.quic.Frame,
@@ -187,7 +333,9 @@ fn ratioTimes100(numerator: u64, denominator: u64) u64 {
 }
 
 const Options = struct {
+    scenario: Scenario = .stream,
     stream_fragments_per_packet: usize = default_stream_fragments_per_packet,
+    datagram_payload_bytes: usize = default_datagram_payload_bytes,
     warmup_iterations: usize = default_warmup_iterations,
     measured_iterations: usize = default_measured_iterations,
 };
@@ -204,10 +352,21 @@ fn parseOptions(
     _ = args.next();
     var options: Options = .{};
     while (args.next()) |arg| {
-        if (std.mem.startsWith(u8, arg, "--stream-fragments=")) {
+        if (std.mem.startsWith(u8, arg, "--scenario=")) {
+            options.scenario = std.meta.stringToEnum(
+                Scenario,
+                arg["--scenario=".len..],
+            ) orelse return error.InvalidArgument;
+        } else if (std.mem.startsWith(u8, arg, "--stream-fragments=")) {
             options.stream_fragments_per_packet = try std.fmt.parseInt(
                 usize,
                 arg["--stream-fragments=".len..],
+                10,
+            );
+        } else if (std.mem.startsWith(u8, arg, "--datagram-payload-bytes=")) {
+            options.datagram_payload_bytes = try std.fmt.parseInt(
+                usize,
+                arg["--datagram-payload-bytes=".len..],
                 10,
             );
         } else if (std.mem.startsWith(u8, arg, "--warmup=")) {
@@ -226,6 +385,8 @@ fn parseOptions(
     }
     if (options.stream_fragments_per_packet == 0 or
         options.stream_fragments_per_packet > max_stream_fragments_per_packet or
+        options.datagram_payload_bytes < 1 or
+        options.datagram_payload_bytes > max_datagram_payload_bytes or
         options.measured_iterations == 0)
     {
         return error.InvalidArgument;
