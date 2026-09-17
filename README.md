@@ -989,7 +989,10 @@ zig build interop-quic-s2n -Doptimize=ReleaseFast
 # conservative 55-byte send boundary under netz's 64-byte frame limit, netz's
 # exact 1171-byte path/header boundary against Quinn's 8-byte CID, local
 # oversized rejection, reliable stream 4, close 57/58, ALPN/SNI, and explicit
-# zio-std-io versus quinn-tokio-rustls runtime identities.
+# zio-std-io versus quinn-tokio-rustls runtime identities. Deterministic loss
+# and true pair-reordering variants make netz the outbound sender in each role:
+# Quinn proves the dropped first DATAGRAM is never retransmitted, observes the
+# reordered pair, and completes the reliable sibling stream and close.
 zig build interop-quic-quinn -Doptimize=ReleaseFast
 # Requires Docker and the crossbario/autobahn-testsuite image. Optional trailing
 # arguments select individual case IDs; with none, all 517 cases run. Pass

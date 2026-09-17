@@ -1099,7 +1099,7 @@ pub fn build(b: *std.Build) void {
     quic_quinn.addArtifactArg(quic_peer_server);
     const quic_quinn_step = b.step(
         "interop-quic-quinn",
-        "Run verified native QUIC DATAGRAM interop with local Quinn",
+        "Run verified native QUIC DATAGRAM and fault interop with local Quinn",
     );
     quic_quinn_step.dependOn(&quic_quinn.step);
 

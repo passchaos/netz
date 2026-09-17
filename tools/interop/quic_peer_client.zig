@@ -28,6 +28,8 @@ const Scenario = enum {
     mixed_churn_loss,
     mixed_churn_reorder,
     datagram,
+    datagram_loss,
+    datagram_reorder,
 };
 const flow_control_payload = [_]u8{'f'} ** 12_288;
 
@@ -87,11 +89,16 @@ pub fn main(init: std.process.Init) !void {
     {
         return error.InvalidArgument;
     }
-    if (peer == .quic_go and scenario != .echo) {
-        return error.InvalidArgument;
-    }
-    if (peer == .quinn and (scenario != .datagram or expect_retry)) {
-        return error.InvalidArgument;
+    switch (peer) {
+        .quic_go => if (scenario != .echo) return error.InvalidArgument,
+        .s2n_quic => if (scenario == .datagram_loss or
+            scenario == .datagram_reorder) return error.InvalidArgument,
+        .quinn => if ((scenario != .datagram and
+            scenario != .datagram_loss and
+            scenario != .datagram_reorder) or expect_retry)
+        {
+            return error.InvalidArgument;
+        },
     }
     const key_exchange_groups: []const netz.quic.tls_client_hello.NamedGroup =
         if (peer != .quic_go)
@@ -134,6 +141,8 @@ pub fn main(init: std.process.Init) !void {
     var cancellation_reorder = OneShotReorder{};
     var churn_loss = PhasedFault.init(.loss);
     var churn_reorder = PhasedFault.init(.reorder);
+    var datagram_loss = PhasedFault.init(.loss);
+    var datagram_reorder = PhasedFault.init(.reorder);
     var endpoint_limits: netz.quic.runtime.Limits = .{
         .max_datagram_size = 8192,
     };
@@ -152,6 +161,16 @@ pub fn main(init: std.process.Init) !void {
             .context = &churn_reorder,
             .should_hold = PhasedFault.shouldHold,
         };
+    } else if (scenario == .datagram_loss) {
+        endpoint_limits.send_interceptor = .{
+            .context = &datagram_loss,
+            .should_drop = PhasedFault.shouldDrop,
+        };
+    } else if (scenario == .datagram_reorder) {
+        endpoint_limits.send_interceptor = .{
+            .context = &datagram_reorder,
+            .should_hold = PhasedFault.shouldHold,
+        };
     }
     var endpoint = try netz.quic.runtime.Endpoint.bind(
         allocator,
@@ -166,7 +185,9 @@ pub fn main(init: std.process.Init) !void {
     try std.Io.randomSecure(io, &client_cid);
     var local_transport_parameters =
         netz.quic.practical_transport_parameters;
-    if (scenario == .datagram) {
+    if (scenario == .datagram or scenario == .datagram_loss or
+        scenario == .datagram_reorder)
+    {
         local_transport_parameters.max_datagram_frame_size = 64;
     }
 
@@ -198,7 +219,9 @@ pub fn main(init: std.process.Init) !void {
                 .max_duration_ms = 10_000,
             },
             .initial_one_rtt_config = .{
-                .max_datagram_size = if (scenario == .datagram) 1200 else 8192,
+                .max_datagram_size = if (scenario == .datagram or
+                    scenario == .datagram_loss or
+                    scenario == .datagram_reorder) 1200 else 8192,
                 // The 32-stream churn can receive dense ACK/STREAM batches
                 // from s2n-quic; keep the ordinary fixture limit elsewhere.
                 .max_frames_per_packet = if (scenario == .mixed_churn or
@@ -325,15 +348,21 @@ pub fn main(init: std.process.Init) !void {
             &established.connection,
             allocator,
         ),
-        .datagram => datagram_result = try native_datagram.run(
-            &established.connection,
-            .client,
-            switch (peer) {
-                .s2n_quic => .s2n,
-                .quinn => .quinn,
-                .quic_go => unreachable,
-            },
-        ),
+        .datagram, .datagram_loss, .datagram_reorder => datagram_result =
+            try native_datagram.run(
+                &established.connection,
+                .client,
+                switch (peer) {
+                    .s2n_quic => .s2n,
+                    .quinn => .quinn,
+                    .quic_go => unreachable,
+                },
+                switch (scenario) {
+                    .datagram_loss => &datagram_loss,
+                    .datagram_reorder => &datagram_reorder,
+                    else => null,
+                },
+            ),
         .echo => unreachable,
     }
 
@@ -445,6 +474,14 @@ pub fn main(init: std.process.Init) !void {
             ),
             .quic_go => unreachable,
         },
+        .datagram_loss => std.debug.print(
+            "netz QUIC client interoperated with Quinn: verified=true version=1 alpn=hq-interop datagram=true fault=loss fault_scope=netz-client-outbound dropped_datagrams={d} unreliable_not_retransmitted=true stream_sibling=4 peer_close=57 client_io=zio-std-io server_io=quinn-tokio-rustls\n",
+            .{datagram_result.?.injected_datagrams},
+        ),
+        .datagram_reorder => std.debug.print(
+            "netz QUIC client interoperated with Quinn: verified=true version=1 alpn=hq-interop datagram=true fault=reorder fault_scope=netz-client-outbound reordered_pairs={d} all_datagrams_received=true stream_sibling=4 peer_close=57 client_io=zio-std-io server_io=quinn-tokio-rustls\n",
+            .{datagram_result.?.injected_datagrams},
+        ),
         .echo => unreachable,
     }
 }
@@ -526,6 +563,8 @@ fn exerciseCancellation(
         .mixed_churn_loss,
         .mixed_churn_reorder,
         .datagram,
+        .datagram_loss,
+        .datagram_reorder,
         => unreachable,
     };
     const target_stream_id = try connection.openStream();
@@ -574,6 +613,8 @@ fn exerciseCancellation(
         .mixed_churn_loss,
         .mixed_churn_reorder,
         .datagram,
+        .datagram_loss,
+        .datagram_reorder,
         => unreachable,
     }
     try receiveExpectedStream(

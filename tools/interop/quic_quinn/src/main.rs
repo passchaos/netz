@@ -65,16 +65,18 @@ async fn main() -> Result<()> {
             let port = parse_port(args.next())?;
             let cert = args.next().context("server requires CERT")?;
             let key = args.next().context("server requires KEY")?;
+            let fault = datagram::Fault::parse(args.next().as_deref())?;
             ensure!(args.next().is_none(), "unexpected server argument");
-            run_server(port, &cert, &key).await
+            run_server(port, &cert, &key, fault).await
         }
         Some("client") => {
             let port = parse_port(args.next())?;
             let ca = args.next().context("client requires CA")?;
+            let fault = datagram::Fault::parse(args.next().as_deref())?;
             ensure!(args.next().is_none(), "unexpected client argument");
-            run_client(port, &ca).await
+            run_client(port, &ca, fault).await
         }
-        _ => bail!("usage: netz-quic-quinn-interop server PORT CERT KEY | client PORT CA | bench-server PORT CERT KEY ROLE_PAIR [OPTIONS] | bench-client PORT CA ROLE_PAIR [OPTIONS] | handshake-bench-server PORT CERT KEY ROLE_PAIR [OPTIONS] | handshake-bench-client PORT CA ROLE_PAIR [OPTIONS]"),
+        _ => bail!("usage: netz-quic-quinn-interop server PORT CERT KEY [none|loss|reorder] | client PORT CA [none|loss|reorder] | bench-server PORT CERT KEY ROLE_PAIR [OPTIONS] | bench-client PORT CA ROLE_PAIR [OPTIONS] | handshake-bench-server PORT CERT KEY ROLE_PAIR [OPTIONS] | handshake-bench-client PORT CA ROLE_PAIR [OPTIONS]"),
     }
 }
 
@@ -129,7 +131,12 @@ fn client_config(ca_path: &str, benchmark: bool) -> Result<ClientConfig> {
     Ok(config)
 }
 
-async fn run_server(port: u16, cert_path: &str, key_path: &str) -> Result<()> {
+async fn run_server(
+    port: u16,
+    cert_path: &str,
+    key_path: &str,
+    fault: datagram::Fault,
+) -> Result<()> {
     let server_config = server_config(cert_path, key_path, false)?;
 
     let address: SocketAddr = format!("127.0.0.1:{port}").parse()?;
@@ -146,22 +153,31 @@ async fn run_server(port: u16, cert_path: &str, key_path: &str) -> Result<()> {
         .await
         .context("Quinn server handshake timed out")??;
     verify_handshake(&connection, true)?;
-    let outcome = datagram::run(&connection, datagram::Role::Server).await?;
+    let outcome = datagram::run(&connection, datagram::Role::Server, fault).await?;
 
     sleep(Duration::from_millis(250)).await;
     connection.close(VarInt::from_u32(57), b"quinn interop complete");
     timeout(TIMEOUT, endpoint.wait_idle())
         .await
         .context("Quinn server close timed out")?;
-    println!(
-        "Quinn server interoperated with netz: verified=true version=1 alpn=hq-interop sni=localhost datagram=true bidirectional=true small_datagrams=2 netz_boundary_bytes={} quinn_boundary_bytes={} oversized_rejected=true stream_sibling=4 peer_close=57 client_io=zio-std-io server_io=quinn-tokio-rustls",
-        outcome.netz_boundary_bytes,
-        outcome.quinn_boundary_bytes,
-    );
+    match fault {
+        datagram::Fault::None => println!(
+            "Quinn server interoperated with netz: verified=true version=1 alpn=hq-interop sni=localhost datagram=true bidirectional=true small_datagrams=2 netz_boundary_bytes={} quinn_boundary_bytes={} oversized_rejected=true stream_sibling=4 peer_close=57 client_io=zio-std-io server_io=quinn-tokio-rustls",
+            outcome.netz_boundary_bytes, outcome.quinn_boundary_bytes,
+        ),
+        datagram::Fault::Loss => println!(
+            "Quinn server interoperated with netz: verified=true version=1 alpn=hq-interop sni=localhost datagram=true fault=loss fault_scope=netz-client-outbound netz_datagrams_received={} first_datagram_missing=true unreliable_not_retransmitted=true stream_sibling=4 peer_close=57 client_io=zio-std-io server_io=quinn-tokio-rustls",
+            outcome.netz_datagrams_received,
+        ),
+        datagram::Fault::Reorder => println!(
+            "Quinn server interoperated with netz: verified=true version=1 alpn=hq-interop sni=localhost datagram=true fault=reorder fault_scope=netz-client-outbound netz_datagrams_received={} reordered={} all_datagrams_received=true stream_sibling=4 peer_close=57 client_io=zio-std-io server_io=quinn-tokio-rustls",
+            outcome.netz_datagrams_received, outcome.reordered,
+        ),
+    }
     Ok(())
 }
 
-async fn run_client(port: u16, ca_path: &str) -> Result<()> {
+async fn run_client(port: u16, ca_path: &str, fault: datagram::Fault) -> Result<()> {
     println!(
         "Quinn interop runtime: endpoint_role=client client_io=quinn-tokio-rustls server_io=zio-std-io"
     );
@@ -174,7 +190,7 @@ async fn run_client(port: u16, ca_path: &str) -> Result<()> {
         .await
         .context("Quinn client handshake timed out")??;
     verify_handshake(&connection, false)?;
-    let outcome = datagram::run(&connection, datagram::Role::Client).await?;
+    let outcome = datagram::run(&connection, datagram::Role::Client, fault).await?;
 
     let close = timeout(TIMEOUT, connection.closed())
         .await
@@ -190,11 +206,20 @@ async fn run_client(port: u16, ca_path: &str) -> Result<()> {
         other => bail!("unexpected netz close: {other}"),
     }
     endpoint.wait_idle().await;
-    println!(
-        "Quinn client interoperated with netz: verified=true version=1 alpn=hq-interop datagram=true bidirectional=true small_datagrams=2 netz_boundary_bytes={} quinn_boundary_bytes={} oversized_rejected=true stream_sibling=4 peer_close=58 client_io=quinn-tokio-rustls server_io=zio-std-io",
-        outcome.netz_boundary_bytes,
-        outcome.quinn_boundary_bytes,
-    );
+    match fault {
+        datagram::Fault::None => println!(
+            "Quinn client interoperated with netz: verified=true version=1 alpn=hq-interop datagram=true bidirectional=true small_datagrams=2 netz_boundary_bytes={} quinn_boundary_bytes={} oversized_rejected=true stream_sibling=4 peer_close=58 client_io=quinn-tokio-rustls server_io=zio-std-io",
+            outcome.netz_boundary_bytes, outcome.quinn_boundary_bytes,
+        ),
+        datagram::Fault::Loss => println!(
+            "Quinn client interoperated with netz: verified=true version=1 alpn=hq-interop datagram=true fault=loss fault_scope=netz-server-outbound netz_datagrams_received={} first_datagram_missing=true unreliable_not_retransmitted=true stream_sibling=4 peer_close=58 client_io=quinn-tokio-rustls server_io=zio-std-io",
+            outcome.netz_datagrams_received,
+        ),
+        datagram::Fault::Reorder => println!(
+            "Quinn client interoperated with netz: verified=true version=1 alpn=hq-interop datagram=true fault=reorder fault_scope=netz-server-outbound netz_datagrams_received={} reordered={} all_datagrams_received=true stream_sibling=4 peer_close=58 client_io=quinn-tokio-rustls server_io=zio-std-io",
+            outcome.netz_datagrams_received, outcome.reordered,
+        ),
+    }
     Ok(())
 }
 

@@ -1,5 +1,6 @@
 const std = @import("std");
 const netz = @import("netz");
+const PhasedFault = @import("phased_datagram_fault.zig").State;
 
 pub const Role = enum { client, server };
 pub const Peer = enum { s2n, quinn };
@@ -7,6 +8,7 @@ pub const Peer = enum { s2n, quinn };
 pub const Result = struct {
     netz_boundary_bytes: usize,
     peer_boundary_bytes: usize,
+    injected_datagrams: usize = 0,
 };
 
 const start = "NZDGRAM1";
@@ -23,6 +25,7 @@ pub fn run(
     connection: *netz.quic.one_rtt.Connection,
     role: Role,
     peer: Peer,
+    fault: ?*PhasedFault,
 ) !Result {
     const deadline = std.Io.Clock.Timestamp.fromNow(connection.endpoint.io, .{
         .clock = .awake,
@@ -56,6 +59,7 @@ pub fn run(
         return error.UnexpectedDatagramBoundary;
     }
 
+    const fault_before = if (fault) |state| try state.arm() else 0;
     for (local_small) |payload| {
         try connection.sendDatagramWithDeadline(payload, deadline);
     }
@@ -72,6 +76,10 @@ pub fn run(
         error.DatagramTooLarge => {},
         else => return err,
     }
+    const injected_datagrams = if (fault) |state|
+        try state.completePhase(fault_before)
+    else
+        0;
 
     switch (role) {
         .client => {
@@ -154,6 +162,7 @@ pub fn run(
     return .{
         .netz_boundary_bytes = boundary_bytes,
         .peer_boundary_bytes = expected_peer_boundary,
+        .injected_datagrams = injected_datagrams,
     };
 }
 

@@ -52,6 +52,8 @@ const Mode = enum {
     s2n_mixed_churn_reorder,
     s2n_datagram,
     quinn_datagram,
+    quinn_datagram_loss,
+    quinn_datagram_reorder,
 };
 
 const CancellationLoss = struct {
@@ -255,6 +257,8 @@ pub fn main(init: std.process.Init) !void {
     var cancellation_reorder = OneShotReorder{};
     var churn_loss = PhasedFault.init(.loss);
     var churn_reorder = PhasedFault.init(.reorder);
+    var datagram_loss = PhasedFault.init(.loss);
+    var datagram_reorder = PhasedFault.init(.reorder);
     var endpoint_limits: netz.quic.runtime.Limits = .{
         .max_datagram_size = 8192,
     };
@@ -278,6 +282,16 @@ pub fn main(init: std.process.Init) !void {
     } else if (mode == .s2n_mixed_churn_reorder) {
         endpoint_limits.send_interceptor = .{
             .context = &churn_reorder,
+            .should_hold = PhasedFault.shouldHold,
+        };
+    } else if (mode == .quinn_datagram_loss) {
+        endpoint_limits.send_interceptor = .{
+            .context = &datagram_loss,
+            .should_drop = PhasedFault.shouldDrop,
+        };
+    } else if (mode == .quinn_datagram_reorder) {
+        endpoint_limits.send_interceptor = .{
+            .context = &datagram_reorder,
             .should_hold = PhasedFault.shouldHold,
         };
     }
@@ -307,7 +321,7 @@ pub fn main(init: std.process.Init) !void {
             .s2n_mixed_churn_reorder,
             .s2n_datagram,
             => "s2n-quic-tokio",
-            .quinn_datagram => "quinn-tokio-rustls",
+            .quinn_datagram, .quinn_datagram_loss, .quinn_datagram_reorder => "quinn-tokio-rustls",
             else => "quic-go-netpoll",
         }},
     );
@@ -325,7 +339,7 @@ pub fn main(init: std.process.Init) !void {
         .stream_limit => {
             local_transport_parameters.initial_max_streams_bidi = 1;
         },
-        .s2n_datagram, .quinn_datagram => {
+        .s2n_datagram, .quinn_datagram, .quinn_datagram_loss, .quinn_datagram_reorder => {
             local_transport_parameters.max_datagram_frame_size = 64;
         },
         else => {},
@@ -371,7 +385,9 @@ pub fn main(init: std.process.Init) !void {
             // ReleaseFast s2n-quic can coalesce the concurrent churn into
             // denser packets than the ordinary fixture's 16-frame budget.
             .max_frames_per_packet = 256,
-        } else if (mode == .s2n_datagram or mode == .quinn_datagram) .{
+        } else if (mode == .s2n_datagram or mode == .quinn_datagram or
+            mode == .quinn_datagram_loss or
+            mode == .quinn_datagram_reorder) .{
             .max_datagram_size = 1200,
         } else .{
             .max_datagram_size = 8192,
@@ -664,10 +680,15 @@ pub fn main(init: std.process.Init) !void {
                 &churn_reorder,
             );
         },
-        .s2n_datagram, .quinn_datagram => datagram_result = try native_datagram.run(
+        .s2n_datagram, .quinn_datagram, .quinn_datagram_loss, .quinn_datagram_reorder => datagram_result = try native_datagram.run(
             &established.connection,
             .server,
             if (mode == .s2n_datagram) .s2n else .quinn,
+            switch (mode) {
+                .quinn_datagram_loss => &datagram_loss,
+                .quinn_datagram_reorder => &datagram_reorder,
+                else => null,
+            },
         ),
         .flow => {
             try receiveExpectedStream(
@@ -733,14 +754,18 @@ pub fn main(init: std.process.Init) !void {
         mode == .s2n_reset_reorder or mode == .s2n_stop_reorder or
         mode == .s2n_mixed_churn or mode == .s2n_mixed_churn_loss or
         mode == .s2n_mixed_churn_reorder or mode == .s2n_datagram or
-        mode == .quinn_datagram)
+        mode == .quinn_datagram or mode == .quinn_datagram_loss or
+        mode == .quinn_datagram_reorder)
     {
         // Give the peer time to consume both FIN-terminated echoes. The close
         // is intentionally delayed just like the ordinary fixture close so
         // the application-close assertion cannot truncate stream validation.
         try std.Io.sleep(io, .fromMilliseconds(250), .awake);
         try established.connection.closeApplication(58, "netz interop complete");
-        if (mode == .s2n_datagram or mode == .quinn_datagram) {
+        if (mode == .s2n_datagram or mode == .quinn_datagram or
+            mode == .quinn_datagram_loss or
+            mode == .quinn_datagram_reorder)
+        {
             // The DATAGRAM case must prove that the peer observed the final
             // application close, not merely that one best-effort UDP write
             // was submitted. Keep the one-shot fixture alive and emit two
@@ -835,6 +860,14 @@ pub fn main(init: std.process.Init) !void {
                     datagram_result.?.peer_boundary_bytes,
                 },
             ),
+            .quinn_datagram_loss => std.debug.print(
+                "netz QUIC server interoperated with Quinn: verified=true version=1 alpn=hq-interop datagram=true fault=loss fault_scope=netz-server-outbound dropped_datagrams={d} unreliable_not_retransmitted=true stream_sibling=4 peer_close=58 client_io=quinn-tokio-rustls server_io=zio-std-io\n",
+                .{datagram_result.?.injected_datagrams},
+            ),
+            .quinn_datagram_reorder => std.debug.print(
+                "netz QUIC server interoperated with Quinn: verified=true version=1 alpn=hq-interop datagram=true fault=reorder fault_scope=netz-server-outbound reordered_pairs={d} all_datagrams_received=true stream_sibling=4 peer_close=58 client_io=quinn-tokio-rustls server_io=zio-std-io\n",
+                .{datagram_result.?.injected_datagrams},
+            ),
             .peer_close => std.debug.print(
                 "netz QUIC close server interoperated with quic-go: alpn=hq-interop peer_close=58\n",
                 .{},
@@ -895,7 +928,7 @@ pub fn main(init: std.process.Init) !void {
         .s2n_mixed_churn_loss => unreachable,
         .s2n_mixed_churn_reorder => unreachable,
         .s2n_datagram => unreachable,
-        .quinn_datagram => unreachable,
+        .quinn_datagram, .quinn_datagram_loss, .quinn_datagram_reorder => unreachable,
         .migration => unreachable,
         .migration_loss => unreachable,
         .nat_rebinding => unreachable,

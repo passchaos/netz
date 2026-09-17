@@ -23,12 +23,32 @@ pub enum Role {
     Server,
 }
 
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum Fault {
+    None,
+    Loss,
+    Reorder,
+}
+
+impl Fault {
+    pub fn parse(value: Option<&str>) -> Result<Self> {
+        match value {
+            None | Some("none") => Ok(Self::None),
+            Some("loss") => Ok(Self::Loss),
+            Some("reorder") => Ok(Self::Reorder),
+            Some(other) => bail!("unsupported DATAGRAM fault: {other}"),
+        }
+    }
+}
+
 pub struct Outcome {
     pub netz_boundary_bytes: usize,
     pub quinn_boundary_bytes: usize,
+    pub netz_datagrams_received: usize,
+    pub reordered: bool,
 }
 
-pub async fn run(connection: &Connection, role: Role) -> Result<Outcome> {
+pub async fn run(connection: &Connection, role: Role, fault: Fault) -> Result<Outcome> {
     let (mut control_send, mut control_recv) = match role {
         Role::Client => {
             let streams = timeout(TIMEOUT, connection.open_bi())
@@ -86,7 +106,7 @@ pub async fn run(connection: &Connection, role: Role) -> Result<Outcome> {
         }
     }
 
-    let netz_boundary_bytes = receive_peer_datagrams(connection).await?;
+    let received = receive_peer_datagrams(connection, fault).await?;
     match role {
         Role::Client => {
             send(&mut control_send, RECEIVED, "datagram received").await?;
@@ -130,17 +150,38 @@ pub async fn run(connection: &Connection, role: Role) -> Result<Outcome> {
             control_send.finish()?;
         }
     }
+    if fault == Fault::Loss {
+        ensure!(
+            timeout(Duration::from_millis(100), connection.read_datagram())
+                .await
+                .is_err(),
+            "lost DATAGRAM was retransmitted",
+        );
+    }
 
     Ok(Outcome {
-        netz_boundary_bytes,
+        netz_boundary_bytes: received.boundary_bytes,
         quinn_boundary_bytes,
+        netz_datagrams_received: received.count,
+        reordered: received.reordered,
     })
 }
 
-async fn receive_peer_datagrams(connection: &Connection) -> Result<usize> {
+struct ReceivedDatagrams {
+    boundary_bytes: usize,
+    count: usize,
+    reordered: bool,
+}
+
+async fn receive_peer_datagrams(
+    connection: &Connection,
+    fault: Fault,
+) -> Result<ReceivedDatagrams> {
     let mut seen = [false; 3];
     let mut netz_boundary_bytes = None;
-    for _ in 0..seen.len() {
+    let expected_count = if fault == Fault::Loss { 2 } else { seen.len() };
+    let mut reordered = false;
+    for _ in 0..expected_count {
         let payload = timeout(TIMEOUT, connection.read_datagram())
             .await
             .context("receiving peer DATAGRAM timed out")??;
@@ -158,10 +199,31 @@ async fn receive_peer_datagrams(connection: &Connection) -> Result<usize> {
         } else {
             bail!("unexpected peer DATAGRAM payload");
         };
+        if fault == Fault::Loss && index == 0 {
+            bail!("lost DATAGRAM was retransmitted");
+        }
+        if index == 1 && !seen[0] {
+            reordered = true;
+        }
         ensure!(!seen[index], "duplicate peer DATAGRAM payload");
         seen[index] = true;
     }
-    netz_boundary_bytes.context("missing netz boundary DATAGRAM")
+    ensure!(
+        if fault == Fault::Loss {
+            !seen[0] && seen[1] && seen[2]
+        } else {
+            seen.into_iter().all(|value| value)
+        },
+        "unexpected DATAGRAM set",
+    );
+    if fault == Fault::Reorder {
+        ensure!(reordered, "DATAGRAM reordering was not observed");
+    }
+    Ok(ReceivedDatagrams {
+        boundary_bytes: netz_boundary_bytes.context("missing netz boundary DATAGRAM")?,
+        count: expected_count,
+        reordered,
+    })
 }
 
 fn expect_too_large(result: std::result::Result<(), SendDatagramError>) -> Result<()> {
@@ -232,5 +294,14 @@ mod tests {
         assert!(boundary_matches(&netz, BoundarySource::Netz));
         assert!(boundary_matches(&quinn, BoundarySource::Quinn));
         assert_ne!(&netz[..QUINN_BOUNDARY_BYTES], quinn);
+    }
+
+    #[test]
+    fn fault_modes_parse_strictly() {
+        assert_eq!(Fault::parse(None).unwrap(), Fault::None);
+        assert_eq!(Fault::parse(Some("none")).unwrap(), Fault::None);
+        assert_eq!(Fault::parse(Some("loss")).unwrap(), Fault::Loss);
+        assert_eq!(Fault::parse(Some("reorder")).unwrap(), Fault::Reorder);
+        assert!(Fault::parse(Some("corrupt")).is_err());
     }
 }

@@ -4272,8 +4272,15 @@ Both sides again validate two distinct small payloads plus the boundary as an
 unordered set, reliable stream 4, application close 57/58, certificate trust,
 ALPN/SNI, and `zio-std-io` versus `quinn-tokio-rustls`. The Zig protocol is
 shared in `tools/interop/support/native_datagram.zig`; the independent Quinn
-adapter remains isolated under `tools/interop/quic_quinn/`. This closes the
-second-native-peer functional gap without adding a performance claim.
+adapter remains isolated under `tools/interop/quic_quinn/`. Four additional
+connections make netz the outbound DATAGRAM sender as client and server under
+one deterministic loss or real hold/send/flush reordering fault. Quinn requires
+the loss case to omit exactly the first payload, completes the reliable stream
+4 exchange, then waits another 100 ms to prove it was not retransmitted. The
+reorder case requires the second small payload before the first and still
+receives all three payloads. Both peers require exactly one injected fault and
+the expected application close. This is functional reliability evidence, not
+a performance claim, and does not inject faults into Quinn's outbound path.
 
 The next zio receive-path step gives direct endpoint-backed handshake sources
 one reusable datagram allocation. Each returned datagram keeps a scoped release

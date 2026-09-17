@@ -78,61 +78,108 @@ openssl x509 -req -in "$work/quinn.csr" -CA "$work/quinn-ca.pem" \
 cargo build --quiet --release --locked --manifest-path "$fixture_manifest"
 quinn_peer="$repo_root/tools/interop/quic_quinn/target/release/netz-quic-quinn-interop"
 
-port=$(free_udp_port)
-"$quinn_peer" server "$port" "$work/quinn-cert.pem" \
-  "$work/quinn-key.pem" >"$work/quinn-server.log" 2>&1 &
-server_pid=$!
-: >"$work/netz-client.log"
-for _ in $(seq 1 200); do
-  grep -q 'Quinn interop server listening=' "$work/quinn-server.log" && break
-  kill -0 "$server_pid" 2>/dev/null || exit 1
-  sleep 0.05
-done
-grep -q 'Quinn interop server listening=' "$work/quinn-server.log" || {
-  echo 'timed out waiting for Quinn server' >&2
-  exit 1
-}
-timeout 20s "$netz_client" "$port" "$work/quinn-ca.pem" \
-  --peer=quinn --scenario=datagram >"$work/netz-client.log" 2>&1
-wait "$server_pid"
-server_pid=
-grep -Fq \
-  'netz QUIC client interoperated with Quinn: verified=true version=1 alpn=hq-interop datagram=true bidirectional=true small_datagrams=2 netz_boundary_bytes=1171 quinn_boundary_bytes=55 oversized_rejected=true stream_sibling=4 peer_close=57 client_io=zio-std-io server_io=quinn-tokio-rustls' \
-  "$work/netz-client.log"
-grep -Fq \
-  'Quinn server interoperated with netz: verified=true version=1 alpn=hq-interop sni=localhost datagram=true bidirectional=true small_datagrams=2 netz_boundary_bytes=1171 quinn_boundary_bytes=55 oversized_rejected=true stream_sibling=4 peer_close=57 client_io=zio-std-io server_io=quinn-tokio-rustls' \
-  "$work/quinn-server.log"
-cat "$work/netz-client.log"
-cat "$work/quinn-server.log"
-
 cat >"$work/netz-ca.pem" <<'EOF'
 -----BEGIN CERTIFICATE-----
 MIIBMDCB1qADAgECAgISNDAKBggqhkjOPQQDAjAUMRIwEAYDVQQDDAlsb2NhbGhvc3QwHhcNMjYwMTAxMDAwMDAwWhcNMzYwMTAxMDAwMDAwWjAUMRIwEAYDVQQDDAlsb2NhbGhvc3QwWTATBgcqhkjOPQIBBggqhkjOPQMBBwNCAARawLjuCeZXZ7tsfTRAu+FcuRLUr+ELbhoX/6Hs0fLlSZe0NNZYPUqZa65oYGMMs9Ud19Qc/RZMzn4vZv5+EakUoxgwFjAUBgNVHREEDTALgglsb2NhbGhvc3QwCgYIKoZIzj0EAwIDSQAwRgIhAJFAj+UlV/FOGaVRnB/9l7wXgSet0zn4CdgFIckqC1hEAiEApPR1fJT2M9PVNn3fwdZBboKEoWrUYLVy6sMvbrhNjKU=
 -----END CERTIFICATE-----
 EOF
 
-port=$(free_udp_port)
-"$netz_server" "$port" quinn_datagram >"$work/netz-server.log" 2>&1 &
-server_pid=$!
-: >"$work/quinn-client.log"
-for _ in $(seq 1 200); do
-  grep -q 'netz QUIC interop server listening' "$work/netz-server.log" && break
-  kill -0 "$server_pid" 2>/dev/null || exit 1
-  sleep 0.05
-done
-grep -q 'netz QUIC interop server listening' "$work/netz-server.log" || {
-  echo 'timed out waiting for netz QUIC server' >&2
-  exit 1
+run_netz_client_case() {
+  local scenario=$1
+  local fault=$2
+  local expected_netz
+  local expected_quinn
+  case "$fault" in
+    none)
+      expected_netz='netz QUIC client interoperated with Quinn: verified=true version=1 alpn=hq-interop datagram=true bidirectional=true small_datagrams=2 netz_boundary_bytes=1171 quinn_boundary_bytes=55 oversized_rejected=true stream_sibling=4 peer_close=57 client_io=zio-std-io server_io=quinn-tokio-rustls'
+      expected_quinn='Quinn server interoperated with netz: verified=true version=1 alpn=hq-interop sni=localhost datagram=true bidirectional=true small_datagrams=2 netz_boundary_bytes=1171 quinn_boundary_bytes=55 oversized_rejected=true stream_sibling=4 peer_close=57 client_io=zio-std-io server_io=quinn-tokio-rustls'
+      ;;
+    loss)
+      expected_netz='netz QUIC client interoperated with Quinn: verified=true version=1 alpn=hq-interop datagram=true fault=loss fault_scope=netz-client-outbound dropped_datagrams=1 unreliable_not_retransmitted=true stream_sibling=4 peer_close=57 client_io=zio-std-io server_io=quinn-tokio-rustls'
+      expected_quinn='Quinn server interoperated with netz: verified=true version=1 alpn=hq-interop sni=localhost datagram=true fault=loss fault_scope=netz-client-outbound netz_datagrams_received=2 first_datagram_missing=true unreliable_not_retransmitted=true stream_sibling=4 peer_close=57 client_io=zio-std-io server_io=quinn-tokio-rustls'
+      ;;
+    reorder)
+      expected_netz='netz QUIC client interoperated with Quinn: verified=true version=1 alpn=hq-interop datagram=true fault=reorder fault_scope=netz-client-outbound reordered_pairs=1 all_datagrams_received=true stream_sibling=4 peer_close=57 client_io=zio-std-io server_io=quinn-tokio-rustls'
+      expected_quinn='Quinn server interoperated with netz: verified=true version=1 alpn=hq-interop sni=localhost datagram=true fault=reorder fault_scope=netz-client-outbound netz_datagrams_received=3 reordered=true all_datagrams_received=true stream_sibling=4 peer_close=57 client_io=zio-std-io server_io=quinn-tokio-rustls'
+      ;;
+  esac
+
+  local port
+  port=$(free_udp_port)
+  local quinn_log="$work/quinn-server-$fault.log"
+  local netz_log="$work/netz-client-$fault.log"
+  "$quinn_peer" server "$port" "$work/quinn-cert.pem" \
+    "$work/quinn-key.pem" "$fault" >"$quinn_log" 2>&1 &
+  server_pid=$!
+  : >"$netz_log"
+  for _ in $(seq 1 200); do
+    grep -q 'Quinn interop server listening=' "$quinn_log" && break
+    kill -0 "$server_pid" 2>/dev/null || exit 1
+    sleep 0.05
+  done
+  grep -q 'Quinn interop server listening=' "$quinn_log" || {
+    echo 'timed out waiting for Quinn server' >&2
+    exit 1
+  }
+  timeout 20s "$netz_client" "$port" "$work/quinn-ca.pem" \
+    --peer=quinn --scenario="$scenario" >"$netz_log" 2>&1
+  wait "$server_pid"
+  server_pid=
+  grep -Fq "$expected_netz" "$netz_log"
+  grep -Fq "$expected_quinn" "$quinn_log"
+  cat "$netz_log"
+  cat "$quinn_log"
 }
-timeout 20s "$quinn_peer" client "$port" "$work/netz-ca.pem" \
-  >"$work/quinn-client.log" 2>&1
-wait "$server_pid"
-server_pid=
-grep -Fq \
-  'Quinn client interoperated with netz: verified=true version=1 alpn=hq-interop datagram=true bidirectional=true small_datagrams=2 netz_boundary_bytes=1171 quinn_boundary_bytes=55 oversized_rejected=true stream_sibling=4 peer_close=58 client_io=quinn-tokio-rustls server_io=zio-std-io' \
-  "$work/quinn-client.log"
-grep -Fq \
-  'netz QUIC server interoperated with Quinn: verified=true version=1 alpn=hq-interop datagram=true bidirectional=true small_datagrams=2 netz_boundary_bytes=1171 quinn_boundary_bytes=55 oversized_rejected=true stream_sibling=4 peer_close=58 client_io=quinn-tokio-rustls server_io=zio-std-io' \
-  "$work/netz-server.log"
-cat "$work/quinn-client.log"
-cat "$work/netz-server.log"
+
+run_quinn_client_case() {
+  local mode=$1
+  local fault=$2
+  local expected_quinn
+  local expected_netz
+  case "$fault" in
+    none)
+      expected_quinn='Quinn client interoperated with netz: verified=true version=1 alpn=hq-interop datagram=true bidirectional=true small_datagrams=2 netz_boundary_bytes=1171 quinn_boundary_bytes=55 oversized_rejected=true stream_sibling=4 peer_close=58 client_io=quinn-tokio-rustls server_io=zio-std-io'
+      expected_netz='netz QUIC server interoperated with Quinn: verified=true version=1 alpn=hq-interop datagram=true bidirectional=true small_datagrams=2 netz_boundary_bytes=1171 quinn_boundary_bytes=55 oversized_rejected=true stream_sibling=4 peer_close=58 client_io=quinn-tokio-rustls server_io=zio-std-io'
+      ;;
+    loss)
+      expected_quinn='Quinn client interoperated with netz: verified=true version=1 alpn=hq-interop datagram=true fault=loss fault_scope=netz-server-outbound netz_datagrams_received=2 first_datagram_missing=true unreliable_not_retransmitted=true stream_sibling=4 peer_close=58 client_io=quinn-tokio-rustls server_io=zio-std-io'
+      expected_netz='netz QUIC server interoperated with Quinn: verified=true version=1 alpn=hq-interop datagram=true fault=loss fault_scope=netz-server-outbound dropped_datagrams=1 unreliable_not_retransmitted=true stream_sibling=4 peer_close=58 client_io=quinn-tokio-rustls server_io=zio-std-io'
+      ;;
+    reorder)
+      expected_quinn='Quinn client interoperated with netz: verified=true version=1 alpn=hq-interop datagram=true fault=reorder fault_scope=netz-server-outbound netz_datagrams_received=3 reordered=true all_datagrams_received=true stream_sibling=4 peer_close=58 client_io=quinn-tokio-rustls server_io=zio-std-io'
+      expected_netz='netz QUIC server interoperated with Quinn: verified=true version=1 alpn=hq-interop datagram=true fault=reorder fault_scope=netz-server-outbound reordered_pairs=1 all_datagrams_received=true stream_sibling=4 peer_close=58 client_io=quinn-tokio-rustls server_io=zio-std-io'
+      ;;
+  esac
+
+  local port
+  port=$(free_udp_port)
+  local netz_log="$work/netz-server-$fault.log"
+  local quinn_log="$work/quinn-client-$fault.log"
+  "$netz_server" "$port" "$mode" >"$netz_log" 2>&1 &
+  server_pid=$!
+  : >"$quinn_log"
+  for _ in $(seq 1 200); do
+    grep -q 'netz QUIC interop server listening' "$netz_log" && break
+    kill -0 "$server_pid" 2>/dev/null || exit 1
+    sleep 0.05
+  done
+  grep -q 'netz QUIC interop server listening' "$netz_log" || {
+    echo 'timed out waiting for netz QUIC server' >&2
+    exit 1
+  }
+  timeout 20s "$quinn_peer" client "$port" "$work/netz-ca.pem" "$fault" \
+    >"$quinn_log" 2>&1
+  wait "$server_pid"
+  server_pid=
+  grep -Fq "$expected_quinn" "$quinn_log"
+  grep -Fq "$expected_netz" "$netz_log"
+  cat "$quinn_log"
+  cat "$netz_log"
+}
+
+run_netz_client_case datagram none
+run_quinn_client_case quinn_datagram none
+run_netz_client_case datagram_loss loss
+run_quinn_client_case quinn_datagram_loss loss
+run_netz_client_case datagram_reorder reorder
+run_quinn_client_case quinn_datagram_reorder reorder
