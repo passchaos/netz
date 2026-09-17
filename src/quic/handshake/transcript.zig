@@ -1,4 +1,4 @@
-//! Incremental TLS transcript ownership for one QUIC client handshake.
+//! Incremental TLS transcript ownership for one QUIC handshake.
 //!
 //! TLS derives several secrets and signatures from successively longer
 //! prefixes of the same transcript. Retaining the negotiated hash state avoids
@@ -41,7 +41,7 @@ pub const Flow = struct {
     }
 };
 
-test "QUIC client transcript snapshots match one-shot hashes" {
+test "QUIC transcript snapshots match one-shot hashes" {
     inline for ([_]quic.tls.secret.Hash{ .sha256, .sha384, .sm3 }) |hash| {
         var flow = Flow.init(hash, "client hello", "server hello");
         try std.testing.expectEqualSlices(

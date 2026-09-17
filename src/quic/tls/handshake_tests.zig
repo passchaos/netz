@@ -107,6 +107,26 @@ test "QUIC integrated mutual TLS proves both P-384 identities" {
             {
                 shared.err = error.TestUnexpectedResult;
             }
+            var request = established.connection.receivePacket() catch |err| {
+                shared.err = err;
+                established.deinit();
+                return;
+            };
+            defer request.deinit(shared.endpoint.allocator);
+            expectSingleStream(request.frames, "mTLS") catch {
+                shared.err = error.TestUnexpectedResult;
+                established.deinit();
+                return;
+            };
+            established.connection.send(&.{.{ .stream = .{
+                .stream_id = 0,
+                .data = "OK",
+                .fin = true,
+            } }}) catch |err| {
+                shared.err = err;
+                established.deinit();
+                return;
+            };
             established.deinit();
         }
     };
@@ -145,9 +165,31 @@ test "QUIC integrated mutual TLS proves both P-384 identities" {
     try std.testing.expectEqualSlices(u8, &server_public, peer[0]);
     // The retained chain must not borrow the server's caller-owned input.
     try std.testing.expect(@intFromPtr(peer[0].ptr) != @intFromPtr(&server_public));
+    try established.connection.send(&.{.{ .stream = .{
+        .stream_id = 0,
+        .data = "mTLS",
+        .fin = true,
+    } }});
+    var response = try established.connection.receivePacket();
+    defer response.deinit(allocator);
+    try expectSingleStream(response.frames, "OK");
     established.deinit();
     thread.join();
     if (shared.err) |err| return err;
+}
+
+fn expectSingleStream(frames: []const quic.Frame, expected: []const u8) !void {
+    var found = false;
+    for (frames) |frame| switch (frame) {
+        .stream => |stream| {
+            if (found or !std.mem.eql(u8, stream.data, expected)) {
+                return error.TestUnexpectedResult;
+            }
+            found = true;
+        },
+        else => {},
+    };
+    if (!found) return error.TestUnexpectedResult;
 }
 
 const Result = struct {

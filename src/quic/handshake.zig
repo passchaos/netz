@@ -5,7 +5,7 @@ const retransmit = @import("handshake/retransmit.zig");
 const retry = @import("handshake/retry.zig");
 const transport_limits = @import("handshake/transport_limits.zig");
 const datagram_reader = @import("handshake/datagram_reader.zig");
-const client_transcript = @import("handshake/client_transcript.zig");
+const handshake_transcript = @import("handshake/transcript.zig");
 const fixed_bit = @import("one_rtt/fixed_bit.zig");
 
 const net = std.Io.net;
@@ -1797,7 +1797,7 @@ fn connectAttempt(
         parsed_server.keyShare(),
     );
     defer shared.wipe();
-    var transcript = client_transcript.Flow.init(
+    var transcript = handshake_transcript.Flow.init(
         parsed_server.cipher_suite.hash(),
         client_hello.items,
         server_initial.crypto_data,
@@ -2767,10 +2767,12 @@ fn acceptInternal(
         .select_psk = selected_psk != null,
         .cipher_suite = cipher_suite,
     });
-    const hs_hash = hashPartsForSuite(
-        cipher_suite,
-        &.{ client_initial.crypto_data, server_hello.items },
+    var transcript = handshake_transcript.Flow.init(
+        cipher_suite.hash(),
+        client_initial.crypto_data,
+        server_hello.items,
     );
+    const hs_hash = transcript.digest();
     const handshake = try quic.tls_client_hello
         .deriveRuntimeHandshakeSecretsFromSliceForVersion(
         options.version.wireValue(),
@@ -2812,6 +2814,7 @@ fn acceptInternal(
     var server_flight: std.ArrayList(u8) = .empty;
     defer server_flight.deinit(endpoint.allocator);
     try server_flight.appendSlice(endpoint.allocator, encrypted_extensions.items);
+    transcript.append(encrypted_extensions.items);
     if (options.client_auth) |client_auth| {
         var certificate_request: std.ArrayList(u8) = .empty;
         defer certificate_request.deinit(endpoint.allocator);
@@ -2825,6 +2828,7 @@ fn acceptInternal(
             endpoint.allocator,
             certificate_request.items,
         );
+        transcript.append(certificate_request.items);
     }
     if (selected_psk == null and options.identity != null) {
         const identity = options.identity.?;
@@ -2837,17 +2841,11 @@ fn acceptInternal(
             identity.certificate_chain,
         );
         try server_flight.appendSlice(endpoint.allocator, certificate.items);
+        transcript.append(certificate.items);
 
         var certificate_verify: std.ArrayList(u8) = .empty;
         defer certificate_verify.deinit(endpoint.allocator);
-        const certificate_transcript_hash = hashPartsForSuite(
-            cipher_suite,
-            &.{
-                client_initial.crypto_data,
-                server_hello.items,
-                server_flight.items,
-            },
-        );
+        const certificate_transcript_hash = transcript.digest();
         try quic.tls.auth.writeCertificateVerify(
             &certificate_verify,
             endpoint.allocator,
@@ -2858,15 +2856,9 @@ fn acceptInternal(
             endpoint.allocator,
             certificate_verify.items,
         );
+        transcript.append(certificate_verify.items);
     }
-    const server_finished_hash = hashPartsForSuite(
-        cipher_suite,
-        &.{
-            client_initial.crypto_data,
-            server_hello.items,
-            server_flight.items,
-        },
-    );
+    const server_finished_hash = transcript.digest();
     const server_verify = try quic.tls_client_hello
         .computeFinishedVerifyDataForHash(
         handshake.server_handshake_traffic_secret,
@@ -2880,6 +2872,8 @@ fn acceptInternal(
         server_verify,
     );
     try server_flight.appendSlice(endpoint.allocator, server_finished.items);
+    transcript.append(server_finished.items);
+    const application_transcript_hash = transcript.digest();
     var send_context = retransmit.InitialHandshakeFlight{
         .endpoint = endpoint,
         .peer = client_initial.from,
@@ -2987,15 +2981,8 @@ fn acceptInternal(
             try quic.tls.auth.parseCertificateVerify(
                 client_flight.certificate_verify.?,
             );
-        const client_certificate_transcript_hash = hashPartsForSuite(
-            cipher_suite,
-            &.{
-                client_initial.crypto_data,
-                server_hello.items,
-                server_flight.items,
-                client_flight.certificate.?,
-            },
-        );
+        const client_certificate_transcript_hash =
+            transcript.digestAfter(client_flight.certificate.?);
         try quic.tls.auth.verifyCertificateVerifyForRole(
             peer_certificate.?.entries[0],
             certificate_verify,
@@ -3007,27 +2994,22 @@ fn acceptInternal(
         client_flight.finished,
         cipher_suite.hash(),
     );
-    const client_finished_hash = hashPartsForSuite(
-        cipher_suite,
-        &.{
-            client_initial.crypto_data,
-            server_hello.items,
-            server_flight.items,
-            client_flight.before_finished,
-        },
-    );
+    transcript.append(client_flight.before_finished);
+    const client_finished_hash = transcript.digest();
     try quic.tls_client_hello.verifyFinishedForHash(
         handshake.client_handshake_traffic_secret,
         client_finished_hash,
         client_verify,
     );
+    transcript.append(client_flight.finished);
+    const complete_transcript_hash = transcript.digest();
 
     const application = try quic.tls_client_hello
         .deriveRuntimeApplicationSecretsForVersion(
         options.version.wireValue(),
         cipher_suite,
         handshake.handshake_secret,
-        client_finished_hash,
+        application_transcript_hash,
     );
     if (options.keylog) |keylog| {
         try keylog.writeApplicationSecrets(
@@ -3058,21 +3040,11 @@ fn acceptInternal(
         if (early_data_accepted) .accepted else if (client_offered_early_data) .rejected else .not_offered,
         try quic.tls.key_schedule.deriveResumptionMasterSecretFor(
             application.master_secret,
-            hashPartsForSuite(cipher_suite, &.{
-                client_initial.crypto_data,
-                server_hello.items,
-                server_flight.items,
-                client_flight.before_finished,
-                client_flight.finished,
-            }),
+            complete_transcript_hash,
         ),
         try quic.tls.key_schedule.deriveExporterMasterSecretFor(
             application.master_secret,
-            hashPartsForSuite(cipher_suite, &.{
-                client_initial.crypto_data,
-                server_hello.items,
-                server_flight.items,
-            }),
+            application_transcript_hash,
         ),
         if (peer_certificate) |certificate| certificate.entries else &.{},
         &reader,
@@ -4805,13 +4777,6 @@ fn handshakeMessageLen(bytes: []const u8) Error!usize {
 
 fn hashParts(parts: []const []const u8) [32]u8 {
     return quic.tls.transcript.hash(parts);
-}
-
-fn hashPartsForSuite(
-    suite: quic.tls_client_hello.CipherSuite,
-    parts: []const []const u8,
-) quic.tls.transcript.Digest {
-    return quic.tls.transcript.hashFor(suite.hash(), parts);
 }
 
 fn random32(io: std.Io, provided: ?[32]u8) std.Io.RandomSecureError![32]u8 {

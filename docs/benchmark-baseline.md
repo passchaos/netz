@@ -3995,6 +3995,26 @@ behavior still prevent an isolated client ranking. All four pairs retained the
 same median connect-time UDP datagram and byte counts as before the transcript
 change.
 
+The server now uses the same incremental transcript owner. In addition to
+removing its overlapping hashes, this corrected the authenticated-client
+application-secret boundary to the server Finished, as required by TLS 1.3; a
+P-384 mTLS test now exchanges protected STREAM data after both identities are
+verified, where it previously checked only metadata. A fixed-Quinn-client
+5x100 ABBA compared client-only incremental binary
+`07ed8888345aaf0b9fcb2b996d5470529855fc558d3b96b85a6964c66b759853`
+with both-role incremental binary
+`58ad398e697d727bf32ec4a0e01df7b2a20e9eab25bcd134ccc6ada0d37d3868`.
+Median P50 moved from 2.234 to 2.140 ms (4.2%, three of five paired wins),
+while median timed-sum rate moved from 395.4 to 390.8 connects/s. These
+conflicting small changes are treated as performance-neutral; the retained
+benefit is less duplicate work and the corrected mTLS traffic-secret boundary.
+The final both-role incremental 5x100 matrix used netz SHA-256
+`58ad398e697d727bf32ec4a0e01df7b2a20e9eab25bcd134ccc6ada0d37d3868`: fixed
+Quinn server measured netz/Quinn at 1.618/1.357 ms P50 (netz 0.839x), while
+fixed netz server measured 1.972/2.201 ms (netz 1.116x). The higher absolute
+latencies than the immediately preceding run demonstrate host-load sensitivity;
+the same-binary A/B above remains the attribution evidence.
+
 The historical 2026-09-16 5 x 100 full-handshake capture used netz binary SHA-256
 `fbb112f461774e4edb8fa8f05f46b78af138f3ce348ffade25d3d57929d307b6`
 and Quinn binary SHA-256

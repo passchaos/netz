@@ -339,8 +339,8 @@ starts with deterministic parsers, serializers, preallocated fixed-width wire-in
   datagram padding/validation, MTU-bounded multi-Initial CRYPTO packetization
   with allocation-free Initial/Handshake CRYPTO payload extraction and
   cross-datagram TLS-message reassembly for large post-quantum
-  ClientHello/ServerHello flights, incremental negotiated-hash client
-  transcript snapshots across Certificate/Finished/key-derivation boundaries,
+  ClientHello/ServerHello flights, incremental negotiated-hash transcript
+  snapshots across both roles' Certificate/Finished/key-derivation boundaries,
   client-carried Initial address tokens,
   server-side token validation hooks, and server-issued address-validation
   NEW_TOKEN frames, preallocated coalesced Initial+Handshake CRYPTO datagram helpers,

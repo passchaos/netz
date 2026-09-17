@@ -1798,6 +1798,17 @@ P50 with the fixed Quinn server (netz 0.925x), versus the preceding
 server produced 1.617/1.270 ms, so further work must continue to separate
 client cryptography from server scheduling rather than treating either
 complete-pair result as a universal implementation ranking.
+The same incremental transcript owner now covers the server. This also fixes
+the mTLS application-secret derivation boundary to server Finished; the P-384
+mTLS test now proves the correction by exchanging protected STREAM data after
+authentication. A fixed-Quinn-client 5x100 A/B moved server-path P50 2.234 to
+2.140 ms but moved timed-sum rate 395.4 to 390.8/s, so no end-to-end server
+speedup is claimed.
+The final both-role incremental 5x100 matrix measured fixed-Quinn-server
+netz/Quinn at 1.618/1.357 ms P50 (netz 0.839x) and fixed-netz-server at
+1.972/2.201 ms (netz 1.116x). Its absolute shift from the immediately preceding
+matrix is treated as host-load noise; the same-binary A/B remains the causal
+evidence.
 
 1. Extend the two-CPU raw QUIC process comparison with kernel/interface packet
    capture, WebSocket/WebTransport allocation telemetry, lossy/reordered on-wire lifecycle churn,
