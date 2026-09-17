@@ -71,6 +71,26 @@ test "QUIC DATAGRAM receive queue OOM keeps caller ownership" {
     try std.testing.expectEqual(@as(usize, 0), queue.count());
 }
 
+test "QUIC DATAGRAM receive queue OOM while reserving recycle metadata is safe" {
+    var storage: [256]u8 = undefined;
+    var fixed = std.heap.FixedBufferAllocator.init(&storage);
+    const allocator = fixed.allocator();
+    var queue: Queue = .{};
+    defer queue.deinit(allocator);
+    const payload = try allocator.dupe(u8, "owned");
+    try std.testing.expectError(
+        error.OutOfMemory,
+        queue.pushDroppingOldest(
+            allocator,
+            payload,
+            1,
+            64,
+        ),
+    );
+    allocator.free(payload);
+    try std.testing.expectEqual(@as(usize, 0), queue.count());
+}
+
 test "QUIC DATAGRAM receive queue capacity one replaces in place" {
     const allocator = std.testing.allocator;
     var queue: Queue = .{};
@@ -151,6 +171,49 @@ test "QUIC DATAGRAM receive queue reuses popped exact-size payload" {
     );
 }
 
+test "QUIC DATAGRAM receive queue reuses a complete steady-state burst" {
+    const allocator = std.testing.allocator;
+    var queue: Queue = .{};
+    defer queue.deinit(allocator);
+    const capacity = 4;
+
+    for (0..capacity) |index| {
+        try std.testing.expect(!try queue.pushCopyDroppingOldest(
+            allocator,
+            "burst",
+            index,
+            capacity,
+        ));
+    }
+    var out: [8]u8 = undefined;
+    for (0..capacity) |_| {
+        try std.testing.expectEqualStrings(
+            "burst",
+            (try queue.popInto(allocator, &out)).?,
+        );
+    }
+
+    var fail = std.testing.FailingAllocator.init(
+        allocator,
+        .{ .fail_index = 0 },
+    );
+    for (0..capacity) |index| {
+        try std.testing.expect(!try queue.pushCopyDroppingOldest(
+            fail.allocator(),
+            "burst",
+            capacity + index,
+            capacity,
+        ));
+    }
+    try std.testing.expect(!fail.has_induced_failure);
+    for (0..capacity) |_| {
+        try std.testing.expectEqualStrings(
+            "burst",
+            (try queue.popInto(allocator, &out)).?,
+        );
+    }
+}
+
 test "QUIC DATAGRAM receive queue safely replaces recycled size" {
     const allocator = std.testing.allocator;
     var queue: Queue = .{};
@@ -210,6 +273,32 @@ test "QUIC DATAGRAM receive queue keeps drop-oldest accounting with recycle" {
     try std.testing.expectEqualStrings(
         "two",
         (try queue.popInto(allocator, &out)).?,
+    );
+}
+
+test "QUIC DATAGRAM receive queue bounds recycled and owned storage together" {
+    const allocator = std.testing.allocator;
+    var queue: Queue = .{};
+    defer queue.deinit(allocator);
+    const capacity = 2;
+
+    try std.testing.expect(!try queue.pushCopyDroppingOldest(
+        allocator,
+        "one",
+        1,
+        capacity,
+    ));
+    var out: [8]u8 = undefined;
+    _ = try queue.popInto(allocator, &out);
+    try std.testing.expectEqual(
+        @as(usize, 1),
+        queue.recycled_payloads.items.len,
+    );
+    try pushOwned(&queue, allocator, "two", 2, capacity);
+    try pushOwned(&queue, allocator, "three", 3, capacity);
+    try std.testing.expectEqual(
+        @as(usize, 0),
+        queue.recycled_payloads.items.len,
     );
 }
 

@@ -384,7 +384,9 @@ starts with deterministic parsers, serializers, preallocated fixed-width wire-in
   zero-consume skips, contiguous duplicate-overlap fast paths, conflict detection, offset reassembly, FIN, RESET_STREAM final-size validation, and STOP_SENDING
   to RESET_STREAM response handling,
   RFC 9221 QUIC DATAGRAM negotiation limits with 1-RTT send helpers,
-  receive queues plus caller-buffer blocking/timeout/deadline reads, automatic
+  MTU-bounded multi-frame batch packing with exact logical-prefix progress,
+  configurable receive queues plus caller-buffer single and up-to-64-item
+  blocking/timeout/deadline reads, automatic
   pending-ACK coalescing on single DATAGRAM sends, max-payload calculation,
   queue overflow/drop counters, and
   oversized/disabled DATAGRAM rejection,
@@ -1150,11 +1152,18 @@ netz and Quinn processes, pins the client/server to distinct CPUs, reuses fixed
 ReleaseFast binaries, requires an odd sample count, and alternates the netz and
 Quinn clients against each fixed server. Its one-outstanding 32-byte ping-pong
 times only post-handshake RTTs and verifies every sequence, checksum, control
-FIN, negotiated payload limit, and application close:
+FIN, negotiated payload limit, and application close. `--window=N` switches to
+windowed ping-pong: every round sends N sequence-tagged DATAGRAMs before reading
+N echoes, accepts arrival reordering while rejecting duplicates or omissions,
+and reports the total logical DATAGRAM count. Window mode enables netz's
+automatic GSO send path and `recvmmsg` receive drain while Quinn retains its
+native runtime batching:
 
 ```sh
 zig build bench-quic-datagram-quinn -Doptimize=ReleaseFast -- \
   --samples=5 --warmup=200 --iterations=5000
+zig build bench-quic-datagram-quinn -Doptimize=ReleaseFast -- \
+  --samples=5 --warmup=50 --iterations=500 --payload-bytes=256 --window=16
 ```
 The WebTransport DATAGRAM round-trip/burst, incremental stream, and steady
 stream-batch benchmarks likewise obtain endpoint I/O and monotonic time from
@@ -1252,8 +1261,8 @@ The aggregate `bench` step runs the current protocol microbenchmarks:
   AES header keys that avoid per-packet crypto setup and refresh on key updates,
 - bounded QUIC DATAGRAM receive queuing in an O(1) ring under
   `quic/one_rtt/datagram_queue.zig`, with exact one-time capacity reservation,
-  one exact-size popped-payload recycle slot, newest-data retention,
-  packet-number rollback, and explicit payload ownership,
+  a capacity-bounded exact-size popped-payload recycle pool, newest-data
+  retention, packet-number rollback, and explicit payload ownership,
 - QUIC long PADDING run parsing for Initial padding and PMTUD/probe payloads,
 - QUIC-LB encrypted server-ID extraction with the draft's three-pass
   load-balancer optimization,

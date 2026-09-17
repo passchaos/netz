@@ -10,6 +10,7 @@ samples=5
 warmup=200
 iterations=5000
 payload_bytes=32
+window=1
 timeout_ms=30000
 client_cpu=
 server_cpu=
@@ -19,6 +20,7 @@ for argument in "$@"; do
     --warmup=*) warmup=${argument#*=} ;;
     --iterations=*) iterations=${argument#*=} ;;
     --payload-bytes=*) payload_bytes=${argument#*=} ;;
+    --window=*) window=${argument#*=} ;;
     --timeout-ms=*) timeout_ms=${argument#*=} ;;
     --client-cpu=*) client_cpu=${argument#*=} ;;
     --server-cpu=*) server_cpu=${argument#*=} ;;
@@ -29,7 +31,7 @@ if [[ $build_mode != ReleaseFast ]]; then
   echo 'bench-quic-datagram-quinn requires -Doptimize=ReleaseFast' >&2
   exit 2
 fi
-for value in "$samples" "$warmup" "$iterations" "$payload_bytes" "$timeout_ms"; do
+for value in "$samples" "$warmup" "$iterations" "$payload_bytes" "$window" "$timeout_ms"; do
   if ! [[ $value =~ ^[0-9]+$ ]]; then
     echo 'DATAGRAM benchmark arguments must be non-negative integers' >&2
     exit 2
@@ -37,7 +39,8 @@ for value in "$samples" "$warmup" "$iterations" "$payload_bytes" "$timeout_ms"; 
 done
 if (( samples == 0 || samples % 2 == 0 || warmup > 100000 ||
       iterations == 0 || iterations > 1000000 || payload_bytes < 12 ||
-      payload_bytes > 1024 || timeout_ms == 0 || timeout_ms > 600000 )); then
+      payload_bytes > 1024 || window == 0 || window > 64 ||
+      timeout_ms == 0 || timeout_ms > 600000 )); then
   echo 'invalid DATAGRAM benchmark configuration' >&2
   exit 2
 fi
@@ -148,11 +151,13 @@ EOF
 
 common=(
   "--warmup=$warmup" "--iterations=$iterations"
-  "--payload-bytes=$payload_bytes" "--timeout-ms=$timeout_ms"
+  "--payload-bytes=$payload_bytes" "--window=$window"
+  "--timeout-ms=$timeout_ms"
 )
+mode=$([[ $window == 1 ]] && echo pingpong || echo windowed-pingpong)
 results="$work/results.log"
 printf '%s\n' \
-  "record=environment protocol=quic-datagram mode=pingpong samples=$samples schedule=abba client_cpu=$client_cpu server_cpu=$server_cpu host=$(hostname) arch=$(uname -m) kernel=$(uname -r) zig=$(zig version) rustc=$(rustc --version | awk '{print $2}') netz_build_mode=$build_mode quinn_revision=$quinn_revision netz_client_sha256=$(sha256 "$netz_client") netz_server_sha256=$(sha256 "$netz_server") quinn_binary_sha256=$(sha256 "$quinn_peer") quinn_lock_sha256=$(sha256 "$repo_root/tools/interop/quic_quinn/Cargo.lock") complete=true" \
+  "record=environment protocol=quic-datagram mode=$mode samples=$samples schedule=abba client_cpu=$client_cpu server_cpu=$server_cpu warmup=$warmup iterations=$iterations payload_bytes=$payload_bytes window=$window timeout_ms=$timeout_ms host=$(hostname) arch=$(uname -m) kernel=$(uname -r) zig=$(zig version) rustc=$(rustc --version | awk '{print $2}') netz_build_mode=$build_mode quinn_revision=$quinn_revision netz_client_sha256=$(sha256 "$netz_client") netz_server_sha256=$(sha256 "$netz_server") quinn_binary_sha256=$(sha256 "$quinn_peer") quinn_lock_sha256=$(sha256 "$repo_root/tools/interop/quic_quinn/Cargo.lock") complete=true" \
   >"$results"
 
 run_pair() {
@@ -186,7 +191,8 @@ run_pair() {
       "$port" "$ca" "$role_pair" "${common[@]}" >"$client_log" 2>&1
   fi
   wait "$server_pid"; server_pid=
-  printf 'record=run protocol=quic-datagram mode=pingpong sample=%d role_pair=%s implementation=%s fixed_server=%s schedule=abba client_cpu=%d server_cpu=%d\n' \
+  printf 'record=run protocol=quic-datagram mode=%s sample=%d role_pair=%s implementation=%s fixed_server=%s schedule=abba client_cpu=%d server_cpu=%d\n' \
+    "$mode" \
     "$sample" "$role_pair" "$client_impl" "$server_impl" \
     "$client_cpu" "$server_cpu" >>"$results"
   grep '^record=config ' "$client_log" >>"$results"
@@ -212,4 +218,5 @@ done
 python3 "$checker" --log "$results" --samples "$samples" \
   --client-cpu "$client_cpu" --server-cpu "$server_cpu" \
   --warmup "$warmup" --iterations "$iterations" \
-  --payload-bytes "$payload_bytes" --timeout-ms "$timeout_ms"
+  --payload-bytes "$payload_bytes" --window "$window" \
+  --timeout-ms "$timeout_ms"

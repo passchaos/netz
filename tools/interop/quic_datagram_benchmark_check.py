@@ -62,6 +62,18 @@ def io_name(implementation: str) -> str:
     return "zio-std-io" if implementation == "netz" else "quinn-tokio-rustls"
 
 
+def mode(window: int) -> str:
+    return "pingpong" if window == 1 else "windowed-pingpong"
+
+
+def timing_scope(window: int) -> str:
+    return (
+        "post-handshake-single-outstanding-roundtrip"
+        if window == 1
+        else "post-handshake-window-roundtrip"
+    )
+
+
 def expected_checksum(rounds: int, payload_bytes: int) -> int:
     checksum = 0
     for sequence in range(rounds):
@@ -85,13 +97,14 @@ def validate_common(
     warmup: int,
     iterations: int,
     payload_bytes: int,
+    window: int,
     timeout_ms: int,
 ) -> None:
     client, server = ROLE_PAIRS[role_pair]
     expected = {
         "implementation": implementation,
         "protocol": "quic-datagram",
-        "mode": "pingpong",
+        "mode": mode(window),
         "role_pair": role_pair,
         "endpoint_role": endpoint_role,
         "client_io": io_name(client),
@@ -99,8 +112,10 @@ def validate_common(
         "warmup": str(warmup),
         "iterations": str(iterations),
         "payload_bytes": str(payload_bytes),
+        "window": str(window),
+        "total_datagrams": str((warmup + iterations) * window),
         "timeout_ms": str(timeout_ms),
-        "timing_scope": "post-handshake-single-outstanding-roundtrip",
+        "timing_scope": timing_scope(window),
         "complete": "true",
     }
     for key, value in expected.items():
@@ -119,11 +134,12 @@ def validate_config(
     warmup: int,
     iterations: int,
     payload_bytes: int,
+    window: int,
     timeout_ms: int,
 ) -> None:
     validate_common(
         record, role_pair, endpoint_role, implementation, warmup, iterations,
-        payload_bytes, timeout_ms,
+        payload_bytes, window, timeout_ms,
     )
     expected = {
         "record": "config",
@@ -134,6 +150,13 @@ def validate_config(
         "quic_version": "1",
         "cert_verify": "true",
         "pacing": "implementation-specific",
+        "udp_batching": (
+            "single-message"
+            if window == 1
+            else "gso-send-auto-recvmmsg-receive"
+            if implementation == "netz"
+            else "quinn-runtime-auto"
+        ),
     }
     for key, value in expected.items():
         if record.get(key) != value:
@@ -147,11 +170,12 @@ def validate_result(
     warmup: int,
     iterations: int,
     payload_bytes: int,
+    window: int,
     timeout_ms: int,
 ) -> int:
     validate_common(
         record, role_pair, "client", implementation, warmup, iterations,
-        payload_bytes, timeout_ms,
+        payload_bytes, window, timeout_ms,
     )
     expected = {
         "record": "result",
@@ -165,9 +189,9 @@ def validate_result(
         if record.get(key) != value:
             raise ValueError(f"invalid result {key}: {record}")
     rounds = warmup + iterations
-    if integer(record, "received_bytes") != rounds * payload_bytes:
+    if integer(record, "received_bytes") != rounds * window * payload_bytes:
         raise ValueError(f"invalid received byte count: {record}")
-    if integer(record, "checksum") != expected_checksum(rounds, payload_bytes):
+    if integer(record, "checksum") != expected_checksum(rounds * window, payload_bytes):
         raise ValueError(f"invalid checksum: {record}")
     values = [
         integer(record, key, positive=True)
@@ -188,17 +212,18 @@ def validate_server_complete(
     warmup: int,
     iterations: int,
     payload_bytes: int,
+    window: int,
     timeout_ms: int,
 ) -> None:
     validate_common(
         record, role_pair, "server", implementation, warmup, iterations,
-        payload_bytes, timeout_ms,
+        payload_bytes, window, timeout_ms,
     )
     rounds = warmup + iterations
     expected = {
         "record": "server-complete",
-        "received_bytes": str(rounds * payload_bytes),
-        "checksum": str(expected_checksum(rounds, payload_bytes)),
+        "received_bytes": str(rounds * window * payload_bytes),
+        "checksum": str(expected_checksum(rounds * window, payload_bytes)),
         "completion_exchange_verified": "true",
         "close_code": "59",
     }
@@ -215,6 +240,7 @@ def summarize(
     warmup: int,
     iterations: int,
     payload_bytes: int,
+    window: int,
     timeout_ms: int,
 ) -> list[str]:
     order = expected_order(samples)
@@ -225,6 +251,7 @@ def summarize(
         or warmup < 0
         or iterations <= 0
         or not 12 <= payload_bytes <= 1024
+        or not 1 <= window <= 64
         or timeout_ms <= 0
     ):
         raise ValueError("invalid benchmark configuration")
@@ -240,11 +267,16 @@ def summarize(
     environment = environments[0]
     expected_environment = {
         "protocol": "quic-datagram",
-        "mode": "pingpong",
+        "mode": mode(window),
         "samples": str(samples),
         "schedule": "abba",
         "client_cpu": str(client_cpu),
         "server_cpu": str(server_cpu),
+        "warmup": str(warmup),
+        "iterations": str(iterations),
+        "payload_bytes": str(payload_bytes),
+        "window": str(window),
+        "timeout_ms": str(timeout_ms),
         "netz_build_mode": "ReleaseFast",
         "quinn_revision": QUINN_REVISION,
         "complete": "true",
@@ -277,7 +309,7 @@ def summarize(
         expected_marker = {
             "record": "run",
             "protocol": "quic-datagram",
-            "mode": "pingpong",
+            "mode": mode(window),
             "sample": str(sample),
             "role_pair": role_pair,
             "implementation": client,
@@ -291,24 +323,26 @@ def summarize(
                 raise ValueError(f"invalid run marker {key}: {marker}")
         validate_config(
             client_config, role_pair, "client", client, warmup, iterations,
-            payload_bytes, timeout_ms,
+            payload_bytes, window, timeout_ms,
         )
         validate_result(
-            result, role_pair, client, warmup, iterations, payload_bytes, timeout_ms,
+            result, role_pair, client, warmup, iterations, payload_bytes, window, timeout_ms,
         )
         for key in grouped[role_pair]:
             grouped[role_pair][key].append(integer(result, key, positive=True))
         validate_config(
             server_config, role_pair, "server", server, warmup, iterations,
-            payload_bytes, timeout_ms,
+            payload_bytes, window, timeout_ms,
         )
         validate_server_complete(
-            server_done, role_pair, server, warmup, iterations, payload_bytes, timeout_ms,
+            server_done, role_pair, server, warmup, iterations, payload_bytes, window, timeout_ms,
         )
 
     output = [
-        "record=environment protocol=quic-datagram mode=pingpong "
+        f"record=environment protocol=quic-datagram mode={mode(window)} "
         f"samples={samples} schedule=abba client_cpu={client_cpu} server_cpu={server_cpu} "
+        f"warmup={warmup} iterations={iterations} payload_bytes={payload_bytes} "
+        f"window={window} timeout_ms={timeout_ms} "
         f"host={environment['host']} arch={environment['arch']} kernel={environment['kernel']} "
         f"zig={environment['zig']} rustc={environment['rustc']} netz_build_mode=ReleaseFast "
         f"quinn_revision={QUINN_REVISION} netz_client_sha256={environment['netz_client_sha256']} "
@@ -325,13 +359,14 @@ def summarize(
         medians[role_pair] = median
         client, server = ROLE_PAIRS[role_pair]
         output.append(
-            "record=summary protocol=quic-datagram mode=pingpong "
+            f"record=summary protocol=quic-datagram mode={mode(window)} "
             f"role_pair={role_pair} implementation={client} fixed_server={server} "
             f"samples={samples} schedule=abba client_cpu={client_cpu} server_cpu={server_cpu} "
             f"client_io={io_name(client)} server_io={io_name(server)} "
             f"median_p50_ns={median} min_p50_ns={min(values)} max_p50_ns={max(values)} "
             f"median_p99_ns={int(statistics.median(grouped[role_pair]['p99_ns']))} "
             f"median_p999_ns={int(statistics.median(grouped[role_pair]['p999_ns']))} "
+            f"payload_bytes={payload_bytes} window={window} "
             "benchmark_scope=same-application-shape complete=true"
         )
     for fixed_server, netz_pair, quinn_pair in (
@@ -342,11 +377,12 @@ def summarize(
         if not math.isfinite(ratio) or ratio <= 0:
             raise ValueError("invalid DATAGRAM comparison ratio")
         output.append(
-            "record=comparison protocol=quic-datagram mode=pingpong "
+            f"record=comparison protocol=quic-datagram mode={mode(window)} "
             f"fixed_server={fixed_server} samples={samples} schedule=abba "
             f"client_cpu={client_cpu} server_cpu={server_cpu} "
             f"median_p50_ns_netz={medians[netz_pair]} "
             f"median_p50_ns_quinn={medians[quinn_pair]} netz_speedup={ratio:.3f} "
+            f"payload_bytes={payload_bytes} window={window} "
             "benchmark_scope=same-application-shape complete=true"
         )
     return output
@@ -361,11 +397,12 @@ def main() -> None:
     parser.add_argument("--warmup", required=True, type=int)
     parser.add_argument("--iterations", required=True, type=int)
     parser.add_argument("--payload-bytes", required=True, type=int)
+    parser.add_argument("--window", required=True, type=int)
     parser.add_argument("--timeout-ms", required=True, type=int)
     args = parser.parse_args()
     for line in summarize(
         args.log, args.samples, args.client_cpu, args.server_cpu, args.warmup,
-        args.iterations, args.payload_bytes, args.timeout_ms,
+        args.iterations, args.payload_bytes, args.window, args.timeout_ms,
     ):
         print(line)
 

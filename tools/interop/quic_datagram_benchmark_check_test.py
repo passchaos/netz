@@ -21,7 +21,8 @@ class DatagramBenchmarkCheckTests(unittest.TestCase):
             f"mode=pingpong role_pair={role_pair} endpoint_role={endpoint_role} "
             f"client_io={CHECK.io_name(client)} server_io={CHECK.io_name(server)} "
             "timing_scope=post-handshake-single-outstanding-roundtrip "
-            "warmup=1 iterations=3 payload_bytes=32 timeout_ms=30000 complete=true"
+            "warmup=1 iterations=3 payload_bytes=32 window=1 "
+            "total_datagrams=4 timeout_ms=30000 complete=true"
         )
         total = 4 * 32
         checksum = CHECK.expected_checksum(4, 32)
@@ -31,7 +32,7 @@ class DatagramBenchmarkCheckTests(unittest.TestCase):
                 common + " connection_scope=fresh-per-sample "
                 "benchmark_scope=same-application-shape steady_state_mtu=1200 "
                 f"datagram_limit={limit} quic_version=1 cert_verify=true "
-                "pacing=implementation-specific"
+                "pacing=implementation-specific udp_batching=single-message"
             )
         if kind == "result":
             limit = 1171 if implementation == "netz" else 1162
@@ -51,7 +52,9 @@ class DatagramBenchmarkCheckTests(unittest.TestCase):
         sha = "a" * 64
         lines = [
             "record=environment protocol=quic-datagram mode=pingpong samples=1 "
-            "schedule=abba client_cpu=0 server_cpu=1 host=test arch=x86_64 kernel=test "
+            "schedule=abba client_cpu=0 server_cpu=1 warmup=1 iterations=3 "
+            "payload_bytes=32 window=1 timeout_ms=30000 "
+            "host=test arch=x86_64 kernel=test "
             f"zig=0.16.0 rustc=1.98.0 netz_build_mode=ReleaseFast "
             f"quinn_revision={CHECK.QUINN_REVISION} netz_client_sha256={sha} "
             f"netz_server_sha256={sha} quinn_binary_sha256={sha} "
@@ -74,7 +77,7 @@ class DatagramBenchmarkCheckTests(unittest.TestCase):
         with tempfile.TemporaryDirectory() as directory:
             path = Path(directory) / "results.log"
             path.write_text(text, encoding="utf-8")
-            return CHECK.summarize(path, 1, 0, 1, 1, 3, 32, 30000)
+            return CHECK.summarize(path, 1, 0, 1, 1, 3, 32, 1, 30000)
 
     def test_valid_matrix(self) -> None:
         output = self.summarize(self.valid_log())
@@ -103,6 +106,42 @@ class DatagramBenchmarkCheckTests(unittest.TestCase):
     def test_even_sample_count_is_rejected(self) -> None:
         with self.assertRaisesRegex(ValueError, "positive odd"):
             CHECK.expected_order(2)
+
+    def test_windowed_matrix_uses_all_datagrams(self) -> None:
+        text = self.valid_log()
+        checksum = CHECK.expected_checksum(4, 32)
+        windowed_checksum = CHECK.expected_checksum(16, 32)
+        text = text.replace("mode=pingpong", "mode=windowed-pingpong")
+        text = text.replace(
+            "payload_bytes=32 window=1 timeout_ms=30000 host=",
+            "payload_bytes=32 window=4 timeout_ms=30000 host=",
+        )
+        text = text.replace(
+            "timing_scope=post-handshake-single-outstanding-roundtrip",
+            "timing_scope=post-handshake-window-roundtrip",
+        )
+        text = text.replace("window=1 total_datagrams=4", "window=4 total_datagrams=16")
+        text = text.replace(
+            "udp_batching=single-message",
+            "udp_batching=gso-send-auto-recvmmsg-receive",
+        )
+        text = "\n".join(
+            line.replace(
+                "udp_batching=gso-send-auto-recvmmsg-receive",
+                "udp_batching=quinn-runtime-auto",
+            )
+            if line.startswith("record=config implementation=quinn ")
+            else line
+            for line in text.splitlines()
+        ) + "\n"
+        text = text.replace("received_bytes=128", "received_bytes=512")
+        text = text.replace(f"checksum={checksum}", f"checksum={windowed_checksum}")
+        with tempfile.TemporaryDirectory() as directory:
+            path = Path(directory) / "results.log"
+            path.write_text(text, encoding="utf-8")
+            output = CHECK.summarize(path, 1, 0, 1, 1, 3, 32, 4, 30000)
+        self.assertIn("mode=windowed-pingpong", output[0])
+        self.assertIn("window=4", output[-1])
 
 
 if __name__ == "__main__":

@@ -209,6 +209,9 @@ pub const OneRttConfig = struct {
     initial_receive_max_stream_data: u64 = std.math.maxInt(u62),
     stream_receive_window: u64 = 64 * 1024,
     max_stream_receive_window: ?u64 = null,
+    /// Maximum application DATAGRAM payloads retained while no direct
+    /// receiver is active. Zero keeps only caller-buffer direct delivery.
+    max_datagram_queue_items: usize = 16,
     max_datagram_size: usize = quic.congestion.default_max_datagram_size,
     /// Select the 1-RTT key-update derivation for this connection. The default
     /// is RFC 9001/RFC 9369; the compatibility value exists only for pinned
@@ -278,6 +281,7 @@ pub const OneRttConfig = struct {
             .max_ack_ranges = self.max_ack_ranges,
             .max_frames_per_packet = self.max_frames_per_packet,
             .max_pending_path_responses = self.max_pending_path_responses,
+            .max_datagram_queue_items = self.max_datagram_queue_items,
             .initial_send_max_data = @min(self.initial_send_max_data, peer_transport_parameters.initial_max_data),
             .initial_receive_max_data = @min(self.initial_receive_max_data, local_transport_parameters.initial_max_data),
             .receive_window = self.receive_window,
@@ -5040,6 +5044,52 @@ test "QUIC handshake one-RTT config propagates local ACK policy" {
     try std.testing.expect(
         disabled_request.automatic_ack_frequency_request == null,
     );
+}
+
+test "QUIC handshake one-RTT config propagates DATAGRAM queue capacity" {
+    const keys = quic.protection.deriveAes128Keys(
+        [_]u8{0xa2} ** quic.protection.secret_len,
+    );
+    const defaults = (OneRttConfig{}).apply(
+        .version_1,
+        .{ .ip4 = .loopback(443) },
+        keys,
+        keys,
+        "local",
+        "peer",
+        .client,
+        .{},
+        .{},
+    );
+    try std.testing.expectEqual(@as(usize, 16), defaults.max_datagram_queue_items);
+    const direct_only = (OneRttConfig{
+        .max_datagram_queue_items = 0,
+    }).apply(
+        .version_1,
+        .{ .ip4 = .loopback(443) },
+        keys,
+        keys,
+        "local",
+        "peer",
+        .server,
+        .{},
+        .{},
+    );
+    try std.testing.expectEqual(@as(usize, 0), direct_only.max_datagram_queue_items);
+    const burst = (OneRttConfig{
+        .max_datagram_queue_items = 64,
+    }).apply(
+        .version_1,
+        .{ .ip4 = .loopback(443) },
+        keys,
+        keys,
+        "local",
+        "peer",
+        .client,
+        .{},
+        .{},
+    );
+    try std.testing.expectEqual(@as(usize, 64), burst.max_datagram_queue_items);
 }
 
 test "QUIC server transport parameters bind reset token to local CID" {

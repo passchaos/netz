@@ -2,17 +2,21 @@ const std = @import("std");
 const quic = @import("../mod.zig");
 
 pub const Target = struct {
-    out: []u8,
-    delivered_len: ?usize = null,
+    outputs: [][]u8,
+    delivered_count: usize = 0,
     buffer_too_small: bool = false,
 
-    /// Consume at most one frame while a caller-buffer receive is active.
-    /// Later frames in the same packet remain available to the queue path.
+    /// Consume frames into caller-owned buffers while a direct receive is
+    /// active. Frames beyond the requested batch remain available to the
+    /// bounded queue path.
     pub fn consume(self: *Target, payload: []const u8) bool {
-        if (self.delivered_len != null or self.buffer_too_small) return false;
-        if (payload.len <= self.out.len) {
-            @memcpy(self.out[0..payload.len], payload);
-            self.delivered_len = payload.len;
+        if (self.delivered_count == self.outputs.len or
+            self.buffer_too_small) return false;
+        const out = self.outputs[self.delivered_count];
+        if (payload.len <= out.len) {
+            @memcpy(out[0..payload.len], payload);
+            self.outputs[self.delivered_count] = out[0..payload.len];
+            self.delivered_count += 1;
         } else {
             self.buffer_too_small = true;
         }
@@ -34,7 +38,8 @@ pub fn receiveUntil(
     }
     while (true) {
         if (try connection.popDatagram(out)) |payload| return payload;
-        var target: Target = .{ .out = out };
+        var outputs = [_][]u8{out};
+        var target: Target = .{ .outputs = &outputs };
         connection.datagram_receive_target = &target;
         const service_result = if (deadline) |bounded|
             connection.servicePacketServicingTimersDeadline(bounded)
@@ -42,23 +47,77 @@ pub fn receiveUntil(
             connection.servicePacketServicingTimers();
         connection.datagram_receive_target = null;
         try service_result;
-        if (target.delivered_len) |len| return out[0..len];
+        if (target.delivered_count == 1) return outputs[0];
+        if (target.buffer_too_small) return error.DatagramBufferTooSmall;
+    }
+}
+
+pub fn receiveManyUntil(
+    comptime ConnectionError: type,
+    connection: anytype,
+    outputs: [][]u8,
+    received_count: *usize,
+    deadline: ?std.Io.Clock.Timestamp,
+) (ConnectionError || quic.runtime.ReceiveTimeoutError)!void {
+    received_count.* = 0;
+    if (outputs.len == 0) return;
+    if (!connection.datagramReceiveEnabled()) {
+        return error.DatagramsNotEnabled;
+    }
+    if (connection.datagram_receive_target != null) {
+        return error.ConcurrencyUnavailable;
+    }
+    if (outputs.len > quic.runtime.max_receive_batch_messages) {
+        return error.BufferTooShort;
+    }
+    while (received_count.* < outputs.len) {
+        if (try connection.popDatagram(outputs[received_count.*])) |payload| {
+            outputs[received_count.*] = payload;
+            received_count.* += 1;
+            continue;
+        }
+        var target: Target = .{
+            .outputs = outputs[received_count.*..],
+        };
+        connection.datagram_receive_target = &target;
+        const service_result = if (deadline) |bounded|
+            connection.servicePacketBatchServicingTimersDeadline(bounded)
+        else
+            connection.servicePacketBatchServicingTimers();
+        connection.datagram_receive_target = null;
+        received_count.* += target.delivered_count;
+        _ = service_result catch |err| return err;
         if (target.buffer_too_small) return error.DatagramBufferTooSmall;
     }
 }
 
 test "caller-buffer target consumes only its first DATAGRAM" {
     var out: [4]u8 = undefined;
-    var target: Target = .{ .out = &out };
+    var outputs = [_][]u8{&out};
+    var target: Target = .{ .outputs = &outputs };
     try std.testing.expect(target.consume("data"));
-    try std.testing.expectEqualStrings("data", out[0..target.delivered_len.?]);
+    try std.testing.expectEqualStrings("data", outputs[0]);
     try std.testing.expect(!target.consume("next"));
 }
 
 test "caller-buffer target consumes an oversized DATAGRAM" {
     var out: [2]u8 = undefined;
-    var target: Target = .{ .out = &out };
+    var outputs = [_][]u8{&out};
+    var target: Target = .{ .outputs = &outputs };
     try std.testing.expect(target.consume("large"));
     try std.testing.expect(target.buffer_too_small);
     try std.testing.expect(!target.consume("ok"));
+}
+
+test "caller-buffer target fills a batch and leaves later frames queued" {
+    var first: [5]u8 = undefined;
+    var second: [6]u8 = undefined;
+    var outputs = [_][]u8{ &first, &second };
+    var target: Target = .{ .outputs = &outputs };
+    try std.testing.expect(target.consume("first"));
+    try std.testing.expect(target.consume("second"));
+    try std.testing.expect(!target.consume("third"));
+    try std.testing.expectEqual(@as(usize, 2), target.delivered_count);
+    try std.testing.expectEqualStrings("first", outputs[0]);
+    try std.testing.expectEqualStrings("second", outputs[1]);
 }

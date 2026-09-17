@@ -32,7 +32,7 @@ pub fn main(init: std.process.Init) !void {
         .{ .ip4 = .loopback(port) },
         .{
             .max_datagram_size = benchmark.mtu,
-            .enable_gso_send = false,
+            .enable_gso_send = config.window > 1,
             .enable_gro_receive = false,
         },
     );

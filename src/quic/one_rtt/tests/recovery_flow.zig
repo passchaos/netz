@@ -1288,6 +1288,7 @@ test "QUIC DATAGRAM batch validates all input and commits socket prefix" {
         .send_keys = keys,
         .local_connection_id = &client_cid,
         .peer_connection_id = &server_cid,
+        .max_frames_per_packet = 1,
         .peer_max_datagram_frame_size = 1200,
         .enable_pacing = false,
     });
@@ -1427,9 +1428,137 @@ test "QUIC DATAGRAM batch continues across transport batch windows" {
         sender.datagramsSent(),
     );
     try std.testing.expectEqual(
-        @as(u64, payloads.len),
+        @as(u64, 5),
         sender.next_packet_number,
     );
+}
+
+test "QUIC DATAGRAM batch packs payloads into the MTU" {
+    const allocator = std.testing.allocator;
+    var threaded = std.Io.Threaded.init(allocator, .{});
+    defer threaded.deinit();
+    const io = threaded.io();
+    var receiver_endpoint = try quic.runtime.Endpoint.bind(
+        allocator,
+        io,
+        .{ .ip4 = .loopback(0) },
+        .{ .max_datagram_size = 1200 },
+    );
+    defer receiver_endpoint.deinit();
+    var sender_endpoint = try quic.runtime.Endpoint.bind(
+        allocator,
+        io,
+        .{ .ip4 = .loopback(0) },
+        .{ .max_datagram_size = 1200, .enable_gso_send = false },
+    );
+    defer sender_endpoint.deinit();
+    const keys = quic.protection.deriveAes128Keys(
+        [_]u8{0xe6} ** quic.protection.secret_len,
+    );
+    var sender = try one_rtt.Connection.init(&sender_endpoint, .{
+        .peer = receiver_endpoint.address(),
+        .receive_keys = keys,
+        .send_keys = keys,
+        .local_connection_id = "packed-local",
+        .peer_connection_id = "packed-peer",
+        .peer_max_datagram_frame_size = 1200,
+        .max_frames_per_packet = 16,
+        .enable_pacing = false,
+    });
+    defer sender.deinit();
+    var receiver = try one_rtt.Connection.init(&receiver_endpoint, .{
+        .peer = sender_endpoint.address(),
+        .receive_keys = keys,
+        .send_keys = keys,
+        .local_connection_id = "packed-peer",
+        .peer_connection_id = "packed-local",
+        .local_endpoint = .server,
+        .local_max_datagram_frame_size = 1200,
+        .max_frames_per_packet = 16,
+        .enable_pacing = false,
+    });
+    defer receiver.deinit();
+
+    const payloads = [_][]const u8{ "one", "two", "three" };
+    var committed: usize = 99;
+    try sender.sendDatagramsWithTimeout(
+        &payloads,
+        &committed,
+        .fromSeconds(1),
+    );
+    try std.testing.expectEqual(payloads.len, committed);
+    try std.testing.expectEqual(@as(u64, payloads.len), sender.datagramsSent());
+    try std.testing.expectEqual(@as(u64, 1), sender.next_packet_number);
+    try std.testing.expectEqual(@as(usize, 0), sender.pendingRecoveryCount());
+
+    var packet = try receiver.receivePacket();
+    defer packet.deinit(allocator);
+    try std.testing.expectEqual(payloads.len, packet.frames.len);
+    for (payloads, packet.frames) |expected, frame| {
+        try std.testing.expect(frame == .datagram);
+        try std.testing.expectEqualStrings(expected, frame.datagram.data);
+    }
+    one_rtt.testing.setNextPacketNumber(
+        &sender,
+        quic.protection.max_packet_number,
+    );
+    try sender.validateDatagrams(&payloads);
+    const too_many_for_last_packet = [_][]const u8{
+        "1",  "2",  "3",  "4",  "5",  "6",  "7",  "8",  "9",
+        "10", "11", "12", "13", "14", "15", "16", "17",
+    };
+    try std.testing.expectError(
+        error.InvalidPacketNumber,
+        sender.validateDatagrams(&too_many_for_last_packet),
+    );
+    one_rtt.testing.setNextPacketNumber(
+        &sender,
+        quic.protection.max_packet_number + 1,
+    );
+    try std.testing.expectError(
+        error.InvalidPacketNumber,
+        sender.validateDatagrams(&payloads),
+    );
+    one_rtt.testing.setNextPacketNumber(&sender, 2);
+
+    var large_storage: [5][500]u8 = undefined;
+    var large_payloads: [large_storage.len][]const u8 = undefined;
+    for (&large_storage, &large_payloads, 0..) |*storage, *payload, index| {
+        @memset(storage, @intCast(index));
+        payload.* = storage;
+    }
+    var partial_send = ObservedBatchSend{
+        .delegate = sender.endpoint.io,
+        .fail_after_prefix = 1,
+    };
+    var partial_vtable = sender.endpoint.io.vtable.*;
+    partial_vtable.netSend = ObservedBatchSend.netSend;
+    sender.endpoint.io = .{
+        .userdata = &partial_send,
+        .vtable = &partial_vtable,
+    };
+    defer sender.endpoint.io = partial_send.delegate;
+    try std.testing.expectError(
+        error.NetworkDown,
+        sender.sendDatagramsWithTimeout(
+            &large_payloads,
+            &committed,
+            .fromSeconds(1),
+        ),
+    );
+    try std.testing.expectEqual(@as(usize, 1), partial_send.calls);
+    try std.testing.expectEqual(@as(usize, 3), partial_send.last_message_count);
+    try std.testing.expectEqual(@as(usize, 2), committed);
+    try std.testing.expectEqual(@as(u64, 5), sender.datagramsSent());
+    try std.testing.expectEqual(@as(u64, 5), sender.next_packet_number);
+    try std.testing.expectEqual(@as(usize, 0), sender.pendingRecoveryCount());
+    var partial_packet = try receiver.receivePacket();
+    defer partial_packet.deinit(allocator);
+    try std.testing.expectEqual(@as(usize, 2), partial_packet.frames.len);
+    for (large_payloads[0..2], partial_packet.frames) |expected, frame| {
+        try std.testing.expect(frame == .datagram);
+        try std.testing.expectEqualSlices(u8, expected, frame.datagram.data);
+    }
 }
 
 test "QUIC 1-RTT single send builds frames in recovery ownership" {

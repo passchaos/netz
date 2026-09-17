@@ -102,6 +102,67 @@ test "QUIC 1-RTT caller-buffer DATAGRAM receive preserves ordering and storage" 
         (try server.popDatagram(&out)).?,
     );
 
+    const batch = [_][]const u8{ "batch-a", "batch-b", "batch-c" };
+    var sent_count: usize = 0;
+    try client.sendDatagramsWithTimeout(
+        &batch,
+        &sent_count,
+        .fromSeconds(1),
+    );
+    try std.testing.expectEqual(batch.len, sent_count);
+    var batch_storage: [batch.len][16]u8 = undefined;
+    var batch_outputs: [batch.len][]u8 = undefined;
+    for (&batch_storage, &batch_outputs) |*storage, *output| output.* = storage;
+    var received_count: usize = 99;
+    try server.receiveDatagramsWithTimeout(
+        &batch_outputs,
+        &received_count,
+        .fromSeconds(1),
+    );
+    try std.testing.expectEqual(batch.len, received_count);
+    for (batch, batch_outputs) |expected, actual| {
+        try std.testing.expectEqualStrings(expected, actual);
+    }
+    try std.testing.expectEqual(@as(usize, 0), server.datagramReceiveQueueLen());
+    var empty_outputs: [0][]u8 = .{};
+    received_count = 99;
+    try server.receiveDatagrams(&empty_outputs, &received_count);
+    try std.testing.expectEqual(@as(usize, 0), received_count);
+    var too_many_outputs: [quic.runtime.max_receive_batch_messages + 1][]u8 = undefined;
+    for (&too_many_outputs) |*output| output.* = &out;
+    try std.testing.expectError(
+        error.BufferTooShort,
+        server.receiveDatagrams(&too_many_outputs, &received_count),
+    );
+    try std.testing.expectEqual(@as(usize, 0), received_count);
+
+    try client.sendDatagram("fits");
+    try client.sendDatagram("too-large");
+    var short_first: [8]u8 = undefined;
+    var short_second: [2]u8 = undefined;
+    var short_outputs = [_][]u8{ &short_first, &short_second };
+    try std.testing.expectError(
+        error.DatagramBufferTooSmall,
+        server.receiveDatagramsWithTimeout(
+            &short_outputs,
+            &received_count,
+            .fromSeconds(1),
+        ),
+    );
+    try std.testing.expectEqual(@as(usize, 1), received_count);
+    try std.testing.expectEqualStrings("fits", short_outputs[0]);
+    try std.testing.expectEqual(@as(usize, 0), server.datagramReceiveQueueLen());
+
+    try std.testing.expectError(
+        error.Timeout,
+        server.receiveDatagramsWithTimeout(
+            &batch_outputs,
+            &received_count,
+            .zero,
+        ),
+    );
+    try std.testing.expectEqual(@as(usize, 0), received_count);
+
     try client.sendDatagram("large");
     try std.testing.expectError(
         error.DatagramBufferTooSmall,
@@ -204,6 +265,85 @@ test "QUIC 1-RTT caller-buffer DATAGRAM receive bypasses disabled queue" {
         receiver.datagramsDroppedIncoming(),
     );
     try std.testing.expectEqual(@as(usize, 0), receiver.datagramReceiveQueueLen());
+}
+
+test "QUIC caller-buffer DATAGRAM batch accepts GRO segments" {
+    const allocator = std.testing.allocator;
+    var threaded = std.Io.Threaded.init(allocator, .{});
+    defer threaded.deinit();
+    const io = threaded.io();
+    var sender_endpoint = try quic.runtime.Endpoint.bind(
+        allocator,
+        io,
+        .{ .ip4 = .loopback(0) },
+        .{ .max_datagram_size = 1200 },
+    );
+    defer sender_endpoint.deinit();
+    var receiver_endpoint = try quic.runtime.Endpoint.bind(
+        allocator,
+        io,
+        .{ .ip4 = .loopback(0) },
+        .{ .max_datagram_size = 1200, .enable_gro_receive = true },
+    );
+    defer receiver_endpoint.deinit();
+    if (!sender_endpoint.gsoSendEnabled() or
+        !receiver_endpoint.groReceiveEnabled())
+    {
+        return error.SkipZigTest;
+    }
+    const sender_cid = [_]u8{ 0xf1, 0xf2, 0xf3, 0xf4 };
+    const receiver_cid = [_]u8{ 0xf5, 0xf6, 0xf7, 0xf8 };
+    const keys = quic.protection.deriveAes128Keys(
+        [_]u8{0xf0} ** quic.protection.secret_len,
+    );
+    var sender = try one_rtt.Connection.init(&sender_endpoint, .{
+        .peer = receiver_endpoint.address(),
+        .receive_keys = keys,
+        .send_keys = keys,
+        .local_connection_id = &sender_cid,
+        .peer_connection_id = &receiver_cid,
+        .peer_max_datagram_frame_size = 1200,
+        .max_frames_per_packet = 1,
+        .enable_pacing = false,
+    });
+    defer sender.deinit();
+    var receiver = try one_rtt.Connection.init(&receiver_endpoint, .{
+        .peer = sender_endpoint.address(),
+        .receive_keys = keys,
+        .send_keys = keys,
+        .local_connection_id = &receiver_cid,
+        .peer_connection_id = &sender_cid,
+        .local_endpoint = .server,
+        .local_max_datagram_frame_size = 1200,
+        .max_datagram_queue_items = 3,
+        .enable_pacing = false,
+    });
+    defer receiver.deinit();
+
+    const payload_storage = [_][4]u8{ "aaaa".*, "bbbb".*, "cccc".* };
+    var payloads: [payload_storage.len][]const u8 = undefined;
+    for (&payload_storage, &payloads) |*storage, *payload| payload.* = storage;
+    var sent_count: usize = 0;
+    try sender.sendDatagramsWithTimeout(
+        &payloads,
+        &sent_count,
+        .fromSeconds(1),
+    );
+    try std.testing.expectEqual(payloads.len, sent_count);
+
+    var output_storage: [payloads.len][8]u8 = undefined;
+    var outputs: [payloads.len][]u8 = undefined;
+    for (&output_storage, &outputs) |*storage, *output| output.* = storage;
+    var received_count: usize = 0;
+    try receiver.receiveDatagramsWithTimeout(
+        &outputs,
+        &received_count,
+        .fromSeconds(1),
+    );
+    try std.testing.expectEqual(payloads.len, received_count);
+    for (payloads, outputs) |expected, actual| {
+        try std.testing.expectEqualStrings(expected, actual);
+    }
 }
 
 test "QUIC 1-RTT caller-buffer DATAGRAM waits for whole-packet validation" {

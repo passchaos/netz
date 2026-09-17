@@ -10,6 +10,7 @@ const RECORD_LEN: usize = 40;
 const RECORD_MAGIC: &[u8; 8] = b"NZDGBN01";
 const PAYLOAD_MAGIC: &[u8; 4] = b"NZDG";
 const MAX_PAYLOAD: usize = 1024;
+const MAX_WINDOW: u16 = 64;
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 enum Kind {
@@ -24,6 +25,7 @@ pub struct Config {
     pub warmup: u32,
     pub iterations: u32,
     pub payload_bytes: u16,
+    pub window: u16,
     pub timeout_ms: u32,
 }
 
@@ -33,6 +35,7 @@ impl Default for Config {
             warmup: 200,
             iterations: 5000,
             payload_bytes: 32,
+            window: 1,
             timeout_ms: 30_000,
         }
     }
@@ -48,6 +51,8 @@ impl Config {
                 config.iterations = value.parse()?;
             } else if let Some(value) = argument.strip_prefix("--payload-bytes=") {
                 config.payload_bytes = value.parse()?;
+            } else if let Some(value) = argument.strip_prefix("--window=") {
+                config.window = value.parse()?;
             } else if let Some(value) = argument.strip_prefix("--timeout-ms=") {
                 config.timeout_ms = value.parse()?;
             } else {
@@ -69,11 +74,18 @@ impl Config {
             "invalid payload bytes"
         );
         ensure!(
+            (1..=MAX_WINDOW).contains(&self.window),
+            "invalid DATAGRAM window"
+        );
+        ensure!(
             (1..=TIMEOUT_MAX_MS).contains(&self.timeout_ms),
             "invalid timeout"
         );
         self.rounds().context("round count overflow")?;
-        self.total_bytes().context("byte count overflow")?;
+        ensure!(
+            self.total_bytes().context("byte count overflow")? <= u64::from(u32::MAX),
+            "byte count exceeds wire record"
+        );
         Ok(())
     }
 
@@ -82,7 +94,12 @@ impl Config {
     }
 
     fn total_bytes(self) -> Option<u64> {
-        u64::from(self.rounds()?).checked_mul(u64::from(self.payload_bytes))
+        self.total_datagrams()?
+            .checked_mul(u64::from(self.payload_bytes))
+    }
+
+    fn total_datagrams(self) -> Option<u64> {
+        u64::from(self.rounds()?).checked_mul(u64::from(self.window))
     }
 
     pub fn timeout(self) -> Duration {
@@ -112,10 +129,11 @@ impl Record {
         let mut out = [0; RECORD_LEN];
         out[0..8].copy_from_slice(RECORD_MAGIC);
         out[8] = self.kind as u8;
-        out[9] = 1;
+        out[9] = 2;
         out[12..16].copy_from_slice(&self.config.warmup.to_be_bytes());
         out[16..20].copy_from_slice(&self.config.iterations.to_be_bytes());
         out[20..22].copy_from_slice(&self.config.payload_bytes.to_be_bytes());
+        out[22..24].copy_from_slice(&self.config.window.to_be_bytes());
         out[24..28].copy_from_slice(&self.config.timeout_ms.to_be_bytes());
         out[28..32].copy_from_slice(
             &u32::try_from(self.received_bytes)
@@ -128,10 +146,7 @@ impl Record {
 
     fn decode(bytes: &[u8; RECORD_LEN]) -> Result<Self> {
         ensure!(
-            &bytes[0..8] == RECORD_MAGIC
-                && bytes[9] == 1
-                && bytes[10..12] == [0, 0]
-                && bytes[22..24] == [0, 0],
+            &bytes[0..8] == RECORD_MAGIC && bytes[9] == 2 && bytes[10..12] == [0, 0],
             "invalid benchmark control header"
         );
         let kind = match bytes[8] {
@@ -145,6 +160,7 @@ impl Record {
             warmup: u32::from_be_bytes(bytes[12..16].try_into()?),
             iterations: u32::from_be_bytes(bytes[16..20].try_into()?),
             payload_bytes: u16::from_be_bytes(bytes[20..22].try_into()?),
+            window: u16::from_be_bytes(bytes[22..24].try_into()?),
             timeout_ms: u32::from_be_bytes(bytes[24..28].try_into()?),
         };
         config.validate()?;
@@ -182,19 +198,32 @@ pub async fn run_client(connection: &Connection, config: Config, role_pair: &str
         "payload exceeds negotiated DATAGRAM size"
     );
     let mut samples = Vec::with_capacity(config.iterations as usize);
-    let mut payload = vec![0; usize::from(config.payload_bytes)];
+    let window = usize::from(config.window);
+    let mut payloads = vec![vec![0; usize::from(config.payload_bytes)]; window];
+    let mut seen = vec![false; window];
     let mut checksum = 0u64;
-    for sequence in 0..config.rounds().unwrap() {
-        fill_payload(&mut payload, sequence);
+    for round in 0..config.rounds().unwrap() {
+        let first_sequence = round * u32::from(config.window);
+        for (index, payload) in payloads.iter_mut().enumerate() {
+            fill_payload(payload, first_sequence + index as u32);
+        }
         let started = Instant::now();
-        connection.send_datagram(Bytes::copy_from_slice(&payload))?;
-        let echoed = timeout(config.timeout(), connection.read_datagram())
-            .await
-            .context("benchmark DATAGRAM receive timed out")??;
+        for payload in &payloads {
+            connection.send_datagram(Bytes::copy_from_slice(payload))?;
+        }
+        seen.fill(false);
+        for _ in 0..window {
+            let echoed = timeout(config.timeout(), connection.read_datagram())
+                .await
+                .context("benchmark DATAGRAM receive timed out")??;
+            let sequence = verify_window_payload(&echoed, first_sequence, config)?;
+            let index = (sequence - first_sequence) as usize;
+            ensure!(!seen[index], "duplicate benchmark DATAGRAM");
+            seen[index] = true;
+            add_checksum(&mut checksum, &echoed);
+        }
         let elapsed = u64::try_from(started.elapsed().as_nanos()).unwrap_or(u64::MAX);
-        verify_payload(&echoed, sequence, config.payload_bytes)?;
-        add_checksum(&mut checksum, &echoed);
-        if sequence >= config.warmup {
+        if round >= config.warmup {
             samples.push(elapsed);
         }
     }
@@ -238,13 +267,27 @@ pub async fn run_server(
     send_record(&mut send, Record::new(Kind::Ready, expected)).await?;
 
     let mut checksum = 0u64;
-    for sequence in 0..expected.rounds().unwrap() {
-        let payload = timeout(expected.timeout(), connection.read_datagram())
-            .await
-            .context("benchmark DATAGRAM receive timed out")??;
-        verify_payload(&payload, sequence, expected.payload_bytes)?;
-        add_checksum(&mut checksum, &payload);
-        connection.send_datagram(payload)?;
+    let window = usize::from(expected.window);
+    let mut received = Vec::with_capacity(window);
+    let mut seen = vec![false; window];
+    for round in 0..expected.rounds().unwrap() {
+        let first_sequence = round * u32::from(expected.window);
+        received.clear();
+        seen.fill(false);
+        for _ in 0..window {
+            let payload = timeout(expected.timeout(), connection.read_datagram())
+                .await
+                .context("benchmark DATAGRAM receive timed out")??;
+            let sequence = verify_window_payload(&payload, first_sequence, expected)?;
+            let index = (sequence - first_sequence) as usize;
+            ensure!(!seen[index], "duplicate benchmark DATAGRAM");
+            seen[index] = true;
+            add_checksum(&mut checksum, &payload);
+            received.push(payload);
+        }
+        for payload in received.drain(..) {
+            connection.send_datagram(payload)?;
+        }
     }
 
     let done = receive_record(&mut recv, true, expected).await?;
@@ -268,25 +311,34 @@ pub async fn run_server(
 
 pub fn print_config(role_pair: &str, endpoint_role: &str, config: Config, limit: usize) {
     println!(
-        "record=config implementation=quinn protocol=quic-datagram mode=pingpong role_pair={role_pair} endpoint_role={endpoint_role} client_io={} server_io={} connection_scope=fresh-per-sample benchmark_scope=same-application-shape timing_scope=post-handshake-single-outstanding-roundtrip warmup={} iterations={} payload_bytes={} timeout_ms={} steady_state_mtu=1200 datagram_limit={limit} quic_version=1 cert_verify=true pacing=implementation-specific complete=true",
+        "record=config implementation=quinn protocol=quic-datagram mode={} role_pair={role_pair} endpoint_role={endpoint_role} client_io={} server_io={} connection_scope=fresh-per-sample benchmark_scope=same-application-shape timing_scope={} warmup={} iterations={} payload_bytes={} window={} total_datagrams={} timeout_ms={} steady_state_mtu=1200 datagram_limit={limit} quic_version=1 cert_verify=true pacing=implementation-specific udp_batching={} complete=true",
+        mode(config),
         client_io(role_pair),
         server_io(role_pair),
+        timing_scope(config),
         config.warmup,
         config.iterations,
         config.payload_bytes,
+        config.window,
+        config.total_datagrams().unwrap(),
         config.timeout_ms,
+        udp_batching(config),
     );
 }
 
 fn print_result(role_pair: &str, config: Config, limit: usize, samples: &[u64], checksum: u64) {
     let sum: u128 = samples.iter().map(|&x| u128::from(x)).sum();
     println!(
-        "record=result implementation=quinn protocol=quic-datagram mode=pingpong role_pair={role_pair} endpoint_role=client client_io={} server_io={} connection_scope=fresh-per-sample benchmark_scope=same-application-shape timing_scope=post-handshake-single-outstanding-roundtrip warmup={} iterations={} payload_bytes={} timeout_ms={} datagram_limit={limit} p50_ns={} p90_ns={} p99_ns={} p999_ns={} mean_ns={} min_ns={} max_ns={} received_bytes={} checksum={} completion_exchange_verified=true close_code=59 complete=true",
+        "record=result implementation=quinn protocol=quic-datagram mode={} role_pair={role_pair} endpoint_role=client client_io={} server_io={} connection_scope=fresh-per-sample benchmark_scope=same-application-shape timing_scope={} warmup={} iterations={} payload_bytes={} window={} total_datagrams={} timeout_ms={} datagram_limit={limit} p50_ns={} p90_ns={} p99_ns={} p999_ns={} mean_ns={} min_ns={} max_ns={} received_bytes={} checksum={} completion_exchange_verified=true close_code=59 complete=true",
+        mode(config),
         client_io(role_pair),
         server_io(role_pair),
+        timing_scope(config),
         config.warmup,
         config.iterations,
         config.payload_bytes,
+        config.window,
+        config.total_datagrams().unwrap(),
         config.timeout_ms,
         percentile(samples, 50, 100),
         percentile(samples, 90, 100),
@@ -302,12 +354,16 @@ fn print_result(role_pair: &str, config: Config, limit: usize, samples: &[u64], 
 
 fn print_server_complete(role_pair: &str, config: Config, received_bytes: u64, checksum: u64) {
     println!(
-        "record=server-complete implementation=quinn protocol=quic-datagram mode=pingpong role_pair={role_pair} endpoint_role=server client_io={} server_io={} timing_scope=post-handshake-single-outstanding-roundtrip warmup={} iterations={} payload_bytes={} timeout_ms={} received_bytes={received_bytes} checksum={checksum} completion_exchange_verified=true close_code=59 complete=true",
+        "record=server-complete implementation=quinn protocol=quic-datagram mode={} role_pair={role_pair} endpoint_role=server client_io={} server_io={} timing_scope={} warmup={} iterations={} payload_bytes={} window={} total_datagrams={} timeout_ms={} received_bytes={received_bytes} checksum={checksum} completion_exchange_verified=true close_code=59 complete=true",
+        mode(config),
         client_io(role_pair),
         server_io(role_pair),
+        timing_scope(config),
         config.warmup,
         config.iterations,
         config.payload_bytes,
+        config.window,
+        config.total_datagrams().unwrap(),
         config.timeout_ms,
     );
 }
@@ -372,6 +428,23 @@ fn verify_payload(payload: &[u8], sequence: u32, expected_len: u16) -> Result<()
     Ok(())
 }
 
+fn verify_window_payload(payload: &[u8], first_sequence: u32, config: Config) -> Result<u32> {
+    ensure!(
+        payload.len() == usize::from(config.payload_bytes)
+            && payload.get(0..4) == Some(PAYLOAD_MAGIC),
+        "invalid benchmark DATAGRAM header"
+    );
+    let sequence = u64::from_be_bytes(payload[4..12].try_into()?)
+        .try_into()
+        .context("benchmark DATAGRAM sequence overflow")?;
+    ensure!(
+        sequence >= first_sequence && sequence < first_sequence + u32::from(config.window),
+        "benchmark DATAGRAM outside current window"
+    );
+    verify_payload(payload, sequence, config.payload_bytes)?;
+    Ok(sequence)
+}
+
 fn add_checksum(checksum: &mut u64, payload: &[u8]) {
     for &byte in payload {
         *checksum = checksum.wrapping_add(u64::from(byte));
@@ -399,13 +472,40 @@ fn server_io(role_pair: &str) -> &'static str {
     }
 }
 
+fn mode(config: Config) -> &'static str {
+    if config.window == 1 {
+        "pingpong"
+    } else {
+        "windowed-pingpong"
+    }
+}
+
+fn timing_scope(config: Config) -> &'static str {
+    if config.window == 1 {
+        "post-handshake-single-outstanding-roundtrip"
+    } else {
+        "post-handshake-window-roundtrip"
+    }
+}
+
+fn udp_batching(config: Config) -> &'static str {
+    if config.window == 1 {
+        "single-message"
+    } else {
+        "quinn-runtime-auto"
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
 
     #[test]
     fn record_and_payload_match_wire_contract() {
-        let config = Config::default();
+        let config = Config {
+            window: 64,
+            ..Config::default()
+        };
         let mut record = Record::new(Kind::Done, config);
         record.received_bytes = config.total_bytes().unwrap();
         record.checksum = 0x0123_4567_89ab_cdef;
@@ -415,5 +515,17 @@ mod tests {
         fill_payload(&mut payload, 123);
         verify_payload(&payload, 123, config.payload_bytes).unwrap();
         assert!(verify_payload(&payload, 124, config.payload_bytes).is_err());
+        assert!(Config {
+            window: 0,
+            ..config
+        }
+        .validate()
+        .is_err());
+        assert!(Config {
+            window: 65,
+            ..config
+        }
+        .validate()
+        .is_err());
     }
 }

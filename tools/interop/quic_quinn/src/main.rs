@@ -89,8 +89,8 @@ fn parse_port(value: Option<String>) -> Result<u16> {
 fn transport_config_with_mtu(benchmark: bool) -> Arc<TransportConfig> {
     let mut config = TransportConfig::default();
     config
-        .datagram_receive_buffer_size(Some(64 * 1024))
-        .datagram_send_buffer_size(64 * 1024)
+        .datagram_receive_buffer_size(Some(128 * 1024))
+        .datagram_send_buffer_size(128 * 1024)
         .mtu_discovery_config(None);
     if benchmark {
         config.initial_mtu(1200).min_mtu(1200);

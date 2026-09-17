@@ -853,6 +853,51 @@ throughput claim. The command is
 `zig build bench-quic-datagram-quinn -Doptimize=ReleaseFast -- --samples=5
 --warmup=200 --iterations=5000`.
 
+The same harness now accepts `--window=1..64`. A window sends all
+sequence-tagged payloads before receiving its complete echo set, accepts
+arrival reordering, and rejects duplicates, omissions, or out-of-window
+sequences. The verifier additionally binds warmup, iterations, payload size,
+window, total logical DATAGRAMs, bytes, checksum, control FIN, and close into
+the result schema. For windowed runs, netz uses automatic GSO when available
+and caller-buffer `recvmmsg`; Quinn retains its runtime-selected batching.
+Packetization remains implementation-specific, so these results are
+`same-application-shape`, not equal-wire.
+
+A 2026-09-17 fixed-binary CPU-0/client, CPU-1/server matrix used five ABBA
+samples, 50 warmups, 500 measured windows, and window 16. The same netz
+client/server and Quinn binary hashes were retained across all three payload
+sizes. Netz greedily packs multiple DATAGRAM frames into one QUIC packet up to
+the 1200-byte path and configured frame-count bounds, matching the strategy in
+the audited Quinn and quiche implementations; the logical payload prefix
+remains exact if a socket accepts only a packet prefix.
+
+| Payload | Fixed server | netz p50 median/range (us) | Quinn p50 median/range (us) | netz/Quinn speed |
+|---:|---|---:|---:|---:|
+| 32 B | Quinn | 54.148 / 53.713–55.241 | 50.927 / 47.685–52.778 | 0.941x |
+| 32 B | netz | 60.954 / 59.676–61.363 | 53.639 / 53.390–55.834 | 0.880x |
+| 256 B | Quinn | 97.296 / 94.371–97.861 | 83.890 / 78.890–85.103 | 0.862x |
+| 256 B | netz | 113.417 / 112.241–114.307 | 100.371 / 96.732–108.084 | 0.885x |
+| 1024 B | Quinn | 195.196 / 194.020–196.622 | 156.511 / 142.825–160.640 | 0.802x |
+| 1024 B | netz | 256.197 / 255.669–260.493 | 202.741 / 200.918–208.289 | 0.791x |
+
+The 32-byte result is near parity, with Quinn ahead by 6.3% against its own
+server and 13.6% against the fixed netz server. Larger payloads still favor
+Quinn by roughly 12–21%, leaving a
+concrete packet-protection/event-loop optimization target rather than a broad
+performance-win claim. Tests independently prove three small payloads share
+one packet, five 500-byte payloads map to three packets, a one-packet partial
+socket send commits exactly two logical payloads, and packet-number exhaustion
+is rejected before emission. Earlier diagnostic runs without packing are not
+treated as a baseline because they were not interleaved against the final
+binary.
+The fixed final hashes were
+`6b5f21da81827e8ad08f36163e5558cf93cf6e37585f3e22af0f5605ac00f5cc`
+for the netz client,
+`d4b94844aa581b82965acfbd7b2d626f5a3c5f84819bf0d47976e9e7c3d2c1e0`
+for the netz server, and
+`e3aac9cece02e028b5909e869c2fd86ed249174c21e2b79907460f0a70f45215`
+for the Quinn fixture.
+
 The bounded QUIC DATAGRAM receive queue now lives in
 `one_rtt/datagram_queue.zig`. Its first successful admission reserves exactly
 the configured ring bound, so later enqueue/overwrite operations allocate
@@ -860,13 +905,14 @@ nothing and retain no geometric capacity beyond policy. Tests exercise
 wrap-around removal by packet number, stable survivor order, capacity-one
 replacement, caller ownership after OOM, and newest-data retention. The public
 queue/drop counters and packet-routing API are unchanged.
-The queue now additionally retains one exact-size payload allocation after an
-application pop. Repeated fixed-size DATAGRAM receive/pop therefore allocates
-the ring and first payload once, then copies subsequent payloads through the
-same storage; different sizes replace the single recycle slot safely. Focused
-tests prove exact-size admission succeeds under a fail-first allocator after
-the initial pop, preserve consume-on-small-buffer behavior, and retain
-drop-oldest accounting. Fixed-binary CPU-0/client, CPU-1/Quinn-server A/B used
+The queue now additionally retains a capacity-bounded pool of exact-size
+payload allocations after application pops. Repeated fixed-size DATAGRAM
+bursts therefore allocate the ring and first full window once, then reuse that
+storage; different sizes replace cached entries safely. Focused tests prove a
+full warmed burst succeeds under a fail-first allocator, preserve
+consume-on-small-buffer behavior and partial batch progress, and retain
+drop-oldest accounting. The earlier single-slot step's fixed-binary
+CPU-0/client, CPU-1/Quinn-server A/B used
 five 200-warmup/5,000-RTT pairs with alternating order. Median p50 moved only
 44.666 to 44.416 us (0.6%, 3/5 wins) and p99 61.047 to 60.547 us (0.8%). The
 reverse fixed-Quinn-client/netz-server comparison moved p50 44.334 to 44.231
@@ -874,12 +920,14 @@ us (0.2%, 3/5 wins), with one noisy candidate p99 tail. These timing results
 are performance-neutral; the supported improvement is the deterministic
 steady-state payload-allocation removal, not a latency claim.
 The connection additionally exposes blocking, relative-timeout, and
-absolute-deadline caller-buffer DATAGRAM receive APIs. Existing queued data
-keeps FIFO priority; when the queue is empty, the first fitting DATAGRAM in an
-authenticated packet is copied directly from the decoded frame into caller
-storage and same-packet successors remain queued. Tests cover single-frame
-direct delivery, multi-frame ordering, short-buffer consumption/error, zero
-timeout, and disabled negotiation. The raw Quinn matrix now uses this path.
+absolute-deadline caller-buffer DATAGRAM receive APIs, including up-to-64-item
+batch forms with exact partial-progress counts. Existing queued data keeps FIFO
+priority; otherwise fitting DATAGRAMs are copied directly from authenticated
+frames into caller storage. Non-GRO endpoints drain ready UDP messages through
+one backend receive and one cumulative ACK decision; GRO endpoints consume the
+existing shared-segment view. Tests cover single and multi-frame delivery,
+GRO segments, short-buffer consumption/error, zero timeout, empty/oversized
+batches, and disabled negotiation. The raw Quinn matrix now uses this path.
 An order-balanced fixed-binary A/B used five 200-warmup/5,000-RTT pairs per
 direction. Against the fixed Quinn server, the client p50 median moved from
 44.250 to 43.769 us (1.1% lower, candidate faster in 4/5 pairs). Against the

@@ -106,6 +106,20 @@ pub fn build(b: *std.Build) void {
     const run_quic_persistent_bench_tests = b.addRunArtifact(
         quic_persistent_bench_tests,
     );
+    const quic_datagram_bench_tests = b.addTest(.{
+        .root_module = b.createModule(.{
+            .root_source_file = b.path(
+                "tools/interop/quic_datagram_bench.zig",
+            ),
+            .target = target,
+            .optimize = optimize,
+            .imports = &.{.{ .name = "netz", .module = netz_mod }},
+        }),
+        .filters = test_filters,
+    });
+    const run_quic_datagram_bench_tests = b.addRunArtifact(
+        quic_datagram_bench_tests,
+    );
     const quic_quic_go_churn_tests = b.addTest(.{
         .root_module = b.createModule(.{
             .root_source_file = b.path(
@@ -245,6 +259,7 @@ pub fn build(b: *std.Build) void {
     test_step.dependOn(&webtransport_benchmark_checker_tests.step);
     test_step.dependOn(&webtransport_churn_checker_tests.step);
     test_step.dependOn(&quic_datagram_benchmark_checker_tests.step);
+    test_step.dependOn(&run_quic_datagram_bench_tests.step);
 
     const mqtt_mtls_server = b.addExecutable(.{
         .name = "netz-mqtt-mtls-server",
@@ -1134,7 +1149,7 @@ pub fn build(b: *std.Build) void {
     if (b.args) |args| quic_datagram_quinn_bench.addArgs(args);
     const quic_datagram_quinn_bench_step = b.step(
         "bench-quic-datagram-quinn",
-        "Compare zio-backed raw QUIC DATAGRAM latency with Quinn",
+        "Compare zio-backed single/windowed QUIC DATAGRAM latency with Quinn",
     );
     quic_datagram_quinn_bench_step.dependOn(
         &quic_datagram_quinn_bench.step,

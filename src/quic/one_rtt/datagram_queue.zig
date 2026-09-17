@@ -9,13 +9,14 @@ pub const Queue = struct {
     slots: std.ArrayList(?Entry) = .empty,
     head: usize = 0,
     len: usize = 0,
-    recycled_payload: ?[]u8 = null,
+    recycled_payloads: std.ArrayList([]u8) = .empty,
 
     pub fn deinit(self: *Queue, allocator: std.mem.Allocator) void {
         for (self.slots.items) |maybe_entry| {
             if (maybe_entry) |entry| allocator.free(entry.payload);
         }
-        if (self.recycled_payload) |payload| allocator.free(payload);
+        for (self.recycled_payloads.items) |payload| allocator.free(payload);
+        self.recycled_payloads.deinit(allocator);
         self.slots.deinit(allocator);
         self.* = undefined;
     }
@@ -47,6 +48,15 @@ pub const Queue = struct {
                     capacity,
                 );
             }
+            if (self.recycled_payloads.capacity < capacity) {
+                try self.recycled_payloads.ensureTotalCapacityPrecise(
+                    allocator,
+                    capacity,
+                );
+            }
+            if (self.recycled_payloads.items.len > capacity - self.len - 1) {
+                allocator.free(self.recycled_payloads.pop().?);
+            }
             const tail = if (self.slots.items.len == 0)
                 0
             else
@@ -77,9 +87,10 @@ pub const Queue = struct {
         return dropped;
     }
 
-    /// Copy a borrowed payload into queue-owned storage. After an application
-    /// pop, one exact-size allocation is retained for the next admission. The
-    /// queue ordering and drop-oldest semantics match `pushDroppingOldest`.
+    /// Copy a borrowed payload into queue-owned storage. After application
+    /// pops, up to the configured queue capacity of exact-size allocations is
+    /// retained for later admissions. The queue ordering and drop-oldest
+    /// semantics match `pushDroppingOldest`.
     pub fn pushCopyDroppingOldest(
         self: *Queue,
         allocator: std.mem.Allocator,
@@ -95,16 +106,20 @@ pub const Queue = struct {
         if (self.len < capacity and self.slots.capacity < capacity) {
             try self.slots.ensureTotalCapacityPrecise(allocator, capacity);
         }
-        const owned = if (self.recycled_payload) |recycled| blk: {
-            if (recycled.len != payload.len) {
-                break :blk try allocator.dupe(u8, payload);
+        const owned = blk: {
+            for (self.recycled_payloads.items, 0..) |recycled, index| {
+                if (recycled.len == payload.len) {
+                    const reused = self.recycled_payloads.swapRemove(index);
+                    @memcpy(reused, payload);
+                    break :blk reused;
+                }
             }
-            self.recycled_payload = null;
-            @memcpy(recycled, payload);
-            break :blk recycled;
-        } else try allocator.dupe(u8, payload);
+            const fresh = try allocator.dupe(u8, payload);
+            if (self.recycled_payloads.pop()) |stale| allocator.free(stale);
+            break :blk fresh;
+        };
         var owns_payload = true;
-        errdefer if (owns_payload) self.recycleOrFree(allocator, owned);
+        errdefer if (owns_payload) allocator.free(owned);
         const dropped = try self.pushDroppingOldest(
             allocator,
             owned,
@@ -195,7 +210,12 @@ pub const Queue = struct {
         allocator: std.mem.Allocator,
         payload: []u8,
     ) void {
-        if (self.recycled_payload) |recycled| allocator.free(recycled);
-        self.recycled_payload = payload;
+        if (self.recycled_payloads.items.len <
+            self.slots.capacity - self.len)
+        {
+            self.recycled_payloads.appendAssumeCapacity(payload);
+        } else {
+            allocator.free(payload);
+        }
     }
 };

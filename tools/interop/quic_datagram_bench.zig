@@ -4,6 +4,7 @@ const netz = @import("netz");
 pub const alpn = "netz-datagram-bench";
 pub const mtu: usize = 1200;
 pub const max_payload: usize = 1024;
+pub const max_window: usize = 64;
 const record_len = 40;
 const record_magic = "NZDGBN01";
 const payload_magic = "NZDG";
@@ -14,6 +15,7 @@ pub const Config = struct {
     warmup: u32 = 200,
     iterations: u32 = 5000,
     payload_bytes: u16 = 32,
+    window: u16 = 1,
     timeout_ms: u32 = 30_000,
 
     pub fn parse(args: []const []const u8) !Config {
@@ -25,6 +27,8 @@ pub const Config = struct {
                 config.iterations = try parsePositive(u32, value);
             } else if (option(arg, "--payload-bytes=")) |value| {
                 config.payload_bytes = try parsePositive(u16, value);
+            } else if (option(arg, "--window=")) |value| {
+                config.window = try parsePositive(u16, value);
             } else if (option(arg, "--timeout-ms=")) |value| {
                 config.timeout_ms = try parsePositive(u32, value);
             } else {
@@ -38,12 +42,15 @@ pub const Config = struct {
     pub fn validate(self: Config) !void {
         if (self.warmup > 100_000 or self.iterations > 1_000_000 or
             self.payload_bytes < 12 or self.payload_bytes > max_payload or
+            self.window == 0 or self.window > max_window or
             self.timeout_ms > 10 * 60 * 1000)
         {
             return error.InvalidArgument;
         }
         _ = try self.rounds();
-        _ = try self.totalBytes();
+        if (try self.totalBytes() > std.math.maxInt(u32)) {
+            return error.InvalidArgument;
+        }
     }
 
     pub fn rounds(self: Config) !u32 {
@@ -52,7 +59,12 @@ pub const Config = struct {
     }
 
     pub fn totalBytes(self: Config) !u64 {
-        return std.math.mul(u64, try self.rounds(), self.payload_bytes) catch
+        return std.math.mul(u64, try self.totalDatagrams(), self.payload_bytes) catch
+            error.InvalidArgument;
+    }
+
+    pub fn totalDatagrams(self: Config) !u64 {
+        return std.math.mul(u64, try self.rounds(), self.window) catch
             error.InvalidArgument;
     }
 
@@ -69,9 +81,10 @@ pub const Config = struct {
     }
 
     pub fn oneRttConfig(self: Config) netz.quic.handshake.OneRttConfig {
-        _ = self;
         return .{
             .max_datagram_size = mtu,
+            .max_datagram_queue_items = self.window,
+            .max_frames_per_packet = @max(16, self.window),
         };
     }
 };
@@ -90,10 +103,11 @@ const Record = struct {
         var out = [_]u8{0} ** record_len;
         @memcpy(out[0..8], record_magic);
         out[8] = @intFromEnum(self.kind);
-        out[9] = 1;
+        out[9] = 2;
         std.mem.writeInt(u32, out[12..16], self.config.warmup, .big);
         std.mem.writeInt(u32, out[16..20], self.config.iterations, .big);
         std.mem.writeInt(u16, out[20..22], self.config.payload_bytes, .big);
+        std.mem.writeInt(u16, out[22..24], self.config.window, .big);
         std.mem.writeInt(u32, out[24..28], self.config.timeout_ms, .big);
         std.mem.writeInt(u32, out[28..32], @intCast(self.received_bytes), .big);
         std.mem.writeInt(u64, out[32..40], self.checksum, .big);
@@ -101,9 +115,8 @@ const Record = struct {
     }
 
     fn decode(bytes: *const [record_len]u8) !Record {
-        if (!std.mem.eql(u8, bytes[0..8], record_magic) or bytes[9] != 1 or
-            !std.mem.allEqual(u8, bytes[10..12], 0) or
-            !std.mem.allEqual(u8, bytes[22..24], 0))
+        if (!std.mem.eql(u8, bytes[0..8], record_magic) or bytes[9] != 2 or
+            !std.mem.allEqual(u8, bytes[10..12], 0))
         {
             return error.InvalidBenchmarkControl;
         }
@@ -114,6 +127,7 @@ const Record = struct {
                 .warmup = std.mem.readInt(u32, bytes[12..16], .big),
                 .iterations = std.mem.readInt(u32, bytes[16..20], .big),
                 .payload_bytes = std.mem.readInt(u16, bytes[20..22], .big),
+                .window = std.mem.readInt(u16, bytes[22..24], .big),
                 .timeout_ms = std.mem.readInt(u32, bytes[24..28], .big),
             },
             .received_bytes = std.mem.readInt(u32, bytes[28..32], .big),
@@ -160,25 +174,53 @@ pub fn runClient(
 
     const samples = try allocator.alloc(u64, config.iterations);
     defer allocator.free(samples);
-    var payload_storage: [max_payload]u8 = undefined;
-    const payload = payload_storage[0..config.payload_bytes];
-    var received_storage: [max_payload]u8 = undefined;
+    var payload_storage: [max_window][max_payload]u8 = undefined;
+    var payloads: [max_window][]const u8 = undefined;
+    var received_storage: [max_window][max_payload]u8 = undefined;
+    var received: [max_window][]u8 = undefined;
+    var seen: [max_window]bool = undefined;
     var checksum: u64 = 0;
-    for (0..try config.rounds()) |sequence_index| {
-        const sequence: u32 = @intCast(sequence_index);
-        fillPayload(payload, sequence);
+    const window: usize = config.window;
+    for (0..try config.rounds()) |round| {
+        const first_sequence: u32 = @intCast(round * window);
+        for (0..window) |index| {
+            const payload = payload_storage[index][0..config.payload_bytes];
+            fillPayload(payload, first_sequence + @as(u32, @intCast(index)));
+            payloads[index] = payload;
+        }
         const started = nowNs(io);
-        try connection.sendDatagramWithDeadline(payload, deadline);
-        const echoed = try receiveDatagram(
-            connection,
-            &received_storage,
+        var committed: usize = 0;
+        try connection.sendDatagramsWithDeadline(
+            payloads[0..window],
+            &committed,
             deadline,
         );
+        if (committed != window) return error.IncompleteDatagramWindow;
+        for (received_storage[0..window], received[0..window]) |*storage, *output| {
+            output.* = storage;
+        }
+        var received_count: usize = 0;
+        try connection.receiveDatagramsWithDeadline(
+            received[0..window],
+            &received_count,
+            deadline,
+        );
+        if (received_count != window) return error.IncompleteDatagramWindow;
+        @memset(seen[0..window], false);
+        for (received[0..window]) |echoed| {
+            const sequence = try verifyWindowPayload(
+                echoed,
+                first_sequence,
+                config,
+            );
+            const index: usize = @intCast(sequence - first_sequence);
+            if (seen[index]) return error.DuplicateBenchmarkPayload;
+            seen[index] = true;
+            addChecksum(&checksum, echoed);
+        }
         const elapsed = nowNs(io) -| started;
-        try verifyPayload(echoed, sequence, config.payload_bytes);
-        addChecksum(&checksum, echoed);
-        if (sequence >= config.warmup) {
-            samples[sequence - config.warmup] = elapsed;
+        if (round >= config.warmup) {
+            samples[round - config.warmup] = elapsed;
         }
     }
 
@@ -239,14 +281,44 @@ pub fn runServer(
         deadline,
     );
 
-    var storage: [max_payload]u8 = undefined;
+    var payload_storage: [max_window][max_payload]u8 = undefined;
+    var received: [max_window][]u8 = undefined;
+    var payloads: [max_window][]const u8 = undefined;
+    var seen: [max_window]bool = undefined;
     var checksum: u64 = 0;
-    for (0..try expected.rounds()) |sequence_index| {
-        const sequence: u32 = @intCast(sequence_index);
-        const payload = try receiveDatagram(connection, &storage, deadline);
-        try verifyPayload(payload, sequence, expected.payload_bytes);
-        addChecksum(&checksum, payload);
-        try connection.sendDatagramWithDeadline(payload, deadline);
+    const window: usize = expected.window;
+    for (0..try expected.rounds()) |round| {
+        const first_sequence: u32 = @intCast(round * window);
+        for (payload_storage[0..window], received[0..window]) |*storage, *output| {
+            output.* = storage;
+        }
+        var received_count: usize = 0;
+        try connection.receiveDatagramsWithDeadline(
+            received[0..window],
+            &received_count,
+            deadline,
+        );
+        if (received_count != window) return error.IncompleteDatagramWindow;
+        @memset(seen[0..window], false);
+        for (received[0..window], payloads[0..window]) |payload, *echo| {
+            const sequence = try verifyWindowPayload(
+                payload,
+                first_sequence,
+                expected,
+            );
+            const index: usize = @intCast(sequence - first_sequence);
+            if (seen[index]) return error.DuplicateBenchmarkPayload;
+            seen[index] = true;
+            addChecksum(&checksum, payload);
+            echo.* = payload;
+        }
+        var committed: usize = 0;
+        try connection.sendDatagramsWithDeadline(
+            payloads[0..window],
+            &committed,
+            deadline,
+        );
+        if (committed != window) return error.IncompleteDatagramWindow;
     }
 
     const done = try receiveRecord(connection, 0, true, deadline);
@@ -270,24 +342,30 @@ pub fn printConfig(
     datagram_limit: usize,
 ) void {
     std.debug.print(
-        "record=config implementation={s} protocol=quic-datagram mode=pingpong " ++
+        "record=config implementation={s} protocol=quic-datagram mode={s} " ++
             "role_pair={s} endpoint_role={s} client_io={s} server_io={s} " ++
             "connection_scope=fresh-per-sample benchmark_scope=same-application-shape " ++
-            "timing_scope=post-handshake-single-outstanding-roundtrip " ++
-            "warmup={d} iterations={d} payload_bytes={d} timeout_ms={d} " ++
+            "timing_scope={s} warmup={d} iterations={d} payload_bytes={d} " ++
+            "window={d} total_datagrams={d} timeout_ms={d} " ++
             "steady_state_mtu=1200 datagram_limit={d} quic_version=1 " ++
-            "cert_verify=true pacing=implementation-specific complete=true\n",
+            "cert_verify=true pacing=implementation-specific udp_batching={s} " ++
+            "complete=true\n",
         .{
             implementation,
+            mode(config),
             role_pair,
             endpoint_role,
             clientIo(role_pair),
             serverIo(role_pair),
+            timingScope(config),
             config.warmup,
             config.iterations,
             config.payload_bytes,
+            config.window,
+            config.totalDatagrams() catch unreachable,
             config.timeout_ms,
             datagram_limit,
+            udpBatching(implementation, config),
         },
     );
 }
@@ -300,20 +378,24 @@ pub fn printServerComplete(
 ) void {
     std.debug.print(
         "record=server-complete implementation={s} protocol=quic-datagram " ++
-            "mode=pingpong role_pair={s} endpoint_role=server client_io={s} " ++
+            "mode={s} role_pair={s} endpoint_role=server client_io={s} " ++
             "server_io={s} warmup={d} iterations={d} payload_bytes={d} " ++
-            "timeout_ms={d} timing_scope=post-handshake-single-outstanding-roundtrip " ++
+            "window={d} total_datagrams={d} timeout_ms={d} timing_scope={s} " ++
             "received_bytes={d} checksum={d} " ++
             "completion_exchange_verified=true close_code=59 complete=true\n",
         .{
             implementation,
+            mode(config),
             role_pair,
             clientIo(role_pair),
             serverIo(role_pair),
             config.warmup,
             config.iterations,
             config.payload_bytes,
+            config.window,
+            config.totalDatagrams() catch unreachable,
             config.timeout_ms,
+            timingScope(config),
             result.received_bytes,
             result.checksum,
         },
@@ -352,23 +434,27 @@ fn printResult(
     checksum: u64,
 ) void {
     std.debug.print(
-        "record=result implementation={s} protocol=quic-datagram mode=pingpong " ++
+        "record=result implementation={s} protocol=quic-datagram mode={s} " ++
             "role_pair={s} endpoint_role=client client_io={s} server_io={s} " ++
             "connection_scope=fresh-per-sample " ++
             "benchmark_scope=same-application-shape warmup={d} iterations={d} " ++
-            "timing_scope=post-handshake-single-outstanding-roundtrip " ++
-            "payload_bytes={d} timeout_ms={d} datagram_limit={d} " ++
+            "timing_scope={s} payload_bytes={d} window={d} total_datagrams={d} " ++
+            "timeout_ms={d} datagram_limit={d} " ++
             "p50_ns={d} p90_ns={d} p99_ns={d} p999_ns={d} mean_ns={d} " ++
             "min_ns={d} max_ns={d} received_bytes={d} checksum={d} " ++
             "completion_exchange_verified=true close_code=59 complete=true\n",
         .{
             implementation,
+            mode(config),
             role_pair,
             clientIo(role_pair),
             serverIo(role_pair),
             config.warmup,
             config.iterations,
+            timingScope(config),
             config.payload_bytes,
+            config.window,
+            config.totalDatagrams() catch unreachable,
             config.timeout_ms,
             datagram_limit,
             percentile(samples, 50, 100),
@@ -407,6 +493,27 @@ fn fillPayload(payload: []u8, sequence: u32) void {
     }
 }
 
+fn verifyWindowPayload(
+    payload: []const u8,
+    first_sequence: u32,
+    config: Config,
+) !u32 {
+    if (payload.len != config.payload_bytes or
+        !std.mem.eql(u8, payload[0..4], payload_magic))
+    {
+        return error.InvalidBenchmarkPayload;
+    }
+    const sequence_u64 = std.mem.readInt(u64, payload[4..12], .big);
+    const sequence = std.math.cast(u32, sequence_u64) orelse
+        return error.InvalidBenchmarkPayload;
+    const end = first_sequence + @as(u32, config.window);
+    if (sequence < first_sequence or sequence >= end) {
+        return error.InvalidBenchmarkPayload;
+    }
+    try verifyPayload(payload, sequence, config.payload_bytes);
+    return sequence;
+}
+
 fn verifyPayload(payload: []const u8, sequence: u32, expected_len: u16) !void {
     if (payload.len != expected_len or
         !std.mem.eql(u8, payload[0..4], payload_magic) or
@@ -423,14 +530,6 @@ fn verifyPayload(payload: []const u8, sequence: u32, expected_len: u16) !void {
 
 fn addChecksum(checksum: *u64, payload: []const u8) void {
     for (payload) |byte| checksum.* +%= byte;
-}
-
-fn receiveDatagram(
-    connection: *netz.quic.one_rtt.Connection,
-    storage: []u8,
-    deadline: std.Io.Clock.Timestamp,
-) ![]u8 {
-    return connection.receiveDatagramWithDeadline(storage, deadline);
 }
 
 fn sendRecord(
@@ -516,4 +615,75 @@ pub fn serverIo(role_pair: []const u8) []const u8 {
         "zio-std-io"
     else
         "quinn-tokio-rustls";
+}
+
+fn mode(config: Config) []const u8 {
+    return if (config.window == 1) "pingpong" else "windowed-pingpong";
+}
+
+fn timingScope(config: Config) []const u8 {
+    return if (config.window == 1)
+        "post-handshake-single-outstanding-roundtrip"
+    else
+        "post-handshake-window-roundtrip";
+}
+
+fn udpBatching(implementation: []const u8, config: Config) []const u8 {
+    if (config.window == 1) return "single-message";
+    return if (std.mem.eql(u8, implementation, "netz"))
+        "gso-send-auto-recvmmsg-receive"
+    else
+        "quinn-runtime-auto";
+}
+
+test "DATAGRAM benchmark config round trips window on the wire" {
+    const config: Config = .{
+        .warmup = 3,
+        .iterations = 5,
+        .payload_bytes = 64,
+        .window = 8,
+        .timeout_ms = 1_000,
+    };
+    try config.validate();
+    try std.testing.expectEqual(@as(u64, 64), try config.totalDatagrams());
+    try std.testing.expectEqual(@as(u64, 4096), try config.totalBytes());
+    const decoded = try Record.decode(&(try Record.init(.config, config).encode()));
+    try std.testing.expectEqual(Kind.config, decoded.kind);
+    try std.testing.expectEqual(config, decoded.config);
+    try std.testing.expectEqual(@as(u64, 0), decoded.received_bytes);
+    try std.testing.expectEqual(@as(u64, 0), decoded.checksum);
+}
+
+test "DATAGRAM benchmark config rejects unsafe windows and wire byte overflow" {
+    try std.testing.expectError(
+        error.InvalidArgument,
+        (Config{ .window = 0 }).validate(),
+    );
+    try std.testing.expectError(
+        error.InvalidArgument,
+        (Config{ .window = max_window + 1 }).validate(),
+    );
+    try std.testing.expectError(
+        error.InvalidArgument,
+        (Config{
+            .warmup = 100_000,
+            .iterations = 1_000_000,
+            .payload_bytes = max_payload,
+            .window = max_window,
+        }).validate(),
+    );
+}
+
+test "DATAGRAM benchmark accepts each sequence once inside a window" {
+    const config: Config = .{ .payload_bytes = 32, .window = 4 };
+    var payload: [32]u8 = undefined;
+    fillPayload(&payload, 42);
+    try std.testing.expectEqual(
+        @as(u32, 42),
+        try verifyWindowPayload(&payload, 40, config),
+    );
+    try std.testing.expectError(
+        error.InvalidBenchmarkPayload,
+        verifyWindowPayload(&payload, 43, config),
+    );
 }

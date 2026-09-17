@@ -3273,10 +3273,12 @@ pub const Connection = struct {
     }
 
     /// Send an ordered batch of unreliable DATAGRAM payloads under one
-    /// absolute awake-clock deadline. Every payload is validated before the
-    /// first packet is emitted. `committed_count` reports only the prefix
-    /// accepted by the socket, even when encryption consumed more packet
-    /// numbers during a partial batch submission.
+    /// absolute awake-clock deadline. Payloads are packed into QUIC packets
+    /// up to the path-MTU and configured frame-count limits. Every payload and
+    /// required packet number is validated before the first packet is emitted.
+    /// `committed_count` reports the logical payload prefix accepted by the
+    /// socket, even when encryption consumed more packet numbers during a
+    /// partial batch submission.
     pub fn sendDatagramsWithTimeout(
         self: *Connection,
         payloads: []const []const u8,
@@ -3331,8 +3333,8 @@ pub const Connection = struct {
     }
 
     /// Submit at most one socket batch of unreliable DATAGRAM payloads. The
-    /// output count is the socket-visible input prefix, including when the
-    /// backend reports an error after accepting some datagrams.
+    /// output count is the socket-visible logical-payload prefix, including
+    /// when the backend reports an error after accepting some packed packets.
     pub fn trySendDatagrams(
         self: *Connection,
         payloads: []const []const u8,
@@ -3349,31 +3351,28 @@ pub const Connection = struct {
         self: Connection,
         payloads: []const []const u8,
     ) Error!void {
-        if (payloads.len != 0) {
-            const last_packet_number = std.math.add(
-                u64,
-                self.next_packet_number,
-                payloads.len - 1,
-            ) catch return error.InvalidPacketNumber;
-            if (last_packet_number > quic.protection.max_packet_number) {
-                return error.InvalidPacketNumber;
-            }
-        }
         for (payloads) |payload| try self.validateDatagramSend(payload);
-        // Include each future packet number in size validation before any
-        // socket submission. A partial socket send returns immediately; a
-        // suffix retry re-enters here with the resulting nonce gap.
-        var frames: [1]quic.Frame = undefined;
-        for (payloads, 0..) |payload, index| {
-            frames[0] = .{ .datagram = .{
-                .data = payload,
-                .length_present = true,
-            } };
-            if (try self.packetLenForFramesAtOffset(index, &frames) >
-                self.currentSendDatagramSize())
-            {
-                return error.DatagramTooLarge;
-            }
+        var payload_offset: usize = 0;
+        var packet_offset: usize = 0;
+        while (payload_offset < payloads.len) {
+            const payload_end = payload_offset +
+                @min(max_batch_packets, payloads.len - payload_offset);
+            var frame_storage: [max_batch_packets]quic.Frame = undefined;
+            var packets: [max_batch_packets][]const quic.Frame = undefined;
+            var packet_payload_ends: [max_batch_packets]usize = undefined;
+            const packet_count = try self.planDatagramPacketPrefix(
+                payloads[payload_offset..payload_end],
+                packet_offset,
+                &frame_storage,
+                &packets,
+                &packet_payload_ends,
+            );
+            payload_offset = payload_end;
+            packet_offset = std.math.add(
+                usize,
+                packet_offset,
+                packet_count,
+            ) catch return error.InvalidPacketNumber;
         }
     }
 
@@ -3384,20 +3383,66 @@ pub const Connection = struct {
     ) Error!void {
         committed_count.* = 0;
         if (payloads.len == 0) return;
-        const batch_len = @min(max_batch_packets, payloads.len);
-        var frame_storage: [max_batch_packets][1]quic.Frame = undefined;
+        var frame_storage: [max_batch_packets]quic.Frame = undefined;
         var packets: [max_batch_packets][]const quic.Frame = undefined;
-        for (payloads[0..batch_len], 0..) |payload, index| {
-            frame_storage[index][0] = .{ .datagram = .{
-                .data = payload,
-                .length_present = true,
-            } };
-            packets[index] = &frame_storage[index];
-        }
-        const result = try self.sendManyProgress(packets[0..batch_len]);
-        committed_count.* = result.sent_count;
-        self.datagrams_sent_count +|= result.sent_count;
+        var packet_payload_ends: [max_batch_packets]usize = undefined;
+        const packet_count = try self.planDatagramPacketPrefix(
+            payloads,
+            0,
+            &frame_storage,
+            &packets,
+            &packet_payload_ends,
+        );
+        const result = try self.sendManyProgress(packets[0..packet_count]);
+        committed_count.* = if (result.sent_count == 0)
+            0
+        else
+            packet_payload_ends[result.sent_count - 1];
+        self.datagrams_sent_count +|= committed_count.*;
         if (result.send_error) |err| return err;
+    }
+
+    fn planDatagramPacketPrefix(
+        self: Connection,
+        payloads: []const []const u8,
+        packet_offset: usize,
+        frame_storage: *[max_batch_packets]quic.Frame,
+        packets: *[max_batch_packets][]const quic.Frame,
+        packet_payload_ends: *[max_batch_packets]usize,
+    ) Error!usize {
+        const payload_limit = @min(max_batch_packets, payloads.len);
+        const packet_frame_limit = @max(
+            @as(usize, 1),
+            @min(max_batch_packets, self.config.max_frames_per_packet),
+        );
+        var payload_index: usize = 0;
+        var packet_count: usize = 0;
+        while (payload_index < payload_limit) {
+            const frame_start = payload_index;
+            var frame_count: usize = 0;
+            while (payload_index < payload_limit and
+                frame_count < packet_frame_limit)
+            {
+                frame_storage[payload_index] = .{ .datagram = .{
+                    .data = payloads[payload_index],
+                    .length_present = true,
+                } };
+                const candidate = frame_storage[frame_start .. payload_index + 1];
+                if (try self.packetLenForFramesAtOffset(
+                    packet_offset + packet_count,
+                    candidate,
+                ) > self.currentSendDatagramSize()) {
+                    if (frame_count == 0) return error.DatagramTooLarge;
+                    break;
+                }
+                payload_index += 1;
+                frame_count += 1;
+            }
+            packets[packet_count] = frame_storage[frame_start..payload_index];
+            packet_payload_ends[packet_count] = payload_index;
+            packet_count += 1;
+        }
+        return packet_count;
     }
 
     /// Perform one DATAGRAM send attempt while bounding any pacing wait.
@@ -3529,6 +3574,63 @@ pub const Connection = struct {
     ) (Error || quic.runtime.ReceiveTimeoutError)![]u8 {
         return self.receiveDatagramUntil(
             out,
+            try deadline_policy.usableAwake(self.endpoint.io, deadline),
+        );
+    }
+
+    /// Fill an arrival-ordered caller-owned batch of application DATAGRAM
+    /// payloads. The transport drains queued payloads first, then consumes
+    /// whole socket receive batches directly into the supplied buffers.
+    /// `received_count` preserves the committed prefix on failure.
+    pub fn receiveDatagrams(
+        self: *Connection,
+        outputs: [][]u8,
+        received_count: *usize,
+    ) Error!void {
+        return datagram_receive.receiveManyUntil(
+            Error,
+            self,
+            outputs,
+            received_count,
+            null,
+        ) catch |err| switch (err) {
+            error.Timeout => unreachable,
+            else => |other| return @errorCast(other),
+        };
+    }
+
+    /// Relative-timeout counterpart to `receiveDatagrams`.
+    pub fn receiveDatagramsWithTimeout(
+        self: *Connection,
+        outputs: [][]u8,
+        received_count: *usize,
+        timeout: std.Io.Duration,
+    ) (Error || quic.runtime.ReceiveTimeoutError)!void {
+        received_count.* = 0;
+        if (timeout.nanoseconds <= 0) return error.Timeout;
+        return self.receiveDatagramsWithDeadline(
+            outputs,
+            received_count,
+            .fromNow(self.endpoint.io, .{
+                .raw = timeout,
+                .clock = .awake,
+            }),
+        );
+    }
+
+    /// Absolute-deadline counterpart to `receiveDatagrams`.
+    pub fn receiveDatagramsWithDeadline(
+        self: *Connection,
+        outputs: [][]u8,
+        received_count: *usize,
+        deadline: std.Io.Clock.Timestamp,
+    ) (Error || quic.runtime.ReceiveTimeoutError)!void {
+        received_count.* = 0;
+        return datagram_receive.receiveManyUntil(
+            Error,
+            self,
+            outputs,
+            received_count,
             try deadline_policy.usableAwake(self.endpoint.io, deadline),
         );
     }
@@ -10774,6 +10876,11 @@ pub const Connection = struct {
         if (callerDeadlineExpired(caller_deadline, first_now_ns)) {
             return error.Timeout;
         }
+        if (self.datagram_receive_target != null) {
+            return self.serviceApplicationDatagramReceiveBatchUntil(
+                caller_deadline,
+            );
+        }
         const receive_storage = try self.stateOnlyBatchReceiveStorage();
         while (true) {
             var datagrams = try self.receiveDatagramBatchServicingTimersUntil(
@@ -10802,6 +10909,106 @@ pub const Connection = struct {
             }
             return completed;
         }
+    }
+
+    fn serviceApplicationDatagramReceiveBatchUntil(
+        self: *Connection,
+        caller_deadline: ?std.Io.Clock.Timestamp,
+    ) (Error || quic.runtime.ReceiveTimeoutError)!usize {
+        if (self.endpoint.groReceiveEnabled()) {
+            const receive_storage = try self.stateOnlyBatchReceiveStorage();
+            while (true) {
+                var datagrams = try self.receiveDatagramBatchServicingTimersUntil(
+                    caller_deadline,
+                    receive_storage,
+                );
+                defer datagrams.deinit(self.endpoint.allocator);
+                var view = datagrams.view();
+                const completed = try self
+                    .processApplicationDatagramBatchView(&view);
+                if (completed != 0) return completed;
+            }
+        }
+        while (true) {
+            const target = self.datagram_receive_target orelse
+                return error.Unexpected;
+            const remaining = target.outputs.len - target.delivered_count;
+            if (remaining == 0) return 0;
+            const batch_len = @min(
+                remaining,
+                quic.runtime.max_receive_batch_messages,
+            );
+            const required = std.math.mul(
+                usize,
+                self.endpoint.limits.max_datagram_size,
+                batch_len,
+            ) catch return error.BufferTooShort;
+            try self.scratch.receive_packet.ensureTotalCapacity(
+                self.endpoint.allocator,
+                required,
+            );
+            var received: [quic.runtime.max_receive_batch_messages]quic.runtime.ReceivedBytesView = undefined;
+            const count = try self.receiveDatagramsIntoServicingTimersUntil(
+                self.scratch.receive_packet.allocatedSlice()[0..required],
+                received[0..batch_len],
+                caller_deadline,
+            );
+            var ack: BatchAckObservation = .{
+                .largest_packet_number = self.received.largestReceived(),
+                .reordering_threshold = self.ack_reordering_threshold,
+            };
+            var completed: usize = 0;
+            for (received[0..count]) |datagram| {
+                var batch: quic.runtime.ReceivedBytesBatchView = .{
+                    .from = datagram.from,
+                    .received_on = datagram.received_on,
+                    .storage = datagram.bytes,
+                    .segment_size = datagram.bytes.len,
+                    .segment_count = 1,
+                    .ecn = datagram.ecn,
+                };
+                completed += try self.processReceivedDatagramBatchVisitingAt(
+                    &batch,
+                    self.monotonicNowNs(),
+                    &ack,
+                    BatchAckObservation.observe,
+                );
+            }
+            if (completed == 0) continue;
+            _ = try self.retransmitPacketThresholdLosses(max_batch_packets);
+            if (ack.ack_eliciting_count != 0) {
+                _ = self.sendAckForObservedPacketMetadata(
+                    ack.ack_eliciting_count,
+                    ack.reordered,
+                ) catch {};
+            }
+            return completed;
+        }
+    }
+
+    fn processApplicationDatagramBatchView(
+        self: *Connection,
+        datagrams: *quic.runtime.ReceivedBytesBatchView,
+    ) Error!usize {
+        var ack: BatchAckObservation = .{
+            .largest_packet_number = self.received.largestReceived(),
+            .reordering_threshold = self.ack_reordering_threshold,
+        };
+        const completed = try self.processReceivedDatagramBatchVisitingAt(
+            datagrams,
+            self.monotonicNowNs(),
+            &ack,
+            BatchAckObservation.observe,
+        );
+        if (completed == 0) return 0;
+        _ = try self.retransmitPacketThresholdLosses(max_batch_packets);
+        if (ack.ack_eliciting_count != 0) {
+            _ = self.sendAckForObservedPacketMetadata(
+                ack.ack_eliciting_count,
+                ack.reordered,
+            ) catch {};
+        }
+        return completed;
     }
 
     /// Receive one ordinary UDP datagram and apply it without returning owned
@@ -15550,6 +15757,13 @@ pub const testing = struct {
 
     pub fn nextPacketNumber(connection: *const Connection) u64 {
         return connection.next_packet_number;
+    }
+
+    pub fn setNextPacketNumber(
+        connection: *Connection,
+        packet_number: u64,
+    ) void {
+        connection.next_packet_number = packet_number;
     }
 
     pub fn ackFrequencyReceiveNextSequence(
