@@ -3693,6 +3693,135 @@ def outgoing_inflight_payload_bytes(executable: Path, mqtt_packets) -> None:
                 subscriber.sendall(mqtt_packets.gen_disconnect(proto_ver=proto_ver))
 
 
+def outgoing_qos2_inflight_payload_bytes(executable: Path, mqtt_packets) -> None:
+    # Direct bounded port of Mosquitto 02-subpub-qos2-max-inflight-bytes.py.
+    # PUBREC releases Receive Maximum credit, but the QoS 2 payload must keep
+    # consuming the broker's byte budget through PUBREL until PUBCOMP.
+    topic = "subpub/qos2/inflight-bytes"
+    with NetzBroker(
+        executable,
+        connections=2,
+        extra_args=("--max-session-inflight-payload-bytes=10",),
+    ) as broker:
+        with broker.connect() as subscriber, broker.connect() as publisher:
+            subscriber.sendall(mqtt_packets.gen_connect(
+                "qos2-inflight-bytes-sub", clean_session=False,
+                proto_ver=5, session_expiry=60,
+            ))
+            connack = read_packet(subscriber)
+            if connack[0] != 0x20 or connack[2] != 0 or connack[3] != 0:
+                raise AssertionError(
+                    "invalid QoS2 inflight-bytes CONNACK: " + connack.hex()
+                )
+            subscriber.sendall(
+                mqtt_packets.gen_subscribe(1, topic, 2, proto_ver=5)
+            )
+            expect_packet(
+                subscriber, mqtt_packets.gen_suback(1, 2, proto_ver=5),
+                "QoS2 inflight-bytes SUBACK",
+            )
+            connect_v5(publisher, mqtt_packets, "qos2-inflight-bytes-pub")
+
+            next_delivery_id = 1
+            for cycle in range(4):
+                publisher_ids = range(cycle * 3 + 1, cycle * 3 + 4)
+                payloads = ("123456", "789012", "third")
+                for publisher_id, payload in zip(publisher_ids, payloads):
+                    publisher.sendall(mqtt_packets.gen_publish(
+                        topic, qos=2, mid=publisher_id, payload=payload,
+                        proto_ver=5,
+                    ))
+                    expect_packet(
+                        publisher, mqtt_packets.gen_pubrec(
+                            publisher_id, proto_ver=5
+                        ),
+                        f"QoS2 byte publisher PUBREC {publisher_id}",
+                    )
+                    publisher.sendall(mqtt_packets.gen_pubrel(
+                        publisher_id, proto_ver=5
+                    ))
+                    expect_packet(
+                        publisher, mqtt_packets.gen_pubcomp(
+                            publisher_id, proto_ver=5
+                        ),
+                        f"QoS2 byte publisher PUBCOMP {publisher_id}",
+                    )
+
+                first_ids = (next_delivery_id, next_delivery_id + 1)
+                for delivery_id, payload in zip(first_ids, payloads[:2]):
+                    expect_packet(
+                        subscriber, mqtt_packets.gen_publish(
+                            topic, qos=2, mid=delivery_id, payload=payload,
+                            proto_ver=5,
+                        ),
+                        f"QoS2 byte first window {cycle}/{delivery_id}",
+                    )
+                subscriber.settimeout(0.05)
+                try:
+                    unexpected = subscriber.recv(1)
+                    if unexpected:
+                        raise AssertionError(
+                            "QoS2 byte window leaked third PUBLISH: "
+                            + unexpected.hex()
+                        )
+                except socket.timeout:
+                    pass
+                finally:
+                    subscriber.settimeout(5)
+
+                first_id, second_id = first_ids
+                subscriber.sendall(mqtt_packets.gen_pubrec(
+                    first_id, proto_ver=5
+                ))
+                expect_packet(
+                    subscriber, mqtt_packets.gen_pubrel(
+                        first_id, proto_ver=5
+                    ),
+                    f"QoS2 byte PUBREL {cycle}/{first_id}",
+                )
+                subscriber.settimeout(0.05)
+                try:
+                    unexpected = subscriber.recv(1)
+                    if unexpected:
+                        raise AssertionError(
+                            "QoS2 byte credit released before PUBCOMP: "
+                            + unexpected.hex()
+                        )
+                except socket.timeout:
+                    pass
+                finally:
+                    subscriber.settimeout(5)
+
+                subscriber.sendall(mqtt_packets.gen_pubcomp(
+                    first_id, proto_ver=5
+                ))
+                third_id = next_delivery_id + 2
+                expect_packet(
+                    subscriber, mqtt_packets.gen_publish(
+                        topic, qos=2, mid=third_id, payload=payloads[2],
+                        proto_ver=5,
+                    ),
+                    f"QoS2 byte released delivery {cycle}/{third_id}",
+                )
+                for delivery_id in (second_id, third_id):
+                    subscriber.sendall(mqtt_packets.gen_pubrec(
+                        delivery_id, proto_ver=5
+                    ))
+                    expect_packet(
+                        subscriber, mqtt_packets.gen_pubrel(
+                            delivery_id, proto_ver=5
+                        ),
+                        f"QoS2 byte PUBREL {cycle}/{delivery_id}",
+                    )
+                    subscriber.sendall(mqtt_packets.gen_pubcomp(
+                        delivery_id, proto_ver=5
+                    ))
+                next_delivery_id += 3
+
+            publisher.sendall(mqtt_packets.gen_disconnect(proto_ver=5))
+            subscriber.sendall(mqtt_packets.gen_disconnect(proto_ver=5))
+
+
 def acknowledgement_length_forms(
     executable: Path, mqtt_packets, mqtt5_props
 ) -> None:
@@ -6001,6 +6130,7 @@ def main() -> None:
     offline_qos0_queue_policy(args.broker, mqtt_packets, mqtt5_props)
     offline_queued_payload_bytes(args.broker, mqtt_packets)
     outgoing_inflight_payload_bytes(args.broker, mqtt_packets)
+    outgoing_qos2_inflight_payload_bytes(args.broker, mqtt_packets)
     acknowledgement_length_forms(args.broker, mqtt_packets, mqtt5_props)
     outgoing_qos2_reconnect_stages(args.broker, mqtt_packets, mqtt5_props)
     incoming_qos2_disconnect_recovery(
@@ -6089,7 +6219,7 @@ def main() -> None:
         args.broker, mqtt_packets, mqtt5_props
     )
     print(
-        "Mosquitto-derived MQTT wire vectors passed: 145 scenarios "
+        "Mosquitto-derived MQTT wire vectors passed: 146 scenarios "
         "with 5000 ms CONNECT deadlines"
     )
 

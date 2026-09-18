@@ -1419,6 +1419,75 @@ test "session inflight payload bytes gate queue drain" {
     try std.testing.expectEqual(@as(usize, 0), stats.queued_payload_bytes);
 }
 
+test "session QoS2 inflight bytes remain charged through PUBCOMP" {
+    const allocator = std.testing.allocator;
+    var store = Store.init(allocator, .{
+        .max_queued_per_session = 16,
+        .max_inflight_per_session = 16,
+        .max_inflight_payload_bytes_per_session = 10,
+    });
+    defer store.deinit();
+    const opened = try store.open("qos2-inflight-bytes", false, 60, .zero);
+    for ([_][]const u8{ "123456", "789012", "third" }) |payload| {
+        _ = try store.enqueuePublish(
+            opened.handle,
+            "qos2/inflight/value",
+            payload,
+            .{ .qos = .exactly_once, .now = .zero },
+        );
+    }
+
+    var transmissions: [3]Transmission = undefined;
+    const first = try store.drainInto(
+        opened.handle,
+        .zero,
+        5,
+        &transmissions,
+    );
+    try std.testing.expectEqual(@as(usize, 2), first.len);
+    const first_id = first[0].publish.packet_id;
+    try std.testing.expectEqual(
+        session.AckAction.send_pubrel,
+        try store.handleAck(opened.handle, .pubrec, first_id, 0),
+    );
+
+    const pubrel = try store.drainInto(
+        opened.handle,
+        .zero,
+        5,
+        &transmissions,
+    );
+    try std.testing.expectEqual(@as(usize, 1), pubrel.len);
+    try std.testing.expect(pubrel[0] == .pubrel);
+    try std.testing.expectEqual(first_id, pubrel[0].pubrel.packet_id);
+    try std.testing.expectEqual(
+        @as(usize, 0),
+        (try store.drainInto(
+            opened.handle,
+            .zero,
+            5,
+            &transmissions,
+        )).len,
+    );
+
+    try std.testing.expectEqual(
+        session.AckAction.completed,
+        try store.handleAck(opened.handle, .pubcomp, first_id, 0),
+    );
+    const third = try store.drainInto(
+        opened.handle,
+        .zero,
+        5,
+        &transmissions,
+    );
+    try std.testing.expectEqual(@as(usize, 1), third.len);
+    try std.testing.expectEqualStrings("third", third[0].publish.payload);
+    const stats = try store.stats(opened.handle);
+    try std.testing.expectEqual(@as(usize, 0), stats.queued_count);
+    try std.testing.expectEqual(@as(usize, 2), stats.inflight_count);
+    try std.testing.expectEqual(@as(usize, 11), stats.inflight_payload_bytes);
+}
+
 test "session allocation failures leak nothing" {
     try std.testing.checkAllAllocationFailures(
         std.testing.allocator,
