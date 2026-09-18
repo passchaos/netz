@@ -883,6 +883,16 @@ pub const Settings = struct {
         if (self.qpack_blocked_streams > max_supported_qpack_blocked_streams) {
             return error.QpackDynamicTableUnsupported;
         }
+        if (self.qpack_max_table_capacity > quic.varint.max_value or
+            (self.max_field_section_size != std.math.maxInt(u64) and
+                self.max_field_section_size > quic.varint.max_value) or
+            self.webtransport_max_sessions > quic.varint.max_value or
+            self.webtransport_initial_max_data > quic.varint.max_value or
+            self.webtransport_initial_max_streams_uni > quic.varint.max_value or
+            self.webtransport_initial_max_streams_bidi > quic.varint.max_value)
+        {
+            return error.InvalidSetting;
+        }
         if (std.math.cast(usize, self.qpack_max_table_capacity) == null) {
             return error.InvalidSetting;
         }
@@ -6266,6 +6276,62 @@ test "HTTP/3 typed settings state tracks negotiation" {
     try std.testing.expectError(error.QpackDynamicTableUnsupported, (Settings{
         .qpack_blocked_streams = 129,
     }).writePayload(&default_payload, allocator));
+    const beyond_varint = @as(u64, quic.varint.max_value) + 1;
+    inline for (.{
+        Settings{ .qpack_max_table_capacity = beyond_varint },
+        Settings{ .max_field_section_size = beyond_varint },
+        Settings{ .webtransport_max_sessions = beyond_varint },
+        Settings{ .webtransport_initial_max_data = beyond_varint },
+        Settings{ .webtransport_initial_max_streams_uni = beyond_varint },
+        Settings{ .webtransport_initial_max_streams_bidi = beyond_varint },
+    }) |invalid| {
+        try std.testing.expectError(
+            error.InvalidSetting,
+            invalid.writePayload(&default_payload, allocator),
+        );
+        try std.testing.expectEqual(@as(usize, 0), default_payload.items.len);
+    }
+    const maximum_qpack_capacity = @min(
+        @as(u64, quic.varint.max_value),
+        std.math.maxInt(usize),
+    );
+    const maximum = Settings{
+        .qpack_max_table_capacity = maximum_qpack_capacity,
+        .max_field_section_size = quic.varint.max_value,
+        .webtransport_max_sessions = quic.varint.max_value,
+        .webtransport_initial_max_data = quic.varint.max_value,
+        .webtransport_initial_max_streams_uni = quic.varint.max_value,
+        .webtransport_initial_max_streams_bidi = quic.varint.max_value,
+    };
+    default_payload.clearRetainingCapacity();
+    try maximum.writePayload(&default_payload, allocator);
+    const maximum_raw = try parseSettings(allocator, default_payload.items);
+    defer allocator.free(maximum_raw);
+    const maximum_decoded = Settings.fromList(maximum_raw);
+    try std.testing.expectEqual(
+        maximum.qpack_max_table_capacity,
+        maximum_decoded.qpack_max_table_capacity,
+    );
+    try std.testing.expectEqual(
+        maximum.max_field_section_size,
+        maximum_decoded.max_field_section_size,
+    );
+    try std.testing.expectEqual(
+        maximum.webtransport_max_sessions,
+        maximum_decoded.webtransport_max_sessions,
+    );
+    try std.testing.expectEqual(
+        maximum.webtransport_initial_max_data,
+        maximum_decoded.webtransport_initial_max_data,
+    );
+    try std.testing.expectEqual(
+        maximum.webtransport_initial_max_streams_uni,
+        maximum_decoded.webtransport_initial_max_streams_uni,
+    );
+    try std.testing.expectEqual(
+        maximum.webtransport_initial_max_streams_bidi,
+        maximum_decoded.webtransport_initial_max_streams_bidi,
+    );
 
     const local = Settings{
         .max_field_section_size = 32 * 1024,

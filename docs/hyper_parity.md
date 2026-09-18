@@ -1225,6 +1225,14 @@ copying it. A warmed retained-scratch regression uses a failing allocator to
 prove compressed never-indexed fields need no transient allocation. Three
 pinned ReleaseFast HPACK runs measured 261-265 ns for stateful encode-only,
 down from 316-319 ns immediately before this change.
+HTTP/3 local SETTINGS validation also rejects every configured numeric value
+that cannot be encoded as a 62-bit QUIC varint; the default
+`max_field_section_size = u64::max` remains the intentional omitted-setting
+sentinel. Handshake session construction applies this before binding or
+connecting UDP and now consistently rejects a QPACK blocked-stream limit above
+the runtime's concurrent request-stream capacity. Codec boundary tests cover
+all six numeric SETTINGS fields and the maximum legal varint, with QPACK table
+capacity additionally bounded by the platform's addressable `usize` range.
 The runtime owning decode path first replaced per-field Huffman/dynamic output
 allocations with a stack-staged byte sequence, a descriptor array and one
 shared contiguous string block. Offset-based plans keep slices valid while

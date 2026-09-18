@@ -5417,10 +5417,6 @@ pub const HandshakeServer = struct {
         if (options.serve_connection_recovery_drain_timeout.nanoseconds <= 0) {
             return error.InvalidHandshakeRecovery;
         }
-        try validateBlockedStreamLimit(
-            options.session.local_settings,
-            options.session.max_concurrent_request_streams,
-        );
         var quic_server = try quic.runtime.Server.bind(allocator, io, bind_address, limits.quic);
         errdefer quic_server.deinit();
 
@@ -5848,10 +5844,7 @@ pub const HandshakeServerSession = struct {
         options: HandshakeSessionOptions,
         transport: quic.handshake.PreconfiguredConnectionOptions,
     ) Error!HandshakeServerSession {
-        try validateBlockedStreamLimit(
-            options.local_settings,
-            options.max_concurrent_request_streams,
-        );
+        try validateHandshakeSessionOptions(options);
         var established = try quic.handshake.establishPreconfigured(
             endpoint,
             peer,
@@ -10827,10 +10820,6 @@ pub const HandshakeClient = struct {
         accepted_early_request: ?*const PreparedEarlyRequest,
     ) Error!HandshakeClient {
         try validateHandshakeSessionOptions(options.session);
-        try validateBlockedStreamLimit(
-            options.session.local_settings,
-            options.session.max_concurrent_request_streams,
-        );
         const endpoint = try allocator.create(quic.runtime.Endpoint);
         errdefer allocator.destroy(endpoint);
         endpoint.* = try quic.runtime.Endpoint.bind(allocator, io, local_address, limits.quic);
@@ -10924,10 +10913,6 @@ pub const HandshakeClient = struct {
         deadline: ?std.Io.Clock.Timestamp,
     ) Error!HandshakeClient {
         try validateHandshakeSessionOptions(options.session);
-        try validateBlockedStreamLimit(
-            options.session.local_settings,
-            options.session.max_concurrent_request_streams,
-        );
         var established = if (deadline) |absolute|
             try quic.handshake.connectFromWithDeadline(
                 endpoint,
@@ -10967,10 +10952,6 @@ pub const HandshakeClient = struct {
         options: HandshakeSessionOptions,
     ) Error!HandshakeClient {
         try validateHandshakeSessionOptions(options);
-        try validateBlockedStreamLimit(
-            options.local_settings,
-            options.max_concurrent_request_streams,
-        );
         if (established.connection.endpoint != endpoint) {
             return error.InvalidTransportParameter;
         }
@@ -11121,10 +11102,6 @@ pub const HandshakeClient = struct {
         transport: quic.handshake.PreconfiguredConnectionOptions,
     ) Error!HandshakeClient {
         try validateHandshakeSessionOptions(options);
-        try validateBlockedStreamLimit(
-            options.local_settings,
-            options.max_concurrent_request_streams,
-        );
         const endpoint = try allocator.create(quic.runtime.Endpoint);
         errdefer allocator.destroy(endpoint);
         endpoint.* = try quic.runtime.Endpoint.bind(
@@ -22999,6 +22976,10 @@ fn validateProtectedConfig(config: ProtectedConfig) Error!void {
 
 fn validateHandshakeSessionOptions(options: HandshakeSessionOptions) Error!void {
     if (options.max_priority_updates == 0) return error.InvalidSetting;
+    try validateBlockedStreamLimit(
+        options.local_settings,
+        options.max_concurrent_request_streams,
+    );
     try receive_policy.validateMaxDatagrams(
         options.max_receive_batch_datagrams,
     );
@@ -23011,6 +22992,56 @@ fn applyResponseReaderSemantics(
 ) void {
     const options = lifecycle.responseDecodeOptions(stream_id);
     reader.applyResponseSemantics(options);
+}
+
+test "HTTP/3 handshake options reject invalid SETTINGS before I/O" {
+    const allocator = std.testing.allocator;
+    var threaded = std.Io.Threaded.init(allocator, .{});
+    defer threaded.deinit();
+    const io = threaded.io();
+    const unreachable_server = net.IpAddress{ .ip4 = .loopback(443) };
+    const invalid_settings = http3.Settings{
+        .qpack_max_table_capacity = @as(u64, quic.varint.max_value) + 1,
+    };
+
+    try std.testing.expectError(
+        error.InvalidSetting,
+        HandshakeServer.bind(
+            allocator,
+            io,
+            .{ .ip4 = .loopback(0) },
+            .{},
+            .{
+                .handshake = .{ .local_connection_id = "server" },
+                .session = .{ .local_settings = invalid_settings },
+            },
+        ),
+    );
+    try std.testing.expectError(
+        error.InvalidSetting,
+        HandshakeClient.connect(
+            allocator,
+            io,
+            .{ .ip4 = .loopback(0) },
+            unreachable_server,
+            .{},
+            .{
+                .handshake = .{
+                    .original_destination_connection_id = "12345678",
+                    .local_connection_id = "client",
+                    .server_name = "localhost",
+                },
+                .session = .{ .local_settings = invalid_settings },
+            },
+        ),
+    );
+    try std.testing.expectError(
+        error.QpackDynamicTableUnsupported,
+        validateHandshakeSessionOptions(.{
+            .local_settings = .{ .qpack_blocked_streams = 2 },
+            .max_concurrent_request_streams = 1,
+        }),
+    );
 }
 
 const sendConnectionFrames = body_sender.sendConnectionFrames;
