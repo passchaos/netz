@@ -2825,9 +2825,7 @@ pub const Connection = struct {
                     if (auth_rounds > 64) {
                         return error.AuthenticationInProgress;
                     }
-                    var auth = try mqtt.Auth.parse(
-                        allocator,
-                        self.protocol,
+                    var auth = try self.parseIncomingAuth(
                         packet.bytes,
                     );
                     defer auth.deinit(allocator);
@@ -3943,6 +3941,7 @@ pub const Connection = struct {
     }
 
     pub fn writeAuth(self: *Connection, reason_code: u8, properties: []const mqtt.Property) Error!void {
+        try self.validateOutgoingAuthReason(reason_code);
         self.write_property_scratch.clearRetainingCapacity();
         const outgoing_properties = try self.outgoingProblemProperties(
             &self.write_property_scratch,
@@ -3966,6 +3965,47 @@ pub const Connection = struct {
             outgoing_properties,
         );
         try self.writePacket(self.write_scratch.items);
+    }
+
+    fn validateOutgoingAuthReason(
+        self: *const Connection,
+        reason_code: u8,
+    ) Error!void {
+        switch (self.endpoint_role) {
+            .unestablished => {},
+            .client => try mqtt.validateAuthReasonForSender(
+                reason_code,
+                .client,
+            ),
+            .server => try mqtt.validateAuthReasonForSender(
+                reason_code,
+                .server,
+            ),
+        }
+    }
+
+    fn parseIncomingAuth(
+        self: *const Connection,
+        packet: []const u8,
+    ) Error!mqtt.Auth {
+        var auth = try mqtt.Auth.parse(
+            self.allocator,
+            self.protocol,
+            packet,
+        );
+        errdefer auth.deinit(self.allocator);
+        switch (self.endpoint_role) {
+            .unestablished => {},
+            .client => try mqtt.validateAuthReasonForSender(
+                auth.reason_code,
+                .server,
+            ),
+            .server => try mqtt.validateAuthReasonForSender(
+                auth.reason_code,
+                .client,
+            ),
+        }
+        return auth;
     }
 
     /// Apply the CONNECT Request Problem Information preference to outbound
@@ -4011,6 +4051,7 @@ pub const Connection = struct {
         self: *Connection,
         data: []const u8,
     ) Error!void {
+        try self.validateOutgoingAuthReason(0x19);
         const method = self.authentication.method orelse
             return error.AuthenticationNotConfigured;
         const properties = [_]mqtt.Property{
@@ -4040,6 +4081,7 @@ pub const Connection = struct {
         self: *Connection,
         properties: []const mqtt.Property,
     ) Error!void {
+        try self.validateOutgoingAuthReason(0x19);
         const previous_phase = self.authentication.phase;
         try self.authentication.beginReauthentication(properties);
         self.writeAuth(0x19, properties) catch |err| {
@@ -4194,8 +4236,7 @@ pub const Connection = struct {
         var packet = try self.readPacket();
         errdefer packet.deinit(self.allocator);
         if (packet.fixed.packet_type != .auth) return error.UnexpectedPacket;
-        var auth_packet = try mqtt.Auth.parse(self.allocator, self.protocol, packet.bytes);
-        errdefer auth_packet.deinit(self.allocator);
+        const auth_packet = try self.parseIncomingAuth(packet.bytes);
         return .{ .packet = packet, .auth = auth_packet };
     }
 
@@ -4285,12 +4326,9 @@ pub const Connection = struct {
         errdefer packet.deinit(self.allocator);
         return switch (packet.fixed.packet_type) {
             .auth => blk: {
-                var value = try mqtt.Auth.parse(
-                    self.allocator,
-                    self.protocol,
+                const value = try self.parseIncomingAuth(
                     packet.bytes,
                 );
-                errdefer value.deinit(self.allocator);
                 break :blk .{ .auth = .{
                     .packet = packet,
                     .auth = value,
@@ -4379,12 +4417,9 @@ pub const Connection = struct {
     ) Error!BrokerEvent {
         return switch (packet.fixed.packet_type) {
             .auth => blk: {
-                var value = try mqtt.Auth.parse(
-                    self.allocator,
-                    self.protocol,
+                const value = try self.parseIncomingAuth(
                     packet.bytes,
                 );
-                errdefer value.deinit(self.allocator);
                 break :blk .{ .auth = .{
                     .packet = packet,
                     .auth = value,
@@ -6725,6 +6760,54 @@ test "MQTT runtime validates DISCONNECT state and sender direction" {
     try server.validateIncomingDisconnect(.{
         .properties = @constCast(&nonzero_expiry),
     });
+}
+
+test "MQTT runtime validates AUTH reason sender direction" {
+    const allocator = std.testing.allocator;
+    var encoded: std.ArrayList(u8) = .empty;
+    defer encoded.deinit(allocator);
+
+    var client = Connection{
+        .allocator = allocator,
+        .transport = undefined,
+        .protocol = .v5,
+        .endpoint_role = .client,
+    };
+    try client.validateOutgoingAuthReason(0x18);
+    try std.testing.expectError(
+        error.InvalidReasonCode,
+        client.writeAuth(0x00, &.{}),
+    );
+    try mqtt.Auth.write(&encoded, allocator, .v5, 0x19, &.{});
+    try std.testing.expectError(
+        error.InvalidReasonCode,
+        client.parseIncomingAuth(encoded.items),
+    );
+
+    encoded.clearRetainingCapacity();
+    var server = Connection{
+        .allocator = allocator,
+        .transport = undefined,
+        .protocol = .v5,
+        .endpoint_role = .server,
+    };
+    try server.validateOutgoingAuthReason(0x00);
+    try std.testing.expectError(
+        error.InvalidReasonCode,
+        server.writeAuth(0x19, &.{}),
+    );
+    try mqtt.Auth.write(&encoded, allocator, .v5, 0x00, &.{});
+    try std.testing.expectError(
+        error.InvalidReasonCode,
+        server.parseIncomingAuth(encoded.items),
+    );
+
+    encoded.clearRetainingCapacity();
+    try mqtt.Auth.write(&encoded, allocator, .v5, 0x18, &.{});
+    var client_continue = try client.parseIncomingAuth(encoded.items);
+    client_continue.deinit(allocator);
+    var server_continue = try server.parseIncomingAuth(encoded.items);
+    server_continue.deinit(allocator);
 }
 
 test "MQTT runtime enforces incoming maximum packet size on full frame" {

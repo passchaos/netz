@@ -1564,7 +1564,16 @@ test "MQTT reconnect poll automatically continues live reauthentication" {
             pending_owned = false;
             defer accepted.deinit(self.server.allocator);
 
-            try accepted.connection.beginReauthentication("server-step");
+            var initial = try accepted.connection.acceptReauthentication();
+            defer initial.deinit(self.server.allocator);
+            try std.testing.expectEqualStrings(
+                "client-first",
+                mqtt.authenticationData(initial.auth.properties).?,
+            );
+            try accepted.connection.continueReauthentication(
+                0x18,
+                "server-step",
+            );
             var response =
                 try accepted.connection.receiveReauthentication();
             defer response.auth.deinit(self.server.allocator);
@@ -1651,6 +1660,16 @@ test "MQTT reconnect poll automatically continues live reauthentication" {
 
     var connected = (try client.pollWithTimeout(.fromSeconds(1))).?;
     defer connected.deinit(allocator);
+    try client.beginReauthentication(&.{
+        .{ .utf8 = .{
+            .id = .authentication_method,
+            .value = method,
+        } },
+        .{ .binary = .{
+            .id = .authentication_data,
+            .value = "client-first",
+        } },
+    });
     var challenge = (try client.pollWithTimeout(.fromSeconds(1))).?;
     defer challenge.deinit(allocator);
     try std.testing.expect(challenge == .auth);
@@ -1702,7 +1721,12 @@ test "MQTT reconnect poll requires a reauthentication handler" {
             var accepted = try pending.finish(.{ .protocol = .v5 });
             pending_owned = false;
             defer accepted.deinit(self.server.allocator);
-            try accepted.connection.beginReauthentication("challenge");
+            var initial = try accepted.connection.acceptReauthentication();
+            defer initial.deinit(self.server.allocator);
+            try accepted.connection.continueReauthentication(
+                0x18,
+                "challenge",
+            );
         }
     };
     var shared = Shared{ .server = &server };
@@ -1732,6 +1756,16 @@ test "MQTT reconnect poll requires a reauthentication handler" {
     defer client.deinit();
     var connected = (try client.pollWithTimeout(.fromSeconds(1))).?;
     defer connected.deinit(allocator);
+    try client.beginReauthentication(&.{
+        .{ .utf8 = .{
+            .id = .authentication_method,
+            .value = "mirror",
+        } },
+        .{ .binary = .{
+            .id = .authentication_data,
+            .value = "client-first",
+        } },
+    });
     try std.testing.expectError(
         error.AuthenticationNotConfigured,
         client.pollWithTimeout(.fromSeconds(1)),

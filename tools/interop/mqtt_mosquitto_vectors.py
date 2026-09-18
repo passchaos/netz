@@ -1408,6 +1408,36 @@ def reject_client_server_only_disconnect_reason(
             healthy.sendall(mqtt_packets.gen_disconnect(proto_ver=5))
 
 
+def reject_client_auth_success(
+    executable: Path, mqtt_packets, mqtt5_rc
+) -> None:
+    # MQTT 5 Table 3-11 reserves AUTH Success for the Server. A Client-sent
+    # Success is a Protocol Error even when the packet is otherwise valid.
+    with NetzBroker(
+        executable, connections=2, ignore_errors=True
+    ) as broker:
+        with broker.connect() as invalid:
+            connect_v5(invalid, mqtt_packets, "invalid-auth-sender")
+            invalid.sendall(mqtt_packets.gen_auth(
+                reason_code=0, properties=""
+            ))
+            expect_packet(
+                invalid, mqtt_packets.gen_disconnect(
+                    reason_code=mqtt5_rc.PROTOCOL_ERROR, proto_ver=5
+                ),
+                "client-sent AUTH Success",
+            )
+
+        with broker.connect() as healthy:
+            connect_v5(healthy, mqtt_packets, "after-invalid-auth-sender")
+            healthy.sendall(mqtt_packets.gen_pingreq())
+            expect_packet(
+                healthy, mqtt_packets.gen_pingresp(),
+                "healthy PINGRESP after invalid AUTH sender",
+            )
+            healthy.sendall(mqtt_packets.gen_disconnect(proto_ver=5))
+
+
 def persistent_session_expiry_cap(
     executable: Path, mqtt_packets, mqtt5_props
 ) -> None:
@@ -6383,6 +6413,7 @@ def main() -> None:
     reject_client_server_only_disconnect_reason(
         args.broker, mqtt_packets, mqtt5_rc
     )
+    reject_client_auth_success(args.broker, mqtt_packets, mqtt5_rc)
     persistent_session_expiry_cap(
         args.broker, mqtt_packets, mqtt5_props
     )
@@ -6390,7 +6421,7 @@ def main() -> None:
         args.broker, mqtt_packets, mqtt5_props
     )
     print(
-        "Mosquitto-derived MQTT wire vectors passed: 152 scenarios "
+        "Mosquitto-derived MQTT wire vectors passed: 153 scenarios "
         "with 5000 ms CONNECT deadlines"
     )
 

@@ -2372,6 +2372,22 @@ fn validateAuthReason(code: u8) Error!void {
     }
 }
 
+pub const AuthSender = enum { client, server };
+
+/// Validate the endpoint direction from MQTT 5 Table 3-11. Success is a
+/// server result, Continue Authentication is bidirectional, and only a Client
+/// may initiate Re-authentication.
+pub fn validateAuthReasonForSender(
+    code: u8,
+    sender: AuthSender,
+) Error!void {
+    try validateAuthReason(code);
+    switch (sender) {
+        .client => if (code == 0x00) return error.InvalidReasonCode,
+        .server => if (code == 0x19) return error.InvalidReasonCode,
+    }
+}
+
 fn validateAuthProperties(properties: []const Property) Error!void {
     try validatePropertiesFor(.auth, properties);
 }
@@ -4290,6 +4306,21 @@ test "MQTT v5 AUTH control" {
     try std.testing.expectError(error.InvalidProperty, Auth.write(&encoded, allocator, .v5, 0x18, &.{
         .{ .two_byte = .{ .id = .receive_maximum, .value = 10 } },
     }));
+}
+
+test "MQTT AUTH reason codes enforce sender direction" {
+    try validateAuthReasonForSender(0x00, .server);
+    try std.testing.expectError(
+        error.InvalidReasonCode,
+        validateAuthReasonForSender(0x00, .client),
+    );
+    try validateAuthReasonForSender(0x18, .client);
+    try validateAuthReasonForSender(0x18, .server);
+    try validateAuthReasonForSender(0x19, .client);
+    try std.testing.expectError(
+        error.InvalidReasonCode,
+        validateAuthReasonForSender(0x19, .server),
+    );
 }
 
 test "MQTT DISCONNECT and AUTH writers reuse output capacity" {
