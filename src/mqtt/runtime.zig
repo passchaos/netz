@@ -2239,6 +2239,7 @@ pub const Connection = struct {
     protocol: mqtt.ProtocolVersion = .v5,
     endpoint_role: EndpointRole = .unestablished,
     connect_session_expiry: u32 = 0,
+    unsupported_connect_level: ?u8 = null,
     limits: Limits = .{},
     next_packet_id: u16 = 1,
     outgoing_inflight: u16 = 0,
@@ -2625,10 +2626,15 @@ pub const Connection = struct {
         if (options.traffic_counters) |counters| {
             self.attachTrafficCounters(counters);
         }
-        var connect = if (deadline) |absolute|
-            try self.readConnectWithDeadline(absolute)
+        var connect = (if (deadline) |absolute|
+            self.readConnectWithDeadline(absolute)
         else
-            try self.readConnect();
+            self.readConnect()) catch |err| {
+            if (err == error.InvalidProtocolLevel) {
+                self.writeUnsupportedProtocolConnAck() catch {};
+            }
+            return err;
+        };
         errdefer connect.deinit(self.allocator);
         const maximum_qos = options.maximum_qos orelse
             mqtt.QoS.exactly_once;
@@ -2932,7 +2938,17 @@ pub const Connection = struct {
         var packet = packet_value;
         errdefer packet.deinit(self.allocator);
         if (packet.fixed.packet_type != .connect) return error.UnexpectedPacket;
-        var connect = try mqtt.Connect.parse(self.allocator, packet.bytes);
+        self.unsupported_connect_level = null;
+        var connect = mqtt.Connect.parse(
+            self.allocator,
+            packet.bytes,
+        ) catch |err| {
+            if (err == error.InvalidProtocolLevel) {
+                self.unsupported_connect_level =
+                    mqtt.connectProtocolLevel(packet.bytes) catch null;
+            }
+            return err;
+        };
         errdefer connect.deinit(self.allocator);
         self.protocol = connect.protocol;
         self.endpoint_role = .server;
@@ -2941,6 +2957,25 @@ pub const Connection = struct {
         ) orelse 0;
         self.keep_alive_seconds = connect.keep_alive_seconds;
         return .{ .packet = packet, .connect = connect };
+    }
+
+    fn writeUnsupportedProtocolConnAck(self: *Connection) Error!void {
+        const raw_level = self.unsupported_connect_level orelse
+            return error.InvalidProtocolLevel;
+        const level = raw_level & 0x7f;
+        const response_protocol: mqtt.ProtocolVersion =
+            if (level == 3 or level == 4) .v3_1_1 else .v5;
+        const reason_code: u8 = if (response_protocol == .v3_1_1)
+            0x01
+        else
+            0x84;
+        var encoded: [mqtt.ConnAck.no_properties_max_len]u8 = undefined;
+        try self.writePacket(try mqtt.ConnAck.writeNoPropertiesInto(
+            &encoded,
+            response_protocol,
+            false,
+            reason_code,
+        ));
     }
 
     pub fn writeConnAck(self: *Connection, options: ConnAckOptions) Error!void {
@@ -5794,6 +5829,95 @@ test "MQTT client connectAttempt exposes refused CONNACK reason" {
     }));
     second_thread.join();
     if (second_shared.err) |err| return err;
+}
+
+test "MQTT server reports unsupported CONNECT protocol levels" {
+    const allocator = std.testing.allocator;
+    var threaded = std.Io.Threaded.init(allocator, .{});
+    defer threaded.deinit();
+    const io = threaded.io();
+    var listener = try (net.IpAddress{ .ip4 = .loopback(0) }).listen(
+        io,
+        .{ .reuse_address = true },
+    );
+    defer listener.deinit(io);
+
+    const Shared = struct {
+        listener: *net.Server,
+        io: std.Io,
+        allocator: std.mem.Allocator,
+        err: ?anyerror = null,
+
+        fn run(self: *@This()) void {
+            for (0..2) |_| {
+                const stream = self.listener.accept(self.io) catch |err| {
+                    self.err = err;
+                    return;
+                };
+                var connection = Connection{
+                    .allocator = self.allocator,
+                    .transport = .initTcp(self.io, stream),
+                };
+                defer connection.close();
+                _ = connection.acceptPending(.{}) catch |err| {
+                    if (err != error.InvalidProtocolLevel) self.err = err;
+                    continue;
+                };
+                self.err = error.TestUnexpectedResult;
+                return;
+            }
+        }
+    };
+    var shared = Shared{
+        .listener = &listener,
+        .io = io,
+        .allocator = allocator,
+    };
+    const server_thread = try std.Thread.spawn(.{}, Shared.run, .{&shared});
+    var joined = false;
+    defer if (!joined) server_thread.join();
+
+    var encoded: std.ArrayList(u8) = .empty;
+    defer encoded.deinit(allocator);
+    try mqtt.writeConnectPacket(&encoded, allocator, .v5, .{
+        .client_id = "unsupported-level",
+    });
+    const level_index = (try mqtt.FixedHeader.parse(encoded.items)).header_len +
+        2 + "MQTT".len;
+    const cases = [_]struct { level: u8, expected: []const u8 }{
+        .{ .level = 3, .expected = &.{ 0x20, 0x02, 0x00, 0x01 } },
+        .{ .level = 6, .expected = &.{ 0x20, 0x03, 0x00, 0x84, 0x00 } },
+    };
+    for (cases) |case| {
+        encoded.items[level_index] = case.level;
+        const stream = try listener.socket.address.connect(
+            io,
+            .{ .mode = .stream },
+        );
+        defer stream.close(io);
+        try stream_io.writeAllSlices(io, stream, &.{encoded.items});
+        var received: [mqtt.ConnAck.no_properties_max_len]u8 = undefined;
+        var offset: usize = 0;
+        while (offset < case.expected.len) {
+            var buffers = [_][]u8{received[offset..case.expected.len]};
+            const count = try io.vtable.netRead(
+                io.userdata,
+                stream.socket.handle,
+                &buffers,
+            );
+            if (count == 0) return error.ConnectionClosed;
+            offset += count;
+        }
+        try std.testing.expectEqualSlices(
+            u8,
+            case.expected,
+            received[0..case.expected.len],
+        );
+    }
+
+    server_thread.join();
+    joined = true;
+    if (shared.err) |err| return err;
 }
 
 test "MQTT client follows bounded Server Reference CONNACK" {

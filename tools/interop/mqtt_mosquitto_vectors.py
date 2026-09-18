@@ -200,6 +200,65 @@ def connect_v5(sock: socket.socket, mqtt_packets, client_id: str) -> None:
     connect_client(sock, mqtt_packets, client_id, 5)
 
 
+def unsupported_protocol_levels(
+    executable: Path, mqtt_packets, mqtt5_rc
+) -> None:
+    # Mosquitto's read_and_verify_protocol_version sends a legacy CONNACK for
+    # level 3/4-family clients and MQTT 5 Unsupported Protocol Version for
+    # newer/unknown levels. Netz supports 3.1.1 and 5, but must still give an
+    # unambiguous refusal instead of bare EOF when the MQTT protocol name is
+    # structurally valid. A wrong protocol name remains a fail-closed EOF.
+    base = bytearray(mqtt_packets.gen_connect(
+        "unsupported-protocol-level", proto_ver=5
+    ))
+    marker = b"\x00\x04MQTT"
+    marker_index = base.find(marker)
+    if marker_index < 0:
+        raise AssertionError("CONNECT fixture is missing MQTT protocol name")
+    level_index = marker_index + len(marker)
+
+    with NetzBroker(
+        executable, connections=4, ignore_errors=True
+    ) as broker:
+        cases = (
+            (3, mqtt_packets.gen_connack(rc=1, proto_ver=4), "level 3"),
+            (6, mqtt_packets.gen_connack(
+                rc=mqtt5_rc.UNSUPPORTED_PROTOCOL_VERSION,
+                proto_ver=5,
+                properties=None,
+            ), "level 6"),
+        )
+        for level, expected, label in cases:
+            packet = bytearray(base)
+            packet[level_index] = level
+            with broker.connect() as sock:
+                sock.sendall(packet)
+                expect_packet(sock, expected, f"unsupported protocol {label}")
+
+        invalid_name = bytearray(base)
+        invalid_name[marker_index + 2] = ord("X")
+        with broker.connect() as sock:
+            sock.sendall(invalid_name)
+            try:
+                unexpected = sock.recv(1)
+            except (ConnectionResetError, BrokenPipeError):
+                unexpected = b""
+            if unexpected:
+                raise AssertionError(
+                    "invalid protocol name received CONNACK bytes: "
+                    + unexpected.hex()
+                )
+
+        with broker.connect() as healthy:
+            connect_v5(healthy, mqtt_packets, "after-unsupported-protocol")
+            healthy.sendall(mqtt_packets.gen_pingreq())
+            expect_packet(
+                healthy, mqtt_packets.gen_pingresp(),
+                "healthy PINGRESP after unsupported protocols",
+            )
+            healthy.sendall(mqtt_packets.gen_disconnect(proto_ver=5))
+
+
 def proxy_protocol_v1_v2(executable: Path, mqtt_packets) -> None:
     # Direct wire ports of Mosquitto 21-proxy-v1-success.py and
     # 21-proxy-v2-ipv4.py. Successful MQTT exchange after each header proves
@@ -6167,6 +6226,7 @@ def main() -> None:
     import mqtt5_opts  # type: ignore
     import mqtt_packets  # type: ignore
 
+    unsupported_protocol_levels(args.broker, mqtt_packets, mqtt5_rc)
     proxy_protocol_v1_v2(args.broker, mqtt_packets)
     deep_topic_hierarchy(args.broker, mqtt_packets)
     no_matching_subscribers(args.broker, mqtt_packets, mqtt5_rc)
@@ -6296,7 +6356,7 @@ def main() -> None:
         args.broker, mqtt_packets, mqtt5_props
     )
     print(
-        "Mosquitto-derived MQTT wire vectors passed: 148 scenarios "
+        "Mosquitto-derived MQTT wire vectors passed: 151 scenarios "
         "with 5000 ms CONNECT deadlines"
     )
 

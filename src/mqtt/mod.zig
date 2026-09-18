@@ -1093,14 +1093,12 @@ pub const Connect = struct {
     }
 
     pub fn parse(allocator: std.mem.Allocator, packet: []const u8) Error!Connect {
-        const fixed = try FixedHeader.parse(packet);
-        if (fixed.packet_type != .connect or fixed.flags != 0) return error.InvalidFlags;
-        try validatePacketBounds(packet, fixed);
-        var cursor = wire.Cursor.init(packet[fixed.header_len .. fixed.header_len + fixed.remaining_len]);
-        const protocol_name = try readUtf8(&cursor);
-        if (!std.mem.eql(u8, protocol_name, "MQTT")) return error.InvalidProtocolName;
-        const level = try cursor.readByte();
-        const protocol = std.enums.fromInt(ProtocolVersion, level) orelse return error.InvalidProtocolLevel;
+        const prefix = try parseConnectProtocolPrefix(packet);
+        const protocol = std.enums.fromInt(
+            ProtocolVersion,
+            prefix.level,
+        ) orelse return error.InvalidProtocolLevel;
+        var cursor = prefix.cursor;
         const connect_flags = try cursor.readByte();
         try validateConnectFlags(protocol, connect_flags);
         const keep_alive = try cursor.readInt(u16, .big);
@@ -1143,6 +1141,40 @@ pub const Connect = struct {
         };
     }
 };
+
+const ConnectProtocolPrefix = struct {
+    cursor: wire.Cursor,
+    level: u8,
+};
+
+fn parseConnectProtocolPrefix(
+    packet: []const u8,
+) Error!ConnectProtocolPrefix {
+    const fixed = try FixedHeader.parse(packet);
+    if (fixed.packet_type != .connect or fixed.flags != 0) {
+        return error.InvalidFlags;
+    }
+    try validatePacketBounds(packet, fixed);
+    var cursor = wire.Cursor.init(
+        packet[fixed.header_len .. fixed.header_len + fixed.remaining_len],
+    );
+    const protocol_name = try readUtf8(&cursor);
+    if (!std.mem.eql(u8, protocol_name, "MQTT")) {
+        return error.InvalidProtocolName;
+    }
+    const level = try cursor.readByte();
+    return .{
+        .cursor = cursor,
+        .level = level,
+    };
+}
+
+/// Inspect a structurally complete CONNECT's protocol level without accepting
+/// it as a supported protocol. Connection-owning servers use this after
+/// `InvalidProtocolLevel` to select the required refusal CONNACK format.
+pub fn connectProtocolLevel(packet: []const u8) Error!u8 {
+    return (try parseConnectProtocolPrefix(packet)).level;
+}
 
 pub const LastWill = struct {
     topic: []const u8,
@@ -3116,6 +3148,30 @@ test "MQTT connect and publish parse" {
     connect = try Connect.parse(allocator, connect_bytes.items);
     try std.testing.expectEqualStrings("", connect.client_id);
     try std.testing.expect(connect.clean_start);
+
+    const protocol_level_index = (try FixedHeader.parse(
+        connect_bytes.items,
+    )).header_len + 2 + "MQTT".len;
+    try std.testing.expectEqual(
+        ProtocolVersion.v5.byte(),
+        try connectProtocolLevel(connect_bytes.items),
+    );
+    connect_bytes.items[protocol_level_index] = 6;
+    try std.testing.expectEqual(
+        @as(u8, 6),
+        try connectProtocolLevel(connect_bytes.items),
+    );
+    try std.testing.expectError(
+        error.InvalidProtocolLevel,
+        Connect.parse(allocator, connect_bytes.items),
+    );
+    connect_bytes.items[protocol_level_index - 1] = 'X';
+    try std.testing.expectError(
+        error.InvalidProtocolName,
+        connectProtocolLevel(connect_bytes.items),
+    );
+    connect_bytes.items[protocol_level_index - 1] = 'T';
+    connect_bytes.items[protocol_level_index] = ProtocolVersion.v5.byte();
     try std.testing.expectError(error.InvalidClientId, writeConnectPacket(&connect_bytes, allocator, .v5, .{
         .client_id = "",
         .clean_start = false,
