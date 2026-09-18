@@ -162,13 +162,10 @@ def run_case(server: Path, websocket_wrapper, do_send, mqtt_packets, mqtt5_props
                 f"{transport}/{protocol_name} PINGRESP: {pingresp.hex()}"
             )
 
-        pingreq = recv_binary_message(peer)
-        if pingreq != mqtt_packets.gen_pingreq():
-            raise AssertionError(
-                f"{transport}/{protocol_name} PINGREQ: {pingreq.hex()}"
-            )
-        # Brokers may deliver ordinary traffic while a client is waiting for
-        # PINGRESP. Netz must preserve this packet for its next typed read.
+        # Send another application packet immediately before a legal
+        # client-originated PINGREQ. The server must retain the MQTT byte-stream
+        # ordering across the WebSocket message boundary and answer only after
+        # it consumes the complete PUBLISH.
         do_send(
             peer,
             mqtt_packets.gen_publish(
@@ -176,9 +173,13 @@ def run_case(server: Path, websocket_wrapper, do_send, mqtt_packets, mqtt5_props
                 qos=0,
                 payload=b"interleaved-publish",
                 proto_ver=proto_ver,
-            ),
+            ) + mqtt_packets.gen_pingreq(),
         )
-        do_send(peer, mqtt_packets.gen_pingresp())
+        pingresp = recv_binary_message(peer)
+        if pingresp != mqtt_packets.gen_pingresp():
+            raise AssertionError(
+                f"{transport}/{protocol_name} second PINGRESP: {pingresp.hex()}"
+            )
 
         outgoing = recv_binary_message(peer)
         expected_publish = mqtt_packets.gen_publish(
@@ -211,7 +212,7 @@ def run_case(server: Path, websocket_wrapper, do_send, mqtt_packets, mqtt5_props
     print(
         f"Mosquitto-derived MQTT {transport.upper()} {protocol_name} "
         f"interop passed: {len(PAYLOAD)}-byte split PUBLISH, coalesced "
-        "PING, preserved interleaved PUBLISH, bounded netz PING round trip, "
+        "PING, ordered second PUBLISH/PING, "
         f"bidirectional QoS 1 {RUNTIME}"
     )
 

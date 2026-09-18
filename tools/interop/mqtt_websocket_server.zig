@@ -188,10 +188,9 @@ fn serveOne(
     // messages. Reading it here proves both byte-stream boundary directions.
     try accepted.connection.readPingReq();
     try accepted.connection.writePingResp();
-    // Exercise netz's client-shaped bounded liveness path against the
-    // independent Mosquitto-derived peer, which answers this server-originated
-    // PINGREQ below before continuing the QoS flow.
-    try accepted.connection.pingWithTimeout(.fromSeconds(5));
+    // The peer sends another PUBLISH immediately before a legal client-side
+    // PINGREQ. Consume the application packet first, then answer liveness in
+    // exact MQTT byte-stream order.
     var interleaved = try accepted.connection.readPublish();
     defer interleaved.deinit(server.allocator);
     try std.testing.expectEqualStrings(
@@ -202,6 +201,8 @@ fn serveOne(
         "interleaved-publish",
         interleaved.publish.payload,
     );
+    try accepted.connection.readPingReq();
+    try accepted.connection.writePingResp();
 
     try accepted.connection.publish(
         "interop/netz/to-mosquitto",

@@ -75,6 +75,27 @@ pub const PacketType = enum(u4) {
     }
 };
 
+pub const PacketSender = enum { client, server };
+
+/// Validate the endpoint direction assigned to every MQTT Control Packet by
+/// MQTT 5 Table 2-1. The same direction rules apply to MQTT 3.1.1; AUTH is
+/// rejected separately by its version-aware codec when used outside MQTT 5.
+pub fn validatePacketTypeForSender(
+    packet_type: PacketType,
+    sender: PacketSender,
+) Error!void {
+    switch (sender) {
+        .client => switch (packet_type) {
+            .connack, .suback, .unsuback, .pingresp => return error.InvalidPacketType,
+            else => {},
+        },
+        .server => switch (packet_type) {
+            .connect, .subscribe, .unsubscribe, .pingreq => return error.InvalidPacketType,
+            else => {},
+        },
+    }
+}
+
 pub const FixedHeader = struct {
     packet_type: PacketType,
     flags: u4,
@@ -3151,6 +3172,49 @@ test "MQTT ping packets reject trailing bytes" {
     );
     try ping.append(std.testing.allocator, 0);
     try std.testing.expectError(error.InvalidPacketType, validatePing(ping.items, false));
+}
+
+test "MQTT Control Packet types enforce sender direction" {
+    const client_only = [_]PacketType{
+        .connect,
+        .subscribe,
+        .unsubscribe,
+        .pingreq,
+    };
+    const server_only = [_]PacketType{
+        .connack,
+        .suback,
+        .unsuback,
+        .pingresp,
+    };
+    const bidirectional = [_]PacketType{
+        .publish,
+        .puback,
+        .pubrec,
+        .pubrel,
+        .pubcomp,
+        .disconnect,
+        .auth,
+    };
+
+    for (client_only) |packet_type| {
+        try validatePacketTypeForSender(packet_type, .client);
+        try std.testing.expectError(
+            error.InvalidPacketType,
+            validatePacketTypeForSender(packet_type, .server),
+        );
+    }
+    for (server_only) |packet_type| {
+        try validatePacketTypeForSender(packet_type, .server);
+        try std.testing.expectError(
+            error.InvalidPacketType,
+            validatePacketTypeForSender(packet_type, .client),
+        );
+    }
+    for (bidirectional) |packet_type| {
+        try validatePacketTypeForSender(packet_type, .client);
+        try validatePacketTypeForSender(packet_type, .server);
+    }
 }
 
 test "MQTT connect and publish parse" {

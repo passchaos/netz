@@ -1438,6 +1438,47 @@ def reject_client_auth_success(
             healthy.sendall(mqtt_packets.gen_disconnect(proto_ver=5))
 
 
+def reject_client_server_only_control_packets(
+    executable: Path, mqtt_packets, mqtt5_rc
+) -> None:
+    # MQTT 5 Table 2-1 reserves these Control Packet types for Server-to-Client
+    # traffic. These are direct wire counterparts of Mosquitto's CONNACK,
+    # SUBACK, UNSUBACK, and PINGRESP negative packet groups.
+    packets = (
+        ("CONNACK", mqtt_packets.gen_connack(proto_ver=5)),
+        ("SUBACK", mqtt_packets.gen_suback(1, 0, proto_ver=5)),
+        ("UNSUBACK", mqtt_packets.gen_unsuback(1, proto_ver=5)),
+        ("PINGRESP", mqtt_packets.gen_pingresp()),
+    )
+    with NetzBroker(
+        executable, connections=len(packets) + 1, ignore_errors=True
+    ) as broker:
+        for label, packet in packets:
+            with broker.connect() as invalid:
+                connect_v5(
+                    invalid, mqtt_packets,
+                    f"invalid-control-direction-{label.lower()}",
+                )
+                invalid.sendall(packet)
+                expect_packet(
+                    invalid, mqtt_packets.gen_disconnect(
+                        reason_code=mqtt5_rc.PROTOCOL_ERROR, proto_ver=5
+                    ),
+                    f"client-sent server-only {label}",
+                )
+
+        with broker.connect() as healthy:
+            connect_v5(
+                healthy, mqtt_packets, "after-invalid-control-direction"
+            )
+            healthy.sendall(mqtt_packets.gen_pingreq())
+            expect_packet(
+                healthy, mqtt_packets.gen_pingresp(),
+                "healthy PINGRESP after invalid Control Packet directions",
+            )
+            healthy.sendall(mqtt_packets.gen_disconnect(proto_ver=5))
+
+
 def persistent_session_expiry_cap(
     executable: Path, mqtt_packets, mqtt5_props
 ) -> None:
@@ -6414,6 +6455,9 @@ def main() -> None:
         args.broker, mqtt_packets, mqtt5_rc
     )
     reject_client_auth_success(args.broker, mqtt_packets, mqtt5_rc)
+    reject_client_server_only_control_packets(
+        args.broker, mqtt_packets, mqtt5_rc
+    )
     persistent_session_expiry_cap(
         args.broker, mqtt_packets, mqtt5_props
     )
@@ -6421,7 +6465,7 @@ def main() -> None:
         args.broker, mqtt_packets, mqtt5_props
     )
     print(
-        "Mosquitto-derived MQTT wire vectors passed: 153 scenarios "
+        "Mosquitto-derived MQTT wire vectors passed: 157 scenarios "
         "with 5000 ms CONNECT deadlines"
     )
 

@@ -750,6 +750,15 @@ reason codes, plus raw non-compliant PUBLISH packets for both capabilities and
 Receive Maximum overflow, and an out-of-range Topic Alias.
 The three subscription capability flags also have raw-wire negative tests.
 An invalid-control-flags wire case verifies the general Protocol Error path.
+Every established runtime write and read boundary also enforces the endpoint
+direction assigned by MQTT 5 Table 2-1 (and shared by MQTT 3.1.1): CONNECT,
+SUBSCRIBE, UNSUBSCRIBE, and PINGREQ are client-only, while CONNACK, SUBACK,
+UNSUBACK, and PINGRESP are server-only. PUBLISH, all four QoS acknowledgements,
+DISCONNECT, and MQTT 5 AUTH remain bidirectional subject to their more specific
+state and reason-code rules. Public writers fail before allocation, state
+mutation, or I/O. Four raw Mosquitto-derived negative vectors send each
+server-only packet type from a client, require exact DISCONNECT Protocol Error
+`0x82`, and then prove the finite broker still accepts a healthy CONNECT/PING.
 
 ## MQTT 5 Enhanced Authentication
 
@@ -1872,7 +1881,7 @@ overflow case now covers both protocol versions and the exact advertised
 Receive Maximum: MQTT 5 receives DISCONNECT 0x93, while MQTT 3.1.1 closes
 without an unrepresentable reason packet. Server-side admission enforces the
 configured inbound limit in MQTT 3.1.1 even though only MQTT 5 can advertise it
-as a CONNACK property. All 153 scenarios pass. This is
+as a CONNACK property. All 157 scenarios pass. This is
 deliberately described as a selected
 wire-vector subset: Mosquitto's Python harness hardcodes its own `-v -c/-p`
 broker CLI and many tests depend on Mosquitto config, logs, reload, persistence

@@ -2734,6 +2734,7 @@ pub const Connection = struct {
         options: ConnectOptions,
         connect_deadline: ?std.Io.Clock.Timestamp,
     ) Error!ConnectAttempt {
+        try self.validateOutgoingPacketType(.connect);
         // This method transfers `self` into the returned attempt. Capture the
         // allocator before that move so deferred temporary cleanup never reads
         // the deliberately undefined moved-from connection.
@@ -2977,6 +2978,7 @@ pub const Connection = struct {
     }
 
     pub fn writeConnAck(self: *Connection, options: ConnAckOptions) Error!void {
+        try self.validateOutgoingPacketType(.connack);
         self.write_property_scratch.clearRetainingCapacity();
         try self.write_property_scratch.appendSlice(
             self.allocator,
@@ -3594,6 +3596,7 @@ pub const Connection = struct {
     }
 
     pub fn subscribe(self: *Connection, subscriptions: []const mqtt.Subscription, options: SubscribeOptions) Error!OwnedSubAck {
+        try self.validateOutgoingPacketType(.subscribe);
         try self.validateOutgoingSubscribe(subscriptions, options.properties);
         const packet_id = self.nextPacketId();
         self.write_scratch.clearRetainingCapacity();
@@ -3619,6 +3622,7 @@ pub const Connection = struct {
     }
 
     pub fn writeSubAck(self: *Connection, packet_id: u16, reason_codes: []const u8, properties: []const mqtt.Property) Error!void {
+        try self.validateOutgoingPacketType(.suback);
         self.write_property_scratch.clearRetainingCapacity();
         const outgoing_properties = try self.outgoingProblemProperties(
             &self.write_property_scratch,
@@ -3663,6 +3667,7 @@ pub const Connection = struct {
     }
 
     pub fn unsubscribe(self: *Connection, topic_filters: []const []const u8, options: UnsubscribeOptions) Error!OwnedUnsubAck {
+        try self.validateOutgoingPacketType(.unsubscribe);
         const packet_id = self.nextPacketId();
         self.write_scratch.clearRetainingCapacity();
         try mqtt.Unsubscribe.write(&self.write_scratch, self.allocator, self.protocol, packet_id, options.properties, topic_filters);
@@ -3684,6 +3689,7 @@ pub const Connection = struct {
     }
 
     pub fn writeUnsubAck(self: *Connection, packet_id: u16, reason_codes: []const u8, properties: []const mqtt.Property) Error!void {
+        try self.validateOutgoingPacketType(.unsuback);
         self.write_property_scratch.clearRetainingCapacity();
         const outgoing_properties = try self.outgoingProblemProperties(
             &self.write_property_scratch,
@@ -3801,6 +3807,7 @@ pub const Connection = struct {
     }
 
     pub fn writePingResp(self: *Connection) Error!void {
+        try self.validateOutgoingPacketType(.pingresp);
         var encoded: [mqtt.ping_packet_len]u8 = undefined;
         try self.writePacket(mqtt.writePingInto(&encoded, true));
     }
@@ -3809,6 +3816,7 @@ pub const Connection = struct {
     /// this split operation so the same receive path can continue delivering
     /// application packets while it waits for PINGRESP.
     pub fn writePingReq(self: *Connection) Error!void {
+        try self.validateOutgoingPacketType(.pingreq);
         var encoded: [mqtt.ping_packet_len]u8 = undefined;
         try self.writePacket(mqtt.writePingInto(&encoded, false));
     }
@@ -4714,6 +4722,7 @@ pub const Connection = struct {
 
     fn writePacket(self: *Connection, bytes: []u8) Error!void {
         const fixed = try mqtt.FixedHeader.parse(bytes);
+        try self.validateOutgoingPacketType(fixed.packet_type);
         try self.authentication.ensurePacketAllowed(
             fixed.packet_type,
         );
@@ -4856,6 +4865,7 @@ pub const Connection = struct {
         packet: packet_transport.OwnedPacket,
     ) Error!OwnedPacket {
         errdefer self.allocator.free(packet.bytes);
+        try self.validateIncomingPacketType(packet.fixed.packet_type);
         self.authentication.ensurePacketAllowed(
             packet.fixed.packet_type,
         ) catch |err| {
@@ -4868,6 +4878,40 @@ pub const Connection = struct {
             .bytes = packet.bytes,
             .fixed = packet.fixed,
         };
+    }
+
+    fn validateOutgoingPacketType(
+        self: *const Connection,
+        packet_type: mqtt.PacketType,
+    ) Error!void {
+        switch (self.endpoint_role) {
+            .unestablished => {},
+            .client => try mqtt.validatePacketTypeForSender(
+                packet_type,
+                .client,
+            ),
+            .server => try mqtt.validatePacketTypeForSender(
+                packet_type,
+                .server,
+            ),
+        }
+    }
+
+    fn validateIncomingPacketType(
+        self: *const Connection,
+        packet_type: mqtt.PacketType,
+    ) Error!void {
+        switch (self.endpoint_role) {
+            .unestablished => {},
+            .client => try mqtt.validatePacketTypeForSender(
+                packet_type,
+                .server,
+            ),
+            .server => try mqtt.validatePacketTypeForSender(
+                packet_type,
+                .client,
+            ),
+        }
     }
 
     fn sendAuthenticationProtocolError(self: *Connection) void {
@@ -6808,6 +6852,97 @@ test "MQTT runtime validates AUTH reason sender direction" {
     client_continue.deinit(allocator);
     var server_continue = try server.parseIncomingAuth(encoded.items);
     server_continue.deinit(allocator);
+}
+
+test "MQTT runtime enforces Control Packet endpoint direction before I/O" {
+    var client = Connection{
+        .allocator = std.testing.allocator,
+        .transport = undefined,
+        .protocol = .v5,
+        .endpoint_role = .client,
+    };
+    try std.testing.expectError(
+        error.InvalidPacketType,
+        client.writeConnAck(.{}),
+    );
+    try std.testing.expectError(
+        error.InvalidPacketType,
+        client.writeSubAck(1, &.{0x00}, &.{}),
+    );
+    try std.testing.expectError(
+        error.InvalidPacketType,
+        client.writeUnsubAck(1, &.{0x00}, &.{}),
+    );
+    try std.testing.expectError(
+        error.InvalidPacketType,
+        client.writePingResp(),
+    );
+    try std.testing.expectError(
+        error.InvalidPacketType,
+        client.validateIncomingPacketType(.subscribe),
+    );
+    try std.testing.expectError(
+        error.InvalidPacketType,
+        client.validateIncomingPacketType(.pingreq),
+    );
+    const client_incoming = try std.testing.allocator.dupe(
+        u8,
+        &.{ 0xc0, 0x00 },
+    );
+    try std.testing.expectError(
+        error.InvalidPacketType,
+        client.finishReadPacket(.{
+            .bytes = client_incoming,
+            .fixed = try mqtt.FixedHeader.parse(client_incoming),
+        }),
+    );
+
+    var server = Connection{
+        .allocator = std.testing.allocator,
+        .transport = undefined,
+        .protocol = .v5,
+        .endpoint_role = .server,
+    };
+    try std.testing.expectError(
+        error.InvalidPacketType,
+        server.establishClient(.{ .client_id = "invalid-server-connect" }),
+    );
+    try std.testing.expectError(
+        error.InvalidPacketType,
+        server.subscribe(&.{.{ .topic_filter = "direction/#" }}, .{}),
+    );
+    try std.testing.expectError(
+        error.InvalidPacketType,
+        server.unsubscribe(&.{"direction/#"}, .{}),
+    );
+    try std.testing.expectError(
+        error.InvalidPacketType,
+        server.writePingReq(),
+    );
+    try std.testing.expectError(
+        error.InvalidPacketType,
+        server.validateIncomingPacketType(.connack),
+    );
+    try std.testing.expectError(
+        error.InvalidPacketType,
+        server.validateIncomingPacketType(.pingresp),
+    );
+    const server_incoming = try std.testing.allocator.dupe(
+        u8,
+        &.{ 0xd0, 0x00 },
+    );
+    try std.testing.expectError(
+        error.InvalidPacketType,
+        server.finishReadPacket(.{
+            .bytes = server_incoming,
+            .fixed = try mqtt.FixedHeader.parse(server_incoming),
+        }),
+    );
+
+    try client.validateOutgoingPacketType(.publish);
+    try server.validateOutgoingPacketType(.publish);
+    try client.validateIncomingPacketType(.publish);
+    try server.validateIncomingPacketType(.publish);
 }
 
 test "MQTT runtime enforces incoming maximum packet size on full frame" {
