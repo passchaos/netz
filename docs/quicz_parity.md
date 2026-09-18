@@ -1850,8 +1850,8 @@ evidence.
    Seven fixed-binary short-packet and real H3 A/B pairs were throughput-neutral
    (H3 median 162.15 to 162.32 MiB/s, 4/7 wins), so this is recorded only as a
    deterministic memory reduction. Connection ownership now groups send and
-   receive prepared contexts into one stable allocation while retaining
-   single-direction and non-accelerated variants for low-level mixed-suite
+   receive prepared keys into one stable allocation while retaining
+   single-direction and non-AES variants for low-level mixed-suite
    configurations. A linked-backend 100-handshake run reduced allocations from
    7,901 to 7,701 with unchanged peak memory; seven fixed-binary paired runs
    left median rate/P50 within 0.3%. Vail `b6dd7b6` then reduced each inner

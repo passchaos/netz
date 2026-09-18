@@ -4,9 +4,9 @@ const protection = @import("../protection.zig");
 const Prepared = protection.PreparedPacketProtectionKeys;
 
 /// Stable connection-owned storage for directional packet-protection state.
-/// TLS negotiates one suite for both directions, so accelerated connections
-/// keep both contexts in one allocation. Direct preconfigured callers with an
-/// accelerated suite in only one direction retain a compact single context.
+/// TLS negotiates one suite for both directions, so prepared AES connections
+/// keep both directions in one allocation. Direct preconfigured callers with
+/// AES in only one direction retain a compact single prepared-key object.
 pub const Set = struct {
     const Pair = struct {
         send: Prepared,
@@ -29,9 +29,9 @@ pub const Set = struct {
         send_keys: protection.PacketProtectionKeys,
         receive_keys: protection.PacketProtectionKeys,
     ) std.mem.Allocator.Error!Set {
-        const send_accelerated = supports(send_keys);
-        const receive_accelerated = supports(receive_keys);
-        if (send_accelerated and receive_accelerated) {
+        const prepare_send = supports(send_keys);
+        const prepare_receive = supports(receive_keys);
+        if (prepare_send and prepare_receive) {
             const pair = try allocator.create(Pair);
             pair.* = .{
                 .send = .init(send_keys),
@@ -43,7 +43,7 @@ pub const Set = struct {
                 .receive_keys = &pair.receive,
             };
         }
-        if (send_accelerated) {
+        if (prepare_send) {
             const prepared = try allocator.create(Prepared);
             prepared.* = .init(send_keys);
             return .{
@@ -51,7 +51,7 @@ pub const Set = struct {
                 .send_keys = prepared,
             };
         }
-        if (receive_accelerated) {
+        if (prepare_receive) {
             const prepared = try allocator.create(Prepared);
             prepared.* = .init(receive_keys);
             return .{
@@ -102,8 +102,8 @@ pub const Set = struct {
     }
 };
 
-test "prepared key set owns accelerated directions together" {
-    if (!protection.prepared_packet_protection_enabled) return error.SkipZigTest;
+test "prepared key set owns AES directions together" {
+    try std.testing.expect(protection.prepared_packet_protection_enabled);
 
     const aes = protection.deriveAes128Keys(
         [_]u8{0x81} ** protection.secret_len,
@@ -179,7 +179,7 @@ test "prepared key set owns accelerated directions together" {
 }
 
 test "prepared key set allocation failure leaves no ownership" {
-    if (!protection.prepared_packet_protection_enabled) return error.SkipZigTest;
+    try std.testing.expect(protection.prepared_packet_protection_enabled);
 
     const keys = protection.deriveAes128Keys(
         [_]u8{0x84} ** protection.secret_len,

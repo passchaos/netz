@@ -105,8 +105,11 @@ pub fn main() !void {
     printPreparedComparison("AES-256", aes256);
     printPreparedComparison("ChaCha", chacha);
     std.debug.print(
-        "  prepared connection backend enabled: {}\n",
-        .{netz.quic.protection.prepared_packet_protection_enabled},
+        "  prepared connection keys enabled: {}; AEAD context enabled: {}\n",
+        .{
+            netz.quic.protection.prepared_packet_protection_enabled,
+            netz.quic.protection.prepared_aead_context_enabled,
+        },
     );
 }
 

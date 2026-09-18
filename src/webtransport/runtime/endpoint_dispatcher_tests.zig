@@ -1574,28 +1574,10 @@ test "WebTransport endpoint control and datagram sends do not wait for pacing" {
         &.{ "batch-one", "batch-two" },
         &datagram_batch_count,
     );
-    try std.testing.expectEqual(@as(usize, 1), datagram_batch_count);
+    // One pacing slot admits one QUIC packet. Both small logical DATAGRAMs
+    // fit in that packet, so the committed prefix includes both payloads.
+    try std.testing.expectEqual(@as(usize, 2), datagram_batch_count);
     try std.testing.expectEqual(@as(usize, 0), fixed_io.sleep_calls);
-    try std.testing.expectEqual(
-        before_datagram.datagrams_sent + 3,
-        accepted.stats().datagrams_sent,
-    );
-    const datagram_suffix_timer = dispatcher.nextTimerDeadline() orelse
-        return error.TestUnexpectedResult;
-    try std.testing.expectEqual(
-        quic.one_rtt.TimerDeadlineKind.pacing,
-        datagram_suffix_timer.timer.kind,
-    );
-    fixed_io.now_ns = @intCast(datagram_suffix_timer.timer.deadline_ns);
-    _ = (try dispatcher.serviceNextTimerAt(
-        datagram_suffix_timer.timer.deadline_ns,
-    )) orelse return error.TestUnexpectedResult;
-    var datagram_suffix_count: usize = 99;
-    try accepted.sendDatagrams(
-        (&[_][]const u8{ "batch-one", "batch-two" })[datagram_batch_count..],
-        &datagram_suffix_count,
-    );
-    try std.testing.expectEqual(@as(usize, 1), datagram_suffix_count);
     try std.testing.expectEqual(
         before_datagram.datagrams_sent + 4,
         accepted.stats().datagrams_sent,

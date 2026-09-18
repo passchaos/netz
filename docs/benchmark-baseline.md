@@ -697,19 +697,18 @@ this subsection predate that migration unless explicitly labeled otherwise and
 remain historical Threaded evidence; the backend change itself is not a crypto
 throughput claim.
 
-Connections built with Vail's linked AWS-LC-compatible backend now keep one
-initialized AES-GCM context and AES header-protection key schedule for each
-current send/receive key generation. This matches quiche's connection-owned
-packet/header key design: the expensive setup is paid when the connection is
-created or its key phase changes, rather than once per packet. AES-128-GCM and
-AES-256-GCM use the prepared path; ChaCha20 and SM4 retain the allocation-free
-Zig path. Builds without the linked backend do not allocate the two
-connection-owned contexts.
+Every AES connection keeps an AES header-protection key schedule for each
+current send/receive key generation. Builds linked to Vail's optional
+AWS-LC-compatible backend additionally keep an initialized AES-GCM context.
+This matches the connection-owned packet/header key design in Quinn, quiche,
+and s2n-quic: key setup is paid when the connection is created or its key phase
+changes rather than once per packet. AES-128-GCM and AES-256-GCM use the
+prepared path; ChaCha20 and SM4 retain the allocation-free Zig path.
 
 The short-packet benchmark reports value-key and prepared-key seal/open paths
-separately and prints whether the build enables prepared connection state. To
-reproduce with an AWS-LC checkout whose static library has been built under
-`build/crypto`, run:
+separately. It distinguishes always-available prepared connection keys from
+the optional prepared AEAD context. To reproduce with an AWS-LC checkout whose
+static library has been built under `build/crypto`, run:
 
 ```sh
 taskset -c 0 zig build bench-quic-short-packet -Doptimize=ReleaseFast \
@@ -730,12 +729,21 @@ primitive rather than AEAD alone.
 | AES-256-GCM open | 564 ns | 272 ns | 2.07x |
 
 The same benchmark showed no material prepared-wrapper change for ChaCha20
-(0.99-1.00x), and the non-linked build leaves prepared connection state
-disabled. Suite-wide equivalence tests cover seal, in-place seal, phase
+(0.99-1.00x). Suite-wide equivalence tests cover seal, in-place seal, phase
 mismatch preservation, open, and key replacement. A connection-level test
-also proves that linked AES connections select prepared send/receive contexts
-and continue exchanging STREAM data across a key update, while ChaCha20 and
-SM4 remain on their existing paths.
+proves that AES connections select prepared send/receive keys and continue
+exchanging STREAM data across a key update, while ChaCha20 and SM4 remain on
+their existing paths.
+
+On 2026-09-18, seven CPU-0 runs of one fixed default-backend binary (without
+AWS-LC) measured AES-128 prepared seal at 244-250 ns versus 292-381 ns for the
+value-key path (1.19-1.54x), and prepared open at 302-303 ns versus 328-332 ns
+(1.08-1.09x). AES-256 prepared seal measured 269-271 ns versus 324-346 ns
+(1.19-1.28x), and prepared open measured 380 ns versus 395 ns (1.03-1.04x).
+The pure-Zig prepared path calls the same AEAD primitive directly and caches
+only the AES header schedule; the ChaCha control remained 0.99-1.02x. Each AES
+connection consequently owns two 432-byte prepared-key objects in one
+allocation. ChaCha20 and SM4 connections retain no prepared-key allocation.
 
 Prepared header-protection state now stores one tagged AES-128 or AES-256 key
 schedule instead of two mutually exclusive optional schedules. This follows
@@ -755,11 +763,11 @@ throughput moved from 162.15 to 162.32 MiB/s with 4/7 candidate wins, also
 noise-level; the retained benefit is the deterministic prepared-key memory
 reduction.
 
-Connection ownership now groups the accelerated send and receive contexts into
-one stable pair allocation. Direct preconfigured connections with an
-accelerated suite in only one direction retain a single-context allocation,
-while non-accelerated pairs allocate none; this keeps the public mixed-suite
-configuration compatible. A linked-backend 100-handshake allocator run fell
+Connection ownership now groups prepared AES send and receive keys into one
+stable pair allocation. Direct preconfigured connections with AES in only one
+direction retain a single-object allocation, while ChaCha20/SM4 pairs allocate
+none; this keeps the public mixed-suite configuration compatible. A
+linked-backend 100-handshake allocator run fell
 from 7,901 to 7,701 allocations, exactly two fewer allocations per benchmark
 round because each round constructs a client and server connection. Requested
 bytes were effectively unchanged (7,693,101 to 7,692,942) and peak live bytes

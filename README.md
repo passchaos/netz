@@ -1259,8 +1259,8 @@ The aggregate `bench` step runs the current protocol microbenchmarks:
   and linear-time overlapping-subscription broker flush plans,
 - QUIC AES-128-GCM, AES-256-GCM, ChaCha20-Poly1305, and SM4-GCM short-packet
   sealing with caller-provided storage versus the allocating convenience
-  wrapper, plus optional connection-lifetime AWS-LC packet contexts and cached
-  AES header keys that avoid per-packet crypto setup and refresh on key updates,
+  wrapper, plus connection-lifetime cached AES header keys and optional AWS-LC
+  packet contexts that avoid per-packet crypto setup and refresh on key updates,
 - bounded QUIC DATAGRAM receive queuing in an O(1) ring under
   `quic/one_rtt/datagram_queue.zig`, with exact one-time capacity reservation,
   a capacity-bounded exact-size popped-payload recycle pool, newest-data

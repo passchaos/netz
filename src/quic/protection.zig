@@ -30,7 +30,10 @@ pub const aead_tag_len = traffic_crypto.tag_len;
 pub const header_protection_sample_len = traffic_crypto.sample_len;
 pub const header_protection_mask_len = traffic_crypto.mask_len;
 pub const max_packet_number: u64 = varint.max_value;
-pub const prepared_packet_protection_enabled =
+/// AES connections can always retain their header-protection key schedule.
+/// A linked AWS-LC build additionally retains its packet AEAD context.
+pub const prepared_packet_protection_enabled = true;
+pub const prepared_aead_context_enabled =
     vail.crypto.backend.aws_lc_linked;
 /// RFC 9001 Section 6.6 / Appendix B.1 limits for AEAD_AES_128_GCM.
 pub const aes_128_gcm_confidentiality_limit =
@@ -143,7 +146,7 @@ pub const PreparedPacketProtectionKeys = struct {
         self.* = undefined;
     }
 
-    /// Heap ownership gives backend contexts a stable address even when their
+    /// Heap ownership gives prepared key state a stable address even when its
     /// containing transport connection is moved by value during handoff.
     pub fn createIfAccelerated(
         allocator: std.mem.Allocator,
@@ -182,6 +185,15 @@ pub const PreparedPacketProtectionKeys = struct {
         ciphertext: []u8,
         tag: *[aead_tag_len]u8,
     ) error{InvalidPayloadLength}!void {
+        if (!comptime prepared_aead_context_enabled) {
+            return self.inner.keys.protect(
+                packet_number,
+                associated_data,
+                plaintext,
+                ciphertext,
+                tag,
+            );
+        }
         return self.inner.protect(
             packet_number,
             associated_data,
@@ -200,6 +212,15 @@ pub const PreparedPacketProtectionKeys = struct {
         plaintext: []u8,
     ) (error{InvalidPayloadLength} ||
         std.crypto.errors.AuthenticationError)!void {
+        if (!comptime prepared_aead_context_enabled) {
+            return self.inner.keys.open(
+                packet_number,
+                associated_data,
+                ciphertext,
+                tag,
+                plaintext,
+            );
+        }
         return self.inner.open(
             packet_number,
             associated_data,
