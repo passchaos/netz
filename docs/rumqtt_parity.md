@@ -237,7 +237,7 @@ optional absolute header timeout prevents incomplete proxy prefaces from
 holding listener workers indefinitely.
 
 The selected Mosquitto-derived process gate enables a five-second CONNECT
-deadline on every one of its finite broker processes, so all 151 raw scenarios
+deadline on every one of its finite broker processes, so all 152 raw scenarios
 also exercise the bounded admission path rather than merely proving the option
 in an isolated unit test.
 Three retained-source scenarios persist and restart the standalone broker after
@@ -520,7 +520,7 @@ property, the result also returns to the fixed path. A real TCP
 fail-first-allocator test covers all four packet types and both wire lengths;
 unlike the audited rumqttd writers, this hot path does not depend on spare
 `BytesMut` capacity. The
-Mosquitto-derived 151-scenario packet gate and MQTT 3.1.1/5 WS/WSS gate remain
+Mosquitto-derived 152-scenario packet gate and MQTT 3.1.1/5 WS/WSS gate remain
 green. CPU-0-pinned 1-KiB QoS 1 regression runs measured 10.437 us per
 PUBLISH/PUBACK over WebSocket (95,805 operations/s) and 11.541 us over native
 TLS (86,640 operations/s). These check the shared packet receive/send paths
@@ -537,7 +537,7 @@ including QoS 1, DUP, retain, a multibyte Remaining Length, and properties. A
 real TCP test sends two 1-KiB packets, disables all allocation after warmup, and
 verifies the prefix scratch remains smaller than the payload while the peer
 parses the complete bytes. WebSocket tests independently verify one-frame
-masked client and unmasked server messages assembled from two parts. The full 2,958-test Netz suite, 151-scenario
+masked client and unmasked server messages assembled from two parts. The full 2,958-test Netz suite, 152-scenario
 Mosquitto-derived wire gate, and MQTT 3.1.1/5 WS/WSS gate remain green. Five
 CPU-0 native-TLS samples measured 11.292-11.761 us per QoS 1 PUBLISH/PUBACK
 (11.445 us mean). Five WebSocket samples measured 10.448-10.859 us with a
@@ -1463,7 +1463,7 @@ Listeners can also opt into Mosquitto-compatible
 then Session, Will, takeover and live ACL state consistently use the required
 username as the effective Client ID. Missing usernames receive Not Authorized;
 tests prove two different wire Client IDs with one username resume/take over the
-same durable Session. The 151-scenario Mosquitto-derived wire gate runs the
+same durable Session. The 152-scenario Mosquitto-derived wire gate runs the
 same policy through the standalone broker option, including exact Session
 Present, takeover DISCONNECT and missing-username refusal bytes.
 `zig build interop-mqtt-listener-mount-mosquitto -Doptimize=ReleaseFast`
@@ -1482,7 +1482,7 @@ Standalone TCP, Unix, TLS, WS, and WSS servers also share a long-running
 `serveUntil` worker supervisor with cancellation, connection reuse, error
 observation, and independent accept/connection failure policies.
 
-`zig build interop-mqtt-mosquitto-vectors -Doptimize=ReleaseFast` now runs 151
+`zig build interop-mqtt-mosquitto-vectors -Doptimize=ReleaseFast` now runs 152
 raw MQTT scenarios derived directly from Mosquitto `5cd25465`'s packet
 generators: two PROXY protocol cases consume Mosquitto's v1 TCP4 and v2 IPv4
 prefaces before completing MQTT 5 CONNECT and PING on the same stream; the
@@ -1706,6 +1706,13 @@ DISCONNECT override receives exact Protocol Error `0x82`. Validation happens
 before Will or Session mutation; a real broker test verifies that the invalid
 packet still triggers the Will as an ungraceful close and cannot manufacture a
 resumable Session.
+The established runtime also enforces the complete MQTT 5 Table 3-10 sender
+direction for DISCONNECT reason codes before I/O. A client cannot impersonate
+server conditions such as Server Busy, Session Taken Over, redirection, or
+unsupported capabilities; a server cannot send the client-only Disconnect with
+Will Message reason. A table-driven codec test covers every valid reason code,
+and a raw client sending Server Busy receives exact Protocol Error `0x82`
+before a fresh connection completes CONNECT/PING.
 Three protocol-negotiation cases mirror Mosquitto's
 `read_and_verify_protocol_version`: a structurally valid `MQTT` CONNECT with
 level 3 receives the legacy four-byte Unsupported Protocol Version CONNACK,
@@ -1860,7 +1867,7 @@ overflow case now covers both protocol versions and the exact advertised
 Receive Maximum: MQTT 5 receives DISCONNECT 0x93, while MQTT 3.1.1 closes
 without an unrepresentable reason packet. Server-side admission enforces the
 configured inbound limit in MQTT 3.1.1 even though only MQTT 5 can advertise it
-as a CONNACK property. All 151 scenarios pass. This is
+as a CONNACK property. All 152 scenarios pass. This is
 deliberately described as a selected
 wire-vector subset: Mosquitto's Python harness hardcodes its own `-v -c/-p`
 broker CLI and many tests depend on Mosquitto config, logs, reload, persistence
@@ -1913,5 +1920,5 @@ or plugins, so passing these vectors is not proxy evidence for the entire suite.
    the independent-peer memory gap.
 3. Expand the selected Mosquitto-derived raw wire gate above, or add a broker
    process adapter capable of preserving the upstream harness's config/reload/
-   persistence semantics. The 151 passing packet-vector scenarios do not cover
+   persistence semantics. The 152 passing packet-vector scenarios do not cover
    the full protocol/conformance suite.

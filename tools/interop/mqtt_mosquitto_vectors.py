@@ -1377,6 +1377,37 @@ def reject_zero_to_nonzero_disconnect_expiry(
             resumed.sendall(mqtt_packets.gen_disconnect(proto_ver=5))
 
 
+def reject_client_server_only_disconnect_reason(
+    executable: Path, mqtt_packets, mqtt5_rc
+) -> None:
+    # MQTT 5 Table 3-10 marks Server Busy as Server-only. A Client that sends
+    # it violates the protocol; the broker replies with Protocol Error and
+    # remains healthy for the next connection.
+    with NetzBroker(
+        executable, connections=2, ignore_errors=True
+    ) as broker:
+        with broker.connect() as invalid:
+            connect_v5(invalid, mqtt_packets, "invalid-disconnect-sender")
+            invalid.sendall(mqtt_packets.gen_disconnect(
+                reason_code=mqtt5_rc.SERVER_BUSY, proto_ver=5
+            ))
+            expect_packet(
+                invalid, mqtt_packets.gen_disconnect(
+                    reason_code=mqtt5_rc.PROTOCOL_ERROR, proto_ver=5
+                ),
+                "client-sent server-only DISCONNECT reason",
+            )
+
+        with broker.connect() as healthy:
+            connect_v5(healthy, mqtt_packets, "after-invalid-disconnect-reason")
+            healthy.sendall(mqtt_packets.gen_pingreq())
+            expect_packet(
+                healthy, mqtt_packets.gen_pingresp(),
+                "healthy PINGRESP after invalid DISCONNECT reason",
+            )
+            healthy.sendall(mqtt_packets.gen_disconnect(proto_ver=5))
+
+
 def persistent_session_expiry_cap(
     executable: Path, mqtt_packets, mqtt5_props
 ) -> None:
@@ -6349,6 +6380,9 @@ def main() -> None:
     reject_zero_to_nonzero_disconnect_expiry(
         args.broker, mqtt_packets, mqtt5_props, mqtt5_rc
     )
+    reject_client_server_only_disconnect_reason(
+        args.broker, mqtt_packets, mqtt5_rc
+    )
     persistent_session_expiry_cap(
         args.broker, mqtt_packets, mqtt5_props
     )
@@ -6356,7 +6390,7 @@ def main() -> None:
         args.broker, mqtt_packets, mqtt5_props
     )
     print(
-        "Mosquitto-derived MQTT wire vectors passed: 151 scenarios "
+        "Mosquitto-derived MQTT wire vectors passed: 152 scenarios "
         "with 5000 ms CONNECT deadlines"
     )
 

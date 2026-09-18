@@ -2331,6 +2331,40 @@ fn validateDisconnectReason(code: u8) Error!void {
     }
 }
 
+pub const DisconnectSender = enum { client, server };
+
+/// Validate the endpoint direction from MQTT 5 Table 3-10 after the generic
+/// DISCONNECT reason registry check. Packet codecs remain role-neutral; an
+/// established runtime supplies the sender role from its CONNECT state.
+pub fn validateDisconnectReasonForSender(
+    code: u8,
+    sender: DisconnectSender,
+) Error!void {
+    try validateDisconnectReason(code);
+    switch (sender) {
+        .client => switch (code) {
+            0x87,
+            0x89,
+            0x8b,
+            0x8d,
+            0x8e,
+            0x8f,
+            0x9a,
+            0x9b,
+            0x9c,
+            0x9d,
+            0x9e,
+            0x9f,
+            0xa0,
+            0xa1,
+            0xa2,
+            => return error.InvalidReasonCode,
+            else => {},
+        },
+        .server => if (code == 0x04) return error.InvalidReasonCode,
+    }
+}
+
 fn validateAuthReason(code: u8) Error!void {
     switch (code) {
         0x00, 0x18, 0x19 => {},
@@ -4164,6 +4198,35 @@ test "MQTT disconnect control" {
         "mqtt://other.example:1883",
         serverReference(disconnect.properties).?,
     );
+}
+
+test "MQTT DISCONNECT reason codes enforce sender direction" {
+    const both = [_]u8{
+        0x00, 0x80, 0x81, 0x82, 0x83, 0x90, 0x93,
+        0x94, 0x95, 0x96, 0x97, 0x98, 0x99,
+    };
+    for (both) |code| {
+        try validateDisconnectReasonForSender(code, .client);
+        try validateDisconnectReasonForSender(code, .server);
+    }
+
+    try validateDisconnectReasonForSender(0x04, .client);
+    try std.testing.expectError(
+        error.InvalidReasonCode,
+        validateDisconnectReasonForSender(0x04, .server),
+    );
+
+    const server_only = [_]u8{
+        0x87, 0x89, 0x8b, 0x8d, 0x8e, 0x8f, 0x9a, 0x9b,
+        0x9c, 0x9d, 0x9e, 0x9f, 0xa0, 0xa1, 0xa2,
+    };
+    for (server_only) |code| {
+        try validateDisconnectReasonForSender(code, .server);
+        try std.testing.expectError(
+            error.InvalidReasonCode,
+            validateDisconnectReasonForSender(code, .client),
+        );
+    }
 }
 
 test "MQTT v5 AUTH control" {

@@ -3835,7 +3835,7 @@ pub const Connection = struct {
         reason_code: u8,
         properties: []const mqtt.Property,
     ) Error!void {
-        try self.validateOutgoingDisconnect(properties);
+        try self.validateOutgoingDisconnect(reason_code, properties);
         if (properties.len == 0) {
             var encoded: [mqtt.Disconnect.no_properties_max_len]u8 = undefined;
             return self.writePacket(
@@ -3859,18 +3859,31 @@ pub const Connection = struct {
 
     fn validateOutgoingDisconnect(
         self: *const Connection,
+        reason_code: u8,
         properties: []const mqtt.Property,
     ) Error!void {
-        const expiry = mqtt.sessionExpiryInterval(properties) orelse return;
         switch (self.endpoint_role) {
             .unestablished => {},
-            // A Server MUST NOT send Session Expiry in DISCONNECT.
-            .server => return error.InvalidProperty,
-            // MQTT-3.14.2-2 forbids raising the value from zero.
-            .client => try mqtt.validateDisconnectSessionExpiry(
-                self.connect_session_expiry,
-                expiry,
-            ),
+            .client => {
+                try mqtt.validateDisconnectReasonForSender(
+                    reason_code,
+                    .client,
+                );
+                try mqtt.validateDisconnectSessionExpiry(
+                    self.connect_session_expiry,
+                    mqtt.sessionExpiryInterval(properties),
+                );
+            },
+            .server => {
+                try mqtt.validateDisconnectReasonForSender(
+                    reason_code,
+                    .server,
+                );
+                // MQTT-3.14.2-2: a Server MUST NOT send Session Expiry.
+                if (mqtt.sessionExpiryInterval(properties) != null) {
+                    return error.InvalidProperty;
+                }
+            },
         }
     }
 
@@ -3878,18 +3891,30 @@ pub const Connection = struct {
         self: *const Connection,
         disconnect_packet: mqtt.Disconnect,
     ) Error!void {
-        const expiry = mqtt.sessionExpiryInterval(
-            disconnect_packet.properties,
-        ) orelse return;
         switch (self.endpoint_role) {
             .unestablished => {},
-            // A Server MUST NOT send Session Expiry in DISCONNECT.
-            .client => return error.InvalidProperty,
-            // MQTT-3.14.2-2 forbids raising the value from zero.
-            .server => try mqtt.validateDisconnectSessionExpiry(
-                self.connect_session_expiry,
-                expiry,
-            ),
+            .client => {
+                try mqtt.validateDisconnectReasonForSender(
+                    disconnect_packet.reason_code,
+                    .server,
+                );
+                // MQTT-3.14.2-2: a Server MUST NOT send Session Expiry.
+                if (mqtt.sessionExpiryInterval(
+                    disconnect_packet.properties,
+                ) != null) return error.InvalidProperty;
+            },
+            .server => {
+                try mqtt.validateDisconnectReasonForSender(
+                    disconnect_packet.reason_code,
+                    .client,
+                );
+                try mqtt.validateDisconnectSessionExpiry(
+                    self.connect_session_expiry,
+                    mqtt.sessionExpiryInterval(
+                        disconnect_packet.properties,
+                    ),
+                );
+            },
         }
     }
 
@@ -6612,7 +6637,7 @@ test "MQTT variable control writes reuse connection scratch" {
     }
 }
 
-test "MQTT runtime validates stateful DISCONNECT Session Expiry" {
+test "MQTT runtime validates DISCONNECT state and sender direction" {
     const zero_expiry = [_]mqtt.Property{.{ .four_byte = .{
         .id = .session_expiry_interval,
         .value = 0,
@@ -6628,10 +6653,18 @@ test "MQTT runtime validates stateful DISCONNECT Session Expiry" {
         .endpoint_role = .client,
         .connect_session_expiry = 0,
     };
-    try client.validateOutgoingDisconnect(&zero_expiry);
+    try client.validateOutgoingDisconnect(0, &zero_expiry);
     try std.testing.expectError(
         error.InvalidProperty,
-        client.validateOutgoingDisconnect(&nonzero_expiry),
+        client.validateOutgoingDisconnect(0, &nonzero_expiry),
+    );
+    try std.testing.expectError(
+        error.InvalidReasonCode,
+        client.validateOutgoingDisconnect(0x89, &.{}),
+    );
+    try std.testing.expectError(
+        error.InvalidReasonCode,
+        client.writeDisconnectWithProperties(0x89, &.{}),
     );
     // The public writer must fail before touching the deliberately absent
     // transport or allocating/encoding packet storage.
@@ -6645,6 +6678,10 @@ test "MQTT runtime validates stateful DISCONNECT Session Expiry" {
             .properties = @constCast(&zero_expiry),
         }),
     );
+    try std.testing.expectError(
+        error.InvalidReasonCode,
+        client.validateIncomingDisconnect(.{ .reason_code = 0x04 }),
+    );
 
     var server = Connection{
         .allocator = std.testing.allocator,
@@ -6654,7 +6691,15 @@ test "MQTT runtime validates stateful DISCONNECT Session Expiry" {
     };
     try std.testing.expectError(
         error.InvalidProperty,
-        server.validateOutgoingDisconnect(&zero_expiry),
+        server.validateOutgoingDisconnect(0, &zero_expiry),
+    );
+    try std.testing.expectError(
+        error.InvalidReasonCode,
+        server.validateOutgoingDisconnect(0x04, &.{}),
+    );
+    try std.testing.expectError(
+        error.InvalidReasonCode,
+        server.writeDisconnectWithProperties(0x04, &.{}),
     );
     try std.testing.expectError(
         error.InvalidProperty,
@@ -6664,6 +6709,10 @@ test "MQTT runtime validates stateful DISCONNECT Session Expiry" {
         .properties = @constCast(&zero_expiry),
     });
     try std.testing.expectError(
+        error.InvalidReasonCode,
+        server.validateIncomingDisconnect(.{ .reason_code = 0x89 }),
+    );
+    try std.testing.expectError(
         error.InvalidProperty,
         server.validateIncomingDisconnect(.{
             .properties = @constCast(&nonzero_expiry),
@@ -6672,7 +6721,7 @@ test "MQTT runtime validates stateful DISCONNECT Session Expiry" {
 
     client.connect_session_expiry = 10;
     server.connect_session_expiry = 10;
-    try client.validateOutgoingDisconnect(&nonzero_expiry);
+    try client.validateOutgoingDisconnect(0, &nonzero_expiry);
     try server.validateIncomingDisconnect(.{
         .properties = @constCast(&nonzero_expiry),
     });
