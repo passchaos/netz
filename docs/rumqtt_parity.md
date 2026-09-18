@@ -749,7 +749,13 @@ Session reconnect delivery, Session packet encoding, and both Will refusal
 reason codes, plus raw non-compliant PUBLISH packets for both capabilities and
 Receive Maximum overflow, and an out-of-range Topic Alias.
 The three subscription capability flags also have raw-wire negative tests.
-An invalid-control-flags wire case verifies the general Protocol Error path.
+MQTT-2.1.3-1 classifies invalid fixed-header reserved flags as a Malformed
+Packet. Ten Mosquitto-derived raw cases span PUBACK/PUBREC/PUBREL/PUBCOMP,
+SUBSCRIBE/UNSUBSCRIBE, PINGREQ/PINGRESP, PUBLISH QoS 0 with DUP, and PUBLISH QoS 3;
+each receives exact DISCONNECT `0x81`. The runtime validates fixed-header
+syntax before endpoint direction or state, so a packet invalid in both ways is
+still reported as malformed. A distinct `InvalidPacketDirection` error keeps
+legal encodings sent by the wrong endpoint mapped to Protocol Error `0x82`.
 Every established runtime write and read boundary also enforces the endpoint
 direction assigned by MQTT 5 Table 2-1 (and shared by MQTT 3.1.1): CONNECT,
 SUBSCRIBE, UNSUBSCRIBE, and PINGREQ are client-only, while CONNACK, SUBACK,
@@ -1881,7 +1887,7 @@ overflow case now covers both protocol versions and the exact advertised
 Receive Maximum: MQTT 5 receives DISCONNECT 0x93, while MQTT 3.1.1 closes
 without an unrepresentable reason packet. Server-side admission enforces the
 configured inbound limit in MQTT 3.1.1 even though only MQTT 5 can advertise it
-as a CONNACK property. All 157 scenarios pass. This is
+as a CONNACK property. All 167 scenarios pass. This is
 deliberately described as a selected
 wire-vector subset: Mosquitto's Python harness hardcodes its own `-v -c/-p`
 broker CLI and many tests depend on Mosquitto config, logs, reload, persistence

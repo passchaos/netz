@@ -1479,6 +1479,62 @@ def reject_client_server_only_control_packets(
             healthy.sendall(mqtt_packets.gen_disconnect(proto_ver=5))
 
 
+def malformed_fixed_header_flags(
+    executable: Path, mqtt_packets, mqtt5_rc
+) -> None:
+    # MQTT-2.1.3-1 classifies an incorrect reserved flag pattern as a
+    # Malformed Packet, not a Protocol Error. These packets are adapted from
+    # Mosquitto's per-type JSON vectors and cover every fixed flag shape: zero,
+    # the required 0x2, and PUBLISH's variable flag field.
+    packets = (
+        ("PUBACK flags=1", bytes.fromhex("41 03 00 01 00")),
+        ("PUBREC flags=2", bytes.fromhex("52 03 00 01 00")),
+        ("PUBREL flags=3", bytes.fromhex("63 03 00 01 00")),
+        ("PUBCOMP flags=8", bytes.fromhex("78 03 00 01 00")),
+        ("SUBSCRIBE flags=4", mqtt_packets.gen_subscribe(
+            1, "invalid/flags", 0, cmd=0x84, proto_ver=5
+        )),
+        ("UNSUBSCRIBE flags=4", mqtt_packets.gen_unsubscribe(
+            1, "invalid/flags", cmd=0xA4, proto_ver=5
+        )),
+        ("PINGREQ flags=1", bytes.fromhex("C1 00")),
+        # PINGRESP is also server-only, so this proves malformed syntax wins
+        # over the later endpoint-direction classification.
+        ("PINGRESP flags=1", bytes.fromhex("D1 00")),
+        ("PUBLISH QoS 0 DUP=1", bytes.fromhex(
+            "38 10 00 0D 69 6E 76 61 6C 69 64 2F 66 6C 61 67 73 00"
+        )),
+        ("PUBLISH QoS=3", bytes.fromhex(
+            "36 12 00 0D 69 6E 76 61 6C 69 64 2F 66 6C 61 67 73 00 01 00"
+        )),
+    )
+    with NetzBroker(
+        executable, connections=len(packets) + 1, ignore_errors=True
+    ) as broker:
+        for label, packet in packets:
+            with broker.connect() as invalid:
+                connect_v5(
+                    invalid, mqtt_packets,
+                    "malformed-flags-" + label.split()[0].lower(),
+                )
+                invalid.sendall(packet)
+                expect_packet(
+                    invalid, mqtt_packets.gen_disconnect(
+                        reason_code=mqtt5_rc.MALFORMED_PACKET, proto_ver=5
+                    ),
+                    label,
+                )
+
+        with broker.connect() as healthy:
+            connect_v5(healthy, mqtt_packets, "after-malformed-flags")
+            healthy.sendall(mqtt_packets.gen_pingreq())
+            expect_packet(
+                healthy, mqtt_packets.gen_pingresp(),
+                "healthy PINGRESP after malformed fixed-header flags",
+            )
+            healthy.sendall(mqtt_packets.gen_disconnect(proto_ver=5))
+
+
 def persistent_session_expiry_cap(
     executable: Path, mqtt_packets, mqtt5_props
 ) -> None:
@@ -6458,6 +6514,7 @@ def main() -> None:
     reject_client_server_only_control_packets(
         args.broker, mqtt_packets, mqtt5_rc
     )
+    malformed_fixed_header_flags(args.broker, mqtt_packets, mqtt5_rc)
     persistent_session_expiry_cap(
         args.broker, mqtt_packets, mqtt5_props
     )
@@ -6465,7 +6522,7 @@ def main() -> None:
         args.broker, mqtt_packets, mqtt5_props
     )
     print(
-        "Mosquitto-derived MQTT wire vectors passed: 157 scenarios "
+        "Mosquitto-derived MQTT wire vectors passed: 167 scenarios "
         "with 5000 ms CONNECT deadlines"
     )
 

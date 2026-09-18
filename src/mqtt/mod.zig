@@ -26,6 +26,7 @@ pub const Error = wire.Error || error{
     MalformedRemainingLength,
     RemainingLengthTooLarge,
     InvalidPacketType,
+    InvalidPacketDirection,
     InvalidFlags,
     InvalidProtocolName,
     InvalidProtocolLevel,
@@ -86,11 +87,11 @@ pub fn validatePacketTypeForSender(
 ) Error!void {
     switch (sender) {
         .client => switch (packet_type) {
-            .connack, .suback, .unsuback, .pingresp => return error.InvalidPacketType,
+            .connack, .suback, .unsuback, .pingresp => return error.InvalidPacketDirection,
             else => {},
         },
         .server => switch (packet_type) {
-            .connect, .subscribe, .unsubscribe, .pingreq => return error.InvalidPacketType,
+            .connect, .subscribe, .unsubscribe, .pingreq => return error.InvalidPacketDirection,
             else => {},
         },
     }
@@ -124,6 +125,30 @@ pub const FixedHeader = struct {
 
 fn validateControlFlags(fixed: FixedHeader) Error!void {
     if (fixed.packet_type != .publish and fixed.flags != fixed.packet_type.defaultFlags()) return error.InvalidFlags;
+}
+
+/// Validate the complete fixed-header flag field for an established protocol
+/// version. MQTT 3.1.1 alone permits DUP on a retransmitted PUBREL; MQTT 5
+/// requires the ordinary 0x2 pattern. PUBLISH has variable flags, but QoS 3
+/// and DUP on QoS 0 are malformed in both versions.
+pub fn validatePacketFlags(
+    protocol: ProtocolVersion,
+    fixed: FixedHeader,
+) Error!void {
+    if (fixed.packet_type == .publish) {
+        const qos_bits = (fixed.flags >> 1) & 0x03;
+        if (qos_bits == 0x03) return error.InvalidQoS;
+        if (qos_bits == 0 and (fixed.flags & 0x08) != 0) {
+            return error.InvalidFlags;
+        }
+        return;
+    }
+    if (protocol == .v3_1_1 and fixed.packet_type == .pubrel and
+        (fixed.flags == 0x02 or fixed.flags == 0x0a))
+    {
+        return;
+    }
+    try validateControlFlags(fixed);
 }
 
 fn validatePacketBounds(packet: []const u8, fixed: FixedHeader) Error!void {
@@ -1352,6 +1377,7 @@ pub const Publish = struct {
     pub fn parse(allocator: std.mem.Allocator, protocol: ProtocolVersion, packet: []const u8) Error!Publish {
         const fixed = try FixedHeader.parse(packet);
         if (fixed.packet_type != .publish) return error.InvalidPacketType;
+        try validatePacketFlags(protocol, fixed);
         try validatePacketBounds(packet, fixed);
         var cursor = wire.Cursor.init(packet[fixed.header_len .. fixed.header_len + fixed.remaining_len]);
         const topic = try readUtf8(&cursor);
@@ -2637,6 +2663,33 @@ pub fn writePublish(
     list.appendSliceAssumeCapacity(payload);
 }
 
+test "MQTT PUBLISH codec rejects DUP at QoS zero transactionally" {
+    var encoded: std.ArrayList(u8) = .empty;
+    defer encoded.deinit(std.testing.allocator);
+    try encoded.appendSlice(std.testing.allocator, "prefix");
+
+    try std.testing.expectError(
+        error.InvalidFlags,
+        writePublish(
+            &encoded,
+            std.testing.allocator,
+            .v5,
+            "invalid/dup",
+            "payload",
+            .{ .qos = .at_most_once, .dup = true },
+        ),
+    );
+    try std.testing.expectEqualStrings("prefix", encoded.items);
+    try std.testing.expectError(
+        error.InvalidFlags,
+        Publish.parse(
+            std.testing.allocator,
+            .v5,
+            &.{ 0x38, 0x04, 0x00, 0x01, 'a', 0x00 },
+        ),
+    );
+}
+
 test "MQTT PUBLISH prefix matches complete packet encoding" {
     const allocator = std.testing.allocator;
     const cases = [_]struct {
@@ -2757,6 +2810,7 @@ fn publishWireLengths(
         return error.InvalidProperty;
     }
     if (options.qos == .at_most_once) {
+        if (options.dup) return error.InvalidFlags;
         if (options.packet_id != null) return error.InvalidPacketIdentifier;
     } else if (options.packet_id == null or options.packet_id.? == 0) {
         // Like rumqtt and the MQTT spec, QoS 1/2 PUBLISH packets must carry a
@@ -3200,14 +3254,14 @@ test "MQTT Control Packet types enforce sender direction" {
     for (client_only) |packet_type| {
         try validatePacketTypeForSender(packet_type, .client);
         try std.testing.expectError(
-            error.InvalidPacketType,
+            error.InvalidPacketDirection,
             validatePacketTypeForSender(packet_type, .server),
         );
     }
     for (server_only) |packet_type| {
         try validatePacketTypeForSender(packet_type, .server);
         try std.testing.expectError(
-            error.InvalidPacketType,
+            error.InvalidPacketDirection,
             validatePacketTypeForSender(packet_type, .client),
         );
     }
@@ -3215,6 +3269,88 @@ test "MQTT Control Packet types enforce sender direction" {
         try validatePacketTypeForSender(packet_type, .client);
         try validatePacketTypeForSender(packet_type, .server);
     }
+}
+
+test "MQTT fixed-header flags are classified as malformed" {
+    const ordinary = [_]PacketType{
+        .connect,
+        .connack,
+        .puback,
+        .pubrec,
+        .pubcomp,
+        .suback,
+        .unsuback,
+        .pingreq,
+        .pingresp,
+        .disconnect,
+        .auth,
+    };
+    for (ordinary) |packet_type| {
+        try validatePacketFlags(.v5, .{
+            .packet_type = packet_type,
+            .flags = packet_type.defaultFlags(),
+            .remaining_len = 0,
+            .header_len = 2,
+        });
+        try std.testing.expectError(
+            error.InvalidFlags,
+            validatePacketFlags(.v5, .{
+                .packet_type = packet_type,
+                .flags = 0x01,
+                .remaining_len = 0,
+                .header_len = 2,
+            }),
+        );
+    }
+
+    for ([_]PacketType{ .pubrel, .subscribe, .unsubscribe }) |packet_type| {
+        try validatePacketFlags(.v5, .{
+            .packet_type = packet_type,
+            .flags = 0x02,
+            .remaining_len = 0,
+            .header_len = 2,
+        });
+    }
+    try validatePacketFlags(.v3_1_1, .{
+        .packet_type = .pubrel,
+        .flags = 0x0a,
+        .remaining_len = 0,
+        .header_len = 2,
+    });
+    try std.testing.expectError(
+        error.InvalidFlags,
+        validatePacketFlags(.v5, .{
+            .packet_type = .pubrel,
+            .flags = 0x0a,
+            .remaining_len = 0,
+            .header_len = 2,
+        }),
+    );
+
+    try validatePacketFlags(.v5, .{
+        .packet_type = .publish,
+        .flags = 0x0c,
+        .remaining_len = 0,
+        .header_len = 2,
+    });
+    try std.testing.expectError(
+        error.InvalidFlags,
+        validatePacketFlags(.v5, .{
+            .packet_type = .publish,
+            .flags = 0x08,
+            .remaining_len = 0,
+            .header_len = 2,
+        }),
+    );
+    try std.testing.expectError(
+        error.InvalidQoS,
+        validatePacketFlags(.v5, .{
+            .packet_type = .publish,
+            .flags = 0x06,
+            .remaining_len = 0,
+            .header_len = 2,
+        }),
+    );
 }
 
 test "MQTT connect and publish parse" {

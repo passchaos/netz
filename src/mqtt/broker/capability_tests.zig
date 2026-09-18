@@ -464,14 +464,14 @@ test "broker disconnects MQTT 5 peer after malformed control flags" {
     );
     defer client.close();
 
-    // PINGREQ requires flags zero. This raw frame reaches the broker parser
-    // with the reserved low bit set and must elicit Protocol Error.
+    // PINGREQ requires flags zero. MQTT-2.1.3-1 classifies a reserved flag
+    // mismatch as a Malformed Packet rather than a post-parse Protocol Error.
     var malformed = [_]u8{ 0xc1, 0x00 };
     try client.transport.writePacket(&malformed);
     var disconnect = try client.readDisconnect();
     defer disconnect.deinit(allocator);
     try std.testing.expectEqual(
-        @as(u8, 0x82),
+        @as(u8, 0x81),
         disconnect.disconnect.reason_code,
     );
     try joinServer(thread, &joined, &serve);

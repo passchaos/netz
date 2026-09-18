@@ -5989,9 +5989,7 @@ fn disconnectReasonForReadViolation(err: anyerror) ?u8 {
         error.SharedSubscriptionsNotSupported => 0x9e,
         error.SubscriptionIdentifiersNotSupported => 0xa1,
         error.WildcardSubscriptionsNotSupported => 0xa2,
-        error.InvalidPacketType,
-        error.InvalidFlags,
-        error.InvalidQoS,
+        error.InvalidPacketDirection,
         error.InvalidProperty,
         error.InvalidReasonCode,
         error.InvalidTopic,
@@ -5999,6 +5997,9 @@ fn disconnectReasonForReadViolation(err: anyerror) ?u8 {
         error.InvalidPacketIdentifier,
         error.UnexpectedPacket,
         => 0x82,
+        error.InvalidPacketType,
+        error.InvalidFlags,
+        error.InvalidQoS,
         error.BufferTooShort,
         error.MalformedRemainingLength,
         error.RemainingLengthTooLarge,
@@ -6050,7 +6051,19 @@ test "broker maps negotiated capability violations to DISCONNECT reasons" {
     );
     try std.testing.expectEqual(
         @as(?u8, 0x82),
+        disconnectReasonForReadViolation(error.InvalidPacketDirection),
+    );
+    try std.testing.expectEqual(
+        @as(?u8, 0x81),
+        disconnectReasonForReadViolation(error.InvalidFlags),
+    );
+    try std.testing.expectEqual(
+        @as(?u8, 0x81),
         disconnectReasonForReadViolation(error.InvalidQoS),
+    );
+    try std.testing.expectEqual(
+        @as(?u8, 0x81),
+        disconnectReasonForReadViolation(error.InvalidPacketType),
     );
     try std.testing.expectEqual(
         @as(?u8, 0x81),

@@ -4722,6 +4722,7 @@ pub const Connection = struct {
 
     fn writePacket(self: *Connection, bytes: []u8) Error!void {
         const fixed = try mqtt.FixedHeader.parse(bytes);
+        try mqtt.validatePacketFlags(self.protocol, fixed);
         try self.validateOutgoingPacketType(fixed.packet_type);
         try self.authentication.ensurePacketAllowed(
             fixed.packet_type,
@@ -4865,6 +4866,9 @@ pub const Connection = struct {
         packet: packet_transport.OwnedPacket,
     ) Error!OwnedPacket {
         errdefer self.allocator.free(packet.bytes);
+        // Validate wire syntax before semantic direction/state so a packet
+        // that is wrong in both ways is still classified as Malformed Packet.
+        try mqtt.validatePacketFlags(self.protocol, packet.fixed);
         try self.validateIncomingPacketType(packet.fixed.packet_type);
         self.authentication.ensurePacketAllowed(
             packet.fixed.packet_type,
@@ -6862,27 +6866,27 @@ test "MQTT runtime enforces Control Packet endpoint direction before I/O" {
         .endpoint_role = .client,
     };
     try std.testing.expectError(
-        error.InvalidPacketType,
+        error.InvalidPacketDirection,
         client.writeConnAck(.{}),
     );
     try std.testing.expectError(
-        error.InvalidPacketType,
+        error.InvalidPacketDirection,
         client.writeSubAck(1, &.{0x00}, &.{}),
     );
     try std.testing.expectError(
-        error.InvalidPacketType,
+        error.InvalidPacketDirection,
         client.writeUnsubAck(1, &.{0x00}, &.{}),
     );
     try std.testing.expectError(
-        error.InvalidPacketType,
+        error.InvalidPacketDirection,
         client.writePingResp(),
     );
     try std.testing.expectError(
-        error.InvalidPacketType,
+        error.InvalidPacketDirection,
         client.validateIncomingPacketType(.subscribe),
     );
     try std.testing.expectError(
-        error.InvalidPacketType,
+        error.InvalidPacketDirection,
         client.validateIncomingPacketType(.pingreq),
     );
     const client_incoming = try std.testing.allocator.dupe(
@@ -6890,7 +6894,7 @@ test "MQTT runtime enforces Control Packet endpoint direction before I/O" {
         &.{ 0xc0, 0x00 },
     );
     try std.testing.expectError(
-        error.InvalidPacketType,
+        error.InvalidPacketDirection,
         client.finishReadPacket(.{
             .bytes = client_incoming,
             .fixed = try mqtt.FixedHeader.parse(client_incoming),
@@ -6904,27 +6908,27 @@ test "MQTT runtime enforces Control Packet endpoint direction before I/O" {
         .endpoint_role = .server,
     };
     try std.testing.expectError(
-        error.InvalidPacketType,
+        error.InvalidPacketDirection,
         server.establishClient(.{ .client_id = "invalid-server-connect" }),
     );
     try std.testing.expectError(
-        error.InvalidPacketType,
+        error.InvalidPacketDirection,
         server.subscribe(&.{.{ .topic_filter = "direction/#" }}, .{}),
     );
     try std.testing.expectError(
-        error.InvalidPacketType,
+        error.InvalidPacketDirection,
         server.unsubscribe(&.{"direction/#"}, .{}),
     );
     try std.testing.expectError(
-        error.InvalidPacketType,
+        error.InvalidPacketDirection,
         server.writePingReq(),
     );
     try std.testing.expectError(
-        error.InvalidPacketType,
+        error.InvalidPacketDirection,
         server.validateIncomingPacketType(.connack),
     );
     try std.testing.expectError(
-        error.InvalidPacketType,
+        error.InvalidPacketDirection,
         server.validateIncomingPacketType(.pingresp),
     );
     const server_incoming = try std.testing.allocator.dupe(
@@ -6932,10 +6936,21 @@ test "MQTT runtime enforces Control Packet endpoint direction before I/O" {
         &.{ 0xd0, 0x00 },
     );
     try std.testing.expectError(
-        error.InvalidPacketType,
+        error.InvalidPacketDirection,
         server.finishReadPacket(.{
             .bytes = server_incoming,
             .fixed = try mqtt.FixedHeader.parse(server_incoming),
+        }),
+    );
+    const malformed_server_only = try std.testing.allocator.dupe(
+        u8,
+        &.{ 0xd1, 0x00 },
+    );
+    try std.testing.expectError(
+        error.InvalidFlags,
+        server.finishReadPacket(.{
+            .bytes = malformed_server_only,
+            .fixed = try mqtt.FixedHeader.parse(malformed_server_only),
         }),
     );
 
