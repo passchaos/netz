@@ -574,6 +574,19 @@ pub fn sessionExpiryInterval(properties: []const Property) ?u32 {
     return null;
 }
 
+/// Validate the state-dependent Session Expiry rule for a client DISCONNECT.
+/// Packet-local property validation cannot enforce this because the original
+/// value belongs to the earlier CONNECT packet.
+pub fn validateDisconnectSessionExpiry(
+    connect_expiry: u32,
+    disconnect_expiry: ?u32,
+) Error!void {
+    const replacement = disconnect_expiry orelse return;
+    if (connect_expiry == 0 and replacement != 0) {
+        return error.InvalidProperty;
+    }
+}
+
 pub fn willDelayInterval(properties: []const Property) ?u32 {
     for (properties) |property| {
         if (property == .four_byte and

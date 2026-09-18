@@ -1278,6 +1278,46 @@ def disconnect_session_expiry(
             removed.sendall(mqtt_packets.gen_disconnect(proto_ver=5))
 
 
+def reject_zero_to_nonzero_disconnect_expiry(
+    executable: Path, mqtt_packets, mqtt5_props, mqtt5_rc
+) -> None:
+    # MQTT-3.14.2-2 and Mosquitto's property__process_disconnect reject a
+    # non-zero DISCONNECT Session Expiry when CONNECT established zero. The
+    # broker must report Protocol Error and must not manufacture resumable
+    # Session State from that invalid packet.
+    client_id = "invalid-disconnect-expiry"
+    connect_packet = mqtt_packets.gen_connect(
+        client_id, clean_session=False, proto_ver=5, session_expiry=0
+    )
+    invalid_expiry = mqtt5_props.gen_uint32_prop(
+        mqtt5_props.SESSION_EXPIRY_INTERVAL, 1
+    )
+    with NetzBroker(executable, connections=2) as broker:
+        with broker.connect() as invalid:
+            invalid.sendall(connect_packet)
+            expect_packet(
+                invalid, expected_connack(mqtt_packets, mqtt5_props),
+                "zero Session Expiry CONNACK",
+            )
+            invalid.sendall(mqtt_packets.gen_disconnect(
+                proto_ver=5, properties=invalid_expiry
+            ))
+            expect_packet(
+                invalid, mqtt_packets.gen_disconnect(
+                    reason_code=mqtt5_rc.PROTOCOL_ERROR, proto_ver=5
+                ),
+                "invalid Session Expiry DISCONNECT",
+            )
+
+        with broker.connect() as resumed:
+            resumed.sendall(connect_packet)
+            expect_packet(
+                resumed, expected_connack(mqtt_packets, mqtt5_props),
+                "non-persistent Session after invalid DISCONNECT",
+            )
+            resumed.sendall(mqtt_packets.gen_disconnect(proto_ver=5))
+
+
 def persistent_session_expiry_cap(
     executable: Path, mqtt_packets, mqtt5_props
 ) -> None:
@@ -6246,6 +6286,9 @@ def main() -> None:
         args.broker, mqtt_packets, mqtt5_props, mqtt5_rc
     )
     disconnect_session_expiry(args.broker, mqtt_packets, mqtt5_props)
+    reject_zero_to_nonzero_disconnect_expiry(
+        args.broker, mqtt_packets, mqtt5_props, mqtt5_rc
+    )
     persistent_session_expiry_cap(
         args.broker, mqtt_packets, mqtt5_props
     )
@@ -6253,7 +6296,7 @@ def main() -> None:
         args.broker, mqtt_packets, mqtt5_props
     )
     print(
-        "Mosquitto-derived MQTT wire vectors passed: 147 scenarios "
+        "Mosquitto-derived MQTT wire vectors passed: 148 scenarios "
         "with 5000 ms CONNECT deadlines"
     )
 

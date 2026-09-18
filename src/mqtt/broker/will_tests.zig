@@ -98,6 +98,95 @@ test "broker routes immediate Will on ungraceful close" {
     try joinServer(thread, &joined, &serve);
 }
 
+test "broker rejects zero to nonzero DISCONNECT expiry before cleanup" {
+    const allocator = std.testing.allocator;
+    var threaded = std.Io.Threaded.init(allocator, .{
+        .async_limit = .unlimited,
+    });
+    defer threaded.deinit();
+    const io = threaded.io();
+    var broker = try testBroker(allocator, io, 3, 64);
+    defer broker.deinit();
+
+    var serve = ServeState{
+        .broker = &broker,
+        .connection_count = 3,
+    };
+    const thread = try std.Thread.spawn(.{}, ServeState.run, .{&serve});
+    var joined = false;
+    defer if (!joined) thread.join();
+
+    var subscriber = try connect(
+        allocator,
+        io,
+        broker,
+        "invalid-expiry-subscriber",
+        &.{},
+    );
+    defer subscriber.close();
+    var suback = try subscriber.subscribe(
+        &.{.{ .topic_filter = "will/#", .qos = .at_least_once }},
+        .{},
+    );
+    defer suback.deinit(allocator);
+
+    var source = try connectWithOptions(
+        allocator,
+        io,
+        broker,
+        .{
+            .protocol = .v5,
+            .client_id = "invalid-expiry-source",
+            .clean_start = false,
+            .will = will(0, false),
+        },
+    );
+    defer source.close();
+    const invalid_expiry = [_]mqtt.Property{.{ .four_byte = .{
+        .id = .session_expiry_interval,
+        .value = 1,
+    } }};
+    var invalid_packet: std.ArrayList(u8) = .empty;
+    defer invalid_packet.deinit(allocator);
+    try mqtt.Disconnect.write(
+        &invalid_packet,
+        allocator,
+        .v5,
+        0,
+        &invalid_expiry,
+    );
+    try source.transport.writePacket(invalid_packet.items);
+    var protocol_error = try source.readDisconnect();
+    defer protocol_error.deinit(allocator);
+    try std.testing.expectEqual(
+        @as(u8, 0x82),
+        protocol_error.disconnect.reason_code,
+    );
+
+    var published = try subscriber.readPublish();
+    defer published.deinit(allocator);
+    try std.testing.expectEqualStrings("will/status", published.publish.topic);
+    try std.testing.expectEqualStrings("offline", published.publish.payload);
+    try subscriber.writePubAck(published.publish.packet_id.?, 0);
+
+    var resumed = try mqtt.runtime.Client.connectWithConnAck(
+        allocator,
+        io,
+        broker.address(),
+        .{
+            .protocol = .v5,
+            .client_id = "invalid-expiry-source",
+            .clean_start = false,
+        },
+    );
+    defer resumed.connection.close();
+    defer resumed.connack.deinit(allocator);
+    try std.testing.expect(!resumed.connack.connack.session_present);
+
+    try disconnectAll(&.{ &subscriber, &resumed.connection });
+    try joinServer(thread, &joined, &serve);
+}
+
 test "broker write ACL suppresses Will before retained and route mutation" {
     const allocator = std.testing.allocator;
     var threaded = std.Io.Threaded.init(allocator, .{

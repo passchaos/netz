@@ -3327,6 +3327,15 @@ pub const Broker = struct {
             self.state_mutex.unlock(self.io);
             self.finishPartialPersistentChange(persistent_changed);
         };
+        // Validate state-dependent DISCONNECT properties before changing the
+        // Will, Session owner, router, or persistence state. In particular,
+        // MQTT-3.14.2-2 makes zero-to-nonzero Session Expiry a Protocol Error.
+        if (slot.session_handle) |handle| {
+            try self.sessions.validateDisconnect(
+                handle,
+                session_expiry_override,
+            );
+        }
         if (slot.will_handle) |handle| {
             const result: ?will_mod.CloseResult = self.wills.closeDisconnectWithSessionExpiry(
                 handle,
@@ -5557,7 +5566,7 @@ const ClientTask = struct {
     ) !void {
         while (true) {
             var event = connection.readBrokerEventWithKeepAlive() catch |err| {
-                if (try task.disconnectForReadViolation(
+                if (try task.disconnectForProtocolViolation(
                     slot,
                     connection,
                     err,
@@ -5737,17 +5746,29 @@ const ClientTask = struct {
                     slot.writer_mutex.unlock(task.broker.io);
                 },
                 .disconnect => |*owned| {
-                    try task.broker.handleDisconnect(
+                    task.broker.handleDisconnect(
                         slot,
                         owned.disconnect,
-                    );
+                    ) catch |err| {
+                        // Some DISCONNECT rules depend on CONNECT/Session
+                        // state and therefore cannot be enforced by the
+                        // packet parser. Report those violations with the
+                        // same MQTT 5 reason mapping as malformed reads before
+                        // unregister performs ungraceful Session/Will cleanup.
+                        if (try task.disconnectForProtocolViolation(
+                            slot,
+                            connection,
+                            err,
+                        )) return;
+                        return err;
+                    };
                     return;
                 },
             }
         }
     }
 
-    fn disconnectForReadViolation(
+    fn disconnectForProtocolViolation(
         task: ClientTask,
         slot: *ClientSlot,
         connection: *runtime.Connection,

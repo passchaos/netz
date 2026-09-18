@@ -2230,11 +2230,15 @@ fn problemInformationProperty(property: mqtt.Property) bool {
 }
 
 pub const Connection = struct {
+    const EndpointRole = enum { unestablished, client, server };
+
     allocator: std.mem.Allocator,
     transport: PacketTransport,
     traffic: TrafficCounters = .{},
     traffic_sink: ?*TrafficCounters = null,
     protocol: mqtt.ProtocolVersion = .v5,
+    endpoint_role: EndpointRole = .unestablished,
+    connect_session_expiry: u32 = 0,
     limits: Limits = .{},
     next_packet_id: u16 = 1,
     outgoing_inflight: u16 = 0,
@@ -2732,6 +2736,10 @@ pub const Connection = struct {
         // A successful MQTT 5 CONNACK may replace it below with Server Keep
         // Alive, but an omitted property must retain the requested interval.
         self.keep_alive_seconds = options.keep_alive_seconds;
+        self.endpoint_role = .client;
+        self.connect_session_expiry = mqtt.sessionExpiryInterval(
+            options.properties,
+        ) orelse 0;
         self.write_scratch.clearRetainingCapacity();
         self.write_property_scratch.clearRetainingCapacity();
         try self.write_property_scratch.appendSlice(
@@ -2927,6 +2935,10 @@ pub const Connection = struct {
         var connect = try mqtt.Connect.parse(self.allocator, packet.bytes);
         errdefer connect.deinit(self.allocator);
         self.protocol = connect.protocol;
+        self.endpoint_role = .server;
+        self.connect_session_expiry = mqtt.sessionExpiryInterval(
+            connect.properties,
+        ) orelse 0;
         self.keep_alive_seconds = connect.keep_alive_seconds;
         return .{ .packet = packet, .connect = connect };
     }
@@ -3788,6 +3800,7 @@ pub const Connection = struct {
         reason_code: u8,
         properties: []const mqtt.Property,
     ) Error!void {
+        try self.validateOutgoingDisconnect(properties);
         if (properties.len == 0) {
             var encoded: [mqtt.Disconnect.no_properties_max_len]u8 = undefined;
             return self.writePacket(
@@ -3809,13 +3822,64 @@ pub const Connection = struct {
         try self.writePacket(self.write_scratch.items);
     }
 
+    fn validateOutgoingDisconnect(
+        self: *const Connection,
+        properties: []const mqtt.Property,
+    ) Error!void {
+        const expiry = mqtt.sessionExpiryInterval(properties) orelse return;
+        switch (self.endpoint_role) {
+            .unestablished => {},
+            // A Server MUST NOT send Session Expiry in DISCONNECT.
+            .server => return error.InvalidProperty,
+            // MQTT-3.14.2-2 forbids raising the value from zero.
+            .client => try mqtt.validateDisconnectSessionExpiry(
+                self.connect_session_expiry,
+                expiry,
+            ),
+        }
+    }
+
+    fn validateIncomingDisconnect(
+        self: *const Connection,
+        disconnect_packet: mqtt.Disconnect,
+    ) Error!void {
+        const expiry = mqtt.sessionExpiryInterval(
+            disconnect_packet.properties,
+        ) orelse return;
+        switch (self.endpoint_role) {
+            .unestablished => {},
+            // A Server MUST NOT send Session Expiry in DISCONNECT.
+            .client => return error.InvalidProperty,
+            // MQTT-3.14.2-2 forbids raising the value from zero.
+            .server => try mqtt.validateDisconnectSessionExpiry(
+                self.connect_session_expiry,
+                expiry,
+            ),
+        }
+    }
+
     pub fn readDisconnect(self: *Connection) Error!OwnedDisconnect {
         var packet = try self.readPacket();
         errdefer packet.deinit(self.allocator);
         if (packet.fixed.packet_type != .disconnect) return error.UnexpectedPacket;
-        var disconnect_packet = try mqtt.Disconnect.parse(self.allocator, self.protocol, packet.bytes);
-        errdefer disconnect_packet.deinit(self.allocator);
+        const disconnect_packet = try self.parseIncomingDisconnect(
+            packet.bytes,
+        );
         return .{ .packet = packet, .disconnect = disconnect_packet };
+    }
+
+    fn parseIncomingDisconnect(
+        self: *const Connection,
+        packet: []const u8,
+    ) Error!mqtt.Disconnect {
+        var disconnect_packet = try mqtt.Disconnect.parse(
+            self.allocator,
+            self.protocol,
+            packet,
+        );
+        errdefer disconnect_packet.deinit(self.allocator);
+        try self.validateIncomingDisconnect(disconnect_packet);
+        return disconnect_packet;
     }
 
     pub fn writeAuth(self: *Connection, reason_code: u8, properties: []const mqtt.Property) Error!void {
@@ -4210,12 +4274,9 @@ pub const Connection = struct {
                 break :blk .{ .pingresp = packet };
             },
             .disconnect => blk: {
-                var value = try mqtt.Disconnect.parse(
-                    self.allocator,
-                    self.protocol,
+                const value = try self.parseIncomingDisconnect(
                     packet.bytes,
                 );
-                errdefer value.deinit(self.allocator);
                 break :blk .{ .disconnect = .{
                     .packet = packet,
                     .disconnect = value,
@@ -4369,12 +4430,9 @@ pub const Connection = struct {
                 break :blk .{ .pingreq = packet };
             },
             .disconnect => blk: {
-                var value = try mqtt.Disconnect.parse(
-                    self.allocator,
-                    self.protocol,
+                const value = try self.parseIncomingDisconnect(
                     packet.bytes,
                 );
-                errdefer value.deinit(self.allocator);
                 break :blk .{ .disconnect = .{
                     .packet = packet,
                     .disconnect = value,
@@ -6428,6 +6486,72 @@ test "MQTT variable control writes reuse connection scratch" {
         defer actual.deinit(allocator);
         try std.testing.expectEqualSlices(u8, expected, actual.bytes);
     }
+}
+
+test "MQTT runtime validates stateful DISCONNECT Session Expiry" {
+    const zero_expiry = [_]mqtt.Property{.{ .four_byte = .{
+        .id = .session_expiry_interval,
+        .value = 0,
+    } }};
+    const nonzero_expiry = [_]mqtt.Property{.{ .four_byte = .{
+        .id = .session_expiry_interval,
+        .value = 30,
+    } }};
+
+    var client = Connection{
+        .allocator = std.testing.allocator,
+        .transport = undefined,
+        .endpoint_role = .client,
+        .connect_session_expiry = 0,
+    };
+    try client.validateOutgoingDisconnect(&zero_expiry);
+    try std.testing.expectError(
+        error.InvalidProperty,
+        client.validateOutgoingDisconnect(&nonzero_expiry),
+    );
+    // The public writer must fail before touching the deliberately absent
+    // transport or allocating/encoding packet storage.
+    try std.testing.expectError(
+        error.InvalidProperty,
+        client.writeDisconnectWithProperties(0, &nonzero_expiry),
+    );
+    try std.testing.expectError(
+        error.InvalidProperty,
+        client.validateIncomingDisconnect(.{
+            .properties = @constCast(&zero_expiry),
+        }),
+    );
+
+    var server = Connection{
+        .allocator = std.testing.allocator,
+        .transport = undefined,
+        .endpoint_role = .server,
+        .connect_session_expiry = 0,
+    };
+    try std.testing.expectError(
+        error.InvalidProperty,
+        server.validateOutgoingDisconnect(&zero_expiry),
+    );
+    try std.testing.expectError(
+        error.InvalidProperty,
+        server.writeDisconnectWithProperties(0, &zero_expiry),
+    );
+    try server.validateIncomingDisconnect(.{
+        .properties = @constCast(&zero_expiry),
+    });
+    try std.testing.expectError(
+        error.InvalidProperty,
+        server.validateIncomingDisconnect(.{
+            .properties = @constCast(&nonzero_expiry),
+        }),
+    );
+
+    client.connect_session_expiry = 10;
+    server.connect_session_expiry = 10;
+    try client.validateOutgoingDisconnect(&nonzero_expiry);
+    try server.validateIncomingDisconnect(.{
+        .properties = @constCast(&nonzero_expiry),
+    });
 }
 
 test "MQTT runtime enforces incoming maximum packet size on full frame" {

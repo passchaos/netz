@@ -643,11 +643,10 @@ pub const Scheduler = struct {
         const entry = try self.getEntry(handle);
         if (entry.state == .connected) {
             if (session_expiry_override) |new_expiry| {
-                // MQTT-3.14.2-2 forbids increasing a zero CONNECT interval in
-                // DISCONNECT. The Session Store enforces the same invariant.
-                if (entry.session_expiry_interval == 0 and new_expiry != 0) {
-                    return error.InvalidProperty;
-                }
+                try mqtt.validateDisconnectSessionExpiry(
+                    entry.session_expiry_interval,
+                    new_expiry,
+                );
                 entry.session_expiry_interval = new_expiry;
             }
         }

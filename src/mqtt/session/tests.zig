@@ -81,6 +81,27 @@ test "session maps MQTT versions to expiry semantics" {
     );
 }
 
+test "session rejects raising zero expiry without mutation" {
+    const allocator = std.testing.allocator;
+    var store = Store.init(allocator, .{});
+    defer store.deinit();
+
+    const opened = try store.open("transient", false, 0, .zero);
+    try std.testing.expectError(
+        error.InvalidProperty,
+        store.disconnect(opened.handle, 1, .zero),
+    );
+    const stats = try store.stats(opened.handle);
+    try std.testing.expect(stats.connected);
+    try std.testing.expectEqual(@as(u32, 0), stats.expiry_interval);
+
+    try store.disconnect(opened.handle, null, .zero);
+    try std.testing.expectError(
+        error.SessionNotFound,
+        store.stats(opened.handle),
+    );
+}
+
 test "session optionally queues QoS0 without MQTT packet identifiers" {
     const allocator = std.testing.allocator;
     var store = Store.init(allocator, .{});

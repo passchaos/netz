@@ -237,7 +237,7 @@ optional absolute header timeout prevents incomplete proxy prefaces from
 holding listener workers indefinitely.
 
 The selected Mosquitto-derived process gate enables a five-second CONNECT
-deadline on every one of its finite broker processes, so all 147 raw scenarios
+deadline on every one of its finite broker processes, so all 148 raw scenarios
 also exercise the bounded admission path rather than merely proving the option
 in an isolated unit test.
 Three retained-source scenarios persist and restart the standalone broker after
@@ -1463,7 +1463,7 @@ Listeners can also opt into Mosquitto-compatible
 then Session, Will, takeover and live ACL state consistently use the required
 username as the effective Client ID. Missing usernames receive Not Authorized;
 tests prove two different wire Client IDs with one username resume/take over the
-same durable Session. The 147-scenario Mosquitto-derived wire gate runs the
+same durable Session. The 148-scenario Mosquitto-derived wire gate runs the
 same policy through the standalone broker option, including exact Session
 Present, takeover DISCONNECT and missing-username refusal bytes.
 `zig build interop-mqtt-listener-mount-mosquitto -Doptimize=ReleaseFast`
@@ -1482,7 +1482,7 @@ Standalone TCP, Unix, TLS, WS, and WSS servers also share a long-running
 `serveUntil` worker supervisor with cancellation, connection reuse, error
 observation, and independent accept/connection failure policies.
 
-`zig build interop-mqtt-mosquitto-vectors -Doptimize=ReleaseFast` now runs 147
+`zig build interop-mqtt-mosquitto-vectors -Doptimize=ReleaseFast` now runs 148
 raw MQTT scenarios derived directly from Mosquitto `5cd25465`'s packet
 generators: two PROXY protocol cases consume Mosquitto's v1 TCP4 and v2 IPv4
 prefaces before completing MQTT 5 CONNECT and PING on the same stream; the
@@ -1700,6 +1700,12 @@ The Session Expiry case ports the timing-observable core of Mosquitto's
 present beyond the one-second CONNECT value, the Session is absent after the
 new deadline, and a zero DISCONNECT override removes the replacement
 immediately. Exact CONNACK bytes distinguish every Session Present transition.
+An additional Mosquitto `property__process_disconnect` vector covers
+MQTT-3.14.2-2: when CONNECT selected Session Expiry zero, a non-zero
+DISCONNECT override receives exact Protocol Error `0x82`. Validation happens
+before Will or Session mutation; a real broker test verifies that the invalid
+packet still triggers the Will as an ungraceful close and cannot manufacture a
+resumable Session.
 The broker also exposes Mosquitto's administrative
 `persistent_client_expiration` behavior as
 `persistent_session_expiry_seconds`: it caps a longer MQTT 5 Session Expiry and
@@ -1846,7 +1852,7 @@ overflow case now covers both protocol versions and the exact advertised
 Receive Maximum: MQTT 5 receives DISCONNECT 0x93, while MQTT 3.1.1 closes
 without an unrepresentable reason packet. Server-side admission enforces the
 configured inbound limit in MQTT 3.1.1 even though only MQTT 5 can advertise it
-as a CONNACK property. All 147 scenarios pass. This is
+as a CONNACK property. All 148 scenarios pass. This is
 deliberately described as a selected
 wire-vector subset: Mosquitto's Python harness hardcodes its own `-v -c/-p`
 broker CLI and many tests depend on Mosquitto config, logs, reload, persistence
@@ -1899,5 +1905,5 @@ or plugins, so passing these vectors is not proxy evidence for the entire suite.
    the independent-peer memory gap.
 3. Expand the selected Mosquitto-derived raw wire gate above, or add a broker
    process adapter capable of preserving the upstream harness's config/reload/
-   persistence semantics. The 147 passing packet-vector scenarios do not cover
+   persistence semantics. The 148 passing packet-vector scenarios do not cover
    the full protocol/conformance suite.

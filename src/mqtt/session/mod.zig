@@ -1057,17 +1057,30 @@ pub const Store = struct {
         );
     }
 
+    /// Validate a DISCONNECT Session Expiry override without mutating Session
+    /// State. Protocol owners call this before applying coupled Will and
+    /// Session transitions.
+    pub fn validateDisconnect(
+        self: *Store,
+        handle: Handle,
+        expiry_override: ?u32,
+    ) Error!void {
+        const session = try self.getSession(handle);
+        try mqtt.validateDisconnectSessionExpiry(
+            session.expiry_interval,
+            expiry_override,
+        );
+    }
+
     pub fn disconnect(
         self: *Store,
         handle: Handle,
         expiry_override: ?u32,
         now: std.Io.Timestamp,
     ) Error!void {
+        try self.validateDisconnect(handle, expiry_override);
         const session = try self.getSession(handle);
         if (expiry_override) |new_expiry| {
-            if (session.expiry_interval == 0 and new_expiry != 0) {
-                return error.InvalidProperty;
-            }
             session.expiry_interval = new_expiry;
         }
         if (session.expiry_interval == 0) {
