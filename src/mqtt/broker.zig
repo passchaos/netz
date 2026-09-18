@@ -3895,7 +3895,7 @@ pub const Broker = struct {
             if (durable_publisher_id != publisher_id) {
                 // The completed inbound transaction belongs to a durable
                 // Session from an earlier Network Connection. Reconcile the
-                // fresh connection's fixed receive table so writePubComp can
+                // fresh connection's receive-state table so writePubComp can
                 // release it normally. MQTT 3.1.1 identifies this retry with
                 // PUBREL DUP; MQTT 5 defines repeated PUBREL as idempotent
                 // without carrying a DUP bit.

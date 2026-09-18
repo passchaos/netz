@@ -9,15 +9,71 @@ mosquitto_binary=${MOSQUITTO_BIN:-}
 expected_mosquitto_commit=${MOSQUITTO_COMMIT:-5cd25465}
 work=$(mktemp -d)
 server_pid=
+sampler_pid=
+stats=${MQTT_STATS:-false}
+if [[ "$stats" != false && "$stats" != true ]]; then
+  echo 'MQTT_STATS must be true or false' >&2
+  exit 2
+fi
+if [[ "$stats" == true && ! -r /proc/self/status ]]; then
+  echo 'MQTT_STATS=true requires Linux /proc process status data' >&2
+  exit 127
+fi
 
 cleanup() {
+  if [[ -n "$sampler_pid" ]]; then
+    kill "$sampler_pid" 2>/dev/null || true
+    wait "$sampler_pid" 2>/dev/null || true
+  fi
   if [[ -n "$server_pid" ]]; then
     kill "$server_pid" 2>/dev/null || true
     wait "$server_pid" 2>/dev/null || true
   fi
   rm -rf "$work"
 }
-trap cleanup EXIT
+on_exit() {
+  local status=$?
+  if [[ $status -ne 0 ]]; then
+    while IFS= read -r artifact; do
+      echo "===== $artifact =====" >&2
+      cat "$artifact" >&2
+    done < <(find "$work" -maxdepth 1 -type f \
+      \( -name '*.log' -o -name '*.txt' -o -name '*.rss' \) \
+      -size +0c | sort)
+  fi
+  cleanup
+  exit "$status"
+}
+trap on_exit EXIT
+
+start_rss_sampler() {
+  local pid=$1
+  local output=$2
+  (
+    local peak=0
+    local value
+    while kill -0 "$pid" 2>/dev/null; do
+      value=$(awk '/^VmRSS:/ { print $2 }' "/proc/$pid/status" \
+        2>/dev/null || true)
+      if [[ -n "$value" && "$value" -gt "$peak" ]]; then
+        peak=$value
+      fi
+      sleep 0.002
+    done
+    if [[ "$peak" -le 0 ]]; then
+      echo 'failed to sample broker RSS' >&2
+      exit 1
+    fi
+    printf '%s\n' "$peak" >"$output"
+  ) &
+  sampler_pid=$!
+}
+
+finish_rss_sampler() {
+  if [[ -z "$sampler_pid" ]]; then return; fi
+  wait "$sampler_pid"
+  sampler_pid=
+}
 
 free_tcp_port() {
   python3 - <<'PY'
@@ -165,9 +221,13 @@ netz_port=$(free_tcp_port)
 server_pid=$!
 wait_for_log "$work/netz-server.log" \
   'netz MQTT 3.1.1/5 broker listening.*server_io=zio-std-io'
+if [[ "$stats" == true ]]; then
+  start_rss_sampler "$server_pid" "$work/netz-server.rss"
+fi
 run_driver "$netz_port" "$work/netz-result.txt" netz zio-std-io
 wait "$server_pid"
 server_pid=
+finish_rss_sampler
 
 mosquitto_port=$(free_tcp_port)
 cat >"$work/mosquitto.conf" <<EOF
@@ -182,13 +242,18 @@ EOF
   >"$work/mosquitto-server.log" 2>&1 &
 server_pid=$!
 wait_for_log "$work/mosquitto-server.log" 'mosquitto version.*running'
+if [[ "$stats" == true ]]; then
+  start_rss_sampler "$server_pid" "$work/mosquitto-server.rss"
+fi
 run_driver "$mosquitto_port" "$work/mosquitto-result.txt" \
   mosquitto mosquitto-event-loop
 kill "$server_pid" 2>/dev/null || true
 wait "$server_pid" 2>/dev/null || true
 server_pid=
+finish_rss_sampler
 
-python3 "$repo_root/tools/interop/mqtt_broker_benchmark_check.py" \
+check_args=(python3 \
+  "$repo_root/tools/interop/mqtt_broker_benchmark_check.py" \
   --netz-log "$work/netz-result.txt" \
   --mosquitto-log "$work/mosquitto-result.txt" \
   --publishers "${PUBLISHERS:-2}" \
@@ -196,7 +261,15 @@ python3 "$repo_root/tools/interop/mqtt_broker_benchmark_check.py" \
   --warmup "${WARMUP_MESSAGES:-100}" \
   --messages "${MESSAGES:-2000}" \
   --payload-bytes "${PAYLOAD_BYTES:-256}" \
-  --publisher-window "${PUBLISHER_WINDOW:-16}"
+  --publisher-window "${PUBLISHER_WINDOW:-16}")
+if [[ "$stats" == true ]]; then
+  check_args+=(
+    --netz-server-rss "$work/netz-server.rss"
+    --mosquitto-server-rss "$work/mosquitto-server.rss"
+    --rss-source proc-vmrss-sampled-2ms
+  )
+fi
+"${check_args[@]}"
 
 echo '--- netz ---'
 cat "$work/netz-result.txt"

@@ -41,6 +41,82 @@ class MqttBrokerBenchmarkCheckTest(unittest.TestCase):
             output = self.verify(netz, mosquitto)
             self.assertIn("client_io=zio-std-io", output)
 
+    def test_accepts_broker_rss_pair(self) -> None:
+        with TemporaryDirectory() as directory:
+            netz = Path(directory, "netz.log")
+            mosquitto = Path(directory, "mosquitto.log")
+            netz.write_text(self.record("netz", "zio-std-io"))
+            mosquitto.write_text(
+                self.record("mosquitto", "mosquitto-event-loop")
+            )
+            netz_rss = Path(directory, "netz.rss")
+            mosquitto_rss = Path(directory, "mosquitto.rss")
+            netz_rss.write_text("4096\n", encoding="ascii")
+            mosquitto_rss.write_text("2048\n", encoding="ascii")
+            output = CHECK.verify(
+                netz, mosquitto, 2, 2, 10, 100, 256, 8,
+                netz_rss, mosquitto_rss, "proc-vmrss-sampled-2ms",
+            )
+            self.assertIn("record=memory implementation=netz", output)
+            self.assertIn("process_peak_rss_kib=4096", output)
+            self.assertIn("server_io=zio-std-io", output)
+            self.assertIn("role_pair=netz-client+netz-server", output)
+            self.assertIn(
+                "record=memory implementation=mosquitto", output
+            )
+
+    def test_rejects_incomplete_broker_rss_pair(self) -> None:
+        with TemporaryDirectory() as directory:
+            netz = Path(directory, "netz.log")
+            mosquitto = Path(directory, "mosquitto.log")
+            netz.write_text(self.record("netz", "zio-std-io"))
+            mosquitto.write_text(
+                self.record("mosquitto", "mosquitto-event-loop")
+            )
+            rss = Path(directory, "netz.rss")
+            rss.write_text("4096\n", encoding="ascii")
+            with self.assertRaisesRegex(ValueError, "both broker RSS"):
+                CHECK.verify(
+                    netz, mosquitto, 2, 2, 10, 100, 256, 8,
+                    netz_server_rss=rss,
+                )
+
+    def test_rejects_nonpositive_broker_rss(self) -> None:
+        with TemporaryDirectory() as directory:
+            netz = Path(directory, "netz.log")
+            mosquitto = Path(directory, "mosquitto.log")
+            netz.write_text(self.record("netz", "zio-std-io"))
+            mosquitto.write_text(
+                self.record("mosquitto", "mosquitto-event-loop")
+            )
+            netz_rss = Path(directory, "netz.rss")
+            mosquitto_rss = Path(directory, "mosquitto.rss")
+            netz_rss.write_text("0\n", encoding="ascii")
+            mosquitto_rss.write_text("2048\n", encoding="ascii")
+            with self.assertRaisesRegex(ValueError, "non-positive"):
+                CHECK.verify(
+                    netz, mosquitto, 2, 2, 10, 100, 256, 8,
+                    netz_rss, mosquitto_rss,
+                )
+
+    def test_rejects_unknown_rss_source(self) -> None:
+        with TemporaryDirectory() as directory:
+            netz = Path(directory, "netz.log")
+            mosquitto = Path(directory, "mosquitto.log")
+            netz.write_text(self.record("netz", "zio-std-io"))
+            mosquitto.write_text(
+                self.record("mosquitto", "mosquitto-event-loop")
+            )
+            netz_rss = Path(directory, "netz.rss")
+            mosquitto_rss = Path(directory, "mosquitto.rss")
+            netz_rss.write_text("4096\n", encoding="ascii")
+            mosquitto_rss.write_text("2048\n", encoding="ascii")
+            with self.assertRaisesRegex(ValueError, "unsupported RSS"):
+                CHECK.verify(
+                    netz, mosquitto, 2, 2, 10, 100, 256, 8,
+                    netz_rss, mosquitto_rss, "untrusted source",
+                )
+
     def test_rejects_wrong_backend(self) -> None:
         with TemporaryDirectory() as directory:
             netz = Path(directory, "netz.log")

@@ -5,6 +5,7 @@ const websocket = @import("../websocket/mod.zig");
 const websocket_runtime = websocket.runtime;
 const http1_runtime = @import("../http1/mod.zig").runtime;
 const packet_transport = @import("runtime/packet_transport.zig");
+const packet_identifiers = @import("runtime/packet_identifiers.zig");
 const stream_io = @import("../internal/stream_io.zig");
 const deadline_policy = @import("../internal/deadline.zig");
 const auth_runtime = @import("runtime/auth.zig");
@@ -139,7 +140,6 @@ pub fn readProxyMetadata(
     return metadata;
 }
 
-const packet_identifier_slots = @as(usize, std.math.maxInt(u16)) + 1;
 const PacketTransport = packet_transport.Transport;
 
 pub const Server = struct {
@@ -2255,11 +2255,7 @@ pub const Connection = struct {
     local_wildcard_subscription_available: bool = true,
     local_subscription_identifier_available: bool = true,
     local_shared_subscription_available: bool = true,
-    incoming_qos1: std.StaticBitSet(packet_identifier_slots) = .empty,
-    incoming_qos2: std.StaticBitSet(packet_identifier_slots) = .empty,
-    outgoing_qos1: std.StaticBitSet(packet_identifier_slots) = .empty,
-    outgoing_qos2: std.StaticBitSet(packet_identifier_slots) = .empty,
-    outgoing_qos2_pubrel: std.StaticBitSet(packet_identifier_slots) = .empty,
+    packet_identifiers: packet_identifiers.State = .{},
     incoming_topic_aliases: topic_alias.Table = .{},
     outgoing_topic_aliases: topic_alias.Table = .{},
     assigned_client_id: ?[]u8 = null,
@@ -2379,6 +2375,7 @@ pub const Connection = struct {
     }
 
     pub fn close(self: *Connection) void {
+        self.packet_identifiers.deinit(self.allocator);
         self.incoming_topic_aliases.deinit(self.allocator);
         self.outgoing_topic_aliases.deinit(self.allocator);
         if (self.assigned_client_id) |client_id| {
@@ -3231,11 +3228,17 @@ pub const Connection = struct {
     }
 
     pub fn completePublishPubAck(self: *Connection, packet_id: u16) Error!void {
-        if (packet_id != 0 and !self.outgoing_qos1.isSet(@as(usize, packet_id))) return error.UnexpectedPacket;
+        if (packet_id != 0 and !self.packet_identifiers.contains(
+            packet_id,
+            .outgoing_qos1,
+        )) return error.UnexpectedPacket;
         var ack = try self.readPubAck();
         defer ack.deinit(self.allocator);
         if (packet_id != 0 and ack.ack.packet_id != packet_id) return error.UnexpectedPacket;
-        if (!self.outgoing_qos1.isSet(@as(usize, ack.ack.packet_id))) return error.UnexpectedPacket;
+        if (!self.packet_identifiers.contains(
+            ack.ack.packet_id,
+            .outgoing_qos1,
+        )) return error.UnexpectedPacket;
         self.releaseOutgoingPublish(ack.ack.packet_id, .at_least_once);
         if (!ack.ack.accepted()) return error.PublishRefused;
     }
@@ -3246,23 +3249,35 @@ pub const Connection = struct {
     }
 
     pub fn completePublishPubRec(self: *Connection, packet_id: u16) Error!u16 {
-        if (packet_id != 0 and !self.outgoing_qos2.isSet(@as(usize, packet_id))) return error.UnexpectedPacket;
+        if (packet_id != 0 and !self.packet_identifiers.contains(
+            packet_id,
+            .outgoing_qos2,
+        )) return error.UnexpectedPacket;
         var pubrec = try self.readPubRec();
         defer pubrec.deinit(self.allocator);
         if (packet_id != 0 and pubrec.ack.packet_id != packet_id) return error.UnexpectedPacket;
-        if (!self.outgoing_qos2.isSet(@as(usize, pubrec.ack.packet_id))) return error.UnexpectedPacket;
+        if (!self.packet_identifiers.contains(
+            pubrec.ack.packet_id,
+            .outgoing_qos2,
+        )) return error.UnexpectedPacket;
         if (!pubrec.ack.accepted()) {
             self.releaseOutgoingPublish(pubrec.ack.packet_id, .exactly_once);
             return error.PublishRefused;
         }
         try self.writePubRel(pubrec.ack.packet_id, 0);
-        self.outgoing_qos2.setValue(@as(usize, pubrec.ack.packet_id), false);
-        self.outgoing_qos2_pubrel.set(@as(usize, pubrec.ack.packet_id));
+        std.debug.assert(self.packet_identifiers.transition(
+            pubrec.ack.packet_id,
+            .outgoing_qos2,
+            .outgoing_qos2_pubrel,
+        ));
         return pubrec.ack.packet_id;
     }
 
     pub fn completePublishPubComp(self: *Connection, packet_id: u16) Error!void {
-        if (!self.outgoing_qos2_pubrel.isSet(@as(usize, packet_id))) return error.UnexpectedPacket;
+        if (!self.packet_identifiers.contains(
+            packet_id,
+            .outgoing_qos2_pubrel,
+        )) return error.UnexpectedPacket;
         var pubcomp = try self.readPubComp();
         defer pubcomp.deinit(self.allocator);
         if (pubcomp.ack.packet_id != packet_id) return error.UnexpectedPacket;
@@ -3289,7 +3304,8 @@ pub const Connection = struct {
 
     /// Whether an inbound QoS PUBLISH with this Packet Identifier is awaiting
     /// its first acknowledgement on this Network Connection. Reconnect clients
-    /// use this to reject stale manual-ACK requests without exposing bitsets.
+    /// use this to reject stale manual-ACK requests without exposing the
+    /// connection's identifier-state representation.
     pub fn hasPendingIncomingPublish(
         self: *const Connection,
         packet_id: u16,
@@ -3298,8 +3314,14 @@ pub const Connection = struct {
         if (packet_id == 0) return false;
         return switch (qos) {
             .at_most_once => false,
-            .at_least_once => self.incoming_qos1.isSet(packet_id),
-            .exactly_once => self.incoming_qos2.isSet(packet_id),
+            .at_least_once => self.packet_identifiers.contains(
+                packet_id,
+                .incoming_qos1,
+            ),
+            .exactly_once => self.packet_identifiers.contains(
+                packet_id,
+                .incoming_qos2,
+            ),
         };
     }
 
@@ -3317,7 +3339,10 @@ pub const Connection = struct {
         ack: mqtt.AckPacket,
     ) Error!void {
         if (ack.packet_type != .puback or
-            !self.outgoing_qos1.isSet(@as(usize, ack.packet_id)))
+            !self.packet_identifiers.contains(
+                ack.packet_id,
+                .outgoing_qos1,
+            ))
         {
             return error.UnexpectedPacket;
         }
@@ -3339,9 +3364,11 @@ pub const Connection = struct {
         self: *Connection,
         ack: mqtt.AckPacket,
     ) Error!void {
-        const index = @as(usize, ack.packet_id);
         if (ack.packet_type != .pubrec or
-            !self.outgoing_qos2.isSet(index))
+            !self.packet_identifiers.contains(
+                ack.packet_id,
+                .outgoing_qos2,
+            ))
         {
             return error.UnexpectedPacket;
         }
@@ -3353,8 +3380,11 @@ pub const Connection = struct {
             return error.PublishRefused;
         }
         try self.writePubRel(ack.packet_id, 0);
-        self.outgoing_qos2.setValue(index, false);
-        self.outgoing_qos2_pubrel.set(index);
+        std.debug.assert(self.packet_identifiers.transition(
+            ack.packet_id,
+            .outgoing_qos2,
+            .outgoing_qos2_pubrel,
+        ));
     }
 
     /// Apply the final PUBCOMP of a broker-originated QoS 2 delivery.
@@ -3363,8 +3393,9 @@ pub const Connection = struct {
         ack: mqtt.AckPacket,
     ) Error!void {
         if (ack.packet_type != .pubcomp or
-            !self.outgoing_qos2_pubrel.isSet(
-                @as(usize, ack.packet_id),
+            !self.packet_identifiers.contains(
+                ack.packet_id,
+                .outgoing_qos2_pubrel,
             ))
         {
             return error.UnexpectedPacket;
@@ -3399,8 +3430,8 @@ pub const Connection = struct {
     /// Parse PUBREL without connection-local receive-state validation.
     ///
     /// Persistent broker Sessions may resume directly in await-PUBCOMP state
-    /// after reconnect, where the new transport's fixed bitset cannot know the
-    /// original Packet Identifier.
+    /// after reconnect, where the new transport's fresh state table cannot
+    /// know the original Packet Identifier.
     pub fn readSessionPubRel(self: *Connection) Error!OwnedAck {
         return self.readAck(.pubrel);
     }
@@ -3414,15 +3445,18 @@ pub const Connection = struct {
         packet_id: u16,
     ) Error!void {
         if (packet_id == 0) return error.InvalidPacketIdentifier;
-        const index = @as(usize, packet_id);
-        if (self.incoming_qos1.isSet(index)) {
+        if (self.packet_identifiers.contains(packet_id, .incoming_qos1)) {
             return error.InvalidPacketIdentifier;
         }
-        if (self.incoming_qos2.isSet(index)) return;
+        if (self.packet_identifiers.contains(packet_id, .incoming_qos2)) return;
         if (self.incoming_inflight >= self.max_incoming_inflight) {
             return error.ReceiveMaximumExceeded;
         }
-        self.incoming_qos2.set(index);
+        _ = try self.packet_identifiers.add(
+            self.allocator,
+            packet_id,
+            .incoming_qos2,
+        );
         self.incoming_inflight += 1;
     }
 
@@ -3729,11 +3763,7 @@ pub const Connection = struct {
         self.next_packet_id = 1;
         self.outgoing_inflight = 0;
         self.incoming_inflight = 0;
-        self.incoming_qos1 = .empty;
-        self.incoming_qos2 = .empty;
-        self.outgoing_qos1 = .empty;
-        self.outgoing_qos2 = .empty;
-        self.outgoing_qos2_pubrel = .empty;
+        self.packet_identifiers.clearRetainingCapacity();
     }
 
     pub fn disconnect(self: *Connection, reason_code: u8) Error!void {
@@ -4156,7 +4186,7 @@ pub const Connection = struct {
                     .puback => .{ .puback = owned },
                     .pubrec => .{ .pubrec = owned },
                     // Durable reconnect clients validate PUBREL against their
-                    // Session store, not this transport's fresh bitset.
+                    // Session store, not this transport's fresh state table.
                     .pubrel => .{ .pubrel = owned },
                     .pubcomp => .{ .pubcomp = owned },
                     else => unreachable,
@@ -4403,43 +4433,49 @@ pub const Connection = struct {
         // PUBLISH with the same Packet Identifier and answered PUBREC.  Rumqtt
         // treats an unsolicited PUBREL as a state error; preserve that guard so
         // peer bugs cannot complete or disturb unrelated QoS state.
-        if (!self.incoming_qos2.isSet(@as(usize, packet_id))) return error.InvalidPacketIdentifier;
+        if (!self.packet_identifiers.contains(
+            packet_id,
+            .incoming_qos2,
+        )) return error.InvalidPacketIdentifier;
     }
 
     fn recordIncomingPublish(self: *Connection, publish_packet: mqtt.Publish) Error!void {
         const packet_id = publish_packet.packet_id orelse return;
-        const index = @as(usize, packet_id);
-        const set = switch (publish_packet.qos) {
+        const stage: packet_identifiers.State.Stage = switch (publish_packet.qos) {
             .at_most_once => return,
-            .at_least_once => &self.incoming_qos1,
-            .exactly_once => &self.incoming_qos2,
+            .at_least_once => .incoming_qos1,
+            .exactly_once => .incoming_qos2,
         };
-        const other_set = switch (publish_packet.qos) {
+        const other_stage: packet_identifiers.State.Stage = switch (publish_packet.qos) {
             .at_most_once => unreachable,
-            .at_least_once => &self.incoming_qos2,
-            .exactly_once => &self.incoming_qos1,
+            .at_least_once => .incoming_qos2,
+            .exactly_once => .incoming_qos1,
         };
 
-        if (other_set.isSet(index)) return error.InvalidPacketIdentifier;
+        if (self.packet_identifiers.contains(packet_id, other_stage)) {
+            return error.InvalidPacketIdentifier;
+        }
         // Retransmissions reuse the same Packet Identifier and must not consume
-        // another Receive Maximum slot.  This mirrors rumqtt's fixed-bitset
-        // state tables: Packet Identifier is the stable O(1) lookup key, so a
-        // retry cannot grow memory or make the connection look over quota.
-        if (set.isSet(index)) return;
+        // another Receive Maximum slot. Packet Identifier is the stable O(1)
+        // lookup key, so a retry cannot grow memory or make the connection
+        // look over quota.
+        if (self.packet_identifiers.contains(packet_id, stage)) return;
         if (self.incoming_inflight >= self.max_incoming_inflight) return error.ReceiveMaximumExceeded;
-        set.set(index);
+        _ = try self.packet_identifiers.add(
+            self.allocator,
+            packet_id,
+            stage,
+        );
         self.incoming_inflight += 1;
     }
 
     fn completeIncomingPublish(self: *Connection, packet_type: mqtt.PacketType, packet_id: u16) void {
-        const set = switch (packet_type) {
-            .puback => &self.incoming_qos1,
-            .pubcomp => &self.incoming_qos2,
+        const stage: packet_identifiers.State.Stage = switch (packet_type) {
+            .puback => .incoming_qos1,
+            .pubcomp => .incoming_qos2,
             else => return,
         };
-        const index = @as(usize, packet_id);
-        if (!set.isSet(index)) return;
-        set.setValue(index, false);
+        if (!self.packet_identifiers.remove(packet_id, stage)) return;
         self.incoming_inflight -= 1;
     }
 
@@ -4693,17 +4729,27 @@ pub const Connection = struct {
     fn reserveOutgoingPublish(self: *Connection, qos: mqtt.QoS) Error!u16 {
         if (self.outgoing_inflight >= self.max_outgoing_inflight) return error.InflightFull;
 
+        const initial_packet_id = self.next_packet_id;
+        errdefer self.next_packet_id = initial_packet_id;
         var attempts: usize = 0;
         while (attempts < std.math.maxInt(u16)) : (attempts += 1) {
-            const packet_id = self.nextPacketId();
-            const index = @as(usize, packet_id);
-            if (self.outgoing_qos1.isSet(index) or self.outgoing_qos2.isSet(index) or self.outgoing_qos2_pubrel.isSet(index)) continue;
-
-            switch (qos) {
-                .at_most_once => unreachable,
-                .at_least_once => self.outgoing_qos1.set(index),
-                .exactly_once => self.outgoing_qos2.set(index),
+            const packet_id = self.next_packet_id;
+            if (self.packet_identifiers.containsOutgoing(packet_id)) {
+                _ = self.nextPacketId();
+                continue;
             }
+
+            const stage: packet_identifiers.State.Stage = switch (qos) {
+                .at_most_once => unreachable,
+                .at_least_once => .outgoing_qos1,
+                .exactly_once => .outgoing_qos2,
+            };
+            _ = try self.packet_identifiers.add(
+                self.allocator,
+                packet_id,
+                stage,
+            );
+            _ = self.nextPacketId();
             self.outgoing_inflight += 1;
             return packet_id;
         }
@@ -4711,17 +4757,15 @@ pub const Connection = struct {
     }
 
     fn releaseOutgoingPublish(self: *Connection, packet_id: u16, qos: mqtt.QoS) void {
-        const index = @as(usize, packet_id);
-        const set = switch (qos) {
+        const stage: packet_identifiers.State.Stage = switch (qos) {
             .at_most_once => return,
-            .at_least_once => &self.outgoing_qos1,
-            .exactly_once => &self.outgoing_qos2,
+            .at_least_once => .outgoing_qos1,
+            .exactly_once => .outgoing_qos2,
         };
-        if (qos == .exactly_once and self.outgoing_qos2_pubrel.isSet(index)) {
-            self.outgoing_qos2_pubrel.setValue(index, false);
-        } else if (set.isSet(index)) {
-            set.setValue(index, false);
-        } else return;
+        if (qos == .exactly_once and self.packet_identifiers.remove(
+            packet_id,
+            .outgoing_qos2_pubrel,
+        )) {} else if (!self.packet_identifiers.remove(packet_id, stage)) return;
         self.outgoing_inflight -= 1;
     }
 };
@@ -5927,8 +5971,14 @@ test "MQTT split publish API accepts out-of-order QoS1 PUBACKs" {
     // the API simple for event-loop users that read acks from the wire before
     // dispatching them to request waiters.
     try client.completePublishPubAck(0);
-    try std.testing.expect(!client.outgoing_qos1.isSet(@as(usize, second_id)));
-    try std.testing.expect(client.outgoing_qos1.isSet(@as(usize, first_id)));
+    try std.testing.expect(!client.packet_identifiers.contains(
+        second_id,
+        .outgoing_qos1,
+    ));
+    try std.testing.expect(client.packet_identifiers.contains(
+        first_id,
+        .outgoing_qos1,
+    ));
     try std.testing.expectEqual(@as(u16, 1), client.outgoing_inflight);
     try client.completePublishPubAck(0);
     try std.testing.expectEqual(@as(u16, 0), client.outgoing_inflight);
@@ -6008,14 +6058,26 @@ test "MQTT split publish API accepts out-of-order QoS2 PUBREC handshakes" {
 
     const second_rec = try client.completePublishPubRec(0);
     try std.testing.expectEqual(second_id, second_rec);
-    try std.testing.expect(!client.outgoing_qos2.isSet(@as(usize, second_id)));
-    try std.testing.expect(client.outgoing_qos2_pubrel.isSet(@as(usize, second_id)));
-    try std.testing.expect(client.outgoing_qos2.isSet(@as(usize, first_id)));
+    try std.testing.expect(!client.packet_identifiers.contains(
+        second_id,
+        .outgoing_qos2,
+    ));
+    try std.testing.expect(client.packet_identifiers.contains(
+        second_id,
+        .outgoing_qos2_pubrel,
+    ));
+    try std.testing.expect(client.packet_identifiers.contains(
+        first_id,
+        .outgoing_qos2,
+    ));
     try std.testing.expectEqual(@as(u16, 2), client.outgoing_inflight);
 
     const first_rec = try client.completePublishPubRec(0);
     try std.testing.expectEqual(first_id, first_rec);
-    try std.testing.expect(client.outgoing_qos2_pubrel.isSet(@as(usize, first_id)));
+    try std.testing.expect(client.packet_identifiers.contains(
+        first_id,
+        .outgoing_qos2_pubrel,
+    ));
     try std.testing.expectEqual(@as(u16, 2), client.outgoing_inflight);
 
     try client.completePublishPubComp(second_id);
@@ -6061,6 +6123,7 @@ test "MQTT connection enforces negotiated maximum packet size" {
         .protocol = .v5,
         .peer_max_packet_size = 8,
     };
+    defer connection.packet_identifiers.deinit(std.testing.allocator);
     defer connection.write_scratch.deinit(std.testing.allocator);
 
     try std.testing.expectError(error.OutgoingPacketTooLarge, connection.publish("limited/topic", "payload too large", .{}));
@@ -6077,6 +6140,7 @@ test "MQTT borrowed PUBLISH preserves preflight errors and inflight state" {
         .peer_max_packet_size = 8,
         .peer_topic_alias_maximum = 1,
     };
+    defer connection.packet_identifiers.deinit(std.testing.allocator);
     defer connection.write_scratch.deinit(std.testing.allocator);
     defer connection.outgoing_topic_aliases.deinit(std.testing.allocator);
 
@@ -6094,7 +6158,7 @@ test "MQTT borrowed PUBLISH preserves preflight errors and inflight state" {
     try std.testing.expectEqual(@as(u16, 0), connection.outgoing_inflight);
     try std.testing.expectEqual(
         @as(usize, 0),
-        connection.outgoing_qos1.count(),
+        connection.packet_identifiers.count(.outgoing_qos1),
     );
 
     try connection.prepareOutgoingTopicAliasCommit(
@@ -6117,7 +6181,7 @@ test "MQTT borrowed PUBLISH preserves preflight errors and inflight state" {
     try std.testing.expectEqual(@as(u16, 0), connection.outgoing_inflight);
     try std.testing.expectEqual(
         @as(usize, 0),
-        connection.outgoing_qos1.count(),
+        connection.packet_identifiers.count(.outgoing_qos1),
     );
 }
 
@@ -6143,6 +6207,7 @@ test "MQTT publish encoding reuses connection scratch" {
         .transport = .initTcp(io, client_stream),
         .protocol = .v5,
     };
+    defer connection.packet_identifiers.deinit(allocator);
     defer connection.write_scratch.deinit(allocator);
 
     const payload = [_]u8{0xa5} ** 1024;
@@ -6188,6 +6253,31 @@ test "MQTT publish encoding reuses connection scratch" {
     );
     defer second_publish.deinit(allocator);
     try std.testing.expectEqualSlices(u8, &payload, second_publish.payload);
+}
+
+test "MQTT outgoing Packet Identifier allocation failure is transactional" {
+    var failing = std.testing.FailingAllocator.init(
+        std.testing.allocator,
+        .{ .fail_index = 0 },
+    );
+    var connection = Connection{
+        .allocator = failing.allocator(),
+        .transport = undefined,
+        .protocol = .v5,
+        .next_packet_id = 65_535,
+    };
+    defer connection.packet_identifiers.deinit(failing.allocator());
+
+    try std.testing.expectError(
+        error.OutOfMemory,
+        connection.reserveOutgoingPublish(.at_least_once),
+    );
+    try std.testing.expectEqual(@as(u16, 65_535), connection.next_packet_id);
+    try std.testing.expectEqual(@as(u16, 0), connection.outgoing_inflight);
+    try std.testing.expectEqual(
+        @as(usize, 0),
+        connection.packet_identifiers.count(.outgoing_qos1),
+    );
 }
 
 test "MQTT variable control writes reuse connection scratch" {
@@ -6637,6 +6727,7 @@ test "MQTT connection enforces incoming receive maximum" {
         .protocol = .v5,
         .max_incoming_inflight = 1,
     };
+    defer connection.packet_identifiers.deinit(std.testing.allocator);
 
     const first = mqtt.Publish{
         .dup = false,
@@ -6683,6 +6774,7 @@ test "MQTT connection keeps QoS2 receive slot until PUBCOMP" {
         .protocol = .v5,
         .max_incoming_inflight = 1,
     };
+    defer connection.packet_identifiers.deinit(std.testing.allocator);
 
     try connection.recordIncomingPublish(.{
         .dup = false,

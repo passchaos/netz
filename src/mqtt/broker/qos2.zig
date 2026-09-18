@@ -1,7 +1,8 @@
 //! Bounded inbound QoS 2 transaction storage for the live broker.
 //!
 //! A QoS 2 PUBLISH must not be routed until PUBREL. The runtime tracks the
-//! protocol receive window in fixed bitsets; this store owns the application
+//! protocol receive window in connection-local state; this store owns the
+//! application
 //! bytes needed to route exactly once at that later control packet.
 
 const std = @import("std");

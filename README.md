@@ -745,6 +745,9 @@ starts with deterministic parsers, serializers, preallocated fixed-width wire-in
   an optional absolute CONNECT/CONNACK packet deadline shared by TCP, TLS, WS,
   and WSS without large-packet progress renewal, MQTT v5 Server Keep Alive,
   conditional Response Information, Request Problem Information filtering for server ACK/AUTH diagnostics, Receive Maximum capped by local inflight limits, Maximum Packet Size, negotiated-or-configured Maximum QoS and Retain Available enforcement for incoming/outgoing publishes, and Topic Alias negotiation/resolution capped to local alias storage with outgoing alias registration checks, QoS publish inflight limiting, and
+  adaptive connection-local Packet Identifier tracking with independent
+  incoming/outgoing sparse maps and bounded dense fallback for unusually large
+  inflight windows, and
   MQTT 5 Server Reference validation plus opt-in bounded, loop-detecting
   CONNACK redirects for TCP/TLS/WS/WSS with per-hop authorization and fresh
   TLS authority verification, and
@@ -1086,6 +1089,8 @@ zig build bench-mqtt-router -Doptimize=ReleaseFast
 zig build bench-mqtt-websocket -Doptimize=ReleaseFast
 taskset -c 0 zig build bench-mqtt-tls -Doptimize=ReleaseFast
 zig build compare-mqtt-mosquitto -Doptimize=ReleaseFast
+# Add verifier-checked 2-ms broker RSS sampling on Linux.
+MQTT_STATS=true zig build compare-mqtt-mosquitto -Doptimize=ReleaseFast
 zig build bench-quic-short-packet -Doptimize=ReleaseFast
 zig build bench-quic-padding-parse -Doptimize=ReleaseFast
 zig build bench-quic-lb -Doptimize=ReleaseFast

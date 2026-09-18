@@ -332,6 +332,7 @@ and independently calculated checksum, then tears down every child:
 
 ```sh
 zig build compare-mqtt-mosquitto -Doptimize=ReleaseFast
+MQTT_STATS=true zig build compare-mqtt-mosquitto -Doptimize=ReleaseFast
 ```
 
 `MOSQUITTO_BIN` may select an existing executable, while `MOSQUITTO_ROOT`
@@ -342,7 +343,9 @@ Source builds require the audited `5cd25465` revision unless
 and `PUBLISHER_WINDOW` select a bounded smoke or longer measurement. Building
 Mosquitto requires its normal development dependencies, including cJSON
 headers; the gate reports that requirement rather than silently using an
-unrelated system broker.
+unrelated system broker. `MQTT_STATS=true` additionally samples each broker's
+resident memory from Linux `/proc/PID/status` every 2 ms and emits validated
+machine-readable memory records without changing the client workload.
 
 The numeric comparison below is the 2026-08-18 same-host `ReleaseFast`
 window-one run from the former Threaded client harness. It remains historical
@@ -1731,8 +1734,28 @@ or plugins, so passing these vectors is not proxy evidence for the entire suite.
    closes the interval between checkpoints for protocol-visible durable
    mutations. Cross-node replication/consensus remains separate work.
 2. Extend the production-scale publisher-window, latency, allocation and RSS
-   comparison above to Mosquitto and additional concurrency/fanout shapes;
-   the current result covers netz versus rumqttd at one bounded QoS 1 shape.
+   comparison above to additional concurrency/fanout shapes; current results
+   cover netz against rumqttd and Mosquitto at bounded QoS 1 shapes.
+   The connection-local Packet Identifier tracker now replaces five embedded
+   65,536-bit tables (40 KiB in every connection, even before QoS traffic)
+   with independent incoming/outgoing sparse stage maps. Each direction
+   promotes transactionally after 1,024 live identifiers to a bounded 16-KiB
+   two-bit table, retaining the complete 1..65,535 identifier space without
+   allowing hash overhead to grow without bound. Incoming and outgoing maps
+   remain physically separate for the runtime's concurrent reader and
+   serialized writer, while QoS 2 stage transitions are allocation-free. A
+   five-pair, CPU-0/1, fixed-binary 32-publisher/32-subscriber comparison
+   (`0b51301a` baseline, `09825721` candidate) with
+   window 4, 64-byte payloads, 10 warmups and 200 measured publishes reduced
+   the netz broker's 2-ms sampled peak RSS from 36,348-36,364 KiB to
+   6,352-6,368 KiB (82.5% by medians). Every arm completed 6,400 measured
+   deliveries with the same checksum; candidate throughput was higher in all
+   five short runs, but the small workload is retained as memory evidence, not
+   a throughput claim. The `MQTT_STATS=true` mode of
+   `zig build compare-mqtt-mosquitto -Doptimize=ReleaseFast` now emits
+   validated broker-process RSS records; a current 64-connection run measured
+   netz at 6,360 KiB versus Mosquitto at 3,896 KiB, narrowing but not closing
+   the independent-peer memory gap.
 3. Expand the selected Mosquitto-derived raw wire gate above, or add a broker
    process adapter capable of preserving the upstream harness's config/reload/
    persistence semantics. The 143 passing packet-vector scenarios do not cover

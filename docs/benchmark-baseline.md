@@ -5117,6 +5117,23 @@ publishes/s with p99 5.467-5.664 ms and 6,472-6,492 KiB broker peak RSS,
 confirming the allocation-count simplification without overstating it as a
 throughput improvement.
 
+Connection-local MQTT Packet Identifier state is now adaptive rather than five
+embedded 65,536-bit tables. Independent incoming and outgoing maps use sparse
+storage for ordinary negotiated inflight windows and promote after 1,024 live
+IDs to bounded 16-KiB two-bit tables; this preserves the full identifier space,
+directional reader/writer isolation, allocation-free QoS 2 stage changes, and a
+32-KiB worst-case bound across both directions. Five alternating fixed-binary
+32-publisher/32-subscriber runs (window 4, 64-byte payload, 10 warmups and 200
+measured publishes; `0b51301a` baseline, `09825721` candidate) reduced netz
+broker peak RSS from 36,348-36,364 KiB to 6,352-6,368 KiB, with all runs
+completing 6,400 deliveries and checksum 356,160. This short shape is memory
+evidence rather than a throughput result.
+The maintained Mosquitto comparison can now set `MQTT_STATS=true` to sample
+both broker processes from `/proc/PID/status` every 2 ms and emit verifier-
+checked memory records. One current run reported 6,360 KiB for netz and 3,896
+KiB for Mosquitto, so the improvement closes most of the prior fixed-state cost
+without claiming memory superiority over Mosquitto.
+
 ## MQTT shared-subscription router
 
 The maintained executable obtains its clock from zio-backed `std.Io` and names
