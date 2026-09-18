@@ -355,7 +355,7 @@ pub fn build(b: *std.Build) void {
     mqtt_outbound_bridge_mosquitto.addArtifactArg(mqtt_outbound_bridge);
     const mqtt_outbound_bridge_mosquitto_step = b.step(
         "interop-mqtt-outbound-bridge-mosquitto",
-        "Bridge two real Mosquitto brokers through netz",
+        "Bridge and recover two real Mosquitto brokers through netz",
     );
     mqtt_outbound_bridge_mosquitto_step.dependOn(
         &mqtt_outbound_bridge_mosquitto.step,

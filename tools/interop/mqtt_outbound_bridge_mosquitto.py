@@ -11,6 +11,7 @@ import subprocess
 import sys
 import tempfile
 import time
+from typing import BinaryIO
 
 
 RUNTIME = (
@@ -40,6 +41,38 @@ CASES = (
     Case("v311-to-v5-qos0", 4, 5, 0, False),
     Case("v5-to-v311-qos1-retain", 5, 4, 1, True),
 )
+
+
+@dataclass
+class ManagedProcess:
+    label: str
+    process: subprocess.Popen[bytes]
+    output: BinaryIO
+    log: Path
+
+    def stop(self) -> None:
+        if self.process.poll() is None:
+            self.process.terminate()
+            try:
+                self.process.wait(timeout=5)
+            except subprocess.TimeoutExpired:
+                self.process.kill()
+                self.process.wait(timeout=5)
+        if not self.output.closed:
+            self.output.close()
+
+    def wait_clean(self) -> None:
+        try:
+            return_code = self.process.wait(timeout=5)
+        except subprocess.TimeoutExpired as exc:
+            raise RuntimeError(f"{self.label} did not stop gracefully") from exc
+        if not self.output.closed:
+            self.output.close()
+        if return_code != 0:
+            raise RuntimeError(
+                f"{self.label} exited {return_code}: "
+                + self.log.read_text(errors="replace")
+            )
 
 
 def parse_args() -> argparse.Namespace:
@@ -190,9 +223,17 @@ def wait_for_log(
     raise RuntimeError(f"timed out waiting for {label}: {path.read_text()}")
 
 
+def assert_log_absent(path: Path, marker: str, duration: float) -> None:
+    deadline = time.monotonic() + duration
+    while time.monotonic() < deadline:
+        if marker in path.read_text(errors="replace"):
+            raise AssertionError(f"unexpected log marker before recovery: {marker}")
+        time.sleep(0.02)
+
+
 def start_broker(
     executable: Path, port: int, directory: Path, label: str
-) -> tuple[subprocess.Popen[bytes], object, Path]:
+) -> ManagedProcess:
     config = directory / f"{label}.conf"
     log = directory / f"{label}.log"
     config.write_text(
@@ -203,28 +244,75 @@ def start_broker(
         encoding="ascii",
     )
     output = log.open("wb")
-    process = subprocess.Popen(
-        [str(executable), "-c", str(config), "-v"],
-        stdout=output,
-        stderr=subprocess.STDOUT,
+    managed = ManagedProcess(
+        label,
+        subprocess.Popen(
+            [str(executable), "-c", str(config), "-v"],
+            stdout=output,
+            stderr=subprocess.STDOUT,
+        ),
+        output,
+        log,
     )
     try:
-        wait_for_log(process, log, " running", label)
+        wait_for_log(managed.process, log, " running", label)
     except BaseException:
-        stop_process(process, output)
+        managed.stop()
         raise
-    return process, output, log
+    return managed
 
 
-def stop_process(process: subprocess.Popen[bytes], output: object) -> None:
-    if process.poll() is None:
-        process.terminate()
+def start_bridge(
+    executable: Path, source_port: int, target_port: int,
+    control_port: int, case: Case, directory: Path,
+) -> ManagedProcess:
+    log = directory / "bridge.log"
+    output = log.open("wb")
+    managed = ManagedProcess(
+        "bridge",
+        subprocess.Popen(
+            [
+                str(executable), str(source_port), str(target_port),
+                str(control_port), case.source_label, case.target_label,
+                str(case.qos), case.name,
+            ],
+            stdout=output,
+            stderr=subprocess.STDOUT,
+        ),
+        output,
+        log,
+    )
+    try:
+        wait_for_log(
+            managed.process, managed.log, "outbound bridge ready",
+            managed.label,
+        )
+    except BaseException:
+        managed.stop()
+        raise
+    return managed
+
+
+def cleanup_case(
+    clients: list[socket.socket],
+    processes: list[ManagedProcess],
+    failed: bool,
+) -> None:
+    for client in clients:
         try:
-            process.wait(timeout=5)
-        except subprocess.TimeoutExpired:
-            process.kill()
-            process.wait(timeout=5)
-    output.close()  # type: ignore[attr-defined]
+            client.close()
+        except OSError:
+            pass
+    for managed in reversed(processes):
+        managed.stop()
+    if failed:
+        for managed in processes:
+            print(f"===== {managed.label} log =====", file=sys.stderr)
+            if managed.log.exists():
+                print(
+                    managed.log.read_text(errors="replace"),
+                    file=sys.stderr,
+                )
 
 
 def run_case(
@@ -233,39 +321,22 @@ def run_case(
     source_port, target_port, control_port = distinct_ports(3)
     with tempfile.TemporaryDirectory() as temporary:
         directory = Path(temporary)
-        source: subprocess.Popen[bytes] | None = None
-        source_output = None
-        target: subprocess.Popen[bytes] | None = None
-        target_output = None
-        bridge: subprocess.Popen[bytes] | None = None
-        bridge_output = None
-        source_log = directory / "source.log"
-        target_log = directory / "target.log"
-        bridge_log = directory / "bridge.log"
+        processes: list[ManagedProcess] = []
         clients: list[socket.socket] = []
         try:
-            source, source_output, source_log = start_broker(
+            source = start_broker(
                 mosquitto, source_port, directory, "source"
             )
-            target, target_output, target_log = start_broker(
+            processes.append(source)
+            target = start_broker(
                 mosquitto, target_port, directory, "target"
             )
-            bridge_output = bridge_log.open("wb")
-            bridge = subprocess.Popen(
-                [
-                    str(bridge_executable),
-                    str(source_port),
-                    str(target_port),
-                    str(control_port),
-                    case.source_label,
-                    case.target_label,
-                    str(case.qos),
-                    case.name,
-                ],
-                stdout=bridge_output,
-                stderr=subprocess.STDOUT,
+            processes.append(target)
+            bridge = start_bridge(
+                bridge_executable, source_port, target_port, control_port,
+                case, directory,
             )
-            wait_for_log(bridge, bridge_log, "outbound bridge ready", "bridge")
+            processes.append(bridge)
             subscriber = connect_client(
                 target_port, mqtt_packets, f"target-{case.name}",
                 case.target_protocol,
@@ -341,38 +412,102 @@ def run_case(
                 ("127.0.0.1", control_port), timeout=5
             ) as control:
                 control.sendall(b"\x01")
-            try:
-                return_code = bridge.wait(timeout=5)
-            except subprocess.TimeoutExpired as exc:
-                raise RuntimeError("bridge did not stop gracefully") from exc
-            if return_code != 0:
-                raise RuntimeError(
-                    f"bridge exited {return_code}: {bridge_log.read_text()}"
-                )
+            bridge.wait_clean()
         finally:
-            for client in clients:
-                try:
-                    client.close()
-                except OSError:
-                    pass
-            if bridge is not None and bridge.poll() is None:
-                bridge.terminate()
-                bridge.wait(timeout=5)
-            if bridge_output is not None:
-                bridge_output.close()
-            if target is not None and target_output is not None:
-                stop_process(target, target_output)
-            if source is not None and source_output is not None:
-                stop_process(source, source_output)
-            if sys.exc_info()[0] is not None:
-                for label, path in (
-                    ("bridge", bridge_log),
-                    ("source", source_log),
-                    ("target", target_log),
-                ):
-                    print(f"===== {label} log =====", file=sys.stderr)
-                    if path.exists():
-                        print(path.read_text(errors="replace"), file=sys.stderr)
+            cleanup_case(clients, processes, sys.exc_info()[0] is not None)
+
+
+def run_fresh_target_reconnect(
+    bridge_executable: Path, mosquitto: Path, mqtt_packets
+) -> None:
+    case = Case("fresh-target-reconnect", 5, 5, 1, True)
+    source_port, target_port, control_port = distinct_ports(3)
+    with tempfile.TemporaryDirectory() as temporary:
+        directory = Path(temporary)
+        processes: list[ManagedProcess] = []
+        clients: list[socket.socket] = []
+        try:
+            source = start_broker(
+                mosquitto, source_port, directory, "source"
+            )
+            processes.append(source)
+            target = start_broker(
+                mosquitto, target_port, directory, "target"
+            )
+            processes.append(target)
+            bridge = start_bridge(
+                bridge_executable, source_port, target_port, control_port,
+                case, directory,
+            )
+            processes.append(bridge)
+
+            target.stop()
+
+            publisher = connect_client(
+                source_port, mqtt_packets, "fresh-target-publisher", 5
+            )
+            clients.append(publisher)
+            payload = b"retained-across-fresh-target"
+            publisher.sendall(
+                mqtt_packets.gen_publish(
+                    "local/sensors/room", qos=1, mid=7, retain=True,
+                    payload=payload, proto_ver=5,
+                )
+            )
+            expected_ack = mqtt_packets.gen_puback(7, proto_ver=5)
+            actual_ack = read_packet(publisher)
+            if actual_ack != expected_ack:
+                raise AssertionError(
+                    f"source publisher PUBACK mismatch: {actual_ack.hex()}"
+                )
+
+            bridge_source_id = "netz-outbound-source-fresh-target-reconnect"
+            bridge_target_id = "netz-outbound-target-fresh-target-reconnect"
+            wait_for_log(
+                source.process, source.log,
+                f"Sending PUBLISH to {bridge_source_id}",
+                "source bridge delivery",
+            )
+            assert_log_absent(
+                source.log, f"Received PUBACK from {bridge_source_id}", 0.3
+            )
+
+            restarted = start_broker(
+                mosquitto, target_port, directory, "target-restarted"
+            )
+            processes.append(restarted)
+            wait_for_log(
+                restarted.process, restarted.log,
+                f"Received PUBLISH from {bridge_target_id} "
+                "(d0, q1, r1,",
+                "fresh target bridge publish",
+            )
+            wait_for_log(
+                source.process, source.log,
+                f"Received PUBACK from {bridge_source_id}",
+                "source bridge acknowledgement",
+            )
+
+            retained = connect_client(
+                target_port, mqtt_packets, "fresh-target-retained", 5
+            )
+            clients.append(retained)
+            subscribe(retained, mqtt_packets, 5, "remote/sensors/room", 1)
+            retained_packet_id = assert_publish(
+                read_packet(retained), 5, qos=1, retain=True, payload=payload
+            )
+            if retained_packet_id is None:
+                raise AssertionError("retained QoS 1 message has no packet id")
+            retained.sendall(mqtt_packets.gen_puback(retained_packet_id, proto_ver=5))
+            publisher.sendall(mqtt_packets.gen_disconnect(proto_ver=5))
+
+            with socket.create_connection(
+                ("127.0.0.1", control_port), timeout=5
+            ) as control:
+                control.sendall(b"\x01")
+            bridge.wait_clean()
+        finally:
+            cleanup_case(clients, processes, sys.exc_info()[0] is not None)
 
 
 def main() -> None:
@@ -382,9 +517,11 @@ def main() -> None:
 
     for case in CASES:
         run_case(args.bridge, args.mosquitto, mqtt_packets, case)
+    run_fresh_target_reconnect(args.bridge, args.mosquitto, mqtt_packets)
     print(
         "MQTT OutboundBridge two-Mosquitto interop passed: "
-        "v3.1.1->v5 QoS0, v5->v3.1.1 QoS1 retained, topic remap "
+        "v3.1.1->v5 QoS0, v5->v3.1.1 QoS1 retained, "
+        "fresh-target reconnect with delayed bridge ACK, topic remap "
         + RUNTIME
     )
 

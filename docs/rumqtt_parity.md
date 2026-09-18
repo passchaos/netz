@@ -202,6 +202,13 @@ covered by the controlled disconnect tests above. Both external cases
 verify the exact `local/sensors/room` to `remote/sensors/room` mapping and
 payload. The runner stops the bridge through its own cancellation event and
 requires a clean exit instead of treating process termination as success.
+A third MQTT 5 case stops the target process after both Bridge Sessions are
+established, then publishes a retained QoS 1 message into the live source. The
+source Mosquitto log proves it has sent that delivery to the Bridge but has not
+received the Bridge subscription's PUBACK while the target is absent. Starting
+a new, empty target process causes the Bridge to republish from the still-owned
+source delivery; the gate observes target receipt before the source PUBACK and
+then reads the retained message through a newly connected target subscriber.
 
 Netz now exceeds the audited rumqtt shared-selection policy surface by adding
 Rendezvous hashing. This provides deterministic topic affinity and the
