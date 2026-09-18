@@ -5060,6 +5060,75 @@ def qos2_receive_maximum(
             subscriber.sendall(mqtt_packets.gen_disconnect(proto_ver=5))
 
 
+def qos1_inflight_expiry_releases_receive_maximum(
+    executable: Path, mqtt_packets, mqtt5_props
+) -> None:
+    # Direct wire port of Mosquitto 03-publish-qos1-max-inflight-expire.py. An
+    # unacknowledged expiring PUBLISH occupies the subscriber's sole Receive
+    # Maximum slot. Once it expires, the next route must reclaim that slot and
+    # advance to a fresh Packet Identifier without waiting for a stale PUBACK.
+    topic = "pub/qos1/max/inflight/expire"
+    receive_one = mqtt5_props.gen_uint16_prop(
+        mqtt5_props.RECEIVE_MAXIMUM, 1
+    )
+    expiry_one = mqtt5_props.gen_uint32_prop(
+        mqtt5_props.MESSAGE_EXPIRY_INTERVAL, 1
+    )
+    with NetzBroker(executable, connections=2) as broker:
+        with broker.connect() as subscriber, broker.connect() as publisher:
+            subscriber.sendall(mqtt_packets.gen_connect(
+                "qos1-inflight-expiry-sub", clean_session=False,
+                proto_ver=5, session_expiry=60, properties=receive_one,
+            ))
+            connack = read_packet(subscriber)
+            if connack[0] != 0x20 or connack[2] != 0 or connack[3] != 0:
+                raise AssertionError(
+                    "invalid inflight-expiry CONNACK: " + connack.hex()
+                )
+            subscriber.sendall(
+                mqtt_packets.gen_subscribe(1, topic, 1, proto_ver=5)
+            )
+            expect_packet(
+                subscriber, mqtt_packets.gen_suback(1, 1, proto_ver=5),
+                "inflight expiry SUBACK",
+            )
+            connect_v5(publisher, mqtt_packets, "qos1-inflight-expiry-pub")
+
+            publisher.sendall(mqtt_packets.gen_publish(
+                topic, qos=1, mid=311, payload="old", proto_ver=5,
+                properties=expiry_one,
+            ))
+            expect_packet(
+                publisher, mqtt_packets.gen_puback(311, proto_ver=5),
+                "inflight expiry first publisher PUBACK",
+            )
+            expect_packet(
+                subscriber, mqtt_packets.gen_publish(
+                    topic, qos=1, mid=1, payload="old", proto_ver=5,
+                    properties=expiry_one,
+                ),
+                "inflight expiry first delivery",
+            )
+
+            time.sleep(2)
+            publisher.sendall(mqtt_packets.gen_publish(
+                topic, qos=1, mid=312, payload="new", proto_ver=5,
+            ))
+            expect_packet(
+                publisher, mqtt_packets.gen_puback(312, proto_ver=5),
+                "inflight expiry second publisher PUBACK",
+            )
+            expect_packet(
+                subscriber, mqtt_packets.gen_publish(
+                    topic, qos=1, mid=2, payload="new", proto_ver=5,
+                ),
+                "delivery after inflight expiry",
+            )
+            subscriber.sendall(mqtt_packets.gen_puback(2, proto_ver=5))
+            publisher.sendall(mqtt_packets.gen_disconnect(proto_ver=5))
+            subscriber.sendall(mqtt_packets.gen_disconnect(proto_ver=5))
+
+
 def maximum_packet_size_qos1(
     executable: Path, mqtt_packets, mqtt5_props
 ) -> None:
@@ -5967,6 +6036,9 @@ def main() -> None:
     )
     qos2_receive_maximum(args.broker, mqtt_packets, mqtt5_props, 1)
     qos2_receive_maximum(args.broker, mqtt_packets, mqtt5_props, 2)
+    qos1_inflight_expiry_releases_receive_maximum(
+        args.broker, mqtt_packets, mqtt5_props
+    )
     maximum_packet_size_qos1(args.broker, mqtt_packets, mqtt5_props)
     maximum_packet_size_qos2(args.broker, mqtt_packets, mqtt5_props)
     retained_repeated_lifecycle(args.broker, mqtt_packets)
@@ -6017,7 +6089,7 @@ def main() -> None:
         args.broker, mqtt_packets, mqtt5_props
     )
     print(
-        "Mosquitto-derived MQTT wire vectors passed: 144 scenarios "
+        "Mosquitto-derived MQTT wire vectors passed: 145 scenarios "
         "with 5000 ms CONNECT deadlines"
     )
 

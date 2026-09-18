@@ -1718,8 +1718,10 @@ multibyte Remaining Length, exact SUBACK, routing, and byte-identical
 self-delivery. The outbound QoS 2 gate also directly ports Mosquitto's Receive
 Maximum 1 and 2 cases: it fills the negotiated window, proves the next PUBLISH
 remains withheld, completes one PUBREC/PUBREL/PUBCOMP exchange, and requires
-the queued PUBLISH immediately afterward. All 144 scenarios pass. This is
-deliberately described as a selected
+the queued PUBLISH immediately afterward. The QoS 1 inflight-expiry case keeps
+an expiring delivery unacknowledged at Receive Maximum 1, then proves its
+expiry releases credit for the next queued delivery without a stale PUBACK.
+All 145 scenarios pass. This is deliberately described as a selected
 wire-vector subset: Mosquitto's Python harness hardcodes its own `-v -c/-p`
 broker CLI and many tests depend on Mosquitto config, logs, reload, persistence
 or plugins, so passing these vectors is not proxy evidence for the entire suite.
@@ -1771,5 +1773,5 @@ or plugins, so passing these vectors is not proxy evidence for the entire suite.
    the independent-peer memory gap.
 3. Expand the selected Mosquitto-derived raw wire gate above, or add a broker
    process adapter capable of preserving the upstream harness's config/reload/
-   persistence semantics. The 144 passing packet-vector scenarios do not cover
+   persistence semantics. The 145 passing packet-vector scenarios do not cover
    the full protocol/conformance suite.

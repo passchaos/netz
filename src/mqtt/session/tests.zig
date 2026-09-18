@@ -967,6 +967,56 @@ test "session message expiry skips queued and publish retransmit" {
     );
 }
 
+test "session inflight expiry releases Receive Maximum credit" {
+    const allocator = std.testing.allocator;
+    var store = Store.init(allocator, .{});
+    defer store.deinit();
+    const opened = try store.open("inflight-expiry", false, 60, .zero);
+    _ = try store.enqueuePublish(opened.handle, "expiry/first", "old", .{
+        .qos = .at_least_once,
+        .properties = &.{.{ .four_byte = .{
+            .id = .message_expiry_interval,
+            .value = 1,
+        } }},
+        .now = .zero,
+    });
+    _ = try store.enqueuePublish(
+        opened.handle,
+        "expiry/second",
+        "new",
+        .{ .qos = .at_least_once, .now = .zero },
+    );
+
+    var output: [1]Transmission = undefined;
+    const first = try store.drainInto(opened.handle, .zero, 1, &output);
+    try std.testing.expectEqual(@as(usize, 1), first.len);
+    try std.testing.expectEqualStrings(
+        "old",
+        first[0].publish.payload,
+    );
+    try std.testing.expectEqual(@as(u16, 1), first[0].publish.packet_id);
+
+    var snapshot_changed = false;
+    const second = try store.drainIntoTrackingSnapshotChange(
+        opened.handle,
+        std.Io.Timestamp.fromNanoseconds(second_ns),
+        1,
+        &output,
+        &snapshot_changed,
+    );
+    try std.testing.expect(snapshot_changed);
+    try std.testing.expectEqual(@as(usize, 1), second.len);
+    try std.testing.expectEqualStrings(
+        "new",
+        second[0].publish.payload,
+    );
+    try std.testing.expectEqual(@as(u16, 2), second[0].publish.packet_id);
+
+    const stats = try store.stats(opened.handle);
+    try std.testing.expectEqual(@as(usize, 0), stats.queued_count);
+    try std.testing.expectEqual(@as(usize, 1), stats.inflight_count);
+}
+
 test "session tracked drain reports pruning and fresh inflight selection" {
     const allocator = std.testing.allocator;
     var store = Store.init(allocator, .{});
