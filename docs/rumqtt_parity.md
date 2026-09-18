@@ -209,6 +209,13 @@ received the Bridge subscription's PUBACK while the target is absent. Starting
 a new, empty target process causes the Bridge to republish from the still-owned
 source delivery; the gate observes target receipt before the source PUBACK and
 then reads the retained message through a newly connected target subscriber.
+A fourth MQTT 5 case keeps the target broker Session alive behind a fault
+proxy. The proxy forwards the first QoS 1 PUBLISH into Mosquitto, discards its
+PUBACK, and closes only the Bridge-facing TCP connection. It verifies
+Session Present on reconnect, then holds the retransmission until it has checked
+the original Packet Identifier, `DUP=1`, QoS, RETAIN, topic, and payload. The
+source Mosquitto still has no Bridge PUBACK at that point; forwarding the held
+retry and target PUBACK completes both broker transactions and retained replay.
 
 Netz now exceeds the audited rumqtt shared-selection policy surface by adding
 Rendezvous hashing. This provides deterministic topic affinity and the

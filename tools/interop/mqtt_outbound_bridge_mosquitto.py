@@ -10,6 +10,7 @@ import socket
 import subprocess
 import sys
 import tempfile
+import threading
 import time
 from typing import BinaryIO
 
@@ -73,6 +74,143 @@ class ManagedProcess:
                 f"{self.label} exited {return_code}: "
                 + self.log.read_text(errors="replace")
             )
+
+
+class AckDropProxy:
+    def __init__(self, listen_port: int, target_port: int, payload: bytes):
+        self.target_port = target_port
+        self.payload = payload
+        self.allow_replay = threading.Event()
+        self.retry_held = threading.Event()
+        self.replay_complete = threading.Event()
+        self.stop_requested = threading.Event()
+        self.error: BaseException | None = None
+        self.listener = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+        self.listener.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
+        self.listener.bind(("127.0.0.1", listen_port))
+        self.listener.listen(2)
+        self.listener.settimeout(0.1)
+        self.thread = threading.Thread(target=self._run, name="mqtt-ack-drop")
+        self.thread.start()
+
+    def _accept(self) -> socket.socket:
+        while not self.stop_requested.is_set():
+            try:
+                client, _ = self.listener.accept()
+                client.settimeout(5)
+                return client
+            except socket.timeout:
+                continue
+        raise RuntimeError("proxy stopped before bridge reconnect")
+
+    def _connect_session(
+        self, client: socket.socket, *, session_present: bool
+    ) -> socket.socket:
+        target = socket.create_connection(
+            ("127.0.0.1", self.target_port), timeout=5
+        )
+        target.settimeout(5)
+        connect_packet = read_packet(client)
+        if connect_packet[0] >> 4 != 1:
+            raise AssertionError(
+                f"proxy expected CONNECT, received {connect_packet.hex()}"
+            )
+        target.sendall(connect_packet)
+        connack = read_packet(target)
+        _, cursor = decode_remaining_length(connack)
+        if connack[0] >> 4 != 2 or bool(connack[cursor] & 0x01) != session_present:
+            raise AssertionError(
+                f"target Session Present mismatch: {connack.hex()}"
+            )
+        client.sendall(connack)
+        return target
+
+    def _read_publish(self, client: socket.socket) -> tuple[bytes, int]:
+        packet = read_packet(client)
+        packet_id = assert_publish(
+            packet, 5, qos=1, retain=True, payload=self.payload
+        )
+        if packet_id is None:
+            raise AssertionError("proxied QoS 1 PUBLISH has no packet id")
+        return packet, packet_id
+
+    @staticmethod
+    def _expect_puback(packet: bytes, packet_id: int) -> None:
+        _, cursor = decode_remaining_length(packet)
+        if packet[0] >> 4 != 4 or int.from_bytes(
+            packet[cursor : cursor + 2], "big"
+        ) != packet_id:
+            raise AssertionError(f"target PUBACK mismatch: {packet.hex()}")
+
+    def _run_fallible(self) -> None:
+        with self._accept() as first:
+            with self._connect_session(first, session_present=False) as target:
+                original, packet_id = self._read_publish(first)
+                if original[0] & 0x08:
+                    raise AssertionError("initial target PUBLISH unexpectedly set DUP")
+                target.sendall(original)
+                puback = read_packet(target)
+                self._expect_puback(puback, packet_id)
+                # Deliberately discard this PUBACK and close the bridge-facing
+                # transport. Mosquitto has completed its QoS 1 transaction.
+
+        with self._accept() as resumed:
+            with self._connect_session(resumed, session_present=True) as target:
+                retry, retry_packet_id = self._read_publish(resumed)
+                if retry[0] & 0x08 == 0:
+                    raise AssertionError("resumed target PUBLISH omitted DUP")
+                if retry_packet_id != packet_id:
+                    raise AssertionError(
+                        "resumed target PUBLISH changed Packet Identifier"
+                    )
+                self.retry_held.set()
+                if not self.allow_replay.wait(timeout=5):
+                    raise RuntimeError("timed out waiting to release retry")
+                target.sendall(retry)
+                puback = read_packet(target)
+                self._expect_puback(puback, packet_id)
+                resumed.sendall(puback)
+                self.replay_complete.set()
+
+                while not self.stop_requested.is_set():
+                    try:
+                        packet = read_packet(resumed)
+                    except socket.timeout:
+                        continue
+                    target.sendall(packet)
+                    if packet[0] >> 4 == 14:
+                        return
+                    response = read_packet(target)
+                    resumed.sendall(response)
+
+    def _run(self) -> None:
+        try:
+            self._run_fallible()
+        except BaseException as exc:
+            if not self.stop_requested.is_set():
+                self.error = exc
+        finally:
+            self.retry_held.set()
+            self.replay_complete.set()
+
+    def wait(self, event: threading.Event, label: str) -> None:
+        if not event.wait(timeout=10):
+            raise RuntimeError(f"timed out waiting for {label}")
+        if self.error is not None:
+            raise self.error
+
+    def finish(self) -> None:
+        self.thread.join(timeout=5)
+        if self.thread.is_alive():
+            raise RuntimeError("ACK-drop proxy did not stop")
+        if self.error is not None:
+            raise self.error
+
+    def stop(self) -> None:
+        self.stop_requested.set()
+        self.allow_replay.set()
+        self.listener.close()
+        self.thread.join(timeout=6)
 
 
 def parse_args() -> argparse.Namespace:
@@ -510,6 +648,88 @@ def run_fresh_target_reconnect(
             cleanup_case(clients, processes, sys.exc_info()[0] is not None)
 
 
+def run_resumed_target_reconnect(
+    bridge_executable: Path, mosquitto: Path, mqtt_packets
+) -> None:
+    case = Case("resumed-target-reconnect", 5, 5, 1, True)
+    source_port, target_port, proxy_port, control_port = distinct_ports(4)
+    payload = b"retained-across-resumed-target"
+    with tempfile.TemporaryDirectory() as temporary:
+        directory = Path(temporary)
+        processes: list[ManagedProcess] = []
+        clients: list[socket.socket] = []
+        proxy: AckDropProxy | None = None
+        try:
+            source = start_broker(
+                mosquitto, source_port, directory, "source"
+            )
+            processes.append(source)
+            target = start_broker(
+                mosquitto, target_port, directory, "target"
+            )
+            processes.append(target)
+            proxy = AckDropProxy(proxy_port, target_port, payload)
+            bridge = start_bridge(
+                bridge_executable, source_port, proxy_port, control_port,
+                case, directory,
+            )
+            processes.append(bridge)
+
+            publisher = connect_client(
+                source_port, mqtt_packets, "resumed-target-publisher", 5
+            )
+            clients.append(publisher)
+            publisher.sendall(
+                mqtt_packets.gen_publish(
+                    "local/sensors/room", qos=1, mid=7, retain=True,
+                    payload=payload, proto_ver=5,
+                )
+            )
+            expected_ack = mqtt_packets.gen_puback(7, proto_ver=5)
+            actual_ack = read_packet(publisher)
+            if actual_ack != expected_ack:
+                raise AssertionError(
+                    f"source publisher PUBACK mismatch: {actual_ack.hex()}"
+                )
+
+            proxy.wait(proxy.retry_held, "held resumed target PUBLISH")
+            bridge_source_id = "netz-outbound-source-resumed-target-reconnect"
+            assert_log_absent(
+                source.log, f"Received PUBACK from {bridge_source_id}", 0.3
+            )
+            proxy.allow_replay.set()
+            proxy.wait(proxy.replay_complete, "resumed target PUBACK")
+            wait_for_log(
+                source.process, source.log,
+                f"Received PUBACK from {bridge_source_id}",
+                "source bridge acknowledgement",
+            )
+
+            retained = connect_client(
+                target_port, mqtt_packets, "resumed-target-retained", 5
+            )
+            clients.append(retained)
+            subscribe(retained, mqtt_packets, 5, "remote/sensors/room", 1)
+            retained_packet_id = assert_publish(
+                read_packet(retained), 5, qos=1, retain=True, payload=payload
+            )
+            if retained_packet_id is None:
+                raise AssertionError("retained QoS 1 message has no packet id")
+            retained.sendall(mqtt_packets.gen_puback(retained_packet_id, proto_ver=5))
+            publisher.sendall(mqtt_packets.gen_disconnect(proto_ver=5))
+
+            with socket.create_connection(
+                ("127.0.0.1", control_port), timeout=5
+            ) as control:
+                control.sendall(b"\x01")
+            bridge.wait_clean()
+            proxy.finish()
+        finally:
+            if proxy is not None:
+                proxy.stop()
+            cleanup_case(clients, processes, sys.exc_info()[0] is not None)
+
+
 def main() -> None:
     args = parse_args()
     sys.path.insert(0, str(args.mosquitto_test_root))
@@ -518,10 +738,12 @@ def main() -> None:
     for case in CASES:
         run_case(args.bridge, args.mosquitto, mqtt_packets, case)
     run_fresh_target_reconnect(args.bridge, args.mosquitto, mqtt_packets)
+    run_resumed_target_reconnect(args.bridge, args.mosquitto, mqtt_packets)
     print(
         "MQTT OutboundBridge two-Mosquitto interop passed: "
         "v3.1.1->v5 QoS0, v5->v3.1.1 QoS1 retained, "
-        "fresh-target reconnect with delayed bridge ACK, topic remap "
+        "fresh-target republish, resumed-target same-ID DUP replay, "
+        "delayed bridge ACK, topic remap "
         + RUNTIME
     )
 
