@@ -84,15 +84,15 @@ Session survives. QoS 2 uses the broker's bounded `BridgeQoS2Store`: the mapped
 message and connection-independent properties are synchronously appended to the
 local commit log before PUBREC; PUBREL atomically admits the message to local
 retained/Session/live routing and installs a released tombstone; PUBCOMP is sent
-only after that boundary, and the tombstone is deleted after a successful
-PUBCOMP write; an ambiguous cleanup failure leaves it recoverable for pruning
-after restart or an explicit `Bridge.disconnect`. A failed live
+only after that boundary. The released tombstone remains until a future
+Session Present=false proves the upstream transaction is gone, so a process
+restart still rejects a delayed duplicate PUBLISH. A failed live
 destination write is then owned by normal connection cleanup or durable Session
 retry and cannot stop the independent upstream bridge after PUBCOMP. Duplicate
 PUBLISH packets are surfaced to the store for full topic/payload/property
 comparison instead of being accepted by Packet Identifier alone. A recreated
-Bridge restores pending receive markers and prunes released tombstones from the
-broker store before reading a resumed Session, while Session Present=false durably retires all old
+Bridge restores pending and released receive markers from the broker store
+before reading a resumed Session, while Session Present=false durably retires all old
 transactions and advances a separately persisted epoch before a new one begins,
 including the no-active-transaction crash window. QoS 2 construction therefore
 requires a stable

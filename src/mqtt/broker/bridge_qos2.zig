@@ -48,10 +48,11 @@ pub const StageResult = enum {
     replaced,
 };
 
-/// Minimal pending-transaction metadata needed to rebuild a bridge client's
+/// Minimal transaction metadata needed to rebuild a bridge client's
 /// inbound QoS 2 receive state after its process or transport is recreated.
-pub const PendingTransaction = struct {
+pub const Transaction = struct {
     packet_id: u16,
+    phase: Phase,
 };
 
 const Epoch = struct {
@@ -447,6 +448,19 @@ pub const Store = struct {
         return true;
     }
 
+    /// Restore a released tombstone after its durable deletion fails. Store
+    /// initialization reserves the full entry capacity, so this rollback is
+    /// allocation-free after `complete` removed one element.
+    pub fn restoreReleased(self: *Store, key: Key) void {
+        std.debug.assert(self.findIndex(key) == null);
+        std.debug.assert(self.entries.items.len < self.options.max_entries);
+        self.entries.appendAssumeCapacity(.{
+            .key = key,
+            .phase = .released,
+            .publish = null,
+        });
+    }
+
     pub fn getPending(self: *const Store, key: Key) ?mqtt.Publish {
         const index = self.findIndex(key) orelse return null;
         const entry = self.entries.items[index];
@@ -540,32 +554,31 @@ pub const Store = struct {
     /// Allocate the protocol state required to resume one upstream Session.
     /// Application Message bytes stay owned by this Store and are released
     /// only when the matching PUBREL reaches the broker transaction API.
-    pub fn pendingSessionTransactionsAlloc(
+    pub fn sessionTransactionsAlloc(
         self: *const Store,
         allocator: std.mem.Allocator,
         bridge_id: [16]u8,
         session_epoch: u64,
-    ) std.mem.Allocator.Error![]PendingTransaction {
+    ) std.mem.Allocator.Error![]Transaction {
         var count: usize = 0;
         for (self.entries.items) |entry| {
-            if (entry.phase == .pending and
-                entry.key.session_epoch == session_epoch and
+            if (entry.key.session_epoch == session_epoch and
                 std.mem.eql(u8, &entry.key.bridge_id, &bridge_id))
             {
                 count += 1;
             }
         }
-        const transactions = try allocator.alloc(PendingTransaction, count);
+        const transactions = try allocator.alloc(Transaction, count);
         var index: usize = 0;
         for (self.entries.items) |entry| {
-            if (entry.phase != .pending or
-                entry.key.session_epoch != session_epoch or
+            if (entry.key.session_epoch != session_epoch or
                 !std.mem.eql(u8, &entry.key.bridge_id, &bridge_id))
             {
                 continue;
             }
             transactions[index] = .{
                 .packet_id = entry.key.packet_id,
+                .phase = entry.phase,
             };
             index += 1;
         }
@@ -610,33 +623,6 @@ pub const Store = struct {
             }
             var entry = self.orderedRemove(index);
             entry.deinit();
-            removed += 1;
-        }
-        return removed;
-    }
-
-    /// Drop only released tombstones from one resumed Session after the
-    /// reconnect client has restored their release-pending markers. A repeated
-    /// PUBREL can then still be completed without retaining the bounded local
-    /// tombstone indefinitely.
-    pub fn removeReleasedSession(
-        self: *Store,
-        bridge_id: [16]u8,
-        session_epoch: u64,
-    ) usize {
-        var removed: usize = 0;
-        var index: usize = 0;
-        while (index < self.entries.items.len) {
-            const entry = self.entries.items[index];
-            if (entry.phase != .released or
-                entry.key.session_epoch != session_epoch or
-                !std.mem.eql(u8, &entry.key.bridge_id, &bridge_id))
-            {
-                index += 1;
-                continue;
-            }
-            var removed_entry = self.orderedRemove(index);
-            removed_entry.deinit();
             removed += 1;
         }
         return removed;
@@ -1218,6 +1204,9 @@ test "bridge QoS2 store release rollback and commit are transactional" {
     const repeated = store.release(key);
     try std.testing.expect(repeated.duplicated);
     try std.testing.expect(repeated.claim == null);
+    try std.testing.expect(store.complete(key));
+    store.restoreReleased(key);
+    try std.testing.expectEqual(Phase.released, store.getPhase(key).?);
 }
 
 test "bridge QoS2 store allows non-DUP replacement after released tombstone and completion" {
@@ -1390,27 +1379,25 @@ test "bridge QoS2 store enumerates epochs and removes bridge state" {
         @as(?u64, 7),
         store.latestSessionEpoch(bridge_id),
     );
-    const transactions = try store.pendingSessionTransactionsAlloc(
+    const transactions = try store.sessionTransactionsAlloc(
         allocator,
         bridge_id,
         4,
     );
     defer allocator.free(transactions);
-    try std.testing.expectEqual(@as(usize, 1), transactions.len);
+    try std.testing.expectEqual(@as(usize, 2), transactions.len);
     try std.testing.expectEqual(@as(u16, 8), transactions[0].packet_id);
+    try std.testing.expectEqual(Phase.pending, transactions[0].phase);
+    try std.testing.expectEqual(@as(u16, 9), transactions[1].packet_id);
+    try std.testing.expectEqual(Phase.released, transactions[1].phase);
 
     try std.testing.expectEqual(Phase.pending, store.getPhase(pending).?);
     try std.testing.expectEqual(Phase.released, store.getPhase(released).?);
     try std.testing.expectEqual(
-        @as(usize, 1),
-        store.removeReleasedSession(bridge_id, 4),
-    );
-    try std.testing.expect(store.getPhase(released) == null);
-    try std.testing.expectEqual(
         @as(u64, 8),
         try store.advanceSession(bridge_id),
     );
-    try std.testing.expectEqual(@as(usize, 2), store.removeBridge(bridge_id));
+    try std.testing.expectEqual(@as(usize, 3), store.removeBridge(bridge_id));
     try std.testing.expectEqual(
         @as(?u64, 8),
         store.latestSessionEpoch(bridge_id),

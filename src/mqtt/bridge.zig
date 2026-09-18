@@ -454,16 +454,10 @@ pub const Bridge = struct {
         self.* = undefined;
     }
 
-    /// Gracefully disconnect the upstream transport. QoS 2 tombstones are
-    /// pruned first; if the following DISCONNECT write fails, a later repeated
-    /// PUBREL remains safe because no pending Application Message exists.
+    /// Gracefully disconnect the upstream transport. Completed QoS 2
+    /// tombstones remain durable until the upstream broker reports a fresh
+    /// Session, preserving duplicate suppression across process restarts.
     pub fn disconnect(self: *Bridge, reason_code: u8) Error!void {
-        if (self.qos2_enabled) {
-            _ = try self.local.pruneReleasedBridgeQoS2Session(
-                self.bridge_id.?,
-                self.session_epoch,
-            );
-        }
         try self.client.disconnect(reason_code);
     }
 
@@ -586,7 +580,7 @@ pub const Bridge = struct {
                 };
             } else {
                 const transactions = try self.local
-                    .pendingBridgeQoS2TransactionsAlloc(
+                    .bridgeQoS2SessionTransactionsAlloc(
                     self.allocator,
                     bridge_id,
                     self.session_epoch,
@@ -595,13 +589,12 @@ pub const Bridge = struct {
                 for (transactions) |transaction| {
                     try self.client.restoreIncomingQoS2(
                         transaction.packet_id,
-                        .await_pubrel,
+                        switch (transaction.phase) {
+                            .pending => .await_pubrel,
+                            .released => .release_pending,
+                        },
                     );
                 }
-                _ = try self.local.pruneReleasedBridgeQoS2Session(
-                    bridge_id,
-                    self.session_epoch,
-                );
             }
             return;
         }
@@ -712,8 +705,9 @@ pub const Bridge = struct {
         try self.client.completeIncomingQoS2(packet_id, .{});
         // PUBCOMP is already on the wire. A later journal failure while
         // pruning the tombstone cannot be repaired by failing this event; the
-        // still-persisted tombstone is restored and pruned on the next Bridge
-        // construction.
+        // Broker restores the in-memory tombstone so a later fresh Session can
+        // retry cleanup without permitting Packet Identifier reuse to race the
+        // older journal state.
         if (released.disposition != .unknown) {
             _ = self.local.completeBridgeQoS2(key) catch return;
         }

@@ -1413,7 +1413,15 @@ pub const Broker = struct {
         // Even an absent key can be a retry after an in-memory deletion whose
         // previous journal append failed. Re-appending is the only way to make
         // the idempotent result durable before its caller forgets the key.
-        try self.finalizePersistentChangeLocked(true, removed);
+        self.appendCommitIfEnabledLocked() catch |err| {
+            if (removed) {
+                self.state_mutex.lockUncancelable(self.io);
+                self.bridge_qos2.restoreReleased(key);
+                self.state_mutex.unlock(self.io);
+            }
+            return err;
+        };
+        self.finishPersistentChangeLocked(removed);
         return removed;
     }
 
@@ -1439,15 +1447,15 @@ pub const Broker = struct {
 
     /// Copy the inbound QoS 2 protocol markers a recreated bridge client must
     /// restore before reading traffic from a resumed upstream Session.
-    pub fn pendingBridgeQoS2TransactionsAlloc(
+    pub fn bridgeQoS2SessionTransactionsAlloc(
         self: *Broker,
         allocator: std.mem.Allocator,
         bridge_id: [16]u8,
         session_epoch: u64,
-    ) std.mem.Allocator.Error![]bridge_qos2_mod.PendingTransaction {
+    ) std.mem.Allocator.Error![]bridge_qos2_mod.Transaction {
         self.state_mutex.lockUncancelable(self.io);
         defer self.state_mutex.unlock(self.io);
-        return self.bridge_qos2.pendingSessionTransactionsAlloc(
+        return self.bridge_qos2.sessionTransactionsAlloc(
             allocator,
             bridge_id,
             session_epoch,
@@ -1473,29 +1481,6 @@ pub const Broker = struct {
         self.state_mutex.unlock(self.io);
         try self.finalizePersistentChangeLocked(true, true);
         return epoch;
-    }
-
-    /// Remove completed tombstones after a recreated bridge has restored
-    /// their release-pending protocol markers. Pending messages remain
-    /// available for their first PUBREL.
-    pub fn pruneReleasedBridgeQoS2Session(
-        self: *Broker,
-        bridge_id: [16]u8,
-        session_epoch: u64,
-    ) Error!usize {
-        self.persistence_mutex.lockUncancelable(self.io);
-        defer self.persistence_mutex.unlock(self.io);
-        self.state_mutex.lockUncancelable(self.io);
-        const removed = self.bridge_qos2.removeReleasedSession(
-            bridge_id,
-            session_epoch,
-        );
-        self.recordPersistentChangeLocked(removed != 0);
-        self.state_mutex.unlock(self.io);
-        if (removed != 0) {
-            try self.finalizePersistentChangeLocked(true, true);
-        }
-        return removed;
     }
 
     fn statsLocked(self: *const Broker) Stats {

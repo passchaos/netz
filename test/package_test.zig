@@ -4796,7 +4796,7 @@ test "public modules are reachable" {
     ));
     try std.testing.expect(@hasDecl(
         netz.mqtt.broker.Broker,
-        "pendingBridgeQoS2TransactionsAlloc",
+        "bridgeQoS2SessionTransactionsAlloc",
     ));
     try std.testing.expect(@hasDecl(
         netz.mqtt.broker.Broker,
@@ -4805,10 +4805,6 @@ test "public modules are reachable" {
     try std.testing.expect(@hasDecl(
         netz.mqtt.broker.Broker,
         "beginBridgeQoS2Session",
-    ));
-    try std.testing.expect(@hasDecl(
-        netz.mqtt.broker.Broker,
-        "pruneReleasedBridgeQoS2Session",
     ));
     try std.testing.expect(@hasDecl(
         netz.mqtt.broker,

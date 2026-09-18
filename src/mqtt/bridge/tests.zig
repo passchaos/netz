@@ -1438,7 +1438,7 @@ fn exerciseInboundBridgeQoS2ExactlyOnce(
     }));
     try expectNoPublish(&subscriber, short_timeout);
     try std.testing.expectEqual(@as(usize, 0), local.stats().publish_messages_received);
-    const staged = try local.pendingBridgeQoS2TransactionsAlloc(
+    const staged = try local.bridgeQoS2SessionTransactionsAlloc(
         allocator,
         [_]u8{0xb2} ** 16,
         bridge.session_epoch,
