@@ -216,10 +216,7 @@ test "bridge rule validates bounded inbound mappings" {
         error.InvalidSubscription,
         (Rule{ .filter = "sensors/#/bad" }).validate(),
     );
-    try std.testing.expectError(
-        error.InvalidBridgeQoS,
-        (Rule{ .filter = "#", .qos = .exactly_once }).validate(),
-    );
+    try (Rule{ .filter = "#", .qos = .exactly_once }).validate();
     try std.testing.expectError(
         error.InvalidTopic,
         (Rule{ .filter = "#", .local_prefix = "bad/+" }).validate(),
@@ -444,6 +441,102 @@ test "bridge public configuration retains MQTT types" {
         },
     };
     try std.testing.expectEqual(mqtt.QoS.at_least_once, options.rule.qos);
+}
+
+test "bridge QoS2 requires stable identity and persistent Session" {
+    const allocator = std.testing.allocator;
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    var threaded = std.Io.Threaded.init(allocator, .{});
+    defer threaded.deinit();
+    const io = threaded.io();
+    var local = try broker_mod.Broker.init(allocator, io, .{});
+    defer local.deinit();
+    var shutdown: std.Io.Event = .unset;
+    const address = std.Io.net.IpAddress{ .ip4 = .loopback(1883) };
+    const qos2_rule = Rule{
+        .filter = "durable/#",
+        .qos = .exactly_once,
+    };
+
+    try std.testing.expectError(
+        error.MissingBridgeIdentifier,
+        bridge_mod.Bridge.init(
+            allocator,
+            io,
+            &local,
+            address,
+            .{
+                .connect = .{
+                    .protocol = .v5,
+                    .client_id = "qos2-missing-id",
+                    .clean_start = false,
+                    .properties = &session_expiry_properties,
+                },
+                .rule = qos2_rule,
+            },
+            &shutdown,
+        ),
+    );
+    try std.testing.expectError(
+        error.QoS2RequiresPersistentSession,
+        bridge_mod.Bridge.init(
+            allocator,
+            io,
+            &local,
+            address,
+            .{
+                .connect = .{
+                    .protocol = .v5,
+                    .client_id = "qos2-clean-session",
+                },
+                .rule = qos2_rule,
+                .bridge_id = [_]u8{0x11} ** 16,
+            },
+            &shutdown,
+        ),
+    );
+    try std.testing.expectError(
+        error.QoS2RequiresCommitLog,
+        bridge_mod.Bridge.init(
+            allocator,
+            io,
+            &local,
+            address,
+            .{
+                .connect = .{
+                    .protocol = .v5,
+                    .client_id = "qos2-no-commit-log",
+                    .clean_start = false,
+                    .properties = &session_expiry_properties,
+                },
+                .rule = qos2_rule,
+                .bridge_id = [_]u8{0x22} ** 16,
+            },
+            &shutdown,
+        ),
+    );
+    try local.createCommitLog(tmp.dir, "bridge-qos2.log", .{});
+
+    var bridge = try bridge_mod.Bridge.init(
+        allocator,
+        io,
+        &local,
+        address,
+        .{
+            .connect = .{
+                .protocol = .v5,
+                .client_id = "qos2-valid",
+                .clean_start = false,
+                .properties = &session_expiry_properties,
+            },
+            .rule = qos2_rule,
+            .bridge_id = [_]u8{0x22} ** 16,
+        },
+        &shutdown,
+    );
+    defer bridge.deinit();
+    try std.testing.expectEqual(@as(usize, 1), bridge.client.subscriptionCount());
 }
 
 test "bridge multi-rule constructor owns every filter and prefix" {
@@ -1192,6 +1285,267 @@ test "inbound bridge mirrors retained MQTT 5 QoS 1 publication end to end" {
     remote_joined = true;
     try local_runner.stop(io, local_thread);
     local_joined = true;
+}
+
+fn exerciseInboundBridgeQoS2ExactlyOnce(
+    protocol: mqtt.ProtocolVersion,
+) !void {
+    const allocator = std.testing.allocator;
+    const operation_timeout = std.Io.Duration.fromSeconds(2);
+    const short_timeout = std.Io.Duration.fromMilliseconds(100);
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+
+    var threaded = std.Io.Threaded.init(allocator, .{
+        .async_limit = .unlimited,
+    });
+    defer threaded.deinit();
+    const io = threaded.io();
+
+    var local = try broker_mod.Broker.listen(
+        allocator,
+        io,
+        .{ .ip4 = .loopback(0) },
+        .{
+            .limits = .{
+                .max_connections = 1,
+                .max_queued_deliveries_per_connection = 4,
+                .runtime = .{ .max_packet_size = 4096 },
+            },
+            .accept = .{ .protocol = protocol },
+        },
+    );
+    defer local.deinit();
+    try local.createCommitLog(tmp.dir, "bridge-qos2.log", .{});
+    var local_runner = BrokerRunner{
+        .broker = &local,
+        .accept_concurrency = 1,
+    };
+    const local_thread = try std.Thread.spawn(
+        .{},
+        BrokerRunner.run,
+        .{&local_runner},
+    );
+    var local_joined = false;
+    defer if (!local_joined) {
+        local_runner.shutdown.set(io);
+        local_thread.join();
+    };
+
+    var remote = try broker_mod.Broker.listen(
+        allocator,
+        io,
+        .{ .ip4 = .loopback(0) },
+        .{
+            .limits = .{
+                .max_connections = 2,
+                .max_queued_deliveries_per_connection = 4,
+                .runtime = .{ .max_packet_size = 4096 },
+            },
+            .accept = .{ .protocol = protocol },
+        },
+    );
+    defer remote.deinit();
+    var remote_runner = BrokerRunner{
+        .broker = &remote,
+        .accept_concurrency = 2,
+    };
+    const remote_thread = try std.Thread.spawn(
+        .{},
+        BrokerRunner.run,
+        .{&remote_runner},
+    );
+    var remote_joined = false;
+    defer if (!remote_joined) {
+        remote_runner.shutdown.set(io);
+        remote_thread.join();
+    };
+
+    var subscriber = try runtime.Client.connectWithTimeout(
+        allocator,
+        io,
+        local.address(),
+        .{
+            .protocol = protocol,
+            .client_id = "bridge-qos2-local-subscriber",
+        },
+        operation_timeout,
+    );
+    defer subscriber.close();
+    var local_suback = try subscriber.subscribe(
+        &.{.{
+            .topic_filter = "mirror/qos2/#",
+            .qos = .exactly_once,
+        }},
+        .{},
+    );
+    defer local_suback.deinit(allocator);
+    try std.testing.expectEqual(@as(u8, 2), local_suback.suback.reason_codes[0]);
+
+    var bridge_shutdown: std.Io.Event = .unset;
+    var bridge = try bridge_mod.Bridge.init(
+        allocator,
+        io,
+        &local,
+        remote.address(),
+        .{
+            .connect = .{
+                .protocol = protocol,
+                .client_id = "inbound-qos2-bridge",
+                .clean_start = false,
+                .properties = if (protocol == .v5)
+                    &session_expiry_properties
+                else
+                    &.{},
+                .connect_timeout = operation_timeout,
+                .network_connect_timeout = operation_timeout,
+            },
+            .rule = .{
+                .filter = "qos2/#",
+                .qos = .exactly_once,
+                .local_prefix = "mirror/",
+            },
+            .bridge_id = [_]u8{0xb2} ** 16,
+        },
+        &bridge_shutdown,
+    );
+    defer bridge.deinit();
+    const connected = try bridge.connect();
+    try std.testing.expect(!connected.session_present);
+
+    var publisher = try runtime.Client.connectWithTimeout(
+        allocator,
+        io,
+        remote.address(),
+        .{ .protocol = protocol, .client_id = "bridge-qos2-publisher" },
+        operation_timeout,
+    );
+    defer publisher.close();
+    const packet_id = (try publisher.writePublish(
+        "qos2/device/state",
+        "exactly-once",
+        .{ .qos = .exactly_once },
+    )).?;
+    var publisher_pubrec = try publisher.readPubRec();
+    defer publisher_pubrec.deinit(allocator);
+    try publisher.applyPubRec(publisher_pubrec.ack);
+
+    // PUBLISH stages in the local durable store and produces upstream PUBREC,
+    // but the local subscriber cannot see it before PUBREL is processed.
+    try std.testing.expect(try bridge.step(.{
+        .timeout = operation_timeout,
+        .cancellation_check_interval = .fromMilliseconds(20),
+    }));
+    try expectNoPublish(&subscriber, short_timeout);
+    try std.testing.expectEqual(@as(usize, 0), local.stats().publish_messages_received);
+    const staged = try local.pendingBridgeQoS2TransactionsAlloc(
+        allocator,
+        [_]u8{0xb2} ** 16,
+        bridge.session_epoch,
+    );
+    try std.testing.expectEqual(@as(usize, 1), staged.len);
+    var changed_duplicate = mqtt.Publish{
+        .dup = true,
+        .qos = .exactly_once,
+        .retain = false,
+        .topic = "qos2/device/state",
+        .packet_id = staged[0].packet_id,
+        .payload = "tampered",
+    };
+    try std.testing.expectError(
+        error.InvalidPacketIdentifier,
+        bridge_mod.testing.injectPublish(&bridge, &changed_duplicate),
+    );
+    try std.testing.expect(bridge.client.connection() == null);
+    const staged_packet_id = staged[0].packet_id;
+    allocator.free(staged);
+
+    // Drop the upstream transport and recreate the Bridge after PUBREC but
+    // before it consumes PUBREL. The new reconnect client has no in-memory
+    // receive marker, so it must rebuild that marker from the local broker's
+    // durable transaction before accepting the upstream release leg.
+    bridge.deinit();
+    bridge = try bridge_mod.Bridge.init(
+        allocator,
+        io,
+        &local,
+        remote.address(),
+        .{
+            .connect = .{
+                .protocol = protocol,
+                .client_id = "inbound-qos2-bridge",
+                .clean_start = false,
+                .properties = if (protocol == .v5)
+                    &session_expiry_properties
+                else
+                    &.{},
+                .connect_timeout = operation_timeout,
+                .network_connect_timeout = operation_timeout,
+            },
+            .rule = .{
+                .filter = "qos2/#",
+                .qos = .exactly_once,
+                .local_prefix = "mirror/",
+            },
+            .bridge_id = [_]u8{0xb2} ** 16,
+        },
+        &bridge_shutdown,
+    );
+    const resumed = try bridge.connect();
+    try std.testing.expect(resumed.session_present);
+    try std.testing.expect(try bridge.step(.{
+        .timeout = operation_timeout,
+        .cancellation_check_interval = .fromMilliseconds(20),
+    }));
+    var publisher_pubcomp = try publisher.readPubComp();
+    defer publisher_pubcomp.deinit(allocator);
+    try std.testing.expectEqual(packet_id, publisher_pubcomp.ack.packet_id);
+    try publisher.applyPubComp(publisher_pubcomp.ack);
+    try std.testing.expect(!local.containsBridgeQoS2(.{
+        .bridge_id = [_]u8{0xb2} ** 16,
+        .session_epoch = bridge.session_epoch,
+        .packet_id = staged_packet_id,
+    }));
+
+    var local_event = try subscriber.readClientPacketEventWithTimeout(
+        operation_timeout,
+    );
+    defer local_event.deinit(allocator);
+    switch (local_event) {
+        .publish => |delivery| {
+            try std.testing.expectEqualStrings(
+                "mirror/qos2/device/state",
+                delivery.publish.topic,
+            );
+            try std.testing.expectEqualStrings(
+                "exactly-once",
+                delivery.publish.payload,
+            );
+            try std.testing.expectEqual(
+                mqtt.QoS.exactly_once,
+                delivery.publish.qos,
+            );
+            try subscriber.writePubRec(delivery.publish.packet_id.?, 0);
+        },
+        else => return error.TestUnexpectedResult,
+    }
+    var downstream_pubrel = try subscriber.readPubRel();
+    defer downstream_pubrel.deinit(allocator);
+    try subscriber.writePubComp(downstream_pubrel.ack.packet_id, 0);
+    try std.testing.expectEqual(@as(usize, 1), local.stats().publish_messages_received);
+
+    try bridge.disconnect(0);
+    try subscriber.disconnect(0);
+    try publisher.disconnect(0);
+    try remote_runner.stop(io, remote_thread);
+    remote_joined = true;
+    try local_runner.stop(io, local_thread);
+    local_joined = true;
+}
+
+test "inbound bridge releases QoS2 exactly once across restart" {
+    try exerciseInboundBridgeQoS2ExactlyOnce(.v3_1_1);
+    try exerciseInboundBridgeQoS2ExactlyOnce(.v5);
 }
 
 test "inbound bridge withholds upstream PUBACK until local injection succeeds" {

@@ -30,7 +30,10 @@ pub const Error = broker_mod.Error || reconnect.Error || error{
     NoBridgeRules,
     DuplicateBridgeFilter,
     OverlappingBridgeFilters,
+    MissingBridgeIdentifier,
     InvalidBridgeQoS,
+    QoS2RequiresPersistentSession,
+    QoS2RequiresCommitLog,
     TopicOutsideBridgeRule,
 };
 
@@ -42,9 +45,10 @@ pub const Error = broker_mod.Error || reconnect.Error || error{
 /// complete remote Topic Name, so `local_prefix = "upstream/"` maps
 /// `sensors/room` to `upstream/sensors/room`.
 ///
-/// Only QoS 0 and 1 are accepted. QoS 2 requires a durable two-phase inbound
-/// transaction across local injection failures, which this intentionally
-/// minimal bridge does not claim to implement.
+/// QoS 2 additionally requires `Options.bridge_id` and a persistent upstream
+/// Session so the bridge can join the remote transaction to the local broker's
+/// durable two-phase store. The bridge identity, Client Identifier, and rule
+/// mapping must describe the same logical bridge after a process restart.
 pub const Rule = struct {
     filter: []const u8,
     qos: mqtt.QoS = .at_most_once,
@@ -52,7 +56,6 @@ pub const Rule = struct {
 
     pub fn validate(self: Rule) Error!void {
         try mqtt.validateTopicFilter(self.filter);
-        if (self.qos == .exactly_once) return error.InvalidBridgeQoS;
         if (self.local_prefix.len == 0) return;
         // A trailing slash intentionally permits a caller to create a new
         // level boundary. Validate a completed Topic Name with a literal
@@ -106,12 +109,19 @@ pub const Options = struct {
     connect: runtime.ConnectOptions,
     reconnect_policy: reconnect.ReconnectPolicy = .{},
     rule: Rule,
+    /// Stable deployment identity for durable QoS 2 transactions. Required
+    /// when `rule.qos` is QoS 2 and must remain unchanged with the Client ID
+    /// and rule mapping across restarts.
+    bridge_id: ?[16]u8 = null,
 };
 
 pub const MultiOptions = struct {
     connect: runtime.ConnectOptions,
     reconnect_policy: reconnect.ReconnectPolicy = .{},
     rules: []const Rule,
+    /// Stable deployment identity shared by every QoS 2 rule; it, the Client
+    /// ID, and all rule mappings must remain unchanged across restarts.
+    bridge_id: ?[16]u8 = null,
 };
 
 /// Deep-owned backing for every public Rule view retained by a Bridge.
@@ -208,6 +218,9 @@ pub const Bridge = struct {
     rule: Rule,
     rules: []const Rule,
     rule_storage: OwnedRules,
+    bridge_id: ?[16]u8,
+    session_epoch: u64,
+    qos2_enabled: bool,
 
     /// Construct a fixed-address cleartext bridge. Configuration slices are
     /// copied, so they may be released immediately after this call.
@@ -228,6 +241,7 @@ pub const Bridge = struct {
                 .connect = options.connect,
                 .reconnect_policy = options.reconnect_policy,
                 .rules = &.{options.rule},
+                .bridge_id = options.bridge_id,
             },
             shutdown,
         );
@@ -275,6 +289,7 @@ pub const Bridge = struct {
                 .connect = options.connect,
                 .reconnect_policy = options.reconnect_policy,
                 .rules = &.{options.rule},
+                .bridge_id = options.bridge_id,
             },
             shutdown,
         );
@@ -321,6 +336,7 @@ pub const Bridge = struct {
                 .connect = options.connect,
                 .reconnect_policy = options.reconnect_policy,
                 .rules = &.{options.rule},
+                .bridge_id = options.bridge_id,
             },
             shutdown,
         );
@@ -356,11 +372,26 @@ pub const Bridge = struct {
     ) Error!Bridge {
         var owned_rules = try OwnedRules.init(allocator, options.rules);
         errdefer owned_rules.deinit(allocator);
+        const qos2 = rulesUseQoS2(owned_rules.values);
+        if (qos2 and options.bridge_id == null) {
+            return error.MissingBridgeIdentifier;
+        }
+        if (qos2 and !persistentSession(options.connect)) {
+            return error.QoS2RequiresPersistentSession;
+        }
+        if (qos2 and !local.commitLogEnabled()) {
+            return error.QoS2RequiresCommitLog;
+        }
         const client_options = reconnect.ClientOptions{
             .max_subscriptions = owned_rules.values.len,
             .manual_acknowledgements = true,
+            .inbound_qos2_release_policy = if (qos2)
+                .deferred
+            else
+                .automatic,
+            .surface_incoming_qos2_retransmissions = qos2,
         };
-        const client = switch (remote) {
+        var client = switch (remote) {
             .address => |address| try reconnect.Client.initWithOptions(
                 allocator,
                 io,
@@ -390,6 +421,20 @@ pub const Bridge = struct {
                 client_options,
             ),
         };
+        errdefer client.deinit();
+        if (qos2) {
+            for (owned_rules.values) |rule| {
+                try client.seedSubscription(.{
+                    .topic_filter = rule.filter,
+                    .qos = rule.qos,
+                    .retain_as_published = client.options.value.protocol == .v5,
+                }, &.{});
+            }
+        }
+        const restored_epoch = if (qos2)
+            local.latestBridgeQoS2SessionEpoch(options.bridge_id.?)
+        else
+            null;
         return .{
             .allocator = allocator,
             .local = local,
@@ -397,6 +442,9 @@ pub const Bridge = struct {
             .rule = owned_rules.values[0],
             .rules = owned_rules.values,
             .rule_storage = owned_rules,
+            .bridge_id = options.bridge_id,
+            .session_epoch = restored_epoch orelse 0,
+            .qos2_enabled = qos2,
         };
     }
 
@@ -406,12 +454,25 @@ pub const Bridge = struct {
         self.* = undefined;
     }
 
+    /// Gracefully disconnect the upstream transport. QoS 2 tombstones are
+    /// pruned first; if the following DISCONNECT write fails, a later repeated
+    /// PUBREL remains safe because no pending Application Message exists.
+    pub fn disconnect(self: *Bridge, reason_code: u8) Error!void {
+        if (self.qos2_enabled) {
+            _ = try self.local.pruneReleasedBridgeQoS2Session(
+                self.bridge_id.?,
+                self.session_epoch,
+            );
+        }
+        try self.client.disconnect(reason_code);
+    }
+
     /// Establish the remote connection and install all inbound rules.
     pub fn connect(
         self: *Bridge,
     ) (Error || std.Io.Cancelable)!reconnect.ConnectEvent {
         const event = try self.client.connect();
-        self.ensureSubscription(event) catch |err| {
+        self.handleConnected(event) catch |err| {
             // A connected client without the bridge subscription cannot make
             // useful progress and would never emit another `connected` event.
             // Retire it so the next connect/step can retry the whole setup.
@@ -437,19 +498,20 @@ pub const Bridge = struct {
             return false;
         defer event.deinit(self.allocator);
         switch (event) {
-            .connected => |connected| self.ensureSubscription(connected) catch |err|
+            .connected => |connected| self.handleConnected(connected) catch |err|
                 {
                     self.client.disconnectTransport();
                     return err;
                 },
             .publish => |owned| try self.inject(&owned.publish),
+            .pubrel => |owned| try self.releaseQoS2(owned.ack.packet_id),
             .disconnect => {
                 // The reconnect client reconnects on its next poll after the
                 // transport is retired. A clean server DISCONNECT otherwise
                 // leaves a non-null connection that has already gone away.
                 self.client.disconnectTransport();
             },
-            .puback, .pubrec, .pubrel, .pubcomp => return error.UnexpectedPacket,
+            .puback, .pubrec, .pubcomp => return error.UnexpectedPacket,
             .pingreq, .pingresp, .auth => {},
         }
         return true;
@@ -507,21 +569,63 @@ pub const Bridge = struct {
         }
     }
 
+    fn handleConnected(
+        self: *Bridge,
+        event: reconnect.ConnectEvent,
+    ) Error!void {
+        if (self.qos2_enabled) {
+            const bridge_id = self.bridge_id.?;
+            if (!event.session_present) {
+                self.session_epoch = self.local.beginBridgeQoS2Session(
+                    bridge_id,
+                ) catch |err| {
+                    self.session_epoch = self.local
+                        .latestBridgeQoS2SessionEpoch(bridge_id) orelse
+                        self.session_epoch;
+                    return err;
+                };
+            } else {
+                const transactions = try self.local
+                    .pendingBridgeQoS2TransactionsAlloc(
+                    self.allocator,
+                    bridge_id,
+                    self.session_epoch,
+                );
+                defer self.allocator.free(transactions);
+                for (transactions) |transaction| {
+                    try self.client.restoreIncomingQoS2(
+                        transaction.packet_id,
+                        .await_pubrel,
+                    );
+                }
+                _ = try self.local.pruneReleasedBridgeQoS2Session(
+                    bridge_id,
+                    self.session_epoch,
+                );
+            }
+            return;
+        }
+        try self.ensureSubscription(event);
+    }
+
     fn inject(self: *Bridge, remote: *const mqtt.Publish) Error!void {
         // A conforming remote broker sends only matching deliveries, but fail
         // closed before local injection if it violates the installed rule.
         const rule = self.matchingRule(remote.topic) orelse
             return error.TopicOutsideBridgeRule;
+        if (@intFromEnum(remote.qos) > @intFromEnum(rule.qos)) {
+            self.client.disconnectTransport();
+            return error.InvalidBridgeQoS;
+        }
+        if (remote.qos == .exactly_once and !self.qos2_enabled) {
+            self.client.disconnectTransport();
+            return error.InvalidBridgeQoS;
+        }
         const topic = try rule.mapTopicAlloc(
             self.allocator,
             remote.topic,
         );
         defer self.allocator.free(topic);
-        if (remote.qos == .exactly_once) {
-            self.client.disconnectTransport();
-            return error.InvalidBridgeQoS;
-        }
-
         var properties: std.ArrayList(mqtt.Property) = .empty;
         defer properties.deinit(self.allocator);
         try properties.ensureTotalCapacity(
@@ -543,7 +647,7 @@ pub const Bridge = struct {
             properties.appendAssumeCapacity(property);
         }
 
-        try self.local.publishLocal(.{
+        const local_publish = mqtt.Publish{
             .dup = false,
             .qos = remote.qos,
             .retain = remote.retain,
@@ -551,14 +655,83 @@ pub const Bridge = struct {
             .packet_id = null,
             .properties = properties.items,
             .payload = remote.payload,
-        });
-        if (remote.qos == .at_least_once) {
-            try self.client.acknowledge(
-                remote.packet_id.?,
-                .at_least_once,
-                .{},
-            );
+        };
+        switch (remote.qos) {
+            .at_most_once => try self.local.publishLocal(local_publish),
+            .at_least_once => {
+                try self.local.publishLocal(local_publish);
+                try self.client.acknowledge(
+                    remote.packet_id.?,
+                    .at_least_once,
+                    .{},
+                );
+            },
+            .exactly_once => {
+                const packet_id = remote.packet_id.?;
+                _ = self.local.stageBridgeQoS2(
+                    self.qos2Key(packet_id),
+                    local_publish,
+                    .{ .duplicate = remote.dup },
+                ) catch |err| {
+                    // The store can have accepted the transaction before a
+                    // journal append fails. Force retransmission so a later
+                    // attempt can validate and persist the same message before
+                    // exposing PUBREC.
+                    self.client.disconnectTransport();
+                    return err;
+                };
+                try self.client.acknowledge(
+                    packet_id,
+                    .exactly_once,
+                    .{},
+                );
+            },
         }
+    }
+
+    fn releaseQoS2(self: *Bridge, packet_id: u16) Error!void {
+        if (!self.qos2_enabled) return error.UnexpectedPacket;
+        const key = self.qos2Key(packet_id);
+        const released = self.local.releaseBridgeQoS2(key) catch |err| {
+            // No PUBCOMP is visible yet. A resumed PUBREL safely retries the
+            // idempotent broker release/tombstone transaction.
+            self.client.disconnectTransport();
+            return err;
+        };
+        switch (released.disposition) {
+            .applied, .already_applied => {},
+            // The reconnect layer surfaces PUBREL only while it owns a
+            // release-pending marker. An absent broker entry therefore means
+            // a completed tombstone was already pruned after restart; it can
+            // never represent an unstaged Application Message here.
+            .unknown => {},
+        }
+        // Keep the broker tombstone until PUBCOMP has been written. If the
+        // transport fails first, a resumed PUBREL observes already_applied and
+        // cannot inject the Application Message twice.
+        try self.client.completeIncomingQoS2(packet_id, .{});
+        // PUBCOMP is already on the wire. A later journal failure while
+        // pruning the tombstone cannot be repaired by failing this event; the
+        // still-persisted tombstone is restored and pruned on the next Bridge
+        // construction.
+        if (released.disposition != .unknown) {
+            _ = self.local.completeBridgeQoS2(key) catch return;
+        }
+        // Durable admission owns any failed live destination from this point;
+        // its connection cleanup or Session retransmission must not stop the
+        // independent upstream bridge after PUBCOMP has completed.
+        _ = released.delivery_error;
+    }
+
+    fn qos2Key(
+        self: *const Bridge,
+        packet_id: u16,
+    ) broker_mod.BridgeQoS2Key {
+        return .{
+            .bridge_id = self.bridge_id.?,
+            .session_epoch = self.session_epoch,
+            .packet_id = packet_id,
+        };
     }
 
     fn matchingRule(self: *const Bridge, topic: []const u8) ?Rule {
@@ -588,6 +761,21 @@ fn validateBridgeRules(rules: []const Rule) Error!void {
             }
         }
     }
+}
+
+fn rulesUseQoS2(rules: []const Rule) bool {
+    for (rules) |rule| {
+        if (rule.qos == .exactly_once) return true;
+    }
+    return false;
+}
+
+fn persistentSession(connect: runtime.ConnectOptions) bool {
+    if (connect.clean_start) return false;
+    return switch (connect.protocol) {
+        .v3_1_1 => true,
+        .v5 => (mqtt.sessionExpiryInterval(connect.properties) orelse 0) != 0,
+    };
 }
 
 const FilterLevel = union(enum) {

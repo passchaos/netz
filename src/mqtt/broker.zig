@@ -1417,6 +1417,87 @@ pub const Broker = struct {
         return removed;
     }
 
+    pub fn latestBridgeQoS2SessionEpoch(
+        self: *Broker,
+        bridge_id: [16]u8,
+    ) ?u64 {
+        self.state_mutex.lockUncancelable(self.io);
+        defer self.state_mutex.unlock(self.io);
+        return self.bridge_qos2.latestSessionEpoch(bridge_id);
+    }
+
+    /// Test whether a bridge transaction still exists after a best-effort
+    /// post-PUBCOMP tombstone cleanup.
+    pub fn containsBridgeQoS2(
+        self: *Broker,
+        key: BridgeQoS2Key,
+    ) bool {
+        self.state_mutex.lockUncancelable(self.io);
+        defer self.state_mutex.unlock(self.io);
+        return self.bridge_qos2.contains(key);
+    }
+
+    /// Copy the inbound QoS 2 protocol markers a recreated bridge client must
+    /// restore before reading traffic from a resumed upstream Session.
+    pub fn pendingBridgeQoS2TransactionsAlloc(
+        self: *Broker,
+        allocator: std.mem.Allocator,
+        bridge_id: [16]u8,
+        session_epoch: u64,
+    ) std.mem.Allocator.Error![]bridge_qos2_mod.PendingTransaction {
+        self.state_mutex.lockUncancelable(self.io);
+        defer self.state_mutex.unlock(self.io);
+        return self.bridge_qos2.pendingSessionTransactionsAlloc(
+            allocator,
+            bridge_id,
+            session_epoch,
+        );
+    }
+
+    /// Retire every durable transaction and advance the stable bridge epoch
+    /// after the upstream CONNACK reports Session Present=false. Both changes
+    /// enter one commit-log record before the Bridge accepts a new PUBLISH.
+    pub fn beginBridgeQoS2Session(
+        self: *Broker,
+        bridge_id: [16]u8,
+    ) Error!u64 {
+        self.persistence_mutex.lockUncancelable(self.io);
+        defer self.persistence_mutex.unlock(self.io);
+        self.state_mutex.lockUncancelable(self.io);
+        const epoch = self.bridge_qos2.advanceSession(bridge_id) catch |err| {
+            self.state_mutex.unlock(self.io);
+            return err;
+        };
+        _ = self.bridge_qos2.removeBridge(bridge_id);
+        self.recordPersistentChangeLocked(true);
+        self.state_mutex.unlock(self.io);
+        try self.finalizePersistentChangeLocked(true, true);
+        return epoch;
+    }
+
+    /// Remove completed tombstones after a recreated bridge has restored
+    /// their release-pending protocol markers. Pending messages remain
+    /// available for their first PUBREL.
+    pub fn pruneReleasedBridgeQoS2Session(
+        self: *Broker,
+        bridge_id: [16]u8,
+        session_epoch: u64,
+    ) Error!usize {
+        self.persistence_mutex.lockUncancelable(self.io);
+        defer self.persistence_mutex.unlock(self.io);
+        self.state_mutex.lockUncancelable(self.io);
+        const removed = self.bridge_qos2.removeReleasedSession(
+            bridge_id,
+            session_epoch,
+        );
+        self.recordPersistentChangeLocked(removed != 0);
+        self.state_mutex.unlock(self.io);
+        if (removed != 0) {
+            try self.finalizePersistentChangeLocked(true, true);
+        }
+        return removed;
+    }
+
     fn statsLocked(self: *const Broker) Stats {
         var active_connections: usize = 0;
         var live_queued_deliveries: usize = 0;
@@ -1547,6 +1628,14 @@ pub const Broker = struct {
         );
         errdefer log.deinit();
         self.commit_log = log;
+    }
+
+    /// Return whether durable mutations synchronously append to a crash-safe
+    /// journal before their MQTT acknowledgement boundary is exposed.
+    pub fn commitLogEnabled(self: *Broker) bool {
+        self.persistence_mutex.lockUncancelable(self.io);
+        defer self.persistence_mutex.unlock(self.io);
+        return self.commit_log != null;
     }
 
     /// Restore the latest complete transaction and keep its journal open.
@@ -2032,6 +2121,7 @@ pub const Broker = struct {
         if (self.router.subscriptionCount() != 0 or
             self.pending_qos2.count() != 0 or
             self.bridge_qos2.stats().entries != 0 or
+            self.bridge_qos2.stats().bridges != 0 or
             self.session_owners.count() != 0 or
             self.will_publishers.count() != 0)
         {

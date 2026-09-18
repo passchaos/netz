@@ -1001,6 +1001,11 @@ pub const InboundQoS2ReleasePolicy = enum {
     deferred,
 };
 
+pub const IncomingQoS2ResumeState = enum {
+    await_pubrel,
+    release_pending,
+};
+
 pub const ClientOptions = struct {
     /// Maximum number of filters retained for fresh-session replay.
     max_subscriptions: usize = 1024,
@@ -1009,6 +1014,11 @@ pub const ClientOptions = struct {
     /// handle so the single socket-owner invariant is preserved.
     manual_acknowledgements: bool = false,
     inbound_qos2_release_policy: InboundQoS2ReleasePolicy = .automatic,
+    /// Deliver a retransmitted inbound QoS 2 PUBLISH to a manual-acknowledging
+    /// application instead of consuming it after re-emitting PUBREC. Durable
+    /// bridges use this to compare the complete message against their own
+    /// persisted transaction before acknowledging the retry.
+    surface_incoming_qos2_retransmissions: bool = false,
     /// Optional notification emitted when an outbound PUBLISH reaches its
     /// protocol delivery boundary: socket completion for QoS 0, PUBACK for
     /// QoS 1, and PUBCOMP (or a negative PUBREC) for QoS 2. This observes all
@@ -1252,6 +1262,12 @@ pub const Client = struct {
         try policy.validate();
         if (client_options.inbound_qos2_release_policy == .deferred and
             !client_options.manual_acknowledgements)
+        {
+            return error.ManualAcknowledgementsDisabled;
+        }
+        if (client_options.surface_incoming_qos2_retransmissions and
+            (!client_options.manual_acknowledgements or
+                client_options.inbound_qos2_release_policy != .deferred))
         {
             return error.ManualAcknowledgementsDisabled;
         }
@@ -1512,6 +1528,41 @@ pub const Client = struct {
         return self.subscriptionIndex(filter) != null;
     }
 
+    /// Seed application-owned desired subscription state before CONNECT. A
+    /// fresh broker Session receives the subscription through normal reconnect
+    /// replay; Session Present=1 leaves the retained remote subscription
+    /// untouched and emits no redundant SUBSCRIBE.
+    pub fn seedSubscription(
+        self: *Client,
+        subscription: mqtt.Subscription,
+        properties: []const mqtt.Property,
+    ) Error!void {
+        if (self.connection_state != null) return error.ConnectionBusy;
+        var validation_buffer: std.ArrayList(u8) = .empty;
+        defer validation_buffer.deinit(self.allocator);
+        try mqtt.Subscribe.write(
+            &validation_buffer,
+            self.allocator,
+            self.options.value.protocol,
+            1,
+            properties,
+            &.{subscription},
+        );
+        if (self.subscriptionIndex(subscription.topic_filter) != null) return;
+        if (self.subscriptions.items.len >=
+            self.client_options.max_subscriptions)
+        {
+            return error.SubscriptionLimitExceeded;
+        }
+        var owned = try cloneSubscription(
+            self.allocator,
+            subscription,
+            properties,
+        );
+        errdefer owned.deinit(self.allocator);
+        try self.subscriptions.append(self.allocator, owned);
+    }
+
     /// Acknowledge one inbound PUBLISH when manual acknowledgements are
     /// enabled. QoS 0 requires no wire response. QoS 1 emits PUBACK and QoS 2
     /// durably records the transaction before emitting PUBREC.
@@ -1568,7 +1619,12 @@ pub const Client = struct {
                         self.outgoing_handle,
                         packet_id,
                     );
-                    if (duplicate) return error.UnexpectedPacket;
+                    if (duplicate and
+                        !self.client_options
+                            .surface_incoming_qos2_retransmissions)
+                    {
+                        return error.UnexpectedPacket;
+                    }
                     recorded = true;
                 }
                 active.writePubRecWithProperties(
@@ -1600,6 +1656,35 @@ pub const Client = struct {
             },
         }
         self.noteControlSent();
+    }
+
+    /// Recreate the protocol marker for an inbound QoS 2 transaction restored
+    /// by an application-owned durable store. Call this only after a CONNECT
+    /// that reported Session Present; a fresh Session has no peer transaction
+    /// to resume. Repeating the call is idempotent.
+    pub fn restoreIncomingQoS2(
+        self: *Client,
+        packet_id: u16,
+        state: IncomingQoS2ResumeState,
+    ) Error!void {
+        if (!self.client_options.manual_acknowledgements or
+            self.client_options.inbound_qos2_release_policy != .deferred)
+        {
+            return error.ManualAcknowledgementsDisabled;
+        }
+        if (self.connection_state == null) {
+            return error.ConnectionUnavailable;
+        }
+        _ = try self.outgoing.recordIncomingQoS2(
+            self.outgoing_handle,
+            packet_id,
+        );
+        if (state == .release_pending) {
+            try self.outgoing.markIncomingQoS2ReleasePending(
+                self.outgoing_handle,
+                packet_id,
+            );
+        }
     }
 
     /// Complete a deferred inbound QoS 2 release and emit PUBCOMP.
@@ -2311,9 +2396,13 @@ pub const Client = struct {
                                     self.outgoing_handle,
                                     packet_id,
                                 )) {
-                                    try active.writePubRec(packet_id, 0);
-                                    self.noteControlSent();
-                                    return null;
+                                    if (!self.client_options
+                                        .surface_incoming_qos2_retransmissions)
+                                    {
+                                        try active.writePubRec(packet_id, 0);
+                                        self.noteControlSent();
+                                        return null;
+                                    }
                                 }
                             } else {
                                 const duplicate =

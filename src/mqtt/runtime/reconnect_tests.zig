@@ -1378,8 +1378,7 @@ test "MQTT reconnect initial connect honors its caller deadline" {
     const connector = runtime.ClientConnector{
         .context = &connector_context,
         .connect_attempt = SlowConnector.connectAttempt,
-        .connect_attempt_deadline =
-            SlowConnector.connectAttemptWithDeadline,
+        .connect_attempt_deadline = SlowConnector.connectAttemptWithDeadline,
     };
     var shutdown: std.Io.Event = .unset;
     var client = try reconnect.Client.initConnector(
@@ -3498,6 +3497,108 @@ test "MQTT manual QoS2 duplicate is not redelivered after PUBREC" {
     if (shared.err) |err| return err;
 }
 
+test "MQTT manual QoS2 can surface duplicate for durable validation" {
+    const allocator = std.testing.allocator;
+    var threaded = std.Io.Threaded.init(allocator, .{
+        .async_limit = .unlimited,
+    });
+    defer threaded.deinit();
+    const io = threaded.io();
+    var server = try runtime.Server.listen(
+        allocator,
+        io,
+        .{ .ip4 = .loopback(0) },
+        .{},
+    );
+    defer server.deinit();
+
+    const Shared = struct {
+        server: *runtime.Server,
+        err: ?anyerror = null,
+        fn run(self: *@This()) void {
+            self.runFallible() catch |err| {
+                self.err = err;
+            };
+        }
+        fn runFallible(self: *@This()) !void {
+            var accepted = try self.server.accept(.{ .protocol = .v5 });
+            defer accepted.deinit(self.server.allocator);
+            const packet_id = (try accepted.connection.writePublish(
+                "manual/surfaced-duplicate",
+                "once",
+                .{ .qos = .exactly_once },
+            )).?;
+            var first_pubrec = try accepted.connection.readPubRec();
+            defer first_pubrec.deinit(self.server.allocator);
+
+            var encoded: std.ArrayList(u8) = .empty;
+            defer encoded.deinit(self.server.allocator);
+            try mqtt.writePublish(
+                &encoded,
+                self.server.allocator,
+                .v5,
+                "manual/surfaced-duplicate",
+                "once",
+                .{
+                    .qos = .exactly_once,
+                    .dup = true,
+                    .packet_id = packet_id,
+                },
+            );
+            try accepted.connection.transport.writePacket(encoded.items);
+            var repeated_pubrec = try accepted.connection.readPubRec();
+            defer repeated_pubrec.deinit(self.server.allocator);
+            try accepted.connection.writePubRel(packet_id, 0);
+            var pubcomp = try accepted.connection.readPubComp();
+            defer pubcomp.deinit(self.server.allocator);
+        }
+    };
+
+    var shared = Shared{ .server = &server };
+    const server_thread = try std.Thread.spawn(.{}, Shared.run, .{&shared});
+    var joined = false;
+    defer if (!joined) server_thread.join();
+    var shutdown: std.Io.Event = .unset;
+    var client = try reconnect.Client.initWithOptions(
+        allocator,
+        io,
+        server.address(),
+        .{ .protocol = .v5, .client_id = "manual-surfaced-duplicate" },
+        .{},
+        &shutdown,
+        .{
+            .manual_acknowledgements = true,
+            .inbound_qos2_release_policy = .deferred,
+            .surface_incoming_qos2_retransmissions = true,
+        },
+    );
+    defer client.deinit();
+    var connected = (try client.pollWithTimeout(.fromSeconds(1))).?;
+    defer connected.deinit(allocator);
+    var first = (try client.pollWithTimeout(.fromSeconds(1))).?;
+    defer first.deinit(allocator);
+    const packet_id = first.publish.publish.packet_id.?;
+    try client.acknowledge(packet_id, .exactly_once, .{});
+
+    var duplicate = (try client.pollWithTimeout(.fromSeconds(1))).?;
+    defer duplicate.deinit(allocator);
+    try std.testing.expect(duplicate == .publish);
+    try std.testing.expect(duplicate.publish.publish.dup);
+    try std.testing.expectEqual(
+        packet_id,
+        duplicate.publish.publish.packet_id.?,
+    );
+    try client.acknowledge(packet_id, .exactly_once, .{});
+    var pubrel = (try client.pollWithTimeout(.fromSeconds(1))).?;
+    defer pubrel.deinit(allocator);
+    try std.testing.expect(pubrel == .pubrel);
+    try client.completeIncomingQoS2(packet_id, .{});
+
+    server_thread.join();
+    joined = true;
+    if (shared.err) |err| return err;
+}
+
 test "MQTT deferred QoS2 release waits for explicit PUBCOMP" {
     const allocator = std.testing.allocator;
     var threaded = std.Io.Threaded.init(allocator, .{
@@ -3623,6 +3724,116 @@ test "MQTT deferred QoS2 release requires manual acknowledgements" {
             .{ .inbound_qos2_release_policy = .deferred },
         ),
     );
+    try std.testing.expectError(
+        error.ManualAcknowledgementsDisabled,
+        reconnect.Client.initWithOptions(
+            allocator,
+            threaded.io(),
+            .{ .ip4 = .loopback(1883) },
+            .{ .protocol = .v5, .client_id = "invalid-surfaced-duplicate" },
+            .{},
+            &shutdown,
+            .{
+                .manual_acknowledgements = true,
+                .surface_incoming_qos2_retransmissions = true,
+            },
+        ),
+    );
+}
+
+test "MQTT reconnect restores deferred inbound QoS2 markers" {
+    const allocator = std.testing.allocator;
+    var threaded = std.Io.Threaded.init(allocator, .{});
+    defer threaded.deinit();
+    var shutdown: std.Io.Event = .unset;
+    var client = try reconnect.Client.initWithOptions(
+        allocator,
+        threaded.io(),
+        .{ .ip4 = .loopback(1883) },
+        .{ .protocol = .v5, .client_id = "restored-deferred" },
+        .{},
+        &shutdown,
+        .{
+            .manual_acknowledgements = true,
+            .inbound_qos2_release_policy = .deferred,
+        },
+    );
+    defer client.deinit();
+    // Restoration is deliberately unavailable until a resumed transport has
+    // been established; a fresh Session must never inherit stale markers.
+    try std.testing.expectError(
+        error.ConnectionUnavailable,
+        client.restoreIncomingQoS2(7, .await_pubrel),
+    );
+}
+
+test "MQTT seeded subscription replays into a fresh Session" {
+    const allocator = std.testing.allocator;
+    var threaded = std.Io.Threaded.init(allocator, .{
+        .async_limit = .unlimited,
+    });
+    defer threaded.deinit();
+    const io = threaded.io();
+    var server = try runtime.Server.listen(
+        allocator,
+        io,
+        .{ .ip4 = .loopback(0) },
+        .{},
+    );
+    defer server.deinit();
+
+    const Shared = struct {
+        server: *runtime.Server,
+        err: ?anyerror = null,
+        fn run(self: *@This()) void {
+            self.runFallible() catch |err| {
+                self.err = err;
+            };
+        }
+        fn runFallible(self: *@This()) !void {
+            var accepted = try self.server.accept(.{ .protocol = .v5 });
+            defer accepted.deinit(self.server.allocator);
+            var subscribe = try accepted.connection.readSubscribe();
+            defer subscribe.deinit(self.server.allocator);
+            try std.testing.expectEqualStrings(
+                "seeded/#",
+                subscribe.subscribe.subscriptions[0].topic_filter,
+            );
+            try accepted.connection.writeSubAck(
+                subscribe.subscribe.packet_id,
+                &.{1},
+                &.{},
+            );
+            var disconnect = try accepted.connection.readDisconnect();
+            defer disconnect.deinit(self.server.allocator);
+        }
+    };
+    var shared = Shared{ .server = &server };
+    const server_thread = try std.Thread.spawn(.{}, Shared.run, .{&shared});
+    var joined = false;
+    defer if (!joined) server_thread.join();
+
+    var shutdown: std.Io.Event = .unset;
+    var client = try reconnect.Client.init(
+        allocator,
+        io,
+        server.address(),
+        .{ .protocol = .v5, .client_id = "seeded-subscription" },
+        .{},
+        &shutdown,
+    );
+    defer client.deinit();
+    try client.seedSubscription(.{
+        .topic_filter = "seeded/#",
+        .qos = .at_least_once,
+    }, &.{});
+    const connected = try client.connectWithTimeout(.fromSeconds(1));
+    try std.testing.expect(!connected.session_present);
+    try client.disconnect(0);
+
+    server_thread.join();
+    joined = true;
+    if (shared.err) |err| return err;
 }
 
 test "MQTT deferred QoS2 PUBREC validation stays retryable" {

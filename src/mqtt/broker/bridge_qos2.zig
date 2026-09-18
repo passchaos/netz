@@ -28,6 +28,7 @@ pub const Error = mqtt.Error || persistence.Error || error{
     OwnedByteLimitExceeded,
     InvalidReleaseState,
     InvalidStoreOptions,
+    SequenceOverflow,
 };
 
 pub const Key = struct {
@@ -47,6 +48,17 @@ pub const StageResult = enum {
     replaced,
 };
 
+/// Minimal pending-transaction metadata needed to rebuild a bridge client's
+/// inbound QoS 2 receive state after its process or transport is recreated.
+pub const PendingTransaction = struct {
+    packet_id: u16,
+};
+
+const Epoch = struct {
+    bridge_id: [16]u8,
+    value: u64,
+};
+
 pub const ReleaseResult = struct {
     duplicated: bool,
     claim: ?Claim,
@@ -54,6 +66,7 @@ pub const ReleaseResult = struct {
 
 pub const Stats = struct {
     entries: usize,
+    bridges: usize,
     pending: usize,
     released: usize,
     owned_bytes: usize,
@@ -64,7 +77,7 @@ pub const Options = struct {
     max_owned_bytes: usize = 64 * 1024 * 1024,
 };
 
-const snapshot_version: u32 = 1;
+const snapshot_version: u32 = 2;
 
 pub const Publish = struct {
     allocator: std.mem.Allocator,
@@ -235,6 +248,7 @@ pub const Store = struct {
     allocator: std.mem.Allocator,
     options: Options,
     entries: std.ArrayListUnmanaged(Entry) = .empty,
+    epochs: std.ArrayListUnmanaged(Epoch) = .empty,
     owned_bytes: usize = 0,
 
     pub fn init(
@@ -253,12 +267,17 @@ pub const Store = struct {
             allocator,
             options.max_entries,
         );
+        try self.epochs.ensureTotalCapacity(
+            allocator,
+            options.max_entries,
+        );
         return self;
     }
 
     pub fn deinit(self: *Store) void {
         for (self.entries.items) |*entry| entry.deinit();
         self.entries.deinit(self.allocator);
+        self.epochs.deinit(self.allocator);
         self.* = undefined;
     }
 
@@ -277,6 +296,7 @@ pub const Store = struct {
         };
         return .{
             .entries = self.entries.items.len,
+            .bridges = self.epochs.items.len,
             .pending = pending,
             .released = released,
             .owned_bytes = self.owned_bytes,
@@ -463,6 +483,95 @@ pub const Store = struct {
         return self.entries.items[index].phase;
     }
 
+    /// Return the greatest persisted Session epoch for one stable bridge. A
+    /// newly constructed Bridge uses this to address transactions restored
+    /// with the local broker before it learns whether the upstream Session
+    /// survived.
+    pub fn latestSessionEpoch(
+        self: *const Store,
+        bridge_id: [16]u8,
+    ) ?u64 {
+        var latest: ?u64 = if (self.findEpochIndex(bridge_id)) |index|
+            self.epochs.items[index].value
+        else
+            null;
+        for (self.entries.items) |entry| {
+            if (!std.mem.eql(u8, &entry.key.bridge_id, &bridge_id)) continue;
+            latest = @max(latest orelse 0, entry.key.session_epoch);
+        }
+        return latest;
+    }
+
+    /// Record a fresh upstream Session generation. The marker survives even
+    /// when no QoS 2 transaction is active, closing the crash window between
+    /// CONNACK and the next PUBLISH.
+    pub fn advanceSession(self: *Store, bridge_id: [16]u8) Error!u64 {
+        const epoch_index = self.findEpochIndex(bridge_id);
+        var current = if (epoch_index) |index|
+            self.epochs.items[index].value
+        else
+            0;
+        for (self.entries.items) |entry| {
+            if (std.mem.eql(u8, &entry.key.bridge_id, &bridge_id)) {
+                current = @max(current, entry.key.session_epoch);
+            }
+        }
+        const next = std.math.add(u64, current, 1) catch
+            return error.SequenceOverflow;
+        if (epoch_index) |index| {
+            self.epochs.items[index].value = next;
+        } else {
+            if (self.epochs.items.len >= self.options.max_entries) {
+                return error.EntryLimitExceeded;
+            }
+            try self.epochs.append(self.allocator, .{
+                .bridge_id = bridge_id,
+                .value = next,
+            });
+        }
+        return next;
+    }
+
+    /// Return whether a durable transaction exists for this exact key.
+    pub fn contains(self: *const Store, key: Key) bool {
+        return self.findIndex(key) != null;
+    }
+
+    /// Allocate the protocol state required to resume one upstream Session.
+    /// Application Message bytes stay owned by this Store and are released
+    /// only when the matching PUBREL reaches the broker transaction API.
+    pub fn pendingSessionTransactionsAlloc(
+        self: *const Store,
+        allocator: std.mem.Allocator,
+        bridge_id: [16]u8,
+        session_epoch: u64,
+    ) std.mem.Allocator.Error![]PendingTransaction {
+        var count: usize = 0;
+        for (self.entries.items) |entry| {
+            if (entry.phase == .pending and
+                entry.key.session_epoch == session_epoch and
+                std.mem.eql(u8, &entry.key.bridge_id, &bridge_id))
+            {
+                count += 1;
+            }
+        }
+        const transactions = try allocator.alloc(PendingTransaction, count);
+        var index: usize = 0;
+        for (self.entries.items) |entry| {
+            if (entry.phase != .pending or
+                entry.key.session_epoch != session_epoch or
+                !std.mem.eql(u8, &entry.key.bridge_id, &bridge_id))
+            {
+                continue;
+            }
+            transactions[index] = .{
+                .packet_id = entry.key.packet_id,
+            };
+            index += 1;
+        }
+        return transactions;
+    }
+
     /// Replace a pending message with its released tombstone without moving
     /// ownership through a Claim. Broker integration uses this while holding
     /// its state barrier so routing effects and the tombstone enter one
@@ -506,6 +615,54 @@ pub const Store = struct {
         return removed;
     }
 
+    /// Drop only released tombstones from one resumed Session after the
+    /// reconnect client has restored their release-pending markers. A repeated
+    /// PUBREL can then still be completed without retaining the bounded local
+    /// tombstone indefinitely.
+    pub fn removeReleasedSession(
+        self: *Store,
+        bridge_id: [16]u8,
+        session_epoch: u64,
+    ) usize {
+        var removed: usize = 0;
+        var index: usize = 0;
+        while (index < self.entries.items.len) {
+            const entry = self.entries.items[index];
+            if (entry.phase != .released or
+                entry.key.session_epoch != session_epoch or
+                !std.mem.eql(u8, &entry.key.bridge_id, &bridge_id))
+            {
+                index += 1;
+                continue;
+            }
+            var removed_entry = self.orderedRemove(index);
+            removed_entry.deinit();
+            removed += 1;
+        }
+        return removed;
+    }
+
+    /// Remove every transaction for a bridge after CONNACK reports a fresh
+    /// upstream Session. The separate epoch marker remains intact.
+    pub fn removeBridge(self: *Store, bridge_id: [16]u8) usize {
+        var removed: usize = 0;
+        var index: usize = 0;
+        while (index < self.entries.items.len) {
+            if (!std.mem.eql(
+                u8,
+                &self.entries.items[index].key.bridge_id,
+                &bridge_id,
+            )) {
+                index += 1;
+                continue;
+            }
+            var entry = self.orderedRemove(index);
+            entry.deinit();
+            removed += 1;
+        }
+        return removed;
+    }
+
     pub fn writeSnapshot(
         self: *const Store,
         out: *std.ArrayList(u8),
@@ -518,6 +675,28 @@ pub const Store = struct {
             u32,
             snapshot_version,
         );
+        if (self.epochs.items.len > std.math.maxInt(u32)) {
+            return error.SnapshotLimitExceeded;
+        }
+        try persistence.appendInt(
+            out,
+            allocator,
+            u32,
+            @intCast(self.epochs.items.len),
+        );
+        for (self.epochs.items) |epoch| {
+            try persistence.appendBlob(
+                out,
+                allocator,
+                &epoch.bridge_id,
+            );
+            try persistence.appendInt(
+                out,
+                allocator,
+                u64,
+                epoch.value,
+            );
+        }
         var count: u32 = 0;
         for (self.entries.items) |entry| {
             if (entry.phase == .pending) {
@@ -601,6 +780,24 @@ pub const Store = struct {
         const version = try cursor.readInt(u32);
         if (version != snapshot_version) {
             return error.UnsupportedSnapshotVersion;
+        }
+        const epoch_count = try cursor.readInt(u32);
+        if (epoch_count > self.options.max_entries) {
+            return error.EntryLimitExceeded;
+        }
+        for (0..epoch_count) |_| {
+            const bridge_id_blob = try cursor.readBlob();
+            if (bridge_id_blob.len != 16) return error.CorruptSnapshot;
+            var bridge_id: [16]u8 = undefined;
+            @memcpy(&bridge_id, bridge_id_blob);
+            const epoch = try cursor.readInt(u64);
+            if (epoch == 0 or self.findEpochIndex(bridge_id) != null) {
+                return error.CorruptSnapshot;
+            }
+            try self.epochs.append(self.allocator, .{
+                .bridge_id = bridge_id,
+                .value = epoch,
+            });
         }
         const count = try cursor.readInt(u32);
         if (count > self.options.max_entries) {
@@ -731,6 +928,13 @@ pub const Store = struct {
     fn findIndex(self: *const Store, key: Key) ?usize {
         for (self.entries.items, 0..) |entry, index| {
             if (keyEqual(entry.key, key)) return index;
+        }
+        return null;
+    }
+
+    fn findEpochIndex(self: *const Store, bridge_id: [16]u8) ?usize {
+        for (self.epochs.items, 0..) |epoch, index| {
+            if (std.mem.eql(u8, &epoch.bridge_id, &bridge_id)) return index;
         }
         return null;
     }
@@ -1148,6 +1352,116 @@ test "bridge QoS2 store retires one upstream Session epoch" {
     );
     try std.testing.expect(store.getPhase(first) == null);
     try std.testing.expectEqual(Phase.pending, store.getPhase(next_epoch).?);
+}
+
+test "bridge QoS2 store enumerates epochs and removes bridge state" {
+    const allocator = std.testing.allocator;
+    var store = try Store.init(allocator, .{});
+    defer store.deinit();
+    const bridge_id = [_]u8{0x31} ** 16;
+    const other_id = [_]u8{0x32} ** 16;
+    const pending = Key{
+        .bridge_id = bridge_id,
+        .session_epoch = 4,
+        .packet_id = 8,
+    };
+    var released = pending;
+    released.packet_id = 9;
+    var newer = pending;
+    newer.session_epoch = 7;
+    newer.packet_id = 10;
+    var other = pending;
+    other.bridge_id = other_id;
+
+    for ([_]Key{ pending, released, newer, other }) |key| {
+        _ = try store.stage(key, .{
+            .dup = false,
+            .qos = .exactly_once,
+            .retain = false,
+            .topic = "bridge/enumerate",
+            .packet_id = null,
+            .payload = "value",
+        }, .zero);
+    }
+    var claim = store.release(released).claim.?;
+    try store.commitRelease(&claim);
+
+    try std.testing.expectEqual(
+        @as(?u64, 7),
+        store.latestSessionEpoch(bridge_id),
+    );
+    const transactions = try store.pendingSessionTransactionsAlloc(
+        allocator,
+        bridge_id,
+        4,
+    );
+    defer allocator.free(transactions);
+    try std.testing.expectEqual(@as(usize, 1), transactions.len);
+    try std.testing.expectEqual(@as(u16, 8), transactions[0].packet_id);
+
+    try std.testing.expectEqual(Phase.pending, store.getPhase(pending).?);
+    try std.testing.expectEqual(Phase.released, store.getPhase(released).?);
+    try std.testing.expectEqual(
+        @as(usize, 1),
+        store.removeReleasedSession(bridge_id, 4),
+    );
+    try std.testing.expect(store.getPhase(released) == null);
+    try std.testing.expectEqual(
+        @as(u64, 8),
+        try store.advanceSession(bridge_id),
+    );
+    try std.testing.expectEqual(@as(usize, 2), store.removeBridge(bridge_id));
+    try std.testing.expectEqual(
+        @as(?u64, 8),
+        store.latestSessionEpoch(bridge_id),
+    );
+    try std.testing.expectEqual(Phase.pending, store.getPhase(other).?);
+}
+
+test "bridge QoS2 epoch survives snapshot without transactions" {
+    const allocator = std.testing.allocator;
+    var store = try Store.init(allocator, .{});
+    defer store.deinit();
+    const bridge_id = [_]u8{0x71} ** 16;
+    try std.testing.expectEqual(
+        @as(u64, 1),
+        try store.advanceSession(bridge_id),
+    );
+
+    var encoded: std.ArrayList(u8) = .empty;
+    defer encoded.deinit(allocator);
+    try store.writeSnapshot(&encoded, allocator, .zero);
+
+    var restored = try Store.init(allocator, .{});
+    defer restored.deinit();
+    var cursor = persistence.Cursor.init(encoded.items);
+    try restored.restoreSnapshot(&cursor, .zero, 0);
+    try cursor.finish();
+    try std.testing.expectEqual(
+        @as(?u64, 1),
+        restored.latestSessionEpoch(bridge_id),
+    );
+    try std.testing.expectEqual(
+        @as(u64, 2),
+        try restored.advanceSession(bridge_id),
+    );
+}
+
+test "bridge QoS2 epoch table is bounded" {
+    const allocator = std.testing.allocator;
+    var store = try Store.init(allocator, .{
+        .max_entries = 1,
+        .max_owned_bytes = 1,
+    });
+    defer store.deinit();
+    const first = [_]u8{0x81} ** 16;
+    const second = [_]u8{0x82} ** 16;
+    try std.testing.expectEqual(@as(u64, 1), try store.advanceSession(first));
+    try std.testing.expectEqual(@as(u64, 2), try store.advanceSession(first));
+    try std.testing.expectError(
+        error.EntryLimitExceeded,
+        store.advanceSession(second),
+    );
 }
 
 test "bridge QoS2 store snapshot restores pending and released state and rejects corruption" {

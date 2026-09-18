@@ -3912,6 +3912,8 @@ test "public modules are reachable" {
     try std.testing.expect(@hasDecl(netz.mqtt.bridge, "Rule"));
     try std.testing.expect(@hasDecl(netz.mqtt.bridge, "Options"));
     try std.testing.expect(@hasDecl(netz.mqtt.bridge, "MultiOptions"));
+    try std.testing.expect(@hasField(netz.mqtt.bridge.Options, "bridge_id"));
+    try std.testing.expect(@hasField(netz.mqtt.bridge.MultiOptions, "bridge_id"));
     try std.testing.expect(@hasField(netz.mqtt.bridge.Bridge, "rule"));
     try std.testing.expect(@hasField(netz.mqtt.bridge.Bridge, "rules"));
     try std.testing.expect(@hasDecl(netz.mqtt.bridge.Bridge, "init"));
@@ -3930,6 +3932,7 @@ test "public modules are reachable" {
         "initConnectorMany",
     ));
     try std.testing.expect(@hasDecl(netz.mqtt.bridge.Bridge, "connect"));
+    try std.testing.expect(@hasDecl(netz.mqtt.bridge.Bridge, "disconnect"));
     try std.testing.expect(@hasDecl(netz.mqtt.bridge.Bridge, "step"));
     try std.testing.expect(@hasDecl(netz.mqtt.bridge.Bridge, "run"));
     try std.testing.expect(@hasDecl(netz.mqtt.bridge.Rule, "mapTopicAlloc"));
@@ -3946,6 +3949,14 @@ test "public modules are reachable" {
     try std.testing.expect(@hasDecl(
         netz.mqtt.reconnect,
         "InboundQoS2ReleasePolicy",
+    ));
+    try std.testing.expect(@hasDecl(
+        netz.mqtt.reconnect.Client,
+        "restoreIncomingQoS2",
+    ));
+    try std.testing.expect(@hasDecl(
+        netz.mqtt.reconnect.Client,
+        "seedSubscription",
     ));
     try std.testing.expect(@hasField(
         netz.mqtt.reconnect.ClientOptions,
@@ -4782,6 +4793,22 @@ test "public modules are reachable" {
     try std.testing.expect(@hasDecl(
         netz.mqtt.broker.Broker,
         "completeBridgeQoS2",
+    ));
+    try std.testing.expect(@hasDecl(
+        netz.mqtt.broker.Broker,
+        "pendingBridgeQoS2TransactionsAlloc",
+    ));
+    try std.testing.expect(@hasDecl(
+        netz.mqtt.broker.Broker,
+        "latestBridgeQoS2SessionEpoch",
+    ));
+    try std.testing.expect(@hasDecl(
+        netz.mqtt.broker.Broker,
+        "beginBridgeQoS2Session",
+    ));
+    try std.testing.expect(@hasDecl(
+        netz.mqtt.broker.Broker,
+        "pruneReleasedBridgeQoS2Session",
     ));
     try std.testing.expect(@hasDecl(
         netz.mqtt.broker,

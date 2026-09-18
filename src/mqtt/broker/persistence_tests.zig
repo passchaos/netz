@@ -2400,4 +2400,68 @@ test "MQTT broker snapshot restores bridge QoS2 transactions" {
         "payload",
         restored.bridge_qos2.getPending(key).?.payload,
     );
+
+    try std.testing.expectEqual(
+        mqtt.broker.BridgeQoS2ReleaseResult.applied,
+        (try restored.releaseBridgeQoS2(key)).disposition,
+    );
+    try std.testing.expectEqual(
+        mqtt.broker.BridgeQoS2ReleaseResult.already_applied,
+        (try restored.releaseBridgeQoS2(key)).disposition,
+    );
+    try std.testing.expect(try restored.completeBridgeQoS2(key));
+    try std.testing.expect(!restored.containsBridgeQoS2(key));
+}
+
+test "MQTT broker persists bridge epoch without an active transaction" {
+    const allocator = std.testing.allocator;
+    var threaded = std.Io.Threaded.init(allocator, .{});
+    defer threaded.deinit();
+    const io = threaded.io();
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    const bridge_id = [_]u8{0x6b} ** 16;
+
+    var source = try createBroker(allocator, io);
+    defer source.deinit();
+    try source.createCommitLog(tmp.dir, "bridge-epoch.log", .{});
+    try std.testing.expectEqual(
+        @as(u64, 1),
+        try source.beginBridgeQoS2Session(bridge_id),
+    );
+    try std.testing.expectEqual(
+        @as(?u64, 1),
+        source.latestBridgeQoS2SessionEpoch(bridge_id),
+    );
+    const stale_key = mqtt.broker.BridgeQoS2Key{
+        .bridge_id = bridge_id,
+        .session_epoch = 1,
+        .packet_id = 9,
+    };
+    _ = try source.stageBridgeQoS2(stale_key, .{
+        .dup = false,
+        .qos = .exactly_once,
+        .retain = false,
+        .topic = "bridge/stale",
+        .packet_id = null,
+        .payload = "old-session",
+    }, .{});
+    try std.testing.expectEqual(
+        @as(u64, 2),
+        try source.beginBridgeQoS2Session(bridge_id),
+    );
+    try std.testing.expect(!source.containsBridgeQoS2(stale_key));
+
+    var restored = try createBroker(allocator, io);
+    defer restored.deinit();
+    try restored.restoreCommitLog(tmp.dir, "bridge-epoch.log", .{});
+    try std.testing.expectEqual(
+        @as(?u64, 2),
+        restored.latestBridgeQoS2SessionEpoch(bridge_id),
+    );
+    try std.testing.expect(!restored.containsBridgeQoS2(stale_key));
+    try std.testing.expectEqual(
+        @as(u64, 3),
+        try restored.beginBridgeQoS2Session(bridge_id),
+    );
 }
