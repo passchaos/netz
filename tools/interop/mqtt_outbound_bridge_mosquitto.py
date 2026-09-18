@@ -1,0 +1,393 @@
+#!/usr/bin/env python3
+"""Exercise netz OutboundBridge between two real Mosquitto brokers."""
+
+from __future__ import annotations
+
+import argparse
+from dataclasses import dataclass
+from pathlib import Path
+import socket
+import subprocess
+import sys
+import tempfile
+import time
+
+
+RUNTIME = (
+    "bridge_io=zio-std-io source_broker_io=mosquitto-event-loop "
+    "target_broker_io=mosquitto-event-loop"
+)
+
+
+@dataclass(frozen=True)
+class Case:
+    name: str
+    source_protocol: int
+    target_protocol: int
+    qos: int
+    retain: bool
+
+    @property
+    def source_label(self) -> str:
+        return "v311" if self.source_protocol == 4 else "v5"
+
+    @property
+    def target_label(self) -> str:
+        return "v311" if self.target_protocol == 4 else "v5"
+
+
+CASES = (
+    Case("v311-to-v5-qos0", 4, 5, 0, False),
+    Case("v5-to-v311-qos1-retain", 5, 4, 1, True),
+)
+
+
+def parse_args() -> argparse.Namespace:
+    parser = argparse.ArgumentParser()
+    parser.add_argument("bridge", type=Path)
+    parser.add_argument("mosquitto", type=Path)
+    parser.add_argument(
+        "--mosquitto-test-root",
+        type=Path,
+        default=Path.home() / "Work/mosquitto/test",
+    )
+    return parser.parse_args()
+
+
+def free_port() -> int:
+    with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as probe:
+        probe.bind(("127.0.0.1", 0))
+        return probe.getsockname()[1]
+
+
+def distinct_ports(count: int) -> list[int]:
+    ports: set[int] = set()
+    while len(ports) != count:
+        ports.add(free_port())
+    return list(ports)
+
+
+def recv_exact(sock: socket.socket, count: int) -> bytes:
+    result = bytearray()
+    while len(result) < count:
+        part = sock.recv(count - len(result))
+        if not part:
+            raise AssertionError("peer closed before complete MQTT packet")
+        result.extend(part)
+    return bytes(result)
+
+
+def decode_remaining_length(data: bytes, offset: int = 1) -> tuple[int, int]:
+    value = 0
+    multiplier = 1
+    for index in range(4):
+        encoded = data[offset + index]
+        value += (encoded & 0x7F) * multiplier
+        if encoded & 0x80 == 0:
+            return value, offset + index + 1
+        multiplier *= 128
+    raise AssertionError("malformed MQTT Remaining Length")
+
+
+def read_packet(sock: socket.socket) -> bytes:
+    packet = bytearray(recv_exact(sock, 1))
+    remaining = 0
+    multiplier = 1
+    for _ in range(4):
+        encoded = recv_exact(sock, 1)[0]
+        packet.append(encoded)
+        remaining += (encoded & 0x7F) * multiplier
+        if encoded & 0x80 == 0:
+            packet.extend(recv_exact(sock, remaining))
+            return bytes(packet)
+        multiplier *= 128
+    raise AssertionError("malformed MQTT Remaining Length")
+
+
+def connect_client(
+    port: int, mqtt_packets, client_id: str, protocol: int
+) -> socket.socket:
+    sock = socket.create_connection(("127.0.0.1", port), timeout=5)
+    sock.settimeout(5)
+    sock.sendall(mqtt_packets.gen_connect(client_id, proto_ver=protocol))
+    connack = read_packet(sock)
+    if connack[0] != 0x20 or len(connack) < 4 or connack[3] >= 0x80:
+        sock.close()
+        raise AssertionError(f"invalid CONNACK: {connack.hex()}")
+    return sock
+
+
+def subscribe(
+    sock: socket.socket, mqtt_packets, protocol: int, topic: str, qos: int
+) -> None:
+    sock.sendall(mqtt_packets.gen_subscribe(1, topic, qos, proto_ver=protocol))
+    packet = read_packet(sock)
+    if packet[0] != 0x90:
+        raise AssertionError(f"expected SUBACK, received {packet.hex()}")
+    expected = mqtt_packets.gen_suback(1, qos, proto_ver=protocol)
+    if packet != expected:
+        raise AssertionError(
+            f"SUBACK mismatch: expected {expected.hex()}, got {packet.hex()}"
+        )
+
+
+def parse_publish(packet: bytes, protocol: int) -> dict[str, object]:
+    if packet[0] >> 4 != 3:
+        raise AssertionError(f"expected PUBLISH, received {packet.hex()}")
+    remaining, cursor = decode_remaining_length(packet)
+    if cursor + remaining != len(packet):
+        raise AssertionError("PUBLISH length mismatch")
+    topic_len = int.from_bytes(packet[cursor : cursor + 2], "big")
+    cursor += 2
+    topic = packet[cursor : cursor + topic_len].decode("utf-8")
+    cursor += topic_len
+    qos = (packet[0] >> 1) & 0x03
+    packet_id = None
+    if qos != 0:
+        packet_id = int.from_bytes(packet[cursor : cursor + 2], "big")
+        cursor += 2
+    if protocol == 5:
+        properties_len, properties_start = decode_remaining_length(
+            packet, cursor
+        )
+        cursor = properties_start + properties_len
+    return {
+        "topic": topic,
+        "payload": packet[cursor:],
+        "qos": qos,
+        "retain": bool(packet[0] & 0x01),
+        "packet_id": packet_id,
+    }
+
+
+def assert_publish(
+    packet: bytes, protocol: int, *, qos: int, retain: bool, payload: bytes
+) -> int | None:
+    publish = parse_publish(packet, protocol)
+    if publish["topic"] != "remote/sensors/room":
+        raise AssertionError(f"wrong remapped topic: {publish['topic']}")
+    if publish["payload"] != payload:
+        raise AssertionError(f"wrong bridged payload: {publish['payload']!r}")
+    if publish["qos"] != qos:
+        raise AssertionError(f"wrong bridged QoS: {publish['qos']}")
+    if publish["retain"] != retain:
+        raise AssertionError(f"wrong RETAIN bit: {publish['retain']}")
+    return publish["packet_id"]  # type: ignore[return-value]
+
+
+def wait_for_log(
+    process: subprocess.Popen[bytes], path: Path, marker: str, label: str
+) -> None:
+    deadline = time.monotonic() + 10
+    while time.monotonic() < deadline:
+        content = path.read_text(errors="replace") if path.exists() else ""
+        if marker in content:
+            return
+        code = process.poll()
+        if code is not None:
+            raise RuntimeError(f"{label} exited {code}: {content}")
+        time.sleep(0.02)
+    raise RuntimeError(f"timed out waiting for {label}: {path.read_text()}")
+
+
+def start_broker(
+    executable: Path, port: int, directory: Path, label: str
+) -> tuple[subprocess.Popen[bytes], object, Path]:
+    config = directory / f"{label}.conf"
+    log = directory / f"{label}.log"
+    config.write_text(
+        f"listener {port} 127.0.0.1\n"
+        "allow_anonymous true\n"
+        "persistence false\n"
+        "log_type all\n",
+        encoding="ascii",
+    )
+    output = log.open("wb")
+    process = subprocess.Popen(
+        [str(executable), "-c", str(config), "-v"],
+        stdout=output,
+        stderr=subprocess.STDOUT,
+    )
+    try:
+        wait_for_log(process, log, " running", label)
+    except BaseException:
+        stop_process(process, output)
+        raise
+    return process, output, log
+
+
+def stop_process(process: subprocess.Popen[bytes], output: object) -> None:
+    if process.poll() is None:
+        process.terminate()
+        try:
+            process.wait(timeout=5)
+        except subprocess.TimeoutExpired:
+            process.kill()
+            process.wait(timeout=5)
+    output.close()  # type: ignore[attr-defined]
+
+
+def run_case(
+    bridge_executable: Path, mosquitto: Path, mqtt_packets, case: Case
+) -> None:
+    source_port, target_port, control_port = distinct_ports(3)
+    with tempfile.TemporaryDirectory() as temporary:
+        directory = Path(temporary)
+        source: subprocess.Popen[bytes] | None = None
+        source_output = None
+        target: subprocess.Popen[bytes] | None = None
+        target_output = None
+        bridge: subprocess.Popen[bytes] | None = None
+        bridge_output = None
+        source_log = directory / "source.log"
+        target_log = directory / "target.log"
+        bridge_log = directory / "bridge.log"
+        clients: list[socket.socket] = []
+        try:
+            source, source_output, source_log = start_broker(
+                mosquitto, source_port, directory, "source"
+            )
+            target, target_output, target_log = start_broker(
+                mosquitto, target_port, directory, "target"
+            )
+            bridge_output = bridge_log.open("wb")
+            bridge = subprocess.Popen(
+                [
+                    str(bridge_executable),
+                    str(source_port),
+                    str(target_port),
+                    str(control_port),
+                    case.source_label,
+                    case.target_label,
+                    str(case.qos),
+                    case.name,
+                ],
+                stdout=bridge_output,
+                stderr=subprocess.STDOUT,
+            )
+            wait_for_log(bridge, bridge_log, "outbound bridge ready", "bridge")
+            subscriber = connect_client(
+                target_port, mqtt_packets, f"target-{case.name}",
+                case.target_protocol,
+            )
+            clients.append(subscriber)
+            subscribe(
+                subscriber, mqtt_packets, case.target_protocol,
+                "remote/sensors/#", case.qos,
+            )
+            publisher = connect_client(
+                source_port, mqtt_packets, f"source-{case.name}",
+                case.source_protocol,
+            )
+            clients.append(publisher)
+            payload = f"outbound-{case.name}".encode("ascii")
+            publisher.sendall(
+                mqtt_packets.gen_publish(
+                    "local/sensors/room", qos=case.qos, mid=7,
+                    retain=case.retain, payload=payload,
+                    proto_ver=case.source_protocol,
+                )
+            )
+            if case.qos == 1:
+                expected_ack = mqtt_packets.gen_puback(
+                    7, proto_ver=case.source_protocol
+                )
+                actual_ack = read_packet(publisher)
+                if actual_ack != expected_ack:
+                    raise AssertionError(
+                        f"source PUBACK mismatch: {actual_ack.hex()}"
+                    )
+            target_packet_id = assert_publish(
+                read_packet(subscriber), case.target_protocol, qos=case.qos,
+                retain=False, payload=payload,
+            )
+            if target_packet_id is not None:
+                subscriber.sendall(
+                    mqtt_packets.gen_puback(
+                        target_packet_id, proto_ver=case.target_protocol
+                    )
+                )
+            subscriber.sendall(
+                mqtt_packets.gen_disconnect(proto_ver=case.target_protocol)
+            )
+            subscriber.close()
+            clients.remove(subscriber)
+
+            if case.retain:
+                retained = connect_client(
+                    target_port, mqtt_packets, f"retained-{case.name}",
+                    case.target_protocol,
+                )
+                clients.append(retained)
+                subscribe(
+                    retained, mqtt_packets, case.target_protocol,
+                    "remote/sensors/room", case.qos,
+                )
+                retained_packet_id = assert_publish(
+                    read_packet(retained), case.target_protocol, qos=case.qos,
+                    retain=True, payload=payload,
+                )
+                if retained_packet_id is not None:
+                    retained.sendall(
+                        mqtt_packets.gen_puback(
+                            retained_packet_id, proto_ver=case.target_protocol
+                        )
+                    )
+
+            publisher.sendall(
+                mqtt_packets.gen_disconnect(proto_ver=case.source_protocol)
+            )
+            with socket.create_connection(
+                ("127.0.0.1", control_port), timeout=5
+            ) as control:
+                control.sendall(b"\x01")
+            try:
+                return_code = bridge.wait(timeout=5)
+            except subprocess.TimeoutExpired as exc:
+                raise RuntimeError("bridge did not stop gracefully") from exc
+            if return_code != 0:
+                raise RuntimeError(
+                    f"bridge exited {return_code}: {bridge_log.read_text()}"
+                )
+        finally:
+            for client in clients:
+                try:
+                    client.close()
+                except OSError:
+                    pass
+            if bridge is not None and bridge.poll() is None:
+                bridge.terminate()
+                bridge.wait(timeout=5)
+            if bridge_output is not None:
+                bridge_output.close()
+            if target is not None and target_output is not None:
+                stop_process(target, target_output)
+            if source is not None and source_output is not None:
+                stop_process(source, source_output)
+            if sys.exc_info()[0] is not None:
+                for label, path in (
+                    ("bridge", bridge_log),
+                    ("source", source_log),
+                    ("target", target_log),
+                ):
+                    print(f"===== {label} log =====", file=sys.stderr)
+                    if path.exists():
+                        print(path.read_text(errors="replace"), file=sys.stderr)
+
+
+def main() -> None:
+    args = parse_args()
+    sys.path.insert(0, str(args.mosquitto_test_root))
+    import mqtt_packets  # type: ignore
+
+    for case in CASES:
+        run_case(args.bridge, args.mosquitto, mqtt_packets, case)
+    print(
+        "MQTT OutboundBridge two-Mosquitto interop passed: "
+        "v3.1.1->v5 QoS0, v5->v3.1.1 QoS1 retained, topic remap "
+        + RUNTIME
+    )
+
+
+if __name__ == "__main__":
+    main()

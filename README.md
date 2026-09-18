@@ -1014,6 +1014,9 @@ zig build interop-websocket-autobahn-smoke -Doptimize=ReleaseFast
 # zio-std-io runtime identity.
 zig build interop-mqtt-mtls-openssl -Doptimize=ReleaseFast
 zig build interop-mqtt-listener-mount-mosquitto -Doptimize=ReleaseFast
+# Build the pinned Mosquitto checkout and bridge two independent broker
+# processes through netz across MQTT versions and QoS levels.
+zig build interop-mqtt-outbound-bridge-mosquitto -Doptimize=ReleaseFast
 zig build interop-mqtt-websocket-mosquitto -Doptimize=ReleaseFast
 zig build interop-mqtt-websocket-origin -Doptimize=ReleaseFast
 # Drive the browser WebSocket API from Chrome against netz. The gate checks

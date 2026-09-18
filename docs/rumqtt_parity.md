@@ -188,6 +188,20 @@ Identifier behavior, ACK ordering, property filtering, QoS 0, and a normal
 two-Broker route. An idle two-peer regression additionally advances both
 one-second Keep Alive state machines through alternating `step` calls and
 observes both PINGRESPs.
+`zig build interop-mqtt-outbound-bridge-mosquitto -Doptimize=ReleaseFast`
+adds an external process boundary: by default it validates and builds the
+audited Mosquitto `5cd25465` checkout in a disposable directory, starts
+independent source and target
+Mosquitto brokers, and runs the netz bridge between them. A Mosquitto-generated
+MQTT 3.1.1 source publication reaches an MQTT 5 target subscriber at QoS 0; the
+reverse-version case uses QoS 1 plus RETAIN, checks the live delivery with
+RETAIN cleared, then reconnects a new target subscriber and reads the retained
+copy with RETAIN set. The source publisher's broker-local PUBACK is deliberately
+not presented as the bridge subscription ACK boundary; that ordering remains
+covered by the controlled disconnect tests above. Both external cases
+verify the exact `local/sensors/room` to `remote/sensors/room` mapping and
+payload. The runner stops the bridge through its own cancellation event and
+requires a clean exit instead of treating process termination as success.
 
 Netz now exceeds the audited rumqtt shared-selection policy surface by adding
 Rendezvous hashing. This provides deterministic topic affinity and the
@@ -209,7 +223,7 @@ optional absolute header timeout prevents incomplete proxy prefaces from
 holding listener workers indefinitely.
 
 The selected Mosquitto-derived process gate enables a five-second CONNECT
-deadline on every one of its finite broker processes, so all 141 raw scenarios
+deadline on every one of its finite broker processes, so all 147 raw scenarios
 also exercise the bounded admission path rather than merely proving the option
 in an isolated unit test.
 Three retained-source scenarios persist and restart the standalone broker after
@@ -1435,7 +1449,7 @@ Listeners can also opt into Mosquitto-compatible
 then Session, Will, takeover and live ACL state consistently use the required
 username as the effective Client ID. Missing usernames receive Not Authorized;
 tests prove two different wire Client IDs with one username resume/take over the
-same durable Session. The 141-scenario Mosquitto-derived wire gate runs the
+same durable Session. The 147-scenario Mosquitto-derived wire gate runs the
 same policy through the standalone broker option, including exact Session
 Present, takeover DISCONNECT and missing-username refusal bytes.
 `zig build interop-mqtt-listener-mount-mosquitto -Doptimize=ReleaseFast`
@@ -1454,7 +1468,7 @@ Standalone TCP, Unix, TLS, WS, and WSS servers also share a long-running
 `serveUntil` worker supervisor with cancellation, connection reuse, error
 observation, and independent accept/connection failure policies.
 
-`zig build interop-mqtt-mosquitto-vectors -Doptimize=ReleaseFast` now runs 141
+`zig build interop-mqtt-mosquitto-vectors -Doptimize=ReleaseFast` now runs 147
 raw MQTT scenarios derived directly from Mosquitto `5cd25465`'s packet
 generators: two PROXY protocol cases consume Mosquitto's v1 TCP4 and v2 IPv4
 prefaces before completing MQTT 5 CONNECT and PING on the same stream; the

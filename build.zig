@@ -338,6 +338,29 @@ pub fn build(b: *std.Build) void {
     );
     mqtt_broker_compare_step.dependOn(&mqtt_broker_compare.step);
 
+    const mqtt_outbound_bridge = b.addExecutable(.{
+        .name = "netz-mqtt-outbound-bridge",
+        .root_module = b.createModule(.{
+            .root_source_file = b.path(
+                "tools/interop/mqtt_outbound_bridge.zig",
+            ),
+            .target = target,
+            .optimize = optimize,
+            .imports = &.{.{ .name = "netz", .module = netz_mod }},
+        }),
+    });
+    const mqtt_outbound_bridge_mosquitto = b.addSystemCommand(&.{
+        "tools/interop/mqtt_outbound_bridge_mosquitto.sh",
+    });
+    mqtt_outbound_bridge_mosquitto.addArtifactArg(mqtt_outbound_bridge);
+    const mqtt_outbound_bridge_mosquitto_step = b.step(
+        "interop-mqtt-outbound-bridge-mosquitto",
+        "Bridge two real Mosquitto brokers through netz",
+    );
+    mqtt_outbound_bridge_mosquitto_step.dependOn(
+        &mqtt_outbound_bridge_mosquitto.step,
+    );
+
     const mqtt_commit_log = b.addSystemCommand(&.{
         "python3",
         "tools/interop/mqtt_commit_log.py",
