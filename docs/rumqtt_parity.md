@@ -1337,6 +1337,13 @@ distinctly, and still report protocol completion through the original
 correlated callback. Absolute awake-clock deadlines are also forwarded through
 the managed `QueuedRun` callback and completion-queue conveniences, so a caller
 can share one budget across multiple stages without renewing a relative timeout.
+Managed `QueuedRun` and `QueuedEventRun` workers additionally expose
+`isFinished`, cancelable `wait`, and relative/absolute bounded waits. Their
+move-stable completion state publishes the exact terminal poll or handler error
+before waking every waiter; waiting never joins or frees the worker, while
+`deinit` remains the single resource-reclamation boundary. This lets supervisors
+compose multiple reconnect loops without hanging on an event queue after one
+side has already failed.
 This covers both rumqttc-style `try_*` and waiting send behavior without
 introducing another network reader.
 

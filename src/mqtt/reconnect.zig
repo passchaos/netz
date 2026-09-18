@@ -283,12 +283,20 @@ pub const RunQueuedOptions = struct {
     serve: QueuedServeOptions,
 };
 
+const QueuedRunState = struct {
+    finished: std.Io.Event = .unset,
+    result: ?anyerror = null,
+};
+
+pub const QueuedRunWaitError = std.Io.Cancelable;
+pub const QueuedRunWaitTimeoutError = std.Io.Event.WaitTimeoutError;
+
 pub const QueuedRun = struct {
     io: std.Io,
     shutdown: *std.Io.Event,
     queue: *CommandQueue,
     worker: std.Thread,
-    result: *?anyerror,
+    state: *QueuedRunState,
 
     pub fn publish(
         self: *QueuedRun,
@@ -921,15 +929,76 @@ pub const QueuedRun = struct {
         self.shutdown.set(self.io);
     }
 
+    /// Return whether the managed reconnect worker has exited. A true result
+    /// acquire-synchronizes with its final error write, so `wait` and the
+    /// bounded wait variants may safely return that result afterward.
+    pub fn isFinished(self: *const QueuedRun) bool {
+        return self.state.finished.isSet();
+    }
+
+    /// Wait until the managed reconnect worker exits, without joining it or
+    /// releasing any resources. A null result is a clean shutdown; a non-null
+    /// result is the terminal poll or event-handler error. The QueuedRun must
+    /// remain alive until every concurrent waiter has returned.
+    pub fn wait(self: *QueuedRun) QueuedRunWaitError!?anyerror {
+        try self.state.finished.wait(self.io);
+        return self.state.result;
+    }
+
+    /// Wait for worker termination under one relative awake-clock budget.
+    /// Timeout does not stop or join the worker and a later wait may resume.
+    pub fn waitTimeout(
+        self: *QueuedRun,
+        timeout: std.Io.Duration,
+    ) QueuedRunWaitTimeoutError!?anyerror {
+        if (timeout.nanoseconds <= 0) return error.Timeout;
+        return self.waitWithDeadline(.fromNow(self.io, .{
+            .raw = timeout,
+            .clock = .awake,
+        }));
+    }
+
+    /// Wait for worker termination without renewing an existing absolute
+    /// awake-clock deadline. An expired or incompatible deadline is rejected
+    /// before observing or changing worker state.
+    pub fn waitWithDeadline(
+        self: *QueuedRun,
+        deadline: std.Io.Clock.Timestamp,
+    ) QueuedRunWaitTimeoutError!?anyerror {
+        if (deadline.clock != .awake or
+            deadline.durationFromNow(self.io).raw.nanoseconds <= 0)
+        {
+            return error.Timeout;
+        }
+        while (!self.isFinished()) {
+            self.state.finished.waitTimeout(
+                self.io,
+                .{ .deadline = deadline },
+            ) catch |err| switch (err) {
+                // std.Io.Event permits spurious timeout wakeups. Recheck the
+                // absolute budget so one cannot shorten the caller's wait.
+                error.Timeout => {
+                    if (self.isFinished()) break;
+                    if (deadline.durationFromNow(self.io).raw.nanoseconds <= 0) {
+                        return error.Timeout;
+                    }
+                    continue;
+                },
+                error.Canceled => return error.Canceled,
+            };
+        }
+        return self.state.result;
+    }
+
     /// Join the managed worker and release its command-channel resources. The
     /// reconnect Client and shutdown Event must still be alive at this point.
     /// Deinitialization requests shutdown, so joining an idle worker is safe.
     pub fn deinit(self: *QueuedRun) ?anyerror {
         self.stop();
         self.worker.join();
-        const result = self.result.*;
+        const result = self.state.result;
         const allocator = self.queue.allocator;
-        allocator.destroy(self.result);
+        allocator.destroy(self.state);
         self.queue.deinit();
         allocator.destroy(self.queue);
         self.* = undefined;
@@ -981,6 +1050,28 @@ pub const QueuedEventRun = struct {
     pub fn stop(self: *QueuedEventRun) void {
         self.commands.stop();
         self.events.close();
+    }
+
+    pub fn isFinished(self: *const QueuedEventRun) bool {
+        return self.commands.isFinished();
+    }
+
+    pub fn wait(self: *QueuedEventRun) QueuedRunWaitError!?anyerror {
+        return self.commands.wait();
+    }
+
+    pub fn waitTimeout(
+        self: *QueuedEventRun,
+        timeout: std.Io.Duration,
+    ) QueuedRunWaitTimeoutError!?anyerror {
+        return self.commands.waitTimeout(timeout);
+    }
+
+    pub fn waitWithDeadline(
+        self: *QueuedEventRun,
+        deadline: std.Io.Clock.Timestamp,
+    ) QueuedRunWaitTimeoutError!?anyerror {
+        return self.commands.waitWithDeadline(deadline);
     }
 
     pub fn deinit(self: *QueuedEventRun) ?anyerror {
@@ -2127,9 +2218,9 @@ pub const Client = struct {
         ) anyerror!void,
         options: RunQueuedOptions,
     ) (std.mem.Allocator.Error || std.Thread.SpawnError)!QueuedRun {
-        const result = try self.allocator.create(?anyerror);
-        errdefer self.allocator.destroy(result);
-        result.* = null;
+        const state = try self.allocator.create(QueuedRunState);
+        errdefer self.allocator.destroy(state);
+        state.* = .{};
         const queue = try self.allocator.create(CommandQueue);
         errdefer self.allocator.destroy(queue);
         queue.* = try CommandQueue.init(
@@ -2143,9 +2234,10 @@ pub const Client = struct {
                 client: *Client,
                 command_channel: *CommandQueue,
                 handler_context: *Context,
-                result_ptr: *?anyerror,
+                run_state: *QueuedRunState,
                 serve_options: QueuedServeOptions,
             ) void {
+                defer run_state.finished.set(client.io);
                 client.serveQueuedUntil(
                     command_channel,
                     Context,
@@ -2153,16 +2245,16 @@ pub const Client = struct {
                     handler,
                     serve_options,
                 ) catch |err| {
-                    result_ptr.* = err;
+                    run_state.result = err;
                 };
             }
-        }.run, .{ self, queue, context, result, options.serve });
+        }.run, .{ self, queue, context, state, options.serve });
         return .{
             .io = self.io,
             .shutdown = self.shutdown,
             .queue = queue,
             .worker = worker,
-            .result = result,
+            .state = state,
         };
     }
 

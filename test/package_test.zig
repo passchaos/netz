@@ -3945,6 +3945,30 @@ test "public modules are reachable" {
     try std.testing.expect(@hasDecl(netz.mqtt.reconnect, "PollOptions"));
     try std.testing.expect(@hasDecl(netz.mqtt.reconnect, "CommandQueue"));
     try std.testing.expect(@hasDecl(netz.mqtt.reconnect, "QueuedRun"));
+    try std.testing.expect(@hasDecl(
+        netz.mqtt.reconnect,
+        "QueuedRunWaitError",
+    ));
+    try std.testing.expect(@hasDecl(
+        netz.mqtt.reconnect,
+        "QueuedRunWaitTimeoutError",
+    ));
+    try std.testing.expect(@hasDecl(
+        netz.mqtt.reconnect.QueuedRun,
+        "isFinished",
+    ));
+    try std.testing.expect(@hasDecl(
+        netz.mqtt.reconnect.QueuedRun,
+        "wait",
+    ));
+    try std.testing.expect(@hasDecl(
+        netz.mqtt.reconnect.QueuedRun,
+        "waitTimeout",
+    ));
+    try std.testing.expect(@hasDecl(
+        netz.mqtt.reconnect.QueuedRun,
+        "waitWithDeadline",
+    ));
     try std.testing.expect(@hasDecl(netz.mqtt.reconnect, "ClientOptions"));
     try std.testing.expect(@hasDecl(
         netz.mqtt.reconnect,
@@ -4061,6 +4085,22 @@ test "public modules are reachable" {
     try std.testing.expect(@hasDecl(
         netz.mqtt.reconnect,
         "QueuedEventRun",
+    ));
+    try std.testing.expect(@hasDecl(
+        netz.mqtt.reconnect.QueuedEventRun,
+        "isFinished",
+    ));
+    try std.testing.expect(@hasDecl(
+        netz.mqtt.reconnect.QueuedEventRun,
+        "wait",
+    ));
+    try std.testing.expect(@hasDecl(
+        netz.mqtt.reconnect.QueuedEventRun,
+        "waitTimeout",
+    ));
+    try std.testing.expect(@hasDecl(
+        netz.mqtt.reconnect.QueuedEventRun,
+        "waitWithDeadline",
     ));
     try std.testing.expect(@hasDecl(
         netz.mqtt.reconnect.Client,
