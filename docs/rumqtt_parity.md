@@ -1723,8 +1723,13 @@ an expiring delivery unacknowledged at Receive Maximum 1, then proves its
 expiry releases credit for the next queued delivery without a stale PUBACK.
 The QoS 2 inflight-byte case additionally proves that PUBREC alone does not
 release payload-byte credit: the queued PUBLISH appears only after PUBCOMP,
-and four cycles verify that the byte accounting is reusable. All 146 scenarios
-pass. This is deliberately described as a selected
+and four cycles verify that the byte accounting is reusable. The inbound QoS 2
+overflow case now covers both protocol versions and the exact advertised
+Receive Maximum: MQTT 5 receives DISCONNECT 0x93, while MQTT 3.1.1 closes
+without an unrepresentable reason packet. Server-side admission enforces the
+configured inbound limit in MQTT 3.1.1 even though only MQTT 5 can advertise it
+as a CONNACK property. All 147 scenarios pass. This is
+deliberately described as a selected
 wire-vector subset: Mosquitto's Python harness hardcodes its own `-v -c/-p`
 broker CLI and many tests depend on Mosquitto config, logs, reload, persistence
 or plugins, so passing these vectors is not proxy evidence for the entire suite.
@@ -1776,5 +1781,5 @@ or plugins, so passing these vectors is not proxy evidence for the entire suite.
    the independent-peer memory gap.
 3. Expand the selected Mosquitto-derived raw wire gate above, or add a broker
    process adapter capable of preserving the upstream harness's config/reload/
-   persistence semantics. The 146 passing packet-vector scenarios do not cover
+   persistence semantics. The 147 passing packet-vector scenarios do not cover
    the full protocol/conformance suite.

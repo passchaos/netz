@@ -927,6 +927,9 @@ pub const AcceptOptions = struct {
     /// for Response Information in CONNECT. The string is borrowed through
     /// synchronous CONNACK encoding and must be valid MQTT UTF-8.
     response_information: ?[]const u8 = null,
+    /// Server-side outbound PUBLISH limit before CONNECT negotiation and the
+    /// Receive Maximum advertised to clients. MQTT 3.1.1 cannot advertise the
+    /// latter, but the same local inbound safety limit is still enforced.
     max_outgoing_inflight: u16 = 16,
     topic_alias_maximum: u16 = 16,
     server_keep_alive_seconds: ?u16 = null,
@@ -1109,7 +1112,9 @@ pub const PendingAcceptedClient = struct {
         options: AcceptOptions,
     ) Error!AcceptOptions {
         var resolved = options;
-        if (resolved.maximum_keep_alive_seconds == 0) {
+        if (resolved.max_outgoing_inflight == 0 or
+            resolved.maximum_keep_alive_seconds == 0)
+        {
             return error.InvalidProperty;
         }
         if (resolved.reason_code != 0) {
@@ -2993,6 +2998,15 @@ pub const Connection = struct {
             break :blk self.write_scratch.items;
         };
         try self.writePacket(bytes);
+        if (accepted) {
+            // This is the Server's own inbound QoS 1/2 limit. MQTT 5 also
+            // advertises it as Receive Maximum; MQTT 3.1.1 has no property,
+            // but the configured resource bound must still be enforced.
+            self.max_incoming_inflight = if (self.protocol == .v5)
+                mqtt.receiveMaximum(self.write_property_scratch.items).?
+            else
+                options.max_outgoing_inflight;
+        }
         self.local_maximum_qos = options.maximum_qos orelse .exactly_once;
         self.local_retain_available = options.retain_available;
         if (self.protocol == .v5) {
@@ -3003,7 +3017,6 @@ pub const Connection = struct {
             self.keep_alive_seconds = mqtt.serverKeepAlive(
                 self.write_property_scratch.items,
             ) orelse self.keep_alive_seconds;
-            self.max_incoming_inflight = mqtt.receiveMaximum(self.write_property_scratch.items) orelse self.max_incoming_inflight;
             self.incoming_topic_alias_maximum = mqtt.topicAliasMaximum(self.write_property_scratch.items) orelse self.incoming_topic_alias_maximum;
             self.local_maximum_qos = mqtt.maximumQoS(self.write_property_scratch.items) orelse self.local_maximum_qos;
             self.local_retain_available = mqtt.retainAvailable(self.write_property_scratch.items) orelse self.local_retain_available;
@@ -6718,6 +6731,46 @@ test "MQTT runtime bare CONNACK uses fixed caller storage" {
         offset += n;
     }
     try std.testing.expectEqualSlices(u8, &expected, &received);
+}
+
+test "MQTT server applies the effective inbound QoS limit" {
+    const allocator = std.testing.allocator;
+    var threaded = std.Io.Threaded.init(allocator, .{});
+    defer threaded.deinit();
+    const io = threaded.io();
+    var listener = try (net.IpAddress{ .ip4 = .loopback(0) }).listen(
+        io,
+        .{ .reuse_address = true },
+    );
+    defer listener.deinit(io);
+    const peer = try listener.socket.address.connect(io, .{ .mode = .stream });
+    defer peer.close(io);
+    const server_stream = try listener.accept(io);
+
+    var connection = Connection{
+        .allocator = allocator,
+        .transport = .initTcp(io, server_stream),
+        .protocol = .v3_1_1,
+    };
+    defer connection.close();
+    try connection.writeConnAck(.{ .max_outgoing_inflight = 1 });
+    try std.testing.expectEqual(
+        @as(u16, 1),
+        connection.max_incoming_inflight,
+    );
+
+    connection.protocol = .v5;
+    try connection.writeConnAck(.{
+        .properties = &.{.{ .two_byte = .{
+            .id = .receive_maximum,
+            .value = 2,
+        } }},
+        .max_outgoing_inflight = 3,
+    });
+    try std.testing.expectEqual(
+        @as(u16, 2),
+        connection.max_incoming_inflight,
+    );
 }
 
 test "MQTT connection enforces incoming receive maximum" {

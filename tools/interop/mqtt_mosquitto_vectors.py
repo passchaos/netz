@@ -90,6 +90,7 @@ def expected_connack(
     mqtt5_props,
     *,
     session_present: bool = False,
+    receive_maximum: int = 64,
     maximum_packet_size: int = 16 * 1024 * 1024,
     topic_alias_maximum: int = 16,
     leading_properties: bytes = b"",
@@ -100,7 +101,9 @@ def expected_connack(
     # changes while retaining a byte-for-byte CONNACK assertion.
     properties = (
         leading_properties
-        + mqtt5_props.gen_uint16_prop(mqtt5_props.RECEIVE_MAXIMUM, 64)
+        + mqtt5_props.gen_uint16_prop(
+            mqtt5_props.RECEIVE_MAXIMUM, receive_maximum
+        )
         + mqtt5_props.gen_uint32_prop(
             mqtt5_props.MAXIMUM_PACKET_SIZE, maximum_packet_size
         )
@@ -2175,32 +2178,61 @@ def topic_alias_disconnect(
 
 
 def receive_maximum_disconnect(
-    executable: Path, mqtt_packets, mqtt5_rc
+    executable: Path, mqtt_packets, mqtt5_props, mqtt5_rc
 ) -> None:
-    # Bounded port of Mosquitto 03-publish-qos2-max-inflight-exceeded.py.
-    with NetzBroker(
-        executable, extra_args=("--max-outgoing-inflight=1",)
-    ) as broker:
-        with broker.connect() as sock:
-            connect_v5(sock, mqtt_packets, "receive-maximum-exceeded")
-            sock.sendall(mqtt_packets.gen_publish(
-                "receive/maximum/one", qos=2, mid=1, proto_ver=5
-            ))
-            sock.sendall(mqtt_packets.gen_publish(
-                "receive/maximum/two", qos=2, mid=2, proto_ver=5
-            ))
-            expect_packet(
-                sock, mqtt_packets.gen_pubrec(1, proto_ver=5),
-                "receive maximum first PUBREC",
-            )
-            expect_packet(
-                sock,
-                mqtt_packets.gen_disconnect(
-                    reason_code=mqtt5_rc.RECEIVE_MAXIMUM_EXCEEDED,
-                    proto_ver=5,
-                ),
-                "receive maximum DISCONNECT",
-            )
+    # Direct bounded ports of Mosquitto
+    # 03-publish-qos2-max-inflight-exceeded.py. The broker advertises one
+    # inbound slot, accepts the first QoS 2 transaction, then closes MQTT
+    # 3.1.1 without a packet or sends MQTT 5 DISCONNECT 0x93 for the second.
+    for proto_ver in (4, 5):
+        with NetzBroker(
+            executable, extra_args=("--max-outgoing-inflight=1",)
+        ) as broker:
+            with broker.connect() as sock:
+                sock.sendall(mqtt_packets.gen_connect(
+                    f"receive-maximum-exceeded-{proto_ver}",
+                    proto_ver=proto_ver,
+                ))
+                expect_packet(
+                    sock,
+                    expected_connack(
+                        mqtt_packets, mqtt5_props, receive_maximum=1
+                    ) if proto_ver == 5 else mqtt_packets.gen_connack(
+                        rc=0, proto_ver=4
+                    ),
+                    f"receive maximum CONNACK v{proto_ver}",
+                )
+                sock.sendall(mqtt_packets.gen_publish(
+                    "receive/maximum/one", qos=2, mid=1,
+                    proto_ver=proto_ver,
+                ))
+                sock.sendall(mqtt_packets.gen_publish(
+                    "receive/maximum/two", qos=2, mid=2,
+                    proto_ver=proto_ver,
+                ))
+                expect_packet(
+                    sock, mqtt_packets.gen_pubrec(1, proto_ver=proto_ver),
+                    f"receive maximum first PUBREC v{proto_ver}",
+                )
+                if proto_ver == 5:
+                    expect_packet(
+                        sock,
+                        mqtt_packets.gen_disconnect(
+                            reason_code=mqtt5_rc.RECEIVE_MAXIMUM_EXCEEDED,
+                            proto_ver=5,
+                        ),
+                        "receive maximum DISCONNECT v5",
+                    )
+                else:
+                    try:
+                        unexpected = sock.recv(1)
+                    except (ConnectionResetError, BrokenPipeError):
+                        unexpected = b""
+                    if unexpected:
+                        raise AssertionError(
+                            "receive maximum violation returned MQTT 3.1.1 "
+                            "packet bytes: " + unexpected.hex()
+                        )
 
 
 def subscription_capability_disconnects(
@@ -6118,7 +6150,9 @@ def main() -> None:
     topic_alias_disconnect(
         args.broker, mqtt_packets, mqtt5_props, mqtt5_rc
     )
-    receive_maximum_disconnect(args.broker, mqtt_packets, mqtt5_rc)
+    receive_maximum_disconnect(
+        args.broker, mqtt_packets, mqtt5_props, mqtt5_rc
+    )
     subscription_capability_disconnects(
         args.broker, mqtt_packets, mqtt5_props, mqtt5_rc
     )
@@ -6219,7 +6253,7 @@ def main() -> None:
         args.broker, mqtt_packets, mqtt5_props
     )
     print(
-        "Mosquitto-derived MQTT wire vectors passed: 146 scenarios "
+        "Mosquitto-derived MQTT wire vectors passed: 147 scenarios "
         "with 5000 ms CONNECT deadlines"
     )
 
