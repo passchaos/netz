@@ -4945,23 +4945,24 @@ def outgoing_qos_upgrade(executable: Path, mqtt_packets) -> None:
                 )
 
 
-def qos2_receive_maximum_one(
-    executable: Path, mqtt_packets, mqtt5_props
+def qos2_receive_maximum(
+    executable: Path, mqtt_packets, mqtt5_props, receive_maximum: int
 ) -> None:
-    # Bounded wire port of Mosquitto 02-subpub-qos2-receive-maximum-1.py. Two
-    # QoS 2 messages are released to the broker, but the subscriber must not
-    # receive the second PUBLISH until the first transaction returns credit.
-    topic = "subpub/qos2/receive/maximum1"
-    receive_one = mqtt5_props.gen_uint16_prop(
-        mqtt5_props.RECEIVE_MAXIMUM, 1
+    # Direct wire ports of Mosquitto's receive-maximum-1/2 cases. Publish one
+    # message beyond the advertised limit, prove that it remains withheld,
+    # then return credit one transaction at a time and require ordered release.
+    topic = f"subpub/qos2/receive/maximum{receive_maximum}"
+    receive_maximum_property = mqtt5_props.gen_uint16_prop(
+        mqtt5_props.RECEIVE_MAXIMUM, receive_maximum
     )
+    message_count = receive_maximum + 1
     with NetzBroker(executable, connections=2) as broker:
         with broker.connect() as subscriber, broker.connect() as publisher:
             subscriber.sendall(
                 mqtt_packets.gen_connect(
-                    "subpub-qos2-receive-max1",
+                    f"subpub-qos2-receive-max{receive_maximum}",
                     proto_ver=5,
-                    properties=receive_one,
+                    properties=receive_maximum_property,
                 )
             )
             connack = read_packet(subscriber)
@@ -4978,9 +4979,10 @@ def qos2_receive_maximum_one(
                 "Receive Maximum SUBACK",
             )
             connect_v5(
-                publisher, mqtt_packets, "subpub-qos2-recv-max1-helper"
+                publisher, mqtt_packets,
+                f"subpub-qos2-recv-max{receive_maximum}-helper",
             )
-            for mid in (1, 2):
+            for mid in range(1, message_count + 1):
                 publisher.sendall(
                     mqtt_packets.gen_publish(
                         topic,
@@ -5004,7 +5006,7 @@ def qos2_receive_maximum_one(
                     f"Receive Maximum publisher PUBCOMP {mid}",
                 )
 
-            for mid in (1, 2):
+            for mid in range(1, receive_maximum + 1):
                 expect_packet(
                     subscriber,
                     mqtt_packets.gen_publish(
@@ -5016,19 +5018,20 @@ def qos2_receive_maximum_one(
                     ),
                     f"Receive Maximum downstream PUBLISH {mid}",
                 )
-                if mid == 1:
-                    subscriber.settimeout(0.05)
-                    try:
-                        early = subscriber.recv(1)
-                        if early:
-                            raise AssertionError(
-                                "Receive Maximum leaked second PUBLISH: "
-                                + early.hex()
-                            )
-                    except socket.timeout:
-                        pass
-                    finally:
-                        subscriber.settimeout(5)
+            subscriber.settimeout(0.05)
+            try:
+                early = subscriber.recv(1)
+                if early:
+                    raise AssertionError(
+                        "Receive Maximum leaked queued PUBLISH: "
+                        + early.hex()
+                    )
+            except socket.timeout:
+                pass
+            finally:
+                subscriber.settimeout(5)
+
+            for mid in range(1, message_count + 1):
                 subscriber.sendall(
                     mqtt_packets.gen_pubrec(mid, proto_ver=5)
                 )
@@ -5040,6 +5043,19 @@ def qos2_receive_maximum_one(
                 subscriber.sendall(
                     mqtt_packets.gen_pubcomp(mid, proto_ver=5)
                 )
+                next_mid = mid + receive_maximum
+                if next_mid <= message_count:
+                    expect_packet(
+                        subscriber,
+                        mqtt_packets.gen_publish(
+                            topic,
+                            qos=2,
+                            mid=next_mid,
+                            payload=f"message{next_mid}",
+                            proto_ver=5,
+                        ),
+                        f"Receive Maximum downstream PUBLISH {next_mid}",
+                    )
             publisher.sendall(mqtt_packets.gen_disconnect(proto_ver=5))
             subscriber.sendall(mqtt_packets.gen_disconnect(proto_ver=5))
 
@@ -5949,7 +5965,8 @@ def main() -> None:
     retained_message_expiry(
         args.broker, mqtt_packets, mqtt5_props, mqtt5_rc
     )
-    qos2_receive_maximum_one(args.broker, mqtt_packets, mqtt5_props)
+    qos2_receive_maximum(args.broker, mqtt_packets, mqtt5_props, 1)
+    qos2_receive_maximum(args.broker, mqtt_packets, mqtt5_props, 2)
     maximum_packet_size_qos1(args.broker, mqtt_packets, mqtt5_props)
     maximum_packet_size_qos2(args.broker, mqtt_packets, mqtt5_props)
     retained_repeated_lifecycle(args.broker, mqtt_packets)
@@ -6000,7 +6017,7 @@ def main() -> None:
         args.broker, mqtt_packets, mqtt5_props
     )
     print(
-        "Mosquitto-derived MQTT wire vectors passed: 143 scenarios "
+        "Mosquitto-derived MQTT wire vectors passed: 144 scenarios "
         "with 5000 ms CONNECT deadlines"
     )
 
