@@ -543,6 +543,9 @@ test "HTTP/2 client pool waits for a released connection" {
     var response = try first.connection().request(.{ .path = "/wait" });
     response.deinit(allocator);
     first.release();
+    first.release();
+    first.discard();
+    try std.testing.expect(!first.active);
     waiter_thread.join();
     if (waiter.err) |err| return err;
     try std.testing.expect(waiter.reused);

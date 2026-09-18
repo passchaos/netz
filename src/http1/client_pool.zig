@@ -688,21 +688,26 @@ pub const Lease = struct {
     active: bool = true,
 
     pub fn client(self: *Lease) *runtime.Client {
+        std.debug.assert(self.active);
         return &self.slot.client;
     }
 
     pub fn release(self: *Lease) void {
+        if (!self.active) return;
+        self.active = false;
         self.pool.release(
             self.slot,
             self.slot.client.isReusableForPool(),
         );
-        self.active = false;
+        self.slot = undefined;
     }
 
     pub fn discard(self: *Lease) void {
+        if (!self.active) return;
+        self.active = false;
         self.slot.deinit(self.pool.allocator);
         self.pool.releaseConnectionSlot();
-        self.active = false;
+        self.slot = undefined;
     }
 };
 

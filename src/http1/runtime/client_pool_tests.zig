@@ -1341,11 +1341,19 @@ test "HTTP/1 client pool caps checked-out connections" {
     );
 
     first.release();
+    first.release();
+    first.discard();
+    try std.testing.expect(!first.active);
     try std.testing.expectEqual(@as(usize, 1), pool.connectionCount());
+    try std.testing.expectEqual(@as(usize, 1), pool.idleCount());
     var reused = try pool.acquireUri(uri);
     try std.testing.expect(reused.was_reused);
     reused.discard();
+    reused.discard();
+    reused.release();
+    try std.testing.expect(!reused.active);
     try std.testing.expectEqual(@as(usize, 0), pool.connectionCount());
+    try std.testing.expectEqual(@as(usize, 0), pool.idleCount());
 
     shared.release.set(io);
     thread.join();

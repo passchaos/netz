@@ -938,6 +938,14 @@ rather than generation broadcasts. New acquisitions cannot barge ahead of
 blocked callers; timeout/cancellation unlinks a stack-owned ticket and wakes its
 successor. Real TCP tests hold the sole slot, enqueue two waiters in a known
 order, and prove that they acquire in that order.
+HTTP/1, HTTP/2, ordinary HTTP/3 and dispatcher-shared HTTP/3 leases also make
+`release` and `discard` idempotent on the same handle. Ownership is marked
+inactive before returning or destroying the connection, so repeated cleanup
+cannot duplicate an idle entry, close an already transferred socket, decrement
+capacity twice, or remove a reused dispatcher route. Real pool tests cover both
+release-then-discard and discard-then-release while checking idle, leased,
+connection and route counts. As with other Zig resource handles, callers must
+not explicitly copy an active lease.
 HTTP/1 pooled one-shot requests also expose an end-to-end absolute deadline: a
 single timestamp spans FIFO capacity waiting, a new DNS/TCP/TLS connection when
 needed, stale-idempotent retry, and the complete response. HTTP/2 pooled

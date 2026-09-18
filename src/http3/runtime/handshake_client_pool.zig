@@ -104,6 +104,7 @@ pub fn Pool(comptime Runtime: type) type {
             active: bool = true,
 
             pub fn client(self: *Lease) *Client {
+                std.debug.assert(self.active);
                 return &self.client_value;
             }
 
@@ -112,22 +113,22 @@ pub fn Pool(comptime Runtime: type) type {
             /// turning an already completed HTTP request into an application
             /// error, matching the HTTP/1 and HTTP/2 pool contract.
             pub fn release(self: *Lease) void {
-                std.debug.assert(self.active);
+                if (!self.active) return;
+                self.active = false;
                 self.pool.release(
                     self.client_value,
                     self.origin_key,
                 );
                 self.client_value = undefined;
                 self.origin_key = undefined;
-                self.active = false;
             }
 
             pub fn discard(self: *Lease) void {
-                std.debug.assert(self.active);
+                if (!self.active) return;
+                self.active = false;
                 self.pool.discard(self.client_value, self.origin_key);
                 self.client_value = undefined;
                 self.origin_key = undefined;
-                self.active = false;
             }
         };
 
@@ -1280,6 +1281,9 @@ test "HTTP/3 handshake client pool discards GOAWAY leases" {
     defer response.deinit(allocator);
     lease.client().control.peer_goaway_id = lease.client().next_stream_id;
     lease.release();
+    lease.release();
+    lease.discard();
+    try std.testing.expect(!lease.active);
     try std.testing.expectEqual(@as(usize, 0), pool.idleCount());
     try std.testing.expectEqual(@as(usize, 0), pool.leasedCount());
     try std.testing.expectEqual(@as(usize, 0), pool.connectionCount());

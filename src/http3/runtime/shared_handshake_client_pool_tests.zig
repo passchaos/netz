@@ -1323,7 +1323,10 @@ test "HTTP/3 shared pool enforces leased capacity" {
         "https://127.0.0.1:443/other",
     ));
     lease.discard();
+    lease.discard();
+    lease.release();
     lease_active = false;
+    try std.testing.expect(!lease.active);
     try std.testing.expectEqual(@as(usize, 0), pool.connectionCount());
     try std.testing.expectEqual(@as(usize, 0), pool.routeCount());
 

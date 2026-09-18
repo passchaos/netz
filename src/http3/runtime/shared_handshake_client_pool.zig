@@ -280,15 +280,15 @@ pub fn Pool(comptime Runtime: type) type {
             }
 
             pub fn release(self: *Lease) void {
-                std.debug.assert(self.active);
-                self.pool.release(self.handle);
+                if (!self.active) return;
                 self.active = false;
+                self.pool.release(self.handle);
             }
 
             pub fn discard(self: *Lease) void {
-                std.debug.assert(self.active);
-                self.pool.dropEntry(self.handle);
+                if (!self.active) return;
                 self.active = false;
+                self.pool.dropEntry(self.handle);
             }
         };
 
