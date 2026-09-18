@@ -1191,6 +1191,11 @@ Inbound HPACK decoding now enforces `Limits.max_header_list_size` while walking
 the compressed block rather than after materializing every header. Static,
 dynamic and Huffman-backed fields are charged using RFC 9113's uncompressed
 `name + value + 32` accounting before allocating application-visible output.
+The two `usize` limits emitted as `SETTINGS_HEADER_TABLE_SIZE` and
+`SETTINGS_MAX_HEADER_LIST_SIZE` must fit the protocol's 32-bit setting value;
+connection and listener construction now rejects larger values instead of
+silently advertising `2^32-1` while enforcing a different local policy. The
+maximum representable value is preserved exactly in the encoded SETTINGS.
 After the limit is crossed, the decoder still consumes and validates the rest
 of the block and applies incremental-indexing updates, keeping the connection's
 compression context synchronized for later streams without retaining oversized

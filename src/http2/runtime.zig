@@ -421,6 +421,8 @@ pub const Limits = struct {
     /// receive frame size to prevent peers from sending endless empty
     /// CONTINUATION frames that never grow the header block.
     max_continuation_frames: ?usize = null,
+    /// Local HPACK decoder capacity advertised as SETTINGS_HEADER_TABLE_SIZE.
+    /// Values above u32 are rejected because the wire setting is 32-bit.
     header_table_size: usize = http2.Hpack.default_dynamic_table_size,
     initial_window_size: u32 = @intCast(default_flow_window),
     /// Desired receive-side connection window. HTTP/2 starts every connection
@@ -436,6 +438,9 @@ pub const Limits = struct {
     adaptive_window_max: u32 = bdp.default_max_window,
     max_concurrent_streams: ?u32 = null,
     max_frame_size: usize = default_max_frame_size,
+    /// Local decoded header-list limit advertised as
+    /// SETTINGS_MAX_HEADER_LIST_SIZE. Values above u32 are rejected because
+    /// they cannot be represented without changing the advertised policy.
     max_header_list_size: usize = default_max_header_list_size,
     /// Local cap for PRIORITY_UPDATE records that target request streams not
     /// opened yet. This remains effective even when MAX_CONCURRENT_STREAMS is
@@ -18512,6 +18517,14 @@ fn writeFrame(
 }
 
 fn validateLocalLimits(limits: Limits) Error!void {
+    // Both values are emitted verbatim in SETTINGS and therefore must fit the
+    // protocol's 32-bit setting value. Silently saturating them would make
+    // the local decoder policy disagree with the limit advertised on wire.
+    if (limits.header_table_size > std.math.maxInt(u32) or
+        limits.max_header_list_size > std.math.maxInt(u32))
+    {
+        return error.InvalidSetting;
+    }
     if (limits.initial_window_size > std.math.maxInt(i31)) return error.InvalidSetting;
     if (limits.initial_connection_window_size < default_flow_window or
         limits.initial_connection_window_size > std.math.maxInt(i31))
@@ -18940,7 +18953,7 @@ fn settingsForLimits(limits: Limits, role: Role) Error!SettingsForLimits {
     try validateLocalLimits(limits);
     var settings_buf: [8]http2.Setting = undefined;
     var count: usize = 0;
-    settings_buf[count] = .{ .id = .header_table_size, .value = @intCast(@min(limits.header_table_size, std.math.maxInt(u32))) };
+    settings_buf[count] = .{ .id = .header_table_size, .value = @intCast(limits.header_table_size) };
     count += 1;
     settings_buf[count] = .{ .id = .initial_window_size, .value = limits.initial_window_size };
     count += 1;
@@ -18952,7 +18965,7 @@ fn settingsForLimits(limits: Limits, role: Role) Error!SettingsForLimits {
         settings_buf[count] = .{ .id = .max_frame_size, .value = @intCast(limits.max_frame_size) };
         count += 1;
     }
-    settings_buf[count] = .{ .id = .max_header_list_size, .value = @intCast(@min(limits.max_header_list_size, std.math.maxInt(u32))) };
+    settings_buf[count] = .{ .id = .max_header_list_size, .value = @intCast(limits.max_header_list_size) };
     count += 1;
     if (limits.enable_connect_protocol) {
         settings_buf[count] = .{ .id = .enable_connect_protocol, .value = 1 };
@@ -34286,6 +34299,15 @@ test "HTTP/2 readFrame enforces inbound SETTINGS_MAX_FRAME_SIZE before payload r
 }
 
 test "HTTP/2 runtime rejects invalid local SETTINGS limits" {
+    if (@sizeOf(usize) > @sizeOf(u32)) {
+        const beyond_settings_value = @as(usize, std.math.maxInt(u32)) + 1;
+        try std.testing.expectError(error.InvalidSetting, validateLocalLimits(.{
+            .header_table_size = beyond_settings_value,
+        }));
+        try std.testing.expectError(error.InvalidSetting, validateLocalLimits(.{
+            .max_header_list_size = beyond_settings_value,
+        }));
+    }
     try std.testing.expectError(error.InvalidSetting, validateLocalLimits(.{
         .initial_window_size = @as(u32, std.math.maxInt(i31)) + 1,
     }));
@@ -34319,10 +34341,58 @@ test "HTTP/2 runtime rejects invalid local SETTINGS limits" {
         .adaptive_window_max = @as(u32, std.math.maxInt(i31)) + 1,
     }));
     try validateLocalLimits(.{
+        .header_table_size = std.math.maxInt(u32),
         .initial_window_size = std.math.maxInt(i31),
         .initial_connection_window_size = std.math.maxInt(i31),
         .max_frame_size = max_max_frame_size,
+        .max_header_list_size = std.math.maxInt(u32),
     });
+}
+
+test "HTTP/2 local SETTINGS preserve maximum 32-bit header limits" {
+    const settings = try settingsForLimits(.{
+        .header_table_size = std.math.maxInt(u32),
+        .max_header_list_size = std.math.maxInt(u32),
+    }, .server);
+    var header_table_size: ?u32 = null;
+    var header_list_size: ?u32 = null;
+    for (settings.buf[0..settings.count]) |setting| switch (setting.id) {
+        .header_table_size => header_table_size = setting.value,
+        .max_header_list_size => header_list_size = setting.value,
+        else => {},
+    };
+    try std.testing.expectEqual(
+        @as(?u32, std.math.maxInt(u32)),
+        header_table_size,
+    );
+    try std.testing.expectEqual(
+        @as(?u32, std.math.maxInt(u32)),
+        header_list_size,
+    );
+}
+
+test "HTTP/2 constructors reject unrepresentable SETTINGS before I/O" {
+    if (@sizeOf(usize) <= @sizeOf(u32)) return;
+
+    const allocator = std.testing.allocator;
+    var threaded = std.Io.Threaded.init(allocator, .{});
+    defer threaded.deinit();
+    const io = threaded.io();
+    const unreachable_address = net.IpAddress{ .ip4 = .loopback(1) };
+    const beyond_settings_value = @as(usize, std.math.maxInt(u32)) + 1;
+
+    try std.testing.expectError(
+        error.InvalidSetting,
+        Server.listen(allocator, io, unreachable_address, .{
+            .header_table_size = beyond_settings_value,
+        }),
+    );
+    try std.testing.expectError(
+        error.InvalidSetting,
+        Client.connect(allocator, io, unreachable_address, .{
+            .max_header_list_size = beyond_settings_value,
+        }),
+    );
 }
 
 test "HTTP/2 runtime validates SETTINGS frame-size and window bounds" {
