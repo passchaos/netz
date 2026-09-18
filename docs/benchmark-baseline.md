@@ -5047,6 +5047,15 @@ independently calculated checksum, and `client_io=zio-std-io` paired with
 migration gate completed 2,000 publishes and 4,000 deliveries against each
 server with checksum 1,029,000. It was one unpinned sequential run, so it is
 correctness evidence rather than a new performance comparison.
+The maintained runner now derives one shared per-client queue capacity: at
+least the historical 1,024-message bound and large enough for the longer of the
+warmup and measured publish counts. This matches the driver's exact-delivery
+contract: a smaller configured bound may legitimately drop QoS fanout after
+acknowledging the publisher, leaving subscribers waiting until Keep Alive
+expiry. `MQTT_MAX_QUEUED_MESSAGES` can increase, but cannot lower, the derived
+capacity.
+Timing, memory, and verification records expose the value as
+`server_queue_capacity`.
 
 The comparison below predates the migration and remains historical
 `std.Io.Threaded` evidence.

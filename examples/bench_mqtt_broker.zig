@@ -20,6 +20,7 @@ const Config = struct {
     payload_bytes: usize = default_payload_bytes,
     overlapping_subscriptions: usize = 1,
     publisher_window: usize = 1,
+    server_queue_capacity: usize = 0,
     session_expiry_seconds: u32 = 0,
     server_implementation: []const u8 = "external",
     server_io: []const u8 = "external-unspecified",
@@ -305,6 +306,7 @@ pub fn main(init: std.process.Init) !void {
         \\  subscribers: {d}
         \\  overlapping subscriptions/client: {d}
         \\  publisher window: {d}
+        \\  server queue capacity: {d}
         \\  session expiry seconds: {d}
         \\  warmup publishes: {d}
         \\  measured publishes: {d}
@@ -327,6 +329,7 @@ pub fn main(init: std.process.Init) !void {
         config.subscribers,
         config.overlapping_subscriptions,
         config.publisher_window,
+        config.server_queue_capacity,
         config.session_expiry_seconds,
         config.warmup_messages,
         config.messages,
@@ -349,6 +352,7 @@ pub fn main(init: std.process.Init) !void {
             "client_io=zio-std-io server_io={s} " ++
             "connection_scope=persistent publishers={d} subscribers={d} " ++
             "overlapping_subscriptions={d} publisher_window={d} " ++
+            "server_queue_capacity={d} " ++
             "session_expiry_seconds={d} warmup={d} publishes={d} " ++
             "deliveries={d} payload_bytes={d} elapsed_ns={d} " ++
             "publishes_per_s={d} deliveries_per_s={d} p50_ns={d} " ++
@@ -360,6 +364,7 @@ pub fn main(init: std.process.Init) !void {
             config.subscribers,
             config.overlapping_subscriptions,
             config.publisher_window,
+            config.server_queue_capacity,
             config.session_expiry_seconds,
             config.warmup_messages,
             config.messages,
@@ -488,6 +493,14 @@ fn parseArgs(
             if (config.publisher_window > std.math.maxInt(u16)) {
                 return error.InvalidArgument;
             }
+        } else if (std.mem.startsWith(
+            u8,
+            arg,
+            "--server-queue-capacity=",
+        )) {
+            config.server_queue_capacity = try parsePositiveUsize(
+                arg["--server-queue-capacity=".len..],
+            );
         } else if (std.mem.startsWith(
             u8,
             arg,

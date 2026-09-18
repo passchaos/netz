@@ -7,6 +7,22 @@ repo_root=$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)
 mosquitto_root=${MOSQUITTO_ROOT:-"$HOME/Work/mosquitto"}
 mosquitto_binary=${MOSQUITTO_BIN:-}
 expected_mosquitto_commit=${MOSQUITTO_COMMIT:-5cd25465}
+publishers=${PUBLISHERS:-2}
+subscribers=${SUBSCRIBERS:-2}
+warmup_messages=${WARMUP_MESSAGES:-100}
+messages=${MESSAGES:-2000}
+payload_bytes=${PAYLOAD_BYTES:-256}
+publisher_window=${PUBLISHER_WINDOW:-16}
+queue_args=(
+  --warmup "$warmup_messages"
+  --messages "$messages"
+)
+if [[ -n "${MQTT_MAX_QUEUED_MESSAGES:-}" ]]; then
+  queue_args+=(--capacity "$MQTT_MAX_QUEUED_MESSAGES")
+fi
+max_queued_messages=$(python3 \
+  "$repo_root/tools/interop/mqtt_broker_benchmark_config.py" \
+  "${queue_args[@]}")
 work=$(mktemp -d)
 server_pid=
 sampler_pid=
@@ -190,12 +206,13 @@ run_driver() {
   local server_io=$4
   timeout 60s "$driver" \
     "--address=127.0.0.1:$port" \
-    "--publishers=${PUBLISHERS:-2}" \
-    "--subscribers=${SUBSCRIBERS:-2}" \
-    "--warmup-messages=${WARMUP_MESSAGES:-100}" \
-    "--messages=${MESSAGES:-2000}" \
-    "--payload-bytes=${PAYLOAD_BYTES:-256}" \
-    "--publisher-window=${PUBLISHER_WINDOW:-16}" \
+    "--publishers=$publishers" \
+    "--subscribers=$subscribers" \
+    "--warmup-messages=$warmup_messages" \
+    "--messages=$messages" \
+    "--payload-bytes=$payload_bytes" \
+    "--publisher-window=$publisher_window" \
+    "--server-queue-capacity=$max_queued_messages" \
     "--server-implementation=$server_implementation" \
     "--server-io=$server_io" \
     >"$output" 2>&1
@@ -214,8 +231,8 @@ mosquitto_binary=$(resolve_mosquitto)
 netz_port=$(free_tcp_port)
 "$netz_broker" \
   "--bind=127.0.0.1:$netz_port" \
-  "--connections=$((${PUBLISHERS:-2} + ${SUBSCRIBERS:-2}))" \
-  --max-queued-deliveries=1024 \
+  "--connections=$((publishers + subscribers))" \
+  "--max-queued-deliveries=$max_queued_messages" \
   --max-outgoing-inflight=64 \
   >"$work/netz-server.log" 2>&1 &
 server_pid=$!
@@ -235,7 +252,7 @@ listener $mosquitto_port 127.0.0.1
 allow_anonymous true
 persistence false
 max_inflight_messages 64
-max_queued_messages 1024
+max_queued_messages $max_queued_messages
 log_dest stdout
 EOF
 "$mosquitto_binary" -c "$work/mosquitto.conf" -v \
@@ -256,12 +273,13 @@ check_args=(python3 \
   "$repo_root/tools/interop/mqtt_broker_benchmark_check.py" \
   --netz-log "$work/netz-result.txt" \
   --mosquitto-log "$work/mosquitto-result.txt" \
-  --publishers "${PUBLISHERS:-2}" \
-  --subscribers "${SUBSCRIBERS:-2}" \
-  --warmup "${WARMUP_MESSAGES:-100}" \
-  --messages "${MESSAGES:-2000}" \
-  --payload-bytes "${PAYLOAD_BYTES:-256}" \
-  --publisher-window "${PUBLISHER_WINDOW:-16}")
+  --publishers "$publishers" \
+  --subscribers "$subscribers" \
+  --warmup "$warmup_messages" \
+  --messages "$messages" \
+  --payload-bytes "$payload_bytes" \
+  --publisher-window "$publisher_window" \
+  --server-queue-capacity "$max_queued_messages")
 if [[ "$stats" == true ]]; then
   check_args+=(
     --netz-server-rss "$work/netz-server.rss"

@@ -21,6 +21,7 @@ class MqttBrokerBenchmarkCheckTest(unittest.TestCase):
             f"client_io=zio-std-io server_io={server_io} "
             "connection_scope=persistent publishers=2 subscribers=2 "
             "overlapping_subscriptions=1 publisher_window=8 "
+            "server_queue_capacity=1024 "
             "session_expiry_seconds=0 warmup=10 publishes=100 deliveries=200 "
             f"payload_bytes=256 elapsed_ns={elapsed} publishes_per_s=100000 "
             "deliveries_per_s=200000 p50_ns=10 p99_ns=20 p999_ns=30 "
@@ -139,6 +140,20 @@ class MqttBrokerBenchmarkCheckTest(unittest.TestCase):
                 )
             )
             with self.assertRaisesRegex(ValueError, "deliveries"):
+                self.verify(netz, mosquitto)
+
+    def test_rejects_mismatched_server_queue_capacity(self) -> None:
+        with TemporaryDirectory() as directory:
+            netz = Path(directory, "netz.log")
+            mosquitto = Path(directory, "mosquitto.log")
+            netz.write_text(self.record("netz", "zio-std-io"))
+            mosquitto.write_text(
+                self.record("mosquitto", "mosquitto-event-loop").replace(
+                    "server_queue_capacity=1024",
+                    "server_queue_capacity=2048",
+                )
+            )
+            with self.assertRaisesRegex(ValueError, "server_queue_capacity"):
                 self.verify(netz, mosquitto)
 
     def test_rejects_bad_derived_rate(self) -> None:

@@ -281,6 +281,16 @@ and the measured interval without polling an OS-thread counter. Its structured
 result records always identify `client_io=zio-std-io` and accept only the
 explicit `netz/zio-std-io`, `mosquitto/mosquitto-event-loop`, or standalone
 external server identity pair.
+The maintained comparison requires every expected fanout delivery, so its
+runner gives both brokers the same queue capacity: at least the historical
+1,024-message bound and large enough for the longer of the warmup and measured
+phases. This prevents a valid bounded-queue drop from turning a long run into a
+misleading Keep Alive timeout.
+`MQTT_MAX_QUEUED_MESSAGES` may raise that common bound, but the runner rejects
+an override smaller than either phase.
+Structured timing, memory, and verification records bind that capacity as
+`server_queue_capacity`, so results with different loss budgets cannot be
+mistaken for an equal-configuration comparison.
 
 The netz broker is a finite process for deterministic teardown:
 

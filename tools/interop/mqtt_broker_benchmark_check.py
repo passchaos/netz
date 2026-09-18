@@ -60,6 +60,7 @@ def validate(
     messages: int,
     payload_bytes: int,
     window: int,
+    queue_capacity: int,
 ) -> None:
     expected = {
         "record": "result",
@@ -75,6 +76,7 @@ def validate(
         "subscribers": str(subscribers),
         "overlapping_subscriptions": "1",
         "publisher_window": str(window),
+        "server_queue_capacity": str(queue_capacity),
         "session_expiry_seconds": "0",
         "warmup": str(warmup),
         "publishes": str(messages),
@@ -112,18 +114,22 @@ def verify(
     netz_server_rss: Path | None = None,
     mosquitto_server_rss: Path | None = None,
     rss_source: str = "proc-vmrss-sampled-2ms",
+    queue_capacity: int = 1_024,
 ) -> str:
-    if min(publishers, subscribers, messages, payload_bytes, window) <= 0 or warmup < 0:
+    if min(
+        publishers, subscribers, messages, payload_bytes, window,
+        queue_capacity,
+    ) <= 0 or warmup < 0:
         raise ValueError("invalid MQTT benchmark configuration")
     netz = result(netz_path)
     mosquitto = result(mosquitto_path)
     validate(
         netz, "netz", "zio-std-io", publishers, subscribers, warmup,
-        messages, payload_bytes, window,
+        messages, payload_bytes, window, queue_capacity,
     )
     validate(
         mosquitto, "mosquitto", "mosquitto-event-loop", publishers,
-        subscribers, warmup, messages, payload_bytes, window,
+        subscribers, warmup, messages, payload_bytes, window, queue_capacity,
     )
     if netz["checksum"] != mosquitto["checksum"]:
         raise ValueError("broker checksums differ")
@@ -146,6 +152,7 @@ def verify(
             f"deliveries={messages * subscribers} "
             "overlapping_subscriptions=1 session_expiry_seconds=0 "
             f"publisher_window={window} payload_bytes={payload_bytes} "
+            f"server_queue_capacity={queue_capacity} "
             "connection_scope=persistent "
             "rss_scope=broker-process "
             f"rss_source={rss_source}"
@@ -169,6 +176,7 @@ def verify(
         f"publishers={publishers} subscribers={subscribers} warmup={warmup} "
         f"publishes={messages} deliveries={messages * subscribers} "
         f"payload_bytes={payload_bytes} publisher_window={window} "
+        f"server_queue_capacity={queue_capacity} "
         f"checksum={expected_checksum} client_io=zio-std-io "
         "server_io=zio-std-io+mosquitto-event-loop complete=true"
     )
@@ -185,6 +193,7 @@ def main() -> None:
     parser.add_argument("--messages", type=int, required=True)
     parser.add_argument("--payload-bytes", type=int, required=True)
     parser.add_argument("--publisher-window", type=int, required=True)
+    parser.add_argument("--server-queue-capacity", type=int, required=True)
     parser.add_argument("--netz-server-rss", type=Path)
     parser.add_argument("--mosquitto-server-rss", type=Path)
     parser.add_argument("--rss-source", default="proc-vmrss-sampled-2ms")
@@ -195,6 +204,7 @@ def main() -> None:
             args.subscribers, args.warmup, args.messages, args.payload_bytes,
             args.publisher_window,
             args.netz_server_rss, args.mosquitto_server_rss, args.rss_source,
+            args.server_queue_capacity,
         )
     )
 

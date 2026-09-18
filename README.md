@@ -1091,6 +1091,10 @@ taskset -c 0 zig build bench-mqtt-tls -Doptimize=ReleaseFast
 zig build compare-mqtt-mosquitto -Doptimize=ReleaseFast
 # Add verifier-checked 2-ms broker RSS sampling on Linux.
 MQTT_STATS=true zig build compare-mqtt-mosquitto -Doptimize=ReleaseFast
+# Exact-delivery runs use at least 1,024 queue slots and cover the longer phase.
+# An explicit override must be at least that derived common bound.
+MQTT_MAX_QUEUED_MESSAGES=5000 MESSAGES=5000 \
+  zig build compare-mqtt-mosquitto -Doptimize=ReleaseFast
 zig build bench-quic-short-packet -Doptimize=ReleaseFast
 zig build bench-quic-padding-parse -Doptimize=ReleaseFast
 zig build bench-quic-lb -Doptimize=ReleaseFast
