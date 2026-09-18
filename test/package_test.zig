@@ -3937,6 +3937,81 @@ test "public modules are reachable" {
     try std.testing.expect(@hasDecl(netz.mqtt.bridge.Bridge, "run"));
     try std.testing.expect(@hasDecl(netz.mqtt.bridge.Rule, "mapTopicAlloc"));
     try std.testing.expect(@hasDecl(netz.mqtt.bridge.Rule, "overlaps"));
+    try std.testing.expect(@hasDecl(netz.mqtt.bridge, "outbound"));
+    try std.testing.expect(@hasDecl(netz.mqtt.bridge, "OutboundBridge"));
+    try std.testing.expect(@hasDecl(netz.mqtt.bridge, "OutboundRule"));
+    try std.testing.expect(@hasDecl(
+        netz.mqtt.bridge.OutboundRule,
+        "validate",
+    ));
+    try std.testing.expect(@hasDecl(
+        netz.mqtt.bridge.OutboundRule,
+        "sourceFilterAlloc",
+    ));
+    try std.testing.expect(@hasDecl(
+        netz.mqtt.bridge.OutboundRule,
+        "mapTopicAlloc",
+    ));
+    try std.testing.expect(@hasDecl(
+        netz.mqtt.bridge.outbound,
+        "Options",
+    ));
+    try std.testing.expect(@hasDecl(
+        netz.mqtt.bridge.outbound,
+        "MultiOptions",
+    ));
+    try std.testing.expect(@hasDecl(
+        netz.mqtt.bridge.outbound,
+        "ConnectEvent",
+    ));
+    try std.testing.expect(@hasDecl(
+        netz.mqtt.bridge.outbound,
+        "Endpoint",
+    ));
+    try std.testing.expect(@hasDecl(
+        netz.mqtt.bridge.OutboundBridge,
+        "init",
+    ));
+    try std.testing.expect(@hasDecl(
+        netz.mqtt.bridge.OutboundBridge,
+        "initMany",
+    ));
+    try std.testing.expect(@hasDecl(
+        netz.mqtt.bridge.OutboundBridge,
+        "initHost",
+    ));
+    try std.testing.expect(@hasDecl(
+        netz.mqtt.bridge.OutboundBridge,
+        "initHostMany",
+    ));
+    try std.testing.expect(@hasDecl(
+        netz.mqtt.bridge.OutboundBridge,
+        "initConnector",
+    ));
+    try std.testing.expect(@hasDecl(
+        netz.mqtt.bridge.OutboundBridge,
+        "initConnectorMany",
+    ));
+    try std.testing.expect(@hasDecl(
+        netz.mqtt.bridge.OutboundBridge,
+        "initEndpoints",
+    ));
+    try std.testing.expect(@hasDecl(
+        netz.mqtt.bridge.OutboundBridge,
+        "connect",
+    ));
+    try std.testing.expect(@hasDecl(
+        netz.mqtt.bridge.OutboundBridge,
+        "disconnect",
+    ));
+    try std.testing.expect(@hasDecl(
+        netz.mqtt.bridge.OutboundBridge,
+        "step",
+    ));
+    try std.testing.expect(@hasDecl(
+        netz.mqtt.bridge.OutboundBridge,
+        "run",
+    ));
     try std.testing.expect(@hasDecl(netz.mqtt, "reconnect"));
     try std.testing.expect(@hasDecl(netz.mqtt.reconnect, "Client"));
     try std.testing.expect(@hasDecl(netz.mqtt.reconnect, "ReconnectPolicy"));
@@ -3993,6 +4068,14 @@ test "public modules are reachable" {
     try std.testing.expect(@hasDecl(
         netz.mqtt.reconnect.Client,
         "completeIncomingQoS2",
+    ));
+    try std.testing.expect(@hasDecl(
+        netz.mqtt.reconnect.Client,
+        "publishOneAttempt",
+    ));
+    try std.testing.expect(@hasDecl(
+        netz.mqtt.reconnect,
+        "PublishAttempt",
     ));
     try std.testing.expect(@hasDecl(
         netz.mqtt.runtime.Connection,

@@ -1134,6 +1134,14 @@ pub const PublishDeliveryHandler = struct {
     complete: *const fn (context: *anyopaque, delivery: PublishDelivery) void,
 };
 
+pub const PublishAttempt = struct {
+    packet_id: ?u16,
+    /// True when a QoS 1/2 write lost its transport after the reconnect
+    /// Session had taken ownership. Drive `pollWith*` to reconnect and replay
+    /// instead of submitting the Application Message a second time.
+    transport_interrupted: bool = false,
+};
+
 pub const PublishDeliveryQueue = delivery_queue.Queue(
     PublishDelivery,
     PublishDeliveryHandler,
@@ -1927,6 +1935,25 @@ pub const Client = struct {
         payload: []const u8,
         options: runtime.PublishOptions,
     ) Error!?u16 {
+        const attempt = try self.publishOneAttempt(topic, payload, options);
+        if (!attempt.transport_interrupted) return attempt.packet_id;
+        const connected = try self.connect();
+        if (!connected.session_present) return error.SessionLost;
+        return attempt.packet_id;
+    }
+
+    /// Queue and attempt one outbound PUBLISH without reconnecting inside this
+    /// call. On a retryable QoS 1/2 transport failure, Session state retains
+    /// the message, the transport is retired, and the Packet Identifier is
+    /// returned with `transport_interrupted=true`. This lets a coordinator
+    /// keep other connections alive while `pollWith*` reconnects and replays.
+    /// QoS 0 has no recoverable state and therefore returns its write error.
+    pub fn publishOneAttempt(
+        self: *Client,
+        topic: []const u8,
+        payload: []const u8,
+        options: runtime.PublishOptions,
+    ) Error!PublishAttempt {
         const active = self.connection() orelse
             return error.ConnectionUnavailable;
         if (@intFromEnum(options.qos) >
@@ -1946,7 +1973,7 @@ pub const Client = struct {
                 .reason_code = 0,
                 .properties = &.{},
             });
-            return null;
+            return .{ .packet_id = null };
         }
         _ = try self.outgoing.enqueuePublish(
             self.outgoing_handle,
@@ -1978,14 +2005,17 @@ pub const Client = struct {
                 );
                 return err;
             }
-            // The store already owns this packet. Reconnect marks the selected
-            // inflight entry sendable and replays it with DUP, so no separate
-            // rollback is required here.
-            const connected = try self.reconnect();
-            if (!connected.session_present) return error.SessionLost;
+            // The store already owns this packet. Disconnect marks the
+            // selected inflight entry sendable so a later poll/connect can
+            // replay it with DUP without a second enqueue.
+            self.disconnectTransport();
+            return .{
+                .packet_id = publish_value.packet_id,
+                .transport_interrupted = true,
+            };
         };
         self.noteControlSent();
-        return publish_value.packet_id;
+        return .{ .packet_id = publish_value.packet_id };
     }
 
     /// Drive exactly one ordered client event, returning null when the caller's
