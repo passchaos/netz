@@ -17,6 +17,8 @@ MOSQUITTO_HELPER_SHA256 = {
         "00a1a30e29092938eeed59240358810914a4120d1b6df08376d3fa3085304576",
 }
 MOSQUITTO_SOURCE_SHA256 = {
+    "broker/02-subhier-crash.py":
+        "9cf95f158aabeff60e96c2dcff2f33c48415507725b383201e143ef832620966",
     "broker/02-subpub-recover-subscriptions.py":
         "2f6289be6000de501a7329b635ea1659f81abb06fbf6f597144a160371e8a271",
     "broker/02-subscribe-persistence-flipflop.py":

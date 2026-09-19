@@ -21,6 +21,7 @@ from mqtt_vectors import (
     persistent_subscriptions,
     source_lock,
     subscription_flip_flop,
+    subscription_hierarchy,
 )
 
 BASE_SCENARIO_COUNT = 167
@@ -28,6 +29,7 @@ SCENARIO_COUNT = (
     BASE_SCENARIO_COUNT
     + persistent_subscriptions.SCENARIO_COUNT
     + subscription_flip_flop.SCENARIO_COUNT
+    + subscription_hierarchy.SCENARIO_COUNT
 )
 
 
@@ -6446,6 +6448,10 @@ def main() -> None:
         connect_client, expected_connack, expect_packet,
     )
     subscription_flip_flop.run(
+        args.broker, mqtt_packets, mqtt5_props, NetzBroker,
+        expected_connack, expect_packet,
+    )
+    subscription_hierarchy.run(
         args.broker, mqtt_packets, mqtt5_props, NetzBroker,
         expected_connack, expect_packet,
     )

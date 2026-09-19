@@ -8,6 +8,7 @@ import unittest
 import persistent_subscriptions
 import source_lock
 import subscription_flip_flop
+import subscription_hierarchy
 
 
 class SourceLockTests(unittest.TestCase):
@@ -31,6 +32,8 @@ class SourceLockTests(unittest.TestCase):
         self.assertEqual(
             source_lock.MOSQUITTO_SOURCE_SHA256,
             {
+                "broker/02-subhier-crash.py":
+                    "9cf95f158aabeff60e96c2dcff2f33c48415507725b383201e143ef832620966",
                 "broker/02-subpub-recover-subscriptions.py":
                     "2f6289be6000de501a7329b635ea1659f81abb06fbf6f597144a160371e8a271",
                 "broker/02-subscribe-persistence-flipflop.py":
@@ -39,6 +42,7 @@ class SourceLockTests(unittest.TestCase):
         )
         self.assertEqual(persistent_subscriptions.SCENARIO_COUNT, 2)
         self.assertEqual(subscription_flip_flop.SCENARIO_COUNT, 2)
+        self.assertEqual(subscription_hierarchy.SCENARIO_COUNT, 2)
 
 
 if __name__ == "__main__":
