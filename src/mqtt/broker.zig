@@ -123,6 +123,11 @@ pub const Options = struct {
     /// replaying a retained Application Message. Mosquitto enables this by
     /// default to prevent a retained write from surviving later ACL revocation.
     check_retain_source: bool = true,
+    /// Reject network-client writes to broker-owned `$SYS` topics and to the
+    /// `$share` subscription namespace. The Mosquitto-compatible
+    /// `$SYS/broker/connection/+/state` bridge-status shape remains allowed.
+    /// Trusted `publishLocal` producers do not cross this client boundary.
+    protect_reserved_topics: bool = true,
     /// Mosquitto-compatible administrative upper bound for a durable
     /// Session's offline lifetime. Null leaves the protocol value unchanged.
     /// This also bounds MQTT 3.1.1 CleanSession=0, whose native lifetime is
@@ -314,6 +319,8 @@ pub const AuthenticationHandler = struct {
         context: *anyopaque,
         pending: *runtime.PendingAcceptedClient,
     ) Error!void,
+    // Runs under the connection's writer lock so AUTH responses cannot
+    // interleave with broker fanout. It must not re-enter this Broker.
     handle: *const fn (
         context: *anyopaque,
         connection: *runtime.Connection,
@@ -2512,12 +2519,24 @@ pub const Broker = struct {
         var pending_owned = true;
         defer if (pending_owned) pending.deinit(self.allocator);
         pending.connection.attachTrafficCounters(&self.traffic);
+        var suppress_reserved_will =
+            self.options.protect_reserved_topics and
+            if (pending.connect.connect.will) |will|
+                !clientMayPublishTopic(will.topic)
+            else
+                false;
         try pending.connection.setTopicNamespace(namespace.prefix);
         var mapped_will = try namespace.mapConnectWill(
             self.allocator,
             &pending.connect.connect,
         );
         defer if (mapped_will) |*mapped| mapped.deinit();
+        if (self.options.protect_reserved_topics) {
+            if (pending.connect.connect.will) |will| {
+                suppress_reserved_will = suppress_reserved_will or
+                    !clientMayPublishTopic(will.topic);
+            }
+        }
 
         var accept_options = try pending.resolvedOptions(listener_accept);
         if (accept_options.reason_code != 0) {
@@ -2585,6 +2604,16 @@ pub const Broker = struct {
             })) {
                 try self.refuseUnauthorizedConnect(pending, &pending_owned);
                 return null;
+            }
+        }
+        if (suppress_reserved_will) {
+            if (mapped_will) |*mapped| {
+                mapped.deinit();
+                mapped_will = null;
+            }
+            if (pending.connect.connect.will) |*will| {
+                will.deinit(self.allocator);
+                pending.connect.connect.will = null;
             }
         }
         var effective_connect = pending.connect.connect;
@@ -3769,6 +3798,16 @@ pub const Broker = struct {
         if (mqtt.subscriptionIdentifier(publish.properties) != null) {
             return error.InvalidProperty;
         }
+        if (self.options.protect_reserved_topics and
+            !clientMayPublishTopic(publish.topic))
+        {
+            return self.rejectPublish(
+                publisher_id,
+                publisher,
+                publish,
+                0x87,
+            );
+        }
         const namespace = listener_namespace.Namespace{
             .prefix = publisher.topicNamespace(),
         };
@@ -3780,6 +3819,16 @@ pub const Broker = struct {
         var canonical_publish = publish;
         canonical_publish.topic = mapped_topic;
         const publisher_slot = try self.slotForSubscriber(publisher_id);
+        if (self.options.protect_reserved_topics and
+            !clientMayPublishTopic(canonical_publish.topic))
+        {
+            return self.rejectPublish(
+                publisher_id,
+                publisher,
+                canonical_publish,
+                0x87,
+            );
+        }
         if (!self.publishAuthorized(
             publisher_slot.listener_access_control,
             connect,
@@ -5360,6 +5409,11 @@ pub const Broker = struct {
             .properties = properties.items,
             .payload = will.payload,
         };
+        if (self.options.protect_reserved_topics and
+            !clientMayPublishTopic(publish.topic))
+        {
+            return;
+        }
         if (self.options.access_control) |access| {
             if (access.authorize_will) |authorize| {
                 if (!authorize(access.context, .{
@@ -5392,6 +5446,15 @@ pub const Broker = struct {
         // flushing all active slots below.
     }
 };
+
+fn clientMayPublishTopic(topic: []const u8) bool {
+    if (std.mem.startsWith(u8, topic, "$share")) return false;
+    if (!std.mem.startsWith(u8, topic, "$SYS")) return true;
+    return mqtt.topicMatchesFilter(
+        topic,
+        "$SYS/broker/connection/+/state",
+    );
+}
 
 test "MQTT Will route failure consumes a partially committed publication" {
     const allocator = std.testing.allocator;
@@ -5598,12 +5661,20 @@ const ClientTask = struct {
             defer event.deinit(task.broker.allocator);
             switch (event) {
                 .auth => |*owned| {
+                    slot.writer_mutex.lockUncancelable(task.broker.io);
+                    defer slot.writer_mutex.unlock(task.broker.io);
+                    const complete =
+                        connection.applyAuthenticationEvent(
+                            owned.auth,
+                        ) catch |err| switch (err) {
+                            error.AuthenticationMethodMismatch,
+                            error.AuthenticationNotConfigured,
+                            error.InvalidAuthenticationState,
+                            => return,
+                            else => return err,
+                        };
                     const handler = task.broker.options.authentication orelse
                         return error.AuthenticationNotConfigured;
-                    const complete =
-                        try connection.applyAuthenticationEvent(
-                            owned.auth,
-                        );
                     try handler.handle(
                         handler.context,
                         connection,
@@ -5612,28 +5683,49 @@ const ClientTask = struct {
                     );
                 },
                 .subscribe => |*owned| {
-                    try task.broker.handleSubscribe(
+                    task.broker.handleSubscribe(
                         task.subscriber_id,
                         connection,
                         connect,
                         owned.subscribe,
-                    );
+                    ) catch |err| {
+                        if (try task.disconnectForProtocolViolation(
+                            slot,
+                            connection,
+                            err,
+                        )) return;
+                        return err;
+                    };
                 },
                 .unsubscribe => |*owned| {
-                    try task.broker.handleUnsubscribe(
+                    task.broker.handleUnsubscribe(
                         task.subscriber_id,
                         connection,
                         connect,
                         owned.unsubscribe,
-                    );
+                    ) catch |err| {
+                        if (try task.disconnectForProtocolViolation(
+                            slot,
+                            connection,
+                            err,
+                        )) return;
+                        return err;
+                    };
                 },
                 .publish => |*owned| {
-                    try task.broker.routePublish(
+                    task.broker.routePublish(
                         task.subscriber_id,
                         connection,
                         connect,
                         owned.publish,
-                    );
+                    ) catch |err| {
+                        if (try task.disconnectForProtocolViolation(
+                            slot,
+                            connection,
+                            err,
+                        )) return;
+                        return err;
+                    };
                 },
                 .puback => |*owned| {
                     slot.writer_mutex.lockUncancelable(task.broker.io);

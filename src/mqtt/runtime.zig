@@ -4150,6 +4150,7 @@ pub const Connection = struct {
                 auth.properties,
             ) catch |err| {
                 if (err == error.AuthenticationMethodMismatch or
+                    err == error.AuthenticationNotConfigured or
                     err == error.InvalidAuthenticationState)
                 {
                     self.sendAuthenticationProtocolError();
@@ -4160,6 +4161,7 @@ pub const Connection = struct {
         }
         return self.authentication.receiveReauth(auth) catch |err| {
             if (err == error.AuthenticationMethodMismatch or
+                err == error.AuthenticationNotConfigured or
                 err == error.InvalidAuthenticationState)
             {
                 self.sendAuthenticationProtocolError();

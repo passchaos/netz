@@ -1,12 +1,13 @@
 #!/usr/bin/env python3
-"""Run complete portable Mosquitto packet-sequence JSON files against netz.
+"""Run complete files and audited Mosquitto packet-sequence subsets.
 
 The upstream broker harness mixes raw packet conformance with Mosquitto CLI,
 configuration, plugin, and log assertions. This adapter deliberately handles
 only its portable packet files and preserves their group/test inheritance,
 payload DSL, and standard MQTT helper-publisher actions. Add a file to
 SEQUENCE_FILES only when every action is portable without weakening or
-rewriting individual expectations.
+rewriting individual expectations. Subsets lock the whole source file and name
+every exclusion with a documented reason so fixture drift fails closed.
 """
 
 from __future__ import annotations
@@ -50,7 +51,74 @@ SEQUENCE_FILES = {
     "UNSUBACK.json":
         "593719885cb1fa474c252449c11f2f1183fa432ee389737dca45beca225ac1a0",
 }
-EXPECTED_SEQUENCE_COUNT = 683
+SEQUENCE_SUBSET_FILES = {
+    "PUBLISH.json":
+        "a3b6a5d5b2cd44b70550ce17a03ff5607cc76e4f165ae1f1f6deb68eb7013f86",
+}
+
+# Each exclusion is an audited divergence from the selected upstream fixture,
+# not a wildcard skip. The full-file hash plus exact group/test identity makes
+# an upstream addition, rename, or content change fail closed.
+EXCLUSION_REASONS = {
+    "mosquitto_qos2_reuse_limit": (
+        "Mosquitto disconnects after its second pre-PUBREL non-DUP reuse; "
+        "MQTT 5 section 4.3.3 requires PUBREC for every same-identifier "
+        "PUBLISH until PUBREL, without replacing the first message"
+    ),
+    "optional_utf8_control_policy": (
+        "MQTT permits receivers to reject U+0001/U+001F/U+007F/U+009F, "
+        "while netz intentionally accepts these valid UTF-8 code points"
+    ),
+    "mosquitto_reason_classification": (
+        "Mosquitto returns Malformed Packet 0x81 where netz retains the "
+        "Protocol Error 0x82 classification for semantic Topic Name faults"
+    ),
+    "mosquitto_fixture_configuration": (
+        "the expected bytes depend on Mosquitto's advertised packet-size or "
+        "topic-alias limits rather than portable MQTT behavior"
+    ),
+}
+SEQUENCE_EXCLUSIONS = {
+    "PUBLISH.json": {
+        ("v3.1.1 PUBLISH", "34 QoS 2 Dup flow*3"):
+            "mosquitto_qos2_reuse_limit",
+        ("v5.0   PUBLISH", "34 QoS 2 Dup flow*3"):
+            "mosquitto_qos2_reuse_limit",
+        ("v5.0   PUBLISH", "30 topic 0"):
+            "mosquitto_reason_classification",
+        ("v5.0   PUBLISH", "30 topic with + [MQTT-3.3.2-2]"):
+            "mosquitto_reason_classification",
+        ("v5.0   PUBLISH", "30 topic with # [MQTT-3.3.2-2]"):
+            "mosquitto_reason_classification",
+        ("v5.0   PUBLISH ALLOWED PROPERTIES", "maximum packet size"):
+            "mosquitto_fixture_configuration",
+        (
+            "v5.0   PUBLISH ALLOWED PROPERTIES",
+            "topic alias > max topic alias",
+        ): "mosquitto_fixture_configuration",
+        ("v3.1.1 PUBLISH", "30 topic with U+0001"):
+            "optional_utf8_control_policy",
+        ("v3.1.1 PUBLISH", "30 topic with U+001F"):
+            "optional_utf8_control_policy",
+        ("v3.1.1 PUBLISH", "30 topic with U+007F"):
+            "optional_utf8_control_policy",
+        ("v3.1.1 PUBLISH", "30 topic with U+009F"):
+            "optional_utf8_control_policy",
+        ("v5.0   PUBLISH", "30 topic with U+0001"):
+            "optional_utf8_control_policy",
+        ("v5.0   PUBLISH", "30 topic with U+001F"):
+            "optional_utf8_control_policy",
+        ("v5.0   PUBLISH", "30 topic with U+007F"):
+            "optional_utf8_control_policy",
+        ("v5.0   PUBLISH", "30 topic with U+009F"):
+            "optional_utf8_control_policy",
+    },
+}
+EXPECTED_COMPLETE_SEQUENCE_COUNT = 683
+EXPECTED_SUBSET_SEQUENCE_COUNT = 145
+EXPECTED_SEQUENCE_COUNT = (
+    EXPECTED_COMPLETE_SEQUENCE_COUNT + EXPECTED_SUBSET_SEQUENCE_COUNT
+)
 MQTT_PACKETS_SHA256 = (
     "0024fcebd421a3286cea021ed64083f906d9b457004786b05f8a74abae5bfb37"
 )
@@ -107,14 +175,23 @@ def parse_message(message: str) -> bytes:
 
 
 def load_sequences(
-    data_root: Path, selected_files: dict[str, str] = SEQUENCE_FILES
+    data_root: Path,
+    selected_files: dict[str, str] | None = None,
+    excluded_tests: dict[str, dict[tuple[str, str], str]] | None = None,
 ) -> list[dict]:
+    if selected_files is None:
+        selected_files = SEQUENCE_FILES | SEQUENCE_SUBSET_FILES
+        excluded_tests = SEQUENCE_EXCLUSIONS
+    elif excluded_tests is None:
+        excluded_tests = {}
     sequences: list[dict] = []
     for filename, expected_hash in selected_files.items():
         path = data_root / filename
         source = path.read_bytes()
         verify_source_hash(path, expected_hash)
         groups = json.loads(source)
+        file_exclusions = excluded_tests.get(filename, {})
+        found_exclusions: set[tuple[str, str]] = set()
         for group in groups:
             if group.get("disable", False):
                 continue
@@ -122,6 +199,16 @@ def load_sequences(
             group_connect = group.get("connect", True)
             group_disconnect = group.get("expect_disconnect", True)
             for test in group["tests"]:
+                identity = (group["group"], test["name"])
+                if identity in file_exclusions:
+                    reason = file_exclusions[identity]
+                    if reason not in EXCLUSION_REASONS:
+                        raise ValueError(
+                            f"{filename} {identity} has unknown exclusion "
+                            f"reason: {reason}"
+                        )
+                    found_exclusions.add(identity)
+                    continue
                 actions = test.get("msgs", [])
                 action_types = {action["type"] for action in actions}
                 if not action_types <= {"send", "recv", "external_publish"}:
@@ -138,6 +225,12 @@ def load_sequences(
                     ),
                     "actions": actions,
                 })
+        expected_exclusions = set(file_exclusions)
+        if found_exclusions != expected_exclusions:
+            missing = sorted(expected_exclusions - found_exclusions)
+            raise ValueError(
+                f"{filename} exclusions not found in source: {missing}"
+            )
     return sequences
 
 
@@ -189,7 +282,7 @@ def expect_sequence_packet(
 ) -> None:
     try:
         expect_packet(sock, expected, label)
-    except AssertionError as exc:
+    except (AssertionError, TimeoutError) as exc:
         raise AssertionError(f"{label}: {exc}") from exc
 
 
@@ -281,6 +374,10 @@ def run_sequence(
 
 def main() -> None:
     args = parse_args()
+    if set(SEQUENCE_EXCLUSIONS) != set(SEQUENCE_SUBSET_FILES):
+        raise AssertionError(
+            "every audited subset file must have one exclusion manifest"
+        )
     verify_source_hash(
         args.mosquitto_test_root / "mqtt_packets.py",
         MQTT_PACKETS_SHA256,
@@ -288,10 +385,27 @@ def main() -> None:
     sys.path.insert(0, str(args.mosquitto_test_root))
     import mqtt_packets  # type: ignore
 
-    sequences = load_sequences(args.mosquitto_test_root / "broker" / "data")
+    data_root = args.mosquitto_test_root / "broker" / "data"
+    complete_sequences = load_sequences(data_root, SEQUENCE_FILES)
+    if len(complete_sequences) != EXPECTED_COMPLETE_SEQUENCE_COUNT:
+        raise AssertionError(
+            f"expected {EXPECTED_COMPLETE_SEQUENCE_COUNT} complete-file "
+            f"sequences, found {len(complete_sequences)}"
+        )
+    subset_sequences = load_sequences(
+        data_root,
+        SEQUENCE_SUBSET_FILES,
+        SEQUENCE_EXCLUSIONS,
+    )
+    if len(subset_sequences) != EXPECTED_SUBSET_SEQUENCE_COUNT:
+        raise AssertionError(
+            f"expected {EXPECTED_SUBSET_SEQUENCE_COUNT} audited-subset "
+            f"sequences, found {len(subset_sequences)}"
+        )
+    sequences = complete_sequences + subset_sequences
     if len(sequences) != EXPECTED_SEQUENCE_COUNT:
         raise AssertionError(
-            f"expected {EXPECTED_SEQUENCE_COUNT} upstream packet sequences, "
+            f"expected {EXPECTED_SEQUENCE_COUNT} total upstream sequences, "
             f"found {len(sequences)}"
         )
 
@@ -321,9 +435,13 @@ def main() -> None:
             healthy.sendall(mqtt_packets.gen_disconnect(proto_ver=5))
 
     filenames = ", ".join(sorted(SEQUENCE_FILES))
+    subset_filenames = ", ".join(sorted(SEQUENCE_SUBSET_FILES))
     print(
         f"Mosquitto packet-sequence JSON gate passed: "
-        f"{EXPECTED_SEQUENCE_COUNT} upstream scenarios from {filenames}"
+        f"{EXPECTED_SEQUENCE_COUNT} upstream scenarios "
+        f"({EXPECTED_COMPLETE_SEQUENCE_COUNT} from complete files "
+        f"{filenames}; {EXPECTED_SUBSET_SEQUENCE_COUNT} from audited "
+        f"subsets {subset_filenames})"
     )
 
 

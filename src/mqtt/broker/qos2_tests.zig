@@ -112,7 +112,7 @@ test "broker routes inbound QoS 2 exactly once at PUBREL" {
     try joinServer(thread, &joined, &serve);
 }
 
-test "broker replaces QoS 2 transaction when a non-DUP PUBLISH reuses its identifier" {
+test "broker preserves QoS 2 transaction when a PUBLISH reuses its identifier" {
     const allocator = std.testing.allocator;
     var threaded = std.Io.Threaded.init(allocator, .{
         .async_limit = .unlimited,
@@ -163,27 +163,36 @@ test "broker replaces QoS 2 transaction when a non-DUP PUBLISH reuses its identi
     defer first_pubrec.deinit(allocator);
     try std.testing.expectEqual(packet_id, first_pubrec.ack.packet_id);
 
-    // MQTT treats DUP=0 as a new PUBLISH even when its identifier collides
-    // with an incomplete QoS 2 transaction. Match Mosquitto by replacing the
-    // stored Application Message; the old payload must never be routed.
+    // MQTT 5 section 4.3.3 requires the receiver to answer every repeated
+    // PUBLISH with PUBREC until PUBREL, regardless of DUP. The original
+    // Application Message remains the exactly-once transaction.
     try writePublishWithPacketId(
         &publisher,
-        "qos2/reuse/replacement",
-        "new",
+        "qos2/reuse/conflicting-retry",
+        "ignored",
         packet_id,
     );
     var second_pubrec = try publisher.readPubRec();
     defer second_pubrec.deinit(allocator);
     try std.testing.expectEqual(packet_id, second_pubrec.ack.packet_id);
+    try writeDuplicatePublish(
+        &publisher,
+        "qos2/reuse/conflicting-dup",
+        "also-ignored",
+        packet_id,
+    );
+    var third_pubrec = try publisher.readPubRec();
+    defer third_pubrec.deinit(allocator);
+    try std.testing.expectEqual(packet_id, third_pubrec.ack.packet_id);
 
     try publisher.writePubRel(packet_id, 0);
     var delivered = try subscriber.readPublish();
     defer delivered.deinit(allocator);
     try std.testing.expectEqualStrings(
-        "qos2/reuse/replacement",
+        "qos2/reuse/original",
         delivered.publish.topic,
     );
-    try std.testing.expectEqualStrings("new", delivered.publish.payload);
+    try std.testing.expectEqualStrings("old", delivered.publish.payload);
     try subscriber.writePubRec(delivered.publish.packet_id.?, 0);
     var downstream_pubrel = try subscriber.readPubRel();
     defer downstream_pubrel.deinit(allocator);

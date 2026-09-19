@@ -18,7 +18,7 @@ and equal-wire broker results are kept separate.
 | Application Message size policy | Independent payload-byte cap for live QoS 0/1/2 PUBLISH and Will acceptance; MQTT 5 returns Packet Too Large while MQTT 3.1.1 completes representable acknowledgements | Mosquitto `message_size_limit`; rumqttd `max_payload_size` |
 | Outgoing QoS policy | MQTT-compliant min(source, subscription) by default; explicit `upgrade_outgoing_qos` compatibility mode covers live, retained and durable Session delivery | Mosquitto exposes the same non-standard opt-in; rumqttd follows its configured routing policy |
 | Shared subscriptions | Trie-indexed `{group, filter}`, RoundRobin/Random/Sticky/Rendezvous; broker defaults to RoundRobin | rumqttd has RoundRobin/Random/Sticky; Mosquitto rotates each shared leaf list |
-| Topic routing | Exact, `+`, `#`, `$SYS`, No Local, shared groups | Both references provide production topic indexes |
+| Topic routing | Exact, `+`, `#`, `$SYS`, No Local, shared groups. Network-client PUBLISH and Will writes to broker-owned `$SYS` and `$share` namespaces are denied by default, with Mosquitto's `$SYS/broker/connection/+/state` exception and an explicit opt-out; trusted local producers retain `$SYS` access | Both references provide production topic indexes; Mosquitto applies the same built-in `$SYS`/`$share` write protection before configured ACLs |
 | Listener topic namespaces and policy | Heterogeneous TCP/Unix/TLS/WS/Unix-WS/WSS `PendingSource`s can share one Broker core and deadline driver. Per-listener namespaces map PUBLISH/Will topics and ordinary/shared filters into canonical broker space, then strip the destination prefix from live, retained and durable Session delivery. Each listener may override CONNECT/CONNACK policy and add CONNECT plus live publish/subscribe/unsubscribe/delivery authorization on top of mandatory broker-wide policy; its negotiated Maximum QoS controls subscription grants plus live and durable delivery | Mosquitto `mount_point` applies a literal prefix at ingress and removes it per destination listener; Maximum QoS, authentication and selected limits may be listener-scoped with `per_listener_settings` |
 | Fanout ownership | One ref-counted topic/payload/property allocation shared by every downstream delivery | Mirrors Mosquitto's `mosquitto__base_msg` reference-counted fanout |
 | Publisher acknowledgement | Route and durable commit before PUBACK; a self-matched PUBLISH is written first on the shared connection, while unrelated slow subscribers cannot delay PUBACK; MQTT 5 reason `0x10` when no subscription matches | Matches Mosquitto `handle_publish.c`; rumqttd uses its router event path |
@@ -29,7 +29,7 @@ and equal-wire broker results are kept separate.
 | CONNECT and PING liveness | Raw TCP, MQTT-over-TLS, WS, and WSS clients expose address, hostname, and validated URI entry points as appropriate; secure address APIs accept an independent TLS identity. Client `network_connect_timeout` gives DNS resolution and every TCP address attempt one absolute budget across TCP, native TLS, WS and WSS; native TLS and WSS also apply their independent TLS handshake timeout on both vail and standard-library clients. Every transport exposes caller-owned absolute-deadline entry points spanning DNS/TCP setup, TLS and HTTP Upgrade where applicable, CONNECT, every enhanced-authentication round, and final CONNACK while retaining stricter configured phase limits. All four transports also expose matching relative-timeout wrappers that convert once at API entry. Partial MQTT bytes and unrelated protocol traffic cannot renew these deadlines. Clients also expose an absolute PINGREQ/PINGRESP round-trip timeout on all transports, preserving interleaved broker packets in a bounded ordered queue (plus one recoverable overflow packet already removed from the wire) | rumqttd exposes `connection_timeout_ms` around its initial packet read; rumqttc detects a PINGREQ that remains unacknowledged while continuing to dispatch other events; Mosquitto relies on its listener/event-loop timeout machinery |
 | Client reconnect | An owning reconnect client deep-copies CONNECT credentials/properties/Will plus raw hostname or canonical `mqtt://`/`tcp://` targets. Native-TLS reconnect connectors cover fixed addresses, DNS hostnames, and `mqtts://`/`ssl://` URIs, re-resolving names and deriving SNI on each attempt; WS/WSS connectors retain the same URI behavior. These encrypted connectors remain borrowed because they can reference caller-managed certificates and callbacks. The client retries with bounded fixed, linear, or exponential delay, optional unbiased full/equal jitter, and interruptible `std.Io.Event` backoff. Its single-owner bounded poll API continuously reconnects, negotiates Server Keep Alive, sends PINGREQ while idle, rejects a missing PINGRESP within a configurable deadline, preserves partially received TCP packets across poll timeouts, and exposes ordered connect/publish/QoS/ping/DISCONNECT/AUTH events; `serveUntil` provides a cancellation-aware callback driver with automatic event cleanup. A bounded multi-producer `CommandQueue` feeds publish/subscribe/unsubscribe/disconnect/manual-ack/flush/re-auth operations to `serveQueuedUntil`, retains the loop as sole socket owner, provides owned asynchronous PUBLISH/SUBSCRIBE/UNSUBSCRIBE/DISCONNECT/manual acknowledgements with correlated typed callbacks or a bounded blocking/nonblocking `CompletionQueue`, and bounds command work between network reads. Its PUBLISH producer offers immediate full-queue rejection and timeout-bounded capacity waiting. Completion-queue SUBACK/UNSUBACK reason codes and properties are deep-owned beyond the network callback. Queued graceful disconnect supports MQTT 5 reason codes/properties, emits MQTT 3.1.1's minimal packet, completes only after the write, and then stops instead of reconnecting. Inbound QoS 1/2 acknowledgement is automatic by default or application-controlled with MQTT 5 reason codes/properties; accepted manual QoS 2 transactions are persisted before PUBREC, suppress duplicate delivery, and resume through PUBREL/PUBCOMP. An opt-in deferred inbound-QoS2 release policy surfaces PUBREL without deleting the Session marker or sending PUBCOMP; `completeIncomingQoS2` emits PUBCOMP only after the application establishes its own release boundary, retains the marker across write failure, and then completes it after a successful write. The Bridge combines this with its broker-owned durable store for end-to-end inbound QoS 2. An optional publish-delivery observer reports QoS 0 after the socket write, QoS 1 at PUBACK, and QoS 2 only at PUBCOMP or a negative PUBREC, including borrowed MQTT 5 diagnostics; Mosquitto exposes an equivalent terminal publish callback while rumqtt exposes lower-level incoming/outgoing events. It applies outbound acknowledgements and drives arbitrary multi-step client-initiated, server-challenged MQTT 5 re-authentication through the CONNECT authentication callback while preserving its returned properties. It retains outgoing QoS 1/2 across transport loss, replays PUBLISH with DUP and its original Packet Identifier when Session Present is true, resumes outgoing QoS 2 directly at PUBREL after PUBREC, clears stale QoS state when the broker reports no Session, and replays only broker-accepted subscriptions into that fresh Session. | rumqttc continuously reconnects while polled and owns its hostname in `MqttOptions`; libmosquitto exposes hostname-based sync/async reconnect plus fixed/progressive reconnect delay control |
 | Broker bridges | `mqtt.bridge.Bridge` owns one reconnect client targeting a fixed address, re-resolved cleartext hostname, or caller-supplied connector such as native TLS, plus one or more non-overlapping remote subscription rules (QoS 0/1/2), and maps the complete remote Topic Name beneath its rule-specific local prefix. Remote QoS 1 is manually acknowledged only after `Broker.publishLocal` completes. QoS 2 requires an explicit stable bridge identity, persistent upstream Session and enabled local commit log; it durably stages before PUBREC, atomically injects at PUBREL, and retains a released tombstone until PUBCOMP is written. `mqtt.bridge.OutboundBridge` composes independent reconnect Sessions to subscribe on a source broker and publish to a target broker with Mosquitto-style local/remote prefix remapping. It supports QoS 0 and persistent-source QoS 1; a source delivery is acknowledged only after target PUBACK, target Session resume retransmits the original Packet Identifier with DUP, and target Session loss republishes from the still-owned source delivery. Both directions strip connection-scoped Topic Alias and Subscription Identifier metadata and add no unbounded intermediate queue. Instances remain explicitly one-way; deployments compose disjoint rules for bidirectional topologies. | Rumqttd's `BridgeLink` is likewise a one-way remote subscription feeding its local router; Mosquitto supports explicit in/out/both rules with local/remote prefix remapping |
-| MQTT 5 Enhanced Authentication | Initial multi-step AUTH before CONNACK, owned method binding, re-authentication traffic gate and broker policy callback | Mosquitto plugin start/continue callbacks and active re-authentication; rumqtt codec/runtime coverage is narrower |
+| MQTT 5 Enhanced Authentication | Initial multi-step AUTH before CONNACK, owned method binding, re-authentication traffic gate and broker policy callback; unnegotiated/mismatched live AUTH receives Protocol Error before close | Mosquitto plugin start/continue callbacks and active re-authentication; rumqtt codec/runtime coverage is narrower |
 | MQTT 5 information preferences | Configurable Response Information is emitted only when CONNECT explicitly requests it; Request Problem Information defaults to enabled and an explicit zero removes Reason String/User Property from server ACK/AUTH packets while retaining functional authentication properties and the reason code | Both references parse/model the CONNECT fields, but the audited Mosquitto documentation labels them supported but unused and rumqttd does not apply them in its router |
 | MQTT 5 Server Reference | CONNACK/DISCONNECT property access, redirect-reason validation, URI and host:port parsing, bounded loop-detecting opt-in redirect chains, authorization callback, and automatic TCP/TLS/WS/WSS CONNACK redirect helpers; TLS/WSS derive certificate identity from every new authority | The audited rumqtt codecs expose the property/reasons but no automatic client redirection; Mosquitto documents Server Reference as supported but unused |
 | Broker persistence | Atomic versioned snapshots plus opt-in interval- or durable-change-count-driven live checkpoints, and a separate opt-in fsynced append journal, for retained messages, scheduled Wills, durable Sessions, opt-in queued QoS 0, outgoing QoS 1/2 and inbound QoS 2 transactions | rumqttd datalog/segments; Mosquitto persisted sessions, subscriptions, bidirectional client-message state and retained/Will base messages; Mosquitto can interpret its autosave threshold as elapsed seconds or persistence changes |
@@ -1602,17 +1602,18 @@ creates exactly one independent downstream QoS 2 transaction.
 The nineteenth scenario verifies Mosquitto's PUBREL idempotence boundary:
 repeating a completed PUBREL and sending an unknown Packet Identifier both
 return PUBCOMP, while the subscriber observes no duplicate Application Message.
-Two companion scenarios directly port Mosquitto's
-`03-publish-qos2-reuse-mid.py` for MQTT 3.1.1 and MQTT 5. A second non-DUP
-PUBLISH reuses an identifier that is still waiting for PUBREL but carries a
+Two companion MQTT 3.1.1/5 scenarios start from Mosquitto's
+`03-publish-qos2-reuse-mid.py` but retain MQTT 5 section 4.3.3's receiver
+semantics instead of Mosquitto's replacement extension. A second non-DUP
+PUBLISH reuses an identifier that is still waiting for PUBREL and carries a
 different topic and payload. Netz acknowledges both PUBLISH packets with
-PUBREC, atomically replaces the pending transaction, and releases only the
-replacement Application Message after PUBREL; the subscriber's bounded silence
-check rejects stale delivery of the original message. DUP retransmissions
-remain stricter and must match the stored transaction byte-for-byte.
+PUBREC, preserves the first pending Application Message, and releases it
+exactly once after PUBREL; the subscriber's bounded silence check rejects
+delivery of the conflicting retry.
 The twentieth scenario sends the server-only Subscription Identifier property
-on a client PUBLISH. Netz rejects the connection before routing and then
-accepts a fresh MQTT 5 client/PING, proving the finite broker remains healthy.
+on a client PUBLISH. Netz sends Protocol Error `0x82`, rejects the connection
+before routing, and then accepts a fresh MQTT 5 client/PING, proving the finite
+broker remains healthy.
 The twenty-first scenario unsubscribes an existing and missing filter in one
 packet, checks ordered MQTT 5 reason codes 0x00/0x11, then proves the removed
 route stays silent while PING remains usable.
@@ -1893,6 +1894,17 @@ source-hash-locked adapter now executes every scenario in Mosquitto's complete
 `FLOW.json`, `FORBIDDEN.json`, `OTHER.json`, `PINGREQ.json`, `PINGRESP.json`,
 `PUBACK.json`, `PUBREC.json`, `PUBCOMP.json`, `REGRESSION.json`, `SUBACK.json`,
 and `UNSUBACK.json` files: 683 upstream scenarios across MQTT 3.1.1 and MQTT 5.
+It additionally runs 145 of the 160 scenarios in the complete, hash-locked
+`PUBLISH.json`, for 828 source-derived sequences total. The fifteen exclusions
+are exact `(group, test)` identities rather than pattern skips, and each maps
+to one of four documented reasons: eight use MQTT's optional rejection of
+U+0001/U+001F/U+007F/U+009F; two exercise Mosquitto's finite non-DUP QoS 2
+reuse tolerance instead of MQTT 5 section 4.3.3's repeat-PUBREC rule; three
+expect Mosquitto's `0x81` where netz retains `0x82` for semantic Topic Name
+violations; and two depend on Mosquitto's configured Maximum Packet Size or
+Topic Alias Maximum. The entire upstream file hash, exclusion identities,
+reason vocabulary, and included count are independently asserted, so upstream
+fixture additions or renamed exclusions fail closed.
 The adapter preserves the upstream payload DSL, group/test inheritance,
 explicit response bytes, connection-liveness expectations, and MQTT 3.1.1
 helper publications with full QoS 0/1/2 handshakes; it rejects other
@@ -1921,6 +1933,24 @@ and cannot delay that acknowledgement. The finite conformance broker now
 preserves concurrent accepts while aggregating and ignoring expected
 per-connection errors, allowing the upstream helper publisher to overlap its
 subscriber.
+The PUBLISH subset exposed three further broker boundaries. Network clients are
+now denied writes to broker-owned `$SYS` and `$share` namespaces by default,
+while Mosquitto's `$SYS/broker/connection/+/state` bridge-status shape and
+ordinary dollar-prefixed application topics remain permitted. The policy is
+explicitly configurable and checks both the client-visible and listener-mapped
+canonical topic, so a mount prefix can neither hide nor inject a reserved
+namespace. It suppresses protected client Wills after CONNECT authorization
+but before they enter persistent Session state, and does not restrict trusted
+`Broker.publishLocal` system metrics. Parsed PUBLISH,
+SUBSCRIBE, and UNSUBSCRIBE semantic failures now pass through the broker's MQTT
+5 DISCONNECT mapper instead of closing with unexplained EOF; an illegal
+client-originated Subscription Identifier is independently verified as `0x82`.
+An unnegotiated live AUTH now follows the same diagnostic boundary, and normal
+or failing AUTH handlers share the connection's writer mutex with fanout so
+their packets cannot interleave. Finally,
+inbound QoS 2 retains the first Application Message for an identifier until
+PUBREL: every later same-identifier PUBLISH receives PUBREC regardless of DUP,
+but conflicting bytes cannot replace or duplicate the original delivery.
 Run it against the audited Mosquitto `5cd25465` checkout with:
 
 ```sh
@@ -1928,10 +1958,11 @@ zig build interop-mqtt-mosquitto-packet-sequences -Doptimize=ReleaseFast -- \
   --mosquitto-test-root=/nav_env/Work/mosquitto/test
 ```
 
-The manifest pins SHA-256 hashes for all eleven JSON inputs and the imported
-`mqtt_packets.py` generator, so a changed upstream fixture cannot silently
-reuse the recorded scenario count.
-The adapter intentionally does not count complete `AUTH.json`,
+The manifest pins SHA-256 hashes for all eleven complete JSON inputs, the
+audited `PUBLISH.json` subset source, and the imported `mqtt_packets.py`
+generator, so a changed upstream fixture cannot silently reuse the recorded
+scenario count.
+The adapter intentionally does not count complete `AUTH.json`, `PUBLISH.json`,
 `DISCONNECT.json`, `PUBREL.json`, or `UNSUBSCRIBE.json` yet: the pinned
 Mosquitto expectations classify a one-byte
 AUTH body with no Property Length and non-zero reserved DISCONNECT flags as
@@ -1939,6 +1970,11 @@ Protocol Error `0x82`, and likewise classify invalid MQTT 5 PUBREL reserved
 flags as `0x82`; MQTT 5 defines unparseable variable headers and invalid
 reserved flags as Malformed Packet `0x81`. Netz retains the standards
 classification instead of adding per-file compatibility exceptions.
+`PUBLISH.json` additionally contains the explicitly enumerated reason-code,
+configuration, optional-Unicode, and QoS 2 reuse differences described above;
+all other scenarios in that hash-locked file are executed. `CONNECT.json` and
+`CONNACK.json` also contain MQTT 3.1 protocol-level cases, outside netz's
+declared MQTT 3.1.1/5 scope.
 The UNSUBSCRIBE file also requires rejection of otherwise valid UTF-8 control
 characters such as U+0001. MQTT 5 makes rejection of these disallowed Unicode
 code points optional, and netz retains its documented interoperable acceptance
@@ -1994,8 +2030,9 @@ or plugins, so passing these vectors is not proxy evidence for the entire suite.
    validated broker-process RSS records; a current 64-connection run measured
    netz at 6,360 KiB versus Mosquitto at 3,896 KiB, narrowing but not closing
    the independent-peer memory gap.
-3. Expand the source-hash-locked complete-file gate beyond its current 683
-   upstream packet sequences, or add a broker process adapter capable of
-   preserving the upstream harness's config/reload/persistence semantics. The
-   167 curated scenarios plus eleven complete portable JSON files still do not
-   cover the full protocol/conformance suite.
+3. Expand the source-hash-locked gate beyond its current 828 upstream packet
+   sequences, or add a broker process adapter capable of preserving the
+   upstream harness's config/reload/persistence semantics. The 167 curated
+   scenarios, eleven complete portable JSON files, and audited 145/160
+   `PUBLISH.json` subset still do not cover the full protocol/conformance
+   suite.

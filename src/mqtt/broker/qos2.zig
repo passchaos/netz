@@ -147,12 +147,11 @@ pub const Store = struct {
 
     /// Store a new transaction, or validate an MQTT retransmission.
     ///
-    /// MQTT permits a DUP=1 PUBLISH to repeat an unacknowledged transaction.
-    /// It must describe the same Application Message; accepting different
-    /// bytes under the same Packet Identifier would make exactly-once routing
-    /// ambiguous. A non-DUP PUBLISH is a fresh transaction and replaces the
-    /// stale pending message for that Packet Identifier, matching Mosquitto's
-    /// reconnect/reuse behavior without temporarily consuming another slot.
+    /// Until PUBREL arrives, MQTT requires every subsequent PUBLISH with the
+    /// same Packet Identifier to receive PUBREC without delivering another
+    /// Application Message. Preserve the first transaction even when a broken
+    /// sender clears DUP or changes later bytes; replacing it would make the
+    /// exactly-once result depend on a retransmission race.
     pub fn record(
         self: *Store,
         publisher_id: router.SubscriberId,
@@ -165,26 +164,7 @@ pub const Store = struct {
             .publisher_id = publisher_id,
             .packet_id = packet_id,
         };
-        if (self.entries.get(key)) |existing| {
-            if (publish.dup and
-                (existing.retain != publish.retain or
-                    !std.mem.eql(u8, existing.bytes[0..existing.topic_len], publish.topic) or
-                    !std.mem.eql(u8, existing.bytes[existing.topic_len..], publish.payload)))
-            {
-                return error.InvalidPacketIdentifier;
-            }
-            if (publish.dup) return false;
-
-            const replacement = try Pending.create(
-                self.allocator,
-                publish,
-                now,
-            );
-            var stale = self.entries.getPtr(key).?.*;
-            self.entries.getPtr(key).?.* = replacement;
-            stale.deinit();
-            return true;
-        }
+        if (self.entries.contains(key)) return false;
         if (self.entries.count() >= self.maximum) {
             return error.ReceiveMaximumExceeded;
         }
@@ -472,7 +452,7 @@ fn remainingAfterDowntimeNs(
     return value -| elapsed;
 }
 
-test "QoS 2 store owns bytes and validates duplicate PUBLISH" {
+test "QoS 2 store owns bytes and preserves the first duplicate PUBLISH" {
     var store = try Store.init(std.testing.allocator, 2);
     defer store.deinit();
 
@@ -504,19 +484,21 @@ test "QoS 2 store owns bytes and validates duplicate PUBLISH" {
         std.Io.Timestamp.zero,
     ));
 
-    var changed = retry;
-    changed.payload = "two";
-    try std.testing.expectError(
-        error.InvalidPacketIdentifier,
-        store.record(10, changed, std.Io.Timestamp.zero),
-    );
-
-    var replacement = changed;
-    replacement.dup = false;
-    replacement.topic = "q/2/replaced";
-    try std.testing.expect(try store.record(
+    var repeated = retry;
+    repeated.dup = false;
+    repeated.topic = "q/2/replaced";
+    repeated.payload = "two";
+    try std.testing.expect(!try store.record(
         10,
-        replacement,
+        repeated,
+        std.Io.Timestamp.zero,
+    ));
+    repeated.dup = true;
+    repeated.topic = "q/2/conflicting-dup";
+    repeated.payload = "three";
+    try std.testing.expect(!try store.record(
+        10,
+        repeated,
         std.Io.Timestamp.zero,
     ));
     try std.testing.expectEqual(@as(usize, 1), store.count());
@@ -530,8 +512,8 @@ test "QoS 2 store owns bytes and validates duplicate PUBLISH" {
         std.Io.Timestamp.zero,
         &properties,
     )).?;
-    try std.testing.expectEqualStrings("q/2/replaced", restored.topic);
-    try std.testing.expectEqualStrings("two", restored.payload);
+    try std.testing.expectEqualStrings("q/2", restored.topic);
+    try std.testing.expectEqualStrings("one", restored.payload);
     try std.testing.expect(restored.retain);
 }
 

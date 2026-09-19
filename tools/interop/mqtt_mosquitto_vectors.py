@@ -1942,10 +1942,6 @@ def multiple_subscription_identifiers(
             sock.sendall(mqtt_packets.gen_publish(
                 topic, qos=1, mid=10, payload="both", retain=True, proto_ver=5
             ))
-            expect_packet(
-                sock, mqtt_packets.gen_puback(10, proto_ver=5),
-                "multi-subid publisher PUBACK",
-            )
             properties = (
                 mqtt5_props.gen_varint_prop(
                     mqtt5_props.SUBSCRIPTION_IDENTIFIER, 3
@@ -1959,6 +1955,10 @@ def multiple_subscription_identifiers(
                     topic, qos=1, mid=1, payload="both", retain=True, proto_ver=5,
                     properties=properties,
                 ), "multi-subid forwarded PUBLISH",
+            )
+            expect_packet(
+                sock, mqtt_packets.gen_puback(10, proto_ver=5),
+                "multi-subid publisher PUBACK",
             )
             sock.sendall(mqtt_packets.gen_puback(1, proto_ver=5))
             sock.sendall(mqtt_packets.gen_disconnect(proto_ver=5))
@@ -5958,12 +5958,13 @@ def qos2_duplicate_publish(executable: Path, mqtt_packets) -> None:
 
 
 def qos2_reuse_packet_identifier(executable: Path, mqtt_packets) -> None:
-    # Direct wire port of Mosquitto 03-publish-qos2-reuse-mid.py. A second
-    # non-DUP PUBLISH is a new transaction even though it reuses an identifier
-    # that is waiting for PUBREL, so only the replacement message is released.
+    # MQTT 5 section 4.3.3 requires every repeated PUBLISH with the same Packet
+    # Identifier to receive PUBREC until PUBREL, regardless of DUP, without
+    # causing a second Application Message. Mosquitto replaces the pending
+    # message on one non-DUP reuse; netz deliberately preserves the original.
     for proto_ver in (4, 5):
         topic = f"qos2/reuse/v{proto_ver}"
-        replacement_topic = f"{topic}/replacement"
+        conflicting_topic = f"{topic}/conflicting-retry"
         with NetzBroker(executable, connections=2) as broker:
             with broker.connect() as subscriber, broker.connect() as publisher:
                 connect_client(
@@ -5992,7 +5993,7 @@ def qos2_reuse_packet_identifier(executable: Path, mqtt_packets) -> None:
                 packet_id = 312
                 for publish_topic, payload in (
                     (topic, "original"),
-                    (replacement_topic, "replacement"),
+                    (conflicting_topic, "ignored"),
                 ):
                     publisher.sendall(
                         mqtt_packets.gen_publish(
@@ -6020,15 +6021,15 @@ def qos2_reuse_packet_identifier(executable: Path, mqtt_packets) -> None:
                     mqtt_packets.gen_pubcomp(
                         packet_id, proto_ver=proto_ver
                     ),
-                    f"QoS2 reuse PUBCOMP v{proto_ver}",
+                    f"QoS2 original PUBCOMP v{proto_ver}",
                 )
                 expect_packet(
                     subscriber,
                     mqtt_packets.gen_publish(
-                        replacement_topic, qos=2, mid=1,
-                        payload="replacement", proto_ver=proto_ver,
+                        topic, qos=2, mid=1,
+                        payload="original", proto_ver=proto_ver,
                     ),
-                    f"QoS2 replacement delivery v{proto_ver}",
+                    f"QoS2 original delivery v{proto_ver}",
                 )
                 subscriber.sendall(
                     mqtt_packets.gen_pubrec(1, proto_ver=proto_ver)
@@ -6036,7 +6037,7 @@ def qos2_reuse_packet_identifier(executable: Path, mqtt_packets) -> None:
                 expect_packet(
                     subscriber,
                     mqtt_packets.gen_pubrel(1, proto_ver=proto_ver),
-                    f"QoS2 replacement PUBREL v{proto_ver}",
+                    f"QoS2 original PUBREL v{proto_ver}",
                 )
                 subscriber.sendall(
                     mqtt_packets.gen_pubcomp(1, proto_ver=proto_ver)
@@ -6046,7 +6047,7 @@ def qos2_reuse_packet_identifier(executable: Path, mqtt_packets) -> None:
                     stale = subscriber.recv(1)
                     if stale:
                         raise AssertionError(
-                            "replaced QoS2 message was also delivered: "
+                            "conflicting QoS2 retry was also delivered: "
                             + stale.hex()
                         )
                 except socket.timeout:
@@ -6125,15 +6126,17 @@ def reject_publish_subscription_identifier(
                 "illegal/subid", qos=0, payload="bad", proto_ver=5,
                 properties=illegal,
             ))
-            try:
-                response = bad.recv(1)
-                if response:
-                    raise AssertionError(
-                        "illegal Subscription Identifier got response: "
-                        + response.hex()
-                    )
-            except (ConnectionResetError, BrokenPipeError):
-                pass
+            expect_packet(
+                bad,
+                mqtt_packets.gen_disconnect(
+                    reason_code=0x82, proto_ver=5
+                ),
+                "illegal Subscription Identifier DISCONNECT",
+            )
+            if bad.recv(1) != b"":
+                raise AssertionError(
+                    "illegal Subscription Identifier connection stayed open"
+                )
         with broker.connect() as healthy:
             connect_v5(healthy, mqtt_packets, "after-illegal-subid")
             healthy.sendall(mqtt_packets.gen_pingreq())

@@ -130,12 +130,116 @@ class SequenceLoadingTests(unittest.TestCase):
                 "UNSUBACK.json",
             },
         )
-        self.assertEqual(sequences.EXPECTED_SEQUENCE_COUNT, 683)
+        self.assertEqual(
+            sequences.SEQUENCE_SUBSET_FILES,
+            {
+                "PUBLISH.json":
+                    "a3b6a5d5b2cd44b70550ce17a03ff5607cc76e4f165ae1f1f6deb68eb7013f86",
+            },
+        )
+        self.assertEqual(
+            set(sequences.SEQUENCE_EXCLUSIONS),
+            set(sequences.SEQUENCE_SUBSET_FILES),
+        )
+        self.assertEqual(sequences.EXPECTED_COMPLETE_SEQUENCE_COUNT, 683)
+        self.assertEqual(sequences.EXPECTED_SUBSET_SEQUENCE_COUNT, 145)
+        self.assertEqual(sequences.EXPECTED_SEQUENCE_COUNT, 828)
+        self.assertEqual(
+            len(sequences.SEQUENCE_EXCLUSIONS["PUBLISH.json"]),
+            15,
+        )
+        self.assertEqual(
+            set(sequences.SEQUENCE_EXCLUSIONS["PUBLISH.json"]),
+            {
+                ("v3.1.1 PUBLISH", "34 QoS 2 Dup flow*3"),
+                ("v5.0   PUBLISH", "34 QoS 2 Dup flow*3"),
+                ("v5.0   PUBLISH", "30 topic 0"),
+                (
+                    "v5.0   PUBLISH",
+                    "30 topic with + [MQTT-3.3.2-2]",
+                ),
+                (
+                    "v5.0   PUBLISH",
+                    "30 topic with # [MQTT-3.3.2-2]",
+                ),
+                (
+                    "v5.0   PUBLISH ALLOWED PROPERTIES",
+                    "maximum packet size",
+                ),
+                (
+                    "v5.0   PUBLISH ALLOWED PROPERTIES",
+                    "topic alias > max topic alias",
+                ),
+                ("v3.1.1 PUBLISH", "30 topic with U+0001"),
+                ("v3.1.1 PUBLISH", "30 topic with U+001F"),
+                ("v3.1.1 PUBLISH", "30 topic with U+007F"),
+                ("v3.1.1 PUBLISH", "30 topic with U+009F"),
+                ("v5.0   PUBLISH", "30 topic with U+0001"),
+                ("v5.0   PUBLISH", "30 topic with U+001F"),
+                ("v5.0   PUBLISH", "30 topic with U+007F"),
+                ("v5.0   PUBLISH", "30 topic with U+009F"),
+            },
+        )
+        self.assertEqual(
+            set(sequences.SEQUENCE_EXCLUSIONS["PUBLISH.json"].values()),
+            set(sequences.EXCLUSION_REASONS),
+        )
+        reasons = sequences.SEQUENCE_EXCLUSIONS["PUBLISH.json"].values()
+        self.assertEqual(
+            {
+                reason: sum(value == reason for value in reasons)
+                for reason in sequences.EXCLUSION_REASONS
+            },
+            {
+                "mosquitto_qos2_reuse_limit": 2,
+                "optional_utf8_control_policy": 8,
+                "mosquitto_reason_classification": 3,
+                "mosquitto_fixture_configuration": 2,
+            },
+        )
         self.assertEqual(len(sequences.MQTT_PACKETS_SHA256), 64)
         int(sequences.MQTT_PACKETS_SHA256, 16)
         for digest in sequences.SEQUENCE_FILES.values():
             self.assertEqual(len(digest), 64)
             int(digest, 16)
+        for digest in sequences.SEQUENCE_SUBSET_FILES.values():
+            self.assertEqual(len(digest), 64)
+            int(digest, 16)
+
+    def test_rejects_missing_named_subset_exclusion(self) -> None:
+        groups = [{
+            "group": "portable",
+            "tests": [{"name": "present", "msgs": []}],
+        }]
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            selected = self.write_source(root, groups)
+            with self.assertRaisesRegex(ValueError, "exclusions not found"):
+                sequences.load_sequences(
+                    root,
+                    selected,
+                    {"TEST.json": {
+                        ("portable", "missing"):
+                            "optional_utf8_control_policy",
+                    }},
+                )
+
+    def test_rejects_unknown_subset_exclusion_reason(self) -> None:
+        groups = [{
+            "group": "portable",
+            "tests": [{"name": "excluded", "msgs": []}],
+        }]
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            selected = self.write_source(root, groups)
+            with self.assertRaisesRegex(ValueError, "unknown exclusion reason"):
+                sequences.load_sequences(
+                    root,
+                    selected,
+                    {"TEST.json": {
+                        ("portable", "excluded"): "undocumented",
+                    }},
+                )
 
 
 class ExternalPublishTests(unittest.TestCase):

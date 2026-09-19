@@ -306,6 +306,83 @@ test "broker write ACL suppresses Will before retained and route mutation" {
     try joinServer(thread, &joined, &serve);
 }
 
+test "broker reserved topic policy suppresses client Will" {
+    const allocator = std.testing.allocator;
+    var threaded = std.Io.Threaded.init(allocator, .{
+        .async_limit = .unlimited,
+    });
+    defer threaded.deinit();
+    const io = threaded.io();
+    var broker = try testBroker(allocator, io, 2, 64);
+    defer broker.deinit();
+
+    var serve = ServeState{
+        .broker = &broker,
+        .connection_count = 2,
+    };
+    const thread = try std.Thread.spawn(.{}, ServeState.run, .{&serve});
+    var joined = false;
+    defer if (!joined) thread.join();
+
+    var subscriber = try connect(
+        allocator,
+        io,
+        broker,
+        "reserved-will-subscriber",
+        &.{},
+    );
+    defer subscriber.close();
+    var suback = try subscriber.subscribe(
+        &.{.{
+            .topic_filter = "$SYS/#",
+            .qos = .at_least_once,
+        }},
+        .{},
+    );
+    defer suback.deinit(allocator);
+
+    var source = try connectWithOptions(allocator, io, broker, .{
+        .protocol = .v5,
+        .client_id = "reserved-will-source",
+        .will = .{
+            .topic = "$SYS/broker/uptime",
+            .payload = "forged",
+            .qos = .at_least_once,
+            .retain = true,
+        },
+    });
+    try source.shutdown();
+    defer source.close();
+
+    const deadline = std.Io.Clock.awake.now(io).addDuration(
+        .fromSeconds(2),
+    );
+    while (std.Io.Clock.awake.now(io).nanoseconds < deadline.nanoseconds) {
+        broker.state_mutex.lockUncancelable(io);
+        const consumed = broker.wills.count() == 0;
+        broker.state_mutex.unlock(io);
+        if (consumed) break;
+        try std.Io.sleep(io, .fromMilliseconds(1), .awake);
+    }
+
+    try subscriber.ping();
+    try std.testing.expectError(
+        error.Timeout,
+        subscriber.readClientPacketEventWithTimeout(
+            .fromMilliseconds(20),
+        ),
+    );
+    {
+        broker.state_mutex.lockUncancelable(io);
+        defer broker.state_mutex.unlock(io);
+        try std.testing.expectEqual(@as(usize, 0), broker.wills.count());
+        try std.testing.expectEqual(@as(usize, 0), broker.retained.count());
+    }
+
+    try subscriber.disconnect(0);
+    try joinServer(thread, &joined, &serve);
+}
+
 test "broker Keep Alive timeout routes Will and closes idle client" {
     const allocator = std.testing.allocator;
     var threaded = std.Io.Threaded.init(allocator, .{
