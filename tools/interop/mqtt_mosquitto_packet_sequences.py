@@ -46,6 +46,8 @@ SEQUENCE_FILES = {
         "bf6a7b5f6c03faf31f2e825ba6853943b7b9cc6fa4bf07706fb54ecd9703e73f",
     "PUBCOMP.json":
         "097a9d2b5e3690295dedde21665a82a97baf0e5f8a0258a6deed35c9f848943f",
+    "PUBREL.json":
+        "5edf48213e6a9c85254b6255618fa5c67b47bfe59bf84b3b09307b8691cea225",
     "SUBACK.json":
         "1894d26a0f79718055ea1135cdeed5632a470ce6968dc9ef2810cfb83e15d3ae",
     "UNSUBACK.json":
@@ -205,6 +207,10 @@ STANDARD_OVERRIDE_REASONS = {
         "MQTT 5 classifies the parsed UNSUBSCRIBE semantic fault as "
         "Protocol Error 0x82 rather than Mosquitto's Malformed Packet 0x81"
     ),
+    "mqtt5_fixed_header_flags_malformed": (
+        "MQTT 5 section 2.1.3 requires invalid reserved Fixed Header flags "
+        "to be reported as Malformed Packet 0x81"
+    ),
 }
 
 
@@ -226,9 +232,16 @@ STANDARD_EXPECTATION_OVERRIDES = {
     for filename, packet, prefix in (
         ("PUBACK.json", "PUBACK", "40"),
         ("PUBREC.json", "PUBREC", "50"),
+        ("PUBREL.json", "PUBREL", "62"),
         ("PUBCOMP.json", "PUBCOMP", "70"),
     )
 }
+STANDARD_EXPECTATION_OVERRIDES["PUBREL.json"].update({
+    ("v5.0   PUBREL", f"{header} unsolicited", 1): expectation_override(
+        "E0 r1 82", "E0 r1 81", "mqtt5_fixed_header_flags_malformed",
+    )
+    for header in ("63", "64", "66", "6A")
+})
 STANDARD_EXPECTATION_OVERRIDES["PUBLISH.json"] = {
     ("v5.0   PUBLISH DISALLOWED PROPERTIES", case, 1):
         expectation_override(
@@ -279,7 +292,7 @@ STANDARD_EXPECTATION_OVERRIDES["UNSUBSCRIBE.json"] = {
         "A2 zero mid",
     )
 }
-EXPECTED_COMPLETE_SEQUENCE_COUNT = 683
+EXPECTED_COMPLETE_SEQUENCE_COUNT = 795
 EXPECTED_SUBSET_SEQUENCE_COUNTS = {
     "PUBLISH.json": 148,
     "SUBSCRIBE.json": 151,
@@ -289,7 +302,7 @@ EXPECTED_SUBSET_SEQUENCE_COUNT = sum(EXPECTED_SUBSET_SEQUENCE_COUNTS.values())
 EXPECTED_SEQUENCE_COUNT = (
     EXPECTED_COMPLETE_SEQUENCE_COUNT + EXPECTED_SUBSET_SEQUENCE_COUNT
 )
-EXPECTED_STANDARD_OVERRIDE_COUNT = 106
+EXPECTED_STANDARD_OVERRIDE_COUNT = 134
 MQTT_PACKETS_SHA256 = (
     "0024fcebd421a3286cea021ed64083f906d9b457004786b05f8a74abae5bfb37"
 )
