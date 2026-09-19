@@ -1896,18 +1896,19 @@ source-hash-locked adapter now executes every scenario in Mosquitto's complete
 `PUBACK.json`, `PUBREC.json`, `PUBREL.json`, `PUBCOMP.json`, `REGRESSION.json`,
 `SUBACK.json`, and `UNSUBACK.json` files: 949 upstream scenarios across MQTT
 3.1.1 and MQTT 5.
-It additionally runs 150 of 160 scenarios in the complete, hash-locked
-`PUBLISH.json`, 151 of 155 in `SUBSCRIBE.json`, and 100 of 108 in
-`UNSUBSCRIBE.json`, for 1,350 source-derived sequences total. The twenty-two
-exclusions are exact `(group, test)` identities rather than pattern skips:
-twenty use MQTT's optional rejection of
+It additionally runs 145 of 146 scenarios in the complete, hash-locked
+`CONNACK.json`, 150 of 160 in `PUBLISH.json`, 151 of 155 in `SUBSCRIBE.json`,
+and 100 of 108 in `UNSUBSCRIBE.json`, for 1,495 source-derived sequences total.
+The twenty-three exclusions are exact `(group, test)` identities rather than
+pattern skips: twenty use MQTT's optional rejection of
 U+0001/U+001F/U+007F/U+009F, two exercise Mosquitto's finite non-DUP QoS 2
-reuse tolerance instead of MQTT 5 section 4.3.3's repeat-PUBREC rule.
+reuse tolerance instead of MQTT 5 section 4.3.3's repeat-PUBREC rule, and one
+uses obsolete MQTT protocol level 3 outside netz's declared 3.1.1/5 scope.
 The entire upstream file hashes, exclusion identities, reason vocabulary, and
 per-file included counts are independently asserted, so upstream fixture
 additions or renamed exclusions fail closed.
 
-The gate also retains 165 upstream scenarios whose packets are portable but
+The gate also retains 170 upstream scenarios whose packets are portable but
 whose expected DISCONNECT reason conflicts with the MQTT 5 text. Each audited
 override names the exact `(file, group, test, action index)`, verifies the
 hash-locked source action still expects its original bytes, and substitutes one
@@ -1918,8 +1919,9 @@ PUBCOMP, and PUBLISH fixtures expect `0x82`. Four PUBREL reserved Fixed Header
 flag cases likewise retain the `MQTT-2.1.3-1` Malformed Packet classification.
 Four AUTH reserved-flag cases use the same rule, and one truncated AUTH
 variable header retains Malformed Packet `0x81`. Four DISCONNECT reserved-flag
-cases and 22 disallowed DISCONNECT Property cases follow the same classifications.
-Three PUBLISH Topic Name cases, nine fully
+cases, 22 disallowed DISCONNECT Property cases, and five invalid/truncated
+CONNACK header cases follow the same classifications. Three PUBLISH Topic Name
+cases, nine fully
 parsed SUBSCRIBE semantic cases, and four UNSUBSCRIBE cases covering an empty
 payload (`MQTT-3.10.3-2`), zero-length Topic Filters (`MQTT-4.7.3-1`), and
 Packet Identifier zero (`MQTT-2.2.1-3`) retain Protocol Error `0x82` where
@@ -1997,11 +1999,11 @@ zig build interop-mqtt-mosquitto-packet-sequences -Doptimize=ReleaseFast -- \
 ```
 
 The manifest pins SHA-256 hashes for all fourteen complete JSON inputs, the
-audited `PUBLISH.json`, `SUBSCRIBE.json`, and `UNSUBSCRIBE.json` subset sources,
-and the imported `mqtt_packets.py` generator, so a changed upstream fixture
-cannot silently reuse the recorded scenario count.
+audited `CONNACK.json`, `PUBLISH.json`, `SUBSCRIBE.json`, and `UNSUBSCRIBE.json`
+subset sources, and the imported `mqtt_packets.py` generator, so a changed
+upstream fixture cannot silently reuse the recorded scenario count.
 The adapter intentionally does not claim complete-file coverage for
-`PUBLISH.json`, `SUBSCRIBE.json`, or `UNSUBSCRIBE.json` yet.
+`CONNACK.json`, `PUBLISH.json`, `SUBSCRIBE.json`, or `UNSUBSCRIBE.json` yet.
 `PUBLISH.json`, `SUBSCRIBE.json`, and `UNSUBSCRIBE.json` additionally contain
 the explicitly enumerated configuration, optional-Unicode, QoS 2 reuse, and
 reason-code differences described above; all other scenarios in those
@@ -2063,9 +2065,10 @@ or plugins, so passing these vectors is not proxy evidence for the entire suite.
    validated broker-process RSS records; a current 64-connection run measured
    netz at 6,360 KiB versus Mosquitto at 3,896 KiB, narrowing but not closing
    the independent-peer memory gap.
-3. Expand the source-hash-locked gate beyond its current 1,350 upstream packet
+3. Expand the source-hash-locked gate beyond its current 1,495 upstream packet
    sequences, or add a broker process adapter capable of preserving the
    upstream harness's config/reload/persistence semantics. The 167 curated
-   scenarios, fourteen complete portable JSON files, audited 150/160
-   `PUBLISH.json`, 151/155 `SUBSCRIBE.json`, and 100/108 `UNSUBSCRIBE.json`
-   subsets still do not cover the full protocol/conformance suite.
+   scenarios, fourteen complete portable JSON files, audited 145/146
+   `CONNACK.json`, 150/160 `PUBLISH.json`, 151/155 `SUBSCRIBE.json`, and
+   100/108 `UNSUBSCRIBE.json` subsets still do not cover the full
+   protocol/conformance suite.

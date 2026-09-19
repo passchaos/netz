@@ -148,6 +148,8 @@ class SequenceLoadingTests(unittest.TestCase):
         self.assertEqual(
             sequences.SEQUENCE_SUBSET_FILES,
             {
+                "CONNACK.json":
+                    "307445b4773e219f4377b880e19678791ee70379f85a43c729b45af548fb9108",
                 "PUBLISH.json":
                     "a3b6a5d5b2cd44b70550ce17a03ff5607cc76e4f165ae1f1f6deb68eb7013f86",
                 "SUBSCRIBE.json":
@@ -164,14 +166,20 @@ class SequenceLoadingTests(unittest.TestCase):
         self.assertEqual(
             sequences.EXPECTED_SUBSET_SEQUENCE_COUNTS,
             {
+                "CONNACK.json": 145,
                 "PUBLISH.json": 150,
                 "SUBSCRIBE.json": 151,
                 "UNSUBSCRIBE.json": 100,
             },
         )
-        self.assertEqual(sequences.EXPECTED_SUBSET_SEQUENCE_COUNT, 401)
-        self.assertEqual(sequences.EXPECTED_SEQUENCE_COUNT, 1350)
-        self.assertEqual(sequences.EXPECTED_EXPECTATION_OVERRIDE_COUNT, 167)
+        self.assertEqual(sequences.EXPECTED_SUBSET_SEQUENCE_COUNT, 546)
+        self.assertEqual(sequences.EXPECTED_SEQUENCE_COUNT, 1495)
+        self.assertEqual(sequences.EXPECTED_EXPECTATION_OVERRIDE_COUNT, 172)
+        self.assertEqual(
+            sequences.SEQUENCE_EXCLUSIONS["CONNACK.json"],
+            {("v3.1.1 CONNACK", "issue 2163 v3"):
+                "unsupported_mqtt_3_1"},
+        )
         self.assertEqual(
             len(sequences.SEQUENCE_EXCLUSIONS["PUBLISH.json"]),
             10,
@@ -223,12 +231,14 @@ class SequenceLoadingTests(unittest.TestCase):
                 for reason in sequences.EXCLUSION_REASONS
             },
             {
+                "unsupported_mqtt_3_1": 1,
                 "mosquitto_qos2_reuse_limit": 2,
                 "optional_utf8_control_policy": 20,
             },
         )
         expected_override_counts = {
             "AUTH.json": 5,
+            "CONNACK.json": 5,
             "DISCONNECT.json": 27,
             "PUBACK.json": 24,
             "PUBREC.json": 24,
@@ -270,6 +280,16 @@ class SequenceLoadingTests(unittest.TestCase):
                 ("v5.0   AUTH", "F2", 1),
                 ("v5.0   AUTH", "F4", 1),
                 ("v5.0   AUTH", "F8", 1),
+            },
+        )
+        self.assertEqual(
+            set(sequences.EXPECTATION_OVERRIDES["CONNACK.json"]),
+            {
+                ("v5.0   CONNACK", "21", 1),
+                ("v5.0   CONNACK", "22", 1),
+                ("v5.0   CONNACK", "24", 1),
+                ("v5.0   CONNACK", "28", 1),
+                ("v5.0   CONNACK", "issue 2163 v5", 1),
             },
         )
         self.assertEqual(
@@ -422,7 +442,7 @@ class SequenceLoadingTests(unittest.TestCase):
                 "mqtt5_publish_protocol_error": 3,
                 "mqtt5_subscribe_protocol_error": 9,
                 "mqtt5_unsubscribe_protocol_error": 4,
-                "mqtt5_fixed_header_flags_malformed": 12,
+                "mqtt5_fixed_header_flags_malformed": 17,
                 "mqtt5_truncated_variable_header_malformed": 1,
                 "equivalent_connack_property_order": 2,
             },

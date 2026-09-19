@@ -58,6 +58,8 @@ SEQUENCE_FILES = {
         "593719885cb1fa474c252449c11f2f1183fa432ee389737dca45beca225ac1a0",
 }
 SEQUENCE_SUBSET_FILES = {
+    "CONNACK.json":
+        "307445b4773e219f4377b880e19678791ee70379f85a43c729b45af548fb9108",
     "PUBLISH.json":
         "a3b6a5d5b2cd44b70550ce17a03ff5607cc76e4f165ae1f1f6deb68eb7013f86",
     "SUBSCRIBE.json":
@@ -70,6 +72,10 @@ SEQUENCE_SUBSET_FILES = {
 # not a wildcard skip. The full-file hash plus exact group/test identity makes
 # an upstream addition, rename, or content change fail closed.
 EXCLUSION_REASONS = {
+    "unsupported_mqtt_3_1": (
+        "the scenario uses obsolete MQTT protocol level 3, outside netz's "
+        "declared MQTT 3.1.1 and MQTT 5 scope"
+    ),
     "mosquitto_qos2_reuse_limit": (
         "Mosquitto disconnects after its second pre-PUBREL non-DUP reuse; "
         "MQTT 5 section 4.3.3 requires PUBREC for every same-identifier "
@@ -81,6 +87,10 @@ EXCLUSION_REASONS = {
     ),
 }
 SEQUENCE_EXCLUSIONS = {
+    "CONNACK.json": {
+        ("v3.1.1 CONNACK", "issue 2163 v3"):
+            "unsupported_mqtt_3_1",
+    },
     "PUBLISH.json": {
         ("v3.1.1 PUBLISH", "34 QoS 2 Dup flow*3"):
             "mosquitto_qos2_reuse_limit",
@@ -251,6 +261,18 @@ EXPECTATION_OVERRIDES["AUTH.json"] = {
         for header in ("F1", "F2", "F4", "F8")
     },
 }
+EXPECTATION_OVERRIDES["CONNACK.json"] = {
+    ("v5.0   CONNACK", test, 1): expectation_override(
+        "E0 r1 82", "E0 r1 81", "mqtt5_fixed_header_flags_malformed",
+    )
+    for test in (
+        "21",
+        "22",
+        "24",
+        "28",
+        "issue 2163 v5",
+    )
+}
 EXPECTATION_OVERRIDES["PUBREL.json"].update({
     ("v5.0   PUBREL", f"{header} unsolicited", 1): expectation_override(
         "E0 r1 82", "E0 r1 81", "mqtt5_fixed_header_flags_malformed",
@@ -358,6 +380,7 @@ EXPECTATION_OVERRIDES["DISCONNECT.json"].update({
 })
 EXPECTED_COMPLETE_SEQUENCE_COUNT = 949
 EXPECTED_SUBSET_SEQUENCE_COUNTS = {
+    "CONNACK.json": 145,
     "PUBLISH.json": 150,
     "SUBSCRIBE.json": 151,
     "UNSUBSCRIBE.json": 100,
@@ -366,7 +389,7 @@ EXPECTED_SUBSET_SEQUENCE_COUNT = sum(EXPECTED_SUBSET_SEQUENCE_COUNTS.values())
 EXPECTED_SEQUENCE_COUNT = (
     EXPECTED_COMPLETE_SEQUENCE_COUNT + EXPECTED_SUBSET_SEQUENCE_COUNT
 )
-EXPECTED_EXPECTATION_OVERRIDE_COUNT = 167
+EXPECTED_EXPECTATION_OVERRIDE_COUNT = 172
 PACKET_SEQUENCE_BROKER_ARGS = (
     "--max-outgoing-inflight=20",
     "--max-packet-size=2000000",
