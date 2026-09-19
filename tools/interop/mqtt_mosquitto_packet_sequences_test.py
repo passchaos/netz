@@ -118,6 +118,7 @@ class SequenceLoadingTests(unittest.TestCase):
             set(sequences.SEQUENCE_FILES),
             {
                 "AUTH.json",
+                "DISCONNECT.json",
                 "FLOW.json",
                 "FORBIDDEN.json",
                 "OTHER.json",
@@ -135,6 +136,10 @@ class SequenceLoadingTests(unittest.TestCase):
         self.assertEqual(
             sequences.SEQUENCE_FILES["AUTH.json"],
             "e9591dd6236144f9d913d9cf2a167e2ed0aacc45f9e8ec1adb6a96031958b1a4",
+        )
+        self.assertEqual(
+            sequences.SEQUENCE_FILES["DISCONNECT.json"],
+            "7572c864a8aea807ab8122a28fa6721292ee367b19e6cbb2a6e76ccb2d21f3bd",
         )
         self.assertEqual(
             sequences.SEQUENCE_FILES["PUBREL.json"],
@@ -155,35 +160,27 @@ class SequenceLoadingTests(unittest.TestCase):
             set(sequences.SEQUENCE_EXCLUSIONS),
             set(sequences.SEQUENCE_SUBSET_FILES),
         )
-        self.assertEqual(sequences.EXPECTED_COMPLETE_SEQUENCE_COUNT, 809)
+        self.assertEqual(sequences.EXPECTED_COMPLETE_SEQUENCE_COUNT, 949)
         self.assertEqual(
             sequences.EXPECTED_SUBSET_SEQUENCE_COUNTS,
             {
-                "PUBLISH.json": 148,
+                "PUBLISH.json": 150,
                 "SUBSCRIBE.json": 151,
                 "UNSUBSCRIBE.json": 100,
             },
         )
-        self.assertEqual(sequences.EXPECTED_SUBSET_SEQUENCE_COUNT, 399)
-        self.assertEqual(sequences.EXPECTED_SEQUENCE_COUNT, 1208)
-        self.assertEqual(sequences.EXPECTED_STANDARD_OVERRIDE_COUNT, 139)
+        self.assertEqual(sequences.EXPECTED_SUBSET_SEQUENCE_COUNT, 401)
+        self.assertEqual(sequences.EXPECTED_SEQUENCE_COUNT, 1350)
+        self.assertEqual(sequences.EXPECTED_EXPECTATION_OVERRIDE_COUNT, 167)
         self.assertEqual(
             len(sequences.SEQUENCE_EXCLUSIONS["PUBLISH.json"]),
-            12,
+            10,
         )
         self.assertEqual(
             set(sequences.SEQUENCE_EXCLUSIONS["PUBLISH.json"]),
             {
                 ("v3.1.1 PUBLISH", "34 QoS 2 Dup flow*3"),
                 ("v5.0   PUBLISH", "34 QoS 2 Dup flow*3"),
-                (
-                    "v5.0   PUBLISH ALLOWED PROPERTIES",
-                    "maximum packet size",
-                ),
-                (
-                    "v5.0   PUBLISH ALLOWED PROPERTIES",
-                    "topic alias > max topic alias",
-                ),
                 ("v3.1.1 PUBLISH", "30 topic with U+0001"),
                 ("v3.1.1 PUBLISH", "30 topic with U+001F"),
                 ("v3.1.1 PUBLISH", "30 topic with U+007F"),
@@ -228,16 +225,16 @@ class SequenceLoadingTests(unittest.TestCase):
             {
                 "mosquitto_qos2_reuse_limit": 2,
                 "optional_utf8_control_policy": 20,
-                "mosquitto_fixture_configuration": 2,
             },
         )
         expected_override_counts = {
             "AUTH.json": 5,
+            "DISCONNECT.json": 27,
             "PUBACK.json": 24,
             "PUBREC.json": 24,
             "PUBREL.json": 28,
             "PUBCOMP.json": 24,
-            "PUBLISH.json": 21,
+            "PUBLISH.json": 22,
             "SUBSCRIBE.json": 9,
             "UNSUBSCRIBE.json": 4,
         }
@@ -245,7 +242,7 @@ class SequenceLoadingTests(unittest.TestCase):
             {
                 filename: len(overrides)
                 for filename, overrides in
-                    sequences.STANDARD_EXPECTATION_OVERRIDES.items()
+                    sequences.EXPECTATION_OVERRIDES.items()
             },
             expected_override_counts,
         )
@@ -255,7 +252,7 @@ class SequenceLoadingTests(unittest.TestCase):
             ("PUBCOMP.json", "PUBCOMP", "70"),
         ):
             self.assertEqual(
-                set(sequences.STANDARD_EXPECTATION_OVERRIDES[filename]),
+                set(sequences.EXPECTATION_OVERRIDES[filename]),
                 {
                     (
                         f"v5.0   {packet} DISALLOWED PROPERTIES",
@@ -266,7 +263,7 @@ class SequenceLoadingTests(unittest.TestCase):
                 },
             )
         self.assertEqual(
-            set(sequences.STANDARD_EXPECTATION_OVERRIDES["AUTH.json"]),
+            set(sequences.EXPECTATION_OVERRIDES["AUTH.json"]),
             {
                 ("v5.0   AUTH", "F0 long", 1),
                 ("v5.0   AUTH", "F1", 1),
@@ -276,7 +273,7 @@ class SequenceLoadingTests(unittest.TestCase):
             },
         )
         self.assertEqual(
-            set(sequences.STANDARD_EXPECTATION_OVERRIDES["PUBREL.json"]),
+            set(sequences.EXPECTATION_OVERRIDES["PUBREL.json"]),
             {
                 (
                     "v5.0   PUBREL DISALLOWED PROPERTIES",
@@ -290,11 +287,16 @@ class SequenceLoadingTests(unittest.TestCase):
             },
         )
         self.assertEqual(
-            set(sequences.STANDARD_EXPECTATION_OVERRIDES["PUBLISH.json"]),
+            set(sequences.EXPECTATION_OVERRIDES["PUBLISH.json"]),
             {
                 ("v5.0   PUBLISH DISALLOWED PROPERTIES", case, 1)
                 for case in sequences.PUBLISH_DISALLOWED_PROPERTY_CASES
             } | {
+                (
+                    "v5.0   PUBLISH ALLOWED PROPERTIES",
+                    "maximum packet size",
+                    1,
+                ),
                 ("v5.0   PUBLISH", "30 topic 0", 1),
                 (
                     "v5.0   PUBLISH",
@@ -309,7 +311,7 @@ class SequenceLoadingTests(unittest.TestCase):
             },
         )
         self.assertEqual(
-            set(sequences.STANDARD_EXPECTATION_OVERRIDES["SUBSCRIBE.json"]),
+            set(sequences.EXPECTATION_OVERRIDES["SUBSCRIBE.json"]),
             {
                 (
                     "v5.0   SUBSCRIBE",
@@ -336,7 +338,7 @@ class SequenceLoadingTests(unittest.TestCase):
         )
         self.assertEqual(
             set(
-                sequences.STANDARD_EXPECTATION_OVERRIDES[
+                sequences.EXPECTATION_OVERRIDES[
                     "UNSUBSCRIBE.json"
                 ]
             ),
@@ -351,32 +353,86 @@ class SequenceLoadingTests(unittest.TestCase):
                 ("v5.0   UNSUBSCRIBE", "A2 zero mid", 1),
             },
         )
+        self.assertEqual(
+            set(sequences.EXPECTATION_OVERRIDES["DISCONNECT.json"]),
+            {
+                (
+                    "v5.0   DISCONNECT DISALLOWED PROPERTIES",
+                    f"E0 with {case}",
+                    1,
+                )
+                for case in sequences.DISCONNECT_DISALLOWED_PROPERTY_CASES
+            } | {
+                (
+                    "v5.0   DISCONNECT",
+                    "E0 non-zero session expiry",
+                    1,
+                ),
+                *{
+                    (
+                        "v5.0   DISCONNECT",
+                        f"{header} [MQTT-3.14.1-1]",
+                        1,
+                    )
+                    for header in ("E1", "E2", "E4", "E8")
+                },
+            },
+        )
+        self.assertEqual(
+            sequences.EXPECTATION_OVERRIDES["PUBLISH.json"][
+                (
+                    "v5.0   PUBLISH ALLOWED PROPERTIES",
+                    "maximum packet size",
+                    1,
+                )
+            ],
+            (
+                "20 r14 00000b 22 H10 27 H30 84 80 21 00 14",
+                "20 r14 00000B 21 H20 27 L2000000 22 H10",
+                "equivalent_connack_property_order",
+            ),
+        )
+        self.assertEqual(
+            sequences.EXPECTATION_OVERRIDES["DISCONNECT.json"][
+                (
+                    "v5.0   DISCONNECT",
+                    "E0 non-zero session expiry",
+                    1,
+                )
+            ],
+            (
+                "20 r14 00000B 22 H10 27 L2000000 21 H20",
+                "20 r14 00000B 21 H20 27 L2000000 22 H10",
+                "equivalent_connack_property_order",
+            ),
+        )
         override_reasons = [
             override[2]
             for overrides in
-                sequences.STANDARD_EXPECTATION_OVERRIDES.values()
+                sequences.EXPECTATION_OVERRIDES.values()
             for override in overrides.values()
         ]
         self.assertEqual(
             {
                 reason: override_reasons.count(reason)
-                for reason in sequences.STANDARD_OVERRIDE_REASONS
+                for reason in sequences.EXPECTATION_OVERRIDE_REASONS
             },
             {
-                "mqtt5_property_context_malformed": 114,
+                "mqtt5_property_context_malformed": 136,
                 "mqtt5_publish_protocol_error": 3,
                 "mqtt5_subscribe_protocol_error": 9,
                 "mqtt5_unsubscribe_protocol_error": 4,
-                "mqtt5_fixed_header_flags_malformed": 8,
+                "mqtt5_fixed_header_flags_malformed": 12,
                 "mqtt5_truncated_variable_header_malformed": 1,
+                "equivalent_connack_property_order": 2,
             },
         )
         for filename, overrides in (
-            sequences.STANDARD_EXPECTATION_OVERRIDES.items()
+            sequences.EXPECTATION_OVERRIDES.items()
         ):
             for identity, (source, expected, reason) in overrides.items():
                 self.assertEqual(identity[2], 1, filename)
-                self.assertIn(reason, sequences.STANDARD_OVERRIDE_REASONS)
+                self.assertIn(reason, sequences.EXPECTATION_OVERRIDE_REASONS)
                 if reason in {
                     "mqtt5_property_context_malformed",
                     "mqtt5_fixed_header_flags_malformed",
@@ -384,9 +440,17 @@ class SequenceLoadingTests(unittest.TestCase):
                 }:
                     self.assertEqual((source, expected),
                                      ("E0 r1 82", "E0 r1 81"))
-                else:
+                elif reason != "equivalent_connack_property_order":
                     self.assertEqual((source, expected),
                                      ("E0 r1 81", "E0 r1 82"))
+        self.assertEqual(
+            sequences.PACKET_SEQUENCE_BROKER_ARGS,
+            (
+                "--max-outgoing-inflight=20",
+                "--max-packet-size=2000000",
+                "--topic-alias-maximum=10",
+            ),
+        )
         self.assertEqual(len(sequences.MQTT_PACKETS_SHA256), 64)
         int(sequences.MQTT_PACKETS_SHA256, 16)
         for digest in sequences.SEQUENCE_FILES.values():

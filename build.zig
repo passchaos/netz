@@ -321,7 +321,7 @@ pub fn build(b: *std.Build) void {
     if (b.args) |args| mqtt_packet_sequences.addArgs(args);
     const mqtt_packet_sequences_step = b.step(
         "interop-mqtt-mosquitto-packet-sequences",
-        "Run hash-locked Mosquitto sequences with audited standards overrides",
+        "Run hash-locked Mosquitto sequences with audited exact expectations",
     );
     mqtt_packet_sequences_step.dependOn(&mqtt_packet_sequences.step);
 

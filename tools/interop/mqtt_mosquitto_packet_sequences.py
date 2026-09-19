@@ -30,6 +30,8 @@ from mqtt_mosquitto_vectors import (
 SEQUENCE_FILES = {
     "AUTH.json":
         "e9591dd6236144f9d913d9cf2a167e2ed0aacc45f9e8ec1adb6a96031958b1a4",
+    "DISCONNECT.json":
+        "7572c864a8aea807ab8122a28fa6721292ee367b19e6cbb2a6e76ccb2d21f3bd",
     "FORBIDDEN.json":
         "9ef4419f01bb7edb907b8846de498883fbd58eebc5fbd41bf2782e0fb14c83ad",
     "FLOW.json":
@@ -77,10 +79,6 @@ EXCLUSION_REASONS = {
         "MQTT permits receivers to reject U+0001/U+001F/U+007F/U+009F, "
         "while netz intentionally accepts these valid UTF-8 code points"
     ),
-    "mosquitto_fixture_configuration": (
-        "the expected bytes depend on Mosquitto's advertised packet-size or "
-        "topic-alias limits rather than portable MQTT behavior"
-    ),
 }
 SEQUENCE_EXCLUSIONS = {
     "PUBLISH.json": {
@@ -88,12 +86,6 @@ SEQUENCE_EXCLUSIONS = {
             "mosquitto_qos2_reuse_limit",
         ("v5.0   PUBLISH", "34 QoS 2 Dup flow*3"):
             "mosquitto_qos2_reuse_limit",
-        ("v5.0   PUBLISH ALLOWED PROPERTIES", "maximum packet size"):
-            "mosquitto_fixture_configuration",
-        (
-            "v5.0   PUBLISH ALLOWED PROPERTIES",
-            "topic alias > max topic alias",
-        ): "mosquitto_fixture_configuration",
         ("v3.1.1 PUBLISH", "30 topic with U+0001"):
             "optional_utf8_control_policy",
         ("v3.1.1 PUBLISH", "30 topic with U+001F"):
@@ -192,7 +184,7 @@ PUBLISH_DISALLOWED_PROPERTY_CASES = (
     "receive-maximum (two byte integer)",
     "topic-alias-maximum (two byte integer)",
 )
-STANDARD_OVERRIDE_REASONS = {
+EXPECTATION_OVERRIDE_REASONS = {
     "mqtt5_property_context_malformed": (
         "MQTT 5 section 2.2.2.2 requires 0x81 when a known Property "
         "Identifier is not valid for its Control Packet type"
@@ -217,6 +209,10 @@ STANDARD_OVERRIDE_REASONS = {
         "MQTT 5 classifies a truncated variable header as Malformed Packet "
         "0x81 rather than Protocol Error 0x82"
     ),
+    "equivalent_connack_property_order": (
+        "the configured CONNACK contains the same properties and values as "
+        "the fixture but emits them in netz's deterministic property order"
+    ),
 }
 
 
@@ -226,7 +222,7 @@ def expectation_override(
     return source, expected, reason
 
 
-STANDARD_EXPECTATION_OVERRIDES = {
+EXPECTATION_OVERRIDES = {
     filename: {
         (f"v5.0   {packet} DISALLOWED PROPERTIES",
          f"{prefix} with {case}", 1): expectation_override(
@@ -242,7 +238,7 @@ STANDARD_EXPECTATION_OVERRIDES = {
         ("PUBCOMP.json", "PUBCOMP", "70"),
     )
 }
-STANDARD_EXPECTATION_OVERRIDES["AUTH.json"] = {
+EXPECTATION_OVERRIDES["AUTH.json"] = {
     ("v5.0   AUTH", "F0 long", 1): expectation_override(
         "E0 r1 82", "E0 r1 81",
         "mqtt5_truncated_variable_header_malformed",
@@ -255,13 +251,13 @@ STANDARD_EXPECTATION_OVERRIDES["AUTH.json"] = {
         for header in ("F1", "F2", "F4", "F8")
     },
 }
-STANDARD_EXPECTATION_OVERRIDES["PUBREL.json"].update({
+EXPECTATION_OVERRIDES["PUBREL.json"].update({
     ("v5.0   PUBREL", f"{header} unsolicited", 1): expectation_override(
         "E0 r1 82", "E0 r1 81", "mqtt5_fixed_header_flags_malformed",
     )
     for header in ("63", "64", "66", "6A")
 })
-STANDARD_EXPECTATION_OVERRIDES["PUBLISH.json"] = {
+EXPECTATION_OVERRIDES["PUBLISH.json"] = {
     ("v5.0   PUBLISH DISALLOWED PROPERTIES", case, 1):
         expectation_override(
             "E0 r1 82", "E0 r1 81",
@@ -269,7 +265,16 @@ STANDARD_EXPECTATION_OVERRIDES["PUBLISH.json"] = {
         )
     for case in PUBLISH_DISALLOWED_PROPERTY_CASES
 }
-STANDARD_EXPECTATION_OVERRIDES["PUBLISH.json"].update({
+EXPECTATION_OVERRIDES["PUBLISH.json"].update({
+    (
+        "v5.0   PUBLISH ALLOWED PROPERTIES",
+        "maximum packet size",
+        1,
+    ): expectation_override(
+        "20 r14 00000b 22 H10 27 H30 84 80 21 00 14",
+        "20 r14 00000B 21 H20 27 L2000000 22 H10",
+        "equivalent_connack_property_order",
+    ),
     ("v5.0   PUBLISH", "30 topic 0", 1): expectation_override(
         "E0 r1 81", "E0 r1 82", "mqtt5_publish_protocol_error",
     ),
@@ -282,7 +287,7 @@ STANDARD_EXPECTATION_OVERRIDES["PUBLISH.json"].update({
             "E0 r1 81", "E0 r1 82", "mqtt5_publish_protocol_error",
         ),
 })
-STANDARD_EXPECTATION_OVERRIDES["SUBSCRIBE.json"] = {
+EXPECTATION_OVERRIDES["SUBSCRIBE.json"] = {
     (group, test, 1): expectation_override(
         "E0 r1 81", "E0 r1 82", "mqtt5_subscribe_protocol_error",
     )
@@ -300,7 +305,7 @@ STANDARD_EXPECTATION_OVERRIDES["SUBSCRIBE.json"] = {
         ("v5.0   SUBSCRIBE", "82 mid 0"),
     )
 }
-STANDARD_EXPECTATION_OVERRIDES["UNSUBSCRIBE.json"] = {
+EXPECTATION_OVERRIDES["UNSUBSCRIBE.json"] = {
     ("v5.0   UNSUBSCRIBE", test, 1): expectation_override(
         "E0 r1 81", "E0 r1 82", "mqtt5_unsubscribe_protocol_error",
     )
@@ -311,9 +316,49 @@ STANDARD_EXPECTATION_OVERRIDES["UNSUBSCRIBE.json"] = {
         "A2 zero mid",
     )
 }
-EXPECTED_COMPLETE_SEQUENCE_COUNT = 809
+DISCONNECT_DISALLOWED_PROPERTY_CASES = tuple(
+    case
+    for case in ACK_DISALLOWED_PROPERTY_CASES
+    if case not in {
+        "session-expiry-interval (four byte integer)",
+        "server-reference (UTF-8 string)",
+    }
+)
+EXPECTATION_OVERRIDES["DISCONNECT.json"] = {
+    (
+        "v5.0   DISCONNECT DISALLOWED PROPERTIES",
+        f"E0 with {case}",
+        1,
+    ): expectation_override(
+        "E0 r1 82", "E0 r1 81", "mqtt5_property_context_malformed",
+    )
+    for case in DISCONNECT_DISALLOWED_PROPERTY_CASES
+}
+EXPECTATION_OVERRIDES["DISCONNECT.json"].update({
+    (
+        "v5.0   DISCONNECT",
+        "E0 non-zero session expiry",
+        1,
+    ): expectation_override(
+        "20 r14 00000B 22 H10 27 L2000000 21 H20",
+        "20 r14 00000B 21 H20 27 L2000000 22 H10",
+        "equivalent_connack_property_order",
+    ),
+    **{
+        (
+            "v5.0   DISCONNECT",
+            f"{header} [MQTT-3.14.1-1]",
+            1,
+        ): expectation_override(
+            "E0 r1 82", "E0 r1 81",
+            "mqtt5_fixed_header_flags_malformed",
+        )
+        for header in ("E1", "E2", "E4", "E8")
+    },
+})
+EXPECTED_COMPLETE_SEQUENCE_COUNT = 949
 EXPECTED_SUBSET_SEQUENCE_COUNTS = {
-    "PUBLISH.json": 148,
+    "PUBLISH.json": 150,
     "SUBSCRIBE.json": 151,
     "UNSUBSCRIBE.json": 100,
 }
@@ -321,7 +366,12 @@ EXPECTED_SUBSET_SEQUENCE_COUNT = sum(EXPECTED_SUBSET_SEQUENCE_COUNTS.values())
 EXPECTED_SEQUENCE_COUNT = (
     EXPECTED_COMPLETE_SEQUENCE_COUNT + EXPECTED_SUBSET_SEQUENCE_COUNT
 )
-EXPECTED_STANDARD_OVERRIDE_COUNT = 139
+EXPECTED_EXPECTATION_OVERRIDE_COUNT = 167
+PACKET_SEQUENCE_BROKER_ARGS = (
+    "--max-outgoing-inflight=20",
+    "--max-packet-size=2000000",
+    "--topic-alias-maximum=10",
+)
 MQTT_PACKETS_SHA256 = (
     "0024fcebd421a3286cea021ed64083f906d9b457004786b05f8a74abae5bfb37"
 )
@@ -388,7 +438,7 @@ def load_sequences(
     if selected_files is None:
         selected_files = SEQUENCE_FILES | SEQUENCE_SUBSET_FILES
         excluded_tests = SEQUENCE_EXCLUSIONS
-        expectation_overrides = STANDARD_EXPECTATION_OVERRIDES
+        expectation_overrides = EXPECTATION_OVERRIDES
     elif excluded_tests is None:
         excluded_tests = {}
     if expectation_overrides is None:
@@ -446,7 +496,7 @@ def load_sequences(
                     if override is None:
                         continue
                     source_payload, expected_payload, reason = override
-                    if reason not in STANDARD_OVERRIDE_REASONS:
+                    if reason not in EXPECTATION_OVERRIDE_REASONS:
                         raise ValueError(
                             f"{filename} {override_identity} has unknown "
                             f"override reason: {reason}"
@@ -633,17 +683,17 @@ def main() -> None:
             "every audited subset file must have one exclusion manifest"
         )
     selected_files = set(SEQUENCE_FILES) | set(SEQUENCE_SUBSET_FILES)
-    if not set(STANDARD_EXPECTATION_OVERRIDES) <= selected_files:
+    if not set(EXPECTATION_OVERRIDES) <= selected_files:
         raise AssertionError(
-            "standard expectation overrides must name selected files"
+            "expectation overrides must name selected files"
         )
     override_count = sum(
         len(overrides)
-        for overrides in STANDARD_EXPECTATION_OVERRIDES.values()
+        for overrides in EXPECTATION_OVERRIDES.values()
     )
-    if override_count != EXPECTED_STANDARD_OVERRIDE_COUNT:
+    if override_count != EXPECTED_EXPECTATION_OVERRIDE_COUNT:
         raise AssertionError(
-            f"expected {EXPECTED_STANDARD_OVERRIDE_COUNT} standard "
+            f"expected {EXPECTED_EXPECTATION_OVERRIDE_COUNT} audited "
             f"expectation overrides, found {override_count}"
         )
     verify_source_hash(
@@ -655,9 +705,9 @@ def main() -> None:
 
     data_root = args.mosquitto_test_root / "broker" / "data"
     complete_overrides = {
-        filename: STANDARD_EXPECTATION_OVERRIDES[filename]
+        filename: EXPECTATION_OVERRIDES[filename]
         for filename in SEQUENCE_FILES
-        if filename in STANDARD_EXPECTATION_OVERRIDES
+        if filename in EXPECTATION_OVERRIDES
     }
     complete_sequences = load_sequences(
         data_root,
@@ -670,9 +720,9 @@ def main() -> None:
             f"sequences, found {len(complete_sequences)}"
         )
     subset_overrides = {
-        filename: STANDARD_EXPECTATION_OVERRIDES[filename]
+        filename: EXPECTATION_OVERRIDES[filename]
         for filename in SEQUENCE_SUBSET_FILES
-        if filename in STANDARD_EXPECTATION_OVERRIDES
+        if filename in EXPECTATION_OVERRIDES
     }
     subset_sequences = load_sequences(
         data_root,
@@ -713,6 +763,7 @@ def main() -> None:
         args.broker,
         connections=len(sequences) + helper_connections + 1,
         ignore_errors=True,
+        extra_args=PACKET_SEQUENCE_BROKER_ARGS,
     ) as broker:
         for index, sequence in enumerate(sequences):
             run_sequence(
@@ -740,7 +791,7 @@ def main() -> None:
         f"({EXPECTED_COMPLETE_SEQUENCE_COUNT} from complete files "
         f"{filenames}; {EXPECTED_SUBSET_SEQUENCE_COUNT} from audited "
         f"subsets {subset_summary}; "
-        f"{EXPECTED_STANDARD_OVERRIDE_COUNT} exact standard expectation "
+        f"{EXPECTED_EXPECTATION_OVERRIDE_COUNT} exact audited expectation "
         f"overrides)"
     )
 
