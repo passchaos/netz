@@ -1422,10 +1422,9 @@ discarded after the complete response packet is applied, so they cannot later
 inflate failed-validation statistics. Deferring that cleanup until packet end
 still permits several valid PATH_RESPONSE frames in one packet.
 
-This is deliberately not yet described as a complete HTTP/3 multi-connection
-server. The low-level ownership and routing primitive is now present, but the
-HTTP/3 now exposes an owning admission lifecycle plus a bounded handshake
-supervisor. It generates unique per-connection server CIDs, assigns inboxes,
+HTTP/3 now exposes an owning multi-connection admission lifecycle plus a
+bounded handshake supervisor. It generates unique per-connection server CIDs,
+assigns inboxes,
 starts cancelable workers, reports completions without blocking the socket
 owner, unregisters failures, and returns stable heap-backed sessions whose
 successful promotion cannot invalidate dispatcher pointers. Admission has
@@ -1434,14 +1433,36 @@ caps, releasing total capacity when a live connection is removed. The supervisor
 single-owner receive API interleaves completion polling, endpoint timers, and
 UDP routing. Shared endpoint sends are serialized across handshake/connection
 workers, including ECN socket state, GSO fallback state, and deterministic
-fault-injection queues. WebTransport exposes a split handshake/admission object that can
+fault-injection queues. `EndpointServer.serveHandlersUntil` adds the aggregate
+application convenience layer above that single-owner loop. It assembles HEAD,
+DATA, trailers, and FIN into bounded owned requests; runs at most
+`max_handler_tasks` callbacks concurrently; copies every returned response
+through a caller-selectable thread-safe allocator immediately after the
+callback returns; and returns response head, packet-sized DATA, and trailers to the
+endpoint owner for transactional nonblocking sends. `max_pending_requests`,
+`max_request_body_bytes`, and optional `stop_after_responses` bound retained
+work and one-shot server lifetime.
+Callbacks receive a borrowed `OwnedEndpointRequest` pointer with exact
+connection/stream identity and owned decoded fields/body/trailers; returned
+slices may borrow that request or longer-lived context, but not callback stack
+locals.
+Handler failures either report and reject only that stream with
+`H3_REQUEST_REJECTED` or stop according to policy; a persistent-connection
+regression proves a later request succeeds after such a rejection. `zig build
+interop-http3-quic-go-handlers -Doptimize=ReleaseFast` pins quic-go v0.59.0
+and opens two independent QUIC connections for each of v1 and v2. Both
+handlers must enter a barrier before either returns, and quic-go verifies both
+echoed bodies and response trailers. This is application-handler concurrency
+evidence rather than handshake admission alone. Streaming requests, Extended
+CONNECT, and protocol adapters continue to use `serveUntil` or
+`serveTransportUntil`, so mutable session state never crosses worker threads.
+WebTransport exposes a split handshake/admission object that can
 be promoted before CONNECT polling. Its endpoint server now retains stable
 pending and accepted sessions around HTTP/3's sole-receiver transport loop,
 dispatches CONNECT, stream, DATAGRAM and Capsule events, and shares HTTP/3's
-handshake expiry policy. The remaining convenience work is a callback/task
-supervisor above this typed event loop. HTTP/3 now
-has an endpoint server that stores stable promoted sessions, routes packets and
-timers, polls requests without per-connection socket reads, and explicitly
+handshake expiry policy. HTTP/3's endpoint server stores stable promoted
+sessions, routes packets and timers, polls requests without per-connection
+socket reads, and explicitly
 removes connection routes before destroying session state. Request polling now
 resumes after the last productive connection via a stable-handle cursor, so a
 busy connection cannot starve another ready request even if the session map

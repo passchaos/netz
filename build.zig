@@ -754,6 +754,17 @@ pub fn build(b: *std.Build) void {
         "Run bidirectional HTTP/3 body, trailer, cancellation, and informational interop with quic-go",
     );
     http3_quic_go_step.dependOn(&http3_quic_go.step);
+    const http3_quic_go_handlers = b.addSystemCommand(
+        &.{"tools/interop/http3_quic_go_handlers.sh"},
+    );
+    http3_quic_go_handlers.addArtifactArg(http3_quic_go_server);
+    const http3_quic_go_handlers_step = b.step(
+        "interop-http3-quic-go-handlers",
+        "Run bounded HTTP/3 handler supervisor interop with concurrent quic-go clients",
+    );
+    http3_quic_go_handlers_step.dependOn(
+        &http3_quic_go_handlers.step,
+    );
     const http3_quic_go_bench = b.addSystemCommand(
         &.{"tools/interop/http3_quic_go.sh"},
     );

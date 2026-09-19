@@ -457,8 +457,13 @@ test "HTTP/3 endpoint server exposes bounded callback loop API" {
         "receiveTransportWithTimeout",
     ));
     try std.testing.expect(@hasDecl(runtime.EndpointServer, "serveUntil"));
+    try std.testing.expect(@hasDecl(
+        runtime.EndpointServer,
+        "serveHandlersUntil",
+    ));
     try std.testing.expect(@hasDecl(runtime, "EndpointServeEvent"));
     try std.testing.expect(@hasDecl(runtime, "EndpointServeOptions"));
+    try std.testing.expect(@hasDecl(runtime, "EndpointHandlerServeOptions"));
 }
 
 test "HTTP/3 endpoint batch receive retains requests beyond caller storage" {

@@ -24,6 +24,7 @@ pub fn main(init: std.process.Init) !void {
     var version: netz.quic.Version = .version_1;
     var version_set = false;
     var informational = false;
+    var handler_supervisor = false;
     for (args[2..]) |arg| {
         if (std.mem.eql(u8, arg, "--version=2") and !version_set) {
             version = .version_2;
@@ -32,10 +33,15 @@ pub fn main(init: std.process.Init) !void {
             !informational)
         {
             informational = true;
+        } else if (std.mem.eql(u8, arg, "--handler-supervisor") and
+            !handler_supervisor)
+        {
+            handler_supervisor = true;
         } else {
             return error.InvalidArgument;
         }
     }
+    if (informational and handler_supervisor) return error.InvalidArgument;
 
     const allocator = std.heap.c_allocator;
     var backend = try netz.runtime.Backend.init(allocator);
@@ -97,6 +103,84 @@ pub fn main(init: std.process.Init) !void {
         "netz HTTP/3 quic-go interop server listening on {f}\n",
         .{server.address()},
     );
+
+    if (handler_supervisor) {
+        var endpoint = try netz.http3.runtime.EndpointServer.init(&server, .{
+            .max_pending_handshakes = 2,
+            .max_connections = 2,
+            .inbox_capacity = 8,
+        });
+        defer endpoint.deinit();
+        const Context = struct {
+            const headers = [_]netz.http3.Qpack.HeaderField{.{
+                .name = "x-netz-handler",
+                .value = "concurrent",
+            }};
+            const trailers = [_]netz.http3.Qpack.HeaderField{.{
+                .name = "x-netz-handler",
+                .value = "complete",
+            }};
+
+            io: std.Io,
+            entered: std.atomic.Value(usize) = .init(0),
+            both_entered: std.Io.Event = .unset,
+
+            fn handle(
+                self: *@This(),
+                request: *const netz.http3.runtime.OwnedEndpointRequest,
+            ) netz.http3.runtime.Error!netz.http3.Response {
+                if (!std.mem.eql(u8, request.method, "POST") or
+                    request.body.len == 0)
+                {
+                    return error.InvalidHeader;
+                }
+                if (self.entered.fetchAdd(1, .acq_rel) + 1 == 2) {
+                    self.both_entered.set(self.io);
+                }
+                self.both_entered.waitTimeout(self.io, .{
+                    .duration = .{
+                        .clock = .awake,
+                        .raw = .fromSeconds(5),
+                    },
+                }) catch return error.InvalidHeader;
+                return .{
+                    .status = 200,
+                    .headers = &headers,
+                    .body = request.body,
+                    .trailers = &trailers,
+                };
+            }
+        };
+        var context = Context{ .io = io };
+        var shutdown: std.Io.Event = .unset;
+        try endpoint.serveHandlersUntil(
+            Context,
+            &context,
+            Context.handle,
+            .{
+                .shutdown = &shutdown,
+                .supported_versions = if (version == .version_2)
+                    &.{netz.quic.Version.version_2.wireValue()}
+                else
+                    &.{netz.quic.Version.version_1.wireValue()},
+                .max_handler_tasks = 2,
+                .max_pending_requests = 4,
+                .max_request_body_bytes = 4096,
+                .stop_after_responses = 2,
+                .poll_interval = .{
+                    .clock = .awake,
+                    .raw = .fromMilliseconds(1),
+                },
+                .error_policy = .stop,
+            },
+        );
+        try std.Io.sleep(io, .fromMilliseconds(250), .awake);
+        std.debug.print(
+            "netz HTTP/3 endpoint handler supervisor served quic-go: version={d} connections=2 handlers=2 concurrent=true bodies=2 trailers=2 server_io=zio-std-io\n",
+            .{if (version == .version_2) @as(u8, 2) else 1},
+        );
+        return;
+    }
 
     var session = try server.accept();
     defer session.deinit();

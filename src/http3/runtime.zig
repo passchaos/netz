@@ -1,4 +1,5 @@
 const std = @import("std");
+const RuntimeModule = @This();
 const round_robin = @import("../internal/round_robin.zig");
 const deadline_policy = @import("../internal/deadline.zig");
 const http3 = @import("mod.zig");
@@ -17,6 +18,8 @@ const development_request_buffer =
 const development_server_peer =
     @import("runtime/development/server_peer/state.zig");
 const handshake_client_pool = @import("runtime/handshake_client_pool.zig");
+const endpoint_handler_supervisor =
+    @import("runtime/endpoint_handler_supervisor.zig");
 const runtime_error = @import("runtime/error.zig");
 const server_response = @import("runtime/server/response.zig");
 const body_sender = @import("runtime/send/body.zig");
@@ -3868,6 +3871,13 @@ pub const HandshakeAdmissionOptions = struct {
     handshake_timeout_ms: u32 = 0,
 };
 
+pub const EndpointHandlerServeOptions = endpoint_handler_supervisor.Options;
+pub const EndpointHandlerErrorStage = endpoint_handler_supervisor.ErrorStage;
+pub const EndpointHandlerErrorPolicy = endpoint_handler_supervisor.ErrorPolicy;
+pub const EndpointHandlerErrorEvent = endpoint_handler_supervisor.ErrorEvent;
+pub const EndpointHandlerErrorObserver = endpoint_handler_supervisor.ErrorObserver;
+pub const OwnedEndpointRequest = endpoint_handler_supervisor.OwnedRequest;
+
 fn handshakeAdmissionDeadlineNs(
     io: std.Io,
     configured_ms: u32,
@@ -4604,6 +4614,23 @@ pub const EndpointServer = struct {
         return self.processTransportEvent(event);
     }
 
+    /// Advance the shared transport once before polling buffered request
+    /// events. Endpoint adapters use this after a ready request cannot return
+    /// receive credit or cancellation because pacing/flow control must first
+    /// progress; it preserves the single UDP receive owner without spinning
+    /// on the same application event.
+    pub fn receiveTransportProgressOnce(
+        self: *EndpointServer,
+        supported_versions: []const u32,
+        poll_interval: std.Io.Clock.Duration,
+    ) HandshakeAdmissionError!?EndpointServerEvent {
+        const event = (try self.receiveTransportOnce(
+            supported_versions,
+            poll_interval,
+        )) orelse return null;
+        return self.processTransportEvent(event);
+    }
+
     /// Receive one application event without renewing an outer operation's
     /// absolute deadline while processing unrelated packets and timers.
     pub fn receiveWithDeadline(
@@ -4721,6 +4748,40 @@ pub const EndpointServer = struct {
                 handler,
             );
         }
+    }
+
+    /// Run bounded application handlers for complete owned requests while
+    /// retaining sole QUIC/QPACK ownership on this endpoint task. Handler
+    /// results are copied into an owned completion before request storage is
+    /// released, then submitted nonblockingly as transport credit permits.
+    ///
+    /// `context` may be entered concurrently by up to
+    /// `options.max_handler_tasks` workers and must synchronize mutable state.
+    /// The request pointer is callback-borrowed and must not be retained.
+    /// Response slices must remain valid through the handler return boundary;
+    /// the supervisor then copies them with the configured thread-safe
+    /// allocator, so they must not refer to handler stack locals. Borrowing the
+    /// request is safe because it remains retained through response delivery.
+    /// Streaming requests and Extended CONNECT protocols should continue to
+    /// use `serveUntil`, whose callbacks retain direct session access.
+    pub fn serveHandlersUntil(
+        self: *EndpointServer,
+        comptime HandlerContext: type,
+        context: *HandlerContext,
+        comptime handler: *const fn (
+            *HandlerContext,
+            *const OwnedEndpointRequest,
+        ) Error!http3.Response,
+        options: EndpointHandlerServeOptions,
+    ) anyerror!void {
+        return endpoint_handler_supervisor.serveUntil(
+            RuntimeModule,
+            self,
+            HandlerContext,
+            context,
+            handler,
+            options,
+        );
     }
 
     fn dispatchServeEvent(
@@ -32302,6 +32363,7 @@ test {
     _ = @import("runtime/development/server_peer/state_tests.zig");
     _ = @import("runtime/endpoint_dispatcher_tests.zig");
     _ = @import("runtime/endpoint_server_tests.zig");
+    _ = @import("runtime/endpoint_handler_supervisor_tests.zig");
     _ = @import("runtime/handshake_server_serve_tests.zig");
     _ = @import("runtime/cancellation_tests.zig");
     _ = @import("runtime/informational_tests.zig");
