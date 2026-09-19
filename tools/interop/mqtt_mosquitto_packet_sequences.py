@@ -54,6 +54,8 @@ SEQUENCE_FILES = {
 SEQUENCE_SUBSET_FILES = {
     "PUBLISH.json":
         "a3b6a5d5b2cd44b70550ce17a03ff5607cc76e4f165ae1f1f6deb68eb7013f86",
+    "SUBSCRIBE.json":
+        "f3feba6c933d43dc7be5397a42afd616e5f4a21824cf5289c986166ec6c0e60c",
 }
 
 # Each exclusion is an audited divergence from the selected upstream fixture,
@@ -69,10 +71,6 @@ EXCLUSION_REASONS = {
         "MQTT permits receivers to reject U+0001/U+001F/U+007F/U+009F, "
         "while netz intentionally accepts these valid UTF-8 code points"
     ),
-    "mosquitto_reason_classification": (
-        "Mosquitto returns Malformed Packet 0x81 where netz retains the "
-        "Protocol Error 0x82 classification for semantic Topic Name faults"
-    ),
     "mosquitto_fixture_configuration": (
         "the expected bytes depend on Mosquitto's advertised packet-size or "
         "topic-alias limits rather than portable MQTT behavior"
@@ -84,12 +82,6 @@ SEQUENCE_EXCLUSIONS = {
             "mosquitto_qos2_reuse_limit",
         ("v5.0   PUBLISH", "34 QoS 2 Dup flow*3"):
             "mosquitto_qos2_reuse_limit",
-        ("v5.0   PUBLISH", "30 topic 0"):
-            "mosquitto_reason_classification",
-        ("v5.0   PUBLISH", "30 topic with + [MQTT-3.3.2-2]"):
-            "mosquitto_reason_classification",
-        ("v5.0   PUBLISH", "30 topic with # [MQTT-3.3.2-2]"):
-            "mosquitto_reason_classification",
         ("v5.0   PUBLISH ALLOWED PROPERTIES", "maximum packet size"):
             "mosquitto_fixture_configuration",
         (
@@ -113,12 +105,155 @@ SEQUENCE_EXCLUSIONS = {
         ("v5.0   PUBLISH", "30 topic with U+009F"):
             "optional_utf8_control_policy",
     },
+    "SUBSCRIBE.json": {
+        ("v3.1.1 SUBSCRIBE", "82 topic with U+0001"):
+            "optional_utf8_control_policy",
+        ("v3.1.1 SUBSCRIBE", "82 topic with U+001F"):
+            "optional_utf8_control_policy",
+        ("v3.1.1 SUBSCRIBE", "82 topic with U+007F"):
+            "optional_utf8_control_policy",
+        ("v3.1.1 SUBSCRIBE", "82 topic with U+009F"):
+            "optional_utf8_control_policy",
+    },
+}
+
+# MQTT 5 section 2.2.2.2 requires a known Property Identifier used in a
+# Control Packet where it is not valid to be reported as Malformed Packet
+# 0x81. Mosquitto's selected fixtures expect Protocol Error 0x82 instead.
+# These finite names retain the upstream scenario and replace only its exact
+# source-locked recv action; a fixture rename or byte change fails closed.
+ACK_DISALLOWED_PROPERTY_CASES = (
+    "payload-format-indicator (byte)",
+    "request-problem-information (byte)",
+    "maximum-qos (byte)",
+    "retain-available (byte)",
+    "wildcard-subscription-available (byte)",
+    "subscription-identifier-available (byte)",
+    "shared-subscription-available (byte)",
+    "message-expiry-interval (four byte integer)",
+    "session-expiry-interval (four byte integer)",
+    "will-delay-interval (four byte integer)",
+    "maximum-packet-size (four byte integer)",
+    "content-type (UTF-8 string)",
+    "response-topic (UTF-8 string)",
+    "assigned-client-identifier (UTF-8 string)",
+    "authentication-method (UTF-8 string)",
+    "response-information (UTF-8 string)",
+    "server-reference (UTF-8 string)",
+    "correlation-data (binary data)",
+    "authentication-data (binary data)",
+    "subscription-identifier (variable byte integer)",
+    "server-keep-alive (two byte integer)",
+    "receive-maximum (two byte integer)",
+    "topic-alias-maximum (two byte integer)",
+    "topic-alias (two byte integer)",
+)
+PUBLISH_DISALLOWED_PROPERTY_CASES = (
+    "reason-string property",
+    "request-problem-information (byte)",
+    "maximum-qos (byte)",
+    "retain-available (byte)",
+    "wildcard-subscription-available (byte)",
+    "subscription-identifier-available (byte)",
+    "shared-subscription-available (byte)",
+    "session-expiry-interval (four byte integer)",
+    "will-delay-interval (four byte integer)",
+    "maximum-packet-size (four byte integer)",
+    "assigned-client-identifier (UTF-8 string)",
+    "authentication-method (UTF-8 string)",
+    "response-information (UTF-8 string)",
+    "server-reference (UTF-8 string)",
+    "authentication-data (binary data)",
+    "server-keep-alive (two byte integer)",
+    "receive-maximum (two byte integer)",
+    "topic-alias-maximum (two byte integer)",
+)
+STANDARD_OVERRIDE_REASONS = {
+    "mqtt5_property_context_malformed": (
+        "MQTT 5 section 2.2.2.2 requires 0x81 when a known Property "
+        "Identifier is not valid for its Control Packet type"
+    ),
+    "mqtt5_publish_protocol_error": (
+        "MQTT 5 classifies a parsed invalid Topic Name as Protocol Error "
+        "0x82 rather than Mosquitto's Malformed Packet 0x81"
+    ),
+    "mqtt5_subscribe_protocol_error": (
+        "MQTT 5 explicitly classifies the parsed SUBSCRIBE semantic fault "
+        "as Protocol Error 0x82 rather than Malformed Packet 0x81"
+    ),
+}
+
+
+def expectation_override(
+    source: str, expected: str, reason: str
+) -> tuple[str, str, str]:
+    return source, expected, reason
+
+
+STANDARD_EXPECTATION_OVERRIDES = {
+    filename: {
+        (f"v5.0   {packet} DISALLOWED PROPERTIES",
+         f"{prefix} with {case}", 1): expectation_override(
+            "E0 r1 82", "E0 r1 81",
+            "mqtt5_property_context_malformed",
+        )
+        for case in ACK_DISALLOWED_PROPERTY_CASES
+    }
+    for filename, packet, prefix in (
+        ("PUBACK.json", "PUBACK", "40"),
+        ("PUBREC.json", "PUBREC", "50"),
+        ("PUBCOMP.json", "PUBCOMP", "70"),
+    )
+}
+STANDARD_EXPECTATION_OVERRIDES["PUBLISH.json"] = {
+    ("v5.0   PUBLISH DISALLOWED PROPERTIES", case, 1):
+        expectation_override(
+            "E0 r1 82", "E0 r1 81",
+            "mqtt5_property_context_malformed",
+        )
+    for case in PUBLISH_DISALLOWED_PROPERTY_CASES
+}
+STANDARD_EXPECTATION_OVERRIDES["PUBLISH.json"].update({
+    ("v5.0   PUBLISH", "30 topic 0", 1): expectation_override(
+        "E0 r1 81", "E0 r1 82", "mqtt5_publish_protocol_error",
+    ),
+    ("v5.0   PUBLISH", "30 topic with + [MQTT-3.3.2-2]", 1):
+        expectation_override(
+            "E0 r1 81", "E0 r1 82", "mqtt5_publish_protocol_error",
+        ),
+    ("v5.0   PUBLISH", "30 topic with # [MQTT-3.3.2-2]", 1):
+        expectation_override(
+            "E0 r1 81", "E0 r1 82", "mqtt5_publish_protocol_error",
+        ),
+})
+STANDARD_EXPECTATION_OVERRIDES["SUBSCRIBE.json"] = {
+    (group, test, 1): expectation_override(
+        "E0 r1 81", "E0 r1 82", "mqtt5_subscribe_protocol_error",
+    )
+    for group, test in (
+        ("v5.0   SUBSCRIBE",
+         "82 QoS 3 [MQTT-3-8.3-2] (no topic or qos)"),
+        ("v5.0   SUBSCRIBE", "82 QoS 3 [MQTT-3-8.3-4]"),
+        ("v5.0   SUBSCRIBE",
+         "82 QoS 0 retain handling=3 0x30 [MQTT-3-8.3-4]"),
+        ("v5.0   SUBSCRIBE", "82 short 3"),
+        ("v5.0   SUBSCRIBE", "82 single topic len 0"),
+        ("v5.0   SUBSCRIBE", "82 multiple topic 1 len 0"),
+        ("v5.0   SUBSCRIBE", "82 multiple topic 2 len 0"),
+        ("v5.0   SUBSCRIBE", "82 multiple topic 1,2 len 0"),
+        ("v5.0   SUBSCRIBE", "82 mid 0"),
+    )
 }
 EXPECTED_COMPLETE_SEQUENCE_COUNT = 683
-EXPECTED_SUBSET_SEQUENCE_COUNT = 145
+EXPECTED_SUBSET_SEQUENCE_COUNTS = {
+    "PUBLISH.json": 148,
+    "SUBSCRIBE.json": 151,
+}
+EXPECTED_SUBSET_SEQUENCE_COUNT = sum(EXPECTED_SUBSET_SEQUENCE_COUNTS.values())
 EXPECTED_SEQUENCE_COUNT = (
     EXPECTED_COMPLETE_SEQUENCE_COUNT + EXPECTED_SUBSET_SEQUENCE_COUNT
 )
+EXPECTED_STANDARD_OVERRIDE_COUNT = 102
 MQTT_PACKETS_SHA256 = (
     "0024fcebd421a3286cea021ed64083f906d9b457004786b05f8a74abae5bfb37"
 )
@@ -178,12 +313,30 @@ def load_sequences(
     data_root: Path,
     selected_files: dict[str, str] | None = None,
     excluded_tests: dict[str, dict[tuple[str, str], str]] | None = None,
+    expectation_overrides: dict[
+        str, dict[tuple[str, str, int], tuple[str, str, str]]
+    ] | None = None,
 ) -> list[dict]:
     if selected_files is None:
         selected_files = SEQUENCE_FILES | SEQUENCE_SUBSET_FILES
         excluded_tests = SEQUENCE_EXCLUSIONS
+        expectation_overrides = STANDARD_EXPECTATION_OVERRIDES
     elif excluded_tests is None:
         excluded_tests = {}
+    if expectation_overrides is None:
+        expectation_overrides = {}
+    unknown_exclusion_files = set(excluded_tests) - set(selected_files)
+    if unknown_exclusion_files:
+        raise ValueError(
+            f"exclusions name unselected files: "
+            f"{sorted(unknown_exclusion_files)}"
+        )
+    unknown_override_files = set(expectation_overrides) - set(selected_files)
+    if unknown_override_files:
+        raise ValueError(
+            f"expectation overrides name unselected files: "
+            f"{sorted(unknown_override_files)}"
+        )
     sequences: list[dict] = []
     for filename, expected_hash in selected_files.items():
         path = data_root / filename
@@ -191,7 +344,9 @@ def load_sequences(
         verify_source_hash(path, expected_hash)
         groups = json.loads(source)
         file_exclusions = excluded_tests.get(filename, {})
+        file_overrides = expectation_overrides.get(filename, {})
         found_exclusions: set[tuple[str, str]] = set()
+        found_overrides: set[tuple[str, str, int]] = set()
         for group in groups:
             if group.get("disable", False):
                 continue
@@ -209,12 +364,36 @@ def load_sequences(
                         )
                     found_exclusions.add(identity)
                     continue
-                actions = test.get("msgs", [])
+                actions = [dict(action) for action in test.get("msgs", [])]
                 action_types = {action["type"] for action in actions}
                 if not action_types <= {"send", "recv", "external_publish"}:
                     raise ValueError(
                         f"{filename} {test['name']} is not a portable raw sequence"
                     )
+                for action_index, action in enumerate(actions):
+                    override_identity = (
+                        group["group"], test["name"], action_index,
+                    )
+                    override = file_overrides.get(override_identity)
+                    if override is None:
+                        continue
+                    source_payload, expected_payload, reason = override
+                    if reason not in STANDARD_OVERRIDE_REASONS:
+                        raise ValueError(
+                            f"{filename} {override_identity} has unknown "
+                            f"override reason: {reason}"
+                        )
+                    if (
+                        action["type"] != "recv"
+                        or action["payload"] != source_payload
+                    ):
+                        raise ValueError(
+                            f"{filename} override source drift for "
+                            f"{override_identity}: expected recv "
+                            f"{source_payload!r}, found {action!r}"
+                        )
+                    action["payload"] = expected_payload
+                    found_overrides.add(override_identity)
                 sequences.append({
                     "source": filename,
                     "name": f"{group['group']} {test['name']}",
@@ -230,6 +409,13 @@ def load_sequences(
             missing = sorted(expected_exclusions - found_exclusions)
             raise ValueError(
                 f"{filename} exclusions not found in source: {missing}"
+            )
+        expected_overrides = set(file_overrides)
+        if found_overrides != expected_overrides:
+            missing = sorted(expected_overrides - found_overrides)
+            raise ValueError(
+                f"{filename} expectation overrides not found in source: "
+                f"{missing}"
             )
     return sequences
 
@@ -378,6 +564,20 @@ def main() -> None:
         raise AssertionError(
             "every audited subset file must have one exclusion manifest"
         )
+    selected_files = set(SEQUENCE_FILES) | set(SEQUENCE_SUBSET_FILES)
+    if not set(STANDARD_EXPECTATION_OVERRIDES) <= selected_files:
+        raise AssertionError(
+            "standard expectation overrides must name selected files"
+        )
+    override_count = sum(
+        len(overrides)
+        for overrides in STANDARD_EXPECTATION_OVERRIDES.values()
+    )
+    if override_count != EXPECTED_STANDARD_OVERRIDE_COUNT:
+        raise AssertionError(
+            f"expected {EXPECTED_STANDARD_OVERRIDE_COUNT} standard "
+            f"expectation overrides, found {override_count}"
+        )
     verify_source_hash(
         args.mosquitto_test_root / "mqtt_packets.py",
         MQTT_PACKETS_SHA256,
@@ -386,21 +586,48 @@ def main() -> None:
     import mqtt_packets  # type: ignore
 
     data_root = args.mosquitto_test_root / "broker" / "data"
-    complete_sequences = load_sequences(data_root, SEQUENCE_FILES)
+    complete_overrides = {
+        filename: STANDARD_EXPECTATION_OVERRIDES[filename]
+        for filename in SEQUENCE_FILES
+        if filename in STANDARD_EXPECTATION_OVERRIDES
+    }
+    complete_sequences = load_sequences(
+        data_root,
+        SEQUENCE_FILES,
+        expectation_overrides=complete_overrides,
+    )
     if len(complete_sequences) != EXPECTED_COMPLETE_SEQUENCE_COUNT:
         raise AssertionError(
             f"expected {EXPECTED_COMPLETE_SEQUENCE_COUNT} complete-file "
             f"sequences, found {len(complete_sequences)}"
         )
+    subset_overrides = {
+        filename: STANDARD_EXPECTATION_OVERRIDES[filename]
+        for filename in SEQUENCE_SUBSET_FILES
+        if filename in STANDARD_EXPECTATION_OVERRIDES
+    }
     subset_sequences = load_sequences(
         data_root,
         SEQUENCE_SUBSET_FILES,
         SEQUENCE_EXCLUSIONS,
+        subset_overrides,
     )
     if len(subset_sequences) != EXPECTED_SUBSET_SEQUENCE_COUNT:
         raise AssertionError(
             f"expected {EXPECTED_SUBSET_SEQUENCE_COUNT} audited-subset "
             f"sequences, found {len(subset_sequences)}"
+        )
+    subset_counts = {
+        filename: sum(
+            sequence["source"] == filename
+            for sequence in subset_sequences
+        )
+        for filename in SEQUENCE_SUBSET_FILES
+    }
+    if subset_counts != EXPECTED_SUBSET_SEQUENCE_COUNTS:
+        raise AssertionError(
+            f"expected audited-subset counts "
+            f"{EXPECTED_SUBSET_SEQUENCE_COUNTS}, found {subset_counts}"
         )
     sequences = complete_sequences + subset_sequences
     if len(sequences) != EXPECTED_SEQUENCE_COUNT:
@@ -435,13 +662,18 @@ def main() -> None:
             healthy.sendall(mqtt_packets.gen_disconnect(proto_ver=5))
 
     filenames = ", ".join(sorted(SEQUENCE_FILES))
-    subset_filenames = ", ".join(sorted(SEQUENCE_SUBSET_FILES))
+    subset_summary = ", ".join(
+        f"{filename}={EXPECTED_SUBSET_SEQUENCE_COUNTS[filename]}"
+        for filename in sorted(SEQUENCE_SUBSET_FILES)
+    )
     print(
         f"Mosquitto packet-sequence JSON gate passed: "
         f"{EXPECTED_SEQUENCE_COUNT} upstream scenarios "
         f"({EXPECTED_COMPLETE_SEQUENCE_COUNT} from complete files "
         f"{filenames}; {EXPECTED_SUBSET_SEQUENCE_COUNT} from audited "
-        f"subsets {subset_filenames})"
+        f"subsets {subset_summary}; "
+        f"{EXPECTED_STANDARD_OVERRIDE_COUNT} exact standard expectation "
+        f"overrides)"
     )
 
 

@@ -35,9 +35,11 @@ pub const Error = wire.Error || error{
     InvalidQoS,
     InvalidProperty,
     InvalidPropertyIdentifier,
+    MalformedPropertyContext,
     InvalidReasonCode,
     InvalidTopic,
     InvalidSubscription,
+    MalformedSubscriptionOptions,
     InvalidClientId,
     InvalidPacketIdentifier,
     IntegerOverflow,
@@ -1016,6 +1018,22 @@ fn validatePropertiesFor(context: PropertyContext, properties: []const Property)
     try validateAuthenticationPropertiesForContext(context, properties);
 }
 
+/// Validate properties decoded from the wire. MQTT 5 section 2.2.2.2 makes
+/// a known Property Identifier in a Control Packet where it is not valid a
+/// Malformed Packet. Local write APIs retain `InvalidProperty` for the same
+/// caller mistake, while parsers preserve the peer-facing reason category.
+fn validateParsedPropertiesFor(
+    context: PropertyContext,
+    properties: []const Property,
+) Error!void {
+    for (properties) |property| {
+        if (!propertyAllowedInContext(context, propertyId(property))) {
+            return error.MalformedPropertyContext;
+        }
+    }
+    try validatePropertiesFor(context, properties);
+}
+
 fn validateAuthenticationPropertiesForContext(context: PropertyContext, properties: []const Property) Error!void {
     switch (context) {
         .connect, .connack, .auth => {},
@@ -1174,13 +1192,15 @@ pub const Connect = struct {
         const keep_alive = try cursor.readInt(u16, .big);
         const props = if (protocol == .v5) try parseProperties(allocator, &cursor) else try allocator.alloc(Property, 0);
         errdefer allocator.free(props);
-        if (protocol == .v5) try validatePropertiesFor(.connect, props);
+        if (protocol == .v5) try validateParsedPropertiesFor(.connect, props);
         const client_id = try readUtf8(&cursor);
         var will: ?LastWill = null;
         if ((connect_flags & 0x04) != 0) {
             const will_props = if (protocol == .v5) try parseProperties(allocator, &cursor) else try allocator.alloc(Property, 0);
             errdefer allocator.free(will_props);
-            if (protocol == .v5) try validatePropertiesFor(.will, will_props);
+            if (protocol == .v5) {
+                try validateParsedPropertiesFor(.will, will_props);
+            }
             const topic = try readUtf8(&cursor);
             try validateTopicName(topic);
             const payload = try readBinary(&cursor);
@@ -1313,7 +1333,7 @@ pub const ConnAck = struct {
         try validateConnAckSessionPresent((ack_flags & 0x01) != 0, reason_code);
         const props = if (protocol == .v5) try parseProperties(allocator, &cursor) else try allocator.alloc(Property, 0);
         errdefer allocator.free(props);
-        if (protocol == .v5) try validatePropertiesFor(.connack, props);
+        if (protocol == .v5) try validateParsedPropertiesFor(.connack, props);
         if (cursor.remaining() != 0) return error.InvalidPacketType;
         return .{
             .session_present = (ack_flags & 0x01) != 0,
@@ -1413,7 +1433,7 @@ pub const Publish = struct {
         };
         const props = if (protocol == .v5) try parseProperties(allocator, &cursor) else try allocator.alloc(Property, 0);
         errdefer allocator.free(props);
-        if (protocol == .v5) try validatePropertiesFor(.publish, props);
+        if (protocol == .v5) try validateParsedPropertiesFor(.publish, props);
         if (topic.len == 0) {
             if (protocol != .v5 or topicAlias(props) == null) return error.InvalidTopic;
         } else try validateTopicName(topic);
@@ -1471,7 +1491,10 @@ pub const AckPacket = struct {
         try validateAckReasonCode(fixed.packet_type, reason_code);
         const props = if (!cursor.eof()) try parseProperties(allocator, &cursor) else try allocator.alloc(Property, 0);
         errdefer allocator.free(props);
-        try validateAckProperties(fixed.packet_type, props);
+        // The packet-type switch above establishes the ACK context. Apply
+        // peer-facing Property validation here so a known Property Identifier
+        // used in the wrong Control Packet remains Malformed Packet.
+        try validateParsedPropertiesFor(.ack, props);
         if (!cursor.eof()) return error.InvalidPacketType;
         return .{
             .packet_type = fixed.packet_type,
@@ -1636,15 +1659,15 @@ pub const Subscribe = struct {
         if (packet_id == 0) return error.InvalidPacketIdentifier;
         const props = if (protocol == .v5) try parseProperties(allocator, &cursor) else try allocator.alloc(Property, 0);
         errdefer allocator.free(props);
-        if (protocol == .v5) try validatePropertiesFor(.subscribe, props);
+        if (protocol == .v5) try validateParsedPropertiesFor(.subscribe, props);
 
         var subs: std.ArrayList(Subscription) = .empty;
         errdefer subs.deinit(allocator);
         while (!cursor.eof()) {
             const topic_filter = try readUtf8(&cursor);
-            try validateTopicFilter(topic_filter);
             const options = try cursor.readByte();
-            try validateSubscriptionOptions(protocol, options);
+            try validateTopicFilter(topic_filter);
+            try validateParsedSubscriptionOptions(protocol, options);
             try validateSharedSubscriptionOptions(protocol, topic_filter, options);
             try subs.append(allocator, .{
                 .topic_filter = topic_filter,
@@ -1741,7 +1764,7 @@ pub const SubAck = struct {
         if (packet_id == 0) return error.InvalidPacketIdentifier;
         const props = if (protocol == .v5) try parseProperties(allocator, &cursor) else try allocator.alloc(Property, 0);
         errdefer allocator.free(props);
-        if (protocol == .v5) try validatePropertiesFor(.suback, props);
+        if (protocol == .v5) try validateParsedPropertiesFor(.suback, props);
         const reason_codes = try allocator.dupe(u8, cursor.buf[cursor.pos..]);
         errdefer allocator.free(reason_codes);
         for (reason_codes) |code| try validateSubAckReason(protocol, code);
@@ -1867,7 +1890,9 @@ pub const Unsubscribe = struct {
         if (packet_id == 0) return error.InvalidPacketIdentifier;
         const props = if (protocol == .v5) try parseProperties(allocator, &cursor) else try allocator.alloc(Property, 0);
         errdefer allocator.free(props);
-        if (protocol == .v5) try validatePropertiesFor(.unsubscribe, props);
+        if (protocol == .v5) {
+            try validateParsedPropertiesFor(.unsubscribe, props);
+        }
 
         var filters: std.ArrayList([]const u8) = .empty;
         errdefer filters.deinit(allocator);
@@ -1956,7 +1981,7 @@ pub const UnsubAck = struct {
         }
         const props = try parseProperties(allocator, &cursor);
         errdefer allocator.free(props);
-        try validatePropertiesFor(.ack, props);
+        try validateParsedPropertiesFor(.ack, props);
         const reason_codes = try allocator.dupe(u8, cursor.buf[cursor.pos..]);
         errdefer allocator.free(reason_codes);
         for (reason_codes) |code| try validateUnsubAckReason(code);
@@ -2100,7 +2125,9 @@ pub const Disconnect = struct {
         if (protocol == .v5) try validateDisconnectReason(reason_code);
         const props = if (protocol == .v5 and !cursor.eof()) try parseProperties(allocator, &cursor) else try allocator.alloc(Property, 0);
         errdefer allocator.free(props);
-        if (protocol == .v5) try validatePropertiesFor(.disconnect, props);
+        if (protocol == .v5) {
+            try validateParsedPropertiesFor(.disconnect, props);
+        }
         if (!cursor.eof()) return error.InvalidPacketType;
         return .{ .reason_code = reason_code, .properties = props };
     }
@@ -2200,7 +2227,7 @@ pub const Auth = struct {
         try validateAuthReason(reason_code);
         const props = try parseProperties(allocator, &cursor);
         errdefer allocator.free(props);
-        try validateAuthProperties(props);
+        try validateParsedPropertiesFor(.auth, props);
         if (!cursor.eof()) return error.InvalidPacketType;
         return .{ .reason_code = reason_code, .properties = props };
     }
@@ -2288,6 +2315,28 @@ fn validateSubscriptionOptions(protocol: ProtocolVersion, options: u8) Error!voi
         },
         .v5 => {
             if (((options >> 4) & 0x03) == 3) return error.InvalidSubscription;
+        },
+    }
+}
+
+fn validateParsedSubscriptionOptions(
+    protocol: ProtocolVersion,
+    options: u8,
+) Error!void {
+    if ((options & 0xc0) != 0) {
+        return error.MalformedSubscriptionOptions;
+    }
+    const qos_bits: u2 = @truncate(options & 0x03);
+    switch (protocol) {
+        .v3_1_1 => {
+            if ((options & 0xfc) != 0 or qos_bits == 3) {
+                return error.MalformedSubscriptionOptions;
+            }
+        },
+        .v5 => {
+            if (qos_bits == 3 or ((options >> 4) & 0x03) == 3) {
+                return error.InvalidSubscription;
+            }
         },
     }
 }
@@ -3731,7 +3780,10 @@ test "MQTT v5 packet-specific properties are validated" {
         .header_len = 0,
     }).write(&invalid_connect, allocator);
     try invalid_connect.appendSlice(allocator, connect_variable.items);
-    try std.testing.expectError(error.InvalidProperty, Connect.parse(allocator, invalid_connect.items));
+    try std.testing.expectError(
+        error.MalformedPropertyContext,
+        Connect.parse(allocator, invalid_connect.items),
+    );
 
     var invalid_suback: std.ArrayList(u8) = .empty;
     defer invalid_suback.deinit(allocator);
@@ -3747,7 +3799,10 @@ test "MQTT v5 packet-specific properties are validated" {
         .header_len = 0,
     }).write(&invalid_suback, allocator);
     try invalid_suback.appendSlice(allocator, suback_variable.items);
-    try std.testing.expectError(error.InvalidProperty, SubAck.parse(allocator, .v5, invalid_suback.items));
+    try std.testing.expectError(
+        error.MalformedPropertyContext,
+        SubAck.parse(allocator, .v5, invalid_suback.items),
+    );
 
     var duplicate_subscribe: std.ArrayList(u8) = .empty;
     defer duplicate_subscribe.deinit(allocator);
@@ -4153,7 +4208,37 @@ test "MQTT subscribe and suback controls" {
         .header_len = 0,
     }).write(&invalid_v3_options, allocator);
     try invalid_v3_options.appendSlice(allocator, invalid_v3_variable.items);
-    try std.testing.expectError(error.InvalidSubscription, Subscribe.parse(allocator, .v3_1_1, invalid_v3_options.items));
+    try std.testing.expectError(error.MalformedSubscriptionOptions, Subscribe.parse(allocator, .v3_1_1, invalid_v3_options.items));
+
+    for ([_]u8{ 0x40, 0x80, 0xf0 }) |options| {
+        const malformed = [_]u8{
+            0x82, 0x07, 0x00, 0x0f, 0x00, 0x00, 0x01, 'p', options,
+        };
+        try std.testing.expectError(
+            error.MalformedSubscriptionOptions,
+            Subscribe.parse(allocator, .v5, &malformed),
+        );
+    }
+    try std.testing.expectError(
+        error.InvalidSubscription,
+        Subscribe.parse(
+            allocator,
+            .v5,
+            &.{ 0x82, 0x07, 0x00, 0x0f, 0x00, 0x00, 0x01, 'p', 0x30 },
+        ),
+    );
+
+    // A complete UTF-8 Topic Filter still needs its Subscription Options
+    // byte. Read the whole subscription tuple before applying semantic Topic
+    // Filter checks so structural truncation remains a Malformed Packet.
+    try std.testing.expectError(
+        error.BufferTooShort,
+        Subscribe.parse(
+            allocator,
+            .v5,
+            &.{ 0x82, 0x06, 0x00, 0x0f, 0x00, 0x00, 0x01, 'p' },
+        ),
+    );
 
     var invalid_shared_no_local: std.ArrayList(u8) = .empty;
     defer invalid_shared_no_local.deinit(allocator);

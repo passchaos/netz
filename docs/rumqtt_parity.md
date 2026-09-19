@@ -1894,17 +1894,29 @@ source-hash-locked adapter now executes every scenario in Mosquitto's complete
 `FLOW.json`, `FORBIDDEN.json`, `OTHER.json`, `PINGREQ.json`, `PINGRESP.json`,
 `PUBACK.json`, `PUBREC.json`, `PUBCOMP.json`, `REGRESSION.json`, `SUBACK.json`,
 and `UNSUBACK.json` files: 683 upstream scenarios across MQTT 3.1.1 and MQTT 5.
-It additionally runs 145 of the 160 scenarios in the complete, hash-locked
-`PUBLISH.json`, for 828 source-derived sequences total. The fifteen exclusions
-are exact `(group, test)` identities rather than pattern skips, and each maps
-to one of four documented reasons: eight use MQTT's optional rejection of
-U+0001/U+001F/U+007F/U+009F; two exercise Mosquitto's finite non-DUP QoS 2
-reuse tolerance instead of MQTT 5 section 4.3.3's repeat-PUBREC rule; three
-expect Mosquitto's `0x81` where netz retains `0x82` for semantic Topic Name
-violations; and two depend on Mosquitto's configured Maximum Packet Size or
-Topic Alias Maximum. The entire upstream file hash, exclusion identities,
-reason vocabulary, and included count are independently asserted, so upstream
-fixture additions or renamed exclusions fail closed.
+It additionally runs 148 of 160 scenarios in the complete, hash-locked
+`PUBLISH.json` and 151 of 155 in `SUBSCRIBE.json`, for 982 source-derived
+sequences total. The sixteen exclusions are exact `(group, test)` identities
+rather than pattern skips: twelve use MQTT's optional rejection of
+U+0001/U+001F/U+007F/U+009F, two exercise Mosquitto's finite non-DUP QoS 2
+reuse tolerance instead of MQTT 5 section 4.3.3's repeat-PUBREC rule, and two
+depend on Mosquitto's configured Maximum Packet Size or Topic Alias Maximum.
+The entire upstream file hashes, exclusion identities, reason vocabulary, and
+per-file included counts are independently asserted, so upstream fixture
+additions or renamed exclusions fail closed.
+
+The gate also retains 102 upstream scenarios whose packets are portable but
+whose expected DISCONNECT reason conflicts with the MQTT 5 text. Each standard
+override names the exact `(file, group, test, action index)`, verifies the
+hash-locked source action still expects its original bytes, and substitutes one
+exact expected packet before the normal socket comparison. Ninety cover section
+2.2.2.2: a known Property Identifier used in a Control Packet where it is not
+valid is Malformed Packet `0x81`, while Mosquitto's PUBACK, PUBREC, PUBCOMP,
+and PUBLISH fixtures expect `0x82`. Three PUBLISH Topic Name cases
+and nine fully parsed SUBSCRIBE semantic cases retain Protocol Error `0x82`
+where Mosquitto expects `0x81`. Thus these are still executed byte-level
+scenarios, not exclusions or permissive comparisons. The source bytes,
+replacement bytes, identities, reasons, and aggregate count are all locked.
 The adapter preserves the upstream payload DSL, group/test inheritance,
 explicit response bytes, connection-liveness expectations, and MQTT 3.1.1
 helper publications with full QoS 0/1/2 handshakes; it rejects other
@@ -1951,6 +1963,18 @@ their packets cannot interleave. Finally,
 inbound QoS 2 retains the first Application Message for an identifier until
 PUBREL: every later same-identifier PUBLISH receives PUBREC regardless of DUP,
 but conflicting bytes cannot replace or duplicate the original delivery.
+The SUBSCRIBE audit additionally corrected the parser's reason boundary. A
+well-formed Property Identifier used outside its allowed Control Packet context
+now has a distinct wire-parse error and produces Malformed Packet `0x81` across
+CONNECT/Will/CONNACK/PUBLISH/ACK/SUBSCRIBE/SUBACK/UNSUBSCRIBE/UNSUBACK/
+DISCONNECT/AUTH parsing, while local encoder APIs retain their existing
+`InvalidProperty` contract. A complete Topic Filter missing its following
+Subscription Options byte is likewise malformed. MQTT 3.1.1 reserved
+Subscription Options and QoS value 3, plus MQTT 5 reserved bits 6/7, map to
+`0x81`; parsed MQTT 5 Maximum QoS 3, Retain Handling 3, an empty subscription
+payload, empty filters, and Packet Identifier zero remain Protocol Error
+`0x82`. A real broker test verifies the `0x81`/`0x82` split over two independent
+connections.
 Run it against the audited Mosquitto `5cd25465` checkout with:
 
 ```sh
@@ -1959,20 +1983,22 @@ zig build interop-mqtt-mosquitto-packet-sequences -Doptimize=ReleaseFast -- \
 ```
 
 The manifest pins SHA-256 hashes for all eleven complete JSON inputs, the
-audited `PUBLISH.json` subset source, and the imported `mqtt_packets.py`
+audited `PUBLISH.json` and `SUBSCRIBE.json` subset sources, and the imported `mqtt_packets.py`
 generator, so a changed upstream fixture cannot silently reuse the recorded
 scenario count.
-The adapter intentionally does not count complete `AUTH.json`, `PUBLISH.json`,
-`DISCONNECT.json`, `PUBREL.json`, or `UNSUBSCRIBE.json` yet: the pinned
+The adapter intentionally does not claim complete-file coverage for
+`AUTH.json`, `PUBLISH.json`, `SUBSCRIBE.json`, `DISCONNECT.json`, `PUBREL.json`,
+or `UNSUBSCRIBE.json` yet: the pinned
 Mosquitto expectations classify a one-byte
 AUTH body with no Property Length and non-zero reserved DISCONNECT flags as
 Protocol Error `0x82`, and likewise classify invalid MQTT 5 PUBREL reserved
 flags as `0x82`; MQTT 5 defines unparseable variable headers and invalid
 reserved flags as Malformed Packet `0x81`. Netz retains the standards
 classification instead of adding per-file compatibility exceptions.
-`PUBLISH.json` additionally contains the explicitly enumerated reason-code,
-configuration, optional-Unicode, and QoS 2 reuse differences described above;
-all other scenarios in that hash-locked file are executed. `CONNECT.json` and
+`PUBLISH.json` and `SUBSCRIBE.json` additionally contain the explicitly
+enumerated configuration, optional-Unicode, QoS 2 reuse, and reason-code
+differences described above; all other scenarios in those hash-locked files
+are executed. `CONNECT.json` and
 `CONNACK.json` also contain MQTT 3.1 protocol-level cases, outside netz's
 declared MQTT 3.1.1/5 scope.
 The UNSUBSCRIBE file also requires rejection of otherwise valid UTF-8 control
@@ -2030,9 +2056,9 @@ or plugins, so passing these vectors is not proxy evidence for the entire suite.
    validated broker-process RSS records; a current 64-connection run measured
    netz at 6,360 KiB versus Mosquitto at 3,896 KiB, narrowing but not closing
    the independent-peer memory gap.
-3. Expand the source-hash-locked gate beyond its current 828 upstream packet
+3. Expand the source-hash-locked gate beyond its current 982 upstream packet
    sequences, or add a broker process adapter capable of preserving the
    upstream harness's config/reload/persistence semantics. The 167 curated
-   scenarios, eleven complete portable JSON files, and audited 145/160
-   `PUBLISH.json` subset still do not cover the full protocol/conformance
-   suite.
+   scenarios, eleven complete portable JSON files, audited 148/160
+   `PUBLISH.json`, and audited 151/155 `SUBSCRIBE.json` subsets still do not
+   cover the full protocol/conformance suite.

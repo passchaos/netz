@@ -6185,6 +6185,8 @@ fn disconnectReasonForReadViolation(err: anyerror) ?u8 {
         error.InvalidFlags,
         error.InvalidQoS,
         error.InvalidPropertyIdentifier,
+        error.MalformedPropertyContext,
+        error.MalformedSubscriptionOptions,
         error.BufferTooShort,
         error.MalformedRemainingLength,
         error.RemainingLengthTooLarge,
@@ -6257,6 +6259,14 @@ test "broker maps negotiated capability violations to DISCONNECT reasons" {
     try std.testing.expectEqual(
         @as(?u8, 0x81),
         disconnectReasonForReadViolation(error.InvalidPropertyIdentifier),
+    );
+    try std.testing.expectEqual(
+        @as(?u8, 0x81),
+        disconnectReasonForReadViolation(error.MalformedPropertyContext),
+    );
+    try std.testing.expectEqual(
+        @as(?u8, 0x81),
+        disconnectReasonForReadViolation(error.MalformedSubscriptionOptions),
     );
     try std.testing.expectEqual(
         @as(?u8, 0x81),

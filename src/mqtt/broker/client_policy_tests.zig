@@ -73,6 +73,61 @@ test "broker reports post-parse PUBLISH property violations" {
     try joinServer(thread, &joined, &serve);
 }
 
+test "broker distinguishes malformed and protocol-error SUBSCRIBE packets" {
+    const allocator = std.testing.allocator;
+    var threaded = std.Io.Threaded.init(allocator, .{
+        .async_limit = .unlimited,
+    });
+    defer threaded.deinit();
+    const io = threaded.io();
+    var broker = try testBroker(allocator, io, 2, 64);
+    defer broker.deinit();
+
+    var serve = ServeState{ .broker = &broker, .connection_count = 2 };
+    const thread = try std.Thread.spawn(.{}, ServeState.run, .{&serve});
+    var joined = false;
+    defer if (!joined) thread.join();
+
+    var malformed = try connectWithOptions(allocator, io, broker, .{
+        .protocol = .v5,
+        .client_id = "malformed-subscribe-property-context",
+    });
+    defer malformed.close();
+    // Payload Format Indicator is well-formed generically but is not valid in
+    // a SUBSCRIBE. MQTT 5 section 2.2.2.2 classifies that packet as malformed.
+    var malformed_subscribe = [_]u8{
+        0x82, 0x09, 0x00, 0x01, 0x02, 0x01, 0x00, 0x00, 0x01, 'p', 0x00,
+    };
+    try malformed.transport.writePacket(&malformed_subscribe);
+    var malformed_disconnect = try malformed.readDisconnect();
+    defer malformed_disconnect.deinit(allocator);
+    try std.testing.expectEqual(
+        @as(u8, 0x81),
+        malformed_disconnect.disconnect.reason_code,
+    );
+    try waitForPeerClose(&malformed);
+
+    var semantic = try connectWithOptions(allocator, io, broker, .{
+        .protocol = .v5,
+        .client_id = "semantic-subscribe-options",
+    });
+    defer semantic.close();
+    // The packet is structurally complete, but Retain Handling value 3 is a
+    // Protocol Error under MQTT 5 section 3.8.3.1.
+    var semantic_subscribe = [_]u8{
+        0x82, 0x07, 0x00, 0x02, 0x00, 0x00, 0x01, 'p', 0x30,
+    };
+    try semantic.transport.writePacket(&semantic_subscribe);
+    var semantic_disconnect = try semantic.readDisconnect();
+    defer semantic_disconnect.deinit(allocator);
+    try std.testing.expectEqual(
+        @as(u8, 0x82),
+        semantic_disconnect.disconnect.reason_code,
+    );
+    try waitForPeerClose(&semantic);
+    try joinServer(thread, &joined, &serve);
+}
+
 test "broker reports unnegotiated reauthentication as protocol error" {
     const allocator = std.testing.allocator;
     var threaded = std.Io.Threaded.init(allocator, .{

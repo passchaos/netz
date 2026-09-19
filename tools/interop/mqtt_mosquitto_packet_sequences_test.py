@@ -135,6 +135,8 @@ class SequenceLoadingTests(unittest.TestCase):
             {
                 "PUBLISH.json":
                     "a3b6a5d5b2cd44b70550ce17a03ff5607cc76e4f165ae1f1f6deb68eb7013f86",
+                "SUBSCRIBE.json":
+                    "f3feba6c933d43dc7be5397a42afd616e5f4a21824cf5289c986166ec6c0e60c",
             },
         )
         self.assertEqual(
@@ -142,26 +144,22 @@ class SequenceLoadingTests(unittest.TestCase):
             set(sequences.SEQUENCE_SUBSET_FILES),
         )
         self.assertEqual(sequences.EXPECTED_COMPLETE_SEQUENCE_COUNT, 683)
-        self.assertEqual(sequences.EXPECTED_SUBSET_SEQUENCE_COUNT, 145)
-        self.assertEqual(sequences.EXPECTED_SEQUENCE_COUNT, 828)
+        self.assertEqual(
+            sequences.EXPECTED_SUBSET_SEQUENCE_COUNTS,
+            {"PUBLISH.json": 148, "SUBSCRIBE.json": 151},
+        )
+        self.assertEqual(sequences.EXPECTED_SUBSET_SEQUENCE_COUNT, 299)
+        self.assertEqual(sequences.EXPECTED_SEQUENCE_COUNT, 982)
+        self.assertEqual(sequences.EXPECTED_STANDARD_OVERRIDE_COUNT, 102)
         self.assertEqual(
             len(sequences.SEQUENCE_EXCLUSIONS["PUBLISH.json"]),
-            15,
+            12,
         )
         self.assertEqual(
             set(sequences.SEQUENCE_EXCLUSIONS["PUBLISH.json"]),
             {
                 ("v3.1.1 PUBLISH", "34 QoS 2 Dup flow*3"),
                 ("v5.0   PUBLISH", "34 QoS 2 Dup flow*3"),
-                ("v5.0   PUBLISH", "30 topic 0"),
-                (
-                    "v5.0   PUBLISH",
-                    "30 topic with + [MQTT-3.3.2-2]",
-                ),
-                (
-                    "v5.0   PUBLISH",
-                    "30 topic with # [MQTT-3.3.2-2]",
-                ),
                 (
                     "v5.0   PUBLISH ALLOWED PROPERTIES",
                     "maximum packet size",
@@ -181,22 +179,134 @@ class SequenceLoadingTests(unittest.TestCase):
             },
         )
         self.assertEqual(
-            set(sequences.SEQUENCE_EXCLUSIONS["PUBLISH.json"].values()),
-            set(sequences.EXCLUSION_REASONS),
+            set(sequences.SEQUENCE_EXCLUSIONS["SUBSCRIBE.json"]),
+            {
+                ("v3.1.1 SUBSCRIBE", "82 topic with U+0001"),
+                ("v3.1.1 SUBSCRIBE", "82 topic with U+001F"),
+                ("v3.1.1 SUBSCRIBE", "82 topic with U+007F"),
+                ("v3.1.1 SUBSCRIBE", "82 topic with U+009F"),
+            },
         )
-        reasons = sequences.SEQUENCE_EXCLUSIONS["PUBLISH.json"].values()
         self.assertEqual(
             {
-                reason: sum(value == reason for value in reasons)
+                reason: sum(
+                    value == reason
+                    for exclusions in sequences.SEQUENCE_EXCLUSIONS.values()
+                    for value in exclusions.values()
+                )
                 for reason in sequences.EXCLUSION_REASONS
             },
             {
                 "mosquitto_qos2_reuse_limit": 2,
-                "optional_utf8_control_policy": 8,
-                "mosquitto_reason_classification": 3,
+                "optional_utf8_control_policy": 12,
                 "mosquitto_fixture_configuration": 2,
             },
         )
+        expected_override_counts = {
+            "PUBACK.json": 24,
+            "PUBREC.json": 24,
+            "PUBCOMP.json": 24,
+            "PUBLISH.json": 21,
+            "SUBSCRIBE.json": 9,
+        }
+        self.assertEqual(
+            {
+                filename: len(overrides)
+                for filename, overrides in
+                    sequences.STANDARD_EXPECTATION_OVERRIDES.items()
+            },
+            expected_override_counts,
+        )
+        for filename, packet, prefix in (
+            ("PUBACK.json", "PUBACK", "40"),
+            ("PUBREC.json", "PUBREC", "50"),
+            ("PUBCOMP.json", "PUBCOMP", "70"),
+        ):
+            self.assertEqual(
+                set(sequences.STANDARD_EXPECTATION_OVERRIDES[filename]),
+                {
+                    (
+                        f"v5.0   {packet} DISALLOWED PROPERTIES",
+                        f"{prefix} with {case}",
+                        1,
+                    )
+                    for case in sequences.ACK_DISALLOWED_PROPERTY_CASES
+                },
+            )
+        self.assertEqual(
+            set(sequences.STANDARD_EXPECTATION_OVERRIDES["PUBLISH.json"]),
+            {
+                ("v5.0   PUBLISH DISALLOWED PROPERTIES", case, 1)
+                for case in sequences.PUBLISH_DISALLOWED_PROPERTY_CASES
+            } | {
+                ("v5.0   PUBLISH", "30 topic 0", 1),
+                (
+                    "v5.0   PUBLISH",
+                    "30 topic with + [MQTT-3.3.2-2]",
+                    1,
+                ),
+                (
+                    "v5.0   PUBLISH",
+                    "30 topic with # [MQTT-3.3.2-2]",
+                    1,
+                ),
+            },
+        )
+        self.assertEqual(
+            set(sequences.STANDARD_EXPECTATION_OVERRIDES["SUBSCRIBE.json"]),
+            {
+                (
+                    "v5.0   SUBSCRIBE",
+                    "82 QoS 3 [MQTT-3-8.3-2] (no topic or qos)",
+                    1,
+                ),
+                (
+                    "v5.0   SUBSCRIBE",
+                    "82 QoS 3 [MQTT-3-8.3-4]",
+                    1,
+                ),
+                (
+                    "v5.0   SUBSCRIBE",
+                    "82 QoS 0 retain handling=3 0x30 [MQTT-3-8.3-4]",
+                    1,
+                ),
+                ("v5.0   SUBSCRIBE", "82 short 3", 1),
+                ("v5.0   SUBSCRIBE", "82 single topic len 0", 1),
+                ("v5.0   SUBSCRIBE", "82 multiple topic 1 len 0", 1),
+                ("v5.0   SUBSCRIBE", "82 multiple topic 2 len 0", 1),
+                ("v5.0   SUBSCRIBE", "82 multiple topic 1,2 len 0", 1),
+                ("v5.0   SUBSCRIBE", "82 mid 0", 1),
+            },
+        )
+        override_reasons = [
+            override[2]
+            for overrides in
+                sequences.STANDARD_EXPECTATION_OVERRIDES.values()
+            for override in overrides.values()
+        ]
+        self.assertEqual(
+            {
+                reason: override_reasons.count(reason)
+                for reason in sequences.STANDARD_OVERRIDE_REASONS
+            },
+            {
+                "mqtt5_property_context_malformed": 90,
+                "mqtt5_publish_protocol_error": 3,
+                "mqtt5_subscribe_protocol_error": 9,
+            },
+        )
+        for filename, overrides in (
+            sequences.STANDARD_EXPECTATION_OVERRIDES.items()
+        ):
+            for identity, (source, expected, reason) in overrides.items():
+                self.assertEqual(identity[2], 1, filename)
+                self.assertIn(reason, sequences.STANDARD_OVERRIDE_REASONS)
+                if reason == "mqtt5_property_context_malformed":
+                    self.assertEqual((source, expected),
+                                     ("E0 r1 82", "E0 r1 81"))
+                else:
+                    self.assertEqual((source, expected),
+                                     ("E0 r1 81", "E0 r1 82"))
         self.assertEqual(len(sequences.MQTT_PACKETS_SHA256), 64)
         int(sequences.MQTT_PACKETS_SHA256, 16)
         for digest in sequences.SEQUENCE_FILES.values():
@@ -238,6 +348,95 @@ class SequenceLoadingTests(unittest.TestCase):
                     selected,
                     {"TEST.json": {
                         ("portable", "excluded"): "undocumented",
+                    }},
+                )
+
+    def test_applies_exact_standard_expectation_override(self) -> None:
+        groups = [{
+            "group": "portable",
+            "tests": [{
+                "name": "reason",
+                "msgs": [
+                    {"type": "send", "payload": "C0 r0"},
+                    {"type": "recv", "payload": "E0 r1 82"},
+                ],
+            }],
+        }]
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            selected = self.write_source(root, groups)
+            loaded = sequences.load_sequences(
+                root,
+                selected,
+                expectation_overrides={"TEST.json": {
+                    ("portable", "reason", 1): (
+                        "E0 r1 82",
+                        "E0 r1 81",
+                        "mqtt5_property_context_malformed",
+                    ),
+                }},
+            )
+        self.assertEqual(loaded[0]["actions"][1]["payload"], "E0 r1 81")
+        self.assertEqual(
+            groups[0]["tests"][0]["msgs"][1]["payload"],
+            "E0 r1 82",
+        )
+
+    def test_rejects_standard_expectation_source_drift(self) -> None:
+        groups = [{
+            "group": "portable",
+            "tests": [{
+                "name": "reason",
+                "msgs": [{"type": "recv", "payload": "E0 r1 81"}],
+            }],
+        }]
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            selected = self.write_source(root, groups)
+            with self.assertRaisesRegex(ValueError, "override source drift"):
+                sequences.load_sequences(
+                    root,
+                    selected,
+                    expectation_overrides={"TEST.json": {
+                        ("portable", "reason", 0): (
+                            "E0 r1 82",
+                            "E0 r1 81",
+                            "mqtt5_property_context_malformed",
+                        ),
+                    }},
+                )
+
+    def test_rejects_missing_or_unknown_standard_override(self) -> None:
+        groups = [{
+            "group": "portable",
+            "tests": [{
+                "name": "reason",
+                "msgs": [{"type": "recv", "payload": "E0 r1 82"}],
+            }],
+        }]
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            selected = self.write_source(root, groups)
+            with self.assertRaisesRegex(ValueError, "overrides not found"):
+                sequences.load_sequences(
+                    root,
+                    selected,
+                    expectation_overrides={"TEST.json": {
+                        ("portable", "missing", 0): (
+                            "E0 r1 82",
+                            "E0 r1 81",
+                            "mqtt5_property_context_malformed",
+                        ),
+                    }},
+                )
+            with self.assertRaisesRegex(ValueError, "unknown override reason"):
+                sequences.load_sequences(
+                    root,
+                    selected,
+                    expectation_overrides={"TEST.json": {
+                        ("portable", "reason", 0): (
+                            "E0 r1 82", "E0 r1 81", "undocumented",
+                        ),
                     }},
                 )
 
