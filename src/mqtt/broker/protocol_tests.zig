@@ -94,6 +94,155 @@ test "broker tolerates unknown outbound acknowledgement identifiers" {
     try joinServer(thread, &joined, &serve);
 }
 
+test "broker retransmits PUBREL after duplicate successful PUBREC" {
+    const allocator = std.testing.allocator;
+    var threaded = std.Io.Threaded.init(allocator, .{
+        .async_limit = .unlimited,
+    });
+    defer threaded.deinit();
+    const io = threaded.io();
+    var broker = try testBroker(allocator, io, 4, 64);
+    defer broker.deinit();
+
+    var serve = ServeState{ .broker = &broker, .connection_count = 4 };
+    const thread = try std.Thread.spawn(.{}, ServeState.run, .{&serve});
+    var joined = false;
+    defer if (!joined) thread.join();
+
+    for ([_]mqtt.ProtocolVersion{ .v3_1_1, .v5 }, 0..) |protocol, index| {
+        var subscriber = try connectWithOptions(
+            allocator,
+            io,
+            broker,
+            .{
+                .protocol = protocol,
+                .client_id = if (index == 0)
+                    "duplicate-pubrec-v311"
+                else
+                    "duplicate-pubrec-v5",
+            },
+        );
+        defer subscriber.close();
+        var suback = try subscriber.subscribe(
+            &.{.{ .topic_filter = "duplicate/pubrec", .qos = .exactly_once }},
+            .{},
+        );
+        defer suback.deinit(allocator);
+
+        var publisher = try connectWithOptions(
+            allocator,
+            io,
+            broker,
+            .{
+                .protocol = protocol,
+                .client_id = if (index == 0)
+                    "duplicate-publisher-v311"
+                else
+                    "duplicate-publisher-v5",
+            },
+        );
+        defer publisher.close();
+        try publisher.publish(
+            "duplicate/pubrec",
+            "payload",
+            .{ .qos = .exactly_once },
+        );
+
+        var delivery = try subscriber.readPublish();
+        defer delivery.deinit(allocator);
+        const packet_id = delivery.publish.packet_id.?;
+        try subscriber.writePubRec(packet_id, 0);
+        var first_pubrel = try subscriber.readPubRel();
+        defer first_pubrel.deinit(allocator);
+        try std.testing.expectEqual(packet_id, first_pubrel.ack.packet_id);
+
+        try subscriber.writePubRec(packet_id, 0);
+        var repeated_pubrel = try subscriber.readPubRel();
+        defer repeated_pubrel.deinit(allocator);
+        try std.testing.expectEqual(packet_id, repeated_pubrel.ack.packet_id);
+        try subscriber.writePubComp(packet_id, 0);
+        try subscriber.ping();
+        try disconnectAll(&.{ &publisher, &subscriber });
+    }
+
+    try joinServer(thread, &joined, &serve);
+}
+
+test "broker reports wrong-stage acknowledgements as protocol errors" {
+    const allocator = std.testing.allocator;
+    var threaded = std.Io.Threaded.init(allocator, .{
+        .async_limit = .unlimited,
+    });
+    defer threaded.deinit();
+    const io = threaded.io();
+    var broker = try testBroker(allocator, io, 4, 64);
+    defer broker.deinit();
+
+    var serve = ServeState{ .broker = &broker, .connection_count = 4 };
+    const thread = try std.Thread.spawn(.{}, ServeState.run, .{&serve});
+    var joined = false;
+    defer if (!joined) thread.join();
+
+    for ([_]mqtt.ProtocolVersion{ .v3_1_1, .v5 }, 0..) |protocol, index| {
+        var subscriber = try connectWithOptions(
+            allocator,
+            io,
+            broker,
+            .{
+                .protocol = protocol,
+                .client_id = if (index == 0)
+                    "wrong-ack-v311"
+                else
+                    "wrong-ack-v5",
+            },
+        );
+        defer subscriber.close();
+        var suback = try subscriber.subscribe(
+            &.{.{ .topic_filter = "wrong/ack", .qos = .at_least_once }},
+            .{},
+        );
+        defer suback.deinit(allocator);
+
+        var publisher = try connectWithOptions(
+            allocator,
+            io,
+            broker,
+            .{
+                .protocol = protocol,
+                .client_id = if (index == 0)
+                    "wrong-ack-publisher-v311"
+                else
+                    "wrong-ack-publisher-v5",
+            },
+        );
+        defer publisher.close();
+        try publisher.publish(
+            "wrong/ack",
+            "payload",
+            .{ .qos = .at_least_once },
+        );
+        var delivery = try subscriber.readPublish();
+        defer delivery.deinit(allocator);
+        try publisher.disconnect(0);
+
+        try subscriber.writePubRec(delivery.publish.packet_id.?, 0);
+        if (protocol == .v5) {
+            var event = try subscriber.readClientPacketEvent();
+            defer event.deinit(allocator);
+            switch (event) {
+                .disconnect => |owned| try std.testing.expectEqual(
+                    @as(u8, 0x82),
+                    owned.disconnect.reason_code,
+                ),
+                else => return error.UnexpectedPacket,
+            }
+        }
+        try waitForPeerClose(&subscriber);
+    }
+
+    try joinServer(thread, &joined, &serve);
+}
+
 test "broker authorizes CONNECT before creating Session state" {
     const allocator = std.testing.allocator;
     var threaded = std.Io.Threaded.init(allocator, .{

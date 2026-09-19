@@ -5620,6 +5620,11 @@ const ClientTask = struct {
                                 task.broker.io,
                             );
                             slot.writer_mutex.unlock(task.broker.io);
+                            if (try task.disconnectForProtocolViolation(
+                                slot,
+                                connection,
+                                err,
+                            )) return;
                             return err;
                         };
                     task.broker.state_mutex.unlock(task.broker.io);
@@ -5637,10 +5642,19 @@ const ClientTask = struct {
                             owned.ack.packet_id,
                         ))
                     {
-                        connection.applyPubAck(owned.ack) catch |err| {
-                            slot.writer_mutex.unlock(task.broker.io);
-                            return err;
-                        };
+                        connection.applyPubAck(owned.ack) catch |err|
+                            switch (err) {
+                                error.PublishRefused => {},
+                                else => {
+                                    slot.writer_mutex.unlock(task.broker.io);
+                                    if (try task.disconnectForProtocolViolation(
+                                        slot,
+                                        connection,
+                                        err,
+                                    )) return;
+                                    return err;
+                                },
+                            };
                     }
                     slot.writer_mutex.unlock(task.broker.io);
                     try task.broker.flushSlot(
@@ -5662,6 +5676,11 @@ const ClientTask = struct {
                                 task.broker.io,
                             );
                             slot.writer_mutex.unlock(task.broker.io);
+                            if (try task.disconnectForProtocolViolation(
+                                slot,
+                                connection,
+                                err,
+                            )) return;
                             return err;
                         };
                     task.broker.state_mutex.unlock(task.broker.io);
@@ -5678,10 +5697,19 @@ const ClientTask = struct {
                         if (connection.hasOutgoingPacketIdentifier(
                             owned.ack.packet_id,
                         )) {
-                            connection.applyPubRec(owned.ack) catch |err| {
-                                slot.writer_mutex.unlock(task.broker.io);
-                                return err;
-                            };
+                            connection.applyPubRec(owned.ack) catch |err|
+                                switch (err) {
+                                    error.PublishRefused => {},
+                                    else => {
+                                        slot.writer_mutex.unlock(task.broker.io);
+                                        if (try task.disconnectForProtocolViolation(
+                                            slot,
+                                            connection,
+                                            err,
+                                        )) return;
+                                        return err;
+                                    },
+                                };
                         } else if (owned.ack.accepted()) {
                             // An accepted PUBREC always advances the QoS 2
                             // exchange with PUBREL. If Session state was lost,
@@ -5728,6 +5756,11 @@ const ClientTask = struct {
                                 task.broker.io,
                             );
                             slot.writer_mutex.unlock(task.broker.io);
+                            if (try task.disconnectForProtocolViolation(
+                                slot,
+                                connection,
+                                err,
+                            )) return;
                             return err;
                         };
                     task.broker.state_mutex.unlock(task.broker.io);
@@ -5745,10 +5778,19 @@ const ClientTask = struct {
                             owned.ack.packet_id,
                         ))
                     {
-                        connection.applyPubComp(owned.ack) catch |err| {
-                            slot.writer_mutex.unlock(task.broker.io);
-                            return err;
-                        };
+                        connection.applyPubComp(owned.ack) catch |err|
+                            switch (err) {
+                                error.PublishRefused => {},
+                                else => {
+                                    slot.writer_mutex.unlock(task.broker.io);
+                                    if (try task.disconnectForProtocolViolation(
+                                        slot,
+                                        connection,
+                                        err,
+                                    )) return;
+                                    return err;
+                                },
+                            };
                     }
                     slot.writer_mutex.unlock(task.broker.io);
                     try task.broker.flushSlot(
@@ -6015,6 +6057,7 @@ fn disconnectReasonForReadViolation(err: anyerror) ?u8 {
         error.InvalidTopic,
         error.InvalidSubscription,
         error.InvalidPacketIdentifier,
+        error.InvalidAcknowledgement,
         error.UnexpectedPacket,
         => 0x82,
         error.InvalidPacketType,

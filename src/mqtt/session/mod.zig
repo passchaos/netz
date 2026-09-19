@@ -1862,6 +1862,17 @@ pub const Store = struct {
                 return .completed;
             },
             .pubrec => {
+                if (inflight.state == .await_pubcomp) {
+                    // A repeated successful PUBREC requests retransmission of
+                    // the PUBREL already emitted for this transaction. Keep
+                    // the durable stage and make the control packet eligible
+                    // for the connection writer again.
+                    if (reason_code >= 0x80) {
+                        return error.InvalidAcknowledgement;
+                    }
+                    inflight.needs_send = true;
+                    return .send_pubrel;
+                }
                 if (inflight.state != .await_pubrec) {
                     return error.InvalidAcknowledgement;
                 }

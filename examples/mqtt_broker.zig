@@ -862,11 +862,12 @@ fn serveBroker(
     }
     if (ignore_connection_errors) {
         // Conformance/fuzz harnesses deliberately open malformed connections.
-        // Serve one finite slot at a time so an expected protocol rejection
-        // does not terminate the process before later valid-vector probes.
-        for (0..connections) |_| broker.serve(1) catch |err| switch (err) {
-            // Autosave uses this helper as a cancelable Select task. Never
-            // swallow its shutdown signal while ignoring peer errors.
+        // The finite serve call waits for every independently accepted client
+        // before returning its first connection error. Ignore that aggregate
+        // result while preserving concurrent clients, which packet-sequence
+        // harnesses need for helper publishers. Autosave uses this helper as a
+        // cancelable Select task, so never swallow its shutdown signal.
+        broker.serve(connections) catch |err| switch (err) {
             error.Canceled => return err,
             else => {},
         };

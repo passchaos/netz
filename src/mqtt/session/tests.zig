@@ -852,6 +852,14 @@ test "session transmission writers preserve DUP and PUBREL identifiers" {
     defer ack.deinit(allocator);
     try std.testing.expectEqual(mqtt.PacketType.pubrel, ack.packet_type);
     try std.testing.expectEqual(packet_id, ack.packet_id);
+
+    try std.testing.expectEqual(
+        session.AckAction.send_pubrel,
+        try store.handleAck(resumed.handle, .pubrec, packet_id, 0),
+    );
+    const repeated = try store.drainInto(resumed.handle, .zero, 10, &output);
+    try std.testing.expectEqual(@as(usize, 1), repeated.len);
+    try std.testing.expectEqual(packet_id, repeated[0].pubrel.packet_id);
 }
 
 test "session reconnect honors a lower Receive Maximum" {

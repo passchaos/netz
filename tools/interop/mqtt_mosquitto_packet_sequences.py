@@ -3,9 +3,10 @@
 
 The upstream broker harness mixes raw packet conformance with Mosquitto CLI,
 configuration, plugin, and log assertions. This adapter deliberately handles
-only its portable raw send/recv files and preserves their group/test inheritance
-and payload DSL. Add a file to SEQUENCE_FILES only when all of its actions are
-portable without weakening or rewriting individual expectations.
+only its portable packet files and preserves their group/test inheritance,
+payload DSL, and standard MQTT helper-publisher actions. Add a file to
+SEQUENCE_FILES only when every action is portable without weakening or
+rewriting individual expectations.
 """
 
 from __future__ import annotations
@@ -28,6 +29,8 @@ from mqtt_mosquitto_vectors import (
 SEQUENCE_FILES = {
     "FORBIDDEN.json":
         "9ef4419f01bb7edb907b8846de498883fbd58eebc5fbd41bf2782e0fb14c83ad",
+    "FLOW.json":
+        "b77b707ca927b593c02b74ebc894c76fafc31327543dc3c04ae3f3f4da7b37ea",
     "PINGREQ.json":
         "85c5d707c54065157f2ded972bac72d1a2fccf24ff4a65e7775ed61759a77408",
     "PINGRESP.json":
@@ -36,6 +39,8 @@ SEQUENCE_FILES = {
         "58bee064eebc419cd2da58b84786010523e996445a337b5414cb5ec3c00e4546",
     "PUBREC.json":
         "f230937d9eebe3df2e0bd5cc269d3e17002df64f976b261a4c07fa3201a49f8a",
+    "REGRESSION.json":
+        "bf6a7b5f6c03faf31f2e825ba6853943b7b9cc6fa4bf07706fb54ecd9703e73f",
     "PUBCOMP.json":
         "097a9d2b5e3690295dedde21665a82a97baf0e5f8a0258a6deed35c9f848943f",
     "SUBACK.json":
@@ -43,7 +48,7 @@ SEQUENCE_FILES = {
     "UNSUBACK.json":
         "593719885cb1fa474c252449c11f2f1183fa432ee389737dca45beca225ac1a0",
 }
-EXPECTED_SEQUENCE_COUNT = 628
+EXPECTED_SEQUENCE_COUNT = 663
 MQTT_PACKETS_SHA256 = (
     "0024fcebd421a3286cea021ed64083f906d9b457004786b05f8a74abae5bfb37"
 )
@@ -117,7 +122,7 @@ def load_sequences(
             for test in group["tests"]:
                 actions = test.get("msgs", [])
                 action_types = {action["type"] for action in actions}
-                if not action_types <= {"send", "recv"}:
+                if not action_types <= {"send", "recv", "external_publish"}:
                     raise ValueError(
                         f"{filename} {test['name']} is not a portable raw sequence"
                     )
@@ -186,6 +191,41 @@ def expect_sequence_packet(
         raise AssertionError(f"{label}: {exc}") from exc
 
 
+def external_publish(
+    broker: NetzBroker,
+    action: dict,
+    mqtt_packets,
+    label: str,
+) -> None:
+    """Perform Mosquitto's standard MQTT 3.1.1 helper publication."""
+    qos = action["qos"]
+    if qos not in (0, 1, 2):
+        raise ValueError(f"{label}: invalid helper QoS {qos}")
+    with broker.connect() as helper:
+        connect_client(helper, mqtt_packets, "helper", 4)
+        helper.sendall(
+            mqtt_packets.gen_publish(
+                topic=action["topic"],
+                qos=qos,
+                payload=action["payload"],
+                retain=action.get("retain", False),
+                mid=1 if qos else 0,
+            )
+        )
+        if qos == 1:
+            expect_sequence_packet(
+                helper, mqtt_packets.gen_puback(mid=1), f"{label} PUBACK"
+            )
+        elif qos == 2:
+            expect_sequence_packet(
+                helper, mqtt_packets.gen_pubrec(mid=1), f"{label} PUBREC"
+            )
+            helper.sendall(mqtt_packets.gen_pubrel(mid=1))
+            expect_sequence_packet(
+                helper, mqtt_packets.gen_pubcomp(mid=1), f"{label} PUBCOMP"
+            )
+
+
 def run_sequence(
     broker: NetzBroker,
     sequence: dict,
@@ -205,8 +245,11 @@ def run_sequence(
             )
 
         for action_index, action in enumerate(sequence["actions"]):
-            packet = parse_message(action["payload"])
             action_label = f"{label} action {action_index}"
+            if action["type"] == "external_publish":
+                external_publish(broker, action, mqtt_packets, action_label)
+                continue
+            packet = parse_message(action["payload"])
             if action["type"] == "send":
                 sock.sendall(packet)
             else:
@@ -250,8 +293,15 @@ def main() -> None:
             f"found {len(sequences)}"
         )
 
+    helper_connections = sum(
+        action["type"] == "external_publish"
+        for sequence in sequences
+        for action in sequence["actions"]
+    )
     with NetzBroker(
-        args.broker, connections=len(sequences) + 1, ignore_errors=True
+        args.broker,
+        connections=len(sequences) + helper_connections + 1,
+        ignore_errors=True,
     ) as broker:
         for index, sequence in enumerate(sequences):
             run_sequence(
@@ -269,9 +319,10 @@ def main() -> None:
             healthy.sendall(mqtt_packets.gen_disconnect(proto_ver=5))
 
     print(
-        "Mosquitto packet-sequence JSON gate passed: 628 upstream scenarios "
-        "from FORBIDDEN.json, PINGREQ.json, PINGRESP.json, PUBACK.json, "
-        "PUBCOMP.json, PUBREC.json, SUBACK.json, and UNSUBACK.json"
+        "Mosquitto packet-sequence JSON gate passed: 663 upstream scenarios "
+        "from FLOW.json, FORBIDDEN.json, PINGREQ.json, PINGRESP.json, "
+        "PUBACK.json, PUBCOMP.json, PUBREC.json, REGRESSION.json, "
+        "SUBACK.json, and UNSUBACK.json"
     )
 
 

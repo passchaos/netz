@@ -3436,14 +3436,24 @@ pub const Connection = struct {
         self: *Connection,
         ack: mqtt.AckPacket,
     ) Error!void {
-        if (ack.packet_type != .pubrec or
-            !self.packet_identifiers.contains(
-                ack.packet_id,
-                .outgoing_qos2,
-            ))
-        {
+        if (ack.packet_type != .pubrec) {
             return error.UnexpectedPacket;
         }
+        if (self.packet_identifiers.contains(
+            ack.packet_id,
+            .outgoing_qos2_pubrel,
+        )) {
+            // A repeated successful PUBREC means the peer did not observe the
+            // prior PUBREL. Retransmit it without changing inflight accounting
+            // or the already-advanced QoS 2 stage.
+            if (!ack.accepted()) return error.UnexpectedPacket;
+            try self.writePubRel(ack.packet_id, 0);
+            return;
+        }
+        if (!self.packet_identifiers.contains(
+            ack.packet_id,
+            .outgoing_qos2,
+        )) return error.UnexpectedPacket;
         if (!ack.accepted()) {
             self.releaseOutgoingPublish(
                 ack.packet_id,
@@ -6197,6 +6207,55 @@ test "MQTT acknowledgement apply preserves wrong-stage inflight state" {
     try std.testing.expect(connection.packet_identifiers.contains(
         42,
         .outgoing_qos2,
+    ));
+}
+
+test "MQTT duplicate successful PUBREC retransmits PUBREL" {
+    const allocator = std.testing.allocator;
+    var threaded = std.Io.Threaded.init(allocator, .{});
+    defer threaded.deinit();
+    const io = threaded.io();
+    var listener = try (net.IpAddress{ .ip4 = .loopback(0) }).listen(
+        io,
+        .{ .reuse_address = true },
+    );
+    defer listener.deinit(io);
+    const client_stream = try listener.socket.address.connect(
+        io,
+        .{ .mode = .stream },
+    );
+    defer client_stream.close(io);
+    const server_stream = try listener.accept(io);
+    defer server_stream.close(io);
+
+    var connection = Connection{
+        .allocator = allocator,
+        .transport = .initTcp(io, client_stream),
+        .protocol = .v5,
+        .outgoing_inflight = 1,
+    };
+    defer connection.packet_identifiers.deinit(allocator);
+    try std.testing.expect(try connection.packet_identifiers.add(
+        allocator,
+        42,
+        .outgoing_qos2_pubrel,
+    ));
+
+    try connection.applyPubRec(.{
+        .packet_type = .pubrec,
+        .packet_id = 42,
+    });
+    var peer = PacketTransport.initTcp(io, server_stream);
+    var repeated = try peer.readPacket(allocator, 16);
+    defer repeated.deinit(allocator);
+    var pubrel = try mqtt.AckPacket.parse(allocator, .v5, repeated.bytes);
+    defer pubrel.deinit(allocator);
+    try std.testing.expectEqual(mqtt.PacketType.pubrel, pubrel.packet_type);
+    try std.testing.expectEqual(@as(u16, 42), pubrel.packet_id);
+    try std.testing.expectEqual(@as(u16, 1), connection.outgoing_inflight);
+    try std.testing.expect(connection.packet_identifiers.contains(
+        42,
+        .outgoing_qos2_pubrel,
     ));
 }
 

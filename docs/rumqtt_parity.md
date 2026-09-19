@@ -1890,12 +1890,14 @@ without an unrepresentable reason packet. Server-side admission enforces the
 configured inbound limit in MQTT 3.1.1 even though only MQTT 5 can advertise it
 as a CONNACK property. All 167 curated scenarios pass. A separate
 source-hash-locked adapter now executes every scenario in Mosquitto's complete
-`FORBIDDEN.json`, `PINGREQ.json`, `PINGRESP.json`, `PUBACK.json`,
-`PUBREC.json`, `PUBCOMP.json`, `SUBACK.json`, and `UNSUBACK.json` files: 628
-upstream scenarios across MQTT 3.1.1 and MQTT 5. The adapter preserves the
-upstream payload DSL, group/test inheritance, explicit response bytes, and
-connection-liveness expectations; it rejects non-portable action types instead
-of silently skipping them. Where an upstream MQTT 5 case requires only EOF,
+`FLOW.json`, `FORBIDDEN.json`, `PINGREQ.json`, `PINGRESP.json`, `PUBACK.json`,
+`PUBREC.json`, `PUBCOMP.json`, `REGRESSION.json`, `SUBACK.json`, and
+`UNSUBACK.json` files: 663 upstream scenarios across MQTT 3.1.1 and MQTT 5.
+The adapter preserves the upstream payload DSL, group/test inheritance,
+explicit response bytes, connection-liveness expectations, and MQTT 3.1.1
+helper publications with full QoS 0/1/2 handshakes; it rejects other
+non-portable action types instead of silently skipping them. Where an upstream
+MQTT 5 case requires only EOF,
 the adapter additionally permits one exact `0x81`/`0x82` diagnostic before
 requiring closure, consistent with MQTT 5 section 4.13. The complete files
 exposed three runtime gaps: reserved Control Packet type zero now has a
@@ -1906,6 +1908,12 @@ Integers and classified as Malformed Packet; and the broker now handles stale
 but well-formed QoS acknowledgments idempotently. Unknown PUBACK/PUBCOMP are
 ignored, while an accepted unknown PUBREC receives its required same-ID PUBREL;
 wrong-stage identifiers remain errors and no inflight accounting is released.
+The FLOW file additionally exposed that duplicate successful PUBREC must
+retransmit PUBREL without changing its inflight stage, and that established
+MQTT 5 connections must receive Protocol Error `0x82` before closing on a
+wrong-stage acknowledgement. The finite conformance broker now preserves
+concurrent accepts while aggregating and ignoring expected per-connection
+errors, allowing the upstream helper publisher to overlap its subscriber.
 Run it against the audited Mosquitto `5cd25465` checkout with:
 
 ```sh
@@ -1913,7 +1921,7 @@ zig build interop-mqtt-mosquitto-packet-sequences -Doptimize=ReleaseFast -- \
   --mosquitto-test-root=/nav_env/Work/mosquitto/test
 ```
 
-The manifest pins SHA-256 hashes for all eight JSON inputs and the imported
+The manifest pins SHA-256 hashes for all ten JSON inputs and the imported
 `mqtt_packets.py` generator, so a changed upstream fixture cannot silently
 reuse the recorded scenario count.
 The adapter intentionally does not count complete `AUTH.json`,
@@ -1979,8 +1987,8 @@ or plugins, so passing these vectors is not proxy evidence for the entire suite.
    validated broker-process RSS records; a current 64-connection run measured
    netz at 6,360 KiB versus Mosquitto at 3,896 KiB, narrowing but not closing
    the independent-peer memory gap.
-3. Expand the source-hash-locked complete-file gate beyond its current 628
+3. Expand the source-hash-locked complete-file gate beyond its current 663
    upstream packet sequences, or add a broker process adapter capable of
    preserving the upstream harness's config/reload/persistence semantics. The
-   167 curated scenarios plus eight complete portable JSON files still do not
+   167 curated scenarios plus ten complete portable JSON files still do not
    cover the full protocol/conformance suite.

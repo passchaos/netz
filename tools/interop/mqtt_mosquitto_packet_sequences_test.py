@@ -5,6 +5,7 @@ import json
 from pathlib import Path
 import tempfile
 import unittest
+from unittest import mock
 
 import mqtt_mosquitto_packet_sequences as sequences
 
@@ -68,7 +69,7 @@ class SequenceLoadingTests(unittest.TestCase):
             "group": "not-portable",
             "tests": [{
                 "name": "helper",
-                "msgs": [{"type": "external_publish"}],
+                "msgs": [{"type": "subscribe"}],
             }],
         }]
         with tempfile.TemporaryDirectory() as directory:
@@ -76,6 +77,27 @@ class SequenceLoadingTests(unittest.TestCase):
             selected = self.write_source(root, groups)
             with self.assertRaisesRegex(ValueError, "not a portable raw sequence"):
                 sequences.load_sequences(root, selected)
+
+    def test_accepts_external_publish_action(self) -> None:
+        groups = [{
+            "group": "portable-helper",
+            "tests": [{
+                "name": "publish",
+                "msgs": [{
+                    "type": "external_publish",
+                    "topic": "p",
+                    "qos": 2,
+                    "payload": "message",
+                    "retain": True,
+                }],
+            }],
+        }]
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            selected = self.write_source(root, groups)
+            loaded = sequences.load_sequences(root, selected)
+
+        self.assertEqual(loaded[0]["actions"], groups[0]["tests"][0]["msgs"])
 
     def test_rejects_source_drift(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
@@ -95,22 +117,105 @@ class SequenceLoadingTests(unittest.TestCase):
         self.assertEqual(
             set(sequences.SEQUENCE_FILES),
             {
+                "FLOW.json",
                 "FORBIDDEN.json",
                 "PINGREQ.json",
                 "PINGRESP.json",
                 "PUBACK.json",
                 "PUBCOMP.json",
                 "PUBREC.json",
+                "REGRESSION.json",
                 "SUBACK.json",
                 "UNSUBACK.json",
             },
         )
-        self.assertEqual(sequences.EXPECTED_SEQUENCE_COUNT, 628)
+        self.assertEqual(sequences.EXPECTED_SEQUENCE_COUNT, 663)
         self.assertEqual(len(sequences.MQTT_PACKETS_SHA256), 64)
         int(sequences.MQTT_PACKETS_SHA256, 16)
         for digest in sequences.SEQUENCE_FILES.values():
             self.assertEqual(len(digest), 64)
             int(digest, 16)
+
+
+class ExternalPublishTests(unittest.TestCase):
+    class FakeSocket:
+        def __init__(self) -> None:
+            self.sent: list[bytes] = []
+
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *_args) -> None:
+            return None
+
+        def sendall(self, packet: bytes) -> None:
+            self.sent.append(packet)
+
+    class FakeBroker:
+        def __init__(self) -> None:
+            self.socket = ExternalPublishTests.FakeSocket()
+
+        def connect(self):
+            return self.socket
+
+    class FakePackets:
+        @staticmethod
+        def gen_publish(**kwargs) -> bytes:
+            return repr(sorted(kwargs.items())).encode()
+
+        @staticmethod
+        def gen_puback(*, mid: int) -> bytes:
+            return bytes((0x40, mid))
+
+        @staticmethod
+        def gen_pubrec(*, mid: int) -> bytes:
+            return bytes((0x50, mid))
+
+        @staticmethod
+        def gen_pubrel(*, mid: int) -> bytes:
+            return bytes((0x62, mid))
+
+        @staticmethod
+        def gen_pubcomp(*, mid: int) -> bytes:
+            return bytes((0x70, mid))
+
+    def test_qos2_helper_runs_complete_v311_handshake(self) -> None:
+        broker = self.FakeBroker()
+        action = {
+            "topic": "p",
+            "payload": "message",
+            "qos": 2,
+            "retain": True,
+        }
+        with (
+            mock.patch.object(sequences, "connect_client") as connect,
+            mock.patch.object(sequences, "expect_sequence_packet") as expect,
+        ):
+            sequences.external_publish(
+                broker, action, self.FakePackets, "helper"
+            )
+
+        connect.assert_called_once_with(
+            broker.socket, self.FakePackets, "helper", 4
+        )
+        self.assertIn(b"('mid', 1)", broker.socket.sent[0])
+        self.assertIn(b"('qos', 2)", broker.socket.sent[0])
+        self.assertIn(b"('retain', True)", broker.socket.sent[0])
+        self.assertEqual(broker.socket.sent[1], bytes((0x62, 1)))
+        self.assertEqual(
+            [call.args[1] for call in expect.call_args_list],
+            [bytes((0x50, 1)), bytes((0x70, 1))],
+        )
+
+    def test_rejects_invalid_helper_qos_before_connect(self) -> None:
+        broker = self.FakeBroker()
+        with self.assertRaisesRegex(ValueError, "invalid helper QoS"):
+            sequences.external_publish(
+                broker,
+                {"topic": "p", "payload": "v", "qos": 3},
+                self.FakePackets,
+                "helper",
+            )
 
 
 if __name__ == "__main__":
