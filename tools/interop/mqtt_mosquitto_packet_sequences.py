@@ -56,6 +56,8 @@ SEQUENCE_SUBSET_FILES = {
         "a3b6a5d5b2cd44b70550ce17a03ff5607cc76e4f165ae1f1f6deb68eb7013f86",
     "SUBSCRIBE.json":
         "f3feba6c933d43dc7be5397a42afd616e5f4a21824cf5289c986166ec6c0e60c",
+    "UNSUBSCRIBE.json":
+        "32a8618e6f74fb02df944bc528e9b4ff258e5e920473b7d7ea81ac107374b825",
 }
 
 # Each exclusion is an audited divergence from the selected upstream fixture,
@@ -113,6 +115,24 @@ SEQUENCE_EXCLUSIONS = {
         ("v3.1.1 SUBSCRIBE", "82 topic with U+007F"):
             "optional_utf8_control_policy",
         ("v3.1.1 SUBSCRIBE", "82 topic with U+009F"):
+            "optional_utf8_control_policy",
+    },
+    "UNSUBSCRIBE.json": {
+        ("v3.1.1 UNSUBSCRIBE", "A2 topic with U+0001"):
+            "optional_utf8_control_policy",
+        ("v3.1.1 UNSUBSCRIBE", "A2 topic with U+001F"):
+            "optional_utf8_control_policy",
+        ("v3.1.1 UNSUBSCRIBE", "A2 topic with U+007F"):
+            "optional_utf8_control_policy",
+        ("v3.1.1 UNSUBSCRIBE", "A2 topic with U+009F"):
+            "optional_utf8_control_policy",
+        ("v5.0   UNSUBSCRIBE", "A2 topic with U+0001"):
+            "optional_utf8_control_policy",
+        ("v5.0   UNSUBSCRIBE", "A2 topic with U+001F"):
+            "optional_utf8_control_policy",
+        ("v5.0   UNSUBSCRIBE", "A2 topic with U+007F"):
+            "optional_utf8_control_policy",
+        ("v5.0   UNSUBSCRIBE", "A2 topic with U+009F"):
             "optional_utf8_control_policy",
     },
 }
@@ -181,6 +201,10 @@ STANDARD_OVERRIDE_REASONS = {
         "MQTT 5 explicitly classifies the parsed SUBSCRIBE semantic fault "
         "as Protocol Error 0x82 rather than Malformed Packet 0x81"
     ),
+    "mqtt5_unsubscribe_protocol_error": (
+        "MQTT 5 classifies the parsed UNSUBSCRIBE semantic fault as "
+        "Protocol Error 0x82 rather than Mosquitto's Malformed Packet 0x81"
+    ),
 }
 
 
@@ -244,16 +268,28 @@ STANDARD_EXPECTATION_OVERRIDES["SUBSCRIBE.json"] = {
         ("v5.0   SUBSCRIBE", "82 mid 0"),
     )
 }
+STANDARD_EXPECTATION_OVERRIDES["UNSUBSCRIBE.json"] = {
+    ("v5.0   UNSUBSCRIBE", test, 1): expectation_override(
+        "E0 r1 81", "E0 r1 82", "mqtt5_unsubscribe_protocol_error",
+    )
+    for test in (
+        "A2 multiple zero 1st",
+        "A2 multiple zero 2nd",
+        "A2 short 3 [MQTT-3.10.3-2]",
+        "A2 zero mid",
+    )
+}
 EXPECTED_COMPLETE_SEQUENCE_COUNT = 683
 EXPECTED_SUBSET_SEQUENCE_COUNTS = {
     "PUBLISH.json": 148,
     "SUBSCRIBE.json": 151,
+    "UNSUBSCRIBE.json": 100,
 }
 EXPECTED_SUBSET_SEQUENCE_COUNT = sum(EXPECTED_SUBSET_SEQUENCE_COUNTS.values())
 EXPECTED_SEQUENCE_COUNT = (
     EXPECTED_COMPLETE_SEQUENCE_COUNT + EXPECTED_SUBSET_SEQUENCE_COUNT
 )
-EXPECTED_STANDARD_OVERRIDE_COUNT = 102
+EXPECTED_STANDARD_OVERRIDE_COUNT = 106
 MQTT_PACKETS_SHA256 = (
     "0024fcebd421a3286cea021ed64083f906d9b457004786b05f8a74abae5bfb37"
 )

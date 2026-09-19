@@ -1895,9 +1895,10 @@ source-hash-locked adapter now executes every scenario in Mosquitto's complete
 `PUBACK.json`, `PUBREC.json`, `PUBCOMP.json`, `REGRESSION.json`, `SUBACK.json`,
 and `UNSUBACK.json` files: 683 upstream scenarios across MQTT 3.1.1 and MQTT 5.
 It additionally runs 148 of 160 scenarios in the complete, hash-locked
-`PUBLISH.json` and 151 of 155 in `SUBSCRIBE.json`, for 982 source-derived
-sequences total. The sixteen exclusions are exact `(group, test)` identities
-rather than pattern skips: twelve use MQTT's optional rejection of
+`PUBLISH.json`, 151 of 155 in `SUBSCRIBE.json`, and 100 of 108 in
+`UNSUBSCRIBE.json`, for 1,082 source-derived sequences total. The twenty-four
+exclusions are exact `(group, test)` identities rather than pattern skips:
+twenty use MQTT's optional rejection of
 U+0001/U+001F/U+007F/U+009F, two exercise Mosquitto's finite non-DUP QoS 2
 reuse tolerance instead of MQTT 5 section 4.3.3's repeat-PUBREC rule, and two
 depend on Mosquitto's configured Maximum Packet Size or Topic Alias Maximum.
@@ -1905,18 +1906,20 @@ The entire upstream file hashes, exclusion identities, reason vocabulary, and
 per-file included counts are independently asserted, so upstream fixture
 additions or renamed exclusions fail closed.
 
-The gate also retains 102 upstream scenarios whose packets are portable but
+The gate also retains 106 upstream scenarios whose packets are portable but
 whose expected DISCONNECT reason conflicts with the MQTT 5 text. Each standard
 override names the exact `(file, group, test, action index)`, verifies the
 hash-locked source action still expects its original bytes, and substitutes one
 exact expected packet before the normal socket comparison. Ninety cover section
 2.2.2.2: a known Property Identifier used in a Control Packet where it is not
 valid is Malformed Packet `0x81`, while Mosquitto's PUBACK, PUBREC, PUBCOMP,
-and PUBLISH fixtures expect `0x82`. Three PUBLISH Topic Name cases
-and nine fully parsed SUBSCRIBE semantic cases retain Protocol Error `0x82`
-where Mosquitto expects `0x81`. Thus these are still executed byte-level
-scenarios, not exclusions or permissive comparisons. The source bytes,
-replacement bytes, identities, reasons, and aggregate count are all locked.
+and PUBLISH fixtures expect `0x82`. Three PUBLISH Topic Name cases, nine fully
+parsed SUBSCRIBE semantic cases, and four UNSUBSCRIBE cases covering an empty
+payload (`MQTT-3.10.3-2`), zero-length Topic Filters (`MQTT-4.7.3-1`), and
+Packet Identifier zero (`MQTT-2.2.1-3`) retain Protocol Error `0x82` where
+Mosquitto expects `0x81`. Thus these are still executed byte-level scenarios,
+not exclusions or permissive comparisons. The source bytes, replacement
+bytes, identities, reasons, and aggregate count are all locked.
 The adapter preserves the upstream payload DSL, group/test inheritance,
 explicit response bytes, connection-liveness expectations, and MQTT 3.1.1
 helper publications with full QoS 0/1/2 handshakes; it rejects other
@@ -1983,9 +1986,9 @@ zig build interop-mqtt-mosquitto-packet-sequences -Doptimize=ReleaseFast -- \
 ```
 
 The manifest pins SHA-256 hashes for all eleven complete JSON inputs, the
-audited `PUBLISH.json` and `SUBSCRIBE.json` subset sources, and the imported `mqtt_packets.py`
-generator, so a changed upstream fixture cannot silently reuse the recorded
-scenario count.
+audited `PUBLISH.json`, `SUBSCRIBE.json`, and `UNSUBSCRIBE.json` subset sources,
+and the imported `mqtt_packets.py` generator, so a changed upstream fixture
+cannot silently reuse the recorded scenario count.
 The adapter intentionally does not claim complete-file coverage for
 `AUTH.json`, `PUBLISH.json`, `SUBSCRIBE.json`, `DISCONNECT.json`, `PUBREL.json`,
 or `UNSUBSCRIBE.json` yet: the pinned
@@ -1995,14 +1998,14 @@ Protocol Error `0x82`, and likewise classify invalid MQTT 5 PUBREL reserved
 flags as `0x82`; MQTT 5 defines unparseable variable headers and invalid
 reserved flags as Malformed Packet `0x81`. Netz retains the standards
 classification instead of adding per-file compatibility exceptions.
-`PUBLISH.json` and `SUBSCRIBE.json` additionally contain the explicitly
-enumerated configuration, optional-Unicode, QoS 2 reuse, and reason-code
-differences described above; all other scenarios in those hash-locked files
-are executed. `CONNECT.json` and
+`PUBLISH.json`, `SUBSCRIBE.json`, and `UNSUBSCRIBE.json` additionally contain
+the explicitly enumerated configuration, optional-Unicode, QoS 2 reuse, and
+reason-code differences described above; all other scenarios in those
+hash-locked files are executed. `CONNECT.json` and
 `CONNACK.json` also contain MQTT 3.1 protocol-level cases, outside netz's
 declared MQTT 3.1.1/5 scope.
-The UNSUBSCRIBE file also requires rejection of otherwise valid UTF-8 control
-characters such as U+0001. MQTT 5 makes rejection of these disallowed Unicode
+The audited subsets require rejection of otherwise valid UTF-8 control
+characters such as U+0001. MQTT makes rejection of these disallowed Unicode
 code points optional, and netz retains its documented interoperable acceptance
 policy instead of pretending that Mosquitto's stricter choice is mandatory.
 This is
@@ -2056,9 +2059,9 @@ or plugins, so passing these vectors is not proxy evidence for the entire suite.
    validated broker-process RSS records; a current 64-connection run measured
    netz at 6,360 KiB versus Mosquitto at 3,896 KiB, narrowing but not closing
    the independent-peer memory gap.
-3. Expand the source-hash-locked gate beyond its current 982 upstream packet
+3. Expand the source-hash-locked gate beyond its current 1,082 upstream packet
    sequences, or add a broker process adapter capable of preserving the
    upstream harness's config/reload/persistence semantics. The 167 curated
    scenarios, eleven complete portable JSON files, audited 148/160
-   `PUBLISH.json`, and audited 151/155 `SUBSCRIBE.json` subsets still do not
-   cover the full protocol/conformance suite.
+   `PUBLISH.json`, 151/155 `SUBSCRIBE.json`, and 100/108 `UNSUBSCRIBE.json`
+   subsets still do not cover the full protocol/conformance suite.

@@ -137,6 +137,8 @@ class SequenceLoadingTests(unittest.TestCase):
                     "a3b6a5d5b2cd44b70550ce17a03ff5607cc76e4f165ae1f1f6deb68eb7013f86",
                 "SUBSCRIBE.json":
                     "f3feba6c933d43dc7be5397a42afd616e5f4a21824cf5289c986166ec6c0e60c",
+                "UNSUBSCRIBE.json":
+                    "32a8618e6f74fb02df944bc528e9b4ff258e5e920473b7d7ea81ac107374b825",
             },
         )
         self.assertEqual(
@@ -146,11 +148,15 @@ class SequenceLoadingTests(unittest.TestCase):
         self.assertEqual(sequences.EXPECTED_COMPLETE_SEQUENCE_COUNT, 683)
         self.assertEqual(
             sequences.EXPECTED_SUBSET_SEQUENCE_COUNTS,
-            {"PUBLISH.json": 148, "SUBSCRIBE.json": 151},
+            {
+                "PUBLISH.json": 148,
+                "SUBSCRIBE.json": 151,
+                "UNSUBSCRIBE.json": 100,
+            },
         )
-        self.assertEqual(sequences.EXPECTED_SUBSET_SEQUENCE_COUNT, 299)
-        self.assertEqual(sequences.EXPECTED_SEQUENCE_COUNT, 982)
-        self.assertEqual(sequences.EXPECTED_STANDARD_OVERRIDE_COUNT, 102)
+        self.assertEqual(sequences.EXPECTED_SUBSET_SEQUENCE_COUNT, 399)
+        self.assertEqual(sequences.EXPECTED_SEQUENCE_COUNT, 1082)
+        self.assertEqual(sequences.EXPECTED_STANDARD_OVERRIDE_COUNT, 106)
         self.assertEqual(
             len(sequences.SEQUENCE_EXCLUSIONS["PUBLISH.json"]),
             12,
@@ -188,6 +194,19 @@ class SequenceLoadingTests(unittest.TestCase):
             },
         )
         self.assertEqual(
+            set(sequences.SEQUENCE_EXCLUSIONS["UNSUBSCRIBE.json"]),
+            {
+                ("v3.1.1 UNSUBSCRIBE", "A2 topic with U+0001"),
+                ("v3.1.1 UNSUBSCRIBE", "A2 topic with U+001F"),
+                ("v3.1.1 UNSUBSCRIBE", "A2 topic with U+007F"),
+                ("v3.1.1 UNSUBSCRIBE", "A2 topic with U+009F"),
+                ("v5.0   UNSUBSCRIBE", "A2 topic with U+0001"),
+                ("v5.0   UNSUBSCRIBE", "A2 topic with U+001F"),
+                ("v5.0   UNSUBSCRIBE", "A2 topic with U+007F"),
+                ("v5.0   UNSUBSCRIBE", "A2 topic with U+009F"),
+            },
+        )
+        self.assertEqual(
             {
                 reason: sum(
                     value == reason
@@ -198,7 +217,7 @@ class SequenceLoadingTests(unittest.TestCase):
             },
             {
                 "mosquitto_qos2_reuse_limit": 2,
-                "optional_utf8_control_policy": 12,
+                "optional_utf8_control_policy": 20,
                 "mosquitto_fixture_configuration": 2,
             },
         )
@@ -208,6 +227,7 @@ class SequenceLoadingTests(unittest.TestCase):
             "PUBCOMP.json": 24,
             "PUBLISH.json": 21,
             "SUBSCRIBE.json": 9,
+            "UNSUBSCRIBE.json": 4,
         }
         self.assertEqual(
             {
@@ -278,6 +298,23 @@ class SequenceLoadingTests(unittest.TestCase):
                 ("v5.0   SUBSCRIBE", "82 mid 0", 1),
             },
         )
+        self.assertEqual(
+            set(
+                sequences.STANDARD_EXPECTATION_OVERRIDES[
+                    "UNSUBSCRIBE.json"
+                ]
+            ),
+            {
+                ("v5.0   UNSUBSCRIBE", "A2 multiple zero 1st", 1),
+                ("v5.0   UNSUBSCRIBE", "A2 multiple zero 2nd", 1),
+                (
+                    "v5.0   UNSUBSCRIBE",
+                    "A2 short 3 [MQTT-3.10.3-2]",
+                    1,
+                ),
+                ("v5.0   UNSUBSCRIBE", "A2 zero mid", 1),
+            },
+        )
         override_reasons = [
             override[2]
             for overrides in
@@ -293,6 +330,7 @@ class SequenceLoadingTests(unittest.TestCase):
                 "mqtt5_property_context_malformed": 90,
                 "mqtt5_publish_protocol_error": 3,
                 "mqtt5_subscribe_protocol_error": 9,
+                "mqtt5_unsubscribe_protocol_error": 4,
             },
         )
         for filename, overrides in (
