@@ -31,6 +31,8 @@ SEQUENCE_FILES = {
         "9ef4419f01bb7edb907b8846de498883fbd58eebc5fbd41bf2782e0fb14c83ad",
     "FLOW.json":
         "b77b707ca927b593c02b74ebc894c76fafc31327543dc3c04ae3f3f4da7b37ea",
+    "OTHER.json":
+        "a5a5b28b3baf530ec1cd6b8c778a1988be35d931798cfced3e247452de9fb30b",
     "PINGREQ.json":
         "85c5d707c54065157f2ded972bac72d1a2fccf24ff4a65e7775ed61759a77408",
     "PINGRESP.json":
@@ -48,7 +50,7 @@ SEQUENCE_FILES = {
     "UNSUBACK.json":
         "593719885cb1fa474c252449c11f2f1183fa432ee389737dca45beca225ac1a0",
 }
-EXPECTED_SEQUENCE_COUNT = 663
+EXPECTED_SEQUENCE_COUNT = 683
 MQTT_PACKETS_SHA256 = (
     "0024fcebd421a3286cea021ed64083f906d9b457004786b05f8a74abae5bfb37"
 )
@@ -318,11 +320,10 @@ def main() -> None:
             )
             healthy.sendall(mqtt_packets.gen_disconnect(proto_ver=5))
 
+    filenames = ", ".join(sorted(SEQUENCE_FILES))
     print(
-        "Mosquitto packet-sequence JSON gate passed: 663 upstream scenarios "
-        "from FLOW.json, FORBIDDEN.json, PINGREQ.json, PINGRESP.json, "
-        "PUBACK.json, PUBCOMP.json, PUBREC.json, REGRESSION.json, "
-        "SUBACK.json, and UNSUBACK.json"
+        f"Mosquitto packet-sequence JSON gate passed: "
+        f"{EXPECTED_SEQUENCE_COUNT} upstream scenarios from {filenames}"
     )
 
 

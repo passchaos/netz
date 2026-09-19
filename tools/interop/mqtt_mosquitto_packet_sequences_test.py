@@ -119,6 +119,7 @@ class SequenceLoadingTests(unittest.TestCase):
             {
                 "FLOW.json",
                 "FORBIDDEN.json",
+                "OTHER.json",
                 "PINGREQ.json",
                 "PINGRESP.json",
                 "PUBACK.json",
@@ -129,7 +130,7 @@ class SequenceLoadingTests(unittest.TestCase):
                 "UNSUBACK.json",
             },
         )
-        self.assertEqual(sequences.EXPECTED_SEQUENCE_COUNT, 663)
+        self.assertEqual(sequences.EXPECTED_SEQUENCE_COUNT, 683)
         self.assertEqual(len(sequences.MQTT_PACKETS_SHA256), 64)
         int(sequences.MQTT_PACKETS_SHA256, 16)
         for digest in sequences.SEQUENCE_FILES.values():

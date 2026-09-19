@@ -4117,7 +4117,13 @@ pub const Broker = struct {
             recorded_change,
         );
 
+        // Mosquitto queues a self-matched delivery before the publisher's
+        // PUBACK, which makes the PUBLISH observable first on their shared
+        // socket. Preserve that deterministic same-connection boundary
+        // without making unrelated slow subscribers delay the publisher
+        // acknowledgement.
         if (acknowledge_qos1) if (publish.packet_id) |packet_id| {
+            try self.flushPublisherMatch(plan, publisher_id);
             const publisher_slot = try self.slotForSubscriber(
                 publisher_id,
             );
@@ -4814,6 +4820,29 @@ pub const Broker = struct {
         // interleave outside the broker state mutex.
         try self.flushMatches(plan.deliveries);
         try self.flushMatches(plan.session_targets);
+    }
+
+    fn flushPublisherMatch(
+        self: *Broker,
+        plan: RoutePlan,
+        publisher_id: router_mod.SubscriberId,
+    ) Error!void {
+        const slot_index = subscriberIndex(
+            publisher_id,
+            self.slots.len,
+        ) orelse return;
+        for (plan.deliveries) |match| {
+            if (match.subscriber_id == publisher_id) {
+                try self.flushSlot(slot_index, &self.slots[slot_index]);
+                return;
+            }
+        }
+        for (plan.session_targets) |match| {
+            if (match.subscriber_id == publisher_id) {
+                try self.flushSlot(slot_index, &self.slots[slot_index]);
+                return;
+            }
+        }
     }
 
     fn flushMatches(

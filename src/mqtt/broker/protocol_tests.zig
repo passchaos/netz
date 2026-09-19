@@ -38,6 +38,84 @@ fn expectNoClientPacket(
     );
 }
 
+test "broker writes self-delivery before publisher acknowledgement" {
+    const allocator = std.testing.allocator;
+    var threaded = std.Io.Threaded.init(allocator, .{
+        .async_limit = .unlimited,
+    });
+    defer threaded.deinit();
+    const io = threaded.io();
+    var broker = try testBroker(allocator, io, 2, 64);
+    defer broker.deinit();
+
+    var serve = ServeState{ .broker = &broker, .connection_count = 2 };
+    const thread = try std.Thread.spawn(.{}, ServeState.run, .{&serve});
+    var joined = false;
+    defer if (!joined) thread.join();
+
+    var clients = [_]context.runtime_mod.Connection{
+        try connectWithOptions(allocator, io, broker, .{
+            .protocol = .v3_1_1,
+            .client_id = "self-delivery-order-v311",
+        }),
+        try connectWithOptions(allocator, io, broker, .{
+            .protocol = .v5,
+            .client_id = "self-delivery-order-v5",
+        }),
+    };
+    defer for (&clients) |*client| client.close();
+
+    for (&clients) |*client| {
+        var suback = try client.subscribe(
+            &.{.{
+                .topic_filter = "self/delivery/order",
+                .qos = .at_least_once,
+            }},
+            .{},
+        );
+        defer suback.deinit(allocator);
+
+        const published_id = (try client.writePublish(
+            "self/delivery/order",
+            "payload",
+            .{ .qos = .at_least_once },
+        )).?;
+        const delivery_id = delivery: {
+            var event = try client.readClientPacketEvent();
+            defer event.deinit(allocator);
+            break :delivery switch (event) {
+                .publish => |owned| blk: {
+                    try std.testing.expectEqualStrings(
+                        "payload",
+                        owned.publish.payload,
+                    );
+                    break :blk owned.publish.packet_id.?;
+                },
+                else => return error.UnexpectedPacket,
+            };
+        };
+
+        {
+            var event = try client.readClientPacketEvent();
+            defer event.deinit(allocator);
+            switch (event) {
+                .puback => |owned| {
+                    try std.testing.expectEqual(
+                        published_id,
+                        owned.ack.packet_id,
+                    );
+                    try client.applyPubAck(owned.ack);
+                },
+                else => return error.UnexpectedPacket,
+            }
+        }
+        try client.writePubAck(delivery_id, 0);
+        try client.disconnect(0);
+    }
+
+    try joinServer(thread, &joined, &serve);
+}
+
 test "broker tolerates unknown outbound acknowledgement identifiers" {
     const allocator = std.testing.allocator;
     var threaded = std.Io.Threaded.init(allocator, .{
