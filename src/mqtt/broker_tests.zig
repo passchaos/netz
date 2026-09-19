@@ -189,6 +189,50 @@ fn subscribeWithIdentifier(
     );
 }
 
+test "broker rejects unconfigured Enhanced Authentication with CONNACK" {
+    const allocator = std.testing.allocator;
+    var threaded = std.Io.Threaded.init(allocator, .{});
+    defer threaded.deinit();
+    const io = threaded.io();
+
+    var broker = try testBroker(allocator, io, 1, 16);
+    defer broker.deinit();
+    var serve = ServeState{
+        .broker = &broker,
+        .connection_count = 1,
+    };
+    const thread = try std.Thread.spawn(.{}, ServeState.run, .{&serve});
+    var joined = false;
+    defer if (!joined) thread.join();
+
+    const properties = [_]mqtt.Property{
+        .{ .utf8 = .{
+            .id = .authentication_method,
+            .value = "unsupported",
+        } },
+        .{ .binary = .{
+            .id = .authentication_data,
+            .value = "test",
+        } },
+    };
+    var attempt = try runtime.Client.connectAttempt(
+        allocator,
+        io,
+        broker.address(),
+        .{
+            .protocol = .v5,
+            .client_id = "p",
+            .properties = &properties,
+        },
+    );
+    defer attempt.deinit(allocator);
+    try std.testing.expect(!attempt.accepted());
+    try std.testing.expectEqual(@as(u8, 0x8c), attempt.connack.connack.reason_code);
+    try std.testing.expectEqual(@as(usize, 0), attempt.connack.connack.properties.len);
+
+    try joinServer(thread, &joined, &serve);
+}
+
 test "broker shares mounted and global TCP listener namespaces" {
     const allocator = std.testing.allocator;
     var threaded = std.Io.Threaded.init(allocator, .{

@@ -1047,23 +1047,31 @@ pub const PendingAcceptedClient = struct {
             } };
             property_count += 1;
         }
-        if (self.connection.authentication.method) |method| {
-            if (resolved.reason_code == 0 and
-                !self.authentication_authorized)
-            {
-                return error.AuthenticationInProgress;
+        if (resolved.reason_code == 0) {
+            if (self.connection.authentication.method) |method| {
+                if (!self.authentication_authorized) {
+                    return error.AuthenticationInProgress;
+                }
+                properties[property_count] = .{ .utf8 = .{
+                    .id = .authentication_method,
+                    .value = method,
+                } };
+                property_count += 1;
             }
-            properties[property_count] = .{ .utf8 = .{
-                .id = .authentication_method,
-                .value = method,
-            } };
-            property_count += 1;
             if (self.authentication_data) |data| {
                 properties[property_count] = .{ .binary = .{
                     .id = .authentication_data,
                     .value = data,
                 } };
                 property_count += 1;
+            }
+        } else if (self.authentication_data != null) {
+            // A failed CONNACK ends Enhanced Authentication instead of
+            // negotiating method-specific output. Keep refusal packets free
+            // of application data even if a policy staged some beforehand.
+            if (self.authentication_data) |data| {
+                self.connection.allocator.free(data);
+                self.authentication_data = null;
             }
         }
         if (resolved.server_reference) |reference| {
@@ -2239,7 +2247,7 @@ pub const Connection = struct {
     protocol: mqtt.ProtocolVersion = .v5,
     endpoint_role: EndpointRole = .unestablished,
     connect_session_expiry: u32 = 0,
-    unsupported_connect_level: ?u8 = null,
+    incoming_connect_level: ?u8 = null,
     limits: Limits = .{},
     next_packet_id: u16 = 1,
     outgoing_inflight: u16 = 0,
@@ -2627,12 +2635,10 @@ pub const Connection = struct {
             self.attachTrafficCounters(counters);
         }
         var connect = (if (deadline) |absolute|
-            self.readConnectWithDeadline(absolute)
+            self.readConnectPacketWithDeadline(absolute)
         else
-            self.readConnect()) catch |err| {
-            if (err == error.InvalidProtocolLevel) {
-                self.writeUnsupportedProtocolConnAck() catch {};
-            }
+            self.readConnectPacket()) catch |err| {
+            self.writeConnectErrorConnAck(err) catch {};
             return err;
         };
         errdefer connect.deinit(self.allocator);
@@ -2906,6 +2912,14 @@ pub const Connection = struct {
         return self.finishReadConnect(packet);
     }
 
+    fn readConnectPacket(self: *Connection) Error!OwnedConnect {
+        const packet = try self.readUnvalidatedTransportPacket();
+        return self.finishReadConnect(.{
+            .bytes = packet.bytes,
+            .fixed = packet.fixed,
+        });
+    }
+
     pub fn readConnectWithTimeout(
         self: *Connection,
         timeout: std.Io.Duration,
@@ -2930,24 +2944,37 @@ pub const Connection = struct {
         return self.finishReadConnect(packet);
     }
 
+    fn readConnectPacketWithDeadline(
+        self: *Connection,
+        deadline: std.Io.Clock.Timestamp,
+    ) Error!OwnedConnect {
+        _ = try deadline_policy.usableAwake(
+            self.transport.ioHandle(),
+            deadline,
+        );
+        const packet = try self.readUnvalidatedTransportPacketWithDeadline(
+            deadline,
+        );
+        return self.finishReadConnect(.{
+            .bytes = packet.bytes,
+            .fixed = packet.fixed,
+        });
+    }
+
     fn finishReadConnect(
         self: *Connection,
         packet_value: OwnedPacket,
     ) Error!OwnedConnect {
         var packet = packet_value;
         errdefer packet.deinit(self.allocator);
+        self.incoming_connect_level = null;
         if (packet.fixed.packet_type != .connect) return error.UnexpectedPacket;
-        self.unsupported_connect_level = null;
+        self.incoming_connect_level =
+            mqtt.connectProtocolLevel(packet.bytes) catch null;
         var connect = mqtt.Connect.parse(
             self.allocator,
             packet.bytes,
-        ) catch |err| {
-            if (err == error.InvalidProtocolLevel) {
-                self.unsupported_connect_level =
-                    mqtt.connectProtocolLevel(packet.bytes) catch null;
-            }
-            return err;
-        };
+        ) catch |err| return err;
         errdefer connect.deinit(self.allocator);
         self.protocol = connect.protocol;
         self.endpoint_role = .server;
@@ -2958,16 +2985,40 @@ pub const Connection = struct {
         return .{ .packet = packet, .connect = connect };
     }
 
-    fn writeUnsupportedProtocolConnAck(self: *Connection) Error!void {
-        const raw_level = self.unsupported_connect_level orelse
-            return error.InvalidProtocolLevel;
+    fn writeConnectErrorConnAck(
+        self: *Connection,
+        err: anyerror,
+    ) Error!void {
+        const raw_level = self.incoming_connect_level orelse return;
         const level = raw_level & 0x7f;
         const response_protocol: mqtt.ProtocolVersion =
             if (level == 3 or level == 4) .v3_1_1 else .v5;
-        const reason_code: u8 = if (response_protocol == .v3_1_1)
-            0x01
-        else
-            0x84;
+        const reason_code: u8 = switch (response_protocol) {
+            .v3_1_1 => switch (err) {
+                error.InvalidProtocolLevel => 0x01,
+                error.InvalidClientId => 0x02,
+                else => return,
+            },
+            .v5 => switch (err) {
+                error.InvalidProtocolLevel => 0x84,
+                error.InvalidClientId => 0x85,
+                error.InvalidProperty => 0x82,
+                error.InvalidTopic => 0x90,
+                error.InvalidPacketType,
+                error.InvalidFlags,
+                error.InvalidQoS,
+                error.InvalidPropertyIdentifier,
+                error.MalformedPropertyContext,
+                error.MalformedSubscriptionOptions,
+                error.BufferTooShort,
+                error.MalformedRemainingLength,
+                error.RemainingLengthTooLarge,
+                error.InvalidUtf8,
+                => 0x81,
+                else => return,
+            },
+        };
+        self.protocol = response_protocol;
         var encoded: [mqtt.ConnAck.no_properties_max_len]u8 = undefined;
         try self.writePacket(try mqtt.ConnAck.writeNoPropertiesInto(
             &encoded,
@@ -4763,12 +4814,19 @@ pub const Connection = struct {
     }
 
     fn readTransportPacket(self: *Connection) Error!OwnedPacket {
+        const packet = try self.readUnvalidatedTransportPacket();
+        return self.finishReadPacket(packet);
+    }
+
+    fn readUnvalidatedTransportPacket(
+        self: *Connection,
+    ) Error!packet_transport.OwnedPacket {
         const packet = try self.transport.readPacket(
             self.allocator,
             self.limits.max_packet_size,
         );
         self.recordPacketReceived(packet.bytes.len);
-        return self.finishReadPacket(packet);
+        return packet;
     }
 
     fn readPacketWithInactivityTimeout(
@@ -4797,13 +4855,23 @@ pub const Connection = struct {
         self: *Connection,
         deadline: std.Io.Clock.Timestamp,
     ) Error!OwnedPacket {
+        const packet = try self.readUnvalidatedTransportPacketWithDeadline(
+            deadline,
+        );
+        return self.finishReadPacket(packet);
+    }
+
+    fn readUnvalidatedTransportPacketWithDeadline(
+        self: *Connection,
+        deadline: std.Io.Clock.Timestamp,
+    ) Error!packet_transport.OwnedPacket {
         const packet = try self.transport.readPacketWithDeadline(
             self.allocator,
             self.limits.max_packet_size,
             deadline,
         );
         self.recordPacketReceived(packet.bytes.len);
-        return self.finishReadPacket(packet);
+        return packet;
     }
 
     fn recordPacketReceived(self: *Connection, bytes: usize) void {
@@ -5964,7 +6032,7 @@ test "MQTT client connectAttempt exposes refused CONNACK reason" {
     if (second_shared.err) |err| return err;
 }
 
-test "MQTT server reports unsupported CONNECT protocol levels" {
+test "MQTT server reports version-aware CONNECT failures" {
     const allocator = std.testing.allocator;
     var threaded = std.Io.Threaded.init(allocator, .{});
     defer threaded.deinit();
@@ -5982,7 +6050,7 @@ test "MQTT server reports unsupported CONNECT protocol levels" {
         err: ?anyerror = null,
 
         fn run(self: *@This()) void {
-            for (0..2) |_| {
+            for (0..9) |_| {
                 const stream = self.listener.accept(self.io) catch |err| {
                     self.err = err;
                     return;
@@ -5991,11 +6059,13 @@ test "MQTT server reports unsupported CONNECT protocol levels" {
                     .allocator = self.allocator,
                     .transport = .initTcp(self.io, stream),
                 };
-                defer connection.close();
-                _ = connection.acceptPending(.{}) catch |err| {
-                    if (err != error.InvalidProtocolLevel) self.err = err;
+                var pending = connection.acceptPending(.{
+                    .connect_timeout = .fromMilliseconds(500),
+                }) catch {
+                    connection.close();
                     continue;
                 };
+                pending.deinit(self.allocator);
                 self.err = error.TestUnexpectedResult;
                 return;
             }
@@ -6017,40 +6087,138 @@ test "MQTT server reports unsupported CONNECT protocol levels" {
     });
     const level_index = (try mqtt.FixedHeader.parse(encoded.items)).header_len +
         2 + "MQTT".len;
-    const cases = [_]struct { level: u8, expected: []const u8 }{
-        .{ .level = 3, .expected = &.{ 0x20, 0x02, 0x00, 0x01 } },
-        .{ .level = 6, .expected = &.{ 0x20, 0x03, 0x00, 0x84, 0x00 } },
+    const valid_v5 = try allocator.dupe(u8, encoded.items);
+    defer allocator.free(valid_v5);
+    const cases = [_]struct { packet: []const u8, expected: ?[]const u8 }{
+        .{
+            .packet = blk: {
+                const packet = try allocator.dupe(u8, valid_v5);
+                packet[level_index] = 3;
+                break :blk packet;
+            },
+            .expected = &.{ 0x20, 0x02, 0x00, 0x01 },
+        },
+        .{
+            .packet = blk: {
+                const packet = try allocator.dupe(u8, valid_v5);
+                packet[level_index] = 6;
+                break :blk packet;
+            },
+            .expected = &.{ 0x20, 0x03, 0x00, 0x84, 0x00 },
+        },
+        .{
+            .packet = &.{
+                0x10, 0x0c, 0x00, 0x04, 'M',  'Q',  'T', 'T',
+                0x04, 0x00, 0x00, 0x0a, 0x00, 0x00,
+            },
+            .expected = &.{ 0x20, 0x02, 0x00, 0x02 },
+        },
+        .{
+            .packet = &.{
+                0x10, 0x0d, 0x00, 0x04, 'M',  'Q',  'T',  'T',
+                0x05, 0x00, 0x00, 0x0a, 0x00, 0x00, 0x00,
+            },
+            .expected = &.{ 0x20, 0x03, 0x00, 0x85, 0x00 },
+        },
+        .{
+            .packet = blk: {
+                const packet = try allocator.dupe(u8, valid_v5);
+                packet[0] = 0x1f;
+                break :blk packet;
+            },
+            .expected = &.{ 0x20, 0x03, 0x00, 0x81, 0x00 },
+        },
+        .{
+            .packet = &.{
+                0x10, 0x07, 0x00, 0x04, 'M', 'Q', 'T', 'T', 0x05,
+            },
+            .expected = &.{ 0x20, 0x03, 0x00, 0x81, 0x00 },
+        },
+        .{
+            .packet = &.{
+                0x10, 0x15, 0x00, 0x04, 'M',  'Q',  'T',  'T',
+                0x05, 0x06, 0x00, 0x0a, 0x00, 0x00, 0x01, 'p',
+                0x00, 0x00, 0x01, '#',  0x00, 0x01, 'p',
+            },
+            .expected = &.{ 0x20, 0x03, 0x00, 0x90, 0x00 },
+        },
+        .{
+            .packet = &.{
+                0x10, 0x0d, 0x00, 0x04, 'M',  'Q',  'T',  'U',
+                0x05, 0x02, 0x00, 0x0a, 0x00, 0x00, 0x00,
+            },
+            .expected = null,
+        },
+        .{
+            .packet = &.{ 0x10, 0x06, 0x00, 0x04, 'M', 'Q', 'T', 'T' },
+            .expected = null,
+        },
     };
-    for (cases) |case| {
-        encoded.items[level_index] = case.level;
-        const stream = try listener.socket.address.connect(
-            io,
-            .{ .mode = .stream },
-        );
-        defer stream.close(io);
-        try stream_io.writeAllSlices(io, stream, &.{encoded.items});
-        var received: [mqtt.ConnAck.no_properties_max_len]u8 = undefined;
-        var offset: usize = 0;
-        while (offset < case.expected.len) {
-            var buffers = [_][]u8{received[offset..case.expected.len]};
-            const count = try io.vtable.netRead(
-                io.userdata,
-                stream.socket.handle,
-                &buffers,
+    defer allocator.free(cases[0].packet);
+    defer allocator.free(cases[1].packet);
+    defer allocator.free(cases[4].packet);
+    const Peer = struct {
+        fn run(
+            peer_io: std.Io,
+            peer_allocator: std.mem.Allocator,
+            address: net.IpAddress,
+            packet: []const u8,
+            expected: ?[]const u8,
+        ) !void {
+            const stream = try address.connect(
+                peer_io,
+                .{ .mode = .stream },
             );
-            if (count == 0) return error.ConnectionClosed;
-            offset += count;
+            defer stream.close(peer_io);
+            try stream_io.writeAllSlices(peer_io, stream, &.{packet});
+            var peer = PacketTransport.initTcp(peer_io, stream);
+            const deadline = peer.deadlineFromNow(.fromMilliseconds(500));
+            const expected_bytes = expected orelse {
+                var received = peer.readPacketWithDeadline(
+                    peer_allocator,
+                    mqtt.ConnAck.no_properties_max_len,
+                    deadline,
+                ) catch |err| switch (err) {
+                    error.EndOfStream,
+                    error.ConnectionClosed,
+                    error.SocketUnconnected,
+                    error.ConnectionResetByPeer,
+                    => return,
+                    else => return err,
+                };
+                defer received.deinit(peer_allocator);
+                return error.TestUnexpectedResult;
+            };
+            var received = try peer.readPacketWithDeadline(
+                peer_allocator,
+                mqtt.ConnAck.no_properties_max_len,
+                deadline,
+            );
+            defer received.deinit(peer_allocator);
+            try std.testing.expectEqualSlices(
+                u8,
+                expected_bytes,
+                received.bytes,
+            );
         }
-        try std.testing.expectEqualSlices(
-            u8,
+    };
+    var peer_err: ?anyerror = null;
+    for (cases) |case| {
+        Peer.run(
+            io,
+            allocator,
+            listener.socket.address,
+            case.packet,
             case.expected,
-            received[0..case.expected.len],
-        );
+        ) catch |err| if (peer_err == null) {
+            peer_err = err;
+        };
     }
 
     server_thread.join();
     joined = true;
     if (shared.err) |err| return err;
+    if (peer_err) |err| return err;
 }
 
 test "MQTT client follows bounded Server Reference CONNACK" {

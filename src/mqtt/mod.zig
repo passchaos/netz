@@ -1240,10 +1240,17 @@ const ConnectProtocolPrefix = struct {
 fn parseConnectProtocolPrefix(
     packet: []const u8,
 ) Error!ConnectProtocolPrefix {
+    const prefix = try inspectConnectProtocolPrefix(packet);
     const fixed = try FixedHeader.parse(packet);
-    if (fixed.packet_type != .connect or fixed.flags != 0) {
-        return error.InvalidFlags;
-    }
+    if (fixed.flags != 0) return error.InvalidFlags;
+    return prefix;
+}
+
+fn inspectConnectProtocolPrefix(
+    packet: []const u8,
+) Error!ConnectProtocolPrefix {
+    const fixed = try FixedHeader.parse(packet);
+    if (fixed.packet_type != .connect) return error.InvalidPacketType;
     try validatePacketBounds(packet, fixed);
     var cursor = wire.Cursor.init(
         packet[fixed.header_len .. fixed.header_len + fixed.remaining_len],
@@ -1263,7 +1270,7 @@ fn parseConnectProtocolPrefix(
 /// it as a supported protocol. Connection-owning servers use this after
 /// `InvalidProtocolLevel` to select the required refusal CONNACK format.
 pub fn connectProtocolLevel(packet: []const u8) Error!u8 {
-    return (try parseConnectProtocolPrefix(packet)).level;
+    return (try inspectConnectProtocolPrefix(packet)).level;
 }
 
 pub const LastWill = struct {

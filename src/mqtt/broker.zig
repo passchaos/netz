@@ -2559,8 +2559,12 @@ pub const Broker = struct {
             }
         }
         if (pending.connection.authentication.phase == .authenticating) {
-            const handler = self.options.authentication orelse
-                return error.AuthenticationNotConfigured;
+            const handler = self.options.authentication orelse {
+                var refused = try pending.finish(.{ .reason_code = 0x8c });
+                pending_owned = false;
+                refused.deinit(self.allocator);
+                return null;
+            };
             try handler.start(handler.context, pending);
             if (!pending.authentication_authorized) {
                 return error.AuthenticationInProgress;

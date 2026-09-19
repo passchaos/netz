@@ -58,6 +58,8 @@ SEQUENCE_FILES = {
         "593719885cb1fa474c252449c11f2f1183fa432ee389737dca45beca225ac1a0",
 }
 SEQUENCE_SUBSET_FILES = {
+    "CONNECT.json":
+        "22dc51ebccb0d9938bb1e5111988ab02a061671dec15beab8aa4410e948158ac",
     "CONNACK.json":
         "307445b4773e219f4377b880e19678791ee70379f85a43c729b45af548fb9108",
     "PUBLISH.json":
@@ -87,6 +89,36 @@ EXCLUSION_REASONS = {
     ),
 }
 SEQUENCE_EXCLUSIONS = {
+    "CONNECT.json": {
+        **{
+            ("v3.1   CONNECT", test): "unsupported_mqtt_3_1"
+            for test in (
+                "10 ok ",
+                "14 ok ",
+                "10 proto ver 2",
+                "10 proto ver 4",
+                "10 proto ver 6",
+                "10 empty client ID",
+                "10 ok",
+                "10 remaining length 5 bytes",
+            )
+        },
+        **{
+            (group, f"10 {field} with {codepoint}"):
+                "optional_utf8_control_policy"
+            for group, field, prefix in (
+                ("v3.1.1 CONNECT", "Will topic", "U+"),
+                ("v3.1.1 CONNECT", "Client ID", "U+"),
+                ("v3.1.1 CONNECT", "Username", "0x"),
+                ("v5.0   CONNECT", "Client ID", "U+"),
+                ("v5.0   CONNECT", "Username", "0x"),
+            )
+            for codepoint in (
+                f"{prefix}0001", f"{prefix}001F",
+                f"{prefix}007F", f"{prefix}009F",
+            )
+        },
+    },
     "CONNACK.json": {
         ("v3.1.1 CONNACK", "issue 2163 v3"):
             "unsupported_mqtt_3_1",
@@ -219,6 +251,11 @@ EXPECTATION_OVERRIDE_REASONS = {
         "MQTT 5 classifies a truncated variable header as Malformed Packet "
         "0x81 rather than Protocol Error 0x82"
     ),
+    "mqtt5_invalid_utf8_malformed": (
+        "MQTT 5 classifies malformed or forbidden UTF-8 in a CONNECT "
+        "field as Malformed Packet 0x81 rather than Client Identifier not "
+        "valid 0x85"
+    ),
     "equivalent_connack_property_order": (
         "the configured CONNACK contains the same properties and values as "
         "the fixture but emits them in netz's deterministic property order"
@@ -272,6 +309,136 @@ EXPECTATION_OVERRIDES["CONNACK.json"] = {
         "28",
         "issue 2163 v5",
     )
+}
+CONNECT_SUCCESS_CASES = (
+    ("v5.0   CONNECT", "10 ok ", 0),
+    ("v5.0   CONNECT", "10 Username flag 1 ok", 0),
+    ("v5.0   CONNECT", "10 Will flag 1 ok", 0),
+    ("v5.0   CONNECT", "10 Will flag 1 ok", 1),
+    *{
+        ("v5.0   CONNECT ALLOWED PROPERTIES", test, 0)
+        for test in (
+            "session-expiry-interval (four byte integer)",
+            "receive-maximum (two byte integer)",
+            "maximum-packet-size (four byte integer)",
+            "maximum-packet-size (four byte integer) FFFFFFFF value",
+            "topic-alias-maximum (two byte integer)",
+            "topic-alias-maximum (two byte integer) 0 value",
+            "request-response-information (byte)",
+            "request-problem-information (byte)",
+            "user-property",
+            "2*user-property",
+            "user-property empty key",
+            "user-property empty value",
+            "user-property empty key,value",
+        )
+    },
+    *{
+        ("v5.0   WILL ALLOWED PROPERTIES", test, 0)
+        for test in (
+            "payload-format-indicator (byte)",
+            "message-expiry-interval (four byte integer)",
+            "will-delay-interval (four byte integer)",
+            "content-type (UTF-8 string)",
+            "content-type (UTF-8 string) empty",
+            "response-topic (UTF-8 string)",
+            "correlation-data (binary)",
+            "correlation-data (binary) empty",
+            "user-property",
+            "2*user-property",
+            "user-property empty key",
+            "user-property empty value",
+            "user-property empty key,value",
+        )
+    },
+)
+CONNECT_DISALLOWED_PROPERTY_CASES = (
+    "payload-format-indicator (byte)",
+    "maximum-qos (byte)",
+    "retain-available (byte)",
+    "wildcard-subscription-available (byte)",
+    "subscription-identifier-available (byte)",
+    "shared-subscription-available (byte)",
+    "message-expiry-interval (four byte integer)",
+    "message-expiry-interval (four byte integer) 0 value",
+    "message-expiry-interval (four byte integer) FFFFFFFF value",
+    "will-delay-interval (four byte integer)",
+    "will-delay-interval (four byte integer) 0 value",
+    "will-delay-interval (four byte integer) FFFFFFFF value",
+    "server-keep-alive (two byte integer)",
+    "topic-alias (two byte integer)",
+    "content-type (UTF-8 string)",
+    "content-type (UTF-8 string) empty",
+    "response-topic (UTF-8 string)",
+    "assigned-client-identifier (UTF-8 string)",
+    "assigned-client-identifier (UTF-8 string) empty",
+    "response-information (UTF-8 string)",
+    "response-information (UTF-8 string) empty",
+    "correlation-data (binary)",
+    "correlation-data (binary) empty",
+    "subscription-identifier (variable byte integer)",
+)
+WILL_DISALLOWED_PROPERTY_CASES = (
+    "request-problem-information (byte)",
+    "request-response-information (byte)",
+    "maximum-qos (byte)",
+    "retain-available (byte)",
+    "wildcard-subscription-available (byte)",
+    "subscription-identifier-available (byte)",
+    "shared-subscription-available (byte)",
+    "server-keep-alive (two byte integer)",
+    "receive-maximum (two byte integer)",
+    "topic-alias-maximum (two byte integer)",
+    "topic-alias (two byte integer)",
+    "session-expiry-interval (four byte integer)",
+    "maximum-packet-size (four byte integer)",
+    "assigned-client-identifier (UTF-8 string)",
+    "assigned-client-identifier (UTF-8 string) empty",
+    "authentication-method (UTF-8 string)",
+    "authentication-method (UTF-8 string) empty",
+    "response-information (UTF-8 string)",
+    "response-information (UTF-8 string) empty",
+    "server-reference (UTF-8 string)",
+    "server-reference (UTF-8 string) empty",
+    "reason-string (UTF-8 string)",
+    "reason-string (UTF-8 string) empty",
+    "authentication-data (binary)",
+    "authentication-data (binary) empty",
+    "subscription-identifier (variable byte integer)",
+)
+EXPECTATION_OVERRIDES["CONNECT.json"] = {
+    **{
+        (group, test, occurrence, 1): expectation_override(
+            "20 r14 00000B 22 H10 27 L2000000 21 H20",
+            "20 r14 00000B 21 H20 27 L2000000 22 H10",
+            "equivalent_connack_property_order",
+        )
+        for group, test, occurrence in CONNECT_SUCCESS_CASES
+    },
+    **{
+        (group, test, 0, 1): expectation_override(
+            "20 r3 00 82 00", "20 r3 00 81 00",
+            "mqtt5_property_context_malformed",
+        )
+        for group, cases in (
+            ("v5.0   CONNECT DISALLOWED PROPERTIES",
+             CONNECT_DISALLOWED_PROPERTY_CASES),
+            ("v5.0   WILL DISALLOWED PROPERTIES",
+             WILL_DISALLOWED_PROPERTY_CASES),
+        )
+        for test in cases
+    },
+    **{
+        ("v5.0   CONNECT", test, 0, 1): expectation_override(
+            "20 r3 00 85 00", "20 r3 00 81 00",
+            "mqtt5_invalid_utf8_malformed",
+        )
+        for test in (
+            "10 Client ID with 0x0000",
+            "10 Client ID with U+D800",
+            "10 Client ID with U+FFFF",
+        )
+    },
 }
 EXPECTATION_OVERRIDES["PUBREL.json"].update({
     ("v5.0   PUBREL", f"{header} unsolicited", 1): expectation_override(
@@ -380,6 +547,7 @@ EXPECTATION_OVERRIDES["DISCONNECT.json"].update({
 })
 EXPECTED_COMPLETE_SEQUENCE_COUNT = 949
 EXPECTED_SUBSET_SEQUENCE_COUNTS = {
+    "CONNECT.json": 279,
     "CONNACK.json": 145,
     "PUBLISH.json": 150,
     "SUBSCRIBE.json": 151,
@@ -389,7 +557,22 @@ EXPECTED_SUBSET_SEQUENCE_COUNT = sum(EXPECTED_SUBSET_SEQUENCE_COUNTS.values())
 EXPECTED_SEQUENCE_COUNT = (
     EXPECTED_COMPLETE_SEQUENCE_COUNT + EXPECTED_SUBSET_SEQUENCE_COUNT
 )
-EXPECTED_EXPECTATION_OVERRIDE_COUNT = 172
+EXPECTED_EXPECTATION_OVERRIDE_COUNT = 255
+CONNECT_REFUSAL_DIAGNOSTICS = {
+    ("CONNECT.json", group, test): bytes.fromhex("20 03 00 81 00")
+    for group, test in (
+        ("v3.1.1 CONNECT", "10 incorrect command flags"),
+        ("v3.1.1 CONNECT", "10 missing keepalive"),
+        ("v5.0   CONNECT",
+         "10 Will flag 1 Will Qos 3 [MQTT-3.1.2-14]"),
+        ("v5.0   CONNECT", "10 [MQTT-3.1.2-17]"),
+        ("v5.0   CONNECT", "10 Username with 0x0000"),
+        ("v5.0   CONNECT", "10 Username with 0xD800"),
+        ("v5.0   CONNECT", "10 Username with 0xFFFF"),
+        ("v5.0   CONNECT", "10 [MQTT-3.1.2-19]"),
+    )
+}
+EXPECTED_CONNECT_REFUSAL_DIAGNOSTIC_COUNT = 8
 PACKET_SEQUENCE_BROKER_ARGS = (
     "--max-outgoing-inflight=20",
     "--max-packet-size=2000000",
@@ -494,8 +677,19 @@ def load_sequences(
             group_protocol = group.get("ver", 4)
             group_connect = group.get("connect", True)
             group_disconnect = group.get("expect_disconnect", True)
+            identity_counts = {
+                test["name"]: sum(
+                    candidate["name"] == test["name"]
+                    for candidate in group["tests"]
+                    if not candidate.get("disable", False)
+                )
+                for test in group["tests"]
+            }
+            identity_occurrences: dict[str, int] = {}
             for test in group["tests"]:
                 identity = (group["group"], test["name"])
+                occurrence = identity_occurrences.get(test["name"], 0)
+                identity_occurrences[test["name"]] = occurrence + 1
                 if identity in file_exclusions:
                     reason = file_exclusions[identity]
                     if reason not in EXCLUSION_REASONS:
@@ -512,10 +706,19 @@ def load_sequences(
                         f"{filename} {test['name']} is not a portable raw sequence"
                     )
                 for action_index, action in enumerate(actions):
-                    override_identity = (
+                    exact_override_identity = (
+                        group["group"], test["name"], occurrence,
+                        action_index,
+                    )
+                    legacy_override_identity = (
                         group["group"], test["name"], action_index,
                     )
-                    override = file_overrides.get(override_identity)
+                    override_identity = exact_override_identity
+                    override = file_overrides.get(exact_override_identity)
+                    if (override is None and
+                            identity_counts[test["name"]] == 1):
+                        override_identity = legacy_override_identity
+                        override = file_overrides.get(legacy_override_identity)
                     if override is None:
                         continue
                     source_payload, expected_payload, reason = override
@@ -537,6 +740,8 @@ def load_sequences(
                     found_overrides.add(override_identity)
                 sequences.append({
                     "source": filename,
+                    "group": group["group"],
+                    "test": test["name"],
                     "name": f"{group['group']} {test['name']}",
                     "protocol": test.get("ver", group_protocol),
                     "connect": test.get("connect", group_connect),
@@ -575,6 +780,7 @@ def expect_closed(
     label: str,
     *,
     optional_v5_diagnostic: bool,
+    optional_connack_diagnostic: bytes | None = None,
 ) -> None:
     try:
         trailing = sock.recv(1)
@@ -583,6 +789,16 @@ def expect_closed(
     except socket.timeout as exc:
         raise AssertionError(f"{label}: broker kept connection open") from exc
     if not trailing:
+        return
+    if optional_connack_diagnostic is not None and trailing == b"\x20":
+        diagnostic = trailing + recv_exact(
+            sock, len(optional_connack_diagnostic) - 1
+        )
+        if diagnostic != optional_connack_diagnostic:
+            raise AssertionError(
+                f"{label}: unexpected CONNECT refusal {diagnostic.hex()}"
+            )
+        expect_closed(sock, label, optional_v5_diagnostic=False)
         return
     if not optional_v5_diagnostic or trailing != b"\xe0":
         raise AssertionError(
@@ -690,6 +906,9 @@ def run_sequence(
                     and sequence["connect"]
                     and not has_explicit_receive
                 ),
+                optional_connack_diagnostic=CONNECT_REFUSAL_DIAGNOSTICS.get((
+                    sequence["source"], sequence["group"], sequence["test"],
+                )),
             )
         else:
             sock.sendall(mqtt_packets.gen_pingreq())
@@ -718,6 +937,13 @@ def main() -> None:
         raise AssertionError(
             f"expected {EXPECTED_EXPECTATION_OVERRIDE_COUNT} audited "
             f"expectation overrides, found {override_count}"
+        )
+    if (len(CONNECT_REFUSAL_DIAGNOSTICS) !=
+            EXPECTED_CONNECT_REFUSAL_DIAGNOSTIC_COUNT):
+        raise AssertionError(
+            f"expected {EXPECTED_CONNECT_REFUSAL_DIAGNOSTIC_COUNT} exact "
+            f"CONNECT refusal diagnostics, found "
+            f"{len(CONNECT_REFUSAL_DIAGNOSTICS)}"
         )
     verify_source_hash(
         args.mosquitto_test_root / "mqtt_packets.py",
@@ -815,7 +1041,8 @@ def main() -> None:
         f"{filenames}; {EXPECTED_SUBSET_SEQUENCE_COUNT} from audited "
         f"subsets {subset_summary}; "
         f"{EXPECTED_EXPECTATION_OVERRIDE_COUNT} exact audited expectation "
-        f"overrides)"
+        f"overrides; {EXPECTED_CONNECT_REFUSAL_DIAGNOSTIC_COUNT} exact "
+        f"optional CONNECT refusal diagnostics)"
     )
 
 

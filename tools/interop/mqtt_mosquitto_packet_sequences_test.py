@@ -148,6 +148,8 @@ class SequenceLoadingTests(unittest.TestCase):
         self.assertEqual(
             sequences.SEQUENCE_SUBSET_FILES,
             {
+                "CONNECT.json":
+                    "22dc51ebccb0d9938bb1e5111988ab02a061671dec15beab8aa4410e948158ac",
                 "CONNACK.json":
                     "307445b4773e219f4377b880e19678791ee70379f85a43c729b45af548fb9108",
                 "PUBLISH.json":
@@ -166,15 +168,76 @@ class SequenceLoadingTests(unittest.TestCase):
         self.assertEqual(
             sequences.EXPECTED_SUBSET_SEQUENCE_COUNTS,
             {
+                "CONNECT.json": 279,
                 "CONNACK.json": 145,
                 "PUBLISH.json": 150,
                 "SUBSCRIBE.json": 151,
                 "UNSUBSCRIBE.json": 100,
             },
         )
-        self.assertEqual(sequences.EXPECTED_SUBSET_SEQUENCE_COUNT, 546)
-        self.assertEqual(sequences.EXPECTED_SEQUENCE_COUNT, 1495)
-        self.assertEqual(sequences.EXPECTED_EXPECTATION_OVERRIDE_COUNT, 172)
+        self.assertEqual(sequences.EXPECTED_SUBSET_SEQUENCE_COUNT, 825)
+        self.assertEqual(sequences.EXPECTED_SEQUENCE_COUNT, 1774)
+        self.assertEqual(sequences.EXPECTED_EXPECTATION_OVERRIDE_COUNT, 255)
+        self.assertEqual(
+            sequences.EXPECTED_CONNECT_REFUSAL_DIAGNOSTIC_COUNT, 8,
+        )
+        self.assertEqual(
+            set(sequences.CONNECT_REFUSAL_DIAGNOSTICS),
+            {
+                ("CONNECT.json", "v3.1.1 CONNECT",
+                 "10 incorrect command flags"),
+                ("CONNECT.json", "v3.1.1 CONNECT",
+                 "10 missing keepalive"),
+                ("CONNECT.json", "v5.0   CONNECT",
+                 "10 Will flag 1 Will Qos 3 [MQTT-3.1.2-14]"),
+                ("CONNECT.json", "v5.0   CONNECT",
+                 "10 [MQTT-3.1.2-17]"),
+                ("CONNECT.json", "v5.0   CONNECT",
+                 "10 Username with 0x0000"),
+                ("CONNECT.json", "v5.0   CONNECT",
+                 "10 Username with 0xD800"),
+                ("CONNECT.json", "v5.0   CONNECT",
+                 "10 Username with 0xFFFF"),
+                ("CONNECT.json", "v5.0   CONNECT",
+                 "10 [MQTT-3.1.2-19]"),
+            },
+        )
+        self.assertEqual(
+            set(sequences.CONNECT_REFUSAL_DIAGNOSTICS.values()),
+            {bytes.fromhex("20 03 00 81 00")},
+        )
+        self.assertEqual(
+            set(sequences.SEQUENCE_EXCLUSIONS["CONNECT.json"]),
+            {
+                *(
+                    ("v3.1   CONNECT", test)
+                    for test in (
+                        "10 ok ",
+                        "14 ok ",
+                        "10 proto ver 2",
+                        "10 proto ver 4",
+                        "10 proto ver 6",
+                        "10 empty client ID",
+                        "10 ok",
+                        "10 remaining length 5 bytes",
+                    )
+                ),
+                *(
+                    (group, f"10 {field} with {codepoint}")
+                    for group, field, prefix in (
+                        ("v3.1.1 CONNECT", "Will topic", "U+"),
+                        ("v3.1.1 CONNECT", "Client ID", "U+"),
+                        ("v3.1.1 CONNECT", "Username", "0x"),
+                        ("v5.0   CONNECT", "Client ID", "U+"),
+                        ("v5.0   CONNECT", "Username", "0x"),
+                    )
+                    for codepoint in (
+                        f"{prefix}0001", f"{prefix}001F",
+                        f"{prefix}007F", f"{prefix}009F",
+                    )
+                ),
+            },
+        )
         self.assertEqual(
             sequences.SEQUENCE_EXCLUSIONS["CONNACK.json"],
             {("v3.1.1 CONNACK", "issue 2163 v3"):
@@ -231,13 +294,14 @@ class SequenceLoadingTests(unittest.TestCase):
                 for reason in sequences.EXCLUSION_REASONS
             },
             {
-                "unsupported_mqtt_3_1": 1,
+                "unsupported_mqtt_3_1": 9,
                 "mosquitto_qos2_reuse_limit": 2,
-                "optional_utf8_control_policy": 20,
+                "optional_utf8_control_policy": 40,
             },
         )
         expected_override_counts = {
             "AUTH.json": 5,
+            "CONNECT.json": 83,
             "CONNACK.json": 5,
             "DISCONNECT.json": 27,
             "PUBACK.json": 24,
@@ -280,6 +344,20 @@ class SequenceLoadingTests(unittest.TestCase):
                 ("v5.0   AUTH", "F2", 1),
                 ("v5.0   AUTH", "F4", 1),
                 ("v5.0   AUTH", "F8", 1),
+            },
+        )
+        self.assertEqual(
+            set(sequences.EXPECTATION_OVERRIDES["CONNECT.json"]),
+            {
+                *((group, test, occurrence, 1)
+                  for group, test, occurrence in sequences.CONNECT_SUCCESS_CASES),
+                *(("v5.0   CONNECT DISALLOWED PROPERTIES", test, 0, 1)
+                  for test in sequences.CONNECT_DISALLOWED_PROPERTY_CASES),
+                *(("v5.0   WILL DISALLOWED PROPERTIES", test, 0, 1)
+                  for test in sequences.WILL_DISALLOWED_PROPERTY_CASES),
+                ("v5.0   CONNECT", "10 Client ID with 0x0000", 0, 1),
+                ("v5.0   CONNECT", "10 Client ID with U+D800", 0, 1),
+                ("v5.0   CONNECT", "10 Client ID with U+FFFF", 0, 1),
             },
         )
         self.assertEqual(
@@ -438,28 +516,44 @@ class SequenceLoadingTests(unittest.TestCase):
                 for reason in sequences.EXPECTATION_OVERRIDE_REASONS
             },
             {
-                "mqtt5_property_context_malformed": 136,
+                "mqtt5_property_context_malformed": 186,
+                "mqtt5_invalid_utf8_malformed": 3,
                 "mqtt5_publish_protocol_error": 3,
                 "mqtt5_subscribe_protocol_error": 9,
                 "mqtt5_unsubscribe_protocol_error": 4,
                 "mqtt5_fixed_header_flags_malformed": 17,
                 "mqtt5_truncated_variable_header_malformed": 1,
-                "equivalent_connack_property_order": 2,
+                "equivalent_connack_property_order": 32,
             },
         )
         for filename, overrides in (
             sequences.EXPECTATION_OVERRIDES.items()
         ):
             for identity, (source, expected, reason) in overrides.items():
-                self.assertEqual(identity[2], 1, filename)
+                self.assertEqual(identity[-1], 1, filename)
                 self.assertIn(reason, sequences.EXPECTATION_OVERRIDE_REASONS)
                 if reason in {
                     "mqtt5_property_context_malformed",
                     "mqtt5_fixed_header_flags_malformed",
                     "mqtt5_truncated_variable_header_malformed",
                 }:
-                    self.assertEqual((source, expected),
-                                     ("E0 r1 82", "E0 r1 81"))
+                    source_bytes = sequences.parse_message(source)
+                    expected_bytes = sequences.parse_message(expected)
+                    if filename == "CONNECT.json":
+                        self.assertEqual(
+                            (source_bytes[3], expected_bytes[3]),
+                            (0x82, 0x81),
+                        )
+                    else:
+                        self.assertEqual(
+                            (source, expected),
+                            ("E0 r1 82", "E0 r1 81"),
+                        )
+                elif reason == "mqtt5_invalid_utf8_malformed":
+                    self.assertEqual(
+                        (source, expected),
+                        ("20 r3 00 85 00", "20 r3 00 81 00"),
+                    )
                 elif reason != "equivalent_connack_property_order":
                     self.assertEqual((source, expected),
                                      ("E0 r1 81", "E0 r1 82"))
@@ -569,6 +663,36 @@ class SequenceLoadingTests(unittest.TestCase):
                         ),
                     }},
                 )
+
+    def test_disambiguates_duplicate_names_by_source_payload(self) -> None:
+        groups = [{
+            "group": "portable",
+            "tests": [
+                {"name": "duplicate", "msgs": [
+                    {"type": "send", "payload": "C0 r0"},
+                    {"type": "recv", "payload": "D0 r0"},
+                ]},
+                {"name": "duplicate", "msgs": [
+                    {"type": "send", "payload": "C0 r0"},
+                    {"type": "recv", "payload": "E0 r1 82"},
+                ]},
+            ],
+        }]
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            selected = self.write_source(root, groups)
+            loaded = sequences.load_sequences(
+                root,
+                selected,
+                expectation_overrides={"TEST.json": {
+                    ("portable", "duplicate", 0, 1): (
+                        "D0 r0", "D0 r0",
+                        "equivalent_connack_property_order",
+                    ),
+                }},
+            )
+        self.assertEqual(loaded[0]["actions"][1]["payload"], "D0 r0")
+        self.assertEqual(loaded[1]["actions"][1]["payload"], "E0 r1 82")
 
     def test_rejects_missing_or_unknown_standard_override(self) -> None:
         groups = [{
