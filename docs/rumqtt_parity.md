@@ -1576,28 +1576,32 @@ The twelfth scenario ports Mosquitto's retained Message Expiry vector with a
 timing-tolerant immediate check: the forwarded interval is 2 or 1 seconds, the
 entry is absent after three seconds, and a non-expiring retained control still
 replays.
-The thirteenth scenario ports Mosquitto's Receive Maximum 1 QoS 2 vector: two
-publisher transactions complete, but the subscriber cannot observe the second
-PUBLISH until PUBREC/PUBREL/PUBCOMP returns credit for the first.
-The fourteenth scenario directly ports Mosquitto's Maximum Packet Size 40
+The thirteenth and fourteenth scenarios are source-hash-locked ports of
+Mosquitto's `02-subpub-qos2-receive-maximum-1.py` and
+`02-subpub-qos2-receive-maximum-2.py`. Three publisher transactions complete
+for each advertised window. The subscriber receives exactly one or two initial
+PUBLISH packets, remains silent after PUBREC/PUBREL, and releases each queued
+PUBLISH only after PUBCOMP returns one complete QoS 2 transaction slot. A final
+PINGRESP proves all three transactions retired without duplicate delivery.
+The next scenario directly ports Mosquitto's Maximum Packet Size 40
 QoS 1 vector. Two oversized self-deliveries are discarded while publisher
 PUBACK/PING keep the socket live, then a boundary-fitting PUBLISH is forwarded.
 This exposed and fixed netz closing transient live connections on
 `OutgoingPacketTooLarge`; durable Session and live delivery queues now share
 the same discard-and-continue policy.
-The fifteenth scenario ports Mosquitto's QoS 2 Maximum Packet Size companion:
+Its QoS 2 Maximum Packet Size companion verifies that
 an oversized released message completes publisher PUBREC/PUBREL/PUBCOMP but
 creates no downstream transaction, then a fitting message completes both the
 publisher and independent subscriber QoS 2 handshakes.
-The sixteenth scenario ports Mosquitto's multi-level retained clear vector on
+The multi-level retained clear vector runs on
 one MQTT 5 connection: three nested topics replay through `#`, middle and leaf
 tombstones return no-match PUBACK 0x10, and subsequent wildcard replay proves
 ancestor/child retained trie nodes survive independent deletion.
-The seventeenth scenario directly ports Mosquitto's five-client shared QoS 0
+The five-client shared QoS 0 scenario directly ports Mosquitto's corresponding
 vector: an ordinary subscription receives all three messages, while two shared
 groups independently select exactly one member and rotate through the upstream
 receiver sequence without duplicate group delivery.
-The eighteenth scenario isolates the core retransmission semantics from
+The following scenario isolates the core retransmission semantics from
 Mosquitto's client-to-broker QoS 2 reconnect vector: original and DUP PUBLISH
 with one Packet Identifier receive PUBREC without early routing, and one PUBREL
 creates exactly one independent downstream QoS 2 transaction.
@@ -1911,10 +1915,11 @@ field limit; exact SUBACK and self-delivered PUBLISH bytes prove netz retains
 standards-valid iterative routing. A companion MQTT 5 case exercises a flat
 65,535-byte Topic Name—the maximum representable UTF-8 field—through a
 multibyte Remaining Length, exact SUBACK, routing, and byte-identical
-self-delivery. The outbound QoS 2 gate also directly ports Mosquitto's Receive
-Maximum 1 and 2 cases: it fills the negotiated window, proves the next PUBLISH
-remains withheld, completes one PUBREC/PUBREL/PUBCOMP exchange, and requires
-the queued PUBLISH immediately afterward. The QoS 1 inflight-expiry case keeps
+self-delivery. The outbound QoS 2 gate also directly ports Mosquitto's
+source-hash-locked Receive Maximum 1 and 2 cases with three messages each. It
+fills the negotiated window, proves the next PUBLISH remains withheld through
+PUBREC/PUBREL, returns one slot only at PUBCOMP, and requires each queued
+PUBLISH immediately after that release. The QoS 1 inflight-expiry case keeps
 an expiring delivery unacknowledged at Receive Maximum 1, then proves its
 expiry releases credit for the next queued delivery without a stale PUBACK.
 The QoS 2 inflight-byte case additionally proves that PUBREC alone does not
