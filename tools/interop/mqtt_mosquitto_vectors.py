@@ -26,6 +26,7 @@ from mqtt_vectors import (
     subscription_flip_flop,
     subscription_hierarchy,
     subscription_identifiers,
+    will_delay_invalid_topic,
 )
 
 BASE_SCENARIO_COUNT = 164
@@ -38,6 +39,7 @@ SCENARIO_COUNT = (
     + subscription_flip_flop.SCENARIO_COUNT
     + subscription_hierarchy.SCENARIO_COUNT
     + subscription_identifiers.SCENARIO_COUNT
+    + will_delay_invalid_topic.SCENARIO_COUNT
 )
 
 
@@ -6254,6 +6256,10 @@ def main() -> None:
     )
     hostile_initial_packets(args.broker, mqtt_packets)
     malformed_will_connects(args.broker, mqtt_packets)
+    will_delay_invalid_topic.run(
+        args.broker, mqtt_packets, mqtt5_props, NetzBroker,
+        expected_connack, expect_packet,
+    )
     zero_length_will_payload(args.broker, mqtt_packets, mqtt5_props)
     publish_capability_disconnects(
         args.broker, mqtt_packets, mqtt5_props, mqtt5_rc

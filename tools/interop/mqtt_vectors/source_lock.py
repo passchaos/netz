@@ -39,6 +39,8 @@ MOSQUITTO_SOURCE_SHA256 = {
         "81264cf8b5af7d7248c2e968ff373e20d07d6b414c4770cca275a38c02beea6a",
     "broker/03-publish-qos1-queued-bytes.py":
         "d320a78b93a39c8ea02e2b5c57e13b2c4d558e39fb4f0be8ce52e70b6dc9980d",
+    "broker/07-will-delay-invalid-573191.py":
+        "f0f02675b050e023c5331696142f0d8bf0e3360f39011bd0dc7efdce3a382285",
 }
 
 

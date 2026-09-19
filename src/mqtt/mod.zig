@@ -3907,6 +3907,25 @@ test "MQTT CONNECT validates flags and will topic" {
     }));
 }
 
+test "MQTT CONNECT releases Will Delay properties after invalid empty topic" {
+    // Exact CONNECT shape from Mosquitto issue 573191. Parsing allocates the
+    // Will property list before validating its empty Topic Name, so the error
+    // path must release that list as well as the outer CONNECT properties.
+    // std.testing.allocator turns either ownership leak into a test failure.
+    const packet = [_]u8{
+        0x10, 0x2a, 0x00, 0x04, 0x4d, 0x51, 0x54, 0x54,
+        0x05, 0x06, 0x00, 0x3c, 0x03, 0x21, 0x00, 0x14,
+        0x00, 0x10, 0x77, 0x69, 0x6c, 0x6c, 0x2d, 0x35,
+        0x37, 0x33, 0x31, 0x39, 0x31, 0x2d, 0x74, 0x65,
+        0x73, 0x74, 0x05, 0x18, 0x00, 0x00, 0x00, 0x03,
+        0x00, 0x00, 0x00, 0x00,
+    };
+    try std.testing.expectError(
+        error.InvalidTopic,
+        Connect.parse(std.testing.allocator, &packet),
+    );
+}
+
 test "MQTT topic validation and filter matching" {
     try std.testing.expect(validTopicName("sensors/temp"));
     try std.testing.expect(!validTopicName(""));
