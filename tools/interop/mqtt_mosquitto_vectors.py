@@ -23,15 +23,17 @@ from mqtt_vectors import (
     source_lock,
     subscription_flip_flop,
     subscription_hierarchy,
+    subscription_identifiers,
 )
 
-BASE_SCENARIO_COUNT = 167
+BASE_SCENARIO_COUNT = 166
 SCENARIO_COUNT = (
     BASE_SCENARIO_COUNT
     + pattern_matching.SCENARIO_COUNT
     + persistent_subscriptions.SCENARIO_COUNT
     + subscription_flip_flop.SCENARIO_COUNT
     + subscription_hierarchy.SCENARIO_COUNT
+    + subscription_identifiers.SCENARIO_COUNT
 )
 
 
@@ -1864,69 +1866,6 @@ def server_reference_connack(executable: Path, mqtt_packets, mqtt5_props) -> Non
                 ),
                 "second Server Reference CONNACK",
             )
-
-
-def subscription_identifiers(executable: Path, mqtt_packets, mqtt5_props) -> None:
-    with NetzBroker(executable) as broker:
-        with broker.connect() as sock:
-            connect_v5(sock, mqtt_packets, "02-subpub-subid")
-            subscriptions = [
-                (1, "02/subpub/subid/id1", 1),
-                (2, "02/subpub/subid/+/id2", 14),
-                (3, "02/subpub/subid/noid", None),
-                (4, "02/subpub/subid/id1", None),
-                (5, "02/subpub/subid/+/id2", 19),
-                (6, "02/subpub/subid/noid", 21),
-            ]
-            for mid, topic, identifier in subscriptions:
-                props = (
-                    mqtt5_props.gen_varint_prop(
-                        mqtt5_props.SUBSCRIPTION_IDENTIFIER, identifier
-                    )
-                    if identifier is not None
-                    else b""
-                )
-                sock.sendall(
-                    mqtt_packets.gen_subscribe(
-                        mid, topic, 0, proto_ver=5, properties=props
-                    )
-                )
-                expect_packet(
-                    sock,
-                    mqtt_packets.gen_suback(mid, 0, proto_ver=5),
-                    f"SUBACK {mid}",
-                )
-
-            publishes = [
-                ("02/subpub/subid/test/id2", "message2", 19),
-                ("02/subpub/subid/noid", "message3", 21),
-                ("02/subpub/subid/id1", "message1", None),
-            ]
-            for topic, payload, identifier in publishes:
-                sock.sendall(
-                    mqtt_packets.gen_publish(
-                        topic, qos=0, payload=payload, proto_ver=5
-                    )
-                )
-                props = (
-                    mqtt5_props.gen_varint_prop(
-                        mqtt5_props.SUBSCRIPTION_IDENTIFIER, identifier
-                    )
-                    if identifier is not None
-                    else b""
-                )
-                expect_packet(
-                    sock,
-                    mqtt_packets.gen_publish(
-                        topic,
-                        qos=0,
-                        payload=payload,
-                        proto_ver=5,
-                        properties=props,
-                    ),
-                    f"forwarded PUBLISH {topic}",
-                )
-            sock.sendall(mqtt_packets.gen_disconnect(proto_ver=5))
 
 
 def multiple_subscription_identifiers(
@@ -6417,7 +6356,10 @@ def main() -> None:
     deep_topic_hierarchy(args.broker, mqtt_packets)
     no_matching_subscribers(args.broker, mqtt_packets, mqtt5_rc)
     server_reference_connack(args.broker, mqtt_packets, mqtt5_props)
-    subscription_identifiers(args.broker, mqtt_packets, mqtt5_props)
+    subscription_identifiers.run(
+        args.broker, mqtt_packets, mqtt5_props, NetzBroker,
+        expected_connack, expect_packet,
+    )
     multiple_subscription_identifiers(
         args.broker, mqtt_packets, mqtt5_props, mqtt5_opts
     )

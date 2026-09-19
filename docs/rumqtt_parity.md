@@ -1631,7 +1631,13 @@ storage and replay byte-for-byte.
 The twenty-fifth scenario clears a retained value with a property-bearing
 zero-length tombstone, proves neither old nor tombstone properties replay, and
 then verifies a replacement live PUBLISH contains only its new User Property.
-The twenty-sixth scenario overlaps an exact and wildcard subscription for one
+The source-hash-locked `02-subpub-qos0-subscription-id.py` scenario first
+installs identifiers 1 and 14 plus one unnumbered filter and verifies all three
+initial deliveries. It then replaces the same filters to remove the first
+identifier, change 14 to 19, and add 21 to the third. Exact self-delivered MQTT
+5 PUBLISH bytes prove all three replacement directions; a final PING barrier
+rejects stale or duplicate identifiers. The twenty-sixth scenario overlaps an
+exact and wildcard subscription for one
 client. Netz now merges the router matches into one PUBLISH and appends both
 Subscription Identifier properties (3 then 9), instead of emitting duplicate
 Application Messages with one identifier each. The gate also gives the two
