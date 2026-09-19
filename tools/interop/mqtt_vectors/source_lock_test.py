@@ -5,6 +5,7 @@ from pathlib import Path
 import tempfile
 import unittest
 
+import pattern_matching
 import persistent_subscriptions
 import source_lock
 import subscription_flip_flop
@@ -38,11 +39,47 @@ class SourceLockTests(unittest.TestCase):
                     "2f6289be6000de501a7329b635ea1659f81abb06fbf6f597144a160371e8a271",
                 "broker/02-subscribe-persistence-flipflop.py":
                     "a505ba09fbeea473296914d9bc7704c88ef99e2db0a5c952c220ab7104b8dffe",
+                "broker/03-pattern-matching.py":
+                    "042fa7fa8728632551bdecb632aa5f41b539a69780bc4d4bdf25582e2ff8fd32",
             },
         )
         self.assertEqual(persistent_subscriptions.SCENARIO_COUNT, 2)
         self.assertEqual(subscription_flip_flop.SCENARIO_COUNT, 2)
         self.assertEqual(subscription_hierarchy.SCENARIO_COUNT, 2)
+        self.assertEqual(pattern_matching.SCENARIO_COUNT, 46)
+
+    def test_pattern_matrix_matches_upstream_source(self) -> None:
+        self.assertEqual(
+            pattern_matching.PATTERN_CASES,
+            (
+                ("#", "test/topic"),
+                ("#", "/test/topic"),
+                ("foo/#", "foo/bar/baz"),
+                ("foo/+/baz", "foo/bar/baz"),
+                ("foo/+/baz/#", "foo/bar/baz"),
+                ("foo/+/baz/#", "foo/bar/baz/bar"),
+                ("foo/foo/baz/#", "foo/foo/baz/bar"),
+                ("foo/#", "foo"),
+                ("foo/#", "foo/"),
+                ("/#", "/foo"),
+                ("test/topic/", "test/topic/"),
+                ("test/topic/+", "test/topic/"),
+                (
+                    "+/+/+/+/+/+/+/+/+/+/test",
+                    "one/two/three/four/five/six/seven/eight/nine/ten/test",
+                ),
+                ("#", "test////a//topic"),
+                ("#", "/test////a//topic"),
+                ("foo/#", "foo//bar///baz"),
+                ("foo/+/baz", "foo//baz"),
+                ("foo/+/baz//", "foo//baz//"),
+                ("foo/+/baz/#", "foo//baz"),
+                ("foo/+/baz/#", "foo//baz/bar"),
+                ("foo//baz/#", "foo//baz/bar"),
+                ("foo/foo/baz/#", "foo/foo/baz/bar"),
+                ("/#", "////foo///bar"),
+            ),
+        )
 
 
 if __name__ == "__main__":

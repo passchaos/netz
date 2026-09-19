@@ -18,6 +18,7 @@ import tempfile
 import time
 
 from mqtt_vectors import (
+    pattern_matching,
     persistent_subscriptions,
     source_lock,
     subscription_flip_flop,
@@ -27,6 +28,7 @@ from mqtt_vectors import (
 BASE_SCENARIO_COUNT = 167
 SCENARIO_COUNT = (
     BASE_SCENARIO_COUNT
+    + pattern_matching.SCENARIO_COUNT
     + persistent_subscriptions.SCENARIO_COUNT
     + subscription_flip_flop.SCENARIO_COUNT
     + subscription_hierarchy.SCENARIO_COUNT
@@ -6452,6 +6454,10 @@ def main() -> None:
         expected_connack, expect_packet,
     )
     subscription_hierarchy.run(
+        args.broker, mqtt_packets, mqtt5_props, NetzBroker,
+        expected_connack, expect_packet,
+    )
+    pattern_matching.run(
         args.broker, mqtt_packets, mqtt5_props, NetzBroker,
         expected_connack, expect_packet,
     )

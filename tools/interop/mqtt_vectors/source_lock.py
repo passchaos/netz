@@ -23,6 +23,8 @@ MOSQUITTO_SOURCE_SHA256 = {
         "2f6289be6000de501a7329b635ea1659f81abb06fbf6f597144a160371e8a271",
     "broker/02-subscribe-persistence-flipflop.py":
         "a505ba09fbeea473296914d9bc7704c88ef99e2db0a5c952c220ab7104b8dffe",
+    "broker/03-pattern-matching.py":
+        "042fa7fa8728632551bdecb632aa5f41b539a69780bc4d4bdf25582e2ff8fd32",
 }
 
 
