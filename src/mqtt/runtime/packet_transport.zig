@@ -524,6 +524,9 @@ fn readStreamPacketWithPolicy(
             state.header[state.header_len .. state.header_len + 1],
             deadline,
         ) catch |err| return err;
+        if (state.header_len == 1) {
+            _ = try mqtt.packetTypeFromFirstByte(state.header[0]);
+        }
         if (state.header_len == 1 or
             (state.header[state.header_len - 1] & 0x80) != 0)
         {
@@ -672,6 +675,9 @@ fn readTcpPacketWithPolicy(
             deadline,
         );
         tcp.header_len += 1;
+        if (tcp.header_len == 1) {
+            _ = try mqtt.packetTypeFromFirstByte(tcp.header[0]);
+        }
         if (tcp.header_len == 1 or
             (tcp.header[tcp.header_len - 1] & 0x80) != 0)
         {
@@ -770,6 +776,7 @@ fn readPacketFromReader(
 ) Error!OwnedPacket {
     var header: [5]u8 = undefined;
     try reader.readExact(header[0..1], false);
+    _ = try mqtt.packetTypeFromFirstByte(header[0]);
     var remaining_len_len: usize = 0;
     while (remaining_len_len < 4) : (remaining_len_len += 1) {
         try reader.readExact(
@@ -940,6 +947,8 @@ fn readWebSocketPacketWithPolicy(
 }
 
 fn completePacketLength(bytes: []const u8) Error!?usize {
+    if (bytes.len == 0) return null;
+    _ = try mqtt.packetTypeFromFirstByte(bytes[0]);
     if (bytes.len < 2) return null;
     const max_remaining_length_bytes = @min(bytes.len - 1, 4);
     const decoded = mqtt.decodeRemainingLength(
@@ -1101,6 +1110,13 @@ test "packet prefix discard retains following packet bytes" {
     );
     discardPacketPrefix(&input, 2);
     try std.testing.expectEqual(@as(usize, 0), input.items.len);
+}
+
+test "packet length rejects reserved type before malformed length" {
+    try std.testing.expectError(
+        error.ReservedPacketType,
+        completePacketLength(&.{ 0x00, 0x80, 0x80, 0x80, 0x80 }),
+    );
 }
 
 test "TCP packet receive allocates the owned packet exactly once" {

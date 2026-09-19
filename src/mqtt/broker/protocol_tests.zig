@@ -38,6 +38,62 @@ fn expectNoClientPacket(
     );
 }
 
+test "broker tolerates unknown outbound acknowledgement identifiers" {
+    const allocator = std.testing.allocator;
+    var threaded = std.Io.Threaded.init(allocator, .{
+        .async_limit = .unlimited,
+    });
+    defer threaded.deinit();
+    const io = threaded.io();
+    var broker = try testBroker(allocator, io, 2, 64);
+    defer broker.deinit();
+
+    var serve = ServeState{ .broker = &broker, .connection_count = 2 };
+    const thread = try std.Thread.spawn(.{}, ServeState.run, .{&serve});
+    var joined = false;
+    defer if (!joined) thread.join();
+
+    for ([_]mqtt.ProtocolVersion{ .v3_1_1, .v5 }, 0..) |protocol, index| {
+        var client = try connectWithOptions(
+            allocator,
+            io,
+            broker,
+            .{
+                .protocol = protocol,
+                .client_id = if (index == 0)
+                    "unknown-ack-v311"
+                else
+                    "unknown-ack-v5",
+            },
+        );
+        defer client.close();
+
+        // A valid PUBACK/PUBCOMP for an identifier absent from both the
+        // durable Session and this Network Connection is idempotently ignored.
+        try client.writePubAck(41, 0);
+        try client.ping();
+
+        // An accepted PUBREC still advances the peer exchange with PUBREL even
+        // when the sender no longer has its original PUBLISH state.
+        try client.writePubRec(42, 0);
+        var event = try client.readClientPacketEvent();
+        defer event.deinit(allocator);
+        switch (event) {
+            .pubrel => |owned| try std.testing.expectEqual(
+                @as(u16, 42),
+                owned.ack.packet_id,
+            ),
+            else => return error.UnexpectedPacket,
+        }
+        try client.writePubComp(42, 0);
+        try client.writePubComp(43, 0);
+        try client.ping();
+        try client.disconnect(0);
+    }
+
+    try joinServer(thread, &joined, &serve);
+}
+
 test "broker authorizes CONNECT before creating Session state" {
     const allocator = std.testing.allocator;
     var threaded = std.Io.Threaded.init(allocator, .{

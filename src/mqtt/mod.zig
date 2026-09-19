@@ -26,6 +26,7 @@ pub const Error = wire.Error || error{
     MalformedRemainingLength,
     RemainingLengthTooLarge,
     InvalidPacketType,
+    ReservedPacketType,
     InvalidPacketDirection,
     InvalidFlags,
     InvalidProtocolName,
@@ -33,6 +34,7 @@ pub const Error = wire.Error || error{
     InvalidUtf8,
     InvalidQoS,
     InvalidProperty,
+    InvalidPropertyIdentifier,
     InvalidReasonCode,
     InvalidTopic,
     InvalidSubscription,
@@ -105,9 +107,7 @@ pub const FixedHeader = struct {
 
     pub fn parse(bytes: []const u8) Error!FixedHeader {
         if (bytes.len < 2) return error.BufferTooShort;
-        const packet_nibble: u4 = @truncate(bytes[0] >> 4);
-        if (packet_nibble == 0) return error.InvalidPacketType;
-        const packet_type: PacketType = std.enums.fromInt(PacketType, packet_nibble) orelse return error.InvalidPacketType;
+        const packet_type = try packetTypeFromFirstByte(bytes[0]);
         const decoded = try decodeRemainingLength(bytes[1..]);
         return .{
             .packet_type = packet_type,
@@ -123,14 +123,36 @@ pub const FixedHeader = struct {
     }
 };
 
+/// Parse the Control Packet type as soon as the first fixed-header byte is
+/// available. Stream framers use this before consuming Remaining Length so a
+/// reserved type remains the primary Protocol Error even when later framing is
+/// independently malformed.
+pub fn packetTypeFromFirstByte(first: u8) Error!PacketType {
+    const packet_nibble: u4 = @truncate(first >> 4);
+    if (packet_nibble == 0) return error.ReservedPacketType;
+    return std.enums.fromInt(PacketType, packet_nibble) orelse
+        error.InvalidPacketType;
+}
+
+test "MQTT fixed header distinguishes reserved packet type zero" {
+    try std.testing.expectError(
+        error.ReservedPacketType,
+        FixedHeader.parse(&.{ 0x00, 0x00 }),
+    );
+    try std.testing.expectError(
+        error.ReservedPacketType,
+        FixedHeader.parse(&.{ 0x0f, 0x00 }),
+    );
+}
+
 fn validateControlFlags(fixed: FixedHeader) Error!void {
     if (fixed.packet_type != .publish and fixed.flags != fixed.packet_type.defaultFlags()) return error.InvalidFlags;
 }
 
 /// Validate the complete fixed-header flag field for an established protocol
-/// version. MQTT 3.1.1 alone permits DUP on a retransmitted PUBREL; MQTT 5
-/// requires the ordinary 0x2 pattern. PUBLISH has variable flags, but QoS 3
-/// and DUP on QoS 0 are malformed in both versions.
+/// version. PUBLISH has variable flags, but QoS 3 and DUP on QoS 0 are
+/// malformed. Every other packet type uses its one reserved pattern in both
+/// supported protocol versions.
 pub fn validatePacketFlags(
     protocol: ProtocolVersion,
     fixed: FixedHeader,
@@ -143,11 +165,7 @@ pub fn validatePacketFlags(
         }
         return;
     }
-    if (protocol == .v3_1_1 and fixed.packet_type == .pubrel and
-        (fixed.flags == 0x02 or fixed.flags == 0x0a))
-    {
-        return;
-    }
+    _ = protocol;
     try validateControlFlags(fixed);
 }
 
@@ -461,8 +479,14 @@ pub fn parseProperties(allocator: std.mem.Allocator, cursor: *wire.Cursor) Error
     var props: std.ArrayList(Property) = .empty;
     errdefer props.deinit(allocator);
     while (!prop_cursor.eof()) {
-        const id_byte = try prop_cursor.readByte();
-        const id = std.enums.fromInt(PropertyId, id_byte) orelse return error.InvalidProperty;
+        const decoded_id = try decodeRemainingLength(
+            prop_cursor.buf[prop_cursor.pos..],
+        );
+        prop_cursor.pos += decoded_id.len;
+        const id_value = std.math.cast(u8, decoded_id.value) orelse
+            return error.InvalidPropertyIdentifier;
+        const id = std.enums.fromInt(PropertyId, id_value) orelse
+            return error.InvalidPropertyIdentifier;
         const prop = switch (propertyWireType(id)) {
             .byte => Property{ .byte = .{ .id = id, .value = try prop_cursor.readByte() } },
             .two_byte => Property{ .two_byte = .{ .id = id, .value = try prop_cursor.readInt(u16, .big) } },
@@ -1410,8 +1434,9 @@ pub const Publish = struct {
 pub const AckPacket = struct {
     packet_type: PacketType,
     packet_id: u16,
-    /// MQTT 3.1.1 permits bit 3 on a retransmitted PUBREL. MQTT 5 removed
-    /// that signaling and requires the ordinary 0x2 reserved flag pattern.
+    /// Retained for source compatibility; always false for supported MQTT
+    /// versions. MQTT 3.1 used bit 3 for retransmitted PUBREL, but MQTT 3.1.1
+    /// and MQTT 5 both require the fixed 0x2 flag pattern.
     dup: bool = false,
     reason_code: u8 = 0,
     properties: []Property = &.{},
@@ -1427,12 +1452,7 @@ pub const AckPacket = struct {
             .puback, .pubrec, .pubrel, .pubcomp => {},
             else => return error.InvalidPacketType,
         }
-        if (!(protocol == .v3_1_1 and
-            fixed.packet_type == .pubrel and
-            (fixed.flags == 0x02 or fixed.flags == 0x0a)))
-        {
-            try validateControlFlags(fixed);
-        }
+        try validatePacketFlags(protocol, fixed);
         try validatePacketBounds(packet, fixed);
         var cursor = wire.Cursor.init(packet[fixed.header_len .. fixed.header_len + fixed.remaining_len]);
         const packet_id = try cursor.readInt(u16, .big);
@@ -1442,8 +1462,6 @@ pub const AckPacket = struct {
             return .{
                 .packet_type = fixed.packet_type,
                 .packet_id = packet_id,
-                .dup = fixed.packet_type == .pubrel and
-                    (fixed.flags & 0x08) != 0,
                 .properties = try allocator.alloc(Property, 0),
             };
         }
@@ -3311,12 +3329,15 @@ test "MQTT fixed-header flags are classified as malformed" {
             .header_len = 2,
         });
     }
-    try validatePacketFlags(.v3_1_1, .{
-        .packet_type = .pubrel,
-        .flags = 0x0a,
-        .remaining_len = 0,
-        .header_len = 2,
-    });
+    try std.testing.expectError(
+        error.InvalidFlags,
+        validatePacketFlags(.v3_1_1, .{
+            .packet_type = .pubrel,
+            .flags = 0x0a,
+            .remaining_len = 0,
+            .header_len = 2,
+        }),
+    );
     try std.testing.expectError(
         error.InvalidFlags,
         validatePacketFlags(.v5, .{
@@ -3531,6 +3552,25 @@ test "MQTT v5 property values are validated" {
             try std.testing.expectError(error.InvalidProperty, parseProperties(std.testing.allocator, &cursor));
         }
     };
+    const InvalidIdentifierCases = struct {
+        fn expectInvalid(bytes: []const u8) !void {
+            var cursor = wire.Cursor.init(bytes);
+            try std.testing.expectError(
+                error.InvalidPropertyIdentifier,
+                parseProperties(std.testing.allocator, &cursor),
+            );
+        }
+    };
+
+    try InvalidIdentifierCases.expectInvalid(&.{ 0x02, 0x00, 0x01 });
+    var noncanonical_identifier = wire.Cursor.init(
+        &.{ 0x03, 0x80, 0x00, 0x01 },
+    );
+    try std.testing.expectError(
+        error.MalformedRemainingLength,
+        parseProperties(allocator, &noncanonical_identifier),
+    );
+    try InvalidIdentifierCases.expectInvalid(&.{ 0x02, 0x7f, 0x01 });
 
     var invalid_receive_maximum: std.ArrayList(u8) = .empty;
     defer invalid_receive_maximum.deinit(allocator);
@@ -4043,14 +4083,10 @@ test "MQTT connack ack and ping controls" {
     try UnsubAck.write(&puback_bytes, allocator, .v5, 44, &.{}, &.{0x00});
     try std.testing.expectError(error.InvalidPacketType, AckPacket.parse(allocator, .v5, puback_bytes.items));
 
-    var duplicate_pubrel = try AckPacket.parse(
-        allocator,
-        .v3_1_1,
-        &.{ 0x6a, 0x02, 0x00, 0x2a },
+    try std.testing.expectError(
+        error.InvalidFlags,
+        AckPacket.parse(allocator, .v3_1_1, &.{ 0x6a, 0x02, 0x00, 0x2a }),
     );
-    defer duplicate_pubrel.deinit(allocator);
-    try std.testing.expect(duplicate_pubrel.dup);
-    try std.testing.expectEqual(@as(u16, 42), duplicate_pubrel.packet_id);
     try std.testing.expectError(
         error.InvalidFlags,
         AckPacket.parse(allocator, .v5, &.{ 0x6a, 0x02, 0x00, 0x2a }),

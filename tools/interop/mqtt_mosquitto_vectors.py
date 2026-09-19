@@ -3436,7 +3436,6 @@ def incoming_qos2_disconnect_recovery(
                     third.sendall(
                         mqtt_packets.gen_pubrel(
                             packet_id,
-                            dup=proto_ver == 4,
                             proto_ver=proto_ver,
                         )
                     )

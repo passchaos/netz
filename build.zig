@@ -225,6 +225,10 @@ pub fn build(b: *std.Build) void {
         "python3",
         "tools/interop/mqtt_broker_benchmark_config_test.py",
     });
+    const mqtt_packet_sequence_tests = b.addSystemCommand(&.{
+        "python3",
+        "tools/interop/mqtt_mosquitto_packet_sequences_test.py",
+    });
     const webtransport_benchmark_checker_tests = b.addSystemCommand(&.{
         "python3",
         "tools/interop/webtransport_benchmark_check_test.py",
@@ -260,6 +264,7 @@ pub fn build(b: *std.Build) void {
     test_step.dependOn(&http1_hyper_benchmark_checker_tests.step);
     test_step.dependOn(&mqtt_broker_benchmark_checker_tests.step);
     test_step.dependOn(&mqtt_broker_benchmark_config_tests.step);
+    test_step.dependOn(&mqtt_packet_sequence_tests.step);
     test_step.dependOn(&websocket_h3_benchmark_checker_tests.step);
     test_step.dependOn(&webtransport_benchmark_checker_tests.step);
     test_step.dependOn(&webtransport_churn_checker_tests.step);
@@ -301,11 +306,24 @@ pub fn build(b: *std.Build) void {
         "tools/interop/mqtt_mosquitto_vectors.py",
     });
     mqtt_vectors.addArtifactArg(mqtt_vectors_broker);
+    if (b.args) |args| mqtt_vectors.addArgs(args);
     const mqtt_vectors_step = b.step(
         "interop-mqtt-mosquitto-vectors",
         "Run selected Mosquitto MQTT 5 wire vectors against netz",
     );
     mqtt_vectors_step.dependOn(&mqtt_vectors.step);
+
+    const mqtt_packet_sequences = b.addSystemCommand(&.{
+        "python3",
+        "tools/interop/mqtt_mosquitto_packet_sequences.py",
+    });
+    mqtt_packet_sequences.addArtifactArg(mqtt_vectors_broker);
+    if (b.args) |args| mqtt_packet_sequences.addArgs(args);
+    const mqtt_packet_sequences_step = b.step(
+        "interop-mqtt-mosquitto-packet-sequences",
+        "Run complete portable Mosquitto packet-sequence JSON files",
+    );
+    mqtt_packet_sequences_step.dependOn(&mqtt_packet_sequences.step);
 
     const mqtt_live_autosave = b.addSystemCommand(&.{
         "python3",

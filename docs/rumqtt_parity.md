@@ -237,7 +237,7 @@ optional absolute header timeout prevents incomplete proxy prefaces from
 holding listener workers indefinitely.
 
 The selected Mosquitto-derived process gate enables a five-second CONNECT
-deadline on every one of its finite broker processes, so all 153 raw scenarios
+deadline on every one of its finite broker processes, so all 167 curated raw scenarios
 also exercise the bounded admission path rather than merely proving the option
 in an isolated unit test.
 Three retained-source scenarios persist and restart the standalone broker after
@@ -520,7 +520,7 @@ property, the result also returns to the fixed path. A real TCP
 fail-first-allocator test covers all four packet types and both wire lengths;
 unlike the audited rumqttd writers, this hot path does not depend on spare
 `BytesMut` capacity. The
-Mosquitto-derived 153-scenario packet gate and MQTT 3.1.1/5 WS/WSS gate remain
+Mosquitto-derived 167-scenario packet gate and MQTT 3.1.1/5 WS/WSS gate remain
 green. CPU-0-pinned 1-KiB QoS 1 regression runs measured 10.437 us per
 PUBLISH/PUBACK over WebSocket (95,805 operations/s) and 11.541 us over native
 TLS (86,640 operations/s). These check the shared packet receive/send paths
@@ -537,7 +537,7 @@ including QoS 1, DUP, retain, a multibyte Remaining Length, and properties. A
 real TCP test sends two 1-KiB packets, disables all allocation after warmup, and
 verifies the prefix scratch remains smaller than the payload while the peer
 parses the complete bytes. WebSocket tests independently verify one-frame
-masked client and unmasked server messages assembled from two parts. The full 2,958-test Netz suite, 153-scenario
+masked client and unmasked server messages assembled from two parts. The full 2,958-test Netz suite, 167-scenario
 Mosquitto-derived wire gate, and MQTT 3.1.1/5 WS/WSS gate remain green. Five
 CPU-0 native-TLS samples measured 11.292-11.761 us per QoS 1 PUBLISH/PUBACK
 (11.445 us mean). Five WebSocket samples measured 10.448-10.859 us with a
@@ -1483,7 +1483,7 @@ Listeners can also opt into Mosquitto-compatible
 then Session, Will, takeover and live ACL state consistently use the required
 username as the effective Client ID. Missing usernames receive Not Authorized;
 tests prove two different wire Client IDs with one username resume/take over the
-same durable Session. The 153-scenario Mosquitto-derived wire gate runs the
+same durable Session. The 167-scenario Mosquitto-derived wire gate runs the
 same policy through the standalone broker option, including exact Session
 Present, takeover DISCONNECT and missing-username refusal bytes.
 `zig build interop-mqtt-listener-mount-mosquitto -Doptimize=ReleaseFast`
@@ -1502,7 +1502,7 @@ Standalone TCP, Unix, TLS, WS, and WSS servers also share a long-running
 `serveUntil` worker supervisor with cancellation, connection reuse, error
 observation, and independent accept/connection failure policies.
 
-`zig build interop-mqtt-mosquitto-vectors -Doptimize=ReleaseFast` now runs 153
+`zig build interop-mqtt-mosquitto-vectors -Doptimize=ReleaseFast` now runs 167
 raw MQTT scenarios derived directly from Mosquitto `5cd25465`'s packet
 generators: two PROXY protocol cases consume Mosquitto's v1 TCP4 and v2 IPv4
 prefaces before completing MQTT 5 CONNECT and PING on the same stream; the
@@ -1792,9 +1792,10 @@ Two additional MQTT 3.1.1/5 scenarios directly port Mosquitto's
 PUBREC, reconnects and retransmits the PUBLISH, completes PUBREL/PUBCOMP, then
 disconnects again as if PUBCOMP were lost. The next Session resume repeats
 PUBREL and receives PUBCOMP without a second subscriber delivery. This exposed
-the MQTT 3.1.1 PUBREL DUP flag being rejected and the fresh connection's
-receive accounting not recognizing an idempotent completed transaction; both
-are now reconciled without weakening MQTT 5 reserved-flag validation.
+the fresh connection's receive accounting not recognizing an idempotent
+completed transaction; it is now reconciled without depending on the obsolete
+MQTT 3.1 PUBREL DUP bit. Both supported versions require the `0x2` PUBREL fixed
+flags from MQTT-3.6.1-1.
 Four MQTT 3.1.1/5 scenarios cover Mosquitto's non-standard
 `upgrade_outgoing_qos` switch. A retained and an ordinary live QoS 0
 Application Message are each delivered at the subscriber's granted QoS 1 when
@@ -1887,7 +1888,47 @@ overflow case now covers both protocol versions and the exact advertised
 Receive Maximum: MQTT 5 receives DISCONNECT 0x93, while MQTT 3.1.1 closes
 without an unrepresentable reason packet. Server-side admission enforces the
 configured inbound limit in MQTT 3.1.1 even though only MQTT 5 can advertise it
-as a CONNACK property. All 167 scenarios pass. This is
+as a CONNACK property. All 167 curated scenarios pass. A separate
+source-hash-locked adapter now executes every scenario in Mosquitto's complete
+`FORBIDDEN.json`, `PINGREQ.json`, `PINGRESP.json`, `PUBACK.json`,
+`PUBREC.json`, `PUBCOMP.json`, `SUBACK.json`, and `UNSUBACK.json` files: 628
+upstream scenarios across MQTT 3.1.1 and MQTT 5. The adapter preserves the
+upstream payload DSL, group/test inheritance, explicit response bytes, and
+connection-liveness expectations; it rejects non-portable action types instead
+of silently skipping them. Where an upstream MQTT 5 case requires only EOF,
+the adapter additionally permits one exact `0x81`/`0x82` diagnostic before
+requiring closure, consistent with MQTT 5 section 4.13. The complete files
+exposed three runtime gaps: reserved Control Packet type zero now has a
+distinct error and is rejected from the first byte before an independently
+malformed Remaining Length can overwrite its Protocol Error classification;
+unknown and multi-byte Property Identifiers are parsed as Variable Byte
+Integers and classified as Malformed Packet; and the broker now handles stale
+but well-formed QoS acknowledgments idempotently. Unknown PUBACK/PUBCOMP are
+ignored, while an accepted unknown PUBREC receives its required same-ID PUBREL;
+wrong-stage identifiers remain errors and no inflight accounting is released.
+Run it against the audited Mosquitto `5cd25465` checkout with:
+
+```sh
+zig build interop-mqtt-mosquitto-packet-sequences -Doptimize=ReleaseFast -- \
+  --mosquitto-test-root=/nav_env/Work/mosquitto/test
+```
+
+The manifest pins SHA-256 hashes for all eight JSON inputs and the imported
+`mqtt_packets.py` generator, so a changed upstream fixture cannot silently
+reuse the recorded scenario count.
+The adapter intentionally does not count complete `AUTH.json`,
+`DISCONNECT.json`, `PUBREL.json`, or `UNSUBSCRIBE.json` yet: the pinned
+Mosquitto expectations classify a one-byte
+AUTH body with no Property Length and non-zero reserved DISCONNECT flags as
+Protocol Error `0x82`, and likewise classify invalid MQTT 5 PUBREL reserved
+flags as `0x82`; MQTT 5 defines unparseable variable headers and invalid
+reserved flags as Malformed Packet `0x81`. Netz retains the standards
+classification instead of adding per-file compatibility exceptions.
+The UNSUBSCRIBE file also requires rejection of otherwise valid UTF-8 control
+characters such as U+0001. MQTT 5 makes rejection of these disallowed Unicode
+code points optional, and netz retains its documented interoperable acceptance
+policy instead of pretending that Mosquitto's stricter choice is mandatory.
+This is
 deliberately described as a selected
 wire-vector subset: Mosquitto's Python harness hardcodes its own `-v -c/-p`
 broker CLI and many tests depend on Mosquitto config, logs, reload, persistence
@@ -1938,7 +1979,8 @@ or plugins, so passing these vectors is not proxy evidence for the entire suite.
    validated broker-process RSS records; a current 64-connection run measured
    netz at 6,360 KiB versus Mosquitto at 3,896 KiB, narrowing but not closing
    the independent-peer memory gap.
-3. Expand the selected Mosquitto-derived raw wire gate above, or add a broker
-   process adapter capable of preserving the upstream harness's config/reload/
-   persistence semantics. The 153 passing packet-vector scenarios do not cover
-   the full protocol/conformance suite.
+3. Expand the source-hash-locked complete-file gate beyond its current 628
+   upstream packet sequences, or add a broker process adapter capable of
+   preserving the upstream harness's config/reload/persistence semantics. The
+   167 curated scenarios plus eight complete portable JSON files still do not
+   cover the full protocol/conformance suite.

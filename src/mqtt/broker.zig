@@ -3976,17 +3976,10 @@ pub const Broker = struct {
             const publisher_slot = try self.slotForSubscriber(publisher_id);
             publisher_slot.writer_mutex.lockUncancelable(self.io);
             defer publisher_slot.writer_mutex.unlock(self.io);
-            if (durable_publisher_id != publisher_id) {
-                // The completed inbound transaction belongs to a durable
-                // Session from an earlier Network Connection. Reconcile the
-                // fresh connection's receive-state table so writePubComp can
-                // release it normally. MQTT 3.1.1 identifies this retry with
-                // PUBREL DUP; MQTT 5 defines repeated PUBREL as idempotent
-                // without carrying a DUP bit.
-                if (publisher.protocol == .v5 or ack.dup) {
-                    try publisher.resumeIncomingQoS2(ack.packet_id);
-                }
-            }
+            // `writePubComp` treats an absent connection-local marker
+            // idempotently. This matters after durable Session recovery, where
+            // the completed inbound transaction belongs to an earlier Network
+            // Connection and cannot be reconstructed from a PUBREL flag.
             try publisher.writePubComp(ack.packet_id, 0);
             return;
         };
@@ -5639,12 +5632,16 @@ const ClientTask = struct {
                             return err;
                         };
                     }
-                    if (!session_ack.owned) connection.applyPubAck(
-                        owned.ack,
-                    ) catch |err| {
-                        slot.writer_mutex.unlock(task.broker.io);
-                        return err;
-                    };
+                    if (!session_ack.owned and
+                        connection.hasOutgoingPacketIdentifier(
+                            owned.ack.packet_id,
+                        ))
+                    {
+                        connection.applyPubAck(owned.ack) catch |err| {
+                            slot.writer_mutex.unlock(task.broker.io);
+                            return err;
+                        };
+                    }
                     slot.writer_mutex.unlock(task.broker.io);
                     try task.broker.flushSlot(
                         task.slot_index,
@@ -5677,12 +5674,30 @@ const ClientTask = struct {
                             return err;
                         };
                     }
-                    if (!session_ack.owned) connection.applyPubRec(
-                        owned.ack,
-                    ) catch |err| {
-                        slot.writer_mutex.unlock(task.broker.io);
-                        return err;
-                    };
+                    if (!session_ack.owned) {
+                        if (connection.hasOutgoingPacketIdentifier(
+                            owned.ack.packet_id,
+                        )) {
+                            connection.applyPubRec(owned.ack) catch |err| {
+                                slot.writer_mutex.unlock(task.broker.io);
+                                return err;
+                            };
+                        } else if (owned.ack.accepted()) {
+                            // An accepted PUBREC always advances the QoS 2
+                            // exchange with PUBREL. If Session state was lost,
+                            // sending PUBREL lets the receiver finish (or answer
+                            // Packet Identifier not found) without poisoning the
+                            // Network Connection. A negative PUBREC is already
+                            // terminal and requires no response.
+                            connection.writePubRel(
+                                owned.ack.packet_id,
+                                0,
+                            ) catch |err| {
+                                slot.writer_mutex.unlock(task.broker.io);
+                                return err;
+                            };
+                        }
+                    }
                     slot.writer_mutex.unlock(task.broker.io);
                     if (session_ack.owned) {
                         try task.broker.flushSlot(
@@ -5725,12 +5740,16 @@ const ClientTask = struct {
                             return err;
                         };
                     }
-                    if (!session_ack.owned) connection.applyPubComp(
-                        owned.ack,
-                    ) catch |err| {
-                        slot.writer_mutex.unlock(task.broker.io);
-                        return err;
-                    };
+                    if (!session_ack.owned and
+                        connection.hasOutgoingPacketIdentifier(
+                            owned.ack.packet_id,
+                        ))
+                    {
+                        connection.applyPubComp(owned.ack) catch |err| {
+                            slot.writer_mutex.unlock(task.broker.io);
+                            return err;
+                        };
+                    }
                     slot.writer_mutex.unlock(task.broker.io);
                     try task.broker.flushSlot(
                         task.slot_index,
@@ -5990,6 +6009,7 @@ fn disconnectReasonForReadViolation(err: anyerror) ?u8 {
         error.SubscriptionIdentifiersNotSupported => 0xa1,
         error.WildcardSubscriptionsNotSupported => 0xa2,
         error.InvalidPacketDirection,
+        error.ReservedPacketType,
         error.InvalidProperty,
         error.InvalidReasonCode,
         error.InvalidTopic,
@@ -6000,6 +6020,7 @@ fn disconnectReasonForReadViolation(err: anyerror) ?u8 {
         error.InvalidPacketType,
         error.InvalidFlags,
         error.InvalidQoS,
+        error.InvalidPropertyIdentifier,
         error.BufferTooShort,
         error.MalformedRemainingLength,
         error.RemainingLengthTooLarge,
@@ -6054,6 +6075,10 @@ test "broker maps negotiated capability violations to DISCONNECT reasons" {
         disconnectReasonForReadViolation(error.InvalidPacketDirection),
     );
     try std.testing.expectEqual(
+        @as(?u8, 0x82),
+        disconnectReasonForReadViolation(error.ReservedPacketType),
+    );
+    try std.testing.expectEqual(
         @as(?u8, 0x81),
         disconnectReasonForReadViolation(error.InvalidFlags),
     );
@@ -6064,6 +6089,10 @@ test "broker maps negotiated capability violations to DISCONNECT reasons" {
     try std.testing.expectEqual(
         @as(?u8, 0x81),
         disconnectReasonForReadViolation(error.InvalidPacketType),
+    );
+    try std.testing.expectEqual(
+        @as(?u8, 0x81),
+        disconnectReasonForReadViolation(error.InvalidPropertyIdentifier),
     );
     try std.testing.expectEqual(
         @as(?u8, 0x81),

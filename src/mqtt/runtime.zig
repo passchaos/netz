@@ -3385,6 +3385,18 @@ pub const Connection = struct {
         };
     }
 
+    /// Whether this Network Connection currently owns an outbound QoS
+    /// transaction with the supplied Packet Identifier, at any stage. Broker
+    /// event loops use this before applying an acknowledgement so an unknown
+    /// identifier can be ignored without weakening wrong-stage validation.
+    pub fn hasOutgoingPacketIdentifier(
+        self: *const Connection,
+        packet_id: u16,
+    ) bool {
+        return packet_id != 0 and
+            self.packet_identifiers.containsOutgoing(packet_id);
+    }
+
     pub fn readPubAck(self: *Connection) Error!OwnedAck {
         return self.readAck(.puback);
     }
@@ -3498,8 +3510,9 @@ pub const Connection = struct {
 
     /// Restore connection-local receive accounting before acknowledging a
     /// PUBREL that belongs to a durable transaction completed on an earlier
-    /// Network Connection. MQTT 5 has no PUBREL DUP flag, so the broker uses
-    /// this only after its Session store identifies the retry.
+    /// Network Connection. MQTT 3.1.1 and MQTT 5 do not encode PUBREL retry
+    /// state in the fixed header, so the broker uses this only after its
+    /// Session store identifies the retry.
     pub fn resumeIncomingQoS2(
         self: *Connection,
         packet_id: u16,
@@ -6133,6 +6146,58 @@ test "MQTT connection enforces outgoing inflight limit before writing" {
 
     try std.testing.expectError(error.InflightFull, connection.publish("limited/topic", "blocked", .{ .qos = .at_least_once }));
     try std.testing.expectEqual(@as(u16, 1), connection.outgoing_inflight);
+}
+
+test "MQTT acknowledgement apply preserves wrong-stage inflight state" {
+    const allocator = std.testing.allocator;
+    var connection = Connection{
+        .allocator = allocator,
+        .transport = undefined,
+        .protocol = .v5,
+        .outgoing_inflight = 2,
+    };
+    defer connection.packet_identifiers.deinit(allocator);
+    try std.testing.expect(try connection.packet_identifiers.add(
+        allocator,
+        41,
+        .outgoing_qos1,
+    ));
+    try std.testing.expect(try connection.packet_identifiers.add(
+        allocator,
+        42,
+        .outgoing_qos2,
+    ));
+
+    try std.testing.expectError(
+        error.UnexpectedPacket,
+        connection.applyPubAck(.{
+            .packet_type = .puback,
+            .packet_id = 42,
+        }),
+    );
+    try std.testing.expectError(
+        error.UnexpectedPacket,
+        connection.applyPubRec(.{
+            .packet_type = .pubrec,
+            .packet_id = 41,
+        }),
+    );
+    try std.testing.expectError(
+        error.UnexpectedPacket,
+        connection.applyPubComp(.{
+            .packet_type = .pubcomp,
+            .packet_id = 42,
+        }),
+    );
+    try std.testing.expectEqual(@as(u16, 2), connection.outgoing_inflight);
+    try std.testing.expect(connection.packet_identifiers.contains(
+        41,
+        .outgoing_qos1,
+    ));
+    try std.testing.expect(connection.packet_identifiers.contains(
+        42,
+        .outgoing_qos2,
+    ));
 }
 
 test "MQTT split publish API pipelines QoS publishes up to receive maximum" {
