@@ -28,6 +28,8 @@ from mqtt_mosquitto_vectors import (
 
 
 SEQUENCE_FILES = {
+    "AUTH.json":
+        "e9591dd6236144f9d913d9cf2a167e2ed0aacc45f9e8ec1adb6a96031958b1a4",
     "FORBIDDEN.json":
         "9ef4419f01bb7edb907b8846de498883fbd58eebc5fbd41bf2782e0fb14c83ad",
     "FLOW.json":
@@ -211,6 +213,10 @@ STANDARD_OVERRIDE_REASONS = {
         "MQTT 5 section 2.1.3 requires invalid reserved Fixed Header flags "
         "to be reported as Malformed Packet 0x81"
     ),
+    "mqtt5_truncated_variable_header_malformed": (
+        "MQTT 5 classifies a truncated variable header as Malformed Packet "
+        "0x81 rather than Protocol Error 0x82"
+    ),
 }
 
 
@@ -235,6 +241,19 @@ STANDARD_EXPECTATION_OVERRIDES = {
         ("PUBREL.json", "PUBREL", "62"),
         ("PUBCOMP.json", "PUBCOMP", "70"),
     )
+}
+STANDARD_EXPECTATION_OVERRIDES["AUTH.json"] = {
+    ("v5.0   AUTH", "F0 long", 1): expectation_override(
+        "E0 r1 82", "E0 r1 81",
+        "mqtt5_truncated_variable_header_malformed",
+    ),
+    **{
+        ("v5.0   AUTH", header, 1): expectation_override(
+            "E0 r1 82", "E0 r1 81",
+            "mqtt5_fixed_header_flags_malformed",
+        )
+        for header in ("F1", "F2", "F4", "F8")
+    },
 }
 STANDARD_EXPECTATION_OVERRIDES["PUBREL.json"].update({
     ("v5.0   PUBREL", f"{header} unsolicited", 1): expectation_override(
@@ -292,7 +311,7 @@ STANDARD_EXPECTATION_OVERRIDES["UNSUBSCRIBE.json"] = {
         "A2 zero mid",
     )
 }
-EXPECTED_COMPLETE_SEQUENCE_COUNT = 795
+EXPECTED_COMPLETE_SEQUENCE_COUNT = 809
 EXPECTED_SUBSET_SEQUENCE_COUNTS = {
     "PUBLISH.json": 148,
     "SUBSCRIBE.json": 151,
@@ -302,7 +321,7 @@ EXPECTED_SUBSET_SEQUENCE_COUNT = sum(EXPECTED_SUBSET_SEQUENCE_COUNTS.values())
 EXPECTED_SEQUENCE_COUNT = (
     EXPECTED_COMPLETE_SEQUENCE_COUNT + EXPECTED_SUBSET_SEQUENCE_COUNT
 )
-EXPECTED_STANDARD_OVERRIDE_COUNT = 134
+EXPECTED_STANDARD_OVERRIDE_COUNT = 139
 MQTT_PACKETS_SHA256 = (
     "0024fcebd421a3286cea021ed64083f906d9b457004786b05f8a74abae5bfb37"
 )

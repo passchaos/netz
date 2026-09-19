@@ -117,6 +117,7 @@ class SequenceLoadingTests(unittest.TestCase):
         self.assertEqual(
             set(sequences.SEQUENCE_FILES),
             {
+                "AUTH.json",
                 "FLOW.json",
                 "FORBIDDEN.json",
                 "OTHER.json",
@@ -130,6 +131,10 @@ class SequenceLoadingTests(unittest.TestCase):
                 "SUBACK.json",
                 "UNSUBACK.json",
             },
+        )
+        self.assertEqual(
+            sequences.SEQUENCE_FILES["AUTH.json"],
+            "e9591dd6236144f9d913d9cf2a167e2ed0aacc45f9e8ec1adb6a96031958b1a4",
         )
         self.assertEqual(
             sequences.SEQUENCE_FILES["PUBREL.json"],
@@ -150,7 +155,7 @@ class SequenceLoadingTests(unittest.TestCase):
             set(sequences.SEQUENCE_EXCLUSIONS),
             set(sequences.SEQUENCE_SUBSET_FILES),
         )
-        self.assertEqual(sequences.EXPECTED_COMPLETE_SEQUENCE_COUNT, 795)
+        self.assertEqual(sequences.EXPECTED_COMPLETE_SEQUENCE_COUNT, 809)
         self.assertEqual(
             sequences.EXPECTED_SUBSET_SEQUENCE_COUNTS,
             {
@@ -160,8 +165,8 @@ class SequenceLoadingTests(unittest.TestCase):
             },
         )
         self.assertEqual(sequences.EXPECTED_SUBSET_SEQUENCE_COUNT, 399)
-        self.assertEqual(sequences.EXPECTED_SEQUENCE_COUNT, 1194)
-        self.assertEqual(sequences.EXPECTED_STANDARD_OVERRIDE_COUNT, 134)
+        self.assertEqual(sequences.EXPECTED_SEQUENCE_COUNT, 1208)
+        self.assertEqual(sequences.EXPECTED_STANDARD_OVERRIDE_COUNT, 139)
         self.assertEqual(
             len(sequences.SEQUENCE_EXCLUSIONS["PUBLISH.json"]),
             12,
@@ -227,6 +232,7 @@ class SequenceLoadingTests(unittest.TestCase):
             },
         )
         expected_override_counts = {
+            "AUTH.json": 5,
             "PUBACK.json": 24,
             "PUBREC.json": 24,
             "PUBREL.json": 28,
@@ -259,6 +265,16 @@ class SequenceLoadingTests(unittest.TestCase):
                     for case in sequences.ACK_DISALLOWED_PROPERTY_CASES
                 },
             )
+        self.assertEqual(
+            set(sequences.STANDARD_EXPECTATION_OVERRIDES["AUTH.json"]),
+            {
+                ("v5.0   AUTH", "F0 long", 1),
+                ("v5.0   AUTH", "F1", 1),
+                ("v5.0   AUTH", "F2", 1),
+                ("v5.0   AUTH", "F4", 1),
+                ("v5.0   AUTH", "F8", 1),
+            },
+        )
         self.assertEqual(
             set(sequences.STANDARD_EXPECTATION_OVERRIDES["PUBREL.json"]),
             {
@@ -351,7 +367,8 @@ class SequenceLoadingTests(unittest.TestCase):
                 "mqtt5_publish_protocol_error": 3,
                 "mqtt5_subscribe_protocol_error": 9,
                 "mqtt5_unsubscribe_protocol_error": 4,
-                "mqtt5_fixed_header_flags_malformed": 4,
+                "mqtt5_fixed_header_flags_malformed": 8,
+                "mqtt5_truncated_variable_header_malformed": 1,
             },
         )
         for filename, overrides in (
@@ -363,6 +380,7 @@ class SequenceLoadingTests(unittest.TestCase):
                 if reason in {
                     "mqtt5_property_context_malformed",
                     "mqtt5_fixed_header_flags_malformed",
+                    "mqtt5_truncated_variable_header_malformed",
                 }:
                     self.assertEqual((source, expected),
                                      ("E0 r1 82", "E0 r1 81"))
