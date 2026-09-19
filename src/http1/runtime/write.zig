@@ -451,6 +451,26 @@ test "HTTP/1 streaming framing honors explicit Trailer declarations" {
             &scratch,
         ),
     );
+    try std.testing.expectError(
+        error.InvalidTrailer,
+        prepareStreamingRequest(
+            allocator,
+            .{
+                .method = .POST,
+                .host = "localhost",
+                .trailer_names = &.{"Connection"},
+            },
+            &scratch,
+        ),
+    );
+    try std.testing.expectError(
+        error.InvalidTrailer,
+        prepareStreamingResponse(
+            allocator,
+            .{ .trailer_names = &.{"Upgrade"} },
+            &scratch,
+        ),
+    );
     const response = try prepareStreamingResponse(
         allocator,
         .{

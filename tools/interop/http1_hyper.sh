@@ -155,6 +155,12 @@ grep -Fq \
 grep -Fq \
   'netz HTTP/1 server interoperated with Hyper generic Upgrade: transport=cleartext protocol=netz-test server_preface=18 client_bytes=19 reply_bytes=18 client_io=hyper-tokio server_io=zio-std-io' \
   "$work/netz-server.log"
+grep -Fq \
+  'Hyper HTTP/1 client observed netz reject connection-control trailer: field=connection response=false' \
+  "$work/hyper-client.log"
+grep -Fq \
+  'netz HTTP/1 server rejected Hyper connection-control trailer: transport=cleartext field=connection error=InvalidTrailer' \
+  "$work/netz-server.log"
 echo 'Hyper HTTP/1 client -> netz server interop passed'
 
 port=$(free_tcp_port)
@@ -258,6 +264,12 @@ grep -Fq \
   "$work/tls-hyper-client.log"
 grep -Fq \
   'netz HTTP/1 server interoperated with Hyper generic Upgrade: transport=tls protocol=netz-test server_preface=18 client_bytes=19 reply_bytes=18 client_io=hyper-tokio server_io=zio-std-io' \
+  "$work/tls-netz-server.log"
+grep -Fq \
+  'Hyper HTTP/1 client observed netz reject connection-control trailer: field=connection response=false' \
+  "$work/tls-hyper-client.log"
+grep -Fq \
+  'netz HTTP/1 server rejected Hyper connection-control trailer: transport=tls field=connection error=InvalidTrailer' \
   "$work/tls-netz-server.log"
 cat "$work/tls-hyper-client.log"
 cat "$work/tls-netz-server.log"

@@ -637,6 +637,62 @@ test "HTTP/1 streaming request optionally unfolds chunked trailers" {
     try std.testing.expectEqual(@as(usize, 2), request.trailer_value_storage.len);
 }
 
+test "HTTP/1 streaming request rejects connection-control trailers" {
+    const allocator = std.testing.allocator;
+    const raw =
+        "POST /invalid-trailer HTTP/1.1\r\n" ++
+        "Host: localhost\r\n" ++
+        "Transfer-Encoding: chunked\r\n\r\n" ++
+        "4\r\nbody\r\n" ++
+        "0\r\nConnection: close\r\n\r\n";
+    const TestError = runtime.Error;
+    const Reader = @import("body_reader.zig").Reader(TestError);
+    const Source = struct {
+        bytes: []const u8,
+        offset: usize = 0,
+
+        fn readSome(raw_context: ?*anyopaque, out: []u8) TestError!usize {
+            const self: *@This() = @ptrCast(@alignCast(raw_context.?));
+            if (self.offset == self.bytes.len) return 0;
+            const count = @min(out.len, self.bytes.len - self.offset);
+            @memcpy(out[0..count], self.bytes[self.offset..][0..count]);
+            self.offset += count;
+            return count;
+        }
+    };
+    const Context = struct {
+        body: std.ArrayList(u8) = .empty,
+
+        fn begin(_: *@This(), _: Reader.RequestHead) !void {}
+
+        fn consume(self: *@This(), bytes: []const u8) !void {
+            try self.body.appendSlice(std.testing.allocator, bytes);
+        }
+    };
+
+    var source = Source{ .bytes = raw };
+    var inbuf: std.ArrayList(u8) = .empty;
+    defer inbuf.deinit(allocator);
+    var context: Context = .{};
+    defer context.body.deinit(allocator);
+    var reader = Reader{
+        .allocator = allocator,
+        .context = &source,
+        .read_some = Source.readSome,
+        .inbuf = &inbuf,
+        .limits = .{
+            .max_head_bytes = limits.max_head_bytes,
+            .max_body_bytes = limits.max_body_bytes,
+        },
+        .options = .{},
+    };
+    try std.testing.expectError(
+        error.InvalidTrailer,
+        reader.readRequest(&context, Context.begin, Context.consume),
+    );
+    try std.testing.expectEqualStrings("body", context.body.items);
+}
+
 test "HTTP/1 streaming response observes informational heads" {
     const allocator = std.testing.allocator;
     const raw =

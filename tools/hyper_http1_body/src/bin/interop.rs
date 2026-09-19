@@ -768,6 +768,53 @@ async fn run_client(port: u16, ca_path: Option<String>) {
         .expect("read Upgrade reply");
     assert_eq!(&reply, b"netz upgrade reply");
     println!("Hyper HTTP/1 client interoperated with netz generic Upgrade: protocol=netz-test server_preface=18 client_bytes=19 reply_bytes=18 client_io=hyper-tokio server_io=zio-std-io");
+
+    let stream = TcpStream::connect(("127.0.0.1", port))
+        .await
+        .expect("connect netz invalid-trailer server");
+    stream
+        .set_nodelay(true)
+        .expect("invalid-trailer TCP_NODELAY");
+    let io = match ca_path.as_ref() {
+        Some(ca) => MaybeTls::Client(
+            TlsConnector::from(tls_client_config(ca))
+                .connect(
+                    rustls::pki_types::ServerName::try_from("localhost")
+                        .expect("valid server name"),
+                    stream,
+                )
+                .await
+                .expect("connect invalid-trailer HTTPS"),
+        ),
+        None => MaybeTls::Clear(stream),
+    };
+    let (mut invalid_sender, invalid_connection) = client_http1::Builder::new()
+        .handshake(TokioIo::new(io))
+        .await
+        .expect("Hyper invalid-trailer handshake");
+    let invalid_driver = tokio::spawn(invalid_connection);
+    let mut connection_trailer = HeaderMap::new();
+    connection_trailer.insert("connection", HeaderValue::from_static("close"));
+    let request = Request::builder()
+        .method(Method::POST)
+        .uri("/invalid-trailer?from=hyper")
+        .header("host", "localhost")
+        .header("trailer", "connection")
+        .body(body_with_trailers(
+            b"hyper-",
+            b"invalid",
+            connection_trailer,
+        ))
+        .expect("invalid-trailer request");
+    assert!(
+        invalid_sender.send_request(request).await.is_err(),
+        "netz must close instead of accepting a connection-control trailer",
+    );
+    drop(invalid_sender);
+    let _ = invalid_driver
+        .await
+        .expect("join Hyper invalid-trailer connection");
+    println!("Hyper HTTP/1 client observed netz reject connection-control trailer: field=connection response=false");
 }
 
 fn empty_body() -> Body {

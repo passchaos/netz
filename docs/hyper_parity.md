@@ -109,6 +109,15 @@ benchmark response:
   trailers under one deadline; this permits pushed bodies larger than the
   initial QUIC connection or unidirectional-stream window and stops an active
   push when the client sends `CANCEL_PUSH`;
+- HTTP/1 trailer validation rejects connection-control fields (`Connection`,
+  `Keep-Alive`, `Proxy-Connection`, and `Upgrade`) in addition to the existing
+  framing, routing, authentication, response-control, and representation
+  fields. One central policy covers aggregate and streaming encoders and
+  decoders, so forbidden fields fail before local emission and cannot affect
+  persistent-message reuse when received. The bidirectional Hyper process gate
+  deliberately sends a real `Connection: close` trailer over cleartext and
+  TLS; netz reports `InvalidTrailer` and closes that connection without a
+  response;
 - persistent clients/connections retain request/response header descriptors,
   trailer rendering and encoding buffers;
 - server `Limits.request_head_timeout` applies one absolute deadline to each

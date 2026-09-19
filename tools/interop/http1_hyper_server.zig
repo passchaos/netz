@@ -238,6 +238,23 @@ pub fn main(init: std.process.Init) !void {
         "netz HTTP/1 server interoperated with Hyper generic Upgrade: transport={s} protocol=netz-test server_preface=18 client_bytes=19 reply_bytes=18 client_io=hyper-tokio server_io=zio-std-io\n",
         .{if (tls_enabled) "tls" else "cleartext"},
     );
+
+    var invalid_trailer_connection = if (tls_enabled)
+        try tls_server.accept()
+    else
+        try clear_server.accept();
+    defer invalid_trailer_connection.close();
+    if (invalid_trailer_connection.readRequest(.{})) |invalid_request| {
+        var unexpected = invalid_request;
+        unexpected.deinit(allocator);
+        return error.ExpectedInvalidTrailer;
+    } else |err| {
+        if (err != error.InvalidTrailer) return err;
+    }
+    std.debug.print(
+        "netz HTTP/1 server rejected Hyper connection-control trailer: transport={s} field=connection error=InvalidTrailer\n",
+        .{if (tls_enabled) "tls" else "cleartext"},
+    );
 }
 
 fn headerEquals(

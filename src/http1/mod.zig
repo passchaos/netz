@@ -1953,18 +1953,26 @@ pub fn parseChunkSize(raw_size: []const u8) Error!usize {
 }
 
 fn validTrailerFieldName(name: []const u8) bool {
+    // RFC 9110 section 6.5.1 defaults registered fields to header-only unless
+    // their definitions opt into trailers. Keep known pre-content and
+    // connection-control fields out, while allowing application extension
+    // fields whose semantics are known only to the caller.
     return !(std.ascii.eqlIgnoreCase(name, "authorization") or
         std.ascii.eqlIgnoreCase(name, "cache-control") or
+        std.ascii.eqlIgnoreCase(name, "connection") or
         std.ascii.eqlIgnoreCase(name, "content-encoding") or
         std.ascii.eqlIgnoreCase(name, "content-length") or
         std.ascii.eqlIgnoreCase(name, "content-range") or
         std.ascii.eqlIgnoreCase(name, "content-type") or
         std.ascii.eqlIgnoreCase(name, "host") or
+        std.ascii.eqlIgnoreCase(name, "keep-alive") or
         std.ascii.eqlIgnoreCase(name, "max-forwards") or
+        std.ascii.eqlIgnoreCase(name, "proxy-connection") or
         std.ascii.eqlIgnoreCase(name, "set-cookie") or
         std.ascii.eqlIgnoreCase(name, "trailer") or
         std.ascii.eqlIgnoreCase(name, "transfer-encoding") or
-        std.ascii.eqlIgnoreCase(name, "te"));
+        std.ascii.eqlIgnoreCase(name, "te") or
+        std.ascii.eqlIgnoreCase(name, "upgrade"));
 }
 
 test "HTTP/1 request parse and serialize" {
@@ -2678,20 +2686,37 @@ test "HTTP/1 chunked codec" {
 
 test "HTTP/1 chunked trailers reject forbidden fields" {
     const allocator = std.testing.allocator;
+    try validateTrailers(&.{
+        .{ .name = "ETag", .value = "\"dynamic\"" },
+        .{ .name = "X-Application-Digest", .value = "sha-256=demo" },
+    });
     const invalid = [_]Header{
         .{ .name = "Content-Length", .value = "5" },
         .{ .name = "Transfer-Encoding", .value = "chunked" },
         .{ .name = "Trailer", .value = "Digest" },
         .{ .name = "Host", .value = "example.com" },
+        .{ .name = "Connection", .value = "close" },
+        .{ .name = "Keep-Alive", .value = "timeout=5" },
+        .{ .name = "Proxy-Connection", .value = "keep-alive" },
+        .{ .name = "Upgrade", .value = "websocket" },
     };
     for (invalid) |trailer| {
         var encoded: std.ArrayList(u8) = .empty;
         defer encoded.deinit(allocator);
         try std.testing.expectError(error.InvalidTrailer, encodeChunked(&encoded, allocator, &[_][]const u8{"hello"}, &.{trailer}));
-    }
 
-    const raw = "5\r\nhello\r\n0\r\nContent-Length: 5\r\n\r\n";
-    try std.testing.expectError(error.InvalidTrailer, decodeChunked(allocator, raw, .{}));
+        var raw: std.ArrayList(u8) = .empty;
+        defer raw.deinit(allocator);
+        try raw.appendSlice(allocator, "5\r\nhello\r\n0\r\n");
+        try raw.appendSlice(allocator, trailer.name);
+        try raw.appendSlice(allocator, ": ");
+        try raw.appendSlice(allocator, trailer.value);
+        try raw.appendSlice(allocator, "\r\n\r\n");
+        try std.testing.expectError(
+            error.InvalidTrailer,
+            decodeChunked(allocator, raw.items, .{}),
+        );
+    }
 }
 
 test "HTTP/1 chunked extensions are bounded" {
