@@ -7,6 +7,7 @@ import unittest
 
 import pattern_matching
 import persistent_subscriptions
+import qos0_live_queue_scope
 import qos2_receive_maximum
 import source_lock
 import subscription_flip_flop
@@ -41,6 +42,8 @@ class SourceLockTests(unittest.TestCase):
                     "2f6289be6000de501a7329b635ea1659f81abb06fbf6f597144a160371e8a271",
                 "broker/02-subpub-qos0-subscription-id.py":
                     "4ec4e803697b4051d1c63a1d3c78bad40400af6794795b904423930903d863ee",
+                "broker/02-subpub-qos0-queued-bytes.py":
+                    "e39f61da69cff986a2255d29739788fa6fff9cd75f0c121f945a738c25f3b126",
                 "broker/02-subpub-qos2-receive-maximum-1.py":
                     "39aea4f9f4c9484384b2c4fe7190ef00ca34729c7ddf65fac42aad7e23cc4d92",
                 "broker/02-subpub-qos2-receive-maximum-2.py":
@@ -56,6 +59,11 @@ class SourceLockTests(unittest.TestCase):
         self.assertEqual(subscription_hierarchy.SCENARIO_COUNT, 2)
         self.assertEqual(subscription_identifiers.SCENARIO_COUNT, 1)
         self.assertEqual(pattern_matching.SCENARIO_COUNT, 46)
+        self.assertEqual(qos0_live_queue_scope.SCENARIO_COUNT, 2)
+        self.assertLess(
+            qos0_live_queue_scope.QUEUED_PAYLOAD_BYTE_LIMIT,
+            len(qos0_live_queue_scope.PAYLOAD.encode()),
+        )
         self.assertEqual(qos2_receive_maximum.RECEIVE_MAXIMUMS, (1, 2))
         self.assertEqual(qos2_receive_maximum.MESSAGE_COUNT, 3)
         self.assertEqual(qos2_receive_maximum.SCENARIO_COUNT, 2)

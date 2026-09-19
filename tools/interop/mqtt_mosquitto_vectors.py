@@ -20,6 +20,7 @@ import time
 from mqtt_vectors import (
     pattern_matching,
     persistent_subscriptions,
+    qos0_live_queue_scope,
     qos2_receive_maximum,
     source_lock,
     subscription_flip_flop,
@@ -32,6 +33,7 @@ SCENARIO_COUNT = (
     BASE_SCENARIO_COUNT
     + pattern_matching.SCENARIO_COUNT
     + persistent_subscriptions.SCENARIO_COUNT
+    + qos0_live_queue_scope.SCENARIO_COUNT
     + qos2_receive_maximum.SCENARIO_COUNT
     + subscription_flip_flop.SCENARIO_COUNT
     + subscription_hierarchy.SCENARIO_COUNT
@@ -6287,6 +6289,10 @@ def main() -> None:
         expected_connack, expect_packet,
     )
     pattern_matching.run(
+        args.broker, mqtt_packets, mqtt5_props, NetzBroker,
+        expected_connack, expect_packet,
+    )
+    qos0_live_queue_scope.run(
         args.broker, mqtt_packets, mqtt5_props, NetzBroker,
         expected_connack, expect_packet,
     )
