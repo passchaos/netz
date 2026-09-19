@@ -17,9 +17,18 @@ import sys
 import tempfile
 import time
 
-from mqtt_vectors import persistent_subscriptions, source_lock
+from mqtt_vectors import (
+    persistent_subscriptions,
+    source_lock,
+    subscription_flip_flop,
+)
 
 BASE_SCENARIO_COUNT = 167
+SCENARIO_COUNT = (
+    BASE_SCENARIO_COUNT
+    + persistent_subscriptions.SCENARIO_COUNT
+    + subscription_flip_flop.SCENARIO_COUNT
+)
 
 
 def parse_args() -> argparse.Namespace:
@@ -6436,6 +6445,10 @@ def main() -> None:
         args.broker, mqtt_packets, mqtt5_props, NetzBroker,
         connect_client, expected_connack, expect_packet,
     )
+    subscription_flip_flop.run(
+        args.broker, mqtt_packets, mqtt5_props, NetzBroker,
+        expected_connack, expect_packet,
+    )
     clean_session_qos1(args.broker, mqtt_packets, mqtt5_props)
     outgoing_qos1_reconnect_dup(args.broker, mqtt_packets, mqtt5_props)
     offline_qos0_queue_policy(args.broker, mqtt_packets, mqtt5_props)
@@ -6542,7 +6555,7 @@ def main() -> None:
     )
     print(
         f"Mosquitto-derived MQTT wire vectors passed: "
-        f"{BASE_SCENARIO_COUNT + persistent_subscriptions.SCENARIO_COUNT} "
+        f"{SCENARIO_COUNT} "
         "scenarios "
         "with 5000 ms CONNECT deadlines"
     )
