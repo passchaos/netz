@@ -1848,17 +1848,19 @@ Application Message are each delivered at the subscriber's granted QoS 1 when
 the opt-in is enabled, with the full PUBLISH/PUBACK exchange checked. The
 default remains the MQTT-required minimum QoS, and the same policy is applied
 before durable Session enqueueing.
-Two MQTT 3.1.1/5 scenarios derive the wire-observable queue behavior from
-Mosquitto's `03-publish-qos1-queued-bytes.py`. The example broker now exposes
+Two source-hash-locked MQTT 3.1.1/5 scenarios derive the wire-observable queue
+behavior from Mosquitto's `03-publish-qos1-queued-bytes.py` and its 400-byte
+configuration fixture. The example broker now exposes
 `--max-session-queued-payload-bytes`; each durable Session tracks queued
 Application Message payload bytes independently of its count and total owned
 memory bounds. A message that reaches the configured threshold is retained,
 later messages are dropped while the publisher still receives its successful
 QoS 1 acknowledgement, and reconnect delivers exactly the retained prefix.
 Draining or expiring a queued message immediately returns byte budget.
-Two companion MQTT 3.1.1/5 scenarios cover Mosquitto's
-`max_inflight_bytes` behavior. A durable subscriber advertises enough Receive
-Maximum credit for all messages, but the broker's independent per-Session
+Two companion source-hash-locked MQTT 3.1.1/5 scenarios and one MQTT 5 QoS 2
+stress scenario cover the `max_inflight_bytes` behavior in Mosquitto's
+`02-subpub-qos2-max-inflight-bytes.py`. A durable subscriber advertises enough
+Receive Maximum credit for all messages, but the broker's independent per-Session
 inflight payload window releases only the first two QoS 1 messages. The third
 remains queued until a PUBACK frees byte budget, then arrives on the same
 connection. The example switch is

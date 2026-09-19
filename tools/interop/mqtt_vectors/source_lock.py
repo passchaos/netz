@@ -25,6 +25,8 @@ MOSQUITTO_SOURCE_SHA256 = {
         "4ec4e803697b4051d1c63a1d3c78bad40400af6794795b904423930903d863ee",
     "broker/02-subpub-qos0-queued-bytes.py":
         "e39f61da69cff986a2255d29739788fa6fff9cd75f0c121f945a738c25f3b126",
+    "broker/02-subpub-qos2-max-inflight-bytes.py":
+        "59ab8100b5aa0cea3b1ae9b82a4afb44cd6027ed69b72e761533044dbc51a91c",
     "broker/02-subpub-qos2-receive-maximum-1.py":
         "39aea4f9f4c9484384b2c4fe7190ef00ca34729c7ddf65fac42aad7e23cc4d92",
     "broker/02-subpub-qos2-receive-maximum-2.py":
@@ -33,6 +35,10 @@ MOSQUITTO_SOURCE_SHA256 = {
         "a505ba09fbeea473296914d9bc7704c88ef99e2db0a5c952c220ab7104b8dffe",
     "broker/03-pattern-matching.py":
         "042fa7fa8728632551bdecb632aa5f41b539a69780bc4d4bdf25582e2ff8fd32",
+    "broker/03-publish-qos1-queued-bytes.conf":
+        "81264cf8b5af7d7248c2e968ff373e20d07d6b414c4770cca275a38c02beea6a",
+    "broker/03-publish-qos1-queued-bytes.py":
+        "d320a78b93a39c8ea02e2b5c57e13b2c4d558e39fb4f0be8ce52e70b6dc9980d",
 }
 
 
