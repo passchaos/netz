@@ -17,6 +17,10 @@ import sys
 import tempfile
 import time
 
+from mqtt_vectors import persistent_subscriptions, source_lock
+
+BASE_SCENARIO_COUNT = 167
+
 
 def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser()
@@ -1993,7 +1997,7 @@ def malformed_will_connects(executable: Path, mqtt_packets) -> None:
     # 07-will-null-topic.py for MQTT 3.1.1 and MQTT 5. A malformed CONNECT is
     # rejected before Session/Will installation; a final valid connection
     # proves the finite broker remains usable after all four failures.
-    cases: list[tuple[str, bytes]] = []
+    cases: list[tuple[str, bytes, bytes | None]] = []
     for proto_ver in (4, 5):
         complete = mqtt_packets.gen_connect(
             f"will-missing-payload-{proto_ver}",
@@ -2010,7 +2014,11 @@ def malformed_will_connects(executable: Path, mqtt_packets) -> None:
         if malformed[1] & 0x80:
             raise AssertionError("unexpected multi-byte CONNECT length")
         malformed[1] -= 2
-        cases.append((f"missing Will payload v{proto_ver}", bytes(malformed)))
+        cases.append((
+            f"missing Will payload v{proto_ver}",
+            bytes(malformed),
+            bytes.fromhex("20 03 00 81 00") if proto_ver == 5 else None,
+        ))
         cases.append((
             f"empty Will Topic v{proto_ver}",
             mqtt_packets.gen_connect(
@@ -2019,14 +2027,18 @@ def malformed_will_connects(executable: Path, mqtt_packets) -> None:
                 will_payload=b"will-message",
                 proto_ver=proto_ver,
             ),
+            bytes.fromhex("20 03 00 90 00") if proto_ver == 5 else None,
         ))
 
     with NetzBroker(
         executable, connections=len(cases) + 1, ignore_errors=True
     ) as broker:
-        for label, packet in cases:
+        for label, packet, expected in cases:
             with broker.connect() as sock:
                 sock.sendall(packet)
+                if expected is not None:
+                    expect_packet(sock, expected, label)
+                    continue
                 try:
                     response = sock.recv(1)
                     if response:
@@ -6380,6 +6392,7 @@ def retained_tombstone_properties(
 
 def main() -> None:
     args = parse_args()
+    source_lock.verify_mosquitto_sources(args.mosquitto_test_root)
     sys.path.insert(0, str(args.mosquitto_test_root))
     import mqtt5_props  # type: ignore
     import mqtt5_rc  # type: ignore
@@ -6419,6 +6432,10 @@ def main() -> None:
     qos2_routes_at_pubrel(args.broker, mqtt_packets)
     mixed_version_qos1(args.broker, mqtt_packets)
     persistent_no_local(args.broker, mqtt_packets)
+    persistent_subscriptions.run(
+        args.broker, mqtt_packets, mqtt5_props, NetzBroker,
+        connect_client, expected_connack, expect_packet,
+    )
     clean_session_qos1(args.broker, mqtt_packets, mqtt5_props)
     outgoing_qos1_reconnect_dup(args.broker, mqtt_packets, mqtt5_props)
     offline_qos0_queue_policy(args.broker, mqtt_packets, mqtt5_props)
@@ -6524,7 +6541,9 @@ def main() -> None:
         args.broker, mqtt_packets, mqtt5_props
     )
     print(
-        "Mosquitto-derived MQTT wire vectors passed: 167 scenarios "
+        f"Mosquitto-derived MQTT wire vectors passed: "
+        f"{BASE_SCENARIO_COUNT + persistent_subscriptions.SCENARIO_COUNT} "
+        "scenarios "
         "with 5000 ms CONNECT deadlines"
     )
 
