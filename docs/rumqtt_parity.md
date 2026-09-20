@@ -365,6 +365,13 @@ The same crash/restart sequence is source-locked to Mosquitto's
 100-second delivery survives with a strictly reduced interval, and a third
 delivery without an expiry remains intact; both surviving messages retain
 Subscription Identifier 53 and their original order.
+The broker-to-client QoS 1 inflight path strengthens Mosquitto's
+`03-publish-b2c-disconnect-qos1.py` for both MQTT 3.1.1 and MQTT 5 with real
+process loss. After the first unacknowledged PUBLISH is durably selected, the
+broker is killed; the next generation must preserve its Packet Identifier and
+payload while setting DUP. PUBACK completion is then journaled before a second
+kill, and a third generation's PING barrier proves the completed transaction
+cannot reappear.
 The outgoing QoS 2 path is independently source-locked to Mosquitto's
 `15-persist-client-msg-out-v5-0.py` and uses three broker generations. The
 first is killed after the durable subscriber has accepted its PUBLISH and the

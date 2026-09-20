@@ -40,56 +40,66 @@ def packet(first: int, body: bytes) -> bytes:
 
 def connect_packet(
     client_id: str, *, clean_start: bool,
+    protocol: int = 5,
     session_expiry: int = 60,
     will_topic: str | None = None, will_payload: bytes = b"",
     will_delay: int = 0, will_qos: int = 0, will_retain: bool = False,
 ) -> bytes:
-    properties = (
-        b"\x11" + session_expiry.to_bytes(4, "big")
-        if session_expiry else b""
-    )
+    if protocol not in (4, 5):
+        raise ValueError("protocol must be MQTT 3.1.1 (4) or MQTT 5 (5)")
+    properties = b""
+    if protocol == 5 and session_expiry:
+        properties = b"\x11" + session_expiry.to_bytes(4, "big")
     connect_flags = 2 if clean_start else 0
     payload = mqtt_string(client_id)
     if will_topic is not None:
         connect_flags |= 0x04 | (will_qos << 3)
         if will_retain:
             connect_flags |= 0x20
+        if protocol == 4 and will_delay:
+            raise ValueError("MQTT 3.1.1 has no Will Delay property")
         will_properties = (
             b"\x18" + will_delay.to_bytes(4, "big")
             if will_delay else b""
         )
         payload += (
-            remaining_length(len(will_properties))
-            + will_properties
+            (
+                remaining_length(len(will_properties)) + will_properties
+                if protocol == 5 else b""
+            )
             + mqtt_string(will_topic)
             + len(will_payload).to_bytes(2, "big")
             + will_payload
         )
-    body = (
+    variable_header = (
         mqtt_string("MQTT")
-        + bytes((5, connect_flags))
+        + bytes((protocol, connect_flags))
         + (60).to_bytes(2, "big")
-        + remaining_length(len(properties))
-        + properties
-        + payload
     )
-    return packet(0x10, body)
+    if protocol == 5:
+        variable_header += remaining_length(len(properties)) + properties
+    return packet(0x10, variable_header + payload)
 
 
 def subscribe_packet(
     packet_id: int, topic_filter: str,
     *, subscription_identifier: int | None = SUBSCRIPTION_IDENTIFIER,
-    qos: int = 1,
+    qos: int = 1, protocol: int = 5,
 ) -> bytes:
+    if protocol not in (4, 5):
+        raise ValueError("protocol must be MQTT 3.1.1 (4) or MQTT 5 (5)")
     properties = (
         bytes((0x0B, subscription_identifier))
-        if subscription_identifier is not None else b""
+        if protocol == 5 and subscription_identifier is not None else b""
+    )
+    encoded_properties = (
+        remaining_length(len(properties)) + properties
+        if protocol == 5 else b""
     )
     return packet(
         0x82,
         packet_id.to_bytes(2, "big")
-        + remaining_length(len(properties))
-        + properties
+        + encoded_properties
         + mqtt_string(topic_filter)
         + bytes((qos,)),
     )
@@ -98,28 +108,39 @@ def subscribe_packet(
 def publish_packet(
     topic: str, payload: bytes, packet_id: int,
     *, qos: int = 1, expiry_seconds: int | None = None,
-    retain: bool = False,
+    retain: bool = False, dup: bool = False, protocol: int = 5,
 ) -> bytes:
     if qos not in (1, 2):
         raise ValueError("publish_packet requires QoS 1 or 2")
+    if protocol not in (4, 5):
+        raise ValueError("protocol must be MQTT 3.1.1 (4) or MQTT 5 (5)")
+    if protocol == 4 and expiry_seconds is not None:
+        raise ValueError("MQTT 3.1.1 has no Message Expiry property")
     properties = (
         b"\x02" + expiry_seconds.to_bytes(4, "big")
         if expiry_seconds is not None else b""
     )
+    encoded_properties = (
+        remaining_length(len(properties)) + properties
+        if protocol == 5 else b""
+    )
     return packet(
-        0x30 | (qos << 1) | int(retain),
+        0x30 | (qos << 1) | (int(dup) << 3) | int(retain),
         mqtt_string(topic)
         + packet_id.to_bytes(2, "big")
-        + remaining_length(len(properties))
-        + properties
+        + encoded_properties
         + payload,
     )
 
 
-def qos0_publish_packet(topic: str, payload: bytes, *, retain: bool) -> bytes:
+def qos0_publish_packet(
+    topic: str, payload: bytes, *, retain: bool, protocol: int = 5,
+) -> bytes:
+    if protocol not in (4, 5):
+        raise ValueError("protocol must be MQTT 3.1.1 (4) or MQTT 5 (5)")
     return packet(
         0x31 if retain else 0x30,
-        mqtt_string(topic) + b"\x00" + payload,
+        mqtt_string(topic) + (b"\x00" if protocol == 5 else b"") + payload,
     )
 
 
@@ -165,7 +186,7 @@ def read_varint(data: bytes, offset: int) -> tuple[int, int]:
 
 def connect_client(
     port: int, client_id: str, *, clean_start: bool, session_present: bool,
-    session_expiry: int = 60,
+    protocol: int = 5, session_expiry: int = 60,
     will_topic: str | None = None, will_payload: bytes = b"",
     will_delay: int = 0, will_qos: int = 0, will_retain: bool = False,
 ) -> socket.socket:
@@ -174,6 +195,7 @@ def connect_client(
     sock.sendall(connect_packet(
         client_id,
         clean_start=clean_start,
+        protocol=protocol,
         session_expiry=session_expiry,
         will_topic=will_topic,
         will_payload=will_payload,

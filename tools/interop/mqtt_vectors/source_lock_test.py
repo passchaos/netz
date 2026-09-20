@@ -60,6 +60,8 @@ class SourceLockTests(unittest.TestCase):
                     "81264cf8b5af7d7248c2e968ff373e20d07d6b414c4770cca275a38c02beea6a",
                 "broker/03-publish-qos1-queued-bytes.py":
                     "d320a78b93a39c8ea02e2b5c57e13b2c4d558e39fb4f0be8ce52e70b6dc9980d",
+                "broker/03-publish-b2c-disconnect-qos1.py":
+                    "ff2c13c469c6ba35060a752c3cfb21b43556312c1fa4f1aca71e069697289b44",
                 "broker/04-retain-check-source-persist.py":
                     "9accde1f896d26b7c798ce3c5ca0a75b28bdad89f3e5e557b5cff0957ba0579c",
                 "broker/07-will-delay-invalid-573191.py":

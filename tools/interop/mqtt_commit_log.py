@@ -10,6 +10,7 @@ import socket
 import tempfile
 import time
 
+from mqtt_commit_log_inflight import verify_outgoing_qos1_recovery
 from mqtt_commit_log_support import (
     SUBSCRIPTION_IDENTIFIER,
     ack_packet,
@@ -28,6 +29,7 @@ from mqtt_vectors import source_lock
 
 
 MOSQUITTO_SOURCES = (
+    "broker/03-publish-b2c-disconnect-qos1.py",
     "broker/04-retain-check-source-persist.py",
     "broker/11-message-expiry.py",
     "broker/11-subscription-id.py",
@@ -521,6 +523,11 @@ def main() -> None:
     verify_outgoing_qos2_recovery(args.broker)
     print(
         "MQTT outgoing QoS 2 resumed at PUBREL and completed across "
+        "commit-log SIGKILL recovery"
+    )
+    verify_outgoing_qos1_recovery(args.broker)
+    print(
+        "MQTT 3.1.1/5 outgoing QoS 1 DUP state completed across "
         "commit-log SIGKILL recovery"
     )
     verify_scheduled_will_recovery(args.broker)
