@@ -1054,7 +1054,7 @@ test "broker queues QoS 1 delivery until Receive Maximum credit returns" {
     try joinServer(thread, &joined, &serve);
 }
 
-test "broker statistics form one coherent live and offline snapshot" {
+test "broker statistics report coherent state and completed traffic" {
     const allocator = std.testing.allocator;
     var threaded = std.Io.Threaded.init(allocator, .{
         .async_limit = .unlimited,
@@ -1141,8 +1141,29 @@ test "broker statistics form one coherent live and offline snapshot" {
     );
     var delivered = try subscriber.readPublish();
     defer delivered.deinit(allocator);
+    // Receiving bytes does not imply the peer's successful write syscall has
+    // returned and published its traffic counters yet. A PING on the publisher
+    // crosses the same broker task after both PUBACK and subscriber fanout. Its
+    // own PINGRESP may still be between write and counter update when observed.
+    // Leave the delivery unacknowledged to preserve the inflight gauge below.
+    try publisher.ping();
 
-    const live = broker.stats();
+    const stats_deadline = std.Io.Clock.awake.now(io).addDuration(
+        .fromSeconds(2),
+    );
+    var live = broker.stats();
+    while (live.messages_received < 5 or
+        live.messages_sent < 6 or
+        live.publish_messages_sent < 1)
+    {
+        if (std.Io.Clock.awake.now(io).nanoseconds >=
+            stats_deadline.nanoseconds)
+        {
+            break;
+        }
+        try std.Io.sleep(io, .fromMilliseconds(1), .awake);
+        live = broker.stats();
+    }
     try std.testing.expectEqual(@as(usize, 2), live.active_connections);
     try std.testing.expectEqual(
         @as(usize, 2),
@@ -1150,10 +1171,11 @@ test "broker statistics form one coherent live and offline snapshot" {
     );
     try std.testing.expectEqual(@as(usize, 0), live.expired_sessions);
     // The finite broker wires its aggregate counter into every accept. Both
-    // CONNECT packets plus the subscriber's SUBSCRIBE and publisher's PUBLISH
-    // have completed before this snapshot.
-    try std.testing.expectEqual(@as(u64, 4), live.messages_received);
-    try std.testing.expectEqual(@as(u64, 5), live.messages_sent);
+    // CONNECT packets, SUBSCRIBE, publisher PUBLISH, and the
+    // synchronization PING have been read. The first five responses are
+    // guaranteed counted; bounded convergence below admits the final PINGRESP.
+    try std.testing.expectEqual(@as(u64, 5), live.messages_received);
+    try std.testing.expectEqual(@as(u64, 6), live.messages_sent);
     try std.testing.expect(live.bytes_received > 0);
     try std.testing.expect(live.bytes_sent > 0);
     try std.testing.expectEqual(@as(usize, 1), live.publish_messages_received);
@@ -1196,8 +1218,8 @@ test "broker statistics form one coherent live and offline snapshot" {
         offline.maximum_active_connections,
     );
     try std.testing.expectEqual(@as(usize, 0), offline.expired_sessions);
-    try std.testing.expectEqual(@as(u64, 7), offline.messages_received);
-    try std.testing.expectEqual(@as(u64, 5), offline.messages_sent);
+    try std.testing.expectEqual(@as(u64, 8), offline.messages_received);
+    try std.testing.expectEqual(@as(u64, 6), offline.messages_sent);
     try std.testing.expectEqual(@as(u64, 2), offline.connections_received);
     try std.testing.expectEqual(@as(usize, 1), offline.sessions);
     try std.testing.expectEqual(@as(usize, 0), offline.connected_sessions);

@@ -562,9 +562,10 @@ const ClientSlot = struct {
     }
 };
 
-/// Point-in-time broker gauges. The snapshot is collected under the same state
-/// lock as routing and Session transitions, so cross-field invariants describe
-/// one coherent instant rather than a mixture of concurrent updates.
+/// Point-in-time broker gauges. State-backed fields are collected under the
+/// same lock as routing and Session transitions, so their cross-field
+/// invariants describe one coherent instant. Wire counters are lock-free and
+/// include each complete transport read/write after that operation returns.
 pub const Stats = struct {
     uptime_seconds: u64,
     /// Successfully parsed CONNECT packets admitted to the broker core.
