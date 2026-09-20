@@ -17,6 +17,8 @@ MOSQUITTO_HELPER_SHA256 = {
         "00a1a30e29092938eeed59240358810914a4120d1b6df08376d3fa3085304576",
 }
 MOSQUITTO_SOURCE_SHA256 = {
+    "broker/02-subpub-qos0-long-topic.py":
+        "3bf17e3a777982979e060f20e919a9f0e3a0bce0b7f2dbe3a9adf8100fee7773",
     "broker/02-subhier-crash.py":
         "9cf95f158aabeff60e96c2dcff2f33c48415507725b383201e143ef832620966",
     "broker/02-subpub-recover-subscriptions.py":
@@ -33,6 +35,8 @@ MOSQUITTO_SOURCE_SHA256 = {
         "76c477790b4572ba13fc77e25dc1d3b3c556751ddfb796c7bcc43bdd1c4345a0",
     "broker/02-subscribe-persistence-flipflop.py":
         "a505ba09fbeea473296914d9bc7704c88ef99e2db0a5c952c220ab7104b8dffe",
+    "broker/02-subscribe-long-topic.py":
+        "d94ceeaaec1733b19f8dd3270dc57f4945455b7c3f23fc518c580c48b20a5c8c",
     "broker/03-pattern-matching.py":
         "042fa7fa8728632551bdecb632aa5f41b539a69780bc4d4bdf25582e2ff8fd32",
     "broker/03-publish-qos1-queued-bytes.conf":
@@ -43,6 +47,8 @@ MOSQUITTO_SOURCE_SHA256 = {
         "ff2c13c469c6ba35060a752c3cfb21b43556312c1fa4f1aca71e069697289b44",
     "broker/03-publish-c2b-disconnect-qos2.py":
         "b4842048512fd9719abfec32074a6d055ca88c1979c2f0588e281c8e9c40e2e7",
+    "broker/03-publish-long-topic.py":
+        "f09b04182bc587a819e007f462000b1c781f8af7d464ed058e8b51439ccb353e",
     "broker/04-retain-check-source-persist.py":
         "9accde1f896d26b7c798ce3c5ca0a75b28bdad89f3e5e557b5cff0957ba0579c",
     "broker/07-will-delay-invalid-573191.py":

@@ -5,6 +5,7 @@ from pathlib import Path
 import tempfile
 import unittest
 
+import maximum_topic_hierarchy
 import pattern_matching
 import persistent_subscriptions
 import qos0_live_queue_scope
@@ -18,6 +19,15 @@ import will_delay_recovery
 
 
 class SourceLockTests(unittest.TestCase):
+    def test_maximum_hierarchy_packet_uses_multibyte_remaining_length(self) -> None:
+        topic = "/" * maximum_topic_hierarchy.MAXIMUM_TOPIC_BYTES
+        packet_v4 = maximum_topic_hierarchy.unsubscribe_packet(56, topic, 4)
+        packet_v5 = maximum_topic_hierarchy.unsubscribe_packet(56, topic, 5)
+        self.assertEqual(packet_v4[:4], bytes.fromhex("a2 83 80 04"))
+        self.assertEqual(packet_v5[:4], bytes.fromhex("a2 84 80 04"))
+        self.assertEqual(len(packet_v4), 65_543)
+        self.assertEqual(len(packet_v5), 65_544)
+
     def test_accepts_exact_source(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
             path = Path(directory) / "source.py"
@@ -38,6 +48,8 @@ class SourceLockTests(unittest.TestCase):
         self.assertEqual(
             source_lock.MOSQUITTO_SOURCE_SHA256,
             {
+                "broker/02-subpub-qos0-long-topic.py":
+                    "3bf17e3a777982979e060f20e919a9f0e3a0bce0b7f2dbe3a9adf8100fee7773",
                 "broker/02-subhier-crash.py":
                     "9cf95f158aabeff60e96c2dcff2f33c48415507725b383201e143ef832620966",
                 "broker/02-subpub-recover-subscriptions.py":
@@ -54,6 +66,8 @@ class SourceLockTests(unittest.TestCase):
                     "76c477790b4572ba13fc77e25dc1d3b3c556751ddfb796c7bcc43bdd1c4345a0",
                 "broker/02-subscribe-persistence-flipflop.py":
                     "a505ba09fbeea473296914d9bc7704c88ef99e2db0a5c952c220ab7104b8dffe",
+                "broker/02-subscribe-long-topic.py":
+                    "d94ceeaaec1733b19f8dd3270dc57f4945455b7c3f23fc518c580c48b20a5c8c",
                 "broker/03-pattern-matching.py":
                     "042fa7fa8728632551bdecb632aa5f41b539a69780bc4d4bdf25582e2ff8fd32",
                 "broker/03-publish-qos1-queued-bytes.conf":
@@ -64,6 +78,8 @@ class SourceLockTests(unittest.TestCase):
                     "ff2c13c469c6ba35060a752c3cfb21b43556312c1fa4f1aca71e069697289b44",
                 "broker/03-publish-c2b-disconnect-qos2.py":
                     "b4842048512fd9719abfec32074a6d055ca88c1979c2f0588e281c8e9c40e2e7",
+                "broker/03-publish-long-topic.py":
+                    "f09b04182bc587a819e007f462000b1c781f8af7d464ed058e8b51439ccb353e",
                 "broker/04-retain-check-source-persist.py":
                     "9accde1f896d26b7c798ce3c5ca0a75b28bdad89f3e5e557b5cff0957ba0579c",
                 "broker/07-will-delay-invalid-573191.py":
@@ -91,6 +107,9 @@ class SourceLockTests(unittest.TestCase):
             },
         )
         self.assertEqual(persistent_subscriptions.SCENARIO_COUNT, 2)
+        self.assertEqual(maximum_topic_hierarchy.MAXIMUM_TOPIC_BYTES, 65_535)
+        self.assertEqual(maximum_topic_hierarchy.PROTOCOL_VERSIONS, (4, 5))
+        self.assertEqual(maximum_topic_hierarchy.SCENARIO_COUNT, 4)
         self.assertEqual(subscription_flip_flop.SCENARIO_COUNT, 2)
         self.assertEqual(subscription_hierarchy.SCENARIO_COUNT, 2)
         self.assertEqual(subscription_identifiers.SCENARIO_COUNT, 1)

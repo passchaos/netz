@@ -18,6 +18,7 @@ import tempfile
 import time
 
 from mqtt_vectors import (
+    maximum_topic_hierarchy,
     pattern_matching,
     persistent_subscriptions,
     qos0_live_queue_scope,
@@ -30,7 +31,7 @@ from mqtt_vectors import (
     will_delay_recovery,
 )
 
-BASE_SCENARIO_COUNT = 163
+BASE_SCENARIO_COUNT = 161
 SCENARIO_COUNT = (
     BASE_SCENARIO_COUNT
     + pattern_matching.SCENARIO_COUNT
@@ -42,6 +43,7 @@ SCENARIO_COUNT = (
     + subscription_identifiers.SCENARIO_COUNT
     + will_delay_invalid_topic.SCENARIO_COUNT
     + will_delay_recovery.SCENARIO_COUNT
+    + maximum_topic_hierarchy.SCENARIO_COUNT
 )
 
 
@@ -324,61 +326,6 @@ def proxy_protocol_v1_v2(executable: Path, mqtt_packets) -> None:
             expect_packet(
                 sock, mqtt_packets.gen_pingresp(), "PROXY v2 PINGRESP"
             )
-            sock.sendall(mqtt_packets.gen_disconnect(proto_ver=5))
-
-
-def deep_topic_hierarchy(executable: Path, mqtt_packets) -> None:
-    # Mosquitto 02-subpub-qos0-long-topic.py accepts 200 hierarchy levels and
-    # rejects 201 as an implementation guard. MQTT's actual UTF-8 field limit
-    # is 65,535 bytes, so netz intentionally has no shallower arbitrary cap.
-    # This exact-wire case goes one level beyond Mosquitto while remaining a
-    # small packet, and proves both subscription storage and iterative match.
-    topic = "/" * 201
-    with NetzBroker(executable) as broker:
-        with broker.connect() as sock:
-            connect_client(sock, mqtt_packets, "deep-topic-levels", 4)
-            sock.sendall(
-                mqtt_packets.gen_subscribe(53, topic, 0, proto_ver=4)
-            )
-            expect_packet(
-                sock,
-                mqtt_packets.gen_suback(53, 0, proto_ver=4),
-                "201-level topic SUBACK",
-            )
-            publish = mqtt_packets.gen_publish(
-                topic, qos=0, payload="message", proto_ver=4
-            )
-            sock.sendall(publish)
-            expect_packet(sock, publish, "201-level topic PUBLISH")
-            sock.sendall(mqtt_packets.gen_disconnect(proto_ver=4))
-
-    # Mosquitto's separate 02-subscribe-long-topic.py and
-    # 03-publish-long-topic.py reject a 65,535-byte slash hierarchy because of
-    # that same 200-level implementation guard. Use one flat maximum-length
-    # Topic Name instead: it reaches MQTT's two-byte UTF-8 field boundary
-    # without relying on the implementation-specific hierarchy policy.
-    maximum_topic = "t" * 65_535
-    with NetzBroker(
-        executable, extra_args=("--max-packet-size=131072",)
-    ) as broker:
-        with broker.connect() as sock:
-            connect_v5(sock, mqtt_packets, "maximum-topic-length")
-            sock.sendall(
-                mqtt_packets.gen_subscribe(54, maximum_topic, 0, proto_ver=5)
-            )
-            expect_packet(
-                sock,
-                mqtt_packets.gen_suback(54, 0, proto_ver=5),
-                "65,535-byte topic SUBACK",
-            )
-            publish = mqtt_packets.gen_publish(
-                maximum_topic,
-                qos=0,
-                payload="maximum",
-                proto_ver=5,
-            )
-            sock.sendall(publish)
-            expect_packet(sock, publish, "65,535-byte topic PUBLISH")
             sock.sendall(mqtt_packets.gen_disconnect(proto_ver=5))
 
 
@@ -6167,7 +6114,10 @@ def main() -> None:
 
     unsupported_protocol_levels(args.broker, mqtt_packets, mqtt5_rc)
     proxy_protocol_v1_v2(args.broker, mqtt_packets)
-    deep_topic_hierarchy(args.broker, mqtt_packets)
+    maximum_topic_hierarchy.run(
+        args.broker, mqtt_packets, mqtt5_props, NetzBroker,
+        expected_connack, expect_packet,
+    )
     no_matching_subscribers(args.broker, mqtt_packets, mqtt5_rc)
     server_reference_connack(args.broker, mqtt_packets, mqtt5_props)
     subscription_identifiers.run(
