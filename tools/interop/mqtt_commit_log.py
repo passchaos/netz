@@ -7,10 +7,23 @@ import argparse
 from pathlib import Path
 import shutil
 import socket
-import subprocess
 import tempfile
 import time
 
+from mqtt_commit_log_support import (
+    SUBSCRIPTION_IDENTIFIER,
+    ack_packet,
+    connect_client,
+    free_port,
+    publish_packet,
+    qos0_publish_packet,
+    read_packet,
+    read_varint,
+    start_broker,
+    stop_broker,
+    subscribe_packet,
+    wait_for_journal_growth,
+)
 from mqtt_vectors import source_lock
 
 
@@ -18,10 +31,11 @@ MOSQUITTO_SOURCES = (
     "broker/04-retain-check-source-persist.py",
     "broker/11-message-expiry.py",
     "broker/11-subscription-id.py",
+    "broker/15-persist-client-msg-out-v5-0.py",
     "broker/15-persist-client-will-persistent.py",
     "broker/persist_client_will_core.py",
+    "broker/persist_module_helper.py",
 )
-SUBSCRIPTION_IDENTIFIER = 53
 WILL_DELAY_SECONDS = 3
 
 
@@ -34,147 +48,6 @@ def parse_args() -> argparse.Namespace:
         help="verify the referenced Mosquitto source before running",
     )
     return parser.parse_args()
-
-
-def free_port() -> int:
-    with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as probe:
-        probe.bind(("127.0.0.1", 0))
-        return probe.getsockname()[1]
-
-
-def remaining_length(value: int) -> bytes:
-    encoded = bytearray()
-    while True:
-        byte = value % 128
-        value //= 128
-        if value:
-            byte |= 0x80
-        encoded.append(byte)
-        if not value:
-            return bytes(encoded)
-
-
-def mqtt_string(value: str) -> bytes:
-    encoded = value.encode()
-    return len(encoded).to_bytes(2, "big") + encoded
-
-
-def packet(first: int, body: bytes) -> bytes:
-    return bytes((first,)) + remaining_length(len(body)) + body
-
-
-def connect_packet(
-    client_id: str, *, clean_start: bool,
-    will_topic: str | None = None, will_payload: bytes = b"",
-    will_delay: int = 0, will_qos: int = 0, will_retain: bool = False,
-) -> bytes:
-    properties = b"\x11" + (60).to_bytes(4, "big")
-    connect_flags = 2 if clean_start else 0
-    payload = mqtt_string(client_id)
-    if will_topic is not None:
-        connect_flags |= 0x04 | (will_qos << 3)
-        if will_retain:
-            connect_flags |= 0x20
-        will_properties = (
-            b"\x18" + will_delay.to_bytes(4, "big")
-            if will_delay else b""
-        )
-        payload += (
-            remaining_length(len(will_properties))
-            + will_properties
-            + mqtt_string(will_topic)
-            + len(will_payload).to_bytes(2, "big")
-            + will_payload
-        )
-    body = (
-        mqtt_string("MQTT")
-        + bytes((5, connect_flags))
-        + (60).to_bytes(2, "big")
-        + remaining_length(len(properties))
-        + properties
-        + payload
-    )
-    return packet(0x10, body)
-
-
-def subscribe_packet(
-    packet_id: int, topic_filter: str,
-    *, subscription_identifier: int | None = SUBSCRIPTION_IDENTIFIER,
-    qos: int = 1,
-) -> bytes:
-    properties = (
-        bytes((0x0B, subscription_identifier))
-        if subscription_identifier is not None else b""
-    )
-    return packet(
-        0x82,
-        packet_id.to_bytes(2, "big")
-        + remaining_length(len(properties))
-        + properties
-        + mqtt_string(topic_filter)
-        + bytes((qos,)),
-    )
-
-
-def publish_packet(
-    topic: str, payload: bytes, packet_id: int,
-    *, expiry_seconds: int | None = None, retain: bool = False,
-) -> bytes:
-    properties = (
-        b"\x02" + expiry_seconds.to_bytes(4, "big")
-        if expiry_seconds is not None else b""
-    )
-    return packet(
-        0x33 if retain else 0x32,
-        mqtt_string(topic)
-        + packet_id.to_bytes(2, "big")
-        + remaining_length(len(properties))
-        + properties
-        + payload,
-    )
-
-
-def qos0_publish_packet(topic: str, payload: bytes, *, retain: bool) -> bytes:
-    return packet(
-        0x31 if retain else 0x30,
-        mqtt_string(topic) + b"\x00" + payload,
-    )
-
-
-def recv_exact(sock: socket.socket, count: int) -> bytes:
-    result = bytearray()
-    while len(result) < count:
-        part = sock.recv(count - len(result))
-        if not part:
-            raise AssertionError("broker closed before a complete packet")
-        result.extend(part)
-    return bytes(result)
-
-
-def read_packet(sock: socket.socket) -> tuple[int, bytes]:
-    first = recv_exact(sock, 1)[0]
-    multiplier = 1
-    length = 0
-    while True:
-        byte = recv_exact(sock, 1)[0]
-        length += (byte & 0x7F) * multiplier
-        if byte & 0x80 == 0:
-            return first, recv_exact(sock, length)
-        multiplier *= 128
-
-
-def read_varint(data: bytes, offset: int) -> tuple[int, int]:
-    multiplier = 1
-    value = 0
-    while True:
-        if offset >= len(data) or multiplier > 128 * 128 * 128:
-            raise AssertionError("malformed MQTT variable byte integer")
-        byte = data[offset]
-        offset += 1
-        value += (byte & 0x7F) * multiplier
-        if byte & 0x80 == 0:
-            return value, offset
-        multiplier *= 128
 
 
 def restored_publish(
@@ -214,73 +87,111 @@ def restored_publish(
     return packet_id
 
 
-def connect_client(
-    port: int, client_id: str, *, clean_start: bool, session_present: bool
-    , will_topic: str | None = None, will_payload: bytes = b"",
-    will_delay: int = 0, will_qos: int = 0, will_retain: bool = False
-) -> socket.socket:
-    sock = socket.create_connection(("127.0.0.1", port), timeout=5)
-    sock.settimeout(5)
-    sock.sendall(connect_packet(
-        client_id,
-        clean_start=clean_start,
-        will_topic=will_topic,
-        will_payload=will_payload,
-        will_delay=will_delay,
-        will_qos=will_qos,
-        will_retain=will_retain,
-    ))
-    first, body = read_packet(sock)
-    if first != 0x20 or body[0] != int(session_present) or body[1] != 0:
-        sock.close()
-        raise AssertionError(f"unexpected CONNACK: {first:#x} {body.hex()}")
-    return sock
+def verify_outgoing_qos2_recovery(executable: Path) -> None:
+    topic = "journal/qos2"
+    payload = b"resume-at-pubrel"
+    client_id = "journal-qos2-subscriber"
+    with tempfile.TemporaryDirectory(prefix="netz-mqtt-qos2-journal-") as raw:
+        journal = Path(raw) / "broker.log"
+        port = free_port()
+        broker = start_broker(executable, port, journal, 2)
+        subscriber = publisher = None
+        try:
+            subscriber = connect_client(
+                port, client_id, clean_start=False, session_present=False,
+            )
+            subscriber.sendall(subscribe_packet(
+                1, topic, subscription_identifier=None, qos=2,
+            ))
+            if read_packet(subscriber) != (0x90, b"\x00\x01\x00\x02"):
+                raise AssertionError("unexpected QoS 2 recovery SUBACK")
 
+            publisher = connect_client(
+                port, "journal-qos2-publisher",
+                clean_start=True, session_present=False, session_expiry=0,
+            )
+            publisher.sendall(publish_packet(
+                topic, payload, 9, qos=2,
+            ))
+            if read_packet(publisher) != (0x50, b"\x00\x09"):
+                raise AssertionError("unexpected publisher PUBREC")
+            publisher.sendall(ack_packet(0x62, 9))
+            if read_packet(publisher) != (0x70, b"\x00\x09"):
+                raise AssertionError("unexpected publisher PUBCOMP")
 
-def start_broker(
-    executable: Path, port: int, journal: Path, connections: int,
-    *, extra_args: tuple[str, ...] = (),
-) -> subprocess.Popen[str]:
-    process = subprocess.Popen(
-        [
-            str(executable),
-            f"--bind=127.0.0.1:{port}",
-            f"--connections={connections}",
-            "--max-queued-deliveries=32",
-            "--max-outgoing-inflight=8",
-            "--queue-qos0-messages",
-            f"--commit-log={journal}",
-            *extra_args,
-        ],
-        stdout=subprocess.PIPE,
-        stderr=subprocess.STDOUT,
-        text=True,
-    )
-    assert process.stdout is not None
-    line = process.stdout.readline()
-    if "listening" not in line:
-        process.kill()
-        raise RuntimeError(f"netz broker failed to start: {line.strip()}")
-    return process
+            expected_publish = publish_packet(topic, payload, 1, qos=2)
+            if read_packet(subscriber) != (
+                expected_publish[0], expected_publish[2:],
+            ):
+                raise AssertionError(
+                    "unexpected initial downstream QoS 2 PUBLISH"
+                )
+            baseline_size = journal.stat().st_size
+            subscriber.sendall(ack_packet(0x50, 1))
+            if read_packet(subscriber) != (0x62, b"\x00\x01"):
+                raise AssertionError("unexpected initial downstream PUBREL")
+            wait_for_journal_growth(journal, baseline_size)
+            broker.kill()
+            broker.wait(timeout=5)
+        finally:
+            if subscriber is not None:
+                subscriber.close()
+            if publisher is not None:
+                publisher.close()
+            if broker.poll() is None:
+                broker.kill()
+                broker.wait()
 
+        restored_port = free_port()
+        restored = start_broker(executable, restored_port, journal, 1)
+        subscriber = None
+        try:
+            subscriber = connect_client(
+                restored_port, client_id,
+                clean_start=False, session_present=True,
+            )
+            # The committed transaction is already beyond PUBLISH. Recovery
+            # must continue at PUBREL with the original Packet Identifier.
+            if read_packet(subscriber) != (0x62, b"\x00\x01"):
+                raise AssertionError(
+                    "outgoing QoS 2 did not resume directly at PUBREL"
+                )
+            baseline_size = journal.stat().st_size
+            subscriber.sendall(ack_packet(0x70, 1))
+            subscriber.sendall(b"\xc0\x00")
+            if read_packet(subscriber) != (0xD0, b""):
+                raise AssertionError("unexpected post-PUBCOMP barrier")
+            wait_for_journal_growth(journal, baseline_size)
+            restored.kill()
+            restored.wait(timeout=5)
+        finally:
+            if subscriber is not None:
+                subscriber.close()
+            if restored.poll() is None:
+                restored.kill()
+                restored.wait()
 
-def stop_broker(process: subprocess.Popen[str]) -> None:
-    process.wait(timeout=5)
-    if process.returncode != 0:
-        assert process.stdout is not None
-        raise RuntimeError(
-            f"netz broker exited {process.returncode}: "
-            + process.stdout.read()
-        )
-
-
-def wait_for_journal_growth(path: Path, previous_size: int) -> None:
-    deadline = time.monotonic() + 30
-    while time.monotonic() < deadline:
-        if path.exists() and path.stat().st_size > previous_size:
-            return
-        time.sleep(0.05)
-    raise AssertionError("timed out waiting for a new commit-log record")
+        final_port = free_port()
+        final = start_broker(executable, final_port, journal, 1)
+        subscriber = None
+        try:
+            subscriber = connect_client(
+                final_port, client_id,
+                clean_start=False, session_present=True,
+            )
+            subscriber.sendall(b"\xc0\x00")
+            if read_packet(subscriber) != (0xD0, b""):
+                raise AssertionError(
+                    "completed outgoing QoS 2 transaction replayed"
+                )
+            final.kill()
+            final.wait(timeout=5)
+        finally:
+            if subscriber is not None:
+                subscriber.close()
+            if final.poll() is None:
+                final.kill()
+                final.wait()
 
 
 def verify_scheduled_will_recovery(executable: Path) -> None:
@@ -606,6 +517,11 @@ def main() -> None:
     print(
         "MQTT retained-source authorization survived commit-log SIGKILL "
         "recovery"
+    )
+    verify_outgoing_qos2_recovery(args.broker)
+    print(
+        "MQTT outgoing QoS 2 resumed at PUBREL and completed across "
+        "commit-log SIGKILL recovery"
     )
     verify_scheduled_will_recovery(args.broker)
     print("MQTT delayed retained Will survived commit-log SIGKILL recovery")

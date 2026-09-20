@@ -365,6 +365,13 @@ The same crash/restart sequence is source-locked to Mosquitto's
 100-second delivery survives with a strictly reduced interval, and a third
 delivery without an expiry remains intact; both surviving messages retain
 Subscription Identifier 53 and their original order.
+The outgoing QoS 2 path is independently source-locked to Mosquitto's
+`15-persist-client-msg-out-v5-0.py` and uses three broker generations. The
+first is killed after the durable subscriber has accepted its PUBLISH and the
+broker has emitted PUBREL. The second must resume directly at PUBREL with the
+original Packet Identifier, never retransmit the Application Message, and is
+killed after PUBCOMP has crossed a PING barrier. The third reconnect then uses
+another PING barrier to prove the completed transaction was durably removed.
 An independent source-hash-locked branch mirrors Mosquitto's
 `04-retain-check-source-persist.py`: it commits a retained publication, kills
 the broker, clones that journal into isolated policy runs, and proves the
