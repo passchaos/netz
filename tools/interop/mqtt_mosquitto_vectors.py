@@ -27,9 +27,10 @@ from mqtt_vectors import (
     subscription_hierarchy,
     subscription_identifiers,
     will_delay_invalid_topic,
+    will_delay_recovery,
 )
 
-BASE_SCENARIO_COUNT = 164
+BASE_SCENARIO_COUNT = 163
 SCENARIO_COUNT = (
     BASE_SCENARIO_COUNT
     + pattern_matching.SCENARIO_COUNT
@@ -40,6 +41,7 @@ SCENARIO_COUNT = (
     + subscription_hierarchy.SCENARIO_COUNT
     + subscription_identifiers.SCENARIO_COUNT
     + will_delay_invalid_topic.SCENARIO_COUNT
+    + will_delay_recovery.SCENARIO_COUNT
 )
 
 
@@ -4743,85 +4745,6 @@ def disconnect_with_will_properties(
             subscriber.sendall(mqtt_packets.gen_disconnect(proto_ver=5))
 
 
-def delayed_will_reconnect_cancels(
-    executable: Path, mqtt_packets, mqtt5_props
-) -> None:
-    # Direct wire port of Mosquitto 07-will-delay-reconnect.py. An ungraceful
-    # disconnect schedules the Will, but reconnecting the same durable Session
-    # before its deadline must cancel that pending publication.
-    client_id = "will-delay-reconnect-helper"
-    topic = "will/delay/reconnect/test"
-    session_expiry = mqtt5_props.gen_uint32_prop(
-        mqtt5_props.SESSION_EXPIRY_INTERVAL, 60
-    )
-    will_delay = mqtt5_props.gen_uint32_prop(
-        mqtt5_props.WILL_DELAY_INTERVAL, 3
-    )
-    with NetzBroker(executable, connections=3) as broker:
-        with broker.connect() as subscriber:
-            connect_v5(
-                subscriber, mqtt_packets, "will-delay-reconnect-test"
-            )
-            subscriber.sendall(
-                mqtt_packets.gen_subscribe(
-                    1, topic, 0, proto_ver=5
-                )
-            )
-            expect_packet(
-                subscriber,
-                mqtt_packets.gen_suback(1, 0, proto_ver=5),
-                "Will Delay reconnect SUBACK",
-            )
-
-            with broker.connect() as source:
-                source.sendall(
-                    mqtt_packets.gen_connect(
-                        client_id,
-                        proto_ver=5,
-                        clean_session=False,
-                        properties=session_expiry,
-                        will_topic=topic,
-                        will_payload=b"will delay",
-                        will_properties=will_delay,
-                    )
-                )
-                expect_packet(
-                    source,
-                    expected_connack(mqtt_packets, mqtt5_props),
-                    "Will Delay source CONNACK",
-                )
-
-            time.sleep(1)
-            with broker.connect() as resumed:
-                resumed.sendall(
-                    mqtt_packets.gen_connect(
-                        client_id,
-                        proto_ver=5,
-                        clean_session=False,
-                    )
-                )
-                expect_packet(
-                    resumed,
-                    expected_connack(
-                        mqtt_packets,
-                        mqtt5_props,
-                        session_present=True,
-                    ),
-                    "Will Delay resumed CONNACK",
-                )
-                # Wait beyond the old Will deadline. PINGRESP must be the next
-                # packet, proving reconnect removed rather than deferred it.
-                time.sleep(3)
-                subscriber.sendall(mqtt_packets.gen_pingreq())
-                expect_packet(
-                    subscriber,
-                    mqtt_packets.gen_pingresp(),
-                    "PINGRESP after canceled delayed Will",
-                )
-                resumed.sendall(mqtt_packets.gen_disconnect(proto_ver=5))
-            subscriber.sendall(mqtt_packets.gen_disconnect(proto_ver=5))
-
-
 def clean_disconnect_will_reconnect(
     executable: Path, mqtt_packets, mqtt5_props
 ) -> None:
@@ -6328,8 +6251,9 @@ def main() -> None:
     disconnect_with_will_properties(
         args.broker, mqtt_packets, mqtt5_props
     )
-    delayed_will_reconnect_cancels(
-        args.broker, mqtt_packets, mqtt5_props
+    will_delay_recovery.run(
+        args.broker, mqtt_packets, mqtt5_props, NetzBroker, connect_v5,
+        expected_connack, expect_packet,
     )
     clean_disconnect_will_reconnect(
         args.broker, mqtt_packets, mqtt5_props

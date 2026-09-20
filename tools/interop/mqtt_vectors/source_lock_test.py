@@ -14,6 +14,7 @@ import subscription_flip_flop
 import subscription_hierarchy
 import subscription_identifiers
 import will_delay_invalid_topic
+import will_delay_recovery
 
 
 class SourceLockTests(unittest.TestCase):
@@ -61,6 +62,8 @@ class SourceLockTests(unittest.TestCase):
                     "d320a78b93a39c8ea02e2b5c57e13b2c4d558e39fb4f0be8ce52e70b6dc9980d",
                 "broker/07-will-delay-invalid-573191.py":
                     "f0f02675b050e023c5331696142f0d8bf0e3360f39011bd0dc7efdce3a382285",
+                "broker/07-will-delay-recover.py":
+                    "94060369730e84a37b39f3414e8d976a96939fa0f31e7e8301ce173ffdefe1dc",
             },
         )
         self.assertEqual(persistent_subscriptions.SCENARIO_COUNT, 2)
@@ -78,6 +81,10 @@ class SourceLockTests(unittest.TestCase):
         self.assertEqual(qos2_receive_maximum.SCENARIO_COUNT, 2)
         self.assertEqual(will_delay_invalid_topic.WILL_DELAY_SECONDS, 3)
         self.assertEqual(will_delay_invalid_topic.SCENARIO_COUNT, 1)
+        self.assertEqual(
+            will_delay_recovery.CLEAN_START_VALUES, (True, False)
+        )
+        self.assertEqual(will_delay_recovery.SCENARIO_COUNT, 2)
 
     def test_subscription_identifier_transitions_match_upstream(self) -> None:
         self.assertEqual(
