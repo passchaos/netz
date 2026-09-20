@@ -46,6 +46,7 @@ fn main() -> Result<()> {
         let mut stats = false;
         let mut traffic = false;
         let mut churn_fault = None;
+        let mut churn_seed = None;
         let mut proxy_control_port = None;
         let mut filtered = all_args.drain(..3).collect::<Vec<_>>();
         for arg in all_args {
@@ -56,6 +57,9 @@ fn main() -> Result<()> {
             } else if let Some(fault) = arg.strip_prefix("--churn=") {
                 ensure!(churn_fault.is_none(), "duplicate churn mode");
                 churn_fault = Some(fault.to_owned());
+            } else if let Some(seed) = arg.strip_prefix("--reset-seed=") {
+                ensure!(churn_seed.is_none(), "duplicate churn reset seed");
+                churn_seed = Some(seed.parse::<u64>().context("invalid churn reset seed")?);
             } else if let Some(port) = arg.strip_prefix("--proxy-control-port=") {
                 ensure!(proxy_control_port.is_none(), "duplicate proxy control port");
                 proxy_control_port =
@@ -70,6 +74,10 @@ fn main() -> Result<()> {
         ensure!(
             proxy_control_port.is_none() || churn_fault.is_some(),
             "--proxy-control-port requires --churn"
+        );
+        ensure!(
+            churn_seed.is_none() || churn_fault.is_some(),
+            "--reset-seed requires --churn"
         );
         ensure!(
             !(stats && traffic),
@@ -91,7 +99,11 @@ fn main() -> Result<()> {
                     !stats && !traffic,
                     "churn does not accept benchmark telemetry"
                 );
-                runtime.block_on(bench::run_churn_server(&filtered[2..], fault))?
+                runtime.block_on(bench::run_churn_server(
+                    &filtered[2..],
+                    fault,
+                    churn_seed.context("churn requires --reset-seed")?,
+                ))?
             }
             ("bench-client", Some(fault)) => {
                 ensure!(
@@ -101,6 +113,7 @@ fn main() -> Result<()> {
                 runtime.block_on(bench::run_churn_client(
                     &filtered[2..],
                     fault,
+                    churn_seed.context("churn requires --reset-seed")?,
                     proxy_control_port.context("churn client requires proxy control port")?,
                 ))?
             }

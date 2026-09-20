@@ -6,6 +6,22 @@ pub const reset_mask_bits: usize = max_streams;
 pub const reset_mask_bytes: usize = reset_mask_bits / 8;
 pub const ResetMask = std.meta.Int(.unsigned, reset_mask_bits);
 pub const result_len: usize = 32 + reset_mask_bytes + 8;
+const splitmix_increment: u64 = 0x9e37_79b9_7f4a_7c15;
+
+/// Select a stable, non-periodic reset set while guaranteeing that every
+/// valid churn shape contains both a reset and a normally finished stream.
+pub fn shouldReset(seed: u64, stream_count: usize, stream_index: usize) bool {
+    std.debug.assert(stream_count >= 2 and stream_count <= max_streams);
+    std.debug.assert(stream_index < stream_count);
+    if (stream_index == 0) return true;
+    if (stream_index == 1) return false;
+
+    var value = seed +% splitmix_increment *% (@as(u64, stream_index) +% 1);
+    value = (value ^ (value >> 30)) *% 0xbf58_476d_1ce4_e5b9;
+    value = (value ^ (value >> 27)) *% 0x94d0_49bb_1331_11eb;
+    value ^= value >> 31;
+    return value & 1 != 0;
+}
 
 pub const Result = struct {
     streams: u16 = 0,
@@ -70,4 +86,23 @@ test "WebTransport churn result encodes all 256 reset bits" {
         @as(ResetMask, 0xaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa),
         result.reset_mask,
     );
+}
+
+test "WebTransport churn reset selection is stable across mask words" {
+    const seed: u64 = 0x0123_4567_89ab_cdef;
+    var mask: ResetMask = 0;
+    var resets: usize = 0;
+    for (0..max_streams) |index| {
+        if (!shouldReset(seed, max_streams, index)) continue;
+        mask |= @as(ResetMask, 1) << @intCast(index);
+        resets += 1;
+    }
+    try std.testing.expectEqual(@as(usize, 134), resets);
+    try std.testing.expectEqual(
+        @as(ResetMask, 0x20717754f9d11ba55f3754fe3fba318753ac3c582f1d6af9817734c8ac80f7c1),
+        mask,
+    );
+    try std.testing.expect(shouldReset(seed, 2, 0));
+    try std.testing.expect(!shouldReset(seed, 2, 1));
+    try std.testing.expect(shouldReset(2, max_streams, max_streams - 1));
 }

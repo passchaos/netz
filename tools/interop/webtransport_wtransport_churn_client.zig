@@ -25,7 +25,7 @@ const Config = struct {
     streams: usize = 32,
     bytes_per_stream: usize = 16 * 1024,
     reset_after_bytes: usize = 256,
-    reset_every: usize = 2,
+    reset_seed: u64 = 0,
     reset_code: u32 = 0x4000,
     timeout_ms: i64 = 30_000,
     loss_pct: u8 = 5,
@@ -292,9 +292,10 @@ pub fn run(_: std.process.Init, args: []const []const u8) !void {
         return error.FaultNotExercised;
     }
     std.debug.print(
-        "netz client churn passed: fault={s} fault_scope=netz-client-outbound streams={d} fin={d} reset={d} bytes={d} checksum={d} reset_mask=0x{x:0>64} reset_code_sum={d} considered={d} dropped={d} held={d} sibling=true peer-close=true client_io=zio-std-io server_io=wtransport-quinn-tokio\n",
+        "netz client churn passed: fault={s} fault_scope=netz-client-outbound reset_seed={d} streams={d} fin={d} reset={d} bytes={d} checksum={d} reset_mask=0x{x:0>64} reset_code_sum={d} considered={d} dropped={d} held={d} sibling=true peer-close=true client_io=zio-std-io server_io=wtransport-quinn-tokio\n",
         .{
             @tagName(config.fault),
+            config.reset_seed,
             config.streams,
             result.fins,
             result.resets,
@@ -316,6 +317,7 @@ fn parseArgs(args: []const []const u8) !Config {
         .fault = undefined,
     };
     var have_fault = false;
+    var have_reset_seed = false;
     for (args[1..]) |arg| {
         if (std.mem.startsWith(u8, arg, "--fault=")) {
             config.fault = std.meta.stringToEnum(Fault, arg["--fault=".len..]) orelse
@@ -325,14 +327,23 @@ fn parseArgs(args: []const []const u8) !Config {
             config.streams = try parsePositive(usize, arg["--streams=".len..]);
         } else if (std.mem.startsWith(u8, arg, "--bytes-per-stream=")) {
             config.bytes_per_stream = try parsePositive(usize, arg["--bytes-per-stream=".len..]);
+        } else if (std.mem.startsWith(u8, arg, "--reset-seed=")) {
+            if (have_reset_seed) return error.InvalidArgument;
+            config.reset_seed = try std.fmt.parseInt(
+                u64,
+                arg["--reset-seed=".len..],
+                10,
+            );
+            have_reset_seed = true;
         } else if (std.mem.startsWith(u8, arg, "--timeout-ms=")) {
             config.timeout_ms = try parsePositive(i64, arg["--timeout-ms=".len..]);
         } else return error.InvalidArgument;
     }
-    if (!have_fault or config.port == 0 or
+    if (!have_fault or !have_reset_seed or config.port == 0 or
+        config.streams < 2 or
         config.streams > churn_protocol.max_streams or
         config.reset_after_bytes > config.bytes_per_stream or
-        config.reset_every > config.streams or config.timeout_ms <= 0)
+        config.timeout_ms <= 0)
     {
         return error.InvalidArgument;
     }
@@ -451,7 +462,11 @@ fn expectedResult(
 }
 
 fn shouldReset(config: Config, index: usize) bool {
-    return (index + 1) % config.reset_every == 0;
+    return churn_protocol.shouldReset(
+        config.reset_seed,
+        config.streams,
+        index,
+    );
 }
 
 fn payloadFor(storage: []u8, config: Config, index: usize) []u8 {

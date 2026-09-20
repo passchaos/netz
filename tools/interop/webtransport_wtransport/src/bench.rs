@@ -466,6 +466,7 @@ pub async fn run_client(args: &[String], traffic: bool) -> Result<Config> {
 pub async fn run_churn_client(
     args: &[String],
     fault: &str,
+    reset_seed: u64,
     proxy_control_port: u16,
 ) -> Result<Config> {
     let (port, options) = parse_port(args)?;
@@ -506,6 +507,7 @@ pub async fn run_churn_client(
         config.bytes_per_stream,
         config.timeout(),
         fault,
+        reset_seed,
         proxy_control_port,
     )
     .await?;
@@ -575,7 +577,7 @@ pub async fn run_server(args: &[String], traffic: bool) -> Result<Config> {
     Ok(config)
 }
 
-pub async fn run_churn_server(args: &[String], fault: &str) -> Result<Config> {
+pub async fn run_churn_server(args: &[String], fault: &str, reset_seed: u64) -> Result<Config> {
     let (port, options) = parse_port(args)?;
     let config = Config::parse(options)?;
     ensure!(config.mode == Mode::Stream, "churn requires stream mode");
@@ -612,6 +614,7 @@ pub async fn run_churn_server(args: &[String], fault: &str) -> Result<Config> {
         config.bytes_per_stream,
         config.timeout(),
         fault,
+        reset_seed,
     )
     .await?;
     connection.close(wtransport::VarInt::from_u32(0), b"churn complete");

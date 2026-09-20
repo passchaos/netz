@@ -40,9 +40,11 @@ stream_values=${NETZ_WEBTRANSPORT_EXTERNAL_CHURN_STREAMS:-"32 64 128 256"}
 timeout_seconds=${NETZ_WEBTRANSPORT_EXTERNAL_CHURN_TIMEOUT_SECONDS:-45}
 bytes_per_stream=${NETZ_WEBTRANSPORT_EXTERNAL_CHURN_BYTES:-16384}
 reset_after_bytes=256
-reset_every=2
+base_reset_seed=${NETZ_WEBTRANSPORT_EXTERNAL_CHURN_SEED:-81985529216486895}
 
-if (( runs < 1 || bytes_per_stream < reset_after_bytes )); then
+if [[ ! $base_reset_seed =~ ^[0-9]+$ ]] ||
+    (( runs < 1 || bytes_per_stream < reset_after_bytes ||
+       base_reset_seed > 9000000000000000000 )); then
   echo 'invalid external WebTransport churn configuration' >&2
   exit 2
 fi
@@ -68,12 +70,18 @@ wait_for_port() {
 
 for streams in $stream_values; do
   for fault in loss reorder; do
+    fault_seed_offset=0
+    if [[ $fault == reorder ]]; then
+      fault_seed_offset=1
+    fi
     for ((run = 1; run <= runs; run++)); do
+      reset_seed=$((base_reset_seed + streams * 1024 + run * 4 + fault_seed_offset))
       case_dir="$work/${streams}-${fault}-${run}"
       mkdir -p "$case_dir"
       timeout "${timeout_seconds}s" "$wtransport" bench-server 0 \
         "--churn=$fault" --mode=stream --warmup=1 --iterations=1 \
         "--streams=$streams" "--bytes-per-stream=$bytes_per_stream" \
+        "--reset-seed=$reset_seed" \
         "--chunk-bytes=$((bytes_per_stream < 16384 ? bytes_per_stream : 16384))" \
         --stream-window=65536 --timeout-ms=30000 \
         >"$case_dir/server.log" 2>&1 &
@@ -84,6 +92,7 @@ for streams in $stream_values; do
       fi
       if ! timeout "${timeout_seconds}s" "$netz_client" churn-client "$port" \
           "--fault=$fault" "--streams=$streams" \
+          "--reset-seed=$reset_seed" \
           "--bytes-per-stream=$bytes_per_stream" \
           >"$case_dir/client.log" 2>&1; then
         exit 1
@@ -94,7 +103,7 @@ for streams in $stream_values; do
         "--fault=$fault" "--streams=$streams" \
         "--bytes-per-stream=$bytes_per_stream" \
         "--reset-after-bytes=$reset_after_bytes" \
-        "--reset-every=$reset_every" \
+        "--reset-seed=$reset_seed" \
         "--client-log=$case_dir/client.log" \
         "--server-log=$case_dir/server.log"
       printf 'external WebTransport churn passed: streams=%d fault=%s run=%d/%d\n' \
@@ -105,11 +114,17 @@ done
 
 for streams in $stream_values; do
   for fault in loss reorder; do
+    fault_seed_offset=0
+    if [[ $fault == reorder ]]; then
+      fault_seed_offset=1
+    fi
     for ((run = 1; run <= runs; run++)); do
+      reset_seed=$((base_reset_seed + streams * 1024 + run * 4 + fault_seed_offset + 2))
       case_dir="$work/reverse-${streams}-${fault}-${run}"
       mkdir -p "$case_dir"
       timeout "$((timeout_seconds + 5))s" "$netz_server" churn-server 0 "$fault" \
         --mode=stream --warmup=1 --iterations=1 \
+        "--reset-seed=$reset_seed" \
         "--streams=$streams" "--bytes-per-stream=$bytes_per_stream" \
         "--chunk-bytes=$((bytes_per_stream < 16384 ? bytes_per_stream : 16384))" \
         --stream-window=65536 --timeout-ms=30000 \
@@ -135,6 +150,7 @@ for streams in $stream_values; do
       fi
       if ! timeout "${timeout_seconds}s" "$wtransport" bench-client "$proxy_port" \
           "--churn=$fault" "--proxy-control-port=$proxy_control_port" \
+          "--reset-seed=$reset_seed" \
           --mode=stream --warmup=1 --iterations=1 \
           "--streams=$streams" "--bytes-per-stream=$bytes_per_stream" \
           "--chunk-bytes=$((bytes_per_stream < 16384 ? bytes_per_stream : 16384))" \
@@ -150,7 +166,7 @@ for streams in $stream_values; do
         --sender=wtransport "--fault=$fault" "--streams=$streams" \
         "--bytes-per-stream=$bytes_per_stream" \
         "--reset-after-bytes=$reset_after_bytes" \
-        "--reset-every=$reset_every" \
+        "--reset-seed=$reset_seed" \
         "--client-log=$case_dir/client.log" \
         "--server-log=$case_dir/server.log" \
         "--proxy-log=$case_dir/proxy.log"

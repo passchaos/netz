@@ -10,15 +10,17 @@ SPEC = importlib.util.spec_from_file_location("webtransport_churn_check", MODULE
 assert SPEC is not None and SPEC.loader is not None
 CHECK = importlib.util.module_from_spec(SPEC)
 SPEC.loader.exec_module(CHECK)
+RESET_SEED = 0x0123_4567_89AB_CDEF
 
 
 class ChurnCheckTests(unittest.TestCase):
-    def write_pair(self, directory: str, *, checksum: int = 33_945_600):
+    def write_pair(self, directory: str, *, checksum: int = 36_001_920):
         fields = (
-            "fault=loss fault_scope=netz-client-outbound streams=32 fin=16 "
-            f"reset=16 bytes=266240 checksum={checksum} "
-            "reset_mask=0x00000000000000000000000000000000000000000000000000000000aaaaaaaa "
-            "reset_code_sum=262400 sibling=true "
+            f"fault=loss fault_scope=netz-client-outbound reset_seed={RESET_SEED} "
+            "streams=32 fin=17 "
+            f"reset=15 bytes=282368 checksum={checksum} "
+            "reset_mask=0x00000000000000000000000000000000000000000000000000000000ac80f7c1 "
+            "reset_code_sum=245990 sibling=true "
             "client_io=zio-std-io server_io=wtransport-quinn-tokio"
         )
         client = pathlib.Path(directory, "client.log")
@@ -30,50 +32,59 @@ class ChurnCheckTests(unittest.TestCase):
         server.write_text(f"wtransport server churn passed: {fields}\n")
         return client, server
 
-    def test_expected_32_stream_shape(self) -> None:
+    def test_expected_seeded_32_stream_shape(self) -> None:
         self.assertEqual(
-            CHECK.expected(32, 16_384, 256, 2),
+            CHECK.expected(32, 16_384, 256, RESET_SEED),
             {
                 "streams": 32,
-                "fin": 16,
-                "reset": 16,
-                "bytes": 266_240,
-                "checksum": 33_945_600,
-                "reset_mask": 0xAAAA_AAAA,
-                "reset_code_sum": 262_400,
+                "fin": 17,
+                "reset": 15,
+                "bytes": 282_368,
+                "checksum": 36_001_920,
+                "reset_mask": 0xAC80_F7C1,
+                "reset_code_sum": 245_990,
             },
         )
 
     def test_expected_64_stream_shape(self) -> None:
-        result = CHECK.expected(64, 16_384, 256, 2)
-        self.assertEqual(result["bytes"], 532_480)
-        self.assertEqual(result["checksum"], 67_891_200)
-        self.assertEqual(result["reset_mask"], 0xAAAA_AAAA_AAAA_AAAA)
-        self.assertEqual(result["reset_code_sum"], 525_312)
+        result = CHECK.expected(64, 16_384, 256, RESET_SEED)
+        self.assertEqual(result["bytes"], 580_864)
+        self.assertEqual(result["checksum"], 74_060_160)
+        self.assertEqual(result["reset_mask"], 0x8177_34C8_AC80_F7C1)
+        self.assertEqual(result["reset_code_sum"], 476_034)
 
     def test_expected_256_stream_shape(self) -> None:
-        result = CHECK.expected(256, 16_384, 256, 2)
-        self.assertEqual(result["fin"], 128)
-        self.assertEqual(result["reset"], 128)
-        self.assertEqual(result["bytes"], 2_129_920)
-        self.assertEqual(result["checksum"], 271_564_800)
+        result = CHECK.expected(256, 16_384, 256, RESET_SEED)
+        self.assertEqual(result["fin"], 122)
+        self.assertEqual(result["reset"], 134)
+        self.assertEqual(result["bytes"], 2_033_152)
+        self.assertEqual(result["checksum"], 259_226_880)
         self.assertEqual(
             result["reset_mask"],
-            int("aa" * 32, 16),
+            int("20717754f9d11ba55f3754fe3fba3187"
+                "53ac3c582f1d6af9817734c8ac80f7c1", 16),
         )
-        self.assertEqual(result["reset_code_sum"], 2_113_536)
+        self.assertEqual(result["reset_code_sum"], 2_212_897)
+
+    def test_seed_changes_distribution_and_can_select_highest_bit(self) -> None:
+        first = CHECK.expected(256, 16_384, 256, 1)
+        second = CHECK.expected(256, 16_384, 256, 2)
+        self.assertNotEqual(first["reset_mask"], second["reset_mask"])
+        self.assertEqual(second["reset_mask"] >> 255, 1)
+        self.assertTrue(CHECK.should_reset(2, 2, 0))
+        self.assertFalse(CHECK.should_reset(2, 2, 1))
 
     def test_rejects_more_than_256_streams(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
             client, server = self.write_pair(directory)
-            with self.assertRaisesRegex(ValueError, "1..256"):
+            with self.assertRaisesRegex(ValueError, "2..256"):
                 CHECK.verify(
                     sender="netz",
                     fault="loss",
                     streams=257,
                     bytes_per_stream=16_384,
                     reset_after_bytes=256,
-                    reset_every=2,
+                    reset_seed=RESET_SEED,
                     client_log=client,
                     server_log=server,
                 )
@@ -104,7 +115,7 @@ class ChurnCheckTests(unittest.TestCase):
                 streams=32,
                 bytes_per_stream=16_384,
                 reset_after_bytes=256,
-                reset_every=2,
+                reset_seed=RESET_SEED,
                 client_log=client,
                 server_log=server,
             )
@@ -119,7 +130,28 @@ class ChurnCheckTests(unittest.TestCase):
                     streams=32,
                     bytes_per_stream=16_384,
                     reset_after_bytes=256,
-                    reset_every=2,
+                    reset_seed=RESET_SEED,
+                    client_log=client,
+                    server_log=server,
+                )
+
+    def test_seed_mismatch_is_rejected(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            client, server = self.write_pair(directory)
+            server.write_text(
+                server.read_text().replace(
+                    f"reset_seed={RESET_SEED}",
+                    f"reset_seed={RESET_SEED + 1}",
+                )
+            )
+            with self.assertRaisesRegex(ValueError, "reset seed mismatch"):
+                CHECK.verify(
+                    sender="netz",
+                    fault="loss",
+                    streams=32,
+                    bytes_per_stream=16_384,
+                    reset_after_bytes=256,
+                    reset_seed=RESET_SEED,
                     client_log=client,
                     server_log=server,
                 )
@@ -134,7 +166,7 @@ class ChurnCheckTests(unittest.TestCase):
                 CHECK.verify(
                     sender="netz", fault="loss", streams=32,
                     bytes_per_stream=16_384, reset_after_bytes=256,
-                    reset_every=2, client_log=client, server_log=server,
+                    reset_seed=RESET_SEED, client_log=client, server_log=server,
                 )
 
     def test_inactive_fault_counter_is_rejected(self) -> None:
@@ -148,7 +180,7 @@ class ChurnCheckTests(unittest.TestCase):
                     streams=32,
                     bytes_per_stream=16_384,
                     reset_after_bytes=256,
-                    reset_every=2,
+                    reset_seed=RESET_SEED,
                     client_log=client,
                     server_log=server,
                 )
@@ -189,7 +221,7 @@ class ChurnCheckTests(unittest.TestCase):
                 streams=32,
                 bytes_per_stream=16_384,
                 reset_after_bytes=256,
-                reset_every=2,
+                reset_seed=RESET_SEED,
                 client_log=client,
                 server_log=server,
                 proxy_log=proxy,
@@ -232,7 +264,7 @@ class ChurnCheckTests(unittest.TestCase):
                     streams=32,
                     bytes_per_stream=16_384,
                     reset_after_bytes=256,
-                    reset_every=2,
+                    reset_seed=RESET_SEED,
                     client_log=client,
                     server_log=server,
                     proxy_log=proxy,
@@ -274,7 +306,7 @@ class ChurnCheckTests(unittest.TestCase):
                     streams=32,
                     bytes_per_stream=16_384,
                     reset_after_bytes=256,
-                    reset_every=2,
+                    reset_seed=RESET_SEED,
                     client_log=client,
                     server_log=server,
                     proxy_log=proxy,

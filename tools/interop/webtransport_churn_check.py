@@ -23,10 +23,30 @@ def record(path: Path, prefix: str) -> dict[str, str]:
     return fields
 
 
-def expected(streams: int, size: int, prefix: int, every: int) -> dict[str, int]:
+MASK64 = (1 << 64) - 1
+SPLITMIX_INCREMENT = 0x9E37_79B9_7F4A_7C15
+
+
+def should_reset(seed: int, streams: int, stream: int) -> bool:
+    if not 0 <= seed <= MASK64:
+        raise ValueError("reset seed must fit u64")
+    if not 2 <= streams <= 256 or not 0 <= stream < streams:
+        raise ValueError("invalid reset selection index")
+    if stream == 0:
+        return True
+    if stream == 1:
+        return False
+    value = (seed + SPLITMIX_INCREMENT * (stream + 1)) & MASK64
+    value = ((value ^ (value >> 30)) * 0xBF58_476D_1CE4_E5B9) & MASK64
+    value = ((value ^ (value >> 27)) * 0x94D0_49BB_1331_11EB) & MASK64
+    value ^= value >> 31
+    return value & 1 != 0
+
+
+def expected(streams: int, size: int, prefix: int, seed: int) -> dict[str, int]:
     total = checksum = reset_mask = code_sum = resets = 0
     for stream in range(streams):
-        reset = (stream + 1) % every == 0
+        reset = should_reset(seed, streams, stream)
         count = prefix if reset else size
         total += count
         checksum = (checksum + sum(((offset * 131 + stream * 17) & 0xFF) for offset in range(count))) & ((1 << 64) - 1)
@@ -56,7 +76,7 @@ def verify(
     streams: int,
     bytes_per_stream: int,
     reset_after_bytes: int,
-    reset_every: int,
+    reset_seed: int,
     client_log: Path,
     server_log: Path,
     proxy_log: Path | None = None,
@@ -65,13 +85,13 @@ def verify(
         raise ValueError("invalid sender")
     if fault not in ("loss", "reorder"):
         raise ValueError("invalid fault mode")
-    if not 1 <= streams <= 256:
-        raise ValueError("streams must be in 1..256")
+    if not 2 <= streams <= 256:
+        raise ValueError("streams must be in 2..256")
     if bytes_per_stream < 1 or not 0 <= reset_after_bytes <= bytes_per_stream:
         raise ValueError("invalid byte shape")
-    if reset_every < 1:
-        raise ValueError("reset cadence must be positive")
-    wanted = expected(streams, bytes_per_stream, reset_after_bytes, reset_every)
+    if not 0 <= reset_seed <= MASK64:
+        raise ValueError("reset seed must fit u64")
+    wanted = expected(streams, bytes_per_stream, reset_after_bytes, reset_seed)
     client_prefix = f"{sender} client churn passed:"
     server_implementation = "wtransport" if sender == "netz" else "netz"
     server_prefix = f"{server_implementation} server churn passed:"
@@ -90,6 +110,8 @@ def verify(
             raise ValueError(f"{name}: invalid fault scope")
         if values.get("sibling") != "true":
             raise ValueError(f"{name}: sibling did not survive")
+        if parse_int(values.get("reset_seed", "-1")) != reset_seed:
+            raise ValueError(f"{name}: reset seed mismatch")
         if (
             values.get("client_io") != endpoint_io["client"]
             or values.get("server_io") != endpoint_io["server"]
@@ -141,7 +163,8 @@ def verify(
             raise ValueError("proxy phase counters do not sum to two")
     print(
         "verified WebTransport churn: "
-        f"fault={fault} streams={streams} fin={wanted['fin']} "
+        f"fault={fault} reset_seed={reset_seed} streams={streams} "
+        f"fin={wanted['fin']} "
         f"reset={wanted['reset']} bytes={wanted['bytes']} "
         f"checksum={wanted['checksum']} reset_mask=0x{wanted['reset_mask']:064x} "
         f"reset_code_sum={wanted['reset_code_sum']} "
@@ -157,7 +180,7 @@ def main() -> None:
     parser.add_argument("--streams", type=int, required=True)
     parser.add_argument("--bytes-per-stream", type=int, required=True)
     parser.add_argument("--reset-after-bytes", type=int, required=True)
-    parser.add_argument("--reset-every", type=int, required=True)
+    parser.add_argument("--reset-seed", type=int, required=True)
     parser.add_argument("--client-log", type=Path, required=True)
     parser.add_argument("--server-log", type=Path, required=True)
     parser.add_argument("--proxy-log", type=Path)
@@ -168,7 +191,7 @@ def main() -> None:
         streams=args.streams,
         bytes_per_stream=args.bytes_per_stream,
         reset_after_bytes=args.reset_after_bytes,
-        reset_every=args.reset_every,
+        reset_seed=args.reset_seed,
         client_log=args.client_log,
         server_log=args.server_log,
         proxy_log=args.proxy_log,

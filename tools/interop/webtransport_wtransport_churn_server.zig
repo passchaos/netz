@@ -16,7 +16,6 @@ const sibling_end = "-after-churn";
 const sibling_response = "sibling-survived";
 const close_ready = "NZWTCLSR";
 const reset_after_bytes: usize = 256;
-const reset_every: usize = 2;
 const reset_code_base: u32 = 0x4000;
 
 pub fn run(_: std.process.Init, args: []const []const u8) !void {
@@ -28,15 +27,32 @@ pub fn run(_: std.process.Init, args: []const []const u8) !void {
     {
         return error.InvalidArgument;
     }
-    const config = try benchmark.Config.parse(args[2..]);
+    const allocator = std.heap.c_allocator;
+    var benchmark_args: std.ArrayList([]const u8) = .empty;
+    defer benchmark_args.deinit(allocator);
+    var reset_seed: ?u64 = null;
+    for (args[2..]) |arg| {
+        if (std.mem.startsWith(u8, arg, "--reset-seed=")) {
+            if (reset_seed != null) return error.InvalidArgument;
+            reset_seed = try std.fmt.parseInt(
+                u64,
+                arg["--reset-seed=".len..],
+                10,
+            );
+        } else {
+            try benchmark_args.append(allocator, arg);
+        }
+    }
+    const seed = reset_seed orelse return error.InvalidArgument;
+    const config = try benchmark.Config.parse(benchmark_args.items);
     if (config.mode != .stream or
+        config.streams < 2 or
         config.streams > churn_protocol.max_streams or
         config.bytes_per_stream < reset_after_bytes)
     {
         return error.InvalidArgument;
     }
 
-    const allocator = std.heap.c_allocator;
     var backend = try netz.runtime.Backend.init(allocator);
     defer backend.deinit();
     const io = backend.io();
@@ -179,7 +195,7 @@ pub fn run(_: std.process.Init, args: []const []const u8) !void {
 
     var reset_count: usize = 0;
     for (streams) |*entry| {
-        if (!shouldReset(entry.index)) continue;
+        if (!churn_protocol.shouldReset(seed, config.streams, entry.index)) continue;
         while (true) {
             const event = try session.readStreamIdWithDeadline(
                 entry.stream_id,
@@ -209,7 +225,7 @@ pub fn run(_: std.process.Init, args: []const []const u8) !void {
 
     var fin_count: usize = 0;
     for (streams) |*entry| {
-        if (shouldReset(entry.index)) continue;
+        if (churn_protocol.shouldReset(seed, config.streams, entry.index)) continue;
         while (!entry.terminal) {
             const event = try session.readStreamIdWithDeadline(
                 entry.stream_id,
@@ -249,7 +265,7 @@ pub fn run(_: std.process.Init, args: []const []const u8) !void {
     for (streams) |stream| {
         result.received_bytes +%= stream.received;
         result.checksum +%= stream.checksum;
-        if (shouldReset(stream.index)) {
+        if (churn_protocol.shouldReset(seed, config.streams, stream.index)) {
             result.resets += 1;
             result.markReset(stream.index);
             result.reset_code_sum += reset_code_base + @as(u32, @intCast(stream.index));
@@ -264,8 +280,8 @@ pub fn run(_: std.process.Init, args: []const []const u8) !void {
     try session.finishStreamWithDeadline(control.stream_id, deadline);
     try receiveExactAndFin(&session, control.stream_id, close_ready, deadline);
     std.debug.print(
-        "netz server churn passed: fault={s} fault_scope=wtransport-client-outbound streams={d} fin={d} reset={d} bytes={d} checksum={d} reset_mask=0x{x:0>64} reset_code_sum={d} sibling=true client_io=wtransport-quinn-tokio server_io=zio-std-io\n",
-        .{ fault, result.streams, result.fins, result.resets, result.received_bytes, result.checksum, result.reset_mask, result.reset_code_sum },
+        "netz server churn passed: fault={s} fault_scope=wtransport-client-outbound reset_seed={d} streams={d} fin={d} reset={d} bytes={d} checksum={d} reset_mask=0x{x:0>64} reset_code_sum={d} sibling=true client_io=wtransport-quinn-tokio server_io=zio-std-io\n",
+        .{ fault, seed, result.streams, result.fins, result.resets, result.received_bytes, result.checksum, result.reset_mask, result.reset_code_sum },
     );
     try session.closeConnection(0, "churn complete");
 }
@@ -371,10 +387,6 @@ fn sendExact(session: anytype, stream_id: u62, bytes: []const u8, fin: bool, dea
     var committed: usize = 0;
     try session.sendStreamWithDeadline(stream_id, bytes, fin, &committed, deadline);
     if (committed != bytes.len) return error.IncompleteTransfer;
-}
-
-fn shouldReset(index: usize) bool {
-    return (index + 1) % reset_every == 0;
 }
 
 fn verifyPayload(bytes: []const u8, stream_index: usize, offset: usize) !void {

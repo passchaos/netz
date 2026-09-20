@@ -862,7 +862,7 @@ real handshake test exercises both outcomes and then serves a sibling request.
    concurrent packet-batched
    stream throughput and cancellation-under-loss now have real-handshake
    baselines. The
-   same benchmark now accepts `--reset-every` and `--reset-after-bytes`, raises
+   same benchmark accepts `--reset-every` and `--reset-after-bytes`, raises
    both QUIC and WebTransport negotiated stream limits to the requested shape,
    and validates every reset code/direction alongside FIN/data checksums. A
    64-stream smoke reset 32 streams after 256 bytes while the other 32 delivered
@@ -882,34 +882,43 @@ real handshake test exercises both outcomes and then serves a sibling request.
    STREAM/FIN direction: 121-123 of 605-615 client datagrams were held, all
    bytes/checksum still matched, and throughput was 153-161 MiB/s. Batch-tail
    holds are flushed explicitly so reordering cannot become hidden loss.
-   A separate external wtransport gate now runs 32-, 64-, 128-, and 256-stream client-upload
-   shapes in both implementation-role directions with deterministic loss and
-   pair reordering. Netz's outbound direction uses a seeded 5% endpoint interceptor;
+   A separate external wtransport gate now runs 32-, 64-, 128-, and 256-stream
+   client-upload shapes in both implementation-role directions with
+   deterministic loss and pair reordering. Netz's outbound direction uses a
+   seeded 5% endpoint interceptor;
    wtransport's outbound direction uses an unprivileged loopback UDP relay that
    stays transparent during handshake and is armed only for the reset and FIN
    phases. Every stream first delivers an indexed 256-byte
-   prefix; only after wtransport acknowledges all prefixes does netz reset every
-   second stream with application code `0x4000 + index`. A second reliable
+   prefix. Only after wtransport acknowledges all prefixes does the sender use
+   an explicit 64-bit seed and stable SplitMix64 selection to reset a
+   non-periodic subset with application code `0x4000 + index`; indices zero and
+   one are fixed to reset and FIN respectively so every valid shape exercises
+   both terminal paths. Direction, fault type, stream count, and repetition all
+   select distinct seeds in the default matrix. A second reliable
    barrier proves wtransport observed every exact mapped code before the other
    streams continue to 16 KiB and FIN. The receiver reports exact FIN/reset
-   counts, a reset mask, application-code sum, byte total and checksum; an
-   independent verifier recomputes all of them. The gate also finishes a bidi
+   counts, a 256-bit reset mask, application-code sum, byte total and checksum;
+   an independent Python verifier recomputes all of them from the reported seed.
+   Zig and Rust fixed-vector tests independently lock the same selection and
+   summary values. The gate also finishes a bidi
    sibling opened before cancellation and verifies control-stream FIN plus peer
    connection close. All sixteen sender-direction/size/fault combinations passed
-   twice consecutively, including 266,240 bytes/checksum 33,945,600 for
-   32 streams, 532,480/67,891,200 for 64, 1,064,960/135,782,400 for 128,
-   and 2,129,920/271,564,800 for 256. The result protocol now uses a
+   twice consecutively. Because each scenario uses a different seed, its exact
+   FIN/reset split, byte count, checksum, reset mask, and code sum deliberately
+   vary instead of repeating one alternating-bit pattern. The result protocol
+   uses a
    network-order 256-bit reset mask, and the Zig, Rust, and independent Python
-   verifier all cover its highest bit and reject 257 streams. The verifier checks the declared
+   verifier all cover its highest bit and reject 257 streams. The verifier
+   checks the declared
    `netz-client-outbound` or `wtransport-client-outbound` scope and, for the
    proxy path, requires matching process/proxy counters plus at least one
    actual fault in both the RESET and FIN phases. The proxy now uses a
    deterministic single-shot arm for each phase: every reverse-role case drops
    exactly two datagrams or completes exactly two reorder pairs overall,
    independent of the stream count. The direct netz-sender cases retain
-   their seeded continuous 5% loss/every-fifth reordering schedules. This remains a bounded
-   loopback lifecycle gate rather than a production-network or throughput
-   comparison.
+   their seeded continuous 5% loss/every-fifth reordering schedules. This
+   remains a bounded loopback lifecycle gate rather than a production-network
+   or throughput comparison.
    A bounded repeatability gate runs a mixed FIN/reset shape three times under
    deterministic 5% loss, then runs sustained client-direction FIN traffic
    three times under reordering. It requires exact delivered-byte/reset
@@ -923,8 +932,9 @@ real handshake test exercises both outcomes and then serves a sibling request.
    1,540-1,545 considered server datagrams. Each client-direction reorder run
    delivered all 128 FINs and 8,388,608 bytes/checksum 1,069,547,520 while
    holding 522-524 of 2,610-2,620 considered datagrams. The external wtransport
-   verifier remains deliberately capped at 64 because its wire result uses a
-   `u64` reset mask. The internal harness now also configures both peers'
+   verifier's earlier 64-stream mask cap is now replaced by the shared
+   network-order 256-bit result described above. The internal harness also
+   configures both peers'
    `max_session_streams` from the requested shape rather than silently retaining
    the runtime default of 128. At the 256-stream ceiling, a mixed 16-KiB run
    delivered 128 RESET_STREAM terminals plus 128 FINs, 2,129,920 bytes and

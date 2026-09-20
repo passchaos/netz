@@ -26,8 +26,8 @@ const SIBLING_RESPONSE: &[u8] = b"sibling-survived";
 const CLOSE_READY: &[u8; 8] = b"NZWTCLSR";
 const FAULT_KICK: &[u8] = b"fault-kick";
 const RESET_AFTER_BYTES: usize = 256;
-const RESET_EVERY: usize = 2;
 const RESET_CODE_BASE: u32 = 0x4000;
+const SPLITMIX_INCREMENT: u64 = 0x9e37_79b9_7f4a_7c15;
 
 #[derive(Debug)]
 struct StreamResult {
@@ -63,11 +63,12 @@ pub(crate) async fn run_client_connection(
     bytes_per_stream: u64,
     timeout: Duration,
     fault: &str,
+    reset_seed: u64,
     proxy_control_port: u16,
 ) -> Result<()> {
     ensure!(matches!(fault, "loss" | "reorder"), "invalid churn fault");
     ensure!(
-        stream_count > 0 && stream_count <= MAX_STREAMS,
+        stream_count >= 2 && stream_count <= MAX_STREAMS,
         "invalid churn stream count"
     );
     ensure!(
@@ -128,7 +129,7 @@ pub(crate) async fn run_client_connection(
 
     proxy_command(&mut proxy, "arm-once", "armed", deadline).await?;
     for (index, sender) in senders.iter_mut().enumerate() {
-        if should_reset(index) {
+        if should_reset(reset_seed, usize::from(stream_count), index) {
             sender.reset(mapped_stream_error(RESET_CODE_BASE + index as u32))?;
         }
     }
@@ -148,7 +149,7 @@ pub(crate) async fn run_client_connection(
 
     proxy_command(&mut proxy, "arm-once", "armed", deadline).await?;
     for (index, sender) in senders.iter_mut().enumerate() {
-        if should_reset(index) {
+        if should_reset(reset_seed, usize::from(stream_count), index) {
             continue;
         }
         let remainder = payload(index, RESET_AFTER_BYTES, stream_bytes - RESET_AFTER_BYTES);
@@ -162,7 +163,7 @@ pub(crate) async fn run_client_connection(
     read_exact_until(control_recv, &mut encoded_result, deadline, "churn result").await?;
     let result = decode_result(&encoded_result)?;
     ensure!(
-        result == expected_result(stream_count, stream_bytes),
+        result == expected_result(stream_count, stream_bytes, reset_seed),
         "churn result mismatch"
     );
     let fin_faults =
@@ -239,7 +240,7 @@ pub(crate) async fn run_client_connection(
         "proxy counters changed after final disarm"
     );
     println!(
-        "wtransport client churn passed: fault={fault} fault_scope=wtransport-client-outbound streams={} fin={} reset={} bytes={} checksum={} reset_mask=0x{} reset_code_sum={} considered={} dropped={} held={} reordered={} reset_dropped={} reset_held={} reset_reordered={} fin_dropped={} fin_held={} fin_reordered={} sibling=true peer-close=true client_io=wtransport-quinn-tokio server_io=zio-std-io",
+        "wtransport client churn passed: fault={fault} fault_scope=wtransport-client-outbound reset_seed={reset_seed} streams={} fin={} reset={} bytes={} checksum={} reset_mask=0x{} reset_code_sum={} considered={} dropped={} held={} reordered={} reset_dropped={} reset_held={} reset_reordered={} fin_dropped={} fin_held={} fin_reordered={} sibling=true peer-close=true client_io=wtransport-quinn-tokio server_io=zio-std-io",
         result.streams,
         result.fins,
         result.resets,
@@ -332,10 +333,11 @@ pub(crate) async fn run_server_connection(
     bytes_per_stream: u64,
     timeout: Duration,
     fault: &str,
+    reset_seed: u64,
 ) -> Result<()> {
     ensure!(matches!(fault, "loss" | "reorder"), "invalid churn fault");
     ensure!(
-        stream_count > 0 && stream_count <= MAX_STREAMS,
+        stream_count >= 2 && stream_count <= MAX_STREAMS,
         "invalid churn stream count"
     );
     ensure!(
@@ -393,7 +395,7 @@ pub(crate) async fn run_server_connection(
     let mut reset_readers = JoinSet::new();
     let mut fin_streams = Vec::with_capacity(usize::from(stream_count) / 2);
     for (index, mut receiver, prefix_checksum) in streams {
-        if !should_reset(index) {
+        if !should_reset(reset_seed, usize::from(stream_count), index) {
             fin_streams.push((index, receiver, prefix_checksum));
             continue;
         }
@@ -439,7 +441,10 @@ pub(crate) async fn run_server_connection(
             reset_code_sum.wrapping_add(u64::from(RESET_CODE_BASE) + result.index as u64);
     }
     ensure!(
-        resets == stream_count / RESET_EVERY as u16,
+        resets
+            == (0..usize::from(stream_count))
+                .filter(|index| should_reset(reset_seed, usize::from(stream_count), *index))
+                .count() as u16,
         "churn reset count mismatch"
     );
 
@@ -555,7 +560,7 @@ pub(crate) async fn run_server_connection(
         .await
         .context("churn control response FIN timed out")??;
     println!(
-        "wtransport server churn passed: fault={fault} fault_scope=netz-client-outbound streams={stream_count} fin={fins} reset={resets} bytes={received_bytes} checksum={checksum} reset_mask=0x{} reset_code_sum={reset_code_sum} sibling=true client_io=zio-std-io server_io=wtransport-quinn-tokio",
+        "wtransport server churn passed: fault={fault} fault_scope=netz-client-outbound reset_seed={reset_seed} streams={stream_count} fin={fins} reset={resets} bytes={received_bytes} checksum={checksum} reset_mask=0x{} reset_code_sum={reset_code_sum} sibling=true client_io=zio-std-io server_io=wtransport-quinn-tokio",
         format_reset_mask(&reset_mask),
     );
     Ok(())
@@ -600,8 +605,21 @@ async fn read_exact_and_fin_until(
     Ok(())
 }
 
-fn should_reset(index: usize) -> bool {
-    (index + 1) % RESET_EVERY == 0
+fn should_reset(seed: u64, stream_count: usize, index: usize) -> bool {
+    debug_assert!((2..=MAX_STREAMS.into()).contains(&stream_count));
+    debug_assert!(index < stream_count);
+    if index == 0 {
+        return true;
+    }
+    if index == 1 {
+        return false;
+    }
+    let mut value =
+        seed.wrapping_add(SPLITMIX_INCREMENT.wrapping_mul((index as u64).wrapping_add(1)));
+    value = (value ^ (value >> 30)).wrapping_mul(0xbf58_476d_1ce4_e5b9);
+    value = (value ^ (value >> 27)).wrapping_mul(0x94d0_49bb_1331_11eb);
+    value ^= value >> 31;
+    value & 1 != 0
 }
 
 fn mapped_stream_error(application_code: u32) -> VarInt {
@@ -714,7 +732,7 @@ fn decode_result(bytes: &[u8; RESULT_LEN]) -> Result<ResultSummary> {
     })
 }
 
-fn expected_result(stream_count: u16, bytes_per_stream: usize) -> ResultSummary {
+fn expected_result(stream_count: u16, bytes_per_stream: usize, reset_seed: u64) -> ResultSummary {
     let mut result = ResultSummary {
         streams: stream_count,
         fins: 0,
@@ -725,7 +743,7 @@ fn expected_result(stream_count: u16, bytes_per_stream: usize) -> ResultSummary 
         reset_code_sum: 0,
     };
     for index in 0..usize::from(stream_count) {
-        let reset = should_reset(index);
+        let reset = should_reset(reset_seed, usize::from(stream_count), index);
         let count = if reset {
             RESET_AFTER_BYTES
         } else {
@@ -780,32 +798,44 @@ mod tests {
 
     #[test]
     fn expected_results_cover_32_64_and_256_stream_shapes() {
+        let seed = 0x0123_4567_89ab_cdef;
         assert_eq!(
-            expected_result(32, 16_384),
+            expected_result(32, 16_384, seed),
             ResultSummary {
                 streams: 32,
-                fins: 16,
-                resets: 16,
-                received_bytes: 266_240,
-                checksum: 33_945_600,
-                reset_mask: [0xaaaa_aaaa, 0, 0, 0],
-                reset_code_sum: 262_400,
+                fins: 17,
+                resets: 15,
+                received_bytes: 282_368,
+                checksum: 36_001_920,
+                reset_mask: [0xac80_f7c1, 0, 0, 0],
+                reset_code_sum: 245_990,
             }
         );
-        let result = expected_result(64, 16_384);
-        assert_eq!(result.fins, 32);
-        assert_eq!(result.resets, 32);
-        assert_eq!(result.received_bytes, 532_480);
-        assert_eq!(result.checksum, 67_891_200);
-        assert_eq!(result.reset_mask, [0xaaaa_aaaa_aaaa_aaaa, 0, 0, 0]);
-        assert_eq!(result.reset_code_sum, 525_312);
-        let large = expected_result(256, 16_384);
-        assert_eq!(large.fins, 128);
-        assert_eq!(large.resets, 128);
-        assert_eq!(large.received_bytes, 2_129_920);
-        assert_eq!(large.checksum, 271_564_800);
-        assert_eq!(large.reset_mask, [u64::MAX / 3 * 2; 4]);
-        assert_eq!(large.reset_code_sum, 2_113_536);
+        let result = expected_result(64, 16_384, seed);
+        assert_eq!(result.fins, 35);
+        assert_eq!(result.resets, 29);
+        assert_eq!(result.received_bytes, 580_864);
+        assert_eq!(result.checksum, 74_060_160);
+        assert_eq!(result.reset_mask, [0x8177_34c8_ac80_f7c1, 0, 0, 0]);
+        assert_eq!(result.reset_code_sum, 476_034);
+        let large = expected_result(256, 16_384, seed);
+        assert_eq!(large.fins, 122);
+        assert_eq!(large.resets, 134);
+        assert_eq!(large.received_bytes, 2_033_152);
+        assert_eq!(large.checksum, 259_226_880);
+        assert_eq!(
+            large.reset_mask,
+            [
+                0x8177_34c8_ac80_f7c1,
+                0x53ac_3c58_2f1d_6af9,
+                0x5f37_54fe_3fba_3187,
+                0x2071_7754_f9d1_1ba5,
+            ]
+        );
+        assert_eq!(large.reset_code_sum, 2_212_897);
+        assert!(should_reset(2, usize::from(MAX_STREAMS), 255));
+        assert!(should_reset(seed, 2, 0));
+        assert!(!should_reset(seed, 2, 1));
     }
 
     #[test]
