@@ -402,6 +402,25 @@ test "QUIC 1-RTT consumes a preloaded coalesced-handshake suffix first" {
         "client control",
         received.frames[0].stream.data,
     );
+
+    try connection.preloadReceivedDatagram(sender.address(), packet, .ect0);
+    const fresh = [_]quic.Frame{.{ .ping = {} }};
+    try one_rtt.sendFrames(&sender, receiver.address(), keys, .{
+        .destination_connection_id = "server",
+        .packet_number = 4,
+        .frames = &fresh,
+    });
+    var after_duplicate = try connection
+        .receivePacketBatchServicingTimersDeadline(.fromNow(io, .{
+        .raw = .fromSeconds(1),
+        .clock = .awake,
+    }));
+    defer after_duplicate.deinit();
+    try std.testing.expectEqual(@as(usize, 1), after_duplicate.packets.len);
+    try std.testing.expectEqual(
+        @as(u64, 4),
+        after_duplicate.packets[0].packet.packet_number,
+    );
     try std.testing.expectError(
         error.InvalidPacket,
         connection.preloadReceivedDatagram(sender.address(), &.{}, .not_ect),
@@ -1363,11 +1382,31 @@ test "QUIC 1-RTT connection receives a UDP GRO packet batch" {
 
     try one_rtt.sendFramesBatch(&client_endpoint, server_endpoint.address(), keys, .{
         .destination_connection_id = &server_cid,
+        .first_packet_number = 1,
+        .packet_number_len = 4,
+        .packets = &packet_frames,
+    });
+    var duplicate_then_fresh = try server.receivePacketBatchAt(20_000_000);
+    defer duplicate_then_fresh.deinit();
+    try std.testing.expectEqual(
+        @as(usize, 1),
+        duplicate_then_fresh.packets.len,
+    );
+    try std.testing.expectEqual(
+        @as(u64, 2),
+        duplicate_then_fresh.packets[0].packet.packet_number,
+    );
+
+    try one_rtt.sendFramesBatch(&client_endpoint, server_endpoint.address(), keys, .{
+        .destination_connection_id = &server_cid,
         .first_packet_number = 2,
         .packet_number_len = 4,
         .packets = &packet_frames,
     });
-    try std.testing.expectEqual(@as(usize, 2), try server.servicePacketBatchAt(20_000_000));
+    try std.testing.expectEqual(
+        @as(usize, 1),
+        try server.servicePacketBatchAt(30_000_000),
+    );
     const second_ack = try server.received.ackFrame(allocator, 0);
     defer allocator.free(second_ack.ranges);
     try std.testing.expectEqual(@as(u64, 3), second_ack.largest_acknowledged);
@@ -2856,6 +2895,31 @@ test "QUIC 1-RTT connection drops duplicate packet numbers before frame effects"
     try std.testing.expectError(error.DuplicatePacket, server.receivePacket());
     try std.testing.expectEqual(@as(u64, 4), server.recv_data_total);
     try std.testing.expectEqual(@as(usize, 1), server.received.ranges.items.len);
+
+    const ping = [_]quic.Frame{.{ .ping = {} }};
+    try one_rtt.sendFrames(&client_endpoint, server_endpoint.address(), client_keys, .{
+        .destination_connection_id = &server_cid,
+        .packet_number = 0,
+        .frames = &ping,
+    });
+    try one_rtt.sendFrames(&client_endpoint, server_endpoint.address(), client_keys, .{
+        .destination_connection_id = &server_cid,
+        .packet_number = 1,
+        .frames = &ping,
+    });
+    const Visitor = struct {
+        fn visit(packet_number: *?u64, packet: one_rtt.ReceivedPacketView) !void {
+            packet_number.* = packet.packet_number;
+        }
+    };
+    var visited_packet_number: ?u64 = null;
+    try server.visitPacketServicingTimersDeadline(
+        .fromNow(io, .{ .clock = .awake, .raw = .fromSeconds(1) }),
+        &visited_packet_number,
+        Visitor.visit,
+    );
+    try std.testing.expectEqual(@as(?u64, 1), visited_packet_number);
+    try std.testing.expectEqual(@as(u64, 2), server.stats().packets_received);
 }
 
 test "QUIC 1-RTT connection preflights ACK frames before receive-side effects" {

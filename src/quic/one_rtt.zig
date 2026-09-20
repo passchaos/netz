@@ -9990,8 +9990,10 @@ pub const Connection = struct {
         self: *Connection,
         now_ns: ?u64,
     ) Error!?ReceivedPacketBatch {
-        var packet = (try self.receivePendingPacketAt(now_ns)) orelse
-            return null;
+        var packet = (self.receivePendingPacketAt(now_ns) catch |err| switch (err) {
+            error.DuplicatePacket => return null,
+            else => |other| return other,
+        }) orelse return null;
         errdefer packet.deinit(self.endpoint.allocator);
         const packets = try self.endpoint.allocator.alloc(ReceivedPacket, 1);
         packets[0] = packet;
@@ -10654,9 +10656,10 @@ pub const Connection = struct {
         self.next_packet_number = last_packet_number + 1;
     }
 
-    /// Receive and process every 1-RTT packet represented by one kernel
-    /// datagram. With UDP_GRO enabled this amortizes recvmsg and allocation
-    /// overhead across the whole coalesced segment batch.
+    /// Receive and process every fresh 1-RTT packet represented by one kernel
+    /// datagram, silently discarding duplicate packet numbers. With UDP_GRO
+    /// enabled this amortizes recvmsg and allocation overhead across the whole
+    /// coalesced segment batch.
     pub fn receivePacketBatch(self: *Connection) Error!ReceivedPacketBatch {
         return self.receivePacketBatchAt(self.monotonicNowNs());
     }
@@ -10700,12 +10703,18 @@ pub const Connection = struct {
             const bytes = datagrams.datagramAt(index) orelse
                 return error.InvalidPacket;
             if (isDiscardedLongHeaderPacket(bytes)) continue;
-            packets[completed] = try self.processReceivedBytesAt(
+            packets[completed] = self.processReceivedBytesAt(
                 datagrams.from,
                 bytes,
                 datagrams.ecn,
                 now_ns,
-            );
+            ) catch |err| switch (err) {
+                // A coalesced receive batch may contain retransmitted packet
+                // numbers alongside fresh packets. Keep the fresh prefix and
+                // silently discard duplicates as required by QUIC.
+                error.DuplicatePacket => continue,
+                else => |other| return other,
+            };
             completed += 1;
         }
         if (completed == 0) {
@@ -10958,12 +10967,15 @@ pub const Connection = struct {
         if (self.takePendingReceivedDatagram()) |pending_value| {
             var pending = pending_value;
             defer pending.deinit(self.endpoint.allocator);
-            var packet = (try self.processReceivedBytesOrDropPeerAddressAt(
+            var packet = (self.processReceivedBytesOrDropPeerAddressAt(
                 pending.from,
                 pending.bytes,
                 pending.ecn,
                 first_now_ns,
-            )) orelse return 0;
+            ) catch |err| switch (err) {
+                error.DuplicatePacket => return 0,
+                else => |other| return other,
+            }) orelse return 0;
             defer packet.deinit(self.endpoint.allocator);
             _ = try self.retransmitPacketThresholdLosses(max_batch_packets);
             _ = self.sendAckForPacketIfNeeded(
@@ -11128,9 +11140,10 @@ pub const Connection = struct {
         return self.visitPacketAt(now_ns, {}, discardPacketView);
     }
 
-    /// Receive one packet, apply its transport frames, and synchronously expose
-    /// borrowed frames to an application protocol before receive storage is
-    /// released.
+    /// Receive the next fresh packet, apply its transport frames, and
+    /// synchronously expose borrowed frames to an application protocol before
+    /// receive storage is released. Duplicate packet numbers are silently
+    /// discarded while waiting because they cannot create application events.
     ///
     /// The overwhelmingly common current-key path decrypts in place and reuses
     /// connection scratch. Key-phase transitions use the owning decoder so
@@ -11156,14 +11169,14 @@ pub const Connection = struct {
             var pending = pending_value;
             defer pending.deinit(self.endpoint.allocator);
             if (!self.shouldDiscardPeerAddressBeforeAuthentication(pending.from)) {
-                return self.processReceivedBytesVisitingAt(
+                if (try self.processReceivedBytesVisitingAt(
                     pending.from,
                     pending.bytes,
                     pending.ecn,
                     now_ns,
                     context,
                     visitor,
-                );
+                )) return;
             }
         }
         while (true) {
@@ -11172,14 +11185,14 @@ pub const Connection = struct {
             );
             if (isDiscardedLongHeaderPacket(datagram.bytes)) continue;
             if (self.shouldDiscardPeerAddressBeforeAuthentication(datagram.from)) continue;
-            return self.processReceivedBytesVisitingAt(
+            if (try self.processReceivedBytesVisitingAt(
                 datagram.from,
                 datagram.bytes,
                 datagram.ecn,
                 now_ns,
                 context,
                 visitor,
-            );
+            )) return;
         }
     }
 
@@ -11203,7 +11216,7 @@ pub const Connection = struct {
         {
             return false;
         }
-        try self.processReceivedBytesVisitingWithDestinationIdAt(
+        return self.processReceivedBytesVisitingWithDestinationIdAt(
             datagram.from,
             datagram.bytes,
             self.config.local_connection_id.len,
@@ -11213,7 +11226,6 @@ pub const Connection = struct {
             context,
             visitor,
         );
-        return true;
     }
 
     pub fn visitReceivedDatagram(
@@ -11444,27 +11456,21 @@ pub const Connection = struct {
         comptime visitor: anytype,
     ) (Error || quic.runtime.ReceiveTimeoutError ||
         callbackErrorSet(visitor))!void {
-        const now_ns = self.monotonicNowNs();
+        var now_ns = self.monotonicNowNs();
         if (self.takePendingReceivedDatagram()) |pending_value| {
             var pending = pending_value;
             defer pending.deinit(self.endpoint.allocator);
             if (!self.shouldDiscardPeerAddressBeforeAuthentication(pending.from)) {
-                return self.processReceivedBytesVisitingAt(
+                if (try self.processReceivedBytesVisitingAt(
                     pending.from,
                     pending.bytes,
                     pending.ecn,
                     now_ns,
                     context,
                     visitor,
-                );
+                )) return;
             }
         }
-        if (callerDeadlineExpired(caller_deadline, now_ns)) {
-            return error.Timeout;
-        }
-        const datagram = try self.receiveBytesIntoServicingTimersUntil(
-            caller_deadline,
-        );
 
         const Context = @TypeOf(context);
         const VisitorError = callbackErrorSet(visitor);
@@ -11487,14 +11493,23 @@ pub const Connection = struct {
             .connection = self,
             .context = context,
         };
-        return self.processReceivedBytesVisitingAt(
-            datagram.from,
-            datagram.bytes,
-            datagram.ecn,
-            self.monotonicNowNs(),
-            &adapter,
-            Adapter.visit,
-        );
+        while (true) {
+            now_ns = self.monotonicNowNs();
+            if (callerDeadlineExpired(caller_deadline, now_ns)) {
+                return error.Timeout;
+            }
+            const datagram = try self.receiveBytesIntoServicingTimersUntil(
+                caller_deadline,
+            );
+            if (try self.processReceivedBytesVisitingAt(
+                datagram.from,
+                datagram.bytes,
+                datagram.ecn,
+                self.monotonicNowNs(),
+                &adapter,
+                Adapter.visit,
+            )) return;
+        }
     }
 
     /// State-only timer-aware receive for stream adapters that consume data
@@ -11677,7 +11692,7 @@ pub const Connection = struct {
         now_ns: ?u64,
         context: anytype,
         comptime visitor: anytype,
-    ) (Error || callbackErrorSet(visitor))!void {
+    ) (Error || callbackErrorSet(visitor))!bool {
         return self.processReceivedBytesVisitingWithDestinationIdAt(
             from,
             bytes,
@@ -11700,7 +11715,7 @@ pub const Connection = struct {
         received_on: ?*quic.runtime.Endpoint,
         context: anytype,
         comptime visitor: anytype,
-    ) (Error || callbackErrorSet(visitor))!void {
+    ) (Error || callbackErrorSet(visitor))!bool {
         const reset_candidate = quic.stateless_reset.tokenCandidate(bytes);
         const current = self.openCurrentShortPacketInPlaceForKeyPhase(
             self.receive_key_phase.currentKeyPhase(),
@@ -11717,7 +11732,13 @@ pub const Connection = struct {
         };
         switch (current) {
             .opened => |packet| {
-                return self.processOpenedBytesInPlaceVisitingAt(
+                // Duplicate packet numbers are ordinary QUIC network input.
+                // Visitor APIs wait for new application progress, so discard
+                // them before applying frame effects or invoking the caller.
+                if (!try self.received.wouldRecordFresh(packet.packet_number)) {
+                    return false;
+                }
+                try self.processOpenedBytesInPlaceVisitingAt(
                     from,
                     bytes,
                     ecn,
@@ -11727,17 +11748,22 @@ pub const Connection = struct {
                     context,
                     visitor,
                 );
+                return true;
             },
             .key_phase_mismatch => {},
         }
-        var packet = try self.processReceivedBytesWithDestinationIdAt(
+        var packet = self.processReceivedBytesWithDestinationIdAt(
             from,
             bytes,
             destination_connection_id_len,
             ecn,
             now_ns,
             received_on,
-        );
+        ) catch |err| switch (err) {
+            // Raised by receive packet-number preflight before frame effects.
+            error.DuplicatePacket => return false,
+            else => |other| return other,
+        };
         defer packet.deinit(self.endpoint.allocator);
         try visitor(context, .{
             .from = packet.from,
@@ -11745,6 +11771,7 @@ pub const Connection = struct {
             .frames = packet.frames,
             .peer_initiated_key_update = packet.peer_initiated_key_update,
         });
+        return true;
     }
 
     fn openCurrentShortPacketInPlaceForKeyPhase(
@@ -11784,12 +11811,15 @@ pub const Connection = struct {
         if (self.takePendingReceivedDatagram()) |pending_value| {
             var pending = pending_value;
             defer pending.deinit(self.endpoint.allocator);
-            var packet = (try self.processReceivedBytesOrDropPeerAddressAt(
+            var packet = (self.processReceivedBytesOrDropPeerAddressAt(
                 pending.from,
                 pending.bytes,
                 pending.ecn,
                 now_ns,
-            )) orelse return 0;
+            ) catch |err| switch (err) {
+                error.DuplicatePacket => return 0,
+                else => |other| return other,
+            }) orelse return 0;
             packet.deinit(self.endpoint.allocator);
             return 1;
         }
@@ -11847,6 +11877,9 @@ pub const Connection = struct {
             };
             switch (current) {
                 .opened => |packet| {
+                    if (!try self.received.wouldRecordFresh(
+                        packet.packet_number,
+                    )) continue;
                     try self.processOpenedBytesInPlaceVisitingAt(
                         datagrams.from,
                         bytes,
@@ -11868,12 +11901,16 @@ pub const Connection = struct {
             // intentionally destroys its output and cannot safely retry
             // current/next/previous generations against the same ciphertext.
             {
-                var packet = try self.processReceivedBytesAt(
+                var packet = self.processReceivedBytesAt(
                     datagrams.from,
                     bytes,
                     datagrams.ecn,
                     now_ns,
-                );
+                ) catch |err| switch (err) {
+                    // Raised before applying any frames in this segment.
+                    error.DuplicatePacket => continue,
+                    else => |other| return other,
+                };
                 defer packet.deinit(self.endpoint.allocator);
                 try visitor(context, .{
                     .from = packet.from,
@@ -12258,7 +12295,8 @@ pub const Connection = struct {
     /// Process one caller-buffer datagram already matched to this connection.
     /// The current-key path decrypts in place and reuses retained frame
     /// storage; key updates retain the safe allocating fallback. `false` means
-    /// the authenticated peer-address policy discarded the datagram.
+    /// the authenticated peer-address policy or packet-number tracker discarded
+    /// the datagram.
     pub fn visitRoutedDatagramAt(
         self: *Connection,
         routed: quic.runtime.RoutedBytesView,
@@ -12272,7 +12310,7 @@ pub const Connection = struct {
         if (self.shouldDiscardPeerAddressBeforeAuthentication(
             routed.datagram.from,
         )) return false;
-        try self.processReceivedBytesVisitingWithDestinationIdAt(
+        return self.processReceivedBytesVisitingWithDestinationIdAt(
             routed.datagram.from,
             routed.datagram.bytes,
             routed.destination_connection_id.len,
@@ -12282,7 +12320,6 @@ pub const Connection = struct {
             context,
             visitor,
         );
-        return true;
     }
 
     pub fn receiveRoutedDatagramWithEcnAt(self: *Connection, routed: quic.runtime.RoutedBytes, now_ns: ?u64, ecn: quic.packet_space.EcnCodepoint) Error!?ReceivedPacket {

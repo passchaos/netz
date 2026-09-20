@@ -824,6 +824,14 @@ The stateful HTTP/3 GRO receive cursor also validates an absolute deadline
 before sending a deferred ACK or advancing a retained packet batch. Wrong-clock
 and expired calls are therefore side-effect free, and a later valid call still
 observes the original packet.
+Its shared QUIC visitor and batch pumps now also treat an authenticated
+duplicate packet number as discard-only input and continue under the original
+deadline until fresh application progress arrives. A duplicate segment cannot
+erase fresh packets already accepted from the same GRO batch. The low-level
+owning `receivePacket` API retains its explicit `DuplicatePacket` result for
+transport diagnostics; focused tests cover both contracts. This matches
+quiche's receive path, which records duplicate packet numbers as ignored rather
+than surfacing them as a connection failure.
 
 The external HTTP/3 throughput harness now runs 1, 4, or 16 concurrent
 request streams in either direction and supports forced QUIC v2 through

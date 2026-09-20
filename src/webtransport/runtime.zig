@@ -15938,6 +15938,20 @@ test "WebTransport protected control deadlines reject invalid budgets" {
 
 test "WebTransport stateful preconfigured runtime exchanges associated streams" {
     const allocator = std.testing.allocator;
+    const ClientStage = enum {
+        setup,
+        connect,
+        datagrams,
+        session_data,
+        streams,
+        reset_stop,
+        close,
+    };
+    var client_stage: ClientStage = .setup;
+    errdefer std.debug.print(
+        "WebTransport stateful associated-stream client failed during {s}\n",
+        .{@tagName(client_stage)},
+    );
 
     var threaded = std.Io.Threaded.init(allocator, .{});
     defer threaded.deinit();
@@ -15991,13 +16005,28 @@ test "WebTransport stateful preconfigured runtime exchanges associated streams" 
     defer server.deinit();
 
     const Shared = struct {
+        const Stage = enum {
+            initial_timeout,
+            accept,
+            datagrams,
+            session_data,
+            streams,
+            reset_stop,
+            close,
+        };
+
         server: *StatefulProtectedServer,
         io: std.Io,
         initial_timeout_done: std.Io.Event = .unset,
+        stage: Stage = .initial_timeout,
         err: ?anyerror = null,
 
         fn run(self: *@This()) void {
             self.runFallible() catch |err| {
+                std.debug.print(
+                    "WebTransport stateful associated-stream server failed during {s}: {s}\n",
+                    .{ @tagName(self.stage), @errorName(err) },
+                );
                 self.err = err;
                 self.initial_timeout_done.set(self.io);
             };
@@ -16018,11 +16047,13 @@ test "WebTransport stateful preconfigured runtime exchanges associated streams" 
                 ),
             );
             self.initial_timeout_done.set(self.io);
+            self.stage = .accept;
             var session = try self.server.acceptWithDeadline(.fromNow(
                 self.io,
                 .{ .raw = .fromSeconds(1), .clock = .awake },
             ));
             defer session.deinit();
+            self.stage = .datagrams;
             var datagrams = try session.receiveManyDatagramsWithTimeout(
                 3,
                 .fromSeconds(3),
@@ -16048,6 +16079,7 @@ test "WebTransport stateful preconfigured runtime exchanges associated streams" 
                 .fromSeconds(3),
             );
             try std.testing.expectEqual(@as(usize, 2), datagrams_sent);
+            self.stage = .session_data;
             const session_data_event = try session
                 .receiveSessionEventWithTimeout(.fromSeconds(3));
             try std.testing.expect(session_data_event == .draining);
@@ -16056,6 +16088,7 @@ test "WebTransport stateful preconfigured runtime exchanges associated streams" 
             // uni stream may complete first. Association routing must remain
             // correct across streams while the missing bidi prefix/data is
             // recovered.
+            self.stage = .streams;
             var received_bidi = false;
             var received_uni = false;
             while (!received_bidi or !received_uni) {
@@ -16091,6 +16124,7 @@ test "WebTransport stateful preconfigured runtime exchanges associated streams" 
             const server_uni = try session.openUnidirectionalStream();
             try session.sendStream(server_uni, "server-uni", true);
 
+            self.stage = .reset_stop;
             var reset_buffer: [32]u8 = undefined;
             while (true) {
                 const event = try session.readStreamWithTimeout(
@@ -16131,6 +16165,7 @@ test "WebTransport stateful preconfigured runtime exchanges associated streams" 
                 }
             }
 
+            self.stage = .close;
             try session.drain();
             const close_event = try session.receiveSessionEventWithTimeout(
                 .fromSeconds(3),
@@ -16198,6 +16233,7 @@ test "WebTransport stateful preconfigured runtime exchanges associated streams" 
             .zero,
         ),
     );
+    client_stage = .connect;
     var client = try StatefulProtectedClientSession.connectWithDeadline(
         allocator,
         io,
@@ -16213,6 +16249,7 @@ test "WebTransport stateful preconfigured runtime exchanges associated streams" 
         client.address(),
         client.session.h3.address(),
     );
+    client_stage = .datagrams;
     var invalid_datagram_count: usize = 99;
     try std.testing.expectError(
         error.Timeout,
@@ -16268,6 +16305,7 @@ test "WebTransport stateful preconfigured runtime exchanges associated streams" 
         before_invalid_registry,
         client.session.streams.registered().len,
     );
+    client_stage = .session_data;
     var unknown_storage: [64]u8 = undefined;
     const unknown = try http3.capsule.writeInto(
         &unknown_storage,
@@ -16291,6 +16329,7 @@ test "WebTransport stateful preconfigured runtime exchanges associated streams" 
 
     // Practical transport parameters provide immediate credit. Exercise both
     // bounded directions and verify the QUIC reservation counter advances.
+    client_stage = .streams;
     const bidi = try client.openBidirectionalStreamWithTimeout(
         .fromSeconds(1),
     );
@@ -16335,6 +16374,7 @@ test "WebTransport stateful preconfigured runtime exchanges associated streams" 
     );
     try std.testing.expect(client.stats().packets_lost >= 1);
 
+    client_stage = .reset_stop;
     const reset_bidi = try client.openBidirectionalStream();
     try std.testing.expectError(
         error.StreamLimitExceeded,
@@ -16381,6 +16421,7 @@ test "WebTransport stateful preconfigured runtime exchanges associated streams" 
             else => {},
         }
     }
+    client_stage = .close;
     const drain_event = try client.receiveSessionEventWithTimeout(
         .fromSeconds(3),
     );
