@@ -13484,6 +13484,7 @@ test "WebTransport DATAGRAM waiter recovers a lost control packet" {
     var threaded = std.Io.Threaded.init(allocator, .{});
     defer threaded.deinit();
     const io = threaded.io();
+    const operation_timeout = std.Io.Duration.fromSeconds(30);
     const original_dcid =
         [_]u8{ 0x57, 0x54, 0x44, 0x47, 0x50, 0x00, 0x00, 0x01 };
     const client_cid = [_]u8{ 0x57, 0x54, 0x44, 0x47, 0x50, 0x00, 0x00, 0x02 };
@@ -13506,23 +13507,58 @@ test "WebTransport DATAGRAM waiter recovers a lost control packet" {
     defer server.deinit();
 
     const Shared = struct {
+        const Stage = enum {
+            accept,
+            open_stream,
+            send_stream,
+            read_stop,
+            send_datagram,
+        };
+
         server: *HandshakeServer,
+        io: std.Io,
+        timeout: std.Io.Duration,
+        stage: Stage = .accept,
         err: ?anyerror = null,
 
         fn run(shared: *@This()) void {
             runFallible(shared) catch |err| {
+                std.debug.print(
+                    "WebTransport DATAGRAM waiter server failed during {s}: {s}\n",
+                    .{ @tagName(shared.stage), @errorName(err) },
+                );
                 shared.err = err;
             };
         }
 
         fn runFallible(shared: *@This()) !void {
-            var accepted = try shared.server.accept();
+            const deadline = std.Io.Clock.Timestamp.fromNow(
+                shared.io,
+                .{ .raw = shared.timeout, .clock = .awake },
+            );
+            var accepted = try shared.server.acceptWithDeadline(deadline);
             defer accepted.deinit();
             var buffer: [32]u8 = undefined;
-            const stream_id = try accepted.openUnidirectionalStream();
-            try accepted.sendStream(stream_id, "stop", false);
+            shared.stage = .open_stream;
+            const stream_id = try accepted.openUnidirectionalStreamWithDeadline(
+                deadline,
+            );
+            shared.stage = .send_stream;
+            var committed: usize = 0;
+            try accepted.sendStreamWithDeadline(
+                stream_id,
+                "stop",
+                false,
+                &committed,
+                deadline,
+            );
+            try std.testing.expectEqual(@as(usize, "stop".len), committed);
+            shared.stage = .read_stop;
             while (true) {
-                const event = try accepted.readStream(&buffer);
+                const event = try accepted.readStreamWithDeadline(
+                    &buffer,
+                    deadline,
+                );
                 if (event != .stopped) continue;
                 try std.testing.expectEqual(stream_id, event.stopped.stream_id);
                 try std.testing.expectEqual(
@@ -13531,14 +13567,31 @@ test "WebTransport DATAGRAM waiter recovers a lost control packet" {
                 );
                 break;
             }
-            try accepted.sendDatagram("cancel observed");
+            shared.stage = .send_datagram;
+            try accepted.sendDatagramWithDeadline("cancel observed", deadline);
         }
     };
 
-    var shared = Shared{ .server = &server };
+    var shared = Shared{
+        .server = &server,
+        .io = io,
+        .timeout = operation_timeout,
+    };
     const thread = try std.Thread.spawn(.{}, Shared.run, .{&shared});
     var joined = false;
     defer if (!joined) thread.join();
+    const ClientStage = enum {
+        connect,
+        read_stream,
+        stop_stream,
+        receive_datagram,
+        join,
+    };
+    var client_stage: ClientStage = .connect;
+    errdefer std.debug.print(
+        "WebTransport DATAGRAM waiter client failed during {s}\n",
+        .{@tagName(client_stage)},
+    );
     var drop_enabled = false;
     var dropped: usize = 0;
     const DropFirst = struct {
@@ -13551,7 +13604,11 @@ test "WebTransport DATAGRAM waiter recovers a lost control packet" {
         }
     };
     var drop_state = .{ .enabled = &drop_enabled, .count = &dropped };
-    var client = try HandshakeClientSession.connect(
+    const deadline = std.Io.Clock.Timestamp.fromNow(
+        io,
+        .{ .raw = operation_timeout, .clock = .awake },
+    );
+    var client = try HandshakeClientSession.connectWithDeadline(
         allocator,
         io,
         .{ .ip4 = .loopback(0) },
@@ -13575,14 +13632,16 @@ test "WebTransport DATAGRAM waiter recovers a lost control packet" {
                 .x25519_secret_key = [_]u8{0xc2} ** 32,
             } },
         },
+        deadline,
     );
     defer client.deinit();
     // A server-created unidirectional stream gives the client a receive side
     // on which STOP_SENDING is valid.
+    client_stage = .read_stream;
     var stopped: ?u62 = null;
     var buffer: [32]u8 = undefined;
     while (stopped == null) {
-        const event = try client.readStream(&buffer);
+        const event = try client.readStreamWithDeadline(&buffer, deadline);
         if (event != .data) return error.UnexpectedStreamEvent;
         try std.testing.expectEqualStrings(
             "stop",
@@ -13591,9 +13650,11 @@ test "WebTransport DATAGRAM waiter recovers a lost control packet" {
         stopped = event.data.stream_id;
     }
     drop_enabled = true;
-    try client.stopStream(stopped.?, 88);
+    client_stage = .stop_stream;
+    try client.stopStreamWithDeadline(stopped.?, 88, deadline);
 
-    var observed = try client.receiveDatagram();
+    client_stage = .receive_datagram;
+    var observed = try client.receiveDatagramWithDeadline(deadline);
     defer observed.deinit(allocator);
     try std.testing.expectEqualStrings(
         "cancel observed",
@@ -13601,6 +13662,7 @@ test "WebTransport DATAGRAM waiter recovers a lost control packet" {
     );
     try std.testing.expectEqual(@as(usize, 1), dropped);
 
+    client_stage = .join;
     thread.join();
     joined = true;
     if (shared.err) |err| return err;
