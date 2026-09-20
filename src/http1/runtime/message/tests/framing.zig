@@ -95,6 +95,20 @@ test "HTTP/1 message framing bounds chunk extensions and trailers independently"
         error.ChunkExtensionTooLarge,
         targetLength(incomplete.items, 1024, 1, null),
     );
+
+    var complete: std.ArrayList(u8) = .empty;
+    defer complete.deinit(std.testing.allocator);
+    try complete.appendSlice(std.testing.allocator, head ++ "1");
+    try complete.appendNTimes(
+        std.testing.allocator,
+        ' ',
+        http1.max_chunk_size_line_bytes - 1,
+    );
+    try complete.appendSlice(std.testing.allocator, "\r\nx\r\n0\r\n\r\n");
+    try std.testing.expectError(
+        error.ChunkExtensionTooLarge,
+        targetLength(complete.items, 1024, 1, null),
+    );
 }
 
 test "HTTP/1 message framing enforces exact head limits" {

@@ -600,7 +600,7 @@ pub fn Reader(comptime RuntimeError: type) type {
             while (true) {
                 const size = try self.readChunkSize(
                     &extension_bytes,
-                    http1.max_chunk_extension_bytes + 32,
+                    http1.max_chunk_size_line_bytes,
                 );
                 if (size == 0) {
                     const trailers = try self.readTrailers();
@@ -702,6 +702,9 @@ pub fn Reader(comptime RuntimeError: type) type {
                     self.buffered(),
                     "\r\n",
                 )) |end| {
+                    if (end >= max_bytes) {
+                        return error.ChunkExtensionTooLarge;
+                    }
                     const line = self.buffered()[0..end];
                     const semi = std.mem.indexOfScalar(
                         u8,

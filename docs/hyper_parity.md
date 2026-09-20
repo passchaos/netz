@@ -287,9 +287,12 @@ payload only, not chunk-size lines, extensions, CRLF framing, trailers, or
 bytes read ahead from the next pipelined message. Exact-limit and empty chunked
 bodies therefore remain valid, while an oversized chunk is rejected as soon as
 its size line is available. Trailer blocks have their own `max_head_bytes`
-budget, incomplete chunk-size lines use the streaming reader's
-`max_chunk_extension_bytes + 32` bound, and the unbuffered adapter retains
-one-byte reads until it discovers the exact message boundary.
+budget, and every chunk-size line has a shared
+`max_chunk_extension_bytes + 32` wire bound. The limit is enforced whether or
+not CRLF is already buffered, so one oversized complete line cannot bypass the
+incremental check; the unbuffered adapter retains one-byte reads until it
+discovers the exact message boundary. Pure decoding, aggregate framing, and
+streaming-reader regressions cover the complete-line case.
 
 The batch read path intentionally rejects chunked bodies because their complete
 wire boundary requires body parsing; existing owned request APIs remain the

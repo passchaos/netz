@@ -277,6 +277,12 @@ pub const InformationalResponseHead = struct {
 };
 
 pub const max_chunk_extension_bytes: usize = 16 * 1024;
+/// Exclusive upper bound for a complete chunk-size line before its CRLF.
+/// The fixed allowance covers the hexadecimal size and optional whitespace;
+/// the remainder bounds extensions. Keeping one shared bound prevents a peer
+/// from bypassing the streaming limit by delivering an oversized line and its
+/// terminator in the same transport read.
+pub const max_chunk_size_line_bytes: usize = max_chunk_extension_bytes + 32;
 
 pub const BodyFraming = enum {
     /// No message body framing was present in the parsed bytes.
@@ -1808,6 +1814,9 @@ fn scanChunkedBody(bytes: []const u8) Error!ChunkedBodyScan {
 
     while (true) {
         const line_end_rel = std.mem.indexOf(u8, bytes[pos..], "\r\n") orelse return error.BufferTooShort;
+        if (line_end_rel >= max_chunk_size_line_bytes) {
+            return error.ChunkExtensionTooLarge;
+        }
         const line = bytes[pos .. pos + line_end_rel];
         pos += line_end_rel + 2;
         const semi = std.mem.indexOfScalar(u8, line, ';') orelse line.len;
@@ -2723,10 +2732,27 @@ test "HTTP/1 chunked extensions are bounded" {
     const allocator = std.testing.allocator;
     var raw: std.ArrayList(u8) = .empty;
     defer raw.deinit(allocator);
+    try raw.append(allocator, '1');
+    try raw.appendNTimes(allocator, ' ', max_chunk_size_line_bytes - 2);
+    try raw.appendSlice(allocator, "\r\nx\r\n0\r\n\r\n");
+    var exact = try decodeChunked(allocator, raw.items, .{});
+    defer exact.deinit(allocator);
+    try std.testing.expectEqualStrings("x", exact.body);
+
+    raw.clearRetainingCapacity();
     try raw.appendSlice(allocator, "1;");
     try raw.appendNTimes(allocator, 'a', max_chunk_extension_bytes + 1);
     try raw.appendSlice(allocator, "\r\nx\r\n0\r\n\r\n");
     try std.testing.expectError(error.ChunkExtensionTooLarge, decodeChunked(allocator, raw.items, .{}));
+
+    raw.clearRetainingCapacity();
+    try raw.append(allocator, '1');
+    try raw.appendNTimes(allocator, ' ', max_chunk_size_line_bytes - 1);
+    try raw.appendSlice(allocator, "\r\nx\r\n0\r\n\r\n");
+    try std.testing.expectError(
+        error.ChunkExtensionTooLarge,
+        decodeChunked(allocator, raw.items, .{}),
+    );
 
     try std.testing.expectError(error.InvalidChunk, decodeChunked(allocator, "\r\n0\r\n\r\n", .{}));
     try std.testing.expectError(error.InvalidChunk, decodeChunked(allocator, "+1\r\nx\r\n0\r\n\r\n", .{}));

@@ -240,11 +240,14 @@ fn chunkedWireLength(
     while (true) {
         const remaining = body[pos..];
         const line_end = std.mem.indexOf(u8, remaining, "\r\n") orelse {
-            if (remaining.len >= http1.max_chunk_extension_bytes + 32) {
+            if (remaining.len >= http1.max_chunk_size_line_bytes) {
                 return error.ChunkExtensionTooLarge;
             }
             return error.BufferTooShort;
         };
+        if (line_end >= http1.max_chunk_size_line_bytes) {
+            return error.ChunkExtensionTooLarge;
+        }
         const line = remaining[0..line_end];
         const line_wire_len = std.math.add(usize, line_end, 2) catch
             return error.ChunkSizeOverflow;

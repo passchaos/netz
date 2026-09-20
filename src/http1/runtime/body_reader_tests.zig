@@ -254,6 +254,60 @@ test "HTTP/1 chunked reader batches transport reads across chunk boundaries" {
     );
 }
 
+test "HTTP/1 streaming chunked reader bounds a complete size line" {
+    const allocator = std.testing.allocator;
+    const BodyReader = @import("body_reader.zig");
+    const TestError = http1.Error || std.mem.Allocator.Error || error{
+        BodyTooLarge,
+        ConnectionClosed,
+        HeadersTooLarge,
+    };
+    const Reader = BodyReader.Reader(TestError);
+    const head =
+        "POST /bounded HTTP/1.1\r\n" ++
+        "Host: localhost\r\n" ++
+        "Transfer-Encoding: chunked\r\n\r\n";
+    var raw: std.ArrayList(u8) = .empty;
+    defer raw.deinit(allocator);
+    try raw.appendSlice(allocator, head ++ "1");
+    try raw.appendNTimes(
+        allocator,
+        ' ',
+        http1.max_chunk_size_line_bytes - 1,
+    );
+    try raw.appendSlice(allocator, "\r\nx\r\n0\r\n\r\n");
+
+    const Source = struct {
+        fn readSome(
+            _: ?*anyopaque,
+            _: []u8,
+        ) TestError!usize {
+            return 0;
+        }
+    };
+    const Context = struct {
+        fn begin(_: *@This(), _: Reader.RequestHead) !void {}
+        fn consume(_: *@This(), _: []const u8) !void {}
+    };
+    var source = Source{};
+    var inbuf: std.ArrayList(u8) = .empty;
+    defer inbuf.deinit(allocator);
+    try inbuf.appendSlice(allocator, raw.items);
+    var reader = Reader{
+        .allocator = allocator,
+        .context = &source,
+        .read_some = Source.readSome,
+        .inbuf = &inbuf,
+        .limits = .{ .max_head_bytes = 1024, .max_body_bytes = 1 },
+        .options = .{},
+    };
+    var context = Context{};
+    try std.testing.expectError(
+        error.ChunkExtensionTooLarge,
+        reader.readRequest(&context, Context.begin, Context.consume),
+    );
+}
+
 test "HTTP/1 streaming request reads fixed body without aggregation" {
     const allocator = std.testing.allocator;
     var threaded = std.Io.Threaded.init(allocator, .{});
