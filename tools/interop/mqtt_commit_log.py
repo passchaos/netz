@@ -5,6 +5,7 @@ from __future__ import annotations
 
 import argparse
 from pathlib import Path
+import shutil
 import socket
 import subprocess
 import tempfile
@@ -14,6 +15,7 @@ from mqtt_vectors import source_lock
 
 
 MOSQUITTO_SOURCES = (
+    "broker/04-retain-check-source-persist.py",
     "broker/11-message-expiry.py",
     "broker/11-subscription-id.py",
 )
@@ -71,32 +73,47 @@ def connect_packet(client_id: str, *, clean_start: bool) -> bytes:
     return packet(0x10, body)
 
 
-def subscribe_packet(packet_id: int, topic_filter: str) -> bytes:
-    properties = bytes((0x0B, SUBSCRIPTION_IDENTIFIER))
+def subscribe_packet(
+    packet_id: int, topic_filter: str,
+    *, subscription_identifier: int | None = SUBSCRIPTION_IDENTIFIER,
+    qos: int = 1,
+) -> bytes:
+    properties = (
+        bytes((0x0B, subscription_identifier))
+        if subscription_identifier is not None else b""
+    )
     return packet(
         0x82,
         packet_id.to_bytes(2, "big")
         + remaining_length(len(properties))
         + properties
         + mqtt_string(topic_filter)
-        + b"\x01",
+        + bytes((qos,)),
     )
 
 
 def publish_packet(
-    topic: str, payload: bytes, packet_id: int, *, expiry_seconds: int | None = None
+    topic: str, payload: bytes, packet_id: int,
+    *, expiry_seconds: int | None = None, retain: bool = False,
 ) -> bytes:
     properties = (
         b"\x02" + expiry_seconds.to_bytes(4, "big")
         if expiry_seconds is not None else b""
     )
     return packet(
-        0x32,
+        0x33 if retain else 0x32,
         mqtt_string(topic)
         + packet_id.to_bytes(2, "big")
         + remaining_length(len(properties))
         + properties
         + payload,
+    )
+
+
+def qos0_publish_packet(topic: str, payload: bytes, *, retain: bool) -> bytes:
+    return packet(
+        0x31 if retain else 0x30,
+        mqtt_string(topic) + b"\x00" + payload,
     )
 
 
@@ -187,7 +204,8 @@ def connect_client(
 
 
 def start_broker(
-    executable: Path, port: int, journal: Path, connections: int
+    executable: Path, port: int, journal: Path, connections: int,
+    *, extra_args: tuple[str, ...] = (),
 ) -> subprocess.Popen[str]:
     process = subprocess.Popen(
         [
@@ -198,6 +216,7 @@ def start_broker(
             "--max-outgoing-inflight=8",
             "--queue-qos0-messages",
             f"--commit-log={journal}",
+            *extra_args,
         ],
         stdout=subprocess.PIPE,
         stderr=subprocess.STDOUT,
@@ -209,6 +228,125 @@ def start_broker(
         process.kill()
         raise RuntimeError(f"netz broker failed to start: {line.strip()}")
     return process
+
+
+def stop_broker(process: subprocess.Popen[str]) -> None:
+    process.wait(timeout=5)
+    if process.returncode != 0:
+        assert process.stdout is not None
+        raise RuntimeError(
+            f"netz broker exited {process.returncode}: "
+            + process.stdout.read()
+        )
+
+
+def verify_retained_source_recovery(executable: Path) -> None:
+    topic = "retain/check-source"
+    payload = b"retained across SIGKILL"
+    source_client_id = "journal-retained-writer"
+    with tempfile.TemporaryDirectory(prefix="netz-mqtt-retained-journal-") as raw:
+        directory = Path(raw)
+        source_journal = directory / "source.log"
+        source_port = free_port()
+        source = start_broker(executable, source_port, source_journal, 1)
+        publisher = None
+        try:
+            publisher = connect_client(
+                source_port,
+                source_client_id, clean_start=True, session_present=False,
+            )
+            publisher.sendall(publish_packet(
+                topic, payload, 7, retain=True
+            ))
+            first, body = read_packet(publisher)
+            if first != 0x40 or body != b"\x00\x07\x10":
+                raise AssertionError(
+                    f"unexpected retained PUBACK: {first:#x} {body.hex()}"
+                )
+            source.kill()
+            source.wait(timeout=5)
+        finally:
+            if publisher is not None:
+                publisher.close()
+            if source.poll() is None:
+                source.kill()
+                source.wait()
+
+        denied_journal = directory / "denied.log"
+        unchecked_journal = directory / "unchecked.log"
+        shutil.copyfile(source_journal, denied_journal)
+        shutil.copyfile(source_journal, unchecked_journal)
+
+        cases = (
+            ("denied", denied_journal, (), False),
+            (
+                "unchecked",
+                unchecked_journal,
+                ("--no-check-retain-source",),
+                True,
+            ),
+        )
+        for label, journal, policy_args, expect_replay in cases:
+            port = free_port()
+            broker = start_broker(
+                executable,
+                port,
+                journal,
+                1,
+                extra_args=(
+                    f"--deny-retained-source-client-id={source_client_id}",
+                    *policy_args,
+                ),
+            )
+            subscriber = None
+            try:
+                subscriber = connect_client(
+                    port,
+                    f"retained-reader-{label}",
+                    clean_start=True,
+                    session_present=False,
+                )
+                subscriber.sendall(subscribe_packet(
+                    1, topic, subscription_identifier=None, qos=0
+                ))
+                first, body = read_packet(subscriber)
+                if first != 0x90 or body != b"\x00\x01\x00\x00":
+                    raise AssertionError(
+                        f"unexpected retained SUBACK {label}: "
+                        f"{first:#x} {body.hex()}"
+                    )
+                if expect_replay:
+                    expected = qos0_publish_packet(
+                        topic, payload, retain=True
+                    )
+                    expected_first = expected[0]
+                    expected_length, expected_body_offset = read_varint(
+                        expected, 1
+                    )
+                    expected_body = expected[expected_body_offset:]
+                    if len(expected_body) != expected_length:
+                        raise AssertionError(
+                            "invalid expected retained PUBLISH framing"
+                        )
+                    actual = read_packet(subscriber)
+                    if actual != (expected_first, expected_body):
+                        raise AssertionError(
+                            f"unexpected retained replay {label}: "
+                            f"{actual[0]:#x} {actual[1].hex()}"
+                        )
+                subscriber.sendall(b"\xc0\x00")
+                if read_packet(subscriber) != (0xD0, b""):
+                    raise AssertionError(
+                        f"unexpected retained source result {label}"
+                    )
+                subscriber.sendall(b"\xe0\x00")
+                stop_broker(broker)
+            finally:
+                if subscriber is not None:
+                    subscriber.close()
+                if broker.poll() is None:
+                    broker.kill()
+                    broker.wait()
 
 
 def main() -> None:
@@ -313,6 +451,11 @@ def main() -> None:
         "MQTT incremental commit-log SIGKILL recovery passed with reduced "
         "Message Expiry and Subscription Identifier "
         f"{SUBSCRIPTION_IDENTIFIER}"
+    )
+    verify_retained_source_recovery(args.broker)
+    print(
+        "MQTT retained-source authorization survived commit-log SIGKILL "
+        "recovery"
     )
 
 

@@ -365,6 +365,12 @@ The same crash/restart sequence is source-locked to Mosquitto's
 100-second delivery survives with a strictly reduced interval, and a third
 delivery without an expiry remains intact; both surviving messages retain
 Subscription Identifier 53 and their original order.
+An independent source-hash-locked branch mirrors Mosquitto's
+`04-retain-check-source-persist.py`: it commits a retained publication, kills
+the broker, clones that journal into isolated policy runs, and proves the
+restored publisher identity suppresses replay after write access is revoked.
+Disabling `check_retain_source` on the second clone must expose the exact
+retained PUBLISH, proving that denial did not merely delete the stored value.
 Unit coverage
 additionally verifies multi-generation replay, atomic compaction, torn-tail
 truncation, committed corruption rejection, and transactional broker-state
