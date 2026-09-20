@@ -14,8 +14,10 @@ const RESET_SENT: &[u8; 8] = b"NZWTRSNT";
 const RESETS_OBSERVED: &[u8; 8] = b"NZWTRST1";
 const FIN_SENT: &[u8; 8] = b"NZWTFSNT";
 const ACK: &[u8; 8] = b"NZWTACK1";
-const RESULT_MAGIC: &[u8; 8] = b"NZWTRES1";
-const RESULT_LEN: usize = 48;
+const RESULT_MAGIC: &[u8; 8] = b"NZWTRES2";
+const MAX_STREAMS: u16 = 256;
+const RESET_MASK_WORDS: usize = 4;
+const RESULT_LEN: usize = 32 + RESET_MASK_WORDS * 8 + 8;
 const STREAM_MAGIC: &[u8; 8] = b"NZWTSTRM";
 const STREAM_PRELUDE_LEN: usize = 12;
 const SIBLING_START: &[u8] = b"sibling-before-churn";
@@ -41,7 +43,7 @@ struct ResultSummary {
     resets: u16,
     received_bytes: u64,
     checksum: u64,
-    reset_mask: u64,
+    reset_mask: [u64; RESET_MASK_WORDS],
     reset_code_sum: u64,
 }
 
@@ -65,7 +67,7 @@ pub(crate) async fn run_client_connection(
 ) -> Result<()> {
     ensure!(matches!(fault, "loss" | "reorder"), "invalid churn fault");
     ensure!(
-        stream_count > 0 && stream_count <= 64,
+        stream_count > 0 && stream_count <= MAX_STREAMS,
         "invalid churn stream count"
     );
     ensure!(
@@ -237,13 +239,13 @@ pub(crate) async fn run_client_connection(
         "proxy counters changed after final disarm"
     );
     println!(
-        "wtransport client churn passed: fault={fault} fault_scope=wtransport-client-outbound streams={} fin={} reset={} bytes={} checksum={} reset_mask=0x{:016x} reset_code_sum={} considered={} dropped={} held={} reordered={} reset_dropped={} reset_held={} reset_reordered={} fin_dropped={} fin_held={} fin_reordered={} sibling=true peer-close=true client_io=wtransport-quinn-tokio server_io=zio-std-io",
+        "wtransport client churn passed: fault={fault} fault_scope=wtransport-client-outbound streams={} fin={} reset={} bytes={} checksum={} reset_mask=0x{} reset_code_sum={} considered={} dropped={} held={} reordered={} reset_dropped={} reset_held={} reset_reordered={} fin_dropped={} fin_held={} fin_reordered={} sibling=true peer-close=true client_io=wtransport-quinn-tokio server_io=zio-std-io",
         result.streams,
         result.fins,
         result.resets,
         result.received_bytes,
         result.checksum,
-        result.reset_mask,
+        format_reset_mask(&result.reset_mask),
         result.reset_code_sum,
         stopped.considered,
         stopped.dropped,
@@ -333,7 +335,7 @@ pub(crate) async fn run_server_connection(
 ) -> Result<()> {
     ensure!(matches!(fault, "loss" | "reorder"), "invalid churn fault");
     ensure!(
-        stream_count > 0 && stream_count <= 64,
+        stream_count > 0 && stream_count <= MAX_STREAMS,
         "invalid churn stream count"
     );
     ensure!(
@@ -359,7 +361,7 @@ pub(crate) async fn run_server_connection(
     );
 
     let mut streams = Vec::with_capacity(usize::from(stream_count));
-    let mut seen = 0u64;
+    let mut seen = [0u64; RESET_MASK_WORDS];
     for _ in 0..stream_count {
         let mut receiver = timeout_at(deadline, connection.accept_uni())
             .await
@@ -379,9 +381,7 @@ pub(crate) async fn run_server_connection(
             index < usize::from(stream_count),
             "churn stream index out of range"
         );
-        let bit = 1u64 << index;
-        ensure!(seen & bit == 0, "duplicate churn stream index");
-        seen |= bit;
+        ensure!(mark_bit(&mut seen, index), "duplicate churn stream index");
 
         let mut prefix = [0u8; RESET_AFTER_BYTES];
         read_exact_until(&mut receiver, &mut prefix, deadline, "churn stream prefix").await?;
@@ -424,14 +424,17 @@ pub(crate) async fn run_server_connection(
     let mut received_bytes = 0u64;
     let mut checksum = 0u64;
     let mut resets = 0u16;
-    let mut reset_mask = 0u64;
+    let mut reset_mask = [0u64; RESET_MASK_WORDS];
     let mut reset_code_sum = 0u64;
     while let Some(result) = reset_readers.join_next().await {
         let result = result.context("churn reset reader task failed")??;
         received_bytes = received_bytes.wrapping_add(result.bytes);
         checksum = checksum.wrapping_add(result.checksum);
         resets += 1;
-        reset_mask |= 1u64 << result.index;
+        ensure!(
+            mark_bit(&mut reset_mask, result.index),
+            "duplicate churn reset index"
+        );
         reset_code_sum =
             reset_code_sum.wrapping_add(u64::from(RESET_CODE_BASE) + result.index as u64);
     }
@@ -552,7 +555,8 @@ pub(crate) async fn run_server_connection(
         .await
         .context("churn control response FIN timed out")??;
     println!(
-        "wtransport server churn passed: fault={fault} fault_scope=netz-client-outbound streams={stream_count} fin={fins} reset={resets} bytes={received_bytes} checksum={checksum} reset_mask=0x{reset_mask:016x} reset_code_sum={reset_code_sum} sibling=true client_io=zio-std-io server_io=wtransport-quinn-tokio"
+        "wtransport server churn passed: fault={fault} fault_scope=netz-client-outbound streams={stream_count} fin={fins} reset={resets} bytes={received_bytes} checksum={checksum} reset_mask=0x{} reset_code_sum={reset_code_sum} sibling=true client_io=zio-std-io server_io=wtransport-quinn-tokio",
+        format_reset_mask(&reset_mask),
     );
     Ok(())
 }
@@ -639,13 +643,46 @@ fn checksum_bytes(bytes: &[u8]) -> u64 {
         .fold(0u64, |sum, byte| sum.wrapping_add(u64::from(*byte)))
 }
 
+fn mark_bit(mask: &mut [u64; RESET_MASK_WORDS], index: usize) -> bool {
+    let word = &mut mask[index / 64];
+    let bit = 1u64 << (index % 64);
+    if *word & bit != 0 {
+        return false;
+    }
+    *word |= bit;
+    true
+}
+
+fn encode_reset_mask(out: &mut [u8], mask: &[u64; RESET_MASK_WORDS]) {
+    assert_eq!(out.len(), RESET_MASK_WORDS * 8);
+    for (wire_index, word) in mask.iter().rev().enumerate() {
+        out[wire_index * 8..][..8].copy_from_slice(&word.to_be_bytes());
+    }
+}
+
+fn decode_reset_mask(bytes: &[u8]) -> [u64; RESET_MASK_WORDS] {
+    assert_eq!(bytes.len(), RESET_MASK_WORDS * 8);
+    let mut mask = [0u64; RESET_MASK_WORDS];
+    for (wire_index, word) in mask.iter_mut().rev().enumerate() {
+        *word = u64::from_be_bytes(bytes[wire_index * 8..][..8].try_into().unwrap());
+    }
+    mask
+}
+
+fn format_reset_mask(mask: &[u64; RESET_MASK_WORDS]) -> String {
+    format!(
+        "{:016x}{:016x}{:016x}{:016x}",
+        mask[3], mask[2], mask[1], mask[0]
+    )
+}
+
 fn encode_result(
     streams: u16,
     fins: u16,
     resets: u16,
     received_bytes: u64,
     checksum: u64,
-    reset_mask: u64,
+    reset_mask: [u64; RESET_MASK_WORDS],
     reset_code_sum: u64,
 ) -> [u8; RESULT_LEN] {
     let mut bytes = [0u8; RESULT_LEN];
@@ -655,8 +692,8 @@ fn encode_result(
     bytes[12..14].copy_from_slice(&resets.to_be_bytes());
     bytes[16..24].copy_from_slice(&received_bytes.to_be_bytes());
     bytes[24..32].copy_from_slice(&checksum.to_be_bytes());
-    bytes[32..40].copy_from_slice(&reset_mask.to_be_bytes());
-    bytes[40..48].copy_from_slice(&reset_code_sum.to_be_bytes());
+    encode_reset_mask(&mut bytes[32..64], &reset_mask);
+    bytes[64..72].copy_from_slice(&reset_code_sum.to_be_bytes());
     bytes
 }
 
@@ -672,8 +709,8 @@ fn decode_result(bytes: &[u8; RESULT_LEN]) -> Result<ResultSummary> {
         resets: u16::from_be_bytes(bytes[12..14].try_into().unwrap()),
         received_bytes: u64::from_be_bytes(bytes[16..24].try_into().unwrap()),
         checksum: u64::from_be_bytes(bytes[24..32].try_into().unwrap()),
-        reset_mask: u64::from_be_bytes(bytes[32..40].try_into().unwrap()),
-        reset_code_sum: u64::from_be_bytes(bytes[40..48].try_into().unwrap()),
+        reset_mask: decode_reset_mask(&bytes[32..64]),
+        reset_code_sum: u64::from_be_bytes(bytes[64..72].try_into().unwrap()),
     })
 }
 
@@ -684,7 +721,7 @@ fn expected_result(stream_count: u16, bytes_per_stream: usize) -> ResultSummary 
         resets: 0,
         received_bytes: 0,
         checksum: 0,
-        reset_mask: 0,
+        reset_mask: [0; RESET_MASK_WORDS],
         reset_code_sum: 0,
     };
     for index in 0..usize::from(stream_count) {
@@ -700,7 +737,7 @@ fn expected_result(stream_count: u16, bytes_per_stream: usize) -> ResultSummary 
             .wrapping_add(checksum_bytes(&payload(index, 0, count)));
         if reset {
             result.resets += 1;
-            result.reset_mask |= 1u64 << index;
+            assert!(mark_bit(&mut result.reset_mask, index));
             result.reset_code_sum += u64::from(RESET_CODE_BASE) + index as u64;
         } else {
             result.fins += 1;
@@ -715,7 +752,8 @@ mod tests {
 
     #[test]
     fn result_encoding_is_stable() {
-        let bytes = encode_result(32, 16, 16, 266_240, 33_945_600, 0xaaaa_aaaa, 262_400);
+        let mask = [0xaaaa_aaaa, 0, 0, 0];
+        let bytes = encode_result(32, 16, 16, 266_240, 33_945_600, mask, 262_400);
         assert_eq!(&bytes[0..8], RESULT_MAGIC);
         assert_eq!(u16::from_be_bytes(bytes[8..10].try_into().unwrap()), 32);
         assert_eq!(u16::from_be_bytes(bytes[10..12].try_into().unwrap()), 16);
@@ -728,18 +766,20 @@ mod tests {
             u64::from_be_bytes(bytes[24..32].try_into().unwrap()),
             33_945_600
         );
+        assert_eq!(decode_reset_mask(&bytes[32..64]), mask);
         assert_eq!(
-            u64::from_be_bytes(bytes[32..40].try_into().unwrap()),
-            0xaaaa_aaaa
-        );
-        assert_eq!(
-            u64::from_be_bytes(bytes[40..48].try_into().unwrap()),
+            u64::from_be_bytes(bytes[64..72].try_into().unwrap()),
             262_400
+        );
+        assert_eq!(decode_result(&bytes).unwrap().reset_mask, mask);
+        assert_eq!(
+            format_reset_mask(&mask),
+            "00000000000000000000000000000000000000000000000000000000aaaaaaaa"
         );
     }
 
     #[test]
-    fn expected_results_cover_32_and_64_stream_shapes() {
+    fn expected_results_cover_32_64_and_256_stream_shapes() {
         assert_eq!(
             expected_result(32, 16_384),
             ResultSummary {
@@ -748,7 +788,7 @@ mod tests {
                 resets: 16,
                 received_bytes: 266_240,
                 checksum: 33_945_600,
-                reset_mask: 0xaaaa_aaaa,
+                reset_mask: [0xaaaa_aaaa, 0, 0, 0],
                 reset_code_sum: 262_400,
             }
         );
@@ -757,8 +797,15 @@ mod tests {
         assert_eq!(result.resets, 32);
         assert_eq!(result.received_bytes, 532_480);
         assert_eq!(result.checksum, 67_891_200);
-        assert_eq!(result.reset_mask, 0xaaaa_aaaa_aaaa_aaaa);
+        assert_eq!(result.reset_mask, [0xaaaa_aaaa_aaaa_aaaa, 0, 0, 0]);
         assert_eq!(result.reset_code_sum, 525_312);
+        let large = expected_result(256, 16_384);
+        assert_eq!(large.fins, 128);
+        assert_eq!(large.resets, 128);
+        assert_eq!(large.received_bytes, 2_129_920);
+        assert_eq!(large.checksum, 271_564_800);
+        assert_eq!(large.reset_mask, [u64::MAX / 3 * 2; 4]);
+        assert_eq!(large.reset_code_sum, 2_113_536);
     }
 
     #[test]

@@ -14,6 +14,8 @@ const PING_MAGIC: &[u8; 6] = b"NZPING";
 const PING_HEADER_LEN: usize = 14;
 const MAX_DATAGRAM_SIZE: u16 = 1200;
 const MAX_STREAMS: u64 = 4096;
+const MAX_PARALLEL_STREAMS: u16 = 256;
+const STREAM_MASK_WORDS: usize = MAX_PARALLEL_STREAMS as usize / u64::BITS as usize;
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 enum Mode {
@@ -115,7 +117,10 @@ impl Config {
             Mode::Stream => 5,
             Mode::DatagramPingPong => 5_000,
         });
-        ensure!(streams <= 64, "--streams must not exceed 64");
+        ensure!(
+            streams <= MAX_PARALLEL_STREAMS,
+            "--streams must not exceed {MAX_PARALLEL_STREAMS}"
+        );
         ensure!(
             netz_max_ack_delay_us <= 25_000,
             "--netz-max-ack-delay-us must not exceed 25000"
@@ -854,7 +859,7 @@ async fn run_stream_server(
         let ready = receive_control(control, config, Kind::RoundReady).await?;
         ensure!(ready.round == round, "ROUND_READY round mismatch");
         let mut streams = Vec::with_capacity(config.streams as usize);
-        let mut seen = 0u64;
+        let mut seen = [0u64; STREAM_MASK_WORDS];
         for _ in 0..config.streams {
             let (sender, mut receiver) = timeout(config.timeout(), connection.accept_bi())
                 .await
@@ -864,9 +869,10 @@ async fn run_stream_server(
                 .await
                 .context("benchmark stream prelude timed out")??;
             let stream_index = verify_stream_prelude(&prelude, config, round)?;
-            let bit = 1u64 << stream_index;
-            ensure!(seen & bit == 0, "duplicate benchmark stream index");
-            seen |= bit;
+            ensure!(
+                mark_stream(&mut seen, stream_index),
+                "duplicate benchmark stream index"
+            );
             streams.push((
                 stream_index,
                 sender,
@@ -1213,6 +1219,17 @@ fn server_io(role_pair: &str) -> &'static str {
     }
 }
 
+fn mark_stream(mask: &mut [u64; STREAM_MASK_WORDS], stream_index: usize) -> bool {
+    debug_assert!(stream_index < MAX_PARALLEL_STREAMS as usize);
+    let word = &mut mask[stream_index / u64::BITS as usize];
+    let bit = 1u64 << (stream_index % u64::BITS as usize);
+    if *word & bit != 0 {
+        return false;
+    }
+    *word |= bit;
+    true
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -1256,6 +1273,32 @@ mod tests {
                 .warmup,
             200
         );
+    }
+
+    #[test]
+    fn parsing_and_tracking_support_256_parallel_streams() {
+        let config = Config::parse(&[
+            "--mode=stream".into(),
+            "--warmup=1".into(),
+            "--iterations=1".into(),
+            "--streams=256".into(),
+        ])
+        .unwrap();
+        assert_eq!(config.streams, 256);
+        assert!(Config::parse(&[
+            "--mode=stream".into(),
+            "--warmup=1".into(),
+            "--iterations=1".into(),
+            "--streams=257".into(),
+        ])
+        .is_err());
+
+        let mut mask = [0u64; STREAM_MASK_WORDS];
+        assert!(mark_stream(&mut mask, 63));
+        assert!(mark_stream(&mut mask, 64));
+        assert!(mark_stream(&mut mask, 255));
+        assert!(!mark_stream(&mut mask, 64));
+        assert_eq!(mask.iter().map(|word| word.count_ones()).sum::<u32>(), 3);
     }
 
     #[test]

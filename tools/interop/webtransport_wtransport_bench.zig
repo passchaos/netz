@@ -7,6 +7,8 @@ const ping_magic = "NZPING";
 const ping_header_len: usize = 14;
 pub const max_datagram_size: usize = 1200;
 const max_benchmark_streams: u64 = 4096;
+const max_parallel_streams: u16 = 256;
+const StreamMask = std.meta.Int(.unsigned, max_parallel_streams);
 
 pub const Mode = enum(u8) {
     stream = 1,
@@ -105,7 +107,8 @@ pub const Config = struct {
             .stream => 5,
             .datagram_pingpong => 5000,
         };
-        if (streams > 64 or chunk_bytes > bytes_per_stream or
+        if (streams > max_parallel_streams or
+            chunk_bytes > bytes_per_stream or
             netz_max_ack_delay_us > 25_000)
         {
             return error.InvalidArgument;
@@ -737,7 +740,7 @@ fn runStreamClient(
             return error.InvalidBenchmarkResult;
         }
         try sendControl(session, control, .init(.round_ack, config, round));
-        var reverse_fin: u64 = 0;
+        var reverse_fin: StreamMask = 0;
         while (@popCount(reverse_fin) < stream_ids.len) {
             var empty: [1]u8 = undefined;
             const event = try session.readStreamWithTimeout(
@@ -759,9 +762,9 @@ fn runStreamClient(
                 }
             }
             const index = found orelse return error.InvalidBenchmarkStream;
-            const bit = @as(u64, 1) << @intCast(index);
-            if (reverse_fin & bit != 0) return error.InvalidBenchmarkStream;
-            reverse_fin |= bit;
+            if (!markStream(&reverse_fin, index)) {
+                return error.InvalidBenchmarkStream;
+            }
         }
         if (round >= config.warmup) {
             const mib_s = if (elapsed == 0)
@@ -859,7 +862,7 @@ fn runStreamServer(
 
         var discovered: usize = 0;
         var preludes_complete: usize = 0;
-        var seen: u64 = 0;
+        var seen: StreamMask = 0;
         while (preludes_complete < streams.len) {
             const event = try session.readStreamWithTimeout(buffer, config.timeout());
             if (event != .data) return error.InvalidBenchmarkStream;
@@ -889,9 +892,9 @@ fn runStreamServer(
             entry.prelude_bytes += data.bytes;
             if (entry.prelude_bytes == entry.prelude.len) {
                 entry.index = try verifyStreamPrelude(&entry.prelude, config, round);
-                const bit = @as(u64, 1) << @intCast(entry.index);
-                if (seen & bit != 0) return error.InvalidBenchmarkStream;
-                seen |= bit;
+                if (!markStream(&seen, entry.index)) {
+                    return error.InvalidBenchmarkStream;
+                }
                 preludes_complete += 1;
             }
         }
@@ -1289,4 +1292,35 @@ fn percentile(
         denominator,
     ) catch unreachable;
     return sorted[@min(sorted.len - 1, rank -| 1)];
+}
+
+fn markStream(mask: *StreamMask, index: usize) bool {
+    std.debug.assert(index < max_parallel_streams);
+    const bit = @as(StreamMask, 1) << @intCast(index);
+    if (mask.* & bit != 0) return false;
+    mask.* |= bit;
+    return true;
+}
+
+test "WebTransport benchmark supports 256 parallel streams" {
+    const config = try Config.parse(&.{
+        "--mode=stream",
+        "--warmup=1",
+        "--iterations=1",
+        "--streams=256",
+    });
+    try std.testing.expectEqual(@as(u16, 256), config.streams);
+    try std.testing.expectError(error.InvalidArgument, Config.parse(&.{
+        "--mode=stream",
+        "--warmup=1",
+        "--iterations=1",
+        "--streams=257",
+    }));
+
+    var mask: StreamMask = 0;
+    try std.testing.expect(markStream(&mask, 63));
+    try std.testing.expect(markStream(&mask, 64));
+    try std.testing.expect(markStream(&mask, 255));
+    try std.testing.expect(!markStream(&mask, 64));
+    try std.testing.expectEqual(@as(usize, 3), @popCount(mask));
 }

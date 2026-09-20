@@ -36,7 +36,7 @@ trap on_exit EXIT
 cargo build --quiet --release --locked --manifest-path "$manifest"
 wtransport="$repo_root/tools/interop/webtransport_wtransport/target/release/netz-webtransport-wtransport"
 runs=${NETZ_WEBTRANSPORT_EXTERNAL_CHURN_RUNS:-2}
-stream_values=${NETZ_WEBTRANSPORT_EXTERNAL_CHURN_STREAMS:-"32 64"}
+stream_values=${NETZ_WEBTRANSPORT_EXTERNAL_CHURN_STREAMS:-"32 64 128 256"}
 timeout_seconds=${NETZ_WEBTRANSPORT_EXTERNAL_CHURN_TIMEOUT_SECONDS:-45}
 bytes_per_stream=${NETZ_WEBTRANSPORT_EXTERNAL_CHURN_BYTES:-16384}
 reset_after_bytes=256

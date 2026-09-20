@@ -65,8 +65,8 @@ def verify(
         raise ValueError("invalid sender")
     if fault not in ("loss", "reorder"):
         raise ValueError("invalid fault mode")
-    if not 1 <= streams <= 64:
-        raise ValueError("streams must be in 1..64")
+    if not 1 <= streams <= 256:
+        raise ValueError("streams must be in 1..256")
     if bytes_per_stream < 1 or not 0 <= reset_after_bytes <= bytes_per_stream:
         raise ValueError("invalid byte shape")
     if reset_every < 1:
@@ -143,7 +143,7 @@ def verify(
         "verified WebTransport churn: "
         f"fault={fault} streams={streams} fin={wanted['fin']} "
         f"reset={wanted['reset']} bytes={wanted['bytes']} "
-        f"checksum={wanted['checksum']} reset_mask=0x{wanted['reset_mask']:016x} "
+        f"checksum={wanted['checksum']} reset_mask=0x{wanted['reset_mask']:064x} "
         f"reset_code_sum={wanted['reset_code_sum']} "
         f"client_io={endpoint_io['client']} server_io={endpoint_io['server']} "
         f"considered={client['considered']} {counter}={client[counter]}"

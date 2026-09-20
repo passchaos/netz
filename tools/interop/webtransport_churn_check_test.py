@@ -17,7 +17,8 @@ class ChurnCheckTests(unittest.TestCase):
         fields = (
             "fault=loss fault_scope=netz-client-outbound streams=32 fin=16 "
             f"reset=16 bytes=266240 checksum={checksum} "
-            "reset_mask=0x00000000aaaaaaaa reset_code_sum=262400 sibling=true "
+            "reset_mask=0x00000000000000000000000000000000000000000000000000000000aaaaaaaa "
+            "reset_code_sum=262400 sibling=true "
             "client_io=zio-std-io server_io=wtransport-quinn-tokio"
         )
         client = pathlib.Path(directory, "client.log")
@@ -49,6 +50,33 @@ class ChurnCheckTests(unittest.TestCase):
         self.assertEqual(result["checksum"], 67_891_200)
         self.assertEqual(result["reset_mask"], 0xAAAA_AAAA_AAAA_AAAA)
         self.assertEqual(result["reset_code_sum"], 525_312)
+
+    def test_expected_256_stream_shape(self) -> None:
+        result = CHECK.expected(256, 16_384, 256, 2)
+        self.assertEqual(result["fin"], 128)
+        self.assertEqual(result["reset"], 128)
+        self.assertEqual(result["bytes"], 2_129_920)
+        self.assertEqual(result["checksum"], 271_564_800)
+        self.assertEqual(
+            result["reset_mask"],
+            int("aa" * 32, 16),
+        )
+        self.assertEqual(result["reset_code_sum"], 2_113_536)
+
+    def test_rejects_more_than_256_streams(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            client, server = self.write_pair(directory)
+            with self.assertRaisesRegex(ValueError, "1..256"):
+                CHECK.verify(
+                    sender="netz",
+                    fault="loss",
+                    streams=257,
+                    bytes_per_stream=16_384,
+                    reset_after_bytes=256,
+                    reset_every=2,
+                    client_log=client,
+                    server_log=server,
+                )
 
     def test_record_retains_hyphenated_keys(self) -> None:
         with tempfile.TemporaryDirectory() as directory:

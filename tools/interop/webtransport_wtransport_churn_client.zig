@@ -1,20 +1,18 @@
 const std = @import("std");
 const netz = @import("netz");
 const benchmark = @import("webtransport_wtransport_bench.zig");
+const churn_protocol = @import("webtransport_churn_protocol.zig");
 
 const ready = "NZWTRDY1";
 const reset_sent = "NZWTRSNT";
 const resets_observed = "NZWTRST1";
 const fin_sent = "NZWTFSNT";
 const ack = "NZWTACK1";
-const result_magic = "NZWTRES1";
-const result_len: usize = 48;
 const stream_magic = "NZWTSTRM";
 const stream_prelude_len: usize = 12;
 const sibling_start = "sibling-before-churn";
 const sibling_end = "-after-churn";
 const sibling_response = "sibling-survived";
-const max_streams: usize = 64;
 
 const Fault = enum(u8) {
     loss = 1,
@@ -258,7 +256,7 @@ pub fn run(_: std.process.Init, args: []const []const u8) !void {
     fault.enabled.store(false, .release);
     try sendExact(&client, control_id, fin_sent, false, deadline);
 
-    var encoded_result: [result_len]u8 = undefined;
+    var encoded_result: [churn_protocol.result_len]u8 = undefined;
     try receiveExact(&client, control_id, &encoded_result, deadline);
     const result = try decodeResult(&encoded_result);
     const expected = expectedResult(config, payloads);
@@ -294,7 +292,7 @@ pub fn run(_: std.process.Init, args: []const []const u8) !void {
         return error.FaultNotExercised;
     }
     std.debug.print(
-        "netz client churn passed: fault={s} fault_scope=netz-client-outbound streams={d} fin={d} reset={d} bytes={d} checksum={d} reset_mask=0x{x:0>16} reset_code_sum={d} considered={d} dropped={d} held={d} sibling=true peer-close=true client_io=zio-std-io server_io=wtransport-quinn-tokio\n",
+        "netz client churn passed: fault={s} fault_scope=netz-client-outbound streams={d} fin={d} reset={d} bytes={d} checksum={d} reset_mask=0x{x:0>64} reset_code_sum={d} considered={d} dropped={d} held={d} sibling=true peer-close=true client_io=zio-std-io server_io=wtransport-quinn-tokio\n",
         .{
             @tagName(config.fault),
             config.streams,
@@ -310,16 +308,6 @@ pub fn run(_: std.process.Init, args: []const []const u8) !void {
         },
     );
 }
-
-const Result = struct {
-    streams: u16,
-    fins: u16,
-    resets: u16,
-    received_bytes: u64,
-    checksum: u64,
-    reset_mask: u64,
-    reset_code_sum: u64,
-};
 
 fn parseArgs(args: []const []const u8) !Config {
     if (args.len == 0) return error.InvalidArgument;
@@ -341,7 +329,8 @@ fn parseArgs(args: []const []const u8) !Config {
             config.timeout_ms = try parsePositive(i64, arg["--timeout-ms=".len..]);
         } else return error.InvalidArgument;
     }
-    if (!have_fault or config.port == 0 or config.streams > max_streams or
+    if (!have_fault or config.port == 0 or
+        config.streams > churn_protocol.max_streams or
         config.reset_after_bytes > config.bytes_per_stream or
         config.reset_every > config.streams or config.timeout_ms <= 0)
     {
@@ -426,25 +415,17 @@ fn receiveFin(session: anytype, stream_id: u62, deadline: std.Io.Clock.Timestamp
     }
 }
 
-fn decodeResult(bytes: *const [result_len]u8) !Result {
-    if (!std.mem.eql(u8, bytes[0..8], result_magic) or
-        bytes[14] != 0 or bytes[15] != 0)
-    {
-        return error.InvalidChurnResult;
-    }
-    return .{
-        .streams = std.mem.readInt(u16, bytes[8..10], .big),
-        .fins = std.mem.readInt(u16, bytes[10..12], .big),
-        .resets = std.mem.readInt(u16, bytes[12..14], .big),
-        .received_bytes = std.mem.readInt(u64, bytes[16..24], .big),
-        .checksum = std.mem.readInt(u64, bytes[24..32], .big),
-        .reset_mask = std.mem.readInt(u64, bytes[32..40], .big),
-        .reset_code_sum = std.mem.readInt(u64, bytes[40..48], .big),
-    };
+fn decodeResult(
+    bytes: *const [churn_protocol.result_len]u8,
+) !churn_protocol.Result {
+    return churn_protocol.Result.decode(bytes);
 }
 
-fn expectedResult(config: Config, payloads: []const u8) Result {
-    var result: Result = .{
+fn expectedResult(
+    config: Config,
+    payloads: []const u8,
+) churn_protocol.Result {
+    var result: churn_protocol.Result = .{
         .streams = @intCast(config.streams),
         .fins = 0,
         .resets = 0,
@@ -462,7 +443,7 @@ fn expectedResult(config: Config, payloads: []const u8) Result {
         }
         if (reset) {
             result.resets += 1;
-            result.reset_mask |= @as(u64, 1) << @intCast(index);
+            result.markReset(index);
             result.reset_code_sum += config.reset_code + @as(u32, @intCast(index));
         } else result.fins += 1;
     }

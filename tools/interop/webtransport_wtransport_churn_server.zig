@@ -1,6 +1,7 @@
 const std = @import("std");
 const netz = @import("netz");
 const benchmark = @import("webtransport_wtransport_bench.zig");
+const churn_protocol = @import("webtransport_churn_protocol.zig");
 
 const ready = "NZWTRDY1";
 const sibling_ready = "NZWTSIB1";
@@ -8,8 +9,6 @@ const reset_sent = "NZWTRSNT";
 const resets_observed = "NZWTRST1";
 const fin_sent = "NZWTFSNT";
 const ack = "NZWTACK1";
-const result_magic = "NZWTRES1";
-const result_len: usize = 48;
 const stream_magic = "NZWTSTRM";
 const stream_prelude_len: usize = 12;
 const sibling_start = "sibling-before-churn";
@@ -19,7 +18,6 @@ const close_ready = "NZWTCLSR";
 const reset_after_bytes: usize = 256;
 const reset_every: usize = 2;
 const reset_code_base: u32 = 0x4000;
-const max_streams: usize = 64;
 
 pub fn run(_: std.process.Init, args: []const []const u8) !void {
     if (args.len < 2) return error.InvalidArgument;
@@ -31,7 +29,8 @@ pub fn run(_: std.process.Init, args: []const []const u8) !void {
         return error.InvalidArgument;
     }
     const config = try benchmark.Config.parse(args[2..]);
-    if (config.mode != .stream or config.streams > max_streams or
+    if (config.mode != .stream or
+        config.streams > churn_protocol.max_streams or
         config.bytes_per_stream < reset_after_bytes)
     {
         return error.InvalidArgument;
@@ -118,7 +117,7 @@ pub fn run(_: std.process.Init, args: []const []const u8) !void {
     const streams = try allocator.alloc(ReceiveStream, config.streams);
     defer allocator.free(streams);
     for (streams) |*stream| stream.* = .{};
-    var seen: u64 = 0;
+    var seen: churn_protocol.ResetMask = 0;
     var buffer: [16 * 1024]u8 = undefined;
     var discovered: usize = 0;
     var prefixes_complete: usize = 0;
@@ -154,7 +153,8 @@ pub fn run(_: std.process.Init, args: []const []const u8) !void {
             consumed = count;
             if (entry.prelude_bytes == stream_prelude_len) {
                 entry.index = try decodePrelude(&entry.prelude, config.streams);
-                const bit = @as(u64, 1) << @intCast(entry.index);
+                const bit = @as(churn_protocol.ResetMask, 1) <<
+                    @intCast(entry.index);
                 if (seen & bit != 0) return error.InvalidChurnStream;
                 seen |= bit;
             }
@@ -245,13 +245,13 @@ pub fn run(_: std.process.Init, args: []const []const u8) !void {
     }
     try receiveMarker(&session, control.stream_id, fin_sent, deadline);
 
-    var result = Result{ .streams = @intCast(streams.len) };
+    var result = churn_protocol.Result{ .streams = @intCast(streams.len) };
     for (streams) |stream| {
         result.received_bytes +%= stream.received;
         result.checksum +%= stream.checksum;
         if (shouldReset(stream.index)) {
             result.resets += 1;
-            result.reset_mask |= @as(u64, 1) << @intCast(stream.index);
+            result.markReset(stream.index);
             result.reset_code_sum += reset_code_base + @as(u32, @intCast(stream.index));
         } else result.fins += 1;
     }
@@ -264,7 +264,7 @@ pub fn run(_: std.process.Init, args: []const []const u8) !void {
     try session.finishStreamWithDeadline(control.stream_id, deadline);
     try receiveExactAndFin(&session, control.stream_id, close_ready, deadline);
     std.debug.print(
-        "netz server churn passed: fault={s} fault_scope=wtransport-client-outbound streams={d} fin={d} reset={d} bytes={d} checksum={d} reset_mask=0x{x:0>16} reset_code_sum={d} sibling=true client_io=wtransport-quinn-tokio server_io=zio-std-io\n",
+        "netz server churn passed: fault={s} fault_scope=wtransport-client-outbound streams={d} fin={d} reset={d} bytes={d} checksum={d} reset_mask=0x{x:0>64} reset_code_sum={d} sibling=true client_io=wtransport-quinn-tokio server_io=zio-std-io\n",
         .{ fault, result.streams, result.fins, result.resets, result.received_bytes, result.checksum, result.reset_mask, result.reset_code_sum },
     );
     try session.closeConnection(0, "churn complete");
@@ -279,29 +279,6 @@ const ReceiveStream = struct {
     checksum: u64 = 0,
     prefix_complete: bool = false,
     terminal: bool = false,
-};
-
-const Result = struct {
-    streams: u16 = 0,
-    fins: u16 = 0,
-    resets: u16 = 0,
-    received_bytes: u64 = 0,
-    checksum: u64 = 0,
-    reset_mask: u64 = 0,
-    reset_code_sum: u64 = 0,
-
-    fn encode(self: Result) [result_len]u8 {
-        var bytes = [_]u8{0} ** result_len;
-        @memcpy(bytes[0..8], result_magic);
-        std.mem.writeInt(u16, bytes[8..10], self.streams, .big);
-        std.mem.writeInt(u16, bytes[10..12], self.fins, .big);
-        std.mem.writeInt(u16, bytes[12..14], self.resets, .big);
-        std.mem.writeInt(u64, bytes[16..24], self.received_bytes, .big);
-        std.mem.writeInt(u64, bytes[24..32], self.checksum, .big);
-        std.mem.writeInt(u64, bytes[32..40], self.reset_mask, .big);
-        std.mem.writeInt(u64, bytes[40..48], self.reset_code_sum, .big);
-        return bytes;
-    }
 };
 
 fn findStream(streams: []ReceiveStream, id: u62) ?*ReceiveStream {

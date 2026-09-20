@@ -175,6 +175,33 @@ pub fn build(b: *std.Build) void {
     const run_websocket_send_shape_tests = b.addRunArtifact(
         websocket_send_shape_tests,
     );
+    const webtransport_wtransport_bench_tests = b.addTest(.{
+        .root_module = b.createModule(.{
+            .root_source_file = b.path(
+                "tools/interop/webtransport_wtransport_bench.zig",
+            ),
+            .target = target,
+            .optimize = optimize,
+            .imports = &.{.{ .name = "netz", .module = netz_mod }},
+        }),
+        .filters = test_filters,
+    });
+    const run_webtransport_wtransport_bench_tests = b.addRunArtifact(
+        webtransport_wtransport_bench_tests,
+    );
+    const webtransport_churn_protocol_tests = b.addTest(.{
+        .root_module = b.createModule(.{
+            .root_source_file = b.path(
+                "tools/interop/webtransport_churn_protocol.zig",
+            ),
+            .target = target,
+            .optimize = optimize,
+        }),
+        .filters = test_filters,
+    });
+    const run_webtransport_churn_protocol_tests = b.addRunArtifact(
+        webtransport_churn_protocol_tests,
+    );
     const websocket_slices_benchmark_checker_tests = b.addSystemCommand(&.{
         "python3",
         "tools/interop/websocket_slices_benchmark_check_test.py",
@@ -259,6 +286,8 @@ pub fn build(b: *std.Build) void {
     test_step.dependOn(&run_http3_quic_go_bench_tests.step);
     test_step.dependOn(&run_exact_certificate_verifier_tests.step);
     test_step.dependOn(&run_websocket_send_shape_tests.step);
+    test_step.dependOn(&run_webtransport_wtransport_bench_tests.step);
+    test_step.dependOn(&run_webtransport_churn_protocol_tests.step);
     test_step.dependOn(&websocket_slices_benchmark_checker_tests.step);
     test_step.dependOn(&quic_quic_go_benchmark_checker_tests.step);
     test_step.dependOn(&quic_quic_go_auxiliary_checker_tests.step);
