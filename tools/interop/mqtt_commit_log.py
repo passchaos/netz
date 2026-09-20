@@ -18,8 +18,11 @@ MOSQUITTO_SOURCES = (
     "broker/04-retain-check-source-persist.py",
     "broker/11-message-expiry.py",
     "broker/11-subscription-id.py",
+    "broker/15-persist-client-will-persistent.py",
+    "broker/persist_client_will_core.py",
 )
 SUBSCRIPTION_IDENTIFIER = 53
+WILL_DELAY_SECONDS = 3
 
 
 def parse_args() -> argparse.Namespace:
@@ -60,15 +63,36 @@ def packet(first: int, body: bytes) -> bytes:
     return bytes((first,)) + remaining_length(len(body)) + body
 
 
-def connect_packet(client_id: str, *, clean_start: bool) -> bytes:
+def connect_packet(
+    client_id: str, *, clean_start: bool,
+    will_topic: str | None = None, will_payload: bytes = b"",
+    will_delay: int = 0, will_qos: int = 0, will_retain: bool = False,
+) -> bytes:
     properties = b"\x11" + (60).to_bytes(4, "big")
+    connect_flags = 2 if clean_start else 0
+    payload = mqtt_string(client_id)
+    if will_topic is not None:
+        connect_flags |= 0x04 | (will_qos << 3)
+        if will_retain:
+            connect_flags |= 0x20
+        will_properties = (
+            b"\x18" + will_delay.to_bytes(4, "big")
+            if will_delay else b""
+        )
+        payload += (
+            remaining_length(len(will_properties))
+            + will_properties
+            + mqtt_string(will_topic)
+            + len(will_payload).to_bytes(2, "big")
+            + will_payload
+        )
     body = (
         mqtt_string("MQTT")
-        + bytes((5, 2 if clean_start else 0))
+        + bytes((5, connect_flags))
         + (60).to_bytes(2, "big")
         + remaining_length(len(properties))
         + properties
-        + mqtt_string(client_id)
+        + payload
     )
     return packet(0x10, body)
 
@@ -192,10 +216,20 @@ def restored_publish(
 
 def connect_client(
     port: int, client_id: str, *, clean_start: bool, session_present: bool
+    , will_topic: str | None = None, will_payload: bytes = b"",
+    will_delay: int = 0, will_qos: int = 0, will_retain: bool = False
 ) -> socket.socket:
     sock = socket.create_connection(("127.0.0.1", port), timeout=5)
     sock.settimeout(5)
-    sock.sendall(connect_packet(client_id, clean_start=clean_start))
+    sock.sendall(connect_packet(
+        client_id,
+        clean_start=clean_start,
+        will_topic=will_topic,
+        will_payload=will_payload,
+        will_delay=will_delay,
+        will_qos=will_qos,
+        will_retain=will_retain,
+    ))
     first, body = read_packet(sock)
     if first != 0x20 or body[0] != int(session_present) or body[1] != 0:
         sock.close()
@@ -238,6 +272,122 @@ def stop_broker(process: subprocess.Popen[str]) -> None:
             f"netz broker exited {process.returncode}: "
             + process.stdout.read()
         )
+
+
+def wait_for_journal_growth(path: Path, previous_size: int) -> None:
+    deadline = time.monotonic() + 30
+    while time.monotonic() < deadline:
+        if path.exists() and path.stat().st_size > previous_size:
+            return
+        time.sleep(0.05)
+    raise AssertionError("timed out waiting for a new commit-log record")
+
+
+def verify_scheduled_will_recovery(executable: Path) -> None:
+    topic = "journal/will"
+    payload = b"survives-crash"
+    with tempfile.TemporaryDirectory(prefix="netz-mqtt-will-journal-") as raw:
+        journal = Path(raw) / "broker.log"
+        port = free_port()
+        broker = start_broker(executable, port, journal, 3)
+        observer = will_source = None
+        try:
+            observer = connect_client(
+                port, "journal-will-observer",
+                clean_start=False, session_present=False,
+            )
+            observer.sendall(subscribe_packet(
+                1, topic, subscription_identifier=None, qos=1
+            ))
+            first, body = read_packet(observer)
+            if first != 0x90 or body != b"\x00\x01\x00\x01":
+                raise AssertionError(
+                    f"unexpected Will observer SUBACK: {first:#x} {body.hex()}"
+                )
+
+            will_source = connect_client(
+                port, "journal-will-source",
+                clean_start=False, session_present=False,
+                will_topic=topic, will_payload=payload,
+                will_delay=WILL_DELAY_SECONDS, will_qos=1, will_retain=True,
+            )
+            baseline_size = journal.stat().st_size
+            will_source.close()
+            will_source = None
+            wait_for_journal_growth(journal, baseline_size)
+            broker.kill()
+            broker.wait(timeout=5)
+        finally:
+            if observer is not None:
+                observer.close()
+            if will_source is not None:
+                will_source.close()
+            if broker.poll() is None:
+                broker.kill()
+                broker.wait()
+
+        restored_port = free_port()
+        restored = start_broker(executable, restored_port, journal, 2)
+        observer = replay = None
+        try:
+            observer = connect_client(
+                restored_port, "journal-will-observer",
+                clean_start=False, session_present=True,
+            )
+            observer.settimeout(WILL_DELAY_SECONDS + 5)
+            expected_live = publish_packet(
+                topic, payload, 1, retain=False
+            )
+            actual = read_packet(observer)
+            if actual != (expected_live[0], expected_live[2:]):
+                raise AssertionError(
+                    f"unexpected restored delayed Will: "
+                    f"{actual[0]:#x} {actual[1].hex()}"
+                )
+            observer.sendall(b"\x40\x04\x00\x01\x00\x00")
+            observer.sendall(b"\xe0\x00")
+            observer.close()
+            observer = None
+
+            replay = connect_client(
+                restored_port, "journal-will-replay",
+                clean_start=True, session_present=False,
+            )
+            replay.sendall(subscribe_packet(
+                1, topic, subscription_identifier=None, qos=1
+            ))
+            first, body = read_packet(replay)
+            if first != 0x90 or body != b"\x00\x01\x00\x01":
+                raise AssertionError(
+                    f"unexpected Will replay SUBACK: {first:#x} {body.hex()}"
+                )
+            expected_retained = publish_packet(
+                topic, payload, 1, retain=True
+            )
+            actual = read_packet(replay)
+            if actual != (expected_retained[0], expected_retained[2:]):
+                raise AssertionError(
+                    f"unexpected retained Will replay: "
+                    f"{actual[0]:#x} {actual[1].hex()}"
+                )
+            replay.sendall(b"\x40\x04\x00\x01\x00\x00")
+            replay.sendall(b"\xc0\x00")
+            if read_packet(replay) != (0xD0, b""):
+                raise AssertionError("restored Will was delivered more than once")
+            # This is a crash-recovery gate. Stop after the protocol barrier
+            # instead of coupling the assertion to the example's independent
+            # quiescent-shutdown snapshot policy while an offline Session is
+            # still present.
+            restored.kill()
+            restored.wait(timeout=5)
+        finally:
+            if observer is not None:
+                observer.close()
+            if replay is not None:
+                replay.close()
+            if restored.poll() is None:
+                restored.kill()
+                restored.wait()
 
 
 def verify_retained_source_recovery(executable: Path) -> None:
@@ -457,6 +607,8 @@ def main() -> None:
         "MQTT retained-source authorization survived commit-log SIGKILL "
         "recovery"
     )
+    verify_scheduled_will_recovery(args.broker)
+    print("MQTT delayed retained Will survived commit-log SIGKILL recovery")
 
 
 if __name__ == "__main__":

@@ -371,6 +371,12 @@ the broker, clones that journal into isolated policy runs, and proves the
 restored publisher identity suppresses replay after write access is revoked.
 Disabling `check_retain_source` on the second clone must expose the exact
 retained PUBLISH, proving that denial did not merely delete the stored value.
+The commit-log gate also covers the persistent delayed-Will branch from
+Mosquitto's `15-persist-client-will-persistent.py`: after the disconnect that
+schedules the retained QoS 1 Will is durably committed, the broker is killed
+before its deadline. On restart the restored observer receives the Will once
+at the remaining deadline, and a fresh subscriber then receives the retained
+copy with the correct RETAIN bit.
 Unit coverage
 additionally verifies multi-generation replay, atomic compaction, torn-tail
 truncation, committed corruption rejection, and transactional broker-state
