@@ -356,10 +356,20 @@ covered uniformly; compact typed delta records and group commit are performance
 work, not missing recovery semantics. The `interop-mqtt-commit-log` build step
 creates a durable subscription, receives PUBACK for an offline queued message,
 immediately kills the broker without any periodic or shutdown snapshot, and
-requires Session Present plus the exact delivery after restart. Unit coverage
+requires Session Present plus the exact delivery after restart. That
+source-hash-locked process flow now mirrors Mosquitto's
+`11-subscription-id.py`: the durable subscription carries identifier 53, and
+the recovered queued PUBLISH must reproduce that exact property after SIGKILL.
+Unit coverage
 additionally verifies multi-generation replay, atomic compaction, torn-tail
 truncation, committed corruption rejection, and transactional broker-state
 preservation when the newest image cannot decode.
+Run the process gate with its upstream identity check enabled using:
+
+```sh
+zig build interop-mqtt-commit-log -Doptimize=ReleaseFast -- \
+  --mosquitto-test-root=/path/to/mosquitto/test
+```
 
 Journal and change-count autosave are independent durability backends. Every
 recorded durable boundary attempts an eligible autosave even when journal

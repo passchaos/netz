@@ -9,10 +9,21 @@ import socket
 import subprocess
 import tempfile
 
+from mqtt_vectors import source_lock
+
+
+MOSQUITTO_SOURCE = "broker/11-subscription-id.py"
+SUBSCRIPTION_IDENTIFIER = 53
+
 
 def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser()
     parser.add_argument("broker", type=Path)
+    parser.add_argument(
+        "--mosquitto-test-root",
+        type=Path,
+        help="verify the referenced Mosquitto source before running",
+    )
     return parser.parse_args()
 
 
@@ -57,10 +68,12 @@ def connect_packet(client_id: str, *, clean_start: bool) -> bytes:
 
 
 def subscribe_packet(packet_id: int, topic_filter: str) -> bytes:
+    properties = bytes((0x0B, SUBSCRIPTION_IDENTIFIER))
     return packet(
         0x82,
         packet_id.to_bytes(2, "big")
-        + b"\x00"
+        + remaining_length(len(properties))
+        + properties
         + mqtt_string(topic_filter)
         + b"\x01",
     )
@@ -138,6 +151,11 @@ def start_broker(
 
 def main() -> None:
     args = parse_args()
+    if args.mosquitto_test_root is not None:
+        source_lock.verify_source_hash(
+            args.mosquitto_test_root / MOSQUITTO_SOURCE,
+            source_lock.MOSQUITTO_SOURCE_SHA256[MOSQUITTO_SOURCE],
+        )
     with tempfile.TemporaryDirectory(prefix="netz-mqtt-journal-") as raw:
         journal = Path(raw) / "broker.log"
         port = free_port()
@@ -199,7 +217,14 @@ def main() -> None:
             if body[2:topic_end] != b"journal/value":
                 raise AssertionError(f"unexpected topic: {body.hex()}")
             packet_id = body[topic_end : topic_end + 2]
-            if body[topic_end + 3 :] != b"survives-sigkill":
+            property_start = topic_end + 2
+            expected_properties = bytes((2, 0x0B, SUBSCRIPTION_IDENTIFIER))
+            if body[property_start : property_start + 3] != expected_properties:
+                raise AssertionError(
+                    "restored Subscription Identifier missing: "
+                    f"{body.hex()}"
+                )
+            if body[property_start + 3 :] != b"survives-sigkill":
                 raise AssertionError(f"unexpected payload: {body.hex()}")
             subscriber.sendall(b"\x40\x04" + packet_id + b"\x00\x00")
             subscriber.sendall(b"\xe0\x00")
@@ -214,7 +239,10 @@ def main() -> None:
                 restored.kill()
                 restored.wait()
 
-    print("MQTT incremental commit-log SIGKILL recovery passed")
+    print(
+        "MQTT incremental commit-log SIGKILL recovery passed "
+        f"with Subscription Identifier {SUBSCRIPTION_IDENTIFIER}"
+    )
 
 
 if __name__ == "__main__":

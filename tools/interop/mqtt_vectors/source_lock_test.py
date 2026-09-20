@@ -64,6 +64,8 @@ class SourceLockTests(unittest.TestCase):
                     "f0f02675b050e023c5331696142f0d8bf0e3360f39011bd0dc7efdce3a382285",
                 "broker/07-will-delay-recover.py":
                     "94060369730e84a37b39f3414e8d976a96939fa0f31e7e8301ce173ffdefe1dc",
+                "broker/11-subscription-id.py":
+                    "bc736a56c9d4e53e346e17d21d17e1dcc477b1693c34fdc6c0dac50854d448aa",
             },
         )
         self.assertEqual(persistent_subscriptions.SCENARIO_COUNT, 2)

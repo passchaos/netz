@@ -389,6 +389,7 @@ pub fn build(b: *std.Build) void {
         "tools/interop/mqtt_commit_log.py",
     });
     mqtt_commit_log.addArtifactArg(mqtt_vectors_broker);
+    if (b.args) |args| mqtt_commit_log.addArgs(args);
     const mqtt_commit_log_step = b.step(
         "interop-mqtt-commit-log",
         "Verify MQTT per-transaction journal recovery after SIGKILL",
