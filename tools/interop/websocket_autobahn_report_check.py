@@ -5,8 +5,11 @@ from __future__ import annotations
 
 import argparse
 import gzip
+import hashlib
 import json
+import re
 from collections import Counter
+from collections.abc import Collection
 from pathlib import Path
 from typing import Any
 
@@ -28,6 +31,17 @@ def unique_object(pairs: list[tuple[str, Any]]) -> dict[str, Any]:
     return result
 
 
+def load_json(path: Path) -> Any:
+    try:
+        if path.suffix == ".gz":
+            with gzip.open(path, "rt", encoding="utf-8") as stream:
+                return json.load(stream, object_pairs_hook=unique_object)
+        with path.open(encoding="utf-8") as stream:
+            return json.load(stream, object_pairs_hook=unique_object)
+    except (OSError, UnicodeError, json.JSONDecodeError) as error:
+        raise ReportError(f"invalid JSON document {path}") from error
+
+
 def report_path(directory: Path) -> Path:
     preferred = directory / "index.json"
     if preferred.is_file():
@@ -43,18 +57,84 @@ def report_path(directory: Path) -> Path:
 
 def load_report(directory: Path) -> dict[str, Any]:
     path = report_path(directory)
-    try:
-        if path.suffix == ".gz":
-            with gzip.open(path, "rt", encoding="utf-8") as stream:
-                value = json.load(stream, object_pairs_hook=unique_object)
-        else:
-            with path.open(encoding="utf-8") as stream:
-                value = json.load(stream, object_pairs_hook=unique_object)
-    except (OSError, UnicodeError, json.JSONDecodeError) as error:
-        raise ReportError(f"invalid Autobahn index report {path}") from error
+    value = load_json(path)
     if not isinstance(value, dict):
         raise ReportError("Autobahn index report must be an object")
     return value
+
+
+def load_case_manifest(path: Path) -> frozenset[str]:
+    value = load_json(path)
+    if not isinstance(value, dict):
+        raise ReportError("Autobahn case manifest must be an object")
+    required = {
+        "version",
+        "source_revision",
+        "image_digest",
+        "case_count",
+        "case_ids_sha256",
+        "case_groups",
+    }
+    if set(value) != required:
+        raise ReportError("Autobahn case manifest has unexpected fields")
+    if not isinstance(value["version"], str) or not value["version"]:
+        raise ReportError("Autobahn case manifest has an invalid version")
+    if not isinstance(value["source_revision"], str) or not re.fullmatch(
+        r"[0-9a-f]{40}", value["source_revision"]
+    ):
+        raise ReportError("Autobahn case manifest has an invalid source revision")
+    if not isinstance(value["image_digest"], str) or not re.fullmatch(
+        r"sha256:[0-9a-f]{64}", value["image_digest"]
+    ):
+        raise ReportError("Autobahn case manifest has an invalid image digest")
+    count = value["case_count"]
+    if isinstance(count, bool) or not isinstance(count, int) or count <= 0:
+        raise ReportError("Autobahn case manifest has an invalid case count")
+    digest = value["case_ids_sha256"]
+    if not isinstance(digest, str) or not re.fullmatch(r"[0-9a-f]{64}", digest):
+        raise ReportError("Autobahn case manifest has an invalid case ID digest")
+    groups = value["case_groups"]
+    if not isinstance(groups, dict) or not groups:
+        raise ReportError("Autobahn case manifest has no case groups")
+
+    case_ids: set[str] = set()
+    for prefix, group_count in groups.items():
+        if not isinstance(prefix, str) or not re.fullmatch(
+            r"[1-9][0-9]*(?:\.[1-9][0-9]*)*", prefix
+        ):
+            raise ReportError(f"Autobahn case manifest has invalid group {prefix!r}")
+        if (
+            isinstance(group_count, bool)
+            or not isinstance(group_count, int)
+            or group_count <= 0
+        ):
+            raise ReportError(
+                f"Autobahn case manifest group {prefix!r} has an invalid count"
+            )
+        for index in range(1, group_count + 1):
+            case_id = f"{prefix}.{index}"
+            if case_id in case_ids:
+                raise ReportError(
+                    f"Autobahn case manifest repeats case ID {case_id!r}"
+                )
+            case_ids.add(case_id)
+
+    if len(case_ids) != count:
+        raise ReportError(
+            f"Autobahn case manifest expands to {len(case_ids)} cases, expected {count}"
+        )
+    canonical = "".join(f"{case_id}\n" for case_id in sorted(case_ids)).encode()
+    if hashlib.sha256(canonical).hexdigest() != digest:
+        raise ReportError("Autobahn case manifest case ID digest does not match")
+    return frozenset(case_ids)
+
+
+def format_case_ids(case_ids: Collection[str]) -> str:
+    ordered = sorted(case_ids)
+    shown = ", ".join(ordered[:10])
+    if len(ordered) > 10:
+        shown += f", ... ({len(ordered)} total)"
+    return shown
 
 
 def validate(
@@ -62,6 +142,7 @@ def validate(
     *,
     expected_agent: str,
     expected_count: int | None,
+    expected_cases: Collection[str] | None = None,
 ) -> tuple[Counter[str], Counter[str], list[tuple[str, str, str]]]:
     data = load_report(reports)
     if set(data) != {expected_agent}:
@@ -78,6 +159,18 @@ def validate(
         raise ReportError(
             f"Autobahn report contained {total} cases, expected {expected_count}"
         )
+    if expected_cases is not None:
+        actual = set(cases)
+        expected = set(expected_cases)
+        missing = expected - actual
+        unexpected = actual - expected
+        if missing or unexpected:
+            details = []
+            if missing:
+                details.append(f"missing=[{format_case_ids(missing)}]")
+            if unexpected:
+                details.append(f"unexpected=[{format_case_ids(unexpected)}]")
+            raise ReportError(f"Autobahn case set mismatch: {'; '.join(details)}")
 
     behavior_counts: Counter[str] = Counter()
     close_counts: Counter[str] = Counter()
@@ -121,14 +214,21 @@ def main() -> None:
     parser.add_argument("reports", type=Path)
     parser.add_argument("--expected-agent", default="netz")
     parser.add_argument("--expected-count", type=int)
+    parser.add_argument("--expected-cases", type=Path)
     args = parser.parse_args()
     if args.expected_count is not None and args.expected_count <= 0:
         raise SystemExit("expected case count must be positive")
     try:
+        expected_cases = (
+            load_case_manifest(args.expected_cases)
+            if args.expected_cases is not None
+            else None
+        )
         behavior_counts, close_counts, non_ok = validate(
             args.reports,
             expected_agent=args.expected_agent,
             expected_count=args.expected_count,
+            expected_cases=expected_cases,
         )
     except ReportError as error:
         raise SystemExit(str(error)) from error

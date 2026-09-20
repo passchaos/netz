@@ -11,6 +11,7 @@ from pathlib import Path
 
 
 MODULE = Path(__file__).with_name("websocket_autobahn_report_check.py")
+MANIFEST = Path(__file__).with_name("websocket_autobahn_cases_25_10_1.json")
 SPEC = importlib.util.spec_from_file_location(
     "websocket_autobahn_report_check", MODULE
 )
@@ -24,6 +25,7 @@ class AutobahnReportCheckTests(unittest.TestCase):
         self.temporary = tempfile.TemporaryDirectory()
         self.addCleanup(self.temporary.cleanup)
         self.directory = Path(self.temporary.name)
+        self.expected_cases = CHECK.load_case_manifest(MANIFEST)
 
     def write(self, value: object) -> None:
         (self.directory / "index.json").write_text(
@@ -32,22 +34,62 @@ class AutobahnReportCheckTests(unittest.TestCase):
 
     def test_accepts_complete_report_and_documented_statuses(self) -> None:
         cases = {
-            str(index): {"behavior": "OK", "behaviorClose": "OK"}
-            for index in range(1, 518)
+            case_id: {"behavior": "OK", "behaviorClose": "OK"}
+            for case_id in self.expected_cases
         }
         cases["7.1.6"] = {
             "behavior": "INFORMATIONAL",
             "behaviorClose": "INFORMATIONAL",
         }
-        cases.pop("517")
         self.write({"netz": cases})
         behavior, close, non_ok = CHECK.validate(
-            self.directory, expected_agent="netz", expected_count=517
+            self.directory,
+            expected_agent="netz",
+            expected_count=517,
+            expected_cases=self.expected_cases,
         )
         self.assertEqual(517, sum(behavior.values()))
         self.assertEqual(1, behavior["INFORMATIONAL"])
         self.assertEqual(1, close["INFORMATIONAL"])
         self.assertEqual([("7.1.6", "INFORMATIONAL", "INFORMATIONAL")], non_ok)
+
+    def test_manifest_is_the_pinned_25_10_1_case_set(self) -> None:
+        self.assertEqual(517, len(self.expected_cases))
+        self.assertIn("1.1.1", self.expected_cases)
+        self.assertIn("6.22.34", self.expected_cases)
+        self.assertIn("13.7.18", self.expected_cases)
+
+    def test_rejects_manifest_with_a_stale_count_or_digest(self) -> None:
+        manifest = json.loads(MANIFEST.read_text(encoding="utf-8"))
+        local_manifest = self.directory / "case-manifest.json"
+        manifest["case_count"] = 516
+        local_manifest.write_text(json.dumps(manifest), encoding="utf-8")
+        with self.assertRaisesRegex(CHECK.ReportError, "expands to 517 cases"):
+            CHECK.load_case_manifest(local_manifest)
+
+        manifest["case_count"] = 517
+        manifest["case_ids_sha256"] = "0" * 64
+        local_manifest.write_text(json.dumps(manifest), encoding="utf-8")
+        with self.assertRaisesRegex(CHECK.ReportError, "digest does not match"):
+            CHECK.load_case_manifest(local_manifest)
+
+    def test_rejects_same_count_with_missing_and_unknown_case(self) -> None:
+        cases = {
+            case_id: {"behavior": "OK", "behaviorClose": "OK"}
+            for case_id in self.expected_cases
+        }
+        cases.pop("6.22.34")
+        cases["99.99.99"] = {"behavior": "OK", "behaviorClose": "OK"}
+        self.write({"netz": cases})
+        with self.assertRaisesRegex(
+            CHECK.ReportError, r"case set mismatch.*6\.22\.34.*99\.99\.99"
+        ):
+            CHECK.validate(
+                self.directory,
+                expected_agent="netz",
+                expected_count=517,
+                expected_cases=self.expected_cases,
+            )
 
     def test_rejects_incomplete_full_report(self) -> None:
         self.write({"netz": {"1.1.1": {"behavior": "OK", "behaviorClose": "OK"}}})

@@ -66,7 +66,10 @@ grep -Fq \
   "$work/server.log"
 
 cases='["*"]'
-expected_count_args=(--expected-count=517)
+expected_count_args=(
+  --expected-count=517
+  --expected-cases="$(dirname "$0")/websocket_autobahn_cases_25_10_1.json"
+)
 if [[ $# -ne 0 ]]; then
   cases=$(printf '%s\n' "$@" | python3 -c \
     'import json, sys; print(json.dumps([line.rstrip("\n") for line in sys.stdin]))')

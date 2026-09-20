@@ -1098,7 +1098,10 @@ applying TCP-only socket options.
    the runner rejects a server that does not identify `server_io=zio-std-io`.
    The extracted report verifier rejects duplicate JSON keys, unexpected or
    additional agents, missing statuses, disallowed status values, and any full
-   run that contains other than exactly 517 cases. Explicit case selections
+   run that differs from the versioned 25.10.1 manifest's exact 517 case IDs,
+   including a count-preserving missing/unknown substitution. The manifest
+   records the upstream source revision, image digest, group boundaries, total,
+   and a canonical case-ID digest. Explicit case selections
    retain the same strict status and agent checks while permitting a smaller
    non-empty report. The 517-case results
    below predate that migration and remain historical Threaded evidence until
