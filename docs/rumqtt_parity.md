@@ -417,6 +417,16 @@ schedules the retained QoS 1 Will is durably committed, the broker is killed
 before its deadline. On restart the restored observer receives the Will once
 at the remaining deadline, and a fresh subscriber then receives the retained
 copy with the correct RETAIN bit.
+The complementary cancellation path is source-locked to Mosquitto's
+`07-will-delay-reconnect.py` and adds a process-crash boundary after
+cancellation. A persistent client schedules a three-second Will, reconnects
+with the same Client ID before the deadline, and requires Session Present.
+After the resulting cancellation grows the journal, the broker is killed
+immediately. A persistent observer must report Session Present after restart;
+once the old deadline has passed, an ordered PINGRESP proves the canceled Will
+was not resurrected by replay. Only after that barrier does the source
+reconnect and require Session Present, so its reconnect cannot mask a restored
+Will by canceling it again.
 Unit coverage
 additionally verifies multi-generation replay, atomic compaction, torn-tail
 truncation, committed corruption rejection, and transactional broker-state

@@ -68,6 +68,8 @@ class SourceLockTests(unittest.TestCase):
                     "9accde1f896d26b7c798ce3c5ca0a75b28bdad89f3e5e557b5cff0957ba0579c",
                 "broker/07-will-delay-invalid-573191.py":
                     "f0f02675b050e023c5331696142f0d8bf0e3360f39011bd0dc7efdce3a382285",
+                "broker/07-will-delay-reconnect.py":
+                    "b6f3b892fb51ebb65748ece41c6773f38fb496b92f7a6008a05a1133817c7224",
                 "broker/07-will-delay-recover.py":
                     "94060369730e84a37b39f3414e8d976a96939fa0f31e7e8301ce173ffdefe1dc",
                 "broker/11-message-expiry.py":
