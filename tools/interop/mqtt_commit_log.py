@@ -8,11 +8,15 @@ from pathlib import Path
 import socket
 import subprocess
 import tempfile
+import time
 
 from mqtt_vectors import source_lock
 
 
-MOSQUITTO_SOURCE = "broker/11-subscription-id.py"
+MOSQUITTO_SOURCES = (
+    "broker/11-message-expiry.py",
+    "broker/11-subscription-id.py",
+)
 SUBSCRIPTION_IDENTIFIER = 53
 
 
@@ -79,12 +83,19 @@ def subscribe_packet(packet_id: int, topic_filter: str) -> bytes:
     )
 
 
-def publish_packet(topic: str, payload: bytes, packet_id: int) -> bytes:
+def publish_packet(
+    topic: str, payload: bytes, packet_id: int, *, expiry_seconds: int | None = None
+) -> bytes:
+    properties = (
+        b"\x02" + expiry_seconds.to_bytes(4, "big")
+        if expiry_seconds is not None else b""
+    )
     return packet(
         0x32,
         mqtt_string(topic)
         + packet_id.to_bytes(2, "big")
-        + b"\x00"
+        + remaining_length(len(properties))
+        + properties
         + payload,
     )
 
@@ -109,6 +120,57 @@ def read_packet(sock: socket.socket) -> tuple[int, bytes]:
         if byte & 0x80 == 0:
             return first, recv_exact(sock, length)
         multiplier *= 128
+
+
+def read_varint(data: bytes, offset: int) -> tuple[int, int]:
+    multiplier = 1
+    value = 0
+    while True:
+        if offset >= len(data) or multiplier > 128 * 128 * 128:
+            raise AssertionError("malformed MQTT variable byte integer")
+        byte = data[offset]
+        offset += 1
+        value += (byte & 0x7F) * multiplier
+        if byte & 0x80 == 0:
+            return value, offset
+        multiplier *= 128
+
+
+def restored_publish(
+    sock: socket.socket, *, expected_payload: bytes, expect_expiry: bool
+) -> bytes:
+    first, body = read_packet(sock)
+    if first != 0x32:
+        raise AssertionError(f"expected restored QoS 1 PUBLISH: {first:#x}")
+    topic_len = int.from_bytes(body[0:2], "big")
+    topic_end = 2 + topic_len
+    if body[2:topic_end] != b"journal/value":
+        raise AssertionError(f"unexpected topic: {body.hex()}")
+    packet_id = body[topic_end : topic_end + 2]
+    properties_len, property_start = read_varint(body, topic_end + 2)
+    property_end = property_start + properties_len
+    properties = body[property_start:property_end]
+    if expect_expiry:
+        expected_suffix = bytes((0x0B, SUBSCRIPTION_IDENTIFIER))
+        if len(properties) != 7 or properties[0] != 0x02 or (
+            properties[5:] != expected_suffix
+        ):
+            raise AssertionError(
+                f"unexpected restored expiring properties: {body.hex()}"
+            )
+        remaining_expiry = int.from_bytes(properties[1:5], "big")
+        if not 1 <= remaining_expiry < 100:
+            raise AssertionError(
+                f"Message Expiry was not reduced across restart: "
+                f"{remaining_expiry}"
+            )
+    elif properties != bytes((0x0B, SUBSCRIPTION_IDENTIFIER)):
+        raise AssertionError(
+            f"unexpected restored non-expiring properties: {body.hex()}"
+        )
+    if body[property_end:] != expected_payload:
+        raise AssertionError(f"unexpected payload: {body.hex()}")
+    return packet_id
 
 
 def connect_client(
@@ -152,10 +214,11 @@ def start_broker(
 def main() -> None:
     args = parse_args()
     if args.mosquitto_test_root is not None:
-        source_lock.verify_source_hash(
-            args.mosquitto_test_root / MOSQUITTO_SOURCE,
-            source_lock.MOSQUITTO_SOURCE_SHA256[MOSQUITTO_SOURCE],
-        )
+        for source in MOSQUITTO_SOURCES:
+            source_lock.verify_source_hash(
+                args.mosquitto_test_root / source,
+                source_lock.MOSQUITTO_SOURCE_SHA256[source],
+            )
     with tempfile.TemporaryDirectory(prefix="netz-mqtt-journal-") as raw:
         journal = Path(raw) / "broker.log"
         port = free_port()
@@ -180,12 +243,20 @@ def main() -> None:
                 port, "journal-publisher",
                 clean_start=True, session_present=False,
             )
-            publisher.sendall(
-                publish_packet("journal/value", b"survives-sigkill", 1)
-            )
-            first, body = read_packet(publisher)
-            if first != 0x40 or body[0:2] != b"\x00\x01":
-                raise AssertionError(f"unexpected PUBACK: {first:#x} {body.hex()}")
+            for packet_id, payload, expiry_seconds in (
+                (1, b"expires-during-downtime", 5),
+                (2, b"survives-with-expiry", 100),
+                (3, b"survives-without-expiry", None),
+            ):
+                publisher.sendall(publish_packet(
+                    "journal/value", payload, packet_id,
+                    expiry_seconds=expiry_seconds,
+                ))
+                first, body = read_packet(publisher)
+                if first != 0x40 or body[0:2] != packet_id.to_bytes(2, "big"):
+                    raise AssertionError(
+                        f"unexpected PUBACK {packet_id}: {first:#x} {body.hex()}"
+                    )
 
             # No timer/checkpoint is involved. PUBACK is sent only after the
             # commit record has been fsynced, so SIGKILL immediately after it
@@ -201,6 +272,8 @@ def main() -> None:
                 source.kill()
                 source.wait()
 
+        # Cross the short message's expiry while the broker is stopped.
+        time.sleep(6)
         restored_port = free_port()
         restored = start_broker(args.broker, restored_port, journal, 1)
         subscriber = None
@@ -209,24 +282,21 @@ def main() -> None:
                 restored_port, "journal-subscriber",
                 clean_start=False, session_present=True,
             )
-            first, body = read_packet(subscriber)
-            if first >> 4 != 3:
-                raise AssertionError(f"expected restored PUBLISH: {first:#x}")
-            topic_len = int.from_bytes(body[0:2], "big")
-            topic_end = 2 + topic_len
-            if body[2:topic_end] != b"journal/value":
-                raise AssertionError(f"unexpected topic: {body.hex()}")
-            packet_id = body[topic_end : topic_end + 2]
-            property_start = topic_end + 2
-            expected_properties = bytes((2, 0x0B, SUBSCRIPTION_IDENTIFIER))
-            if body[property_start : property_start + 3] != expected_properties:
-                raise AssertionError(
-                    "restored Subscription Identifier missing: "
-                    f"{body.hex()}"
-                )
-            if body[property_start + 3 :] != b"survives-sigkill":
-                raise AssertionError(f"unexpected payload: {body.hex()}")
-            subscriber.sendall(b"\x40\x04" + packet_id + b"\x00\x00")
+            expiring_id = restored_publish(
+                subscriber, expected_payload=b"survives-with-expiry",
+                expect_expiry=True,
+            )
+            permanent_id = restored_publish(
+                subscriber, expected_payload=b"survives-without-expiry",
+                expect_expiry=False,
+            )
+            subscriber.sendall(b"\x40\x04" + expiring_id + b"\x00\x00")
+            subscriber.sendall(b"\x40\x04" + permanent_id + b"\x00\x00")
+            # PINGRESP must follow the two surviving deliveries. A stale first
+            # PUBLISH would be read here instead and fail the exact check.
+            subscriber.sendall(b"\xc0\x00")
+            if read_packet(subscriber) != (0xD0, b""):
+                raise AssertionError("expired PUBLISH survived broker restart")
             subscriber.sendall(b"\xe0\x00")
             restored.wait(timeout=5)
             if restored.returncode != 0:
@@ -240,8 +310,9 @@ def main() -> None:
                 restored.wait()
 
     print(
-        "MQTT incremental commit-log SIGKILL recovery passed "
-        f"with Subscription Identifier {SUBSCRIPTION_IDENTIFIER}"
+        "MQTT incremental commit-log SIGKILL recovery passed with reduced "
+        "Message Expiry and Subscription Identifier "
+        f"{SUBSCRIPTION_IDENTIFIER}"
     )
 
 

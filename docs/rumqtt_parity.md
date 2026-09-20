@@ -360,6 +360,11 @@ requires Session Present plus the exact delivery after restart. That
 source-hash-locked process flow now mirrors Mosquitto's
 `11-subscription-id.py`: the durable subscription carries identifier 53, and
 the recovered queued PUBLISH must reproduce that exact property after SIGKILL.
+The same crash/restart sequence is source-locked to Mosquitto's
+`11-message-expiry.py`: a five-second delivery expires during downtime, a
+100-second delivery survives with a strictly reduced interval, and a third
+delivery without an expiry remains intact; both surviving messages retain
+Subscription Identifier 53 and their original order.
 Unit coverage
 additionally verifies multi-generation replay, atomic compaction, torn-tail
 truncation, committed corruption rejection, and transactional broker-state
