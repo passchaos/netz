@@ -385,6 +385,14 @@ the broker, clones that journal into isolated policy runs, and proves the
 restored publisher identity suppresses replay after write access is revoked.
 Disabling `check_retain_source` on the second clone must expose the exact
 retained PUBLISH, proving that denial did not merely delete the stored value.
+The retained mutation path also strengthens Mosquitto's
+`15-persist-retain-clear.py` for MQTT 3.1.1 and MQTT 5. Two retained sibling
+messages first survive a process kill. After restart, an empty retained
+PUBLISH clears only one topic and is observed live with RETAIN unset; the
+broker is killed immediately after the journal boundary. A third generation
+must replay the untouched sibling and then answer PING without resurrecting
+the deleted value, distinguishing durable deletion from loss of the complete
+retained store.
 The commit-log gate also covers the persistent delayed-Will branch from
 Mosquitto's `15-persist-client-will-persistent.py`: after the disconnect that
 schedules the retained QoS 1 Will is durably committed, the broker is killed

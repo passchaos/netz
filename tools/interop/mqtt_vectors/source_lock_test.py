@@ -74,6 +74,8 @@ class SourceLockTests(unittest.TestCase):
                     "bc736a56c9d4e53e346e17d21d17e1dcc477b1693c34fdc6c0dac50854d448aa",
                 "broker/15-persist-client-msg-out-v5-0.py":
                     "2612901cb197a0c602ae6dc34b46d80a742f6b35cdc3757a81ddf10d77093b97",
+                "broker/15-persist-retain-clear.py":
+                    "e5797091eab0e807f74223f25dc4759371614bf69ae60779fe8d999090488ef9",
                 "broker/15-persist-client-will-persistent.py":
                     "95b2079245e724956128e1a62d6fa46b9972ddc9166b97d51ae3d3a131d1ed6d",
                 "broker/persist_client_will_core.py":

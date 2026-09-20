@@ -11,6 +11,7 @@ import tempfile
 import time
 
 from mqtt_commit_log_inflight import verify_outgoing_qos1_recovery
+from mqtt_commit_log_retained import verify_retained_delete_recovery
 from mqtt_commit_log_support import (
     SUBSCRIPTION_IDENTIFIER,
     ack_packet,
@@ -34,6 +35,7 @@ MOSQUITTO_SOURCES = (
     "broker/11-message-expiry.py",
     "broker/11-subscription-id.py",
     "broker/15-persist-client-msg-out-v5-0.py",
+    "broker/15-persist-retain-clear.py",
     "broker/15-persist-client-will-persistent.py",
     "broker/persist_client_will_core.py",
     "broker/persist_module_helper.py",
@@ -518,6 +520,11 @@ def main() -> None:
     verify_retained_source_recovery(args.broker)
     print(
         "MQTT retained-source authorization survived commit-log SIGKILL "
+        "recovery"
+    )
+    verify_retained_delete_recovery(args.broker)
+    print(
+        "MQTT 3.1.1/5 retained deletion survived commit-log SIGKILL "
         "recovery"
     )
     verify_outgoing_qos2_recovery(args.broker)
