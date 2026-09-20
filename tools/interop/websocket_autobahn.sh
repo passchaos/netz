@@ -3,7 +3,7 @@ set -euo pipefail
 
 server=${1:?server executable path}
 shift
-image=${AUTOBAHN_IMAGE:-crossbario/autobahn-testsuite:latest}
+image=${AUTOBAHN_IMAGE:-crossbario/autobahn-testsuite:25.10.1@sha256:519915fb568b04c9383f70a1c405ae3ff44ab9e35835b085239c258b6fac3074}
 use_tls=false
 if [[ ${1:-} == "--tls" ]]; then
   use_tls=true
@@ -66,9 +66,11 @@ grep -Fq \
   "$work/server.log"
 
 cases='["*"]'
+expected_count_args=(--expected-count=517)
 if [[ $# -ne 0 ]]; then
   cases=$(printf '%s\n' "$@" | python3 -c \
     'import json, sys; print(json.dumps([line.rstrip("\n") for line in sys.stdin]))')
+  expected_count_args=()
 fi
 mkdir -p "$work/reports"
 cat >"$work/config.json" <<EOF
@@ -93,53 +95,5 @@ docker run --rm --network host \
     exit 1
   }
 
-python3 - "$work/reports" <<'PY'
-import json
-from collections import Counter
-from pathlib import Path
-import sys
-
-reports = Path(sys.argv[1])
-indexes = sorted(reports.glob("index.json*"))
-if not indexes:
-    raise SystemExit("Autobahn did not produce an index report")
-data = json.loads(indexes[0].read_text())
-accepted_behaviors = {"OK", "NON-STRICT", "INFORMATIONAL"}
-accepted_close_behaviors = {"OK", "INFORMATIONAL"}
-behavior_counts = Counter()
-close_counts = Counter()
-non_ok = []
-unexpected = []
-total = 0
-for agent, cases in data.items():
-    for case_id, result in cases.items():
-        total += 1
-        behavior = result.get("behavior", "<missing>")
-        close_behavior = result.get("behaviorClose", "<missing>")
-        behavior_counts[behavior] += 1
-        close_counts[close_behavior] += 1
-        item = (agent, case_id, behavior, close_behavior)
-        if behavior != "OK" or close_behavior != "OK":
-            non_ok.append(item)
-        if (
-            behavior not in accepted_behaviors
-            or close_behavior not in accepted_close_behaviors
-        ):
-            unexpected.append(item)
-
-def format_counts(counts):
-    return ", ".join(f"{status}={counts[status]}" for status in sorted(counts))
-
-print(f"Autobahn WebSocket cases completed: {total}")
-print(f"Autobahn behavior counts: {format_counts(behavior_counts)}")
-print(f"Autobahn close-behavior counts: {format_counts(close_counts)}")
-for item in non_ok:
-    print("Autobahn non-OK: %s %s behavior=%s close=%s" % item)
-
-if total == 0:
-    raise SystemExit("Autobahn report contained no case results")
-if unexpected:
-    for item in unexpected:
-        print("Autobahn rejected status: %s %s behavior=%s close=%s" % item, file=sys.stderr)
-    raise SystemExit(1)
-PY
+python3 "$(dirname "$0")/websocket_autobahn_report_check.py" \
+  "$work/reports" --expected-agent=netz "${expected_count_args[@]}"

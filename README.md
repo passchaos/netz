@@ -999,8 +999,9 @@ zig build interop-quic-s2n -Doptimize=ReleaseFast
 # Quinn proves the dropped first DATAGRAM is never retransmitted, observes the
 # reordered pair, and completes the reliable sibling stream and close.
 zig build interop-quic-quinn -Doptimize=ReleaseFast
-# Requires Docker and the crossbario/autobahn-testsuite image. Optional trailing
-# arguments select individual case IDs; with none, all 517 cases run. Pass
+# Requires Docker and defaults to the digest-locked Autobahn Testsuite 25.10.1
+# image. Optional trailing arguments select individual case IDs; with none, the
+# report verifier requires exactly all 517 cases from the sole `netz` agent. Pass
 # --tls before case IDs to run the same gate over native TLS 1.3 WSS.
 # The long-lived netz endpoint uses 64 reusable zio-backed std.Io workers.
 zig build interop-websocket-autobahn -Doptimize=ReleaseFast

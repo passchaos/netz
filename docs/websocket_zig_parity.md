@@ -1090,13 +1090,17 @@ applying TCP-only socket options.
    benchmark concurrency.
 3. Keep the external Autobahn gate current.
    `zig build interop-websocket-autobahn -Doptimize=ReleaseFast` runs the
-   Dockerized Autobahn Testsuite 25.10.1 fuzzing client against the dedicated
+   digest-locked Autobahn Testsuite 25.10.1 fuzzing client against the dedicated
    long-lived netz echo endpoint. Passing `--tls` runs the identical cases over
    native TLS 1.3 WSS using the checked-in localhost test identity. On
    current builds the listener obtains `std.Io` from zio and uses the runtime's
    bounded long-running supervisor with 64 reusable accept/connection workers;
    the runner rejects a server that does not identify `server_io=zio-std-io`.
-   The 517-case results
+   The extracted report verifier rejects duplicate JSON keys, unexpected or
+   additional agents, missing statuses, disallowed status values, and any full
+   run that contains other than exactly 517 cases. Explicit case selections
+   retain the same strict status and agent checks while permitting a smaller
+   non-empty report. The 517-case results
    below predate that migration and remain historical Threaded evidence until
    the container suite is rerun on zio. The separate
    `interop-websocket-autobahn-smoke` gate uses real cleartext and TLS sockets

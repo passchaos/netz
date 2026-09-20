@@ -206,6 +206,10 @@ pub fn build(b: *std.Build) void {
         "python3",
         "tools/interop/websocket_slices_benchmark_check_test.py",
     });
+    const websocket_autobahn_report_checker_tests = b.addSystemCommand(&.{
+        "python3",
+        "tools/interop/websocket_autobahn_report_check_test.py",
+    });
     const quic_quic_go_benchmark_checker_tests = b.addSystemCommand(&.{
         "python3",
         "tools/interop/quic_quic_go_benchmark_check_test.py",
@@ -289,6 +293,7 @@ pub fn build(b: *std.Build) void {
     test_step.dependOn(&run_webtransport_wtransport_bench_tests.step);
     test_step.dependOn(&run_webtransport_churn_protocol_tests.step);
     test_step.dependOn(&websocket_slices_benchmark_checker_tests.step);
+    test_step.dependOn(&websocket_autobahn_report_checker_tests.step);
     test_step.dependOn(&quic_quic_go_benchmark_checker_tests.step);
     test_step.dependOn(&quic_quic_go_auxiliary_checker_tests.step);
     test_step.dependOn(&quic_quic_go_churn_checker_tests.step);
