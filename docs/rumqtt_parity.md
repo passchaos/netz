@@ -402,6 +402,15 @@ broker is killed immediately after the journal boundary. A third generation
 must replay the untouched sibling and then answer PING without resurrecting
 the deleted value, distinguishing durable deletion from loss of the complete
 retained store.
+The active Session deadline path is source-locked to Mosquitto's
+`15-persist-client-expired-session.py`. A two-second MQTT 5 Session first owns
+a subscription and a verified unacknowledged queued delivery, while an
+unrelated long-lived Session remains as a recovery control. With no later
+durable client operation, the deadline driver removes the expired Session, its
+route, and its inflight message and appends that deletion. An immediate
+`SIGKILL` followed by restart preserves the control Session but returns
+Session Present false for the expired ClientID; PING barriers before and after
+a new publication prove neither its old queue nor subscription was revived.
 The commit-log gate also covers the persistent delayed-Will branch from
 Mosquitto's `15-persist-client-will-persistent.py`: after the disconnect that
 schedules the retained QoS 1 Will is durably committed, the broker is killed

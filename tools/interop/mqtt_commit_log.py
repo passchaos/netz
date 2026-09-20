@@ -16,6 +16,7 @@ from mqtt_commit_log_inflight import (
     verify_outgoing_qos2_recovery,
 )
 from mqtt_commit_log_retained import verify_retained_delete_recovery
+from mqtt_commit_log_session import verify_active_session_expiry_recovery
 from mqtt_commit_log_support import (
     SUBSCRIPTION_IDENTIFIER,
     connect_client,
@@ -39,6 +40,7 @@ MOSQUITTO_SOURCES = (
     "broker/11-message-expiry.py",
     "broker/11-subscription-id.py",
     "broker/15-persist-client-msg-out-v5-0.py",
+    "broker/15-persist-client-expired-session.py",
     "broker/15-persist-retain-clear.py",
     "broker/15-persist-client-will-persistent.py",
     "broker/persist_client_will_core.py",
@@ -423,6 +425,10 @@ def main() -> None:
     print(
         "MQTT 3.1.1/5 retained deletion survived commit-log SIGKILL "
         "recovery"
+    )
+    verify_active_session_expiry_recovery(args.broker)
+    print(
+        "MQTT expired Session deletion survived commit-log SIGKILL recovery"
     )
     verify_outgoing_qos2_recovery(args.broker)
     print(
