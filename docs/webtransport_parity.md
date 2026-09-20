@@ -882,7 +882,7 @@ real handshake test exercises both outcomes and then serves a sibling request.
    STREAM/FIN direction: 121-123 of 605-615 client datagrams were held, all
    bytes/checksum still matched, and throughput was 153-161 MiB/s. Batch-tail
    holds are flushed explicitly so reordering cannot become hidden loss.
-   A separate external wtransport gate now runs 32- and 64-stream client-upload
+   A separate external wtransport gate now runs 32-, 64-, 128-, and 256-stream client-upload
    shapes in both implementation-role directions with deterministic loss and
    pair reordering. Netz's outbound direction uses a seeded 5% endpoint interceptor;
    wtransport's outbound direction uses an unprivileged loopback UDP relay that
@@ -895,15 +895,18 @@ real handshake test exercises both outcomes and then serves a sibling request.
    counts, a reset mask, application-code sum, byte total and checksum; an
    independent verifier recomputes all of them. The gate also finishes a bidi
    sibling opened before cancellation and verifies control-stream FIN plus peer
-   connection close. All eight sender-direction/size/fault combinations passed
+   connection close. All sixteen sender-direction/size/fault combinations passed
    twice consecutively, including 266,240 bytes/checksum 33,945,600 for
-   32 streams and 532,480/67,891,200 for 64. The verifier checks the declared
+   32 streams, 532,480/67,891,200 for 64, 1,064,960/135,782,400 for 128,
+   and 2,129,920/271,564,800 for 256. The result protocol now uses a
+   network-order 256-bit reset mask, and the Zig, Rust, and independent Python
+   verifier all cover its highest bit and reject 257 streams. The verifier checks the declared
    `netz-client-outbound` or `wtransport-client-outbound` scope and, for the
    proxy path, requires matching process/proxy counters plus at least one
    actual fault in both the RESET and FIN phases. The proxy now uses a
    deterministic single-shot arm for each phase: every reverse-role case drops
    exactly two datagrams or completes exactly two reorder pairs overall,
-   independent of the 32/64-stream size. The direct netz-sender cases retain
+   independent of the stream count. The direct netz-sender cases retain
    their seeded continuous 5% loss/every-fifth reordering schedules. This remains a bounded
    loopback lifecycle gate rather than a production-network or throughput
    comparison.
@@ -927,7 +930,11 @@ real handshake test exercises both outcomes and then serves a sibling request.
    delivered 128 RESET_STREAM terminals plus 128 FINs, 2,129,920 bytes and
    checksum 271,564,800 after 84 injected drops; an all-FIN reorder run
    delivered 4,194,304 bytes/checksum 534,773,760 after holding 335 of 1,679
-   datagrams. A 257-stream request remains rejected before network setup.
+   datagrams. A 257-stream request remains rejected before network setup. The
+   ordinary wtransport comparison also supports 256 parallel streams with
+   multiword duplicate/FIN tracking; a two-role 1-KiB-per-stream run completed
+   all 256 streams and matched 262,144 bytes/checksum 33,423,360 in each
+   direction.
 
 The whole-stream and caller-buffer incremental receive pollers enumerate QUIC
 receive streams through a fixed 256-ID stack page, but that page is not a
