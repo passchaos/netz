@@ -379,6 +379,15 @@ broker has emitted PUBREL. The second must resume directly at PUBREL with the
 original Packet Identifier, never retransmit the Application Message, and is
 killed after PUBCOMP has crossed a PING barrier. The third reconnect then uses
 another PING barrier to prove the completed transaction was durably removed.
+The inverse QoS 2 direction strengthens Mosquitto's
+`03-publish-c2b-disconnect-qos2.py` for MQTT 3.1.1 and MQTT 5. A persistent
+publisher reaches the durable PUBREC boundary and the broker is killed before
+PUBREL. After restart, a same-identifier DUP PUBLISH receives PUBREC without
+early fanout; PUBREL then routes the original Application Message exactly once
+and receives PUBCOMP. After the observer acknowledges that delivery and the
+broker is killed again, a third generation answers a repeated PUBREL
+idempotently while a PING barrier on the observer proves there is no duplicate
+delivery.
 An independent source-hash-locked branch mirrors Mosquitto's
 `04-retain-check-source-persist.py`: it commits a retained publication, kills
 the broker, clones that journal into isolated policy runs, and proves the
