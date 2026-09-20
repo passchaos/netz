@@ -308,6 +308,7 @@ test "broker reserved client topic protection can be disabled" {
     try joinServer(thread, &joined, &serve);
 
     try std.testing.expectEqual(@as(usize, 3), broker.retained.count());
+    try std.testing.expectEqual(@as(usize, 0), broker.wills.count());
     var storage: [1]mqtt.retained.Match = undefined;
     const matches = try broker.retained.matchInto(
         "$SYS/application-owned",

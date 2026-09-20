@@ -1543,7 +1543,11 @@ accept counts concurrently over one router, retained store, Session store, Will
 scheduler and deadline driver. `serveListenersUntil` adds a long-running,
 gracefully cancellable supervisor with configurable per-listener concurrency
 and error policy; the legacy `Broker.listen`/`serve` remains a single-TCP
-convenience. Each accepted connection deep-owns its namespace, so
+convenience. Once every finite connection worker exits, `serveListeners` stops
+and joins the deadline driver, then synchronously completes only the Will and
+Session deadlines already due at that boundary. Its return therefore includes
+an immediate Will from the final disconnected client without publishing a
+future delayed Will early. Each accepted connection deep-owns its namespace, so
 live and durable Session delivery always strips according to the current
 destination listener. Durable Sessions retain canonical subscriptions across
 listener changes: queued topics visible through the reconnecting listener are

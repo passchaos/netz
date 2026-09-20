@@ -2283,6 +2283,11 @@ pub const Broker = struct {
         const deadline_result = deadline_future.await(self.io);
         stop_driver = false;
         if (deadline_result) |err| return err;
+        // The last client can schedule an immediate Will and wake the driver
+        // just as this finite server stops it. Complete every lifecycle action
+        // already due at the worker-join boundary before reporting that serve
+        // has finished; future delayed Wills remain scheduled.
+        try self.processDueLifecycle(std.Io.Clock.awake.now(self.io));
         for (errors) |maybe_error| {
             if (maybe_error) |err| return err;
         }
@@ -5248,29 +5253,10 @@ pub const Broker = struct {
         self: *Broker,
     ) ?anyerror {
         while (!self.deadline_driver.stopped()) {
-            self.state_mutex.lockUncancelable(self.io);
             const now = std.Io.Clock.awake.now(self.io);
-            const expired_count = self.pruneExpiredSessionRoutesLocked(now);
-            var published_any = false;
-            var persistent_changed = expired_count != 0;
-            self.publishDueWillsLocked(
-                now,
-                &published_any,
-                &persistent_changed,
-            ) catch |err| {
-                self.recordPersistentChangeLocked(persistent_changed);
-                self.state_mutex.unlock(self.io);
-                if (persistent_changed) {
-                    self.finalizePersistentChange(true, true) catch {};
-                }
-                // A prior Will, or a failing Will with a partially committed
-                // publication, may already have populated live/durable queues.
-                // Preserve the original route error while making that prefix
-                // observable exactly once.
-                if (published_any) self.flushAllSlots() catch {};
-                return err;
-            };
-            self.recordPersistentChangeLocked(persistent_changed);
+            try self.processDueLifecycle(now);
+
+            self.state_mutex.lockUncancelable(self.io);
             // `$SYS` publication itself uses the state lock and ordinary
             // routing. Decide whether it is due here, but advance the next
             // deadline only after a complete snapshot is published. A failed
@@ -5304,16 +5290,6 @@ pub const Broker = struct {
             const generation =
                 self.deadline_driver.currentGeneration();
             self.state_mutex.unlock(self.io);
-
-            if (published_any or expired_count != 0) {
-                try self.finalizePersistentChange(
-                    persistent_changed,
-                    persistent_changed,
-                );
-            }
-            if (published_any) {
-                self.flushAllSlots() catch |err| return err;
-            }
             if (publish_system_stats) {
                 self.publishSystemStats() catch |err| return err;
                 self.state_mutex.lockUncancelable(self.io);
@@ -5333,6 +5309,43 @@ pub const Broker = struct {
             };
         }
         return null;
+    }
+
+    fn processDueLifecycle(
+        self: *Broker,
+        now: std.Io.Timestamp,
+    ) Error!void {
+        self.state_mutex.lockUncancelable(self.io);
+        const expired_count = self.pruneExpiredSessionRoutesLocked(now);
+        var published_any = false;
+        var persistent_changed = expired_count != 0;
+        self.publishDueWillsLocked(
+            now,
+            &published_any,
+            &persistent_changed,
+        ) catch |err| {
+            self.recordPersistentChangeLocked(persistent_changed);
+            self.state_mutex.unlock(self.io);
+            if (persistent_changed) {
+                self.finalizePersistentChange(true, true) catch {};
+            }
+            // A prior Will, or a failing Will with a partially committed
+            // publication, may already have populated live/durable queues.
+            // Preserve the original route error while making that prefix
+            // observable exactly once.
+            if (published_any) self.flushAllSlots() catch {};
+            return err;
+        };
+        self.recordPersistentChangeLocked(persistent_changed);
+        self.state_mutex.unlock(self.io);
+
+        if (published_any or expired_count != 0) {
+            try self.finalizePersistentChange(
+                persistent_changed,
+                persistent_changed,
+            );
+        }
+        if (published_any) try self.flushAllSlots();
     }
 
     /// Claim and route every Will whose deadline has passed.

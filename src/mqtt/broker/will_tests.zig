@@ -98,6 +98,72 @@ test "broker routes immediate Will on ungraceful close" {
     try joinServer(thread, &joined, &serve);
 }
 
+test "finite broker serve drains the final immediate retained Will" {
+    const allocator = std.testing.allocator;
+    var threaded = std.Io.Threaded.init(allocator, .{
+        .async_limit = .unlimited,
+    });
+    defer threaded.deinit();
+    const io = threaded.io();
+    var broker = try testBroker(allocator, io, 1, 64);
+    defer broker.deinit();
+
+    var serve = ServeState{ .broker = &broker, .connection_count = 1 };
+    const thread = try std.Thread.spawn(.{}, ServeState.run, .{&serve});
+    var joined = false;
+    defer if (!joined) thread.join();
+
+    var source = try connectWithOptions(allocator, io, broker, .{
+        .protocol = .v5,
+        .client_id = "finite-immediate-will-source",
+        .will = will(0, true),
+    });
+    try source.shutdown();
+    defer source.close();
+    try joinServer(thread, &joined, &serve);
+
+    try std.testing.expectEqual(@as(usize, 0), broker.wills.count());
+    try std.testing.expectEqual(@as(usize, 1), broker.retained.count());
+}
+
+test "finite broker serve keeps the final future Will scheduled" {
+    const allocator = std.testing.allocator;
+    var threaded = std.Io.Threaded.init(allocator, .{
+        .async_limit = .unlimited,
+    });
+    defer threaded.deinit();
+    const io = threaded.io();
+    var broker = try testBroker(allocator, io, 1, 64);
+    defer broker.deinit();
+
+    var serve = ServeState{ .broker = &broker, .connection_count = 1 };
+    const thread = try std.Thread.spawn(.{}, ServeState.run, .{&serve});
+    var joined = false;
+    defer if (!joined) thread.join();
+
+    var source = try connectWithOptions(allocator, io, broker, .{
+        .protocol = .v5,
+        .client_id = "finite-delayed-will-source",
+        .clean_start = false,
+        .properties = &.{.{ .four_byte = .{
+            .id = .session_expiry_interval,
+            .value = 120,
+        } }},
+        .will = will(60, true),
+    });
+    try source.shutdown();
+    defer source.close();
+    try joinServer(thread, &joined, &serve);
+
+    try std.testing.expectEqual(@as(usize, 1), broker.wills.count());
+    try std.testing.expectEqual(@as(usize, 0), broker.retained.count());
+    const deadline = broker.wills.nextDeadline() orelse
+        return error.TestUnexpectedResult;
+    try std.testing.expect(
+        deadline.nanoseconds > std.Io.Clock.awake.now(io).nanoseconds,
+    );
+}
+
 test "broker rejects zero to nonzero DISCONNECT expiry before cleanup" {
     const allocator = std.testing.allocator;
     var threaded = std.Io.Threaded.init(allocator, .{
