@@ -13452,6 +13452,10 @@ pub const testing = struct {
         return session.control.local_close_failed;
     }
 
+    pub fn hasPendingSessionEvent(session: anytype) bool {
+        return session.pending_session_event != null;
+    }
+
     pub fn classifyTerminalSessionBodySendError(err: anyerror) bool {
         return terminalSessionBodySendError(err);
     }

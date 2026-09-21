@@ -976,6 +976,52 @@ test "WebTransport terminal event survives cleanup timeout" {
     defer threaded.deinit();
     const io = threaded.io();
 
+    const FixedDeadlineIo = struct {
+        delegate: std.Io,
+        now_ns: i96 = 1_000_000,
+        send_calls: usize = 0,
+        sleep_calls: usize = 0,
+
+        fn now(
+            context: ?*anyopaque,
+            _: std.Io.Clock,
+        ) std.Io.Timestamp {
+            const self: *@This() = @ptrCast(@alignCast(context.?));
+            return .fromNanoseconds(self.now_ns);
+        }
+
+        fn sleep(
+            context: ?*anyopaque,
+            _: std.Io.Timeout,
+        ) std.Io.Cancelable!void {
+            const self: *@This() = @ptrCast(@alignCast(context.?));
+            self.sleep_calls += 1;
+            return error.Canceled;
+        }
+
+        fn netSend(
+            context: ?*anyopaque,
+            socket_handle: std.Io.net.Socket.Handle,
+            messages: []std.Io.net.OutgoingMessage,
+            flags: std.Io.net.SendFlags,
+        ) struct { ?std.Io.net.Socket.SendError, usize } {
+            const self: *@This() = @ptrCast(@alignCast(context.?));
+            self.send_calls += 1;
+            return self.delegate.vtable.netSend(
+                self.delegate.userdata,
+                socket_handle,
+                messages,
+                flags,
+            );
+        }
+    };
+    const Stage = enum { connect, await_peer_fin, force_cleanup_timeout, resume_cleanup, join };
+    var stage: Stage = .connect;
+    errdefer std.debug.print(
+        "WebTransport terminal cleanup test failed during {s}\n",
+        .{@tagName(stage)},
+    );
+
     const original_dcid =
         [_]u8{ 0x57, 0x54, 0x4f, 0x01, 0x57, 0x54, 0x4f, 0x02 };
     const client_cid = [_]u8{ 0x57, 0x54, 0x4f, 0x03 };
@@ -1011,6 +1057,15 @@ test "WebTransport terminal event survives cleanup timeout" {
             var session = try self.server.accept();
             defer session.deinit();
             try session.close(313, "peer terminal retained");
+            // Keep the QUIC owner alive to service ACK/PTO recovery until the
+            // client resumes cleanup and closes its CONNECT send direction.
+            // Returning immediately after the first UDP submission would make
+            // this reliability test depend on that datagram never being lost.
+            const event = try session.receiveSessionEventWithTimeout(
+                .fromSeconds(5),
+            );
+            try std.testing.expect(event == .closed);
+            try std.testing.expectEqual(@as(u32, 0), event.closed.code);
         }
     };
     var shared = Shared{ .server = &server };
@@ -1031,6 +1086,7 @@ test "WebTransport terminal event survives cleanup timeout" {
                 .original_destination_connection_id = &original_dcid,
                 .local_connection_id = &client_cid,
                 .server_name = "localhost",
+                .initial_one_rtt_config = .{ .enable_pacing = true },
                 .random = [_]u8{0xf5} ** 32,
                 .x25519_secret_key = [_]u8{0xf6} ** 32,
             } },
@@ -1038,6 +1094,7 @@ test "WebTransport terminal event survives cleanup timeout" {
     );
     defer client.deinit();
 
+    stage = .await_peer_fin;
     while ((client.h3.established.connection.recvStreamStats(
         client.session_id.value,
     ) orelse return error.TestUnexpectedResult).final_size == null) {
@@ -1052,20 +1109,41 @@ test "WebTransport terminal event survives cleanup timeout" {
         try client.processPacket(&packet);
     }
 
+    var fixed = FixedDeadlineIo{
+        .delegate = client.h3.established.connection.endpoint.io,
+    };
+    var vtable = fixed.delegate.vtable.*;
+    vtable.now = FixedDeadlineIo.now;
+    vtable.sleep = FixedDeadlineIo.sleep;
+    vtable.netSend = FixedDeadlineIo.netSend;
+    client.h3.established.connection.endpoint.io = .{
+        .userdata = &fixed,
+        .vtable = &vtable,
+    };
+    defer client.h3.established.connection.endpoint.io = fixed.delegate;
     quic.one_rtt.testing.exhaustPacingAt(
         &client.h3.established.connection,
-        @intCast(std.Io.Clock.awake.now(io).nanoseconds),
+        @intCast(fixed.now_ns),
     );
+    stage = .force_cleanup_timeout;
     try std.testing.expectError(
         error.Timeout,
-        client.receiveSessionEventWithTimeout(.fromNanoseconds(1)),
+        client.receiveSessionEventWithDeadline(.{
+            .clock = .awake,
+            .raw = .fromNanoseconds(fixed.now_ns + 1),
+        }),
     );
+    try std.testing.expect(runtime.testing.hasPendingSessionEvent(&client));
+    try std.testing.expectEqual(@as(usize, 0), fixed.send_calls);
+    try std.testing.expectEqual(@as(usize, 0), fixed.sleep_calls);
     quic.one_rtt.testing.setPacingBudgetAt(
         &client.h3.established.connection,
         100_000,
-        @intCast(std.Io.Clock.awake.now(io).nanoseconds),
+        @intCast(fixed.now_ns),
     );
+    stage = .resume_cleanup;
     const event = try client.receiveSessionEventWithTimeout(.fromSeconds(5));
+    try std.testing.expect(fixed.send_calls > 0);
     try std.testing.expect(event == .closed);
     try std.testing.expectEqual(@as(u32, 313), event.closed.code);
     try std.testing.expectEqualStrings(
@@ -1073,6 +1151,7 @@ test "WebTransport terminal event survives cleanup timeout" {
         event.closed.reason,
     );
 
+    stage = .join;
     thread.join();
     joined = true;
     if (shared.err) |err| return err;
