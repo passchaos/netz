@@ -1595,7 +1595,10 @@ pub const Client = struct {
     ) Error!void {
         const active = self.connection() orelse
             return error.ConnectionUnavailable;
-        try active.writeDisconnectWithProperties(reason_code, properties);
+        active.writeDisconnectWithProperties(reason_code, properties) catch |err| {
+            self.retireConnectionAfterOperationError(err);
+            return err;
+        };
         self.noteControlSent();
         self.disconnectTransport();
     }
@@ -1683,11 +1686,14 @@ pub const Client = struct {
                 if (!active.hasPendingIncomingPublish(packet_id, qos)) {
                     return error.UnexpectedPacket;
                 }
-                try active.writePubAckWithProperties(
+                active.writePubAckWithProperties(
                     packet_id,
                     options.reason_code,
                     options.properties,
-                );
+                ) catch |err| {
+                    self.retireConnectionAfterOperationError(err);
+                    return err;
+                };
             },
             .exactly_once => {
                 if (!active.hasPendingIncomingPublish(packet_id, qos)) {
@@ -1745,11 +1751,7 @@ pub const Client = struct {
                             packet_id,
                         ) catch unreachable;
                     }
-                    if (self.client_options.inbound_qos2_release_policy ==
-                        .deferred)
-                    {
-                        self.disconnectTransport();
-                    }
+                    self.retireConnectionAfterOperationError(err);
                     return err;
                 };
             },
@@ -1790,8 +1792,8 @@ pub const Client = struct {
     ///
     /// The Session marker is retained until the complete PUBCOMP write
     /// succeeds. A transport failure therefore leaves the transaction
-    /// recoverable after Session-Present reconnect; callers must treat such a
-    /// write error as an unusable transport and reconnect before retrying.
+    /// recoverable after Session-Present reconnect and immediately retires the
+    /// unusable current transport before returning the write error.
     pub fn completeIncomingQoS2(
         self: *Client,
         packet_id: u16,
@@ -1835,7 +1837,7 @@ pub const Client = struct {
             options.reason_code,
             options.properties,
         ) catch |err| {
-            self.disconnectTransport();
+            self.retireConnectionAfterOperationError(err);
             return err;
         };
         self.outgoing.completeIncomingQoS2(
@@ -1888,7 +1890,10 @@ pub const Client = struct {
             );
         }
         try self.subscriptions.ensureUnusedCapacity(self.allocator, additions);
-        var suback = try active.subscribe(subscriptions, options);
+        var suback = active.subscribe(subscriptions, options) catch |err| {
+            self.retireConnectionAfterOperationError(err);
+            return err;
+        };
         self.noteControlSent();
         errdefer suback.deinit(self.allocator);
         if (suback.suback.reason_codes.len != subscriptions.len) {
@@ -1916,7 +1921,10 @@ pub const Client = struct {
     ) Error!runtime.OwnedUnsubAck {
         const active = self.connection() orelse
             return error.ConnectionUnavailable;
-        var unsuback = try active.unsubscribe(filters, options);
+        var unsuback = active.unsubscribe(filters, options) catch |err| {
+            self.retireConnectionAfterOperationError(err);
+            return err;
+        };
         self.noteControlSent();
         errdefer unsuback.deinit(self.allocator);
         if (active.protocol == .v3_1_1) {
@@ -1966,7 +1974,7 @@ pub const Client = struct {
         }
         if (options.qos == .at_most_once) {
             active.publish(topic, payload, options) catch |err| {
-                if (!active.isUsable()) self.disconnectTransport();
+                self.retireConnectionAfterOperationError(err);
                 return err;
             };
             self.noteControlSent();
@@ -2084,8 +2092,9 @@ pub const Client = struct {
                 if (now.nanoseconds >= deadline.nanoseconds) {
                     const active = self.connection().?;
                     active.writePingReq() catch |err| {
-                        if (!retryableConnectError(err)) return err;
-                        self.disconnectTransport();
+                        const retryable = retryableConnectError(err);
+                        self.retireConnectionAfterOperationError(err);
+                        if (!retryable) return err;
                         return try self.connectEventBefore(call_deadline);
                     };
                     const sent_at = std.Io.Clock.awake.now(self.io);
@@ -2108,11 +2117,12 @@ pub const Client = struct {
                 now,
                 cancellation_check_interval,
             );
-            var packet_event = self.connection().?
-                .readClientPacketEventWithDeadline(
+            const active = self.connection().?;
+            var packet_event = active.readClientPacketEventWithDeadline(
                 read_deadline.withClock(.awake),
             ) catch |err| {
                 if (err == error.Timeout) continue;
+                self.retireUnusableConnection();
                 if (!retryableConnectError(err)) return err;
                 self.disconnectTransport();
                 return try self.connectEventBefore(call_deadline);
@@ -2120,12 +2130,14 @@ pub const Client = struct {
             var packet_owned = true;
             defer if (packet_owned) packet_event.deinit(self.allocator);
             const client_event = self.applyPacketEvent(&packet_event) catch |err| {
-                if (err == error.UnexpectedPacket and
+                const deferred_pubrel_error = err == error.UnexpectedPacket and
                     packet_event == .pubrel and
                     self.client_options.inbound_qos2_release_policy ==
-                        .deferred)
-                {
+                        .deferred;
+                if (deferred_pubrel_error) {
                     self.disconnectTransport();
+                } else {
+                    self.retireUnusableConnection();
                 }
                 return err;
             };
@@ -2338,7 +2350,10 @@ pub const Client = struct {
     ) Error!void {
         const active = self.connection() orelse
             return error.ConnectionUnavailable;
-        try active.beginReauthenticationWithProperties(properties);
+        active.beginReauthenticationWithProperties(properties) catch |err| {
+            self.retireConnectionAfterOperationError(err);
+            return err;
+        };
         self.noteControlSent();
     }
 
@@ -2357,6 +2372,7 @@ pub const Client = struct {
             const active = self.connection() orelse
                 return error.ConnectionUnavailable;
             var event = active.readBrokerEvent() catch |err| {
+                self.retireUnusableConnection();
                 if (!retryableConnectError(err)) return err;
                 const connected = try self.reconnect();
                 if (!connected.session_present) return error.SessionLost;
@@ -2848,21 +2864,16 @@ pub const Client = struct {
         reason_code: u8,
         properties: []const mqtt.Property,
     ) bool {
-        const active = self.connection() orelse {
+        if (self.connection() == null) {
             command.finishFailure(self.io, error.ConnectionUnavailable);
             return false;
-        };
+        }
         // Validate and encode before signaling shutdown. A protocol error must
         // leave the active connection and reconnect loop usable.
-        active.writeDisconnectWithProperties(
-            reason_code,
-            properties,
-        ) catch |err| {
+        self.disconnectWithProperties(reason_code, properties) catch |err| {
             command.finishFailure(self.io, err);
             return false;
         };
-        self.noteControlSent();
-        self.disconnectTransport();
         // Set shutdown before publishing success. A synchronous caller may
         // return and immediately call `deinit`, which must not race the worker
         // into a fresh reconnect iteration.
@@ -2895,6 +2906,31 @@ pub const Client = struct {
         self.keep_alive_deadline = std.Io.Clock.awake.now(self.io).addDuration(
             .fromSeconds(active.keep_alive_seconds),
         );
+    }
+
+    /// Preserve an established connection after purely local validation or
+    /// application callback failure, but never retain a transport whose read
+    /// or write progress is ambiguous.
+    fn retireUnusableConnection(self: *Client) void {
+        const unusable = if (self.connection_state) |*active|
+            !active.isUsable()
+        else
+            false;
+        if (unusable) self.disconnectTransport();
+    }
+
+    /// Synchronous public operations own both their socket write and matching
+    /// response read, so a known transport failure retires the connection even
+    /// when no write marker was set (for example EOF while awaiting SUBACK).
+    fn retireConnectionAfterOperationError(
+        self: *Client,
+        err: anyerror,
+    ) void {
+        if (retryableConnectError(err)) {
+            self.disconnectTransport();
+        } else {
+            self.retireUnusableConnection();
+        }
     }
 
     fn keepAliveDeadline(self: *const Client) ?std.Io.Timestamp {

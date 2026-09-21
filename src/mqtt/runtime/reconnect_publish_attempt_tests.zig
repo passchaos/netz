@@ -62,6 +62,7 @@ test "MQTT reconnect publish one attempt returns with durable inflight" {
     defer client.deinit();
     _ = try client.connect();
     try client.connection().?.shutdown();
+    try std.testing.expect(!client.connection().?.isUsable());
 
     const attempt = try client.publishOneAttempt(
         "one/attempt",
@@ -132,7 +133,7 @@ test "MQTT reconnect retires connection after QoS0 write failure" {
     );
     defer client.deinit();
     _ = try client.connect();
-    try client.connection().?.shutdown();
+    try client.connection().?.transport.shutdown();
 
     const publish_failed = blk: {
         _ = client.publishOneAttempt(
@@ -148,6 +149,91 @@ test "MQTT reconnect retires connection after QoS0 write failure" {
     release.set(io);
     thread.join();
     joined = true;
+    if (shared.err) |err| return err;
+}
+
+test "MQTT reconnect preserves local SUBSCRIBE failure and retires response EOF" {
+    const allocator = std.testing.allocator;
+    var threaded = std.Io.Threaded.init(allocator, .{
+        .async_limit = .unlimited,
+    });
+    defer threaded.deinit();
+    const io = threaded.io();
+    var server = try runtime.Server.listen(
+        allocator,
+        io,
+        .{ .ip4 = .loopback(0) },
+        .{},
+    );
+    defer server.deinit();
+
+    const Shared = struct {
+        server: *runtime.Server,
+        release: *std.Io.Event,
+        err: ?anyerror = null,
+
+        fn run(self: *@This()) void {
+            var accepted = self.server.accept(.{ .protocol = .v5 }) catch |err| {
+                self.err = err;
+                return;
+            };
+            defer accepted.deinit(self.server.allocator);
+            self.release.waitUncancelable(self.server.io);
+        }
+    };
+    var release: std.Io.Event = .unset;
+    var shared = Shared{ .server = &server, .release = &release };
+    const thread = try std.Thread.spawn(.{}, Shared.run, .{&shared});
+    var joined = false;
+    defer {
+        release.set(io);
+        if (!joined) thread.join();
+    }
+
+    var shutdown: std.Io.Event = .unset;
+    var client = try reconnect.Client.init(
+        allocator,
+        io,
+        server.address(),
+        .{
+            .protocol = .v5,
+            .client_id = "subscribe-write-failure",
+        },
+        .{},
+        &shutdown,
+    );
+    defer client.deinit();
+    _ = try client.connect();
+
+    const valid = [_]mqtt.Subscription{.{
+        .topic_filter = "retired/subscribe",
+    }};
+    const invalid_properties = [_]mqtt.Property{.{ .byte = .{
+        .id = .payload_format_indicator,
+        .value = 0,
+    } }};
+    // This passes the reconnect layer's subscription preflight and fails in
+    // the runtime encoder before transport I/O. The shared error classifier
+    // must leave the connection available for a corrected request.
+    try std.testing.expectError(
+        error.InvalidProperty,
+        client.subscribe(&valid, .{ .properties = &invalid_properties }),
+    );
+    try std.testing.expect(client.connection() != null);
+    try std.testing.expect(client.connection().?.isUsable());
+
+    release.set(io);
+    thread.join();
+    joined = true;
+    const subscribe_failed = blk: {
+        var result = client.subscribe(&valid, .{}) catch break :blk true;
+        result.deinit(allocator);
+        break :blk false;
+    };
+    try std.testing.expect(subscribe_failed);
+    try std.testing.expect(client.connection() == null);
+    try std.testing.expectEqual(@as(usize, 0), client.subscriptionCount());
+
     if (shared.err) |err| return err;
 }
 

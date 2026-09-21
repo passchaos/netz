@@ -2280,7 +2280,7 @@ pub const Connection = struct {
     /// received none, part, or all of the MQTT Control Packet. No later read
     /// or write may reuse connection-scoped state (especially Topic Alias)
     /// after that ambiguity. The owner must close this Network Connection.
-    transport_write_failed: std.atomic.Value(bool) = .init(false),
+    transport_unusable: std.atomic.Value(bool) = .init(false),
     assigned_client_id: ?[]u8 = null,
     authentication: auth_runtime.State = .{},
     /// Shared packet-output storage. MQTT writes are synchronous and a
@@ -2442,14 +2442,14 @@ pub const Connection = struct {
     }
 
     /// Whether this Network Connection can still carry MQTT packets. A write
-    /// error retires it permanently because stream transports cannot prove
-    /// how much of the failed Control Packet reached the peer.
+    /// error or explicit shutdown retires it permanently.
     pub fn isUsable(self: *const Connection) bool {
-        return !self.transport_write_failed.load(.acquire);
+        return !self.transport_unusable.load(.acquire);
     }
 
     /// Wake a concurrent TCP reader while retaining connection ownership.
     pub fn shutdown(self: *Connection) Error!void {
+        self.transport_unusable.store(true, .release);
         try self.transport.shutdown();
     }
 
@@ -4884,7 +4884,7 @@ pub const Connection = struct {
     ) Error!void {
         if (!self.isUsable()) return error.ConnectionClosed;
         self.transport.writePacket(bytes) catch |err| {
-            self.transport_write_failed.store(true, .release);
+            self.transport_unusable.store(true, .release);
             return err;
         };
     }
@@ -4896,7 +4896,7 @@ pub const Connection = struct {
     ) Error!void {
         if (!self.isUsable()) return error.ConnectionClosed;
         self.transport.writePacketParts(prefix, payload) catch |err| {
-            self.transport_write_failed.store(true, .release);
+            self.transport_unusable.store(true, .release);
             return err;
         };
     }
@@ -8037,7 +8037,7 @@ test "MQTT transport write failure retires connection Topic Alias state" {
     // A local full shutdown makes the first socket write fail deterministically.
     // Alias ownership was prepared before that attempt, but its wire outcome
     // is unknowable and therefore the connection may never use it again.
-    try connection.shutdown();
+    try connection.transport.shutdown();
     const first_failed = blk: {
         _ = connection.writePublish(
             "retired/alias",

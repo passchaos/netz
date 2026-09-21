@@ -252,6 +252,7 @@ test "MQTT broker event timeout and deadline resume partial publish" {
                     .fromMilliseconds(20),
                 ),
             );
+            try std.testing.expect(accepted.connection.isUsable());
             self.timed_out.set(self.server.io);
             var event = try accepted.connection.readBrokerEventWithDeadline(
                 .fromNow(

@@ -2147,6 +2147,12 @@ error permanently retires that Network Connection: stream APIs cannot prove
 whether zero, some, or all bytes reached the peer, so neither alias mappings
 nor other connection-scoped state may be reused. Reconnect creates fresh alias
 tables while durable QoS retransmission remains Session-scoped.
+The owning reconnect client also retires this unusable handle immediately
+across publish, subscribe, unsubscribe, manual acknowledgement, keep-alive,
+authentication, and graceful-disconnect paths. The decision uses the runtime's
+transport-origin marker rather than matching error names, so purely local
+validation, allocation, and application-callback errors leave the established
+connection available for correction.
 An unnegotiated live AUTH now follows the same diagnostic boundary, and normal
 or failing AUTH handlers share the connection's writer mutex with fanout so
 their packets cannot interleave. Finally,

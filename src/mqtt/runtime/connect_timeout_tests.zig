@@ -223,6 +223,7 @@ test "MQTT absolute CONNECT deadline preserves partial packet" {
             .{ .raw = .fromMilliseconds(20), .clock = .awake },
         )),
     );
+    try std.testing.expect(connection.isUsable());
     try writeAll(io, sender, connect[3..]);
     var decoded = try connection.readConnectWithDeadline(.fromNow(
         io,
