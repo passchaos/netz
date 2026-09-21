@@ -726,6 +726,11 @@ fn validateFrameType(frame_type: u64) Error!void {
         // frames; do the same at the frame parser boundary so every stream
         // context gets consistent behavior.
         0x02, 0x06, 0x08, 0x09 => return error.UnexpectedFrame,
+        // RFC 9297's WEBTRANSPORT_STREAM is a special bidirectional-stream
+        // prefix followed by a Session ID, not an ordinary HTTP/3 frame with
+        // a payload-length field. WebTransport routing parses it before the
+        // generic frame codec; every generic frame context must reject it.
+        FrameType.webtransport_stream => return error.UnexpectedFrame,
         else => {},
     }
 }
@@ -5890,6 +5895,30 @@ test "HTTP/3 rejects reserved HTTP/2 frame types" {
     }
 }
 
+test "HTTP/3 generic frame codec rejects WebTransport stream prefix" {
+    const allocator = std.testing.allocator;
+    var encoded: std.ArrayList(u8) = .empty;
+    defer encoded.deinit(allocator);
+    try quic.varint.encode(
+        &encoded,
+        allocator,
+        FrameType.webtransport_stream,
+    );
+    try quic.varint.encode(&encoded, allocator, 17);
+    try std.testing.expectError(
+        error.UnexpectedFrame,
+        Frame.parseHeader(encoded.items),
+    );
+    try std.testing.expectError(
+        error.UnexpectedFrame,
+        (Frame{
+            .frame_type = FrameType.webtransport_stream,
+            .payload = &.{},
+            .consumed = 0,
+        }).write(&encoded, allocator),
+    );
+}
+
 test {
     _ = @import("qpack/tests.zig");
 }
@@ -7709,11 +7738,16 @@ test "HTTP/3 message rejects bad frame order and content length" {
             .payload = header_block.items,
             .consumed = 0,
         }).write(&forbidden, allocator);
-        try (Frame{
-            .frame_type = frame_type,
-            .payload = &.{},
-            .consumed = 0,
-        }).write(&forbidden, allocator);
+        if (frame_type == FrameType.webtransport_stream) {
+            try quic.varint.encode(&forbidden, allocator, frame_type);
+            try quic.varint.encode(&forbidden, allocator, 0);
+        } else {
+            try (Frame{
+                .frame_type = frame_type,
+                .payload = &.{},
+                .consumed = 0,
+            }).write(&forbidden, allocator);
+        }
         try std.testing.expectError(
             error.UnexpectedFrame,
             decodeResponse(allocator, forbidden.items),

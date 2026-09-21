@@ -258,7 +258,9 @@ test "HTTP/3 incremental message reader rejects misplaced registered frames" {
         }).write(&bytes, allocator);
         // Reserved HTTP/2 code points cannot use Frame.write because that
         // generic encoder correctly rejects them at its own boundary.
-        if (frame_type == 0x02) {
+        if (frame_type == 0x02 or
+            frame_type == http3.FrameType.webtransport_stream)
+        {
             try quic.varint.encode(&bytes, allocator, frame_type);
             try quic.varint.encode(&bytes, allocator, 0);
         } else {
