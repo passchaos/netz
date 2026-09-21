@@ -416,7 +416,7 @@ const RegistrationProgress = struct {
 
 const EncodedSessionPacket = struct {
     encoded: session_route.EncodedPacket,
-    transmission: session_mod.Transmission,
+    payload_len: usize,
     handle: session_mod.Handle,
     route_id: u64,
 
@@ -4958,9 +4958,8 @@ pub const Broker = struct {
                 // before the bytes can reach the peer, so restart retransmits
                 // the same identifier with DUP rather than inventing a new
                 // transaction.
-                slot.connection.?.writeSessionTransmission(
-                    packet.transmission,
-                    slot.connection.?.localMaximumQoS(),
+                slot.connection.?.writeEncodedSessionTransmission(
+                    packet.encoded.bytes,
                 ) catch |err| switch (err) {
                     error.OutgoingPacketTooLarge => {
                         if (packet.encoded.kind == .pubrel) return err;
@@ -4997,10 +4996,8 @@ pub const Broker = struct {
                         return err;
                     },
                 };
-                if (packet.transmission == .publish) {
-                    self.recordPublishSent(
-                        packet.transmission.publish.payload.len,
-                    );
+                if (packet.encoded.kind != .pubrel) {
+                    self.recordPublishSent(packet.payload_len);
                 }
                 if (packet.encoded.kind == .qos0_publish) {
                     self.state_mutex.lockUncancelable(self.io);
@@ -5204,29 +5201,37 @@ pub const Broker = struct {
                     (persistent_session and drop_action == .dropped);
                 continue;
             }
-            if (transmission == .publish and
-                !connection.topic_namespace.containsTopic(
-                    transmission.publish.topic,
-                ))
-            {
-                // A durable Session may reconnect through a listener with a
-                // different mount point. Its subscriptions remain canonical,
-                // but a queued publication outside the new listener's view
-                // must not abort the connection or permanently block later
-                // visible messages. This follows the same fail-closed/drop
-                // policy as a delivery whose read ACL changed while offline.
-                const drop_action = try self.sessions.dropOutgoingPublish(
-                    handle,
-                    transmission.publish.packet_id,
-                );
-                persistent_changed = persistent_changed or
-                    (persistent_session and drop_action == .dropped);
-                continue;
-            }
+            var wire_transmission = transmission;
+            const payload_len = switch (wire_transmission) {
+                .publish => |*publish| blk: {
+                    publish.topic = connection.topic_namespace.visibleTopic(
+                        publish.topic,
+                    ) catch |err| switch (err) {
+                        error.TopicOutsideNamespace => {
+                            // A durable Session may reconnect through a
+                            // listener with a different mount point. Drop a
+                            // queued publication outside that listener's view
+                            // without blocking later visible messages.
+                            const drop_action = try self.sessions
+                                .dropOutgoingPublish(
+                                handle,
+                                publish.packet_id,
+                            );
+                            persistent_changed = persistent_changed or
+                                (persistent_session and
+                                    drop_action == .dropped);
+                            continue;
+                        },
+                        else => return err,
+                    };
+                    break :blk publish.payload.len;
+                },
+                .pubrel => 0,
+            };
             const encoded = session_route.encodeTransmission(
                 self.allocator,
                 connection.protocol,
-                transmission,
+                wire_transmission,
                 connection.localMaximumQoS(),
             ) catch |err| {
                 switch (transmission) {
@@ -5242,7 +5247,7 @@ pub const Broker = struct {
             self.recordPersistentChangeLocked(persistent_changed);
             return .{
                 .encoded = encoded,
-                .transmission = transmission,
+                .payload_len = payload_len,
                 .handle = handle,
                 .route_id = route_id,
             };

@@ -3155,53 +3155,32 @@ pub const Connection = struct {
     }
 
     pub fn writePublish(self: *Connection, topic: []const u8, payload: []const u8, options: PublishOptions) Error!?u16 {
-        if (!self.isUsable()) return error.ConnectionClosed;
-        try self.validatePublishPropertyDirection(options.properties, .outgoing);
-        if (@intFromEnum(options.qos) > @intFromEnum(self.peer_maximum_qos)) return error.InvalidQoS;
-        if (options.retain and !self.peer_retain_available) return error.InvalidProperty;
-        try self.validateOutgoingTopicAlias(topic, options.properties);
+        try self.validateOutgoingPublish(
+            topic,
+            options.qos,
+            options.retain,
+            options.properties,
+        );
 
         const packet_id = if (options.qos == .at_most_once) null else try self.reserveOutgoingPublish(options.qos);
         errdefer if (packet_id) |id| self.releaseOutgoingPublish(id, options.qos);
 
-        self.write_scratch.clearRetainingCapacity();
-        const write_options: mqtt.PublishWriteOptions = .{
+        try self.writeValidatedPublish(topic, payload, .{
             .qos = options.qos,
             .retain = options.retain,
             .dup = options.dup,
             .packet_id = packet_id,
             .properties = options.properties,
-        };
-        const lengths = try mqtt.writePublishPrefix(
-            &self.write_scratch,
-            self.allocator,
-            self.protocol,
-            topic,
-            payload,
-            write_options,
-        );
-        try self.authentication.ensurePacketAllowed(.publish);
-        if (lengths.total > self.peer_max_packet_size) {
-            return error.OutgoingPacketTooLarge;
-        }
-        // Topic-alias registration allocates connection-owned state. Complete
-        // it after all local preflight checks but before any transport bytes
-        // are emitted, so rejected packets cannot mutate the alias table and
-        // OOM cannot be reported after the peer has received the packet.
-        try self.prepareOutgoingTopicAliasCommit(topic, options.properties);
-        try self.writeTransportPacketParts(
-            self.write_scratch.items,
-            payload,
-        );
-        self.recordPacketSent(lengths.total);
+        });
         return packet_id;
     }
 
-    /// Add or reuse a negotiated Topic Alias for a server-forwarded PUBLISH.
+    /// Add or reuse a negotiated Topic Alias for a connection-local PUBLISH.
     ///
     /// The caller retains property-list ownership and must pass the returned
-    /// Topic Name plus the same list to `writePublish`. Alias state is committed
-    /// there after local preflight checks and before transport bytes are sent.
+    /// Topic Name plus the same list to the outgoing PUBLISH writer. Alias
+    /// state is committed there after local preflight checks and before
+    /// transport bytes are sent.
     /// Existing explicit aliases are left untouched, and a full alias table
     /// falls back to the full topic.
     pub fn prepareAutomaticTopicAlias(
@@ -3244,6 +3223,36 @@ pub const Connection = struct {
         bytes: []u8,
     ) Error!void {
         try self.writePacket(bytes);
+    }
+
+    /// Send one detached Session packet while applying only this Network
+    /// Connection's Topic Alias state. PUBLISH payload and property values
+    /// remain borrowed from `bytes`; PUBREL is already in its final wire form.
+    pub fn writeEncodedSessionTransmission(
+        self: *Connection,
+        bytes: []u8,
+    ) Error!void {
+        const fixed = try mqtt.FixedHeader.parse(bytes);
+        if (fixed.packet_type == .pubrel) return self.writePacket(bytes);
+        if (fixed.packet_type != .publish) return error.InvalidPacketType;
+        var publish_packet = try mqtt.Publish.parse(
+            self.allocator,
+            self.protocol,
+            bytes,
+        );
+        defer publish_packet.deinit(self.allocator);
+        return self.writeSessionPublish(.{
+            .topic = publish_packet.topic,
+            .payload = publish_packet.payload,
+            .qos = publish_packet.qos,
+            .retain = publish_packet.retain,
+            .dup = publish_packet.dup,
+            .packet_id = publish_packet.packet_id orelse 0,
+            .properties = publish_packet.properties,
+            .message_expiry_interval = mqtt.messageExpiryInterval(
+                publish_packet.properties,
+            ),
+        });
     }
 
     /// Write an already-selected durable Session transmission while projecting
@@ -3298,10 +3307,17 @@ pub const Connection = struct {
         self: *Connection,
         value: @import("session/mod.zig").PublishTransmission,
     ) Error!void {
+        if (!self.isUsable()) return error.ConnectionClosed;
         try self.validatePublishPropertyDirection(
             value.properties,
             .outgoing,
         );
+        // A durable Session always owns a canonical Topic Name. An alias is a
+        // projection of that value onto one Network Connection and must never
+        // be accepted from restored or caller-constructed Session state.
+        if (mqtt.topicAlias(value.properties) != null) {
+            return error.InvalidProperty;
+        }
         var properties: std.ArrayList(mqtt.Property) = .empty;
         defer properties.deinit(self.allocator);
         if (self.protocol == .v5) {
@@ -3324,25 +3340,115 @@ pub const Connection = struct {
                 }
             }
         }
+        const property_count_before_alias = properties.items.len;
+        const outgoing_topic = try self.prepareAutomaticTopicAlias(
+            value.topic,
+            &properties,
+        );
+        const automatic_alias_added =
+            properties.items.len != property_count_before_alias;
+        const write_options: mqtt.PublishWriteOptions = .{
+            .qos = value.qos,
+            .retain = value.retain,
+            .dup = value.qos != .at_most_once and value.dup,
+            .packet_id = if (value.qos == .at_most_once)
+                null
+            else
+                value.packet_id,
+            .properties = properties.items,
+        };
+        try self.validateOutgoingPublish(
+            outgoing_topic,
+            write_options.qos,
+            write_options.retain,
+            properties.items,
+        );
+        self.writeValidatedPublish(
+            outgoing_topic,
+            value.payload,
+            write_options,
+        ) catch |err| {
+            if (err != error.OutgoingPacketTooLarge or
+                !automatic_alias_added)
+            {
+                return err;
+            }
+            // An alias property can be larger than the Topic Name it replaces
+            // for a very short topic. If automatic aliasing alone crosses
+            // Maximum Packet Size, keep the Application Message deliverable
+            // with its canonical topic and no connection-state mutation.
+            properties.shrinkRetainingCapacity(property_count_before_alias);
+            const fallback_options: mqtt.PublishWriteOptions = .{
+                .qos = write_options.qos,
+                .retain = write_options.retain,
+                .dup = write_options.dup,
+                .packet_id = write_options.packet_id,
+                .properties = properties.items,
+            };
+            try self.validateOutgoingPublish(
+                value.topic,
+                fallback_options.qos,
+                fallback_options.retain,
+                fallback_options.properties,
+            );
+            return self.writeValidatedPublish(
+                value.topic,
+                value.payload,
+                fallback_options,
+            );
+        };
+    }
+
+    fn validateOutgoingPublish(
+        self: *Connection,
+        topic: []const u8,
+        qos: mqtt.QoS,
+        retain: bool,
+        properties: []const mqtt.Property,
+    ) Error!void {
+        if (!self.isUsable()) return error.ConnectionClosed;
+        try self.validatePublishPropertyDirection(properties, .outgoing);
+        if (@intFromEnum(qos) > @intFromEnum(self.peer_maximum_qos)) {
+            return error.InvalidQoS;
+        }
+        if (retain and !self.peer_retain_available) {
+            return error.InvalidProperty;
+        }
+        try self.validateOutgoingTopicAlias(topic, properties);
+    }
+
+    fn writeValidatedPublish(
+        self: *Connection,
+        topic: []const u8,
+        payload: []const u8,
+        options: mqtt.PublishWriteOptions,
+    ) Error!void {
         self.write_scratch.clearRetainingCapacity();
-        try mqtt.writePublish(
+        const lengths = try mqtt.writePublishPrefix(
             &self.write_scratch,
             self.allocator,
             self.protocol,
-            value.topic,
-            value.payload,
-            .{
-                .qos = value.qos,
-                .retain = value.retain,
-                .dup = value.qos != .at_most_once and value.dup,
-                .packet_id = if (value.qos == .at_most_once)
-                    null
-                else
-                    value.packet_id,
-                .properties = properties.items,
-            },
+            topic,
+            payload,
+            options,
         );
-        try self.writePacket(self.write_scratch.items);
+        try self.authentication.ensurePacketAllowed(.publish);
+        if (lengths.total > self.peer_max_packet_size) {
+            return error.OutgoingPacketTooLarge;
+        }
+        // Topic-alias registration allocates connection-owned state. Complete
+        // it after all local preflight checks but before any transport bytes
+        // are emitted, so rejected packets cannot mutate the alias table and
+        // OOM cannot be reported after the peer has received the packet.
+        try self.prepareOutgoingTopicAliasCommit(
+            topic,
+            options.properties,
+        );
+        try self.writeTransportPacketParts(
+            self.write_scratch.items,
+            payload,
+        );
+        self.recordPacketSent(lengths.total);
     }
 
     pub fn writeSessionPubRel(
@@ -8007,6 +8113,260 @@ test "MQTT connection automatically establishes and reuses outgoing aliases" {
     try std.testing.expectEqual(@as(?u16, 2), mqtt.topicAlias(
         second_properties.items,
     ));
+}
+
+test "MQTT Session PUBLISH projects Topic Alias per Network Connection" {
+    const allocator = std.testing.allocator;
+    var threaded = std.Io.Threaded.init(allocator, .{});
+    defer threaded.deinit();
+    const io = threaded.io();
+    var listener = try (net.IpAddress{ .ip4 = .loopback(0) }).listen(
+        io,
+        .{ .reuse_address = true },
+    );
+    defer listener.deinit(io);
+
+    const transmission = @import("session/mod.zig").Transmission{
+        .publish = .{
+            .topic = "durable/alias",
+            .payload = "payload",
+            .qos = .at_least_once,
+            .retain = false,
+            .dup = true,
+            .packet_id = 7,
+            .properties = &.{.{ .four_byte = .{
+                .id = .message_expiry_interval,
+                .value = 60,
+            } }},
+            .message_expiry_interval = 30,
+        },
+    };
+
+    const client_stream = try listener.socket.address.connect(
+        io,
+        .{ .mode = .stream },
+    );
+    var peer = PacketTransport.initTcp(io, try listener.accept(io));
+    defer peer.close(allocator);
+    var connection = Connection{
+        .allocator = allocator,
+        .transport = .initTcp(io, client_stream),
+        .protocol = .v5,
+        .endpoint_role = .server,
+        .peer_topic_alias_maximum = 1,
+    };
+    defer connection.close();
+
+    try connection.writeSessionTransmission(
+        transmission,
+        .exactly_once,
+    );
+    var first_packet = try peer.readPacket(allocator, 4096);
+    defer first_packet.deinit(allocator);
+    var first = try mqtt.Publish.parse(allocator, .v5, first_packet.bytes);
+    defer first.deinit(allocator);
+    try std.testing.expectEqualStrings("durable/alias", first.topic);
+    try std.testing.expectEqual(@as(?u16, 1), mqtt.topicAlias(
+        first.properties,
+    ));
+    try std.testing.expectEqual(@as(?u32, 30), mqtt.messageExpiryInterval(
+        first.properties,
+    ));
+    try std.testing.expect(connection.write_scratch.items.len <
+        first_packet.bytes.len);
+
+    try connection.writeSessionTransmission(
+        transmission,
+        .exactly_once,
+    );
+    var second_packet = try peer.readPacket(allocator, 4096);
+    defer second_packet.deinit(allocator);
+    var second = try mqtt.Publish.parse(
+        allocator,
+        .v5,
+        second_packet.bytes,
+    );
+    defer second.deinit(allocator);
+    try std.testing.expectEqualStrings("", second.topic);
+    try std.testing.expectEqual(@as(?u16, 1), mqtt.topicAlias(
+        second.properties,
+    ));
+    try std.testing.expectEqualStrings(
+        "durable/alias",
+        transmission.publish.topic,
+    );
+    try std.testing.expect(mqtt.topicAlias(
+        transmission.publish.properties,
+    ) == null);
+
+    const fresh_client_stream = try listener.socket.address.connect(
+        io,
+        .{ .mode = .stream },
+    );
+    var fresh_peer = PacketTransport.initTcp(io, try listener.accept(io));
+    defer fresh_peer.close(allocator);
+    var fresh = Connection{
+        .allocator = allocator,
+        .transport = .initTcp(io, fresh_client_stream),
+        .protocol = .v5,
+        .endpoint_role = .client,
+        .peer_topic_alias_maximum = 1,
+    };
+    defer fresh.close();
+    try fresh.writeClientSessionTransmission(transmission);
+    var fresh_packet = try fresh_peer.readPacket(allocator, 4096);
+    defer fresh_packet.deinit(allocator);
+    var fresh_publish = try mqtt.Publish.parse(
+        allocator,
+        .v5,
+        fresh_packet.bytes,
+    );
+    defer fresh_publish.deinit(allocator);
+    try std.testing.expectEqualStrings("durable/alias", fresh_publish.topic);
+    try std.testing.expectEqual(@as(?u16, 1), mqtt.topicAlias(
+        fresh_publish.properties,
+    ));
+}
+
+test "MQTT Session PUBLISH falls back when alias form exceeds packet limit" {
+    const allocator = std.testing.allocator;
+    var threaded = std.Io.Threaded.init(allocator, .{});
+    defer threaded.deinit();
+    const io = threaded.io();
+    var listener = try (net.IpAddress{ .ip4 = .loopback(0) }).listen(
+        io,
+        .{ .reuse_address = true },
+    );
+    defer listener.deinit(io);
+    const client_stream = try listener.socket.address.connect(
+        io,
+        .{ .mode = .stream },
+    );
+    var peer = PacketTransport.initTcp(io, try listener.accept(io));
+    defer peer.close(allocator);
+
+    const transmission = @import("session/mod.zig").Transmission{
+        .publish = .{
+            .topic = "a",
+            .payload = "x",
+            .qos = .at_least_once,
+            .retain = false,
+            .dup = false,
+            .packet_id = 9,
+            .properties = &.{},
+            .message_expiry_interval = null,
+        },
+    };
+    var exact: std.ArrayList(u8) = .empty;
+    defer exact.deinit(allocator);
+    try transmission.publish.write(&exact, allocator, .v5);
+    var connection = Connection{
+        .allocator = allocator,
+        .transport = .initTcp(io, client_stream),
+        .protocol = .v5,
+        .endpoint_role = .server,
+        .peer_topic_alias_maximum = 1,
+        .peer_max_packet_size = exact.items.len,
+    };
+    defer connection.close();
+    try connection.outgoing_topic_aliases.put(allocator, 1, "a");
+
+    try connection.writeSessionTransmission(transmission, .exactly_once);
+    try std.testing.expectEqual(@as(usize, 1), connection.outgoing_topic_aliases.count());
+    try std.testing.expectEqualStrings(
+        "a",
+        connection.outgoing_topic_aliases.get(1).?,
+    );
+    var packet = try peer.readPacket(allocator, 4096);
+    defer packet.deinit(allocator);
+    var publish = try mqtt.Publish.parse(allocator, .v5, packet.bytes);
+    defer publish.deinit(allocator);
+    try std.testing.expectEqualStrings("a", publish.topic);
+    try std.testing.expect(mqtt.topicAlias(publish.properties) == null);
+
+    try std.testing.expectError(
+        error.InvalidProperty,
+        connection.writeClientSessionTransmission(.{ .publish = .{
+            .topic = "must/remain/canonical",
+            .payload = "x",
+            .qos = .at_least_once,
+            .retain = false,
+            .dup = true,
+            .packet_id = 10,
+            .properties = &.{.{ .two_byte = .{
+                .id = .topic_alias,
+                .value = 1,
+            } }},
+            .message_expiry_interval = null,
+        } }),
+    );
+    try std.testing.expect(connection.isUsable());
+    try std.testing.expectEqual(
+        @as(usize, 1),
+        connection.outgoing_topic_aliases.count(),
+    );
+}
+
+test "MQTT Session PUBLISH alias allocation failure is pre-wire" {
+    const allocator = std.testing.allocator;
+    var threaded = std.Io.Threaded.init(allocator, .{});
+    defer threaded.deinit();
+    const io = threaded.io();
+    var listener = try (net.IpAddress{ .ip4 = .loopback(0) }).listen(
+        io,
+        .{ .reuse_address = true },
+    );
+    defer listener.deinit(io);
+    const client_stream = try listener.socket.address.connect(
+        io,
+        .{ .mode = .stream },
+    );
+    var peer = PacketTransport.initTcp(io, try listener.accept(io));
+    defer peer.close(allocator);
+    var connection = Connection{
+        .allocator = allocator,
+        .transport = .initTcp(io, client_stream),
+        .protocol = .v5,
+        .endpoint_role = .client,
+        .peer_topic_alias_maximum = 1,
+    };
+    defer connection.close();
+
+    var failing = std.testing.FailingAllocator.init(
+        allocator,
+        .{ .fail_index = 0, .resize_fail_index = 0 },
+    );
+    connection.allocator = failing.allocator();
+    try std.testing.expectError(
+        error.OutOfMemory,
+        connection.writeClientSessionTransmission(.{ .publish = .{
+            .topic = "allocation/failure",
+            .payload = "payload",
+            .qos = .at_least_once,
+            .retain = false,
+            .dup = true,
+            .packet_id = 11,
+            .properties = &.{},
+            .message_expiry_interval = null,
+        } }),
+    );
+    try std.testing.expect(connection.isUsable());
+    try std.testing.expectEqual(
+        @as(usize, 0),
+        connection.outgoing_topic_aliases.count(),
+    );
+    try std.testing.expectEqual(@as(usize, 0), connection.write_scratch.items.len);
+    try std.testing.expectError(
+        error.Timeout,
+        peer.readPacketWithDeadline(
+            allocator,
+            4096,
+            .fromNow(io, .{
+                .raw = .fromMilliseconds(20),
+                .clock = .awake,
+            }),
+        ),
+    );
 }
 
 test "MQTT transport write failure retires connection Topic Alias state" {

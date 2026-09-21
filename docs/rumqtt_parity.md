@@ -2147,6 +2147,12 @@ error permanently retires that Network Connection: stream APIs cannot prove
 whether zero, some, or all bytes reached the peer, so neither alias mappings
 nor other connection-scoped state may be reused. Reconnect creates fresh alias
 tables while durable QoS retransmission remains Session-scoped.
+Broker and reconnect Session retransmissions now project their canonical
+stored Topic Name through that fresh connection-local table: the first send
+carries the full Topic Name plus alias, later sends may omit the Topic Name,
+and a reconnect establishes it again. The borrowed payload is sent separately
+from the encoded prefix, and an automatic alias representation that would
+exceed Maximum Packet Size falls back to the original full-topic packet.
 The owning reconnect client also retires this unusable handle immediately
 across publish, subscribe, unsubscribe, manual acknowledgement, keep-alive,
 authentication, and graceful-disconnect paths. The decision uses the runtime's

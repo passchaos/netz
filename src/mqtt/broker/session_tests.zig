@@ -1165,6 +1165,10 @@ test "broker queues offline QoS 1 and drains on resume" {
     );
     defer suback.deinit(allocator);
     try subscriber.disconnect(0);
+    // MQTT has no DISCONNECT acknowledgment. Keep offline queueing and the
+    // reconnect unambiguous by waiting for the broker to retire the old
+    // Network Connection before publishing.
+    try waitForPeerClose(&subscriber);
 
     var publisher = try connect(
         allocator,
@@ -1176,7 +1180,12 @@ test "broker queues offline QoS 1 and drains on resume" {
     defer publisher.close();
     try publisher.publish(
         "offline/qos1",
-        "queued",
+        "queued-one",
+        .{ .qos = .at_least_once },
+    );
+    try publisher.publish(
+        "offline/qos1",
+        "queued-two",
         .{ .qos = .at_least_once },
     );
 
@@ -1189,20 +1198,36 @@ test "broker queues offline QoS 1 and drains on resume" {
             .client_id = "offline-qos1",
             .clean_start = false,
             .properties = &session_expiry,
+            .topic_alias_maximum = 1,
         },
     );
     var resumed = resumed_result.connection;
     defer resumed.close();
     defer resumed_result.connack.deinit(allocator);
     try std.testing.expect(resumed_result.connack.connack.session_present);
-    var delivered = try resumed.readPublish();
-    defer delivered.deinit(allocator);
-    try std.testing.expectEqualStrings("queued", delivered.publish.payload);
-    // DISCONNECT has no acknowledgment. If reconnect races the broker's prior
-    // task teardown, it may legitimately have attempted this queued PUBLISH on
-    // that previous Network Connection, in which case MQTT requires DUP=1.
-    // The Store-level unsent-write test covers the stricter never-on-wire case.
-    try resumed.writePubAck(delivered.publish.packet_id.?, 0);
+    var first_packet = try resumed.transport.readPacket(allocator, 4096);
+    defer first_packet.deinit(allocator);
+    var first = try mqtt.Publish.parse(allocator, .v5, first_packet.bytes);
+    defer first.deinit(allocator);
+    try std.testing.expectEqualStrings("offline/qos1", first.topic);
+    try std.testing.expectEqualStrings("queued-one", first.payload);
+    try std.testing.expectEqual(
+        @as(?u16, 1),
+        mqtt.topicAlias(first.properties),
+    );
+
+    var second_packet = try resumed.transport.readPacket(allocator, 4096);
+    defer second_packet.deinit(allocator);
+    var second = try mqtt.Publish.parse(allocator, .v5, second_packet.bytes);
+    defer second.deinit(allocator);
+    try std.testing.expectEqualStrings("", second.topic);
+    try std.testing.expectEqualStrings("queued-two", second.payload);
+    try std.testing.expectEqual(
+        @as(?u16, 1),
+        mqtt.topicAlias(second.properties),
+    );
+    try resumed.writePubAck(first.packet_id.?, 0);
+    try resumed.writePubAck(second.packet_id.?, 0);
 
     try disconnectAll(&.{ &publisher, &resumed });
     try joinServer(thread, &joined, &serve);
